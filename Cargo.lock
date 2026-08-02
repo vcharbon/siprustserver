@@ -498,6 +498,7 @@ dependencies = [
  "call",
  "call-limiter",
  "http-net",
+ "observe",
  "proptest",
  "repl-net",
  "serde",
@@ -4100,6 +4101,7 @@ dependencies = [
  "bytes",
  "hmac",
  "layer-harness",
+ "observe",
  "scenario-harness",
  "sha1",
  "sha2",
@@ -4112,6 +4114,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "topology",
+ "tracing",
 ]
 
 [[package]]

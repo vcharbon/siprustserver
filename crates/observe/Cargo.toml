@@ -4,20 +4,34 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Process observability foundation (ADR-0026): subscriber installation (compact key=value lifecycle logs over a non-blocking bounded lossy stdout writer; OTLP trace export only when OTEL_EXPORTER_OTLP_ENDPOINT is set), the per-call trace admission chain (rate draw -> token bucket -> active cap), the 16 KiB attribute cap, and the thread-scoped in-memory subscriber tests capture with. Domain crates depend on `tracing` alone — the OpenTelemetry dependency tree terminates here."
+description = "Process observability foundation (ADR-0026): subscriber installation (compact key=value lifecycle logs over a non-blocking bounded lossy stdout writer; OTLP trace export, feature `otlp`, only when OTEL_EXPORTER_OTLP_ENDPOINT is set), the per-call trace admission chain (rate draw -> token bucket -> active cap), the 16 KiB attribute cap, the rising-edge/summary/falling-edge burst aggregation that keeps lifecycle logging traffic-independent, and the thread-scoped in-memory subscriber tests capture with. The OpenTelemetry dependency tree terminates here and is feature-gated off for domain crates."
 
 [lints]
 workspace = true
 
+[features]
+# The OTLP span-export tree. ON in the runners (which install the subscriber),
+# OFF for the domain crates that depend on this crate only for the lifecycle
+# aggregation helpers — so `b2bua`/`sip-proxy` gain `tracing` plumbing without
+# the OpenTelemetry dependency tree (ADR-0026 consequences).
+otlp = [
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+]
+
 [dependencies]
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# OTLP export tree. Present unconditionally in this crate (and only here) so the
-# runtime env gate — not a build flag — decides whether a process exports.
-tracing-opentelemetry = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
-opentelemetry-otlp = { workspace = true }
+# Burst aggregation rides `tokio::time` (paused-clock drivable) and spawns one
+# task per open episode.
+tokio = { workspace = true }
+# --- OTLP export only (feature "otlp") ---
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

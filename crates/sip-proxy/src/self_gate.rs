@@ -392,6 +392,22 @@ impl TokenBucket {
 const REASON_ELU: &str = "proxy_overload_elu";
 const REASON_CPS: &str = "proxy_overload_cps";
 
+/// The intake-shed episode log, keyed by rejection reason (ADR-0026): shedding
+/// is a per-call event class, so it is aggregated — one rising line, a ~5 s
+/// summary carrying the shed count, one falling line with the totals.
+fn shed_waves() -> Arc<observe::WaveSet> {
+    observe::WaveSet::new(|reason: &str, r: &observe::WaveReport| {
+        tracing::info!(
+            node = observe::node(),
+            reason,
+            edge = %r.edge,
+            elapsed_ms = r.elapsed_ms,
+            totals = %r.tally,
+            "proxy intake shed"
+        );
+    })
+}
+
 /// Snapshot of the gate's published state, for `/status` + Prometheus (port of
 /// the subset of `ProxySelfGateMetrics` this gate owns).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -436,6 +452,10 @@ pub struct EluCpsGate {
     cps_bucket_max: f64,
     /// Sampler cadence, re-exported for the runner task that drives `sample()`.
     sampler_interval: std::time::Duration,
+    /// Intake-shed aggregation keyed by rejection reason (ADR-0026): a shedding
+    /// window is ONE episode — shed-on line, ~5 s summaries with the shed
+    /// count, shed-off line with the totals — closed by the first admit.
+    shed: Arc<observe::WaveSet>,
     // Lock-free counters — bumped off the EWMA lock on the admission/bypass paths.
     external_admitted: Arc<AtomicU64>,
     rejected_elu: Arc<AtomicU64>,
@@ -460,6 +480,7 @@ impl EluCpsGate {
             elu_critical: config.elu_critical,
             cps_bucket_max: config.cps_bucket_size as f64,
             sampler_interval: config.sampler_interval,
+            shed: shed_waves(),
             external_admitted: Arc::new(AtomicU64::new(0)),
             rejected_elu: Arc::new(AtomicU64::new(0)),
             rejected_cps: Arc::new(AtomicU64::new(0)),
@@ -537,6 +558,7 @@ impl ProxySelfGate for EluCpsGate {
         if inner.elu_ewma.get() > self.elu_critical {
             drop(inner);
             self.rejected_elu.fetch_add(1, Ordering::Relaxed);
+            self.shed.record(REASON_ELU, "shed", 1);
             return AdmitDecision::reject(REASON_ELU, 1);
         }
 
@@ -545,12 +567,17 @@ impl ProxySelfGate for EluCpsGate {
             let retry = inner.bucket.retry_after_sec();
             drop(inner);
             self.rejected_cps.fetch_add(1, Ordering::Relaxed);
+            self.shed.record(REASON_CPS, "shed", 1);
             return AdmitDecision::reject(REASON_CPS, retry);
         }
 
-        // 3. Admit (a token has been consumed above).
+        // 3. Admit (a token has been consumed above). An admit ends whatever
+        // shedding window was open — one relaxed load while nothing is shedding.
         drop(inner);
         self.external_admitted.fetch_add(1, Ordering::Relaxed);
+        if self.shed.is_active() {
+            self.shed.close_all();
+        }
         AdmitDecision::admit()
     }
 

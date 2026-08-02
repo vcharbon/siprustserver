@@ -86,6 +86,11 @@ pub struct CallState {
     /// forget to stamp (ADR-0020 X4). `b2bua_core` wires the runtime clock;
     /// the default reads the same paused/tokio time the tests advance.
     clock: sip_clock::Clock,
+    /// Acting-backup takeover burst aggregation, keyed by the dead peer
+    /// (ADR-0026): a 5000-call failover owes ~3 log lines per peer, never one
+    /// per hydrated call. Shared with the router's self-release path so a
+    /// takeover and the shedding that ends it read as ONE episode.
+    takeover_log: Arc<observe::WaveSet>,
 }
 
 impl CallState {
@@ -119,6 +124,7 @@ impl CallState {
             metrics,
             replicated_ttl_ms: CALL_TTL_MS,
             clock: sip_clock::Clock::test_at(0),
+            takeover_log: crate::lifecycle::takeover_waves(),
         }
     }
 
@@ -266,6 +272,7 @@ impl CallState {
         // A failed-over in-dialog request just loaded its dialog from a backup
         // replica — the acting-backup takeover actually fired.
         self.metrics.bump_repl_takeover_hydrated();
+        self.takeover_log.record(&primary, "hydrated", 1);
         Some((call, true, skew))
     }
 
@@ -711,14 +718,31 @@ impl CallState {
         if !tag.is_empty() {
             if let Ok(Some(r)) = repl.get_index(&format!("leg:{call_id}|{tag}")).await {
                 self.metrics.bump_repl_takeover_resolved();
+                self.note_takeover(&r, "resolved");
                 return Some(r);
             }
         }
         let hit = repl.get_index(&format!("leg:{call_id}")).await.ok().flatten();
-        if hit.is_some() {
+        if let Some(r) = &hit {
             self.metrics.bump_repl_takeover_resolved();
+            self.note_takeover(r, "resolved");
         }
         hit
+    }
+
+    /// Fold one takeover event for `call_ref` into its dead primary's episode
+    /// (ADR-0026 aggregation): the counter names what happened, the peer the
+    /// `call_ref` encodes keys the episode.
+    fn note_takeover(&self, call_ref: &str, counter: &'static str) {
+        let (_, primary) = partition_of(&self.self_ordinal, call_ref);
+        self.takeover_log.record(&primary, counter, 1);
+    }
+
+    /// Fold an acting-backup **self-release** into the dead peer's takeover
+    /// episode — the shedding that ends a takeover is part of the same story,
+    /// so it never gets its own line.
+    pub fn note_takeover_self_release(&self, call_ref: &str) {
+        self.note_takeover(call_ref, "self_released");
     }
 
     /// Acquire the per-callRef serialization lock (held across a handler run).

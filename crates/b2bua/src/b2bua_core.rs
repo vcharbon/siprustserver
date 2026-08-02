@@ -358,6 +358,7 @@ impl B2buaCore {
             obligations: Arc::new(crate::obligations::ObligationSet::core()),
             readiness: readiness.clone(),
             overload: overload.clone(),
+            keepalive_waves: crate::lifecycle::keepalive_timeout_waves(),
             reentry_tx,
             // Arc-share the injected port into every per-call `ctx.clone()`,
             // exactly like `decision`/`limiter`.

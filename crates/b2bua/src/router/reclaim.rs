@@ -57,6 +57,18 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
             if !reverse_flush_dominates(&replica, &live) {
                 return;
             }
+            // Rare by construction (a backup served an in-dialog request for a
+            // call we still own), so it gets its own line with the identity an
+            // operator correlates by: the call and both `(p,b)` views.
+            tracing::info!(
+                node = observe::node(),
+                call_ref,
+                call_id = %live.a_leg.call_id,
+                state = ?replica.state,
+                replica_pb = %format_pb(&replica),
+                live_pb = %format_pb(&live),
+                "reverse-flush reconcile"
+            );
             match replica.state {
                 // The backup deferred a terminal it served; discharge OUR live copy
                 // through the funnel with the live (non-terminal) copy as `before`
@@ -203,6 +215,15 @@ async fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
     }
 }
 
+/// The call's `(p,b)` version vector rendered for a lifecycle line
+/// (`-` when the call carries no topology and is therefore non-replicable).
+fn format_pb(call: &Call) -> String {
+    match call.topology.as_ref() {
+        Some(t) => format!("({},{})", t.gen, t.bak_gen),
+        None => "-".to_string(),
+    }
+}
+
 /// The ADR-0014 **Reverse** `(p,b)` apply rule for a live-map fold: the
 /// reverse-flushed `replica` dominates our `live` copy iff the primary counter is
 /// unchanged (`p_in == p_cur` — we have not mutated since the backup branched) and
@@ -275,6 +296,7 @@ pub(super) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     let active_after = ctx.state.active_count() as u64;
     let duration_ms = ctx.clock.now_ms() - start_ms;
     tracing::info!(
+        node = observe::node(),
         active_before,
         scanned,
         materialized,
@@ -337,9 +359,26 @@ async fn reclaim_into_live(
         smoothing,
     );
     let timers = call.timers.clone();
+    // Line the STRAGGLER only (`smoothing == None`): the bulk sweep folds into
+    // `reclaim_all`'s single summary, and its per-call fields are not even
+    // built — one line per reclaimed call would be a per-call info line
+    // (ADR-0026).
+    let line = smoothing
+        .is_none()
+        .then(|| (format_pb(&call), call.a_leg.call_id.clone(), timers.len()));
     if ctx.state.materialize_if_absent(call) {
-        ctx.timers.restore(timers, call_ref).await;
+        ctx.timers.restore(timers, call_ref.clone()).await;
         ctx.metrics.bump_repl_reclaimed();
+        if let Some((pb, call_id, timer_count)) = line {
+            tracing::info!(
+                node = observe::node(),
+                call_ref,
+                call_id,
+                pb,
+                timers = timer_count,
+                "straggler reclaim"
+            );
+        }
         true
     } else {
         false

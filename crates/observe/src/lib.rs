@@ -17,6 +17,11 @@
 //! call evaluates no format arguments and allocates nothing. Subscriber-side
 //! filtering is never the mechanism.
 //!
+//! Lifecycle logs are traffic-INDEPENDENT by construction: a per-call event
+//! class is aggregated through [`WaveSet`] into a rising-edge line, a ~5 s
+//! periodic summary and a falling-edge totals line, so a 5000-call failover
+//! prints a handful of lines instead of 5000.
+//!
 //! Domain crates depend on `tracing` and the thin helpers here; the
 //! OpenTelemetry dependency tree terminates in this crate.
 
@@ -24,18 +29,27 @@ mod admission;
 mod attr;
 pub mod counters;
 mod init;
+mod node;
+#[cfg(feature = "otlp")]
 mod otlp;
 mod rate_draw;
 mod test_buffer;
 mod token_bucket;
+mod wave;
+mod wave_set;
 mod writer;
 
 pub use admission::{Denied, SampleAdmission, TraceLease};
 pub use attr::{cap_bytes, cap_str, ATTR_CAP_BYTES, TRUNCATED_FIELD};
 pub use init::{init_production, ObserveGuard};
+pub use node::{node, set_node_identity};
 pub use rate_draw::RateDraw;
 pub use test_buffer::{test_buffer, CapturedEvent, TestLogGuard, TestLogHandle};
 pub use token_bucket::TokenBucket;
+pub use wave::{
+    Edge, Tally, Wave, WaveReport, DEFAULT_IDLE_CLOSE_AFTER, DEFAULT_SUMMARY_EVERY, MAX_COUNTERS,
+};
+pub use wave_set::{WaveSet, MAX_KEYS};
 
 /// The env var whose presence enables OTLP span export for this process.
 pub const OTLP_ENDPOINT_ENV: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";

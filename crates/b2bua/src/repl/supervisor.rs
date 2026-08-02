@@ -419,6 +419,14 @@ impl ReplicationSupervisor {
 
             // Reclaim always; Backup only once the gate has latched.
             if entry.reclaim.status_rx.is_none() || drift {
+                tracing::info!(
+                    node = observe::node(),
+                    peer = %peer.ordinal,
+                    host = %peer.host,
+                    flow = "recovery",
+                    reason = if drift { "host moved" } else { "new peer" },
+                    "replication peer flow started"
+                );
                 self.spawn_flow(&mut entry.reclaim, peer, Partition::Pri);
             }
             // Under reactive-only takeover (ADR-0014) there is **no** eager
@@ -429,6 +437,14 @@ impl ReplicationSupervisor {
             // lost node dies after the keepalive slack — the deliberate trade for
             // killing the eager-takeover stale-CSeq storm (ADR-0014 §13).
             if backup_enabled && (entry.backup.status_rx.is_none() || drift) {
+                tracing::info!(
+                    node = observe::node(),
+                    peer = %peer.ordinal,
+                    host = %peer.host,
+                    flow = "backup",
+                    reason = if drift { "host moved" } else { "new peer" },
+                    "replication peer flow started"
+                );
                 self.spawn_flow(&mut entry.backup, peer, Partition::Bak);
             }
         }
@@ -438,6 +454,13 @@ impl ReplicationSupervisor {
             desired.iter().map(|p| p.ordinal.as_str()).collect();
         for (ord, entry) in peers.iter_mut() {
             if !desired_ords.contains(ord.as_str()) {
+                if entry.reclaim.cancel_tx.is_some() || entry.backup.cancel_tx.is_some() {
+                    tracing::info!(
+                        node = observe::node(),
+                        peer = %ord,
+                        "replication peer parked (left the membership set)"
+                    );
+                }
                 entry.park();
             }
         }

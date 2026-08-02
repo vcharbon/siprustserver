@@ -7,11 +7,12 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(feature = "otlp")]
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Registry};
 
-use crate::{otlp, writer};
+use crate::writer;
 
 /// Installed once per process; a second call is inert rather than a panic.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -22,24 +23,37 @@ const DEFAULT_FILTER: &str = "info";
 /// Holds the process subscriber's resources. Drop flushes and shuts down.
 pub struct ObserveGuard {
     writer: Option<writer::LogWriterGuard>,
+    #[cfg(feature = "otlp")]
     provider: Option<SdkTracerProvider>,
 }
 
 impl ObserveGuard {
     /// The inert guard: nothing was installed, nothing to flush.
     fn inert() -> Self {
-        Self { writer: None, provider: None }
+        Self {
+            writer: None,
+            #[cfg(feature = "otlp")]
+            provider: None,
+        }
     }
 
     /// Whether this process exports spans over OTLP.
     pub fn exports_traces(&self) -> bool {
-        self.provider.is_some()
+        #[cfg(feature = "otlp")]
+        {
+            self.provider.is_some()
+        }
+        #[cfg(not(feature = "otlp"))]
+        {
+            false
+        }
     }
 }
 
 impl Drop for ObserveGuard {
     fn drop(&mut self) {
         // Spans first: their export may itself log.
+        #[cfg(feature = "otlp")]
         if let Some(provider) = self.provider.take() {
             let _ = provider.force_flush();
             let _ = provider.shutdown();
@@ -53,10 +67,13 @@ impl Drop for ObserveGuard {
 /// Layers, in order:
 /// 1. a compact single-line `key=value` fmt layer over the bounded lossy stdout
 ///    writer — lifecycle logs, always on, never back-pressuring;
-/// 2. the OTLP span layer, present only when `OTEL_EXPORTER_OTLP_ENDPOINT` is
-///    set (see [`otlp::provider_from_env`]).
+/// 2. the OTLP span layer, present only when this build carries the `otlp`
+///    feature (the runners) AND `OTEL_EXPORTER_OTLP_ENDPOINT` is set (see
+///    `otlp::provider_from_env`). A domain crate depending on `observe` for the
+///    lifecycle helpers therefore never compiles the export tree.
 ///
 /// Hold the returned guard until the process exits.
+#[cfg_attr(not(feature = "otlp"), allow(unused_variables))]
 pub fn init_production(service_name: &str) -> ObserveGuard {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return ObserveGuard::inert();
@@ -70,18 +87,29 @@ pub fn init_production(service_name: &str) -> ObserveGuard {
         .with_level(true)
         .with_writer(make_writer);
 
-    let provider = otlp::provider_from_env(service_name);
-    let otlp_layer = provider.as_ref().map(otlp::layer);
-    let registry = Registry::default().with(filter).with(fmt_layer).with(otlp_layer);
-
-    if tracing::subscriber::set_global_default(registry).is_err() {
-        // Another subscriber owns this process (an embedding host): keep its
-        // choice and tear our own resources down.
-        drop(writer_guard);
-        if let Some(p) = provider {
-            let _ = p.shutdown();
+    #[cfg(feature = "otlp")]
+    {
+        let provider = crate::otlp::provider_from_env(service_name);
+        let otlp_layer = provider.as_ref().map(crate::otlp::layer);
+        let registry = Registry::default().with(filter).with(fmt_layer).with(otlp_layer);
+        if tracing::subscriber::set_global_default(registry).is_err() {
+            // Another subscriber owns this process (an embedding host): keep its
+            // choice and tear our own resources down.
+            drop(writer_guard);
+            if let Some(p) = provider {
+                let _ = p.shutdown();
+            }
+            return ObserveGuard::inert();
         }
-        return ObserveGuard::inert();
+        ObserveGuard { writer: Some(writer_guard), provider }
     }
-    ObserveGuard { writer: Some(writer_guard), provider }
+    #[cfg(not(feature = "otlp"))]
+    {
+        let registry = Registry::default().with(filter).with(fmt_layer);
+        if tracing::subscriber::set_global_default(registry).is_err() {
+            drop(writer_guard);
+            return ObserveGuard::inert();
+        }
+        ObserveGuard { writer: Some(writer_guard) }
+    }
 }

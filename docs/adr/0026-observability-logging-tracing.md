@@ -40,6 +40,10 @@ helpers only.
   rising-edge line, a ~5 s periodic summary, and a falling-edge totals line. The
   summary ticker rides `tokio::time`, so a paused-clock test drives it. **No
   per-call info line, ever** — a 5000-call failover produces ~5 lines.
+  Mechanised by `observe::WaveSet`: an episode per key (dead peer, failing
+  target, shed reason) with named counters, one driver task per open episode,
+  and a bounded key space (keys can be wire-influenceable). An episode ends on
+  an explicit close — the recovery that ended it — or on an idle window.
 - Every line carries node identity, and peer / epoch / `(p,b)` where relevant.
 
 ### 2. Per-call traces — sampled, OTLP, explicit-guard
@@ -149,8 +153,10 @@ a live parent that will never close.
 
 ## Consequences
 
-- `crates/observe` is the only crate that links OpenTelemetry; a domain crate
-  gaining `tracing` gains no transitive export tree.
+- `crates/observe` is the only crate that links OpenTelemetry, and behind its
+  `otlp` feature: the runners turn it on, the domain crates depend on `observe`
+  for the lifecycle-aggregation helpers with default features, so a domain crate
+  gains no transitive export tree.
 - Log output is lossy under extreme pressure. That is deliberate and measurable:
   `log_lines_dropped_total` is scraped alongside the trace-denial counters.
 - A collector outage degrades to "no traces": the batch exporter drops, and the

@@ -20,6 +20,8 @@ thiserror = { workspace = true }
 # through `tracing`. The subscriber — and the whole OpenTelemetry tree — is the
 # runner's, installed via `crates/observe`; this crate never sees it.
 tracing = { workspace = true }
+# Lifecycle aggregation helpers only (default features: no OTLP export tree).
+observe = { path = "../observe", default-features = false }
 b2bua-sdk = { path = "../b2bua-sdk" }
 call = { path = "../call" }
 sip-message = { path = "../sip-message" }

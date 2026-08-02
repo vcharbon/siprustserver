@@ -681,6 +681,8 @@ impl RunnerBase {
                 // Dropped log lines + trace-admission denials (ADR-0026): the
                 // only visibility into output the process deliberately shed.
                 text.push_str(&observe::counters::prometheus_text());
+                // Cause-labelled client HTTP failures (limiter / decision engine).
+                text.push_str(&http_net::failures::prometheus_text());
                 if let Some(extra) = &extra_metrics {
                     text.push_str(&extra());
                 }

@@ -15,7 +15,7 @@ call-limiter = { path = "../call-limiter" }
 sip-clock = { path = "../sip-clock" }
 tokio = { workspace = true }
 # Process subscriber + lifecycle logging (ADR-0026).
-observe = { path = "../observe" }
+observe = { path = "../observe", features = ["otlp"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

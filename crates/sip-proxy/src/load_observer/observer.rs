@@ -145,10 +145,24 @@ impl WorkerLoadObserver {
     /// floor + arm cooldown; `hard_to_critical` → multiplicative decrease + arm
     /// cooldown; `soft_to_hard` → hold; `below_soft` → additive increase iff
     /// the cooldown has elapsed (else suppress).
-    fn apply_aimd_step(&self, state: &mut WorkerState, elu: f64, now_ms: i64) {
+    fn apply_aimd_step(&self, worker_id: &str, state: &mut WorkerState, elu: f64, now_ms: i64) {
         let c = &self.config;
+        let previous = state.band;
         let new_band = compute_band(c, elu, state.band);
         state.band = new_band;
+        // A band change is a rare state transition (hysteresis keeps it from
+        // flapping), so it gets its own line with the load that caused it.
+        if new_band != previous {
+            tracing::info!(
+                node = observe::node(),
+                worker = worker_id,
+                from = ?previous,
+                to = ?new_band,
+                elu,
+                cap_cps = state.cap,
+                "worker load band change"
+            );
+        }
 
         match new_band {
             EluBand::AboveCritical => {
@@ -207,7 +221,7 @@ impl WorkerLoadObserver {
         state.elu = payload.elu;
         state.gc = payload.gc;
         state.last_payload_at_ms = now_ms;
-        self.apply_aimd_step(state, payload.elu, now_ms);
+        self.apply_aimd_step(worker_id, state, payload.elu, now_ms);
     }
 
     /// An OPTIONS reply arrived without a usable `X-Overload` header — tracked as

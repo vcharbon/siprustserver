@@ -27,6 +27,12 @@
 //!   into a capture sink (stamped with the injected [`sip_clock::Clock`]) for
 //!   test assertions.
 //!
+//! ## Failure counters
+//! The real transport classifies every client failure into
+//! `http_request_failures_total{peer, cause}` ([`failures`]) — counters only,
+//! never a per-request log line (ADR-0026). A runner appends
+//! [`failures::prometheus_text`] to its `/metrics` body.
+//!
 //! ## Fail-open lives in the client, not here
 //! The transport reports the honest outcome (`Ok(response)` or
 //! [`HttpError`]). The *timeout budget* and the fail-open policy are the
@@ -34,6 +40,7 @@
 //! clock a [`Fault::Stall`]ed request simply never completes until the caller's
 //! timeout fires when the harness advances. See `b2bua::limiter_http`.
 
+pub mod failures;
 mod transport;
 
 #[cfg(feature = "real")]

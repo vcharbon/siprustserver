@@ -102,6 +102,11 @@ pub enum CallDecisionError {
 pub struct DeadlineDecisionEngine {
     inner: std::sync::Arc<dyn CallDecisionEngine>,
     deadline: std::time::Duration,
+    /// Deadline-breach aggregation keyed by decision method (ADR-0026): an
+    /// unreachable backend is ONE episode per method — rising edge, ~5 s
+    /// summaries, falling-edge totals — closed by the first answer that lands
+    /// inside the deadline again.
+    breaches: std::sync::Arc<observe::WaveSet>,
 }
 
 impl DeadlineDecisionEngine {
@@ -118,6 +123,7 @@ impl DeadlineDecisionEngine {
         std::sync::Arc::new(Self {
             inner,
             deadline: std::time::Duration::from_millis(timeout_ms as u64),
+            breaches: crate::lifecycle::backend_waves("decision-engine"),
         })
     }
 
@@ -127,24 +133,47 @@ impl DeadlineDecisionEngine {
             self.deadline.as_millis()
         ))
     }
+
+    /// Fold one round-trip outcome into `method`'s degradation episode: a
+    /// deadline breach and a backend-reported `Unavailable` belong to the SAME
+    /// episode (both are "the decision engine is not answering calls"); any
+    /// real answer ends it. Aggregated, never one line per call (ADR-0026).
+    fn observe_outcome<T>(
+        &self,
+        method: &'static str,
+        outcome: Result<Result<T, CallDecisionError>, tokio::time::error::Elapsed>,
+    ) -> Result<T, CallDecisionError> {
+        match outcome {
+            Ok(Ok(v)) => {
+                if self.breaches.is_active() {
+                    self.breaches.close(method);
+                }
+                Ok(v)
+            }
+            Ok(Err(e)) => {
+                self.breaches.record(method, "unavailable", 1);
+                Err(e)
+            }
+            Err(_) => {
+                self.breaches.record(method, "deadline_breaches", 1);
+                Err(self.expired(method))
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl CallDecisionEngine for DeadlineDecisionEngine {
     async fn new_call(&self, req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
-        match tokio::time::timeout(self.deadline, self.inner.new_call(req)).await {
-            Ok(r) => r,
-            Err(_) => Err(self.expired("/call/new")),
-        }
+        let outcome = tokio::time::timeout(self.deadline, self.inner.new_call(req)).await;
+        self.observe_outcome("/call/new", outcome)
     }
     async fn call_failure(
         &self,
         req: CallFailureRequest,
     ) -> Result<CallFailureResponse, CallDecisionError> {
-        match tokio::time::timeout(self.deadline, self.inner.call_failure(req)).await {
-            Ok(r) => r,
-            Err(_) => Err(self.expired("/call/failure")),
-        }
+        let outcome = tokio::time::timeout(self.deadline, self.inner.call_failure(req)).await;
+        self.observe_outcome("/call/failure", outcome)
     }
     /// NOT deadline-wrapped — see the type doc. The REFER's 202 is already out;
     /// the refer subscription-expiry / overall-safety timers bound this.
@@ -161,9 +190,7 @@ impl CallDecisionEngine for DeadlineDecisionEngine {
         &self,
         req: CallReleaseRequest,
     ) -> Result<CallReleaseResponse, CallDecisionError> {
-        match tokio::time::timeout(self.deadline, self.inner.call_release(req)).await {
-            Ok(r) => r,
-            Err(_) => Err(self.expired("/calls/events/release")),
-        }
+        let outcome = tokio::time::timeout(self.deadline, self.inner.call_release(req)).await;
+        self.observe_outcome("/calls/events/release", outcome)
     }
 }

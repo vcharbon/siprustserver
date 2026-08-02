@@ -549,6 +549,9 @@ fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call
                         classify_b2bua_peer(&ctx.config, &dest),
                         crate::peer_failures::PeerFailureKind::KeepaliveTimeout,
                     );
+                    // Aggregated per hop: a dead peer is one episode, however
+                    // many calls it takes with it (ADR-0026).
+                    ctx.keepalive_waves.record(&dest.to_string(), "timeouts", 1);
                 }
             }
         }

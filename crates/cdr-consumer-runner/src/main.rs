@@ -112,7 +112,9 @@ async fn consume(
     let props = ConnectionProperties::default()
         .with_executor(tokio_executor_trait::Tokio::current())
         .with_reactor(tokio_reactor_trait::Tokio);
+    tracing::info!(node = observe::node(), state = "connecting", %url, "AMQP connection");
     let conn = Connection::connect(url, props).await?;
+    tracing::info!(node = observe::node(), state = "connected", %url, "AMQP connection");
     let chan = conn.create_channel().await?;
 
     // Declare the SAME queue the producer declares (durable + bounded), so the
@@ -143,7 +145,13 @@ async fn consume(
             FieldTable::default(),
         )
         .await?;
-    tracing::info!(%queue, %url, "consuming CDR queue");
+    tracing::info!(
+        node = observe::node(),
+        state = "consuming",
+        %queue,
+        %url,
+        "AMQP connection"
+    );
 
     while let Some(delivery) = consumer.next().await {
         let delivery = delivery?;
@@ -161,6 +169,13 @@ async fn consume(
         // Ack regardless: a malformed record is counted, not redelivered forever.
         delivery.ack(BasicAckOptions::default()).await?;
     }
+    // The consumer stream ended without an error — the broker closed it.
+    tracing::info!(
+        node = observe::node(),
+        state = "stream_closed",
+        %queue,
+        "AMQP connection"
+    );
     Ok(())
 }
 
@@ -192,7 +207,13 @@ async fn main() {
     // missed while disconnected are bounded by the broker's own x-max-length.
     loop {
         if let Err(e) = consume(&url, &queue, max_len, &metrics).await {
-            tracing::warn!(error = %e, retry_in_sec = 2, "AMQP error; reconnecting");
+            tracing::warn!(
+                node = observe::node(),
+                state = "disconnected",
+                error = %e,
+                retry_in_sec = 2,
+                "AMQP connection"
+            );
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }

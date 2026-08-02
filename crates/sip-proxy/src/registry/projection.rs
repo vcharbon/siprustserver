@@ -95,6 +95,40 @@ impl WorkerAnnotations {
     /// This is the only proxy-specific lifecycle rule; it has no membership twin.
     fn sync_membership(&self, peers: &[Peer], now_ms: u64) {
         let live: HashSet<&str> = peers.iter().map(|p| p.ordinal.as_str()).collect();
+        // Membership deltas are rare state changes: each gets its own line. The
+        // diff is read before the `rcu` update so a retried closure cannot
+        // double-log it.
+        {
+            let current = self.snapshot();
+            for (id, rec) in current.iter() {
+                if !live.contains(id.as_str()) {
+                    tracing::info!(
+                        node = observe::node(),
+                        worker = %id,
+                        host = %rec.host,
+                        "worker left the registry"
+                    );
+                }
+            }
+            for p in peers {
+                match current.get(&p.ordinal) {
+                    Some(rec) if rec.host == p.host => {}
+                    Some(rec) => tracing::info!(
+                        node = observe::node(),
+                        worker = %p.ordinal,
+                        from_host = %rec.host,
+                        host = %p.host,
+                        "worker re-created at a new host"
+                    ),
+                    None => tracing::info!(
+                        node = observe::node(),
+                        worker = %p.ordinal,
+                        host = %p.host,
+                        "worker joined the registry"
+                    ),
+                }
+            }
+        }
         self.update(|recs| {
             recs.retain(|id, _| live.contains(id.as_str()));
             for p in peers {
@@ -112,8 +146,18 @@ impl WorkerAnnotations {
     /// if the worker is unknown or unchanged; entering `Draining` stamps
     /// `draining_since`.
     fn set_health(&self, id: &str, health: WorkerHealth, now_ms: u64) {
-        if self.snapshot().get(id).map(|r| r.health) == Some(health) {
+        let previous = self.snapshot().get(id).map(|r| r.health);
+        if previous == Some(health) {
             return;
+        }
+        if let Some(previous) = previous {
+            tracing::info!(
+                node = observe::node(),
+                worker = id,
+                from = ?previous,
+                to = ?health,
+                "worker health flip"
+            );
         }
         self.update(|recs| {
             if let Some(rec) = recs.get_mut(id) {
