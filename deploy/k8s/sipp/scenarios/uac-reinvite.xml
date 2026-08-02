@@ -13,9 +13,11 @@
 
   Complements uac-long-options.xml (which exercises the in-dialog OPTIONS
   keepalive path): together they prove BOTH in-dialog request classes route
-  correctly across failover. The call lifetime (~2 min) is shorter than the 300 s
-  keepalive interval, so no in-dialog OPTIONS fires during it — the re-INVITE
-  path is exercised in isolation.
+  correctly across failover. Each 60s hold answers any in-dialog OPTIONS
+  (RFC 3261 §11): a rebooted worker's reclaim re-spreads restored dialogs'
+  300s keepalives EARLIER, so a probe can land mid-hold even in a ~2 min
+  call; the ontimeout path preserves the 60s re-INVITE spacing when none
+  arrives.
 
   CSeq increments per in-dialog transaction (RFC 3261 §12.2.1.1):
     INVITE=1, re-INVITE=2, re-INVITE=3, BYE=4 — each ACK reuses its INVITE's CSeq.
@@ -72,7 +74,27 @@
   </send>
 
   <!-- ===== re-INVITE #1 at +60 s (likely served by one worker) ===== -->
-  <pause milliseconds="60000"/>
+  <!-- 60s hold that answers in-dialog OPTIONS (RFC 3261 §11). The recv is
+       MANDATORY (sipp rejects an all-optional recv before a send); ontimeout
+       reproduces the former bare 60s pause when no keepalive probe arrives.
+       An answered probe re-parks and restarts the 60s hold. -->
+  <label id="hold1"/>
+  <recv request="OPTIONS" crlf="true" timeout="60000" ontimeout="hold1_done"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="hold1"/>
+  <label id="hold1_done"/>
   <send retrans="500">
     <![CDATA[
       INVITE [next_url] SIP/2.0
@@ -115,7 +137,24 @@
   </send>
 
   <!-- ===== re-INVITE #2 at +120 s (may be served by the OTHER worker post-failover) ===== -->
-  <pause milliseconds="60000"/>
+  <!-- Second 60s hold: same answer-and-resume loop, distinct label pair. -->
+  <label id="hold2"/>
+  <recv request="OPTIONS" crlf="true" timeout="60000" ontimeout="hold2_done"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="hold2"/>
+  <label id="hold2_done"/>
   <send retrans="500">
     <![CDATA[
       INVITE [next_url] SIP/2.0
@@ -175,5 +214,5 @@
   <recv response="200" crlf="true"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
-  <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000"/>
+  <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000, 60000, 120000"/>
 </scenario>

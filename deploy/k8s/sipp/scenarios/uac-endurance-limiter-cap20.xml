@@ -85,7 +85,27 @@
     ]]>
   </send>
 
-  <pause milliseconds="30000"/>
+  <!-- 30s hold that answers in-dialog OPTIONS (RFC 3261 §11). The recv is
+       MANDATORY (sipp rejects an all-optional recv before a send); ontimeout
+       reproduces the former bare 30s pause when no keepalive probe arrives.
+       An answered probe re-parks and restarts the 30s hold. -->
+  <label id="hold"/>
+  <recv request="OPTIONS" crlf="true" timeout="30000" ontimeout="hold_done"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="hold"/>
+  <label id="hold_done"/>
 
   <send retrans="500">
     <![CDATA[
@@ -110,5 +130,5 @@
   <label id="rejected"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
-  <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000, 15000"/>
+  <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000, 15000, 60000, 120000"/>
 </scenario>

@@ -23,8 +23,9 @@
 
   A call that is ADMITTED runs the normal INVITE / 200 / ACK / 30s hold / BYE so
   established (in-dialog) short calls span the overload window and prove they are
-  NOT impacted. Hold is hardcoded 30000ms (sipp does not expand [$var] inside
-  <pause>), same as the emergency sibling.
+  NOT impacted. The hold answers in-dialog OPTIONS (RFC 3261 §11), same as the
+  emergency sibling; its 30000ms is hardcoded in the recv timeout attribute
+  (sipp does not expand [$var] in attributes).
 -->
 <scenario name="K8s UAC endurance short-hold NON-emergency — INVITE / 200|reject / hold / BYE">
 
@@ -76,7 +77,27 @@
     ]]>
   </send>
 
-  <pause milliseconds="30000"/>
+  <!-- 30s hold that answers in-dialog OPTIONS (RFC 3261 §11). The recv is
+       MANDATORY (sipp rejects an all-optional recv before a send); ontimeout
+       reproduces the former bare 30s pause when no keepalive probe arrives.
+       An answered probe re-parks and restarts the 30s hold. -->
+  <label id="hold"/>
+  <recv request="OPTIONS" crlf="true" timeout="30000" ontimeout="hold_done"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="hold"/>
+  <label id="hold_done"/>
 
   <send retrans="500">
     <![CDATA[
@@ -98,5 +119,5 @@
   <label id="rejected"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
-  <CallLengthRepartition value="100, 1000, 10000, 30000, 60000"/>
+  <CallLengthRepartition value="100, 1000, 10000, 30000, 60000, 120000"/>
 </scenario>
