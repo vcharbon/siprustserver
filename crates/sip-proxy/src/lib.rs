@@ -13,8 +13,8 @@
 //!   cookie + routing matrix, [`strategies`]), the worker registry (static +
 //!   simulated), OPTIONS health probing toward the B2BUA, the metrics layer
 //!   (counters + a Prometheus HTTP endpoint), and [`self_gate`] — the ELU/CPS
-//!   admission gate ([`self_gate::EluCpsGate`]: EWMA-smoothed proxy ELU +
-//!   per-class CPS token bucket + load sampler) shedding external new-dialog
+//!   admission gate ([`self_gate::EluCpsGate`]: EWMA-smoothed intake pressure
+//!   (packet age at dequeue) + per-class CPS token bucket) shedding external new-dialog
 //!   non-emergency INVITEs under self-overload, with the always-admit
 //!   [`self_gate::AlwaysAdmitGate`] as the no-protection default.
 //! - Out of scope: the SIP registrar/REGISTER path, the per-worker AIMD

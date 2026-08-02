@@ -6,8 +6,9 @@
 //! sheds **external, new-dialog, non-emergency** INVITEs on two cheap binary
 //! checks:
 //!
-//!   - `proxy_elu > elu_critical` — hard rejection by event-loop pressure
-//!     (`proxy_overload_elu`).
+//!   - `proxy_elu > elu_critical` — hard rejection by intake pressure: the
+//!     "ELU" reading is packet age at dequeue, normalized by
+//!     [`IntakeAgeSampler`] (`proxy_overload_elu` keeps its wire name).
 //!   - a per-class CPS token bucket — hard cap on the external new-dialog
 //!     non-emergency rate (`proxy_overload_cps`).
 //!
@@ -160,49 +161,52 @@ pub trait LoadSampler: Send + Sync {
     fn gc_fraction(&self) -> f64;
 }
 
-/// Production [`LoadSampler`].
-///
-/// **Platform caveat (TODO):** Rust has no Node `perf_hooks`
-/// `eventLoopUtilization()` and no managed GC, so there is no direct analogue of
-/// the TS live sampler. This impl reports an ELU derived from how late the
-/// periodic sampler task lands (the fraction of wall time beyond the nominal
-/// window is a coarse proxy for loop saturation — when the runtime is busy the
-/// 100 ms task lands late) and a GC fraction of `0` (Rust has no stop-the-world
-/// GC pauses to attribute). The gate keys on `elu` only, so a `gc` of `0` is
-/// correct, not a stub. This is the **same** coarse busy-proxy the b2bua-side
-/// `LiveLoadSampler` uses; the fidelity debt and the `RuntimeMetrics` follow-up
-/// are tracked there (MIGRATION_STATUS debt (1)).
-//
-// TODO(migration/14): replace the elapsed-since-last-read busy proxy with
-// `tokio::runtime::Handle::current().metrics()` busy-duration accounting once an
-// ELU definition that matches `elu_critical` is settled (shared with migration/08).
-pub struct LiveLoadSampler {
-    prev_elu_at: Mutex<tokio::time::Instant>,
-    sample_window: std::time::Duration,
+/// Dequeue age (ms) at which [`IntakeAgeSampler::elu`] reads `1.0`. Past ~500 ms
+/// of queueing the caller's Timer A (T1 = 500 ms) has already fired, so the
+/// retransmit storm is compounding the overload — full shed pressure.
+pub const AGE_CRITICAL_MS: u64 = 500;
+
+/// Shared max-dequeue-age cell: every `ProxyCore` recv shard (both faces) folds
+/// the age of each packet it dequeues in via [`record`](Self::record); the
+/// [`IntakeAgeSampler`] drains the max per sample window. ONE instance across
+/// all shards, so the window max is the whole-intake saturation signal.
+/// Clone-cheap (shares one atomic).
+#[derive(Clone, Debug, Default)]
+pub struct IntakeAgeRecorder {
+    max_age_ms: Arc<AtomicU64>,
 }
 
-impl LiveLoadSampler {
-    /// Build a live sampler normalising busy-time against `sample_window` (the
-    /// sampler cadence; pass [`ProxySelfGateConfig::sampler_interval`]).
-    pub fn new(sample_window: std::time::Duration) -> Self {
-        Self { prev_elu_at: Mutex::new(tokio::time::Instant::now()), sample_window }
+impl IntakeAgeRecorder {
+    /// Fold one packet's dequeue age into the window max (one `fetch_max`).
+    pub fn record(&self, age_ms: u64) {
+        self.max_age_ms.fetch_max(age_ms, Ordering::Relaxed);
+    }
+
+    /// Take the window max and reset it to `0` (the per-window drain).
+    pub fn drain_max(&self) -> u64 {
+        self.max_age_ms.swap(0, Ordering::Relaxed)
     }
 }
 
-impl LoadSampler for LiveLoadSampler {
+/// Production [`LoadSampler`]: intake saturation measured as the **age of
+/// packets at dequeue** (`Clock::now_ms − UdpPacket::arrival_ms`, recorded by
+/// every recv shard into one shared [`IntakeAgeRecorder`]). Each `elu()` read
+/// drains the window max and normalizes it against [`AGE_CRITICAL_MS`], so a
+/// saturated serial recv shard reads busy even with idle runtime workers.
+pub struct IntakeAgeSampler {
+    recorder: IntakeAgeRecorder,
+}
+
+impl IntakeAgeSampler {
+    /// Build over the recorder the recv shards feed.
+    pub fn new(recorder: IntakeAgeRecorder) -> Self {
+        Self { recorder }
+    }
+}
+
+impl LoadSampler for IntakeAgeSampler {
     fn elu(&self) -> f64 {
-        let now = tokio::time::Instant::now();
-        let mut prev = self.prev_elu_at.lock().unwrap();
-        let elapsed = now.saturating_duration_since(*prev);
-        *prev = now;
-        let window = self.sample_window.as_secs_f64();
-        if window <= 0.0 {
-            return 0.0;
-        }
-        // Lag beyond the nominal window is the "busy" signal; an on-time sample
-        // reads ~0, a window-late sample reads ~1.
-        let lag = (elapsed.as_secs_f64() - window).max(0.0);
-        clamp01(lag / window)
+        clamp01(self.recorder.drain_max() as f64 / AGE_CRITICAL_MS as f64)
     }
 
     fn gc_fraction(&self) -> f64 {
@@ -422,7 +426,7 @@ struct GateInner {
 }
 
 /// The real ELU/CPS proxy-self gate (port of TS `ProxySelfGate`). Clone-cheap
-/// (shares one `Arc`); construct one with [`EluCpsGate::new`]/[`EluCpsGate::live`],
+/// (shares one `Arc`); construct one with [`EluCpsGate::new`]/[`EluCpsGate::intake`],
 /// hand it to `ProxyCoreBuilder::self_gate`, and drive [`sample`](EluCpsGate::sample)
 /// from a periodic task at [`ProxySelfGateConfig::sampler_interval`].
 #[derive(Clone)]
@@ -464,18 +468,12 @@ impl EluCpsGate {
         }
     }
 
-    /// Production gate: a [`LiveLoadSampler`] at the configured cadence, default
-    /// config. The EWMA only moves once a sampler task drives
-    /// [`sample`](EluCpsGate::sample); without one the ELU reads `0` (admit) —
-    /// the correct "no signal yet" classification.
-    pub fn live() -> Self {
-        Self::live_with(ProxySelfGateConfig::default())
-    }
-
-    /// Production gate at an explicit config (its [`LiveLoadSampler`] normalises
-    /// busy-time against `config.sampler_interval`).
-    pub fn live_with(config: ProxySelfGateConfig) -> Self {
-        Self::new(Arc::new(LiveLoadSampler::new(config.sampler_interval)), config)
+    /// Production gate: an [`IntakeAgeSampler`] over `recorder` — the shared
+    /// cell every recv shard's dequeue path feeds. The EWMA only moves once a
+    /// sampler task drives [`sample`](EluCpsGate::sample); without one the ELU
+    /// reads `0` (admit) — the correct "no signal yet" classification.
+    pub fn intake(recorder: IntakeAgeRecorder, config: ProxySelfGateConfig) -> Self {
+        Self::new(Arc::new(IntakeAgeSampler::new(recorder)), config)
     }
 
     /// The sampler cadence — the period a runner task should `tick` before each
@@ -738,26 +736,66 @@ mod tests {
         assert!((g.elu_ewma() - 0.64).abs() < 1e-9);
     }
 
-    /// The live sampler reports a `0..=1` ELU and a structurally-`0` GC fraction;
-    /// a late sample (runtime starved past the window) reads busy (> 0).
-    #[tokio::test(start_paused = true)]
-    async fn live_sampler_reports_clamped_elu_and_zero_gc() {
-        let s = LiveLoadSampler::new(Duration::from_millis(100));
-        let e0 = s.elu();
-        assert!((0.0..=1.0).contains(&e0), "elu {e0} out of [0,1]");
+    /// The intake sampler normalizes the window's max dequeue age against
+    /// `AGE_CRITICAL_MS` (max wins over later smaller ages; ≥ critical clamps
+    /// to 1.0) and reports a structurally-`0` GC fraction.
+    #[test]
+    fn intake_sampler_normalizes_max_age_against_critical() {
+        let rec = IntakeAgeRecorder::default();
+        let s = IntakeAgeSampler::new(rec.clone());
+        assert_eq!(s.elu(), 0.0, "no traffic reads idle");
         assert_eq!(s.gc_fraction(), 0.0);
-        tokio::time::advance(Duration::from_millis(500)).await;
-        let e1 = s.elu();
-        assert!((0.0..=1.0).contains(&e1), "elu {e1} out of [0,1]");
-        assert!(e1 > 0.0, "a late sample should read busy (> 0), got {e1}");
+        rec.record(250);
+        rec.record(100); // smaller later age must not shrink the window max
+        assert!((s.elu() - 0.5).abs() < 1e-9, "250ms / 500ms critical = 0.5");
+        rec.record(AGE_CRITICAL_MS * 4); // way past critical clamps to 1.0
+        assert_eq!(s.elu(), 1.0);
     }
 
-    /// The end-to-end injected-ELU → running-sampler-task → shed loop. The live
-    /// sampler alone reads ~0 under a paused runtime, so (like the b2bua
-    /// `overload.rs`) this injects the `simulated()` sampler and spawns the real
-    /// 100 ms `sample()` task, then advances the paused clock to drive the
-    /// injected ELU through the task into the EWMA and observe the gate flip to
-    /// shedding. Pins the seam the runner wires.
+    /// Each `elu()` read drains the recorder: a second read with no new traffic
+    /// reads `0` (the signal is per-window, not sticky).
+    #[test]
+    fn intake_sampler_read_drains_the_window() {
+        let rec = IntakeAgeRecorder::default();
+        let s = IntakeAgeSampler::new(rec.clone());
+        rec.record(AGE_CRITICAL_MS);
+        assert_eq!(s.elu(), 1.0);
+        assert_eq!(s.elu(), 0.0, "the read must have swapped the max to 0");
+        assert_eq!(rec.drain_max(), 0);
+    }
+
+    /// The production seam end-to-end: an `EluCpsGate::intake` gate over a
+    /// recorder the "dequeue path" feeds. Sustained critical ages sampled into
+    /// the EWMA flip the gate to `proxy_overload_elu`; once traffic drains
+    /// (empty windows read 0) the samples pull the EWMA back and it admits.
+    #[tokio::test(start_paused = true)]
+    async fn intake_gate_sheds_on_sustained_dequeue_age_then_recovers() {
+        let rec = IntakeAgeRecorder::default();
+        let g = EluCpsGate::intake(rec.clone(), ProxySelfGateConfig::default());
+        assert!(g.try_admit_external().admit, "calm intake admits");
+
+        // Saturated intake: every sample window sees a ≥ critical dequeue age.
+        for _ in 0..10 {
+            rec.record(AGE_CRITICAL_MS);
+            g.sample();
+        }
+        assert!(g.elu_ewma() > 0.8, "sustained critical age must cross elu_critical, got {}", g.elu_ewma());
+        let d = g.try_admit_external();
+        assert!(!d.admit);
+        assert_eq!(d.reason.as_deref(), Some("proxy_overload_elu"));
+
+        // Intake drains: empty windows sample 0 and the EWMA recovers.
+        for _ in 0..10 {
+            g.sample();
+        }
+        assert!(g.try_admit_external().admit, "a drained intake must admit again");
+    }
+
+    /// The end-to-end injected-ELU → running-sampler-task → shed loop: (like
+    /// the b2bua `overload.rs`) this injects the `simulated()` sampler and
+    /// spawns the real 100 ms `sample()` task, then advances the paused clock
+    /// to drive the injected ELU through the task into the EWMA and observe the
+    /// gate flip to shedding. Pins the sampler-task seam the runner wires.
     #[tokio::test(start_paused = true)]
     async fn running_sampler_task_drives_the_gate_to_shed_on_injected_elu() {
         let (sampler, ctl) = simulated();

@@ -11,9 +11,10 @@
 //!     from new-dialog selection). Health writes flow through the registry's
 //!     `control()` seam, so an unanswered worker is demoted (Dead/NotReady/
 //!     Draining) and routing reacts — for the static pool too.
-//!   - `EluCpsGate` self-gate (migration/14): EWMA-smoothed proxy-self ELU + a
-//!     per-class CPS token bucket shed external new-dialog non-emergency INVITEs
-//!     under self-overload (a stateless 503 + `Retry-After`/`Reason`). A 100 ms
+//!   - `EluCpsGate` self-gate (migration/14): EWMA-smoothed intake pressure
+//!     (packet age at dequeue, recorded by every recv shard) + a per-class CPS
+//!     token bucket shed external new-dialog non-emergency INVITEs under
+//!     self-overload (a stateless 503 + `Retry-After`/`Reason`). A 100 ms
 //!     `tokio::time::interval` task drives its load sampler. `PROXY_SELF_GATE=0`
 //!     reverts to the always-admit gate.
 //!   - Prometheus `/metrics` + `/healthz` + `/readyz` via the shared `probe-http`.
@@ -90,7 +91,7 @@ use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
 use topology::{K8sMembership, Membership};
 use sip_proxy::resolver::ResolverConfig;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, ProxySelfGate, ProxySelfGateConfig};
+use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate, ProxySelfGateConfig};
 use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
 use sip_proxy::{ExternalFaceParts, FaceCidrs, ProxyAddr, ProxyCoreBuilder, RoutingStrategy};
 use sip_txn::IdGen;
@@ -694,14 +695,17 @@ async fn main() {
     let clock = Clock::system();
     let id_gen = Arc::new(IdGen::from_entropy());
 
-    // Proxy-self ELU/CPS admission gate (migration/14). On by default; the live
-    // ELU sampler is driven by the 100 ms task spawned below. `PROXY_SELF_GATE=0`
-    // reverts to the always-admit gate (then `self_gate` is `None`, no sampler
-    // task, no self-gate /metrics). Build the concrete `EluCpsGate` once so the
-    // sampler task + the /metrics exposition can read it; hand each core an
-    // `Arc<dyn ProxySelfGate>` view of the same gate.
+    // Proxy-self ELU/CPS admission gate (migration/14). On by default; the ELU
+    // arm observes intake saturation — every recv shard records each packet's
+    // age at dequeue into this ONE shared recorder, and the 100 ms sampler task
+    // spawned below drains the window max into the gate's EWMA.
+    // `PROXY_SELF_GATE=0` reverts to the always-admit gate (then `self_gate` is
+    // `None`, no sampler task, no self-gate /metrics). Build the concrete
+    // `EluCpsGate` once so the sampler task + the /metrics exposition can read
+    // it; hand each core an `Arc<dyn ProxySelfGate>` view of the same gate.
+    let intake_age = IntakeAgeRecorder::default();
     let self_gate: Option<EluCpsGate> = if parse_bool("PROXY_SELF_GATE", true) {
-        Some(EluCpsGate::live_with(ProxySelfGateConfig {
+        Some(EluCpsGate::intake(intake_age.clone(), ProxySelfGateConfig {
             elu_critical: parse_f64("PROXY_SELF_GATE_ELU_CRITICAL", 0.8),
             cps_bucket_size: parse_u64("PROXY_SELF_GATE_CPS_SIZE", 50) as u32,
             cps_bucket_rate: parse_u64("PROXY_SELF_GATE_CPS_RATE", 100) as u32,
@@ -786,6 +790,7 @@ async fn main() {
             .metrics(metrics.clone())
             .cancel_lru(cancel_lru.clone())
             .self_gate(gate_dyn.clone())
+            .intake_age(intake_age.clone())
             .resolver_config(resolver_cfg)
             .shard(shard);
         if let Some((_, ext_adv, cidrs)) = &ext_face {
@@ -909,10 +914,10 @@ async fn main() {
     }
 
     // Proxy-self gate sampler (migration/14). Rides `tokio::time::interval` (NOT
-    // the TS raw `setInterval`) so behaviour stays on one clock; each tick reads
-    // the ELU/GC load sampler and feeds the gate's EWMA. Only spawned when the
-    // real gate is enabled. Owns no per-call state, so it needs no release path;
-    // the live sampler's busy proxy keys on how late this task lands under load.
+    // the TS raw `setInterval`) so behaviour stays on one clock; each tick
+    // drains the shared intake-age recorder's window max into the gate's EWMA.
+    // Only spawned when the real gate is enabled. Owns no per-call state, so it
+    // needs no release path.
     if let Some(g) = self_gate.clone() {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(g.sampler_interval());
