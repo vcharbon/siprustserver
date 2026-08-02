@@ -117,6 +117,22 @@ impl ProbeServer {
         idle_timeout: Duration,
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
+        Self::serve_on_with(listener, routes, idle_timeout)
+    }
+
+    /// Serve on a pre-bound listener. The caller owns bind policy — ordering
+    /// relative to its other sockets, EADDRINUSE retry — and can hold the bound
+    /// port long before route construction; this only runs the accept loop.
+    pub fn serve_on(listener: TcpListener, routes: ProbeRoutes) -> std::io::Result<Self> {
+        Self::serve_on_with(listener, routes, IDLE_TIMEOUT)
+    }
+
+    /// [`serve_on`](Self::serve_on) with an explicit fully-idle cut window.
+    pub fn serve_on_with(
+        listener: TcpListener,
+        routes: ProbeRoutes,
+        idle_timeout: Duration,
+    ) -> std::io::Result<Self> {
         let local = listener.local_addr()?;
         let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         let task = tokio::spawn(async move {
@@ -328,6 +344,20 @@ mod tests {
             let r = get(server.addr(), path).await;
             assert!(r.contains("503") && r.contains("draining"), "{path} draining: {r}");
         }
+    }
+
+    #[tokio::test]
+    async fn serve_on_runs_the_accept_loop_on_a_pre_bound_listener() {
+        // The caller binds (and may retry-wait on) the listener itself; the
+        // server only accepts on it — same routes, same behaviour.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = ProbeServer::serve_on(
+            listener,
+            routes("pre-bound\n", always(ProbeState::Ready)),
+        )
+        .unwrap();
+        assert!(get(server.addr(), "/metrics").await.contains("pre-bound"));
+        assert!(get(server.addr(), "/healthz").await.contains("200 OK"));
     }
 
     #[tokio::test]

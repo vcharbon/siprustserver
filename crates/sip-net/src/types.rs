@@ -254,7 +254,12 @@ pub struct UndeliveredPacket {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindErrorReason {
+    /// The simulated fabric already has an endpoint at this address.
     AlreadyBound,
+    /// The OS holds the address for another socket (`EADDRINUSE`). Transient
+    /// during a same-node process handover — callers may wait for release.
+    AddrInUse,
+    /// Any other OS-level bind failure.
     OsError,
 }
 
@@ -265,6 +270,15 @@ pub struct BindError {
     pub reason: BindErrorReason,
     pub addr: SocketAddr,
     pub message: String,
+}
+
+impl BindError {
+    /// True when the address is currently held by another socket — the one
+    /// bind failure that is retryable (the holder may be a predecessor process
+    /// still draining). Structured so callers never string-match the message.
+    pub fn is_addr_in_use(&self) -> bool {
+        matches!(self.reason, BindErrorReason::AlreadyBound | BindErrorReason::AddrInUse)
+    }
 }
 
 /// Failure sending a datagram (port of `SendError`).

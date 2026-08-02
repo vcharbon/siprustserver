@@ -43,6 +43,11 @@
 //!                    the serial recv loop — the ~550 OPTIONS/s burst ceiling —
 //!                    across N sockets; kernel flow-hashing keeps each UAC
 //!                    src:port on one socket so per-flow ordering holds)
+//!   PROXY_BIND_RETRY_INTERVAL_MS  cadence of bind retries while a port is
+//!                    still held (EADDRINUSE)                (default 200)
+//!   PROXY_BIND_RETRY_DEADLINE_MS  bind-retry give-up deadline; exceeds the 5 s
+//!                    SIGTERM drain grace so a recreated pod waits out its
+//!                    predecessor instead of crash-looping   (default 10000)
 //!   PROXY_HMAC_KID   stickiness cookie key id              (default k0)
 //!   PROXY_HMAC_KEY   stickiness cookie secret (>=16 bytes) (default dev key)
 //!   HEALTH_INTERVAL_MS / HEALTH_TIMEOUT_MS / HEALTH_THRESHOLD  (probe tuning)
@@ -74,7 +79,7 @@ use std::time::Duration;
 
 use sip_clock::Clock;
 use sip_net::types::BindUdpOpts;
-use sip_net::{RealSignalingNetwork, SignalingNetwork};
+use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork};
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::observability::ProxyMetrics;
@@ -382,6 +387,55 @@ fn self_gate_prometheus_text(gate: &Option<EluCpsGate>) -> String {
     s
 }
 
+/// Bounded bind retry for a port a predecessor process may still hold.
+///
+/// A recreated `hostNetwork` pod lands in the node netns its predecessor just
+/// vacated, so a bind can hit a transient `EADDRINUSE` while the old sockets
+/// linger. Re-attempts `bind` every `interval` while `is_addr_in_use(&err)`,
+/// logging each wait so a slow release is visible, until `deadline`. The
+/// default deadline (10 s) deliberately exceeds the 5 s SIGTERM drain grace so
+/// a fast pod recreation waits out its predecessor — instances serialize on
+/// the node, never overlap.
+///
+/// Any other bind error, or addr-in-use past the deadline, returns a message
+/// naming the address. The caller MUST treat that as fatal (panic → non-zero
+/// exit): the process never runs with a subset of its ports.
+async fn bind_with_retry<T, E, Fut>(
+    what: &str,
+    addr: SocketAddr,
+    interval: Duration,
+    deadline: Duration,
+    is_addr_in_use: impl Fn(&E) -> bool,
+    mut bind: impl FnMut() -> Fut,
+) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let started = tokio::time::Instant::now();
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match bind().await {
+            Ok(t) => return Ok(t),
+            Err(e) if !is_addr_in_use(&e) => {
+                return Err(format!("bind {what} {addr} failed: {e}"));
+            }
+            Err(e) => {
+                if started.elapsed() + interval > deadline {
+                    return Err(format!(
+                        "bind {what} {addr} still in use after {attempt} attempt(s) over {}ms — \
+                         the address belongs to someone else: {e}",
+                        started.elapsed().as_millis(),
+                    ));
+                }
+                eprintln!("sip-proxy-runner waiting for {addr} release ({what}): attempt {attempt}");
+                tokio::time::sleep(interval).await;
+            }
+        }
+    }
+}
+
 /// Build the worker pool registry + its health-write control seam.
 ///
 /// `PROXY_WORKERS` (a static `id@host:port,..` list) takes precedence for
@@ -540,16 +594,52 @@ async fn main() {
 
     let net = RealSignalingNetwork::new();
 
+    // Every bind below rides the same bounded EADDRINUSE retry, and ANY bind
+    // still failing at the deadline aborts the process — it never runs with a
+    // subset of its ports.
+    let bind_interval = Duration::from_millis(parse_u64("PROXY_BIND_RETRY_INTERVAL_MS", 200));
+    let bind_deadline = Duration::from_millis(parse_u64("PROXY_BIND_RETRY_DEADLINE_MS", 10_000));
+    let is_udp_in_use = |e: &BindError| e.is_addr_in_use();
+    let is_tcp_in_use = |e: &std::io::Error| e.kind() == std::io::ErrorKind::AddrInUse;
+
+    // BIND ORDER: metrics/probe HTTP listener FIRST, then the internal-face
+    // signaling sockets, then the external-face sockets LAST. The SIP stack is
+    // never exposed unless the process can already report health, and the
+    // metrics port — inherently exclusive TCP — is the node-singleton lock:
+    // holding it proves no other proxy instance is alive on the node in every
+    // shard config, whereas the data sockets may carry SO_REUSEPORT
+    // (recv_shards > 1) and would silently overlap a predecessor. The accept
+    // loop starts later (ProbeServer::serve_on) — the bind is the lock.
+    let metrics_listener = bind_with_retry(
+        "metrics",
+        metrics_sa,
+        bind_interval,
+        bind_deadline,
+        is_tcp_in_use,
+        || tokio::net::TcpListener::bind(metrics_sa),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
+
     // Main signaling endpoint(s) — one per recv shard. With N > 1 every bind
     // (including the first) sets SO_REUSEPORT; the kernel flow-hashes on the
     // 4-tuple so all datagrams from one UAC src:port land on ONE socket and
     // per-flow ordering (INVITE→CANCEL, retransmits) is preserved.
     let mut endpoints = Vec::with_capacity(recv_shards);
     for _ in 0..recv_shards {
-        let ep = net
-            .bind_udp(BindUdpOpts::new(listen_sa, queue_max).with_reuse_port(recv_shards > 1))
-            .await
-            .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"));
+        let ep = bind_with_retry(
+            "internal face",
+            listen_sa,
+            bind_interval,
+            bind_deadline,
+            is_udp_in_use,
+            || {
+                let opts = BindUdpOpts::new(listen_sa, queue_max).with_reuse_port(recv_shards > 1);
+                async move { net.bind_udp(opts).await }
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
         endpoints.push(ep);
     }
 
@@ -560,22 +650,40 @@ async fn main() {
     let mut ext_endpoints = Vec::new();
     if let Some((ext_sa, _, _)) = &ext_face {
         for _ in 0..recv_shards {
-            let ep = net
-                .bind_udp(BindUdpOpts::new(*ext_sa, queue_max).with_reuse_port(recv_shards > 1))
-                .await
-                .unwrap_or_else(|e| panic!("bind external face {ext_sa} failed: {e:?}"));
+            let ep = bind_with_retry(
+                "external face",
+                *ext_sa,
+                bind_interval,
+                bind_deadline,
+                is_udp_in_use,
+                || {
+                    let opts =
+                        BindUdpOpts::new(*ext_sa, queue_max).with_reuse_port(recv_shards > 1);
+                    async move { net.bind_udp(opts).await }
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
             ext_endpoints.push(ep);
         }
     }
 
     // Separate endpoint for the OPTIONS health probe (its own source socket).
-    let probe_ep = net
-        .bind_udp(BindUdpOpts::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-            1024,
-        ))
-        .await
-        .unwrap_or_else(|e| panic!("bind probe socket failed: {e:?}"));
+    // Port 0 (ephemeral) never conflicts; the retry wrapper keeps the fatal
+    // contract uniform across every bind.
+    let probe_sa = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+    let probe_ep = bind_with_retry(
+        "probe socket",
+        probe_sa,
+        bind_interval,
+        bind_deadline,
+        is_udp_in_use,
+        || {
+            async move { net.bind_udp(BindUdpOpts::new(probe_sa, 1024)).await }
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
 
     let hmac = Arc::new(
         StaticHmacKeyProvider::new(HmacKey::new(hmac_kid, hmac_key.into_bytes()), None)
@@ -836,16 +944,17 @@ async fn main() {
         // feature off here). /debug/heap → 503.
         heap: None,
     };
-    let _metrics_server = match probe_http::ProbeServer::start(metrics_sa, routes).await {
-        Ok(s) => {
-            eprintln!("sip-proxy-runner metrics on http://{}/metrics (readiness /readyz)", s.addr());
-            Some(s)
-        }
-        Err(e) => {
-            eprintln!("sip-proxy-runner metrics server failed to bind {metrics_sa}: {e}");
-            None
-        }
-    };
+    // The listener was bound FIRST (metrics-first bind order above); this only
+    // starts the accept loop. A failure here is fatal — a proxy without its
+    // health endpoint gets liveness-killed 30 s later with a lying /readyz.
+    let _metrics_server = probe_http::ProbeServer::serve_on(metrics_listener, routes)
+        .unwrap_or_else(|e| {
+            panic!("sip-proxy-runner FATAL: metrics server on {metrics_sa} failed to start: {e}")
+        });
+    eprintln!(
+        "sip-proxy-runner metrics on http://{}/metrics (readiness /readyz)",
+        _metrics_server.addr()
+    );
 
     let probe_task = tokio::spawn(probe.run());
     let mut core_tasks = tokio::task::JoinSet::new();
@@ -1248,5 +1357,87 @@ mod tests {
         let cfg = load_observer_cfg_from_env(LoadObserverConfig::default());
         clear_lb_vars();
         assert_valid_config(HELM_PROBE, &cfg); // panics: refusing to start
+    }
+
+    // ── bind_with_retry — bounded EADDRINUSE wait ───────────────────────────
+    //
+    // Real sockets ⇒ real clock (docs/testing/test-clock.md forbids pausing
+    // tokio time under real socket readiness). Intervals are test-short
+    // (10 ms / 300 ms) so the whole group stays sub-second — default lane.
+
+    const TEST_INTERVAL: Duration = Duration::from_millis(10);
+    const TEST_DEADLINE: Duration = Duration::from_millis(300);
+
+    fn tcp_in_use(e: &std::io::Error) -> bool {
+        e.kind() == std::io::ErrorKind::AddrInUse
+    }
+
+    /// (a) The holder releases the port mid-retry: the bind lands well before
+    /// the deadline instead of the process dying on the first attempt.
+    #[tokio::test]
+    async fn bind_retry_succeeds_once_the_holder_releases() {
+        let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = holder.local_addr().unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(holder);
+        });
+        let bound = bind_with_retry("test", addr, TEST_INTERVAL, TEST_DEADLINE, tcp_in_use, || {
+            tokio::net::TcpListener::bind(addr)
+        })
+        .await
+        .expect("retry must win once the holder releases");
+        assert_eq!(bound.local_addr().unwrap(), addr);
+        release.await.unwrap();
+    }
+
+    /// (b) The holder never releases: the deadline expires and the error names
+    /// the contested address. Exercises the UDP side end-to-end — the real
+    /// network's `BindError` classifies EADDRINUSE structurally.
+    #[tokio::test]
+    async fn bind_retry_gives_up_at_the_deadline_naming_the_addr() {
+        let holder = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = holder.local_addr().unwrap();
+        let net = RealSignalingNetwork::new();
+        let err = bind_with_retry(
+            "test",
+            addr,
+            TEST_INTERVAL,
+            TEST_DEADLINE,
+            |e: &BindError| e.is_addr_in_use(),
+            || {
+                async move { net.bind_udp(BindUdpOpts::new(addr, 8)).await }
+            },
+        )
+        .await;
+        // Manual unwrap of the Err arm — `Box<dyn UdpEndpoint>` is not Debug.
+        let err = match err {
+            Ok(_) => panic!("the addr stays held — the deadline must expire"),
+            Err(e) => e,
+        };
+        assert!(err.contains(&addr.to_string()), "error must name the addr: {err}");
+        assert!(err.contains("still in use"), "{err}");
+        drop(holder);
+    }
+
+    /// A non-addr-in-use failure is NOT retried — it surfaces immediately
+    /// (still naming the address) so a genuine misconfiguration fails fast.
+    #[tokio::test]
+    async fn bind_retry_fails_fast_on_a_non_in_use_error() {
+        let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = holder.local_addr().unwrap();
+        let started = std::time::Instant::now();
+        let err = bind_with_retry(
+            "test",
+            addr,
+            TEST_INTERVAL,
+            TEST_DEADLINE,
+            |_: &std::io::Error| false,
+            || tokio::net::TcpListener::bind(addr),
+        )
+        .await
+        .expect_err("a non-retryable error must surface at once");
+        assert!(started.elapsed() < TEST_DEADLINE, "must not wait out the deadline");
+        assert!(err.contains(&addr.to_string()) && err.contains("failed"), "{err}");
     }
 }

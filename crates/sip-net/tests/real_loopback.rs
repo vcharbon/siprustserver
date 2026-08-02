@@ -110,11 +110,17 @@ async fn reuse_port_shards_one_flow_to_one_socket() {
     assert_eq!(got, (0..N).collect::<Vec<_>>(), "per-flow order preserved on one shard");
 }
 
-/// Without reuse_port, a second bind on a taken port still fails loudly.
+/// Without reuse_port, a second bind on a taken port still fails loudly — and
+/// the error is structurally classified as addr-in-use (retryable), so a
+/// bounded bind-retry loop never string-matches "Address already in use".
 #[tokio::test]
 async fn plain_rebind_still_conflicts() {
     let net = RealSignalingNetwork::new();
     let s1 = net.bind_udp(loopback(64)).await.unwrap();
-    let err = net.bind_udp(BindUdpOpts::new(s1.local_addr(), 64)).await;
-    assert!(err.is_err(), "non-reuse-port rebind must fail");
+    // Manual unwrap of the Err arm — `Box<dyn UdpEndpoint>` is not Debug.
+    let err = match net.bind_udp(BindUdpOpts::new(s1.local_addr(), 64)).await {
+        Ok(_) => panic!("non-reuse-port rebind must fail"),
+        Err(e) => e,
+    };
+    assert!(err.is_addr_in_use(), "EADDRINUSE must classify as addr-in-use: {err:?}");
 }
