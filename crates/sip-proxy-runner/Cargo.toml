@@ -19,6 +19,9 @@ sip-proxy = { path = "../sip-proxy" }
 # /debug/flamegraph pprof route — one module shared with the b2bua worker.
 probe-http = { path = "../probe-http" }
 sip-net = { path = "../sip-net" }
+# ONLY for sip_message::sniff::is_sheddable_new_invite — the intake-shed
+# pre-ingress hook calls the classifier; no SIP scanning lives in this crate.
+sip-message = { path = "../sip-message" }
 sip-txn = { path = "../sip-txn" }
 sip-clock = { path = "../sip-clock" }
 # Cluster membership: the shared topology crate with the kube EndpointSlice

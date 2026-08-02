@@ -79,7 +79,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sip_clock::Clock;
-use sip_net::types::BindUdpOpts;
+use sip_net::types::{BindUdpOpts, PreIngressAction, PreIngressHook};
 use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork};
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
@@ -113,6 +113,31 @@ fn parse_u64(key: &str, default: u64) -> u64 {
 
 fn parse_f64(key: &str, default: f64) -> f64 {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Depth-watermark selective intake shed (062): the LAST-line guard below the
+/// admission layer (the self-gate, 063, is the first-line brake). At or above
+/// `watermark` queued datagrams the socket pump drops only what
+/// [`sip_message::sniff::is_sheddable_new_invite`] classifies as a NEW
+/// non-emergency INVITE; in-dialog traffic, responses, ACK/BYE/CANCEL,
+/// emergency INVITEs, and garbage are always admitted. Drops land on the
+/// endpoint's `pre_ingress_dropped` counter → `sip_proxy_intake_shed_total`.
+fn intake_shed_hook(watermark: usize) -> PreIngressHook {
+    Arc::new(move |raw, _src, depth| {
+        if depth >= watermark && sip_message::sniff::is_sheddable_new_invite(raw) {
+            PreIngressAction::Drop
+        } else {
+            PreIngressAction::Accept
+        }
+    })
+}
+
+/// The shed watermark in queued datagrams: `PROXY_INTAKE_SHED_PCT` percent of
+/// `queue_max` (default 50), floored at 1 so `0%` sheds whenever anything is
+/// queued rather than on an idle socket; `>= 100%` only sheds at a full queue.
+fn intake_shed_watermark(queue_max: usize) -> usize {
+    let pct = parse_u64("PROXY_INTAKE_SHED_PCT", 50) as usize;
+    (queue_max.saturating_mul(pct) / 100).max(1)
 }
 
 /// `1`/`true`/`yes`/`on` → on; `0`/`false`/`no`/`off` → off; anything else uses
@@ -626,6 +651,11 @@ async fn main() {
     // (including the first) sets SO_REUSEPORT; the kernel flow-hashes on the
     // 4-tuple so all datagrams from one UAC src:port land on ONE socket and
     // per-flow ordering (INVITE→CANCEL, retransmits) is preserved.
+    //
+    // Every signaling bind (both faces, all shards) carries the selective
+    // intake-shed hook — a blind tail-drop at the queue cap would otherwise
+    // kill emergency and in-dialog traffic first-come-first-served (062).
+    let intake_shed = intake_shed_hook(intake_shed_watermark(queue_max));
     let mut endpoints = Vec::with_capacity(recv_shards);
     for _ in 0..recv_shards {
         let ep = bind_with_retry(
@@ -635,7 +665,9 @@ async fn main() {
             bind_deadline,
             is_udp_in_use,
             || {
-                let opts = BindUdpOpts::new(listen_sa, queue_max).with_reuse_port(recv_shards > 1);
+                let opts = BindUdpOpts::new(listen_sa, queue_max)
+                    .with_reuse_port(recv_shards > 1)
+                    .with_pre_ingress(intake_shed.clone());
                 async move { net.bind_udp(opts).await }
             },
         )
@@ -658,8 +690,9 @@ async fn main() {
                 bind_deadline,
                 is_udp_in_use,
                 || {
-                    let opts =
-                        BindUdpOpts::new(*ext_sa, queue_max).with_reuse_port(recv_shards > 1);
+                    let opts = BindUdpOpts::new(*ext_sa, queue_max)
+                        .with_reuse_port(recv_shards > 1)
+                        .with_pre_ingress(intake_shed.clone());
                     async move { net.bind_udp(opts).await }
                 },
             )
@@ -1444,5 +1477,80 @@ mod tests {
         .expect_err("a non-retryable error must surface at once");
         assert!(started.elapsed() < TEST_DEADLINE, "must not wait out the deadline");
         assert!(err.contains(&addr.to_string()) && err.contains("failed"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod intake_shed_tests {
+    //! Pins [`intake_shed_hook`] (062): the hook is pure over `(raw, depth)`
+    //! — no socket needed — so each case invokes it directly.
+
+    use super::*;
+
+    const WATERMARK: usize = 8;
+
+    fn src() -> SocketAddr {
+        "192.0.2.9:5060".parse().unwrap()
+    }
+
+    const NEW_INVITE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-shed\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: shed@10.0.0.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+
+    const IN_DIALOG_INVITE: &[u8] = b"INVITE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-re\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>;tag=b2\r\n\
+Call-ID: shed@10.0.0.1\r\nCSeq: 2 INVITE\r\nContent-Length: 0\r\n\r\n";
+
+    const EMERGENCY_INVITE: &[u8] = b"INVITE sip:911@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-em\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:911@example.com>\r\n\
+Resource-Priority: esnet.0\r\n\
+Call-ID: em@10.0.0.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+
+    const BYE: &[u8] = b"BYE sip:bob@10.0.0.2:5070 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-bye\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>;tag=b2\r\n\
+Call-ID: shed@10.0.0.1\r\nCSeq: 3 BYE\r\nContent-Length: 0\r\n\r\n";
+
+    const OK_200: &[u8] = b"SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-shed\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>;tag=b2\r\n\
+Call-ID: shed@10.0.0.1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+
+    #[test]
+    fn below_the_watermark_everything_is_admitted() {
+        let hook = intake_shed_hook(WATERMARK);
+        for raw in [NEW_INVITE, IN_DIALOG_INVITE, EMERGENCY_INVITE, BYE, OK_200] {
+            assert_eq!(hook(raw, src(), WATERMARK - 1), PreIngressAction::Accept);
+        }
+    }
+
+    #[test]
+    fn at_the_watermark_only_the_new_non_emergency_invite_is_dropped() {
+        let hook = intake_shed_hook(WATERMARK);
+        assert_eq!(hook(NEW_INVITE, src(), WATERMARK), PreIngressAction::Drop);
+        for admitted in [IN_DIALOG_INVITE, EMERGENCY_INVITE, BYE, OK_200] {
+            assert_eq!(hook(admitted, src(), WATERMARK), PreIngressAction::Accept);
+        }
+    }
+
+    #[test]
+    fn deeper_than_the_watermark_still_sheds_new_invites() {
+        let hook = intake_shed_hook(WATERMARK);
+        assert_eq!(hook(NEW_INVITE, src(), WATERMARK * 100), PreIngressAction::Drop);
+    }
+
+    #[test]
+    fn watermark_defaults_to_half_the_queue_and_floors_at_one() {
+        // No env override in the test process — the 50% default applies.
+        assert_eq!(intake_shed_watermark(8192), 4096);
+        assert_eq!(intake_shed_watermark(1), 1);
     }
 }

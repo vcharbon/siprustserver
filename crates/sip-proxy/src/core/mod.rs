@@ -329,6 +329,7 @@ impl ProxyCore {
         let stats = {
             let metrics = self.metrics.clone();
             let endpoint = self.endpoint.clone();
+            let ext_endpoint = self.external.as_ref().map(|e| e.endpoint.clone());
             let shard = self.shard;
             tokio::spawn(async move {
                 let mut tick =
@@ -337,12 +338,19 @@ impl ProxyCore {
                 loop {
                     tick.tick().await;
                     let c = endpoint.counters();
+                    // Intake-shed drops are counted on BOTH faces — in
+                    // dual-face mode callers arrive on the external socket, so
+                    // its pre-ingress drops must not be invisible.
+                    let ext_shed = ext_endpoint
+                        .as_ref()
+                        .map_or(0, |e| e.counters().pre_ingress_dropped);
                     metrics.set_udp_endpoint_stats(
                         shard,
                         endpoint.queue_depth() as u64,
                         endpoint.queue_max() as u64,
                         c.enqueued,
                         c.tail_dropped,
+                        c.pre_ingress_dropped + ext_shed,
                     );
                 }
             })

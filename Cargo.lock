@@ -3952,6 +3952,7 @@ dependencies = [
  "probe-http",
  "rustls",
  "sip-clock",
+ "sip-message",
  "sip-net",
  "sip-proxy",
  "sip-txn",

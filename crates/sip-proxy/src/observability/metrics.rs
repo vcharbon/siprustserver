@@ -235,8 +235,9 @@ pub struct ProxyMetrics {
     /// from the gates). Keyed by shard index so N reuse-port cores don't stomp
     /// one gauge; rendered as the cross-shard aggregate (sum), keeping the
     /// metric names/meaning dashboards already use. Not hot: written every
-    /// sweep tick, read at render. `[depth, max, enqueued, tail_dropped]`.
-    udp_shards: Mutex<BTreeMap<usize, [u64; 4]>>,
+    /// sweep tick, read at render.
+    /// `[depth, max, enqueued, tail_dropped, pre_ingress_dropped]`.
+    udp_shards: Mutex<BTreeMap<usize, [u64; 5]>>,
     health: HealthGauges,
     /// `1` ⇒ the worker pool has **zero routable (`Alive`) workers** — the proxy
     /// can serve no new dialog. Set from the registry by the runner's health
@@ -401,14 +402,15 @@ impl ProxyMetrics {
     /// Publish one recv shard's endpoint receive-queue state (gauges) and
     /// lifetime counters (monotonic, endpoint-owned — stored, not accumulated).
     /// Single-socket deployments are just `shard = 0`.
-    pub fn set_udp_endpoint_stats(&self, shard: usize, queue_depth: u64, queue_max: u64, enqueued: u64, tail_dropped: u64) {
-        self.udp_shards.lock().unwrap().insert(shard, [queue_depth, queue_max, enqueued, tail_dropped]);
+    pub fn set_udp_endpoint_stats(&self, shard: usize, queue_depth: u64, queue_max: u64, enqueued: u64, tail_dropped: u64, pre_ingress_dropped: u64) {
+        self.udp_shards.lock().unwrap().insert(shard, [queue_depth, queue_max, enqueued, tail_dropped, pre_ingress_dropped]);
     }
 
-    /// Cross-shard aggregate `[depth, max, enqueued, tail_dropped]`.
-    fn udp_totals(&self) -> [u64; 4] {
+    /// Cross-shard aggregate
+    /// `[depth, max, enqueued, tail_dropped, pre_ingress_dropped]`.
+    fn udp_totals(&self) -> [u64; 5] {
         let shards = self.udp_shards.lock().unwrap();
-        let mut t = [0u64; 4];
+        let mut t = [0u64; 5];
         for v in shards.values() {
             for (acc, x) in t.iter_mut().zip(v) {
                 *acc += x;
@@ -567,11 +569,12 @@ impl ProxyMetrics {
         labeled(&mut s, "sip_proxy_resolver_refresh_total", "Proactive resolver refresh + startup prewarm events by outcome.", "counter", "outcome", &self.resolver_refresh.snapshot());
         g(&mut s, "sip_proxy_resolver_cache_size", "Resolver name-cache size.", "gauge", self.resolver_cache_size.load(Ordering::Relaxed));
         g(&mut s, "sip_proxy_send_failures_total", "Outbound datagrams the endpoint failed to send.", "counter", self.send_failures.load(Ordering::Relaxed));
-        let [udp_depth, udp_max, udp_enq, udp_drop] = self.udp_totals();
+        let [udp_depth, udp_max, udp_enq, udp_drop, udp_shed] = self.udp_totals();
         g(&mut s, "sip_proxy_udp_queue_depth", "Inbound UDP queue depth (sampled, summed over recv shards).", "gauge", udp_depth);
         g(&mut s, "sip_proxy_udp_queue_max", "Inbound UDP queue capacity (summed over recv shards).", "gauge", udp_max);
         g(&mut s, "sip_proxy_udp_enqueued_total", "Datagrams accepted into the inbound queue(s).", "counter", udp_enq);
         g(&mut s, "sip_proxy_udp_tail_dropped_total", "Datagrams tail-dropped by the full inbound queue(s).", "counter", udp_drop);
+        g(&mut s, "sip_proxy_intake_shed_total", "New non-emergency INVITEs dropped by the depth-watermark pre-ingress shed (the selective last-line guard below the admission layer).", "counter", udp_shed);
         g(&mut s, "sip_proxy_worker_pool_empty", "1 iff no worker is Alive (routable) — the proxy can serve no new dialog.", "gauge", self.worker_pool_empty.load(Ordering::Relaxed));
 
         // Overload-shed visibility (port of the TS AIMD counters). Without these a
