@@ -34,7 +34,8 @@ use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::{Changelog, ReplicatingCallStore};
-use b2bua::store::{CallStore, PartitionRole};
+use b2bua::store::{CallStore, PartitionRole, PutOpts};
+use call::{CallBodyCodec, MsgpackCodec, TimerEntry, TimerType};
 use b2bua::{B2buaCore, ReplicationSetup};
 use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
 
@@ -335,6 +336,46 @@ impl ReplicatedB2buaSut {
     /// only yields under timing.
     pub fn drop_live_copy(&self, call_ref: &str) -> bool {
         self.core.as_ref().map(|c| c.drop_live_copy(call_ref)).unwrap_or(false)
+    }
+
+    /// HARNESS SURGERY: implant a stale per-b-leg `NoAnswer` entry into the
+    /// replica body this node holds for `call_ref` in `(role, primary)`, firing
+    /// at absolute `fire_at_ms` — the upstreamneed-059 shape: an entry whose
+    /// cancel died with the crashed primary, so the body a later bootstrap +
+    /// reclaim serves still carries it. The stored `(p,b)` version is kept, so
+    /// pull/reclaim replay the mutated body exactly as they would the original.
+    /// Returns the b-leg id the entry names.
+    pub async fn implant_stale_no_answer(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+        fire_at_ms: i64,
+    ) -> String {
+        let body = self
+            .store
+            .get_call(role, primary, call_ref)
+            .await
+            .expect("replica store read")
+            .expect("replica body present");
+        let codec = MsgpackCodec::new();
+        let mut call = codec.decode(&body).expect("replica body decodes");
+        let leg = call.b_legs.first().expect("replicated call has a b-leg").leg_id.clone();
+        call.timers.push(TimerEntry {
+            id: format!("{:?}:{leg}", TimerType::NoAnswer),
+            timer_type: TimerType::NoAnswer,
+            fire_at: fire_at_ms,
+            leg_id: Some(leg.clone()),
+        });
+        let (p, b) = self
+            .store
+            .current_cv(role, primary, call_ref)
+            .expect("replica version vector present");
+        self.store
+            .put_call(role, primary, call_ref, codec.encode(&call), &[], 600_000, p, b, &PutOpts::default())
+            .await
+            .expect("replica store write");
+        leg
     }
 
     /// Is this node **synchronized** as the backup for `call_ref` — does it hold a

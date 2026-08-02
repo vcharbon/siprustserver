@@ -1194,12 +1194,16 @@ fn core_rules() -> Vec<RuleDefinition> {
         }),
         // ── timers ──────────────────────────────────────────────────────────
         rule("no-answer", &[], Match::timer().timer_type(TimerType::NoAnswer), |ctx| {
-            // Answer raced the fire (e.g. a reclaim restored a stale ledger
-            // entry whose cancel was lost with the crashed node): absorb, and
-            // scrub the spent entry so a later reclaim cannot re-fire it.
-            let answered = ctx.call.a_leg().state == LegState::Confirmed
-                || ctx.call.b_legs().iter().any(|b| b.state == LegState::Confirmed);
-            if answered {
+            // NoAnswer is armed PER B-LEG: a fire for leg X is spent iff X is
+            // no longer awaiting an answer — Confirmed, or absent from the call
+            // (reclaim can restore a stale entry whose cancel died with the
+            // crashed node); absorb and scrub so a later reclaim cannot
+            // re-fire it. Other legs' states are irrelevant to X's fire.
+            let spent = match ctx.source_leg() {
+                Some(leg) => leg.state == LegState::Confirmed,
+                None => true,
+            };
+            if spent {
                 return ok(vec![RuleAction::cancel_timer(
                     &TimerType::NoAnswer,
                     Some(ctx.source_leg_id),
