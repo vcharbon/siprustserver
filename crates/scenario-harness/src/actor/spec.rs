@@ -16,6 +16,7 @@
 use super::endpoint::{Automatics, Disposition};
 use super::delta::AcceptedDeltaPolicy;
 use super::goals::GoalStep;
+use super::observe::ReceptionObserver;
 use super::state::{ObservedState, ReplayEntry};
 use super::{run_call_with, ActorSpec, BarrierPhase, CallPlan, CallVerdict, SettleBarrier};
 use crate::realcall::{CallCtx, CallEnv, ScenarioId};
@@ -46,6 +47,11 @@ pub struct ActorCall {
     /// The plan's accepted-delta policy (ADR-0024 §6), riding the plan like
     /// `waivers`. `None` (the default) = hook absent, behavior unchanged.
     pub delta_policy: Option<AcceptedDeltaPolicy>,
+    /// The plan's reception observer, riding the plan like `delta_policy`:
+    /// invoked with the typed message each time a reception goal consumes
+    /// one, and unable to change the outcome. `None` (the default) = hook
+    /// absent, behavior unchanged.
+    pub reception_observer: Option<ReceptionObserver>,
 }
 
 impl ActorCall {
@@ -67,6 +73,7 @@ impl ActorCall {
             automatics: Automatics::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         }
     }
 
@@ -91,6 +98,14 @@ impl ActorCall {
     /// Attach the plan's accepted-delta policy (ADR-0024 §6).
     pub fn with_delta_policy(mut self, policy: AcceptedDeltaPolicy) -> Self {
         self.delta_policy = Some(policy);
+        self
+    }
+
+    /// Attach the plan's reception observer — the observational twin of
+    /// [`with_delta_policy`](Self::with_delta_policy): it sees the typed
+    /// message of every goal-driven reception and decides nothing.
+    pub fn with_reception_observer(mut self, observer: ReceptionObserver) -> Self {
+        self.reception_observer = Some(observer);
         self
     }
 }
@@ -275,8 +290,17 @@ pub async fn run_built_actor_call(
     env: &CallEnv<'_>,
     ctx: &CallCtx,
 ) -> Result<(), StepError> {
-    let ActorCall { actors, plan, settle, expect, waivers: _, automatics, ceiling, delta_policy } =
-        call;
+    let ActorCall {
+        actors,
+        plan,
+        settle,
+        expect,
+        waivers: _,
+        automatics,
+        ceiling,
+        delta_policy,
+        reception_observer,
+    } = call;
     // The originating leg — the role a Reject terminal is attributed to,
     // keyed on which actor's first goal originates the dialog.
     let caller = originating_role(&actors);
@@ -288,7 +312,7 @@ pub async fn run_built_actor_call(
     // establishing INVITE from the call env — `None` on every current surface
     // (no CLI flag mints one yet), so a challenge classifies unchanged.
     let verdict = run_call_with(
-        CallPlan { actors, plan, settle, automatics, delta_policy },
+        CallPlan { actors, plan, settle, automatics, delta_policy, reception_observer },
         obs.clone(),
         ctx,
         step_timeout,

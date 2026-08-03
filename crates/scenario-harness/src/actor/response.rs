@@ -125,13 +125,17 @@ async fn absorb_establishing_failure(
 }
 
 /// Fold one inbound response into this leg's ordered response-fact log. The
-/// typed message is retained only while a matcher-carrying reception goal is
-/// still pending on this actor (the content matcher compares it later).
+/// typed message is retained while a matcher-carrying reception goal is still
+/// pending on this actor (the content matcher compares it later), and — with a
+/// reception observer installed — for every response, so a reception goal that
+/// carries no matcher still hands the hook a fully populated message. With
+/// neither, nothing is retained.
 pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, now: Instant) {
-    let retain = st
-        .goals
-        .remaining_steps()
-        .any(|s| matches!(s, GoalStep::ExpectResponse { matcher: Some(_), .. }));
+    let retain = st.reception_observer.is_some()
+        || st
+            .goals
+            .remaining_steps()
+            .any(|s| matches!(s, GoalStep::ExpectResponse { matcher: Some(_), .. }));
     let body_is_sdp = carries_sdp(resp.body(), resp.header::<MediaType>());
     st.obs.record(
         Observation::LegResponse {

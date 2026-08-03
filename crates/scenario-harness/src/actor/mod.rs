@@ -32,11 +32,11 @@
 //! [`Agent::recv_any`](crate::Agent::recv_any) itself, unchanged.
 //!
 //! Module map: the declarative vocabulary is [`endpoint`] + [`goals`] +
-//! [`delta`]; the live loop is [`runner`] with its arms in [`react`] /
-//! [`response`] / [`answer`] / [`drive`] / [`originate`] / [`script`] /
-//! [`accept_delta`] and its inbound fan-out in [`shared_endpoint`]; the verdict
-//! machinery is [`state`] + [`ledger`] + [`settle`]; scenario surfaces are
-//! [`spec`] + [`scenarios`].
+//! [`delta`] + [`observe`]; the live loop is [`runner`] with its arms in
+//! [`react`] / [`response`] / [`answer`] / [`drive`] / [`originate`] /
+//! [`script`] / [`accept_delta`] and its inbound fan-out in
+//! [`shared_endpoint`]; the verdict machinery is [`state`] + [`ledger`] +
+//! [`settle`]; scenario surfaces are [`spec`] + [`scenarios`].
 
 mod accept_delta;
 mod answer;
@@ -45,6 +45,7 @@ mod drive;
 mod endpoint;
 mod goals;
 mod ledger;
+mod observe;
 mod originate;
 mod react;
 mod response;
@@ -78,6 +79,7 @@ pub use delta::{
 };
 pub use goals::{Barrier, BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind};
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
+pub use observe::{ReceivedMessage, ReceptionContext, ReceptionObserver};
 pub use settle::{SettleBarrier, SettleVerdict, T1};
 pub use spec::{
     into_result, originating_role, run_actor_scenario, run_built_actor_call, ActorCall,
@@ -140,6 +142,10 @@ pub struct CallPlan {
     /// classifiable inbound. `None` (the default) = hook absent, behavior
     /// unchanged.
     pub delta_policy: Option<AcceptedDeltaPolicy>,
+    /// The plan's reception observer: invoked by every actor with the typed
+    /// message each time one of its reception goals consumes one. Purely
+    /// observational. `None` (the default) = hook absent, behavior unchanged.
+    pub reception_observer: Option<ReceptionObserver>,
 }
 
 /// The controller: owns the shared observed state, the barrier plan, the settle
@@ -249,6 +255,7 @@ pub async fn run_call_with(
             challenge_responder.clone(),
             automatics,
             call.delta_policy.clone(),
+            call.reception_observer.clone(),
         );
         if let Some((inbox, handle)) = seat {
             state = state.on_shared_endpoint(inbox, handle);

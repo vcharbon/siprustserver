@@ -64,6 +64,7 @@ async fn scripted_template_replay_end_to_end() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -114,6 +115,7 @@ async fn observe_final_records_divergence_and_acks_observed_2xx() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let ctx = CallCtx::new();
@@ -170,6 +172,7 @@ async fn truncated_flow_completes_after_class_assert() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -211,6 +214,7 @@ async fn truncated_class_assert_fails_fast_on_wrong_class() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -269,6 +273,7 @@ async fn reception_goal_suppresses_incidental_shed() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let ctx = CallCtx::new();

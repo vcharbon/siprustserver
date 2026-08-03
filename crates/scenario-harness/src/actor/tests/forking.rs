@@ -26,6 +26,7 @@ fn forking_bob_plan(bob: &crate::Agent, disposition: Disposition) -> CallPlan {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     }
 }
 
@@ -264,6 +265,7 @@ fn forked_pair_plan(
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     }
 }
 

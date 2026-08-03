@@ -72,6 +72,7 @@ async fn request_template_reinvite_completes_renegotiation() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -132,6 +133,7 @@ async fn request_template_bye_tears_down() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -221,6 +223,7 @@ async fn request_template_early_update_rides_early_dialog() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -301,6 +304,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(10)).await;

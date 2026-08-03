@@ -52,6 +52,7 @@ async fn cancel_consumed_parked_invite_fails_respond_fast() {
         // the CANCEL follows a provisional (RFC 3261 §9.1).
         automatics: Automatics { answer_100_trying: true },
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -163,6 +164,7 @@ async fn scripted_cancel_reception_487_rides_bound_invite() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -231,6 +233,7 @@ async fn cancel_automatic_487s_script_bound_invite() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let ctx = CallCtx::new();
@@ -328,6 +331,7 @@ async fn parked_cancel_waits_for_dwelling_cancel_expectation() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let ctx = CallCtx::new();

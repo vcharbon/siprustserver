@@ -388,6 +388,7 @@ impl ShapePlan {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 

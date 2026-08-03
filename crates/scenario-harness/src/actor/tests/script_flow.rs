@@ -72,6 +72,7 @@ async fn requeue_on_advance_auto_reacts_passed_parked_request() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let ctx = CallCtx::new();
@@ -142,6 +143,7 @@ async fn expect_response_fails_fast_when_final_precedes_provisional() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -218,6 +220,7 @@ async fn forked_respond_template_early_ids_name_winner() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -314,6 +317,7 @@ async fn run_100_trying_case(name: &'static str, on: bool) -> bool {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics { answer_100_trying: on },
         delta_policy: None,
+        reception_observer: None,
     };
 
     let ctx = CallCtx::new();
@@ -401,6 +405,7 @@ async fn run_initial_matcher_case(name: &'static str, expect_value: &str) -> Cal
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;

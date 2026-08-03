@@ -63,6 +63,7 @@ async fn two_actor_toy_call_reaches_torn_down() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -132,6 +133,7 @@ async fn two_actor_crossing_bye_both_terminate() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;

@@ -63,6 +63,7 @@ fn cancel_crossing_plan(
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     }
 }
 
@@ -178,6 +179,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;

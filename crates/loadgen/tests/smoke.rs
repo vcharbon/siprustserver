@@ -2081,6 +2081,7 @@ impl ActorScenario for ByeWithContact {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }
@@ -2280,6 +2281,7 @@ impl ActorScenario for NumberPlanRefer {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }

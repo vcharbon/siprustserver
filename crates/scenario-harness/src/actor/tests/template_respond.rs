@@ -87,6 +87,7 @@ async fn scripted_reinvite_answer_holds_settle_until_ack() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -153,6 +154,7 @@ async fn scripted_bye_answer_tears_down_cleanly() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let ctx = CallCtx::new();
@@ -240,6 +242,7 @@ async fn ack_body_override_rides_the_reinvite_ack() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -345,6 +348,7 @@ async fn per_goal_deadline_bounds_the_guard_wait() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let started = tokio::time::Instant::now();
@@ -428,6 +432,7 @@ async fn content_matcher_fails_fast_on_changed_value() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;

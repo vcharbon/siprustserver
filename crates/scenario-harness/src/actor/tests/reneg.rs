@@ -74,6 +74,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(10)).await;
@@ -152,6 +153,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(10)).await;
@@ -238,6 +240,7 @@ async fn early_update_on_the_reliable_early_dialog() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -321,6 +324,7 @@ async fn actor_originates_in_dialog_info() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;

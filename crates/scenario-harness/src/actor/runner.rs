@@ -26,6 +26,7 @@ use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, MediaState};
 use super::shared_endpoint::{EndpointHandle, Inbox};
 use super::goals::{GoalCursor, GoalStep};
 use super::ledger::ObligationKey;
+use super::observe::ReceptionObserver;
 use super::originate::{originate_reinvite, originate_update, wait_reinvite_retry, wait_update_retry};
 use super::react::default_react;
 use super::script::{goal_arm_enabled, requeue_parked};
@@ -245,6 +246,11 @@ pub struct ActorState<'c> {
     /// classifiable inbound, BEFORE the mismatch path. `None` = the hook is
     /// absent and behavior is unchanged.
     pub(super) delta_policy: Option<AcceptedDeltaPolicy>,
+    /// The plan's reception observer: invoked with the typed message each
+    /// time one of this actor's reception goals consumes one. Purely
+    /// observational — it cannot change the run's outcome. `None` = the hook
+    /// is absent and behavior (including message retention) is unchanged.
+    pub(super) reception_observer: Option<ReceptionObserver>,
     /// The distinct To-tags this UAS has emitted >100 provisionals under on
     /// its pending initial INVITE (`""` = the transaction's default sticky
     /// tag) — the [`DialogSnapshot::early_dialog_count`] source. Read only
@@ -272,6 +278,7 @@ impl<'c> ActorState<'c> {
         challenge_responder: Option<Arc<dyn ChallengeResponder>>,
         automatics: Automatics,
         delta_policy: Option<AcceptedDeltaPolicy>,
+        reception_observer: Option<ReceptionObserver>,
     ) -> Self {
         let originates = spec
             .goals
@@ -331,6 +338,7 @@ impl<'c> ActorState<'c> {
             delayed: spec.delayed,
             originates,
             delta_policy,
+            reception_observer,
             early_provisionals: HashSet::new(),
             inbox: None,
             endpoint: None,
