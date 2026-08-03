@@ -150,19 +150,6 @@ impl WorkerLoadObserver {
         let previous = state.band;
         let new_band = compute_band(c, elu, state.band);
         state.band = new_band;
-        // A band change is a rare state transition (hysteresis keeps it from
-        // flapping), so it gets its own line with the load that caused it.
-        if new_band != previous {
-            tracing::info!(
-                node = observe::node(),
-                worker = worker_id,
-                from = ?previous,
-                to = ?new_band,
-                elu,
-                cap_cps = state.cap,
-                "worker load band change"
-            );
-        }
 
         match new_band {
             EluBand::AboveCritical => {
@@ -187,6 +174,23 @@ impl WorkerLoadObserver {
                     state.last_action = AimdAction::Increase;
                 }
             }
+        }
+
+        // A band change is a rare state transition (hysteresis keeps it from
+        // flapping), so it gets its own line with the load that caused it —
+        // emitted AFTER the AIMD step, because `cap_cps` is the number the line
+        // exists to explain and the step above is what sets it. Read before the
+        // step, an `AboveCritical` entry would report the cap the slam replaced.
+        if new_band != previous {
+            tracing::info!(
+                node = observe::node(),
+                worker = worker_id,
+                from = ?previous,
+                to = ?new_band,
+                elu,
+                cap_cps = state.cap,
+                "worker load band change"
+            );
         }
     }
 

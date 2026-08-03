@@ -12,6 +12,7 @@ use sip_message::{Method, SipRequest, SipStr};
 
 use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
 use crate::strategy::SelectError;
+use crate::trace::emit;
 
 use super::super::ProxyCore;
 use super::{top_via_branch, RouteOutcome};
@@ -43,6 +44,11 @@ impl ProxyCore {
         let resp = generate_response(req, status, reason, &opts);
         self.reply_to_source(resp.image(), src).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Responded);
+        // This is the proxy's ONLY self-generated-final seam, so it is the only
+        // place a traced call's own 503 / 483 / 420 / 400 becomes a `sip.out`.
+        // A shed call never reaches a downstream hop, so without this its span
+        // would show the INVITE arriving and nothing leaving.
+        emit::responded(&self.traces, req.call_id().as_str(), self.now_ms() as i64, src, resp.image());
 
         // ── §16.7 / §17.1.1.3: absorb the ACK to our OWN non-2xx INVITE final ─
         // Generating a final response makes this proxy the UAS of that INVITE

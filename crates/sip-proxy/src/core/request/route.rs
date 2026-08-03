@@ -294,11 +294,13 @@ impl ProxyCore {
                         extra_header(RetryAfter::new(decision.retry_after_sec.to_string())),
                         extra_header(proxy_reason(503, &reason)),
                     ];
+                    // The shed fact precedes the 503 it explains: `reply` is
+                    // itself an emission site (the datagram it synthesizes).
+                    emit::shed(&self.traces, call_id.as_str(), self.now_ms() as i64, &reason);
                     self.reply(req, src, 503, "Service Unavailable", &extra).await;
                     // Bounded set: the self-gate's own reason constants
                     // (proxy_overload_elu / proxy_overload_cps).
                     self.metrics.record_reject(&reason);
-                    emit::shed(&self.traces, call_id.as_str(), self.now_ms() as i64, &reason);
                     return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
                 }
             } else if is_new_dialog_invite && is_emergency {

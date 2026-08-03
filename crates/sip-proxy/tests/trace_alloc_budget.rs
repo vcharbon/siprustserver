@@ -21,6 +21,7 @@ use observe::{CallIdentity, RateDraw, SampleAdmission, TokenBucket};
 use sip_message::sniff;
 use sip_proxy::observability::metrics::{Face, RoutingDecisionKind};
 use sip_proxy::trace::emit::{self, RouteFacts};
+use sip_proxy::trace::Activation;
 use sip_proxy::{ProxyAddr, ProxyTraces};
 
 /// Counts every allocation the test binary performs. The single test below runs
@@ -114,8 +115,9 @@ fn an_unsampled_call_allocates_nothing_per_packet() {
 
 fn nothing_sampled() {
     let traces = untraced();
-    assert!(
-        !traces.activate(CALL_ID, CallIdentity { call_id: CALL_ID, from_tag: "a", to_tag: "" }, None, 0),
+    assert_eq!(
+        traces.activate(CALL_ID, CallIdentity { call_id: CALL_ID, from_tag: "a", to_tag: "" }, None, 0),
+        Activation::Refused,
         "the 0.0 draw refuses every call — nothing is sampled",
     );
     let allocs = cost_of(|| assert!(!std::hint::black_box(traces.as_ref()).any_sampled()));
@@ -141,8 +143,9 @@ fn one_other_call_traced() {
         true,
     ));
     const TRACED: &str = "traced@10.0.0.9";
-    assert!(
+    assert_eq!(
         traces.activate(TRACED, CallIdentity { call_id: TRACED, from_tag: "t", to_tag: "" }, None, 0),
+        Activation::Opened,
         "the 1.0 draw admits the one traced call",
     );
     assert!(traces.any_sampled(), "the process-wide flag is up for the whole test");

@@ -68,6 +68,16 @@ pub fn relayed(traces: &ProxyTraces, call_id: &str, at_ms: i64, next_hop: &Proxy
     });
 }
 
+/// A final the proxy SYNTHESIZED and sent back to the packet source: a shed
+/// 503, a 483, a 420, a 400, a select-failure 503. It is the only `sip.out` a
+/// call that never reached a downstream hop has — without it a traced shed
+/// shows an INVITE arriving and nothing leaving.
+pub fn responded(traces: &ProxyTraces, call_id: &str, at_ms: i64, dst: SocketAddr, wire: &[u8]) {
+    traces.with_span(call_id, at_ms, |span| {
+        span.record(TraceEvent::new("sip.out", at_ms, &format!("to {dst}")).with_body(wire));
+    });
+}
+
 /// The call was refused at the intake gate under self-overload — the routing
 /// fact that explains why nothing was forwarded.
 pub fn shed(traces: &ProxyTraces, call_id: &str, at_ms: i64, reason: &str) {
@@ -135,16 +145,22 @@ mod tests {
     fn a_traced_call_records_its_datagrams_and_routing_facts() {
         let (_guard, log) = observe::test_buffer();
         let traces = traces(true);
-        assert!(traces.activate("c@h", identity(), None, 0));
+        assert!(traces.activate("c@h", identity(), None, 0).is_traced());
         let target = ProxyAddr::new("10.0.0.2", 5070);
 
-        sip_in(&traces, "c@h", 1, "10.0.0.1:5060".parse().expect("fixture"), WIRE);
+        let src = "10.0.0.1:5060".parse().expect("fixture");
+        sip_in(&traces, "c@h", 1, src, WIRE);
         forwarded(&traces, "c@h", 2, facts(&target), WIRE);
         relayed(&traces, "c@h", 3, &target, b"SIP/2.0 200 OK\r\n\r\n");
         shed(&traces, "c@h", 4, "proxy_overload_cps");
+        responded(&traces, "c@h", 5, src, b"SIP/2.0 503 Service Unavailable\r\n\r\n");
 
         assert!(log.matching("kind=sip.in").iter().any(|e| e.contains("INVITE sip:")));
-        assert_eq!(log.matching("kind=sip.out").len(), 2);
+        assert_eq!(log.matching("kind=sip.out").len(), 3);
+        assert!(
+            log.matching("kind=sip.out").iter().any(|e| e.contains("503 Service Unavailable")),
+            "the proxy's own final is a datagram out like any other",
+        );
         let decision = log.matching("kind=route.decision");
         assert_eq!(decision.len(), 1);
         assert!(decision[0].contains("decode_forward target=10.0.0.2:5070 face=int stickiness=hit"));
@@ -155,7 +171,7 @@ mod tests {
     fn an_untraced_proxy_records_nothing() {
         let (_guard, log) = observe::test_buffer();
         let traces = traces(false);
-        assert!(!traces.activate("c@h", identity(), None, 0));
+        assert!(!traces.activate("c@h", identity(), None, 0).is_traced());
         sip_in(&traces, "c@h", 1, "10.0.0.1:5060".parse().expect("fixture"), WIRE);
         assert!(log.lines().is_empty());
     }

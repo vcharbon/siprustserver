@@ -5,9 +5,10 @@
 //! processes' spans are correlated by the `sip.call_id` attribute alone.
 //!
 //! One concern per submodule: [`registry`] owns the admission gate and the live
-//! `Call-ID -> root span` map (bounded by the active-trace cap, closed on an
-//! observed BYE final or on TTL); [`emit`] owns the guarded vocabulary — the
-//! datagrams in and out and the routing facts a traced call records.
+//! `Call-ID -> root span` map (bounded by the active-trace cap, closed on the
+//! last fact this hop observes about the call, or on TTL); [`emit`] owns the
+//! guarded vocabulary — the datagrams in and out and the routing facts a traced
+//! call records.
 //!
 //! **Explicit-guard discipline.** Every emission goes through
 //! [`registry::ProxyTraces::with_span`], whose first act is one relaxed load of
@@ -17,4 +18,4 @@
 pub mod emit;
 pub mod registry;
 
-pub use registry::{ProxyTraces, SPAN_IDLE_TTL_MS};
+pub use registry::{Activation, ProxyTraces, SPAN_IDLE_TTL_MS};

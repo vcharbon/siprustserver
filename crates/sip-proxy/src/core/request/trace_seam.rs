@@ -14,7 +14,7 @@ use sip_message::SipRequest;
 
 use crate::addr::ProxyAddr;
 use crate::observability::metrics::RoutingDecisionKind;
-use crate::trace::{emit, ProxyTraces};
+use crate::trace::{emit, Activation, ProxyTraces};
 
 use super::super::ProxyCore;
 
@@ -22,6 +22,12 @@ impl ProxyCore {
     /// Run the admission chain for an initial INVITE and, on success, open the
     /// proxy's root span for the call and record the INVITE that opened it.
     /// A refusal is counted inside the chain and never logged.
+    ///
+    /// Only an [`Activation::Opened`] records here. A call that reaches this
+    /// seam a second time — a digest-auth retry, an INVITE retransmit whose
+    /// memo has been evicted — is `AlreadyOpen`, and its datagram was already
+    /// recorded by the per-packet seam at the top of `handle_request`, which
+    /// hits the map for every call that has a span.
     pub(super) fn activate_trace(&self, req: &SipRequest, src: SocketAddr, at_ms: i64) {
         let call_id = req.call_id().as_str();
         let id = CallIdentity {
@@ -31,7 +37,8 @@ impl ProxyCore {
             // routes, and it never mints one.
             to_tag: "",
         };
-        if !self.traces.activate(call_id, id, intake_rate(&self.traces, req.image()), at_ms) {
+        let rate = intake_rate(&self.traces, req.image());
+        if self.traces.activate(call_id, id, rate, at_ms) != Activation::Opened {
             return;
         }
         emit::sip_in(&self.traces, call_id, at_ms, src, req.image());
