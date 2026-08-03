@@ -61,7 +61,9 @@ helpers only.
   events).
 - Every span carries `sip.call_id` plus the From/To tags.
 - **16 KiB per-attribute cap**, with a `truncated=true` marker so a prefix is
-  never mistaken for a whole value.
+  never mistaken for a whole value. The cap governs the EMITTED attribute, so a
+  base64-encoded remainder is capped at its source (12 KiB, which encodes to
+  exactly 16 KiB) rather than after encoding.
 - **The two planes are separated by `tracing` TARGET.** Every per-call span and
   event is emitted under the single target `sip::trace`; the stdout fmt layer
   carries a per-layer filter that excludes it, the OTLP layer does not. Without

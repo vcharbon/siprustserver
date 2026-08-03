@@ -1,9 +1,11 @@
 //! Attribute shaping: the size cap, and the lossless payload encoding.
 //!
 //! A traced call records raw wire bytes; one oversized body must not become an
-//! unbounded export payload. Every attribute is capped at [`ATTR_CAP_BYTES`]
-//! and a capped attribute is marked so a reader never mistakes a prefix for the
-//! whole value.
+//! unbounded export payload. Every EMITTED attribute is capped at
+//! [`ATTR_CAP_BYTES`] — an encoded attribute is capped at its source
+//! ([`BASE64_SOURCE_CAP_BYTES`]) so the encoding's own expansion stays under the
+//! same ceiling — and a capped attribute is marked so a reader never mistakes a
+//! prefix for the whole value.
 //!
 //! This module is the single home for how a payload becomes span attributes —
 //! both the B2BUA and the proxy record through [`crate::CallSpan`], which shapes
@@ -19,6 +21,12 @@ use base64::Engine;
 
 /// Maximum bytes any single span attribute carries.
 pub const ATTR_CAP_BYTES: usize = 16 * 1024;
+
+/// Maximum bytes of SOURCE a base64 attribute carries. Base64 spends 4 output
+/// bytes per 3 input bytes, so the cap on the emitted attribute is a smaller cap
+/// on what feeds it: `BASE64_SOURCE_CAP_BYTES` encodes to exactly
+/// [`ATTR_CAP_BYTES`].
+pub const BASE64_SOURCE_CAP_BYTES: usize = ATTR_CAP_BYTES / 4 * 3;
 
 /// The span field set alongside a capped attribute.
 pub const TRUNCATED_FIELD: &str = "truncated";
@@ -43,10 +51,17 @@ pub fn cap_str(value: &str) -> (Cow<'_, str>, bool) {
 /// Cap a raw byte attribute (a wire message), returning the value and whether
 /// it was truncated.
 pub fn cap_bytes(value: &[u8]) -> (&[u8], bool) {
-    if value.len() <= ATTR_CAP_BYTES {
+    cap_bytes_to(value, ATTR_CAP_BYTES)
+}
+
+/// Cap a raw byte slice at `limit`, returning the value and whether it was
+/// truncated. `limit` is a budget on the EMITTED attribute, which for an encoded
+/// attribute is smaller than the slice's own length.
+fn cap_bytes_to(value: &[u8], limit: usize) -> (&[u8], bool) {
+    if value.len() <= limit {
         (value, false)
     } else {
-        (&value[..ATTR_CAP_BYTES], true)
+        (&value[..limit], true)
     }
 }
 
@@ -71,7 +86,7 @@ pub struct ShapedBody<'a> {
     pub text: Cow<'a, str>,
     /// Present only when the payload is not entirely valid UTF-8.
     pub binary: Option<BinaryTail>,
-    /// Whether either part hit [`ATTR_CAP_BYTES`].
+    /// Whether either part hit its cap.
     pub truncated: bool,
 }
 
@@ -81,7 +96,9 @@ pub struct ShapedBody<'a> {
 /// allocation: the text borrows the caller's bytes. Otherwise the payload is
 /// split at the first invalid byte — in SIP practice the start line, the headers
 /// and usually most of the body stay readable, and only the binary remainder is
-/// encoded. Both parts carry the [`ATTR_CAP_BYTES`] cap.
+/// encoded. Neither emitted part exceeds [`ATTR_CAP_BYTES`]: the text caps
+/// there directly, the remainder caps at [`BASE64_SOURCE_CAP_BYTES`] of source
+/// so its encoding lands on the same ceiling.
 pub fn shape_body(body: &[u8]) -> ShapedBody<'_> {
     match std::str::from_utf8(body) {
         Ok(text) => {
@@ -94,7 +111,8 @@ pub fn shape_body(body: &[u8]) -> ShapedBody<'_> {
             // scan stopped.
             let prefix = std::str::from_utf8(&body[..split_offset]).unwrap_or_default();
             let (text, text_truncated) = cap_str(prefix);
-            let (tail, tail_truncated) = cap_bytes(&body[split_offset..]);
+            let (tail, tail_truncated) =
+                cap_bytes_to(&body[split_offset..], BASE64_SOURCE_CAP_BYTES);
             ShapedBody {
                 text,
                 binary: Some(BinaryTail { base64: BASE64.encode(tail), split_offset }),
@@ -201,9 +219,33 @@ mod tests {
         let tail = shaped.binary.as_ref().expect("encoded");
         assert_eq!(
             BASE64.decode(&tail.base64).expect("valid base64").len(),
-            ATTR_CAP_BYTES,
-            "the encoded remainder caps at the same ceiling",
+            BASE64_SOURCE_CAP_BYTES,
+            "the remainder caps at the source budget its encoding fits in",
         );
+    }
+
+    #[test]
+    fn the_encoded_attribute_never_exceeds_the_attribute_cap() {
+        // The emitted attribute is the base64 STRING, so that is what the cap
+        // governs — the raw remainder it came from is necessarily smaller.
+        let mut wire = vec![b'h'; 4];
+        wire.extend_from_slice(&vec![0xFEu8; 4 * ATTR_CAP_BYTES]);
+        let shaped = shape_body(&wire);
+
+        let tail = shaped.binary.as_ref().expect("encoded");
+        assert!(shaped.truncated);
+        assert_eq!(tail.base64.len(), ATTR_CAP_BYTES, "the budget encodes to exactly the cap");
+        assert!(tail.base64.len() <= ATTR_CAP_BYTES);
+    }
+
+    #[test]
+    fn a_remainder_at_the_source_budget_is_carried_whole() {
+        let mut wire = vec![b'h'; 4];
+        wire.extend_from_slice(&vec![0xFEu8; BASE64_SOURCE_CAP_BYTES]);
+        let shaped = shape_body(&wire);
+
+        assert!(!shaped.truncated, "a remainder exactly at the budget is not truncated");
+        assert_eq!(reconstructed(&shaped), wire);
     }
 
     #[test]
