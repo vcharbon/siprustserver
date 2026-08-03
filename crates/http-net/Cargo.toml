@@ -29,8 +29,9 @@ sip-clock = { path = "../sip-clock" }
 
 # --- real transport only (feature "real") ---
 # Pooled, keep-alive HTTP client (the b2bua makes many small calls). No TLS —
-# internal cluster http:// only.
-reqwest = { version = "0.12", default-features = false, optional = true }
+# internal cluster http:// only. Workspace-pinned so the process links exactly
+# one reqwest major (shared with the OTLP exporter).
+reqwest = { workspace = true, optional = true }
 # Real HTTP/1.1 server with connection keep-alive.
 hyper = { version = "1", features = ["http1", "server"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }

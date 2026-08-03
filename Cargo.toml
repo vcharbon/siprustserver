@@ -159,6 +159,13 @@ tracing-opentelemetry = { version = "0.33", default-features = false, features =
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+# THE HTTP client of the workspace — one major, linked once. Both consumers ride
+# this pin: `http-net`'s pooled async client (feature `real`) and the OTLP
+# exporter's blocking client above, whose own floor is 0.13. `default-features =
+# false` is load-bearing: reqwest's `default-tls` is rustls, and both consumers
+# speak plaintext `http://` only (internal cluster / collector), so no TLS stack,
+# no h2, no system-proxy probing is compiled in.
+reqwest = { version = "0.13", default-features = false }
 # CDR-on-RabbitMQ sink (b2bua-runner) + the dedicated CDR metrics consumer
 # (cdr-consumer-runner). `lapin` is the async AMQP 0-9-1 client; it is runtime-
 # agnostic, so the two `*-trait` shims bind its executor/reactor to the same
