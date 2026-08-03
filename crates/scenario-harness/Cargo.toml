@@ -26,7 +26,6 @@ sip-message = { path = "../sip-message" }
 # and per-call trace into, dumped to stderr when a scenario panics (ADR-0026).
 # No `otlp` feature: a test never exports.
 observe = { path = "../observe" }
-tracing = { workspace = true }
 sip-net = { path = "../sip-net" }
 layer-harness = { path = "../layer-harness" }
 seq-report = { path = "../seq-report" }
@@ -34,3 +33,6 @@ sip-clock = { path = "../sip-clock", features = ["testkit"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Test-only: the harness itself never emits. Its own tests log through the
+# facade to prove the capture buffer a run installs is the one that sees it.
+tracing = { workspace = true }
