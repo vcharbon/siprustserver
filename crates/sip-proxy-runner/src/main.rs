@@ -823,6 +823,10 @@ async fn main() {
         })
         .collect();
 
+    // ONE trace registry across every recv shard: the active-trace cap and the
+    // "anything sampled?" flag bound the process, not a socket (ADR-0026).
+    let traces = Arc::new(sip_proxy::ProxyTraces::from_env(clock.now_ms()));
+
     let mut cores = Vec::with_capacity(recv_shards);
     let mut ext_endpoints = ext_endpoints.into_iter();
     for (shard, endpoint) in endpoints.into_iter().enumerate() {
@@ -834,6 +838,7 @@ async fn main() {
             .self_gate(gate_dyn.clone())
             .intake_age(intake_age.clone())
             .resolver_config(resolver_cfg)
+            .traces(traces.clone())
             .shard(shard);
         if let Some((_, ext_adv, cidrs)) = &ext_face {
             builder = builder.external_face(ExternalFaceParts {

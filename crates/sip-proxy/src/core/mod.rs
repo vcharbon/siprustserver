@@ -34,6 +34,7 @@ use crate::registry::WorkerRegistry;
 use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig, SystemResolver};
 use crate::self_gate::{AlwaysAdmitGate, IntakeAgeRecorder, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
+use crate::trace::ProxyTraces;
 
 /// Methods that create a dialog (RFC 3261) — the proxy inserts a Record-Route
 /// only for these.
@@ -93,6 +94,9 @@ pub(crate) struct ProxyCoreParts {
     /// single-socket wiring; `0..N` when the runner shards the recv path over
     /// N reuse-port sockets).
     pub shard: usize,
+    /// The per-call trace tier (ADR-0026). ONE registry across every recv
+    /// shard, so the active-trace cap bounds the process rather than a socket.
+    pub traces: Arc<ProxyTraces>,
 }
 
 /// The stateless proxy.
@@ -115,6 +119,7 @@ pub struct ProxyCore {
     /// Off-loop send path for DNS-named targets (cache + single-flight resolve).
     named: NamedForwarder,
     shard: usize,
+    pub(super) traces: Arc<ProxyTraces>,
 }
 
 impl ProxyCore {
@@ -159,7 +164,14 @@ impl ProxyCore {
             parser: CustomParser::default(),
             named,
             shard: parts.shard,
+            traces: parts.traces,
         }
+    }
+
+    /// This proxy's per-call trace registry (ADR-0026) — the seam a runner
+    /// shares across recv shards and a test drives its own gate through.
+    pub fn traces(&self) -> Arc<ProxyTraces> {
+        self.traces.clone()
     }
 
     /// A handle to this proxy's metrics (for SUT assertions / a metrics server).
@@ -455,6 +467,7 @@ pub struct ProxyCoreBuilder {
     resolver: Option<Arc<dyn HostResolver>>,
     resolver_cfg: Option<ResolverConfig>,
     shard: usize,
+    traces: Option<Arc<ProxyTraces>>,
 }
 
 impl ProxyCoreBuilder {
@@ -473,6 +486,7 @@ impl ProxyCoreBuilder {
             resolver: None,
             resolver_cfg: None,
             shard: 0,
+            traces: None,
         }
     }
 
@@ -529,10 +543,20 @@ impl ProxyCoreBuilder {
         self.shard = shard;
         self
     }
+    /// The per-call trace registry (ADR-0026). Pass ONE clone to every recv
+    /// shard so the active-trace cap bounds the process; the default is an
+    /// environment-read registry, inert without an OTLP endpoint.
+    pub fn traces(mut self, traces: Arc<ProxyTraces>) -> Self {
+        self.traces = Some(traces);
+        self
+    }
 
     /// Finish into a [`ProxyCore`] bound on `endpoint`.
     pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
         let clock = self.clock.unwrap_or_else(Clock::system);
+        let traces = self
+            .traces
+            .unwrap_or_else(|| Arc::new(ProxyTraces::from_env(clock.now_ms())));
         ProxyCore::new(ProxyCoreParts {
             endpoint,
             advertised: self.advertised,
@@ -548,6 +572,7 @@ impl ProxyCoreBuilder {
             resolver: self.resolver.unwrap_or_else(|| Arc::new(SystemResolver)),
             resolver_cfg: self.resolver_cfg.unwrap_or_default(),
             shard: self.shard,
+            traces,
         })
     }
 }

@@ -4098,6 +4098,7 @@ dependencies = [
 name = "sip-proxy"
 version = "0.1.0"
 dependencies = [
+ "alloc-counter",
  "arc-swap",
  "async-trait",
  "base64 0.22.1",

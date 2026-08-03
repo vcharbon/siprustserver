@@ -14,6 +14,7 @@ use crate::cancel_lru::call_id_cseq_key;
 use crate::observability::metrics::{Direction, MessageResult};
 use crate::registry::WorkerHealth;
 use crate::strategy::DecodeResult;
+use crate::trace::emit;
 
 use super::ProxyCore;
 
@@ -22,6 +23,22 @@ impl ProxyCore {
         let cseq = resp.cseq();
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
         self.metrics.record_response(cseq.method().as_str(), resp.status());
+        // Per-call trace tier (ADR-0026): the parsed Call-ID, one predicted
+        // branch while nothing is sampled.
+        let at_ms = self.now_ms() as i64;
+        emit::response_in(
+            &self.traces,
+            resp.call_id().as_str(),
+            at_ms,
+            resp.status(),
+            cseq.method().as_str(),
+            resp.image(),
+        );
+        // The relay below consumes the message, so a TRACED call's key is
+        // carried across it. Nothing sampled → no key, no allocation.
+        let traced: Option<String> =
+            self.traces.any_sampled().then(|| resp.call_id().as_str().to_string());
+        let ends_the_call = cseq.method() == Method::Bye && resp.status() >= 200;
 
         // §16.7.3: need ≥2 Via (ours + the next hop's).
         let hops: Vec<Via> = resp.via().iter().cloned().collect();
@@ -111,6 +128,14 @@ impl ProxyCore {
         let next_hop = ProxyAddr::new(host, port);
         self.send_to(&bytes, &next_hop).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
+        if let Some(call_id) = &traced {
+            emit::relayed(&self.traces, call_id, at_ms, &next_hop, &bytes);
+            // The BYE's final is the last fact this hop will see about the
+            // call: close the span here rather than leaving it to the TTL.
+            if ends_the_call {
+                self.traces.close(call_id);
+            }
+        }
 
         // ── Relayed non-2xx INVITE final: remember the ACK-relay hop ────────
         // This transaction-less proxy (ADR-0022 X4) does NOT synthesize the

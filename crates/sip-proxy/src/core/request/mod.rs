@@ -13,6 +13,7 @@
 mod record_route;
 mod reply;
 mod route;
+mod trace_seam;
 
 #[cfg(test)]
 mod ack_hop_tests;
@@ -29,10 +30,11 @@ mod worker_outbound_tests;
 
 use std::net::SocketAddr;
 
-use sip_message::{SipMessage, SipRequest};
+use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
+use crate::trace::emit;
 
 use super::ProxyCore;
 
@@ -67,7 +69,24 @@ impl ProxyCore {
         // (`sip_proxy_calls_total` is counted inside `route_request`, where the
         // retransmission memo can exclude re-sent copies of the same INVITE.)
 
+        // Per-call trace tier (ADR-0026): the Call-ID is the one the routing
+        // ladder already parsed — the hot path never re-scans the datagram —
+        // and the whole check is one predicted branch while nothing is sampled.
+        // A brand-new call is not in the map yet; its INVITE is recorded by the
+        // activation itself, so nothing is recorded twice.
+        let at_ms = start_ms as i64;
+        let call_id = req.call_id().as_str();
+        emit::sip_in(&self.traces, call_id, at_ms, src, req.image());
+        let initial_invite = matches!(req.method(), Method::Invite) && req.to().tag().is_none();
+
         let outcome = self.route_request(&msg, src).await;
+
+        // An initial INVITE the ladder refused ends the call at this hop:
+        // nothing will ever name that Call-ID again, so its span closes now
+        // rather than at the idle TTL.
+        if initial_invite && outcome.decision == RoutingDecisionKind::Reject {
+            self.traces.close(call_id);
+        }
 
         let duration = (self.now_ms().saturating_sub(start_ms)) as f64 / 1000.0;
         self.metrics.observe_routing_duration(duration);

@@ -16,7 +16,9 @@
 //!   admission gate ([`self_gate::EluCpsGate`]: EWMA-smoothed intake pressure
 //!   (packet age at dequeue) + per-class CPS token bucket) shedding external new-dialog
 //!   non-emergency INVITEs under self-overload, with the always-admit
-//!   [`self_gate::AlwaysAdmitGate`] as the no-protection default.
+//!   [`self_gate::AlwaysAdmitGate`] as the no-protection default, and the
+//!   per-call trace tier ([`trace`], ADR-0026: independent sampling on the
+//!   initial INVITE, correlation by `Call-ID` only, nothing added to the wire).
 //! - Out of scope: the SIP registrar/REGISTER path, the per-worker AIMD
 //!   rate-cap token bucket (band classification only here), and the
 //!   kubernetes registry.
@@ -35,10 +37,12 @@ pub mod security;
 pub mod self_gate;
 pub mod strategy;
 pub mod strategies;
+pub mod trace;
 
 pub use addr::ProxyAddr;
 pub use core::{ExternalFaceParts, ProxyCore, ProxyCoreBuilder};
 pub use face::{FaceCidrs, Ipv4Cidr};
 pub use observability::ProxyMetrics;
 pub use strategies::{ForwardAllStrategy, LoadBalancerConfig, LoadBalancerStrategy};
+pub use trace::ProxyTraces;
 pub use strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};

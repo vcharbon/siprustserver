@@ -61,6 +61,27 @@ pub async fn spawn_proxy(
     ProxySut { addr: sock, metrics, task }
 }
 
+/// Bind + spawn a real `ProxyCore` whose per-call trace registry is `traces`
+/// (ADR-0026) — the seam a trace test drives its own always-on gate through.
+pub async fn spawn_proxy_with_traces(
+    h: &Harness,
+    addr: &str,
+    strategy: Arc<dyn RoutingStrategy>,
+    registry: Arc<dyn WorkerRegistry>,
+    traces: Arc<sip_proxy::ProxyTraces>,
+) -> ProxySut {
+    let (ep, sock) = h.bind_sut("proxy", addr).await;
+    let metrics = Arc::new(ProxyMetrics::new());
+    let core = ProxyCoreBuilder::new(ProxyAddr::from(sock), strategy, registry)
+        .clock(Clock::test_at(0))
+        .id_gen(Arc::new(IdGen::seeded(0xC0FFEE)))
+        .metrics(metrics.clone())
+        .traces(traces)
+        .build(ep);
+    let task = tokio::spawn(core.run());
+    ProxySut { addr: sock, metrics, task }
+}
+
 /// A `ForwardAll` strategy pointed at a single backend, with an empty registry
 /// (alice/bob are never classified as workers).
 pub fn forward_all(target: SocketAddr) -> (Arc<dyn RoutingStrategy>, Arc<dyn WorkerRegistry>) {

@@ -12,6 +12,8 @@
 
 use std::borrow::Cow;
 
+use crate::trace_sample::{TraceSample, TRACE_SAMPLE_HEADER};
+
 fn as_str(raw: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(raw)
 }
@@ -213,6 +215,48 @@ fn contains_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle))
 }
 
+/// The longest `X-Trace-Sample` value [`trace_sample_rate`] reads. A rate is a
+/// short float; anything longer states something this reader will not act on.
+pub const TRACE_SAMPLE_VALUE_CAP: usize = 32;
+
+/// The `X-Trace-Sample` sampling rate an INVITE **datagram** asks for, read off
+/// the raw bytes (ADR-0026) — the proxy's entry path, which samples before it
+/// has a call. Non-INVITE datagrams read [`TraceSample::Absent`]: only an
+/// initial INVITE opens a trace, so no other datagram is scanned.
+///
+/// Same value grammar as the full-parse reader
+/// ([`crate::trace_sample::trace_sample`]): a float in `0..=1` reads, the FIRST
+/// instance wins, and a value that does not read is [`TraceSample::Malformed`]
+/// — kept apart from absent so a rig that mistyped its rate is counted, not
+/// silently ignored. A value longer than [`TRACE_SAMPLE_VALUE_CAP`] is
+/// malformed by length alone. Allocation-free.
+pub fn trace_sample_rate(raw: &[u8]) -> TraceSample {
+    if !crate::preparse::is_invite_request_buffer(raw) {
+        return TraceSample::Absent;
+    }
+    let mut lines = raw.split(|&b| b == b'\n');
+    lines.next(); // request line
+    for line in lines {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            break; // end of headers
+        }
+        let Some(colon) = line.iter().position(|&b| b == b':') else { continue };
+        if !line[..colon].trim_ascii().eq_ignore_ascii_case(TRACE_SAMPLE_HEADER.as_bytes()) {
+            continue;
+        }
+        let value = line[colon + 1..].trim_ascii();
+        if value.len() > TRACE_SAMPLE_VALUE_CAP {
+            return TraceSample::Malformed;
+        }
+        return match std::str::from_utf8(value).ok().and_then(|v| v.parse::<f64>().ok()) {
+            Some(rate) if rate.is_finite() && (0.0..=1.0).contains(&rate) => TraceSample::Rate(rate),
+            _ => TraceSample::Malformed,
+        };
+    }
+    TraceSample::Absent
+}
+
 /// The `branch` parameter of the TOP-most Via header (RFC 3261 §17 transaction
 /// key), or `None` if absent. Only the first Via matters — on a request we sent
 /// it is OUR Via, echoed by the UAS onto the matching response.
@@ -384,6 +428,55 @@ Content-Length: 0\r\n\r\n"
         ] {
             assert!(!is_sheddable_new_invite(raw), "{raw:?} must be admitted");
         }
+    }
+
+    #[test]
+    fn trace_sample_rate_reads_a_float_in_range_off_the_raw_invite() {
+        for (wire, expected) in [("1", 1.0), ("0", 0.0), ("0.25", 0.25), ("  0.5 ", 0.5)] {
+            let raw = req("INVITE", &format!("X-Trace-Sample: {wire}\r\n"));
+            assert_eq!(trace_sample_rate(&raw), TraceSample::Rate(expected), "{wire}");
+        }
+    }
+
+    #[test]
+    fn trace_sample_rate_matches_the_full_parse_readers_grammar() {
+        // Absent and malformed stay apart, out-of-range is refused, the first
+        // instance wins, and the header name is case-insensitive — the same
+        // contract `trace_sample::trace_sample` states over a parsed request.
+        assert_eq!(trace_sample_rate(&req("INVITE", "")), TraceSample::Absent);
+        for bad in ["yes", "1.5", "-0.1", "NaN", "inf", "0.5,0.9", ""] {
+            let raw = req("INVITE", &format!("X-Trace-Sample: {bad}\r\n"));
+            assert_eq!(trace_sample_rate(&raw), TraceSample::Malformed, "{bad:?}");
+        }
+        let repeated = req("INVITE", "X-Trace-Sample: 0.1\r\nX-Trace-Sample: 1\r\n");
+        assert_eq!(trace_sample_rate(&repeated), TraceSample::Rate(0.1));
+        let lower = req("INVITE", "x-trace-sample: 0.75\r\n");
+        assert_eq!(trace_sample_rate(&lower), TraceSample::Rate(0.75));
+    }
+
+    #[test]
+    fn an_over_long_value_is_malformed_by_length_alone() {
+        let raw = req("INVITE", &format!("X-Trace-Sample: 0.{}\r\n", "1".repeat(64)));
+        assert_eq!(trace_sample_rate(&raw), TraceSample::Malformed);
+    }
+
+    #[test]
+    fn only_an_invite_datagram_is_scanned() {
+        for m in ["ACK", "BYE", "CANCEL", "OPTIONS", "REGISTER"] {
+            let raw = req(m, "X-Trace-Sample: 1\r\n");
+            assert_eq!(trace_sample_rate(&raw), TraceSample::Absent, "{m} opens no trace");
+        }
+        assert_eq!(
+            trace_sample_rate(b"SIP/2.0 200 OK\r\nX-Trace-Sample: 1\r\n\r\n"),
+            TraceSample::Absent,
+        );
+    }
+
+    #[test]
+    fn a_body_carrying_the_header_name_is_not_scanned() {
+        let mut raw = req("INVITE", "");
+        raw.extend_from_slice(b"X-Trace-Sample: 1\r\n");
+        assert_eq!(trace_sample_rate(&raw), TraceSample::Absent, "the scan stops at the body");
     }
 
     #[test]
