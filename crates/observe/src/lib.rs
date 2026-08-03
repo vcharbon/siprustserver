@@ -72,10 +72,25 @@ pub const TRACE_HEADER_ENV: &str = "SIP_TRACE_HEADER";
 /// force-enable apply.
 pub const DEFAULT_SAMPLE_RATE: f64 = 1e-4;
 
+/// Set when a named endpoint yielded no exporter, so the answer below stops
+/// promising an export this process cannot perform.
+static EXPORT_UNUSABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that the configured endpoint produced no tracer provider. Called by
+/// [`init_production`], which runs before any gate reads the answer.
+#[cfg(feature = "otlp")]
+pub(crate) fn mark_export_unusable() {
+    EXPORT_UNUSABLE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Whether this process exports traces at all: `OTEL_EXPORTER_OTLP_ENDPOINT` is
-/// set to a non-empty value. Read once at startup and carried thereafter.
+/// set to a non-empty value AND its exporter built. An endpoint that named a
+/// collector but produced no provider reads the same as an unset one, so the
+/// sampling machinery stays inert instead of opening root spans nothing
+/// collects. Read once at startup and carried thereafter.
 pub fn exporter_configured() -> bool {
-    std::env::var(OTLP_ENDPOINT_ENV).map(|v| !v.trim().is_empty()).unwrap_or(false)
+    !EXPORT_UNUSABLE.load(std::sync::atomic::Ordering::Relaxed)
+        && std::env::var(OTLP_ENDPOINT_ENV).map(|v| !v.trim().is_empty()).unwrap_or(false)
 }
 
 /// Whether the `X-Trace-Sample` header override is honored by this process.

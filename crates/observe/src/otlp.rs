@@ -14,6 +14,11 @@
 //! it here — rather than leaving it to the exporter's env fallback — is what
 //! makes an unusable endpoint fail loudly at build time instead of silently
 //! redirecting every batch to the SDK's `localhost:4318` default.
+//!
+//! Failure is REPORTED, not logged here: resolution runs before a subscriber
+//! exists, so this module returns [`ExportSetup::Unusable`] and
+//! [`crate::init_production`] emits the warning once the subscriber is
+//! installed.
 
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
@@ -35,30 +40,43 @@ fn signal_endpoint(base: &str) -> Option<String> {
     (!base.is_empty()).then(|| format!("{}{TRACES_PATH}", base.trim_end_matches('/')))
 }
 
-/// The configured tracer provider, or `None` when this process exports nothing.
-/// An endpoint that is set but unusable also yields `None` — a broken collector
-/// url degrades to "no traces" plus a warning, never to a crash-looping runner
-/// and never to a silently redirected export.
-pub fn provider_from_env(service_name: &str) -> Option<SdkTracerProvider> {
-    let endpoint = signal_endpoint(&std::env::var(crate::OTLP_ENDPOINT_ENV).ok()?)?;
-    let exporter = SpanExporter::builder()
-        .with_http()
-        .with_endpoint(endpoint.as_str())
-        .build()
-        .map_err(|e| {
-            tracing::warn!(
-                endpoint = %endpoint,
-                error = %e,
-                "OTLP exporter refused to build; this process exports no traces"
-            )
-        })
-        .ok()?;
-    Some(
-        SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .with_resource(Resource::builder().with_service_name(service_name.to_string()).build())
-            .build(),
-    )
+/// What resolving the environment says about this process's span export.
+pub enum ExportSetup {
+    /// No endpoint is named: this process exports nothing, by configuration.
+    Disabled,
+    /// The endpoint resolved and its exporter built.
+    Provider(SdkTracerProvider),
+    /// An endpoint is named but its exporter refused to build: this process
+    /// exports nothing, against the operator's intent. Carries what the
+    /// installer needs to say so — a broken collector url degrades to "no
+    /// traces", never to a crash-looping runner and never to a silently
+    /// redirected export.
+    Unusable { endpoint: String, error: String },
+}
+
+/// This process's export setup, read from `OTEL_EXPORTER_OTLP_ENDPOINT`.
+pub fn export_from_env(service_name: &str) -> ExportSetup {
+    match std::env::var(crate::OTLP_ENDPOINT_ENV).ok().as_deref().and_then(signal_endpoint) {
+        Some(endpoint) => build(&endpoint, service_name),
+        None => ExportSetup::Disabled,
+    }
+}
+
+/// The export setup for an already-resolved trace-signal `endpoint`.
+fn build(endpoint: &str, service_name: &str) -> ExportSetup {
+    match SpanExporter::builder().with_http().with_endpoint(endpoint).build() {
+        Ok(exporter) => ExportSetup::Provider(
+            SdkTracerProvider::builder()
+                .with_batch_exporter(exporter)
+                .with_resource(
+                    Resource::builder().with_service_name(service_name.to_string()).build(),
+                )
+                .build(),
+        ),
+        Err(error) => {
+            ExportSetup::Unusable { endpoint: endpoint.to_string(), error: error.to_string() }
+        }
+    }
 }
 
 /// The `tracing` layer feeding `provider`'s tracer.
@@ -71,7 +89,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::signal_endpoint;
+    use super::{build, signal_endpoint, ExportSetup};
+
+    #[test]
+    fn an_unusable_endpoint_is_reported_not_logged() {
+        match build("not a url/v1/traces", "svc") {
+            ExportSetup::Unusable { endpoint, error } => {
+                assert_eq!(endpoint, "not a url/v1/traces");
+                assert!(!error.is_empty(), "the installer needs a cause to log");
+            }
+            _ => panic!("an endpoint no url parser accepts must not yield a provider"),
+        }
+    }
 
     #[test]
     fn base_url_gains_the_trace_signal_path() {

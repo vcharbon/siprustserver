@@ -101,10 +101,30 @@ pub fn init_production(service_name: &str) -> ObserveGuard {
 
     #[cfg(feature = "otlp")]
     {
-        let provider = crate::otlp::provider_from_env(service_name);
+        let (provider, unusable) = match crate::otlp::export_from_env(service_name) {
+            crate::otlp::ExportSetup::Disabled => (None, None),
+            crate::otlp::ExportSetup::Provider(p) => (Some(p), None),
+            crate::otlp::ExportSetup::Unusable { endpoint, error } => {
+                // The operator asked for export and will not get it: hold the
+                // whole sampling machinery inert rather than open root spans
+                // nothing collects.
+                crate::mark_export_unusable();
+                (None, Some((endpoint, error)))
+            }
+        };
         let otlp_layer = provider.as_ref().map(crate::otlp::layer);
         let registry = Registry::default().with(filter).with(fmt_layer).with(otlp_layer);
-        if tracing::subscriber::set_global_default(registry).is_err() {
+        let installed = tracing::subscriber::set_global_default(registry).is_ok();
+        // Warn only now: before this point the emission would reach the no-op
+        // dispatcher and the operator would see nothing at all.
+        if let Some((endpoint, error)) = unusable {
+            tracing::warn!(
+                endpoint = %endpoint,
+                error = %error,
+                "OTLP exporter refused to build; this process exports no traces"
+            );
+        }
+        if !installed {
             // Another subscriber owns this process (an embedding host): keep its
             // choice and tear our own resources down.
             drop(writer_guard);

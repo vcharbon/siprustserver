@@ -92,8 +92,12 @@ with the resolved `<base>/v1/traces`. It resolves the url rather than leaving
 the var to the exporter's own lookup because that lookup falls back to the SDK's
 `localhost:4318` default whenever the value fails to parse — a typo'd endpoint
 would then report as configured, open root spans, and post every batch into the
-void. Resolved here, an unusable endpoint fails at build time: a warning, no
-tracer provider, and the same "exports nothing" state as an unset var.
+void. Resolved here, an unusable endpoint fails at exporter-build time and the
+process enters the same "exports nothing" state as an unset var — the sampling
+machinery goes inert, so no root span is opened for a collector that will never
+see it. The cause is reported to the subscriber installer, which warns AFTER
+installing the subscriber: resolution happens before any subscriber exists, and
+a warning emitted there would reach the no-op dispatcher and be lost.
 
 ### 3. Sampling and activation — monotonic, decided once
 
