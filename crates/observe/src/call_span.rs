@@ -22,7 +22,7 @@
 use tracing::Span;
 
 use crate::admission::TraceLease;
-use crate::attr::{cap_bytes, ATTR_CAP_BYTES};
+use crate::attr::{shape_body, ATTR_CAP_BYTES, BODY_ENCODING_BASE64};
 use crate::plane::TRACE_TARGET;
 use crate::trace_ids::{is_valid_id, new_span_id, new_trace_id, SPAN_ID_HEX, TRACE_ID_HEX};
 
@@ -71,7 +71,28 @@ pub struct CallSpan {
     span: Span,
     trace_id: String,
     span_id: String,
+    /// The dialog identity, owned so EVERY span on the call — root and child —
+    /// carries it (ADR-0026). Owning it costs one clone per span OPEN, never
+    /// per packet.
+    id: OwnedIdentity,
     _lease: TraceLease,
+}
+
+/// [`CallIdentity`] as the span keeps it.
+struct OwnedIdentity {
+    call_id: String,
+    from_tag: String,
+    to_tag: String,
+}
+
+impl From<CallIdentity<'_>> for OwnedIdentity {
+    fn from(id: CallIdentity<'_>) -> Self {
+        Self {
+            call_id: id.call_id.to_string(),
+            from_tag: id.from_tag.to_string(),
+            to_tag: id.to_tag.to_string(),
+        }
+    }
 }
 
 impl CallSpan {
@@ -84,20 +105,20 @@ impl CallSpan {
     /// the replicated `trace_id` is reused so both processes' spans belong to
     /// one trace, and `linked_span_id` is recorded as a link to the nominal's
     /// root. An unusable replicated id falls back to a fresh trace — a
-    /// malformed correlation is worse than an unlinked one.
+    /// malformed correlation is worse than an unlinked one — and takes the link
+    /// with it: a span id is only resolvable inside the trace it was minted in,
+    /// so naming the nominal's root from a FRESH trace points at nothing.
     pub fn linked(
         lease: TraceLease,
         id: CallIdentity<'_>,
         trace_id: &str,
         linked_span_id: Option<&str>,
     ) -> Self {
-        let trace_id = if is_valid_id(trace_id, TRACE_ID_HEX) {
-            trace_id.to_string()
-        } else {
-            new_trace_id()
-        };
+        if !is_valid_id(trace_id, TRACE_ID_HEX) {
+            return Self::build(lease, id, new_trace_id(), None);
+        }
         let link = linked_span_id.filter(|s| is_valid_id(s, SPAN_ID_HEX));
-        Self::build(lease, id, trace_id, link)
+        Self::build(lease, id, trace_id.to_string(), link)
     }
 
     fn build(
@@ -118,7 +139,7 @@ impl CallSpan {
             link.trace_id = link_span_id.map(|_| trace_id.as_str()).unwrap_or(""),
             link.span_id = link_span_id.unwrap_or(""),
         );
-        Self { span, trace_id, span_id, _lease: lease }
+        Self { span, trace_id, span_id, id: id.into(), _lease: lease }
     }
 
     /// The trace this call belongs to — replicated on `Call.trace_id`.
@@ -139,6 +160,7 @@ impl CallSpan {
 
     /// Open a child span for one outbound HTTP round trip. Request and response
     /// bodies are recorded on it as events; nothing else gets a child span.
+    /// It carries the call's dialog identity, like every span on the call.
     pub fn child(&self, name: &'static str) -> ChildSpan {
         ChildSpan {
             span: tracing::info_span!(
@@ -146,6 +168,9 @@ impl CallSpan {
                 parent: &self.span,
                 "sip.call.http",
                 trace_id = %self.trace_id,
+                sip.call_id = %self.id.call_id,
+                sip.from_tag = %self.id.from_tag,
+                sip.to_tag = %self.id.to_tag,
                 http.route = name,
             ),
         }
@@ -166,19 +191,40 @@ impl ChildSpan {
 
 /// Emit one event under `span`, capping the payload and marking a capped one so
 /// a prefix is never mistaken for the whole value.
+///
+/// The payload is shaped by [`shape_body`], so a message that is valid UTF-8 —
+/// virtually every SIP message — reads as text and a message that is not loses
+/// nothing: the readable prefix stays in `body` and the remainder rides
+/// `body_b64`, with `body_split_offset` naming where the two meet.
 fn emit(span: &Span, event: TraceEvent<'_>) {
-    let (body, body_truncated) = cap_bytes(event.body);
+    let body = shape_body(event.body);
     let (detail, detail_truncated) = crate::attr::cap_str(event.detail);
-    tracing::info!(
-        target: TRACE_TARGET,
-        parent: span,
-        kind = event.kind,
-        at_ms = event.at_ms,
-        detail = %detail,
-        body = %String::from_utf8_lossy(body),
-        truncated = body_truncated || detail_truncated,
-        "trace"
-    );
+    let truncated = body.truncated || detail_truncated;
+    match &body.binary {
+        None => tracing::info!(
+            target: TRACE_TARGET,
+            parent: span,
+            kind = event.kind,
+            at_ms = event.at_ms,
+            detail = %detail,
+            body = %body.text,
+            truncated = truncated,
+            "trace"
+        ),
+        Some(tail) => tracing::info!(
+            target: TRACE_TARGET,
+            parent: span,
+            kind = event.kind,
+            at_ms = event.at_ms,
+            detail = %detail,
+            body = %body.text,
+            body_encoding = BODY_ENCODING_BASE64,
+            body_split_offset = tail.split_offset as u64,
+            body_b64 = %tail.base64,
+            truncated = truncated,
+            "trace"
+        ),
+    }
 }
 
 /// The payload size beyond which a recorded body is capped.
@@ -269,6 +315,86 @@ mod tests {
     fn an_unusable_replicated_trace_id_falls_back_to_a_fresh_trace() {
         let backup = CallSpan::linked(lease(), identity(), "not-a-trace-id", Some("nope"));
         assert!(is_valid_id(backup.trace_id(), TRACE_ID_HEX));
+    }
+
+    #[test]
+    fn a_regenerated_trace_carries_no_link_at_all() {
+        let (_guard, log) = test_buffer();
+        let nominal_span_id = new_span_id();
+        let backup = CallSpan::linked(lease(), identity(), "garbage", Some(&nominal_span_id));
+        assert!(is_valid_id(backup.trace_id(), TRACE_ID_HEX));
+
+        let spans = log.spans_matching("sip.call");
+        assert_eq!(spans.len(), 1);
+        let field = |name: &str| {
+            spans[0]
+                .fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+                .expect("link fields are always declared")
+        };
+        assert_eq!(field("link.trace_id"), "", "a link into a fresh trace resolves to nothing");
+        assert_eq!(field("link.span_id"), "");
+    }
+
+    #[test]
+    fn every_span_on_a_call_carries_the_dialog_identity() {
+        let (_guard, log) = test_buffer();
+        let span = CallSpan::open(lease(), identity());
+        let _child = span.child("/call/new");
+
+        let http = log.spans_matching("sip.call.http");
+        assert_eq!(http.len(), 1);
+        assert!(http[0].contains("sip.call_id=c1@host"), "{}", http[0].line());
+        assert!(http[0].contains("sip.from_tag=ft"), "{}", http[0].line());
+        assert!(http[0].contains("http.route=/call/new"));
+    }
+
+    #[test]
+    fn a_text_message_is_recorded_as_readable_text() {
+        let (_guard, log) = test_buffer();
+        let span = CallSpan::open(lease(), identity());
+        span.record(TraceEvent::new("sip.in", 5, "alice").with_body(b"INVITE sip:bob\r\n\r\nv=0"));
+
+        let events = log.matching("kind=sip.in");
+        assert_eq!(events.len(), 1);
+        let field = |name: &str| events[0].fields.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+        assert_eq!(field("body").map(String::as_str), Some("INVITE sip:bob\r\n\r\nv=0"));
+        assert!(field("body_encoding").is_none(), "readable text is never encoded");
+        assert!(field("body_b64").is_none());
+    }
+
+    #[test]
+    fn a_binary_body_segment_reconstructs_byte_exact() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+
+        let (_guard, log) = test_buffer();
+        let head: &[u8] = b"INVITE sip:bob\r\nCall-ID: c1@host\r\n\r\n";
+        let mut wire = head.to_vec();
+        wire.extend_from_slice(&[0x80, 0x00, 0xFF, b'k']);
+
+        let span = CallSpan::open(lease(), identity());
+        span.record(TraceEvent::new("sip.in", 7, "alice").with_body(&wire));
+
+        let events = log.matching("kind=sip.in");
+        assert_eq!(events.len(), 1);
+        let field = |name: &str| {
+            events[0]
+                .fields
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("field {name}"))
+        };
+        assert_eq!(field("body_encoding"), BODY_ENCODING_BASE64);
+        assert_eq!(field("body_split_offset"), head.len().to_string());
+        assert_eq!(field("truncated"), "false");
+
+        let mut rebuilt = field("body").into_bytes();
+        rebuilt.extend_from_slice(&BASE64.decode(field("body_b64")).expect("valid base64"));
+        assert_eq!(rebuilt, wire, "the exact wire bytes reconstruct from the two fields");
     }
 
     #[test]

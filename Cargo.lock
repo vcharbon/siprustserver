@@ -2643,6 +2643,7 @@ dependencies = [
 name = "observe"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

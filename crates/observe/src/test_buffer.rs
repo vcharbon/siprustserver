@@ -12,6 +12,8 @@
 //! One buffer per thread: [`current_test_buffer`] hands the installed handle to
 //! a second would-be installer (a harness constructed inside a test that already
 //! captures), so nesting reuses one buffer instead of shadowing the outer one.
+//! Installs are tracked as a stack keyed by handle identity, so a guard dropped
+//! out of order withdraws only its own entry.
 
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
@@ -26,8 +28,12 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
 
 thread_local! {
-    /// The buffer installed on this thread, if any — see [`current_test_buffer`].
-    static CURRENT: RefCell<Option<TestLogHandle>> = const { RefCell::new(None) };
+    /// The buffers installed on this thread, oldest first; the last is the
+    /// current one — see [`current_test_buffer`]. A STACK rather than one slot
+    /// because guards need not drop in install order: each guard removes its
+    /// OWN entry wherever it sits, so an out-of-order drop neither resurrects a
+    /// buffer nobody holds nor hides the live one.
+    static INSTALLED: RefCell<Vec<TestLogHandle>> = const { RefCell::new(Vec::new()) };
 }
 
 /// One captured `tracing` event: its level, target, message and fields, in
@@ -141,14 +147,23 @@ impl TestLogHandle {
 /// was in place when this is dropped.
 pub struct TestLogGuard {
     _inner: DefaultGuard,
-    /// The handle this install displaced, restored on drop.
-    prev: Option<TestLogHandle>,
+    /// The handle this guard installed — the identity its removal is keyed on.
+    mine: TestLogHandle,
 }
 
 impl Drop for TestLogGuard {
+    /// Withdraw THIS guard's buffer, whatever position it holds. Dropping in
+    /// install order pops the top and uncovers the enclosing buffer; dropping
+    /// out of order removes an entry from under the live one and leaves the
+    /// current buffer where it is.
     fn drop(&mut self) {
-        let prev = self.prev.take();
-        CURRENT.with(|c| *c.borrow_mut() = prev);
+        INSTALLED.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if let Some(at) = stack.iter().rposition(|h| Arc::ptr_eq(&h.events, &self.mine.events))
+            {
+                stack.remove(at);
+            }
+        });
     }
 }
 
@@ -163,8 +178,8 @@ pub fn test_buffer() -> (TestLogGuard, TestLogHandle) {
     let layer = CaptureLayer { handle: handle.clone() }.with_filter(LevelFilter::INFO);
     let subscriber = Registry::default().with(layer);
     let guard = tracing::subscriber::set_default(subscriber);
-    let prev = CURRENT.with(|c| c.borrow_mut().replace(handle.clone()));
-    (TestLogGuard { _inner: guard, prev }, handle)
+    INSTALLED.with(|stack| stack.borrow_mut().push(handle.clone()));
+    (TestLogGuard { _inner: guard, mine: handle.clone() }, handle)
 }
 
 /// The buffer [`test_buffer`] installed on this thread, if one is active.
@@ -172,7 +187,7 @@ pub fn test_buffer() -> (TestLogGuard, TestLogHandle) {
 /// A component that wants capture but must not shadow an enclosing test's
 /// buffer reuses this handle instead of installing its own.
 pub fn current_test_buffer() -> Option<TestLogHandle> {
-    CURRENT.with(|c| c.borrow().clone())
+    INSTALLED.with(|stack| stack.borrow().last().cloned())
 }
 
 /// The capture layer: appends one [`CapturedEvent`] per event and one
@@ -306,6 +321,26 @@ mod tests {
             assert!(current_test_buffer().is_some());
         }
         assert!(current_test_buffer().is_none(), "the guard restores what it displaced");
+    }
+
+    #[test]
+    fn an_out_of_order_guard_drop_leaves_the_current_buffer_alone() {
+        let (first, _a) = test_buffer();
+        let (second, b) = test_buffer();
+        // The first guard drops while the second is still live — guards nest by
+        // convention, not by construction.
+        drop(first);
+
+        let current = current_test_buffer().expect("the second install is still current");
+        assert!(
+            Arc::ptr_eq(&current.events, &b.events),
+            "an out-of-order drop must not hand back the buffer it displaced",
+        );
+        drop(second);
+        assert!(
+            current_test_buffer().is_none(),
+            "the withdrawn buffer is gone for good — no dead handle is uncovered",
+        );
     }
 
     #[test]

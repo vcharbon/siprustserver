@@ -46,7 +46,10 @@ mod wave_set;
 mod writer;
 
 pub use admission::{Denied, SampleAdmission, TraceLease, DEFAULT_MAX_ACTIVE};
-pub use attr::{cap_bytes, cap_str, ATTR_CAP_BYTES, TRUNCATED_FIELD};
+pub use attr::{
+    cap_bytes, cap_str, shape_body, BinaryTail, ShapedBody, ATTR_CAP_BYTES, BODY_ENCODING_BASE64,
+    TRUNCATED_FIELD,
+};
 pub use call_span::{CallIdentity, CallSpan, ChildSpan, TraceEvent, BODY_CAP_BYTES};
 pub use init::{init_production, ObserveGuard};
 pub use node::{node, set_node_identity};

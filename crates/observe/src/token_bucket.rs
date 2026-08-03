@@ -43,11 +43,12 @@ impl TokenBucket {
 
     /// Take one token, refilling for the elapsed time first. `false` when the
     /// bucket is empty. A `now_ms` that moves backwards (a wall-clock step)
-    /// refills nothing and never adds tokens.
+    /// refills nothing and never adds tokens: the anchor is a high-water mark,
+    /// so returning to an already-credited instant mints nothing a second time.
     pub fn try_take(&self, now_ms: i64) -> bool {
         let mut st = self.state.lock().expect("token bucket mutex");
         let elapsed_ms = (now_ms - st.last_ms).max(0) as f64;
-        st.last_ms = now_ms;
+        st.last_ms = st.last_ms.max(now_ms);
         st.tokens = (st.tokens + elapsed_ms / 1000.0 * self.refill_per_sec).min(self.burst);
         if st.tokens >= 1.0 {
             st.tokens -= 1.0;
@@ -107,5 +108,17 @@ mod tests {
         assert!(b.try_take(10_000));
         assert!(!b.try_take(0), "time going backwards must not mint a token");
         assert!(!b.try_take(0));
+    }
+
+    #[test]
+    fn a_step_back_and_forward_re_mints_nothing_for_time_already_credited() {
+        let b = TokenBucket::new(1.0, 1.0, 0);
+        assert!(b.try_take(10_000), "the starting token");
+        assert!(!b.try_take(0), "a step backwards refills nothing");
+        assert!(
+            !b.try_take(10_000),
+            "returning to an instant already credited must not buy a second token",
+        );
+        assert!(b.try_take(11_000), "a second of genuinely new time buys one");
     }
 }

@@ -235,7 +235,11 @@ detail: [docs/observability.md](../observability.md).
 - `crates/observe` is the only crate that links OpenTelemetry, and behind its
   `otlp` feature: the runners turn it on, the domain crates depend on `observe`
   for the lifecycle-aggregation helpers with default features, so a domain crate
-  gains no transitive export tree.
+  gains no transitive export tree. That holds per crate graph, not per build:
+  Cargo unifies features across a workspace build, so any build that also
+  selects a runner compiles ONE `observe` with `otlp` on, which `b2bua` and
+  `sip-proxy` then link — the guarantee is that no domain crate REQUESTS the
+  tree, not that a workspace `cargo build` can avoid compiling it.
 - Log output is lossy under extreme pressure. That is deliberate and measurable:
   `log_lines_dropped_total` is scraped alongside the trace-denial counters.
 - A collector outage degrades to "no traces": the batch exporter drops, and the
