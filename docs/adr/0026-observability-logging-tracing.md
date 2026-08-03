@@ -62,6 +62,14 @@ helpers only.
 - Every span carries `sip.call_id` plus the From/To tags.
 - **16 KiB per-attribute cap**, with a `truncated=true` marker so a prefix is
   never mistaken for a whole value.
+- **The two planes are separated by `tracing` TARGET.** Every per-call span and
+  event is emitted under the single target `sip::trace`; the stdout fmt layer
+  carries a per-layer filter that excludes it, the OTLP layer does not. Without
+  that separation a traced call's wire bytes would render as stdout `info`
+  lines — per-call logging, the thing §1 forbids — and would crowd genuine
+  lifecycle lines out of the bounded lossy writer exactly when an operator needs
+  them. A shared level/target filter cannot do this: muting the trace plane for
+  stdout would starve the exporter with it.
 
 #### Explicit-guard discipline
 
@@ -164,7 +172,14 @@ replicated `Call` and are populated. On takeover the backup opens its OWN root
 span with the replicated `trace_id` and a **span LINK** to the nominal's
 `root_span_id` — not a parent. The nominal's span is closed (or lost) by
 definition at takeover; linking records the causal relationship without claiming
-a live parent that will never close.
+a live parent that will never close. A core's root spans die with the core: they
+are runtime state, never replicated, so a survivor always opens its own.
+
+Adoption runs at each hydration site **on the copy the store keeps, under the
+residency check** — a node opens a span only for a call it goes on to serve.
+Adopting a copy the store then discards would register a root span that no
+stored call names, and the next takeover would link to a root no process ever
+served.
 
 ### 6. Tests
 

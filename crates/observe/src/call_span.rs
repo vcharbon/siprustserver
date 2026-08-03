@@ -7,6 +7,10 @@
 //! original times rather than at activation time. Child spans exist only for
 //! outbound HTTP round trips.
 //!
+//! Every span and event here is emitted under [`TRACE_TARGET`], the trace
+//! plane's only target — that is what keeps a call's raw wire bytes off the
+//! lifecycle stdout stream (ADR-0026).
+//!
 //! Correlation ids are minted by [`crate::trace_ids`] and carried as span
 //! attributes, so a domain crate populates `Call.trace_id` / `Call.root_span_id`
 //! and links a takeover span without the OpenTelemetry dependency tree. On
@@ -19,6 +23,7 @@ use tracing::Span;
 
 use crate::admission::TraceLease;
 use crate::attr::{cap_bytes, ATTR_CAP_BYTES};
+use crate::plane::TRACE_TARGET;
 use crate::trace_ids::{is_valid_id, new_span_id, new_trace_id, SPAN_ID_HEX, TRACE_ID_HEX};
 
 /// The dialog identity every span on a call carries.
@@ -103,6 +108,7 @@ impl CallSpan {
     ) -> Self {
         let span_id = new_span_id();
         let span = tracing::info_span!(
+            target: TRACE_TARGET,
             "sip.call",
             trace_id = %trace_id,
             span_id = %span_id,
@@ -136,6 +142,7 @@ impl CallSpan {
     pub fn child(&self, name: &'static str) -> ChildSpan {
         ChildSpan {
             span: tracing::info_span!(
+                target: TRACE_TARGET,
                 parent: &self.span,
                 "sip.call.http",
                 trace_id = %self.trace_id,
@@ -163,6 +170,7 @@ fn emit(span: &Span, event: TraceEvent<'_>) {
     let (body, body_truncated) = cap_bytes(event.body);
     let (detail, detail_truncated) = crate::attr::cap_str(event.detail);
     tracing::info!(
+        target: TRACE_TARGET,
         parent: span,
         kind = event.kind,
         at_ms = event.at_ms,
@@ -212,6 +220,22 @@ mod tests {
         assert!(events[0].contains("at_ms=1234"));
         assert!(events[0].contains("INVITE sip:bob"));
         assert!(events[0].contains("truncated=false"));
+    }
+
+    #[test]
+    fn every_recorded_fact_rides_the_trace_plane_target() {
+        let (_guard, log) = test_buffer();
+        let span = CallSpan::open(lease(), identity());
+        span.record(TraceEvent::new("sip.in", 1, "alice").with_body(b"INVITE sip:bob"));
+        span.child("/call/new").record(TraceEvent::new("http.request", 2, "POST"));
+
+        let events = log.snapshot();
+        assert_eq!(events.len(), 2);
+        assert!(
+            events.iter().all(|e| crate::plane::is_trace_plane(&e.target)),
+            "stdout filters the trace plane out by target: {:?}",
+            events.iter().map(|e| e.target.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

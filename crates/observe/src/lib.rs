@@ -7,6 +7,9 @@
 //!   are traffic-independent: a SIP task never blocks on a log line and an
 //!   overloaded writer drops lines against a counter instead of applying back
 //!   pressure.
+//!   Only the lifecycle plane reaches stdout: the fmt layer filters
+//!   [`TRACE_TARGET`] out per-layer, so a traced call's wire bytes never
+//!   become log lines and never displace a lifecycle line in the writer queue.
 //! - **Per-call traces** are exported over OTLP and exist ONLY when
 //!   `OTEL_EXPORTER_OTLP_ENDPOINT` names a collector. With no endpoint the
 //!   whole sampling machinery is inert: [`SampleAdmission::admit`] refuses
@@ -33,6 +36,7 @@ mod init;
 mod node;
 #[cfg(feature = "otlp")]
 mod otlp;
+mod plane;
 mod rate_draw;
 mod test_buffer;
 mod token_bucket;
@@ -46,8 +50,9 @@ pub use attr::{cap_bytes, cap_str, ATTR_CAP_BYTES, TRUNCATED_FIELD};
 pub use call_span::{CallIdentity, CallSpan, ChildSpan, TraceEvent, BODY_CAP_BYTES};
 pub use init::{init_production, ObserveGuard};
 pub use node::{node, set_node_identity};
+pub use plane::{is_trace_plane, TRACE_TARGET};
 pub use rate_draw::RateDraw;
-pub use test_buffer::{test_buffer, CapturedEvent, TestLogGuard, TestLogHandle};
+pub use test_buffer::{test_buffer, CapturedEvent, CapturedSpan, TestLogGuard, TestLogHandle};
 pub use token_bucket::TokenBucket;
 pub use wave::{
     Edge, Tally, Wave, WaveReport, DEFAULT_IDLE_CLOSE_AFTER, DEFAULT_SUMMARY_EVERY, MAX_COUNTERS,

@@ -258,15 +258,17 @@ impl CallState {
         let mut call = self.codec.decode(&body).ok()?;
         let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
         let now_ms = self.clock.now_ms();
-        // A traced call taken over from a crashed primary gets THIS node's own
-        // root span, linked to the nominal's (ADR-0026 §5) — never parented to
-        // it: that span is closed or lost by definition.
-        crate::trace::adopt_replicated(&mut call, now_ms);
         let mut inner = self.inner.lock().unwrap();
         // Re-check under the lock (a concurrent hydrate may have won the race).
         if let Some(c) = inner.calls.get(call_ref) {
             return Some((c.clone(), false, 0));
         }
+        // A traced call taken over from a crashed primary gets THIS node's own
+        // root span, linked to the nominal's (ADR-0026 §5) — never parented to
+        // it: that span is closed or lost by definition. Under the residency
+        // lock, on the copy that lands: a span is opened only for the call this
+        // node goes on to serve, and its ids never diverge from the stored call.
+        crate::trace::adopt_replicated(&mut call, now_ms);
         Self::reindex(&mut inner, &call);
         inner.calls.insert(call_ref.to_string(), call.clone());
         // The idle clock starts at hydration, never at `created_at` — a freshly
@@ -585,10 +587,6 @@ impl CallState {
     /// scan until the next keepalive re-flush — re-establishing it here closes that
     /// un-backed-up window the instant the call is re-served.
     pub fn materialize_if_absent(&self, mut call: Call) -> bool {
-        // Reclaim is a hydration site too: a traced call re-served here opens
-        // this node's own root span, linked to the one that served it before
-        // (ADR-0026 §5). Idempotent — a call already holding a span keeps it.
-        crate::trace::adopt_replicated(&mut call, self.clock.now_ms());
         let backup = call
             .topology
             .as_ref()
@@ -601,6 +599,11 @@ impl CallState {
             if inner.calls.contains_key(&call.call_ref) {
                 return false;
             }
+            // Reclaim is a hydration site too: a traced call re-served here opens
+            // this node's own root span, linked to the one that served it before
+            // (ADR-0026 §5). After the residency check, so the node never opens a
+            // span for a call it does not go on to serve.
+            crate::trace::adopt_replicated(&mut call, now_ms);
             Self::reindex(&mut inner, &call);
             // Reclaim restarts the idle clock (ADR-0020 X4): a 2 h-old reclaimed
             // long-hold call is fresh here, not reap-stale.
@@ -768,6 +771,13 @@ impl CallState {
 
     pub fn active_count(&self) -> usize {
         self.inner.lock().unwrap().calls.len()
+    }
+
+    /// Every callRef this node holds live. The core's teardown reads it to
+    /// release the per-call runtime state that is NOT in the store — the root
+    /// spans (ADR-0026) — and tests read it as ground truth.
+    pub fn live_call_refs(&self) -> Vec<String> {
+        self.inner.lock().unwrap().calls.keys().cloned().collect()
     }
 
     /// The number of live per-call serialization locks. Should track

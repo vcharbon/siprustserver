@@ -419,11 +419,7 @@ async fn hydrate_or_reclaim(ctx: &Arc<RouterCtx>, call_ref: &str) -> Option<Call
         // `bak:{self}`) still orphans — recovering THAT population needs an
         // on-demand pull from the peer (s11 CASE B, open).
         None => {
-            let (mut call, skew_offset_ms) = ctx.state.peek_reclaimable(call_ref).await?;
-            // Same hydration seam as the takeover path: a traced call re-served
-            // here opens this node's own linked root span (ADR-0026 §5). Stamped
-            // on the copy we return too, so the turn that follows records.
-            crate::trace::adopt_replicated(&mut call, ctx.clock.now_ms());
+            let (call, skew_offset_ms) = ctx.state.peek_reclaimable(call_ref).await?;
             let mut timers = call.timers.clone();
             // Same restore-hygiene seam as the bulk/reactive reclaim paths:
             // re-anchor by the skew offset, drop the stale timeout, apply the
@@ -440,7 +436,9 @@ async fn hydrate_or_reclaim(ctx: &Arc<RouterCtx>, call_ref: &str) -> Option<Call
                 ctx.timers.restore(timers, call_ref.to_string()).await;
                 ctx.metrics.bump_repl_reclaimed();
             }
-            Some(call)
+            // The materialised copy is the authoritative one — it carries this
+            // node's own root span ids when the call is traced (ADR-0026 §5).
+            Some(ctx.state.peek(call_ref).unwrap_or(call))
         }
     }
 }

@@ -12,6 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id};
 use tracing::subscriber::DefaultGuard;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
@@ -52,11 +53,44 @@ impl CapturedEvent {
     }
 }
 
+/// One captured span at creation: its name, target and the fields it opened
+/// with. A span's own attributes — the correlation ids, the takeover link — are
+/// only visible here, never on its events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedSpan {
+    /// The span's name (`sip.call`, `sip.call.http`).
+    pub name: String,
+    /// The emitting target.
+    pub target: String,
+    /// Every creation field as `(name, rendered value)`, in declaration order.
+    pub fields: Vec<(String, String)>,
+}
+
+impl CapturedSpan {
+    /// The span rendered as one `key=value` line.
+    pub fn line(&self) -> String {
+        let mut s = format!("{}: {}", self.target, self.name);
+        for (k, v) in &self.fields {
+            s.push(' ');
+            s.push_str(k);
+            s.push('=');
+            s.push_str(v);
+        }
+        s
+    }
+
+    /// Whether any part of the rendered line contains `needle`.
+    pub fn contains(&self, needle: &str) -> bool {
+        self.line().contains(needle)
+    }
+}
+
 /// A snapshot handle over the capture buffer. Cloneable and cheap; every clone
 /// reads the same buffer.
 #[derive(Clone, Default)]
 pub struct TestLogHandle {
     events: Arc<Mutex<Vec<CapturedEvent>>>,
+    spans: Arc<Mutex<Vec<CapturedSpan>>>,
 }
 
 impl TestLogHandle {
@@ -75,9 +109,20 @@ impl TestLogHandle {
         self.snapshot().into_iter().filter(|e| e.contains(needle)).collect()
     }
 
+    /// Every span captured at creation, oldest first.
+    pub fn spans(&self) -> Vec<CapturedSpan> {
+        self.spans.lock().expect("capture buffer mutex").clone()
+    }
+
+    /// Captured spans whose rendered line contains `needle`.
+    pub fn spans_matching(&self, needle: &str) -> Vec<CapturedSpan> {
+        self.spans().into_iter().filter(|s| s.contains(needle)).collect()
+    }
+
     /// Drop everything captured so far.
     pub fn clear(&self) {
         self.events.lock().expect("capture buffer mutex").clear();
+        self.spans.lock().expect("capture buffer mutex").clear();
     }
 }
 
@@ -96,12 +141,25 @@ pub fn test_buffer() -> (TestLogGuard, TestLogHandle) {
     (TestLogGuard { _inner: guard }, handle)
 }
 
-/// The capture layer: appends one [`CapturedEvent`] per event, nothing else.
+/// The capture layer: appends one [`CapturedEvent`] per event and one
+/// [`CapturedSpan`] per span creation, nothing else.
 struct CaptureLayer {
     handle: TestLogHandle,
 }
 
 impl<S: Subscriber> Layer<S> for CaptureLayer {
+    fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
+        let mut visitor = FieldVisitor::default();
+        attrs.record(&mut visitor);
+        let meta = attrs.metadata();
+        let captured = CapturedSpan {
+            name: meta.name().to_string(),
+            target: meta.target().to_string(),
+            fields: visitor.fields,
+        };
+        self.handle.spans.lock().expect("capture buffer mutex").push(captured);
+    }
+
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
@@ -184,6 +242,17 @@ mod tests {
             vec![("node".to_string(), "w-0".to_string()), ("peer".to_string(), "3".to_string())]
         );
         assert!(events[1].contains("reason=no_exporter"));
+    }
+
+    #[test]
+    fn a_spans_creation_fields_are_captured() {
+        let (_guard, log) = test_buffer();
+        let _span = tracing::info_span!("sip.call", link.span_id = "abc123", sip.call_id = "c@h");
+
+        let spans = log.spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name, "sip.call");
+        assert!(spans[0].contains("link.span_id=abc123"));
     }
 
     #[test]

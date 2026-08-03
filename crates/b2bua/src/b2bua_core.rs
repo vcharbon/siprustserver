@@ -548,6 +548,14 @@ impl B2buaCore {
         if let Some(s) = &self.supervisor {
             s.shutdown();
         }
+        // Per-call root spans are this core's runtime state, not replicated
+        // state: they die with the core and return their active-trace slots
+        // (ADR-0026). A survivor taking one of these calls over therefore opens
+        // its OWN linked root, exactly as it does across a process boundary.
+        let traces = crate::trace::traces();
+        for call_ref in self.ctx.state.live_call_refs() {
+            traces.close(&call_ref);
+        }
     }
 
     /// Latch this worker into the `Draining` readiness state (SIGTERM → drain).
