@@ -27,7 +27,8 @@ pub fn sip_in(traces: &ProxyTraces, call_id: &str, at_ms: i64, src: SocketAddr, 
 
 /// A response the proxy received for the call. A response names no source on
 /// this seam — the Via chain in its own bytes does — so the detail is what it
-/// answers.
+/// answers. Returns whether the call is traced, so the relay path knows before
+/// it spends anything carrying the call's key across the message it consumes.
 pub fn response_in(
     traces: &ProxyTraces,
     call_id: &str,
@@ -35,12 +36,12 @@ pub fn response_in(
     status: u16,
     method: &str,
     wire: &[u8],
-) {
+) -> bool {
     traces.with_span(call_id, at_ms, |span| {
         span.record(
             TraceEvent::new("sip.in", at_ms, &format!("{status} for {method}")).with_body(wire),
         );
-    });
+    })
 }
 
 /// A request the proxy forwarded: the datagram it put on the wire, plus the

@@ -26,7 +26,7 @@ impl ProxyCore {
         // Per-call trace tier (ADR-0026): the parsed Call-ID, one predicted
         // branch while nothing is sampled.
         let at_ms = self.now_ms() as i64;
-        emit::response_in(
+        let is_traced = emit::response_in(
             &self.traces,
             resp.call_id().as_str(),
             at_ms,
@@ -35,9 +35,10 @@ impl ProxyCore {
             resp.image(),
         );
         // The relay below consumes the message, so a TRACED call's key is
-        // carried across it. Nothing sampled → no key, no allocation.
-        let traced: Option<String> =
-            self.traces.any_sampled().then(|| resp.call_id().as_str().to_string());
+        // carried across it. An untraced call allocates nothing — the emission
+        // above already answered whether this call has a span, so the clone
+        // rides that answer and not the process-wide sampled flag.
+        let traced: Option<String> = is_traced.then(|| resp.call_id().as_str().to_string());
         let ends_the_call = cseq.method() == Method::Bye && resp.status() >= 200;
 
         // §16.7.3: need ≥2 Via (ours + the next hop's).

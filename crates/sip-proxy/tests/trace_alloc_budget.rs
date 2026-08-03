@@ -1,13 +1,15 @@
-//! Allocation budget for the proxy's per-call trace tier when NOTHING is
-//! sampled (ADR-0026).
+//! Allocation budget for the proxy's per-call trace tier on an UNSAMPLED call
+//! (ADR-0026).
 //!
 //! The proxy touches every datagram of every call on the box, so the tier makes
-//! one promise a code review cannot check and a flamegraph cannot measure: with
-//! no call sampled, the per-packet path is a single predicted branch — no
-//! lookup, no formatting, no allocation. Every emission site is exercised here
-//! against an untraced registry and asserted at **zero** allocation events, so a
-//! helper that ever formats its detail or copies a Call-ID before consulting the
-//! flag fails here instead of quietly costing every packet in production.
+//! one promise a code review cannot check and a flamegraph cannot measure: an
+//! unsampled call costs zero allocations. Two regimes, both asserted at **zero**
+//! allocation events: nothing sampled at all (the per-packet path is a single
+//! predicted branch) and — the production steady state, since one traced call
+//! holds its slot for the whole call — another call traced while this one is
+//! not, where the branch is a map miss. A helper that formats its detail or
+//! copies a Call-ID before knowing THIS call has a span fails here instead of
+//! quietly costing every packet in production.
 //!
 //! Run with output:
 //! `cargo test -p sip-proxy --test trace_alloc_budget -- --nocapture`.
@@ -67,13 +69,9 @@ fn cost_of(mut op: impl FnMut()) -> usize {
     total.allocs
 }
 
-#[test]
-fn an_untraced_proxy_allocates_nothing_per_packet() {
-    let traces = untraced();
-    assert!(
-        !traces.activate(CALL_ID, CallIdentity { call_id: CALL_ID, from_tag: "a", to_tag: "" }, None, 0),
-        "the 0.0 draw refuses every call — nothing is sampled",
-    );
+/// Every emission site the data path runs for `CALL_ID`, each asserted at zero
+/// allocations. `regime` names the sampling state under test in the failure.
+fn assert_every_site_is_free(traces: &ProxyTraces, regime: &str) {
     let src = "10.0.0.1:5060".parse().expect("fixture address");
     let target = ProxyAddr::new("10.0.0.2", 5070);
     let facts = || RouteFacts {
@@ -82,12 +80,18 @@ fn an_untraced_proxy_allocates_nothing_per_packet() {
         face: Some(Face::Internal),
         stickiness: None,
     };
-    let t = || std::hint::black_box(traces.as_ref());
+    let t = || std::hint::black_box(traces);
 
-    let sites: [Site<'_>; 6] = [
-        ("any_sampled", Box::new(|| assert!(!t().any_sampled()))),
+    let sites: [Site<'_>; 5] = [
         ("sip.in", Box::new(|| emit::sip_in(t(), CALL_ID, 0, src, INVITE))),
-        ("response sip.in", Box::new(|| emit::response_in(t(), CALL_ID, 0, 200, "INVITE", INVITE))),
+        (
+            "response sip.in",
+            Box::new(|| {
+                // The relay path clones the Call-ID off THIS answer: an
+                // unsampled call must be told it is unsampled.
+                assert!(!emit::response_in(t(), CALL_ID, 0, 200, "INVITE", INVITE));
+            }),
+        ),
         ("sip.out + route", Box::new(|| emit::forwarded(t(), CALL_ID, 0, facts(), INVITE))),
         ("route.shed", Box::new(|| emit::shed(t(), CALL_ID, 0, "proxy_overload_cps"))),
         ("close", Box::new(|| t().close(CALL_ID))),
@@ -95,9 +99,28 @@ fn an_untraced_proxy_allocates_nothing_per_packet() {
 
     for (name, op) in &sites {
         let allocs = cost_of(op);
-        println!("{name:<18} {allocs:>4} allocs / {ITERS} emissions");
-        assert_eq!(allocs, 0, "untraced `{name}` must not allocate; it allocated {allocs}");
+        println!("[{regime}] {name:<18} {allocs:>4} allocs / {ITERS} emissions");
+        assert_eq!(allocs, 0, "{regime}: `{name}` must not allocate; it allocated {allocs}");
     }
+}
+
+/// The whole budget in ONE test: the counters are process-wide, so a measured
+/// region must be the only thing running in this binary.
+#[test]
+fn an_unsampled_call_allocates_nothing_per_packet() {
+    nothing_sampled();
+    one_other_call_traced();
+}
+
+fn nothing_sampled() {
+    let traces = untraced();
+    assert!(
+        !traces.activate(CALL_ID, CallIdentity { call_id: CALL_ID, from_tag: "a", to_tag: "" }, None, 0),
+        "the 0.0 draw refuses every call — nothing is sampled",
+    );
+    let allocs = cost_of(|| assert!(!std::hint::black_box(traces.as_ref()).any_sampled()));
+    assert_eq!(allocs, 0, "the flag read must not allocate; it allocated {allocs}");
+    assert_every_site_is_free(&traces, "nothing sampled");
 
     // The raw INVITE scan the sampling decision runs on a lab-gated process is
     // on the same path, and reads the datagram in place.
@@ -105,4 +128,25 @@ fn an_untraced_proxy_allocates_nothing_per_packet() {
         std::hint::black_box(sniff::trace_sample_rate(std::hint::black_box(INVITE)));
     });
     assert_eq!(allocs, 0, "the raw X-Trace-Sample scan must not allocate; it allocated {allocs}");
+}
+
+// The production steady state: a traced call holds its slot for its whole life,
+// so the process-wide "anything sampled?" flag is up essentially continuously.
+// Every OTHER call on the box — tens of thousands of datagrams a second on a
+// front LB — must still cost zero allocations, which means no site may spend
+// anything on the strength of that flag alone.
+fn one_other_call_traced() {
+    let traces = Arc::new(ProxyTraces::new(
+        SampleAdmission::new(true, 1.0, 200, RateDraw::seeded(1), TokenBucket::default_at(0)),
+        true,
+    ));
+    const TRACED: &str = "traced@10.0.0.9";
+    assert!(
+        traces.activate(TRACED, CallIdentity { call_id: TRACED, from_tag: "t", to_tag: "" }, None, 0),
+        "the 1.0 draw admits the one traced call",
+    );
+    assert!(traces.any_sampled(), "the process-wide flag is up for the whole test");
+
+    assert_every_site_is_free(&traces, "another call traced");
+    assert!(traces.any_sampled(), "the traced call kept its span throughout");
 }

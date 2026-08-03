@@ -112,22 +112,25 @@ impl ProxyTraces {
         true
     }
 
-    /// Record on a traced call's root span, refreshing its idle deadline. The
-    /// guard every emission site runs through: one relaxed load when nothing is
-    /// sampled, one map miss for an unsampled call while others are traced.
-    /// `f` is reached only for a call that IS traced, so a detail string is
-    /// formatted only when it will be recorded.
+    /// Record on a traced call's root span, refreshing its idle deadline, and
+    /// report whether the call IS traced. The guard every emission site runs
+    /// through: one relaxed load when nothing is sampled, one map miss for an
+    /// unsampled call while others are traced. `f` is reached only for a call
+    /// that IS traced, so a detail string is formatted only when it will be
+    /// recorded. The returned flag is the same answer without a second lookup,
+    /// for a caller that must know before it spends anything on the call.
     #[inline]
-    pub fn with_span(&self, call_id: &str, at_ms: i64, f: impl FnOnce(&CallSpan)) {
+    pub fn with_span(&self, call_id: &str, at_ms: i64, f: impl FnOnce(&CallSpan)) -> bool {
         if !self.any_sampled() {
-            return;
+            return false;
         }
         let mut spans = self.spans.lock().expect("proxy trace registry mutex");
         let Some(entry) = spans.get_mut(call_id) else {
-            return;
+            return false;
         };
         entry.expires_at_ms = at_ms + self.idle_ttl_ms;
         f(&entry.span);
+        true
     }
 
     /// Close a call's root span, returning its active-trace slot. Idempotent —
@@ -221,9 +224,12 @@ mod tests {
         let (_guard, log) = observe::test_buffer();
         let traces = gate(true, 100);
         traces.activate("a@h", id(), None, 0);
-        traces.with_span("other@h", 1, |span| span.record(TraceEvent::new("sip.in", 1, "x")));
+        assert!(
+            !traces.with_span("other@h", 1, |span| span.record(TraceEvent::new("sip.in", 1, "x"))),
+            "an untraced call reports untraced even while another call is traced",
+        );
         assert!(log.lines().is_empty(), "no span names that call");
-        traces.with_span("a@h", 2, |span| span.record(TraceEvent::new("sip.in", 2, "x")));
+        assert!(traces.with_span("a@h", 2, |span| span.record(TraceEvent::new("sip.in", 2, "x"))));
         assert_eq!(log.matching("kind=sip.in").len(), 1);
     }
 }
