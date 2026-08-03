@@ -1,7 +1,8 @@
 //! The fluent session: [`Harness`] owns the recording-wrapped simulated
 //! network, binds agents/proxies/SUTs, advances virtual time, and renders the
 //! [`RunReport`] at [`Harness::finish`] behind the mandatory RFC hard gate.
-//! The Drop-armed backstops live in [`super::run_guards`].
+//! The Drop-armed backstops live in [`super::run_guards`] (wire trace, RFC
+//! gate) and [`super::log_dump`] (what the SUT logged and traced).
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -17,6 +18,7 @@ use sip_net::{
     with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork, UdpEndpoint,
 };
 
+use super::log_dump::LogDump;
 use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate, PanicDump};
 use super::rr_fold::decide_rr_fold;
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
@@ -49,6 +51,10 @@ pub struct Harness {
     /// Dumps the recorded trace to stderr if the scenario task unwinds before
     /// [`finish`](Harness::finish) renders a report. `finish` disarms it.
     dump: PanicDump,
+    /// Captures what the SUT logs and traces for the run and dumps it to stderr
+    /// next to [`dump`](Self::dump)'s wire trace on the same panic path.
+    /// Declared after `dump` so the wire trace prints first. `finish` disarms it.
+    log_dump: LogDump,
     /// MANDATORY HARD GATE: fails the test on Drop if the recorded trace violates
     /// any non-advisory RFC rule — the backstop for a harness dropped WITHOUT
     /// [`finish`](Harness::finish) (which enforces the same gate inline).
@@ -151,6 +157,7 @@ impl Harness {
             true,
         );
         let dump = PanicDump::new(name.clone(), wrapped.recording.channel(), recorder.clone());
+        let log_dump = LogDump::install(name.clone());
         let waivers: Rc<RefCell<Vec<WaiverState>>> = Rc::new(RefCell::new(Vec::new()));
         let cseq_gate = CseqGate::new(
             name.clone(),
@@ -166,6 +173,7 @@ impl Harness {
             name,
             description: None,
             dump,
+            log_dump,
             cseq_gate,
             waivers,
             recv_timeout,
@@ -491,6 +499,7 @@ impl Harness {
         // Drop-time cseq backstop is likewise disarmed — `finish` runs the SAME
         // gate inline just below, so the Drop guard would only double-check.
         self.dump.disarm();
+        self.log_dump.disarm();
         self.cseq_gate.disarm();
         self.settle_network().await;
         let events = self.recording.channel().snapshot();
@@ -543,6 +552,7 @@ impl Harness {
     /// (an executor keeps the report over a dead-waiver abort).
     pub async fn finish_collecting(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
         self.dump.disarm();
+        self.log_dump.disarm();
         self.cseq_gate.disarm();
         self.settle_network().await;
         let events = self.recording.channel().snapshot();

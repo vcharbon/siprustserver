@@ -63,8 +63,13 @@
 # re-applied on every `up` since recreating the cluster wipes them. Grafana:
 # http://localhost:3333 (anonymous admin). Set OBS_ENABLE=0 to skip.
 #
+# Per-call traces (ADR-0026) go to the same stack's VictoriaTraces over OTLP.
+# This is the LAB composition: it exports and it trusts `X-Trace-Sample`. See
+# docs/observability.md for how to activate a trace on a call.
+#
 # Env: SUT_IMAGE=siprustserver:dev  WORKER_REPLICAS=2  CLUSTER=sip-e2e  NS=sip-test
-#      OBS_ENABLE=1
+#      OBS_ENABLE=1  OTLP_EXPORT_ENDPOINT=<otlp base, empty = export nothing>
+#      SIP_TRACE_HEADER=1
 set -euo pipefail
 # Resolve our own directory WITHOUT a top-level `cd` (a source-time cd would leak
 # into any script sourcing this library — issue 025); every path below that used
@@ -139,6 +144,24 @@ export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO LIMITER_CAP RABB
 # Set OBS_ENABLE=0 to skip (e.g. CI without docker compose).
 OBS_ENABLE="${OBS_ENABLE:-1}"
 OBS_DIR="${OBS_DIR:-$REPO_ROOT/deploy/observability}"
+# Per-call tracing (ADR-0026) — this is the DEV/LAB composition, so it exports.
+# OTLP_EXPORT_ENDPOINT is the OTLP/HTTP base the workers + proxy send spans to;
+# the exporter appends `/v1/traces`, and VictoriaTraces ingests at
+# /insert/opentelemetry/v1/traces. The host address from the cluster's POV is the
+# kind bridge gateway (SIP_GATEWAY, lib/net-env.sh) — WSL2 has no fixed host IP.
+# EMPTY is the meaningful "no exporter" value: the whole sampling machinery is
+# then inert, which is what OBS_ENABLE=0 and a production composition both get.
+# SIP_TRACE_HEADER=1 makes the runners honour an `X-Trace-Sample` header —
+# lab/endurance ONLY (untrusted input on a serving edge). Both are stamped into
+# manifests/20-worker.yaml + 30-proxy.yaml by envsubst.
+OTLP_EXPORT_PORT="${OTLP_EXPORT_PORT:-10428}"
+if [ "$OBS_ENABLE" = "1" ]; then
+  OTLP_EXPORT_ENDPOINT="${OTLP_EXPORT_ENDPOINT:-http://${SIP_GATEWAY}:${OTLP_EXPORT_PORT}/insert/opentelemetry}"
+else
+  OTLP_EXPORT_ENDPOINT="${OTLP_EXPORT_ENDPOINT:-}"
+fi
+SIP_TRACE_HEADER="${SIP_TRACE_HEADER:-1}"
+export OTLP_EXPORT_ENDPOINT SIP_TRACE_HEADER
 
 log() { printf '\033[1;36m>> %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }

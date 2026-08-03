@@ -9,6 +9,7 @@ checkout). Host-side storage + UI, in-cluster scraper/forwarder.
             ────────────────────                      ──────────────────────
  Grafana :3333 ◀── PromQL ── VictoriaMetrics :8428 ◀── remote_write ── vmagent (Deployment)
                ◀── LogsQL ── VictoriaLogs   :9428 ◀── HTTP push   ── fluent-bit (DaemonSet)
+               ◀── Jaeger ── VictoriaTraces :10428 ◀── OTLP/HTTP  ── b2bua-worker + sip-front-proxy
 
                                               vmagent k8s SD scrapes:
                                                 • pods annotated prometheus.io/scrape=true
@@ -39,6 +40,7 @@ Skip with `OBS_ENABLE=0 ./run.sh up`. Re-apply by hand with `./run.sh obs`.
 - Grafana:        http://localhost:3333  (anonymous admin)
 - VictoriaMetrics: http://localhost:8428/vmui
 - VictoriaLogs:    http://localhost:9428/select/vmui
+- VictoriaTraces:  http://localhost:10428  (OTLP ingest `/insert/opentelemetry/v1/traces`)
 
 ## Dashboards (auto-provisioned, bind-mounted)
 
@@ -81,5 +83,8 @@ The Rust manifests already set these: `deploy/k8s/manifests/30-proxy.yaml`
   stack — only one can run at a time. `install.sh --down` the other first.
 - Use `127.0.0.1`, not `localhost`, when curling the host endpoints
   (`localhost` → IPv6 `::1` gets connection-reset against these containers).
-- VictoriaTraces/OTel tracing is provisioned but the Rust binaries don't emit
-  spans yet (deferred per ADR-0009/0010) — that datasource will be empty.
+- Per-call traces (ADR-0026) are SAMPLED, so the VictoriaTraces datasource is
+  near-empty by design: the default draw is 1e-4. To see a specific call, send
+  `X-Trace-Sample: 1.0` on its INVITE (`run.sh` sets `SIP_TRACE_HEADER=1`, which
+  is what makes the lab honour that header) or return `"trace": true` from the
+  decision engine. See [docs/observability.md](../../docs/observability.md).

@@ -35,6 +35,7 @@
 //!   virtual-time advance, `finish()` + the RFC hard gate.
 //! - [`run_guards`] — Drop-armed backstops: panic-time trace dump, the
 //!   forgot-to-`finish` RFC gate.
+//! - [`log_dump`] — the panic-time dump of what the SUT logged and traced.
 //! - [`step`] — [`StepError`], the fallible-core step vocabulary.
 //! - [`ua`] + [`tolerant_recv`] — [`Agent`]: the send/receive cores and the
 //!   method-filtered receive policies.
@@ -57,6 +58,7 @@ mod client_txn;
 mod dialog;
 mod harness;
 mod invite;
+mod log_dump;
 mod out_of_dialog;
 mod proxy;
 mod rr_fold;

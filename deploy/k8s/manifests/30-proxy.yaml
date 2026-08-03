@@ -194,7 +194,15 @@ spec:
             # src/main.rs); aggressive decay returns freed pages to the OS quickly.
             # Confirm it parsed via the jemalloc_opt_*_decay_ms gauges on /metrics
             # (a typo here is silently ignored). (_RJEM_ prefix = tikv-jemalloc.)
-            - { name: _RJEM_MALLOC_CONF,    value: "dirty_decay_ms:1000,muzzy_decay_ms:1000" }
+            # Per-call tracing (ADR-0026). An EMPTY OTEL_EXPORTER_OTLP_ENDPOINT
+            # means "no exporter": the whole sampling machinery is inert, no span
+            # is ever built. run.sh stamps the lab VictoriaTraces OTLP base
+            # (host:10428/insert/opentelemetry; the exporter appends /v1/traces);
+            # a production composition leaves both empty. SIP_TRACE_HEADER=1 makes
+            # the process honour an `X-Trace-Sample` header — lab/endurance only,
+            # since the header is untrusted on a serving edge.
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "${OTLP_EXPORT_ENDPOINT}" }
+            - { name: SIP_TRACE_HEADER,            value: "${SIP_TRACE_HEADER}" }
           ports:
             # containerPort is cosmetic under hostNetwork (the real bind is
             # PROXY_LISTEN=${PROXY_VIP}:${SIP_PORT}); kept at 5060 as a label only.

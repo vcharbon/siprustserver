@@ -8,16 +8,27 @@
 //!
 //! Scenario tests never assert on captured content — the `Recorder` is the
 //! oracle. Tests OF the trace machinery may.
+//!
+//! One buffer per thread: [`current_test_buffer`] hands the installed handle to
+//! a second would-be installer (a harness constructed inside a test that already
+//! captures), so nesting reuses one buffer instead of shadowing the outer one.
 
+use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
 use tracing::subscriber::DefaultGuard;
 use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
+
+thread_local! {
+    /// The buffer installed on this thread, if any — see [`current_test_buffer`].
+    static CURRENT: RefCell<Option<TestLogHandle>> = const { RefCell::new(None) };
+}
 
 /// One captured `tracing` event: its level, target, message and fields, in
 /// emission order.
@@ -130,15 +141,38 @@ impl TestLogHandle {
 /// was in place when this is dropped.
 pub struct TestLogGuard {
     _inner: DefaultGuard,
+    /// The handle this install displaced, restored on drop.
+    prev: Option<TestLogHandle>,
+}
+
+impl Drop for TestLogGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        CURRENT.with(|c| *c.borrow_mut() = prev);
+    }
 }
 
 /// Install the in-memory subscriber for the current thread. Hold the guard for
 /// as long as capture should run.
+///
+/// Captures `info` and above: the lifecycle plane and the per-call trace plane
+/// both emit at `info`, while `debug`/`trace` diagnostics stay off so a long
+/// scenario does not accumulate what nothing reads.
 pub fn test_buffer() -> (TestLogGuard, TestLogHandle) {
     let handle = TestLogHandle::default();
-    let subscriber = Registry::default().with(CaptureLayer { handle: handle.clone() });
+    let layer = CaptureLayer { handle: handle.clone() }.with_filter(LevelFilter::INFO);
+    let subscriber = Registry::default().with(layer);
     let guard = tracing::subscriber::set_default(subscriber);
-    (TestLogGuard { _inner: guard }, handle)
+    let prev = CURRENT.with(|c| c.borrow_mut().replace(handle.clone()));
+    (TestLogGuard { _inner: guard, prev }, handle)
+}
+
+/// The buffer [`test_buffer`] installed on this thread, if one is active.
+///
+/// A component that wants capture but must not shadow an enclosing test's
+/// buffer reuses this handle instead of installing its own.
+pub fn current_test_buffer() -> Option<TestLogHandle> {
+    CURRENT.with(|c| c.borrow().clone())
 }
 
 /// The capture layer: appends one [`CapturedEvent`] per event and one
@@ -253,6 +287,34 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].name, "sip.call");
         assert!(spans[0].contains("link.span_id=abc123"));
+    }
+
+    #[test]
+    fn a_nested_installer_reuses_the_outer_buffer_instead_of_shadowing_it() {
+        let (_guard, outer) = test_buffer();
+        let reused = current_test_buffer().expect("a buffer is installed on this thread");
+        tracing::info!("one line");
+        assert_eq!(reused.lines().len(), 1, "the reused handle reads the same buffer");
+        assert_eq!(outer.lines().len(), 1);
+    }
+
+    #[test]
+    fn no_buffer_is_current_outside_an_install() {
+        assert!(current_test_buffer().is_none());
+        {
+            let (_guard, _log) = test_buffer();
+            assert!(current_test_buffer().is_some());
+        }
+        assert!(current_test_buffer().is_none(), "the guard restores what it displaced");
+    }
+
+    #[test]
+    fn debug_diagnostics_are_not_accumulated() {
+        let (_guard, log) = test_buffer();
+        tracing::debug!("per-call diagnostic");
+        tracing::info!("lifecycle");
+        assert_eq!(log.lines().len(), 1);
+        assert!(log.lines()[0].contains("lifecycle"));
     }
 
     #[test]

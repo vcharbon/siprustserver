@@ -52,7 +52,9 @@ pub use init::{init_production, ObserveGuard};
 pub use node::{node, set_node_identity};
 pub use plane::{is_trace_plane, TRACE_TARGET};
 pub use rate_draw::RateDraw;
-pub use test_buffer::{test_buffer, CapturedEvent, CapturedSpan, TestLogGuard, TestLogHandle};
+pub use test_buffer::{
+    current_test_buffer, test_buffer, CapturedEvent, CapturedSpan, TestLogGuard, TestLogHandle,
+};
 pub use token_bucket::TokenBucket;
 pub use wave::{
     Edge, Tally, Wave, WaveReport, DEFAULT_IDLE_CLOSE_AFTER, DEFAULT_SUMMARY_EVERY, MAX_COUNTERS,

@@ -7,9 +7,13 @@
 //! That processor owns a dedicated OS thread outside the tokio runtime, so the
 //! HTTP client under it is the blocking one — see the workspace `[workspace
 //! .dependencies]` note on `opentelemetry-otlp`.
+//!
+//! The endpoint is a BASE url, per the OTLP/HTTP spec: the exporter resolves the
+//! signal path itself (`<base>/v1/traces`), so an operator sets the same value
+//! any OpenTelemetry SDK takes.
 
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_otlp::SpanExporter;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 
@@ -25,9 +29,11 @@ pub fn provider_from_env(service_name: &str) -> Option<SdkTracerProvider> {
     if endpoint.is_empty() {
         return None;
     }
+    // No `with_endpoint`: a programmatic endpoint is taken verbatim, while the
+    // env var is a base the exporter appends `/v1/traces` to. Reading it here
+    // only decides WHETHER to export; the exporter resolves the URL.
     let exporter = SpanExporter::builder()
         .with_http()
-        .with_endpoint(endpoint)
         .build()
         .map_err(|e| {
             tracing::warn!(

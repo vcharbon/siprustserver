@@ -22,6 +22,11 @@ futures = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sip-message = { path = "../sip-message" }
+# The thread-scoped in-memory subscriber a run captures the SUT's lifecycle logs
+# and per-call trace into, dumped to stderr when a scenario panics (ADR-0026).
+# No `otlp` feature: a test never exports.
+observe = { path = "../observe" }
+tracing = { workspace = true }
 sip-net = { path = "../sip-net" }
 layer-harness = { path = "../layer-harness" }
 seq-report = { path = "../seq-report" }

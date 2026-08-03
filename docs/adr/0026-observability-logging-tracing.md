@@ -86,6 +86,12 @@ The exporter is enabled ONLY by `OTEL_EXPORTER_OTLP_ENDPOINT`. With it unset the
 and an activation attempt bumps `trace_dropped_no_exporter_total` and returns.
 A process with no collector therefore pays one boolean check per call.
 
+That env var is an OTLP/HTTP **base** url, exactly as every OpenTelemetry SDK
+reads it — the exporter resolves `<base>/v1/traces` itself. `observe` reads the
+var only to decide WHETHER to export and never passes an endpoint
+programmatically, because a programmatic endpoint is taken verbatim and would
+silently diverge from what an operator expects to configure.
+
 ### 3. Sampling and activation — monotonic, decided once
 
 Sampling is enable-only: once a call is sampled it stays sampled; nothing
@@ -181,12 +187,38 @@ Adopting a copy the store then discards would register a root span that no
 stored call names, and the next takeover would link to a root no process ever
 served.
 
-### 6. Tests
+### 6. Deployment compositions
+
+Which composition a process belongs to is expressed entirely by the two env
+vars, so the same binary serves all of them:
+
+- **dev/lab and endurance** (`deploy/k8s/run.sh`, which endurance drives): both
+  the worker and the proxy manifests carry `OTEL_EXPORTER_OTLP_ENDPOINT` pointed
+  at the host stack's VictoriaTraces and `SIP_TRACE_HEADER=1`. The values are
+  stamped by `envsubst` at deploy time because the host's address from the
+  cluster's point of view is the kind bridge gateway, which is not a fixed
+  address on WSL2.
+- **production**: both empty. Empty is the meaningful value — not a missing
+  key — so a composition never has to remember to delete a line to stay inert.
+
+Traces are stored in VictoriaTraces alongside the existing VictoriaMetrics /
+VictoriaLogs, read in Grafana through a Jaeger-protocol datasource, and share
+their lifecycle (`install.sh --bootstrap|--apply|--down|--status`). Operating
+detail: [docs/observability.md](../observability.md).
+
+### 7. Tests
 
 - **No OTel machinery in tests.** The harness installs a thread-scoped in-memory
   buffer subscriber: no background task, no real IO, no wall-clock signal
-  (docs/testing/test-clock.md — a paused test must never ride one).
-- The buffer is dumped on panic alongside `PanicDump`, otherwise discarded.
+  (docs/testing/test-clock.md — a paused test must never ride one). It captures
+  `info` and above, which is both planes.
+- `scenario-harness`'s `Harness` installs it for every run — so `b2bua-harness`
+  and `failover-harness`, which wrap it, are covered by construction — and dumps
+  the captured tail to stderr on panic alongside `PanicDump`'s wire trace;
+  `finish()` disarms both and a clean run discards the buffer.
+- Installation is nested-safe: a test that already captures (a test OF the trace
+  machinery) keeps its own buffer and the harness joins it rather than shadowing
+  it, so the test still reads everything it asserts on.
 - Scenario tests NEVER assert on log content — the `Recorder` stays the oracle.
   Dedicated unit/integration tests for the trace machinery itself MAY assert on
   the captured buffer.
@@ -202,4 +234,8 @@ served.
 - A collector outage degrades to "no traces": the batch exporter drops, and the
   SIP path is unaffected because nothing on it ever awaits the exporter.
 - Adding a per-call `info!` anywhere is a review must-fix — it breaks the
-  traffic-independence guarantee that makes the log stream usable at all.
+  traffic-independence guarantee that makes the log stream usable at all. The
+  standing directives for new code live in
+  [docs/observability.md](../observability.md) and CLAUDE.md.
+- A failing scenario now self-documents twice: the wire trace and what the SUT
+  logged and traced while producing it.

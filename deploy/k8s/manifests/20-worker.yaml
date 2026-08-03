@@ -176,6 +176,17 @@ spec:
             #    for a diagnostic soak).
             # Confirm via the startup log line `prof.active=1`. (_RJEM_ = tikv.)
             - { name: _RJEM_MALLOC_CONF,    value: "prof:true,prof_active:true,lg_prof_sample:13,prof_prefix:/tmp/jeprof/auto,dirty_decay_ms:1000,muzzy_decay_ms:1000" }
+            # Per-call tracing (ADR-0026). An EMPTY OTEL_EXPORTER_OTLP_ENDPOINT
+            # means "no exporter": the whole sampling machinery is inert, no span
+            # is ever built. run.sh stamps the lab VictoriaTraces OTLP base
+            # (host:10428/insert/opentelemetry; the exporter appends /v1/traces);
+            # a production composition leaves both empty. SIP_TRACE_HEADER=1 makes
+            # the worker honour an `X-Trace-Sample` header — lab/endurance only,
+            # since the header is untrusted on a serving edge. Sampling is
+            # per-process and independent of the proxy's: nothing rides the wire,
+            # the two sides correlate on sip.call_id.
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: "${OTLP_EXPORT_ENDPOINT}" }
+            - { name: SIP_TRACE_HEADER,            value: "${SIP_TRACE_HEADER}" }
           ports:
             - { name: sip,     containerPort: 5060, protocol: UDP }
             - { name: metrics, containerPort: 9091, protocol: TCP }

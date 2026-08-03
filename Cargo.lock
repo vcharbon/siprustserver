@@ -3765,6 +3765,7 @@ dependencies = [
  "async-trait",
  "futures",
  "layer-harness",
+ "observe",
  "seq-report",
  "serde",
  "serde_json",
@@ -3772,6 +3773,7 @@ dependencies = [
  "sip-message",
  "sip-net",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
