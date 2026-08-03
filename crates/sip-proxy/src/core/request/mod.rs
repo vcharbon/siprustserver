@@ -92,13 +92,16 @@ impl ProxyCore {
         // flag for the full idle TTL:
         //  • an initial INVITE the ladder refused — nothing will ever name that
         //    Call-ID again;
-        //  • the ACK relayed on a remembered non-2xx INVITE final — the
-        //    rejected transaction (486, 603, and the CANCEL flow's 487) is over
-        //    once its ACK is on the wire.
-        let ends_the_call = (initial_invite && outcome.decision == RoutingDecisionKind::Reject)
-            || outcome.decision == RoutingDecisionKind::AckHop;
-        if ends_the_call {
+        //  • the ACK of a setup this hop saw rejected for good (486, 603, and
+        //    the CANCEL flow's 487) — that call is over once its ACK is on the
+        //    wire. Which ACK that is was decided on the response path, where
+        //    the final's status is known: an `AckHop` is written for EVERY
+        //    relayed non-2xx INVITE final, including a mid-dialog re-INVITE's
+        //    488 and an auth challenge, neither of which ends the call.
+        if initial_invite && outcome.decision == RoutingDecisionKind::Reject {
             self.traces.close(call_id);
+        } else if outcome.decision == RoutingDecisionKind::AckHop {
+            self.traces.close_on_ack(call_id);
         }
 
         let duration = (self.now_ms().saturating_sub(start_ms)) as f64 / 1000.0;

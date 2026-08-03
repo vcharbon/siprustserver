@@ -145,7 +145,7 @@ mod tests {
     fn a_traced_call_records_its_datagrams_and_routing_facts() {
         let (_guard, log) = observe::test_buffer();
         let traces = traces(true);
-        assert!(traces.activate("c@h", identity(), None, 0).is_traced());
+        assert!(traces.activate("c@h", identity(), 1, None, 0).is_traced());
         let target = ProxyAddr::new("10.0.0.2", 5070);
 
         let src = "10.0.0.1:5060".parse().expect("fixture");
@@ -171,7 +171,7 @@ mod tests {
     fn an_untraced_proxy_records_nothing() {
         let (_guard, log) = observe::test_buffer();
         let traces = traces(false);
-        assert!(!traces.activate("c@h", identity(), None, 0).is_traced());
+        assert!(!traces.activate("c@h", identity(), 1, None, 0).is_traced());
         sip_in(&traces, "c@h", 1, "10.0.0.1:5060".parse().expect("fixture"), WIRE);
         assert!(log.lines().is_empty());
     }

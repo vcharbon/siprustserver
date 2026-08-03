@@ -18,6 +18,14 @@ use crate::trace::emit;
 
 use super::ProxyCore;
 
+/// Whether a response this hop relayed rejects the call's SETUP for good — the
+/// class after which the ACK is the only fact left. The two auth challenges are
+/// not in it: they are answered by retrying the same call with credentials, so
+/// the call outlives the transaction they end.
+fn rejects_the_setup(status: u16, method: &Method) -> bool {
+    *method == Method::Invite && (300..700).contains(&status) && !matches!(status, 401 | 407)
+}
+
 impl ProxyCore {
     pub(super) async fn handle_response(&self, resp: SipResponse) {
         let cseq = resp.cseq();
@@ -135,6 +143,15 @@ impl ProxyCore {
             // call: close the span here rather than leaving it to the TTL.
             if ends_the_call {
                 self.traces.close(call_id);
+            }
+            // A non-2xx INVITE final ends the CALL only when it rejects its
+            // setup for good. An auth challenge does not — the caller retries
+            // the same Call-ID with credentials — and neither does a
+            // mid-dialog re-INVITE's 488/491, which the registry tells apart
+            // by the transaction it is holding. One more fact follows a
+            // rejection on this hop, the ACK, so the span closes there.
+            if rejects_the_setup(resp.status(), cseq.method()) {
+                self.traces.arm_close_on_ack(call_id, resp.from().tag(), cseq.seq());
             }
         }
 

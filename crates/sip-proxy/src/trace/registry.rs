@@ -6,10 +6,12 @@
 //! lease it was admitted with, so the cap counts open spans exactly.
 //!
 //! A span closes when the proxy observes the call's last fact on this hop — a
-//! BYE final, or the ACK relayed on a remembered non-2xx INVITE final — or when
+//! BYE final, or the ACK of a SETUP this hop saw rejected for good — or when
 //! [`SPAN_IDLE_TTL_MS`] passes with no datagram naming it, the ceiling on a span
 //! whose teardown this hop never sees (a caller that vanishes, a BYE that takes
-//! another path).
+//! another path). Which INVITE transaction is that setup is state the span
+//! carries ([`ProxyTraces::arm_close_on_ack`]): a rejected re-INVITE and an auth
+//! challenge are transactions that end while the call goes on.
 //!
 //! **One registry serves every SO_REUSEPORT shard**, so its lock is on the path
 //! of every shard's every datagram once anything is sampled. It is therefore an
@@ -19,7 +21,7 @@
 //! take the write lock.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use observe::{CallIdentity, CallSpan, SampleAdmission};
@@ -53,12 +55,22 @@ impl Activation {
     }
 }
 
-/// One traced call: its root span and the instant it goes stale. The deadline
-/// is atomic so refreshing it — the per-datagram write — needs only the read
-/// lock.
+/// One traced call: its root span, the instant it goes stale, and which INVITE
+/// transaction is the call's SETUP. The mutable fields are atomic so the writes
+/// on the datagram path — refreshing the deadline, arming the close — need only
+/// the read lock.
 struct Entry {
     span: CallSpan,
     expires_at_ms: AtomicI64,
+    /// From-tag of the leg attempting the setup. Fixed at open: a challenged
+    /// INVITE's credentialed retry keeps the caller's From-tag and advances only
+    /// the CSeq, and the callee's own requests — which number their CSeq in an
+    /// independent space (§12.2.1.1) — are a different leg by this tag.
+    setup_from_tag: String,
+    /// CSeq of the dialog-creating INVITE currently attempting the setup.
+    setup_cseq: AtomicU32,
+    /// The setup was rejected for good and only its ACK is outstanding.
+    closes_on_ack: AtomicBool,
 }
 
 /// The proxy's trace gate + live root spans.
@@ -126,19 +138,25 @@ impl ProxyTraces {
     }
 
     /// Run the admission chain for an initial INVITE and, on success, open the
-    /// call's root span. `rate_override` is the `X-Trace-Sample` rate when this
-    /// process honors one, `None` for the configured rate.
+    /// call's root span. `setup_cseq` is that INVITE's CSeq number: the caller
+    /// reaches here only for a dialog-creating INVITE, so it names the
+    /// transaction attempting the call's setup — the one whose rejection ends
+    /// the call. `rate_override` is the `X-Trace-Sample` rate when this process
+    /// honors one, `None` for the configured rate.
     ///
     /// The returned [`Activation`] tells an opener apart from a call that was
     /// ALREADY traced — a digest-auth retry, or a retransmit whose memo has
     /// been evicted, reaches this seam a second time. Sampling is monotonic, so
     /// such a call keeps its span; the distinction exists because only an
     /// opener may record the datagram that opened it (the per-packet seam
-    /// already recorded it for every other case).
+    /// already recorded it for every other case). The span does FOLLOW that
+    /// second INVITE: a credentialed retry continues the same setup, and it is
+    /// the retry, not the challenged attempt, that the call now hangs on.
     pub fn activate(
         &self,
         call_id: &str,
         id: CallIdentity<'_>,
+        setup_cseq: u32,
         rate_override: Option<f64>,
         now_ms: i64,
     ) -> Activation {
@@ -152,7 +170,15 @@ impl ProxyTraces {
         // this hop never saw frees its cap slot for the call now asking for one.
         self.sweep_if_due(now_ms);
         let mut spans = self.spans.write().expect("proxy trace registry lock");
-        if spans.contains_key(call_id) {
+        if let Some(open) = spans.get(call_id) {
+            // The same leg attempting the setup again: the span follows the new
+            // transaction. A different leg's dialog-creating INVITE under this
+            // Call-ID is not this call's setup, and leaves the span pointing at
+            // the one it opened for.
+            if open.setup_from_tag == id.from_tag {
+                open.setup_cseq.store(setup_cseq, Ordering::Relaxed);
+                open.closes_on_ack.store(false, Ordering::Relaxed);
+            }
             return Activation::AlreadyOpen;
         }
         let Ok(lease) = self.admission.admit(rate_override, now_ms) else {
@@ -161,6 +187,9 @@ impl ProxyTraces {
         let entry = Entry {
             span: CallSpan::open(lease, id),
             expires_at_ms: AtomicI64::new(now_ms + self.idle_ttl_ms),
+            setup_from_tag: id.from_tag.to_string(),
+            setup_cseq: AtomicU32::new(setup_cseq),
+            closes_on_ack: AtomicBool::new(false),
         };
         spans.insert(call_id.to_string(), entry);
         self.any.store(true, Ordering::Relaxed);
@@ -189,6 +218,55 @@ impl ProxyTraces {
         };
         entry.expires_at_ms.store(at_ms + self.idle_ttl_ms, Ordering::Relaxed);
         f(&entry.span);
+        true
+    }
+
+    /// Note that the call's SETUP has been rejected for good: the final is on
+    /// the wire and the only fact left on this hop is its ACK, which closes the
+    /// span ([`close_on_ack`](Self::close_on_ack)).
+    ///
+    /// `(from_tag, cseq)` must name the dialog-creating INVITE the span follows,
+    /// which is what keeps the two rejections that do NOT end a call from
+    /// closing it: a mid-dialog re-INVITE's 488 or 491 (a different CSeq, and
+    /// from the callee's leg a different From-tag in an independent CSeq space
+    /// that can collide with the setup's), and an auth challenge, whose
+    /// credentialed retry re-enters `activate` and moves the span onto itself.
+    ///
+    /// Arming is the datagram path, so it runs under the read lock like every
+    /// other per-datagram write.
+    pub fn arm_close_on_ack(&self, call_id: &str, from_tag: Option<&str>, cseq: u32) {
+        if !self.any_sampled() {
+            return;
+        }
+        let spans = self.spans.read().expect("proxy trace registry lock");
+        let Some(entry) = spans.get(call_id) else {
+            return;
+        };
+        if entry.setup_from_tag == from_tag.unwrap_or("")
+            && entry.setup_cseq.load(Ordering::Relaxed) == cseq
+        {
+            entry.closes_on_ack.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Close the span if this ACK is the one a rejected setup armed, and report
+    /// whether it did. Any other ACK relayed on a remembered non-2xx final —
+    /// an auth challenge's, a rejected re-INVITE's — leaves the span open: the
+    /// call it belongs to is still going, and `activate` runs only for a
+    /// dialog-creating INVITE, so a span closed mid-call can never be reopened
+    /// (ADR-0026 §2).
+    pub fn close_on_ack(&self, call_id: &str) -> bool {
+        if !self.any_sampled() {
+            return false;
+        }
+        {
+            let spans = self.spans.read().expect("proxy trace registry lock");
+            match spans.get(call_id) {
+                Some(entry) if entry.closes_on_ack.load(Ordering::Relaxed) => {}
+                _ => return false,
+            }
+        }
+        self.close(call_id);
         true
     }
 
@@ -242,7 +320,7 @@ mod tests {
     fn without_an_exporter_no_span_is_ever_opened() {
         let before = observe::counters::get(&observe::counters::TRACE_DROPPED_NO_EXPORTER);
         let traces = gate(false, 100);
-        assert_eq!(traces.activate("c@h", id(), None, 0), Activation::Refused);
+        assert_eq!(traces.activate("c@h", id(), 1, None, 0), Activation::Refused);
         assert_eq!(traces.active(), 0);
         assert!(!traces.any_sampled(), "the per-packet flag stays down");
         assert!(
@@ -254,41 +332,79 @@ mod tests {
     #[test]
     fn a_second_activation_reports_the_span_it_did_not_open() {
         let traces = gate(true, 100);
-        assert_eq!(traces.activate("c@h", id(), None, 0), Activation::Opened);
+        assert_eq!(traces.activate("c@h", id(), 1, None, 0), Activation::Opened);
         assert!(traces.any_sampled());
         // Sampling is monotonic: the call keeps its span even when the second
         // attempt would draw at 0. But the caller must not treat this as an
         // open — the datagram is already recorded by the per-packet seam.
         assert_eq!(
-            traces.activate("c@h", id(), Some(0.0), 0),
+            traces.activate("c@h", id(), 1, Some(0.0), 0),
             Activation::AlreadyOpen,
             "a traced call stays traced, and says so distinguishably",
         );
         assert_eq!(traces.active(), 1);
     }
 
+    // A span closes on the ACK of the transaction that was attempting the call's
+    // SETUP, and on no other. The proxy relays a non-2xx INVITE final — and so
+    // reaches this seam — for a mid-dialog re-INVITE's rejection too, and the
+    // callee's leg numbers its CSeq in an independent space (§12.2.1.1) where it
+    // collides with the setup's, so both halves of the key are load-bearing.
+    #[test]
+    fn only_the_setup_transaction_arms_the_close() {
+        let traces = gate(true, 100);
+        traces.activate("c@h", id(), 1, None, 0);
+
+        traces.arm_close_on_ack("c@h", Some("ft"), 2);
+        assert!(!traces.close_on_ack("c@h"), "a re-INVITE's rejection ends a transaction, not the call");
+        traces.arm_close_on_ack("c@h", Some("callee"), 1);
+        assert!(!traces.close_on_ack("c@h"), "nor does the callee leg's own colliding CSeq");
+        assert_eq!(traces.active(), 1, "the live call keeps the span every later datagram needs");
+
+        traces.arm_close_on_ack("c@h", Some("ft"), 1);
+        assert!(traces.close_on_ack("c@h"), "the setup's own rejection does end the call");
+        assert_eq!(traces.active(), 0);
+        assert!(!traces.close_on_ack("c@h"), "and says so once");
+    }
+
+    // An auth challenge is a rejected transaction inside a call that goes on: the
+    // credentialed retry re-enters `activate`, and it is the retry the call now
+    // hangs on. (The challenge itself never arms — that is the response path's
+    // status test; here the span simply follows.)
+    #[test]
+    fn a_credentialed_retry_moves_the_span_onto_itself() {
+        let traces = gate(true, 100);
+        traces.activate("c@h", id(), 1, None, 0);
+        assert_eq!(traces.activate("c@h", id(), 2, None, 10), Activation::AlreadyOpen);
+
+        traces.arm_close_on_ack("c@h", Some("ft"), 1);
+        assert!(!traces.close_on_ack("c@h"), "the challenged attempt is not what the call hangs on");
+        traces.arm_close_on_ack("c@h", Some("ft"), 2);
+        assert!(traces.close_on_ack("c@h"), "the retry's own rejection ends the call");
+    }
+
     #[test]
     fn closing_frees_the_span_its_slot_and_the_flag() {
         let traces = gate(true, 1);
-        assert_eq!(traces.activate("a@h", id(), None, 0), Activation::Opened);
-        assert_eq!(traces.activate("b@h", id(), None, 1000), Activation::Refused, "the active cap holds");
+        assert_eq!(traces.activate("a@h", id(), 1, None, 0), Activation::Opened);
+        assert_eq!(traces.activate("b@h", id(), 1, None, 1000), Activation::Refused, "the active cap holds");
         traces.close("a@h");
         traces.close("a@h");
         assert_eq!(traces.active(), 0);
         assert!(!traces.any_sampled());
-        assert_eq!(traces.activate("b@h", id(), None, 2000), Activation::Opened, "a closed span frees a slot");
+        assert_eq!(traces.activate("b@h", id(), 1, None, 2000), Activation::Opened, "a closed span frees a slot");
     }
 
     #[test]
     fn a_call_that_goes_quiet_expires_at_the_idle_ttl() {
         let traces = gate(true, 100);
-        traces.activate("a@h", id(), None, 0);
+        traces.activate("a@h", id(), 1, None, 0);
         // Traffic at the deadline keeps the call alive; the sweep reclaims only
         // what has actually gone quiet.
         traces.with_span("a@h", SPAN_IDLE_TTL_MS, |_| {});
-        traces.activate("b@h", id(), None, SPAN_IDLE_TTL_MS + 1);
+        traces.activate("b@h", id(), 1, None, SPAN_IDLE_TTL_MS + 1);
         assert_eq!(traces.active(), 2, "a call still sending is not stale");
-        traces.activate("c@h", id(), None, 2 * SPAN_IDLE_TTL_MS + 2);
+        traces.activate("c@h", id(), 1, None, 2 * SPAN_IDLE_TTL_MS + 2);
         assert_eq!(traces.active(), 1, "both quiet calls were reclaimed");
         assert!(traces.any_sampled(), "the freshly activated call keeps the flag up");
     }
@@ -301,17 +417,17 @@ mod tests {
         const TTL: i64 = 1600;
         let traces = gate(true, 100).with_idle_ttl(TTL);
         // Nothing is sampled yet, so this one takes no sweep at all.
-        traces.activate("a@h", id(), None, 0);
+        traces.activate("a@h", id(), 1, None, 0);
         // First sweep: `a` is not stale yet (it expires at TTL). The next slot
         // is now TTL - 50 + 100.
-        traces.activate("b@h", id(), None, TTL - 50);
+        traces.activate("b@h", id(), 1, None, TTL - 50);
         assert_eq!(traces.active(), 2);
 
         // `a` went stale at TTL, but the schedule's next slot is TTL + 50.
-        traces.activate("c@h", id(), None, TTL + 1);
+        traces.activate("c@h", id(), 1, None, TTL + 1);
         assert_eq!(traces.active(), 3, "a stale span lingers until the sweep is due");
 
-        traces.activate("d@h", id(), None, TTL + 50);
+        traces.activate("d@h", id(), 1, None, TTL + 50);
         assert_eq!(traces.active(), 3, "the due sweep reclaimed `a`, and `d` took its place");
     }
 
@@ -319,7 +435,7 @@ mod tests {
     fn recording_on_an_untraced_call_is_a_no_op() {
         let (_guard, log) = observe::test_buffer();
         let traces = gate(true, 100);
-        traces.activate("a@h", id(), None, 0);
+        traces.activate("a@h", id(), 1, None, 0);
         assert!(
             !traces.with_span("other@h", 1, |span| span.record(TraceEvent::new("sip.in", 1, "x"))),
             "an untraced call reports untraced even while another call is traced",

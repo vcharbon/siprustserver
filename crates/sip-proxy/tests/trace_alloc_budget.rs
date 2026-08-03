@@ -83,7 +83,7 @@ fn assert_every_site_is_free(traces: &ProxyTraces, regime: &str) {
     };
     let t = || std::hint::black_box(traces);
 
-    let sites: [Site<'_>; 5] = [
+    let sites: [Site<'_>; 7] = [
         ("sip.in", Box::new(|| emit::sip_in(t(), CALL_ID, 0, src, INVITE))),
         (
             "response sip.in",
@@ -95,6 +95,11 @@ fn assert_every_site_is_free(traces: &ProxyTraces, regime: &str) {
         ),
         ("sip.out + route", Box::new(|| emit::forwarded(t(), CALL_ID, 0, facts(), INVITE))),
         ("route.shed", Box::new(|| emit::shed(t(), CALL_ID, 0, "proxy_overload_cps"))),
+        // The span-close seam is per-datagram too: every relayed non-2xx INVITE
+        // final offers the registry an arm, and every relayed ACK asks it
+        // whether this call is over.
+        ("arm close-on-ack", Box::new(|| t().arm_close_on_ack(CALL_ID, Some("a"), 1))),
+        ("close on ack", Box::new(|| assert!(!t().close_on_ack(CALL_ID)))),
         ("close", Box::new(|| t().close(CALL_ID))),
     ];
 
@@ -116,7 +121,7 @@ fn an_unsampled_call_allocates_nothing_per_packet() {
 fn nothing_sampled() {
     let traces = untraced();
     assert_eq!(
-        traces.activate(CALL_ID, CallIdentity { call_id: CALL_ID, from_tag: "a", to_tag: "" }, None, 0),
+        traces.activate(CALL_ID, CallIdentity { call_id: CALL_ID, from_tag: "a", to_tag: "" }, 1, None, 0),
         Activation::Refused,
         "the 0.0 draw refuses every call — nothing is sampled",
     );
@@ -144,7 +149,7 @@ fn one_other_call_traced() {
     ));
     const TRACED: &str = "traced@10.0.0.9";
     assert_eq!(
-        traces.activate(TRACED, CallIdentity { call_id: TRACED, from_tag: "t", to_tag: "" }, None, 0),
+        traces.activate(TRACED, CallIdentity { call_id: TRACED, from_tag: "t", to_tag: "" }, 1, None, 0),
         Activation::Opened,
         "the 1.0 draw admits the one traced call",
     );

@@ -27,7 +27,9 @@ impl ProxyCore {
     /// seam a second time — a digest-auth retry, an INVITE retransmit whose
     /// memo has been evicted — is `AlreadyOpen`, and its datagram was already
     /// recorded by the per-packet seam at the top of `handle_request`, which
-    /// hits the map for every call that has a span.
+    /// hits the map for every call that has a span. The CSeq goes in either
+    /// way: the span follows whichever dialog-creating INVITE the call's setup
+    /// currently hangs on.
     pub(super) fn activate_trace(&self, req: &SipRequest, src: SocketAddr, at_ms: i64) {
         let call_id = req.call_id().as_str();
         let id = CallIdentity {
@@ -38,7 +40,7 @@ impl ProxyCore {
             to_tag: "",
         };
         let rate = intake_rate(&self.traces, req.image());
-        if self.traces.activate(call_id, id, rate, at_ms) != Activation::Opened {
+        if self.traces.activate(call_id, id, req.cseq().seq(), rate, at_ms) != Activation::Opened {
             return;
         }
         emit::sip_in(&self.traces, call_id, at_ms, src, req.image());

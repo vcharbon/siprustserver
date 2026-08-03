@@ -1,10 +1,12 @@
 //! Request-path trace tier: what a traced call's span records, and when it
 //! closes (ADR-0026).
 //!
-//! Three seams the per-packet emission alone cannot cover: a call that reaches
+//! Seams the per-packet emission alone cannot cover: a call that reaches
 //! activation twice must record each datagram exactly once, a self-generated
-//! final must show up as the `sip.out` it is, and a rejected call's span must
-//! close at the ACK that ends it rather than at the 15-minute idle TTL.
+//! final must show up as the `sip.out` it is, and the span must close at the ACK
+//! that ends the call rather than at the 15-minute idle TTL — on that ACK and no
+//! other, since the proxy relays a non-2xx INVITE final for transactions that
+//! end while the call goes on (a rejected re-INVITE, an auth challenge).
 
 use std::sync::{Arc, Mutex};
 
@@ -140,6 +142,49 @@ Content-Length: 0\r\n\r\n"
     CustomParser::default().parse(raw.as_bytes()).expect("fixture INVITE")
 }
 
+/// An in-dialog request from the caller — the To-tag the callee gave the dialog
+/// is on it. For an ACK to a non-2xx final `cseq` is the rejected INVITE's and
+/// `branch` its top-Via branch (§17.1.1.3: same transaction).
+fn in_dialog(method: &str, call_id: &str, branch: &str, cseq: u32) -> SipMessage {
+    let raw = format!(
+        "{method} sip:bob@{W1}:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch={branch};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{UAC}>;tag=alice1\r\n\
+To: <sip:bob@example.com>;tag=bob1\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: {cseq} {method}\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    CustomParser::default().parse(raw.as_bytes()).expect("fixture in-dialog request")
+}
+
+/// The downstream's answer on its way back through us: our own Via on top
+/// (the branch we stamped on the forward), the caller's below.
+fn response(
+    call_id: &str,
+    status: &str,
+    proxy_branch: &str,
+    uac_branch: &str,
+    cseq: &str,
+) -> sip_message::types::SipResponse {
+    let raw = format!(
+        "SIP/2.0 {status}\r\n\
+Via: SIP/2.0/UDP {PROXY}:5060;branch={proxy_branch}\r\n\
+Via: SIP/2.0/UDP {UAC}:5060;branch={uac_branch}\r\n\
+From: <sip:alice@{UAC}>;tag=alice1\r\n\
+To: <sip:bob@example.com>;tag=bob1\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: {cseq}\r\n\
+Content-Length: 0\r\n\r\n"
+    );
+    let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).expect("fixture response")
+    else {
+        panic!("expected a response")
+    };
+    resp
+}
+
 fn src() -> std::net::SocketAddr {
     format!("{UAC}:5060").parse().expect("fixture address")
 }
@@ -235,36 +280,77 @@ async fn a_rejected_call_closes_its_span_when_the_ack_relays() {
     assert_eq!(traces.active(), 1);
     let proxy_branch = forwarded_branch(&ep);
 
-    let raw_486 = format!(
-        "SIP/2.0 486 Busy Here\r\n\
-Via: SIP/2.0/UDP {PROXY}:5060;branch={proxy_branch}\r\n\
-Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bK-rej\r\n\
-From: <sip:alice@{UAC}>;tag=alice1\r\n\
-To: <sip:bob@example.com>;tag=bob1\r\n\
-Call-ID: {CALL_ID}\r\n\
-CSeq: 1 INVITE\r\n\
-Content-Length: 0\r\n\r\n"
-    );
-    let SipMessage::Response(resp) = CustomParser::default().parse(raw_486.as_bytes()).expect("fixture 486")
-    else {
-        panic!("expected a response")
-    };
-    core.handle_response(resp).await;
+    core.handle_response(response(CALL_ID, "486 Busy Here", &proxy_branch, "z9hG4bK-rej", "1 INVITE")).await;
     assert_eq!(traces.active(), 1, "the call is not over until its ACK is on the wire");
 
-    let raw_ack = format!(
-        "ACK sip:bob@{W1}:5060 SIP/2.0\r\n\
-Via: SIP/2.0/UDP {UAC}:5060;branch=z9hG4bK-rej;rport\r\n\
-Max-Forwards: 70\r\n\
-From: <sip:alice@{UAC}>;tag=alice1\r\n\
-To: <sip:bob@example.com>;tag=bob1\r\n\
-Call-ID: {CALL_ID}\r\n\
-CSeq: 1 ACK\r\n\
-Content-Length: 0\r\n\r\n"
-    );
-    let ack = CustomParser::default().parse(raw_ack.as_bytes()).expect("fixture ACK");
-    core.handle_request(ack, src()).await;
+    core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-rej", 1), src()).await;
 
     assert_eq!(traces.active(), 0, "the relayed ACK ends the rejected transaction at this hop");
     assert!(!traces.any_sampled(), "and the process-wide flag drops with the last span");
+}
+
+// Regression: the span closed on EVERY relayed non-2xx INVITE final's ACK, and
+// the proxy relays one for a mid-dialog re-INVITE too (a hold or codec
+// renegotiation the worker answers 488, or 491 on glare). That ended a LIVE
+// call's trace: `activate` runs only for a dialog-creating INVITE, so the span
+// could never be reopened and the rest of the call — the BYE included — went
+// unrecorded (ADR-0026 §2: one root span per call, closed at its terminal
+// state).
+#[tokio::test]
+async fn a_rejected_re_invite_leaves_the_live_call_its_span() {
+    let (_guard, log) = observe::test_buffer();
+    let traces = sample_everything();
+    let (core, ep) = core_with(traces.clone(), None);
+    const CALL_ID: &str = "reinvite@10.0.0.1";
+
+    core.handle_request(invite(CALL_ID, "z9hG4bK-setup", 1), src()).await;
+    let setup = forwarded_branch(&ep);
+    core.handle_response(response(CALL_ID, "200 OK", &setup, "z9hG4bK-setup", "1 INVITE")).await;
+    core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-ack", 1), src()).await;
+
+    core.handle_request(in_dialog("INVITE", CALL_ID, "z9hG4bK-hold", 2), src()).await;
+    let hold = forwarded_branch(&ep);
+    core.handle_response(response(CALL_ID, "488 Not Acceptable Here", &hold, "z9hG4bK-hold", "2 INVITE")).await;
+    core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-hold", 2), src()).await;
+    assert_eq!(traces.active(), 1, "a rejected re-INVITE ends a transaction, not the dialog");
+
+    core.handle_request(in_dialog("BYE", CALL_ID, "z9hG4bK-bye", 3), src()).await;
+    let bye = forwarded_branch(&ep);
+    core.handle_response(response(CALL_ID, "200 OK", &bye, "z9hG4bK-bye", "3 BYE")).await;
+
+    assert!(
+        log.matching("kind=sip.in").iter().any(|e| e.contains("BYE sip:")),
+        "the teardown is recorded, which is the whole point of keeping the span",
+    );
+    assert_eq!(traces.active(), 0, "and the BYE's final is what actually ends this call");
+    assert!(!traces.any_sampled());
+}
+
+// Regression: an auth challenge is a relayed non-2xx INVITE final too, so its
+// ACK closed the span — and the credentialed retry then re-entered `activate`
+// with a FRESH Bernoulli draw (1e-4 in production), which refuses. The answered
+// call went untraced from that point, i.e. half-traced: worse than untraced
+// (ADR-0026 §3, sampling is monotonic).
+#[tokio::test]
+async fn an_auth_challenge_keeps_the_span_for_the_credentialed_retry() {
+    let traces = sample_everything();
+    let (core, ep) = core_with(traces.clone(), None);
+    const CALL_ID: &str = "auth@10.0.0.1";
+
+    core.handle_request(invite(CALL_ID, "z9hG4bK-chal", 1), src()).await;
+    let challenged = forwarded_branch(&ep);
+    let challenge = response(CALL_ID, "407 Proxy Authentication Required", &challenged, "z9hG4bK-chal", "1 INVITE");
+    core.handle_response(challenge).await;
+    core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-chal", 1), src()).await;
+    assert_eq!(traces.active(), 1, "the caller answers a challenge with credentials, on the same call");
+
+    // The retry is the transaction the call now hangs on — and its rejection is
+    // the one that ends the call.
+    core.handle_request(invite(CALL_ID, "z9hG4bK-cred", 2), src()).await;
+    let credentialed = forwarded_branch(&ep);
+    core.handle_response(response(CALL_ID, "486 Busy Here", &credentialed, "z9hG4bK-cred", "2 INVITE")).await;
+    core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-cred", 2), src()).await;
+
+    assert_eq!(traces.active(), 0);
+    assert!(!traces.any_sampled());
 }
