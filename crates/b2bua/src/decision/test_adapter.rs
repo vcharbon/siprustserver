@@ -253,6 +253,10 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
     // the plan (the `no-answer` rule POSTs /call/failure) like a reject would.
     r.no_answer_timeout_sec = obj.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
     r.update_headers = parse_update_headers(obj.get("update_headers"));
+    // The engine force-enable (ADR-0026 §3). Read here or an e2e/endurance rig
+    // could never reach it: this is the only JSON → `RouteDecision` decoder, so
+    // dropping the field makes `"trace": true` in an `X-Api-Call` plan a no-op.
+    r.trace = obj.get("trace").and_then(|v| v.as_bool()).unwrap_or(false);
     if let Some(arr) = obj.get("call_limiter").and_then(|v| v.as_array()) {
         for e in arr {
             if let (Some(id), Some(limit)) = (
@@ -953,6 +957,48 @@ mod tests {
                 // No reroute / on_exhausted ⇒ no carried context.
                 assert!(r.callback_context.is_none());
             }
+            _ => panic!("expected route"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plan_route_carries_the_engine_force_enable_to_the_decision() {
+        // This decoder is the ONLY way a plan JSON becomes a `RouteDecision`, so
+        // a dropped `trace` field makes the ADR-0026 force-enable unreachable
+        // from any e2e / endurance rig — the flag would read as configured and
+        // do nothing. It must survive on the initial route AND on a failover one.
+        let eng = ScriptedDecisionEngine::numbering_plan();
+        let plan = serde_json::json!({
+            "action": "route",
+            "routes": [
+                {"destination": {"host": "10.0.0.1", "port": 5070}},
+                {"destination": {"host": "10.0.0.2", "port": 5070}, "trace": true}
+            ],
+            "on_exhausted": {"action": "relay"}
+        });
+        let ctx = match eng.new_call(plan_req(plan)).await.unwrap() {
+            NewCallResponse::Route(r) => {
+                assert!(!r.trace, "a route that asks for nothing stays untraced");
+                r.callback_context.expect("context carries the remainder")
+            }
+            _ => panic!("expected route #1"),
+        };
+        match eng.call_failure(failure_req(Some(&ctx))).await.unwrap() {
+            CallTreatment::Route(r) => {
+                assert_eq!(r.destination.host, "10.0.0.2");
+                assert!(r.trace, "`trace: true` must reach the engine force-enable");
+            }
+            _ => panic!("expected route #2"),
+        }
+
+        // The same field on a single top-level route (no `routes` array).
+        let plan = serde_json::json!({
+            "action": "route",
+            "destination": {"host": "10.0.0.9", "port": 5070},
+            "trace": true
+        });
+        match eng.new_call(plan_req(plan)).await.unwrap() {
+            NewCallResponse::Route(r) => assert!(r.trace),
             _ => panic!("expected route"),
         }
     }

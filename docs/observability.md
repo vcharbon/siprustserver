@@ -65,7 +65,10 @@ happened) — on the backfill path that is NOT the emission timestamp, so read
 Why a call you expected is not there, in order of likelihood: no exporter
 configured (`trace_dropped_no_exporter_total`), the burst bucket
 (`trace_denied_rate_total`), the concurrent cap
-(`trace_denied_active_cap_total`). Denials are counted, never logged. All
+(`trace_denied_active_cap_total`). Why a traced call goes quiet at a takeover:
+the node that hydrated it was refused a span of its own by the same chain
+(`trace_adoption_refused_total`) — the call stays sampled, this node just
+records nothing for it. Denials are counted, never logged. All
 counters are on each runner's `/metrics`, next to `log_lines_dropped_total`
 (lifecycle lines the non-blocking writer dropped under pressure).
 

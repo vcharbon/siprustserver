@@ -186,7 +186,10 @@ pub fn call_identity(call: &call::Call) -> CallIdentity<'_> {
 ///
 /// A refusal (the active cap, the bucket) leaves `sampled` alone: sampling is
 /// monotonic and the trace exists at the node that opened it, so this node
-/// simply records nothing for the call.
+/// simply records nothing for the call — and counts it
+/// (`trace_adoption_refused_total`), because a mass takeover refuses a whole
+/// population at once and an uncounted gap looks like a call that was never
+/// traced.
 pub fn adopt_replicated(call: &mut call::Call, now_ms: i64) {
     adopt_into(&traces(), call, now_ms);
 }
@@ -209,6 +212,7 @@ pub fn adopt_into(traces: &CallTraces, call: &mut call::Call, now_ms: i64) {
         nominal_root.as_deref(),
         now_ms,
     ) else {
+        observe::counters::bump(&observe::counters::TRACE_ADOPTION_REFUSED);
         return;
     };
     call.trace_id = Some(ids.trace_id);
@@ -364,6 +368,27 @@ mod tests {
         adopt_into(&backup, &mut call, 0);
         assert_eq!(backup.active(), 0);
         assert_eq!(call.root_span_id.as_deref(), Some("b".repeat(16).as_str()));
+    }
+
+    #[test]
+    fn a_refused_adoption_is_counted() {
+        // The cap is full, so the hydrated call gets no span here. It stays
+        // sampled (monotonic) and keeps the nominal's root id — the only
+        // evidence this node dropped its half of the story is the counter.
+        let backup = gate(true, 1.0, 1);
+        backup.activate("squatter", id(), None, 0).expect("the one slot");
+
+        let before = observe::counters::get(&observe::counters::TRACE_ADOPTION_REFUSED);
+        let mut call = replicated_call(&"a".repeat(32), &"b".repeat(16), Some(true));
+        adopt_into(&backup, &mut call, 0);
+
+        assert_eq!(backup.active(), 1, "the cap held");
+        assert_eq!(call.root_span_id.as_deref(), Some("b".repeat(16).as_str()));
+        assert_eq!(
+            observe::counters::get(&observe::counters::TRACE_ADOPTION_REFUSED),
+            before + 1,
+            "a mass takeover's lost traces must not be invisible"
+        );
     }
 
     #[test]

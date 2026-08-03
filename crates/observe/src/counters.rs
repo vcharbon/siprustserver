@@ -27,6 +27,12 @@ pub static TRACE_HEADER_MALFORMED: AtomicU64 = AtomicU64::new(0);
 /// Traces admitted (a root span was opened for the call).
 pub static TRACE_ADMITTED: AtomicU64 = AtomicU64::new(0);
 
+/// Hydrated traced calls this node opened no span for because the admission
+/// chain refused the adoption. The call stays sampled — sampling is monotonic —
+/// so its story simply has a gap at this node; a mass takeover turns that into a
+/// population, which is what makes the count worth having.
+pub static TRACE_ADOPTION_REFUSED: AtomicU64 = AtomicU64::new(0);
+
 /// Bump a counter by one.
 pub fn bump(c: &AtomicU64) {
     c.fetch_add(1, Ordering::Relaxed);
@@ -71,6 +77,11 @@ pub fn prometheus_text() -> String {
             "trace_admitted_total",
             "Calls admitted for tracing (a root span was opened).",
             get(&TRACE_ADMITTED),
+        ),
+        (
+            "trace_adoption_refused_total",
+            "Hydrated traced calls this node opened no root span for because the admission chain refused.",
+            get(&TRACE_ADOPTION_REFUSED),
         ),
     ] {
         s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"));

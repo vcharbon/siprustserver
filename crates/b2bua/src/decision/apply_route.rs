@@ -4,6 +4,7 @@
 
 use call::helpers::set_call_ext;
 use call::{Call, CallLimiterState, CdrEvent, CdrEventType, TimerEntry, TimerType};
+use sip_clock::Clock;
 use sip_message::draft::RequestDraft;
 use sip_message::header::{HeaderName, MediaType, Supported};
 use sip_message::SipRequest;
@@ -26,20 +27,33 @@ pub(crate) const MAX_LIMITER_FAILOVER: u32 = 5;
 
 /// Apply a route decision to `call` (which already carries the a-leg), creating
 /// the first b-leg + its outbound INVITE. `depth` tracks chained limiter-reject
-/// failovers (start at 0).
+/// failovers (start at 0); `invite_wire` is the a-leg INVITE's datagram, which a
+/// late trace activation backfills from. `now_ms` is the turn's timestamp (every
+/// CDR entry and timer deadline below reads it); `clock` measures the failover
+/// round trip.
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_route(
     mut call: Call,
     route: RouteDecision,
     a_invite: &SipRequest,
+    invite_wire: &[u8],
     decision: &dyn CallDecisionEngine,
     limiter: &dyn CallLimiter,
     config: &B2buaConfig,
     id_gen: &IdGen,
+    clock: &Clock,
     now_ms: i64,
     depth: u32,
 ) -> HandlerResult {
     let mut fx = HandlerEffects::new();
+
+    // The engine force-enable (ADR-0026 §3), honored on EVERY route that reaches
+    // here — the initial one and every `/call/failure` failover route — so "trace
+    // this call from here on" works mid-call. Idempotent for a sampled call; a
+    // newly activated one is backfilled with the INVITE it arrived on.
+    if route.trace {
+        crate::trace::intake::force_enable(&mut call, invite_wire, now_ms);
+    }
 
     call.features = Some(route.features.clone());
     call.callback_context = route.callback_context.clone();
@@ -117,65 +131,11 @@ pub async fn apply_route(
             // Fail open: admit, record NO holds (nothing released or refreshed).
             AdmitOutcome::Unavailable => {}
             AdmitOutcome::Rejected { limiter_id } => {
-                // Failover via /call/failure when a callback context is set
-                // (bounded), else answer 486 Busy Here and terminate.
-                if call.callback_context.is_some() && depth < MAX_LIMITER_FAILOVER {
-                    let req = CallFailureRequest {
-                        callback_context: call.callback_context.clone(),
-                        failure: FailureInfo {
-                            origin: "call_limiter".to_string(),
-                            status_code: None,
-                            limiter_id: Some(limiter_id),
-                            failed_leg_id: None,
-                            sip_headers: Vec::new(),
-                        },
-                        snapshot: crate::decision::CallSnapshot::of(&call),
-                    };
-                    let request_json = crate::trace::sampled(&call)
-                        .then(|| serde_json::to_vec(&req).unwrap_or_default());
-                    let response = decision.call_failure(req).await;
-                    record_failure_round_trip(&call, request_json, &response, now_ms);
-                    match response {
-                        Ok(CallTreatment::Route(route2)) => {
-                            return Box::pin(apply_route(
-                                call, route2, a_invite, decision, limiter, config, id_gen, now_ms,
-                                depth + 1,
-                            ))
-                            .await;
-                        }
-                        Ok(CallTreatment::Reject(rj)) => {
-                            return crate::initial_invite::reject_call(
-                                call, a_invite, rj.reject_code, rj.reject_reason,
-                                rj.update_headers.as_ref(), &[], id_gen, now_ms,
-                            );
-                        }
-                        Ok(CallTreatment::Redirect(rd)) => {
-                            return crate::initial_invite::reject_call(
-                                call, a_invite, rd.code, rd.reason,
-                                rd.update_headers.as_ref(), &rd.contacts, id_gen, now_ms,
-                            );
-                        }
-                        // Relay with no captured failure (a limiter reject is
-                        // pre-leg) → 480 fallback (ADR-0017 X5); backend error →
-                        // 486 Busy Here (today's behaviour).
-                        Ok(CallTreatment::Relay) => {
-                            return crate::initial_invite::reject_call(
-                                call, a_invite, 480, Some("Temporarily Unavailable".into()),
-                                None, &[], id_gen, now_ms,
-                            );
-                        }
-                        Err(_) => {
-                            return crate::initial_invite::reject_call(
-                                call, a_invite, 486, Some("Busy Here".into()), None, &[],
-                                id_gen, now_ms,
-                            );
-                        }
-                    }
-                } else {
-                    return crate::initial_invite::reject_call(
-                        call, a_invite, 486, Some("Busy Here".into()), None, &[], id_gen, now_ms,
-                    );
-                }
+                return Box::pin(limiter_reject_failover(
+                    call, limiter_id, a_invite, invite_wire, decision, limiter, config, id_gen,
+                    clock, now_ms, depth,
+                ))
+                .await;
             }
         }
     }
@@ -318,14 +278,105 @@ pub async fn apply_route(
     HandlerResult { call, effects: fx }
 }
 
+/// The limiter refused this route: consult `/call/failure` for a failover
+/// treatment and apply it, or answer `486 Busy Here` when the call has no
+/// callback context to fail over with — or has already burned
+/// [`MAX_LIMITER_FAILOVER`] hops, so a plan that keeps returning limited
+/// destinations terminates instead of looping.
+#[allow(clippy::too_many_arguments)]
+async fn limiter_reject_failover(
+    mut call: Call,
+    limiter_id: String,
+    a_invite: &SipRequest,
+    invite_wire: &[u8],
+    decision: &dyn CallDecisionEngine,
+    limiter: &dyn CallLimiter,
+    config: &B2buaConfig,
+    id_gen: &IdGen,
+    clock: &Clock,
+    now_ms: i64,
+    depth: u32,
+) -> HandlerResult {
+    if call.callback_context.is_none() || depth >= MAX_LIMITER_FAILOVER {
+        return crate::initial_invite::reject_call(
+            call, a_invite, 486, Some("Busy Here".into()), None, &[], id_gen, now_ms,
+        );
+    }
+    let req = limiter_failure_request(&call, &limiter_id);
+    let mut request_json = crate::trace::intake::request_body(&call, &req);
+    let sent_at_ms = clock.now_ms();
+    let response = decision.call_failure(req).await;
+    let received_at_ms = clock.now_ms();
+    // A failover route carrying `trace: true` opens the trace right here, so
+    // activate before recording: the consult that turned tracing on is the first
+    // thing its child span carries. The rebuild is derived from the same call,
+    // so it IS the body that went out.
+    if let Ok(CallTreatment::Route(route2)) = &response {
+        if route2.trace && !crate::trace::sampled(&call) {
+            let rebuilt = crate::trace::intake::json_body(&limiter_failure_request(
+                &call,
+                &limiter_id,
+            ));
+            if crate::trace::intake::force_enable(&mut call, invite_wire, now_ms) {
+                request_json = Some(rebuilt);
+            }
+        }
+    }
+    record_failure_round_trip(&call, request_json, &response, sent_at_ms, received_at_ms);
+    match response {
+        Ok(CallTreatment::Route(route2)) => {
+            Box::pin(apply_route(
+                call, route2, a_invite, invite_wire, decision, limiter, config, id_gen, clock,
+                now_ms, depth + 1,
+            ))
+            .await
+        }
+        Ok(CallTreatment::Reject(rj)) => crate::initial_invite::reject_call(
+            call, a_invite, rj.reject_code, rj.reject_reason, rj.update_headers.as_ref(), &[],
+            id_gen, now_ms,
+        ),
+        Ok(CallTreatment::Redirect(rd)) => crate::initial_invite::reject_call(
+            call, a_invite, rd.code, rd.reason, rd.update_headers.as_ref(), &rd.contacts, id_gen,
+            now_ms,
+        ),
+        // Relay with no captured failure (a limiter reject is pre-leg) → 480
+        // fallback (ADR-0017 X5); a backend error → 486 Busy Here.
+        Ok(CallTreatment::Relay) => crate::initial_invite::reject_call(
+            call, a_invite, 480, Some("Temporarily Unavailable".into()), None, &[], id_gen, now_ms,
+        ),
+        Err(_) => crate::initial_invite::reject_call(
+            call, a_invite, 486, Some("Busy Here".into()), None, &[], id_gen, now_ms,
+        ),
+    }
+}
+
+/// The `/call/failure` consult a limiter reject raises: origin `call_limiter`,
+/// the refusing limiter, and the call's context snapshot. Pure — the trace path
+/// rebuilds it after a late activation, and the rebuild must equal what was sent.
+fn limiter_failure_request(call: &Call, limiter_id: &str) -> CallFailureRequest {
+    CallFailureRequest {
+        callback_context: call.callback_context.clone(),
+        failure: FailureInfo {
+            origin: "call_limiter".to_string(),
+            status_code: None,
+            limiter_id: Some(limiter_id.to_string()),
+            failed_leg_id: None,
+            sip_headers: Vec::new(),
+        },
+        snapshot: crate::decision::CallSnapshot::of(call),
+    }
+}
+
 /// Record the limiter-reject `/call/failure` consult as a child span on a traced
-/// call (ADR-0026). `request_json` is `None` for an unsampled call, which is
-/// also when this returns immediately — nothing was serialized for it.
+/// call (ADR-0026), with the times the request left and the response landed.
+/// `request_json` is `None` for an unsampled call, which is also when this
+/// returns immediately — nothing was serialized for it.
 fn record_failure_round_trip(
     call: &Call,
     request_json: Option<Vec<u8>>,
     response: &Result<CallTreatment, crate::decision::CallDecisionError>,
-    now_ms: i64,
+    sent_at_ms: i64,
+    received_at_ms: i64,
 ) {
     let Some(request) = request_json else {
         return;
@@ -338,11 +389,19 @@ fn record_failure_round_trip(
                 CallTreatment::Reject(_) => "reject",
                 CallTreatment::Relay => "relay",
             },
-            serde_json::to_vec(treatment).unwrap_or_default(),
+            crate::trace::intake::json_body(treatment),
         ),
         Err(err) => ("error", err.to_string().into_bytes()),
     };
-    crate::trace::emit::round_trip(call, "/call/failure", now_ms, &request, now_ms, outcome, &body);
+    crate::trace::emit::round_trip(
+        call,
+        "/call/failure",
+        sent_at_ms,
+        &request,
+        received_at_ms,
+        outcome,
+        &body,
+    );
 }
 
 /// Arm the GlobalDuration absolute-cap backstop on the call (idempotent by id).

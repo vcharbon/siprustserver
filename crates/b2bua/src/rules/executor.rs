@@ -73,10 +73,18 @@ pub fn execute_rules(
             report_diagnostics(rule, call, &outcome);
             check_declared_effects(rule, &outcome.actions);
             let result = exec.execute(&outcome.actions, call, ctx);
+            // The rule's OWN cursor move is checked against what the rule
+            // produced — the projections and the terminal fold below belong to
+            // the engine, not to the rule that triggered them.
             check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors);
-            record_transitions(rule, &before, &result.call, exec.now_ms);
             let result = invariants::finalize(result);
-            return invariants::enforce(obligations, &before, result, exec.now_ms, true);
+            let enforced = invariants::enforce(obligations, &before, result, exec.now_ms, true);
+            // Recorded from the FINAL call, so the trace carries what finalize
+            // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503
+            // otherwise shows on a traced call as a `sip.out` with no matching
+            // `call.transition`.
+            record_transitions(rule, &before, &enforced.call, exec.now_ms);
+            return enforced;
         }
     }
     HandlerResult::new(call.clone())
@@ -93,10 +101,13 @@ fn report_diagnostics(rule: &RuleDefinition, call: &Call, outcome: &RuleHandleRe
     }
 }
 
-/// Record what the winning rule did on a traced call (ADR-0026): which rule
-/// handled the event, every state-machine cursor it moved, and the call's own
-/// lifecycle transition. Guarded — an unsampled call reads one `Option<bool>`
-/// and returns, evaluating no format argument.
+/// Record what the winning rule's turn did on a traced call (ADR-0026): which
+/// rule handled the event, every state-machine cursor the turn moved, and the
+/// call's own lifecycle transition. `after` is the call as the turn LEAVES it —
+/// invariant finalization and enforcement included — so a transition those
+/// layers synthesize reaches the trace attributed to the turn that caused it.
+/// Guarded — an unsampled call reads one `Option<bool>` and returns, evaluating
+/// no format argument.
 fn record_transitions(rule: &RuleDefinition, before: &Call, after: &Call, now_ms: i64) {
     if !crate::trace::sampled(after) {
         return;

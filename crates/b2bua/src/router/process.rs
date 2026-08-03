@@ -86,16 +86,14 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return;
         };
-        // Traced call: the message as it arrived, raw (ADR-0026). Guarded, so an
-        // unsampled call never serializes a copy of what it just parsed.
+        // Traced call: the message as it arrived, raw (ADR-0026). `image()` is
+        // the received datagram itself, so a lenient-parser normalization — a
+        // folded header, an odd-cased name, a rewritten URI — stays visible in
+        // the very artifact that exists to diagnose it; re-serializing the
+        // parse would hide it. Guarded, and it borrows: no copy either way.
         if let CallEvent::Sip { message, src } = &event {
             if crate::trace::sampled(&call) {
-                crate::trace::emit::sip_in(
-                    &call,
-                    now_ms,
-                    *src,
-                    &sip_message::serialize(message.as_ref()),
-                );
+                crate::trace::emit::sip_in(&call, now_ms, *src, message.image());
             }
         }
         // The limiter-refresh timer is async (an HTTP call to migrate holds), so
@@ -287,8 +285,21 @@ async fn initial_invite_turn(
         );
         crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(rejected), now_ms, true)
     } else {
-        let handled =
-            handle_initial_invite(call.clone(), ctx.decision.as_ref(), ctx.limiter.as_ref(), &ctx.config, &ctx.id_gen, &ctx.services, now_ms).await;
+        // `req.image()` is the datagram this INVITE arrived as — the only place
+        // it exists (the call carries a header snapshot, not bytes), and what a
+        // trace activation backfills its `sip.in` from.
+        let handled = handle_initial_invite(
+            call.clone(),
+            ctx.decision.as_ref(),
+            ctx.limiter.as_ref(),
+            &ctx.config,
+            &ctx.id_gen,
+            &ctx.services,
+            req.image(),
+            &ctx.clock,
+            now_ms,
+        )
+        .await;
         crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(handled), now_ms, true)
     };
     Turn::Result(result)
