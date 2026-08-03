@@ -26,7 +26,7 @@ it. Traces land in **VictoriaTraces** and are read in Grafana through the
 
 | var | meaning |
 |---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP **base** url (the exporter appends `/v1/traces`). Unset or empty = this process exports nothing and the whole sampling machinery is inert. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP **base** url (`/v1/traces` is appended for you). Unset or empty = this process exports nothing and the whole sampling machinery is inert. A value that is set but unparseable logs a warning at startup and also exports nothing — it never falls back to a default collector. |
 | `SIP_TRACE_HEADER` | `1` makes the process honour `X-Trace-Sample`. Lab/endurance ONLY — the header is untrusted input on a serving edge. |
 | `RUST_LOG` | Lifecycle log filter, default `info`. |
 

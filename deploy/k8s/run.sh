@@ -146,7 +146,7 @@ OBS_ENABLE="${OBS_ENABLE:-1}"
 OBS_DIR="${OBS_DIR:-$REPO_ROOT/deploy/observability}"
 # Per-call tracing (ADR-0026) — this is the DEV/LAB composition, so it exports.
 # OTLP_EXPORT_ENDPOINT is the OTLP/HTTP base the workers + proxy send spans to;
-# the exporter appends `/v1/traces`, and VictoriaTraces ingests at
+# the runners append `/v1/traces`, and VictoriaTraces ingests at
 # /insert/opentelemetry/v1/traces. The host address from the cluster's POV is the
 # kind bridge gateway (SIP_GATEWAY, lib/net-env.sh) — WSL2 has no fixed host IP.
 # EMPTY is the meaningful "no exporter" value: the whole sampling machinery is

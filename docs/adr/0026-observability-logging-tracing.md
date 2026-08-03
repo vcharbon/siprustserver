@@ -87,10 +87,13 @@ and an activation attempt bumps `trace_dropped_no_exporter_total` and returns.
 A process with no collector therefore pays one boolean check per call.
 
 That env var is an OTLP/HTTP **base** url, exactly as every OpenTelemetry SDK
-reads it — the exporter resolves `<base>/v1/traces` itself. `observe` reads the
-var only to decide WHETHER to export and never passes an endpoint
-programmatically, because a programmatic endpoint is taken verbatim and would
-silently diverge from what an operator expects to configure.
+reads it: `observe` appends the trace-signal path and configures the exporter
+with the resolved `<base>/v1/traces`. It resolves the url rather than leaving
+the var to the exporter's own lookup because that lookup falls back to the SDK's
+`localhost:4318` default whenever the value fails to parse — a typo'd endpoint
+would then report as configured, open root spans, and post every batch into the
+void. Resolved here, an unusable endpoint fails at build time: a warning, no
+tracer provider, and the same "exports nothing" state as an unset var.
 
 ### 3. Sampling and activation — monotonic, decided once
 
