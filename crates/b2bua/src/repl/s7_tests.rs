@@ -18,7 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use sip_message::generators::{
-    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
+    generate_out_of_dialog_request, CapabilitySet, GenerateOutOfDialogRequestOpts,
+    OutOfDialogMethod,
 };
 use sip_message::HeaderName;
 use sip_message::header::{self, Uri, Via};
@@ -108,7 +109,7 @@ fn options_reports_not_ready_then_ready_then_draining() {
     let req = options_probe();
 
     // NotReady → 503 + Reason text contains "not-ready" (probe → NotReady).
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert!(resp.to().tag().is_some(), "503 to out-of-dialog OPTIONS needs a To-tag");
     let reason = reason_of(&resp).expect("NotReady carries a Reason header");
@@ -119,14 +120,14 @@ fn options_reports_not_ready_then_ready_then_draining() {
 
     // Gate opens → 200 OK (probe → Alive). No Reason header.
     src.set(true, true);
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     assert!(resp.to().tag().is_some(), "200 to out-of-dialog OPTIONS needs a To-tag");
     assert!(reason_of(&resp).is_none());
 
     // SIGTERM → Draining → 503 + Reason "draining" + Retry-After: 0.
     r.set_draining();
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert!(resp.to().tag().is_some());
     let reason = reason_of(&resp).expect("Draining carries a Reason header");
@@ -150,17 +151,17 @@ fn options_latches_ready_across_blip_then_drains() {
     let id_gen = IdGen::seeded(7);
     let req = options_probe();
 
-    assert_eq!(build_options_health_response(&r, &ov(), &id_gen, &req).status(), 200);
+    assert_eq!(build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default()).status(), 200);
 
     // Peer blip: no longer current/bootstrapped — must NOT revert to 503.
     src.set(false, false);
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200, "latched Ready must not flap to NotReady");
     assert!(reason_of(&resp).is_none());
 
     // Draining still wins over the latched Ready.
     r.set_draining();
-    let resp = build_options_health_response(&r, &ov(), &id_gen, &req);
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
 }
@@ -188,13 +189,13 @@ fn emitted_reason_aligns_with_proxy_classify_503() {
     let req = options_probe();
 
     let not_ready = Readiness::new(FlagSource::new(false, false));
-    let resp = build_options_health_response(&not_ready, &ov(), &id_gen, &req);
+    let resp = build_options_health_response(&not_ready, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert_eq!(classify_503(reason_of(&resp).as_deref()), Health::NotReady);
 
     let draining = Readiness::always_ready();
     draining.set_draining();
-    let resp = build_options_health_response(&draining, &ov(), &id_gen, &req);
+    let resp = build_options_health_response(&draining, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert_eq!(classify_503(reason_of(&resp).as_deref()), Health::Draining);
 }
@@ -214,7 +215,7 @@ fn options_200_stamps_x_overload_503_does_not() {
     // Ready → 200 with an X-Overload header in the exact zero-state v=1 schema.
     let overload = OverloadSignal::live();
     let ready = Readiness::always_ready();
-    let resp = build_options_health_response(&ready, &overload, &id_gen, &req);
+    let resp = build_options_health_response(&ready, &overload, &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     let xo = x_overload(&resp)
         .expect("OPTIONS 200 must advertise the worker load signal");
@@ -223,7 +224,7 @@ fn options_200_stamps_x_overload_503_does_not() {
     // Advance the admit counter; the next 200's header reflects it as adm=2.
     overload.increment_non_emergency_admitted();
     overload.increment_non_emergency_admitted();
-    let resp = build_options_health_response(&ready, &overload, &id_gen, &req);
+    let resp = build_options_health_response(&ready, &overload, &id_gen, &req, &CapabilitySet::default());
     let xo = x_overload(&resp).unwrap();
     assert_eq!(
         xo, "v=1; elu=0.000; gc=0.000; adm=2",
@@ -232,7 +233,7 @@ fn options_200_stamps_x_overload_503_does_not() {
 
     // NotReady (503) and Draining (503) carry NO X-Overload.
     let not_ready = Readiness::new(FlagSource::new(false, false));
-    let resp = build_options_health_response(&not_ready, &overload, &id_gen, &req);
+    let resp = build_options_health_response(&not_ready, &overload, &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert!(
         x_overload(&resp).is_none(),
@@ -241,7 +242,7 @@ fn options_200_stamps_x_overload_503_does_not() {
 
     let draining = Readiness::always_ready();
     draining.set_draining();
-    let resp = build_options_health_response(&draining, &overload, &id_gen, &req);
+    let resp = build_options_health_response(&draining, &overload, &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert!(
         x_overload(&resp).is_none(),
@@ -315,7 +316,7 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
         vec![Peer::new("B", "B")],
         clock.clone(),
     )));
-    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req);
+    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503, "before catch-up: NotReady");
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("not-ready"));
 
@@ -330,13 +331,13 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     );
 
     // Gate now open → 200 OK; readiness latches.
-    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req);
+    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     assert!(reason_of(&resp).is_none());
 
     // SIGTERM → 503 draining + Retry-After: 0.
     readiness.set_draining();
-    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req);
+    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("0"));
@@ -409,7 +410,42 @@ async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
     // End to end through the readiness latch + OPTIONS responder: 200 OK.
     let readiness = Readiness::new(Arc::new(a_sup.clone()));
     let id_gen = IdGen::seeded(0xC0FFEE);
-    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &options_probe());
+    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &options_probe(), &CapabilitySet::default());
     assert_eq!(resp.status(), 200, "peerless-after-departure node serves Ready");
     assert!(reason_of(&resp).is_none());
+}
+
+/// The node capability advertisement on the OPTIONS health 200 (RFC 3261
+/// §11.2): the node-scoped declaration, and the stack set when none is made.
+#[test]
+fn options_200_advertises_the_node_capability_set() {
+    let r = Readiness::new(FlagSource::new(true, true));
+    let id_gen = IdGen::seeded(0xA11);
+    let req = options_probe();
+    let value = |resp: &sip_message::SipResponse, name: HeaderName| {
+        resp.raw_text(name).next().map(|v| v.as_str().to_string())
+    };
+
+    // Undeclared → the stack set, byte for byte.
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default());
+    assert_eq!(
+        value(&resp, HeaderName::Allow).as_deref(),
+        Some(sip_message::generators::B2BUA_ALLOW)
+    );
+    assert_eq!(
+        value(&resp, HeaderName::Supported).as_deref(),
+        Some(sip_message::generators::B2BUA_SUPPORTED)
+    );
+
+    // Declared → exactly the declared tokens reach the querier.
+    let declared = CapabilitySet::new(
+        header::Allow::of(["INVITE", "ACK", "CANCEL", "BYE", "OPTIONS"]),
+        header::Supported::of(["timer"]),
+    );
+    let resp = build_options_health_response(&r, &ov(), &id_gen, &req, &declared);
+    assert_eq!(
+        value(&resp, HeaderName::Allow).as_deref(),
+        Some("INVITE, ACK, CANCEL, BYE, OPTIONS")
+    );
+    assert_eq!(value(&resp, HeaderName::Supported).as_deref(), Some("timer"));
 }

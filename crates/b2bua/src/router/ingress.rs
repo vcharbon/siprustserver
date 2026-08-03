@@ -99,8 +99,13 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     if let CallEvent::Sip { message, src } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method() == "OPTIONS" && req.to().tag().is_none() {
-                let resp =
-                    build_options_health_response(&ctx.readiness, &ctx.overload, &ctx.id_gen, req);
+                let resp = build_options_health_response(
+                    &ctx.readiness,
+                    &ctx.overload,
+                    &ctx.id_gen,
+                    req,
+                    &ctx.config.node_capabilities,
+                );
                 let _ = ctx.txn.send_response(resp, *src).await;
                 return;
             }

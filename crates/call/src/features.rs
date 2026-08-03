@@ -74,6 +74,50 @@ pub struct RelayFirst18xTo180Feature {
     pub messages: Relay18xMessages,
 }
 
+/// One face's advertised capability set: the accepted methods (`Allow`, RFC
+/// 3261 §20.5) and the understood option tags (`Supported`, §20.37), each as
+/// its token list. This is the **replicated encoding** of the typed capability
+/// value the SIP layer advertises — the data model holds tokens, not headers,
+/// because it takes no `sip-message` dependency (ADR-0008).
+///
+/// The two halves are stated INDEPENDENTLY, so narrowing the methods never
+/// forces a caller to restate (and freeze a copy of) the stack's option tags.
+/// Per half: absent = advertise the stack's value for it; present and empty =
+/// advertise the empty set, a value-less header line (§20.5 reads that as
+/// "accepts no methods" — deliberately different from omitting the header); a
+/// token that is not an RFC 3261 §25.1 `token` is dropped at the SIP boundary
+/// and never reaches the wire.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvertisedCapabilities {
+    /// Accepted methods, e.g. `["INVITE", "ACK", "CANCEL", "BYE"]`.
+    #[serde(default)]
+    pub allow: Option<Vec<String>>,
+    /// Understood option tags, e.g. `["timer"]`.
+    #[serde(default)]
+    pub supported: Option<Vec<String>>,
+}
+
+/// Optional per-face capability-advertisement arm. The two faces of a
+/// back-to-back UA are independent so an asymmetric bridge can advertise a
+/// narrow set toward one domain and the full set toward the other; an absent
+/// face advertises the stack default, which is today's behaviour.
+///
+/// Scope of the declaration: the messages the stack MINTS — the INVITE it
+/// originates, the INVITE 2xx it returns to the originator, and the re-INVITEs
+/// it originates or relays. It does NOT rewrite the reliable-provisional
+/// negotiation (`Require`/`Supported`/`RSeq` on a relayed 1xx), which stays
+/// end-to-end per RFC 3262. `toward_originated` covers EVERY originated leg —
+/// the faces are two, not one per leg.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvertiseCapabilitiesFeature {
+    /// Advertised on messages the stack sends toward the originator (a-leg).
+    #[serde(default)]
+    pub toward_originator: Option<AdvertisedCapabilities>,
+    /// Advertised on messages the stack sends toward an originated leg (b-leg).
+    #[serde(default)]
+    pub toward_originated: Option<AdvertisedCapabilities>,
+}
+
 /// One entry in the optional `callLimiters` feature arm.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLimiterFeatureEntry {
@@ -89,4 +133,9 @@ pub struct FeatureActivations {
     pub relay_first_18x_to_180: Option<RelayFirst18xTo180Feature>,
     pub no_answer_timeout_sec: Option<i64>,
     pub call_limiters: Option<Vec<CallLimiterFeatureEntry>>,
+    /// Per-face `Allow`/`Supported` advertisement. Absent — and absent for one
+    /// face — means "advertise the stack default there". `#[serde(default)]` so
+    /// a body encoded before this arm decodes as no declaration.
+    #[serde(default)]
+    pub advertise_capabilities: Option<AdvertiseCapabilitiesFeature>,
 }

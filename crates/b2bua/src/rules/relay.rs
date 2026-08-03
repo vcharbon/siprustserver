@@ -11,8 +11,8 @@ use call::{
 };
 use sip_message::draft::{Entry, RequestDraft};
 use sip_message::generators::{
-    self, GenerateAckFor2xxOpts, GenerateOutOfDialogRequestOpts, GenerateResponseOpts,
-    OutOfDialogMethod,
+    self, CapabilitySet, GenerateAckFor2xxOpts, GenerateOutOfDialogRequestOpts,
+    GenerateResponseOpts, OutOfDialogMethod,
 };
 use sip_message::header::{
     self, HeaderClass, HeaderName, HeaderValue, HostPort, MaxForwards, MediaType, NameAddr,
@@ -367,6 +367,10 @@ pub fn build_b_leg(
     // the C INVITE. The basic-B2BUA path passes `(None, &[])`.
     body_override: Option<&[u8]>,
     header_updates: &[(String, Option<String>)],
+    // Capability set advertised on this originated leg (`Allow`/`Supported`).
+    // `CapabilitySet::default()` is the stack set — today's advertisement.
+    // A `header_updates` entry naming either header is more specific and wins.
+    capabilities: &CapabilitySet,
     // Leg role (ADR-0014/0016). `None` ⇒ [`LegKind::Destination`]. `adopted` is
     // left `None` so it derives from the kind (`is_adopted`): a `media` leg is
     // unadopted and thus gated out of the generic relay-to-peer fallback.
@@ -417,14 +421,14 @@ pub fn build_b_leg(
     // `apply_supported_for_18x` runs after this and rewrites it from alice's value
     // (stripping `100rel` as the strategy dictates). Neither clobbers a
     // caller-supplied value from `header_updates`.
-    for (name, default) in [
-        (HeaderName::Allow, generators::B2BUA_ALLOW),
-        (HeaderName::Supported, generators::B2BUA_SUPPORTED),
+    for (name, value) in [
+        (HeaderName::Allow, capabilities.allow_text()),
+        (HeaderName::Supported, capabilities.supported_text()),
     ] {
         if !extra_headers.iter().any(|h| name.matches(&h.name)) {
             extra_headers.push(MsgHeader {
                 name: SipStr::owned(name.as_wire_str()),
-                value: SipStr::from_static(default),
+                value: SipStr::owned(&value),
             });
         }
     }
@@ -550,7 +554,10 @@ pub fn build_b_leg(
 ///
 /// This is plain transparent relay — distinct from the deferred B2BUA-side
 /// 18x-management *policies* (`relayFirst18xTo180`/`promote18xPemTo200`), which
-/// would instead *rewrite* these provisionals.
+/// would instead *rewrite* these provisionals. A call's declared capability set
+/// does NOT narrow these: RFC 3262 negotiation is end-to-end, and the
+/// declaration governs the messages the stack mints (the INVITE 2xx included,
+/// which [`stamp_a_facing_invite_advert`] owns).
 pub fn relay_response_passthrough_headers(resp: &sip_message::SipResponse) -> Vec<MsgHeader> {
     const PASSTHROUGH: &[HeaderName] =
         &[HeaderName::Require, HeaderName::RSeq, HeaderName::Supported];
@@ -567,20 +574,24 @@ fn copy_named(headers: &[MsgHeader], wanted: &[HeaderName]) -> Vec<MsgHeader> {
 }
 
 /// Ensure an a-facing INVITE 2xx header set carries exactly ONE `Allow` and ONE
-/// `Supported` — the B2BUA's own capability set (RFC 3261 §13.2.1/§20.37). The
-/// B2BUA is a back-to-back UA: a 2xx it mints toward the caller must advertise
-/// *its* methods/extensions, not whatever the callee's 200 happened to carry
-/// (or omit). For each of Allow/Supported, `rule_stamped` names the headers the
-/// firing rule already set with its own value (e.g. `promote18xPemTo200`
-/// advertises `Supported` WITHOUT `100rel`, since Alice never saw a reliable
-/// provisional from us) — those are kept verbatim and only de-duplicated. For
-/// the rest we drop the callee's passed-through value and append the B2BUA
-/// default. Either way exactly one of each results (no §7.3.1 duplicate);
-/// `Require`/`RSeq` (reliable-provisional negotiation) are untouched.
-pub fn stamp_a_facing_invite_advert(headers: &mut Vec<MsgHeader>, rule_stamped: &[Entry]) {
-    for (name, default) in [
-        (HeaderName::Allow, generators::B2BUA_ALLOW),
-        (HeaderName::Supported, generators::B2BUA_SUPPORTED),
+/// `Supported` — the capability set advertised toward the originator (RFC 3261
+/// §13.2.1/§20.37). The B2BUA is a back-to-back UA: a 2xx it mints toward the
+/// caller must advertise *its* methods/extensions, not whatever the callee's
+/// 200 happened to carry (or omit). `capabilities` is the set for this face
+/// (`CapabilitySet::default()` = the stack set); `rule_stamped` names the
+/// headers the firing rule already set with its own value — those are more
+/// specific, so they are kept verbatim and only de-duplicated. For the rest we
+/// drop the callee's passed-through value and append `capabilities`. Either way
+/// exactly one of each results (no §7.3.1 duplicate); `Require`/`RSeq`
+/// (reliable-provisional negotiation) are untouched.
+pub fn stamp_a_facing_invite_advert(
+    headers: &mut Vec<MsgHeader>,
+    rule_stamped: &[Entry],
+    capabilities: &CapabilitySet,
+) {
+    for (name, value) in [
+        (HeaderName::Allow, capabilities.allow_text()),
+        (HeaderName::Supported, capabilities.supported_text()),
     ] {
         if rule_stamped.iter().any(|e| e.is(&name)) {
             // The rule owns this value; just collapse any duplicate to one.
@@ -596,11 +607,11 @@ pub fn stamp_a_facing_invite_advert(headers: &mut Vec<MsgHeader>, rule_stamped: 
             });
             continue;
         }
-        // Replace any passed-through value with the B2BUA default, exactly once.
+        // Replace any passed-through value with this face's set, exactly once.
         headers.retain(|h| !name.matches(&h.name));
         headers.push(MsgHeader {
             name: SipStr::owned(name.as_wire_str()),
-            value: SipStr::from_static(default),
+            value: SipStr::owned(&value),
         });
     }
 }
@@ -618,7 +629,17 @@ pub fn stamp_a_facing_invite_advert(headers: &mut Vec<MsgHeader>, rule_stamped: 
 /// generator adds `Event`/`Subscription-State` from its own opts ONLY for a
 /// B2BUA-originated NOTIFY (`opts.event`/`subscription_state`), which the relay
 /// path leaves unset — so these pass through here without duplicating.
-pub fn relay_request_passthrough_headers(req: &SipRequest) -> Vec<MsgHeader> {
+///
+/// `target_declares_supported` — the face this request is relayed toward states
+/// its own option tags. The peer's `Supported` is then NOT copied: it is a
+/// relayed value, not an explicit instruction, and copying it would silently
+/// revert the declared narrowing on every re-INVITE while `Allow` (never
+/// copied) stayed narrowed. `Require` still rides through either way — it is
+/// the peer's requirement on this request, not our advertisement.
+pub fn relay_request_passthrough_headers(
+    req: &SipRequest,
+    target_declares_supported: bool,
+) -> Vec<MsgHeader> {
     const PASSTHROUGH: &[HeaderName] = &[
         HeaderName::Require,
         HeaderName::Supported,
@@ -627,7 +648,11 @@ pub fn relay_request_passthrough_headers(req: &SipRequest) -> Vec<MsgHeader> {
         HeaderName::Event,
         HeaderName::SubscriptionState,
     ];
-    copy_named(req.headers(), PASSTHROUGH)
+    let mut headers = copy_named(req.headers(), PASSTHROUGH);
+    if target_declares_supported {
+        headers.retain(|h| !HeaderName::Supported.matches(&h.name));
+    }
+    headers
 }
 
 /// Build a UAS response on a leg's inbound INVITE (toward alice). `to_tag` pins
@@ -959,6 +984,7 @@ Content-Length: 0\r\n\r\n",
             &id_gen,
             None, // no body override
             &[],  // no header updates
+            &CapabilitySet::default(), // undeclared → the stack capability set
             None, // Destination leg
         )
         .expect("no identity rewrites, so nothing to refuse");
@@ -1022,6 +1048,7 @@ Content-Length: 0\r\n\r\n",
             &IdGen::seeded(0xE3E),
             None,
             &[],
+            &CapabilitySet::default(),
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
@@ -1101,6 +1128,7 @@ Content-Length: 0\r\n\r\n",
             &IdGen::seeded(0x4747),
             None,
             &[],
+            &CapabilitySet::default(),
             None,
         )
         .expect("the R-URI under test reads");
@@ -1210,6 +1238,7 @@ Content-Length: 0\r\n\r\n";
             &IdGen::seeded(0x055),
             None,
             &[],
+            &CapabilitySet::default(),
             None,
         )
     }
@@ -1291,5 +1320,239 @@ Content-Length: 0\r\n\r\n";
             .expect("a readable redirect target must render");
         assert!(header.value.contains("sip:carol@10.244.2.11:5060"));
         assert!(header.value.contains("q=0.7"));
+    }
+}
+
+#[cfg(test)]
+mod advertisement_tests {
+    //! What the two B2BUA-owned INVITE mint points advertise (`Allow` /
+    //! `Supported`): [`build_b_leg`] on the originated leg and
+    //! [`stamp_a_facing_invite_advert`] on the response facing the originator.
+    //! Every assertion reads the emitted header, not the declaration.
+    use super::*;
+    use sip_message::header::{Allow, Supported};
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+
+    fn a_leg_invite() -> SipRequest {
+        let raw = "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice;lg=a\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\
+To: <sip:bob@10.244.2.7:5060>\r\n\
+Call-ID: alice-call-id@192.0.2.5\r\n\
+CSeq: 314 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        }
+    }
+
+    /// The `(Allow, Supported)` the originated-leg INVITE carries on the wire.
+    fn b_leg_advert(
+        capabilities: &CapabilitySet,
+        header_updates: &[(String, Option<String>)],
+    ) -> (Option<String>, Option<String>) {
+        let (_leg, effect) = build_b_leg(
+            "w0|call-ref|xyz",
+            "b-1",
+            false,
+            &a_leg_invite(),
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &IdGen::seeded(0xCAB),
+            None,
+            header_updates,
+            capabilities,
+            None,
+        )
+        .expect("no identity rewrites, so nothing to refuse");
+        let invite = match effect.body {
+            OutboundBody::Request(r) => r,
+            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+        };
+        let allow = invite.raw_text(HeaderName::Allow).next().map(|v| v.as_str().to_string());
+        let supported =
+            invite.raw_text(HeaderName::Supported).next().map(|v| v.as_str().to_string());
+        (allow, supported)
+    }
+
+    /// The `(Allow, Supported)` the a-facing 2xx header set ends up carrying,
+    /// starting from a callee value the B2BUA must replace.
+    fn a_facing_advert(
+        capabilities: &CapabilitySet,
+        rule_stamped: &[Entry],
+    ) -> (Option<String>, Option<String>) {
+        let mut headers = vec![MsgHeader {
+            name: SipStr::from_static("Supported"),
+            value: SipStr::from_static("callees-own-tag"),
+        }];
+        stamp_a_facing_invite_advert(&mut headers, rule_stamped, capabilities);
+        let value = |name: HeaderName| {
+            headers.iter().find(|h| name.matches(&h.name)).map(|h| h.value.as_str().to_string())
+        };
+        (value(HeaderName::Allow), value(HeaderName::Supported))
+    }
+
+    /// An inbound re-INVITE carrying the peer's own `Supported`.
+    fn peer_reinvite() -> SipRequest {
+        let raw = "INVITE sip:b2bua@10.244.2.7:5080 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-reinvite\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\
+To: <sip:bob@10.244.2.7:5060>;tag=b2bua-to-tag\r\n\
+Call-ID: alice-call-id@192.0.2.5\r\n\
+CSeq: 315 INVITE\r\n\
+Supported: 100rel, timer, replaces\r\n\
+Content-Length: 0\r\n\r\n";
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        }
+    }
+
+    /// The `(Allow, Supported)` a RELAYED re-INVITE carries toward the target
+    /// face, built exactly as the relay action builds it: the passthrough set
+    /// as `extra_headers`, the face's set as `capabilities`.
+    fn relayed_reinvite_advert(
+        capabilities: &CapabilitySet,
+        target_declares_supported: bool,
+    ) -> (Option<String>, Option<String>) {
+        let dialog = generators::StackDialog {
+            call_id: "b-leg-call-id".to_string(),
+            local_tag: "b2bua-local".to_string(),
+            remote_tag: "bob-remote".to_string(),
+            local_uri: "sip:b2bua@10.244.2.7:5080".to_string(),
+            remote_uri: "sip:bob@10.0.0.2:5070".to_string(),
+            remote_target: "sip:bob@10.0.0.2:5070".to_string(),
+            local_cseq: 41,
+            route_set: Vec::new(),
+        };
+        let opts = generators::GenerateInDialogRequestOpts {
+            via: Some(
+                Via::parse(&SipStr::from_static("SIP/2.0/UDP 10.244.2.7:5080;branch=z9hG4bK-b"))
+                    .unwrap(),
+            ),
+            contact: Some(
+                header::Contact::parse(&SipStr::from_static("<sip:b2bua@10.244.2.7:5080>"))
+                    .unwrap(),
+            ),
+            extra_headers: relay_request_passthrough_headers(
+                &peer_reinvite(),
+                target_declares_supported,
+            ),
+            capabilities: Some(capabilities.clone()),
+            ..Default::default()
+        };
+        let out = generators::generate_in_dialog_request(
+            generators::InDialogMethod::Invite,
+            &dialog,
+            &opts,
+        )
+        .request;
+        let value =
+            |name: HeaderName| out.raw_text(name).next().map(|v| v.as_str().to_string());
+        (value(HeaderName::Allow), value(HeaderName::Supported))
+    }
+
+    /// A narrow set: no REFER/INFO/NOTIFY/PRACK, no 100rel, no timers.
+    fn narrow() -> CapabilitySet {
+        CapabilitySet::new(
+            Allow::of(["INVITE", "ACK", "CANCEL", "BYE", "OPTIONS"]),
+            Supported::of(["replaces"]),
+        )
+    }
+
+    /// Declaring nothing advertises the stack set on BOTH faces, byte for byte.
+    #[test]
+    fn an_undeclared_call_advertises_the_stack_set_on_both_faces() {
+        let default = CapabilitySet::default();
+        let (allow, supported) = b_leg_advert(&default, &[]);
+        assert_eq!(allow.as_deref(), Some(generators::B2BUA_ALLOW));
+        assert_eq!(supported.as_deref(), Some(generators::B2BUA_SUPPORTED));
+
+        let (allow, supported) = a_facing_advert(&default, &[]);
+        assert_eq!(allow.as_deref(), Some(generators::B2BUA_ALLOW));
+        assert_eq!(supported.as_deref(), Some(generators::B2BUA_SUPPORTED));
+    }
+
+    /// A declared set is what reaches the wire on the originated leg.
+    #[test]
+    fn the_declared_set_reaches_the_originated_leg() {
+        let (allow, supported) = b_leg_advert(&narrow(), &[]);
+        assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE, OPTIONS"));
+        assert_eq!(supported.as_deref(), Some("replaces"));
+    }
+
+    /// A declared set is what reaches the wire toward the originator, replacing
+    /// whatever the callee's 200 carried.
+    #[test]
+    fn the_declared_set_reaches_the_originator() {
+        let (allow, supported) = a_facing_advert(&narrow(), &[]);
+        assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE, OPTIONS"));
+        assert_eq!(supported.as_deref(), Some("replaces"));
+    }
+
+    /// The two faces are independent: a bridge between asymmetric domains
+    /// narrows the originated leg while the originator still sees the full set.
+    #[test]
+    fn the_two_faces_advertise_independently() {
+        let (b_allow, b_supported) = b_leg_advert(&narrow(), &[]);
+        let (a_allow, a_supported) = a_facing_advert(&CapabilitySet::default(), &[]);
+        assert_eq!(b_allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE, OPTIONS"));
+        assert_eq!(b_supported.as_deref(), Some("replaces"));
+        assert_eq!(a_allow.as_deref(), Some(generators::B2BUA_ALLOW));
+        assert_eq!(a_supported.as_deref(), Some(generators::B2BUA_SUPPORTED));
+        assert_ne!(a_allow, b_allow, "the faces carry different Allow sets");
+    }
+
+    /// An explicit header update on the message is more specific than the
+    /// call's declared set and wins; the declaration still supplies the header
+    /// the update does not name.
+    #[test]
+    fn an_explicit_header_update_beats_the_declared_set_on_the_originated_leg() {
+        let updates =
+            vec![("Allow".to_string(), Some("INVITE, ACK, BYE, MESSAGE".to_string()))];
+        let (allow, supported) = b_leg_advert(&narrow(), &updates);
+        assert_eq!(allow.as_deref(), Some("INVITE, ACK, BYE, MESSAGE"));
+        assert_eq!(supported.as_deref(), Some("replaces"));
+    }
+
+    /// Same precedence toward the originator: a value the firing rule stamped
+    /// itself wins over the declared set, and stays the ONLY line of that name.
+    #[test]
+    fn a_rule_stamped_value_beats_the_declared_set_toward_the_originator() {
+        let stamped = [Entry::typed(Supported::of(["timer"]))];
+        let (allow, supported) = a_facing_advert(&narrow(), &stamped);
+        assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE, OPTIONS"));
+        assert_eq!(
+            supported.as_deref(),
+            Some("callees-own-tag"),
+            "the rule owns Supported here, so the pass-through line it placed is kept as-is"
+        );
+    }
+
+    /// A declared set survives the RELAYED re-INVITE: the peer's `Supported`
+    /// is a relayed value, not an explicit instruction, so it does not revert
+    /// the narrowing that `Allow` (never relayed) keeps on the same message.
+    #[test]
+    fn a_declared_set_survives_a_relayed_reinvite() {
+        let (allow, supported) = relayed_reinvite_advert(&narrow(), true);
+        assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE, OPTIONS"));
+        assert_eq!(supported.as_deref(), Some("replaces"));
+    }
+
+    /// With no option-tag declaration the transparent relay stands: the peer's
+    /// `Supported` still rides end to end (RFC 3262 negotiation).
+    #[test]
+    fn an_undeclared_supported_still_relays_the_peers_value_on_a_reinvite() {
+        let (allow, supported) = relayed_reinvite_advert(&CapabilitySet::default(), false);
+        assert_eq!(allow.as_deref(), Some(generators::B2BUA_ALLOW));
+        assert_eq!(supported.as_deref(), Some("100rel, timer, replaces"));
     }
 }

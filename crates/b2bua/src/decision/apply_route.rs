@@ -13,6 +13,7 @@ use crate::config::B2buaConfig;
 use crate::decision::{CallDecisionEngine, CallFailureRequest, CallTreatment, FailureInfo};
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
+use crate::rules::capabilities;
 use crate::rules::relay;
 use crate::target_admission::{classify_admission, AdmissionVerdict};
 
@@ -217,6 +218,7 @@ pub async fn apply_route(
         id_gen,
         None,
         &header_updates,
+        &capabilities::for_leg(&call, leg_id),
         None,
     ) {
         Ok(built) => built,

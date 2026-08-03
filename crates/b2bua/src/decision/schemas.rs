@@ -392,5 +392,6 @@ pub fn default_platform_features() -> FeatureActivations {
         relay_first_18x_to_180: None,
         no_answer_timeout_sec: None,
         call_limiters: None,
+        advertise_capabilities: None,
     }
 }

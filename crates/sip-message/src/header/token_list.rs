@@ -9,6 +9,7 @@
 use std::marker::PhantomData;
 
 use crate::error::SipParseError;
+use crate::parser::custom::scanner::is_token_char;
 use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 
@@ -16,6 +17,12 @@ use super::kind::TokenKind;
 use super::name::HeaderName;
 use super::value::{Folding, HeaderValue};
 use super::wire::Wire;
+
+/// Whether `s` is one RFC 3261 §25.1 `token`: at least one character, all of
+/// them token characters.
+fn is_token(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(is_token_char)
+}
 
 /// An ordered set of tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,10 +62,14 @@ impl<K: TokenKind> TokenListHeader<K> {
         self.tokens.is_empty()
     }
 
-    /// Add `token` if the set does not already carry it.
+    /// Add `token` if it is a well-formed [`token`](is_token) the set does not
+    /// already carry. Anything else — a comma list, an embedded space, a value
+    /// carrying CR/LF — is DROPPED: the set is the stack's grammar barrier, so
+    /// a caller-supplied string can never render a second value or a second
+    /// header line.
     pub fn with(mut self, token: impl Into<SipStr>) -> Self {
         let token: SipStr = token.into();
-        if !token.is_empty() && !self.contains(&token) {
+        if is_token(token.as_str()) && !self.contains(&token) {
             self.tokens.push(token);
         }
         self
@@ -137,6 +148,17 @@ mod tests {
         ];
         let merged = Supported::combine(lines).unwrap();
         assert_eq!(merged.to_wire(), "100rel, timer");
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_token_never_enters_the_set() {
+        let set = Supported::empty()
+            .with("timer")
+            .with("evil\r\nX-Injected: yes")
+            .with("two words")
+            .with("100rel, replaces")
+            .with("");
+        assert_eq!(set.to_wire(), "timer");
     }
 
     #[test]

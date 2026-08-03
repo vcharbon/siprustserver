@@ -2,8 +2,9 @@
 //! NOTIFY, INFO, UPDATE, MESSAGE, REFER — plus the loose/strict Request-URI +
 //! Route-set computation shared with the ACK generator.
 
+use super::capabilities::CapabilitySet;
 use super::emit;
-use super::methods::{InDialogMethod, B2BUA_ALLOW, B2BUA_SUPPORTED};
+use super::methods::InDialogMethod;
 use super::spec::StackDialog;
 use crate::draft::RequestDraft;
 use crate::header::{
@@ -87,6 +88,14 @@ pub struct GenerateInDialogRequestOpts {
     /// Remote-target override; defaults to `dialog.remote_target`. The route
     /// set still decides the Request-URI (§12.2.1.1).
     pub request_uri: Option<Uri>,
+    /// Capability set advertised on a re-INVITE (`Allow` / `Supported`, RFC
+    /// 3261 §20.5/§20.37); ignored for every other method. `None` advertises
+    /// [`CapabilitySet::default`]; an empty half advertises a value-less line.
+    /// Precedence, most specific first: an `extra_headers` line naming
+    /// `Allow`/`Supported` wins over this set, which wins over the default —
+    /// so a caller relaying a peer's `Allow`/`Supported` through
+    /// `extra_headers` must drop it first, or the peer's value wins.
+    pub capabilities: Option<CapabilitySet>,
 }
 
 /// Result of [`generate_in_dialog_request`]: the request plus the dialog with
@@ -133,14 +142,16 @@ pub fn generate_in_dialog_request(
         }
     }
     if method == InDialogMethod::Invite {
-        // Advertise capabilities — but never duplicate a header the caller
-        // already carries through `extra_headers` (duplicated values merge per
-        // RFC 3261 §7.3.1).
+        // Advertise the declared capability set (or the default) — but never
+        // duplicate a header the caller already carries through `extra_headers`
+        // (duplicated values merge per RFC 3261 §7.3.1), which is how an
+        // explicit line stays the most specific statement.
+        let caps = opts.capabilities.clone().unwrap_or_default();
         if !emit::carries(&opts.extra_headers, &HeaderName::Allow) {
-            draft = draft.push_raw(HeaderName::Allow, SipStr::from_static(B2BUA_ALLOW));
+            draft = draft.push(caps.allow().clone());
         }
         if !emit::carries(&opts.extra_headers, &HeaderName::Supported) {
-            draft = draft.push_raw(HeaderName::Supported, SipStr::from_static(B2BUA_SUPPORTED));
+            draft = draft.push(caps.supported().clone());
         }
     }
 

@@ -241,6 +241,7 @@ pub fn representative_call() -> Call {
             }),
             no_answer_timeout_sec: Some(45),
             call_limiters: None,
+            advertise_capabilities: None,
         }),
         policy_update_headers: None,
         policy_update_body: None,
@@ -604,6 +605,7 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
                 .map(|(strategy, messages)| RelayFirst18xTo180Feature { strategy, messages }),
             no_answer_timeout_sec: no_answer,
             call_limiters: None,
+            advertise_capabilities: None,
         })
 }
 

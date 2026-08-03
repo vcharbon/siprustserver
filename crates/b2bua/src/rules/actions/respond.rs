@@ -13,6 +13,7 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{SipHeader, SipMessage, SipParser, SipStr};
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::rules::capabilities::{self, Face};
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
 
@@ -140,7 +141,11 @@ impl ActionExecutor<'_> {
         // §13.2.1/§20.37), exactly as the original confirm-dialog relay stamped —
         // so the retransmit is byte-faithful and the RFC audit stays clean.
         let mut extra: Vec<SipHeader> = Vec::new();
-        relay::stamp_a_facing_invite_advert(&mut extra, &[]);
+        relay::stamp_a_facing_invite_advert(
+            &mut extra,
+            &[],
+            &capabilities::advertised(call, Face::Originator),
+        );
         let mut effect = relay::response_to_a_leg(
             &a_invite,
             200,
@@ -317,7 +322,11 @@ impl ActionExecutor<'_> {
                     })
             })
             .collect();
-        relay::stamp_a_facing_invite_advert(&mut extra_headers, &service_owned);
+        relay::stamp_a_facing_invite_advert(
+            &mut extra_headers,
+            &service_owned,
+            &capabilities::advertised(call, Face::Originator),
+        );
         fx.outbound.push(relay::response_to_a_leg(
             &a_invite,
             status,

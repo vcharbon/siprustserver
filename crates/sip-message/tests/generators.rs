@@ -5,8 +5,8 @@ use sip_message::generators::{
     extract_non_structural_headers, generate_ack_for_2xx, generate_ack_for_non_2xx,
     generate_cancel, generate_in_dialog_request, generate_out_of_dialog_request, generate_response,
     GenerateAckFor2xxOpts, GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts,
-    GenerateResponseOpts, InDialogMethod, InviteClientTransactionHandle, OutOfDialogMethod,
-    StackDialog,
+    CapabilitySet, GenerateResponseOpts, InDialogMethod, InviteClientTransactionHandle,
+    OutOfDialogMethod, StackDialog,
 };
 use sip_message::header::{
     self, Event, HeaderName, HeaderValue, MediaType, ParamValue, RAck, SubscriptionState, Uri, Via,
@@ -302,6 +302,84 @@ fn bumps_cseq_uses_remote_target_swaps_tags() {
     assert_eq!(first_value(request.headers(), "From"), Some("<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"));
     assert_eq!(first_value(request.headers(), "To"), Some("<sip:bob@192.0.2.20:5060>;tag=bob-remote"));
     assert_eq!(first_value(request.headers(), "Call-ID"), Some("call-bleg-1"));
+}
+
+/// Build a re-INVITE with the given capability declaration + extra headers and
+/// return its `(Allow, Supported)` as they reach the wire.
+fn reinvite_advert(
+    capabilities: Option<CapabilitySet>,
+    extra_headers: Vec<SipHeader>,
+) -> (Option<String>, Option<String>) {
+    let result = generate_in_dialog_request(
+        InDialogMethod::Invite,
+        &dialog(),
+        &GenerateInDialogRequestOpts {
+            via: Some(via()),
+            contact: Some(contact()),
+            capabilities,
+            extra_headers,
+            ..Default::default()
+        },
+    );
+    let headers = result.request.headers().to_vec();
+    (
+        first_value(&headers, "Allow").map(str::to_string),
+        first_value(&headers, "Supported").map(str::to_string),
+    )
+}
+
+/// An undeclared re-INVITE advertises exactly the constants, byte for byte.
+#[test]
+fn reinvite_without_a_declared_capability_set_advertises_the_default() {
+    let (allow, supported) = reinvite_advert(None, vec![]);
+    assert_eq!(allow.as_deref(), Some(sip_message::generators::B2BUA_ALLOW));
+    assert_eq!(supported.as_deref(), Some(sip_message::generators::B2BUA_SUPPORTED));
+}
+
+/// A declared set is what reaches the wire — no REFER, no 100rel.
+#[test]
+fn reinvite_advertises_the_declared_capability_set() {
+    let caps = CapabilitySet::new(
+        header::Allow::of(["INVITE", "ACK", "CANCEL", "BYE"]),
+        header::Supported::of(["timer"]),
+    );
+    let (allow, supported) = reinvite_advert(Some(caps), vec![]);
+    assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE"));
+    assert_eq!(supported.as_deref(), Some("timer"));
+}
+
+/// An explicit `extra_headers` line is more specific than the declared set and
+/// wins; the declaration still supplies the header the line does not name.
+#[test]
+fn an_explicit_header_line_beats_the_declared_capability_set() {
+    let caps = CapabilitySet::new(
+        header::Allow::of(["INVITE", "ACK", "CANCEL", "BYE"]),
+        header::Supported::of(["timer"]),
+    );
+    let explicit =
+        vec![SipHeader { name: "Allow".into(), value: "INVITE, ACK, BYE, NOTIFY".into() }];
+    let (allow, supported) = reinvite_advert(Some(caps), explicit);
+    assert_eq!(allow.as_deref(), Some("INVITE, ACK, BYE, NOTIFY"));
+    assert_eq!(supported.as_deref(), Some("timer"));
+}
+
+/// The declaration rides INVITE only — a BYE/NOTIFY carries no advertisement.
+#[test]
+fn a_declared_capability_set_is_ignored_off_the_invite_path() {
+    let result = generate_in_dialog_request(
+        InDialogMethod::Bye,
+        &dialog(),
+        &GenerateInDialogRequestOpts {
+            via: Some(via()),
+            capabilities: Some(CapabilitySet::new(
+                header::Allow::of(["INVITE"]),
+                header::Supported::of(["timer"]),
+            )),
+            ..Default::default()
+        },
+    );
+    assert_eq!(first_value(result.request.headers(), "Allow"), None);
+    assert_eq!(first_value(result.request.headers(), "Supported"), None);
 }
 
 #[test]

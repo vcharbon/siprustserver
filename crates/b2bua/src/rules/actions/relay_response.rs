@@ -12,6 +12,7 @@ use sip_message::header::{HeaderName, HeaderValue, MediaType, Via};
 use sip_message::{SipHeader, SipStr};
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::rules::capabilities::{self, Face};
 use crate::rules::model::{MessageTransform, RuleContext};
 use crate::rules::relay;
 
@@ -121,10 +122,8 @@ impl ActionExecutor<'_> {
                 // replacing the source response's. Non-INVITE 2xx (PRACK/UPDATE)
                 // and provisionals keep verbatim passthrough.
                 if cseq_method == "INVITE" && (200..300).contains(&status) {
-                    relay::stamp_a_facing_invite_advert(
-                        &mut transparent_headers,
-                        &transform.add_headers,
-                    );
+                    let caps = capabilities::for_leg(call, target_leg);
+                    relay::stamp_a_facing_invite_advert(&mut transparent_headers, &transform.add_headers, &caps);
                 }
                 // §8.2.6.2 makes Via / From / To / Call-ID / CSeq equal the
                 // originator's, and the snapshot holds the originator's own
@@ -260,7 +259,8 @@ impl ActionExecutor<'_> {
             // Allow/Supported the callee's 200 carried. Provisionals keep verbatim
             // passthrough so reliable-1xx (Supported:100rel) negotiation survives.
             if (200..300).contains(&status) {
-                relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers);
+                let caps = capabilities::advertised(call, Face::Originator);
+                relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
             }
             let effect = relay::response_to_a_leg(
                 &a_invite,
@@ -296,7 +296,8 @@ impl ActionExecutor<'_> {
         // A 2xx INVITE answer carries the B2BUA's own Allow/Supported, replacing
         // the callee's (RFC 3261 §13.2.1/§20.37); provisionals keep passthrough.
         if (200..300).contains(&status) {
-            relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers);
+            let caps = capabilities::advertised(call, Face::Originator);
+            relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
         }
         let effect = relay::response_to_a_leg(
             &a_invite,

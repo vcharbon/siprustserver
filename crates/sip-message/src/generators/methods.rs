@@ -1,11 +1,6 @@
 //! Admissible-method views over [`Method`](crate::method::Method) — which
-//! methods a generator may build in / out of dialog — plus the capability
-//! sets the B2BUA advertises (Allow / Supported).
-
-// RFC 3261 §13.2.1 / §20.37 — accepted methods + supported extensions, advertised
-// on every B2BUA-originated INVITE so the peer can negotiate.
-pub const B2BUA_ALLOW: &str = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, NOTIFY, PRACK";
-pub const B2BUA_SUPPORTED: &str = "100rel, timer, replaces";
+//! methods a generator may build in / out of dialog. The capability set a
+//! message *advertises* is [`super::capabilities`].
 
 /// Methods the in-dialog generator accepts (ACK excluded — it has its own
 /// primitive [`generate_ack_for_2xx`](super::generate_ack_for_2xx), a

@@ -13,6 +13,7 @@ use sip_message::Method;
 use sip_txn::TxnKind;
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::rules::capabilities;
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
 
@@ -136,14 +137,19 @@ impl ActionExecutor<'_> {
 
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&target_dialog.sip);
+        let target_face = capabilities::Face::of_leg(target_leg);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, call.emergency == Some(true), branch.clone())),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true))),
             body: req.body().to_vec(),
             content_type: req.raw(HeaderName::ContentType).next().and_then(relay::media_type),
             cseq: Some(outbound_cseq as u32),
-            extra_headers: relay::relay_request_passthrough_headers(req),
+            extra_headers: relay::relay_request_passthrough_headers(
+                req,
+                capabilities::declares_supported_in(call.features.as_ref(), target_face),
+            ),
             rack,
+            capabilities: Some(capabilities::advertised(call, target_face)),
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(method, &gen_dialog, &opts);

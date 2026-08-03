@@ -9,24 +9,27 @@
 //! resyncs Alice with a B2BUA-originated re-INVITE. The per-call state lives on
 //! `Call.promote_pem` (the typed slice that replaces the TS `PemCallExt`).
 
-use call::features::RelayFirst18xStrategy;
+use call::features::{FeatureActivations, RelayFirst18xStrategy};
 use call::{CdrEventType, Direction, LegDisposition, LegState, PromotePemState, TimerType};
 use sip_message::draft::Entry;
+use sip_message::generators::CapabilitySet;
 use sip_message::header::{Allow, HeaderName, RSeq, Require, Supported};
 use sip_message::sdp_media_equivalent;
 use sip_message::SipResponse;
 
+use super::capabilities::{self, Face};
 use super::model::{
     Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
     SERVICE_LAYER,
 };
 
 /// RFC 3261 §13.3.1 / §20.5: methods the B2BUA relays end-to-end, advertised on
-/// the synthetic 200 OK / resync re-INVITE toward Alice.
-const B2BUA_ALLOW: &str = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, PRACK, MESSAGE, NOTIFY";
+/// the synthetic 200 OK / resync re-INVITE toward Alice when the call declares
+/// no set of its own.
+const SERVICE_ALLOW: &str = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, PRACK, MESSAGE, NOTIFY";
 /// RFC 3261 §20.37: option-tags the B2BUA understands. 100rel is OMITTED — Alice
 /// never saw a reliable provisional from us.
-const B2BUA_SUPPORTED_NO_100REL: &str = "timer, replaces";
+const SERVICE_SUPPORTED_NO_100REL: &str = "timer, replaces";
 
 fn rule(
     id: &'static str,
@@ -74,12 +77,21 @@ fn window_open(ctx: &RuleContext) -> bool {
     ctx.call.promote_pem_window_open()
 }
 
-/// Allow + Supported header updates for messages we mint toward Alice.
-fn a_facing_advert() -> Vec<Entry> {
-    vec![
-        Entry::typed(Allow::of(B2BUA_ALLOW.split(',').map(str::trim))),
-        Entry::typed(Supported::of(B2BUA_SUPPORTED_NO_100REL.split(',').map(str::trim))),
-    ]
+/// Allow + Supported header updates for messages we mint toward Alice. A set
+/// the call declares for the originator face wins — narrowed by `100rel`, which
+/// this service must never claim (Alice saw no reliable provisional from us).
+/// With nothing declared the service's own pair above is advertised.
+fn a_facing_advert(features: Option<&FeatureActivations>) -> Vec<Entry> {
+    capabilities::declared_in(features, Face::Originator)
+        .map(|caps| caps.without_option_tag("100rel"))
+        .unwrap_or_else(|| {
+            CapabilitySet::new(
+                Allow::of(SERVICE_ALLOW.split(',').map(str::trim)),
+                Supported::of(SERVICE_SUPPORTED_NO_100REL.split(',').map(str::trim)),
+            )
+        })
+        .entries()
+        .to_vec()
 }
 
 /// The `promote18xPemTo200` SERVICE_LAYER rules. Dormant unless the call
@@ -124,7 +136,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     reason: Some("OK".to_string()),
                     drop_body: false,
                     remove_headers: vec![HeaderName::Require, HeaderName::RSeq],
-                    add_headers: a_facing_advert(),
+                    add_headers: a_facing_advert(ctx.call.features()),
                 };
 
                 let mut actions = vec![
@@ -288,7 +300,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::SendReinvite {
                     leg_id: a,
                     body: final_sdp.to_vec(),
-                    add_headers: a_facing_advert(),
+                    add_headers: a_facing_advert(ctx.call.features()),
                 });
                 actions.push(RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Provisional,
@@ -453,4 +465,71 @@ fn max_duration(ctx: &RuleContext) -> i64 {
         .features()
         .map(|f| f.platform.max_duration_sec)
         .unwrap_or(3600)
+}
+
+#[cfg(test)]
+mod tests {
+    //! What the promotion advertises toward Alice. The service owns a default
+    //! of its own; a call-declared originator set replaces it and is narrowed
+    //! by `100rel`, which this service never claims.
+    use super::*;
+    use call::features::{
+        AdvertiseCapabilitiesFeature, AdvertisedCapabilities, KeepaliveActivation,
+        PlatformActivations,
+    };
+
+    /// The `(Allow, Supported)` values the advert stamps, as they reach Alice.
+    fn advert(features: Option<&FeatureActivations>) -> (String, String) {
+        let entries = a_facing_advert(features);
+        let text = |name: HeaderName| {
+            entries
+                .iter()
+                .find(|e| e.is(&name))
+                .unwrap_or_else(|| panic!("advert carries {name:?}"))
+                .text()
+                .as_str()
+                .to_string()
+        };
+        (text(HeaderName::Allow), text(HeaderName::Supported))
+    }
+
+    fn features_declaring(allow: &[&str], supported: &[&str]) -> FeatureActivations {
+        FeatureActivations {
+            platform: PlatformActivations {
+                max_duration_sec: 3_600,
+                keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
+            },
+            refer: None,
+            relay_first_18x_to_180: None,
+            no_answer_timeout_sec: None,
+            call_limiters: None,
+            advertise_capabilities: Some(AdvertiseCapabilitiesFeature {
+                toward_originator: Some(AdvertisedCapabilities {
+                    allow: Some(allow.iter().map(|s| s.to_string()).collect()),
+                    supported: Some(supported.iter().map(|s| s.to_string()).collect()),
+                }),
+                toward_originated: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn an_undeclared_call_gets_the_services_own_set() {
+        let (allow, supported) = advert(None);
+        assert_eq!(allow, SERVICE_ALLOW);
+        assert_eq!(supported, SERVICE_SUPPORTED_NO_100REL);
+    }
+
+    /// The declaration wins — and `100rel` is dropped from it even when the
+    /// call declares it, because Alice saw no reliable provisional from us.
+    #[test]
+    fn a_declared_set_wins_and_never_claims_100rel() {
+        let features = features_declaring(
+            &["INVITE", "ACK", "CANCEL", "BYE"],
+            &["100rel", "timer"],
+        );
+        let (allow, supported) = advert(Some(&features));
+        assert_eq!(allow, "INVITE, ACK, CANCEL, BYE");
+        assert_eq!(supported, "timer");
+    }
 }
