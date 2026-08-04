@@ -9,9 +9,8 @@
 //! rule's own `Allow`/`Supported`) beats the call's declared set for that face,
 //! which beats [`CapabilitySet::default`] — the stack set, which is what an
 //! undeclared face advertises. A value RELAYED from the other peer is not an
-//! explicit update and never outranks a declaration: the one message that
-//! carries one, the relayed in-dialog request, drops it (see
-//! [`declares_supported_in`]).
+//! explicit update and never outranks a declaration: the messages that carry
+//! one, the relayed requests, drop it (see [`declared_advert_headers`]).
 //!
 //! The two halves resolve independently — an undeclared `Allow` keeps the stack
 //! methods while a declared `Supported` narrows the option tags — and an empty
@@ -25,7 +24,7 @@
 use call::features::{AdvertisedCapabilities, FeatureActivations};
 use call::Call;
 use sip_message::generators::CapabilitySet;
-use sip_message::header::{Allow, Supported};
+use sip_message::header::{Allow, HeaderName, Supported};
 
 /// The face of the back-to-back UA an advertisement is emitted on. The two are
 /// declared independently, so a bridge between asymmetric domains can narrow
@@ -61,14 +60,28 @@ pub fn declared_in(features: Option<&FeatureActivations>, face: Face) -> Option<
     Some(typed(declared_face(features, face)?))
 }
 
-/// Whether `features` declare the option-tag half (`Supported`) for `face`.
+/// The advertisement headers `features` DECLARE for `face`, empty when they
+/// declare neither half.
 ///
-/// A relayed in-dialog request carries the other peer's `Supported` through
-/// (RFC 3262 negotiation); that copy would defeat a declared narrowing, so the
-/// relay drops it exactly when this holds — and leaves the transparent relay
-/// alone when it does not.
-pub fn declares_supported_in(features: Option<&FeatureActivations>, face: Face) -> bool {
-    declared_face(features, face).is_some_and(|f| f.supported.is_some())
+/// A relayed request carries the other peer's `Allow`/`Supported` through (RFC
+/// 3261 §16.6); that copy would defeat a declared narrowing, so the relay drops
+/// exactly these names — and leaves the transparent relay alone for a half
+/// nothing declares.
+pub fn declared_advert_headers(
+    features: Option<&FeatureActivations>,
+    face: Face,
+) -> Vec<HeaderName> {
+    let Some(declared) = declared_face(features, face) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    if declared.allow.is_some() {
+        names.push(HeaderName::Allow);
+    }
+    if declared.supported.is_some() {
+        names.push(HeaderName::Supported);
+    }
+    names
 }
 
 /// The face's declaration inside `features`, if any.
@@ -157,7 +170,7 @@ mod tests {
         let caps = originated(&features);
         assert_eq!(caps.allow_text(), "INVITE, ACK, CANCEL, BYE");
         assert_eq!(caps.supported_text(), CapabilitySet::default().supported_text());
-        assert!(!declares_supported_in(Some(&features), Face::Originated));
+        assert_eq!(declared_advert_headers(Some(&features), Face::Originated), [HeaderName::Allow]);
     }
 
     /// …and the mirror: option tags alone leave the methods at the stack set.
@@ -168,7 +181,10 @@ mod tests {
         let caps = originated(&features);
         assert_eq!(caps.allow_text(), CapabilitySet::default().allow_text());
         assert_eq!(caps.supported_text(), "timer");
-        assert!(declares_supported_in(Some(&features), Face::Originated));
+        assert_eq!(
+            declared_advert_headers(Some(&features), Face::Originated),
+            [HeaderName::Supported]
+        );
     }
 
     /// An EMPTY half is "advertise nothing", NOT "fall back to the stack" —
@@ -204,6 +220,6 @@ mod tests {
         let features = declaring(AdvertisedCapabilities { allow: None, supported: None });
         assert_eq!(declared_in(Some(&features), Face::Originator), None);
         assert_eq!(declared_in(None, Face::Originated), None);
-        assert!(!declares_supported_in(None, Face::Originated));
+        assert!(declared_advert_headers(None, Face::Originated).is_empty());
     }
 }

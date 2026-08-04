@@ -12,11 +12,11 @@ use call::{
 use sip_message::draft::{Entry, RequestDraft};
 use sip_message::generators::{
     self, CapabilitySet, GenerateAckFor2xxOpts, GenerateOutOfDialogRequestOpts,
-    GenerateResponseOpts, OutOfDialogMethod,
+    GenerateResponseOpts, OutOfDialogMethod, RelayScope,
 };
 use sip_message::header::{
-    self, HeaderClass, HeaderName, HeaderValue, HostPort, MaxForwards, MediaType, NameAddr,
-    ParamValue, RouteEntry, Uri, Via,
+    self, HeaderName, HeaderValue, HostPort, MaxForwards, MediaType, NameAddr, ParamValue,
+    RouteEntry, Uri, Via,
 };
 use sip_message::{Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
@@ -83,11 +83,15 @@ pub fn sdp() -> MediaType {
     MediaType::new(SipStr::from_static("application/sdp"))
 }
 
-/// Whether the generator owns this header on a message the B2BUA mints: the
-/// stack-owned structural set (RFC 3261 §16.6) plus `Content-Type` — the B2BUA
-/// states its own body, so the media type describing it is the stack's.
-fn stack_owned(name: &HeaderName) -> bool {
-    name.class() == HeaderClass::Structural || *name == HeaderName::ContentType
+/// The transparency scope of the INVITE this B2BUA originates: a decision that
+/// replaces the originator's body (a held REFER offer, or none) takes the
+/// headers describing that body with it.
+fn relay_scope(body_override: Option<&[u8]>) -> RelayScope {
+    let scope = RelayScope::request();
+    match body_override {
+        Some(_) => scope.without_source_body(),
+        None => scope,
+    }
 }
 
 /// One `Contact: <uri>;q=…` redirect target (RFC 3261 §20.10) for a 3xx the
@@ -433,22 +437,34 @@ pub fn build_b_leg(
         }
     }
 
-    // Opt-in transparent header relay (config.relay_headers, empty = no-op
-    // default). Copy each named a-leg INVITE header verbatim onto this b-leg
-    // INVITE. This single mint point covers BOTH originated legs: the normal
-    // callee leg (apply_route) and the REFER transfer-target leg (actions.rs
-    // passes `rebuild_a_leg_invite`, which rehydrates alice's full header
-    // snapshot) — so one copy here reaches bob AND charlie. Guards: never
-    // clobber a value already set via `header_updates` (case-insensitive), and
-    // never relay a structural header the generator owns (so a misconfig can't
-    // corrupt the dialog).
+    // Names the deployment states must ride, copied from the a-leg INVITE. A
+    // name the relay withholds is refused here too, so configuration cannot
+    // reach past the transparency rules; a value `header_updates` already set
+    // stands (case-insensitive).
     for configured in &config.relay_headers {
         let name = HeaderName::from(configured.as_str());
-        if extra_headers.iter().any(|h| name.matches(&h.name)) || stack_owned(&name) {
+        if extra_headers.iter().any(|h| name.matches(&h.name))
+            || !generators::relayable(configured, relay_scope(body_override))
+        {
             continue;
         }
         if let Some(v) = a_leg_invite.raw_text(name.clone()).next() {
             extra_headers.push(MsgHeader { name: SipStr::owned(configured), value: v });
+        }
+    }
+
+    // RFC 3261 §16.6: every header the originator sent that this stack does not
+    // own rides onto the leg it originates — one mint point for BOTH originated
+    // legs (the callee leg, and the REFER transfer leg whose `a_leg_invite` is
+    // alice's rehydrated snapshot). A name stated above is the more specific
+    // statement and stands: an explicit `header_updates` value, then this face's
+    // advertisement, then the relayed value.
+    let stated = extra_headers.clone();
+    for header in generators::relayable_headers(a_leg_invite.headers(), relay_scope(body_override))
+    {
+        let name = HeaderName::from(header.name.as_str());
+        if !stated.iter().any(|h| name.matches(&h.name)) {
+            extra_headers.push(header);
         }
     }
 
@@ -547,30 +563,24 @@ pub fn build_b_leg(
     Ok((leg, effect))
 }
 
-/// Headers a B2BUA must carry transparently when relaying an INVITE response
-/// from the b-leg to the a-leg so end-to-end reliable-provisional (RFC 3262)
-/// keeps working: `Require`/`Supported` (the `100rel` option-tag negotiation)
-/// and `RSeq` (the provisional sequence the caller's PRACK acknowledges).
+/// What the B2BUA carries transparently from a b-leg response onto the response
+/// it mints toward the a-leg (RFC 3261 §16.6): every header it does not own,
+/// which includes the reliable-provisional negotiation end to end
+/// (`Require`/`Supported`/`RSeq`, RFC 3262). `keeps_body` states whether the
+/// relayed response carries this response's own body — a policy that drops or
+/// replaces the body leaves the headers describing it behind.
 ///
-/// This is plain transparent relay — distinct from the deferred B2BUA-side
-/// 18x-management *policies* (`relayFirst18xTo180`/`promote18xPemTo200`), which
-/// would instead *rewrite* these provisionals. A call's declared capability set
-/// does NOT narrow these: RFC 3262 negotiation is end-to-end, and the
-/// declaration governs the messages the stack mints (the INVITE 2xx included,
-/// which [`stamp_a_facing_invite_advert`] owns).
-pub fn relay_response_passthrough_headers(resp: &sip_message::SipResponse) -> Vec<MsgHeader> {
-    const PASSTHROUGH: &[HeaderName] =
-        &[HeaderName::Require, HeaderName::RSeq, HeaderName::Supported];
-    copy_named(resp.headers(), PASSTHROUGH)
-}
-
-/// The lines of `headers` naming one of `wanted`, in wire order.
-fn copy_named(headers: &[MsgHeader], wanted: &[HeaderName]) -> Vec<MsgHeader> {
-    headers
-        .iter()
-        .filter(|h| wanted.iter().any(|n| n.matches(&h.name)))
-        .cloned()
-        .collect()
+/// This is plain transparent relay — distinct from the B2BUA-side 18x
+/// management *policies* (`relayFirst18xTo180`/`promote18xPemTo200`), which
+/// *rewrite* these provisionals, and from the a-facing 2xx advertisement
+/// [`stamp_a_facing_invite_advert`] owns.
+pub fn relay_response_passthrough_headers(
+    resp: &sip_message::SipResponse,
+    keeps_body: bool,
+) -> Vec<MsgHeader> {
+    let scope = RelayScope::response();
+    let scope = if keeps_body { scope } else { scope.without_source_body() };
+    generators::relayable_headers(resp.headers(), scope)
 }
 
 /// Ensure an a-facing INVITE 2xx header set carries exactly ONE `Allow` and ONE
@@ -616,42 +626,25 @@ pub fn stamp_a_facing_invite_advert(
     }
 }
 
-/// Headers carried transparently when relaying an in-dialog *request* across
-/// the back-to-back UA (RFC 3261 §16.6 spirit — non-structural headers pass
-/// through; structural ones are owned by the generator). For the basic-B2BUA
-/// set this is the reliable-provisional negotiation (`Require`/`Supported`),
-/// plus the payload-bearing headers of a **transparently relayed REFER/NOTIFY**
-/// (upstreamneed-019): a relayed REFER without its `Refer-To`/`Referred-By` is
-/// malformed, and a relayed NOTIFY's implicit-subscription state lives in
-/// `Event`/`Subscription-State` (the body carries only the sipfrag). These names
-/// only occur on REFER/NOTIFY, so an OPTIONS/INFO/UPDATE relay is unaffected.
-/// `RAck` is rewritten separately (RFC 3262 §7.2), not copied verbatim; the
-/// generator adds `Event`/`Subscription-State` from its own opts ONLY for a
-/// B2BUA-originated NOTIFY (`opts.event`/`subscription_state`), which the relay
-/// path leaves unset — so these pass through here without duplicating.
+/// What the B2BUA carries transparently when relaying an in-dialog *request*
+/// across the back-to-back UA: every header of the received request it does not
+/// own (RFC 3261 §16.6). A relayed REFER keeps its `Refer-To`/`Referred-By`
+/// (without them it is malformed) and a relayed NOTIFY its
+/// `Event`/`Subscription-State` — the generator states those from its own opts
+/// ONLY for a B2BUA-originated NOTIFY, which the relay path leaves unset, so
+/// nothing duplicates. The generator restates `RAck` per RFC 3262 §7.2, so the
+/// received one is withheld rather than copied.
 ///
-/// `target_declares_supported` — the face this request is relayed toward states
-/// its own option tags. The peer's `Supported` is then NOT copied: it is a
-/// relayed value, not an explicit instruction, and copying it would silently
-/// revert the declared narrowing on every re-INVITE while `Allow` (never
-/// copied) stayed narrowed. `Require` still rides through either way — it is
-/// the peer's requirement on this request, not our advertisement.
+/// `target_declared` names the advertisement halves the face this request is
+/// relayed toward states for itself. The peer's value for those is NOT copied:
+/// it is a relayed value, not an explicit instruction, and copying it would
+/// silently revert the declared narrowing on every re-INVITE.
 pub fn relay_request_passthrough_headers(
     req: &SipRequest,
-    target_declares_supported: bool,
+    target_declared: &[HeaderName],
 ) -> Vec<MsgHeader> {
-    const PASSTHROUGH: &[HeaderName] = &[
-        HeaderName::Require,
-        HeaderName::Supported,
-        HeaderName::ReferTo,
-        HeaderName::ReferredBy,
-        HeaderName::Event,
-        HeaderName::SubscriptionState,
-    ];
-    let mut headers = copy_named(req.headers(), PASSTHROUGH);
-    if target_declares_supported {
-        headers.retain(|h| !HeaderName::Supported.matches(&h.name));
-    }
+    let mut headers = generators::relayable_headers(req.headers(), RelayScope::request());
+    headers.retain(|h| !target_declared.iter().any(|name| name.matches(&h.name)));
     headers
 }
 
@@ -1091,19 +1084,28 @@ Content-Length: 0\r\n\r\n",
         );
     }
 
-    /// An a-leg INVITE carrying a relayable correlation header (`X-Loadgen-Id`)
-    /// plus a `To` (a structural header that must NEVER be relayed even if named).
+    /// An a-leg INVITE carrying, alongside its structural headers: an extension
+    /// header and an unmodelled vendor one (both relayable), a `Record-Route`
+    /// (alice's route set is not the callee's to learn), and one member of each
+    /// withheld class.
     fn a_leg_invite_with_relay_header() -> SipRequest {
         parse(
             "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice;lg=a\r\n\
 Max-Forwards: 70\r\n\
+Record-Route: <sip:proxy.alice.example;lr>\r\n\
 From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\
 To: <sip:bob@10.244.2.7:5060>\r\n\
 Contact: <sip:alice@192.0.2.5:5060>\r\n\
 Call-ID: alice-call-id@192.0.2.5\r\n\
 CSeq: 314 INVITE\r\n\
 X-Loadgen-Id: lg-abc123\r\n\
+P-Charging-Vector: icid-value=\"icid-from-alice\"\r\n\
+Authorization: Digest username=\"alice\",realm=\"alice.example\"\r\n\
+Session-Expires: 1800;refresher=uac\r\n\
+Timestamp: 54\r\n\
+Replaces: other-call-id;to-tag=t;from-tag=f\r\n\
+Require: precondition\r\n\
 Content-Length: 0\r\n\r\n",
         )
     }
@@ -1138,57 +1140,168 @@ Content-Length: 0\r\n\r\n",
         }
     }
 
-    /// Opt-in transparent relay: a named a-leg header rides onto BOTH originated
-    /// legs (callee + REFER transfer target), the empty default is a strict no-op,
-    /// and a structural header named in the relay list is NEVER duplicated. Both
-    /// legs are asserted at the single `build_b_leg` mint point — charlie's leg
-    /// goes through the exact same fn with the rebuilt a-leg invite, so a second
-    /// call with a charlie R-URI faithfully simulates the REFER transfer leg.
+    /// RFC 3261 §16.6: a header alice sent that the generator does not own rides
+    /// onto BOTH originated legs — the callee leg and the REFER transfer leg,
+    /// which is the same mint point fed alice's rehydrated INVITE. The
+    /// generator-owned headers stay the generator's: naming `To` in the
+    /// configured list still yields exactly one, structurally minted `To`, and
+    /// alice's `Record-Route`/`Contact`/`Via` never reach the callee.
     #[test]
-    fn relay_headers_copy_to_both_legs_and_never_clobber_structural() {
+    fn a_received_header_rides_both_originated_legs_and_never_the_owned_ones() {
         let has = |hs: &[MsgHeader], name: &str, val: &str| {
             hs.iter().any(|h| h.name.eq_ignore_ascii_case(name) && h.value == val)
         };
+        let count = |hs: &[MsgHeader], name: &str| {
+            hs.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).count()
+        };
 
-        // (a) NORMAL callee leg (bob): the named header is relayed verbatim.
-        let bob = relay_b_leg_headers(vec!["X-Loadgen-Id".into()], None);
+        // (a) NORMAL callee leg (bob), with nothing configured: the relay carries
+        //     the extension header and the vendor header it has no model for.
+        let bob = relay_b_leg_headers(Vec::new(), None);
+        assert!(has(&bob, "X-Loadgen-Id", "lg-abc123"), "callee leg carries it: {bob:?}");
         assert!(
-            has(&bob, "X-Loadgen-Id", "lg-abc123"),
-            "callee leg must carry the relayed X-Loadgen-Id: {bob:?}"
+            has(&bob, "P-Charging-Vector", "icid-value=\"icid-from-alice\""),
+            "an unmodelled header rides verbatim: {bob:?}"
         );
 
-        // (b) REFER transfer leg (charlie): same mint point, R-URI re-aimed → the
-        // header still rides. Proves the single insertion point covers charlie.
-        let charlie = relay_b_leg_headers(
-            vec!["X-Loadgen-Id".into()],
-            Some("sip:charlie@10.244.2.9:5060"),
-        );
+        // (b) REFER transfer leg (charlie): same mint point, R-URI re-aimed.
+        let charlie = relay_b_leg_headers(Vec::new(), Some("sip:charlie@10.244.2.9:5060"));
+        assert!(has(&charlie, "X-Loadgen-Id", "lg-abc123"), "transfer leg carries it");
+
+        // (c) The generator's own headers are the generator's: alice's route set
+        //     and her Contact are hers, and her Via would be a routing loop.
+        assert_eq!(count(&bob, "Record-Route"), 0, "alice's route set stays alice's: {bob:?}");
+        assert_eq!(count(&bob, "Via"), 1, "exactly the b-leg's own Via: {bob:?}");
         assert!(
-            has(&charlie, "X-Loadgen-Id", "lg-abc123"),
-            "REFER transfer leg must carry the relayed X-Loadgen-Id: {charlie:?}"
+            !has(&bob, "Contact", "<sip:alice@192.0.2.5:5060>"),
+            "the b-leg Contact is this stack's: {bob:?}"
         );
 
-        // (c) Default (empty list) is a strict no-op: the header is ABSENT.
-        let noop = relay_b_leg_headers(Vec::new(), None);
-        assert!(
-            !noop.iter().any(|h| h.name.eq_ignore_ascii_case("X-Loadgen-Id")),
-            "empty relay_headers must NOT copy the header: {noop:?}"
-        );
+        // (d) Naming a generator-owned header in the configured list cannot
+        //     duplicate it — configuration does not reach past §16.6.
+        let with_to = relay_b_leg_headers(vec!["To".into()], None);
+        assert_eq!(count(&with_to, "To"), 1, "one structural To, never a relayed dup: {with_to:?}");
+    }
 
-        // (d) A structural header named in the list is NEVER relayed: the b-leg To
-        // is minted structurally by the generator (the generator owns it), so the
-        // relay path must skip it and NOT push a second copy. Naming "To" in the
-        // relay list yields exactly ONE To header — the structural one — proving
-        // the forbidden-set guard blocks the relay duplication that a misconfig
-        // would otherwise introduce.
-        let with_to = relay_b_leg_headers(
-            vec!["X-Loadgen-Id".into(), "To".into()],
+    /// The withheld classes do not ride the originated INVITE: a credential
+    /// scoped to alice's realm, a session interval negotiated with alice, her
+    /// own clock stamp, a dialog identifier this stack re-mints, and a
+    /// requirement this stack already accepted as the UAS.
+    #[test]
+    fn the_withheld_classes_never_reach_the_callee() {
+        let bob = relay_b_leg_headers(Vec::new(), None);
+        for name in
+            ["Authorization", "Session-Expires", "Timestamp", "Replaces", "Require"]
+        {
+            assert!(
+                !bob.iter().any(|h| h.name.eq_ignore_ascii_case(name)),
+                "{name} must not reach the callee: {bob:?}"
+            );
+        }
+    }
+
+    /// Precedence at the originated-leg mint point: a decision's explicit header
+    /// update is more specific than the relayed value and wins, as exactly one
+    /// line of that name.
+    #[test]
+    fn an_explicit_header_update_beats_the_relayed_value() {
+        let updates =
+            vec![("X-Loadgen-Id".to_string(), Some("stated-by-the-decision".to_string()))];
+        let bob = build_b_leg(
+            "w0|call-ref|xyz",
+            "b-1",
+            false,
+            &a_leg_invite_with_relay_header(),
+            ("10.244.2.7".to_string(), 5060),
             None,
-        );
-        let to_count = with_to.iter().filter(|h| h.name.eq_ignore_ascii_case("To")).count();
-        assert_eq!(to_count, 1, "exactly one structural To header, never a relayed dup: {with_to:?}");
-        // The relayable header still rode alongside the rejected structural one.
-        assert!(has(&with_to, "X-Loadgen-Id", "lg-abc123"));
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &IdGen::seeded(0x4747),
+            None,
+            &updates,
+            &CapabilitySet::default(),
+            None,
+        )
+        .map(|(_leg, effect)| match effect.body {
+            OutboundBody::Request(r) => r.headers().to_vec(),
+            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+        })
+        .expect("no identity rewrites, so nothing to refuse");
+        let stated: Vec<&str> = bob
+            .iter()
+            .filter(|h| h.name.eq_ignore_ascii_case("X-Loadgen-Id"))
+            .map(|h| h.value.as_str())
+            .collect();
+        assert_eq!(stated, ["stated-by-the-decision"], "the update wins, alone: {bob:?}");
+    }
+}
+
+#[cfg(test)]
+mod response_transparency_tests {
+    //! What a b-leg response carries onto the response minted toward the
+    //! originator (RFC 3261 §16.6) — the set every relay exit shares.
+    use super::*;
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+
+    /// A callee 183 carrying the reliable-provisional negotiation, an early-media
+    /// authorization, a release cause, a body and the header describing it, plus
+    /// the callee's own route set and clock stamp.
+    fn b_leg_183() -> sip_message::SipResponse {
+        let raw = "SIP/2.0 183 Session Progress\r\n\
+Via: SIP/2.0/UDP 10.244.2.7:5080;branch=z9hG4bK-b\r\n\
+Record-Route: <sip:proxy.bob.example;lr>\r\n\
+From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\
+To: <sip:bob@10.244.2.7:5060>;tag=bob-tag\r\n\
+Call-ID: b-leg-call-id\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:bob@10.0.0.2:5070>\r\n\
+Require: 100rel\r\n\
+RSeq: 1\r\n\
+Supported: 100rel, timer\r\n\
+P-Early-Media: sendrecv\r\n\
+Reason: Q.850;cause=17\r\n\
+Timestamp: 54\r\n\
+Content-Disposition: session;handling=required\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: 4\r\n\r\nv=0\n";
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Response(r) => r,
+            _ => panic!("expected response"),
+        }
+    }
+
+    fn names(headers: &[MsgHeader]) -> Vec<String> {
+        headers.iter().map(|h| h.name.to_ascii_lowercase()).collect()
+    }
+
+    /// The callee's end-to-end headers reach the caller — the RFC 3262
+    /// negotiation, the RFC 5009 early-media authorization and the Q.850 cause
+    /// alike — while the callee's route set, Contact and clock stamp do not.
+    #[test]
+    fn a_relayed_response_carries_the_callee_end_to_end_set() {
+        let carried = names(&relay_response_passthrough_headers(&b_leg_183(), true));
+        for name in ["require", "rseq", "supported", "p-early-media", "reason"] {
+            assert!(carried.contains(&name.to_string()), "{name} must ride: {carried:?}");
+        }
+        for name in ["via", "record-route", "contact", "to", "content-type", "timestamp"] {
+            assert!(!carried.contains(&name.to_string()), "{name} must not ride: {carried:?}");
+        }
+    }
+
+    /// A policy that drops or replaces the body leaves the header describing
+    /// that body behind: `handling=required` must not describe a body the caller
+    /// never receives.
+    #[test]
+    fn body_metadata_does_not_outlive_the_body_it_describes() {
+        let with_body = names(&relay_response_passthrough_headers(&b_leg_183(), true));
+        assert!(with_body.contains(&"content-disposition".to_string()));
+
+        let without = names(&relay_response_passthrough_headers(&b_leg_183(), false));
+        assert!(!without.contains(&"content-disposition".to_string()), "{without:?}");
+        assert!(without.contains(&"p-early-media".to_string()), "the rest still rides: {without:?}");
     }
 }
 
@@ -1421,7 +1534,7 @@ Content-Length: 0\r\n\r\n";
     /// as `extra_headers`, the face's set as `capabilities`.
     fn relayed_reinvite_advert(
         capabilities: &CapabilitySet,
-        target_declares_supported: bool,
+        target_declared: &[HeaderName],
     ) -> (Option<String>, Option<String>) {
         let dialog = generators::StackDialog {
             call_id: "b-leg-call-id".to_string(),
@@ -1442,10 +1555,7 @@ Content-Length: 0\r\n\r\n";
                 header::Contact::parse(&SipStr::from_static("<sip:b2bua@10.244.2.7:5080>"))
                     .unwrap(),
             ),
-            extra_headers: relay_request_passthrough_headers(
-                &peer_reinvite(),
-                target_declares_supported,
-            ),
+            extra_headers: relay_request_passthrough_headers(&peer_reinvite(), target_declared),
             capabilities: Some(capabilities.clone()),
             ..Default::default()
         };
@@ -1542,7 +1652,7 @@ Content-Length: 0\r\n\r\n";
     /// the narrowing that `Allow` (never relayed) keeps on the same message.
     #[test]
     fn a_declared_set_survives_a_relayed_reinvite() {
-        let (allow, supported) = relayed_reinvite_advert(&narrow(), true);
+        let (allow, supported) = relayed_reinvite_advert(&narrow(), &[HeaderName::Supported]);
         assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE, OPTIONS"));
         assert_eq!(supported.as_deref(), Some("replaces"));
     }
@@ -1551,7 +1661,7 @@ Content-Length: 0\r\n\r\n";
     /// `Supported` still rides end to end (RFC 3262 negotiation).
     #[test]
     fn an_undeclared_supported_still_relays_the_peers_value_on_a_reinvite() {
-        let (allow, supported) = relayed_reinvite_advert(&CapabilitySet::default(), false);
+        let (allow, supported) = relayed_reinvite_advert(&CapabilitySet::default(), &[]);
         assert_eq!(allow.as_deref(), Some(generators::B2BUA_ALLOW));
         assert_eq!(supported.as_deref(), Some("100rel, timer, replaces"));
     }

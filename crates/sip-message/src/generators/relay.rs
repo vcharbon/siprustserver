@@ -1,27 +1,134 @@
-//! B2BUA relay transparency: the stack-owned structural header set, the
-//! non-structural pass-through extractor, and rebuilding a response for the
-//! peer leg from snapshotted fields (RFC 3261 §16.6 / §12.1.1).
+//! B2BUA relay transparency: which received headers may be carried onto the
+//! message minted for the peer leg, the extractor that selects them, and
+//! rebuilding a response for the peer leg from snapshotted fields (RFC 3261
+//! §16.6 / §12.1.1).
 
 use super::emit;
 use crate::draft::{Entry, ResponseDraft};
 use crate::header::{self, HeaderClass, HeaderName, MediaType};
 use crate::sip_str::SipStr;
-use crate::types::{SipHeader, SipMessage, SipResponse};
+use crate::types::{SipHeader, SipResponse};
 
-/// True iff the relay owns this header rather than copying the peer's (RFC 3261
-/// §16.6): the stack-owned structural set, plus `Content-Type` — the relay
+/// Which message the relayed headers land on — a request the back-to-back UA
+/// mints toward the peer, or a response it mints on the peer's transaction.
+/// One class of header travels only the response way ([`WITHHELD_ON_REQUEST`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RelayTarget {
+    Request,
+    Response,
+}
+
+/// The message being minted, as far as transparency is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RelayScope {
+    /// Which side of the transaction the minted message sits on.
+    pub target: RelayTarget,
+    /// Whether the minted message carries the source's own body — a header
+    /// that describes a body must not outlive the body it describes.
+    pub carries_source_body: bool,
+}
+
+impl RelayScope {
+    /// A request minted toward the peer, carrying the source's body.
+    pub const fn request() -> Self {
+        Self { target: RelayTarget::Request, carries_source_body: true }
+    }
+
+    /// A response minted on the peer's transaction, carrying the source's body.
+    pub const fn response() -> Self {
+        Self { target: RelayTarget::Response, carries_source_body: true }
+    }
+
+    /// The same message with the source's body dropped or replaced.
+    pub const fn without_source_body(self) -> Self {
+        Self { carries_source_body: false, ..self }
+    }
+}
+
+/// True iff the generator owns this header rather than copying the peer's (RFC
+/// 3261 §16.6): the stack-owned structural set, plus `Content-Type` — the relay
 /// emits its own body, so the media type describing it is the relay's to state.
 fn relay_owns(name: &str) -> bool {
     HeaderName::class_of(name) == HeaderClass::Structural
         || HeaderName::known(name) == Some(HeaderName::ContentType)
 }
 
-/// Every header from `msg` the relay does NOT own — callers pass the result
-/// through `extra_headers` when relaying so transparent fields (Allow,
-/// Supported, P-Asserted-Identity, …) flow through unchanged while the
-/// generator owns the dialog headers.
-pub fn extract_non_structural_headers(msg: &SipMessage) -> Vec<SipHeader> {
-    msg.headers().iter().filter(|hdr| !relay_owns(&hdr.name)).cloned().collect()
+/// End-to-end by class, still not the peer's to receive. One entry per class,
+/// each naming the invariant it protects:
+const WITHHELD: &[HeaderName] = &[
+    // RFC 3261 §22: a credential is scoped to the realm that challenged for it,
+    // so relaying one offers it for replay in a domain that never challenged.
+    HeaderName::Authorization,
+    HeaderName::ProxyAuthorization,
+    HeaderName::AuthenticationInfo,
+    HeaderName::WwwAuthenticate,
+    HeaderName::ProxyAuthenticate,
+    // RFC 4028 §7: the refresh interval is negotiated per leg, so a relayed one
+    // binds this peer to an interval agreed with the other.
+    HeaderName::SessionExpires,
+    HeaderName::MinSe,
+    // RFC 3261 §20.38 / §20.17: both state when THIS message was sent, so they
+    // belong to the stack that mints it (§8.2.6.1 answers a Timestamp with an
+    // echo, never with the peer's).
+    HeaderName::Timestamp,
+    HeaderName::Date,
+    // RFC 3891 §3 names a dialog by Call-ID and both tags, all of which a
+    // back-to-back UA re-mints per leg: a relayed Replaces names a dialog the
+    // peer never had (481).
+    HeaderName::Replaces,
+];
+
+/// Additionally withheld from a relayed REQUEST.
+const WITHHELD_ON_REQUEST: &[HeaderName] = &[
+    // RFC 3261 §20.32 / §20.29: an imposition on whoever receives the request.
+    // This stack is the UAS that just accepted it — re-imposing it on the peer
+    // fails (420) a call it already agreed to serve. In a response the same
+    // names report the negotiation's outcome and stay end-to-end (RFC 3262).
+    HeaderName::Require,
+    HeaderName::ProxyRequire,
+    HeaderName::Unsupported,
+    // RFC 3262 §7.2: RAck names the reliable provisional and the INVITE CSeq of
+    // the leg it is sent on, both of which the generator restates.
+    HeaderName::RAck,
+];
+
+/// Describes the body, so it rides only where that body rides (RFC 3261 §20.11
+/// / §20.12 / §20.15, RFC 2045 §4).
+const DESCRIBES_BODY: &[HeaderName] = &[
+    HeaderName::ContentDisposition,
+    HeaderName::ContentEncoding,
+    HeaderName::ContentLanguage,
+    HeaderName::MimeVersion,
+];
+
+/// True iff a header the back-to-back UA received may be carried onto the
+/// message it mints for the peer (RFC 3261 §16.6). An extension header is
+/// always relayable: the relay never needs to know what a header means, only
+/// whether it is one of the classes it must withhold.
+pub fn relayable(name: &str, scope: RelayScope) -> bool {
+    if relay_owns(name) {
+        return false;
+    }
+    let Some(known) = HeaderName::known(name) else {
+        return true;
+    };
+    if WITHHELD.contains(&known) {
+        return false;
+    }
+    if scope.target == RelayTarget::Request && WITHHELD_ON_REQUEST.contains(&known) {
+        return false;
+    }
+    if !scope.carries_source_body && DESCRIBES_BODY.contains(&known) {
+        return false;
+    }
+    true
+}
+
+/// The received headers that ride onto the minted message, in wire order and
+/// with every repeat kept — callers pass the result through `extra_headers`, so
+/// each reaches the peer with its name spelling and value bytes unchanged.
+pub fn relayable_headers(headers: &[SipHeader], scope: RelayScope) -> Vec<SipHeader> {
+    headers.iter().filter(|hdr| relayable(&hdr.name, scope)).cloned().collect()
 }
 
 /// Inputs for [`generate_relayed_response`]. RFC 3261 §8.2.6.2 makes Via /

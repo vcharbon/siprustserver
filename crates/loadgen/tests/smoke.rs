@@ -121,11 +121,9 @@ async fn setup_with(
     setup_inner(base, correlation, sample_cap, recv, true, extra_tune).await
 }
 
-/// [`setup`] WITHOUT the correlation-header relay tune on the SUT — the
-/// third-party-SUT shape (a B2BUA that strips/ignores unknown headers, breaking
-/// header correlation entirely). Only a strategy needing zero SUT cooperation
-/// (`Correlation::to_user`) can correlate the callee leg here.
-async fn setup_no_relay(
+/// [`setup`] with no correlation header named in the SUT's relay configuration,
+/// so the token reaches the callee leg on nothing but the strategy's own terms.
+async fn setup_without_relay_config(
     base: u16,
     correlation: Correlation,
     sample_cap: u32,
@@ -187,10 +185,9 @@ async fn setup_shaped(
     h.disarm_cseq_gate(); // infra harness; loadgen runs its own per-call audit
 
     let (uac, uas, refer) = (base, base + 1, base + 2);
-    // Make the in-process b2bua transparent to the loadgen correlation header
-    // (the production `B2BUA_RELAY_HEADERS=X-Loadgen-Id`), so the token alice
-    // stamps reaches BOTH the b-leg (bob) and the REFER transfer leg (charlie).
-    // `relay_header = false` models a third-party SUT that relays nothing.
+    // Name the loadgen correlation header in the SUT's relay configuration (the
+    // production `B2BUA_RELAY_HEADERS=X-Loadgen-Id`), so the token alice stamps
+    // reaches BOTH the b-leg (bob) and the REFER transfer leg (charlie).
     let b2bua = make_sut("127.0.0.1", uas)
         .tune(move |c| {
             if relay_header {
@@ -298,14 +295,14 @@ async fn loadgen_mux_smoke_basic_concurrent() {
 }
 
 /// TO-USER correlation end-to-end: the token rides the To-header user-part, so
-/// a full call correlates WITHOUT the SUT relaying any loadgen header — the
-/// in-process b2bua here has NO `relay_headers` configured (the third-party-SUT
-/// shape under which header correlation yields zero OK calls). Concurrent basic
-/// calls all complete OK, with zero correlation orphans and no mux/SUT leak.
+/// a full call correlates on the callee leg's own addressing — nothing about it
+/// is named in the SUT's configuration. Concurrent basic calls all complete OK,
+/// with zero correlation orphans and no mux/SUT leak.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn loadgen_to_user_correlation_without_relayed_header() {
+async fn loadgen_to_user_correlation_rides_the_to_header() {
     use std::sync::atomic::Ordering::Relaxed;
-    let (_h, b2bua, core, transport) = setup_no_relay(6540, Correlation::to_user(), 5).await;
+    let (_h, b2bua, core, transport) =
+        setup_without_relay_config(6540, Correlation::to_user(), 5).await;
     let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
 
     let driver = Driver::new(

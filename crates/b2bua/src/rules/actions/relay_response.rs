@@ -42,17 +42,20 @@ impl ActionExecutor<'_> {
         // The body relayed toward alice: dropped (bare-180 downgrade), replaced
         // by a staged policy body (fake-prack cached SDP on the 200 OK), or the
         // response's own body verbatim.
-        let (relay_body, relay_content_type): (Vec<u8>, Option<MediaType>) = if transform.drop_body
-        {
-            (vec![], None)
-        } else if let Some(call::PolicyUpdateBody::Bytes(b)) = call.policy_update_body.clone() {
-            (b, Some(relay::sdp()))
-        } else {
-            (
-                resp.body().to_vec(),
-                resp.raw(HeaderName::ContentType).next().and_then(relay::media_type),
-            )
-        };
+        // `keeps_body` — whether the relayed message carries THIS response's own
+        // body, so the headers describing that body travel with it (§16.6).
+        let (relay_body, relay_content_type, keeps_body): (Vec<u8>, Option<MediaType>, bool) =
+            if transform.drop_body {
+                (vec![], None, false)
+            } else if let Some(call::PolicyUpdateBody::Bytes(b)) = call.policy_update_body.clone() {
+                (b, Some(relay::sdp()), false)
+            } else {
+                (
+                    resp.body().to_vec(),
+                    resp.raw(HeaderName::ContentType).next().and_then(relay::media_type),
+                    true,
+                )
+            };
         // Passthrough headers minus any the transform suppresses (e.g.
         // Require/RSeq on a bare-180 downgrade), plus any the transform stamps
         // with replace semantics (Allow/Supported on the synthetic 200 / resync
@@ -116,7 +119,7 @@ impl ActionExecutor<'_> {
                 };
                 let contact = relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true));
                 let mut transparent_headers =
-                    filter_passthrough(relay::relay_response_passthrough_headers(resp));
+                    filter_passthrough(relay::relay_response_passthrough_headers(resp, keeps_body));
                 // A 2xx answer to a B2BUA-relayed re-INVITE advertises the B2BUA's
                 // own Allow/Supported toward the peer (RFC 3261 §13.2.1/§20.37),
                 // replacing the source response's. Non-INVITE 2xx (PRACK/UPDATE)
@@ -253,7 +256,8 @@ impl ActionExecutor<'_> {
             };
             let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
             let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
-            let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
+            let mut passthrough =
+                filter_passthrough(relay::relay_response_passthrough_headers(resp, keeps_body));
             // A 2xx INVITE answer the B2BUA mints toward the caller advertises the
             // B2BUA's own capability set (RFC 3261 §13.2.1/§20.37), replacing any
             // Allow/Supported the callee's 200 carried. Provisionals keep verbatim
@@ -292,7 +296,8 @@ impl ActionExecutor<'_> {
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
         // Reliable-provisional negotiation headers (Require/Supported/RSeq) pass
         // through transparently so end-to-end PRACK keeps working (RFC 3262).
-        let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(resp));
+        let mut passthrough =
+            filter_passthrough(relay::relay_response_passthrough_headers(resp, keeps_body));
         // A 2xx INVITE answer carries the B2BUA's own Allow/Supported, replacing
         // the callee's (RFC 3261 §13.2.1/§20.37); provisionals keep passthrough.
         if (200..300).contains(&status) {

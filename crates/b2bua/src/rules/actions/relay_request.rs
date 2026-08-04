@@ -146,7 +146,7 @@ impl ActionExecutor<'_> {
             cseq: Some(outbound_cseq as u32),
             extra_headers: relay::relay_request_passthrough_headers(
                 req,
-                capabilities::declares_supported_in(call.features.as_ref(), target_face),
+                &capabilities::declared_advert_headers(call.features.as_ref(), target_face),
             ),
             rack,
             capabilities: Some(capabilities::advertised(call, target_face)),

@@ -2,7 +2,7 @@
 //! Port of `tests/sip/generators.test.ts`.
 
 use sip_message::generators::{
-    extract_non_structural_headers, generate_ack_for_2xx, generate_ack_for_non_2xx,
+    generate_ack_for_2xx, generate_ack_for_non_2xx, relayable, relayable_headers, RelayScope,
     generate_cancel, generate_in_dialog_request, generate_out_of_dialog_request, generate_response,
     GenerateAckFor2xxOpts, GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts,
     CapabilitySet, GenerateResponseOpts, InDialogMethod, InviteClientTransactionHandle,
@@ -12,7 +12,7 @@ use sip_message::header::{
     self, Event, HeaderName, HeaderValue, MediaType, ParamValue, RAck, SubscriptionState, Uri, Via,
 };
 use sip_message::method::Method;
-use sip_message::{hydrate_request, SipHeader, SipMessage, SipRequest, SipStr};
+use sip_message::{hydrate_request, SipHeader, SipRequest, SipStr};
 
 fn name(header: &str) -> HeaderName {
     HeaderName::of(&SipStr::owned(header))
@@ -135,25 +135,112 @@ fn invite_handle() -> InviteClientTransactionHandle {
     InviteClientTransactionHandle { original_invite: invite }
 }
 
-// --- extract_non_structural_headers ---
+// --- relayable / relayable_headers ---
 
 #[test]
 fn keeps_transparent_headers_and_drops_structural() {
     let a_leg = make_a_leg_invite();
-    let kept = extract_non_structural_headers(&SipMessage::Request(a_leg));
+    let kept = relayable_headers(a_leg.headers(), RelayScope::request());
     let mut names: Vec<String> = kept.iter().map(|h| h.name.to_ascii_lowercase()).collect();
     names.sort();
     assert_eq!(names, vec!["allow", "p-asserted-identity", "supported"]);
 }
 
 #[test]
-fn preserves_order_among_non_structural() {
-    let a_leg = make_a_leg_invite();
-    let kept = extract_non_structural_headers(&SipMessage::Request(a_leg));
+fn preserves_order_and_repeats_among_relayable() {
+    let mut headers = make_a_leg_invite().headers().to_vec();
+    headers.push(hdr("P-Asserted-Identity", "<tel:+15551234>"));
+    let kept = relayable_headers(&headers, RelayScope::request());
     assert_eq!(
         kept.iter().map(|h| h.name.clone()).collect::<Vec<_>>(),
-        vec!["Allow", "Supported", "P-Asserted-Identity"]
+        vec!["Allow", "Supported", "P-Asserted-Identity", "P-Asserted-Identity"],
+        "wire order, and every repeat of a name kept"
     );
+}
+
+/// The generator owns the routing, transaction and dialog identity of the
+/// message it mints, plus the media type of the body it states (§16.6).
+#[test]
+fn the_generator_owned_headers_are_never_relayed() {
+    for name in [
+        "Via", "From", "To", "Call-ID", "CSeq", "Contact", "Route", "Record-Route", "Max-Forwards",
+        "Content-Length", "Content-Type",
+    ] {
+        assert!(!relayable(name, RelayScope::request()), "{name} on a request");
+        assert!(!relayable(name, RelayScope::response()), "{name} on a response");
+    }
+}
+
+/// An extension header is relayed whatever it means — the relay classifies, it
+/// does not interpret.
+#[test]
+fn an_extension_header_is_always_relayed() {
+    for name in ["X-Vendor-Thing", "P-Charging-Vector", "P-Early-Media", "Reason", "Expires"] {
+        assert!(relayable(name, RelayScope::request()), "{name}");
+        assert!(relayable(name, RelayScope::response()), "{name}");
+    }
+}
+
+/// One case per withheld class: a credential scoped to the realm that
+/// challenged, a per-leg session-refresh interval, a sender's own clock stamp,
+/// and a dialog identifier this stack re-mints per leg.
+#[test]
+fn the_withheld_classes_are_relayed_in_neither_direction() {
+    for name in [
+        "Authorization",
+        "Proxy-Authorization",
+        "Authentication-Info",
+        "WWW-Authenticate",
+        "Proxy-Authenticate",
+        "Session-Expires",
+        "Min-SE",
+        "Timestamp",
+        "Date",
+        "Replaces",
+    ] {
+        assert!(!relayable(name, RelayScope::request()), "{name} on a request");
+        assert!(!relayable(name, RelayScope::response()), "{name} on a response");
+    }
+}
+
+/// An imposition on the receiver is withheld from a relayed request — this
+/// stack is the UAS that accepted it — while the same name in a RESPONSE reports
+/// the outcome of the negotiation and stays end-to-end (RFC 3262).
+#[test]
+fn an_imposing_header_rides_a_response_but_never_a_relayed_request() {
+    for name in ["Require", "Proxy-Require", "Unsupported", "RAck"] {
+        assert!(!relayable(name, RelayScope::request()), "{name} on a request");
+    }
+    for name in ["Require", "Unsupported", "RSeq", "Supported"] {
+        assert!(relayable(name, RelayScope::response()), "{name} on a response");
+    }
+}
+
+/// A header describing the body does not outlive the body it describes: it
+/// rides when the minted message carries the source's body, and is withheld
+/// when a policy dropped or replaced it.
+#[test]
+fn body_metadata_rides_only_with_the_body_it_describes() {
+    for name in ["Content-Disposition", "Content-Encoding", "Content-Language", "MIME-Version"] {
+        assert!(relayable(name, RelayScope::response()), "{name} with the body");
+        assert!(
+            !relayable(name, RelayScope::response().without_source_body()),
+            "{name} without the body"
+        );
+    }
+    assert!(
+        relayable("P-Asserted-Identity", RelayScope::request().without_source_body()),
+        "dropping the body withholds nothing else"
+    );
+}
+
+/// The compact forms name the same headers (RFC 3261 §7.3.3), so a peer using
+/// them cannot slip a generator-owned header past the relay.
+#[test]
+fn compact_forms_classify_as_their_long_name() {
+    assert!(!relayable("v", RelayScope::request()), "v = Via");
+    assert!(!relayable("c", RelayScope::request()), "c = Content-Type");
+    assert!(relayable("k", RelayScope::request()), "k = Supported");
 }
 
 // --- generate_out_of_dialog_request ---
@@ -197,7 +284,7 @@ fn builds_initial_invite_with_via_contact_maxforwards_content_length() {
 #[test]
 fn passes_extra_headers_through_verbatim() {
     let a_leg = make_a_leg_invite();
-    let transparent = extract_non_structural_headers(&SipMessage::Request(a_leg.clone()));
+    let transparent = relayable_headers(a_leg.headers(), RelayScope::request());
     let req = generate_out_of_dialog_request(
         OutOfDialogMethod::Invite,
         &GenerateOutOfDialogRequestOpts {

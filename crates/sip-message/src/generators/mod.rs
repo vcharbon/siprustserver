@@ -46,7 +46,8 @@ pub use in_dialog::{generate_in_dialog_request, GenerateInDialogRequestOpts, InD
 pub use methods::{InDialogMethod, OutOfDialogMethod};
 pub use out_of_dialog::{generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts};
 pub use relay::{
-    extract_non_structural_headers, generate_relayed_response, GenerateRelayedResponseOpts,
+    generate_relayed_response, relayable, relayable_headers, GenerateRelayedResponseOpts,
+    RelayScope, RelayTarget,
 };
 pub use response::{generate_response, GenerateResponseOpts};
 pub use spec::{InviteClientTransactionHandle, StackDialog};

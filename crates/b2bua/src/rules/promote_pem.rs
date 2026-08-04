@@ -124,18 +124,23 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let leg = ctx.source_leg_id.to_string();
                 let promoted_sdp = resp.body().clone();
 
-                // 183 → 200 OK on the wire toward Alice: drop Require/RSeq
-                // (+ P-Early-Media is not in the relay passthrough set, so it
-                // never reaches Alice), stamp Allow + Supported, keep the SDP.
-                // RelayFirstBare180 already mints the a-facing tag + seeds the
-                // tag map; here we relay as a 200 carrying the body, so we mint
-                // the tag via the relay path's reliable-1xx tracking instead and
-                // pre-seed by reusing the default a-dialog tag continuity.
+                // 183 → 200 OK on the wire toward Alice: drop Require/RSeq and
+                // the RFC 5009 early-media authorization (the promoted answer is
+                // final media, not authorized early media), stamp Allow +
+                // Supported, keep the SDP. RelayFirstBare180 already mints the
+                // a-facing tag + seeds the tag map; here we relay as a 200
+                // carrying the body, so we mint the tag via the relay path's
+                // reliable-1xx tracking instead and pre-seed by reusing the
+                // default a-dialog tag continuity.
                 let transform = MessageTransform {
                     status: Some(200),
                     reason: Some("OK".to_string()),
                     drop_body: false,
-                    remove_headers: vec![HeaderName::Require, HeaderName::RSeq],
+                    remove_headers: vec![
+                        HeaderName::Require,
+                        HeaderName::RSeq,
+                        HeaderName::PEarlyMedia,
+                    ],
                     add_headers: a_facing_advert(ctx.call.features()),
                 };
 
