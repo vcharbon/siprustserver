@@ -18,8 +18,10 @@ use crate::types::SipHeader;
 /// the caller declares no set of its own.
 pub const B2BUA_ALLOW: &str = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, NOTIFY, PRACK";
 /// RFC 3261 §20.37 — the option tags the stack understands, advertised when the
-/// caller declares no set of its own.
-pub const B2BUA_SUPPORTED: &str = "100rel, timer, replaces";
+/// caller declares no set of its own. An option tag obliges whoever advertises
+/// it, so a tag no part of this stack exercises is not a member: RFC 4028's
+/// `timer` would promise a session refresh nothing here performs.
+pub const B2BUA_SUPPORTED: &str = "100rel, replaces";
 
 /// One face's advertised capabilities: accepted methods + understood option
 /// tags. Immutable; narrow with [`without_option_tag`](Self::without_option_tag).
@@ -67,7 +69,9 @@ impl CapabilitySet {
     ///   whoever advertises it (§20.37), so the face claims an extension only
     ///   where the peer's own set claimed it.
     ///
-    /// A half `received` carries no line for falls back to this set's half.
+    /// A half `received` carries no line for falls back to this set's half — a
+    /// peer that advertised nothing leaves the face stating what this stack
+    /// itself understands, which is a claim of its own and not the peer's.
     pub fn relaying(&self, received: &[SipHeader]) -> Self {
         Self {
             allow: match line_value::<Allow>(received) {
@@ -147,7 +151,7 @@ mod tests {
     #[test]
     fn narrowing_drops_the_option_tag_case_insensitively_and_keeps_allow() {
         let caps = CapabilitySet::default().without_option_tag("100REL");
-        assert_eq!(caps.supported_text(), "timer, replaces");
+        assert_eq!(caps.supported_text(), "replaces");
         assert_eq!(caps.allow_text(), B2BUA_ALLOW);
     }
 
@@ -213,6 +217,10 @@ mod tests {
         let caps = CapabilitySet::default()
             .relaying(&received(&[("Supported", "timer"), ("k", "replaces")]));
         assert_eq!(caps.supported_text(), "timer, replaces");
+        assert!(
+            !CapabilitySet::default().supported_text().contains("timer"),
+            "the peer's tag rides even where this stack states none of its own"
+        );
 
         let none = CapabilitySet::default().relaying(&received(&[("Supported", "")]));
         assert_eq!(none.supported_text(), "");

@@ -122,6 +122,23 @@ impl ActionExecutor<'_> {
         ));
     }
 
+    /// Record the `Allow`/`Supported` an a-facing INVITE 2xx states, so the
+    /// §13.3.1.4 retransmit re-emits the response it retransmits instead of
+    /// re-resolving the face — the two differ whenever the answer relayed the
+    /// callee's own set or a firing rule stamped one.
+    pub(super) fn cache_answered_advert(call: &mut Call, headers: &[SipHeader]) {
+        let advert: Vec<(String, String)> = headers
+            .iter()
+            .filter(|h| {
+                HeaderName::Allow.matches(&h.name) || HeaderName::Supported.matches(&h.name)
+            })
+            .map(|h| (h.name.to_string(), h.value.to_string()))
+            .collect();
+        if let Some(d) = call.a_leg.dialogs.first_mut() {
+            d.ext.answered_advert = advert;
+        }
+    }
+
     /// RFC 3261 §13.3.1.4 — re-send the a-leg INVITE 2xx toward the caller while
     /// its ACK is missing. The a-leg INVITE server txn is already `Completed`, so
     /// the txn layer would DROP a second final on the `ServerResponse` path; we
@@ -137,18 +154,25 @@ impl ActionExecutor<'_> {
         let content_type = (!body.is_empty()).then(relay::sdp);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
-        // A 2xx INVITE answer carries the originator face's Allow/Supported
-        // (RFC 3261 §13.2.1/§20.37). The retransmit rebuilds from the a-leg
-        // INVITE snapshot, which holds the caller's message, not the callee's.
-        // FIXME(b2bua): a 2xx whose advertisement came from the callee's own
-        // (relayed) or from a firing rule's set retransmits with the face's set
-        // instead — cache the advertised lines beside `cached_sdp` at relay time.
-        let mut extra: Vec<SipHeader> = Vec::new();
-        relay::stamp_a_facing_invite_advert(
-            &mut extra,
-            &[],
-            &capabilities::advertised(call, Face::Originator),
-        );
+        // §13.3.1.4 makes this a copy of the 2xx it retransmits, so it restates
+        // the advertisement that 2xx carried — recorded at answer time, since a
+        // set relayed from the callee is not derivable from the a-leg snapshot.
+        let mut extra: Vec<SipHeader> = d
+            .ext
+            .answered_advert
+            .iter()
+            .map(|(name, value)| SipHeader {
+                name: SipStr::owned(name),
+                value: SipStr::owned(value),
+            })
+            .collect();
+        if extra.is_empty() {
+            relay::stamp_a_facing_invite_advert(
+                &mut extra,
+                &[],
+                &capabilities::advertised(call, Face::Originator),
+            );
+        }
         let mut effect = relay::response_to_a_leg(
             &a_invite,
             200,
@@ -330,6 +354,7 @@ impl ActionExecutor<'_> {
             &service_owned,
             &capabilities::advertised(call, Face::Originator),
         );
+        Self::cache_answered_advert(call, &extra_headers);
         fx.outbound.push(relay::response_to_a_leg(
             &a_invite,
             status,

@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 
 use call::TimerType;
-use sip_message::SipMessage;
+use sip_message::{SipHeader, SipMessage};
 use sip_txn::{TimeoutKind, TransactionEvent};
 
 /// One thing that happens to a call: an inbound SIP message, a fired timer, a
@@ -33,6 +33,9 @@ pub enum CallEvent {
         from_tag: String,
         invite_cseq: Option<u32>,
         in_dialog: bool,
+        /// The CANCEL's own header lines — the canceller's `Reason` (RFC 3326
+        /// §2) among them, which the CANCEL this stack sends onward restates.
+        headers: Vec<SipHeader>,
     },
     /// A client transaction (b-leg INVITE, BYE, …) timed out with no final.
     Timeout {
@@ -76,8 +79,8 @@ impl CallEvent {
     pub fn from_txn(event: TransactionEvent) -> Self {
         match event {
             TransactionEvent::Message { message, src } => CallEvent::Sip { message, src },
-            TransactionEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog } => {
-                CallEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog }
+            TransactionEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers } => {
+                CallEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers }
             }
             TransactionEvent::Timeout {
                 branch,

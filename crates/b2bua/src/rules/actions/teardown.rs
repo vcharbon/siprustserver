@@ -8,13 +8,15 @@ use call::helpers::{
 };
 use call::{ByeDisposition, Call, LegDisposition, LegState, StackDialog, TimerType};
 use sip_message::generators::{
-    self, GenerateInDialogRequestOpts, InDialogMethod, InviteClientTransactionHandle,
+    self, GenerateInDialogRequestOpts, InDialogMethod, InviteClientTransactionHandle, RelayScope,
 };
+use sip_message::header::HeaderName;
 use sip_message::parser::custom::CustomParser;
-use sip_message::{SipMessage, SipParser};
+use sip_message::{Method, SipHeader, SipMessage, SipParser};
 use sip_txn::TxnKind;
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::rules::model::RuleContext;
 use crate::rules::relay;
 
 use super::select::find_pending_dialog;
@@ -39,9 +41,13 @@ impl ActionExecutor<'_> {
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
-        _source_leg_id: &str,
+        ctx: &RuleContext,
         reason: Option<&str>,
     ) {
+        // RFC 3261 §16.6: a termination the peer ASKED for restates what it
+        // said — the Q.850 cause (RFC 3326 §2), the charging correlation, the
+        // end-to-end data — on the BYE/CANCEL minted for the other leg.
+        let relayed = relayed_teardown_headers(ctx);
         // RFC 3326: stamp the teardown cause on each BYE only when the firing
         // rule supplied a structured `SIP;cause=…` value (the
         // `promote18xPemTo200` diagnostic teardown). The CORE rules pass opaque
@@ -68,9 +74,9 @@ impl ActionExecutor<'_> {
             match state {
                 LegState::Confirmed => {
                     let e = if is_a {
-                        self.bye_to_leg_a(call, reason_header)
+                        self.bye_to_leg_a(call, reason_header, &relayed)
                     } else {
-                        self.bye_to_b_leg(call, &id, reason_header)
+                        self.bye_to_b_leg(call, &id, reason_header, &relayed)
                     };
                     if let Some(e) = e {
                         fx.outbound.push(e);
@@ -101,7 +107,7 @@ impl ActionExecutor<'_> {
                             *call = set_leg_state(call.clone(), &id, LegState::Terminated);
                         }
                     } else {
-                        if let Some(e) = self.cancel_to_leg(call, &id) {
+                        if let Some(e) = self.cancel_to_leg(call, &id, &relayed) {
                             fx.outbound.push(e);
                         }
                         *call = set_bye_disposition(call.clone(), &id, ByeDisposition::Cancelled);
@@ -130,13 +136,13 @@ impl ActionExecutor<'_> {
             .or_else(|| (call.a_leg.leg_id == leg_id).then_some(call.a_leg.state));
         match state {
             Some(LegState::Confirmed) => {
-                if let Some(e) = self.bye_to_b_leg(call, leg_id, None) {
+                if let Some(e) = self.bye_to_b_leg(call, leg_id, None, &[]) {
                     fx.outbound.push(e);
                 }
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::ByeSent);
             }
             Some(LegState::Trying) | Some(LegState::Early) => {
-                if let Some(e) = self.cancel_to_leg(call, leg_id) {
+                if let Some(e) = self.cancel_to_leg(call, leg_id, &[]) {
                     fx.outbound.push(e);
                 }
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::Cancelled);
@@ -155,8 +161,14 @@ impl ActionExecutor<'_> {
 
     /// CANCEL a ringing b-leg and mark it `Cancelling`
     /// ([`crate::rules::model::RuleAction::CancelLeg`]).
-    pub(super) fn cancel_leg(&self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) {
-        if let Some(e) = self.cancel_to_leg(call, leg_id) {
+    pub(super) fn cancel_leg(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        ctx: &RuleContext,
+        leg_id: &str,
+    ) {
+        if let Some(e) = self.cancel_to_leg(call, leg_id, &relayed_teardown_headers(ctx)) {
             fx.outbound.push(e);
         }
         *call = set_leg_disposition(call.clone(), leg_id, LegDisposition::Cancelling);
@@ -190,13 +202,31 @@ impl ActionExecutor<'_> {
         }
     }
 
-    fn bye_to_b_leg(&self, call: &Call, leg_id: &str, reason: Option<&str>) -> Option<OutboundSipEffect> {
+    fn bye_to_b_leg(
+        &self,
+        call: &Call,
+        leg_id: &str,
+        reason: Option<&str>,
+        relayed: &[SipHeader],
+    ) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
         let d = leg.dialogs.first()?;
-        self.bye_on_dialog(&call.call_ref, leg_id, call.emergency == Some(true), &d.sip, reason)
+        self.bye_on_dialog(
+            &call.call_ref,
+            leg_id,
+            call.emergency == Some(true),
+            &d.sip,
+            reason,
+            relayed,
+        )
     }
 
-    fn bye_to_leg_a(&self, call: &Call, reason: Option<&str>) -> Option<OutboundSipEffect> {
+    fn bye_to_leg_a(
+        &self,
+        call: &Call,
+        reason: Option<&str>,
+        relayed: &[SipHeader],
+    ) -> Option<OutboundSipEffect> {
         let d = call.a_leg.dialogs.first()?;
         self.bye_on_dialog(
             &call.call_ref,
@@ -204,9 +234,11 @@ impl ActionExecutor<'_> {
             call.emergency == Some(true),
             &d.sip,
             reason,
+            relayed,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn bye_on_dialog(
         &self,
         call_ref: &str,
@@ -214,20 +246,29 @@ impl ActionExecutor<'_> {
         is_emergency: bool,
         sip: &StackDialog,
         reason: Option<&str>,
+        relayed: &[SipHeader],
     ) -> Option<OutboundSipEffect> {
         if sip.remote_tag.is_empty() {
             return None; // not a confirmed dialog
         }
         let dialog = relay::to_gen_dialog(sip);
         let branch = self.id_gen.new_branch();
-        let extra_headers = reason
+        let mut extra_headers: Vec<SipHeader> = reason
             .map(|r| {
-                vec![sip_message::SipHeader {
+                vec![SipHeader {
                     name: "Reason".to_string().into(),
                     value: r.to_string().into(),
                 }]
             })
             .unwrap_or_default();
+        // The firing rule's own statement is the more specific one and stands;
+        // every other name the releasing peer sent rides beside it.
+        for header in relayed {
+            let name = HeaderName::from(header.name.as_str());
+            if !extra_headers.iter().any(|h| name.matches(&h.name)) {
+                extra_headers.push(header.clone());
+            }
+        }
         // Per-dialog CSeq (§12.2.1.1): `generate_in_dialog_request` defaults to
         // this dialog's `local_cseq + 1`, the next sequence number within THIS
         // dialog (a forked sibling's CSeq is irrelevant — distinct dialog).
@@ -282,9 +323,10 @@ impl ActionExecutor<'_> {
         if req.cseq().seq() as i64 != outbound_cseq {
             return;
         }
-        let cancel = generators::generate_cancel(&InviteClientTransactionHandle {
-            original_invite: req,
-        });
+        let cancel = generators::generate_cancel(
+            &InviteClientTransactionHandle { original_invite: req },
+            &[],
+        );
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(cancel),
             mode: OutboundTxnMode::Raw,
@@ -296,7 +338,12 @@ impl ActionExecutor<'_> {
             call::helpers::cancel_pending_request(call.clone(), leg_id, &t_id, outbound_cseq);
     }
 
-    pub(super) fn cancel_to_leg(&self, call: &Call, leg_id: &str) -> Option<OutboundSipEffect> {
+    pub(super) fn cancel_to_leg(
+        &self,
+        call: &Call,
+        leg_id: &str,
+        relayed: &[SipHeader],
+    ) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
         let d = leg.dialogs.first()?;
         let handle = d.ext.pending_invite_txn.as_ref()?;
@@ -305,9 +352,10 @@ impl ActionExecutor<'_> {
             SipMessage::Request(r) => r,
             _ => return None,
         };
-        let cancel = generators::generate_cancel(&InviteClientTransactionHandle {
-            original_invite: req,
-        });
+        let cancel = generators::generate_cancel(
+            &InviteClientTransactionHandle { original_invite: req },
+            relayed,
+        );
         // RFC 3261 §9.1: the CANCEL follows the INVITE's next hop, NOT `leg.source`
         // (the callee's advertised address). When the b-leg egresses through the
         // front proxy (`b2b_outbound_proxy`), the INVITE's wire destination — cached
@@ -323,6 +371,21 @@ impl ActionExecutor<'_> {
             leg_id: Some(leg_id.to_string()),
         })
     }
+}
+
+/// What the peer said about the teardown it asked for, for the BYE or CANCEL
+/// this stack mints toward the other leg (RFC 3261 §16.6). RFC 3326 §2 scopes
+/// `Reason` to exactly these two methods, and the transaction layer already
+/// answered the CANCEL, so its lines ride the event rather than a request.
+/// Empty for a timer or a failure: those state a release of OURS, and nothing
+/// is put in the peer's mouth. The minted request carries no body, so the
+/// source's body metadata is withheld with it.
+fn relayed_teardown_headers(ctx: &RuleContext) -> Vec<SipHeader> {
+    let received = match ctx.request() {
+        Some(request) if request.method() == Method::Bye => request.headers(),
+        _ => ctx.cancelled_headers(),
+    };
+    generators::relayable_headers(received, RelayScope::request().without_source_body())
 }
 
 /// Hard-terminate every leg and the call ([`crate::rules::model::RuleAction::TerminateCall`],

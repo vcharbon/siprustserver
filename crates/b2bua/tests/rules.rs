@@ -601,6 +601,7 @@ fn b_leg_pending() -> Leg {
             pending_invite_txn: None,
             cached_sdp: None,
             pending_reinvite_2xx: None,
+            answered_advert: Vec::new(),
         },
     };
     Leg {
@@ -938,6 +939,7 @@ mod media_primitives {
                 pending_invite_txn: None,
                 cached_sdp: None,
                 pending_reinvite_2xx: None,
+                answered_advert: Vec::new(),
             },
         }];
     }
@@ -1255,6 +1257,7 @@ mod answer_a_leg_new_dialog {
                 pending_invite_txn: None,
                 cached_sdp: None,
                 pending_reinvite_2xx: None,
+                answered_advert: Vec::new(),
             },
         }];
         call

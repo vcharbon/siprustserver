@@ -114,7 +114,7 @@ impl ActionExecutor<'_> {
                 self.destroy_leg(call, fx, leg_id);
             }
             RuleAction::CancelLeg { leg_id } => {
-                self.cancel_leg(call, fx, leg_id);
+                self.cancel_leg(call, fx, ctx, leg_id);
             }
             RuleAction::CancelPendingReinvite { leg_id, outbound_cseq } => {
                 self.cancel_pending_reinvite(call, fx, leg_id, *outbound_cseq);
@@ -146,7 +146,7 @@ impl ActionExecutor<'_> {
                 terminate_all(call);
             }
             RuleAction::BeginTermination { reason } => {
-                self.begin_termination(call, fx, ctx.source_leg_id, reason.as_deref());
+                self.begin_termination(call, fx, ctx, reason.as_deref());
             }
             RuleAction::TerminateLeg {
                 leg_id,

@@ -420,6 +420,7 @@ impl Owner {
             from_tag: from_tag.to_string(),
             invite_cseq,
             in_dialog,
+            headers: req.headers().to_vec(),
         });
     }
 }

@@ -236,6 +236,42 @@ fn body_metadata_rides_only_with_the_body_it_describes() {
     );
 }
 
+/// RFC 3325 §7 / RFC 3323 §5.3: a message asking for privacy over its identity
+/// leaves the network's assertion behind. The instruction travels so the next
+/// element knows what was asked; the identity it suppresses does not.
+#[test]
+fn a_privacy_request_strips_the_asserted_identity_it_conceals() {
+    let asserted = |privacy: &str| {
+        let mut headers = vec![
+            hdr("P-Asserted-Identity", "<sip:+15551234@op.example>"),
+            hdr("P-Preferred-Identity", "<sip:+15551234@op.example>"),
+            hdr("Remote-Party-ID", "<sip:+15551234@op.example>;party=calling"),
+            hdr("X-Vendor-Thing", "kept"),
+        ];
+        if !privacy.is_empty() {
+            headers.push(hdr("Privacy", privacy));
+        }
+        relayable_headers(&headers, RelayScope::request())
+            .iter()
+            .map(|h| h.name.to_string())
+            .collect::<Vec<_>>()
+    };
+    for concealing in ["id", "id;critical", "header", "user", "session;id", "ID"] {
+        assert_eq!(
+            asserted(concealing),
+            vec!["X-Vendor-Thing", "Privacy"],
+            "{concealing} conceals the assertion and travels itself"
+        );
+    }
+    for open in ["", "none", "session", "critical"] {
+        assert_eq!(
+            asserted(open).first().map(String::as_str),
+            Some("P-Asserted-Identity"),
+            "{open:?} asks for nothing over the identity"
+        );
+    }
+}
+
 /// The compact forms name the same headers (RFC 3261 §7.3.3), so a peer using
 /// them cannot slip a generator-owned header past the relay.
 #[test]
@@ -652,7 +688,7 @@ fn ack_carries_sdp_body() {
 
 #[test]
 fn cancel_reuses_invite_topmost_via_verbatim() {
-    let cancel = generate_cancel(&invite_handle());
+    let cancel = generate_cancel(&invite_handle(), &[]);
     assert_eq!(cancel.method(), "CANCEL");
     assert_eq!(
         first_value(cancel.headers(), "Via"),
@@ -660,9 +696,29 @@ fn cancel_reuses_invite_topmost_via_verbatim() {
     );
 }
 
+/// RFC 3326 §2 scopes `Reason` to CANCEL and BYE, so a back-to-back UA
+/// cancelling on a peer's behalf restates the cause that peer gave.
+#[test]
+fn cancel_carries_the_cancellers_own_release_cause() {
+    let cancel = generate_cancel(
+        &invite_handle(),
+        &[hdr("Reason", "Q.850;cause=16"), hdr("P-Charging-Vector", "icid-value=\"abc\"")],
+    );
+    assert_eq!(first_value(cancel.headers(), "Reason"), Some("Q.850;cause=16"));
+    assert_eq!(
+        first_value(cancel.headers(), "P-Charging-Vector"),
+        Some("icid-value=\"abc\"")
+    );
+    assert_eq!(
+        first_value(cancel.headers(), "Via"),
+        Some("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123;cr=cref1;lg=b-1"),
+        "the correlation key is still the cancelled INVITE's"
+    );
+}
+
 #[test]
 fn cancel_mirrors_request_uri_callid_from_to_cseq() {
-    let cancel = generate_cancel(&invite_handle());
+    let cancel = generate_cancel(&invite_handle(), &[]);
     assert_eq!(cancel.request_uri().text(), "sip:bob@192.0.2.20:5060");
     assert_eq!(first_value(cancel.headers(), "Call-ID"), Some("call-bleg-1"));
     assert_eq!(first_value(cancel.headers(), "From"), Some("<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"));
@@ -690,7 +746,7 @@ fn cancel_and_non_2xx_ack_echo_the_invite_request_uri_octet_for_octet() {
     let invite = hydrate_request("INVITE", r_uri, headers, Vec::new()).expect("invite hydrates");
     let handle = InviteClientTransactionHandle { original_invite: invite };
 
-    assert_eq!(generate_cancel(&handle).request_uri().text(), r_uri);
+    assert_eq!(generate_cancel(&handle, &[]).request_uri().text(), r_uri);
 
     let final487 = generate_response(
         &handle.original_invite,
@@ -724,7 +780,7 @@ fn cancel_echoes_the_invite_route_set_verbatim() {
     ];
     let invite = hydrate_request("INVITE", "sip:bob@192.0.2.20:5060", headers, Vec::new())
         .expect("invite hydrates");
-    let cancel = generate_cancel(&InviteClientTransactionHandle { original_invite: invite });
+    let cancel = generate_cancel(&InviteClientTransactionHandle { original_invite: invite }, &[]);
 
     let cancel_routes: Vec<String> = cancel
         .headers()

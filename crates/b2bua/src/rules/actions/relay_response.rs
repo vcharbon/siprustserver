@@ -274,6 +274,7 @@ impl ActionExecutor<'_> {
             if (200..300).contains(&status) {
                 let caps = capabilities::relaying(call, Face::Originator, &passthrough);
                 relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
+                Self::cache_answered_advert(call, &passthrough);
             }
             let effect = relay::response_to_a_leg(
                 &a_invite,
@@ -313,6 +314,7 @@ impl ActionExecutor<'_> {
         if (200..300).contains(&status) {
             let caps = capabilities::relaying(call, Face::Originator, &passthrough);
             relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
+            Self::cache_answered_advert(call, &passthrough);
         }
         let effect = relay::response_to_a_leg(
             &a_invite,

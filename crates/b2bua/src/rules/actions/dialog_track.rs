@@ -284,6 +284,7 @@ impl ActionExecutor<'_> {
                 pending_invite_txn: None,
                 cached_sdp: None,
                 pending_reinvite_2xx: None,
+                answered_advert: Vec::new(),
             },
         };
         call.a_leg.dialogs = vec![dialog];

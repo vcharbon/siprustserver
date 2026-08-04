@@ -5,7 +5,7 @@ use super::spec::InviteClientTransactionHandle;
 use crate::draft::RequestDraft;
 use crate::header::{CSeq, ContentLength, HeaderName, MaxForwards};
 use crate::method::Method;
-use crate::types::SipRequest;
+use crate::types::{SipHeader, SipRequest};
 
 /// Build a CANCEL for the outstanding INVITE (RFC 3261 §9.1): the CANCEL "MUST
 /// have a single Via header field value, and that value MUST equal the top Via
@@ -18,7 +18,14 @@ use crate::types::SipRequest;
 /// Route: without it the CANCEL bypasses the proxy the INVITE traversed, and the
 /// cross-message audit flags `cancelRouteEchoesInvite`). Panics when the INVITE
 /// is missing a required header.
-pub fn generate_cancel(invite_txn: &InviteClientTransactionHandle) -> SipRequest {
+///
+/// `extra_headers` ride after the generator's own, in the order given: RFC 3326
+/// §2 scopes `Reason` to CANCEL and BYE, so a back-to-back UA cancelling on a
+/// peer's behalf restates here what that peer said about the cancellation.
+pub fn generate_cancel(
+    invite_txn: &InviteClientTransactionHandle,
+    extra_headers: &[SipHeader],
+) -> SipRequest {
     let invite = &invite_txn.original_invite;
     let echoed = |name: HeaderName| {
         invite
@@ -37,6 +44,7 @@ pub fn generate_cancel(invite_txn: &InviteClientTransactionHandle) -> SipRequest
     for route in invite.raw_text(HeaderName::Route) {
         draft = draft.push_raw(HeaderName::Route, route);
     }
+    draft = emit::extra_headers(draft, extra_headers);
 
     emit::request(draft.push(ContentLength::new(0)))
 }

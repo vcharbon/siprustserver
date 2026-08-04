@@ -170,6 +170,7 @@ pub fn make_empty_dialog(ctx: &MakeDialogLegCtx, initial_cseq: i64) -> Dialog {
             pending_invite_txn: None,
             cached_sdp: None,
             pending_reinvite_2xx: None,
+            answered_advert: Vec::new(),
         },
     }
 }
@@ -191,6 +192,7 @@ pub fn make_dialog_from_incoming(
             pending_invite_txn: None,
             cached_sdp: None,
             pending_reinvite_2xx: None,
+            answered_advert: Vec::new(),
         },
     }
 }

@@ -74,6 +74,7 @@ fn dialog(
             pending_invite_txn: None,
             cached_sdp: cached_sdp.then(|| SDP_BODY.to_vec()),
             pending_reinvite_2xx: None,
+            answered_advert: Vec::new(),
         },
     }
 }
@@ -464,6 +465,7 @@ fn arb_dialog() -> impl Strategy<Value = Dialog> {
                     pending_invite_txn,
                     cached_sdp,
                     pending_reinvite_2xx: None,
+                    answered_advert: Vec::new(),
                 }
             },
         );

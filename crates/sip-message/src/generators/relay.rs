@@ -101,6 +101,30 @@ const DESCRIBES_BODY: &[HeaderName] = &[
     HeaderName::MimeVersion,
 ];
 
+/// The network's own assertion about who the sender is — the thing RFC 3323
+/// privacy suppresses, as opposed to the `From` claim the sender makes.
+const ASSERTED_IDENTITY: &[HeaderName] = &[
+    HeaderName::PAssertedIdentity,
+    HeaderName::PPreferredIdentity,
+    HeaderName::RemotePartyId,
+];
+
+/// The RFC 3323 §4.2 priv-values that ask an intermediary to suppress the
+/// network's assertion before passing the message on: `id` is RFC 3325 §7's
+/// own, `header` and `user` are §5.3's broader levels.
+const CONCEALING_PRIV_VALUES: &[&str] = &["id", "header", "user"];
+
+/// True iff `headers` carry a privacy request that conceals the asserted
+/// identity. The priv-values are `;`-separated (RFC 3323 §4.2), and a value
+/// this stack does not model leaves the assertion alone.
+fn privacy_conceals_identity(headers: &[SipHeader]) -> bool {
+    headers
+        .iter()
+        .filter(|hdr| HeaderName::Privacy.matches(&hdr.name))
+        .flat_map(|hdr| hdr.value.as_str().split(';'))
+        .any(|value| CONCEALING_PRIV_VALUES.iter().any(|p| value.trim().eq_ignore_ascii_case(p)))
+}
+
 /// True iff a header the back-to-back UA received may be carried onto the
 /// message it mints for the peer (RFC 3261 §16.6). An extension header is
 /// always relayable: the relay never needs to know what a header means, only
@@ -127,8 +151,19 @@ pub fn relayable(name: &str, scope: RelayScope) -> bool {
 /// The received headers that ride onto the minted message, in wire order and
 /// with every repeat kept — callers pass the result through `extra_headers`, so
 /// each reaches the peer with its name spelling and value bytes unchanged.
+///
+/// RFC 3325 §7 / RFC 3323 §5.3: a message asking for privacy over its identity
+/// leaves the network's assertion behind. The instruction itself travels, so
+/// the next element still knows what was asked for; the identity it suppresses
+/// does not — the two must never cross a leg together.
 pub fn relayable_headers(headers: &[SipHeader], scope: RelayScope) -> Vec<SipHeader> {
-    headers.iter().filter(|hdr| relayable(&hdr.name, scope)).cloned().collect()
+    let conceal = privacy_conceals_identity(headers);
+    headers
+        .iter()
+        .filter(|hdr| relayable(&hdr.name, scope))
+        .filter(|hdr| !conceal || !ASSERTED_IDENTITY.iter().any(|n| n.matches(&hdr.name)))
+        .cloned()
+        .collect()
 }
 
 /// Inputs for [`generate_relayed_response`]. RFC 3261 §8.2.6.2 makes Via /

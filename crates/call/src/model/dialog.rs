@@ -106,6 +106,13 @@ pub struct B2buaDialogExt {
     /// decode-tolerant of a body encoded before it existed.
     #[serde(default)]
     pub pending_reinvite_2xx: Option<PendingReinvite2xx>,
+    /// The `(name, value)` advertisement lines the initial-INVITE 2xx carried to
+    /// the originator, cached beside `cached_sdp` at answer time. RFC 3261
+    /// §13.3.1.4 makes a retransmit a copy of the response it retransmits, and
+    /// the set resolved then — the callee's own relayed one, or a firing rule's
+    /// — is not derivable from the a-leg snapshot. Empty until answered.
+    #[serde(default)]
+    pub answered_advert: Vec<(String, String)>,
 }
 
 /// Composite Dialog = stack §12 state + B2BUA-only extensions.
