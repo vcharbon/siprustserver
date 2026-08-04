@@ -46,19 +46,23 @@ pub fn classify(err: &reqwest::Error) -> FailureCause {
 
 /// The chain's leaf is often a plain message (`hyper_util`'s resolver and the
 /// TLS stack both surface as text). Only definite markers count.
+///
+/// Order matters: the markers that name a whole failure phrase are tested
+/// first, and the bare `tls`/`ssl` tokens — which the target url embedded in
+/// `reqwest`'s own Display can carry — only after none of them matched.
 fn classify_text(text: &str) -> Option<FailureCause> {
     let t = text.to_ascii_lowercase();
     if t.contains("dns error") || t.contains("failed to lookup address") || t.contains("name or service not known") {
         return Some(FailureCause::Dns);
-    }
-    if t.contains("tls") || t.contains("certificate") || t.contains("ssl") {
-        return Some(FailureCause::Tls);
     }
     if t.contains("connection refused") {
         return Some(FailureCause::Refused);
     }
     if t.contains("connection reset") || t.contains("broken pipe") {
         return Some(FailureCause::ConnReset);
+    }
+    if t.contains("tls") || t.contains("certificate") || t.contains("ssl") {
+        return Some(FailureCause::Tls);
     }
     None
 }
@@ -74,5 +78,31 @@ mod tests {
         assert_eq!(classify_text("tcp connect error: Connection refused (os error 111)"), Some(FailureCause::Refused));
         assert_eq!(classify_text("connection reset by peer"), Some(FailureCause::ConnReset));
         assert_eq!(classify_text("error sending request"), None);
+    }
+
+    #[test]
+    fn a_target_named_tls_does_not_disguise_the_transport_failure() {
+        // reqwest's top-level Display embeds the request url, so the target's
+        // own name reaches the classifier.
+        assert_eq!(
+            classify_text(
+                "error sending request for url (http://tls-limiter.svc:8080/ssl/admit): \
+                 tcp connect error: Connection refused (os error 111)"
+            ),
+            Some(FailureCause::Refused),
+        );
+        assert_eq!(
+            classify_text("error sending request for url (http://ssl-host:8080/tls): connection reset by peer"),
+            Some(FailureCause::ConnReset),
+        );
+        assert_eq!(
+            classify_text("error sending request for url (http://tls-limiter.svc:8080/): dns error"),
+            Some(FailureCause::Dns),
+        );
+        // A genuine TLS failure still classifies as one.
+        assert_eq!(
+            classify_text("error sending request for url (http://peer:8080/): invalid peer certificate: Expired"),
+            Some(FailureCause::Tls),
+        );
     }
 }
