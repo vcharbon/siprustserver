@@ -193,6 +193,7 @@ impl ActionExecutor<'_> {
                 source_call_id: req.call_id().as_str().to_string(),
                 source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),
                 source_to: req.raw(HeaderName::To).next().unwrap_or_default().to_string(),
+                source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
                 direction: ctx.direction,
                 cancelled: false,
             };

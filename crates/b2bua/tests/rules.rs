@@ -818,6 +818,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         None,
         &[],
         &CapabilitySet::default(),
+        None, // no charging vector
         None,
     )
     .expect("no identity rewrites, so nothing to refuse");
@@ -2170,6 +2171,7 @@ fn a_declared_capability_set_reaches_the_originated_leg_wire_header() {
         None,
         &[],
         &b2bua::rules::capabilities::for_leg(&call, "b-1"),
+        None, // no charging vector
         None,
     )
     .expect("no identity rewrites, so nothing to refuse");

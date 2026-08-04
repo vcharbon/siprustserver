@@ -137,9 +137,12 @@ impl ActionExecutor<'_> {
         let content_type = (!body.is_empty()).then(relay::sdp);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
-        // A 2xx INVITE answer carries the B2BUA's own Allow/Supported (RFC 3261
-        // §13.2.1/§20.37), exactly as the original confirm-dialog relay stamped —
-        // so the retransmit is byte-faithful and the RFC audit stays clean.
+        // A 2xx INVITE answer carries the originator face's Allow/Supported
+        // (RFC 3261 §13.2.1/§20.37). The retransmit rebuilds from the a-leg
+        // INVITE snapshot, which holds the caller's message, not the callee's.
+        // FIXME(b2bua): a 2xx whose advertisement came from the callee's own
+        // (relayed) or from a firing rule's set retransmits with the face's set
+        // instead — cache the advertised lines beside `cached_sdp` at relay time.
         let mut extra: Vec<SipHeader> = Vec::new();
         relay::stamp_a_facing_invite_advert(
             &mut extra,

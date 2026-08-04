@@ -17,6 +17,7 @@
 //! module would shadow the prelude's `From` trait.
 
 mod aliases;
+mod charging;
 mod class;
 mod credentials;
 mod identity;
@@ -42,6 +43,7 @@ pub use aliases::{
     Require, RetryAfter, RouteEntry, ServiceRouteEntry, SessionExpires, SubscriptionState,
     Supported, To, Unsupported, WwwAuthenticate,
 };
+pub use charging::ChargingVector;
 pub use class::HeaderClass;
 pub use identity::{CSeq, CallId, RAck};
 pub use credentials::Credentials;

@@ -15,8 +15,8 @@ use sip_message::generators::{
     GenerateResponseOpts, OutOfDialogMethod, RelayScope,
 };
 use sip_message::header::{
-    self, HeaderName, HeaderValue, HostPort, MaxForwards, MediaType, NameAddr, ParamValue,
-    RouteEntry, Uri, Via,
+    self, ChargingVector, HeaderName, HeaderValue, HostPort, MaxForwards, MediaType, NameAddr,
+    ParamValue, RouteEntry, Uri, Via,
 };
 use sip_message::{Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
@@ -371,10 +371,16 @@ pub fn build_b_leg(
     // the C INVITE. The basic-B2BUA path passes `(None, &[])`.
     body_override: Option<&[u8]>,
     header_updates: &[(String, Option<String>)],
-    // Capability set advertised on this originated leg (`Allow`/`Supported`).
-    // `CapabilitySet::default()` is the stack set — today's advertisement.
-    // A `header_updates` entry naming either header is more specific and wins.
+    // Capability set advertised on this originated leg (`Allow`/`Supported`),
+    // resolved by the caller: declared, else relayed from the originator, else
+    // the stack set (`rules::capabilities`). A `header_updates` entry naming
+    // either header is more specific and wins.
     capabilities: &CapabilitySet,
+    // RFC 7315 §5.6 charging correlation. `Some` stamps an icid identifying
+    // this leg's charging session; `None` stamps none. A vector the originator
+    // sent is relayed either way and never re-minted — re-minting it breaks the
+    // correlation between the two operators' records.
+    charging: Option<&call::features::ChargingVectorFeature>,
     // Leg role (ADR-0014/0016). `None` ⇒ [`LegKind::Destination`]. `adopted` is
     // left `None` so it derives from the kind (`is_adopted`): a `media` leg is
     // unadopted and thus gated out of the generic relay-to-peer fallback.
@@ -465,6 +471,23 @@ pub fn build_b_leg(
         let name = HeaderName::from(header.name.as_str());
         if !stated.iter().any(|h| name.matches(&h.name)) {
             extra_headers.push(header);
+        }
+    }
+
+    // RFC 7315 §5.6: the element that STARTS a leg generates the identifier its
+    // charging session is correlated on. One already on the message — relayed
+    // from the originator, or stated by the decision — is that identifier, so
+    // this only ever mints where none arrived.
+    if let Some(charging) = charging {
+        let name = ChargingVector::header_name();
+        if !extra_headers.iter().any(|h| name.matches(&h.name)) {
+            let host =
+                charging.generated_at.clone().unwrap_or_else(|| config.sip_local_ip.clone());
+            let icid = format!("{}-{}", id_gen.new_tag(), leg_id);
+            extra_headers.push(MsgHeader {
+                name: SipStr::owned(name.as_wire_str()),
+                value: SipStr::owned(&ChargingVector::new(icid, host).to_wire()),
+            });
         }
     }
 
@@ -585,13 +608,12 @@ pub fn relay_response_passthrough_headers(
 
 /// Ensure an a-facing INVITE 2xx header set carries exactly ONE `Allow` and ONE
 /// `Supported` — the capability set advertised toward the originator (RFC 3261
-/// §13.2.1/§20.37). The B2BUA is a back-to-back UA: a 2xx it mints toward the
-/// caller must advertise *its* methods/extensions, not whatever the callee's
-/// 200 happened to carry (or omit). `capabilities` is the set for this face
-/// (`CapabilitySet::default()` = the stack set); `rule_stamped` names the
+/// §13.2.1/§20.37). `capabilities` is the set for this face, which the caller
+/// resolves from the declaration, the callee's own relayed advertisement and
+/// the stack set (`rules::capabilities::relaying`); `rule_stamped` names the
 /// headers the firing rule already set with its own value — those are more
-/// specific, so they are kept verbatim and only de-duplicated. For the rest we
-/// drop the callee's passed-through value and append `capabilities`. Either way
+/// specific, so they are kept verbatim and only de-duplicated. For the rest the
+/// passed-through lines collapse into the single resolved value. Either way
 /// exactly one of each results (no §7.3.1 duplicate); `Require`/`RSeq`
 /// (reliable-provisional negotiation) are untouched.
 pub fn stamp_a_facing_invite_advert(
@@ -978,6 +1000,7 @@ Content-Length: 0\r\n\r\n",
             None, // no body override
             &[],  // no header updates
             &CapabilitySet::default(), // undeclared → the stack capability set
+            None,
             None, // Destination leg
         )
         .expect("no identity rewrites, so nothing to refuse");
@@ -1042,6 +1065,7 @@ Content-Length: 0\r\n\r\n",
             None,
             &[],
             &CapabilitySet::default(),
+            None, // no charging vector
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
@@ -1131,6 +1155,7 @@ Content-Length: 0\r\n\r\n",
             None,
             &[],
             &CapabilitySet::default(),
+            None, // no charging vector
             None,
         )
         .expect("the R-URI under test reads");
@@ -1222,6 +1247,7 @@ Content-Length: 0\r\n\r\n",
             None,
             &updates,
             &CapabilitySet::default(),
+            None, // no charging vector
             None,
         )
         .map(|(_leg, effect)| match effect.body {
@@ -1352,6 +1378,7 @@ Content-Length: 0\r\n\r\n";
             None,
             &[],
             &CapabilitySet::default(),
+            None, // no charging vector
             None,
         )
     }
@@ -1448,14 +1475,23 @@ mod advertisement_tests {
     use sip_message::{SipMessage, SipParser};
 
     fn a_leg_invite() -> SipRequest {
-        let raw = "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
+        a_leg_invite_carrying(&[])
+    }
+
+    /// Alice's INVITE, carrying `extra` header lines of her own.
+    pub(super) fn a_leg_invite_carrying(extra: &[(&str, &str)]) -> SipRequest {
+        let mut raw = "INVITE sip:bob@10.244.2.7:5060 SIP/2.0\r\n\
 Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-alice;lg=a\r\n\
 Max-Forwards: 70\r\n\
 From: <sip:alice@192.0.2.5:5060>;tag=alice-from-tag\r\n\
 To: <sip:bob@10.244.2.7:5060>\r\n\
 Call-ID: alice-call-id@192.0.2.5\r\n\
-CSeq: 314 INVITE\r\n\
-Content-Length: 0\r\n\r\n";
+CSeq: 314 INVITE\r\n"
+            .to_string();
+        for (name, value) in extra {
+            raw.push_str(&format!("{name}: {value}\r\n"));
+        }
+        raw.push_str("Content-Length: 0\r\n\r\n");
         match CustomParser::new().parse(raw.as_bytes()).unwrap() {
             SipMessage::Request(r) => r,
             _ => panic!("expected request"),
@@ -1467,11 +1503,20 @@ Content-Length: 0\r\n\r\n";
         capabilities: &CapabilitySet,
         header_updates: &[(String, Option<String>)],
     ) -> (Option<String>, Option<String>) {
+        b_leg_advert_from(&a_leg_invite(), capabilities, header_updates)
+    }
+
+    /// The same, for an originator INVITE that advertises a set of its own.
+    fn b_leg_advert_from(
+        a_leg_invite: &SipRequest,
+        capabilities: &CapabilitySet,
+        header_updates: &[(String, Option<String>)],
+    ) -> (Option<String>, Option<String>) {
         let (_leg, effect) = build_b_leg(
             "w0|call-ref|xyz",
             "b-1",
             false,
-            &a_leg_invite(),
+            a_leg_invite,
             ("10.244.2.7".to_string(), 5060),
             None,
             None,
@@ -1482,6 +1527,7 @@ Content-Length: 0\r\n\r\n";
             None,
             header_updates,
             capabilities,
+            None, // no charging vector
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
@@ -1664,5 +1710,189 @@ Content-Length: 0\r\n\r\n";
         let (allow, supported) = relayed_reinvite_advert(&CapabilitySet::default(), &[]);
         assert_eq!(allow.as_deref(), Some(generators::B2BUA_ALLOW));
         assert_eq!(supported.as_deref(), Some("100rel, timer, replaces"));
+    }
+
+    /// The originator's own advertisement travels onto the leg the B2BUA
+    /// originates (RFC 3261 §16.6): every method she accepts is still there,
+    /// with the stack's own added — the face accepts those too.
+    #[test]
+    fn the_originators_methods_reach_the_originated_leg_with_the_stacks_added() {
+        let invite = a_leg_invite_carrying(&[("Allow", "INVITE, ACK, BYE, MESSAGE")]);
+        let caps = crate::rules::capabilities::relaying_in(
+            None,
+            crate::rules::capabilities::Face::Originated,
+            invite.headers(),
+        );
+        let (allow, _) = b_leg_advert_from(&invite, &caps, &[]);
+        let allow = allow.expect("the originated leg advertises its methods");
+        for method in ["INVITE", "ACK", "BYE", "MESSAGE"] {
+            assert!(allow.contains(method), "{method} the originator accepts must survive");
+        }
+        assert!(allow.contains("PRACK"), "a method the stack services is added");
+    }
+
+    /// An option tag obliges whoever advertises it: the originated leg claims
+    /// exactly what the originator claimed — the captured tag is not dropped,
+    /// and `100rel`/`timer` are not invented on her behalf.
+    #[test]
+    fn the_originated_leg_claims_the_originators_option_tags_and_no_others() {
+        let invite = a_leg_invite_carrying(&[("Supported", "path, gin")]);
+        let caps = crate::rules::capabilities::relaying_in(
+            None,
+            crate::rules::capabilities::Face::Originated,
+            invite.headers(),
+        );
+        let (_, supported) = b_leg_advert_from(&invite, &caps, &[]);
+        assert_eq!(supported.as_deref(), Some("path, gin"));
+    }
+
+    /// A declaration is the more specific statement and still outranks the
+    /// relayed set, half for half.
+    #[test]
+    fn a_declaration_outranks_the_originators_relayed_set() {
+        let invite =
+            a_leg_invite_carrying(&[("Allow", "INVITE, MESSAGE"), ("Supported", "path")]);
+        let features = declaring_originated(Some(vec!["INVITE".into(), "ACK".into()]), None);
+        let caps = crate::rules::capabilities::relaying_in(
+            Some(&features),
+            crate::rules::capabilities::Face::Originated,
+            invite.headers(),
+        );
+        let (allow, supported) = b_leg_advert_from(&invite, &caps, &[]);
+        assert_eq!(allow.as_deref(), Some("INVITE, ACK"), "the declared half stands");
+        assert_eq!(supported.as_deref(), Some("path"), "the undeclared half relays");
+    }
+
+    /// Feature activations declaring a set toward the originated face.
+    fn declaring_originated(
+        allow: Option<Vec<String>>,
+        supported: Option<Vec<String>>,
+    ) -> call::features::FeatureActivations {
+        call::features::FeatureActivations {
+            platform: call::features::PlatformActivations {
+                max_duration_sec: 3_600,
+                keepalive: call::features::KeepaliveActivation {
+                    interval_sec: 30,
+                    max_missed: 2,
+                },
+            },
+            refer: None,
+            relay_first_18x_to_180: None,
+            no_answer_timeout_sec: None,
+            call_limiters: None,
+            charging_vector: None,
+            advertise_capabilities: Some(call::features::AdvertiseCapabilitiesFeature {
+                toward_originator: None,
+                toward_originated: Some(call::features::AdvertisedCapabilities {
+                    allow,
+                    supported,
+                }),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod charging_tests {
+    //! RFC 7315 §5.6 charging correlation on a leg the B2BUA originates.
+    use super::advertisement_tests::a_leg_invite_carrying;
+    use super::*;
+    use call::features::ChargingVectorFeature;
+
+    /// The `P-Charging-Vector` the originated-leg INVITE carries, if any.
+    fn b_leg_vector(
+        a_leg_invite: &SipRequest,
+        charging: Option<&ChargingVectorFeature>,
+    ) -> Option<String> {
+        b_leg_vector_from(a_leg_invite, charging, &IdGen::seeded(0xCAB))
+    }
+
+    /// The same, on a stated generator — one worker's identifier stream.
+    fn b_leg_vector_from(
+        a_leg_invite: &SipRequest,
+        charging: Option<&ChargingVectorFeature>,
+        id_gen: &IdGen,
+    ) -> Option<String> {
+        let (_leg, effect) = build_b_leg(
+            "w0|call-ref|xyz",
+            "b-1",
+            false,
+            a_leg_invite,
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            id_gen,
+            None,
+            &[],
+            &CapabilitySet::default(),
+            charging,
+            None,
+        )
+        .expect("no identity rewrites, so nothing to refuse");
+        let invite = match effect.body {
+            OutboundBody::Request(r) => r,
+            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+        };
+        let name = ChargingVector::header_name();
+        invite
+            .headers()
+            .iter()
+            .find(|h| name.matches(&h.name))
+            .map(|h| h.value.as_str().to_string())
+    }
+
+    /// Armed and nothing received: the element starting the leg generates the
+    /// identifier, stating where it generated it.
+    #[test]
+    fn an_originated_leg_carries_a_generated_identifier() {
+        let value = b_leg_vector(&a_leg_invite_carrying(&[]), Some(&ChargingVectorFeature::default()))
+            .expect("an armed call stamps a charging vector");
+        let parsed = ChargingVector::parse(&SipStr::owned(&value)).expect("RFC 7315 §5.6 form");
+        assert!(!parsed.icid_value().is_empty());
+        assert_eq!(parsed.icid_generated_at(), Some(B2buaConfig::default().sip_local_ip.as_str()));
+    }
+
+    /// Two legs of two calls never share an identifier — it is the key the
+    /// records are matched on.
+    #[test]
+    fn each_originated_leg_generates_its_own_identifier() {
+        let arm = ChargingVectorFeature::default();
+        let id_gen = IdGen::seeded(0xCAB);
+        let first = b_leg_vector_from(&a_leg_invite_carrying(&[]), Some(&arm), &id_gen);
+        let second = b_leg_vector_from(&a_leg_invite_carrying(&[]), Some(&arm), &id_gen);
+        assert_ne!(first, second);
+    }
+
+    /// The correlation invariant: a vector the originator sent is the session's
+    /// identifier, relayed unchanged — an armed call never re-mints it.
+    #[test]
+    fn a_received_identifier_is_relayed_unchanged_even_when_armed() {
+        let received = "icid-value=abc123;icid-generated-at=upstream.example";
+        let invite = a_leg_invite_carrying(&[("P-Charging-Vector", received)]);
+        assert_eq!(
+            b_leg_vector(&invite, Some(&ChargingVectorFeature::default())).as_deref(),
+            Some(received)
+        );
+    }
+
+    /// Unarmed: the stack generates none, and a received one still relays.
+    #[test]
+    fn an_unarmed_call_generates_none() {
+        assert_eq!(b_leg_vector(&a_leg_invite_carrying(&[]), None), None);
+        let received = "icid-value=abc123";
+        let invite = a_leg_invite_carrying(&[("P-Charging-Vector", received)]);
+        assert_eq!(b_leg_vector(&invite, None).as_deref(), Some(received));
+    }
+
+    /// The arm names the element the identifier is generated at.
+    #[test]
+    fn the_arm_names_the_generating_element() {
+        let arm = ChargingVectorFeature { generated_at: Some("edge.example".to_string()) };
+        let value = b_leg_vector(&a_leg_invite_carrying(&[]), Some(&arm)).expect("armed");
+        let parsed = ChargingVector::parse(&SipStr::owned(&value)).unwrap();
+        assert_eq!(parsed.icid_generated_at(), Some("edge.example"));
     }
 }

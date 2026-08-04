@@ -2,12 +2,14 @@
 //! Port of `tests/sip/generators.test.ts`.
 
 use sip_message::generators::{
-    generate_ack_for_2xx, generate_ack_for_non_2xx, relayable, relayable_headers, RelayScope,
-    generate_cancel, generate_in_dialog_request, generate_out_of_dialog_request, generate_response,
-    GenerateAckFor2xxOpts, GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts,
+    generate_ack_for_2xx, generate_ack_for_non_2xx, generate_relayed_response, relayable,
+    relayable_headers, RelayScope, generate_cancel, generate_in_dialog_request,
+    generate_out_of_dialog_request, generate_response, GenerateAckFor2xxOpts,
+    GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, GenerateRelayedResponseOpts,
     CapabilitySet, GenerateResponseOpts, InDialogMethod, InviteClientTransactionHandle,
     OutOfDialogMethod, StackDialog,
 };
+use sip_message::draft::Entry;
 use sip_message::header::{
     self, Event, HeaderName, HeaderValue, MediaType, ParamValue, RAck, SubscriptionState, Uri, Via,
 };
@@ -783,6 +785,80 @@ fn mints_fallback_to_tag_when_caller_supplies_none_on_non100() {
     // Deterministic per Call-ID: a retransmit re-derives the same tag.
     let resp2 = generate_response(&req, 200, "OK", &GenerateResponseOpts::default());
     assert_eq!(first_value(resp2.headers(), "To"), Some(to));
+}
+
+/// RFC 3261 §8.2.6.1: the 100 answering a request that carried a Timestamp
+/// carries that Timestamp — it is how the requester measures the round trip.
+#[test]
+fn echoes_the_requests_timestamp_on_the_100_and_on_every_later_response() {
+    let mut headers = make_a_leg_invite().headers().to_vec();
+    headers.push(hdr("Timestamp", "54"));
+    let req = hydrate_request(
+        "INVITE",
+        "sip:bob@biloxi.example.com",
+        headers,
+        sdp_body(),
+    )
+    .expect("a-leg hydrates");
+
+    for status in [100u16, 180, 200, 486] {
+        let resp = generate_response(&req, status, "…", &GenerateResponseOpts::default());
+        assert_eq!(
+            first_value(resp.headers(), "Timestamp"),
+            Some("54"),
+            "the {status} must echo the request's Timestamp"
+        );
+        assert_eq!(all_values(resp.headers(), "Timestamp").len(), 1);
+    }
+}
+
+/// A response rebuilt from a snapshot answers the SNAPSHOTTED request, so the
+/// Timestamp it echoes is the requester's own — never the peer's (§8.2.6.1).
+#[test]
+fn a_relayed_response_echoes_the_snapshotted_requests_timestamp() {
+    let echo = |name: HeaderName, text: &str| Entry::raw(name, SipStr::owned(text));
+    let opts = GenerateRelayedResponseOpts {
+        vias: vec![echo(HeaderName::Via, "SIP/2.0/UDP atlanta.example.com:5060;branch=z9hG4bKa")],
+        from: Some(echo(HeaderName::From, "<sip:alice@atlanta.example.com>;tag=alice-tag")),
+        to: Some(echo(HeaderName::To, "<sip:bob@biloxi.example.com>;tag=b2bua")),
+        call_id: Some(echo(HeaderName::CallId, "call-aleg-1")),
+        cseq: Some(echo(HeaderName::CSeq, "2 OPTIONS")),
+        timestamp: Some(echo(HeaderName::Timestamp, "1392.3")),
+        ..Default::default()
+    };
+    let resp = generate_relayed_response(200, "OK", &opts);
+    assert_eq!(all_values(resp.headers(), "Timestamp"), vec!["1392.3"]);
+
+    let none = GenerateRelayedResponseOpts { timestamp: None, ..opts };
+    assert_eq!(all_values(generate_relayed_response(200, "OK", &none).headers(), "Timestamp").len(), 0);
+}
+
+/// §20.38 defines the header only where the request carried one: a request
+/// without a Timestamp is answered without one.
+#[test]
+fn a_request_without_a_timestamp_is_answered_without_one() {
+    let resp =
+        generate_response(&make_a_leg_invite(), 200, "OK", &GenerateResponseOpts::default());
+    assert_eq!(first_value(resp.headers(), "Timestamp"), None);
+}
+
+/// A caller stating its own Timestamp owns it — the echo never duplicates it.
+#[test]
+fn a_caller_stated_timestamp_beats_the_echo() {
+    let mut headers = make_a_leg_invite().headers().to_vec();
+    headers.push(hdr("Timestamp", "54"));
+    let req = hydrate_request("INVITE", "sip:bob@biloxi.example.com", headers, sdp_body())
+        .expect("a-leg hydrates");
+    let resp = generate_response(
+        &req,
+        200,
+        "OK",
+        &GenerateResponseOpts {
+            extra_headers: vec![hdr("Timestamp", "54 0.5")],
+            ..Default::default()
+        },
+    );
+    assert_eq!(all_values(resp.headers(), "Timestamp"), vec!["54 0.5"]);
 }
 
 #[test]

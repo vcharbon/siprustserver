@@ -27,6 +27,10 @@ pub struct PendingRequest {
     pub source_call_id: String,
     pub source_from: String,
     pub source_to: String,
+    /// The requester's `Timestamp`, held so the response echoes the value the
+    /// request carried (RFC 3261 §8.2.6.1); absent when the request carried none.
+    #[serde(default)]
+    pub source_timestamp: Option<String>,
     pub direction: Direction,
     /// The originator CANCELled this relayed (re-)INVITE (RFC 3261 §9): the
     /// B2BUA CANCELled the outbound client transaction and the txn layer

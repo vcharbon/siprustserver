@@ -12,6 +12,7 @@
 
 use crate::draft::Entry;
 use crate::header::{Allow, HeaderValue, Supported};
+use crate::types::SipHeader;
 
 /// RFC 3261 §13.2.1 / §20.5 — the methods the stack accepts, advertised when
 /// the caller declares no set of its own.
@@ -57,6 +58,27 @@ impl CapabilitySet {
         Self { allow: self.allow.clone(), supported: self.supported.clone().without(tag) }
     }
 
+    /// This set as a face that carries the peer's own advertisement through
+    /// states it (RFC 3261 §16.6). Per half, from `received`:
+    ///
+    /// - `Allow` — the received methods, with this set's own added: a method
+    ///   this stack services is one the face accepts, whoever asked for it.
+    /// - `Supported` — the received option tags VERBATIM. An option tag obliges
+    ///   whoever advertises it (§20.37), so the face claims an extension only
+    ///   where the peer's own set claimed it.
+    ///
+    /// A half `received` carries no line for falls back to this set's half.
+    pub fn relaying(&self, received: &[SipHeader]) -> Self {
+        Self {
+            allow: match line_value::<Allow>(received) {
+                Some(peer) => Allow::combine(vec![peer, self.allow.clone()])
+                    .unwrap_or_else(|| self.allow.clone()),
+                None => self.allow.clone(),
+            },
+            supported: line_value::<Supported>(received).unwrap_or_else(|| self.supported.clone()),
+        }
+    }
+
     /// The two header lines this set advertises, `Allow` then `Supported`, as
     /// draft entries a rule can stamp on a message it mints.
     pub fn entries(&self) -> [Entry; 2] {
@@ -72,6 +94,20 @@ impl CapabilitySet {
     pub fn supported_text(&self) -> String {
         self.supported.to_wire()
     }
+}
+
+/// The value `received` states for the set-like header `V`, or `None` when it
+/// carries no line of that header. Several lines are one set (RFC 3261 §7.3.1),
+/// and a line whose value is empty states the empty set — a statement, distinct
+/// from carrying no line at all.
+fn line_value<V: HeaderValue>(received: &[SipHeader]) -> Option<V> {
+    let name = V::header_name();
+    let lines: Vec<V> = received
+        .iter()
+        .filter(|h| name.matches(&h.name))
+        .filter_map(|h| V::parse(&h.value).ok())
+        .collect();
+    V::combine(lines)
 }
 
 /// The stack's own capability set — what every face advertises when nothing
@@ -134,6 +170,52 @@ mod tests {
         let caps = CapabilitySet::new(Allow::empty(), Supported::of(["timer"]));
         assert_eq!(caps.allow_text(), "");
         assert_eq!(caps.supported_text(), "timer");
+    }
+
+    fn received(lines: &[(&str, &str)]) -> Vec<SipHeader> {
+        lines
+            .iter()
+            .map(|(name, value)| SipHeader {
+                name: crate::sip_str::SipStr::owned(name),
+                value: crate::sip_str::SipStr::owned(value),
+            })
+            .collect()
+    }
+
+    /// The peer's methods lead and the stack's own are added — the face accepts
+    /// both — while the option tags are exactly the peer's: an extension is
+    /// claimed only where the peer claimed it.
+    #[test]
+    fn a_relayed_set_keeps_the_peer_tokens_and_adds_the_stack_methods() {
+        let caps = CapabilitySet::default()
+            .relaying(&received(&[("Allow", "INVITE, ACK, BYE, MESSAGE"), ("Supported", "path")]));
+        assert_eq!(
+            caps.allow_text(),
+            "INVITE, ACK, BYE, MESSAGE, CANCEL, OPTIONS, UPDATE, INFO, REFER, NOTIFY, PRACK"
+        );
+        assert_eq!(caps.supported_text(), "path");
+    }
+
+    /// A half the peer never advertised falls back to this set's half, so a
+    /// reception carrying neither is indistinguishable from an unrelayed mint.
+    #[test]
+    fn a_half_the_peer_never_sent_falls_back_to_this_set() {
+        let caps = CapabilitySet::default().relaying(&received(&[("Supported", "100rel")]));
+        assert_eq!(caps.allow_text(), B2BUA_ALLOW);
+        assert_eq!(caps.supported_text(), "100rel");
+        assert_eq!(CapabilitySet::default().relaying(&[]), CapabilitySet::default());
+    }
+
+    /// Compact and repeated lines are the same set (RFC 3261 §7.3.1/§7.3.3),
+    /// and an empty line states the empty set rather than falling back.
+    #[test]
+    fn repeated_and_empty_lines_read_as_one_set() {
+        let caps = CapabilitySet::default()
+            .relaying(&received(&[("Supported", "timer"), ("k", "replaces")]));
+        assert_eq!(caps.supported_text(), "timer, replaces");
+
+        let none = CapabilitySet::default().relaying(&received(&[("Supported", "")]));
+        assert_eq!(none.supported_text(), "");
     }
 
     #[test]

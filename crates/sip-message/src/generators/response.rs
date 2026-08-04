@@ -115,6 +115,16 @@ pub fn generate_response(
         .push_raw(HeaderName::CallId, call_id)
         .push_raw(HeaderName::CSeq, line(HeaderName::CSeq));
 
+    // RFC 3261 §8.2.6.1 / §20.38: a request carrying a Timestamp is answered
+    // with that same Timestamp, so the requester can measure the round trip
+    // against the value it sent. The delay this stack adds is not measured, so
+    // no delay is appended. A caller stating its own Timestamp owns it.
+    if !emit::carries(&opts.extra_headers, &HeaderName::Timestamp) {
+        for timestamp in incoming_request.raw_text(HeaderName::Timestamp).take(1) {
+            draft = draft.push_raw(HeaderName::Timestamp, timestamp);
+        }
+    }
+
     if let Some(contact) = opts.contact.clone() {
         draft = draft.push(contact);
     }

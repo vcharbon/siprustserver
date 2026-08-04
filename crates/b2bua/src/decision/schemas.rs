@@ -393,5 +393,6 @@ pub fn default_platform_features() -> FeatureActivations {
         no_answer_timeout_sec: None,
         call_limiters: None,
         advertise_capabilities: None,
+        charging_vector: None,
     }
 }

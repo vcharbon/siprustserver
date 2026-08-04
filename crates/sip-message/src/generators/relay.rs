@@ -152,6 +152,9 @@ pub struct GenerateRelayedResponseOpts {
     pub content_type: Option<MediaType>,
     /// Non-structural headers carried through from the source response (§16.6).
     pub transparent_headers: Vec<SipHeader>,
+    /// Timestamp of the request being answered, echoed unchanged (§8.2.6.1 /
+    /// §20.38). The relay holds the requester's own bytes, so it rides raw.
+    pub timestamp: Option<Entry>,
     /// Record-Route headers reflected in received order.
     pub record_routes: Vec<Entry>,
     pub contact: Option<header::Contact>,
@@ -181,6 +184,9 @@ pub fn generate_relayed_response(
     draft = echo(draft, &opts.to, HeaderName::To);
     draft = echo(draft, &opts.call_id, HeaderName::CallId);
     draft = echo(draft, &opts.cseq, HeaderName::CSeq);
+    if let Some(timestamp) = &opts.timestamp {
+        draft = draft.push_entry(timestamp.clone());
+    }
 
     draft = emit::extra_headers(draft, &opts.transparent_headers);
 

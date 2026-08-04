@@ -65,6 +65,7 @@ fn dialog(
                     source_call_id: call_id.to_string(),
                     source_from: "<sip:alice@example.com>;tag=alice-001".into(),
                     source_to: "<sip:bob@example.com>;tag=b2bua-aleg".into(),
+                    source_timestamp: None,
                     direction: Direction::FromA,
                     cancelled: false,
                 })
@@ -242,6 +243,7 @@ pub fn representative_call() -> Call {
             no_answer_timeout_sec: Some(45),
             call_limiters: None,
             advertise_capabilities: None,
+            charging_vector: None,
         }),
         policy_update_headers: None,
         policy_update_body: None,
@@ -413,6 +415,7 @@ fn arb_pending_request() -> impl Strategy<Value = PendingRequest> {
                     source_call_id,
                     source_from,
                     source_to,
+                    source_timestamp: None,
                     direction,
                     cancelled: false,
                 }
@@ -606,6 +609,7 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
             no_answer_timeout_sec: no_answer,
             call_limiters: None,
             advertise_capabilities: None,
+            charging_vector: None,
         })
 }
 

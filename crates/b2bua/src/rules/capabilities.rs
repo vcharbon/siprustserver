@@ -7,10 +7,11 @@
 //! Precedence at every mint point, most specific first: an explicit header
 //! update carried on the message (a decision's `header_updates`, a firing
 //! rule's own `Allow`/`Supported`) beats the call's declared set for that face,
-//! which beats [`CapabilitySet::default`] — the stack set, which is what an
-//! undeclared face advertises. A value RELAYED from the other peer is not an
-//! explicit update and never outranks a declaration: the messages that carry
-//! one, the relayed requests, drop it (see [`declared_advert_headers`]).
+//! which beats the set RELAYED from the peer (RFC 3261 §16.6, [`relaying`]),
+//! which beats [`CapabilitySet::default`] — the stack set, advertised where the
+//! peer advertised nothing. A relayed value is not an explicit update and never
+//! outranks a declaration: the messages that carry one, the relayed requests,
+//! drop it (see [`declared_advert_headers`]).
 //!
 //! The two halves resolve independently — an undeclared `Allow` keeps the stack
 //! methods while a declared `Supported` narrows the option tags — and an empty
@@ -25,6 +26,7 @@ use call::features::{AdvertisedCapabilities, FeatureActivations};
 use call::Call;
 use sip_message::generators::CapabilitySet;
 use sip_message::header::{Allow, HeaderName, Supported};
+use sip_message::SipHeader;
 
 /// The face of the back-to-back UA an advertisement is emitted on. The two are
 /// declared independently, so a bridge between asymmetric domains can narrow
@@ -111,6 +113,41 @@ pub fn for_leg(call: &Call, leg_id: &str) -> CapabilitySet {
     advertised(call, Face::of_leg(leg_id))
 }
 
+/// The set advertised on `face` for a message that carries the peer's own
+/// advertisement across the back-to-back UA, `received` being that peer's
+/// header lines. Per half: a DECLARED half is the more specific statement and
+/// stands; an undeclared half states what the peer advertised
+/// ([`CapabilitySet::relaying`]) and falls back to the stack's half when the
+/// peer advertised none.
+pub fn relaying_in(
+    features: Option<&FeatureActivations>,
+    face: Face,
+    received: &[SipHeader],
+) -> CapabilitySet {
+    let declared_halves = declared_advert_headers(features, face);
+    let declared_set = declared_in(features, face).unwrap_or_default();
+    let relayed = CapabilitySet::default().relaying(received);
+    let half = |name: HeaderName| declared_halves.contains(&name);
+    CapabilitySet::new(
+        if half(HeaderName::Allow) { declared_set.allow().clone() } else { relayed.allow().clone() },
+        if half(HeaderName::Supported) {
+            declared_set.supported().clone()
+        } else {
+            relayed.supported().clone()
+        },
+    )
+}
+
+/// [`relaying_in`] for the set `call` declares.
+pub fn relaying(call: &Call, face: Face, received: &[SipHeader]) -> CapabilitySet {
+    relaying_in(call.features.as_ref(), face, received)
+}
+
+/// [`relaying`] on whichever face `leg_id` sits on.
+pub fn relaying_for_leg(call: &Call, leg_id: &str, received: &[SipHeader]) -> CapabilitySet {
+    relaying(call, Face::of_leg(leg_id), received)
+}
+
 /// Read the replicated token lists into the typed value the SIP layer stamps.
 /// A half the declaration omits keeps the stack's value for that half; a half
 /// it states EMPTY advertises the empty set. Tokens that are not RFC 3261
@@ -147,6 +184,7 @@ mod tests {
             relay_first_18x_to_180: None,
             no_answer_timeout_sec: None,
             call_limiters: None,
+            charging_vector: None,
             advertise_capabilities: Some(AdvertiseCapabilitiesFeature {
                 toward_originator: None,
                 toward_originated: Some(caps),

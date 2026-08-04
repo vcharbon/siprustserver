@@ -118,6 +118,19 @@ pub struct AdvertiseCapabilitiesFeature {
     pub toward_originated: Option<AdvertisedCapabilities>,
 }
 
+/// Optional RFC 7315 §5.6 charging-correlation arm: the stack stamps a
+/// `P-Charging-Vector` on every leg it ORIGINATES, so the records of the two
+/// operators either side of it match on one identifier. A vector the originator
+/// sent is relayed unchanged whether or not this arm is present — an identifier
+/// re-minted mid-path breaks the correlation it exists for.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChargingVectorFeature {
+    /// The element the identifier is generated at (`icid-generated-at`).
+    /// Absent — the stack's own SIP address.
+    #[serde(default)]
+    pub generated_at: Option<String>,
+}
+
 /// One entry in the optional `callLimiters` feature arm.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLimiterFeatureEntry {
@@ -138,4 +151,9 @@ pub struct FeatureActivations {
     /// a body encoded before this arm decodes as no declaration.
     #[serde(default)]
     pub advertise_capabilities: Option<AdvertiseCapabilitiesFeature>,
+    /// RFC 7315 §5.6 charging correlation on originated legs. Absent means the
+    /// stack stamps none. `#[serde(default)]` so a body encoded before this arm
+    /// decodes as no activation.
+    #[serde(default)]
+    pub charging_vector: Option<ChargingVectorFeature>,
 }

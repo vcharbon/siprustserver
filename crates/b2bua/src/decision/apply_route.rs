@@ -218,7 +218,8 @@ pub async fn apply_route(
         id_gen,
         None,
         &header_updates,
-        &capabilities::for_leg(&call, leg_id),
+        &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
+        call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
         None,
     ) {
         Ok(built) => built,

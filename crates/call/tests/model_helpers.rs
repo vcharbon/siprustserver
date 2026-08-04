@@ -66,6 +66,7 @@ fn pending_request_lifecycle() {
         source_call_id: "cid".into(),
         source_from: "f".into(),
         source_to: "t".into(),
+        source_timestamp: None,
         direction: Direction::FromB,
         cancelled: false,
     };
