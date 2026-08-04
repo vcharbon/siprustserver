@@ -949,7 +949,7 @@ impl ActorScenario for AbandonRinging {
                         Barrier::None,
                         GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
                     ),
-                    Goal::new(Barrier::pred("ringing", alice_early), GoalStep::Cancel),
+                    Goal::new(Barrier::pred("ringing", alice_early), GoalStep::Cancel { stated: Vec::new() }),
                 ],
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,

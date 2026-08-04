@@ -26,7 +26,7 @@ async fn cancel_consumed_parked_invite_fails_respond_fast() {
                 ("bob", bob.clone()),
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(Barrier::None, GoalStep::Cancel).after(Duration::from_millis(200)),
+                    Goal::new(Barrier::None, GoalStep::Cancel { stated: Vec::new() }).after(Duration::from_millis(200)),
                 ],
             ),
             scripted_spec(
@@ -114,7 +114,7 @@ async fn scripted_cancel_reception_487_rides_bound_invite() {
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
                     Goal::new(Barrier::None, expect_resp(180, None)),
-                    Goal::new(Barrier::None, GoalStep::Cancel),
+                    Goal::new(Barrier::None, GoalStep::Cancel { stated: Vec::new() }),
                     // The CANCEL hop's 200, then the 487 with the frozen
                     // header — verbatim fidelity pinned by the matcher.
                     Goal::new(Barrier::None, expect_resp(200, None)),
@@ -200,7 +200,7 @@ async fn cancel_automatic_487s_script_bound_invite() {
                 ("bob", bob.clone()),
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel)
+                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel { stated: Vec::new() })
                         .after(Duration::from_millis(200)),
                 ],
             ),
@@ -288,7 +288,7 @@ async fn parked_cancel_waits_for_dwelling_cancel_expectation() {
                             matcher: None,
                         },
                     ),
-                    Goal::new(Barrier::None, GoalStep::Cancel),
+                    Goal::new(Barrier::None, GoalStep::Cancel { stated: Vec::new() }),
                 ],
             ),
             scripted_spec(

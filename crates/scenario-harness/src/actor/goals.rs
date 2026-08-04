@@ -168,8 +168,11 @@ pub enum GoalStep {
     /// first stamps `keepalive_ack`.
     EveryOptions { cadence: Duration, hold: Duration },
     /// CANCEL the still-pending initial INVITE (RFC 3261 §9.1) — the abandon
-    /// path. Keeps the pending INVITE so its `487` still routes to it.
-    Cancel,
+    /// path. Keeps the pending INVITE so its `487` still routes to it. §9.1
+    /// pins the Request-URI, Via branch, CSeq and identities to the INVITE's, so
+    /// `stated` carries the only thing the canceller adds of its own: RFC 3326
+    /// §2 scopes `Reason` to CANCEL and BYE, and this is the CANCEL half.
+    Cancel { stated: Vec<(String, String)> },
     /// Originate a plain in-dialog request (`INFO`/`MESSAGE`) on the confirmed
     /// dialog, optionally carrying a typed body + extra headers — the GENERIC
     /// origination for the long tail of body-carrying in-dialog requests that
