@@ -41,6 +41,9 @@ media-harness = { path = "../media-harness" }
 http-net = { path = "../http-net" }
 call-limiter = { path = "../call-limiter" }
 serde_json = { workspace = true }
+# The trace-machinery tests install their own admission gate and read the
+# thread-scoped capture buffer (ADR-0026); no OTel tree in tests.
+observe = { path = "../observe", default-features = false }
 # Slice 8 capstone: the out-of-tree `announcement` callflow service, injected
 # into the SUT via `B2buaSut::builder(..).services(..)` for the early-media e2e.
 announcement = { path = "../announcement" }

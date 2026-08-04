@@ -11,6 +11,7 @@ use call::{
     ALegInviteSnapshot, Call, CallModelState, CallTopology, CdrEvent, CdrEventType, Leg,
     LegDisposition, LegKind, LegState, RemoteInfo,
 };
+use sip_clock::Clock;
 use sip_message::header::{HeaderClass, HeaderName, ParamValue, RecordRouteEntry};
 use sip_message::emergency::is_emergency_request;
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
@@ -25,6 +26,7 @@ use crate::effects::{HandlerEffects, HandlerResult};
 use crate::event::CallEvent;
 use crate::limiter::CallLimiter;
 use crate::rules::{relay, seed_services, ActionExecutor, ServiceDef};
+use crate::trace;
 
 /// Headers sent as top-level decision-request fields (excluded from
 /// `sip_headers`). Shared with the failure path: `route-failure` applies the
@@ -125,11 +127,12 @@ fn topology_from_cookie(
         CookieRead::Topology(topology) => Some(topology),
         CookieRead::NoCookie => None,
         CookieRead::Unreadable(err) => {
-            eprintln!(
-                "WARN: call {call_ref} (Call-ID {}): a recorded route does not read ({err}); the \
-                 proxy's stickiness cookie cannot be read, so this call is placed NON-REPLICATING \
-                 — it does not survive a takeover",
-                invite.call_id().as_str()
+            tracing::warn!(
+                %call_ref,
+                call_id = invite.call_id().as_str(),
+                error = %err,
+                "a recorded route does not read; the proxy's stickiness cookie cannot be read, so \
+                 this call is placed NON-REPLICATING — it does not survive a takeover"
             );
             None
         }
@@ -235,29 +238,59 @@ pub fn build_initial_call(
 }
 
 /// Run the initial-INVITE decision + route/reject. `call` must already carry the
-/// a-leg (from [`build_initial_call`]).
+/// a-leg (from [`build_initial_call`]); `invite_wire` is the datagram it arrived
+/// as, which only the router holds (the call carries a header snapshot, not
+/// bytes). `now_ms` is the turn's timestamp — every CDR entry and timer deadline
+/// this handler mints reads it, so it is taken once; `clock` measures the
+/// decision round trip, whose two ends are by definition not the same instant.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_initial_invite(
-    call: Call,
+    mut call: Call,
     decision: &dyn CallDecisionEngine,
     limiter: &dyn CallLimiter,
     config: &B2buaConfig,
     id_gen: &IdGen,
     services: &[ServiceDef],
+    invite_wire: &[u8],
+    clock: &Clock,
     now_ms: i64,
 ) -> HandlerResult {
     let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
     let req = build_request(&a_invite);
 
-    match decision.new_call(req).await {
+    // ── Trace intake (ADR-0026) ────────────────────────────────────────────
+    // The admission chain runs here, once, before the decision round trip, so a
+    // sampled call's story starts at its own INVITE. `apply_route` owns the
+    // other door (an engine force-enable, on this route or a later failover
+    // one), and it backfills what it missed.
+    trace::intake::activate(&mut call, &a_invite, invite_wire, now_ms);
+    let mut request_json = trace::intake::request_body(&call, &req);
+
+    let sent_at_ms = clock.now_ms();
+    let response = decision.new_call(req).await;
+    let received_at_ms = clock.now_ms();
+    if let Ok(NewCallResponse::Route(route)) = &response {
+        // The route that turned the trace on arrived after its own request was
+        // sent, so rebuild that request: it is derived from the a-leg INVITE, so
+        // the rebuilt body IS the body that went out.
+        if route.trace && trace::intake::force_enable(&mut call, invite_wire, now_ms) {
+            request_json = Some(trace::intake::json_body(&build_request(&a_invite)));
+        }
+    }
+    trace::intake::record_new_call(&call, request_json, &response, sent_at_ms, received_at_ms);
+
+    match response {
         Ok(NewCallResponse::Route(route)) => {
             // The route built the Call; now run each service's `init` (ADR-0016
             // X8) — the source's `call-routed` re-entry point — folding any seed
             // (cursor + data + initial actions) through the normal executor.
             // A dormant service (`init` → `None`) and the empty-service list
             // (production today) both leave the result untouched.
-            let result =
-                apply_route(call, route, &a_invite, decision, limiter, config, id_gen, now_ms, 0)
-                    .await;
+            let result = apply_route(
+                call, route, &a_invite, invite_wire, decision, limiter, config, id_gen, clock,
+                now_ms, 0,
+            )
+            .await;
             let exec = ActionExecutor { config, id_gen, now_ms };
             let setup_event = setup_event(&result.call, &a_invite);
             seed_services(result, services, &exec, &setup_event, "a", call::Direction::FromA)
@@ -338,10 +371,10 @@ pub(crate) fn reject_call(
     let extra_headers = match build_reject_headers(update_headers, contacts) {
         Ok(headers) => headers,
         Err(err) => {
-            eprintln!(
-                "WARN: call {}: redirect refused — {}",
-                call.call_ref,
-                err.detail()
+            tracing::warn!(
+                call_ref = %call.call_ref,
+                detail = %err.detail(),
+                "redirect refused"
             );
             return reject_call(
                 call, a_invite, 500, Some(err.to_string()), update_headers, &[], id_gen, now_ms,

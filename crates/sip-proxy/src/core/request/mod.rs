@@ -13,6 +13,7 @@
 mod record_route;
 mod reply;
 mod route;
+mod trace_seam;
 
 #[cfg(test)]
 mod ack_hop_tests;
@@ -25,14 +26,17 @@ mod retransmission_tests;
 #[cfg(test)]
 mod rfc_small_fix_tests;
 #[cfg(test)]
+mod trace_request_tests;
+#[cfg(test)]
 mod worker_outbound_tests;
 
 use std::net::SocketAddr;
 
-use sip_message::{SipMessage, SipRequest};
+use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
+use crate::trace::emit;
 
 use super::ProxyCore;
 
@@ -67,7 +71,38 @@ impl ProxyCore {
         // (`sip_proxy_calls_total` is counted inside `route_request`, where the
         // retransmission memo can exclude re-sent copies of the same INVITE.)
 
+        // Per-call trace tier (ADR-0026): the Call-ID is the one the routing
+        // ladder already parsed — the hot path never re-scans the datagram —
+        // and the whole check is one predicted branch while nothing is sampled.
+        // A brand-new call is not in the map yet, so this is a miss and the
+        // activation that opens its span records the INVITE. Every LATER
+        // datagram of a traced call — including one that reaches activation
+        // again (a digest retry, a retransmit whose memo has been evicted) — is
+        // recorded HERE and only here: that activation reports `AlreadyOpen`
+        // and records nothing.
+        let at_ms = start_ms as i64;
+        let call_id = req.call_id().as_str();
+        emit::sip_in(&self.traces, call_id, at_ms, src, req.image());
+        let initial_invite = matches!(req.method(), Method::Invite) && req.to().tag().is_none();
+
         let outcome = self.route_request(&msg, src).await;
+
+        // Close on the last fact this hop sees about the call, rather than
+        // holding its span, its active-cap slot and the process-wide sampled
+        // flag for the full idle TTL:
+        //  • an initial INVITE the ladder refused — nothing will ever name that
+        //    Call-ID again;
+        //  • the ACK of a setup this hop saw rejected for good (486, 603, and
+        //    the CANCEL flow's 487) — that call is over once its ACK is on the
+        //    wire. Which ACK that is was decided on the response path, where
+        //    the final's status is known: an `AckHop` is written for EVERY
+        //    relayed non-2xx INVITE final, including a mid-dialog re-INVITE's
+        //    488 and an auth challenge, neither of which ends the call.
+        if initial_invite && outcome.decision == RoutingDecisionKind::Reject {
+            self.traces.close(call_id);
+        } else if outcome.decision == RoutingDecisionKind::AckHop {
+            self.traces.close_on_ack(call_id);
+        }
 
         let duration = (self.now_ms().saturating_sub(start_ms)) as f64 / 1000.0;
         self.metrics.observe_routing_duration(duration);

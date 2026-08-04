@@ -36,6 +36,9 @@ kube = { version = "1", default-features = false, features = ["client", "rustls-
 # b2bua-runner) or the kube client panics.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { workspace = true }
+# Process subscriber + lifecycle logging (ADR-0026).
+observe = { path = "../observe", features = ["otlp"] }
+tracing = { workspace = true }
 
 # jemalloc global allocator + its stats probe (see the #[global_allocator] note
 # in src/main.rs). The front proxy is single-task but still churns SIP buffers

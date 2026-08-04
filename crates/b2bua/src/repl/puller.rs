@@ -230,6 +230,11 @@ pub struct Puller {
     /// `None` outside a live `B2buaCore` (the sim/unit puller tests drive the
     /// store directly), so the existing constructors stay source-compatible.
     repl_tx: Option<mpsc::UnboundedSender<ReplCommand>>,
+    /// When this puller's bootstrap started — the `duration_ms` on the
+    /// bootstrap-complete lifecycle line. `None` for a warm resume (no
+    /// bootstrap to time). Written from the single task that runs the FSM; the
+    /// mutex is what keeps `&Puller` `Sync` across its awaits.
+    bootstrap_started_at: std::sync::Mutex<Option<tokio::time::Instant>>,
 }
 
 impl Puller {
@@ -271,6 +276,9 @@ impl Puller {
                 status_tx,
                 metrics,
                 repl_tx: None,
+                bootstrap_started_at: std::sync::Mutex::new(
+                    (!warm).then(tokio::time::Instant::now),
+                ),
             },
             status_rx,
         )
@@ -333,6 +341,19 @@ impl Puller {
         if self.is_reclaim() { "recovery" } else { "backup" }
     }
 
+    /// One puller FSM transition, one line (ADR-0026): per `(peer, flow)` these
+    /// are rare state changes, not per-call events.
+    fn note_state(&self, state: &'static str, reason: &str) {
+        tracing::info!(
+            node = observe::node(),
+            peer = %self.peer.ordinal,
+            flow = self.flow_label(),
+            state,
+            reason,
+            "puller state"
+        );
+    }
+
     /// Resolve the peer's address (fresh) and open a connection. `None` if the
     /// address is unresolvable right now or the connect fails — the caller treats
     /// either as a failed connect (→ Backoff, then retry/re-resolve).
@@ -349,8 +370,10 @@ impl Puller {
         // already `bootstrap_complete` (set in `new`), so no deadline is needed.
         let mut deadline: Option<tokio::time::Instant> =
             if self.status_tx.borrow().bootstrap_complete {
+                self.note_state("warm", "resumed from a retained watermark");
                 None
             } else {
+                self.note_state("bootstrap_start", "cold watermark");
                 Some(
                     tokio::time::Instant::now()
                         + Duration::from_millis(self.config.bootstrap_hard_timeout_ms),
@@ -367,6 +390,7 @@ impl Puller {
                     // ---- Backoff{attempt} ---- retain W (status already holds it).
                     attempt = attempt.saturating_add(1);
                     let ms = self.backoff_ms(attempt);
+                    self.note_state("backoff", &format!("attempt {attempt}, retry in {ms}ms"));
                     // The hard timer must keep ticking through backoff so an
                     // unreachable peer still becomes bootstrap-complete on time.
                     let fire_hard = self.select_with_deadline(
@@ -377,7 +401,7 @@ impl Puller {
                     match fire_hard.await {
                         SelectOutcome::Cancelled => return,
                         SelectOutcome::Deadline => {
-                            self.mark_bootstrap_complete();
+                            self.mark_bootstrap_complete(0, "hard timeout while backing off");
                             deadline = None;
                         }
                         SelectOutcome::Completed => {}
@@ -394,8 +418,28 @@ impl Puller {
     }
 
     /// Mark this puller **bootstrap-complete** (sticky). Called on the first
-    /// catch-up `Noop` and on the hard-timer firing (best-effort).
-    fn mark_bootstrap_complete(&self) {
+    /// catch-up `Noop` and on the hard-timer firing (best-effort). Lines the
+    /// per-peer completion once — `applied` bodies imported, `reason` telling a
+    /// real catch-up from a best-effort timer expiry.
+    fn mark_bootstrap_complete(&self, applied: u64, reason: &'static str) {
+        if !self.status_tx.borrow().bootstrap_complete {
+            let duration_ms = self
+                .bootstrap_started_at
+                .lock()
+                .unwrap()
+                .take()
+                .map(|at| at.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            tracing::info!(
+                node = observe::node(),
+                peer = %self.peer.ordinal,
+                flow = self.flow_label(),
+                applied,
+                duration_ms,
+                reason,
+                "peer bootstrap complete"
+            );
+        }
         self.status_tx.send_modify(|s| s.bootstrap_complete = true);
     }
 
@@ -472,7 +516,7 @@ impl Puller {
                     _ = tokio::time::sleep_until(at) => {
                         // Hard timer tripped mid-connect: best-effort complete for
                         // readiness, then back off + retry (now warm → no hard timer).
-                        self.mark_bootstrap_complete();
+                        self.mark_bootstrap_complete(0, "hard timeout while connecting");
                         *deadline = None;
                         return RunOutcome::ConnectFailed;
                     }
@@ -498,6 +542,7 @@ impl Puller {
         if !self.status_tx.borrow().ever_connected {
             self.status_tx.send_modify(|s| s.ever_connected = true);
         }
+        self.note_state("streaming", "connected");
 
         // One PullRequest opens this flow's stream from the retained W. `since ==
         // (0,0)` ⇒ the server store-scans this flow's keyspace (every frame
@@ -537,7 +582,10 @@ impl Puller {
                         // arrived (Reclaim flow), then KEEP streaming on the same
                         // socket — the real Noop will complete it for real. No
                         // apply-gate collision exists to force a disconnect now.
-                        self.mark_bootstrap_complete();
+                        self.mark_bootstrap_complete(
+                            applied_in_bootstrap,
+                            "hard timeout awaiting the first catch-up Noop",
+                        );
                         *deadline = None;
                         if self.is_reclaim() {
                             self.metrics.bump_repl_bootstrap_stalled();
@@ -617,7 +665,10 @@ impl Puller {
                         // First catch-up Noop ends the bootstrap: from here the
                         // tail advances W and (Reclaim) applies the Reverse rule.
                         bootstrapped = true;
-                        self.mark_bootstrap_complete();
+                        self.mark_bootstrap_complete(
+                            applied_in_bootstrap,
+                            "first catch-up Noop",
+                        );
                         *deadline = None;
                         // Reclaim flow: bulk-materialise everything the bootstrap
                         // scan imported into the live serving map (smoothed).
@@ -650,6 +701,8 @@ impl Puller {
                         tokio::time::Instant::now()
                             + Duration::from_millis(self.config.bootstrap_hard_timeout_ms),
                     );
+                    *self.bootstrap_started_at.lock().unwrap() = Some(tokio::time::Instant::now());
+                    self.note_state("reset_to_bootstrap", "server dropped our watermark");
                     return RunOutcome::Disconnected;
                 }
                 // PullRequest is client→server; never expected here. Ignore.

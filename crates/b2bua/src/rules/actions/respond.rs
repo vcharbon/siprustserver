@@ -100,10 +100,10 @@ impl ActionExecutor<'_> {
             match build_a_leg_response_headers(header_updates, contacts) {
                 Ok(headers) => (status, reason.to_string(), headers),
                 Err(err) => {
-                    eprintln!(
-                        "WARN: call {}: redirect refused — {}",
-                        call.call_ref,
-                        err.detail()
+                    tracing::warn!(
+                        call_ref = %call.call_ref,
+                        detail = %err.detail(),
+                        "redirect refused"
                     );
                     (500, err.to_string(), Vec::new())
                 }

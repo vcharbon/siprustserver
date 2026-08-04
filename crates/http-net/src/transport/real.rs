@@ -155,6 +155,9 @@ impl HttpTransport for RealHttpNetwork {
             builder = builder.header(name.as_str(), value.as_str());
         }
         let resp = builder.body(req.body).send().await.map_err(|e| {
+            // Cause-labelled counter only — the caller's fail-open episode owns
+            // the log line (ADR-0026: no per-request output).
+            crate::failures::record(&dst.to_string(), super::cause::classify(&e));
             if e.is_connect() {
                 HttpError::Connect(dst)
             } else {
@@ -173,9 +176,12 @@ impl HttpTransport for RealHttpNetwork {
         let body = resp
             .bytes()
             .await
-            .map_err(|e| HttpError::Io {
-                addr: dst,
-                reason: e.to_string(),
+            .map_err(|e| {
+                crate::failures::record(&dst.to_string(), super::cause::classify(&e));
+                HttpError::Io {
+                    addr: dst,
+                    reason: e.to_string(),
+                }
             })?
             .to_vec();
         Ok(HttpResponse {

@@ -39,7 +39,8 @@ pub enum Face {
 }
 
 impl Face {
-    fn as_str(self) -> &'static str {
+    /// The face's metrics label, and the value a trace event names it by.
+    pub fn as_str(self) -> &'static str {
         match self {
             Face::Internal => "int",
             Face::External => "ext",
@@ -92,7 +93,8 @@ impl RoutingDecisionKind {
         RoutingDecisionKind::Reject,
     ];
 
-    fn as_str(self) -> &'static str {
+    /// The decision's metrics label, and the value a trace event names it by.
+    pub fn as_str(self) -> &'static str {
         match self {
             RoutingDecisionKind::SelectNew => "select_new",
             RoutingDecisionKind::DecodeForward => "decode_forward",

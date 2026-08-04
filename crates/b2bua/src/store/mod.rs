@@ -86,6 +86,11 @@ pub struct CallState {
     /// forget to stamp (ADR-0020 X4). `b2bua_core` wires the runtime clock;
     /// the default reads the same paused/tokio time the tests advance.
     clock: sip_clock::Clock,
+    /// Acting-backup takeover burst aggregation, keyed by the dead peer
+    /// (ADR-0026): a 5000-call failover owes ~3 log lines per peer, never one
+    /// per hydrated call. Shared with the router's self-release path so a
+    /// takeover and the shedding that ends it read as ONE episode.
+    takeover_log: Arc<observe::WaveSet>,
 }
 
 impl CallState {
@@ -119,6 +124,7 @@ impl CallState {
             metrics,
             replicated_ttl_ms: CALL_TTL_MS,
             clock: sip_clock::Clock::test_at(0),
+            takeover_log: crate::lifecycle::takeover_waves(),
         }
     }
 
@@ -249,7 +255,7 @@ impl CallState {
             return None;
         }
         let body = repl.get_call(role, &primary, call_ref).await.ok().flatten()?;
-        let call = self.codec.decode(&body).ok()?;
+        let mut call = self.codec.decode(&body).ok()?;
         let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
         let now_ms = self.clock.now_ms();
         let mut inner = self.inner.lock().unwrap();
@@ -257,6 +263,12 @@ impl CallState {
         if let Some(c) = inner.calls.get(call_ref) {
             return Some((c.clone(), false, 0));
         }
+        // A traced call taken over from a crashed primary gets THIS node's own
+        // root span, linked to the nominal's (ADR-0026 §5) — never parented to
+        // it: that span is closed or lost by definition. Under the residency
+        // lock, on the copy that lands: a span is opened only for the call this
+        // node goes on to serve, and its ids never diverge from the stored call.
+        crate::trace::adopt_replicated(&mut call, now_ms);
         Self::reindex(&mut inner, &call);
         inner.calls.insert(call_ref.to_string(), call.clone());
         // The idle clock starts at hydration, never at `created_at` — a freshly
@@ -266,6 +278,7 @@ impl CallState {
         // A failed-over in-dialog request just loaded its dialog from a backup
         // replica — the acting-backup takeover actually fired.
         self.metrics.bump_repl_takeover_hydrated();
+        self.takeover_log.record(&primary, "hydrated", 1);
         Some((call, true, skew))
     }
 
@@ -573,7 +586,7 @@ impl CallState {
     /// `CallMeta.backup == None` and the call invisible to its backup's bootstrap
     /// scan until the next keepalive re-flush — re-establishing it here closes that
     /// un-backed-up window the instant the call is re-served.
-    pub fn materialize_if_absent(&self, call: Call) -> bool {
+    pub fn materialize_if_absent(&self, mut call: Call) -> bool {
         let backup = call
             .topology
             .as_ref()
@@ -586,6 +599,11 @@ impl CallState {
             if inner.calls.contains_key(&call.call_ref) {
                 return false;
             }
+            // Reclaim is a hydration site too: a traced call re-served here opens
+            // this node's own root span, linked to the one that served it before
+            // (ADR-0026 §5). After the residency check, so the node never opens a
+            // span for a call it does not go on to serve.
+            crate::trace::adopt_replicated(&mut call, now_ms);
             Self::reindex(&mut inner, &call);
             // Reclaim restarts the idle clock (ADR-0020 X4): a 2 h-old reclaimed
             // long-hold call is fresh here, not reap-stale.
@@ -711,14 +729,31 @@ impl CallState {
         if !tag.is_empty() {
             if let Ok(Some(r)) = repl.get_index(&format!("leg:{call_id}|{tag}")).await {
                 self.metrics.bump_repl_takeover_resolved();
+                self.note_takeover(&r, "resolved");
                 return Some(r);
             }
         }
         let hit = repl.get_index(&format!("leg:{call_id}")).await.ok().flatten();
-        if hit.is_some() {
+        if let Some(r) = &hit {
             self.metrics.bump_repl_takeover_resolved();
+            self.note_takeover(r, "resolved");
         }
         hit
+    }
+
+    /// Fold one takeover event for `call_ref` into its dead primary's episode
+    /// (ADR-0026 aggregation): the counter names what happened, the peer the
+    /// `call_ref` encodes keys the episode.
+    fn note_takeover(&self, call_ref: &str, counter: &'static str) {
+        let (_, primary) = partition_of(&self.self_ordinal, call_ref);
+        self.takeover_log.record(&primary, counter, 1);
+    }
+
+    /// Fold an acting-backup **self-release** into the dead peer's takeover
+    /// episode — the shedding that ends a takeover is part of the same story,
+    /// so it never gets its own line.
+    pub fn note_takeover_self_release(&self, call_ref: &str) {
+        self.note_takeover(call_ref, "self_released");
     }
 
     /// Acquire the per-callRef serialization lock (held across a handler run).
@@ -736,6 +771,13 @@ impl CallState {
 
     pub fn active_count(&self) -> usize {
         self.inner.lock().unwrap().calls.len()
+    }
+
+    /// Every callRef this node holds live. The core's teardown reads it to
+    /// release the per-call runtime state that is NOT in the store — the root
+    /// spans (ADR-0026) — and tests read it as ground truth.
+    pub fn live_call_refs(&self) -> Vec<String> {
+        self.inner.lock().unwrap().calls.keys().cloned().collect()
     }
 
     /// The number of live per-call serialization locks. Should track

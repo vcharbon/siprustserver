@@ -68,6 +68,8 @@ impl Metrics {
         s.push_str("# HELP cdr_parse_errors_total CDR payloads that failed to decode\n");
         s.push_str("# TYPE cdr_parse_errors_total counter\n");
         s.push_str(&format!("cdr_parse_errors_total {parse_errors}\n"));
+        // Dropped log lines + trace-admission denials (ADR-0026).
+        s.push_str(&observe::counters::prometheus_text());
         s
     }
 }
@@ -75,7 +77,7 @@ impl Metrics {
 /// Hand-rolled Prometheus exposition + liveness server (mirrors b2bua-runner).
 async fn serve_metrics(addr: std::net::SocketAddr, metrics: Arc<Metrics>) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    eprintln!("cdr-consumer metrics on http://{}/metrics", listener.local_addr()?);
+    tracing::info!(addr = %listener.local_addr()?, "metrics server listening (/metrics)");
     loop {
         let (mut stream, _) = listener.accept().await?;
         let metrics = metrics.clone();
@@ -110,7 +112,9 @@ async fn consume(
     let props = ConnectionProperties::default()
         .with_executor(tokio_executor_trait::Tokio::current())
         .with_reactor(tokio_reactor_trait::Tokio);
+    tracing::info!(node = observe::node(), state = "connecting", %url, "AMQP connection");
     let conn = Connection::connect(url, props).await?;
+    tracing::info!(node = observe::node(), state = "connected", %url, "AMQP connection");
     let chan = conn.create_channel().await?;
 
     // Declare the SAME queue the producer declares (durable + bounded), so the
@@ -141,7 +145,13 @@ async fn consume(
             FieldTable::default(),
         )
         .await?;
-    eprintln!("cdr-consumer: consuming queue {queue:?} on {url}");
+    tracing::info!(
+        node = observe::node(),
+        state = "consuming",
+        %queue,
+        %url,
+        "AMQP connection"
+    );
 
     while let Some(delivery) = consumer.next().await {
         let delivery = delivery?;
@@ -153,17 +163,27 @@ async fn consume(
             }
             Err(e) => {
                 metrics.parse_errors.fetch_add(1, Ordering::Relaxed);
-                eprintln!("cdr-consumer: parse error: {e}");
+                tracing::warn!(error = %e, "CDR payload parse error");
             }
         }
         // Ack regardless: a malformed record is counted, not redelivered forever.
         delivery.ack(BasicAckOptions::default()).await?;
     }
+    // The consumer stream ended without an error — the broker closed it.
+    tracing::info!(
+        node = observe::node(),
+        state = "stream_closed",
+        %queue,
+        "AMQP connection"
+    );
     Ok(())
 }
 
 #[tokio::main]
 async fn main() {
+    // Subscriber first (ADR-0026); the guard drains the log writer at exit.
+    let _observe = observe::init_production("cdr-consumer-runner");
+
     let url = env_or("CDR_AMQP_URL", "amqp://guest:guest@rabbitmq:5672/%2f");
     let queue = env_or("CDR_QUEUE", "cdr");
     let max_len: i64 = env_or("CDR_QUEUE_MAX_LEN", "100000")
@@ -179,7 +199,7 @@ async fn main() {
     let m = metrics.clone();
     tokio::spawn(async move {
         if let Err(e) = serve_metrics(addr, m).await {
-            eprintln!("cdr-consumer metrics server error: {e}");
+            tracing::error!(error = %e, "metrics server error");
         }
     });
 
@@ -187,7 +207,13 @@ async fn main() {
     // missed while disconnected are bounded by the broker's own x-max-length.
     loop {
         if let Err(e) = consume(&url, &queue, max_len, &metrics).await {
-            eprintln!("cdr-consumer: AMQP error: {e}; reconnecting in 2s");
+            tracing::warn!(
+                node = observe::node(),
+                state = "disconnected",
+                error = %e,
+                retry_in_sec = 2,
+                "AMQP connection"
+            );
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }

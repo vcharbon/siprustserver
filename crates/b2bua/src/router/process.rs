@@ -86,6 +86,16 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return;
         };
+        // Traced call: the message as it arrived, raw (ADR-0026). `image()` is
+        // the received datagram itself, so a lenient-parser normalization — a
+        // folded header, an odd-cased name, a rewritten URI — stays visible in
+        // the very artifact that exists to diagnose it; re-serializing the
+        // parse would hide it. Guarded, and it borrows: no copy either way.
+        if let CallEvent::Sip { message, src } = &event {
+            if crate::trace::sampled(&call) {
+                crate::trace::emit::sip_in(&call, now_ms, *src, message.image());
+            }
+        }
         // The limiter-refresh timer is async (an HTTP call to migrate holds), so
         // it is handled outside the synchronous rule chain — like initial-INVITE.
         if matches!(
@@ -275,8 +285,21 @@ async fn initial_invite_turn(
         );
         crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(rejected), now_ms, true)
     } else {
-        let handled =
-            handle_initial_invite(call.clone(), ctx.decision.as_ref(), ctx.limiter.as_ref(), &ctx.config, &ctx.id_gen, &ctx.services, now_ms).await;
+        // `req.image()` is the datagram this INVITE arrived as — the only place
+        // it exists (the call carries a header snapshot, not bytes), and what a
+        // trace activation backfills its `sip.in` from.
+        let handled = handle_initial_invite(
+            call.clone(),
+            ctx.decision.as_ref(),
+            ctx.limiter.as_ref(),
+            &ctx.config,
+            &ctx.id_gen,
+            &ctx.services,
+            req.image(),
+            &ctx.clock,
+            now_ms,
+        )
+        .await;
         crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(handled), now_ms, true)
     };
     Turn::Result(result)
@@ -424,7 +447,9 @@ async fn hydrate_or_reclaim(ctx: &Arc<RouterCtx>, call_ref: &str) -> Option<Call
                 ctx.timers.restore(timers, call_ref.to_string()).await;
                 ctx.metrics.bump_repl_reclaimed();
             }
-            Some(call)
+            // The materialised copy is the authoritative one — it carries this
+            // node's own root span ids when the call is traced (ADR-0026 §5).
+            Some(ctx.state.peek(call_ref).unwrap_or(call))
         }
     }
 }
@@ -549,6 +574,9 @@ fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call
                         classify_b2bua_peer(&ctx.config, &dest),
                         crate::peer_failures::PeerFailureKind::KeepaliveTimeout,
                     );
+                    // Aggregated per hop: a dead peer is one episode, however
+                    // many calls it takes with it (ADR-0026).
+                    ctx.keepalive_waves.record(&dest.to_string(), "timeouts", 1);
                 }
             }
         }
@@ -570,6 +598,14 @@ async fn handle_limiter_refresh(ctx: &Arc<RouterCtx>, mut call: Call, now_ms: i6
     // entry. On a backend failure `refresh` returns the holds unchanged, so the
     // windows simply stay put and we retry next cycle.
     let updated = ctx.limiter.refresh(&holds).await;
+    if crate::trace::sampled(&call) {
+        crate::trace::emit::limiter(
+            &call,
+            now_ms,
+            "refresh",
+            &format!("{} hold(s) -> window {:?}", holds.len(), updated.first().map(|h| h.window)),
+        );
+    }
     if let Some(new_window) = updated.first().map(|h| h.window) {
         for e in call.limiter_entries.iter_mut() {
             if e.increment_succeeded != Some(false) {

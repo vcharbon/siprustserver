@@ -17,6 +17,11 @@ http-net = { path = "../http-net", features = ["real"] }
 # The shared /metrics + /healthz + /ready probe server every runner exposes.
 probe-http = { path = "../probe-http" }
 sip-clock = { path = "../sip-clock" }
+# Process subscriber installation (ADR-0026): every runner composed from this
+# kit gets the lifecycle-log + OTLP plumbing at `bind`, so no binary re-derives
+# it. `tracing` is the emission facade for the kit's own lifecycle lines.
+observe = { path = "../observe", features = ["otlp"] }
+tracing = { workspace = true }
 sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
 tokio = { workspace = true }

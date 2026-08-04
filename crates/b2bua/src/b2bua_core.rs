@@ -358,6 +358,7 @@ impl B2buaCore {
             obligations: Arc::new(crate::obligations::ObligationSet::core()),
             readiness: readiness.clone(),
             overload: overload.clone(),
+            keepalive_waves: crate::lifecycle::keepalive_timeout_waves(),
             reentry_tx,
             // Arc-share the injected port into every per-call `ctx.clone()`,
             // exactly like `decision`/`limiter`.
@@ -433,7 +434,7 @@ impl B2buaCore {
         // monotonic-anchored `Clock::now_ms` — `now_ms` does NOT follow a host NTP
         // step, so the gap names exactly the event that skews cross-node replicated
         // timer deadlines (endurance-20260630). Publishes `clock_wall_divergence_ms`
-        // and rate-limits a warn to stderr when the magnitude crosses 500 ms.
+        // and rate-limits a warn line when the magnitude crosses 500 ms.
         // Observability only: does NOT re-anchor the clock (timestamps stay
         // monotonic; the behavioural fix is the replication-boundary re-anchor).
         // Rides `tokio::time::interval` so a paused-clock test advances it too;
@@ -456,11 +457,12 @@ impl B2buaCore {
                         // Rate-limit: warn on the RISING edge only, so a sustained
                         // step logs once, not every 30 s.
                         if !warned_recently {
-                            eprintln!(
-                                "b2bua clock-skew WARNING: wall-clock divergence {divergence} ms \
-                                 (raw SystemTime − monotonic Clock::now_ms) — likely a host NTP \
-                                 step; cross-node replicated timer deadlines may skew. Fix is INFRA \
-                                 (slewing chrony + host kept awake), NOT the SUT."
+                            tracing::warn!(
+                                divergence_ms = divergence,
+                                "clock skew: wall-clock divergence (raw SystemTime - monotonic \
+                                 Clock::now_ms) — likely a host NTP step; cross-node replicated \
+                                 timer deadlines may skew. Fix is INFRA (slewing chrony + host \
+                                 kept awake), NOT the SUT."
                             );
                             warned_recently = true;
                         }
@@ -545,6 +547,14 @@ impl B2buaCore {
         self.ctx.txn.abort_owner();
         if let Some(s) = &self.supervisor {
             s.shutdown();
+        }
+        // Per-call root spans are this core's runtime state, not replicated
+        // state: they die with the core and return their active-trace slots
+        // (ADR-0026). A survivor taking one of these calls over therefore opens
+        // its OWN linked root, exactly as it does across a process boundary.
+        let traces = crate::trace::traces();
+        for call_ref in self.ctx.state.live_call_refs() {
+            traces.close(&call_ref);
         }
     }
 

@@ -362,8 +362,19 @@ impl RunnerEnv {
     /// Bind the real UDP endpoint (Tier-1 brake installed), coerce the
     /// advertise address, assemble + validate the [`B2buaConfig`], and mint the
     /// process-wide metrics registry / system clock. Panics (refuses boot) on a
-    /// bind failure or an invalid config. `name` prefixes every log line.
+    /// bind failure or an invalid config. `name` names the service in every log
+    /// line and in the OTLP resource.
+    ///
+    /// Installs the process subscriber (ADR-0026) first, so every runner
+    /// composed from this kit logs and traces identically without wiring it.
     pub async fn bind(self, name: &str) -> RunnerBase {
+        let observe = observe::init_production(name);
+        // The per-call trace gate, configured once from the environment before
+        // any call arrives (ADR-0026): with no OTLP endpoint it is inert and no
+        // call path pays more than one boolean check.
+        b2bua::trace::install_process_traces(std::sync::Arc::new(
+            b2bua::trace::CallTraces::from_env(0),
+        ));
         validate_tier1_pct(self.udp_tier1_pct)
             .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
         validate_outbound_proxy_requirement(self.require_outbound_proxy, self.outbound_proxy.is_some())
@@ -418,18 +429,18 @@ impl RunnerEnv {
                 Arc::new(move || ep_tail.counters().tail_dropped),
             )
         };
-        eprintln!(
-            "{name} Tier-1 brake armed: stateless-503 new non-emergency INVITEs at \
-             ingress depth >= {} (queue_max={}, tier1_pct={})",
-            Tier1BrakeConfig {
+        tracing::info!(
+            service = name,
+            threshold = Tier1BrakeConfig {
                 queue_max: self.queue_max,
                 tier1_threshold_pct: self.udp_tier1_pct,
                 retry_after_base_sec: self.retry_after_base_sec,
                 retry_after_jitter_sec: self.retry_after_jitter_sec,
             }
             .threshold(),
-            self.queue_max,
-            self.udp_tier1_pct,
+            queue_max = self.queue_max,
+            tier1_pct = self.udp_tier1_pct,
+            "Tier-1 brake armed: stateless-503 for new non-emergency INVITEs at ingress depth >= threshold"
         );
 
         // Advertised SIP host:port stamped on every outbound Via / Contact /
@@ -460,17 +471,27 @@ impl RunnerEnv {
                 (ip.to_string(), local.port())
             }
         };
-        eprintln!("{name} advertised SIP identity = {advertise_ip}:{advertise_port} (bind {local})");
+        tracing::info!(
+            service = name,
+            %advertise_ip,
+            advertise_port,
+            bind = %local,
+            "advertised SIP identity"
+        );
 
         match &self.outbound_proxy {
             // Every b-leg request goes to the front proxy with a preloaded
             // `Route: <sip:host:port;lr;outbound>` so the proxy classifies it
             // worker-outbound and record-routes itself into the b-leg.
-            Some((h, p)) => eprintln!(
-                "{name} b-leg egress forced through front proxy {h}:{p} (all worker→callee SIP traverses the LB)"
+            Some((h, p)) => tracing::info!(
+                service = name,
+                proxy_host = %h,
+                proxy_port = p,
+                "b-leg egress forced through the front proxy (all worker->callee SIP traverses the LB)"
             ),
-            None => eprintln!(
-                "{name} B2BUA_OUTBOUND_PROXY unset — b-leg goes pod-direct (local/dev only; NOT for the cluster)"
+            None => tracing::warn!(
+                service = name,
+                "B2BUA_OUTBOUND_PROXY unset — b-leg goes pod-direct (local/dev only; NOT for the cluster)"
             ),
         }
 
@@ -515,6 +536,7 @@ impl RunnerEnv {
             metrics: B2buaMetrics::new(),
             clock: Clock::system(),
             metrics_sa,
+            observe,
             env: self,
         }
     }
@@ -548,6 +570,9 @@ pub struct RunnerBase {
     pub clock: Clock,
     /// Resolved probe/metrics HTTP listen address.
     pub metrics_sa: SocketAddr,
+    /// The installed process subscriber (ADR-0026). Held for the process
+    /// lifetime: dropping it drains the log writer and flushes pending spans.
+    pub observe: observe::ObserveGuard,
 }
 
 impl RunnerBase {
@@ -567,9 +592,12 @@ impl RunnerBase {
             .trim_end_matches('/');
         match hostport.to_socket_addrs().ok().and_then(|mut a| a.next()) {
             Some(addr) => {
-                eprintln!(
-                    "call-limiter client -> {addr} (timeout {}ms, refresh {}s)",
-                    self.env.limiter_timeout_ms, self.env.limiter_refresh_sec
+                tracing::info!(
+                    service = %self.name,
+                    limiter = %addr,
+                    timeout_ms = self.env.limiter_timeout_ms,
+                    refresh_sec = self.env.limiter_refresh_sec,
+                    "call-limiter client wired"
                 );
                 Arc::new(HttpCallLimiter::new(
                     Arc::new(RealHttpNetwork::new()),
@@ -578,9 +606,10 @@ impl RunnerBase {
                 ))
             }
             None => {
-                eprintln!(
-                    "WARNING: LIMITER_URL {:?} did not resolve; running unlimited (NoopLimiter)",
-                    self.env.limiter_url
+                tracing::warn!(
+                    service = %self.name,
+                    limiter_url = %self.env.limiter_url,
+                    "LIMITER_URL did not resolve; running unlimited (NoopLimiter)"
                 );
                 Arc::new(NoopLimiter)
             }
@@ -655,6 +684,11 @@ impl RunnerBase {
                 text.push_str(&txn_metrics_text(&txn_metrics));
                 text.push_str(&udp_metrics.prometheus_text());
                 text.push_str(&overload.prometheus_text());
+                // Dropped log lines + trace-admission denials (ADR-0026): the
+                // only visibility into output the process deliberately shed.
+                text.push_str(&observe::counters::prometheus_text());
+                // Cause-labelled client HTTP failures (limiter / decision engine).
+                text.push_str(&http_net::failures::prometheus_text());
                 if let Some(extra) = &extra_metrics {
                     text.push_str(&extra());
                 }
@@ -669,15 +703,20 @@ impl RunnerBase {
         };
         match probe_http::ProbeServer::start(self.metrics_sa, routes).await {
             Ok(server) => {
-                eprintln!(
-                    "{} metrics on http://{}/metrics (readiness /ready)",
-                    self.name,
-                    server.addr()
+                tracing::info!(
+                    service = %self.name,
+                    addr = %server.addr(),
+                    "metrics server listening (/metrics, readiness /ready)"
                 );
                 Some(server)
             }
             Err(e) => {
-                eprintln!("{} metrics server failed to bind {}: {e}", self.name, self.metrics_sa);
+                tracing::warn!(
+                    service = %self.name,
+                    addr = %self.metrics_sa,
+                    error = %e,
+                    "metrics server failed to bind"
+                );
                 None
             }
         }
@@ -719,18 +758,27 @@ impl RunnerBase {
         let drain_grace_ms = self.env.drain_grace_ms;
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                eprintln!("{name} SIGINT — shutting down");
+                tracing::info!(service = name, signal = "SIGINT", "shutting down");
             }
             _ = wait_sigterm(name) => {
-                eprintln!("{name} SIGTERM — begin draining ({drain_grace_ms}ms grace)");
+                tracing::info!(
+                    service = name,
+                    signal = "SIGTERM",
+                    drain_grace_ms,
+                    "begin draining"
+                );
                 // Latch Draining, then wait for the live call map to clear —
                 // capped at the grace. A node with no calls exits at once; a
                 // busy node is bounded; a residual is logged, never silently cut.
                 let residual = core.drain(std::time::Duration::from_millis(drain_grace_ms)).await;
                 if residual == 0 {
-                    eprintln!("{name} drained cleanly — exiting");
+                    tracing::info!(service = name, residual = 0, "drained cleanly — exiting");
                 } else {
-                    eprintln!("{name} drain grace elapsed with {residual} call(s) still active — exiting");
+                    tracing::warn!(
+                        service = name,
+                        residual,
+                        "drain grace elapsed with calls still active — exiting"
+                    );
                 }
             }
         }
@@ -782,7 +830,7 @@ async fn wait_sigterm(name: &str) {
             s.recv().await;
         }
         Err(e) => {
-            eprintln!("{name} cannot install SIGTERM handler: {e}");
+            tracing::warn!(service = name, error = %e, "cannot install SIGTERM handler");
             std::future::pending::<()>().await;
         }
     }

@@ -27,7 +27,14 @@ sha1 = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }
 arc-swap = { workspace = true }
+# Instrumentation facade (ADR-0026): lifecycle events go out through `tracing`;
+# the subscriber is the runner's. `observe` brings the burst-aggregation helpers
+# only — default features, so no OpenTelemetry tree here.
+tracing = { workspace = true }
+observe = { path = "../observe", default-features = false }
 
 [dev-dependencies]
 scenario-harness = { path = "../scenario-harness" }
 layer-harness = { path = "../layer-harness" }
+# The per-packet trace-tier budget: an untraced proxy allocates nothing.
+alloc-counter = { path = "../alloc-counter" }

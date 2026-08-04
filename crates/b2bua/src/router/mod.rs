@@ -110,6 +110,10 @@ pub struct RouterCtx {
     /// `CallEvent::InternalEvent` here, which `run` consumes via `on_event` —
     /// keeping re-entry single-threaded and out of a non-`Send` async cycle.
     pub reentry_tx: mpsc::UnboundedSender<CallEvent>,
+    /// Keepalive-timeout burst aggregation keyed by the failed leg's egress hop
+    /// (ADR-0026): a peer going away is ONE episode — rising edge, ~5 s
+    /// summaries, falling-edge totals — not one line per dead call.
+    pub keepalive_waves: Arc<observe::WaveSet>,
     /// Host-injected generic async-HTTP capability (ADR-0016 seam). `Arc`-shared
     /// into every per-call `ctx.clone()` exactly like `decision`/`limiter`;
     /// `None` reproduces today's behaviour (the `ServiceHttpRequest` dispatch

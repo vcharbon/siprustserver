@@ -197,7 +197,7 @@ pub fn target_dest(target: &str) -> (String, u16) {
         }
         Err(err) => {
             if !target.trim().is_empty() {
-                eprintln!("WARN: dialog target {target:?} does not read ({err}); resolving it as a host name");
+                tracing::warn!(%target, error = %err, "dialog target does not read; resolving it as a host name");
             }
             (target.trim().to_string(), HostPort::DEFAULT_PORT)
         }
@@ -273,9 +273,13 @@ pub fn apply_b_leg_egress(
         // this leg pod-direct, which the deployment forbids (every worker-
         // originated request traverses the front proxy).
         Err(err) => {
-            eprintln!(
-                "WARN: leg {leg_id}: b-leg egress could not preload the outbound-proxy Route \
-                 ({err}); forwarding to {host}:{port} WITHOUT it rather than pod-direct"
+            tracing::warn!(
+                %leg_id,
+                error = %err,
+                %host,
+                port,
+                "b-leg egress could not preload the outbound-proxy Route; forwarding WITHOUT it \
+                 rather than pod-direct"
             );
             (req, (host, port))
         }

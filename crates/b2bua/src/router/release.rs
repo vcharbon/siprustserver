@@ -32,6 +32,10 @@ pub(super) enum ReleaseKind {
 /// the dispatch queue — so the released-at-call-end invariant lives in ONE
 /// place instead of per-path hand-maintained copies.
 pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: ReleaseKind) {
+    // A traced call's root span closes here — the ONE place every release funnels
+    // through — so the active-trace slot returns exactly when the call's runtime
+    // state does (ADR-0026). Idempotent, and a no-op for an unsampled call.
+    crate::trace::traces().close(call_ref);
     match kind {
         ReleaseKind::Terminated => {
             ctx.state.remove(call_ref);
@@ -52,6 +56,9 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
                 let _ = ctx.txn.cancel_txns_for_call(call_ref).await;
                 ctx.dispatcher.enqueue_poison(call_ref);
                 ctx.metrics.bump_repl_self_release();
+                // Folded into the dead peer's takeover episode, never its own
+                // line: shedding is the tail of the takeover it ends.
+                ctx.state.note_takeover_self_release(call_ref);
             }
         }
         ReleaseKind::Orphan => {

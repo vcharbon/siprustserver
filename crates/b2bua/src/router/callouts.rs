@@ -40,6 +40,31 @@ fn send_internal(
     });
 }
 
+/// Record one detached decision round trip on a traced call's root span
+/// (ADR-0026): the seed request and the resolved treatment as the two bodies of
+/// a child span. `None` handle = unsampled call, and nothing is serialized.
+fn record_round_trip(
+    trace: &Option<crate::trace::emit::TraceHandle>,
+    ctx: &RouterCtx,
+    route: &'static str,
+    sent_at_ms: i64,
+    request: &serde_json::Value,
+    outcome: &str,
+    payload: &serde_json::Value,
+) {
+    let Some(trace) = trace else {
+        return;
+    };
+    trace.round_trip(
+        route,
+        sent_at_ms,
+        &serde_json::to_vec(request).unwrap_or_default(),
+        ctx.clock.now_ms(),
+        outcome,
+        &serde_json::to_vec(payload).unwrap_or_default(),
+    );
+}
+
 /// Serialize a typed payload to the internal-event JSON. Payload structs are
 /// program-constructed (no non-string keys, no non-finite floats), so failure
 /// is unreachable; degrade to an empty object rather than kill the callout task.
@@ -119,7 +144,9 @@ pub(super) fn spawn_refer_callout(
 ) {
     let ctx2 = ctx.clone();
     let snapshot = CallSnapshot::of(call);
+    let trace = crate::trace::emit::TraceHandle::of(call);
     tokio::spawn(async move {
+        let sent_at_ms = ctx2.clock.now_ms();
         let mut req = parse_call_refer_request(&request);
         req.snapshot = snapshot;
         let (outcome, payload) = match ctx2.decision.call_refer(req).await {
@@ -150,6 +177,7 @@ pub(super) fn spawn_refer_callout(
             ),
             Err(_) => ("error", json!({})),
         };
+        record_round_trip(&trace, &ctx2, "/call/refer", sent_at_ms, &request, outcome, &payload);
         send_internal(&ctx2, call_ref, "refer-http-result", outcome, payload, Vec::new());
     });
 }
@@ -196,8 +224,11 @@ pub(super) fn spawn_failure_callout(
 ) {
     let ctx2 = ctx.clone();
     let snapshot = CallSnapshot::of(call);
+    let trace = crate::trace::emit::TraceHandle::of(call);
     tokio::spawn(async move {
+        let sent_at_ms = ctx2.clock.now_ms();
         let (outcome, payload) = failure_outcome(&ctx2, snapshot, &request).await;
+        record_round_trip(&trace, &ctx2, "/call/failure", sent_at_ms, &request, outcome, &payload);
         send_internal(&ctx2, call_ref, "call-failure-result", outcome, payload, Vec::new());
     });
 }
@@ -324,7 +355,9 @@ pub(super) fn spawn_release_callout(
 ) {
     let ctx2 = ctx.clone();
     let snapshot = CallSnapshot::of(call);
+    let trace = crate::trace::emit::TraceHandle::of(call);
     tokio::spawn(async move {
+        let sent_at_ms = ctx2.clock.now_ms();
         let req = parse_call_release_request(&request, snapshot);
         let (outcome, payload) = match ctx2.decision.call_release(req).await {
             Ok(CallReleaseResponse::Route(route)) => {
@@ -343,6 +376,15 @@ pub(super) fn spawn_release_callout(
             Ok(CallReleaseResponse::Release) => ("release", json!({})),
             Err(_) => ("release", json!({"reason": "engine_error"})),
         };
+        record_round_trip(
+            &trace,
+            &ctx2,
+            "/calls/events/release",
+            sent_at_ms,
+            &request,
+            outcome,
+            &payload,
+        );
         send_internal(&ctx2, call_ref, "call-release-result", outcome, payload, Vec::new());
     });
 }

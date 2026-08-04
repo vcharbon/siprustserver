@@ -310,10 +310,13 @@ impl ActionExecutor<'_> {
             Err(err) => {
                 let fallback = relay::outbound_proxy_route_set(self.config);
                 let route = fallback.first().map(String::as_str).unwrap_or("<none configured>");
-                eprintln!(
-                    "WARN: call {call_ref} leg {leg_id}: a recorded route does not read ({err}); \
-                     dialog route set falls back to the outbound proxy {route} — an empty route \
-                     set would send in-dialog requests pod-direct"
+                tracing::warn!(
+                    %call_ref,
+                    %leg_id,
+                    error = %err,
+                    %route,
+                    "a recorded route does not read; the dialog route set falls back to the \
+                     outbound proxy — an empty route set would send in-dialog requests pod-direct"
                 );
                 fallback
             }
@@ -333,9 +336,11 @@ fn contact_uri(
     match contact? {
         Ok(c) => Some(c.uri().to_string()),
         Err(err) => {
-            eprintln!(
-                "WARN: call {call_ref} leg {leg_id}: Contact does not read ({err}); keeping the \
-                 dialog's current remote target"
+            tracing::warn!(
+                %call_ref,
+                %leg_id,
+                error = %err,
+                "Contact does not read; keeping the dialog's current remote target"
             );
             None
         }

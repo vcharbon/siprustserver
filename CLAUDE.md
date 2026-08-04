@@ -25,6 +25,9 @@ summaries + hard directives only.
 - [docs/testing/ha-acceptance.md](docs/testing/ha-acceptance.md) — HA/chaos/
   endurance triage: SUT bug vs accepted collateral vs infra artifact, and the
   HA design invariants that must never be reintroduced.
+- [docs/observability.md](docs/observability.md) — **read before adding any
+  `info!` or any per-call trace emission**: operating the lab trace stack, plus
+  the directive guidelines for new code.
 - [docs/adr/](docs/adr/) — decisions. Load-bearing day-to-day:
   [ADR-0014](docs/adr/0014-reactive-only-takeover-version-vector.md) (reactive
   takeover, `(p,b)` reconciliation),
@@ -117,6 +120,25 @@ reintroduce: time-based settle/handback (reconciliation is `(p,b)`-causal
 only), smoothing or skew re-anchoring inside the timer driver, reclaim
 discharge touching the SIP wire, a non-pristine reboot. Details + references
 in the guide.
+
+## Logging & tracing — summary ([guide](docs/observability.md), [ADR-0026](docs/adr/0026-observability-logging-tracing.md))
+
+Two planes, never mixed. **`info!` is lifecycle ONLY** — state transitions, HA,
+startup, readiness, drain, long-term peer state — and MUST be
+**traffic-independent**: a 5000-call failover prints ~5 lines. A per-call event
+class goes through `observe::WaveSet` (rising edge / ~5 s summary /
+falling-edge totals); **a per-call `info!` line is a review must-fix**. Per-call
+diagnostics go in the per-call trace or at `debug!`. Every line carries node
+identity (+ peer / epoch / `(p,b)` where relevant).
+Per-call **traces**: the choke points (SIP messages, rule/context transitions,
+limiter) are already hooked — most work adds nothing. The ONLY class new code
+adds is per-call external-service I/O (a new per-call HTTP/remote dependency) as
+a child span with its request/response. **Every emission site sits behind
+`if call.sampled { … }`** — an unsampled call evaluates no format arg and
+allocates nothing; subscriber-side filtering is never the mechanism. Tracing is
+inert unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set; `X-Trace-Sample` is honored
+only under `SIP_TRACE_HEADER=1` (lab/endurance) and, like every SIP header, is
+extracted ONLY in `sip-message` / `sip_message::sniff`.
 
 ## Initial-INVITE final-response guarantee — summary ([ADR-0022](docs/adr/0022-initial-invite-final-response-guarantee.md))
 

@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 
 use async_trait::async_trait;
 
+#[cfg(feature = "real")]
+mod cause;
 mod recording;
 #[cfg(feature = "real")]
 mod real;

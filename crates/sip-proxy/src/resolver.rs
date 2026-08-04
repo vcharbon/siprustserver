@@ -273,17 +273,46 @@ struct Inner {
     /// names (wire-influenceable; see module doc).
     refresh_armed: Mutex<HashSet<String>>,
     metrics: Arc<ProxyMetrics>,
+    /// Resolution-failure aggregation keyed by name (ADR-0026): a name that
+    /// stops resolving is ONE episode — rising edge, ~5 s summaries, falling
+    /// edge with the totals — ended once the name resolves again for the idle
+    /// window, so a name flapping does not print a pair of lines per packet.
+    /// Names are wire-influenceable, so the set's own key bound is what keeps
+    /// this bounded.
+    resolve_failures: Arc<observe::WaveSet>,
 }
 
 impl Inner {
     /// Store a resolve outcome (publishing the cache-size gauge) and, for a
     /// positive entry, arm the proactive refresh one-shot.
     fn store_and_arm(self: &Arc<Self>, target: &ProxyAddr, outcome: Option<SocketAddr>) {
-        let size = self.cache.store(&target.to_string(), outcome);
+        let key = target.to_string();
+        let size = self.cache.store(&key, outcome);
         self.metrics.set_resolver_cache_size(size as u64);
-        if outcome.is_some() {
-            self.arm_refresh(target);
+        match outcome {
+            Some(_) => {
+                if self.resolve_failures.is_active() {
+                    self.resolve_failures.recovered(&key);
+                }
+                self.arm_refresh(target);
+            }
+            None => self.resolve_failures.record(&key, "failures", 1),
         }
+    }
+
+    /// The name-resolution failure log. A name flapping is a per-packet event
+    /// class, so it is aggregated into an episode per name.
+    fn failure_waves() -> Arc<observe::WaveSet> {
+        observe::WaveSet::new(|name: &str, r: &observe::WaveReport| {
+            tracing::info!(
+                node = observe::node(),
+                name,
+                edge = %r.edge,
+                elapsed_ms = r.elapsed_ms,
+                totals = %r.tally,
+                "name resolution failing"
+            );
+        })
     }
 
     /// Schedule the per-name refresh one-shot at `refresh_after_ms` from now.
@@ -350,6 +379,7 @@ impl Inner {
             }
             None => {
                 self.metrics.record_resolver_refresh(fail);
+                self.resolve_failures.record(&key, "failures", 1);
                 self.arm_refresh(target);
             }
         }
@@ -376,6 +406,7 @@ impl NamedForwarder {
             pinned: Mutex::new(HashSet::new()),
             refresh_armed: Mutex::new(HashSet::new()),
             metrics,
+            resolve_failures: Inner::failure_waves(),
         }))
     }
 

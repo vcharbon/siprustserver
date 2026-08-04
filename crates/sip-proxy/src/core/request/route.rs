@@ -17,6 +17,7 @@ use crate::headers::{cookie_params, route_target};
 use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
 use crate::self_gate::BypassKind;
 use crate::strategy::{DecodeResult, SelectOpts};
+use crate::trace::emit;
 
 use super::super::{is_dialog_creating, ProxyCore};
 use super::reply::{extra_header, proxy_reason};
@@ -202,6 +203,9 @@ impl ProxyCore {
         let has_to_tag = to.tag().is_some_and(|t| !t.is_empty());
         if method == Method::Invite && to.tag().is_none() && rtx_hit.is_none() {
             self.metrics.record_call();
+            // The proxy's own sampling decision — independent of the worker's,
+            // taken once, on the call's first INVITE (ADR-0026).
+            self.activate_trace(req, src, self.now_ms() as i64);
         }
 
         // ── §16.4 Route preprocessing ───────────────────────────────────────
@@ -290,6 +294,9 @@ impl ProxyCore {
                         extra_header(RetryAfter::new(decision.retry_after_sec.to_string())),
                         extra_header(proxy_reason(503, &reason)),
                     ];
+                    // The shed fact precedes the 503 it explains: `reply` is
+                    // itself an emission site (the datagram it synthesizes).
+                    emit::shed(&self.traces, call_id.as_str(), self.now_ms() as i64, &reason);
                     self.reply(req, src, 503, "Service Unavailable", &extra).await;
                     // Bounded set: the self-gate's own reason constants
                     // (proxy_overload_elu / proxy_overload_cps).
@@ -318,6 +325,9 @@ impl ProxyCore {
         let decision;
         let target: Option<ProxyAddr>;
         let mut reuse_branch: Option<String> = None;
+        // What the cookie said, for the traced routing fact — set only by the
+        // branch that consulted one.
+        let mut stickiness: Option<&'static str> = None;
 
         if method == Method::Cancel {
             let key = call_id_cseq_key(call_id.as_str(), from.tag(), cseq.seq());
@@ -364,10 +374,12 @@ impl ProxyCore {
                 DecodeResult::Forward { target: t, .. } => {
                     target = Some(t);
                     decision = RoutingDecisionKind::DecodeForward;
+                    stickiness = Some("hit");
                 }
                 DecodeResult::ForwardBackup { target: t, .. } => {
                     target = Some(t);
                     decision = RoutingDecisionKind::DecodeForwardBackup;
+                    stickiness = Some("backup");
                 }
                 DecodeResult::Reject { status, reason } => {
                     self.reply(req, src, status, &reason, &[]).await;
@@ -389,6 +401,7 @@ impl ProxyCore {
                         }
                     }
                     decision = RoutingDecisionKind::DecodeForward;
+                    stickiness = Some("miss");
                 }
             }
         } else if let Some(found) = &rtx_hit {
@@ -486,6 +499,7 @@ impl ProxyCore {
         let Ok(bytes) = draft.freeze_bytes() else { return self.drop_unforwardable() };
         self.send_to(&bytes, &target).await;
         self.metrics.record_message(Direction::Outbound, MessageResult::Forwarded);
+        self.trace_forward(call_id.as_str(), decision, &target, stickiness, &bytes);
 
         RouteOutcome { decision, target: Some(target) }
     }

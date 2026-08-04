@@ -724,7 +724,10 @@ pub struct FailoverHarness {
     /// `mark()`/`partition()`/`heal()`/crash/reboot so they interleave with SIP
     /// messages and repl frames in true append order (Issue 1).
     event_seq: Arc<layer_harness::EventSequencer>,
-    /// The SIP harness handle (shared so workers can re-bind on reboot).
+    /// The SIP harness handle (shared so workers can re-bind on reboot). It also
+    /// carries this run's log/trace capture: the inner `scenario_harness::Harness`
+    /// installs the thread-scoped `observe` buffer and dumps it to stderr when a
+    /// failover scenario panics, alongside the wire trace (ADR-0026).
     harness: Arc<HarnessHandle>,
     /// **Per-node wall-clock anchor offset (ms)** for clock-skew hardening tests.
     /// The harness rides ONE monotonic `tokio::time` timeline, but each node's

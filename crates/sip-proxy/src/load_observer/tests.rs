@@ -395,3 +395,31 @@ fn retry_after_is_finite_when_capped_and_zero_when_unknown() {
     // empty bucket, cap=10/s → (1-0)/10 = 0.1 → ceil = 1s.
     assert_eq!(o.retry_after_sec_for(W, 1000), 1);
 }
+
+// ── the band-change line ──────────────────────────────────────────────────
+
+/// The band-change line exists to explain the transition with the load that
+/// caused it AND the cap it produced. Read before the AIMD step, `cap_cps`
+/// named the cap the step was about to replace — an `AboveCritical` entry
+/// reported the pre-slam cap, the one number an operator reads that line for.
+#[test]
+fn the_band_change_line_reports_the_cap_the_transition_produced() {
+    let (_guard, log) = observe::test_buffer();
+    let o = obs_with(|c| {
+        bands_cfg(c);
+        c.cap_initial_cps = 100.0;
+        c.cap_floor_cps = 1.0;
+    });
+
+    o.apply_payload(W, &payload(0.99), 1000);
+    assert_eq!(snap1(&o, 1000).cap_cps, 1.0, "the slam pinned the cap at the floor");
+
+    let lines = log.matching("worker load band change");
+    assert_eq!(lines.len(), 1, "one line per transition");
+    assert!(lines[0].contains("to=AboveCritical"), "naming the band entered");
+    assert!(
+        lines[0].line().ends_with("cap_cps=1.0"),
+        "the cap AFTER the slam, not the 100.0 it replaced: {}",
+        lines[0].line(),
+    );
+}

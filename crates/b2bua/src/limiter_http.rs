@@ -24,6 +24,13 @@ pub struct HttpCallLimiter {
     transport: Arc<dyn HttpTransport>,
     addr: SocketAddr,
     timeout: Duration,
+    /// Fail-open aggregation keyed by the limiter address (ADR-0026): a limiter
+    /// outage is ONE episode — rising edge, ~5 s summaries, falling-edge totals
+    /// — ended once 200s have come back for the idle window.
+    fail_open: Arc<observe::WaveSet>,
+    /// `addr` rendered once — the episode key, so an outage costs no
+    /// per-request allocation.
+    addr_key: String,
 }
 
 impl HttpCallLimiter {
@@ -34,6 +41,8 @@ impl HttpCallLimiter {
             transport,
             addr,
             timeout,
+            fail_open: crate::lifecycle::backend_waves("call-limiter"),
+            addr_key: addr.to_string(),
         }
     }
 
@@ -41,8 +50,24 @@ impl HttpCallLimiter {
     /// error / non-200 — the caller treats all three as "backend unavailable".
     async fn call(&self, req: HttpRequest) -> Option<HttpResponse> {
         match tokio::time::timeout(self.timeout, self.transport.request(self.addr, req)).await {
-            Ok(Ok(resp)) if resp.status == 200 => Some(resp),
-            _ => None,
+            Ok(Ok(resp)) if resp.status == 200 => {
+                // A 200 reports the recovery; the episode ends once the
+                // limiter stops failing, so a limiter answering every other
+                // request stays one episode. One relaxed load while healthy.
+                if self.fail_open.is_active() {
+                    self.fail_open.recovered(&self.addr_key);
+                }
+                Some(resp)
+            }
+            other => {
+                let counter = match other {
+                    Err(_) => "timeouts",
+                    Ok(Err(_)) => "transport_errors",
+                    Ok(Ok(_)) => "non_200",
+                };
+                self.fail_open.record(&self.addr_key, counter, 1);
+                None
+            }
         }
     }
 }

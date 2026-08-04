@@ -87,6 +87,11 @@ struct ReadinessInner {
     draining: AtomicBool,
     /// Sticky readiness — once the gate opens it stays open (X6 anti-flap).
     ready_latched: AtomicBool,
+    /// Whether the "still NotReady, and why" line has been emitted. The state
+    /// machine is monotone (NotReady → Ready → Draining), so each transition —
+    /// including the boot state — is lined exactly once (ADR-0026): `state` is
+    /// read once per OPTIONS probe and must never be a per-probe line.
+    not_ready_logged: AtomicBool,
 }
 
 /// Clone-cheap readiness handle (shared `Arc` inside). Wired into
@@ -104,6 +109,7 @@ impl Readiness {
                 source,
                 draining: AtomicBool::new(false),
                 ready_latched: AtomicBool::new(false),
+                not_ready_logged: AtomicBool::new(false),
             }),
         }
     }
@@ -116,7 +122,14 @@ impl Readiness {
 
     /// Mark the node Draining (SIGTERM). Terminal — never reverts.
     pub fn set_draining(&self) {
-        self.inner.draining.store(true, Ordering::SeqCst);
+        if !self.inner.draining.swap(true, Ordering::SeqCst) {
+            tracing::info!(
+                node = observe::node(),
+                state = "Draining",
+                reason = "shutdown requested",
+                "readiness transition"
+            );
+        }
     }
 
     /// The current readiness state (Draining wins; else latched/gated Ready;
@@ -130,12 +143,31 @@ impl Readiness {
         if self.inner.ready_latched.load(Ordering::SeqCst) {
             return ReadinessState::Ready;
         }
-        if self.inner.source.membership_synced()
-            && self.inner.source.all_bootstrapped()
-            && self.inner.source.all_current()
-        {
-            self.inner.ready_latched.store(true, Ordering::SeqCst);
+        let synced = self.inner.source.membership_synced();
+        let bootstrapped = self.inner.source.all_bootstrapped();
+        let current = self.inner.source.all_current();
+        if synced && bootstrapped && current {
+            // `swap`, not `store`: two probes racing the opening gate must
+            // produce ONE transition line.
+            if !self.inner.ready_latched.swap(true, Ordering::SeqCst) {
+                tracing::info!(
+                    node = observe::node(),
+                    state = "Ready",
+                    reason = "membership synced, every peer bootstrapped and current",
+                    "readiness transition"
+                );
+            }
             return ReadinessState::Ready;
+        }
+        if !self.inner.not_ready_logged.swap(true, Ordering::SeqCst) {
+            tracing::info!(
+                node = observe::node(),
+                state = "NotReady",
+                membership_synced = synced,
+                all_bootstrapped = bootstrapped,
+                all_current = current,
+                "readiness transition"
+            );
         }
         ReadinessState::NotReady
     }

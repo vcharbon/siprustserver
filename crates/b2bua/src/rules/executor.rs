@@ -73,9 +73,18 @@ pub fn execute_rules(
             report_diagnostics(rule, call, &outcome);
             check_declared_effects(rule, &outcome.actions);
             let result = exec.execute(&outcome.actions, call, ctx);
+            // The rule's OWN cursor move is checked against what the rule
+            // produced — the projections and the terminal fold below belong to
+            // the engine, not to the rule that triggered them.
             check_declared_transition(rule, &before.sm_cursors, &result.call.sm_cursors);
             let result = invariants::finalize(result);
-            return invariants::enforce(obligations, &before, result, exec.now_ms, true);
+            let enforced = invariants::enforce(obligations, &before, result, exec.now_ms, true);
+            // Recorded from the FINAL call, so the trace carries what finalize
+            // and enforce synthesized too — the ADR-0022 unanswered-a-leg 503
+            // otherwise shows on a traced call as a `sip.out` with no matching
+            // `call.transition`.
+            record_transitions(rule, &before, &enforced.call, exec.now_ms);
+            return enforced;
         }
     }
     HandlerResult::new(call.clone())
@@ -88,7 +97,50 @@ pub fn execute_rules(
 /// no wire traffic — the rule's actions do.
 fn report_diagnostics(rule: &RuleDefinition, call: &Call, outcome: &RuleHandleResult) {
     for d in &outcome.diagnostics {
-        eprintln!("WARN: call {}: rule {} refused an input — {d}", call.call_ref, rule.id);
+        tracing::warn!(call_ref = %call.call_ref, rule = %rule.id, detail = %d, "rule refused an input");
+    }
+}
+
+/// Record what the winning rule's turn did on a traced call (ADR-0026): which
+/// rule handled the event, every state-machine cursor the turn moved, and the
+/// call's own lifecycle transition. `after` is the call as the turn LEAVES it —
+/// invariant finalization and enforcement included — so a transition those
+/// layers synthesize reaches the trace attributed to the turn that caused it.
+/// Guarded — an unsampled call reads one `Option<bool>` and returns, evaluating
+/// no format argument.
+fn record_transitions(rule: &RuleDefinition, before: &Call, after: &Call, now_ms: i64) {
+    if !crate::trace::sampled(after) {
+        return;
+    }
+    crate::trace::emit::rule_fired(after, now_ms, rule.id);
+    for (machine, to) in &after.sm_cursors {
+        if before.sm_cursors.get(machine) != Some(to) {
+            let from = before.sm_cursors.get(machine).map(call::StateLabel::as_str).unwrap_or("");
+            crate::trace::emit::rule_transition(
+                after,
+                now_ms,
+                rule.id,
+                machine.as_str(),
+                from,
+                to.as_str(),
+            );
+        }
+    }
+    // A removed cursor is machine deactivation (`ClearState`, ADR-0016 X9).
+    for (machine, from) in &before.sm_cursors {
+        if !after.sm_cursors.contains_key(machine) {
+            crate::trace::emit::rule_transition(
+                after,
+                now_ms,
+                rule.id,
+                machine.as_str(),
+                from.as_str(),
+                "terminal",
+            );
+        }
+    }
+    if before.state != after.state {
+        crate::trace::emit::context_transition(after, now_ms, before.state, after.state);
     }
 }
 
@@ -132,12 +184,12 @@ fn check_declared_transition(
                 to.map(call::StateLabel::as_str),
             );
         } else {
-            eprintln!(
-                "WARN: rule '{}' caused an undeclared transition on machine '{}': {:?} -> {:?}",
-                rule.id,
-                machine.as_str(),
-                from.map(call::StateLabel::as_str),
-                to.map(call::StateLabel::as_str),
+            tracing::warn!(
+                rule = %rule.id,
+                machine = machine.as_str(),
+                from = ?from.map(call::StateLabel::as_str),
+                to = ?to.map(call::StateLabel::as_str),
+                "rule caused an undeclared transition"
             );
         }
     }
@@ -166,10 +218,7 @@ fn check_declared_effects(rule: &RuleDefinition, emitted: &[RuleAction]) {
                     rule.id, kind,
                 );
             } else {
-                eprintln!(
-                    "WARN: rule '{}' emitted an undeclared {:?} side effect",
-                    rule.id, kind,
-                );
+                tracing::warn!(rule = %rule.id, effect = ?kind, "rule emitted an undeclared side effect");
             }
         }
     }
