@@ -106,8 +106,8 @@ fn the_reliable_provisional_map_round_trips() {
     assert_eq!(decoded, call, "no reliable provisional relayed yet");
 
     call.reliable_provisionals = vec![
-        ReliableProvisional { a_rseq: 9_000, b_leg_id: "b-1".into(), b_rseq: 4711 },
-        ReliableProvisional { a_rseq: 9_001, b_leg_id: "b-2".into(), b_rseq: 1 },
+        ReliableProvisional { a_rseq: 9_000, b_leg_id: "b-1".into(), b_cseq: 1, b_rseq: 4711 },
+        ReliableProvisional { a_rseq: 9_001, b_leg_id: "b-2".into(), b_cseq: 1, b_rseq: 1 },
     ];
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call, "both early dialogs' provisionals survive");

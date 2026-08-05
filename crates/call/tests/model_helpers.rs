@@ -221,9 +221,9 @@ fn dump_cursors_renders_sorted_or_dash() {
 
 #[test]
 fn a_fresh_reliable_provisional_takes_the_next_number() {
-    let (call, first) = assign_a_rseq(representative_call(), "b-1", 4711, 9_000);
+    let (call, first) = assign_a_rseq(representative_call(), "b-1", 1, 4711, 9_000);
     assert_eq!(first, 9_000, "the first relayed provisional takes the random start");
-    let (call, second) = assign_a_rseq(call, "b-1", 4712, 9_000);
+    let (call, second) = assign_a_rseq(call, "b-1", 1, 4712, 9_000);
     assert_eq!(second, 9_001, "RFC 3262 §3: the next is greater by exactly one");
     assert_eq!(call.reliable_provisionals.len(), 2);
     assert_eq!(b_rseq_for(&call, "b-1", 9_001), Some(4712));
@@ -231,8 +231,8 @@ fn a_fresh_reliable_provisional_takes_the_next_number() {
 
 #[test]
 fn relaying_the_same_reliable_provisional_again_is_the_same_number() {
-    let (call, first) = assign_a_rseq(representative_call(), "b-1", 4711, 9_000);
-    let (call, again) = assign_a_rseq(call, "b-1", 4711, 9_000);
+    let (call, first) = assign_a_rseq(representative_call(), "b-1", 1, 4711, 9_000);
+    let (call, again) = assign_a_rseq(call, "b-1", 1, 4711, 9_000);
     assert_eq!(again, first, "a retransmission is a retransmission, not a new provisional");
     assert_eq!(call.reliable_provisionals.len(), 1);
 }
@@ -242,9 +242,9 @@ fn relaying_the_same_reliable_provisional_again_is_the_same_number() {
 /// increasing across both, which two relayed b-side sequences are not.
 #[test]
 fn two_b_legs_with_overlapping_sequences_share_one_a_facing_ladder() {
-    let (call, one) = assign_a_rseq(representative_call(), "b-1", 1, 5);
-    let (call, two) = assign_a_rseq(call, "b-2", 1, 5);
-    let (call, three) = assign_a_rseq(call, "b-1", 2, 5);
+    let (call, one) = assign_a_rseq(representative_call(), "b-1", 1, 1, 5);
+    let (call, two) = assign_a_rseq(call, "b-2", 1, 1, 5);
+    let (call, three) = assign_a_rseq(call, "b-1", 1, 2, 5);
     assert_eq!((one, two, three), (5, 6, 7));
     assert_eq!(b_rseq_for(&call, "b-1", 5), Some(1));
     assert_eq!(b_rseq_for(&call, "b-2", 6), Some(1));
@@ -253,8 +253,38 @@ fn two_b_legs_with_overlapping_sequences_share_one_a_facing_ladder() {
     assert_eq!(b_rseq_for(&call, "b-1", 99), None, "a number this stack never minted");
 }
 
+/// RFC 3262 §7.1 restarts the callee's `RSeq` at random per INVITE
+/// transaction, so a re-INVITE may state a number the initial INVITE already
+/// used on the same leg. That is a NEW provisional, never a retransmission.
+#[test]
+fn the_same_b_sequence_on_a_later_transaction_is_a_new_provisional() {
+    let (call, initial) = assign_a_rseq(representative_call(), "b-1", 1, 4711, 9_000);
+    let (call, reinvite) = assign_a_rseq(call, "b-1", 2, 4711, 9_000);
+    assert_ne!(reinvite, initial, "a later INVITE transaction restarts the callee's sequence");
+    assert_eq!(reinvite, initial + 1, "RFC 3262 §3: the a-facing ladder still rises by one");
+    assert_eq!(call.reliable_provisionals.len(), 2);
+    assert_eq!(b_rseq_for(&call, "b-1", initial), Some(4711));
+    assert_eq!(b_rseq_for(&call, "b-1", reinvite), Some(4711));
+}
+
+/// Interleaved forks: each early dialog sends TWO provisionals, alternating.
+/// The a-facing ladder rises by exactly one across the interleaving (RFC 3262
+/// §4 reads the sequence per request), and every rung translates back onto the
+/// fork that stated it.
+#[test]
+fn interleaved_forked_provisionals_share_one_rising_ladder() {
+    let (call, one) = assign_a_rseq(representative_call(), "b-1", 1, 100, 5);
+    let (call, two) = assign_a_rseq(call, "b-2", 1, 200, 5);
+    let (call, three) = assign_a_rseq(call, "b-1", 1, 101, 5);
+    let (call, four) = assign_a_rseq(call, "b-2", 1, 201, 5);
+    assert_eq!((one, two, three, four), (5, 6, 7, 8), "one ladder, no gap and no repeat");
+    assert_eq!(b_rseq_for(&call, "b-1", 7), Some(101));
+    assert_eq!(b_rseq_for(&call, "b-2", 8), Some(201));
+    assert_eq!(b_rseq_for(&call, "b-1", 8), None, "a rung minted toward the other fork");
+}
+
 #[test]
 fn an_a_facing_sequence_number_is_never_below_one() {
-    let (_, a_rseq) = assign_a_rseq(representative_call(), "b-1", 1, 0);
+    let (_, a_rseq) = assign_a_rseq(representative_call(), "b-1", 1, 1, 0);
     assert_eq!(a_rseq, 1, "RFC 3262 §7.1: zero is not a sequence number");
 }

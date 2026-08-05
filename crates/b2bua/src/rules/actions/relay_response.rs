@@ -44,8 +44,9 @@ impl ActionExecutor<'_> {
         } else {
             0
         };
+        let b_cseq = i64::from(resp.cseq().seq());
         let (updated, a_rseq) =
-            call::helpers::assign_a_rseq(call.clone(), source_leg_id, b_rseq, initial);
+            call::helpers::assign_a_rseq(call.clone(), source_leg_id, b_cseq, b_rseq, initial);
         *call = updated;
         relay::own_the_rseq(headers, a_rseq);
     }

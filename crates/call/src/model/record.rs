@@ -29,12 +29,18 @@ pub struct TagMapping {
 /// `RSeq` this stack minted and the b-leg response it stands for. The caller
 /// PRACKs the number she was shown, so the relayed `RAck` translates back
 /// through this map before it reaches the callee that owns the other sequence.
+/// `(b_leg_id, b_cseq, b_rseq)` identifies the provisional: RFC 3262 §7.1
+/// restarts the callee's `RSeq` at random per INVITE transaction, so without
+/// the `CSeq` a re-INVITE's first provisional could collide with the initial
+/// INVITE's and be misread as a retransmission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReliableProvisional {
     /// The `RSeq` shown to the caller — this stack's own sequence.
     pub a_rseq: i64,
     /// The b-leg the provisional came from.
     pub b_leg_id: String,
+    /// The `CSeq` number of the b-leg INVITE transaction it answers.
+    pub b_cseq: i64,
     /// The `RSeq` that b-leg stated.
     pub b_rseq: i64,
 }
@@ -212,8 +218,8 @@ pub struct Call {
     #[serde(default)]
     pub reroute: Option<RerouteState>,
     /// The reliable provisionals relayed toward the caller, in mint order
-    /// (RFC 3262 §7.1). The a-facing `RSeq` sequence belongs to the a-leg
-    /// INVITE transaction, so it survives here: a PRACK arriving after a
+    /// (RFC 3262 §7.1) — one entry per provisional this stack renumbered, for
+    /// the life of the call. It survives here because a PRACK arriving after a
     /// takeover still translates onto the b-leg number it acknowledges.
     #[serde(default)]
     pub reliable_provisionals: Vec<ReliableProvisional>,
