@@ -101,11 +101,9 @@ impl ActionExecutor<'_> {
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
-        status: u16,
-        reason: &str,
-        header_updates: &[(String, Option<String>)],
-        contacts: &[(String, Option<f32>)],
+        authored: AuthoredFinal<'_>,
     ) {
+        let AuthoredFinal { status, reason, header_updates, contacts } = authored;
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         // A redirect target that does not read is refused, not invented: the
@@ -414,6 +412,16 @@ fn header_update_lines(header_updates: &[(String, Option<String>)]) -> Vec<SipHe
             }
         })
         .collect()
+}
+
+/// What the decision authored for the caller's final, as
+/// [`crate::rules::model::RuleAction::RespondToALeg`] states it: the status line
+/// plus the two lists that own their own names.
+pub(super) struct AuthoredFinal<'a> {
+    pub status: u16,
+    pub reason: &'a str,
+    pub header_updates: &'a [(String, Option<String>)],
+    pub contacts: &'a [(String, Option<f32>)],
 }
 
 /// The failing peer's relayable headers, but ONLY on a final that answers the

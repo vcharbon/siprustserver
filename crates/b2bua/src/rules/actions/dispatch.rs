@@ -341,7 +341,13 @@ impl ActionExecutor<'_> {
                 self.relay_failure_to_a_leg(call, fx, ctx, *status, reason);
             }
             RuleAction::RespondToALeg { status, reason, header_updates, contacts } => {
-                self.respond_to_a_leg(call, fx, ctx, *status, reason, header_updates, contacts);
+                let authored = super::respond::AuthoredFinal {
+                    status: *status,
+                    reason,
+                    header_updates,
+                    contacts,
+                };
+                self.respond_to_a_leg(call, fx, ctx, authored);
             }
             RuleAction::AnswerALegNewDialog {
                 status,
