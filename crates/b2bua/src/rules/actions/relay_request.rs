@@ -125,12 +125,18 @@ impl ActionExecutor<'_> {
         let t_id = dialog_identity_tag(target_leg, &target_dialog);
         *call = bump_local_cseq(call.clone(), target_leg, &t_id, delta);
 
-        // RFC 3262 §7.2: rewrite RAck's middle (CSeq) token to the INVITE CSeq
-        // that produced the reliable 1xx *on the target leg*.
+        // RFC 3262 §7.2: RAck names the reliable 1xx and the INVITE that drew it
+        // *on the target leg*, and this stack owns neither number on the face it
+        // received them from — the CSeq token becomes the target leg's INVITE
+        // CSeq, and the RSeq token translates back to the sequence the target
+        // stated (`b_rseq_for`). A number this stack never minted relays as it
+        // stands, so the target answers 481 rather than acknowledging nothing.
         let rack = if method == InDialogMethod::Prack {
-            req.header::<RAck>()
-                .and_then(Result::ok)
-                .map(|r| RAck::new(r.rseq(), target_invite_cseq.max(0) as u32, r.method().clone()))
+            req.header::<RAck>().and_then(Result::ok).map(|r| {
+                let rseq = call::helpers::b_rseq_for(call, target_leg, i64::from(r.rseq()))
+                    .map_or(r.rseq(), |b_rseq| b_rseq.max(0) as u32);
+                RAck::new(rseq, target_invite_cseq.max(0) as u32, r.method().clone())
+            })
         } else {
             None
         };

@@ -21,11 +21,16 @@
 use b2bua_harness::B2buaSut;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
-use sip_message::header::RAck;
+use sip_message::header::{RAck, RSeq};
+use sip_message::types::SipResponse;
 use sip_message::Method;
 
 const ANSWER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const OFFER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+
+fn rseq_of(resp: &SipResponse) -> u32 {
+    resp.header::<RSeq>().expect("an RSeq").expect("readable RSeq").value()
+}
 
 #[tokio::test]
 async fn prack_forking_two_early_dialogs() {
@@ -53,7 +58,7 @@ async fn prack_forking_two_early_dialogs() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack("1 1 INVITE")
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
         .with_sdp(ANSWER)
         .send()
         .await;
@@ -76,11 +81,19 @@ async fn prack_forking_two_early_dialogs() {
     let p2 = call.expect(183).await;
     let fork2_atag = p2.to().tag().expect("fork2 a-facing tag").to_string();
     assert_ne!(fork1_atag, fork2_atag, "each callee fork maps to a distinct a-facing tag");
+    // Both forks ride ONE a-leg INVITE transaction, so the caller must see one
+    // ladder rising by exactly one (RFC 3262 §3) — which the two callee
+    // sequences (1 and 200) are not.
+    assert_eq!(
+        rseq_of(&p2),
+        rseq_of(&p1) + 1,
+        "the a-facing sequence spans both early dialogs, rising by exactly one",
+    );
 
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork2_atag)
-        .with_rack("200 1 INVITE")
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
         .with_sdp(ANSWER)
         .send()
         .await;

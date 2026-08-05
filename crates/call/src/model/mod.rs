@@ -41,7 +41,7 @@ pub mod timer;
 
 pub use record::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallLimiterState, CallModelState,
-    CallTopology, PolicyUpdateBody, SipHeader, TagMapping,
+    CallTopology, PolicyUpdateBody, ReliableProvisional, SipHeader, TagMapping,
 };
 pub use cdr::{CdrEvent, CdrEventType};
 pub use dialog::{

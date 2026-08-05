@@ -32,7 +32,7 @@ pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};
 // The Call→Leg→Dialog tree + call-level satellites.
 pub use model::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallLimiterState, CallModelState,
-    CallTopology, Leg, PolicyUpdateBody, SipHeader, TagMapping,
+    CallTopology, Leg, PolicyUpdateBody, ReliableProvisional, SipHeader, TagMapping,
 };
 // Leg + dialog state.
 pub use model::{

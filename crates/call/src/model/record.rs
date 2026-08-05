@@ -25,6 +25,20 @@ pub struct TagMapping {
     pub b_tag: String,
 }
 
+/// One reliable provisional relayed toward the caller (RFC 3262): the a-facing
+/// `RSeq` this stack minted and the b-leg response it stands for. The caller
+/// PRACKs the number she was shown, so the relayed `RAck` translates back
+/// through this map before it reaches the callee that owns the other sequence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReliableProvisional {
+    /// The `RSeq` shown to the caller — this stack's own sequence.
+    pub a_rseq: i64,
+    /// The b-leg the provisional came from.
+    pub b_leg_id: String,
+    /// The `RSeq` that b-leg stated.
+    pub b_rseq: i64,
+}
+
 /// Active limiter entry on a call.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLimiterState {
@@ -197,6 +211,12 @@ pub struct Call {
     /// `None` when no reroute is in flight.
     #[serde(default)]
     pub reroute: Option<RerouteState>,
+    /// The reliable provisionals relayed toward the caller, in mint order
+    /// (RFC 3262 §7.1). The a-facing `RSeq` sequence belongs to the a-leg
+    /// INVITE transaction, so it survives here: a PRACK arriving after a
+    /// takeover still translates onto the b-leg number it acknowledges.
+    #[serde(default)]
+    pub reliable_provisionals: Vec<ReliableProvisional>,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate

@@ -590,9 +590,11 @@ pub fn build_b_leg(
 /// What the B2BUA carries transparently from a b-leg response onto the response
 /// it mints toward the a-leg (RFC 3261 §16.6): every header it does not own,
 /// which includes the reliable-provisional negotiation end to end
-/// (`Require`/`Supported`/`RSeq`, RFC 3262). `keeps_body` states whether the
-/// relayed response carries this response's own body — a policy that drops or
-/// replaces the body leaves the headers describing it behind.
+/// (`Require`/`Supported`, RFC 3262). `RSeq` rides here too, but as a
+/// placeholder: it is per-transaction sequencing the a-leg owns, so
+/// [`own_the_rseq`] restates it before the response leaves. `keeps_body` states
+/// whether the relayed response carries this response's own body — a policy
+/// that drops or replaces the body leaves the headers describing it behind.
 ///
 /// This is plain transparent relay — distinct from the B2BUA-side 18x
 /// management *policies* (`relayFirst18xTo180`/`promote18xPemTo200`), which
@@ -605,6 +607,26 @@ pub fn relay_response_passthrough_headers(
     let scope = RelayScope::response();
     let scope = if keeps_body { scope } else { scope.without_source_body() };
     generators::relayable_headers(resp.headers(), scope)
+}
+
+/// The `RSeq` a reliable provisional states (RFC 3262: `Require: 100rel` plus a
+/// numeric `RSeq`), or `None` when this response is not one.
+pub fn reliable_rseq(resp: &sip_message::SipResponse) -> Option<i64> {
+    let requires = resp.header::<header::Require>()?.ok()?;
+    if !requires.contains("100rel") {
+        return None;
+    }
+    Some(resp.header::<header::RSeq>()?.ok()?.value() as i64)
+}
+
+/// Restate a relayed reliable provisional's `RSeq` with the number this stack
+/// owns. RSeq is per-INVITE-transaction sequencing exactly like CSeq, so the
+/// caller is shown the a-leg transaction's own ladder (RFC 3262 §3/§7.1) and
+/// the PRACK naming it translates back at [`call::helpers::b_rseq_for`].
+pub fn own_the_rseq(headers: &mut [MsgHeader], a_rseq: i64) {
+    for h in headers.iter_mut().filter(|h| HeaderName::RSeq.matches(&h.name)) {
+        h.value = SipStr::owned(&a_rseq.to_string());
+    }
 }
 
 /// `Call.ext` slot carrying the LAST failing b-leg final's relayable header

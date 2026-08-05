@@ -230,6 +230,7 @@ pub fn build_initial_call(
         transfer: None,
         subscriptions: Vec::new(),
         reroute: None,
+        reliable_provisionals: Vec::new(),
         sm_cursors: std::collections::BTreeMap::new(),
     }
 }

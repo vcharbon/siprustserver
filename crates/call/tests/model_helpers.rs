@@ -216,3 +216,45 @@ fn dump_cursors_renders_sorted_or_dash() {
         .insert(MachineId::new("global-call"), StateLabel::new("Active"));
     assert_eq!(dump_cursors(&call), "global-call=Active transfer=CRinging");
 }
+
+// ── the a-facing reliable-provisional sequence (RFC 3262) ───────────────────
+
+#[test]
+fn a_fresh_reliable_provisional_takes_the_next_number() {
+    let (call, first) = assign_a_rseq(representative_call(), "b-1", 4711, 9_000);
+    assert_eq!(first, 9_000, "the first relayed provisional takes the random start");
+    let (call, second) = assign_a_rseq(call, "b-1", 4712, 9_000);
+    assert_eq!(second, 9_001, "RFC 3262 §3: the next is greater by exactly one");
+    assert_eq!(call.reliable_provisionals.len(), 2);
+    assert_eq!(b_rseq_for(&call, "b-1", 9_001), Some(4712));
+}
+
+#[test]
+fn relaying_the_same_reliable_provisional_again_is_the_same_number() {
+    let (call, first) = assign_a_rseq(representative_call(), "b-1", 4711, 9_000);
+    let (call, again) = assign_a_rseq(call, "b-1", 4711, 9_000);
+    assert_eq!(again, first, "a retransmission is a retransmission, not a new provisional");
+    assert_eq!(call.reliable_provisionals.len(), 1);
+}
+
+/// Forking: two early dialogs number their provisionals independently, and both
+/// ride ONE a-leg INVITE transaction — so the a-facing ladder is strictly
+/// increasing across both, which two relayed b-side sequences are not.
+#[test]
+fn two_b_legs_with_overlapping_sequences_share_one_a_facing_ladder() {
+    let (call, one) = assign_a_rseq(representative_call(), "b-1", 1, 5);
+    let (call, two) = assign_a_rseq(call, "b-2", 1, 5);
+    let (call, three) = assign_a_rseq(call, "b-1", 2, 5);
+    assert_eq!((one, two, three), (5, 6, 7));
+    assert_eq!(b_rseq_for(&call, "b-1", 5), Some(1));
+    assert_eq!(b_rseq_for(&call, "b-2", 6), Some(1));
+    assert_eq!(b_rseq_for(&call, "b-1", 7), Some(2));
+    assert_eq!(b_rseq_for(&call, "b-2", 5), None, "a number minted toward the other fork");
+    assert_eq!(b_rseq_for(&call, "b-1", 99), None, "a number this stack never minted");
+}
+
+#[test]
+fn an_a_facing_sequence_number_is_never_below_one() {
+    let (_, a_rseq) = assign_a_rseq(representative_call(), "b-1", 1, 0);
+    assert_eq!(a_rseq, 1, "RFC 3262 §7.1: zero is not a sequence number");
+}

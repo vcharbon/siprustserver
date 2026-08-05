@@ -81,6 +81,15 @@ impl IdGen {
     pub fn new_branch(&self) -> String {
         format!("{MAGIC_COOKIE}{:016x}", self.next_u64())
     }
+
+    /// The initial value of a 32-bit signed sequence counter — `1..=2^31 - 1`,
+    /// the range RFC 3261 §8.1.1.5 (CSeq) and RFC 3262 §7.1 (RSeq) share and
+    /// ask to be picked at random, so a peer cannot guess where a sequence
+    /// resumes. Kept an order of magnitude below the ceiling so a long
+    /// transaction's increments cannot run past it.
+    pub fn new_sequence_number(&self) -> u32 {
+        (self.next_u64() % 100_000_000) as u32 + 1
+    }
 }
 
 impl Default for IdGen {

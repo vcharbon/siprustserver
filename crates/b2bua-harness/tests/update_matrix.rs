@@ -20,7 +20,12 @@ use b2bua_harness::{B2buaScene, B2buaSut};
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
-use sip_message::header::MediaType;
+use sip_message::header::{MediaType, RSeq};
+use sip_message::types::SipResponse;
+
+fn rseq_of(resp: &SipResponse) -> u32 {
+    resp.header::<RSeq>().expect("an RSeq").expect("readable RSeq").value()
+}
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
@@ -196,7 +201,7 @@ async fn early_pracked_update_no_sdp_a_to_b() {
     let mut prack = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&atag)
-        .with_rack("1 1 INVITE")
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p183)))
         .send()
         .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
@@ -339,7 +344,7 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     uas.respond(183, "Session Progress").with_to_tag("bf1").reliable(1).with_sdp(ANSWER).await;
     let p1 = call.expect(183).await;
     let f1 = p1.to().tag().expect("fork1 a-tag").to_string();
-    let mut prack1 = call.send_request(InDialogMethod::Prack).with_to_tag(&f1).with_rack("1 1 INVITE").send().await;
+    let mut prack1 = call.send_request(InDialogMethod::Prack).with_to_tag(&f1).with_rack(&format!("{} 1 INVITE", rseq_of(&p1))).send().await;
     bob.receive("PRACK").await.respond(200, "OK").await;
     prack1.expect(200).await;
 
@@ -348,7 +353,7 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     let p2 = call.expect(183).await;
     let f2 = p2.to().tag().expect("fork2 a-tag").to_string();
     assert_ne!(f1, f2);
-    let mut prack2 = call.send_request(InDialogMethod::Prack).with_to_tag(&f2).with_rack("1 1 INVITE").send().await;
+    let mut prack2 = call.send_request(InDialogMethod::Prack).with_to_tag(&f2).with_rack(&format!("{} 1 INVITE", rseq_of(&p2))).send().await;
     let mut prack2_at_bob = bob.receive("PRACK").await;
     assert_eq!(prack2_at_bob.request().to().tag(), Some("bf2"), "fork2 PRACK targets fork2");
     prack2_at_bob.respond(200, "OK").await;

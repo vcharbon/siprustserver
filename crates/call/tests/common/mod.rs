@@ -271,6 +271,7 @@ pub fn representative_call() -> Call {
             old_leg_id: Some("b-1".into()),
             started_at_ms: 1_779_440_050_000,
         }),
+        reliable_provisionals: Vec::new(),
         sm_cursors: BTreeMap::new(),
     }
 }
@@ -757,6 +758,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             transfer: None,
             subscriptions,
             reroute,
+            reliable_provisionals: Vec::new(),
             sm_cursors,
         },
     )

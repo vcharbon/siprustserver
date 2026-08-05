@@ -20,6 +20,36 @@ use super::select::{dialog_identity_tag, resolve_peer};
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
+    /// Restate a relayed reliable provisional's `RSeq` with the a-leg INVITE
+    /// transaction's own number (RFC 3262 §7.1) and remember what it stands
+    /// for, so the caller's PRACK translates back onto the b-leg's sequence. A
+    /// retransmitted provisional recalls the number already shown; a
+    /// provisional relayed without an `RSeq` (a masking policy stripped it) is
+    /// not a reliable one and takes no number.
+    fn own_relayed_rseq(
+        &self,
+        call: &mut Call,
+        source_leg_id: &str,
+        resp: &sip_message::SipResponse,
+        headers: &mut [SipHeader],
+    ) {
+        if !headers.iter().any(|h| HeaderName::RSeq.matches(&h.name)) {
+            return;
+        }
+        let Some(b_rseq) = relay::reliable_rseq(resp) else {
+            return;
+        };
+        let initial = if call.reliable_provisionals.is_empty() {
+            self.id_gen.new_sequence_number() as i64
+        } else {
+            0
+        };
+        let (updated, a_rseq) =
+            call::helpers::assign_a_rseq(call.clone(), source_leg_id, b_rseq, initial);
+        *call = updated;
+        relay::own_the_rseq(headers, a_rseq);
+    }
+
     /// Relay an inbound SIP response toward `target_leg` (normally the a-leg).
     /// Two paths, mirroring the source:
     ///   - **pending-correlated** (in-dialog non-INVITE: PRACK/OPTIONS/INFO/
@@ -278,6 +308,7 @@ impl ActionExecutor<'_> {
                 relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
                 Self::cache_answered_advert(call, &passthrough);
             }
+            self.own_relayed_rseq(call, &source_leg_id, resp, &mut passthrough);
             let effect = relay::response_to_a_leg(
                 &a_invite,
                 status,
@@ -306,8 +337,9 @@ impl ActionExecutor<'_> {
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
-        // Reliable-provisional negotiation headers (Require/Supported/RSeq) pass
-        // through transparently so end-to-end PRACK keeps working (RFC 3262).
+        // Reliable-provisional negotiation (Require/Supported) passes through
+        // transparently so end-to-end PRACK keeps working (RFC 3262); the RSeq
+        // it rides on is this transaction's own (`own_relayed_rseq`).
         let mut passthrough =
             filter_passthrough(relay::relay_response_passthrough_headers(resp, keeps_body));
         // A 2xx INVITE answer carries the originator face's Allow/Supported —
@@ -318,6 +350,7 @@ impl ActionExecutor<'_> {
             relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
             Self::cache_answered_advert(call, &passthrough);
         }
+        self.own_relayed_rseq(call, &source_leg_id, resp, &mut passthrough);
         let effect = relay::response_to_a_leg(
             &a_invite,
             status,

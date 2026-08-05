@@ -105,8 +105,8 @@ pub struct AdvertisedCapabilities {
 /// Scope of the declaration: the messages the stack MINTS — the INVITE it
 /// originates, the INVITE 2xx it returns to the originator, and the re-INVITEs
 /// it originates or relays. It does NOT rewrite the reliable-provisional
-/// negotiation (`Require`/`Supported`/`RSeq` on a relayed 1xx), which stays
-/// end-to-end per RFC 3262. `toward_originated` covers EVERY originated leg —
+/// negotiation (`Require`/`Supported` on a relayed 1xx), which stays end-to-end
+/// per RFC 3262. `toward_originated` covers EVERY originated leg —
 /// the faces are two, not one per leg.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdvertiseCapabilitiesFeature {

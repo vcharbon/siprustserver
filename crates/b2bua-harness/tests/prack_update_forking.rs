@@ -36,11 +36,16 @@
 use b2bua_harness::B2buaSut;
 use scenario_harness::{Harness, RunReport};
 use sip_message::generators::InDialogMethod;
-use sip_message::header::{RAck, Require};
+use sip_message::header::{RAck, RSeq, Require};
+use sip_message::types::SipResponse;
 use sip_message::Method;
 use std::path::Path;
 
 // Alice's initial offer, two codecs so the re-offer can narrow it.
+fn rseq_of(resp: &SipResponse) -> u32 {
+    resp.header::<RSeq>().expect("an RSeq").expect("readable RSeq").value()
+}
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 // Each fork's answer (distinct media port per fork — independent early media).
 const ANSWER_F1: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20001 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
@@ -82,7 +87,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack("1 1 INVITE")
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
         .send()
         .await;
     let mut prack1_at_bob = bob.receive("PRACK").await;
@@ -109,7 +114,7 @@ async fn prack_update_forking_answer_on_second_fork() {
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork2_atag)
-        .with_rack("1 1 INVITE")
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
         .send()
         .await;
     let mut prack2_at_bob = bob.receive("PRACK").await;
