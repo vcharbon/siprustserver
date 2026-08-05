@@ -55,7 +55,8 @@ impl ActionExecutor<'_> {
     }
 
     /// Answer the a-leg INVITE with a failure final under the B2BUA's own
-    /// a-dialog tag and Contact ([`crate::rules::model::RuleAction::RelayFailureToALeg`]).
+    /// a-dialog tag ([`crate::rules::model::RuleAction::RelayFailureToALeg`]);
+    /// the Contact rides only where [`relay::stamps_contact`] allows it.
     /// The final restates the failing b-leg final's relayable headers (RFC 3261
     /// §16.6, seeded on the call by `route-failure`), so what the refusing peer
     /// stated — its `Warning`, charging correlation, vendor annotations —
@@ -87,7 +88,8 @@ impl ActionExecutor<'_> {
     /// Answer the a-leg INVITE with a decision-authored Reject/Redirect final
     /// ([`crate::rules::model::RuleAction::RespondToALeg`]). No B2BUA Contact: a
     /// redirect carries its own Contact list (via the built headers), a reject
-    /// carries none (ADR-0017 header-ownership X2). The failing b-leg final's
+    /// carries none (ADR-0017 header-ownership X2, [`relay::stamps_contact`]).
+    /// The failing b-leg final's
     /// relayable headers (seeded by `route-failure`) ride UNDER the decision's
     /// own statements: a `header_updates` entry naming a header — set or
     /// removal — owns that name (X2 precedence).

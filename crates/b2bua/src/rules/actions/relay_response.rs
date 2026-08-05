@@ -117,7 +117,9 @@ impl ActionExecutor<'_> {
                     );
                     return;
                 };
-                let contact = relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true));
+                let contact = relay::stamps_contact(status).then(|| {
+                    relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true))
+                });
                 let mut transparent_headers =
                     filter_passthrough(relay::relay_response_passthrough_headers(resp, keeps_body));
                 // A 2xx answer to a B2BUA-relayed re-INVITE advertises this
@@ -158,7 +160,7 @@ impl ActionExecutor<'_> {
                         .map(|t| echo(HeaderName::Timestamp, t)),
                     transparent_headers,
                     content_type: relay_content_type.clone(),
-                    contact: Some(contact),
+                    contact,
                 };
                 let relayed = generators::generate_relayed_response(status, &reason, &opts);
                 let s_id = dialog_identity_tag(&source_leg_id, &src_dialog);
