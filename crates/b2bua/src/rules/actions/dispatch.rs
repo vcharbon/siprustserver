@@ -338,10 +338,10 @@ impl ActionExecutor<'_> {
                 }
             }
             RuleAction::RelayFailureToALeg { status, reason } => {
-                self.relay_failure_to_a_leg(call, fx, *status, reason);
+                self.relay_failure_to_a_leg(call, fx, ctx, *status, reason);
             }
             RuleAction::RespondToALeg { status, reason, header_updates, contacts } => {
-                self.respond_to_a_leg(call, fx, *status, reason, header_updates, contacts);
+                self.respond_to_a_leg(call, fx, ctx, *status, reason, header_updates, contacts);
             }
             RuleAction::AnswerALegNewDialog {
                 status,

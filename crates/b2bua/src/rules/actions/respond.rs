@@ -57,21 +57,23 @@ impl ActionExecutor<'_> {
     /// Answer the a-leg INVITE with a failure final under the B2BUA's own
     /// a-dialog tag ([`crate::rules::model::RuleAction::RelayFailureToALeg`]);
     /// the Contact rides only where [`relay::stamps_contact`] allows it.
-    /// The final restates the failing b-leg final's relayable headers (RFC 3261
-    /// §16.6, seeded on the call by `route-failure`), so what the refusing peer
-    /// stated — its `Warning`, charging correlation, vendor annotations —
-    /// reaches the caller.
+    /// A final that answers the `/call/failure` consult restates the failing
+    /// b-leg final's relayable headers (RFC 3261 §16.6), so what the refusing
+    /// peer stated — its `Warning`, charging correlation, vendor annotations —
+    /// reaches the caller; a final answering anything else speaks only for
+    /// itself.
     pub(super) fn relay_failure_to_a_leg(
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
+        ctx: &RuleContext,
         status: u16,
         reason: &str,
     ) {
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
-        let extra = relay::relayed_failure_headers(call.ext.as_ref());
+        let extra = failure_headers_answering(ctx, call);
         fx.outbound.push(relay::response_to_a_leg(
             &a_invite,
             status,
@@ -89,14 +91,16 @@ impl ActionExecutor<'_> {
     /// ([`crate::rules::model::RuleAction::RespondToALeg`]). No B2BUA Contact: a
     /// redirect carries its own Contact list (via the built headers), a reject
     /// carries none (ADR-0017 header-ownership X2, [`relay::stamps_contact`]).
-    /// The failing b-leg final's
-    /// relayable headers (seeded by `route-failure`) ride UNDER the decision's
-    /// own statements: a `header_updates` entry naming a header — set or
-    /// removal — owns that name (X2 precedence).
+    /// When this final answers the `/call/failure` consult, the failing b-leg
+    /// final's relayable headers ride UNDER the decision's own statements: a
+    /// `header_updates` entry naming a header — set or removal — owns that name
+    /// (X2 precedence). A refused redirect is the stack's own diagnosis, so it
+    /// carries none of them.
     pub(super) fn respond_to_a_leg(
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
+        ctx: &RuleContext,
         status: u16,
         reason: &str,
         header_updates: &[(String, Option<String>)],
@@ -107,22 +111,24 @@ impl ActionExecutor<'_> {
         // A redirect target that does not read is refused, not invented: the
         // caller dials what a 3xx Contact names (055). The caller still gets a
         // final — the plain server error, with no Contact list.
-        let (status, reason, mut extra) =
+        let (status, reason, mut extra, refused) =
             match build_a_leg_response_headers(header_updates, contacts) {
-                Ok(headers) => (status, reason.to_string(), headers),
+                Ok(headers) => (status, reason.to_string(), headers, false),
                 Err(err) => {
                     eprintln!(
                         "WARN: call {}: redirect refused — {}",
                         call.call_ref,
                         err.detail()
                     );
-                    (500, err.to_string(), Vec::new())
+                    (500, err.to_string(), Vec::new(), true)
                 }
             };
-        for h in relay::relayed_failure_headers(call.ext.as_ref()) {
-            let name = HeaderName::from(h.name.as_str());
-            if !header_updates.iter().any(|(n, _)| name.matches(n)) {
-                extra.push(h);
+        if !refused {
+            for h in failure_headers_answering(ctx, call) {
+                let name = HeaderName::from(h.name.as_str());
+                if !header_updates.iter().any(|(n, _)| name.matches(n)) {
+                    extra.push(h);
+                }
             }
         }
         fx.outbound.push(relay::response_to_a_leg(
@@ -408,6 +414,22 @@ fn header_update_lines(header_updates: &[(String, Option<String>)]) -> Vec<SipHe
             }
         })
         .collect()
+}
+
+/// The failing peer's relayable headers, but ONLY on a final that answers the
+/// `/call/failure` consult the image belongs to — the `call-failure-result`
+/// event. A setup deadline, a capacity refusal or a media-service failure mints
+/// its own diagnosis about a peer that is not the one being answered, so it
+/// carries none of them.
+fn failure_headers_answering(ctx: &RuleContext, call: &Call) -> Vec<SipHeader> {
+    match ctx.event {
+        crate::event::CallEvent::InternalEvent { topic, .. }
+            if topic == "call-failure-result" =>
+        {
+            relay::relayed_failure_headers(call.ext.as_ref())
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Errs when a redirect target does not read — the whole redirect is refused,

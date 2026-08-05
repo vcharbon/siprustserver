@@ -9,6 +9,7 @@
 //! code, the charging correlation, the vendor's own annotation of why.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut, BOB_PORT};
@@ -16,11 +17,31 @@ use sip_message::header::HeaderName;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
+/// The second attempt's callee, dialed after bob's refusal reroutes the plan.
+const CAROL_PORT: u16 = 5071;
+
 /// One route to bob; on its failure the plan applies `on_exhausted`.
 fn plan(on_exhausted: serde_json::Value) -> String {
     serde_json::json!({
         "action": "route",
         "routes": [{"destination": {"host": "127.0.0.1", "port": BOB_PORT}}],
+        "on_exhausted": on_exhausted,
+    })
+    .to_string()
+}
+
+/// bob, then carol with a ring deadline; on exhaustion the plan applies
+/// `on_exhausted`. The shape a superseded attempt needs: attempt 1 draws a
+/// final, attempt 2 does not.
+fn reroute_plan(carol_no_answer_sec: i64, on_exhausted: serde_json::Value) -> String {
+    serde_json::json!({
+        "routes": [
+            {"destination": {"host": "127.0.0.1", "port": BOB_PORT}},
+            {
+                "destination": {"host": "127.0.0.1", "port": CAROL_PORT},
+                "no_answer_timeout_sec": carol_no_answer_sec,
+            },
+        ],
         "on_exhausted": on_exhausted,
     })
     .to_string()
@@ -184,6 +205,109 @@ async fn privacy_id_withholds_the_identity_the_failing_final_conceals() {
     );
     assert_eq!(raw("Privacy"), ["id"], "the privacy instruction itself travels");
     assert_eq!(raw("P-Vendor-Thing"), ["annotation"], "privacy withholds only the assertion");
+
+    settle_until(|| s.b2bua.active_calls() == 0).await;
+    s.b2bua.assert_fully_reaped();
+    let _report = s.finish().await;
+}
+
+/// A superseded attempt's headers leave with it: bob refuses with the full
+/// diagnostic set, the plan reroutes, and the second attempt draws NO final at
+/// all. The final the decision then authors speaks for a peer that never
+/// answered — nothing bob said may ride it.
+#[tokio::test(start_paused = true)]
+async fn a_superseded_attempts_headers_do_not_answer_a_later_no_answer() {
+    let s = plan_scene("failure-hdr-superseded-no-answer").await;
+    let carol = s.h.agent("carol", &format!("127.0.0.1:{CAROL_PORT}")).await;
+    let plan = reroute_plan(
+        5,
+        serde_json::json!({"action": "reject", "code": 480, "reason": "Temporarily Unavailable"}),
+    );
+
+    let mut call =
+        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    s.bob
+        .receive("INVITE")
+        .await
+        .respond(486, "Busy Here")
+        .with_header("Warning", "399 gw.example \"Refused by ISUP\"")
+        .with_header("Retry-After", "300")
+        .with_header("P-Charging-Vector", "icid-value=\"cv-attempt-1\"")
+        .await;
+    s.bob.receive("ACK").await;
+
+    // Attempt 2 rings and never answers; its ring deadline exhausts the plan.
+    let mut carol_uas = carol.receive("INVITE").await;
+    carol_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    s.h.advance(Duration::from_secs(6)).await;
+    let mut cancel = carol.receive("CANCEL").await;
+    cancel.respond(200, "OK").await;
+    carol_uas.respond(487, "Request Terminated").await;
+    carol.receive("ACK").await; // the b2bua completes carol's 487 txn (§17.1.1.3)
+
+    let resp = call.expect(480).await;
+    let raw = |name: &str| -> Vec<String> {
+        resp.raw(HeaderName::from(name)).map(str::to_string).collect()
+    };
+    assert_eq!(raw("Warning"), Vec::<String>::new(), "the superseded attempt's Warning does not diagnose this failure");
+    assert_eq!(raw("Retry-After"), Vec::<String>::new(), "a stale Retry-After names a peer that was never contacted");
+    assert_eq!(
+        raw("P-Charging-Vector"),
+        Vec::<String>::new(),
+        "no charging correlation for a leg that produced no final"
+    );
+
+    settle_until(|| s.b2bua.active_calls() == 0).await;
+    s.b2bua.assert_fully_reaped();
+    let _report = s.finish().await;
+}
+
+/// The a-leg setup deadline answers the CALLER's wait, not the b-leg's
+/// refusal: the 408 it mints is the stack's own statement and carries none of
+/// the failing peer's diagnostics, even with a failure round trip in flight.
+#[tokio::test(start_paused = true)]
+async fn the_setup_deadline_final_speaks_only_for_itself() {
+    let s = B2buaScene::with_b2bua("failure-hdr-setup-deadline", |_bob_port| {
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::numbering_plan()))
+            .tune(|c| c.setup_timeout_sec = 10)
+    })
+    .await;
+    let carol = s.h.agent("carol", &format!("127.0.0.1:{CAROL_PORT}")).await;
+    // Carol's ring deadline sits past the setup deadline, so the 408 — not the
+    // plan — is what answers alice.
+    let plan = reroute_plan(60, serde_json::json!({"action": "relay"}));
+
+    let mut call =
+        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    s.bob
+        .receive("INVITE")
+        .await
+        .respond(486, "Busy Here")
+        .with_header("Warning", "399 gw.example \"Refused by ISUP\"")
+        .with_header("P-Charging-Vector", "icid-value=\"cv-attempt-1\"")
+        .await;
+    s.bob.receive("ACK").await;
+
+    let mut carol_uas = carol.receive("INVITE").await;
+    carol_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    s.h.advance(Duration::from_secs(11)).await;
+    let mut cancel = carol.receive("CANCEL").await;
+    cancel.respond(200, "OK").await;
+    carol_uas.respond(487, "Request Terminated").await;
+    carol.receive("ACK").await; // the b2bua completes carol's 487 txn (§17.1.1.3)
+
+    let resp = call.expect(408).await;
+    let raw = |name: &str| -> Vec<String> {
+        resp.raw(HeaderName::from(name)).map(str::to_string).collect()
+    };
+    assert_eq!(raw("Warning"), Vec::<String>::new(), "the refusing peer's Warning does not explain a setup deadline");
+    assert_eq!(
+        raw("P-Charging-Vector"),
+        Vec::<String>::new(),
+        "the timed-out final correlates no peer's charging"
+    );
 
     settle_until(|| s.b2bua.active_calls() == 0).await;
     s.b2bua.assert_fully_reaped();

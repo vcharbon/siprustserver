@@ -75,14 +75,28 @@ Structural rewrites (From/To URI) go through **typed identity fields**
 headers and removes non-structural headers. Tags are never HTTP-settable.
 
 A non-structural header **neither party states** has a third source, at the
-bottom of the precedence ladder: on the failover path the a-facing final also
-carries the failing b-leg final's relayable headers
+bottom of the precedence ladder: a final that **answers a `/call/failure`
+consult** also carries that consult's failing b-leg final relayable headers
 (`generators::relayable_headers`, response scope — credentials, per-leg
 negotiation and a privacy-concealed identity stay withheld). Per name:
 explicit `update_headers` (set or removal) > decision-typed fields > relayed
 from the failing peer's final > core-authored structural. The decision layer
 therefore never needs to echo the `sip_headers` it was shown on
 `/call/failure` — silence means the peer's statement travels.
+
+The image is **scoped to the consult in flight**, and that scope is the
+invariant: every consult restates it (empty when the failure drew no peer final
+— a ring deadline or a transaction timeout), and a final that answers something
+else — a setup deadline, a capacity refusal, a media-service failure, a refused
+redirect — carries none of it. Otherwise a superseded attempt's `Warning` and
+`Retry-After` would diagnose a peer that was never contacted.
+
+Product identity travels with the rest: no allow-list filters the image, so a
+decision-authored final restates the failing peer's `Server` and its `Allow`
+even though the a-face responder is this stack, which states no `Server` of its
+own. Transparency about who refused is the reading taken here; withholding the
+responder-describing headers is the alternative, and would be a change to every
+failure final this stack mints.
 
 ### X3 — The reroute plan rides the opaque callback context (callback-per-failure)
 

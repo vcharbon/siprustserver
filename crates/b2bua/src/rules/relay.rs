@@ -620,38 +620,57 @@ pub fn reliable_rseq(resp: &sip_message::SipResponse) -> Option<i64> {
 }
 
 /// Restate a relayed reliable provisional's `RSeq` with the number this stack
-/// owns. RSeq is per-INVITE-transaction sequencing exactly like CSeq, so the
-/// caller is shown the a-leg transaction's own ladder (RFC 3262 §3/§7.1) and
-/// the PRACK naming it translates back at [`call::helpers::b_rseq_for`].
+/// owns. The sender of a reliable provisional owns its sequence, exactly as it
+/// owns `CSeq`, so the caller is shown this call's own ladder (RFC 3262 §3/§7.1,
+/// one ladder per call — see [`call::helpers::assign_a_rseq`]) and the PRACK
+/// naming it translates back at [`call::helpers::b_rseq_for`].
 pub fn own_the_rseq(headers: &mut [MsgHeader], a_rseq: i64) {
     for h in headers.iter_mut().filter(|h| HeaderName::RSeq.matches(&h.name)) {
         h.value = SipStr::owned(&a_rseq.to_string());
     }
 }
 
-/// `Call.ext` slot carrying the LAST failing b-leg final's relayable header
-/// image. Seeded by `route-failure` on the failover path (a reroute's later
-/// failure overwrites it) and read by the a-facing failure mints, so the final
-/// the decision authors still carries what the failing peer stated — under the
-/// decision's own `header_updates`, which win per name (ADR-0017 X2).
+/// `Call.ext` slot carrying the relayable header image of the failure round
+/// trip IN FLIGHT — the `/call/failure` consult the caller is still waiting on.
+/// **Every** consult restates it, empty when that failure produced no peer
+/// final (a no-answer or transaction timeout), so a superseded attempt's
+/// headers can never outlive their own failure; only the final answering that
+/// consult folds it, under the decision's `header_updates` (ADR-0017 X2).
 pub const RELAYED_FAILURE_HEADERS_EXT: &str = "relayed-failure-headers";
 
-/// Encode a failing final's relayable image for the
-/// [`RELAYED_FAILURE_HEADERS_EXT`] slot: a JSON array of `[name, value]`
-/// pairs, wire order and repeats kept. The image is
-/// [`relay_response_passthrough_headers`] with the body dropped — the minted
-/// final never carries the source's body.
-pub fn failure_headers_ext_value(resp: &sip_message::SipResponse) -> serde_json::Value {
-    let pairs: Vec<serde_json::Value> = relay_response_passthrough_headers(resp, false)
-        .iter()
-        .map(|h| serde_json::json!([h.name.as_str(), h.value.as_str()]))
-        .collect();
-    serde_json::Value::Array(pairs)
+/// Is this `Call.ext` key the CORE's own slot rather than a service id? A
+/// reserved key rides the replicated call state but is never a service slice,
+/// so it never reaches a decision backend (ADR-0016).
+pub fn is_core_reserved_ext(key: &str) -> bool {
+    key == RELAYED_FAILURE_HEADERS_EXT
+}
+
+/// The one-entry `Call.ext` merge every `/call/failure` consult states: the
+/// failing final's relayable image for the [`RELAYED_FAILURE_HEADERS_EXT`]
+/// slot — a JSON array of `[name, value]` pairs, wire order and repeats kept,
+/// body dropped ([`relay_response_passthrough_headers`], since the minted final
+/// never carries the source's body) — or JSON null, which CLEARS the slot, when
+/// the failure has no peer final to state.
+pub fn failure_headers_ext(resp: Option<&sip_message::SipResponse>) -> call::ExtMap {
+    let value = match resp {
+        Some(resp) => {
+            let pairs: Vec<serde_json::Value> = relay_response_passthrough_headers(resp, false)
+                .iter()
+                .map(|h| serde_json::json!([h.name.as_str(), h.value.as_str()]))
+                .collect();
+            serde_json::Value::Array(pairs)
+        }
+        None => serde_json::Value::Null,
+    };
+    let mut ext = call::ExtMap::new();
+    ext.insert(RELAYED_FAILURE_HEADERS_EXT.to_string(), value);
+    ext
 }
 
 /// Decode the [`RELAYED_FAILURE_HEADERS_EXT`] slot back into headers. Empty
-/// when nothing was seeded — the failure being answered had no peer final
-/// (e.g. a no-answer timeout on the first attempt).
+/// when the failure round trip in flight produced no peer final, and empty on
+/// every a-facing final that answers something else (a setup deadline, a
+/// capacity refusal, a media-service failure) rather than that round trip.
 pub fn relayed_failure_headers(ext: Option<&call::ExtMap>) -> Vec<MsgHeader> {
     ext.and_then(|m| m.get(RELAYED_FAILURE_HEADERS_EXT))
         .and_then(|v| v.as_array())
