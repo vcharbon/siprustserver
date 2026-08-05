@@ -74,6 +74,16 @@ Structural rewrites (From/To URI) go through **typed identity fields**
 (`new_from`, `new_to`), never the flat map; the map only appends non-structural
 headers and removes non-structural headers. Tags are never HTTP-settable.
 
+A non-structural header **neither party states** has a third source, at the
+bottom of the precedence ladder: on the failover path the a-facing final also
+carries the failing b-leg final's relayable headers
+(`generators::relayable_headers`, response scope — credentials, per-leg
+negotiation and a privacy-concealed identity stay withheld). Per name:
+explicit `update_headers` (set or removal) > decision-typed fields > relayed
+from the failing peer's final > core-authored structural. The decision layer
+therefore never needs to echo the `sip_headers` it was shown on
+`/call/failure` — silence means the peer's statement travels.
+
 ### X3 — The reroute plan rides the opaque callback context (callback-per-failure)
 
 Failover stays **callback-per-failure** — the architecture a real HTTP backend

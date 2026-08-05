@@ -56,6 +56,10 @@ impl ActionExecutor<'_> {
 
     /// Answer the a-leg INVITE with a failure final under the B2BUA's own
     /// a-dialog tag and Contact ([`crate::rules::model::RuleAction::RelayFailureToALeg`]).
+    /// The final restates the failing b-leg final's relayable headers (RFC 3261
+    /// §16.6, seeded on the call by `route-failure`), so what the refusing peer
+    /// stated — its `Warning`, charging correlation, vendor annotations —
+    /// reaches the caller.
     pub(super) fn relay_failure_to_a_leg(
         &self,
         call: &mut Call,
@@ -66,6 +70,7 @@ impl ActionExecutor<'_> {
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
+        let extra = relay::relayed_failure_headers(call.ext.as_ref());
         fx.outbound.push(relay::response_to_a_leg(
             &a_invite,
             status,
@@ -75,14 +80,17 @@ impl ActionExecutor<'_> {
             vec![],
             None,
             None,
-            vec![],
+            extra,
         ));
     }
 
     /// Answer the a-leg INVITE with a decision-authored Reject/Redirect final
     /// ([`crate::rules::model::RuleAction::RespondToALeg`]). No B2BUA Contact: a
     /// redirect carries its own Contact list (via the built headers), a reject
-    /// carries none (ADR-0017 header-ownership X2).
+    /// carries none (ADR-0017 header-ownership X2). The failing b-leg final's
+    /// relayable headers (seeded by `route-failure`) ride UNDER the decision's
+    /// own statements: a `header_updates` entry naming a header — set or
+    /// removal — owns that name (X2 precedence).
     pub(super) fn respond_to_a_leg(
         &self,
         call: &mut Call,
@@ -97,7 +105,7 @@ impl ActionExecutor<'_> {
         // A redirect target that does not read is refused, not invented: the
         // caller dials what a 3xx Contact names (055). The caller still gets a
         // final — the plain server error, with no Contact list.
-        let (status, reason, extra) =
+        let (status, reason, mut extra) =
             match build_a_leg_response_headers(header_updates, contacts) {
                 Ok(headers) => (status, reason.to_string(), headers),
                 Err(err) => {
@@ -109,6 +117,12 @@ impl ActionExecutor<'_> {
                     (500, err.to_string(), Vec::new())
                 }
             };
+        for h in relay::relayed_failure_headers(call.ext.as_ref()) {
+            let name = HeaderName::from(h.name.as_str());
+            if !header_updates.iter().any(|(n, _)| name.matches(n)) {
+                extra.push(h);
+            }
+        }
         fx.outbound.push(relay::response_to_a_leg(
             &a_invite,
             status,

@@ -743,6 +743,19 @@ fn core_rules() -> Vec<RuleDefinition> {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        // The same final's RELAYABLE image is kept on the call
+                        // (distinct from the payload above — `relayable_headers`
+                        // withholds credentials, per-leg negotiation and a
+                        // concealed identity), so the a-facing final the
+                        // decision authors carries what the callee stated.
+                        if let Some(resp) = ctx.response() {
+                            let mut ext = call::ExtMap::new();
+                            ext.insert(
+                                super::relay::RELAYED_FAILURE_HEADERS_EXT.to_string(),
+                                super::relay::failure_headers_ext_value(resp),
+                            );
+                            actions.push(RuleAction::MergeCallExt { ext });
+                        }
                         actions.push(RuleAction::FailureAsyncHttp {
                             request: serde_json::json!({
                                 "callback_context": cbctx,

@@ -607,6 +607,45 @@ pub fn relay_response_passthrough_headers(
     generators::relayable_headers(resp.headers(), scope)
 }
 
+/// `Call.ext` slot carrying the LAST failing b-leg final's relayable header
+/// image. Seeded by `route-failure` on the failover path (a reroute's later
+/// failure overwrites it) and read by the a-facing failure mints, so the final
+/// the decision authors still carries what the failing peer stated — under the
+/// decision's own `header_updates`, which win per name (ADR-0017 X2).
+pub const RELAYED_FAILURE_HEADERS_EXT: &str = "relayed-failure-headers";
+
+/// Encode a failing final's relayable image for the
+/// [`RELAYED_FAILURE_HEADERS_EXT`] slot: a JSON array of `[name, value]`
+/// pairs, wire order and repeats kept. The image is
+/// [`relay_response_passthrough_headers`] with the body dropped — the minted
+/// final never carries the source's body.
+pub fn failure_headers_ext_value(resp: &sip_message::SipResponse) -> serde_json::Value {
+    let pairs: Vec<serde_json::Value> = relay_response_passthrough_headers(resp, false)
+        .iter()
+        .map(|h| serde_json::json!([h.name.as_str(), h.value.as_str()]))
+        .collect();
+    serde_json::Value::Array(pairs)
+}
+
+/// Decode the [`RELAYED_FAILURE_HEADERS_EXT`] slot back into headers. Empty
+/// when nothing was seeded — the failure being answered had no peer final
+/// (e.g. a no-answer timeout on the first attempt).
+pub fn relayed_failure_headers(ext: Option<&call::ExtMap>) -> Vec<MsgHeader> {
+    ext.and_then(|m| m.get(RELAYED_FAILURE_HEADERS_EXT))
+        .and_then(|v| v.as_array())
+        .map(|pairs| {
+            pairs
+                .iter()
+                .filter_map(|p| {
+                    let name = p.get(0)?.as_str()?;
+                    let value = p.get(1)?.as_str()?;
+                    Some(MsgHeader { name: SipStr::owned(name), value: SipStr::owned(value) })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Ensure an a-facing INVITE 2xx header set carries exactly ONE `Allow` and ONE
 /// `Supported` — the capability set advertised toward the originator (RFC 3261
 /// §13.2.1/§20.37). `capabilities` is the set for this face, which the caller
