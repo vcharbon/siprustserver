@@ -82,11 +82,11 @@ impl IdGen {
         format!("{MAGIC_COOKIE}{:016x}", self.next_u64())
     }
 
-    /// The initial value of a 32-bit signed sequence counter — `1..=2^31 - 1`,
-    /// the range RFC 3261 §8.1.1.5 (CSeq) and RFC 3262 §7.1 (RSeq) share and
-    /// ask to be picked at random, so a peer cannot guess where a sequence
-    /// resumes. Kept an order of magnitude below the ceiling so a long
-    /// transaction's increments cannot run past it.
+    /// The initial value of a 32-bit signed sequence counter, picked at random
+    /// from `1..=10^8` so a peer cannot guess where a sequence resumes. The
+    /// ceiling RFC 3261 §8.1.1.5 (CSeq) and RFC 3262 §7.1 (RSeq) share is
+    /// `2^31 - 1`; starting two decimal orders of magnitude below it leaves
+    /// every increment a long call can make inside the range.
     pub fn new_sequence_number(&self) -> u32 {
         (self.next_u64() % 100_000_000) as u32 + 1
     }
