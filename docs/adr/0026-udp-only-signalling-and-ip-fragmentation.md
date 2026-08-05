@@ -10,9 +10,9 @@ transport in the tree: the only TCP the runners open is HA replication
 `bind_udp` on the one network layer (`sip-net`), simulated or real.
 
 SIP messages routinely outgrow a 1 500-byte Ethernet path. Measured over a
-500-capture production corpus: 279 messages exceed 1 472 bytes (the largest UDP
-payload that crosses a 1 500-MTU path unfragmented), the largest single message
-is 1 975 bytes, and 392 datagrams had to be reassembled from more than one IP
+production SIP corpus: 279 messages exceed 1 472 bytes (the largest UDP payload
+that crosses a 1 500-MTU path unfragmented), the largest single message is
+1 975 bytes, and 392 datagrams had to be reassembled from more than one IP
 fragment. Long Route sets, identity/charging headers and a full SDP get there
 without anything unusual happening.
 
@@ -45,11 +45,13 @@ an unimplemented one. §18.1.1's "if the request is within 200 bytes of the path
 MTU, or larger than 1300 bytes and the path MTU is unknown, the request MUST be
 sent over a congestion-controlled transport" is the clause being declined.
 
-What buys the deviation: every peer this stack interworks with is a carrier SBC
-or gateway on a controlled path, the corpus shows fragmented SIP being carried
-and reassembled in production, and a second transport is a second transaction
-layer, a second connection lifecycle and a second failure surface for a
-back-to-back UA whose whole state model is datagram-shaped.
+What buys the deviation: the corpus shows fragmented SIP being carried and
+reassembled in production, and a second transport is a second transaction layer,
+a second connection lifecycle and a second failure surface for a back-to-back UA
+whose whole state model is datagram-shaped. **The precondition a deploying
+system must satisfy:** every signalling peer sits on a path that carries IP
+fragments end to end — a carrier SBC or gateway on a controlled path, not an
+arbitrary internet endpoint behind a fragment-dropping middlebox.
 
 What it costs, stated so it is never a surprise: a lost fragment loses the whole
 message (recovery is the transaction layer's retransmission, not IP's);
@@ -66,10 +68,19 @@ used to be. The pin states the choice instead of inheriting it, and forecloses
 `IP_PMTUDISC_DO`, under which an oversize INVITE would fail to leave at all.
 
 Accepted: pinning `DONT` gives up ICMP-learned path-MTU discovery on the
-signalling sockets. Under the previous default that discovery never happened
-either (a socket that sets no DF learns nothing), so nothing is lost in
-practice, and a SIP stack has no use for a learned path MTU it cannot act on
-without a second transport.
+signalling sockets. The cost differs by address family, and the IPv6 arm is the
+sharper one:
+
+- **IPv4** — `DONT` clears DF, so the datagram fragments at the local interface
+  and any downstream router with a smaller MTU re-fragments it. Under the
+  previous default that discovery never happened either (a socket that sets no
+  DF learns nothing), so nothing is lost in practice.
+- **IPv6** — routers do not fragment; only the sender may. `DONT` fragments at
+  the LOCAL interface MTU and the socket ignores ICMPv6 Packet Too Big, so a
+  smaller downstream MTU — an IPsec, GRE or VXLAN tunnel on a carrier
+  interconnect — **silently blackholes every oversize signalling datagram**,
+  with no learning path and no TCP to fail over to. This stack chooses not to
+  detect that; the deployment precondition in X1 is what keeps it out of reach.
 
 ### X3 — A failed send says *why*, structurally
 
@@ -121,6 +132,13 @@ message.
   design even though it behaves identically today: the behaviour then depends on
   a default that a future sysctl, container runtime or library can change under
   the stack, and the failure mode is a call that never leaves.
+- **`IPV6_PMTUDISC_WANT` on the IPv6 socket only** (fragment at the LEARNED path
+  MTU, so a tunnel below the local MTU is honoured instead of blackholed). It is
+  the answer to X2's IPv6 cost and it keeps the property the pin exists for —
+  `WANT` is not `DO`, and the man page has it fragment rather than return
+  `EMSGSIZE`. Not adopted here because the measurement behind X2 covers IPv4
+  only: the same veth-namespace measurement on an IPv6 path is what this needs
+  before the modes diverge by family.
 - **Reject oversize messages at the application layer** (refuse to send past
   1 300 bytes, per §18.1.1's threshold). Rejected: with no second transport, a
   refusal is a dropped call where fragmentation is a delivered one.
