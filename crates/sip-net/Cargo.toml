@@ -10,8 +10,9 @@ description = "SIP signaling network layer (UDP transport + SignalingNetwork) �
 # raw `setsockopt`/`getsockopt`, which the workspace's `forbid(unsafe_code)`
 # lint cannot admit locally. This crate pins `deny` instead — every other
 # crate's guarantee still holds — and the two call sites in `fragmentation.rs`
-# each carry a narrow `#[allow(unsafe_code)]` with a SAFETY comment. Every
-# other workspace lint still applies.
+# each carry a narrow `#[allow(unsafe_code)]` with a SAFETY comment. Leaving
+# `[lints] workspace = true` out drops the workspace table entirely, so the
+# block below MIRRORS it — a lint added there must be added here too.
 [lints.rust]
 unsafe_code = "deny"
 

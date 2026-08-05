@@ -160,15 +160,12 @@ async fn recv_loop(
             }
             PreIngressAction::Reply(bytes) => {
                 counters.pre_ingress_replies.fetch_add(1, Ordering::Relaxed);
-                // The reply is best-effort — the pump must keep receiving — but
-                // a silent failure hides a dead peer or an oversize reply, so
-                // it is counted and named by kind.
-                if let Err(e) = socket.send_to(&bytes, src).await {
+                // The reply is best-effort — the pump must keep receiving — and
+                // a failure is COUNTED, never printed: this crate reports
+                // through counters alone, and a peer that rejects every reply
+                // would otherwise print once per datagram on the receive path.
+                if socket.send_to(&bytes, src).await.is_err() {
                     counters.pre_ingress_reply_failures.fetch_add(1, Ordering::Relaxed);
-                    eprintln!(
-                        "WARN: pre-ingress reply to {src} failed ({}): {e}",
-                        crate::types::SendErrorKind::of(&e).label()
-                    );
                 }
             }
             PreIngressAction::Accept => {
