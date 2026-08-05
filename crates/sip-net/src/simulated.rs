@@ -235,7 +235,7 @@ impl UdpEndpoint for SimEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
         if let Some(fault) = &self.shared.send_fault {
             if let Some(reason) = fault(self.addr, dst) {
-                return Err(SendError { message: reason });
+                return Err(SendError::stated(reason));
             }
         }
         self.shared.in_flight.fetch_add(1, Ordering::Relaxed);
