@@ -115,14 +115,16 @@ const ASSERTED_IDENTITY: &[HeaderName] = &[
 const CONCEALING_PRIV_VALUES: &[&str] = &["id", "header", "user"];
 
 /// True iff `headers` carry a privacy request that conceals the asserted
-/// identity. The priv-values are `;`-separated (RFC 3323 §4.2), and a value
-/// this stack does not model leaves the assertion alone.
+/// identity. The priv-values are separated as the header's own grammar
+/// declares ([`HeaderName::item_separator`]), and a value this stack does not
+/// model leaves the assertion alone.
 fn privacy_conceals_identity(headers: &[SipHeader]) -> bool {
+    let separator = HeaderName::Privacy.item_separator();
     headers
         .iter()
         .filter(|hdr| HeaderName::Privacy.matches(&hdr.name))
-        .flat_map(|hdr| hdr.value.as_str().split(';'))
-        .any(|value| CONCEALING_PRIV_VALUES.iter().any(|p| value.trim().eq_ignore_ascii_case(p)))
+        .flat_map(|hdr| separator.split(hdr.value.as_str()))
+        .any(|value| CONCEALING_PRIV_VALUES.iter().any(|p| value.eq_ignore_ascii_case(p)))
 }
 
 /// True iff a header the back-to-back UA received may be carried onto the

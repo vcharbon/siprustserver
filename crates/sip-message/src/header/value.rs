@@ -24,8 +24,9 @@ pub enum Folding {
     /// family (RFC 3261 §20.7) carries its parameters comma-separated inside a
     /// single value, so splitting a line tears one value in half.
     Opaque,
-    /// One value per line, and the value is itself the comma-separated token
-    /// set the value type parses (Require, Supported, Allow): a line reads as
+    /// One value per line, and the value is itself the token set the value
+    /// type parses (Require, Supported, Allow, Privacy) over the separator its
+    /// own grammar declares ([`HeaderName::item_separator`]): a line reads as
     /// one set rather than as several values, and several lines union into one.
     SetPerLine,
 }

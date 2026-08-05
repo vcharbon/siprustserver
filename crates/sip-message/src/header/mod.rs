@@ -21,6 +21,7 @@ mod charging;
 mod class;
 mod credentials;
 mod identity;
+mod item_separator;
 pub mod kind;
 mod name;
 mod name_addr;
@@ -38,7 +39,7 @@ mod wire;
 pub use aliases::{
     Allow, AllowEvents, Authorization, Contact, ContentDisposition, ContentLength, Diversion,
     Event, Expires, From, HistoryInfo, MaxForwards, MediaType, MinExpires, MinSe,
-    PAssertedIdentity, PPreferredIdentity, PathEntry, ProxyAuthenticate, ProxyAuthorization,
+    PAssertedIdentity, PPreferredIdentity, PathEntry, Privacy, ProxyAuthenticate, ProxyAuthorization,
     ProxyRequire, Reason, RSeq, RecordRouteEntry, ReferTo, ReferredBy, RemotePartyId, ReplyTo,
     Require, RetryAfter, RouteEntry, ServiceRouteEntry, SessionExpires, SubscriptionState,
     Supported, To, Unsupported, WwwAuthenticate,
@@ -46,6 +47,7 @@ pub use aliases::{
 pub use charging::ChargingVector;
 pub use class::HeaderClass;
 pub use identity::{CSeq, CallId, RAck};
+pub use item_separator::ItemSeparator;
 pub use credentials::Credentials;
 pub use name::HeaderName;
 pub use name_addr::NameAddr;

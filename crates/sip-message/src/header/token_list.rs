@@ -3,14 +3,16 @@
 //! The value is the option-tag *set*, so a reader asks `contains("100rel")`
 //! instead of splitting a string; several lines of the same header union into
 //! one set, which is the semantics RFC 3261 §7.3.1 gives them. The family is
-//! declared [`Folding::SetPerLine`]: the commas on a line belong to this
+//! declared [`Folding::SetPerLine`]: the separators on a line belong to this
 //! grammar, which reads them into one set, not to the line-splitting rule.
+//! Which separator that is comes from the header's own grammar
+//! ([`HeaderName::item_separator`]) — a comma for the option-tag headers, a
+//! `;` for the RFC 3323 §4.2 priv-value set.
 
 use std::marker::PhantomData;
 
 use crate::error::SipParseError;
 use crate::parser::custom::scanner::is_token_char;
-use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 
 use super::kind::TokenKind;
@@ -92,16 +94,17 @@ impl<K: TokenKind> HeaderValue for TokenListHeader<K> {
 
     fn parse(raw: &SipStr) -> Result<Self, SipParseError> {
         let mut set = Self::empty();
-        for entry in top_level_comma_entries(raw.as_str()) {
+        for entry in K::name().item_separator().split(raw.as_str()) {
             set = set.with(raw.reslice(entry));
         }
         Ok(set)
     }
 
     fn render(&self, out: &mut Wire) {
+        let joiner = K::name().item_separator().joiner();
         for (i, token) in self.tokens.iter().enumerate() {
             if i > 0 {
-                out.str(", ");
+                out.str(joiner);
             }
             out.str(token.as_str());
         }
@@ -129,7 +132,7 @@ impl<K: TokenKind> std::fmt::Display for TokenListHeader<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::{Require, Supported};
+    use crate::header::{Privacy, Require, Supported};
 
     #[test]
     fn option_tags_match_case_insensitively() {
@@ -159,6 +162,26 @@ mod tests {
             .with("100rel, replaces")
             .with("");
         assert_eq!(set.to_wire(), "timer");
+    }
+
+    /// RFC 3323 §4.2: the priv-values are `;`-separated, so the set reads and
+    /// writes them that way while the option-tag family keeps its commas.
+    #[test]
+    fn the_priv_value_set_reads_and_writes_semicolons() {
+        let p = Privacy::parse(&SipStr::owned("id;user; critical")).unwrap();
+        assert!(p.contains("id"));
+        assert!(p.contains("USER"));
+        assert_eq!(p.len(), 3);
+        assert_eq!(p.to_wire(), "id;user;critical");
+        assert_eq!(Supported::of(["100rel", "timer"]).to_wire(), "100rel, timer");
+    }
+
+    /// A comma is DATA inside a priv-value list: splitting on it would mint a
+    /// token the sender never wrote.
+    #[test]
+    fn a_comma_is_not_a_priv_value_separator() {
+        let p = Privacy::parse(&SipStr::owned("id,user")).unwrap();
+        assert_eq!(p.len(), 0, "`id,user` is one malformed priv-value, not two: {p:?}");
     }
 
     #[test]

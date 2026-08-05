@@ -66,31 +66,44 @@ pub struct ParsedUri {
 }
 
 // ---------------------------------------------------------------------------
-// Top-level comma splitter — quote-aware and angle-bracket-aware.
+// Top-level entry splitter — quote-aware and angle-bracket-aware.
 // ---------------------------------------------------------------------------
 
-/// The comma-separated entries of one header value, trimmed and borrowed. A
-/// comma inside a quoted-string or `<...>` is data, not a separator. An empty
-/// value yields nothing; an empty entry between two commas is yielded.
-pub fn top_level_comma_entries(value: &str) -> TopLevelCommaEntries<'_> {
-    TopLevelCommaEntries { value, pos: 0, emitted: 0, done: false }
+/// The `sep`-separated entries of one header value, trimmed and borrowed. A
+/// separator inside a quoted-string or `<...>` is data. An empty value yields
+/// nothing; an empty entry between two separators is yielded. `sep` must be
+/// ASCII — the byte scan below relies on it.
+pub fn top_level_entries(value: &str, sep: u8) -> TopLevelEntries<'_> {
+    TopLevelEntries { value, sep, pos: 0, emitted: 0, done: false }
 }
 
-pub struct TopLevelCommaEntries<'a> {
+/// The comma-separated entries of one header value — the SIP §7.3.1 default.
+pub fn top_level_comma_entries(value: &str) -> TopLevelEntries<'_> {
+    top_level_entries(value, b',')
+}
+
+/// The `;`-separated entries of one header value — the layout RFC 3323 §4.2
+/// gives the priv-value list.
+pub fn top_level_semicolon_entries(value: &str) -> TopLevelEntries<'_> {
+    top_level_entries(value, b';')
+}
+
+pub struct TopLevelEntries<'a> {
     value: &'a str,
+    sep: u8,
     pos: usize,
     emitted: usize,
     done: bool,
 }
 
-impl<'a> Iterator for TopLevelCommaEntries<'a> {
+impl<'a> Iterator for TopLevelEntries<'a> {
     type Item = &'a str;
 
     // Byte-scan rather than collecting a `Vec<char>` (4x the bytes, and the
     // single hottest parse frame under load). Every structural delimiter here
-    // (`" \ < > ,`) is ASCII, so a UTF-8 lead/continuation byte can never alias
-    // one, and each split index lands on a `,` — always a char boundary — so
-    // slicing by byte index is panic-free. Entries are trimmed *borrowed*
+    // (`" \ < >` and the separator) is ASCII, so a UTF-8 lead/continuation byte
+    // can never alias one, and each split index lands on the separator — always
+    // a char boundary — so slicing by byte index is panic-free. Entries are trimmed *borrowed*
     // subslices; a caller that stores one calls `.to_string()` at the point of
     // ownership. Scanning resumes with depth 0 and no open quote because a
     // separator is only recognised in exactly that state.
@@ -120,7 +133,7 @@ impl<'a> Iterator for TopLevelCommaEntries<'a> {
                 b'"' => in_quote = true,
                 b'<' => depth += 1,
                 b'>' if depth > 0 => depth -= 1,
-                b',' if depth == 0 => {
+                c if c == self.sep && depth == 0 => {
                     self.pos = i + 1;
                     self.emitted += 1;
                     return Some(self.value[start..i].trim());

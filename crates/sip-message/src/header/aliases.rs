@@ -33,6 +33,9 @@ pub type Supported = TokenListHeader<kind::Supported>;
 pub type Unsupported = TokenListHeader<kind::Unsupported>;
 pub type Allow = TokenListHeader<kind::Allow>;
 pub type AllowEvents = TokenListHeader<kind::AllowEvents>;
+/// The RFC 3323 §4.2 priv-value set — a token list whose members its own
+/// grammar separates with `;`.
+pub type Privacy = TokenListHeader<kind::Privacy>;
 
 pub type Event = TokenParamsHeader<kind::Event>;
 pub type SubscriptionState = TokenParamsHeader<kind::SubscriptionState>;
