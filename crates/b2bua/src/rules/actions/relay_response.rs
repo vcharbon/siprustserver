@@ -20,15 +20,16 @@ use super::select::{dialog_identity_tag, resolve_peer};
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
-    /// Restate a relayed reliable provisional's `RSeq` with the a-leg INVITE
-    /// transaction's own number (RFC 3262 §7.1) and remember what it stands
-    /// for, so the caller's PRACK translates back onto the b-leg's sequence. A
-    /// retransmitted provisional recalls the number already shown; a
-    /// provisional relayed without an `RSeq` (a masking policy stripped it) is
-    /// not a reliable one and takes no number.
+    /// Restate a relayed reliable provisional's `RSeq` with the a-facing early
+    /// dialog's own number (RFC 3262 §4, errata 4603) and remember what it
+    /// stands for, so the caller's PRACK translates back onto the b-leg's
+    /// sequence. A retransmitted provisional recalls the number already shown;
+    /// a provisional relayed without an `RSeq` (a masking policy stripped it)
+    /// is not a reliable one and takes no number.
     fn own_relayed_rseq(
         &self,
         call: &mut Call,
+        a_tag: &str,
         source_leg_id: &str,
         resp: &sip_message::SipResponse,
         headers: &mut [SipHeader],
@@ -39,14 +40,15 @@ impl ActionExecutor<'_> {
         let Some(b_rseq) = relay::reliable_rseq(resp) else {
             return;
         };
-        let initial = if call.reliable_provisionals.is_empty() {
+        let b_tag = resp.to().tag().unwrap_or_default().to_string();
+        let initial = if call::helpers::starts_reliable_ladder(call, a_tag) {
             self.id_gen.new_sequence_number() as i64
         } else {
             0
         };
         let b_cseq = i64::from(resp.cseq().seq());
         let (updated, a_rseq) =
-            call::helpers::assign_a_rseq(call.clone(), source_leg_id, b_cseq, b_rseq, initial);
+            call::helpers::assign_a_rseq(call.clone(), a_tag, source_leg_id, &b_tag, b_cseq, b_rseq, initial);
         *call = updated;
         relay::own_the_rseq(headers, a_rseq);
     }
@@ -309,7 +311,7 @@ impl ActionExecutor<'_> {
                 relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
                 Self::cache_answered_advert(call, &passthrough);
             }
-            self.own_relayed_rseq(call, &source_leg_id, resp, &mut passthrough);
+            self.own_relayed_rseq(call, &a_face, &source_leg_id, resp, &mut passthrough);
             let effect = relay::response_to_a_leg(
                 &a_invite,
                 status,
@@ -351,7 +353,7 @@ impl ActionExecutor<'_> {
             relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
             Self::cache_answered_advert(call, &passthrough);
         }
-        self.own_relayed_rseq(call, &source_leg_id, resp, &mut passthrough);
+        self.own_relayed_rseq(call, &a_tag, &source_leg_id, resp, &mut passthrough);
         let effect = relay::response_to_a_leg(
             &a_invite,
             status,

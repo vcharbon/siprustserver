@@ -132,9 +132,14 @@ impl ActionExecutor<'_> {
         // stated (`b_rseq_for`). A number this stack never minted relays as it
         // stands, so the target answers 481 rather than acknowledging nothing.
         let rack = if method == InDialogMethod::Prack {
+            // The number the caller PRACKs is unique to the a-facing early
+            // dialog she saw it in, so the translation is keyed there — and the
+            // PRACK names that dialog itself: its To-tag is the tag this stack
+            // showed her, whichever fork the provisional came from.
+            let a_tag = req.to().tag().unwrap_or_default().to_string();
             req.header::<RAck>().and_then(Result::ok).map(|r| {
-                let rseq = call::helpers::b_rseq_for(call, target_leg, i64::from(r.rseq()))
-                    .map_or(r.rseq(), |b_rseq| b_rseq.max(0) as u32);
+                let rseq = call::helpers::b_rseq_for(call, &a_tag, i64::from(r.rseq()))
+                    .map_or(r.rseq(), |(_, b_rseq)| b_rseq.max(0) as u32);
                 RAck::new(rseq, target_invite_cseq.max(0) as u32, r.method().clone())
             })
         } else {

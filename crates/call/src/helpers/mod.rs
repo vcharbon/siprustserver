@@ -39,7 +39,7 @@ pub use leg::{
     remote_tag, set_bye_disposition, set_leg_disposition, set_leg_state,
 };
 pub use lens::{update_dialog, update_leg};
-pub use reliable::{assign_a_rseq, b_rseq_for};
+pub use reliable::{assign_a_rseq, b_rseq_for, starts_reliable_ladder};
 pub use peering::{
     add_tag_mapping, all_peered_legs, find_by_a_tag, find_by_b_tag, get_peer, merge_leg,
     relay_peer_dialog_ready, resolve_relay_peer, split_leg,

@@ -630,9 +630,10 @@ pub fn reliable_rseq(resp: &sip_message::SipResponse) -> Option<i64> {
 
 /// Restate a relayed reliable provisional's `RSeq` with the number this stack
 /// owns. The sender of a reliable provisional owns its sequence, exactly as it
-/// owns `CSeq`, so the caller is shown this call's own ladder (RFC 3262 §3/§7.1,
-/// one ladder per call — see [`call::helpers::assign_a_rseq`]) and the PRACK
-/// naming it translates back at [`call::helpers::b_rseq_for`].
+/// owns `CSeq`, so the caller is shown a ladder of this stack's own — one per
+/// a-facing early dialog (RFC 3262 §4 as corrected by errata 4603, see
+/// [`call::helpers::assign_a_rseq`]) — and the PRACK naming it translates back
+/// at [`call::helpers::b_rseq_for`].
 pub fn own_the_rseq(headers: &mut [MsgHeader], a_rseq: i64) {
     for h in headers.iter_mut().filter(|h| HeaderName::RSeq.matches(&h.name)) {
         h.value = SipStr::owned(&a_rseq.to_string());
