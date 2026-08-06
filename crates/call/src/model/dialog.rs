@@ -27,6 +27,10 @@ pub struct PendingRequest {
     pub source_call_id: String,
     pub source_from: String,
     pub source_to: String,
+    /// The requester's `Timestamp`, held so the response echoes the value the
+    /// request carried (RFC 3261 §8.2.6.1); absent when the request carried none.
+    #[serde(default)]
+    pub source_timestamp: Option<String>,
     pub direction: Direction,
     /// The originator CANCELled this relayed (re-)INVITE (RFC 3261 §9): the
     /// B2BUA CANCELled the outbound client transaction and the txn layer
@@ -102,6 +106,13 @@ pub struct B2buaDialogExt {
     /// decode-tolerant of a body encoded before it existed.
     #[serde(default)]
     pub pending_reinvite_2xx: Option<PendingReinvite2xx>,
+    /// The `(name, value)` advertisement lines the initial-INVITE 2xx carried to
+    /// the originator, cached beside `cached_sdp` at answer time. RFC 3261
+    /// §13.3.1.4 makes a retransmit a copy of the response it retransmits, and
+    /// the set resolved then — the callee's own relayed one, or a firing rule's
+    /// — is not derivable from the a-leg snapshot. Empty until answered.
+    #[serde(default)]
+    pub answered_advert: Vec<(String, String)>,
 }
 
 /// Composite Dialog = stack §12 state + B2BUA-only extensions.

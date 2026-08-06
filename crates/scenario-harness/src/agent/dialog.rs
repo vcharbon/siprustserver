@@ -313,7 +313,7 @@ impl ClientReinvite {
     /// is a dedicated primitive: it takes no template in v1 (a captured CANCEL's
     /// frozen-header quirks are not replayable yet).
     pub async fn cancel(&self) -> InDialogTxn {
-        unwrap_step(try_send_cancel(&self.agent, &self.original_invite, self.wire_dst).await);
+        unwrap_step(try_send_cancel(&self.agent, &self.original_invite, self.wire_dst, &[]).await);
         InDialogTxn::new(
             self.agent.clone(),
             // The CANCELled re-INVITE's 487 is read — and auto-ACKed — via

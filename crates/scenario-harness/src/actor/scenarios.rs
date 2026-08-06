@@ -200,6 +200,7 @@ impl ActorScenario for Refer {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }
@@ -344,6 +345,7 @@ impl ActorScenario for ReferCharlieReject {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }
@@ -469,6 +471,7 @@ impl ActorScenario for ReroutingPrack {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }
@@ -567,6 +570,7 @@ impl ActorScenario for PrackUpdate {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }
@@ -656,6 +660,7 @@ impl ActorScenario for Reinvite {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }
@@ -742,6 +747,7 @@ impl ActorScenario for OptionsHold {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }
@@ -830,6 +836,7 @@ impl ActorScenario for LongCall {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }
@@ -905,6 +912,7 @@ impl ActorScenario for InviteReject {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }
@@ -941,7 +949,7 @@ impl ActorScenario for AbandonRinging {
                         Barrier::None,
                         GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
                     ),
-                    Goal::new(Barrier::pred("ringing", alice_early), GoalStep::Cancel),
+                    Goal::new(Barrier::pred("ringing", alice_early), GoalStep::Cancel { stated: Vec::new() }),
                 ],
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
@@ -987,6 +995,7 @@ impl ActorScenario for AbandonRinging {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }
@@ -1067,6 +1076,7 @@ impl ActorScenario for BasicCall {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 }

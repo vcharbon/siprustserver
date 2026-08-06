@@ -133,6 +133,10 @@ arc-swap = "1"
 # no reuse-port knob): N sockets on one port, kernel flow-hashing keeps a given
 # UAC src:port pinned to one shard so per-flow ordering is preserved. Pass 9.
 socket2 = "0.6"
+# `libc` reaches the two socket options no safe wrapper exposes: the IPv4/IPv6
+# path-MTU-discovery mode UDP-only signalling pins (ADR-0027). Linux-only, and
+# only where a raw `setsockopt`/`getsockopt` is the sole route.
+libc = "0.2"
 # Media layer (`crates/media`, slice S-media). `rtp`/`rtcp` are the webrtc-rs
 # wire-codec crates used as the independent framing *witness* against our
 # hand-rolled RFC 3550 encoder (the rtp.js role in the TS port). `rustfft` backs

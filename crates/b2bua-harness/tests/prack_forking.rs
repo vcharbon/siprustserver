@@ -21,11 +21,16 @@
 use b2bua_harness::B2buaSut;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
-use sip_message::header::RAck;
+use sip_message::header::{RAck, RSeq};
+use sip_message::types::SipResponse;
 use sip_message::Method;
 
 const ANSWER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const OFFER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
+
+fn rseq_of(resp: &SipResponse) -> u32 {
+    resp.header::<RSeq>().expect("an RSeq").expect("readable RSeq").value()
+}
 
 #[tokio::test]
 async fn prack_forking_two_early_dialogs() {
@@ -53,7 +58,7 @@ async fn prack_forking_two_early_dialogs() {
     let mut prack1 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork1_atag)
-        .with_rack("1 1 INVITE")
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
         .with_sdp(ANSWER)
         .send()
         .await;
@@ -80,7 +85,7 @@ async fn prack_forking_two_early_dialogs() {
     let mut prack2 = call
         .send_request(InDialogMethod::Prack)
         .with_to_tag(&fork2_atag)
-        .with_rack("200 1 INVITE")
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
         .with_sdp(ANSWER)
         .send()
         .await;
@@ -103,6 +108,50 @@ async fn prack_forking_two_early_dialogs() {
     );
     prack2_at_bob.respond(200, "OK").await;
     prack2.expect(200).await;
+
+    // ── Fork 1 rings again, AFTER fork 2 interleaved ─────────────────────────
+    // RFC 3262 §4 (errata 4603/4604) keeps the caller's sequence independently
+    // per early dialog, so this must be fork 1's own previous number plus
+    // exactly one — a ladder shared with fork 2 would leave a gap here, and a
+    // conformant caller drops a provisional whose RSeq is not the next one.
+    uas.respond(183, "Session Progress")
+        .with_to_tag("bobfork1")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "2")
+        .with_sdp(OFFER)
+        .await;
+    let p3 = call.expect(183).await;
+    assert_eq!(
+        p3.to().tag(),
+        Some(fork1_atag.as_str()),
+        "the second fork-1 provisional stays in fork 1's early dialog",
+    );
+    assert_eq!(
+        rseq_of(&p3),
+        rseq_of(&p1) + 1,
+        "fork 1's ladder rises by exactly one across the fork-2 interleave",
+    );
+
+    let mut prack3 = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&fork1_atag)
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p3)))
+        .with_sdp(ANSWER)
+        .send()
+        .await;
+    let mut prack3_at_bob = bob.receive("PRACK").await;
+    assert_eq!(
+        prack3_at_bob
+            .request()
+            .header::<RAck>()
+            .expect("relayed PRACK keeps an RAck")
+            .expect("readable RAck")
+            .rseq(),
+        2,
+        "the RAck translates back onto the number fork 1 itself stated",
+    );
+    prack3_at_bob.respond(200, "OK").await;
+    prack3.expect(200).await;
 
     // ── Bob answers the INVITE on fork 1 (no body — offer/answer done) ───────
     uas.respond(200, "OK").with_to_tag("bobfork1").await;

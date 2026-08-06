@@ -117,6 +117,7 @@ fn plan(actors: Vec<ActorSpec>) -> CallPlan {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     }
 }
 

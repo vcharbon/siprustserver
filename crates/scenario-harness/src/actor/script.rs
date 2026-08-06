@@ -14,6 +14,7 @@ use super::answer::{
 use super::endpoint::SUBFLOW_REALIGN;
 use super::goals::{BodyExpect, EarlyId, GoalStep, RequestKind};
 use super::ledger::{ObligationKey, ObligationKind};
+use super::observe::{observe_reception, ReceivedMessage};
 use super::react::{cancel_pending_initial, react_in_dialog_request};
 use super::runner::{ActorState, ParkedRequest};
 use super::state::{Observation, ResponseFact, SubflowState};
@@ -306,6 +307,9 @@ pub(super) fn consume_final_fact(st: &mut ActorState<'_>) -> Result<ResponseFact
     for (i, f) in facts.iter().enumerate() {
         if f.status >= 200 {
             st.resp_seen += i + 1;
+            if let Some(resp) = f.typed.as_deref() {
+                observe_reception(st, ReceivedMessage::Response(resp));
+            }
             return Ok(f.clone());
         }
     }
@@ -388,6 +392,12 @@ pub(super) fn expect_response(
             detail: "ExpectResponse fired with no consumable response observed".to_string(),
         });
     };
+    // The reception is satisfied: hand the message to the observer BEFORE the
+    // goal's own assertions, so an installed hook sees it whether or not they
+    // pass.
+    if let Some(resp) = fact.typed.as_deref() {
+        observe_reception(st, ReceivedMessage::Response(resp));
+    }
     if let Some(id) = early {
         if fact.early_tag.as_deref() != Some(id) {
             return Err(StepError::UnexpectedKind {
@@ -437,6 +447,8 @@ pub(super) fn expect_request(
     };
     let entry = st.parked.remove(idx);
     let req = entry.txn.request();
+    // Same contract as `expect_response`: observed before the assertions.
+    observe_reception(st, ReceivedMessage::Request(req));
     let body_is_sdp = !req.body().is_empty()
         && req
             .header::<sip_message::header::MediaType>()

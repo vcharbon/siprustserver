@@ -117,6 +117,7 @@ kinds! {
     Unsupported => Unsupported, SetPerLine;
     Allow => Allow, SetPerLine;
     AllowEvents => AllowEvents, SetPerLine;
+    Privacy => Privacy, SetPerLine;
 
     Event => Event, Single;
     SubscriptionState => SubscriptionState, Single;
@@ -153,7 +154,7 @@ capability! { NoParams: PAssertedIdentity, PPreferredIdentity }
 
 capability! { TaggedKind: From, To }
 
-capability! { TokenKind: Require, ProxyRequire, Supported, Unsupported, Allow, AllowEvents }
+capability! { TokenKind: Require, ProxyRequire, Supported, Unsupported, Allow, AllowEvents, Privacy }
 
 capability! { TokenParamsKind:
     Event, SubscriptionState, ContentType, ContentDisposition, SessionExpires, RetryAfter, Reason,

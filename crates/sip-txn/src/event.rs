@@ -3,7 +3,7 @@
 
 use std::net::SocketAddr;
 
-use sip_message::{Method, SipMessage};
+use sip_message::{Method, SipHeader, SipMessage};
 
 /// A deduplicated/processed event for the upstream router. The peer address is
 /// a `SocketAddr` (sip-net's everywhere-`SocketAddr` convention, ADR-0005).
@@ -29,6 +29,10 @@ pub enum TransactionEvent {
         from_tag: String,
         invite_cseq: Option<u32>,
         in_dialog: bool,
+        /// The CANCEL's own header lines. RFC 3326 §2 scopes `Reason` to CANCEL
+        /// and BYE, so the request the layer already answered is the only place
+        /// the canceller's cause is ever stated.
+        headers: Vec<SipHeader>,
     },
     /// A client transaction's Timer B/F (or the long INVITE_INITIAL_TIMEOUT
     /// backstop) fired with no final response — the transaction timed out.

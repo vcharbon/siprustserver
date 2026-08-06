@@ -1120,6 +1120,15 @@ impl<'a> RuleContext<'a> {
     pub fn cancelled_in_dialog(&self) -> bool {
         matches!(self.event, CallEvent::Cancelled { in_dialog: true, .. })
     }
+    /// For a `Cancelled` event: the CANCEL's own header lines, empty for every
+    /// other event. The transaction layer answered the CANCEL, so this is the
+    /// only place the canceller's `Reason` (RFC 3326 §2) is ever stated.
+    pub fn cancelled_headers(&self) -> &'a [sip_message::SipHeader] {
+        match self.event {
+            CallEvent::Cancelled { headers, .. } => headers,
+            _ => &[],
+        }
+    }
     /// For a `Cancelled` event: the CSeq number of the INVITE transaction the
     /// CANCEL matched (the canceller's own CSeq space — i.e. the relayed
     /// pending request's `inbound_cseq`).

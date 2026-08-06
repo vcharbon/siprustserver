@@ -12,6 +12,7 @@
 //! `effect-layer-test` SKILL for the wrapper philosophy.
 
 pub mod contracts;
+pub mod fragmentation;
 pub mod loss;
 pub mod net;
 pub mod queue;
@@ -37,7 +38,7 @@ pub use real::RealSignalingNetwork;
 pub use simulated::SimulatedSignalingNetwork;
 pub use types::{
     all_ua_roles, BindError, BindErrorReason, BindSummary, BindUdpOpts, PreIngressAction,
-    PreIngressHook, ReEmitKind, RecvDisposition, RecvTap, SendError, SendTap, UaRole,
-    UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+    PreIngressHook, ReEmitKind, RecvDisposition, RecvTap, SendError, SendErrorKind, SendTap,
+    UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
     MAX_UDP_PAYLOAD,
 };

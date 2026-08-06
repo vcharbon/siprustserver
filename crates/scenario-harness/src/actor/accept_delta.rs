@@ -13,6 +13,7 @@ use super::delta::{
     ObservedStimulus,
 };
 use super::goals::GoalStep;
+use super::observe::{observe_reception, ReceivedMessage};
 use super::react::{cancel_pending_initial, react_in_dialog_request};
 use super::runner::ActorState;
 use super::script::{request_matches_kind, requeue_parked};
@@ -107,6 +108,9 @@ pub(super) async fn try_accept_request_delta(
         return Ok(Some(uas));
     };
     check_satisfies_bound(st, rule, satisfies_steps)?;
+    // A blessed substitution satisfies the due reception goal, so it reaches
+    // the observer like any other satisfied reception.
+    observe_reception(st, ReceivedMessage::Request(uas.request()));
     let now = Instant::now();
     st.obs.record(
         Observation::AcceptedDelta {
@@ -184,6 +188,9 @@ pub(super) fn try_accept_response_delta(
                 "accepted-delta rule {rule:?}: a response substitution takes DeltaReaction::Default"
             ),
         });
+    }
+    if let Some(resp) = fact.typed.as_deref() {
+        observe_reception(st, ReceivedMessage::Response(resp));
     }
     st.obs.record(
         Observation::AcceptedDelta {

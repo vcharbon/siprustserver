@@ -3,6 +3,7 @@
 //! basic-B2BUA default rule set. Port of `src/b2bua/rules/`.
 
 pub mod actions;
+pub mod capabilities;
 pub mod defaults;
 pub mod docgen;
 pub mod executor;

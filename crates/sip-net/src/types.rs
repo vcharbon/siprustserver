@@ -117,6 +117,8 @@ pub struct UdpEndpointCounters {
     pub tail_dropped: u64,
     pub pre_ingress_dropped: u64,
     pub pre_ingress_replies: u64,
+    /// Pre-ingress replies the socket refused to send (see [`SendErrorKind`]).
+    pub pre_ingress_reply_failures: u64,
 }
 
 /// SIP role(s) a bind serves (port of `UaRole`). The audit framework's
@@ -281,9 +283,106 @@ impl BindError {
     }
 }
 
+/// Why a datagram did not leave — the structural axis, so a caller never
+/// string-matches an OS message to tell an oversize message from a dead peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SendErrorKind {
+    /// `EMSGSIZE`: the datagram exceeds what this path accepts whole. On a
+    /// socket pinned to fragment (ADR-0027) this means the message is over
+    /// [`MAX_UDP_PAYLOAD`], not merely over the path MTU.
+    MessageTooLong,
+    /// `ENETUNREACH` / `EHOSTUNREACH` / `ECONNREFUSED`: no route to the peer,
+    /// or the peer's port answered with an ICMP rejection.
+    Unreachable,
+    /// Everything else — buffer exhaustion, a filter's `EPERM`, a closed fd.
+    #[default]
+    Other,
+}
+
+impl SendErrorKind {
+    /// Classify an OS send failure by its errno. An error carrying no errno
+    /// (a simulated fabric's refusal) is [`Self::Other`].
+    pub fn of(err: &std::io::Error) -> Self {
+        match err.raw_os_error() {
+            Some(libc::EMSGSIZE) => SendErrorKind::MessageTooLong,
+            Some(libc::ENETUNREACH | libc::EHOSTUNREACH | libc::ECONNREFUSED) => {
+                SendErrorKind::Unreachable
+            }
+            _ => SendErrorKind::Other,
+        }
+    }
+
+    /// The metric-label spelling.
+    pub const fn label(self) -> &'static str {
+        match self {
+            SendErrorKind::MessageTooLong => "message_too_long",
+            SendErrorKind::Unreachable => "unreachable",
+            SendErrorKind::Other => "other",
+        }
+    }
+}
+
 /// Failure sending a datagram (port of `SendError`).
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("send failed: {message}")]
 pub struct SendError {
     pub message: String,
+    /// Why it failed, structurally — [`SendErrorKind::Other`] where the sender
+    /// has no errno to classify.
+    pub kind: SendErrorKind,
+}
+
+impl SendError {
+    /// A send failure carrying only a reason string — the simulated fabric's
+    /// shape, where no errno exists.
+    pub fn stated(message: impl Into<String>) -> Self {
+        Self { message: message.into(), kind: SendErrorKind::Other }
+    }
+}
+
+impl From<std::io::Error> for SendError {
+    fn from(err: std::io::Error) -> Self {
+        Self { message: err.to_string(), kind: SendErrorKind::of(&err) }
+    }
+}
+
+#[cfg(test)]
+mod send_error_tests {
+    use super::*;
+
+    fn os(errno: i32) -> SendError {
+        SendError::from(std::io::Error::from_raw_os_error(errno))
+    }
+
+    /// An oversize datagram is told apart from a dead peer by errno, never by
+    /// the OS message text (ADR-0027 X3).
+    #[test]
+    fn the_errno_names_the_failure_not_the_message_text() {
+        assert_eq!(os(libc::EMSGSIZE).kind, SendErrorKind::MessageTooLong);
+        assert_eq!(os(libc::EHOSTUNREACH).kind, SendErrorKind::Unreachable);
+        assert_eq!(os(libc::ENETUNREACH).kind, SendErrorKind::Unreachable);
+        assert_eq!(os(libc::ECONNREFUSED).kind, SendErrorKind::Unreachable);
+        assert_eq!(os(libc::ENOBUFS).kind, SendErrorKind::Other);
+    }
+
+    /// A failure with no errno behind it — the simulated fabric's refusal —
+    /// classifies as `Other` rather than guessing.
+    #[test]
+    fn a_stated_refusal_carries_no_errno_claim() {
+        assert_eq!(SendError::stated("no route in the fabric").kind, SendErrorKind::Other);
+        assert_eq!(
+            SendError::from(std::io::Error::other("not an OS failure")).kind,
+            SendErrorKind::Other
+        );
+    }
+
+    #[test]
+    fn every_kind_has_a_distinct_metric_label() {
+        let labels = [
+            SendErrorKind::MessageTooLong.label(),
+            SendErrorKind::Unreachable.label(),
+            SendErrorKind::Other.label(),
+        ];
+        assert_eq!(labels.len(), std::collections::HashSet::from(labels).len());
+    }
 }

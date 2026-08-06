@@ -388,6 +388,7 @@ impl ShapePlan {
             automatics: Default::default(),
             ceiling: None,
             delta_policy: None,
+            reception_observer: None,
         })
     }
 
@@ -603,7 +604,7 @@ impl ShapePlan {
                     Barrier::None,
                     GoalStep::Invite { callee: "bob", plan: Some(plan) },
                 ));
-                b.caller_goals.push(Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel));
+                b.caller_goals.push(Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel { stated: Vec::new() }));
                 b.caller_feed.on_provisional = Feed::new(Some("time_to_180"), None);
                 b.callees.push(ActorSpec {
                     role: "bob",
@@ -639,7 +640,7 @@ impl ShapePlan {
                     GoalStep::Invite { callee: "bob", plan: Some(plan) },
                 ));
                 b.caller_goals.push(
-                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel)
+                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel { stated: Vec::new() })
                         .after(env.ring_delay),
                 );
                 b.caller_feed.on_provisional = Feed::new(Some("time_to_180"), None);

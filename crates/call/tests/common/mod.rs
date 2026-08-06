@@ -65,6 +65,7 @@ fn dialog(
                     source_call_id: call_id.to_string(),
                     source_from: "<sip:alice@example.com>;tag=alice-001".into(),
                     source_to: "<sip:bob@example.com>;tag=b2bua-aleg".into(),
+                    source_timestamp: None,
                     direction: Direction::FromA,
                     cancelled: false,
                 })
@@ -73,6 +74,7 @@ fn dialog(
             pending_invite_txn: None,
             cached_sdp: cached_sdp.then(|| SDP_BODY.to_vec()),
             pending_reinvite_2xx: None,
+            answered_advert: Vec::new(),
         },
     }
 }
@@ -241,6 +243,8 @@ pub fn representative_call() -> Call {
             }),
             no_answer_timeout_sec: Some(45),
             call_limiters: None,
+            advertise_capabilities: None,
+            charging_vector: None,
         }),
         policy_update_headers: None,
         policy_update_body: None,
@@ -267,6 +271,7 @@ pub fn representative_call() -> Call {
             old_leg_id: Some("b-1".into()),
             started_at_ms: 1_779_440_050_000,
         }),
+        reliable_provisionals: Vec::new(),
         sm_cursors: BTreeMap::new(),
     }
 }
@@ -412,6 +417,7 @@ fn arb_pending_request() -> impl Strategy<Value = PendingRequest> {
                     source_call_id,
                     source_from,
                     source_to,
+                    source_timestamp: None,
                     direction,
                     cancelled: false,
                 }
@@ -460,6 +466,7 @@ fn arb_dialog() -> impl Strategy<Value = Dialog> {
                     pending_invite_txn,
                     cached_sdp,
                     pending_reinvite_2xx: None,
+                    answered_advert: Vec::new(),
                 }
             },
         );
@@ -604,6 +611,8 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
                 .map(|(strategy, messages)| RelayFirst18xTo180Feature { strategy, messages }),
             no_answer_timeout_sec: no_answer,
             call_limiters: None,
+            advertise_capabilities: None,
+            charging_vector: None,
         })
 }
 
@@ -749,6 +758,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             transfer: None,
             subscriptions,
             reroute,
+            reliable_provisionals: Vec::new(),
             sm_cursors,
         },
     )

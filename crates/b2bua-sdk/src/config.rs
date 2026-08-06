@@ -233,6 +233,13 @@ pub struct B2buaConfig {
     /// `body_override: None` on purpose to relay the caller's own offer). `None`
     /// (the default) = no canned SDP, today's behaviour.
     pub default_sdp: Option<Vec<u8>>,
+    /// **Node capability advertisement.** The `Allow`/`Supported` set this
+    /// worker advertises on the out-of-dialog OPTIONS health reply (RFC 3261
+    /// §11.2) — a node-scoped statement, not a call-scoped one, so it is
+    /// declared here rather than by a routing decision. The default is the
+    /// stack set; the health path borrows this value, so a keepalive probe
+    /// resolves its advertisement without allocating.
+    pub node_capabilities: sip_message::generators::CapabilitySet,
 }
 
 impl Default for B2buaConfig {
@@ -294,6 +301,7 @@ impl Default for B2buaConfig {
             // Default SDP source: None = no canned offer. Opt-in per-CreateLeg
             // via `body_override`, never an automatic fallback.
             default_sdp: None,
+            node_capabilities: sip_message::generators::CapabilitySet::default(),
         }
     }
 }

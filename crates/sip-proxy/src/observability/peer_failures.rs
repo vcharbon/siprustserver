@@ -67,6 +67,10 @@ pub enum PeerFailureKind {
     KeepaliveTimeout,
     /// Outbound send to the peer failed (ENOBUFS/EPERM/…).
     SendFailure,
+    /// Outbound send refused the datagram as too long (`EMSGSIZE`): the message
+    /// exceeds what this path carries even fragmented (ADR-0027). Split out
+    /// from [`Self::SendFailure`] because it accuses the message, not the peer.
+    MessageTooLong,
 }
 
 impl PeerFailureKind {
@@ -76,6 +80,7 @@ impl PeerFailureKind {
             PeerFailureKind::TransactionTimeout => 1,
             PeerFailureKind::KeepaliveTimeout => 2,
             PeerFailureKind::SendFailure => 3,
+            PeerFailureKind::MessageTooLong => 4,
         }
     }
 
@@ -85,6 +90,7 @@ impl PeerFailureKind {
             PeerFailureKind::TransactionTimeout => "transaction_timeout",
             PeerFailureKind::KeepaliveTimeout => "keepalive_timeout",
             PeerFailureKind::SendFailure => "send_failure",
+            PeerFailureKind::MessageTooLong => "message_too_long",
         }
     }
 
@@ -93,10 +99,11 @@ impl PeerFailureKind {
         PeerFailureKind::TransactionTimeout,
         PeerFailureKind::KeepaliveTimeout,
         PeerFailureKind::SendFailure,
+        PeerFailureKind::MessageTooLong,
     ];
 }
 
-const N_KINDS: usize = 4;
+const N_KINDS: usize = 5;
 
 /// The literal peer label for folded-in evicted external peers.
 const OVERFLOW_PEER: &str = "__external_overflow__";

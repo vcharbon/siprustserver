@@ -2,7 +2,7 @@
 //! call-layer-stateless store-fault 500. The overload reject lives with the
 //! policy that owns it — [`crate::overload::build_reject_new_call_503`].
 
-use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
 use sip_message::types::SipHeader;
 use sip_txn::IdGen;
 
@@ -28,6 +28,10 @@ fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
 ///   - `Draining` → `503` + `Reason: SIP;cause=503;text="draining"` +
 ///     `Retry-After: 0`.
 ///
+/// `capabilities` is the node's advertised `Allow`/`Supported` set (§11.2) —
+/// node-scoped, since an out-of-dialog OPTIONS names no call; `B2buaConfig`
+/// declares it, defaulting to the stack set.
+///
 /// The `X-Overload` worker load signal rides the **200 path only**: it is the
 /// live signal the proxy's ELU-band AIMD
 /// (`sip_proxy::load_observer::parse_x_overload_header`) consumes to steer (and,
@@ -40,6 +44,7 @@ pub(crate) fn build_options_health_response(
     overload: &OverloadSignal,
     id_gen: &IdGen,
     req: &sip_message::SipRequest,
+    capabilities: &CapabilitySet,
 ) -> sip_message::SipResponse {
     let (status, reason, extra_headers): (u16, &str, Vec<SipHeader>) = match readiness.state() {
         ReadinessState::Ready => (
@@ -49,9 +54,9 @@ pub(crate) fn build_options_health_response(
             // querier learns method/extension/body support, not just liveness.
             // Plus the worker load signal the proxy's AIMD band reads.
             vec![
-                hdr("Allow", sip_message::generators::B2BUA_ALLOW),
+                hdr("Allow", capabilities.allow_text()),
                 hdr("Accept", "application/sdp"),
-                hdr("Supported", sip_message::generators::B2BUA_SUPPORTED),
+                hdr("Supported", capabilities.supported_text()),
                 hdr("X-Overload", overload.x_overload_header_value()),
             ],
         ),

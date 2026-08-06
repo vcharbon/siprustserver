@@ -20,10 +20,35 @@ use tokio::task::JoinHandle;
 
 use crate::net::{Counters, SignalingNetwork, UdpEndpoint};
 use crate::queue::PacketQueue;
+use crate::fragmentation::pin_fragmentation;
 use crate::types::{
     BindError, BindErrorReason, BindUdpOpts, PreIngressAction, PreIngressHook, SendError,
     UdpEndpointCounters, UdpPacket, UndeliveredPacket,
 };
+
+/// Build the UDP socket every real bind stands on. socket2, always, because
+/// two things this stack needs have no tokio knob: the path-MTU-discovery mode
+/// (ADR-0027 — signalling is UDP-only, so an oversize datagram MUST fragment at
+/// IP rather than fail the send) and `SO_REUSEPORT`. N reuse-port sockets on
+/// one port shard the recv path across N tasks; the kernel flow-hashes on the
+/// 4-tuple, so all datagrams from one src:port land on ONE socket and per-flow
+/// ordering (INVITE→CANCEL, retransmits) is preserved. Public so a test reads
+/// the options back off the very socket the bind path produces.
+pub fn build_bound_socket(
+    addr: SocketAddr,
+    reuse_port: bool,
+) -> std::io::Result<socket2::Socket> {
+    let domain = socket2::Domain::for_address(addr);
+    let raw = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    if reuse_port {
+        raw.set_reuse_port(true)?;
+    }
+    pin_fragmentation(&raw, addr.is_ipv4())?;
+    // tokio's reactor requires the fd non-blocking.
+    raw.set_nonblocking(true)?;
+    raw.bind(&addr.into())?;
+    Ok(raw)
+}
 
 /// Production network. Stateless — every `bind_udp` is an independent socket.
 #[derive(Debug, Default, Clone, Copy)]
@@ -50,23 +75,8 @@ impl SignalingNetwork for RealSignalingNetwork {
             addr: opts.addr,
             message: e.to_string(),
         };
-        // `reuse_port` (SO_REUSEPORT) needs a socket2 detour — tokio's
-        // `UdpSocket::bind` has no knob for it. N reuse-port sockets on one
-        // port shard the recv path across N tasks; the kernel flow-hashes on
-        // the 4-tuple, so all datagrams from one src:port land on ONE socket
-        // and per-flow ordering (INVITE→CANCEL, retransmits) is preserved.
-        let socket = if opts.reuse_port {
-            let domain = socket2::Domain::for_address(opts.addr);
-            let raw = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
-                .map_err(os_err)?;
-            raw.set_reuse_port(true).map_err(os_err)?;
-            // tokio's reactor requires the fd non-blocking.
-            raw.set_nonblocking(true).map_err(os_err)?;
-            raw.bind(&opts.addr.into()).map_err(os_err)?;
-            UdpSocket::from_std(raw.into()).map_err(os_err)?
-        } else {
-            UdpSocket::bind(opts.addr).await.map_err(os_err)?
-        };
+        let raw = build_bound_socket(opts.addr, opts.reuse_port).map_err(os_err)?;
+        let socket = UdpSocket::from_std(raw.into()).map_err(os_err)?;
         let local = socket.local_addr().map_err(|e| BindError {
             reason: BindErrorReason::OsError,
             addr: opts.addr,
@@ -117,6 +127,14 @@ impl SignalingNetwork for RealSignalingNetwork {
     async fn await_in_flight(&self, _timeout: Duration) {}
 }
 
+/// The receive buffer one `recv_from` reads into. Linux TRUNCATES a datagram
+/// that does not fit and reports the truncated length, so a buffer smaller than
+/// the largest datagram the socket can receive tears messages silently — this
+/// inequality is the only thing standing between the kernel's reassembled
+/// datagram and a torn SIP message (ADR-0027).
+const RECV_BUF_LEN: usize = 65_536;
+const _: () = assert!(RECV_BUF_LEN > crate::types::MAX_UDP_PAYLOAD);
+
 /// The receive pump. Mirrors the source's `socket.on("message", ...)` handler:
 /// depth-aware pre-ingress dispatch, tail-drop on a full queue.
 async fn recv_loop(
@@ -125,7 +143,7 @@ async fn recv_loop(
     counters: Arc<Counters>,
     pre_ingress: Option<PreIngressHook>,
 ) {
-    let mut buf = vec![0u8; 65_536];
+    let mut buf = vec![0u8; RECV_BUF_LEN];
     // A `recv_from` error is treated as terminal (socket closed) and ends the
     // pump. The source logged and continued on transient errors; for our
     // test/loopback usage surfacing an error here is effectively terminal.
@@ -142,7 +160,13 @@ async fn recv_loop(
             }
             PreIngressAction::Reply(bytes) => {
                 counters.pre_ingress_replies.fetch_add(1, Ordering::Relaxed);
-                let _ = socket.send_to(&bytes, src).await;
+                // The reply is best-effort — the pump must keep receiving — and
+                // a failure is COUNTED, never printed: this crate reports
+                // through counters alone, and a peer that rejects every reply
+                // would otherwise print once per datagram on the receive path.
+                if socket.send_to(&bytes, src).await.is_err() {
+                    counters.pre_ingress_reply_failures.fetch_add(1, Ordering::Relaxed);
+                }
             }
             PreIngressAction::Accept => {
                 let pkt = UdpPacket {
@@ -179,13 +203,7 @@ struct RealEndpoint {
 #[async_trait]
 impl UdpEndpoint for RealEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
-        self.socket
-            .send_to(buf, dst)
-            .await
-            .map(|_| ())
-            .map_err(|e| SendError {
-                message: e.to_string(),
-            })
+        self.socket.send_to(buf, dst).await.map(|_| ()).map_err(SendError::from)
     }
 
     async fn recv(&self) -> Option<UdpPacket> {

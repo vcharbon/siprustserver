@@ -25,6 +25,38 @@ pub struct TagMapping {
     pub b_tag: String,
 }
 
+/// One reliable provisional relayed toward the caller (RFC 3262): the a-facing
+/// early dialog it was shown in, the `RSeq` this stack minted for it, and the
+/// b-leg response it stands for. The caller PRACKs the number she was shown, so
+/// the relayed `RAck` translates back through this map before it reaches the
+/// callee that owns the other sequence.
+///
+/// `(b_leg_id, b_tag, b_cseq, b_rseq)` identifies the provisional. Every part
+/// earns its place: RFC 3262 §3 (errata 4600) makes each callee fork's sequence
+/// independent, so two forks of one leg may state the SAME `RSeq` and only the
+/// fork tag tells them apart; and §3 restarts the sequence per INVITE
+/// transaction, so without the `CSeq` a re-INVITE's first provisional could
+/// collide with the initial INVITE's. Either collision would be misread as a
+/// retransmission and answered with a number minted for another provisional.
+/// `(a_tag, a_rseq)` identifies it from the caller's side, which is the side a
+/// PRACK arrives from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReliableProvisional {
+    /// The a-facing early dialog this rung belongs to — the To-tag the caller
+    /// saw. Each such dialog carries its own sequence (RFC 3262 §4, errata 4603).
+    pub a_tag: String,
+    /// The `RSeq` shown to the caller — this stack's own sequence.
+    pub a_rseq: i64,
+    /// The b-leg the provisional came from.
+    pub b_leg_id: String,
+    /// The callee fork that sent it — its own early dialog's To-tag.
+    pub b_tag: String,
+    /// The `CSeq` number of the b-leg INVITE transaction it answers.
+    pub b_cseq: i64,
+    /// The `RSeq` that b-leg stated.
+    pub b_rseq: i64,
+}
+
 /// Active limiter entry on a call.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLimiterState {
@@ -197,6 +229,12 @@ pub struct Call {
     /// `None` when no reroute is in flight.
     #[serde(default)]
     pub reroute: Option<RerouteState>,
+    /// The reliable provisionals relayed toward the caller, in mint order
+    /// (RFC 3262 §7.1) — one entry per provisional this stack renumbered, for
+    /// the life of the call. It survives here because a PRACK arriving after a
+    /// takeover still translates onto the b-leg number it acknowledges.
+    #[serde(default)]
+    pub reliable_provisionals: Vec<ReliableProvisional>,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate

@@ -13,6 +13,7 @@ use sip_message::{Method, SipStr};
 use sip_txn::TxnKind;
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::rules::capabilities;
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
 
@@ -86,6 +87,8 @@ impl ActionExecutor<'_> {
             self.id_gen,
             body_override,
             header_updates,
+            &capabilities::relaying_for_leg(call, &leg_id, a_invite.headers()),
+            call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
             kind,
         ) {
             Ok(built) => built,
@@ -231,6 +234,7 @@ impl ActionExecutor<'_> {
             content_type: (!body.is_empty()).then(relay::sdp),
             cseq: Some(outbound_cseq as u32),
             extra_headers: extra,
+            capabilities: Some(capabilities::for_leg(call, leg_id)),
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Invite, &gen_dialog, &opts);

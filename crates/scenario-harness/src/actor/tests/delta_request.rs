@@ -32,7 +32,7 @@ fn bye_expecting_cancel_plan(
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
                     Goal::new(Barrier::None, expect_resp(180)),
-                    Goal::new(Barrier::None, GoalStep::Cancel),
+                    Goal::new(Barrier::None, GoalStep::Cancel { stated: Vec::new() }),
                     Goal::new(Barrier::None, expect_resp(200)),
                     Goal::new(Barrier::None, expect_resp(487)),
                 ],
@@ -75,6 +75,7 @@ fn bye_expecting_cancel_plan(
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy,
+        reception_observer: None,
     }
 }
 
@@ -305,7 +306,7 @@ async fn forked_early_dialogs_decline_bye_for_cancel() {
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
                     Goal::new(Barrier::None, expect_resp(180)),
                     Goal::new(Barrier::None, expect_resp(180)),
-                    Goal::new(Barrier::None, GoalStep::Cancel),
+                    Goal::new(Barrier::None, GoalStep::Cancel { stated: Vec::new() }),
                     Goal::new(Barrier::None, expect_resp(200)),
                     Goal::new(Barrier::None, expect_resp(487)),
                 ],
@@ -341,6 +342,7 @@ async fn forked_early_dialogs_decline_bye_for_cancel() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: Some(bye_for_cancel_policy()),
+        reception_observer: None,
     };
     let ctx = CallCtx::new();
     let obs = ObservedState::new();

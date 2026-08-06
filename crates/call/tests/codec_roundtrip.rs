@@ -91,6 +91,29 @@ fn release_subscriptions_and_reroute_round_trip() {
     assert_eq!(decoded, call, "mid-reroute shape");
 }
 
+/// RFC 3262 §7.1: the a-facing reliable-provisional map is replicated state —
+/// a PRACK arriving after a takeover must still translate onto the b-leg number
+/// it acknowledges, so the map has to survive the replication codec.
+#[test]
+fn the_reliable_provisional_map_round_trips() {
+    use call::ReliableProvisional;
+
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+
+    call.reliable_provisionals = Vec::new();
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "no reliable provisional relayed yet");
+
+    call.reliable_provisionals = vec![
+        ReliableProvisional { a_tag: "a1".into(), a_rseq: 9_000, b_leg_id: "b-1".into(), b_tag: "bf1".into(), b_cseq: 1, b_rseq: 4711 },
+        ReliableProvisional { a_tag: "a2".into(), a_rseq: 40, b_leg_id: "b-2".into(), b_tag: "bf2".into(), b_cseq: 1, b_rseq: 1 },
+    ];
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "both early dialogs' provisionals survive");
+    assert_eq!(decoded.reliable_provisionals[1].b_rseq, 1);
+}
+
 /// PA2 (source paranoid-decode precondition): empty input is a typed error.
 #[test]
 fn decode_empty_is_error() {

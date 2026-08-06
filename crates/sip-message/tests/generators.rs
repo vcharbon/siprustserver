@@ -2,17 +2,19 @@
 //! Port of `tests/sip/generators.test.ts`.
 
 use sip_message::generators::{
-    extract_non_structural_headers, generate_ack_for_2xx, generate_ack_for_non_2xx,
-    generate_cancel, generate_in_dialog_request, generate_out_of_dialog_request, generate_response,
-    GenerateAckFor2xxOpts, GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts,
-    GenerateResponseOpts, InDialogMethod, InviteClientTransactionHandle, OutOfDialogMethod,
-    StackDialog,
+    generate_ack_for_2xx, generate_ack_for_non_2xx, generate_relayed_response, relayable,
+    relayable_headers, RelayScope, generate_cancel, generate_in_dialog_request,
+    generate_out_of_dialog_request, generate_response, GenerateAckFor2xxOpts,
+    GenerateInDialogRequestOpts, GenerateOutOfDialogRequestOpts, GenerateRelayedResponseOpts,
+    CapabilitySet, GenerateResponseOpts, InDialogMethod, InviteClientTransactionHandle,
+    OutOfDialogMethod, StackDialog,
 };
+use sip_message::draft::Entry;
 use sip_message::header::{
     self, Event, HeaderName, HeaderValue, MediaType, ParamValue, RAck, SubscriptionState, Uri, Via,
 };
 use sip_message::method::Method;
-use sip_message::{hydrate_request, SipHeader, SipMessage, SipRequest, SipStr};
+use sip_message::{hydrate_request, SipHeader, SipRequest, SipStr};
 
 fn name(header: &str) -> HeaderName {
     HeaderName::of(&SipStr::owned(header))
@@ -135,25 +137,148 @@ fn invite_handle() -> InviteClientTransactionHandle {
     InviteClientTransactionHandle { original_invite: invite }
 }
 
-// --- extract_non_structural_headers ---
+// --- relayable / relayable_headers ---
 
 #[test]
 fn keeps_transparent_headers_and_drops_structural() {
     let a_leg = make_a_leg_invite();
-    let kept = extract_non_structural_headers(&SipMessage::Request(a_leg));
+    let kept = relayable_headers(a_leg.headers(), RelayScope::request());
     let mut names: Vec<String> = kept.iter().map(|h| h.name.to_ascii_lowercase()).collect();
     names.sort();
     assert_eq!(names, vec!["allow", "p-asserted-identity", "supported"]);
 }
 
 #[test]
-fn preserves_order_among_non_structural() {
-    let a_leg = make_a_leg_invite();
-    let kept = extract_non_structural_headers(&SipMessage::Request(a_leg));
+fn preserves_order_and_repeats_among_relayable() {
+    let mut headers = make_a_leg_invite().headers().to_vec();
+    headers.push(hdr("P-Asserted-Identity", "<tel:+15551234>"));
+    let kept = relayable_headers(&headers, RelayScope::request());
     assert_eq!(
         kept.iter().map(|h| h.name.clone()).collect::<Vec<_>>(),
-        vec!["Allow", "Supported", "P-Asserted-Identity"]
+        vec!["Allow", "Supported", "P-Asserted-Identity", "P-Asserted-Identity"],
+        "wire order, and every repeat of a name kept"
     );
+}
+
+/// The generator owns the routing, transaction and dialog identity of the
+/// message it mints, plus the media type of the body it states (§16.6).
+#[test]
+fn the_generator_owned_headers_are_never_relayed() {
+    for name in [
+        "Via", "From", "To", "Call-ID", "CSeq", "Contact", "Route", "Record-Route", "Max-Forwards",
+        "Content-Length", "Content-Type",
+    ] {
+        assert!(!relayable(name, RelayScope::request()), "{name} on a request");
+        assert!(!relayable(name, RelayScope::response()), "{name} on a response");
+    }
+}
+
+/// An extension header is relayed whatever it means — the relay classifies, it
+/// does not interpret.
+#[test]
+fn an_extension_header_is_always_relayed() {
+    for name in ["X-Vendor-Thing", "P-Charging-Vector", "P-Early-Media", "Reason", "Expires"] {
+        assert!(relayable(name, RelayScope::request()), "{name}");
+        assert!(relayable(name, RelayScope::response()), "{name}");
+    }
+}
+
+/// One case per withheld class: a credential scoped to the realm that
+/// challenged, a per-leg session-refresh interval, a sender's own clock stamp,
+/// and a dialog identifier this stack re-mints per leg.
+#[test]
+fn the_withheld_classes_are_relayed_in_neither_direction() {
+    for name in [
+        "Authorization",
+        "Proxy-Authorization",
+        "Authentication-Info",
+        "WWW-Authenticate",
+        "Proxy-Authenticate",
+        "Session-Expires",
+        "Min-SE",
+        "Timestamp",
+        "Date",
+        "Replaces",
+    ] {
+        assert!(!relayable(name, RelayScope::request()), "{name} on a request");
+        assert!(!relayable(name, RelayScope::response()), "{name} on a response");
+    }
+}
+
+/// An imposition on the receiver is withheld from a relayed request — this
+/// stack is the UAS that accepted it — while the same name in a RESPONSE reports
+/// the outcome of the negotiation and stays end-to-end (RFC 3262).
+#[test]
+fn an_imposing_header_rides_a_response_but_never_a_relayed_request() {
+    for name in ["Require", "Proxy-Require", "Unsupported", "RAck"] {
+        assert!(!relayable(name, RelayScope::request()), "{name} on a request");
+    }
+    for name in ["Require", "Unsupported", "RSeq", "Supported"] {
+        assert!(relayable(name, RelayScope::response()), "{name} on a response");
+    }
+}
+
+/// A header describing the body does not outlive the body it describes: it
+/// rides when the minted message carries the source's body, and is withheld
+/// when a policy dropped or replaced it.
+#[test]
+fn body_metadata_rides_only_with_the_body_it_describes() {
+    for name in ["Content-Disposition", "Content-Encoding", "Content-Language", "MIME-Version"] {
+        assert!(relayable(name, RelayScope::response()), "{name} with the body");
+        assert!(
+            !relayable(name, RelayScope::response().without_source_body()),
+            "{name} without the body"
+        );
+    }
+    assert!(
+        relayable("P-Asserted-Identity", RelayScope::request().without_source_body()),
+        "dropping the body withholds nothing else"
+    );
+}
+
+/// RFC 3325 §7 / RFC 3323 §5.3: a message asking for privacy over its identity
+/// leaves the network's assertion behind. The instruction travels so the next
+/// element knows what was asked; the identity it suppresses does not.
+#[test]
+fn a_privacy_request_strips_the_asserted_identity_it_conceals() {
+    let asserted = |privacy: &str| {
+        let mut headers = vec![
+            hdr("P-Asserted-Identity", "<sip:+15551234@op.example>"),
+            hdr("P-Preferred-Identity", "<sip:+15551234@op.example>"),
+            hdr("Remote-Party-ID", "<sip:+15551234@op.example>;party=calling"),
+            hdr("X-Vendor-Thing", "kept"),
+        ];
+        if !privacy.is_empty() {
+            headers.push(hdr("Privacy", privacy));
+        }
+        relayable_headers(&headers, RelayScope::request())
+            .iter()
+            .map(|h| h.name.to_string())
+            .collect::<Vec<_>>()
+    };
+    for concealing in ["id", "id;critical", "header", "user", "session;id", "ID"] {
+        assert_eq!(
+            asserted(concealing),
+            vec!["X-Vendor-Thing", "Privacy"],
+            "{concealing} conceals the assertion and travels itself"
+        );
+    }
+    for open in ["", "none", "session", "critical"] {
+        assert_eq!(
+            asserted(open).first().map(String::as_str),
+            Some("P-Asserted-Identity"),
+            "{open:?} asks for nothing over the identity"
+        );
+    }
+}
+
+/// The compact forms name the same headers (RFC 3261 §7.3.3), so a peer using
+/// them cannot slip a generator-owned header past the relay.
+#[test]
+fn compact_forms_classify_as_their_long_name() {
+    assert!(!relayable("v", RelayScope::request()), "v = Via");
+    assert!(!relayable("c", RelayScope::request()), "c = Content-Type");
+    assert!(relayable("k", RelayScope::request()), "k = Supported");
 }
 
 // --- generate_out_of_dialog_request ---
@@ -197,7 +322,7 @@ fn builds_initial_invite_with_via_contact_maxforwards_content_length() {
 #[test]
 fn passes_extra_headers_through_verbatim() {
     let a_leg = make_a_leg_invite();
-    let transparent = extract_non_structural_headers(&SipMessage::Request(a_leg.clone()));
+    let transparent = relayable_headers(a_leg.headers(), RelayScope::request());
     let req = generate_out_of_dialog_request(
         OutOfDialogMethod::Invite,
         &GenerateOutOfDialogRequestOpts {
@@ -302,6 +427,84 @@ fn bumps_cseq_uses_remote_target_swaps_tags() {
     assert_eq!(first_value(request.headers(), "From"), Some("<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"));
     assert_eq!(first_value(request.headers(), "To"), Some("<sip:bob@192.0.2.20:5060>;tag=bob-remote"));
     assert_eq!(first_value(request.headers(), "Call-ID"), Some("call-bleg-1"));
+}
+
+/// Build a re-INVITE with the given capability declaration + extra headers and
+/// return its `(Allow, Supported)` as they reach the wire.
+fn reinvite_advert(
+    capabilities: Option<CapabilitySet>,
+    extra_headers: Vec<SipHeader>,
+) -> (Option<String>, Option<String>) {
+    let result = generate_in_dialog_request(
+        InDialogMethod::Invite,
+        &dialog(),
+        &GenerateInDialogRequestOpts {
+            via: Some(via()),
+            contact: Some(contact()),
+            capabilities,
+            extra_headers,
+            ..Default::default()
+        },
+    );
+    let headers = result.request.headers().to_vec();
+    (
+        first_value(&headers, "Allow").map(str::to_string),
+        first_value(&headers, "Supported").map(str::to_string),
+    )
+}
+
+/// An undeclared re-INVITE advertises exactly the constants, byte for byte.
+#[test]
+fn reinvite_without_a_declared_capability_set_advertises_the_default() {
+    let (allow, supported) = reinvite_advert(None, vec![]);
+    assert_eq!(allow.as_deref(), Some(sip_message::generators::B2BUA_ALLOW));
+    assert_eq!(supported.as_deref(), Some(sip_message::generators::B2BUA_SUPPORTED));
+}
+
+/// A declared set is what reaches the wire — no REFER, no 100rel.
+#[test]
+fn reinvite_advertises_the_declared_capability_set() {
+    let caps = CapabilitySet::new(
+        header::Allow::of(["INVITE", "ACK", "CANCEL", "BYE"]),
+        header::Supported::of(["timer"]),
+    );
+    let (allow, supported) = reinvite_advert(Some(caps), vec![]);
+    assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE"));
+    assert_eq!(supported.as_deref(), Some("timer"));
+}
+
+/// An explicit `extra_headers` line is more specific than the declared set and
+/// wins; the declaration still supplies the header the line does not name.
+#[test]
+fn an_explicit_header_line_beats_the_declared_capability_set() {
+    let caps = CapabilitySet::new(
+        header::Allow::of(["INVITE", "ACK", "CANCEL", "BYE"]),
+        header::Supported::of(["timer"]),
+    );
+    let explicit =
+        vec![SipHeader { name: "Allow".into(), value: "INVITE, ACK, BYE, NOTIFY".into() }];
+    let (allow, supported) = reinvite_advert(Some(caps), explicit);
+    assert_eq!(allow.as_deref(), Some("INVITE, ACK, BYE, NOTIFY"));
+    assert_eq!(supported.as_deref(), Some("timer"));
+}
+
+/// The declaration rides INVITE only — a BYE/NOTIFY carries no advertisement.
+#[test]
+fn a_declared_capability_set_is_ignored_off_the_invite_path() {
+    let result = generate_in_dialog_request(
+        InDialogMethod::Bye,
+        &dialog(),
+        &GenerateInDialogRequestOpts {
+            via: Some(via()),
+            capabilities: Some(CapabilitySet::new(
+                header::Allow::of(["INVITE"]),
+                header::Supported::of(["timer"]),
+            )),
+            ..Default::default()
+        },
+    );
+    assert_eq!(first_value(result.request.headers(), "Allow"), None);
+    assert_eq!(first_value(result.request.headers(), "Supported"), None);
 }
 
 #[test]
@@ -485,7 +688,7 @@ fn ack_carries_sdp_body() {
 
 #[test]
 fn cancel_reuses_invite_topmost_via_verbatim() {
-    let cancel = generate_cancel(&invite_handle());
+    let cancel = generate_cancel(&invite_handle(), &[]);
     assert_eq!(cancel.method(), "CANCEL");
     assert_eq!(
         first_value(cancel.headers(), "Via"),
@@ -493,9 +696,29 @@ fn cancel_reuses_invite_topmost_via_verbatim() {
     );
 }
 
+/// RFC 3326 §2 scopes `Reason` to CANCEL and BYE, so a back-to-back UA
+/// cancelling on a peer's behalf restates the cause that peer gave.
+#[test]
+fn cancel_carries_the_cancellers_own_release_cause() {
+    let cancel = generate_cancel(
+        &invite_handle(),
+        &[hdr("Reason", "Q.850;cause=16"), hdr("P-Charging-Vector", "icid-value=\"abc\"")],
+    );
+    assert_eq!(first_value(cancel.headers(), "Reason"), Some("Q.850;cause=16"));
+    assert_eq!(
+        first_value(cancel.headers(), "P-Charging-Vector"),
+        Some("icid-value=\"abc\"")
+    );
+    assert_eq!(
+        first_value(cancel.headers(), "Via"),
+        Some("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123;cr=cref1;lg=b-1"),
+        "the correlation key is still the cancelled INVITE's"
+    );
+}
+
 #[test]
 fn cancel_mirrors_request_uri_callid_from_to_cseq() {
-    let cancel = generate_cancel(&invite_handle());
+    let cancel = generate_cancel(&invite_handle(), &[]);
     assert_eq!(cancel.request_uri().text(), "sip:bob@192.0.2.20:5060");
     assert_eq!(first_value(cancel.headers(), "Call-ID"), Some("call-bleg-1"));
     assert_eq!(first_value(cancel.headers(), "From"), Some("<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local"));
@@ -523,7 +746,7 @@ fn cancel_and_non_2xx_ack_echo_the_invite_request_uri_octet_for_octet() {
     let invite = hydrate_request("INVITE", r_uri, headers, Vec::new()).expect("invite hydrates");
     let handle = InviteClientTransactionHandle { original_invite: invite };
 
-    assert_eq!(generate_cancel(&handle).request_uri().text(), r_uri);
+    assert_eq!(generate_cancel(&handle, &[]).request_uri().text(), r_uri);
 
     let final487 = generate_response(
         &handle.original_invite,
@@ -557,7 +780,7 @@ fn cancel_echoes_the_invite_route_set_verbatim() {
     ];
     let invite = hydrate_request("INVITE", "sip:bob@192.0.2.20:5060", headers, Vec::new())
         .expect("invite hydrates");
-    let cancel = generate_cancel(&InviteClientTransactionHandle { original_invite: invite });
+    let cancel = generate_cancel(&InviteClientTransactionHandle { original_invite: invite }, &[]);
 
     let cancel_routes: Vec<String> = cancel
         .headers()
@@ -618,6 +841,80 @@ fn mints_fallback_to_tag_when_caller_supplies_none_on_non100() {
     // Deterministic per Call-ID: a retransmit re-derives the same tag.
     let resp2 = generate_response(&req, 200, "OK", &GenerateResponseOpts::default());
     assert_eq!(first_value(resp2.headers(), "To"), Some(to));
+}
+
+/// RFC 3261 §8.2.6.1: the 100 answering a request that carried a Timestamp
+/// carries that Timestamp — it is how the requester measures the round trip.
+#[test]
+fn echoes_the_requests_timestamp_on_the_100_and_on_every_later_response() {
+    let mut headers = make_a_leg_invite().headers().to_vec();
+    headers.push(hdr("Timestamp", "54"));
+    let req = hydrate_request(
+        "INVITE",
+        "sip:bob@biloxi.example.com",
+        headers,
+        sdp_body(),
+    )
+    .expect("a-leg hydrates");
+
+    for status in [100u16, 180, 200, 486] {
+        let resp = generate_response(&req, status, "…", &GenerateResponseOpts::default());
+        assert_eq!(
+            first_value(resp.headers(), "Timestamp"),
+            Some("54"),
+            "the {status} must echo the request's Timestamp"
+        );
+        assert_eq!(all_values(resp.headers(), "Timestamp").len(), 1);
+    }
+}
+
+/// A response rebuilt from a snapshot answers the SNAPSHOTTED request, so the
+/// Timestamp it echoes is the requester's own — never the peer's (§8.2.6.1).
+#[test]
+fn a_relayed_response_echoes_the_snapshotted_requests_timestamp() {
+    let echo = |name: HeaderName, text: &str| Entry::raw(name, SipStr::owned(text));
+    let opts = GenerateRelayedResponseOpts {
+        vias: vec![echo(HeaderName::Via, "SIP/2.0/UDP atlanta.example.com:5060;branch=z9hG4bKa")],
+        from: Some(echo(HeaderName::From, "<sip:alice@atlanta.example.com>;tag=alice-tag")),
+        to: Some(echo(HeaderName::To, "<sip:bob@biloxi.example.com>;tag=b2bua")),
+        call_id: Some(echo(HeaderName::CallId, "call-aleg-1")),
+        cseq: Some(echo(HeaderName::CSeq, "2 OPTIONS")),
+        timestamp: Some(echo(HeaderName::Timestamp, "1392.3")),
+        ..Default::default()
+    };
+    let resp = generate_relayed_response(200, "OK", &opts);
+    assert_eq!(all_values(resp.headers(), "Timestamp"), vec!["1392.3"]);
+
+    let none = GenerateRelayedResponseOpts { timestamp: None, ..opts };
+    assert_eq!(all_values(generate_relayed_response(200, "OK", &none).headers(), "Timestamp").len(), 0);
+}
+
+/// §20.38 defines the header only where the request carried one: a request
+/// without a Timestamp is answered without one.
+#[test]
+fn a_request_without_a_timestamp_is_answered_without_one() {
+    let resp =
+        generate_response(&make_a_leg_invite(), 200, "OK", &GenerateResponseOpts::default());
+    assert_eq!(first_value(resp.headers(), "Timestamp"), None);
+}
+
+/// A caller stating its own Timestamp owns it — the echo never duplicates it.
+#[test]
+fn a_caller_stated_timestamp_beats_the_echo() {
+    let mut headers = make_a_leg_invite().headers().to_vec();
+    headers.push(hdr("Timestamp", "54"));
+    let req = hydrate_request("INVITE", "sip:bob@biloxi.example.com", headers, sdp_body())
+        .expect("a-leg hydrates");
+    let resp = generate_response(
+        &req,
+        200,
+        "OK",
+        &GenerateResponseOpts {
+            extra_headers: vec![hdr("Timestamp", "54 0.5")],
+            ..Default::default()
+        },
+    );
+    assert_eq!(all_values(resp.headers(), "Timestamp"), vec!["54 0.5"]);
 }
 
 #[test]

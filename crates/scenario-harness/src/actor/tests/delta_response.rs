@@ -50,6 +50,7 @@ fn reject_drift_plan(
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy,
+        reception_observer: None,
     }
 }
 

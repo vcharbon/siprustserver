@@ -107,6 +107,7 @@ async fn ack_to_an_offer_carrying_reinvite_is_bodyless() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;
@@ -159,6 +160,7 @@ async fn ack_to_a_delayed_offer_reinvite_carries_the_answer() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;

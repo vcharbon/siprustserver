@@ -339,15 +339,13 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
             .with_header("RSeq", &rseq.to_string())
             .with_sdp(ANSWER)
             .await;
-        call.expect(183).await;
+        let p183 = call.expect(183).await;
         if b2bua.metrics().message_cap_terminated_total() == 1 {
             break; // the 183 tripped the cap
         }
-        let mut prack = call
-            .send_request(InDialogMethod::Prack)
-            .with_rack(&format!("{rseq} 1 INVITE"))
-            .send()
-            .await;
+        // The RAck names the RSeq alice was SHOWN — the a-leg transaction's own
+        // sequence, which the relay translates back onto bob's (RFC 3262 §7.2).
+        let mut prack = call.try_prack(&p183).await.expect("alice PRACKs the reliable 183");
         let mut b_prack = bob.receive("PRACK").await;
         b_prack.respond(200, "OK").await;
         if b2bua.metrics().message_cap_terminated_total() == 1 {

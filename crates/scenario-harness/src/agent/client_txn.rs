@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use sip_message::generators::{
     generate_ack_for_non_2xx, generate_cancel, InviteClientTransactionHandle,
 };
-use sip_message::{Method, SipMessage, SipRequest, SipResponse};
+use sip_message::{Method, SipHeader, SipMessage, SipRequest, SipResponse};
 
 use super::server_txn::ServerTxn;
 use super::step::{unwrap_step, StepError};
@@ -52,14 +52,26 @@ impl AckCtx<'_> {
 /// [`ClientReinvite::cancel`](super::ClientReinvite::cancel) (which unwrap it)
 /// and [`CancelHandle::cancel_best_effort`](super::CancelHandle::cancel_best_effort)
 /// (which swallows the error — the call is already failing).
+///
+/// `stated` are the canceller's own header lines — RFC 3326 §2 scopes `Reason`
+/// to CANCEL and BYE, so this is where a caller gives up with a cause.
 pub(super) async fn try_send_cancel(
     agent: &Agent,
     original_invite: &SipRequest,
     wire_dst: SocketAddr,
+    stated: &[(&str, &str)],
 ) -> Result<(), StepError> {
-    let cancel = generate_cancel(&InviteClientTransactionHandle {
-        original_invite: original_invite.clone(),
-    });
+    let stated: Vec<SipHeader> = stated
+        .iter()
+        .map(|(name, value)| SipHeader {
+            name: (*name).to_string().into(),
+            value: (*value).to_string().into(),
+        })
+        .collect();
+    let cancel = generate_cancel(
+        &InviteClientTransactionHandle { original_invite: original_invite.clone() },
+        &stated,
+    );
     agent.try_send(&SipMessage::Request(cancel), wire_dst).await
 }
 

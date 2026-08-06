@@ -12,6 +12,7 @@
 //!   - [`leg`] — role, lookup, state/disposition setters, resolution, tags
 //!   - [`dialog`] — CSeq, ACK branch, pending relays, SDP cache, constructors
 //!   - [`peering`] — tag map, active peer pair, relay-peer resolution
+//!   - [`reliable`] — the a-facing reliable-provisional sequence (RFC 3262)
 //!   - [`services`] — per-service slice accessors + opaque ext writes
 //!   - [`record`] — CDR append, rule deactivation, SM-cursor rendering
 //!   - [`timer`] — the timer ledger (`replace_timer_by_id`, terminating cap)
@@ -20,6 +21,7 @@ pub mod dialog;
 pub mod leg;
 pub mod lens;
 pub mod peering;
+pub mod reliable;
 pub mod record;
 pub mod services;
 pub mod timer;
@@ -37,6 +39,7 @@ pub use leg::{
     remote_tag, set_bye_disposition, set_leg_disposition, set_leg_state,
 };
 pub use lens::{update_dialog, update_leg};
+pub use reliable::{assign_a_rseq, b_rseq_for, starts_reliable_ladder};
 pub use peering::{
     add_tag_mapping, all_peered_legs, find_by_a_tag, find_by_b_tag, get_peer, merge_leg,
     relay_peer_dialog_ready, resolve_relay_peer, split_leg,

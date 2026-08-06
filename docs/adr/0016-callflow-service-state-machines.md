@@ -86,6 +86,11 @@ separately and is **not** duplicated into the slice:
   (ADR-0002), because they physically cannot add a typed field to the `call`
   crate they do not fork.
 
+`Call.ext` also holds a small set of **core-reserved keys** — slots the engine
+itself replicates, named by `rules::relay::is_core_reserved_ext`. They are not
+service slices: `CallSnapshot::of` filters them out, so a decision backend never
+sees one and no service id may collide with them.
+
 This is forced by the HA constraint "**the B2BUA owns and replicates all
 per-call state**": the core must serialise an integrator's state without knowing
 its type. The uniform cursor map gives the engine (selection), the doc

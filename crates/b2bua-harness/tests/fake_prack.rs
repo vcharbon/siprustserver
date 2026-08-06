@@ -242,12 +242,9 @@ async fn no_policy_control() {
         "Require:100rel relayed verbatim (default path)",
     );
 
-    // Alice PRACKs end-to-end; the B2BUA relays it to bob.
-    let mut prack = call
-        .send_request(InDialogMethod::Prack)
-        .with_rack("1 1 INVITE")
-        .send()
-        .await;
+    // Alice PRACKs the provisional she was shown — the RAck names the RSeq on
+    // her own 183 (this stack's, not bob's) and translates back on the relay.
+    let mut prack = call.try_prack(&p183).await.expect("alice PRACKs the reliable 183");
     bob.receive("PRACK").await.respond(200, "OK").await;
     prack.expect(200).await;
 

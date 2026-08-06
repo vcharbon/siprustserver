@@ -275,7 +275,8 @@ pub struct CallSnapshot {
     pub legs: Vec<LegSnapshot>,
     /// The full observed CDR trail (invite/provisional/answer/reject/timeout…).
     pub cdr_events: Vec<call::CdrEvent>,
-    /// Per-service opaque call ext slices (`Call.ext`, ADR-0016).
+    /// Per-service opaque call ext slices (`Call.ext`, ADR-0016). Core-reserved
+    /// keys are not service slices and never ship.
     pub service_ext: call::ExtMap,
     /// Per-service state-machine cursors (machine id → state label).
     pub sm_cursors: BTreeMap<String, String>,
@@ -307,7 +308,13 @@ impl CallSnapshot {
             callback_context: call.callback_context.clone(),
             legs,
             cdr_events: call.cdr_events.clone(),
-            service_ext: call.ext.clone().unwrap_or_default(),
+            service_ext: call
+                .ext
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(k, _)| !crate::rules::relay::is_core_reserved_ext(k))
+                .collect(),
             sm_cursors: call
                 .sm_cursors
                 .iter()
@@ -400,5 +407,7 @@ pub fn default_platform_features() -> FeatureActivations {
         relay_first_18x_to_180: None,
         no_answer_timeout_sec: None,
         call_limiters: None,
+        advertise_capabilities: None,
+        charging_vector: None,
     }
 }

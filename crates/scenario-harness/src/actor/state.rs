@@ -25,9 +25,10 @@ use super::ledger::{ObligationKey, ObligationLedger};
 use crate::StepError;
 
 /// One observed inbound response on a leg — status, body presence, and the
-/// fork identity (`To`-tag) it carried. `typed` retains the full response only
-/// while a matcher-carrying reception goal is pending on the leg, so a content
-/// matcher can compare headers+body without a second receive.
+/// fork identity (`To`-tag) it carried. `typed` retains the full response while
+/// a matcher-carrying reception goal is pending on the leg, or a reception
+/// observer is installed, so a content matcher or an observing caller reads
+/// headers+body without a second receive.
 #[derive(Debug, Clone)]
 pub struct ResponseFact {
     pub status: u16,
@@ -42,8 +43,8 @@ pub struct ResponseFact {
     /// The `To`-tag — the early-dialog/fork identity a reception goal's
     /// `early` binding matches (RFC 3261 §12.1.2).
     pub early_tag: Option<String>,
-    /// Boxed: retained only for a pending matcher, and kept off the
-    /// `Observation` fold's common-variant size.
+    /// Boxed: retained only for a pending matcher or an installed reception
+    /// observer, and kept off the `Observation` fold's common-variant size.
     pub typed: Option<Box<sip_message::SipResponse>>,
 }
 

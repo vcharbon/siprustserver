@@ -145,6 +145,7 @@ pub struct Counters {
     pub tail_dropped: AtomicU64,
     pub pre_ingress_dropped: AtomicU64,
     pub pre_ingress_replies: AtomicU64,
+    pub pre_ingress_reply_failures: AtomicU64,
 }
 
 impl Counters {
@@ -154,6 +155,7 @@ impl Counters {
             tail_dropped: self.tail_dropped.load(Ordering::Relaxed),
             pre_ingress_dropped: self.pre_ingress_dropped.load(Ordering::Relaxed),
             pre_ingress_replies: self.pre_ingress_replies.load(Ordering::Relaxed),
+            pre_ingress_reply_failures: self.pre_ingress_reply_failures.load(Ordering::Relaxed),
         }
     }
 }

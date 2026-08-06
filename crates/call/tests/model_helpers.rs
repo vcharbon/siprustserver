@@ -66,6 +66,7 @@ fn pending_request_lifecycle() {
         source_call_id: "cid".into(),
         source_from: "f".into(),
         source_to: "t".into(),
+        source_timestamp: None,
         direction: Direction::FromB,
         cancelled: false,
     };
@@ -214,4 +215,71 @@ fn dump_cursors_renders_sorted_or_dash() {
     call.sm_cursors
         .insert(MachineId::new("global-call"), StateLabel::new("Active"));
     assert_eq!(dump_cursors(&call), "global-call=Active transfer=CRinging");
+}
+
+// ── the a-facing reliable-provisional sequence (RFC 3262) ───────────────────
+
+#[test]
+fn a_fresh_reliable_provisional_takes_the_next_number() {
+    let (call, first) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 4711, 9_000);
+    assert_eq!(first, 9_000, "the first relayed provisional takes the random start");
+    let (call, second) = assign_a_rseq(call, "a1", "b-1", "bf1", 1, 4712, 9_000);
+    assert_eq!(second, 9_001, "RFC 3262 §4: the next in this dialog is greater by exactly one");
+    assert_eq!(call.reliable_provisionals.len(), 2);
+    assert_eq!(b_rseq_for(&call, "a1", 9_001), Some(("b-1", 4712)));
+}
+
+#[test]
+fn relaying_the_same_reliable_provisional_again_is_the_same_number() {
+    let (call, first) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 4711, 9_000);
+    let (call, again) = assign_a_rseq(call, "a1", "b-1", "bf1", 1, 4711, 9_000);
+    assert_eq!(again, first, "a retransmission is a retransmission, not a new provisional");
+    assert_eq!(call.reliable_provisionals.len(), 1);
+}
+
+/// Forks mirrored as DISTINCT a-facing early dialogs each carry their own
+/// ladder (RFC 3262 §4, errata 4603/4604), so interleaving them never shows
+/// either caller dialog a gap — the failure a single call-wide ladder produces.
+#[test]
+fn each_a_facing_early_dialog_carries_its_own_ladder() {
+    let (call, one) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 1, 5);
+    let (call, two) = assign_a_rseq(call, "a2", "b-1", "bf2", 1, 200, 40);
+    let (call, three) = assign_a_rseq(call, "a1", "b-1", "bf1", 1, 2, 5);
+    let (call, four) = assign_a_rseq(call, "a2", "b-1", "bf2", 1, 201, 40);
+    assert_eq!((one, three), (5, 6), "dialog a1 rises by exactly one across the interleave");
+    assert_eq!((two, four), (40, 41), "dialog a2 rises by exactly one across the interleave");
+    assert_eq!(b_rseq_for(&call, "a1", 6), Some(("b-1", 2)));
+    assert_eq!(b_rseq_for(&call, "a2", 41), Some(("b-1", 201)));
+    assert_eq!(b_rseq_for(&call, "a2", 5), None, "a number minted in the other dialog");
+    assert_eq!(b_rseq_for(&call, "a1", 99), None, "a number this stack never minted");
+}
+
+/// Forks COLLAPSED behind one a-facing tag share that dialog's ladder — the
+/// case the mapping exists for, since two callee sequences cannot both be
+/// shown verbatim in a single caller dialog.
+#[test]
+fn forks_collapsed_behind_one_tag_share_that_dialogs_ladder() {
+    let (call, one) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 1, 5);
+    let (call, two) = assign_a_rseq(call, "a1", "b-2", "bf2", 1, 1, 5);
+    assert_eq!((one, two), (5, 6), "one caller dialog, one ladder rising by exactly one");
+    assert_eq!(b_rseq_for(&call, "a1", 5), Some(("b-1", 1)));
+    assert_eq!(b_rseq_for(&call, "a1", 6), Some(("b-2", 1)), "the PRACK reaches the right fork");
+}
+
+/// RFC 3262 §7.1 restarts the callee's `RSeq` at random per INVITE
+/// transaction, so a re-INVITE may state a number the initial INVITE already
+/// used on the same leg. That is a NEW provisional, never a retransmission.
+#[test]
+fn the_same_b_sequence_on_a_later_transaction_is_a_new_provisional() {
+    let (call, initial) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 4711, 9_000);
+    let (call, reinvite) = assign_a_rseq(call, "a1", "b-1", "bf1", 2, 4711, 9_000);
+    assert_ne!(reinvite, initial, "a later INVITE transaction restarts the callee's sequence");
+    assert_eq!(reinvite, initial + 1, "RFC 3262 §4: this dialog's ladder still rises by one");
+    assert_eq!(call.reliable_provisionals.len(), 2);
+}
+
+#[test]
+fn an_a_facing_sequence_number_is_never_below_one() {
+    let (_, a_rseq) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 1, 0);
+    assert_eq!(a_rseq, 1, "RFC 3262 §3: zero is not a sequence number");
 }

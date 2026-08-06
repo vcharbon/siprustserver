@@ -117,6 +117,7 @@ async fn actor_caller_retries_through_a_401_challenge() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let ctx = CallCtx::new();
@@ -206,6 +207,7 @@ async fn actor_caller_without_responder_classifies_401_unchanged() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let ctx = CallCtx::new();

@@ -5,7 +5,6 @@
 //! bookkeeping is UA-to-UA. Entirely message-driven (advance-free).
 
 use async_trait::async_trait;
-use sip_message::generators::InDialogMethod;
 
 use crate::infra::InfraRuntime;
 use crate::model::Input;
@@ -62,12 +61,9 @@ impl CallflowShape for ReroutingPrack {
         let p183 = call.expect(183).await;
         rt.anchor("alice", Anchor::FirstProvisional, &p183);
 
-        // alice PRACKs the reliable 183 on the early dialog; bob2 200s it.
-        let mut prack = call
-            .send_request(InDialogMethod::Prack)
-            .with_rack("1 1 INVITE")
-            .send()
-            .await;
+        // alice PRACKs the reliable 183 on the early dialog — the RAck names the
+        // RSeq she was shown, which the SUT translates back onto bob2's.
+        let mut prack = call.try_prack(&p183).await.expect("alice PRACKs the reliable 183");
         let mut prack_uas = bob2.receive("PRACK").await;
         rt.anchor("bob2", Anchor::Prack, prack_uas.request());
         prack_uas.respond(200, "OK").await;

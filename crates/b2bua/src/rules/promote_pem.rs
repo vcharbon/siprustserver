@@ -9,24 +9,18 @@
 //! resyncs Alice with a B2BUA-originated re-INVITE. The per-call state lives on
 //! `Call.promote_pem` (the typed slice that replaces the TS `PemCallExt`).
 
-use call::features::RelayFirst18xStrategy;
+use call::features::{FeatureActivations, RelayFirst18xStrategy};
 use call::{CdrEventType, Direction, LegDisposition, LegState, PromotePemState, TimerType};
 use sip_message::draft::Entry;
-use sip_message::header::{Allow, HeaderName, RSeq, Require, Supported};
+use sip_message::header::{HeaderName, RSeq, Require};
 use sip_message::sdp_media_equivalent;
-use sip_message::SipResponse;
+use sip_message::{SipHeader, SipResponse};
 
+use super::capabilities::{self, Face};
 use super::model::{
     Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
     SERVICE_LAYER,
 };
-
-/// RFC 3261 §13.3.1 / §20.5: methods the B2BUA relays end-to-end, advertised on
-/// the synthetic 200 OK / resync re-INVITE toward Alice.
-const B2BUA_ALLOW: &str = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, PRACK, MESSAGE, NOTIFY";
-/// RFC 3261 §20.37: option-tags the B2BUA understands. 100rel is OMITTED — Alice
-/// never saw a reliable provisional from us.
-const B2BUA_SUPPORTED_NO_100REL: &str = "timer, replaces";
 
 fn rule(
     id: &'static str,
@@ -74,12 +68,16 @@ fn window_open(ctx: &RuleContext) -> bool {
     ctx.call.promote_pem_window_open()
 }
 
-/// Allow + Supported header updates for messages we mint toward Alice.
-fn a_facing_advert() -> Vec<Entry> {
-    vec![
-        Entry::typed(Allow::of(B2BUA_ALLOW.split(',').map(str::trim))),
-        Entry::typed(Supported::of(B2BUA_SUPPORTED_NO_100REL.split(',').map(str::trim))),
-    ]
+/// Allow + Supported header updates for messages we mint toward Alice: the
+/// originator face's set (declared, else Bob's own relayed advertisement, else
+/// the stack set) narrowed by `100rel` — the one claim this service must never
+/// make, since Alice saw no reliable provisional from us. Every mint point of
+/// the call therefore advertises the same set but for that narrowing.
+fn a_facing_advert(features: Option<&FeatureActivations>, received: &[SipHeader]) -> Vec<Entry> {
+    capabilities::relaying_in(features, Face::Originator, received)
+        .without_option_tag("100rel")
+        .entries()
+        .to_vec()
 }
 
 /// The `promote18xPemTo200` SERVICE_LAYER rules. Dormant unless the call
@@ -112,19 +110,24 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let leg = ctx.source_leg_id.to_string();
                 let promoted_sdp = resp.body().clone();
 
-                // 183 → 200 OK on the wire toward Alice: drop Require/RSeq
-                // (+ P-Early-Media is not in the relay passthrough set, so it
-                // never reaches Alice), stamp Allow + Supported, keep the SDP.
-                // RelayFirstBare180 already mints the a-facing tag + seeds the
-                // tag map; here we relay as a 200 carrying the body, so we mint
-                // the tag via the relay path's reliable-1xx tracking instead and
-                // pre-seed by reusing the default a-dialog tag continuity.
+                // 183 → 200 OK on the wire toward Alice: drop Require/RSeq and
+                // the RFC 5009 early-media authorization (the promoted answer is
+                // final media, not authorized early media), stamp Allow +
+                // Supported, keep the SDP. RelayFirstBare180 already mints the
+                // a-facing tag + seeds the tag map; here we relay as a 200
+                // carrying the body, so we mint the tag via the relay path's
+                // reliable-1xx tracking instead and pre-seed by reusing the
+                // default a-dialog tag continuity.
                 let transform = MessageTransform {
                     status: Some(200),
                     reason: Some("OK".to_string()),
                     drop_body: false,
-                    remove_headers: vec![HeaderName::Require, HeaderName::RSeq],
-                    add_headers: a_facing_advert(),
+                    remove_headers: vec![
+                        HeaderName::Require,
+                        HeaderName::RSeq,
+                        HeaderName::PEarlyMedia,
+                    ],
+                    add_headers: a_facing_advert(ctx.call.features(), resp.headers()),
                 };
 
                 let mut actions = vec![
@@ -288,7 +291,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 actions.push(RuleAction::SendReinvite {
                     leg_id: a,
                     body: final_sdp.to_vec(),
-                    add_headers: a_facing_advert(),
+                    add_headers: a_facing_advert(ctx.call.features(), resp.headers()),
                 });
                 actions.push(RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Provisional,
@@ -453,4 +456,118 @@ fn max_duration(ctx: &RuleContext) -> i64 {
         .features()
         .map(|f| f.platform.max_duration_sec)
         .unwrap_or(3600)
+}
+
+#[cfg(test)]
+mod tests {
+    //! What the promotion advertises toward Alice: the same set every other
+    //! mint point of the call resolves — declared, else Bob's own relayed
+    //! advertisement, else the stack set — minus `100rel`, which this service
+    //! never claims.
+    use super::*;
+    use call::features::{
+        AdvertiseCapabilitiesFeature, AdvertisedCapabilities, KeepaliveActivation,
+        PlatformActivations,
+    };
+    use sip_message::generators::CapabilitySet;
+    use sip_message::SipStr;
+
+    fn received(lines: &[(&str, &str)]) -> Vec<SipHeader> {
+        lines
+            .iter()
+            .map(|(name, value)| SipHeader {
+                name: SipStr::owned(name),
+                value: SipStr::owned(value),
+            })
+            .collect()
+    }
+
+    /// The `(Allow, Supported)` values the advert stamps, as they reach Alice.
+    fn advert_relaying(features: Option<&FeatureActivations>, from_bob: &[SipHeader]) -> (String, String) {
+        let entries = a_facing_advert(features, from_bob);
+        let text = |name: HeaderName| {
+            entries
+                .iter()
+                .find(|e| e.is(&name))
+                .unwrap_or_else(|| panic!("advert carries {name:?}"))
+                .text()
+                .as_str()
+                .to_string()
+        };
+        (text(HeaderName::Allow), text(HeaderName::Supported))
+    }
+
+    fn features_declaring(allow: &[&str], supported: &[&str]) -> FeatureActivations {
+        FeatureActivations {
+            platform: PlatformActivations {
+                max_duration_sec: 3_600,
+                keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
+            },
+            refer: None,
+            relay_first_18x_to_180: None,
+            no_answer_timeout_sec: None,
+            call_limiters: None,
+            charging_vector: None,
+            advertise_capabilities: Some(AdvertiseCapabilitiesFeature {
+                toward_originator: Some(AdvertisedCapabilities {
+                    allow: Some(allow.iter().map(|s| s.to_string()).collect()),
+                    supported: Some(supported.iter().map(|s| s.to_string()).collect()),
+                }),
+                toward_originated: None,
+            }),
+        }
+    }
+
+    fn advert(features: Option<&FeatureActivations>) -> (String, String) {
+        advert_relaying(features, &[])
+    }
+
+    /// Nothing declared and nothing advertised by Bob: the stack set, minus the
+    /// one tag the service may not claim. No set of its own to diverge from.
+    #[test]
+    fn an_undeclared_call_gets_the_stack_set_without_100rel() {
+        let (allow, supported) = advert(None);
+        let stack = CapabilitySet::default();
+        assert_eq!(allow, stack.allow_text());
+        assert_eq!(supported, stack.without_option_tag("100rel").supported_text());
+    }
+
+    /// Bob's own advertisement travels to Alice, so the promoted 200 states
+    /// what the generic relay would have stated — `100rel` excepted.
+    #[test]
+    fn bobs_advertisement_reaches_alice_but_never_100rel() {
+        let (allow, supported) = advert_relaying(
+            None,
+            &received(&[("Allow", "INVITE, ACK, BYE"), ("Supported", "100rel, timer, foo")]),
+        );
+        assert!(allow.starts_with("INVITE, ACK, BYE"));
+        assert_eq!(supported, "timer, foo");
+    }
+
+    /// The advertised set does not depend on which rule minted the message:
+    /// the service resolves what every other mint point resolves, and the one
+    /// deliberate difference is the tag it may not claim.
+    #[test]
+    fn the_service_advertises_what_every_other_mint_point_resolves() {
+        let from_bob =
+            received(&[("Allow", "INVITE, ACK, BYE"), ("Supported", "100rel, timer")]);
+        let generic = capabilities::relaying_in(None, Face::Originator, &from_bob);
+        let (allow, supported) = advert_relaying(None, &from_bob);
+        assert_eq!(allow, generic.allow_text());
+        assert_eq!(supported, generic.without_option_tag("100rel").supported_text());
+    }
+
+    /// The declaration wins — and `100rel` is dropped from it even when the
+    /// call declares it, because Alice saw no reliable provisional from us.
+    #[test]
+    fn a_declared_set_wins_and_never_claims_100rel() {
+        let features = features_declaring(
+            &["INVITE", "ACK", "CANCEL", "BYE"],
+            &["100rel", "timer"],
+        );
+        let (allow, supported) =
+            advert_relaying(Some(&features), &received(&[("Allow", "MESSAGE")]));
+        assert_eq!(allow, "INVITE, ACK, CANCEL, BYE");
+        assert_eq!(supported, "timer");
+    }
 }

@@ -18,7 +18,8 @@ use call::{
 };
 use sip_txn::IdGen;
 use sip_message::generators::{
-    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
+    generate_out_of_dialog_request, CapabilitySet, GenerateOutOfDialogRequestOpts,
+    OutOfDialogMethod,
 };
 use sip_message::parser::custom::CustomParser;
 use sip_message::header::{self, Uri, Via};
@@ -600,6 +601,7 @@ fn b_leg_pending() -> Leg {
             pending_invite_txn: None,
             cached_sdp: None,
             pending_reinvite_2xx: None,
+            answered_advert: Vec::new(),
         },
     };
     Leg {
@@ -816,6 +818,8 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         &id_gen,
         None,
         &[],
+        &CapabilitySet::default(),
+        None, // no charging vector
         None,
     )
     .expect("no identity rewrites, so nothing to refuse");
@@ -935,6 +939,7 @@ mod media_primitives {
                 pending_invite_txn: None,
                 cached_sdp: None,
                 pending_reinvite_2xx: None,
+                answered_advert: Vec::new(),
             },
         }];
     }
@@ -1252,6 +1257,7 @@ mod answer_a_leg_new_dialog {
                 pending_invite_txn: None,
                 cached_sdp: None,
                 pending_reinvite_2xx: None,
+                answered_advert: Vec::new(),
             },
         }];
         call
@@ -1831,6 +1837,121 @@ mod default_sdp_create_leg {
     }
 }
 
+// ── header_updates removal beats the §16.6 relay on an originated request ───
+//
+// `(name, None)` states that a name does not ride. On a response the mint sites
+// already honour it; on an originated request the §16.6 relay would otherwise
+// re-add the originator's own copy, so a caller asking for a header to be
+// withheld would see it travel anyway. The removal owns the name on every path.
+mod header_update_removal_withholds_a_relayed_name {
+    use super::*;
+    use b2bua::effects::OutboundBody;
+    use sip_message::{HeaderName, SipHeader};
+
+    /// An a-leg INVITE carrying a vendor annotation the originator sent.
+    fn invite_with_vendor_header() -> SipRequest {
+        let opts = GenerateOutOfDialogRequestOpts {
+            request_uri: Some(uri_of("sip:bob@127.0.0.1:5070")),
+            call_id: "c1@alice".into(),
+            from: Some(
+                header::From::from_uri(uri_of("sip:alice@host"))
+                    .with_tag(SipStr::from_static("atag")),
+            ),
+            to: Some(header::To::from_uri(uri_of("sip:bob@host"))),
+            cseq: 1,
+            via: Some(Via::udp("127.0.0.1", 5060).with_branch(SipStr::from_static("z9hG4bKalice"))),
+            contact: Some(header::Contact::from_uri(
+                Uri::sip_user("alice", "127.0.0.1").with_port(5060),
+            )),
+            max_forwards: Some(70),
+            body: b"v=0\r\n".to_vec(),
+            content_type: None,
+            extra_headers: vec![
+                SipHeader { name: "P-Term".into(), value: "sbc.example".into() },
+                SipHeader { name: "P-Kept".into(), value: "rides-on".into() },
+            ],
+        };
+        generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts)
+    }
+
+    /// The b-leg INVITE a `CreateLeg` carrying `header_updates` emits.
+    fn b_leg_invite(header_updates: Vec<(String, Option<String>)>) -> SipRequest {
+        let config = B2buaConfig::default();
+        let a_invite = invite_with_vendor_header();
+        let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+        let call = build_initial_call(&a_invite, src, &config, 0);
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(a_invite)),
+            src,
+        };
+        let ctx = RuleContext {
+            call: RuleCall::new(&call),
+            call_ref: &call.call_ref,
+            event: &event,
+            source_leg_id: "a",
+            direction: Direction::FromA,
+            now_ms: 0,
+            config: &config,
+        };
+        let id_gen = IdGen::seeded(1);
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+        let create = RuleAction::CreateLeg {
+            destination: ("10.0.1.5".into(), 5070), // IP literal → admission passes
+            new_ruri: None,
+            new_from: None,
+            new_to: None,
+            no_answer_timeout_sec: None,
+            callback_context: None,
+            body_override: None,
+            header_updates,
+            kind: None,
+        };
+        let result = exec.execute(&[create], &call, &ctx);
+        match &result
+            .effects
+            .outbound
+            .iter()
+            .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method() == "INVITE"))
+            .expect("CreateLeg emits a b-leg INVITE")
+            .body
+        {
+            OutboundBody::Request(r) => r.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Without a removal the annotation rides on — the §16.6 default this test
+    /// exists to keep honest, so the removal case cannot pass vacuously.
+    #[test]
+    fn the_relay_carries_the_name_when_nothing_removes_it() {
+        let inv = b_leg_invite(vec![]);
+        assert_eq!(inv.raw(HeaderName::from("P-Term")).next(), Some("sbc.example"));
+        assert_eq!(inv.raw(HeaderName::from("P-Kept")).next(), Some("rides-on"));
+    }
+
+    #[test]
+    fn a_removal_withholds_the_name_and_leaves_every_other_relayed_header() {
+        let inv = b_leg_invite(vec![("P-Term".into(), None)]);
+        assert_eq!(
+            inv.raw(HeaderName::from("P-Term")).next(),
+            None,
+            "a removal beats the relayed copy of the same name"
+        );
+        assert_eq!(
+            inv.raw(HeaderName::from("P-Kept")).next(),
+            Some("rides-on"),
+            "and withholds nothing else"
+        );
+    }
+
+    /// Case-insensitively, since a name is a header name and not a string.
+    #[test]
+    fn the_removal_matches_the_name_however_it_is_spelled() {
+        let inv = b_leg_invite(vec![("p-TERM".into(), None)]);
+        assert_eq!(inv.raw(HeaderName::from("P-Term")).next(), None);
+    }
+}
+
 // ── ADR-0020 X7: obligation-extraction equivalence gate ─────────────────────
 //
 // The limiter/CDR blocks of `invariants::enforce` were extracted verbatim into
@@ -2127,4 +2248,77 @@ mod service_timers {
             config,
         }
     }
+}
+
+// ── Declared capability advertisement: call model → wire ────────────────────
+
+/// A call declaring a narrow set toward the originated leg and the full set
+/// toward the originator (`advertise_capabilities`).
+fn call_declaring_asymmetric_capabilities() -> call::Call {
+    let mut call = test_call();
+    let mut features = b2bua::decision::default_platform_features();
+    features.advertise_capabilities = Some(call::features::AdvertiseCapabilitiesFeature {
+        toward_originator: None,
+        toward_originated: Some(call::features::AdvertisedCapabilities {
+            allow: Some(["INVITE", "ACK", "CANCEL", "BYE"].iter().map(|s| s.to_string()).collect()),
+            supported: Some(vec!["timer".to_string()]),
+        }),
+    });
+    call.features = Some(features);
+    call
+}
+
+/// The declared set reaches the originated leg's wire header, resolved off the
+/// call's own feature activations — the model→mint-point→wire chain.
+#[test]
+fn a_declared_capability_set_reaches_the_originated_leg_wire_header() {
+    let call = call_declaring_asymmetric_capabilities();
+    let a_invite = b2bua::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
+    let (_leg, effect) = b2bua::rules::relay::build_b_leg(
+        &call.call_ref,
+        "b-1",
+        false,
+        &a_invite,
+        ("10.0.0.2".to_string(), 5070),
+        None,
+        None,
+        None,
+        None,
+        &B2buaConfig::default(),
+        &IdGen::seeded(11),
+        None,
+        &[],
+        &b2bua::rules::capabilities::for_leg(&call, "b-1"),
+        None, // no charging vector
+        None,
+    )
+    .expect("no identity rewrites, so nothing to refuse");
+    let invite = match effect.body {
+        b2bua::effects::OutboundBody::Request(r) => r,
+        b2bua::effects::OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+    };
+    let allow = invite.raw_text(HeaderName::Allow).next().map(|v| v.as_str().to_string());
+    let supported = invite.raw_text(HeaderName::Supported).next().map(|v| v.as_str().to_string());
+    assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE"));
+    assert_eq!(supported.as_deref(), Some("timer"));
+}
+
+/// The undeclared face keeps the stack set, so one declaration cannot narrow
+/// the other side of the bridge.
+#[test]
+fn the_undeclared_face_of_a_declaring_call_keeps_the_stack_set() {
+    let call = call_declaring_asymmetric_capabilities();
+    use b2bua::rules::capabilities::{self, Face};
+    assert_eq!(capabilities::declared(&call, Face::Originator), None, "nothing declared here");
+    assert_eq!(capabilities::for_leg(&call, "a"), CapabilitySet::default());
+    assert!(capabilities::declared(&call, Face::Originated).is_some());
+    assert_ne!(capabilities::for_leg(&call, "b-1"), CapabilitySet::default());
+}
+
+/// A call that declares nothing resolves to the stack set on every face.
+#[test]
+fn an_undeclared_call_resolves_to_the_stack_set_on_every_face() {
+    let call = test_call();
+    assert_eq!(b2bua::rules::capabilities::for_leg(&call, "a"), CapabilitySet::default());
+    assert_eq!(b2bua::rules::capabilities::for_leg(&call, "b-1"), CapabilitySet::default());
 }

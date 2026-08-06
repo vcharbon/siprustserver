@@ -743,6 +743,16 @@ fn core_rules() -> Vec<RuleDefinition> {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        // The same final's RELAYABLE image is kept on the call
+                        // (distinct from the payload above — `relayable_headers`
+                        // withholds credentials, per-leg negotiation and a
+                        // concealed identity), so the a-facing final the
+                        // decision authors carries what the callee stated. It
+                        // is restated on EVERY consult, so a superseded
+                        // attempt's image never answers a later failure.
+                        actions.push(RuleAction::MergeCallExt {
+                            ext: super::relay::failure_headers_ext(ctx.response()),
+                        });
                         actions.push(RuleAction::FailureAsyncHttp {
                             request: serde_json::json!({
                                 "callback_context": cbctx,
@@ -1180,6 +1190,10 @@ fn core_rules() -> Vec<RuleDefinition> {
                             reason: Some("transaction_timeout".into()),
                         },
                         RuleAction::DestroyLeg { leg_id: leg.clone() },
+                        // A blackholed hop drew no final: this consult states an
+                        // empty relayable image, so an earlier attempt's headers
+                        // cannot answer it.
+                        RuleAction::MergeCallExt { ext: super::relay::failure_headers_ext(None) },
                         RuleAction::FailureAsyncHttp {
                             request: serde_json::json!({
                                 "callback_context": cbctx,
@@ -1217,13 +1231,19 @@ fn core_rules() -> Vec<RuleDefinition> {
             match ctx.call.callback_context() {
                 // Failover-capable → ask /call/failure (origin no_answer_timeout);
                 // the result drives `failover-create-leg` / `failover-terminate`.
-                Some(cbctx) => actions.push(RuleAction::FailureAsyncHttp {
-                    request: serde_json::json!({
-                        "callback_context": cbctx,
-                        "origin": "no_answer_timeout",
-                        "failed_leg_id": leg,
-                    }),
-                }),
+                // A ring-forever hop drew no final, so this consult states an
+                // EMPTY relayable image: the final it authors speaks for a peer
+                // that never answered, not for an earlier attempt that did.
+                Some(cbctx) => actions.extend([
+                    RuleAction::MergeCallExt { ext: super::relay::failure_headers_ext(None) },
+                    RuleAction::FailureAsyncHttp {
+                        request: serde_json::json!({
+                            "callback_context": cbctx,
+                            "origin": "no_answer_timeout",
+                            "failed_leg_id": leg,
+                        }),
+                    },
+                ]),
                 None => actions.push(RuleAction::BeginTermination { reason: Some("no-answer".into()) }),
             }
             ok(actions)

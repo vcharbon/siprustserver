@@ -36,6 +36,16 @@ use crate::self_gate::{AlwaysAdmitGate, IntakeAgeRecorder, ProxySelfGate};
 use crate::strategy::RoutingStrategy;
 use crate::trace::ProxyTraces;
 
+/// The per-peer bucket a failed send belongs in: an oversize datagram accuses
+/// the message, everything else the peer or the socket.
+fn peer_failure_kind(err: &sip_net::SendError) -> crate::observability::peer_failures::PeerFailureKind {
+    use crate::observability::peer_failures::PeerFailureKind;
+    match err.kind {
+        sip_net::SendErrorKind::MessageTooLong => PeerFailureKind::MessageTooLong,
+        _ => PeerFailureKind::SendFailure,
+    }
+}
+
 /// Methods that create a dialog (RFC 3261) — the proxy inserts a Record-Route
 /// only for these.
 fn is_dialog_creating(method: &str) -> bool {
@@ -275,15 +285,16 @@ impl ProxyCore {
     async fn send_to(&self, bytes: &[u8], target: &ProxyAddr) {
         if let Some(dst) = target.to_socket_addr() {
             self.metrics.record_face_egress(self.egress_face(dst));
-            if self.egress_endpoint(dst).send_to(bytes, dst).await.is_err() {
+            if let Err(e) = self.egress_endpoint(dst).send_to(bytes, dst).await {
                 self.metrics.record_send_failure();
                 // Per-peer attribution (sip_proxy_peer_failures_total{...,
-                // kind="send_failure"}): classify against the registry (a known
-                // worker is internal/pinned, else external/LRU-bounded).
+                // kind=…}): classify against the registry (a known worker is
+                // internal/pinned, else external/LRU-bounded), and name an
+                // oversize message as such rather than blaming the peer.
                 self.metrics.record_peer_failure(
                     &dst,
                     self.classify_peer(target),
-                    crate::observability::peer_failures::PeerFailureKind::SendFailure,
+                    peer_failure_kind(&e),
                 );
             }
             return;
@@ -307,17 +318,13 @@ impl ProxyCore {
     /// — which is the face the packet arrived on).
     async fn reply_to_source(&self, bytes: &[u8], src: SocketAddr) {
         self.metrics.record_face_egress(self.egress_face(src));
-        if self.egress_endpoint(src).send_to(bytes, src).await.is_err() {
+        if let Err(e) = self.egress_endpoint(src).send_to(bytes, src).await {
             self.metrics.record_send_failure();
             // The reply source is whoever sent us the packet (typically an
             // upstream UAC/UAS — external); still classify via the registry in
             // case it is a worker.
             let target = ProxyAddr::from(src);
-            self.metrics.record_peer_failure(
-                &src,
-                self.classify_peer(&target),
-                crate::observability::peer_failures::PeerFailureKind::SendFailure,
-            );
+            self.metrics.record_peer_failure(&src, self.classify_peer(&target), peer_failure_kind(&e));
         }
     }
 

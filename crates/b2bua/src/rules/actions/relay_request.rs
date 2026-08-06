@@ -13,6 +13,7 @@ use sip_message::Method;
 use sip_txn::TxnKind;
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::rules::capabilities;
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
 
@@ -124,26 +125,42 @@ impl ActionExecutor<'_> {
         let t_id = dialog_identity_tag(target_leg, &target_dialog);
         *call = bump_local_cseq(call.clone(), target_leg, &t_id, delta);
 
-        // RFC 3262 §7.2: rewrite RAck's middle (CSeq) token to the INVITE CSeq
-        // that produced the reliable 1xx *on the target leg*.
+        // RFC 3262 §7.2: RAck names the reliable 1xx and the INVITE that drew it
+        // *on the target leg*, and this stack owns neither number on the face it
+        // received them from — the CSeq token becomes the target leg's INVITE
+        // CSeq, and the RSeq token translates back to the sequence the target
+        // stated (`b_rseq_for`). A number this stack never minted relays as it
+        // stands, so the target answers 481 rather than acknowledging nothing.
         let rack = if method == InDialogMethod::Prack {
-            req.header::<RAck>()
-                .and_then(Result::ok)
-                .map(|r| RAck::new(r.rseq(), target_invite_cseq.max(0) as u32, r.method().clone()))
+            // The number the caller PRACKs is unique to the a-facing early
+            // dialog she saw it in, so the translation is keyed there — and the
+            // PRACK names that dialog itself: its To-tag is the tag this stack
+            // showed her, whichever fork the provisional came from.
+            let a_tag = req.to().tag().unwrap_or_default().to_string();
+            req.header::<RAck>().and_then(Result::ok).map(|r| {
+                let rseq = call::helpers::b_rseq_for(call, &a_tag, i64::from(r.rseq()))
+                    .map_or(r.rseq(), |(_, b_rseq)| b_rseq.max(0) as u32);
+                RAck::new(rseq, target_invite_cseq.max(0) as u32, r.method().clone())
+            })
         } else {
             None
         };
 
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&target_dialog.sip);
+        let target_face = capabilities::Face::of_leg(target_leg);
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, call.emergency == Some(true), branch.clone())),
             contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true))),
             body: req.body().to_vec(),
             content_type: req.raw(HeaderName::ContentType).next().and_then(relay::media_type),
             cseq: Some(outbound_cseq as u32),
-            extra_headers: relay::relay_request_passthrough_headers(req),
+            extra_headers: relay::relay_request_passthrough_headers(
+                req,
+                &capabilities::declared_advert_headers(call.features.as_ref(), target_face),
+            ),
             rack,
+            capabilities: Some(capabilities::advertised(call, target_face)),
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(method, &gen_dialog, &opts);
@@ -187,6 +204,7 @@ impl ActionExecutor<'_> {
                 source_call_id: req.call_id().as_str().to_string(),
                 source_from: req.raw(HeaderName::From).next().unwrap_or_default().to_string(),
                 source_to: req.raw(HeaderName::To).next().unwrap_or_default().to_string(),
+                source_timestamp: req.raw(HeaderName::Timestamp).next().map(str::to_string),
                 direction: ctx.direction,
                 cancelled: false,
             };

@@ -23,7 +23,7 @@ fn cancel_crossing_plan(
                 media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel)
+                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel { stated: Vec::new() })
                         .after(cancel_after),
                 ],
                 invite_targets: vec![("bob", bob.clone())],
@@ -63,6 +63,7 @@ fn cancel_crossing_plan(
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     }
 }
 
@@ -148,7 +149,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
                     // The stand-in for the SUT's no-answer timer: CANCEL a
                     // while after the ring (bob would ring forever).
-                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel)
+                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel { stated: Vec::new() })
                         .after(Duration::from_millis(500)),
                 ],
                 invite_targets: vec![("bob", bob.clone())],
@@ -178,6 +179,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
         settle: SettleBarrier::default_ceiling(),
         automatics: Automatics::default(),
         delta_policy: None,
+        reception_observer: None,
     };
 
     let verdict = run_call(call, Duration::from_secs(5)).await;

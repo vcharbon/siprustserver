@@ -422,7 +422,16 @@ impl ClientInvite {
     /// template in v1 (a captured CANCEL's frozen-header quirks are not
     /// replayable yet).
     pub async fn cancel(&self) -> InDialogTxn {
-        unwrap_step(try_send_cancel(&self.agent, &self.original_invite, self.wire_dst).await);
+        self.cancel_stating(&[]).await
+    }
+
+    /// [`cancel`](Self::cancel) with the canceller's own header lines — RFC 3326
+    /// §2 scopes `Reason` to CANCEL and BYE, so a caller that gives up with a
+    /// cause states it here.
+    pub async fn cancel_stating(&self, stated: &[(&str, &str)]) -> InDialogTxn {
+        unwrap_step(
+            try_send_cancel(&self.agent, &self.original_invite, self.wire_dst, stated).await,
+        );
         InDialogTxn::new(
             self.agent.clone(),
             // A CANCEL transaction's finals take no ACK; the INVITE's 487 is
@@ -571,6 +580,6 @@ impl CancelHandle {
     /// basis — a transport error is swallowed (the call is already failing). Does
     /// not wait for the 200/487.
     pub async fn cancel_best_effort(&self) {
-        let _ = try_send_cancel(&self.agent, &self.original_invite, self.wire_dst).await;
+        let _ = try_send_cancel(&self.agent, &self.original_invite, self.wire_dst, &[]).await;
     }
 }

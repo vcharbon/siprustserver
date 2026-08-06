@@ -117,14 +117,17 @@ async fn no_policy_control() {
         .await;
 
     // Default relay-provisional fires — alice sees a 183, NOT a synthetic 200,
-    // and the SDP body survives the relay (the regression guard: the PEM service
-    // is off so the packet flows through the CORE path). NB the Rust CORE relay's
-    // passthrough set is Require/RSeq/Supported only, so it does not forward the
-    // non-structural `P-Early-Media` header — unlike the TS relay. That is a CORE
-    // relay-passthrough fidelity gap, independent of the PEM service under test
-    // here; the load-bearing guard is "183 not 200, body intact".
+    // the SDP body survives the relay, and the callee's RFC 5009 early-media
+    // authorization reaches her with it (§16.6): without it she has no standing
+    // to render the early media the body describes.
     let p183 = call.expect(183).await;
     assert!(!p183.body().is_empty(), "183 body survives the default relay");
+    let early_media = p183.raw_text(sip_message::HeaderName::PEarlyMedia).next();
+    assert_eq!(
+        early_media.as_ref().map(|v| v.as_str()),
+        Some("sendrecv"),
+        "the callee's P-Early-Media rides the relayed 183"
+    );
 
     uas.respond(200, "OK").with_sdp(EARLY).await;
     call.expect(200).await;
