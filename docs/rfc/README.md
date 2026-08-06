@@ -4,6 +4,18 @@ Plain-text copies from <https://www.rfc-editor.org/rfc/rfcNNNN.txt> of every
 RFC the codebase cites, so they are on hand offline. Grep the codebase for
 `rfcNNNN` / `RFC NNNN` to find the citing sites.
 
+## Errata
+
+`rfcNNNN-errata.md` beside `rfcNNNN.txt` holds that RFC's full errata record —
+a 2026-08-06 snapshot of the RFC Editor database
+(<https://www.rfc-editor.org/errata/rfcNNNN>), sorted Verified → Held for
+Document Update → Reported → Rejected, Technical before Editorial. **Read the
+errata alongside the RFC — Verified technical errata correct the spec text.**
+Rejected entries are kept (clearly labelled) because the rejection rationale is
+often itself an authoritative reading. No errata file means the RFC had zero
+errata at snapshot time: 3263, 3311, 3326, 3551, 4412, 4475, 5009, 5407, 6665,
+7433, 8760.
+
 ## Core SIP
 
 - [rfc3261.txt](rfc3261.txt) — SIP: Session Initiation Protocol
