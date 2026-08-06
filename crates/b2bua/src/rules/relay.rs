@@ -340,6 +340,13 @@ pub fn leg_egress_dest(
     base_dest
 }
 
+/// True iff `header_updates` names `header` with no value — a caller stating
+/// that this name does not ride, which the §16.6 relay and the configured
+/// carry-through both honour so a withheld name has one meaning on every path.
+fn removed(header_updates: &[(String, Option<String>)], header: &HeaderName) -> bool {
+    header_updates.iter().any(|(name, value)| value.is_none() && header.matches(name))
+}
+
 /// Build a fresh b-leg + its outbound INVITE effect (initial route + failover).
 ///
 /// Errs when a decision-supplied address (`new_ruri` / `new_from` / `new_to`)
@@ -416,8 +423,9 @@ pub fn build_b_leg(
             .and_then(media_type)
             .or_else(|| body_override.map(|_| sdp()))
     };
-    // `(name, Some(v))` sets, `(name, None)` removes. Removals never apply to
-    // structural headers (the generator owns those); only extra sets ride here.
+    // `(name, Some(v))` sets, `(name, None)` removes — either way the name is the
+    // caller's and no relayed or configured copy of it rides (see [`removed`]).
+    // Removals never apply to structural headers: the generator owns those.
     let mut extra_headers: Vec<MsgHeader> = header_updates
         .iter()
         .filter_map(|(n, v)| {
@@ -450,6 +458,7 @@ pub fn build_b_leg(
     for configured in &config.relay_headers {
         let name = HeaderName::from(configured.as_str());
         if extra_headers.iter().any(|h| name.matches(&h.name))
+            || removed(header_updates, &name)
             || !generators::relayable(configured, relay_scope(body_override))
         {
             continue;
@@ -469,7 +478,7 @@ pub fn build_b_leg(
     for header in generators::relayable_headers(a_leg_invite.headers(), relay_scope(body_override))
     {
         let name = HeaderName::from(header.name.as_str());
-        if !stated.iter().any(|h| name.matches(&h.name)) {
+        if !stated.iter().any(|h| name.matches(&h.name)) && !removed(header_updates, &name) {
             extra_headers.push(header);
         }
     }
