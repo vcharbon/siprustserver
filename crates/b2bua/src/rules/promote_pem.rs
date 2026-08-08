@@ -1,5 +1,4 @@
-//! `promote18xPemTo200` — SERVICE_LAYER early-media service. Port of
-//! `src/b2bua/rules/custom/promote18xPemTo200.ts`.
+//! `promote18xPemTo200` — SERVICE_LAYER early-media service.
 //!
 //! Activated by `features.relay_first_18x_to_180` strategy `promote-pem-to-200`.
 //! Promotes Bob's first `183 Session Progress + SDP + P-Early-Media` (RFC 5009)
@@ -7,7 +6,7 @@
 //! Alice's in-dialog requests are gated; on Bob's real 200 it confirms silently
 //! and, if Bob's SDP differs from the promoted SDP (`sdp_media_equivalent`),
 //! resyncs Alice with a B2BUA-originated re-INVITE. The per-call state lives on
-//! `Call.promote_pem` (the typed slice that replaces the TS `PemCallExt`).
+//! the typed `Call.promote_pem` slice.
 
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
 use call::{CdrEventType, Direction, LegDisposition, LegState, PromotePemState, TimerType};
@@ -328,8 +327,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 }),
             |ctx| {
                 let resp = ctx.response()?;
-                // Provisional — keep waiting (leave unclaimed via empty action set
-                // is not possible here since we consume; emit no effect).
+                // Provisional — keep waiting; consume with no effects.
                 if resp.status() < 200 {
                     return ok(vec![]);
                 }

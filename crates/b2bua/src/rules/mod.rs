@@ -1,6 +1,9 @@
-//! The rule engine — declarative match descriptors, a first-match/layer-ranked
-//! executor, the action vocabulary + executor, framework invariants, and the
-//! basic-B2BUA default rule set.
+//! The rule engine — declarative match descriptors ([`model`]), a
+//! first-match/layer-ranked executor, the action vocabulary + executor
+//! ([`actions`]), framework invariants, and the rule families: the CORE
+//! lifecycle set ([`defaults`]), the 18x-policy services ([`relay_first_18x`],
+//! [`promote_pem`]), REFER transfer ([`refer_transfer`]), and release/reroute
+//! ([`release_reroute`]).
 
 pub mod actions;
 pub mod capabilities;

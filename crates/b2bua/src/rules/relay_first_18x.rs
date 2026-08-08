@@ -1,7 +1,6 @@
 //! `relayFirst18xTo180` — the early-media masking callflow **service** that hides
-//! forking/failover from the caller. Port of
-//! `src/b2bua/rules/custom/relayFirst18xTo180.ts`, expressed as an ADR-0016
-//! `define_service!` state machine (mirroring the `transfer` retrofit, slice 7).
+//! forking/failover from the caller, an ADR-0016 `define_service!` state machine
+//! (mirroring `transfer`).
 //!
 //! The machine has two states tracking how far the masking has progressed:
 //!   - **`Masking`** — the first 18x has not been relayed yet. The next 18x from
@@ -26,10 +25,9 @@
 //! therefore implicit in the strategy: the delayed-offer fallback that nulls the
 //! feature in `apply_route` (no alice SDP under `fake-prack`) deactivates the
 //! machine the same turn, so the rules go inert and the call falls back to plain
-//! relay. Each rule is gated by `active_states` instead of the old
-//! `module_active`/`is_fake_prack` *strategy* filter; the `fake-prack`-only rules
+//! relay. Each rule is gated by `active_states`; the `fake-prack`-only rules
 //! keep an `is_fake_prack` filter because the machine is active for all three
-//! strategies. Handlers are unchanged from the pre-retrofit core rules.
+//! strategies.
 //!
 //! These rules ride `default_rules()` (the flat list, like `transfer`): their
 //! `machine_active` gate keeps them dormant until the cursor is projected, and
@@ -79,13 +77,12 @@ fn is_fake_prack(ctx: &RuleContext) -> bool {
     ctx.call.relay_first_18x_strategy() == Some(RelayFirst18xStrategy::FakePrack)
 }
 
-/// The source leg is NOT mid-CANCEL (upstreamneed-024). A 2xx crossing a CANCEL
-/// on the wire is a **reap** case — CORE `cancel-200-crossing` ACK+BYEs the
-/// abandoned callee — regardless of which relay machine is armed. Without this
-/// guard the SERVICE_LAYER 2xx rule out-ranks the CORE reap and relays/merges
-/// the crossing 200 into the being-rejected a-leg, orphaning the callee in a
-/// one-sided established dialog (the 012/016 symptom, resurrected by machine
-/// composition).
+/// The source leg is NOT mid-CANCEL. A 2xx crossing a CANCEL on the wire is a
+/// **reap** case — CORE `cancel-200-crossing` ACK+BYEs the abandoned callee —
+/// regardless of which relay machine is armed. Without this guard the
+/// SERVICE_LAYER 2xx rule out-ranks the CORE reap and relays/merges the
+/// crossing 200 into the being-rejected a-leg, orphaning the callee in a
+/// one-sided established dialog.
 fn source_leg_not_cancelling(ctx: &RuleContext) -> bool {
     ctx.source_leg()
         .map(|l| l.disposition != LegDisposition::Cancelling)
@@ -125,7 +122,7 @@ define_service! {
         // early dialog); ONE_PER_VALUE relays the first 18x of each distinct
         // *upstream* status value and suppresses repeats. Reliable 1xx is PRACKed
         // by the B2BUA itself (alice never saw it); `fake-prack` caches bob's SDP
-        // per `(leg, To-tag)` dialog — strictly, one cache per fork (GAP-P7-1).
+        // per `(leg, To-tag)` dialog — strictly, one cache per fork.
         sm_rule! {
             id: "suppress-18x",
             machine: RELAY_FIRST_18X_MACHINE,
@@ -237,8 +234,8 @@ define_service! {
         // when it has nothing to pre-seed it declines (`None`) and `confirm-dialog`
         // (CORE, ranked just below) handles the 2xx. No cursor move — the call
         // bridges via the `global-call` machine; the masking property persists.
-        // A 2xx on a leg being CANCELled is NOT matched (`source_leg_not_cancelling`,
-        // upstreamneed-024): it defers to CORE `cancel-200-crossing`, which reaps
+        // A 2xx on a leg being CANCELled is NOT matched (`source_leg_not_cancelling`):
+        // it defers to CORE `cancel-200-crossing`, which reaps
         // the abandoned callee (ACK+BYE) instead of bridging it to a caller the
         // teardown is already rejecting.
         sm_rule! {
@@ -420,8 +417,8 @@ define_service! {
     ],
 }
 
-/// The machine-gated service rules, kept under the pre-retrofit name for
-/// `default_rules()` (the engine runs them via the flat rule list; the
+/// The machine-gated service rules, under the flat-list name `default_rules()`
+/// composes (the engine runs them via the flat rule list; the
 /// `define_service!`-generated `rules()` is the source). Mirrors `transfer_rules`.
 pub fn relay_first_18x_rules() -> Vec<RuleDefinition> {
     rules()
@@ -459,7 +456,8 @@ pub fn project_cursor(call: &mut Call) {
 
 /// Replay `confirm-dialog`'s action sequence (the `force-tag-consistency` rule
 /// composes with it: it wins the 2xx match, so it must emit confirm-dialog's
-/// effects itself). Kept in sync with `defaults.rs::confirm-dialog`.
+/// effects itself). Kept in sync with the CORE `confirm-dialog` rule
+/// (`defaults::core_rules`).
 fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     let b = ctx.source_leg_id.to_string();
     let a = ctx.call.a_leg().leg_id.clone();

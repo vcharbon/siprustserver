@@ -1,13 +1,12 @@
-//! `b2bua` — the B2BUA core (migration slice "Dispatch / per-call FIFO" +
-//! "Rule engine"; port of `src/sip/{SipRouter,PerCallDispatcher}.ts`,
-//! `src/call/CallState.ts`, `src/b2bua/rules/`, and `src/decision/`).
+//! `b2bua` — the B2BUA core: per-call dispatch, the rule engine, and the call
+//! router.
 //!
 //! Layers, bottom-up:
 //! - [`store`] — the in-memory call map + per-call serialization over a
 //!   replication-aware [`store::CallStore`] seam (HA drops in later, no changes
 //!   to rules/dispatch).
 //! - [`dispatch`] — the per-call FIFO: a bounded queue + worker task per call,
-//!   capped globally (port of `PerCallDispatcher`, source ADR-0004/0005).
+//!   capped globally (ADR-0004/0005).
 //! - [`timers`] — one `DelayQueue` driver firing [`event::CallEvent::Timer`].
 //! - [`decision`] — the call-decision adapter seam + a scripted test impl.
 //! - [`rules`] — first-match, layer-ranked rule engine + invariant enforcement.
@@ -18,7 +17,7 @@
 //!   vocabulary (ADR-0026).
 //! - [`b2bua_core`] — wires it all together.
 //!
-//! Builds on the already-ported `call` data model; see MIGRATION_STATUS + ADR-0010.
+//! Builds on the `call` data model (ADR-0010).
 
 pub mod b2bua_core;
 pub mod cdr;

@@ -115,18 +115,13 @@ Sizes rescanned 2026-08-08 (`find crates -name '*.rs' -not -path '*/target/*'
 with growth rate as a tie-breaker: a hub that is still accreting costs more
 every week it waits.
 
-### Lane 2 — hot paths & rule engines (remainder)
-
-- [ ] **2. `crates/b2bua/src/rules/defaults.rs`** — 1445 L. `core_rules` is
-  an exhaustive match on the `too_many_lines` warn ratchet — the ratchet
-  stays; split the surrounding registry/config concerns.
-- [ ] **3. `crates/b2bua/src/rules/refer_transfer.rs`** — 1107 L.
-- [ ] **3b. `crates/b2bua/src/rules/relay_first_18x.rs`** (506) +
-  **`promote_pem.rs`** (573) — the 18x-policy satellites of the `relay/`
-  split; borderline size, so chiefly a comment-scrub + lib-TOC pass, splitting
-  only if a seam is obvious.
-
 ### Lane 3 — big but self-contained (internal fan-in only)
+
+Lane 2 is complete (entries #1–#3b removed per the convention above; the
+2026-08-08 finishers are the `defaults/` and `refer_transfer/` splits +
+the 18x-satellite scrub). One deliberate >500 L survivor:
+`defaults/core_rules.rs` (~1220 L) — the exhaustive CORE registration
+list stays one file by design, like the `define_service!` index.
 
 - [ ] **4. `crates/sip-net/src/rfc_audit/` suite** — gates EVERY test; split
   rule-family-per-file so a failing rule name maps to one file. Waiver text
