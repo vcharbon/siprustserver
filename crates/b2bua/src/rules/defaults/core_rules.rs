@@ -1,16 +1,16 @@
-//! The basic-B2BUA default rule set (CORE_LAYER) — port of the load-bearing
-//! rules in `src/b2bua/rules/defaults/`. Covers the bridged-call lifecycle:
-//! INVITE → 18x → 200 → ACK → in-dialog → BYE, plus CANCEL, b-leg failure, and
-//! the housekeeping timers. The 18x-management strategies, PEM/fake-prack, and
-//! REFER transfer (SERVICE_LAYER) are deferred (see MIGRATION_STATUS / ADR-0010).
-//!
-//! Rules are registered in priority order: corner cases + failure resolution
-//! first (narrow matches), broad relays last. `overrides` removes a displaced
-//! rule regardless of order.
+//! The CORE_LAYER rules of the bridged-call lifecycle: INVITE → 18x → 200 →
+//! ACK → in-dialog → BYE, plus CANCEL, b-leg failure, failover resolution, and
+//! the housekeeping timers. Rules are registered in priority order: corner
+//! cases + failure resolution first (narrow matches), broad relays last;
+//! `overrides` removes a displaced rule regardless of order. Which families
+//! compose around this list — and in what order — is owned by
+//! [`super::compose`].
 
 use call::{ByeDisposition, CdrEventType, Direction, CallModelState, LegDisposition, LegState, TimerType};
 
-use super::model::{CORE_LAYER, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult};
+use crate::rules::model::{CORE_LAYER, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult};
+
+use super::route_fold::{parse_header_updates, parse_route_fold, route_fold_parity_actions};
 
 fn rule(
     id: &'static str,
@@ -27,146 +27,6 @@ fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
 
 fn no_transform() -> MessageTransform {
     MessageTransform::default()
-}
-
-/// Parse a `call-failure-result` payload's `update_headers` object into the
-/// `(name, set-or-remove)` pairs the response/leg builders consume.
-fn parse_header_updates(payload: &serde_json::Value) -> Vec<(String, Option<String>)> {
-    payload
-        .get("update_headers")
-        .and_then(|v| v.as_object())
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string))).collect())
-        .unwrap_or_default()
-}
-
-/// The decoded fields of a **route-shaped internal-event payload** (built by
-/// the router's `route_result_payload`) that both async route folds —
-/// `failover-create-leg` (`call-failure-result`) and `release-reroute`
-/// (`call-release-result`) — must apply identically (upstreamneed-005 output
-/// parity). One parser + one parity-action builder so the folds cannot drift.
-pub(crate) struct RouteFold {
-    pub destination: (String, u16),
-    pub new_ruri: Option<String>,
-    pub new_from: Option<String>,
-    pub new_to: Option<String>,
-    pub no_answer: Option<i64>,
-    pub callback_context: Option<String>,
-    pub header_updates: Vec<(String, Option<String>)>,
-    pub features: Option<call::features::FeatureActivations>,
-    pub service_ext: call::ExtMap,
-    /// `None` = field absent from the payload (an old emitter) → leave the
-    /// call's registry untouched; `Some` (possibly empty) = the route owns it.
-    pub subscriptions: Option<Vec<call::ReleaseEventKind>>,
-    /// `update_body` wire shape: absent = keep A's INVITE body, null = drop
-    /// (`Some(vec![])`), string = substitute.
-    pub body_override: Option<Vec<u8>>,
-    /// Limiter holds the dispatching task already admitted: `(entries, window)`.
-    pub limiter_holds: Option<(Vec<(String, i64)>, i64)>,
-}
-
-/// Parse a route-shaped payload. `None` only when the mandatory
-/// `destination.host` is missing (a malformed fold).
-pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold> {
-    let host = payload
-        .get("destination")
-        .and_then(|d| d.get("host"))
-        .and_then(|v| v.as_str())?
-        .to_string();
-    // Absent ⇒ RFC 3261 §19.1.2's 5060; stated-but-no-port ⇒ no fold, so the
-    // reroute never dials 5060 on a host the decision did not name (055). The
-    // payload is this stack's own round-trip of a typed `Option<u16>`
-    // (`callouts::route_payload`), so the refusal is unreachable by
-    // construction — it is the reader's contract, not a live branch.
-    let port = crate::decision::read_stated_port(
-        payload.get("destination").and_then(|d| d.get("port")),
-    )?;
-    Some(RouteFold {
-        destination: (host, port),
-        new_ruri: payload.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string),
-        new_from: payload.get("new_from").and_then(|v| v.as_str()).map(str::to_string),
-        new_to: payload.get("new_to").and_then(|v| v.as_str()).map(str::to_string),
-        no_answer: payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64()),
-        callback_context: payload
-            .get("callback_context")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        header_updates: payload
-            .get("update_headers")
-            .and_then(|v| v.as_object())
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string))).collect())
-            .unwrap_or_default(),
-        features: payload
-            .get("features")
-            .and_then(|v| serde_json::from_value(v.clone()).ok()),
-        service_ext: payload
-            .get("service_ext")
-            .and_then(|v| v.as_object())
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-            .unwrap_or_default(),
-        subscriptions: payload
-            .get("subscriptions")
-            .and_then(|v| serde_json::from_value(v.clone()).ok()),
-        body_override: match payload.get("update_body") {
-            None => None,
-            Some(serde_json::Value::Null) => Some(Vec::new()),
-            Some(serde_json::Value::String(s)) => Some(s.clone().into_bytes()),
-            Some(_) => None,
-        },
-        limiter_holds: payload
-            .get("call_limiter")
-            .and_then(|v| v.as_object())
-            .and_then(|o| {
-                let window = o.get("window")?.as_i64()?;
-                let entries: Vec<(String, i64)> = o
-                    .get("entries")?
-                    .as_array()?
-                    .iter()
-                    .filter_map(|e| {
-                        Some((e.get("id")?.as_str()?.to_string(), e.get("limit")?.as_i64()?))
-                    })
-                    .collect();
-                Some((entries, window))
-            }),
-    })
-}
-
-/// The output-parity bookkeeping actions BOTH async route folds emit before
-/// their `CreateLeg` — what the initial `apply_route` applies at route time:
-/// features (incl. the GlobalDuration re-arm), service_ext merge, the
-/// release-subscription registry, and the already-admitted limiter holds
-/// (+ the LimiterRefresh cadence that keeps them alive).
-pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> Vec<RuleAction> {
-    let mut actions = Vec::new();
-    if let Some(f) = &fold.features {
-        // Re-arm the duration cap from the reroute's features, as the initial
-        // path does at route time (ScheduleTimer id-dedups).
-        actions.push(RuleAction::ScheduleTimer {
-            timer_type: TimerType::GlobalDuration,
-            delay_sec: f.platform.max_duration_sec,
-            leg_id: None,
-        });
-        actions.push(RuleAction::SetFeatures { features: f.clone() });
-    }
-    if !fold.service_ext.is_empty() {
-        actions.push(RuleAction::MergeCallExt { ext: fold.service_ext.clone() });
-    }
-    if let Some(events) = &fold.subscriptions {
-        // The latest applied route OWNS the registry (empty clears), exactly
-        // like `apply_route` on the initial path.
-        actions.push(RuleAction::SetSubscriptions { events: events.clone() });
-    }
-    if let Some((entries, window)) = &fold.limiter_holds {
-        actions.push(RuleAction::RecordLimiterHolds {
-            entries: entries.clone(),
-            window: *window,
-        });
-        actions.push(RuleAction::ScheduleTimer {
-            timer_type: TimerType::LimiterRefresh,
-            delay_sec: ctx.config.limiter_refresh_sec,
-            leg_id: None,
-        });
-    }
-    actions
 }
 
 /// Locate the leg carrying the still-pending relayed re-INVITE a CANCEL
@@ -199,15 +59,15 @@ fn keepalive_interval(ctx: &RuleContext) -> i64 {
     // The in-dialog OPTIONS keepalive interval is an operator/worker knob
     // (`B2buaConfig::keepalive_interval_sec`, production default 300 s,
     // `B2BUA_KEEPALIVE_SEC` override), not a per-call feature: a 30 s poke breaks
-    // long-hold endurance traffic. The per-call `features` keepalive interval is
-    // retained for compatibility but no longer drives the runtime timer.
+    // long-hold endurance traffic. The per-call `features` keepalive value is
+    // accepted but does not drive the runtime timer.
     ctx.config.keepalive_interval_sec
 }
 fn keepalive_timeout(ctx: &RuleContext) -> i64 {
     // Grace for the in-dialog OPTIONS 200 before the leg is declared dead and the
     // call is torn down. Operator knob (`B2BUA_KEEPALIVE_TIMEOUT_SEC`, default
-    // 32 s) — a hard-coded 5 s was too tight across a reboot, BYE-ing healthy
-    // reclaimed dialogs whose keepalive round-trip was still settling.
+    // 32 s) — wide enough that a healthy reclaimed dialog whose keepalive
+    // round-trip is still settling across a reboot is not BYE'd as dead.
     ctx.config.keepalive_timeout_sec
 }
 fn max_duration(ctx: &RuleContext) -> i64 {
@@ -225,8 +85,9 @@ fn ack_timeout(ctx: &RuleContext) -> i64 {
 /// bounds the whole window. Seconds for the `ScheduleTimer` delay_sec contract is
 /// integer, so the cadence is kept as a whole second (1 s) to stay on the
 /// existing seconds-granularity timer plumbing without a finer-grained API.
-/// `pub(crate)` so the re-INVITE watchdog's first arm (in `actions.rs`
-/// `relay_response`) shares the one cadence constant with the re-arm rule below.
+/// `pub(crate)` so the re-INVITE watchdog's first arm (in
+/// `actions::relay_response`) shares the one cadence constant with the re-arm
+/// rule below.
 pub(crate) const ACK_RETRANSMIT_SEC: i64 = 1;
 
 /// Shared body of the reaper-verdict rules (ADR-0020 X1): force every
@@ -258,85 +119,8 @@ fn reap_force_terminal(ctx: &RuleContext, reason: &'static str) -> Option<RuleHa
     ok(actions)
 }
 
-/// Compose-time selection of which built-in CORE machines participate in the
-/// default rule set (ADR-0016 opt-out seam, upstreamneed-019 part 1). Default =
-/// every built-in included, so [`default_rules`] is behaviour-preserving. A
-/// downstream integrator that ships its OWN subscription-gated transfer machine
-/// (a SERVICE_LAYER service) uses [`without_core_refer_transfer`](Self::without_core_refer_transfer)
-/// so it fully owns REFER; the opt-out is reachable via the spawn seam
-/// ([`B2buaDeps::compose`](crate::B2buaDeps)).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ComposeOptions {
-    /// Include the upstream `refer_transfer` seed (`transfer-intercept-refer` /
-    /// `transfer-reject-a-leg-refer` / `transfer-reject-replaces`) **and** its
-    /// machine-gated SERVICE_LAYER rules (default `true`). Set `false` and an
-    /// in-dialog REFER is no longer intercepted — it falls through to the
-    /// transparent `relay-refer` path, forwarded to the peer leg like INFO. A
-    /// downstream transfer machine then owns the *subscribed* REFER; the
-    /// *unsubscribed* one relays transparently (RFC 3515 implicit subscription
-    /// rides the dialog, so its NOTIFYs relay through too).
-    pub core_refer_transfer: bool,
-}
-
-impl Default for ComposeOptions {
-    fn default() -> Self {
-        Self { core_refer_transfer: true }
-    }
-}
-
-impl ComposeOptions {
-    /// Exclude the upstream `refer_transfer` seed + machine-gated rules. The
-    /// composed rule set then relays every in-dialog REFER transparently via
-    /// `relay-refer` (upstreamneed-019 part 1). Default composition (seed present)
-    /// is unaffected — `transfer-intercept-refer` still out-ranks `relay-refer`
-    /// by registration order.
-    pub fn without_core_refer_transfer(mut self) -> Self {
-        self.core_refer_transfer = false;
-        self
-    }
-}
-
-/// The ordered basic-B2BUA rule list. The SERVICE_LAYER `relayFirst18xTo180`
-/// rules are appended at the end; they are dormant unless a call activates the
-/// feature (their column+filter gate keeps them out of `pick_ranked` otherwise),
-/// and `pick_ranked` ranks SERVICE_LAYER above CORE so they win when active.
-pub fn default_rules() -> Vec<RuleDefinition> {
-    default_rules_with(&ComposeOptions::default())
-}
-
-/// [`default_rules`] under an explicit [`ComposeOptions`] — the compose-time
-/// opt-out seam. Threaded from [`B2buaDeps::compose`](crate::B2buaDeps) through
-/// `spawn_with_overload`, so a downstream runner selects it without touching the
-/// rule tables directly.
-pub fn default_rules_with(options: &ComposeOptions) -> Vec<RuleDefinition> {
-    // The REFER seed rules are CORE_LAYER and must out-rank the generic
-    // `relay-refer`/`relay-non-invite` REFER relay; registration order (earlier
-    // wins within a layer) puts them first. Their match columns + `no_transfer_active`
-    // filter keep them inert for non-REFER traffic. Excluded when a downstream
-    // owns REFER via its own transfer machine.
-    let mut rules = Vec::new();
-    if options.core_refer_transfer {
-        rules.extend(super::refer_transfer::transfer_seed_rules());
-    }
-    // Release-event / established-call-reroute rules (upstreamneed-009). CORE,
-    // registered BEFORE the generic core rules so the reroute-gated matches
-    // (filtered on the `reroute` slice — inert otherwise) out-rank
-    // `confirm-dialog`/`relay-provisional`/`route-failure` by order.
-    rules.extend(super::release_reroute::release_reroute_rules());
-    rules.extend(core_rules());
-    rules.extend(super::relay_first_18x::relay_first_18x_rules());
-    rules.extend(super::promote_pem::promote_pem_rules());
-    if options.core_refer_transfer {
-        // The machine-gated transfer rules stay dormant without the seed (the
-        // slice is never installed), but a downstream owning REFER wants the
-        // whole upstream machine gone — exclude them together with the seed.
-        rules.extend(super::refer_transfer::transfer_rules());
-    }
-    rules
-}
-
-/// The CORE_LAYER rule set.
-fn core_rules() -> Vec<RuleDefinition> {
+/// The CORE_LAYER rule set, in registration (priority) order.
+pub(super) fn core_rules() -> Vec<RuleDefinition> {
     vec![
         // ── corner cases ────────────────────────────────────────────────────
         rule(
@@ -403,8 +187,7 @@ fn core_rules() -> Vec<RuleDefinition> {
         // on a dialog that already carries an in-flight inbound INVITE (a
         // re-INVITE we relayed onto this dialog and have not yet seen a final
         // response for) → reject the newcomer 491 Request Pending. More specific
-        // than `relay-reinvite` (no filter), so it wins on glare. Port of
-        // `reinviteGlareRule`.
+        // than `relay-reinvite` (no filter), so it wins on glare.
         rule(
             "reinvite-glare",
             &["relay-reinvite"],
@@ -415,8 +198,8 @@ fn core_rules() -> Vec<RuleDefinition> {
             }),
             |_ctx| ok(vec![RuleAction::Respond { status: 491, reason: "Request Pending".into(), body: vec![], content_type: None }]),
         ),
-        // In-dialog UPDATE while the peer side is NOT in a relayable state
-        // (GAP-P8b-2): no peer leg, the peer leg terminated by a failure whose
+        // In-dialog UPDATE while the peer side is NOT in a relayable state:
+        // no peer leg, the peer leg terminated by a failure whose
         // `/call/failure` reroute is still pending, or a replacement leg whose
         // dialog has no remote tag yet. `relay-update` would either be silently
         // dropped by the relay machinery (tag-less target dialog) or fired into
@@ -493,7 +276,7 @@ fn core_rules() -> Vec<RuleDefinition> {
         // relay path rebuilds the response from that snapshot and removes the
         // entry on the final response. Outranks `relay-provisional`,
         // `confirm-dialog` and `route-failure`, which would otherwise claim an
-        // INVITE response. Port of `relayReinviteResponseRule`.
+        // INVITE response.
         rule(
             "relay-reinvite-response",
             &["relay-provisional", "confirm-dialog", "route-failure"],
@@ -518,10 +301,10 @@ fn core_rules() -> Vec<RuleDefinition> {
         // the B2BUA — as the ACKing UAC on its own realign/reroute re-INVITE, or
         // when it ACKs a callee's 2xx — MUST re-emit the ACK on the SAME client
         // transaction (reusing the retained `ack_branch` + the INVITE CSeq) for
-        // every retransmit. Without this, a single lost ACK on a realign/reroute
-        // (or initial) leg strands the answerer's INVITE server txn: the confirmed
-        // call is never fully reaped (leak) or times out late — a genuine SUT bug
-        // under real-network packet loss. This is the b-leg / realign twin of the
+        // every retransmit — otherwise a single lost ACK on a realign/reroute
+        // (or initial) leg strands the answerer's INVITE server txn and the
+        // confirmed call is never fully reaped (leak) or times out late under
+        // real-network packet loss. This is the b-leg / realign twin of the
         // a-leg `unacked-2xx-retransmit` (which retransmits the B2BUA's *own* 2xx
         // to a silent caller). Delayed-offer answer bodies are not replayed on the
         // re-ACK (the realign/reroute leak paths are all offer-in-INVITE, so their
@@ -548,7 +331,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                     }
                     let Some(resp) = ctx.response() else { return false };
                     let cseq = resp.cseq().seq() as i64;
-                    super::relay::acked_invite_cseq(d) == Some(resp.cseq().seq())
+                    crate::rules::relay::acked_invite_cseq(d) == Some(resp.cseq().seq())
                         && call::helpers::find_pending_request(d, cseq).is_none()
                 }),
             |ctx| {
@@ -649,8 +432,8 @@ fn core_rules() -> Vec<RuleDefinition> {
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
         // A relayed non-INVITE request's **non-2xx final** is relayed back to
-        // its requester — plain transaction-layer symmetry (RFC 3261 §8.1.3.3),
-        // GAP-P8b-5. The non-INVITE sibling of `relay-reinvite-response`
+        // its requester — plain transaction-layer symmetry (RFC 3261 §8.1.3.3).
+        // The non-INVITE sibling of `relay-reinvite-response`
         // (INVITE) alongside `relay-non-invite-200` (the 2xx half): without it
         // the far end's 481/488/491… to a relayed UPDATE/INFO was silently
         // dropped and the requester timed out. Matches ONLY when the source
@@ -751,7 +534,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                         // is restated on EVERY consult, so a superseded
                         // attempt's image never answers a later failure.
                         actions.push(RuleAction::MergeCallExt {
-                            ext: super::relay::failure_headers_ext(ctx.response()),
+                            ext: crate::rules::relay::failure_headers_ext(ctx.response()),
                         });
                         actions.push(RuleAction::FailureAsyncHttp {
                             request: serde_json::json!({
@@ -779,8 +562,7 @@ fn core_rules() -> Vec<RuleDefinition> {
         // `call-failure-result` internal event. `failover` → cancel the failed
         // leg's no-answer timer + create a fresh b-leg toward the new
         // destination (A's INVITE snapshot; the relay_first_18x slice survives so
-        // the new leg's To-tag stays the first 180's). Port of FailureRules.ts
-        // route-failure / no-answer-failover failover branches.
+        // the new leg's To-tag stays the first 180's).
         rule(
             "failover-create-leg",
             &[],
@@ -945,8 +727,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             // Only a B2BUA-originated keepalive OPTIONS is absorbed: it leaves no
             // pending-relay snapshot on the source dialog. A relayed end-to-end
             // OPTIONS does leave one (matching the response CSeq) → this declines
-            // and `relay-non-invite-200` forwards the 200 to the peer. Port of
-            // `absorbOptions200Rule`'s filter.
+            // and `relay-non-invite-200` forwards the 200 to the peer.
             Match::response().method("OPTIONS").status_class(2).filter(|ctx| {
                 let cseq = ctx.response().map(|r| r.cseq().seq() as i64);
                 match (ctx.source_dialog(), cseq) {
@@ -1052,7 +833,7 @@ fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-bye", &[], Match::request().method("BYE").call_state(CallModelState::Active), |ctx| {
             // Pre-mark the BYE-sending leg `bye_received` (RFC 3261 §15.1.2) so the
             // subsequent begin-termination skips it (no duplicate BYE back to the
-            // sender) and only tears down the peer. Port of `relayByeRule`.
+            // sender) and only tears down the peer.
             ok(vec![
                 RuleAction::Respond { status: 200, reason: "OK".into(), body: vec![], content_type: None },
                 RuleAction::TerminateLeg { leg_id: ctx.source_leg_id.to_string(), bye_disposition: Some(ByeDisposition::ByeReceived) },
@@ -1078,7 +859,7 @@ fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-message", &[], Match::request().method("MESSAGE"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
-        // Transparent in-dialog REFER relay (upstreamneed-019 part 2): forward a
+        // Transparent in-dialog REFER relay: forward a
         // REFER to the peer leg like INFO/MESSAGE. This is the FALLBACK for an
         // *unsubscribed* transfer — with the `refer_transfer` seed PRESENT (default
         // composition) `transfer-intercept-refer` (also CORE, registered earlier)
@@ -1163,8 +944,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             // A **pending b-leg INVITE** transaction timeout (Timer B / the long
             // INVITE backstop) on a failover-capable call is a failure the
             // decision backend must get a shot at — the dead-gateway reroute is
-            // the classic failover case, and before this it was the one b-leg
-            // failure that never consulted `/call/failure`. Mirror the
+            // the classic failover case. Mirror the
             // `no-answer` shape: record the timeout, destroy the failed leg
             // (CANCELs a still-early dialog; a total blackhole gets a harmless
             // raw CANCEL), and let `call-failure-result` drive the outcome.
@@ -1193,7 +973,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                         // A blackholed hop drew no final: this consult states an
                         // empty relayable image, so an earlier attempt's headers
                         // cannot answer it.
-                        RuleAction::MergeCallExt { ext: super::relay::failure_headers_ext(None) },
+                        RuleAction::MergeCallExt { ext: crate::rules::relay::failure_headers_ext(None) },
                         RuleAction::FailureAsyncHttp {
                             request: serde_json::json!({
                                 "callback_context": cbctx,
@@ -1235,7 +1015,7 @@ fn core_rules() -> Vec<RuleDefinition> {
                 // EMPTY relayable image: the final it authors speaks for a peer
                 // that never answered, not for an earlier attempt that did.
                 Some(cbctx) => actions.extend([
-                    RuleAction::MergeCallExt { ext: super::relay::failure_headers_ext(None) },
+                    RuleAction::MergeCallExt { ext: crate::rules::relay::failure_headers_ext(None) },
                     RuleAction::FailureAsyncHttp {
                         request: serde_json::json!({
                             "callback_context": cbctx,
@@ -1254,8 +1034,8 @@ fn core_rules() -> Vec<RuleDefinition> {
         // caller's TOTAL wait for a final response. It rides the replicated
         // `call.timers` ledger, so a crash → reclaim restores it and a
         // stuck-in-setup call is torn down at the deadline instead of holding
-        // its limiter slots until GlobalDuration (the 2026-06-12 endurance
-        // zombie: the sip-txn INVITE_INITIAL_TIMEOUT died with the node).
+        // its limiter slots until GlobalDuration — the sip-txn setup timeout
+        // is process-local and dies with a crashed node; this one survives.
         rule("setup-timeout", &[], Match::timer().timer_type(TimerType::SetupTimeout), |ctx| {
             // Answer raced the fire (e.g. a reclaim restored a stale ledger
             // entry whose cancel was lost with the crashed node): absorb, and
@@ -1287,7 +1067,7 @@ fn core_rules() -> Vec<RuleDefinition> {
             ])
         }),
         rule("max-duration", &[], Match::timer().timer_type(TimerType::GlobalDuration), |ctx| {
-            // upstreamneed-009: a **subscribed** max-call-duration on an ANSWERED
+            // A **subscribed** max-call-duration on an ANSWERED
             // call with a callback_context consults the engine (`call_release`
             // via `ReleaseAsyncHttp` → `call-release-result`: release |
             // reroute) instead of tearing down locally. Everything else keeps
@@ -1419,9 +1199,8 @@ fn core_rules() -> Vec<RuleDefinition> {
             // BYE, a dead UAC/UAS, or proxy churn during teardown). The call is
             // wedged in Terminating with a non-terminal `ByeSent` leg, so
             // `is_fully_resolved` never passes, `RemoveCall` is never emitted, and
-            // the call — its `active_calls` slot AND its memory — leaks forever
-            // (observed: active_calls pinned flat for hours after all traffic
-            // stopped). Force every still-unresolved leg terminal (mirroring the
+            // the call — its `active_calls` slot AND its memory — leaks forever.
+            // Force every still-unresolved leg terminal (mirroring the
             // `is_fully_resolved` predicate) so the invariant promotes
             // Terminating→Terminated→RemoveCall and the call is reaped + the
             // replication delete propagates. If the call already resolved, the
