@@ -1,6 +1,6 @@
 //! The rule engine — declarative match descriptors, a first-match/layer-ranked
 //! executor, the action vocabulary + executor, framework invariants, and the
-//! basic-B2BUA default rule set. Port of `src/b2bua/rules/`.
+//! basic-B2BUA default rule set.
 
 pub mod actions;
 pub mod capabilities;

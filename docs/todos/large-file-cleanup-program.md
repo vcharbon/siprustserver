@@ -117,15 +117,14 @@ every week it waits.
 
 ### Lane 2 — hot paths & rule engines (remainder)
 
-- [ ] **1. `crates/b2bua/src/rules/relay.rs`** — 2003 L, nearly DOUBLED
-  since the 2026-07-15 scan (1039 L): fastest-growing file in the workspace
-  and on the per-message hot path. Split first. Copy the `actions/` split
-  shape. Satellite rule files that may absorb or donate concerns while the
-  seams are open: `relay_first_18x.rs` (506), `promote_pem.rs` (573).
 - [ ] **2. `crates/b2bua/src/rules/defaults.rs`** — 1445 L. `core_rules` is
   an exhaustive match on the `too_many_lines` warn ratchet — the ratchet
   stays; split the surrounding registry/config concerns.
 - [ ] **3. `crates/b2bua/src/rules/refer_transfer.rs`** — 1107 L.
+- [ ] **3b. `crates/b2bua/src/rules/relay_first_18x.rs`** (506) +
+  **`promote_pem.rs`** (573) — the 18x-policy satellites of the `relay/`
+  split; borderline size, so chiefly a comment-scrub + lib-TOC pass, splitting
+  only if a seam is obvious.
 
 ### Lane 3 — big but self-contained (internal fan-in only)
 
