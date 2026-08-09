@@ -15,7 +15,8 @@
 //!   - [`reliable`] — the a-facing reliable-provisional sequence (RFC 3262)
 //!   - [`services`] — per-service slice accessors + opaque ext writes
 //!   - [`record`] — CDR append, rule deactivation, SM-cursor rendering
-//!   - [`timer`] — the timer ledger (`replace_timer_by_id`, terminating cap)
+//!   - [`timer`] — the timer ledger (`replace_timer_by_id`, terminating cap,
+//!     the keepalive one-interval ceiling)
 
 pub mod dialog;
 pub mod leg;
@@ -52,4 +53,4 @@ pub use services::{
     set_call_ext, set_leg_ext, set_promote_pem, set_relay_first_18x_relayed, set_reroute,
     set_transfer, transfer_active, transfer_state,
 };
-pub use timer::{replace_timer_by_id, TERMINATING_TIMEOUT_MS};
+pub use timer::{cap_keepalive_fire_at, replace_timer_by_id, TERMINATING_TIMEOUT_MS};

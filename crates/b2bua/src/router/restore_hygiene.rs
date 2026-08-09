@@ -5,6 +5,7 @@
 //! driver stays untouched and `(p,b)`-causal reconciliation remains the sole
 //! correctness mechanism (ADR-0014).
 
+use call::helpers::cap_keepalive_fire_at;
 use call::{TimerEntry, TimerType};
 
 /// Strip a stale `KeepaliveTimeout` from a timer set hydrated off a replica
@@ -88,18 +89,16 @@ fn smooth_keepalives(
     }
 }
 
-/// Clamp every `Keepalive` to at most one interval out — the seam's ceiling.
+/// Enforce the ledger's one-interval ceiling ([`cap_keepalive_fire_at`]) on every
+/// restored `Keepalive` — the seam's half of the invariant the arming sites assert.
 ///
-/// The `keepalive` rule re-arms at exactly `+interval` from each fire, so a
-/// deadline beyond that is an origin-frame residual [`reanchor_timers`] could not
-/// remove, never a legitimate intent — and a call held past a cadence unprobed
-/// loses its UAC's keepalive tolerance. Applies on every hydration path; moves a
-/// probe only earlier, so no settle or handback is introduced (ADR-0014 untouched).
+/// A deadline beyond the cadence is an origin-frame residual [`reanchor_timers`]
+/// could not remove. Applies on every hydration path; moves a probe only earlier,
+/// so no settle or handback is introduced (ADR-0014 untouched).
 fn cap_future_keepalives(timers: &mut [TimerEntry], now_ms: i64, keepalive_interval_ms: i64) {
-    let ceiling = now_ms + keepalive_interval_ms;
     for t in timers.iter_mut() {
         if matches!(t.timer_type, TimerType::Keepalive) {
-            t.fire_at = t.fire_at.min(ceiling);
+            t.fire_at = cap_keepalive_fire_at(t.fire_at, now_ms, keepalive_interval_ms);
         }
     }
 }
