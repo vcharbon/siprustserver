@@ -18,8 +18,9 @@ pub const TERMINATING_TIMEOUT_MS: i64 = 32_000;
 /// an intent — and it holds the call unprobed for a whole extra cadence, longer
 /// than a peer's keepalive tolerance. Clamping moves a probe only earlier, which
 /// costs nothing. `keepalive_interval_ms <= 0` (probing disabled) imposes no
-/// ceiling. The single expression of the invariant: minting sites assert on it,
-/// restore-hygiene enforces it on every hydrated timer set.
+/// ceiling. The single expression of the invariant: the rule-arming seam asserts
+/// on it, the driver-only store-fault re-arm and restore-hygiene clamp through it
+/// — every `Keepalive` deadline in the process passes one of the three.
 pub fn cap_keepalive_fire_at(fire_at: i64, now_ms: i64, keepalive_interval_ms: i64) -> i64 {
     if keepalive_interval_ms <= 0 {
         return fire_at;

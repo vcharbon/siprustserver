@@ -551,6 +551,11 @@ pub enum RuleAction {
     /// Arm (or re-arm — same derived id supersedes) a per-call timer. The
     /// persisted id is `timer_type.timer_id(leg_id)`; a service arms its own
     /// watchdog with a [`TimerType::Service`] `(service_id, key)`.
+    ///
+    /// A [`TimerType::Keepalive`] is held to one `keepalive_interval_sec`
+    /// (`call::helpers::cap_keepalive_fire_at`): a larger `delay_sec` trips a
+    /// debug assertion and is clamped in release. Every other timer type keeps
+    /// its full `delay_sec`.
     ScheduleTimer {
         timer_type: TimerType,
         delay_sec: i64,

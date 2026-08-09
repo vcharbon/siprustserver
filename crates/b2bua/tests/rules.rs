@@ -2777,6 +2777,19 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
         now_ms + 3_600_000,
         "a non-keepalive deadline keeps its full delay — the ceiling is keepalive-only",
     );
+    let replicated = result
+        .effects
+        .critical
+        .iter()
+        .find_map(|e| match e {
+            CriticalStateEffect::ScheduleTimer(t) if t.timer_type == TimerType::Keepalive => Some(t),
+            _ => None,
+        })
+        .expect("the probe's ledger write is replicated");
+    assert_eq!(
+        replicated.fire_at, armed.fire_at,
+        "the replicated copy a peer later hydrates carries the ledger's capped deadline",
+    );
 }
 
 /// An arming site that computes a `Keepalive` deadline beyond one cadence is a
@@ -2813,6 +2826,7 @@ fn arming_a_keepalive_beyond_one_cadence_trips_the_ledger_invariant() {
 /// keepalive tolerance.
 #[cfg(not(debug_assertions))]
 #[test]
+#[ignore = "release-profile clamp — slow lane (just test-slow)"]
 fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
     let now_ms = 1_000_000;
     let config = B2buaConfig::default();

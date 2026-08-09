@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use call::helpers::cap_keepalive_fire_at;
 use call::{Call, CallModelState, LegState, TimerEntry, TimerType};
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::emergency::is_emergency_request;
@@ -391,13 +392,15 @@ async fn in_dialog_store_fault_gate(
             ctx.metrics.bump_store_fault_audit_skipped();
             // Re-arm at the config cadence — the same interval the `keepalive`
             // rule re-arms with, read from config because the call body is what
-            // we could not fetch. Runtime driver only: the serialized
-            // `call.timers` intent stays untouched (the call is untouched),
-            // which is safe — a later HA restore sanitizes past-due entries.
+            // we could not fetch, and held to the same ledger ceiling. Runtime
+            // driver only: the serialized `call.timers` intent stays untouched
+            // (the call is untouched), which is safe — a later HA restore
+            // sanitizes past-due entries.
+            let interval_ms = ctx.config.keepalive_interval_sec * 1000;
             let entry = TimerEntry {
                 id: TimerType::Keepalive.timer_id(None),
                 timer_type: TimerType::Keepalive,
-                fire_at: now_ms + ctx.config.keepalive_interval_sec * 1000,
+                fire_at: cap_keepalive_fire_at(now_ms + interval_ms, now_ms, interval_ms),
                 leg_id: None,
             };
             ctx.timers.schedule(entry, call_ref.to_string()).await;
