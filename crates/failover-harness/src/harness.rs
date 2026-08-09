@@ -53,6 +53,8 @@ use sip_txn::IdGen;
 use tokio::task::JoinHandle;
 use topology::{Peer, SimulatedMembership};
 
+use crate::rfc_acceptance::{lane_details, Finding, RfcAcceptance};
+
 /// Changelog TTLs `(tombstone, dead_peer)`: long enough that a backed-up call
 /// survives the whole scenario, short enough that dead-peer auto-clean is
 /// reachable in a test budget.
@@ -741,46 +743,16 @@ pub struct FailoverHarness {
     /// uses it, so a replica it flushes stamps `origin_now_ms` in ITS frame and the
     /// receiver computes the true cross-node offset. Default 0 (no skew).
     worker_clock_offsets: HashMap<String, i64>,
-    /// RFC-audit rule `name()`s waived on the Drop-time hard gate for the WHOLE
-    /// harness lifetime (see [`allow_rfc_violation`](Self::allow_rfc_violation)).
-    /// Coarsest scope available — prefer a window
-    /// ([`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now)).
-    waived_rfc_rules: std::collections::HashSet<String>,
-    /// Window-scoped acceptances: outside every window the rule gates in full.
-    rfc_waiver_windows: Vec<RfcWaiverWindow>,
-}
-
-/// One RFC-audit rule accepted over a bounded slice of the run — the window scope
-/// behind [`FailoverHarness::accept_rfc_deviations_from_now`]. A finding matches
-/// only when its offending message was EMITTED inside the window, so the same
-/// rule keeps gating on every message before and after it.
-struct RfcWaiverWindow {
-    /// The audit rule `name()` accepted inside the window.
-    rule: String,
-    /// Recording-clock ms the window opened (the fault-injection instant), on the
-    /// same timeline as a recorded entry's `sent_ms`.
-    from_ms: u64,
-    /// Recording-clock ms the window closed; `None` ⇒ open to the end of the run.
-    until_ms: Option<u64>,
-}
-
-impl RfcWaiverWindow {
-    /// Whether a message emitted at `sent_ms` falls inside this window.
-    fn covers(&self, sent_ms: u64) -> bool {
-        sent_ms >= self.from_ms && self.until_ms.is_none_or(|until| sent_ms <= until)
-    }
+    /// This run's declared RFC-audit scoping — lifetime waivers plus acceptance
+    /// windows (see [`crate::rfc_acceptance`]). Everything it does not cover
+    /// gates.
+    rfc_acceptance: RfcAcceptance,
 }
 
 /// The in-dialog CSeq-ordering audit rule (`sip_net::rfc_audit`), named here so
 /// the failover tests can waive it by a symbol rather than a bare string. See
 /// [`FailoverHarness::accept_rfc_deviations_from_now`].
 pub const RULE_CSEQ_IN_DIALOG_ORDER: &str = "rfc3261.cseqInDialogOrder";
-
-/// `(rule, lane, detail)` findings reduced to the `(lane, detail)` pairs the
-/// assertion messages render.
-fn lane_details(findings: Vec<(String, String, String)>) -> Vec<(String, String)> {
-    findings.into_iter().map(|(_, lane, detail)| (lane, detail)).collect()
-}
 
 /// `127.0.0.1:9400+n` — a stable per-ordinal repl listen address.
 fn repl_addr_for(index: usize) -> SocketAddr {
@@ -847,8 +819,7 @@ impl FailoverHarness {
             event_seq,
             harness: Arc::new(HarnessHandle::new(harness)),
             worker_clock_offsets: HashMap::new(),
-            waived_rfc_rules: std::collections::HashSet::new(),
-            rfc_waiver_windows: Vec::new(),
+            rfc_acceptance: RfcAcceptance::default(),
         }
     }
 
@@ -865,15 +836,20 @@ impl FailoverHarness {
     pub fn allow_rfc_violation(&mut self, rule: &str, justification: &str) {
         debug_assert!(!justification.trim().is_empty(), "waiver needs a justification");
         let _ = justification;
-        self.waived_rfc_rules.insert(rule.to_string());
+        self.rfc_acceptance.waive_lifetime(rule);
     }
 
-    /// Accept `rule`'s findings on messages emitted from **now** until
+    /// Accept `rule`'s findings on messages recorded from **now** until
     /// [`resume_rfc_gate`](Self::resume_rfc_gate) (or the end of the run) — the
     /// window-scoped counterpart of [`allow_rfc_violation`]. Call it at the instant
     /// the scenario injects its fault: establishment, every message before the
     /// injection, and every no-fault scenario keep the rule fully gating, so a new
     /// regression outside the window still fails the test.
+    ///
+    /// The boundary is the recording's **capture order** (`seq`), not a timestamp:
+    /// under a paused clock a whole burst shares one `at_ms`, so a message captured
+    /// before this call is outside the window even when it carries the same
+    /// millisecond.
     ///
     /// A finding the rule cannot pin to a wire entry is unattributable and stays
     /// gated (only [`allow_rfc_violation`] covers it).
@@ -888,32 +864,37 @@ impl FailoverHarness {
     /// overlap. Two owners of one leg (a proxy-Dead-but-alive primary and/or a
     /// stale-hydrated backup) each mint `dialog.sip.local_cseq + 1`; `(p,b)` rejects
     /// the loser, but its mutation already reached the wire. The reused number rides
-    /// a FRESH `branch`, so a compliant UAS sees a new server transaction whose
-    /// sequence number went backwards and rejects it out of order (RFC 3261
-    /// §12.2.2, 500) — it is not folded away as a retransmission. That one call
-    /// drops cleanly; nothing else on the dialog is affected.
+    /// a FRESH `branch`, so a compliant UAS does not fold it away as a
+    /// retransmission: it sees a new server transaction whose sequence number did
+    /// not advance and rejects it out of order (RFC 3261 §12.2.2 — 500, or an
+    /// implementation-defined reject of the stale number). That one call drops
+    /// cleanly; nothing else on the dialog is affected.
     pub fn accept_rfc_deviations_from_now(&mut self, rule: &str, justification: &str) {
         debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
         let _ = justification;
-        self.rfc_waiver_windows.push(RfcWaiverWindow {
-            rule: rule.to_string(),
-            from_ms: self.now_ms().max(0) as u64,
-            until_ms: None,
-        });
+        let from = self.recorded_seq_high_water();
+        self.rfc_acceptance.open_window(rule, from);
     }
 
-    /// Close `rule`'s open acceptance window at this instant — the rule gates in
-    /// full again from here on. No-op when no window for `rule` is open.
+    /// Close EVERY open acceptance window for `rule` at this instant — the rule
+    /// gates in full again from here on. No-op when no window for `rule` is open.
     pub fn resume_rfc_gate(&mut self, rule: &str) {
-        let now = self.now_ms().max(0) as u64;
-        if let Some(w) = self
-            .rfc_waiver_windows
-            .iter_mut()
-            .rev()
-            .find(|w| w.rule == rule && w.until_ms.is_none())
-        {
-            w.until_ms = Some(now);
-        }
+        let until = self.recorded_seq_high_water();
+        self.rfc_acceptance.close_windows(rule, until);
+    }
+
+    /// The highest recording `seq` captured on the SIP channel so far — the
+    /// capture-order boundary an acceptance window is anchored on. `0` before the
+    /// first recorded event.
+    fn recorded_seq_high_water(&self) -> u64 {
+        self.harness
+            .recording()
+            .channel()
+            .snapshot()
+            .iter()
+            .map(|s| s.seq)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Set a worker's **wall-clock anchor offset** (ms) for a clock-skew test —
@@ -1439,11 +1420,15 @@ impl FailoverHarness {
     /// transactions (e.g. `rfc3261.via` §8.1.3/§17.1.3 response matching).
     pub fn assert_full_rfc_clean(&self, cell: &str) {
         let events = self.harness.recording().channel().snapshot();
-        let entries = sip_net::to_sip_entries(&events);
+        // `offending` is a 1-based index into the AUDIT-visible wire entries — the
+        // same view `evaluate_rfc_findings` hands the rules — so a window must be
+        // resolved against `audit_wire_entries`, never the raw snapshot (whose
+        // extra ReEmit / invisible-disposition rows shift every later index).
+        let entries = sip_net::audit_wire_entries(&events);
         let findings: Vec<sip_net::RfcFinding> = sip_net::evaluate_rfc_findings(&events)
             .into_iter()
-            .filter(|f| !f.advisory && !self.waived_rfc_rules.contains(&f.rule))
-            .filter(|f| !self.window_accepts(&f.rule, f.offending, &entries))
+            .filter(|f| !f.advisory && !self.rfc_acceptance.waived(&f.rule))
+            .filter(|f| !self.rfc_acceptance.accepts(&f.rule, f.offending, &entries))
             .collect();
         assert!(
             findings.is_empty(),
@@ -1481,6 +1466,13 @@ impl FailoverHarness {
         lane_details(self.partition_rfc_findings().0)
     }
 
+    /// Split the endpoint-scoped cross-message audit into `(gating, accepted)` —
+    /// see [`RfcAcceptance::partition`].
+    #[allow(clippy::type_complexity)]
+    fn partition_rfc_findings(&self) -> (Vec<Finding>, Vec<Finding>) {
+        self.rfc_acceptance.partition(&self.audited_events())
+    }
+
     /// The findings an acceptance window covered this run — the deviations the
     /// scenario declared accepted via
     /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now).
@@ -1489,76 +1481,6 @@ impl FailoverHarness {
     /// them to prove its window matched something.
     pub fn accepted_rfc_deviations(&self) -> Vec<(String, String)> {
         lane_details(self.partition_rfc_findings().1)
-    }
-
-    /// Run the endpoint-scoped cross-message audit and split its non-advisory
-    /// `(rule, lane, detail)` findings into `(gating, accepted)`: a finding is
-    /// accepted when its OFFENDING message was emitted inside an acceptance window
-    /// for its rule. A finding the rule cannot pin to a wire entry gates (it is
-    /// unattributable to any window); a lifetime waiver drops the rule outright.
-    #[allow(clippy::type_complexity)]
-    fn partition_rfc_findings(
-        &self,
-    ) -> (Vec<(String, String, String)>, Vec<(String, String, String)>) {
-        let events = self.audited_events();
-        let entries = sip_net::to_sip_entries(&events);
-        let mut gating = Vec::new();
-        let mut accepted = Vec::new();
-        for rule in sip_net::rfc_cross_message_rules() {
-            // Honour the advisory tier exactly as the scenario-harness hard gate
-            // does: a `force_advisory` rule (a documented B2BUA-architectural
-            // divergence — per-leg SDP re-origin, OPTIONS-keepalive response
-            // headers, the un-timeable proxy-100 bound, …) is recorded, not
-            // gated. Skipping it here keeps the failover matrix from failing on
-            // the same architectural divergences the main gate already excuses.
-            if rule.force_advisory() {
-                continue;
-            }
-            // Lifetime waiver (see `allow_rfc_violation`): the rule is not judged
-            // at all on this run.
-            if self.waived_rfc_rules.contains(rule.name()) {
-                continue;
-            }
-            let has_window = self.rfc_waiver_windows.iter().any(|w| w.rule == rule.name());
-            if !has_window {
-                gating.extend(
-                    rule.check(&events)
-                        .into_iter()
-                        .map(|(lane, detail)| (rule.name().to_string(), lane, detail)),
-                );
-                continue;
-            }
-            for (lane, detail, offending) in rule.check_positioned(&events) {
-                let finding = (rule.name().to_string(), lane, detail);
-                if self.window_accepts(rule.name(), offending, &entries) {
-                    accepted.push(finding);
-                } else {
-                    gating.push(finding);
-                }
-            }
-        }
-        (gating, accepted)
-    }
-
-    /// Whether an acceptance window for `rule` covers the finding whose offending
-    /// message is the 1-based `offending` index into `entries`. A finding with no
-    /// pinned message is never accepted — it cannot be placed in time.
-    fn window_accepts(
-        &self,
-        rule: &str,
-        offending: Option<usize>,
-        entries: &[sip_net::RecordedSipEntry],
-    ) -> bool {
-        let Some(sent_ms) = offending
-            .and_then(|i| i.checked_sub(1))
-            .and_then(|i| entries.get(i))
-            .map(|e| e.sent_ms)
-        else {
-            return false;
-        };
-        self.rfc_waiver_windows
-            .iter()
-            .any(|w| w.rule == rule && w.covers(sent_ms))
     }
 
     /// The recorded SIP events the audit judges — the endpoint-scoped view.

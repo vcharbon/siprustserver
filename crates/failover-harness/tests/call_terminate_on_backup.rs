@@ -194,8 +194,16 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
 /// mint the same `local_cseq + 1` (the loser's mutation reaches the wire before
 /// `(p,b)` rejects it), and the accepted outcome is that one call dropping cleanly —
 /// which every cell asserts via `assert_call_fully_over` / `assert_call_lost_no_cdr`.
-/// Call it at the cell's fault injection: establishment, and any cell that creates
-/// no second owner (C1, C12), keep `cseqInDialogOrder` fully gating.
+/// Call it at the cell's fault injection. Cells that never give one leg two
+/// concurrent owners keep `cseqInDialogOrder` fully gating for their whole run, and
+/// so does every cell's establishment: C1 (no fault at all), C12 (the call is
+/// terminated before the crash, so the reboot reclaims nothing), and C8/C9 — the
+/// primary is genuinely dead, the passive backup never takes over an idle call, and
+/// only the reboot-reclaimed copy originates (keepalive OPTIONS / the terminal). Its
+/// hydrated CSeq high-water is therefore judged in full: those two cells are the
+/// suite's baseline for the reclaim-origination path.
+///
+/// The two limiter-HA cases and the takeover-span cell make the same distinction.
 fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
     fh.accept_rfc_deviations_from_now(
         failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,

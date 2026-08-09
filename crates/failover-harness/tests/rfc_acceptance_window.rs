@@ -136,3 +136,26 @@ async fn deviation_after_the_window_closes_gates_again() {
     hangup(&mut dialog, &bob).await;
     fh.advance(Duration::from_secs(1)).await;
 }
+
+/// A two-phase scenario arms the SAME rule twice (two faults); one
+/// `resume_rfc_gate` must close BOTH — an older still-open window may not keep the
+/// rule accepted for the rest of the run.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "RFC 3261 audit violation")]
+async fn resume_closes_every_open_window_for_the_rule() {
+    let mut fh = FailoverHarness::new("rfc-window-two-arms", &["b1"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+
+    let mut dialog = establish(&alice, &bob).await;
+    fh.accept_rfc_deviations_from_now(RULE_CSEQ_IN_DIALOG_ORDER, JUSTIFICATION);
+    fh.advance(Duration::from_secs(1)).await;
+    fh.accept_rfc_deviations_from_now(RULE_CSEQ_IN_DIALOG_ORDER, JUSTIFICATION);
+    fh.advance(Duration::from_secs(1)).await;
+    fh.resume_rfc_gate(RULE_CSEQ_IN_DIALOG_ORDER);
+    fh.advance(Duration::from_secs(1)).await;
+
+    commit_cseq_reuse(&mut dialog, &alice, &bob).await;
+    hangup(&mut dialog, &bob).await;
+    fh.advance(Duration::from_secs(1)).await;
+}

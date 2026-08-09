@@ -221,8 +221,10 @@ non-INVITE clears at Timer J; a failed leg at Timer B/F.
   without cross-node coordination; fails by cleanly dropping one call. The reused
   number rides a **fresh `branch`** (every `send_request_to_leg` mints one), so a
   compliant UAS does not fold it away as a retransmission (§17.2.3, branch-keyed):
-  it is a new server transaction whose sequence number went backwards and is
-  rejected out of order (§12.2.2, 500). The failover suites encode this as a
+  it is a new server transaction whose sequence number did not advance and is
+  rejected out of order (§12.2.2 — 500 when the number is strictly lower, an
+  implementation-defined reject when both owners mint the same value). The
+  failover suites encode this as a
   deviation window scoped to the takeover
   (`FailoverHarness::accept_rfc_deviations_from_now`) and still assert the accepted
   outcome — call fully over, one CDR, limiter released; the same rule gates in full

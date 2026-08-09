@@ -321,15 +321,19 @@ fn dialog_desc(call_id: &str, from_tag: &str, to_tag: &str) -> String {
 
 /// Phrase a §12.2.1.1 **reuse**: `{method} CSeq {seq}` was already carried by an
 /// earlier transaction on this dialog. A new in-dialog request MUST increment the
-/// dialog CSeq by exactly one, so a repeat means the CSeq never advanced — a real
-/// UAS drops it as a retransmission.
+/// dialog CSeq by exactly one, so a repeat means the CSeq never advanced. The
+/// reuse reaches here only on a DIFFERENT top-`Via` branch (a same-branch repeat
+/// is folded as a retransmission, §17.2.3), so a real UAS sees a new server
+/// transaction and rejects it out of order (§12.2.2).
 fn cseq_reuse_msg(method: &str, seq: u32, call_id: &str, from_tag: &str, to_tag: &str) -> String {
     let dialog = dialog_desc(call_id, from_tag, to_tag);
     format!(
         "in-dialog CSeq reused (RFC 3261 §12.2.1.1): {method} CSeq {seq} reuses a prior \
          request's CSeq (a new in-dialog transaction must increment the dialog CSeq by \
-         exactly one) on {dialog} — a real UAS treats this as a retransmission and drops the \
-         new request (the test UA answers it, hiding the bug)"
+         exactly one) on {dialog} — it rides a FRESH Via branch, so a real UAS does not fold \
+         it away as a retransmission (§17.2.3): it is a new server transaction whose sequence \
+         number did not advance and is rejected out of order (§12.2.2 — 500, or an \
+         implementation-defined reject) (the test UA answers it, hiding the bug)"
     )
 }
 
@@ -697,8 +701,9 @@ mod tests {
         // primary keepalives OPTIONS 2 then 3; the survivor takes over with a
         // pre-failover snapshot and re-originates OPTIONS 2 on a NEW transaction
         // (fresh branch) — reusing a CSeq the dialog already spent. The reuse is
-        // the violation (a real UAS drops it as a retransmission); the fact that
-        // it also arrives "after" CSeq 3 is not, on its own, judged.
+        // the violation (a real UAS rejects it out of order, §12.2.2 — the fresh
+        // branch means §17.2.3 cannot fold it away); the fact that it also arrives
+        // "after" CSeq 3 is not, on its own, judged.
         let evs = vec![
             recv_at("bob", options("cid-1", "ft", 2), 0),
             recv_at("bob", options("cid-1", "ft", 3), 1),
@@ -928,7 +933,7 @@ mod tests {
         // bucket); a later in-dialog INFO reuses CSeq 1 in the To-tagged bucket.
         // The per-To-tag split means the two never collide as a same-bucket reuse,
         // yet the INFO failed to advance the dialog CSeq past the INVITE — a
-        // §12.2.1.1 violation a real UAS drops as a retransmission.
+        // §12.2.1.1 violation a real UAS rejects out of order (§12.2.2).
         let evs = vec![
             recv_at("bob", req_to("INVITE", "cid-1", "ft", 1, "z9hG4bK-i", None), 0),
             recv_at("bob", req_to("INFO", "cid-1", "ft", 1, "z9hG4bK-info", Some("btag")), 1),
