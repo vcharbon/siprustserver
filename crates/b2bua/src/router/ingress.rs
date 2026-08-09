@@ -134,6 +134,19 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         }
     };
 
+    // ── Setup-CANCEL mark (069) ──────────────────────────────────────────────
+    // An out-of-dialog CANCEL means the txn layer just finalized the initial
+    // INVITE (200 + 487 already on the wire). The `Cancelled` event queues on
+    // the per-call FIFO BEHIND an initial-INVITE turn parked on its decision
+    // round trip, so the call model cannot learn the caller is gone until that
+    // turn ends — mark it here (the run loop) so the decision-application seam
+    // (`process::initial_invite_turn`) drops a route/reject landing on the
+    // cancelled call. An in-dialog CANCEL targets one re-INVITE transaction,
+    // never the call setup, and is not marked.
+    if matches!(&event, CallEvent::Cancelled { in_dialog: false, .. }) {
+        ctx.state.mark_setup_cancelled(&call_ref);
+    }
+
     // ── Full-guarantee cap shed (ADR-0022) ────────────────────────────────────
     // At the per-call global cap, `dispatch` would SILENTLY drop a brand-new
     // call_ref's body before any call/txn context exists — leaving a caller who

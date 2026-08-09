@@ -57,6 +57,16 @@ struct Inner {
     /// Membership mirrors `calls` exactly: stamped at insertion, cleared in
     /// `remove`/`drop_local`; an orphan never enters either.
     touched: HashMap<String, i64>,
+    /// **Setup-CANCEL marks**: call_refs whose *initial-INVITE* server
+    /// transaction the txn layer already finalized (200 to the CANCEL, 487 to
+    /// the INVITE) while the call's decision round trip is still parked on the
+    /// per-call FIFO — the queued `Cancelled` event cannot reach the call model
+    /// until that turn ends, so the model alone cannot tell the seam the caller
+    /// is gone. Set at `Cancelled` ingress (router run loop), read at the
+    /// decision-application seam (`router::process::initial_invite_turn`) to
+    /// drop a route/reject that lands on a cancelled call. Node-local, never
+    /// serialized; cleared on `remove`/`drop_local`/`discard_orphan`.
+    setup_cancelled: HashSet<String>,
 }
 
 /// The call store. Clone-cheap (one `Arc`); share across the stack.
@@ -379,6 +389,7 @@ impl CallState {
         inner.locks.remove(call_ref);
         inner.takeover.remove(call_ref);
         inner.touched.remove(call_ref);
+        inner.setup_cancelled.remove(call_ref);
         drop(inner);
 
         self.terminate_writer.submit_delete(
@@ -410,6 +421,7 @@ impl CallState {
         inner.locks.remove(call_ref);
         inner.takeover.remove(call_ref);
         inner.touched.remove(call_ref);
+        inner.setup_cancelled.remove(call_ref);
         present
     }
 
@@ -419,9 +431,10 @@ impl CallState {
     /// or a late in-dialog request after teardown). [`process`] acquired the
     /// per-call [`lock`](Self::lock) — and the router spun up a per-call dispatch
     /// queue (one `bump_creation`) — yet there is nothing to [`remove`](Self::remove):
-    /// the call was never in the map. Drop the lone artifact this leaves behind —
-    /// the `locks`-map entry — with **no** store mutation (unlike `remove`, which
-    /// would reverse-propagate a *spurious delete* for a call we never held).
+    /// the call was never in the map. Drop the artifacts this leaves behind —
+    /// the `locks`-map entry and any setup-CANCEL mark — with **no** store
+    /// mutation (unlike `remove`, which would reverse-propagate a *spurious
+    /// delete* for a call we never held).
     ///
     /// Paired with the router poisoning the dispatch queue (so the worker exits and
     /// `removals` balances `creations`), this is what stops an **orphan storm** —
@@ -432,7 +445,12 @@ impl CallState {
     ///
     /// [`process`]: crate::router
     pub fn discard_orphan(&self, call_ref: &str) {
-        self.inner.lock().unwrap().locks.remove(call_ref);
+        let mut inner = self.inner.lock().unwrap();
+        inner.locks.remove(call_ref);
+        // A CANCEL can race an initial INVITE the admission ladder then sheds
+        // (Tier-3 / store-fault / at-cap): the mark was set with no call ever
+        // resident, and this is its only teardown path.
+        inner.setup_cancelled.remove(call_ref);
     }
 
     /// Mark `call_ref` as a live acting-backup **takeover copy** (ADR-0011 X11 /
@@ -449,6 +467,24 @@ impl CallState {
     /// [`drop_local`](Self::drop_local).
     pub fn is_takeover(&self, call_ref: &str) -> bool {
         self.inner.lock().unwrap().takeover.contains(call_ref)
+    }
+
+    /// Mark `call_ref`'s initial-INVITE server transaction as CANCEL-finalized
+    /// (the txn layer answered 200 + 487 and emitted `Cancelled`). Called by the
+    /// router run loop at `Cancelled` ingress — BEFORE the event queues behind a
+    /// decision round trip parked on the per-call FIFO — so the
+    /// decision-application seam can see the caller is gone while the call model
+    /// still reads `Active`. Idempotent per call_ref.
+    pub fn mark_setup_cancelled(&self, call_ref: &str) {
+        self.inner.lock().unwrap().setup_cancelled.insert(call_ref.to_string());
+    }
+
+    /// Has `call_ref`'s initial INVITE been CANCELed (see
+    /// [`mark_setup_cancelled`](Self::mark_setup_cancelled))? Read at the
+    /// decision-application seam: a route/reject landing on a cancelled call is
+    /// dropped — the caller already holds its 487.
+    pub fn is_setup_cancelled(&self, call_ref: &str) -> bool {
+        self.inner.lock().unwrap().setup_cancelled.contains(call_ref)
     }
 
     /// **Active-reclaim bulk read-path** (ADR-0011 X11): scan this node's own
@@ -793,6 +829,13 @@ impl CallState {
     /// `assert_fully_reaped` 4th invariant — ADR-0020).
     pub fn touched_count(&self) -> usize {
         self.inner.lock().unwrap().touched.len()
+    }
+
+    /// The number of live setup-CANCEL marks. Cleared on every teardown path
+    /// (`remove`/`drop_local`/`discard_orphan`); a residue after teardown is a
+    /// mark leak (the harness `assert_fully_reaped` 5th invariant).
+    pub fn setup_cancelled_count(&self) -> usize {
+        self.inner.lock().unwrap().setup_cancelled.len()
     }
 
     /// Push the store's map lengths into the memory-attribution gauges (one

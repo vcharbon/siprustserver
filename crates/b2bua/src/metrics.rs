@@ -57,6 +57,12 @@ struct Inner {
     // protecting itself from new-call overload (the LB's AIMD should have shed
     // first; a non-zero local count flags the LB absent/misconfigured/overloaded).
     overload_rejected: AtomicU64,
+    // Decision-application drop guard (069): a `/calls` decision result (route
+    // or reject) that landed on a call whose initial INVITE the caller already
+    // CANCELed — dropped whole: no b-leg launch, no second final on the a-leg's
+    // completed transaction. A non-zero rate measures the caller-gives-up-
+    // during-routing race, not a fault.
+    decision_dropped_cancelled: AtomicU64,
     // Injectable store-fault seam (ADR-0023): `store_fault_rejected` = live
     // lookups that failed CLOSED with a 500 final (initial-INVITE dialog-
     // existence check or in-dialog request fetch); `store_fault_audit_skipped`
@@ -249,6 +255,12 @@ impl B2buaMetrics {
     counter!(bump_cdr_dropped, cdr_dropped_total, cdr_dropped);
     // Tier-3 admission gate (migration/09).
     counter!(bump_overload_rejected, overload_rejected_total, overload_rejected);
+    // Decision-application drop guard (069).
+    counter!(
+        bump_decision_dropped_cancelled,
+        decision_dropped_cancelled_total,
+        decision_dropped_cancelled
+    );
     // Injectable store-fault seam (ADR-0023).
     counter!(bump_store_fault_rejected, store_fault_rejected_total, store_fault_rejected);
     counter!(
@@ -519,6 +531,8 @@ impl B2buaMetrics {
         counter("b2bua_cdr_dropped_total", "CDRs dropped (submit-queue overflow or sink failure)", self.cdr_dropped_total());
         // ── Tier-3 admission gate (migration/09) ──
         counter("b2bua_overload_rejected_total", "new INVITEs shed with a stateless 503 by the Tier-3 admission gate (CPS token bucket empty OR panic-ELU backstop tripped; a non-zero rate flags the LB's AIMD absent/misconfigured/overloaded)", self.overload_rejected_total());
+        // ── decision-application drop guard (069) ──
+        counter("b2bua_decision_dropped_cancelled_total", "decision results (route/reject) dropped whole because the caller CANCELed the initial INVITE while the decision was in flight (the 487 is the transaction's one final; no b-leg is launched)", self.decision_dropped_cancelled_total());
         // ── injectable store-fault seam (ADR-0023) ──
         counter("b2bua_store_fault_rejected_total", "live store lookups that failed CLOSED (a 500 final to the initial INVITE or in-dialog request; a faulted ACK is dropped un-answered; 0 unless a fault is armed)", self.store_fault_rejected_total());
         counter("b2bua_store_fault_audit_skipped_total", "keepalive/audit cycles skipped FAIL-OPEN on a store fault (call kept up, timer re-armed; 0 unless a fault is armed)", self.store_fault_audit_skipped_total());

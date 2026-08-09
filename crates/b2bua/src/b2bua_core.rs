@@ -625,6 +625,13 @@ impl B2buaCore {
         self.ctx.state.touched_count()
     }
 
+    /// Live setup-CANCEL marks (the decision-application drop guard). Cleared on
+    /// every teardown path; a residue after teardown is a mark leak (the harness
+    /// reap oracle's 5th invariant).
+    pub fn setup_cancelled_count(&self) -> usize {
+        self.ctx.state.setup_cancelled_count()
+    }
+
     /// HARNESS SURGERY: drop the live in-memory copy of `call_ref` — map, index,
     /// lock, takeover mark — with NO store mutation (the `pri:`/`bak:` replica
     /// bodies stay). Recreates, deterministically, the rebooted-primary

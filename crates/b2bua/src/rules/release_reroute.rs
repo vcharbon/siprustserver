@@ -103,6 +103,12 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             &[],
             Match::internal_event().topic("call-release-result").outcome("release"),
             |ctx| {
+                // Fold landed on a going-away call (069): the termination in
+                // progress owns the teardown — no duplicate CDR, no
+                // BeginTermination re-arm of the safety timer.
+                if super::defaults::fold_lands_on_going_away_call(ctx) {
+                    return ok(vec![]);
+                }
                 ok(vec![
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Bye,
@@ -125,6 +131,12 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             &[],
             Match::internal_event().topic("call-release-result").outcome("reroute"),
             |ctx| {
+                // Fold landed on a going-away call (069): no replacement leg
+                // for a call whose parties already hung up (see
+                // `fold_lands_on_going_away_call`).
+                if super::defaults::fold_lands_on_going_away_call(ctx) {
+                    return ok(vec![]);
+                }
                 let payload = match ctx.event {
                     crate::event::CallEvent::InternalEvent { payload, .. } => payload,
                     _ => return None,

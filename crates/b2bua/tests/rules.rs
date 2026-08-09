@@ -379,6 +379,136 @@ fn max_duration_fire_on_a_live_subscribed_call_still_consults() {
     );
 }
 
+/// The named decision-fold rule's output for an internal event of
+/// `topic`/`outcome` carrying `payload` on `call`.
+fn fold_result(
+    call: &call::Call,
+    rule_id: &str,
+    topic: &str,
+    outcome: &str,
+    payload: serde_json::Value,
+) -> Vec<RuleAction> {
+    let event = CallEvent::InternalEvent {
+        call_ref: call.call_ref.clone(),
+        topic: topic.into(),
+        outcome: outcome.into(),
+        payload,
+        body: Vec::new(),
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, call, &ctx);
+    let rule = ranked
+        .iter()
+        .find(|r| r.id == rule_id)
+        .unwrap_or_else(|| panic!("{rule_id} is a candidate"));
+    (rule.handle)(&ctx)
+        .unwrap_or_else(|| panic!("{rule_id} handles its fold"))
+        .actions
+}
+
+/// A route-shaped fold payload (what `callouts::route_result_payload` emits).
+fn route_fold_payload() -> serde_json::Value {
+    serde_json::json!({
+        "destination": { "host": "127.0.0.1", "port": 5070 },
+        "failed_leg_id": "b-1",
+    })
+}
+
+#[test]
+fn decision_folds_on_a_terminating_call_are_dropped_whole() {
+    // A `/calls` decision result landing on a call already going away drives
+    // no forward progress, whatever it decides (upstreamneed-069): no
+    // failover/reroute leg toward a caller-less callee, no second final on the
+    // a-leg's completed transaction (RFC 3261 §17.2.1), no re-termination.
+    let mut call = test_call();
+    call.state = CallModelState::Terminating;
+    call.callback_context = Some("cb".into());
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+    for (rule_id, topic, outcome, payload) in [
+        ("failover-create-leg", "call-failure-result", "failover", route_fold_payload()),
+        (
+            "failover-reject",
+            "call-failure-result",
+            "reject",
+            serde_json::json!({ "code": 484, "reason": "Address Incomplete" }),
+        ),
+        (
+            "failover-redirect",
+            "call-failure-result",
+            "redirect",
+            serde_json::json!({
+                "code": 302,
+                "contacts": [ { "uri": "sip:carol@10.0.0.3", "q": null } ],
+            }),
+        ),
+        (
+            "failover-terminate",
+            "call-failure-result",
+            "terminate",
+            serde_json::json!({ "status": 486, "reason": "Busy Here" }),
+        ),
+        ("release-result-release", "call-release-result", "release", serde_json::json!({})),
+        ("release-result-reroute", "call-release-result", "reroute", route_fold_payload()),
+    ] {
+        let actions = fold_result(&call, rule_id, topic, outcome, payload);
+        assert!(
+            actions.is_empty(),
+            "{rule_id} on a terminating call is dropped whole, got {actions:?}",
+        );
+    }
+}
+
+#[test]
+fn decision_folds_on_a_live_call_still_apply() {
+    // The going-away guard is narrow: the same folds on an Active call keep
+    // their normal bodies.
+    let mut call = test_call();
+    call.callback_context = Some("cb".into());
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+
+    let actions =
+        fold_result(&call, "failover-create-leg", "call-failure-result", "failover", route_fold_payload());
+    assert!(
+        actions.iter().any(|a| matches!(a, RuleAction::CreateLeg { .. })),
+        "live failover fold creates the leg, got {actions:?}",
+    );
+
+    let actions = fold_result(
+        &call,
+        "failover-reject",
+        "call-failure-result",
+        "reject",
+        serde_json::json!({ "code": 484, "reason": "Address Incomplete" }),
+    );
+    assert!(
+        actions.iter().any(|a| matches!(a, RuleAction::RespondToALeg { status: 484, .. })),
+        "live reject fold answers the caller, got {actions:?}",
+    );
+
+    // The reroute fold's live shape (answered + subscribed) is pinned by the
+    // release-reroute suite; here the release outcome suffices as the control.
+    let actions = fold_result(
+        &call,
+        "release-result-release",
+        "call-release-result",
+        "release",
+        serde_json::json!({}),
+    );
+    assert!(
+        actions.iter().any(|a| matches!(a, RuleAction::BeginTermination { .. })),
+        "live release fold tears down, got {actions:?}",
+    );
+}
+
 #[test]
 fn begin_termination_scrubs_per_leg_no_answer_entries() {
     // Entering `terminating` cancels every per-leg NoAnswer ledger entry —

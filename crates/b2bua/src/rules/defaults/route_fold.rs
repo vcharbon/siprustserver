@@ -5,9 +5,24 @@
 //! One parser + one parity-action builder so the folds cannot drift from each
 //! other or from the initial `apply_route`.
 
-use call::TimerType;
+use call::{CallModelState, TimerType};
 
 use crate::rules::model::{RuleAction, RuleContext};
+
+/// Whether a decision fold has landed on a call already going away — the
+/// call-scoped clause of [`call::helpers::leg_is_going_away`]. A `/calls`
+/// result (route or reject, any outcome) applied to a `Terminating`/
+/// `Terminated` call is moot: the caller already holds its final, so the fold
+/// drives no forward progress — no new leg toward a callee whose caller is
+/// gone, no second final on the a-leg's completed transaction (RFC 3261
+/// §17.2.1). The termination in progress owns the teardown; a limiter INCR
+/// the dispatching callout already admitted ages out of its window.
+pub(crate) fn fold_lands_on_going_away_call(ctx: &RuleContext) -> bool {
+    matches!(
+        ctx.call.state(),
+        CallModelState::Terminating | CallModelState::Terminated
+    )
+}
 
 /// Parse a `call-failure-result` payload's `update_headers` object into the
 /// `(name, set-or-remove)` pairs the response/leg builders consume.

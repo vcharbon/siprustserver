@@ -18,17 +18,21 @@
 //!
 //!  2. The `Cancelled` event is dispatched to the SAME per-call FIFO as the
 //!     in-flight INVITE body and so queues strictly BEHIND it (`PerCallDispatcher`
-//!     runs one body at a time). When the slow decision finally returns and the
-//!     INVITE body finishes building the b-leg, the queued `handle-cancel` rule
-//!     runs next, CANCELs the freshly-created b-leg, and drives the call to
-//!     Terminated. FIFO ordering is what makes this deterministic — the cancel
-//!     can never be processed against half-built state, nor be lost because the
-//!     call did not exist yet (the INVITE body `create`s the call synchronously,
-//!     before its first `await`).
+//!     runs one body at a time), and the run loop marks the setup as CANCELed.
+//!     When the slow decision finally returns, the decision-application seam
+//!     reads the mark and DROPS the result whole (upstreamneed-069) — no b-leg is
+//!     ever built toward a callee whose caller is gone — then the queued
+//!     `handle-cancel` rule runs and drives the call to Terminated. FIFO
+//!     ordering is what makes this deterministic — the cancel can never be
+//!     processed against half-built state, nor be lost because the call did not
+//!     exist yet (the INVITE body `create`s the call synchronously, before its
+//!     first `await`).
 //!
 //! Without (2) a CANCEL arriving mid-decision could be dropped as "unroutable"
-//! (no call yet) or applied before the b-leg exists, leaking the b-leg the slow
-//! decision is about to create — the failure mode this test pins shut.
+//! (no call yet) or the landing route could dial the b-leg anyway — the failure
+//! modes this test pins shut. The decision-drop seam itself (route AND reject
+//! variants, plus the async-fold family) is pinned in
+//! `decision_lands_on_cancelled_call.rs`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -118,26 +122,24 @@ async fn cancel_during_slow_decision_tears_down_cleanly() {
     cxl.expect(200).await; // 200 OK to the CANCEL itself
     call.expect(487).await; // 487 Request Terminated on the INVITE
 
-    // ── The slow decision finally returns ─────────────────────────────────────
-    // Advance past the decision delay so the parked INVITE body resumes: it
-    // builds the b-leg and sends it to bob, then the queued `handle-cancel` runs
-    // and CANCELs that b-leg. (We advance explicitly rather than letting
-    // `bob.receive` auto-advance, because the paused runtime would otherwise trip
-    // that call's internal 2 s recv-timeout before the 5 s decision returns.)
-    // The CANCEL is HELD while bob's branch is response-less (RFC 3261 §9.1);
-    // bob's first provisional releases it.
+    // ── The slow decision finally returns — and is dropped ────────────────────
+    // The parked INVITE body resumes, reads the setup-CANCEL mark, and discards
+    // the route whole (069): bob is never dialed. The queued `handle-cancel`
+    // then terminates the call — nothing is left ringing, nothing to CANCEL.
     h.advance(DECISION_DELAY + Duration::from_secs(1)).await;
-    let mut b_inv = bob.receive("INVITE").await;
-    b_inv.respond(180, "Ringing").await;
-    let mut b_cxl = bob.receive("CANCEL").await;
-    b_cxl.respond(200, "OK").await; // 200 to the CANCEL
-    b_inv.respond(487, "Request Terminated").await; // 487 to the b-leg INVITE
-    bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
+    assert!(
+        bob.try_receive_tolerating("INVITE", &[]).await.is_none(),
+        "the dropped route must not dial a callee whose caller is gone",
+    );
+    assert_eq!(
+        b2bua.metrics().decision_dropped_cancelled_total(),
+        1,
+        "the landing decision was dropped, not applied",
+    );
 
     // ── The call must be fully reaped (active_calls -> 0) ──────────────────────
-    // The B2BUA's b-leg client txn ACKed the 487 (read above) and the call
-    // resolves to Terminated — well before the 32 s TerminatingTimeout backstop,
-    // so a 1 s settle suffices.
+    // With no b-leg pending, the queued `handle-cancel` finalizes the call
+    // immediately — well before the 32 s TerminatingTimeout backstop.
     h.advance(Duration::from_secs(1)).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     // A CANCEL racing a slow decision must still reap the call.

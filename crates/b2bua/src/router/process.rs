@@ -288,7 +288,7 @@ async fn initial_invite_turn(
         // `req.image()` is the datagram this INVITE arrived as — the only place
         // it exists (the call carries a header snapshot, not bytes), and what a
         // trace activation backfills its `sip.in` from.
-        let handled = handle_initial_invite(
+        let mut handled = handle_initial_invite(
             call.clone(),
             ctx.decision.as_ref(),
             ctx.limiter.as_ref(),
@@ -300,6 +300,24 @@ async fn initial_invite_turn(
             now_ms,
         )
         .await;
+        // ── Decision-application drop guard (069) ───────────────────────────
+        // The caller CANCELed while the decision round trip was parked: the txn
+        // layer already finalized the a-leg INVITE (200 + 487 — the
+        // transaction's ONE final, RFC 3261 §17.2.1) and the `Cancelled` event
+        // is queued right behind this turn. Whatever the decision resolved —
+        // route, reject, redirect, relay, error — is moot: drop the result
+        // whole. No b-leg launch, no authored final; the queued `handle-cancel`
+        // turn owns the termination (its Cancel CDR is what keeps the ADR-0022
+        // X2 synthesis silent). A limiter INCR the discarded route admitted
+        // ages out of its window.
+        if ctx.state.is_setup_cancelled(call_ref) {
+            ctx.metrics.bump_decision_dropped_cancelled();
+            tracing::debug!(
+                %call_ref,
+                "decision result dropped: caller CANCELed during the decision round trip"
+            );
+            handled = HandlerResult { call: call.clone(), effects: HandlerEffects::new() };
+        }
         crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(handled), now_ms, true)
     };
     Turn::Result(result)

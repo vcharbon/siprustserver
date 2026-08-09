@@ -716,6 +716,14 @@ impl B2buaSut {
             "stamp leak: {} stranded last-touched ledger entr(ies)",
             self._core.touched_count()
         );
+        // 5. the setup-CANCEL marks (the decision-application drop guard) are
+        //    cleared on every teardown path; a residue is a mark leak.
+        assert_eq!(
+            self._core.setup_cancelled_count(),
+            0,
+            "mark leak: {} stranded setup-CANCEL mark(s)",
+            self._core.setup_cancelled_count()
+        );
     }
 }
 
