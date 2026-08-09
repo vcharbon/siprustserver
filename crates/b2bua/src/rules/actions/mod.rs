@@ -23,7 +23,7 @@ mod respond;
 mod select;
 mod teardown;
 
-use call::helpers::replace_timer_by_id;
+use call::helpers::{cap_keepalive_fire_at, replace_timer_by_id};
 use call::{Call, TimerEntry, TimerType};
 use sip_txn::IdGen;
 
@@ -59,7 +59,9 @@ impl ActionExecutor<'_> {
 
     /// Arm (or re-arm) a persisted per-call timer. The ONE persisted-id recipe
     /// (`TimerType::timer_id`); every cancel site mints from the same method so
-    /// schedule/cancel can never drift.
+    /// schedule/cancel can never drift. A `Keepalive` is additionally held to the
+    /// ledger's one-interval ceiling ([`cap_keepalive_fire_at`]) — the arming half
+    /// of the invariant `router::restore_hygiene` enforces on hydrated deadlines.
     fn schedule(
         &self,
         call: &mut Call,
@@ -71,11 +73,31 @@ impl ActionExecutor<'_> {
         let id = timer_type.timer_id(leg_id.as_deref());
         let entry = TimerEntry {
             id,
+            fire_at: self.capped_fire_at(&timer_type, self.now_ms + delay_ms),
             timer_type,
-            fire_at: self.now_ms + delay_ms,
             leg_id,
         };
         call.timers = replace_timer_by_id(std::mem::take(&mut call.timers), entry.clone());
         fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
+    }
+
+    /// `fire_at` for a minted timer, with a `Keepalive` held to one keepalive
+    /// interval (the configured cadence — every arming site re-arms at exactly
+    /// that, so a farther deadline is a defect at the caller and trips here in
+    /// debug builds). Non-keepalive deadlines pass through: a policy timer
+    /// legitimately outlives a probe cadence.
+    fn capped_fire_at(&self, timer_type: &TimerType, fire_at: i64) -> i64 {
+        if !matches!(timer_type, TimerType::Keepalive) {
+            return fire_at;
+        }
+        let interval_ms = self.config.keepalive_interval_sec * 1000;
+        let capped = cap_keepalive_fire_at(fire_at, self.now_ms, interval_ms);
+        debug_assert_eq!(
+            capped,
+            fire_at,
+            "Keepalive armed beyond one interval: {} ms out of a {interval_ms} ms cadence",
+            fire_at - self.now_ms,
+        );
+        capped
     }
 }

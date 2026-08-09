@@ -2704,3 +2704,145 @@ fn an_undeclared_call_resolves_to_the_stack_set_on_every_face() {
     assert_eq!(b2bua::rules::capabilities::for_leg(&call, "a"), CapabilitySet::default());
     assert_eq!(b2bua::rules::capabilities::for_leg(&call, "b-1"), CapabilitySet::default());
 }
+
+// ── the keepalive ledger ceiling (arming side) ────────────────────────────────
+
+/// A `RuleContext` for `event` on `call` at `now_ms`, acting on the a-leg.
+fn timer_ctx<'a>(
+    call: &'a call::Call,
+    event: &'a CallEvent,
+    config: &'a B2buaConfig,
+    now_ms: i64,
+) -> RuleContext<'a> {
+    RuleContext {
+        call: RuleCall::new(call),
+        call_ref: &call.call_ref,
+        event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms,
+        config,
+    }
+}
+
+/// The `keepalive` rule's own re-arm enters the ledger at exactly the configured
+/// cadence — never farther — so no restored call can inherit a deadline the
+/// restore seam has to clamp, and a policy deadline that legitimately outlives a
+/// probe cadence (`GlobalDuration`) is untouched.
+#[test]
+fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
+    let now_ms = 1_000_000;
+    let config = B2buaConfig::default();
+    let interval_ms = config.keepalive_interval_sec * 1000;
+    let call = test_call();
+    let event = CallEvent::Timer {
+        timer_type: TimerType::Keepalive,
+        call_ref: call.call_ref.clone(),
+        leg_id: None,
+    };
+    let ctx = timer_ctx(&call, &event, &config, now_ms);
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, &call, &ctx);
+    let keepalive = ranked.iter().find(|r| r.id == "keepalive").expect("keepalive is a candidate");
+    let mut actions = (keepalive.handle)(&ctx).expect("keepalive handles its own timer").actions;
+    actions.push(RuleAction::ScheduleTimer {
+        timer_type: TimerType::GlobalDuration,
+        delay_sec: 3600,
+        leg_id: None,
+    });
+
+    let id_gen = IdGen::seeded(0x65);
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms };
+    let result = exec.execute(&actions, &call, &ctx);
+
+    let armed = result
+        .call
+        .timers
+        .iter()
+        .find(|t| t.timer_type == TimerType::Keepalive)
+        .expect("the rule re-arms the probe");
+    assert_eq!(
+        armed.fire_at,
+        now_ms + interval_ms,
+        "the probe is re-armed one cadence out, in this node's clock frame",
+    );
+    let duration = result
+        .call
+        .timers
+        .iter()
+        .find(|t| t.timer_type == TimerType::GlobalDuration)
+        .expect("the policy timer is armed");
+    assert_eq!(
+        duration.fire_at,
+        now_ms + 3_600_000,
+        "a non-keepalive deadline keeps its full delay — the ceiling is keepalive-only",
+    );
+}
+
+/// An arming site that computes a `Keepalive` deadline beyond one cadence is a
+/// defect at that site: the ledger invariant trips in debug builds instead of
+/// letting a foreign-frame deadline be persisted and replicated.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "Keepalive armed beyond one interval")]
+fn arming_a_keepalive_beyond_one_cadence_trips_the_ledger_invariant() {
+    let now_ms = 1_000_000;
+    let config = B2buaConfig::default();
+    let call = test_call();
+    let event = CallEvent::Timer {
+        timer_type: TimerType::Keepalive,
+        call_ref: call.call_ref.clone(),
+        leg_id: None,
+    };
+    let ctx = timer_ctx(&call, &event, &config, now_ms);
+    let id_gen = IdGen::seeded(0x65);
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms };
+    exec.execute(
+        &[RuleAction::ScheduleTimer {
+            timer_type: TimerType::Keepalive,
+            delay_sec: config.keepalive_interval_sec * 2,
+            leg_id: None,
+        }],
+        &call,
+        &ctx,
+    );
+}
+
+/// In release the same over-cadence deadline is clamped rather than fatal: an
+/// early probe costs nothing, a probe a cadence late costs the call its peer's
+/// keepalive tolerance.
+#[cfg(not(debug_assertions))]
+#[test]
+fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
+    let now_ms = 1_000_000;
+    let config = B2buaConfig::default();
+    let call = test_call();
+    let event = CallEvent::Timer {
+        timer_type: TimerType::Keepalive,
+        call_ref: call.call_ref.clone(),
+        leg_id: None,
+    };
+    let ctx = timer_ctx(&call, &event, &config, now_ms);
+    let id_gen = IdGen::seeded(0x65);
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms };
+    let result = exec.execute(
+        &[RuleAction::ScheduleTimer {
+            timer_type: TimerType::Keepalive,
+            delay_sec: config.keepalive_interval_sec * 2,
+            leg_id: None,
+        }],
+        &call,
+        &ctx,
+    );
+    let armed = result
+        .call
+        .timers
+        .iter()
+        .find(|t| t.timer_type == TimerType::Keepalive)
+        .expect("the probe is armed");
+    assert_eq!(
+        armed.fire_at,
+        now_ms + config.keepalive_interval_sec * 1000,
+        "the over-cadence deadline is clamped to one interval out",
+    );
+}
