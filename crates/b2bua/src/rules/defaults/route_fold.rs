@@ -89,10 +89,17 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
         features: payload
             .get("features")
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        // A core-reserved key is not a service slice and no service id may
+        // collide with it (ADR-0016) — a decision response cannot write it.
         service_ext: payload
             .get("service_ext")
             .and_then(|v| v.as_object())
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .map(|m| {
+                m.iter()
+                    .filter(|(k, _)| !crate::rules::relay::is_core_reserved_ext(k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
             .unwrap_or_default(),
         subscriptions: payload
             .get("subscriptions")
