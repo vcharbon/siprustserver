@@ -44,7 +44,13 @@ Automatic (you cannot opt out, only waive per-rule):
   without `finish()` still gets the gate via the `CseqGate` Drop backstop;
   `FailoverHarness` gates in its own Drop. `allow_violation(rule,
   justification)` is the **only** sanctioned waiver — see the default test
-  requirements in [CLAUDE.md](../../CLAUDE.md).
+  requirements in [CLAUDE.md](../../CLAUDE.md). In `failover-harness` an
+  ADR-documented *accepted* deviation is scoped in time instead:
+  `accept_rfc_deviations_from_now(rule, justification)` /
+  `resume_rfc_gate(rule)` accept the rule only on messages emitted inside the
+  window (arm it at the fault injection), list what they accepted in
+  `accepted_rfc_deviations()` + the unified report as advisory, and leave the
+  rule gating on establishment and on every fault-free scenario.
 - **Panic trace** — on any panic before `finish()`, `PanicDump` prints the
   compact wire trace to stderr. Read it before adding instrumentation.
 
