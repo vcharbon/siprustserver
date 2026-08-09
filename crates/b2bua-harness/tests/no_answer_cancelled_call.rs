@@ -15,11 +15,14 @@
 //! one. Two layers pin it here: `BeginTermination` scrubs the per-leg
 //! `NoAnswer` entries at the source, and the `no-answer` spent-check absorbs
 //! a fire that still reaches a going-away leg (the reclaim-restored shape).
+//! The third test pins the `handle-timeout` sibling: the b-leg INVITE
+//! transaction backstop firing on a caller-CANCELed leg resolves it locally.
 //!
 //! The b-leg CANCEL toward the response-less callee is HELD by sip-txn and
 //! never hits the wire (RFC 3261 §9.1, ADR-0028) — bob sees Timer-A INVITE
 //! retransmits only.
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +33,9 @@ use b2bua::decision::{
     CallDecisionEngine, CallTreatment, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
 };
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::Harness;
+use scenario_harness::{Harness, RunReport};
+use sip_message::parser::custom::CustomParser;
+use sip_message::{Method, SipMessage, SipParser};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
@@ -68,6 +73,29 @@ fn failover_capable_decision(
 
 fn reasons_of(cdr: &CdrRecord) -> Vec<String> {
     cdr.events.iter().filter_map(|e| e.reason.clone()).collect()
+}
+
+/// The distinct final statuses delivered to `to` for its initial-INVITE
+/// transaction (CSeq method INVITE) — the §17.2.1 one-final-per-transaction
+/// oracle. Retransmits of the SAME final dedup to one status; a regression's
+/// second, different final (the 480) shows up as a second element.
+fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
+    let mut statuses: Vec<u16> = report
+        .entries()
+        .iter()
+        .filter(|e| e.to == to)
+        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
+            Ok(SipMessage::Response(r))
+                if r.status() >= 200 && *r.cseq().method() == Method::Invite =>
+            {
+                Some(r.status())
+            }
+            _ => None,
+        })
+        .collect();
+    statuses.sort_unstable();
+    statuses.dedup();
+    statuses
 }
 
 /// Probe service for the reclaim shape: re-arms the b-leg's `NoAnswer` ledger
@@ -210,7 +238,12 @@ async fn no_answer_deadline_on_a_caller_cancelled_call_is_inert() {
         reasons_of(&cdrs[0]),
     );
 
-    let _report = h.finish().await;
+    let report = h.finish().await;
+    assert_eq!(
+        invite_final_statuses(&report, alice.addr()),
+        vec![487],
+        "the a-leg INVITE transaction carries exactly one final: the 487",
+    );
 }
 
 /// The reclaim shape: a stale `NoAnswer` entry restored INTO the terminating
@@ -264,5 +297,116 @@ async fn stale_no_answer_fire_during_the_terminating_window_is_absorbed() {
     );
     b2bua.assert_fully_reaped();
 
-    let _report = h.finish().await;
+    let report = h.finish().await;
+    assert_eq!(
+        invite_final_statuses(&report, alice.addr()),
+        vec![487],
+        "the a-leg INVITE transaction carries exactly one final: the 487",
+    );
+}
+
+/// The `handle-timeout` sibling of the same invariant, in-SUT: the b-leg's
+/// long INVITE transaction backstop (~158 s, sip-txn) fires on a leg the
+/// caller already CANCELed — carol rang 180, alice CANCELed just before the
+/// backstop, and carol's txn layer answered the CANCEL but the dead app never
+/// sent the 487, so the leg sits Early + `Cancelling` when the transaction
+/// dies. The fire resolves the leg locally: no `/calls/failure` consult
+/// (origin `transaction_timeout`), no second final on the a-leg's completed
+/// transaction, no second CANCEL toward the callee — and clearing
+/// `Cancelling` lets the deferred termination finalize at once instead of
+/// riding the 32 s terminating backstop.
+#[tokio::test(start_paused = true)]
+async fn invite_transaction_timeout_on_a_caller_cancelled_call_is_inert() {
+    // 1 ms transit, mirroring `cancel_200_crossing_internal`'s timeout shape.
+    let h = Harness::with_transit_delay("txn-timeout-cancelled-call", 1);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let carol = h.agent("carol", "127.0.0.1:5070").await; // rings once, then dies
+    let consults = Arc::new(AtomicUsize::new(0));
+    let consults_in = consults.clone();
+    // Failover-capable (callback_context) so the consult path is REACHABLE,
+    // but NO NoAnswer deadline: the sip-txn INVITE backstop is the fire under
+    // test. Setup deadline past it; keepalive far out; reaper off.
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_req| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.callback_context = Some("nk068-txn".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(move |_req| {
+                consults_in.fetch_add(1, Ordering::SeqCst);
+                CallTreatment::Reject(RejectDecision {
+                    reject_code: 480,
+                    reject_reason: Some("Temporarily Unavailable".into()),
+                    update_headers: None,
+                })
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.setup_timeout_sec = 300;
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&carol).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut carol_uas = carol.receive("INVITE").await;
+    carol_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    // ── the caller hangs up just before the transaction backstop ────────────
+    // The 180 keeps the b-leg's client transaction alive to its long timeout
+    // AND lets the b-leg CANCEL go on the wire (§9.1). Carol 200s the CANCEL
+    // but never sends the 487.
+    h.advance(Duration::from_secs(157)).await;
+    let mut cxl = call.cancel().await;
+    cxl.expect(200).await;
+    call.expect(487).await;
+    let mut b_cancel = carol.receive("CANCEL").await;
+    b_cancel.respond(200, "OK").await;
+
+    // ── cross exactly the 158 s transaction backstop ─────────────────────────
+    // (The terminating safety timer, armed at the CANCEL, sits at ~189 s.)
+    // Pre-fix this consulted /calls/failure and relayed its 480 onto the
+    // a-leg's completed transaction; now the leg resolves locally and
+    // finalization promotes the call immediately.
+    h.advance(Duration::from_secs(2)).await;
+    assert_eq!(consults.load(Ordering::SeqCst), 0, "no consult for an abandoned call");
+    assert!(
+        alice.try_receive_tolerating("CANCEL", &[]).await.is_none(),
+        "nothing may reach the caller after the 487",
+    );
+    assert!(
+        carol.try_receive_tolerating("CANCEL", &[]).await.is_none(),
+        "no second CANCEL toward the already-CANCELed callee",
+    );
+
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    assert_eq!(consults.load(Ordering::SeqCst), 0, "still no consult through teardown");
+    b2bua.assert_fully_reaped();
+
+    // The CDR records the CANCEL and no trace of a timeout treatment.
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    let cdrs = b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "exactly one CDR");
+    assert!(
+        cdrs[0].events.iter().any(|e| e.event_type == call::CdrEventType::Cancel),
+        "the caller's CANCEL is on the CDR: {:?}",
+        cdrs[0].events,
+    );
+    assert!(
+        !reasons_of(&cdrs[0]).iter().any(|r| r.contains("transaction_timeout")),
+        "no timeout treatment on the abandoned call: {:?}",
+        reasons_of(&cdrs[0]),
+    );
+
+    let report = h.finish().await;
+    assert_eq!(
+        invite_final_statuses(&report, alice.addr()),
+        vec![487],
+        "the a-leg INVITE transaction carries exactly one final: the 487",
+    );
 }

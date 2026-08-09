@@ -1111,6 +1111,21 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // wraps `call_release`); its error/timeout folds outcome `release`
             // → the `release-result-release` rule performs exactly this local
             // teardown, so the fail-safe is this same path.
+            //
+            // A cap crossing the terminating window (the caller BYE'd just
+            // before it, or a reclaim restored a stale entry) is SPENT: the
+            // call is already going away, so no `call_release` consult (a
+            // `reroute` outcome would dial a fresh b-leg on a terminating
+            // call) and no BeginTermination re-arm of the safety timer —
+            // absorb, and scrub the entry so a later reclaim cannot re-fire it.
+            if matches!(
+                ctx.call.state(),
+                CallModelState::Terminating | CallModelState::Terminated
+            ) {
+                return ok(vec![RuleAction::CancelTimer {
+                    id: format!("{:?}", TimerType::GlobalDuration),
+                }]);
+            }
             let answered = ctx.call.a_leg().state == LegState::Confirmed;
             if answered
                 && !ctx.call.reroute_active()

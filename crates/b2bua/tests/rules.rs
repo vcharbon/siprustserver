@@ -319,6 +319,66 @@ fn setup_timeout_fire_on_a_terminating_call_absorbs_to_cancel_only() {
     );
 }
 
+/// The `max-duration` rule's output for a `GlobalDuration` fire on `call`.
+fn max_duration_result(call: &call::Call) -> Vec<RuleAction> {
+    let event = CallEvent::Timer {
+        timer_type: TimerType::GlobalDuration,
+        call_ref: call.call_ref.clone(),
+        leg_id: None,
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, call, &ctx);
+    let max_duration =
+        ranked.iter().find(|r| r.id == "max-duration").expect("max-duration is a candidate");
+    (max_duration.handle)(&ctx).expect("max-duration handles its timer").actions
+}
+
+#[test]
+fn max_duration_fire_on_a_terminating_call_absorbs_to_cancel_only() {
+    // The cap crossing the terminating window (caller BYE'd just before it, or
+    // a reclaim restored a stale entry): even the consult-eligible shape —
+    // answered, subscribed, callback_context — is spent on a going-away call.
+    // No `call_release` consult (a `reroute` outcome would dial a fresh b-leg),
+    // no BeginTermination re-arm — absorb and scrub.
+    let mut call = test_call();
+    call.a_leg.state = LegState::Confirmed;
+    call.state = CallModelState::Terminating;
+    call.callback_context = Some("cb".into());
+    call.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
+    let actions = max_duration_result(&call);
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RuleAction::CancelTimer { id }] if id == "GlobalDuration"
+        ),
+        "absorb: exactly the spent-entry scrub, got {actions:?}",
+    );
+}
+
+#[test]
+fn max_duration_fire_on_a_live_subscribed_call_still_consults() {
+    // The going-away guard is narrow: an Active answered subscribed call's cap
+    // keeps the `call_release` consult.
+    let mut call = test_call();
+    call.a_leg.state = LegState::Confirmed;
+    call.callback_context = Some("cb".into());
+    call.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
+    let actions = max_duration_result(&call);
+    assert!(
+        actions.iter().any(|a| matches!(a, RuleAction::ReleaseAsyncHttp { .. })),
+        "live subscribed cap consults call_release, got {actions:?}",
+    );
+}
+
 #[test]
 fn begin_termination_scrubs_per_leg_no_answer_entries() {
     // Entering `terminating` cancels every per-leg NoAnswer ledger entry —
