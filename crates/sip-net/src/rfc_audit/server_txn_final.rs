@@ -23,14 +23,18 @@ use crate::rfc_audit::dialog_model::{
 use crate::types::UaRole;
 
 /// Identity of one server transaction on one lane: the sending lane, the
-/// top-Via branch and the CSeq `(number, method)` the responses answer.
+/// Call-ID, the top-Via branch and the CSeq `(number, method)` the responses
+/// answer.
 ///
 /// Branch + method is the RFC 3261 §17 transaction key — method is load-bearing
 /// because a CANCEL shares its INVITE's branch (§9.1), so a `200 OK (CANCEL)`
 /// and the `487 (INVITE)` that follows it are two transactions on one branch.
-/// The CSeq number rides along so a fixture that reuses a hard-coded branch for
-/// a second request cannot fold two transactions into one key.
-type ServerTxnKey = (LaneKey, String, u32, String);
+/// Call-ID and CSeq number ride along so a fixture that reuses a hard-coded
+/// branch across calls or requests cannot fold two transactions into one key:
+/// every response of one real server transaction repeats both, and a response
+/// bearing the wrong one is `responseCorrelation` /
+/// `responseCseqMatchesTransaction`'s finding to make.
+type ServerTxnKey = (LaneKey, String, String, u32, String);
 
 /// The finals a lane has sent on one server transaction: the first one (the
 /// status every legal retransmission repeats) and the divergent statuses already
@@ -51,6 +55,9 @@ struct FinalsSent {
 /// **authored**. A `{Proxy}`-declared bind, or a lane that forwards both
 /// directions of one Call-ID, relays whatever the upstream produced — the
 /// divergent pair is the upstream's defect and is flagged on the upstream lane.
+/// The skip has recording granularity, not per-call: a lane classified relay in
+/// ANY dialog slice is unjudged for the whole recording (the semantics
+/// [`relay_lanes`] shares with the sibling rule).
 pub struct SingleFinalPerServerTxnRule;
 
 impl CrossMessageAuditRule for SingleFinalPerServerTxnRule {
@@ -88,9 +95,15 @@ impl CrossMessageAuditRule for SingleFinalPerServerTxnRule {
             if code < 200 {
                 continue; // a provisional after the final is the sibling rule's finding
             }
-            let Some(branch) = top_via_branch(&msg).filter(|b| !b.is_empty()) else { continue };
+            let Some(branch) = top_via_branch(&msg) else { continue };
             let method = cseq_method(&msg).to_ascii_uppercase();
-            let key = (sender.clone(), branch.clone(), cseq_seq(&msg), method.clone());
+            let key = (
+                sender.clone(),
+                call_id(&msg).to_string(),
+                branch.clone(),
+                cseq_seq(&msg),
+                method.clone(),
+            );
 
             if let Some(sent) = txns.get_mut(&key) {
                 let first = sent.first;
@@ -180,6 +193,10 @@ mod tests {
     }
 
     fn req(method: &str, branch: &str, cseq: u32, ttag: Option<&str>) -> Vec<u8> {
+        req_in(method, branch, cseq, ttag, "cid-1@127.0.0.1")
+    }
+
+    fn req_in(method: &str, branch: &str, cseq: u32, ttag: Option<&str>, cid: &str) -> Vec<u8> {
         let to = match ttag {
             Some(t) => format!("<{B}>;tag={t}"),
             None => format!("<{B}>"),
@@ -189,7 +206,7 @@ mod tests {
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              From: <{A}>;tag=at\r\n\
              To: {to}\r\n\
-             Call-ID: cid-1@127.0.0.1\r\n\
+             Call-ID: {cid}\r\n\
              CSeq: {cseq} {method}\r\n\
              Max-Forwards: 70\r\n\
              Content-Length: 0\r\n\r\n"
@@ -198,6 +215,17 @@ mod tests {
     }
 
     fn resp(status: u16, cseq: u32, method: &str, ttag: &str, branch: &str) -> Vec<u8> {
+        resp_in(status, cseq, method, ttag, branch, "cid-1@127.0.0.1")
+    }
+
+    fn resp_in(
+        status: u16,
+        cseq: u32,
+        method: &str,
+        ttag: &str,
+        branch: &str,
+        cid: &str,
+    ) -> Vec<u8> {
         // Empty `ttag` ⇒ a tagless To (a 100 Trying); `;tag=` with an empty
         // value is not a wire token and even the lenient parser rejects it.
         let to = if ttag.is_empty() { format!("<{B}>") } else { format!("<{B}>;tag={ttag}") };
@@ -206,7 +234,7 @@ mod tests {
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\
              From: <{A}>;tag=at\r\n\
              To: {to}\r\n\
-             Call-ID: cid-1@127.0.0.1\r\n\
+             Call-ID: {cid}\r\n\
              CSeq: {cseq} {method}\r\n\
              Content-Length: 0\r\n\r\n"
         )
@@ -330,6 +358,70 @@ mod tests {
         let out = SingleFinalPerServerTxnRule.check(&evs);
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].0, SUT);
+    }
+
+    #[test]
+    fn each_divergent_status_is_reported_exactly_once() {
+        // The offending final retransmitted (Timer G) is ONE finding, not one
+        // per copy; a genuinely third status is still its own finding.
+        let retransmitted = vec![
+            recv(SUT, req("INVITE", "z9hG4bK-r", 1, None), ALICE, 0),
+            sent(SUT, resp(487, 1, "INVITE", "bt", "z9hG4bK-r"), ALICE, 1),
+            sent(SUT, resp(480, 1, "INVITE", "bt", "z9hG4bK-r"), ALICE, 2),
+            sent(SUT, resp(480, 1, "INVITE", "bt", "z9hG4bK-r"), ALICE, 3),
+            recv(SUT, req("ACK", "z9hG4bK-r", 1, Some("bt")), ALICE, 4),
+        ];
+        let out = SingleFinalPerServerTxnRule.check_positioned(&retransmitted);
+        assert_eq!(out.len(), 1, "one finding per divergent status, not per copy: {out:?}");
+        assert_eq!(out[0].2, Some(3), "attributed to the FIRST copy of the offending final");
+
+        let three = vec![
+            recv(SUT, req("INVITE", "z9hG4bK-r", 1, None), ALICE, 0),
+            sent(SUT, resp(487, 1, "INVITE", "bt", "z9hG4bK-r"), ALICE, 1),
+            sent(SUT, resp(480, 1, "INVITE", "bt", "z9hG4bK-r"), ALICE, 2),
+            sent(SUT, resp(480, 1, "INVITE", "bt", "z9hG4bK-r"), ALICE, 3),
+            sent(SUT, resp(486, 1, "INVITE", "bt", "z9hG4bK-r"), ALICE, 4),
+            recv(SUT, req("ACK", "z9hG4bK-r", 1, Some("bt")), ALICE, 5),
+        ];
+        let out = SingleFinalPerServerTxnRule.check_positioned(&three);
+        assert_eq!(out.len(), 2, "a third distinct status is its own finding: {out:?}");
+        assert!(out[0].1.contains("480") && out[1].1.contains("486"), "{out:?}");
+    }
+
+    #[test]
+    fn non_invite_server_txn_is_judged() {
+        // §17.2.2: the one-final rule is not INVITE-specific — a BYE server
+        // transaction answered twice with different statuses is a violation,
+        // while the retransmitted 200 is legal.
+        let diverging = vec![
+            recv(SUT, req("BYE", "z9hG4bK-n", 2, Some("bt")), ALICE, 0),
+            sent(SUT, resp(200, 2, "BYE", "bt", "z9hG4bK-n"), ALICE, 1),
+            sent(SUT, resp(481, 2, "BYE", "bt", "z9hG4bK-n"), ALICE, 2),
+        ];
+        assert_eq!(SingleFinalPerServerTxnRule.check(&diverging).len(), 1);
+
+        let retransmitted = vec![
+            recv(SUT, req("BYE", "z9hG4bK-n", 2, Some("bt")), ALICE, 0),
+            sent(SUT, resp(200, 2, "BYE", "bt", "z9hG4bK-n"), ALICE, 1),
+            sent(SUT, resp(200, 2, "BYE", "bt", "z9hG4bK-n"), ALICE, 2),
+        ];
+        assert!(SingleFinalPerServerTxnRule.check(&retransmitted).is_empty());
+    }
+
+    #[test]
+    fn two_calls_reusing_one_branch_are_distinct_transactions() {
+        // Raw-injection fixtures share hard-coded branches and `CSeq 1 INVITE`;
+        // the Call-ID in the key keeps two compliant calls from folding into one
+        // transaction and false-firing this gating rule.
+        let evs = vec![
+            recv(SUT, req_in("INVITE", "z9hG4bK-1", 1, None, "call-a@h"), ALICE, 0),
+            sent(SUT, resp_in(200, 1, "INVITE", "bt", "z9hG4bK-1", "call-a@h"), ALICE, 1),
+            recv(SUT, req_in("ACK", "z9hG4bK-1", 1, Some("bt"), "call-a@h"), ALICE, 2),
+            recv(SUT, req_in("INVITE", "z9hG4bK-1", 1, None, "call-b@h"), ALICE, 3),
+            sent(SUT, resp_in(486, 1, "INVITE", "bt2", "z9hG4bK-1", "call-b@h"), ALICE, 4),
+            recv(SUT, req_in("ACK", "z9hG4bK-1", 1, Some("bt2"), "call-b@h"), ALICE, 5),
+        ];
+        assert!(SingleFinalPerServerTxnRule.check_positioned(&evs).is_empty());
     }
 
     #[test]
