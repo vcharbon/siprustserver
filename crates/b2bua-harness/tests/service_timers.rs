@@ -230,24 +230,30 @@ async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
         .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
+    let _uas = bob.receive("INVITE").await;
     // Bob stays silent — no 18x, ever.
 
     // Cross the 5 s watchdog deadline (far below the 150 s core SetupTimeout).
     h.advance(Duration::from_secs(ringwatch::DEADLINE_SEC as u64 + 1)).await;
 
-    // The service rule answered the caller and tore the call down. Bob never
-    // sent a provisional, so the SUT's Timer-A INVITE retransmits (+0.5 s,
-    // +1.5 s, +3.5 s) queued ahead of the CANCEL — all byte-identical to the
-    // original INVITE, so the §17.2 receive view (upstreamneed-034) absorbs them
-    // below the API; bob just receives the CANCEL. (Pre-034 this needed a manual
-    // `for _ in 0..3 { bob.receive("INVITE") }` drain.)
-    let mut cancel = bob.receive("CANCEL").await;
-    cancel.respond(200, "OK").await;
-    uas.respond(487, "Request Terminated").await;
-    bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
+    // The service rule answered the caller and began tearing the call down.
     let final_resp = call.expect(480).await;
     assert_eq!(final_resp.status(), 480, "service watchdog authored the caller's final");
+
+    // Bob never sent ANY response, so the b-leg CANCEL is HELD (RFC 3261 §9.1)
+    // and dies with the b-leg transaction — it never reaches the wire (bob sees
+    // only Timer-A INVITE retransmits, absorbed below the API by the §17.2
+    // receive view). The SUT's own terminating backstop reaps the silent leg;
+    // pump past it in 1 s steps.
+    let mut waited = Duration::ZERO;
+    while b2bua.active_calls() > 0 && waited < Duration::from_secs(200) {
+        h.advance(Duration::from_secs(1)).await;
+        waited += Duration::from_secs(1);
+    }
+    assert!(
+        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
+        "no CANCEL may reach a response-less b-leg branch (RFC 3261 §9.1)"
+    );
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;
     let cdrs = b2bua.cdr_records();

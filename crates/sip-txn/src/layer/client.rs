@@ -1,8 +1,9 @@
 //! RFC 3261 §17.1 client (UAC) transactions: creation on `send_request`
-//! (CANCEL/ACK go raw — they reuse their INVITE's branch), Timer A/E
-//! retransmission, Timer B/F timeout, inbound-response matching (including the
-//! non-2xx auto-ACK + Timer D hold), and per-call eviction. The server (UAS)
-//! side does NOT live here — see `layer::server`.
+//! (CANCEL/ACK go raw — they reuse their INVITE's branch; a CANCEL for a
+//! response-less INVITE txn is held until the first provisional, §9.1),
+//! Timer A/E retransmission, Timer B/F timeout, inbound-response matching
+//! (including the non-2xx auto-ACK + Timer D hold), and per-call eviction. The
+//! server (UAS) side does NOT live here — see `layer::server`.
 
 use std::net::SocketAddr;
 
@@ -38,11 +39,37 @@ impl Owner {
         // creating a client transaction for them here would DISPLACE the live INVITE
         // client txn at that shared branch — and the txn could never complete anyway
         // (CANCEL responses are passed through, an ACK elicits none). Send them raw
-        // — the same path the B2BUA already uses (OutboundTxnMode::Raw) — without
-        // touching the map. This closes the branch-collision foot-gun at its source,
-        // so the branch-only key never has to disambiguate by method.
+        // without creating a map entry. This closes the branch-collision foot-gun at
+        // its source, so the branch-only key never has to disambiguate by method.
         if msg.method() == Method::Cancel || msg.method() == Method::Ack {
-            self.send_buffer(endpoint, &buf, dest).await;
+            // RFC 3261 §9.1: a CANCEL for an INVITE client txn that has received
+            // NO response is held on the txn and flushed on the first provisional
+            // (`handle_inbound_response`). A CANCEL sent before any response is
+            // unmatchable at a UAS that has not built the server txn yet — it
+            // 481s while Timer A keeps re-ringing the callee for a call that no
+            // longer exists. If the txn instead takes a final or dies at Timer B,
+            // the held CANCEL is dropped (nothing is owed to a dead transaction).
+            let hold = msg.method() == Method::Cancel
+                && msg
+                    .top_via()
+                    .branch()
+                    .and_then(|b| self.txns.get(b))
+                    .is_some_and(|t| {
+                        t.role == TxnRole::Client
+                            && t.kind == TxnKind::Invite
+                            && t.state == TxnState::Trying
+                    });
+            if hold {
+                let branch_key = msg.top_via().branch().unwrap_or_default().to_string();
+                if let Some(txn) = self.txns.get_mut(branch_key.as_str()) {
+                    txn.held_cancel = Some((buf, dest));
+                }
+                self.metrics
+                    .cancels_held
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                self.send_buffer(endpoint, &buf, dest).await;
+            }
             let branch = msg.top_via().branch().unwrap_or_default().to_string();
             return match txn_type {
                 TxnKind::Invite => ClientTransactionHandle::Invite {
@@ -84,6 +111,7 @@ impl Owner {
             retransmit_key: None,
             timeout_key: None,
             cleanup_key: None,
+            held_cancel: None,
             retransmit_buf: None,
             retransmit_interval_ms: T1,
             retransmit_elapsed_ms: T1,
@@ -105,6 +133,22 @@ impl Owner {
                 original_request: msg,
                 destination: dest,
             },
+        }
+    }
+
+    /// Put a held CANCEL on the wire — called when its INVITE client txn takes
+    /// its first provisional (RFC 3261 §9.1 "wait for the arrival of a
+    /// provisional response before sending").
+    pub(super) async fn flush_held_cancel(
+        &self,
+        endpoint: &dyn UdpEndpoint,
+        held: Option<(Bytes, SocketAddr)>,
+    ) {
+        if let Some((buf, dest)) = held {
+            self.send_buffer(endpoint, &buf, dest).await;
+            self.metrics
+                .held_cancels_flushed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -284,14 +328,20 @@ impl Owner {
         // so leave its timer running.
         if resp.status() == 100 {
             if !branch.is_empty() {
-                let key = match self.txns.get_mut(branch) {
+                let (key, held) = match self.txns.get_mut(branch) {
                     Some(txn) if txn.role == TxnRole::Client => {
                         txn.state = TxnState::Proceeding;
-                        (txn.kind == TxnKind::Invite).then(|| txn.retransmit_key.take()).flatten()
+                        (
+                            (txn.kind == TxnKind::Invite)
+                                .then(|| txn.retransmit_key.take())
+                                .flatten(),
+                            txn.held_cancel.take(),
+                        )
                     }
-                    _ => None,
+                    _ => (None, None),
                 };
                 self.cancel_timer(key);
+                self.flush_held_cancel(endpoint, held).await;
             }
             return;
         }
@@ -321,14 +371,20 @@ impl Owner {
                     // final). INVITE stops retransmitting (§17.1.1.2); non-INVITE
                     // continues at T2 (§17.1.2.2), so only cancel retransmit for INVITE.
                     if state != TxnState::Completed {
-                        let key = match self.txns.get_mut(branch) {
+                        let (key, held) = match self.txns.get_mut(branch) {
                             Some(txn) => {
                                 txn.state = TxnState::Proceeding;
-                                (kind == TxnKind::Invite).then(|| txn.retransmit_key.take()).flatten()
+                                (
+                                    (kind == TxnKind::Invite)
+                                        .then(|| txn.retransmit_key.take())
+                                        .flatten(),
+                                    txn.held_cancel.take(),
+                                )
                             }
-                            None => None,
+                            None => (None, None),
                         };
                         self.cancel_timer(key);
+                        self.flush_held_cancel(endpoint, held).await;
                     }
                 } else if kind == TxnKind::Invite && resp.status() >= 300 {
                     // Non-2xx INVITE final: (re-)ACK hop-by-hop (RFC 3261 §17.1.1.2).
@@ -352,6 +408,13 @@ impl Owner {
                     let (r, t) = match self.txns.get_mut(branch) {
                         Some(txn) => {
                             txn.state = TxnState::Completed;
+                            // A final ends the txn — a still-held CANCEL is moot
+                            // (the UAS already rejected); drop it (§9.1).
+                            if txn.held_cancel.take().is_some() {
+                                self.metrics
+                                    .held_cancels_dropped
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
                             (txn.retransmit_key.take(), txn.timeout_key.take())
                         }
                         None => (None, None),

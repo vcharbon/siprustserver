@@ -137,8 +137,10 @@ async fn non_invite_keeps_retransmitting_after_provisional() {
 }
 
 /// A CANCEL fed through `send_request` reusing the INVITE's branch (RFC 3261
-/// §9.1) is sent RAW and must NOT displace the live INVITE client txn at that
-/// shared branch — no second, never-completing CANCEL txn is created.
+/// §9.1) goes raw once the branch has a provisional and must NOT displace the
+/// live INVITE client txn at that shared branch — no second, never-completing
+/// CANCEL txn is created. (The pre-provisional hold itself is pinned in
+/// `cancel_hold.rs`.)
 #[tokio::test(start_paused = true)]
 async fn send_request_cancel_is_raw_and_does_not_displace_the_invite() {
     let stack = Stack::build(TRANSIT, 64, 64).await;
@@ -150,6 +152,10 @@ async fn send_request_cancel_is_raw_and_does_not_displace_the_invite() {
         .await
         .unwrap();
     assert_eq!(active(&stack), 1);
+    // A provisional lands first, so the CANCEL below owes no §9.1 wait.
+    stack
+        .inject(&response_bytes(180, "Ringing", "INVITE", branch, "handle-shape-test", true))
+        .await;
     elapse_ms(60).await;
     let _ = stack.drain_peer(); // the initial INVITE
 
@@ -162,13 +168,6 @@ async fn send_request_cancel_is_raw_and_does_not_displace_the_invite() {
     elapse_ms(60).await;
     assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "CANCEL sent raw");
     assert_eq!(active(&stack), 1, "INVITE txn not displaced; no CANCEL txn created");
-
-    // The INVITE's Timer-A retransmit still fires → its txn is intact, not displaced.
-    elapse_ms(700).await;
-    assert!(
-        count_requests(&stack.drain_peer(), "INVITE") >= 1,
-        "INVITE retransmit intact (the CANCEL did not displace it)"
-    );
 }
 
 // ── Client timeout (Timer B) ────────────────────────────────────────────────
