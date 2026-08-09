@@ -314,6 +314,32 @@ pub async fn settle_until(cond: impl Fn() -> bool) {
     }
 }
 
+/// The distinct final statuses delivered to `to` for its initial-INVITE
+/// transaction (CSeq method INVITE) — the RFC 3261 §17.2.1
+/// one-final-per-transaction oracle shared by the cancelled-call scenarios
+/// (068/069 family). Retransmits of the SAME final dedup to one status; a
+/// regression's second, different final shows up as a second element.
+pub fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{Method, SipMessage, SipParser};
+    let mut statuses: Vec<u16> = report
+        .entries()
+        .iter()
+        .filter(|e| e.to == to)
+        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
+            Ok(SipMessage::Response(r))
+                if r.status() >= 200 && *r.cseq().method() == Method::Invite =>
+            {
+                Some(r.status())
+            }
+            _ => None,
+        })
+        .collect();
+    statuses.sort_unstable();
+    statuses.dedup();
+    statuses
+}
+
 /// A running B2BUA bound on the harness fabric. Keep it alive for the duration
 /// of the scenario (drop tears the worker tasks down with the endpoint).
 pub struct B2buaSut {
@@ -715,6 +741,14 @@ impl B2buaSut {
             0,
             "stamp leak: {} stranded last-touched ledger entr(ies)",
             self._core.touched_count()
+        );
+        // 5. the setup-CANCEL marks (the decision-application drop guard) are
+        //    cleared on every teardown path; a residue is a mark leak.
+        assert_eq!(
+            self._core.setup_cancelled_count(),
+            0,
+            "mark leak: {} stranded setup-CANCEL mark(s)",
+            self._core.setup_cancelled_count()
         );
     }
 }

@@ -10,7 +10,10 @@ use call::{ByeDisposition, CdrEventType, Direction, CallModelState, LegDispositi
 
 use crate::rules::model::{CORE_LAYER, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult};
 
-use super::route_fold::{parse_header_updates, parse_route_fold, route_fold_parity_actions};
+use super::route_fold::{
+    fold_lands_on_going_away_call, parse_header_updates, parse_route_fold,
+    route_fold_parity_actions,
+};
 
 fn rule(
     id: &'static str,
@@ -570,6 +573,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .topic("call-failure-result")
                 .outcome("failover"),
             |ctx| {
+                // Fold landed on a going-away call (069): the caller already
+                // holds its final — drop whole, no leg toward a caller-less
+                // callee (see `fold_lands_on_going_away_call`).
+                if fold_lands_on_going_away_call(ctx) {
+                    return ok(vec![]);
+                }
                 let payload = match ctx.event {
                     crate::event::CallEvent::InternalEvent { payload, .. } => payload,
                     _ => return None,
@@ -618,6 +627,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .topic("call-failure-result")
                 .outcome("terminate"),
             |ctx| {
+                // Fold landed on a going-away call (069): the caller already
+                // holds its final — no relayed failure, no re-termination.
+                if fold_lands_on_going_away_call(ctx) {
+                    return ok(vec![]);
+                }
                 let payload = match ctx.event {
                     crate::event::CallEvent::InternalEvent { payload, .. } => payload,
                     _ => return None,
@@ -645,6 +659,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .topic("call-failure-result")
                 .outcome("reject"),
             |ctx| {
+                // Fold landed on a going-away call (069): no second final on
+                // the a-leg's completed transaction (RFC 3261 §17.2.1).
+                if fold_lands_on_going_away_call(ctx) {
+                    return ok(vec![]);
+                }
                 let payload = match ctx.event {
                     crate::event::CallEvent::InternalEvent { payload, .. } => payload,
                     _ => return None,
@@ -671,6 +690,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .topic("call-failure-result")
                 .outcome("redirect"),
             |ctx| {
+                // Fold landed on a going-away call (069): no second final on
+                // the a-leg's completed transaction (RFC 3261 §17.2.1).
+                if fold_lands_on_going_away_call(ctx) {
+                    return ok(vec![]);
+                }
                 let payload = match ctx.event {
                     crate::event::CallEvent::InternalEvent { payload, .. } => payload,
                     _ => return None,

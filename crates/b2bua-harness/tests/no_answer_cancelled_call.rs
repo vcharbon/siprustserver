@@ -22,7 +22,6 @@
 //! never hits the wire (RFC 3261 §9.1, ADR-0028) — bob sees Timer-A INVITE
 //! retransmits only.
 
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,10 +31,8 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallTreatment, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
 };
-use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, RunReport};
-use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipMessage, SipParser};
+use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut};
+use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
@@ -73,29 +70,6 @@ fn failover_capable_decision(
 
 fn reasons_of(cdr: &CdrRecord) -> Vec<String> {
     cdr.events.iter().filter_map(|e| e.reason.clone()).collect()
-}
-
-/// The distinct final statuses delivered to `to` for its initial-INVITE
-/// transaction (CSeq method INVITE) — the §17.2.1 one-final-per-transaction
-/// oracle. Retransmits of the SAME final dedup to one status; a regression's
-/// second, different final (the 480) shows up as a second element.
-fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
-    let mut statuses: Vec<u16> = report
-        .entries()
-        .iter()
-        .filter(|e| e.to == to)
-        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
-            Ok(SipMessage::Response(r))
-                if r.status() >= 200 && *r.cseq().method() == Method::Invite =>
-            {
-                Some(r.status())
-            }
-            _ => None,
-        })
-        .collect();
-    statuses.sort_unstable();
-    statuses.dedup();
-    statuses
 }
 
 /// Probe service for the reclaim shape: re-arms the b-leg's `NoAnswer` ledger
