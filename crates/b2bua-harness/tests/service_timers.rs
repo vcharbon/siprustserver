@@ -243,13 +243,13 @@ async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     // Bob never sent ANY response, so the b-leg CANCEL is HELD (RFC 3261 §9.1)
     // and dies with the b-leg transaction — it never reaches the wire (bob sees
     // only Timer-A INVITE retransmits, absorbed below the API by the §17.2
-    // receive view). The SUT's own terminating backstop reaps the silent leg;
-    // pump past it in 1 s steps.
-    let mut waited = Duration::ZERO;
-    while b2bua.active_calls() > 0 && waited < Duration::from_secs(200) {
-        h.advance(Duration::from_secs(1)).await;
-        waited += Duration::from_secs(1);
-    }
+    // receive view). The terminating backstop (armed at BeginTermination) reaps
+    // the silent leg — advance exactly past it, so a regression that falls back
+    // to the 150 s SetupTimeout fails here instead of passing under a longer pump.
+    h.advance(Duration::from_millis(
+        call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000,
+    ))
+    .await;
     assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
         "no CANCEL may reach a response-less b-leg branch (RFC 3261 §9.1)"

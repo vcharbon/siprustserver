@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 
 use layer_harness::{LaneKey, Stamped};
 use sip_message::header::{HeaderValue, RecordRouteEntry, RouteEntry};
-use sip_message::{SipMessage, SipParser, SipRequest};
+use sip_message::{sniff, SipMessage, SipParser, SipRequest};
 
 use crate::contracts::SignalingNetworkEvent;
 
@@ -410,8 +410,9 @@ pub fn invite_forwarder_lanes(
             }
             _ => continue,
         };
-        // Cheap prefix gate before parsing — only initial INVITEs matter.
-        if !raw.starts_with(b"INVITE ") {
+        // Cheap method gate before parsing — only initial INVITEs matter. Raw
+        // scanning is sip-message's job (`sniff` is the only home for it).
+        if !sniff::req_method(raw).is_some_and(|m| m == "INVITE") {
             continue;
         }
         let side = if is_sent { &mut sent } else { &mut received };

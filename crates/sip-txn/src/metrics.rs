@@ -37,6 +37,10 @@ pub(crate) struct MetricsInner {
     /// Held CANCELs discarded because the txn ended without a provisional
     /// (final response, Timer B, call evict) — no CANCEL was owed.
     pub held_cancels_dropped: AtomicU64,
+    /// CANCELs suppressed at send because their INVITE client txn had already
+    /// taken its final (Completed) — §9.1/§9.2: a CANCEL has no effect on an
+    /// answered request; sending it would put a pre-1xx CANCEL on the wire.
+    pub cancels_suppressed_on_final: AtomicU64,
     /// RFC 3261 §17.2.1 Timer-G retransmissions of an INVITE server txn's non-2xx
     /// final (the reject the caller has not yet ACKed). Zero under no loss (the ACK
     /// beats the 500 ms Timer G); a climb tracks loss on the caller-facing reject
@@ -68,6 +72,7 @@ impl MetricsInner {
             cancels_held: AtomicU64::new(0),
             held_cancels_flushed: AtomicU64::new(0),
             held_cancels_dropped: AtomicU64::new(0),
+            cancels_suppressed_on_final: AtomicU64::new(0),
             server_final_retransmits: AtomicU64::new(0),
             parse_errors: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
@@ -160,6 +165,11 @@ impl TransactionMetrics {
     /// Held CANCELs discarded with their transaction (final / Timer B / evict).
     pub fn held_cancels_dropped(&self) -> u64 {
         self.inner.held_cancels_dropped.load(Ordering::Relaxed)
+    }
+
+    /// CANCELs suppressed at send: the INVITE txn had already taken its final.
+    pub fn cancels_suppressed_on_final(&self) -> u64 {
+        self.inner.cancels_suppressed_on_final.load(Ordering::Relaxed)
     }
 
     /// Timer-G retransmissions of an INVITE server txn's unACKed non-2xx final

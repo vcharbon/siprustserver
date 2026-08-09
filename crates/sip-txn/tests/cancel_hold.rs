@@ -209,3 +209,41 @@ async fn cancel_after_provisional_passes_straight_through() {
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn cancel_racing_a_completed_final_is_suppressed() {
+    let stack = Stack::build(5, 64, 64).await;
+    let branch = "z9hG4bK-race-486";
+
+    stack
+        .txn
+        .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+    elapse_ms(20).await;
+
+    // The callee rejects with no provisional ever: the txn takes its final
+    // (Completed, Timer-D hold) and the layer auto-ACKs it.
+    stack
+        .inject(&response_bytes(486, "Busy Here", "INVITE", branch, "handle-shape-test", true))
+        .await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
+
+    // A CANCEL emitted after the final (the TU's turn raced the 486) is
+    // suppressed — §9.1/§9.2: the UAS already answered, and sending it would
+    // put a pre-1xx CANCEL on the wire.
+    stack
+        .txn
+        .send_request(outbound_request("CANCEL", branch), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+    elapse_ms(20).await;
+    assert_eq!(
+        count_requests(&stack.drain_peer(), "CANCEL"),
+        0,
+        "a CANCEL for a Completed INVITE client txn never reaches the wire"
+    );
+    assert_eq!(stack.txn.metrics().cancels_suppressed_on_final(), 1);
+    assert_eq!(stack.txn.metrics().cancels_held(), 0);
+}

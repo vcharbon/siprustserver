@@ -166,6 +166,13 @@ impl Owner {
             self.cancel_timer(old.timeout_key);
             self.cancel_timer(old.cleanup_key);
             self.untrack_call_ref(&old.call_ref, &branch);
+            // The displaced txn's held CANCEL dies with it — counted so the
+            // held counters reconcile (held == flushed + dropped).
+            if old.held_cancel.is_some() {
+                self.metrics
+                    .held_cancels_dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         self.track_call_ref(&new_call_ref, &branch);
         self.sync_active();

@@ -5,7 +5,7 @@
 //! retransmits keep ringing a call that no longer exists. The transaction layer
 //! holds the CANCEL and flushes it on the first provisional; a branch that
 //! never draws one owes no CANCEL at all (`sip-txn/tests/cancel_hold.rs` pins
-//! the layer seam; this pins the end-to-end callflow).
+//! the layer seam; this pins the end-to-end callflow). Decision: ADR-0028.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,15 +89,14 @@ async fn b_leg_cancel_is_dropped_when_callee_stays_silent() {
     cxl.expect(200).await;
     call.expect(487).await;
 
-    // Advance past the SUT's own dead-call detection (the terminating safety
-    // window), pumping in 1 s steps until the call is released.
-    let mut waited = Duration::ZERO;
-    while b2bua.metrics().removals_total() < b2bua.metrics().creations_total()
-        && waited < Duration::from_secs(200)
-    {
-        h.advance(Duration::from_secs(1)).await;
-        waited += Duration::from_secs(1);
-    }
+    // The terminating backstop (armed when the caller's CANCEL moved the call
+    // to Terminating) is the deadline that reaps the silent b-leg — advance
+    // exactly past it, so a regression that falls back to the 150 s
+    // SetupTimeout fails here instead of passing under a longer pump.
+    h.advance(Duration::from_millis(
+        call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000,
+    ))
+    .await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
 
     // The branch never drew a provisional: the CANCEL died with the txn and

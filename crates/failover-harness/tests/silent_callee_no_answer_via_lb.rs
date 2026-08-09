@@ -19,6 +19,8 @@
 //! fires the worker CANCELs the ringing b-leg — a CANCEL the transaction layer
 //! HOLDS (RFC 3261 §9.1: the branch never drew a provisional), so it never
 //! reaches the wire; the callee's `200 OK` then resolves the `Cancelling` leg.
+//! The never-CANCELable 100-only b-leg behind the LB is an accepted design
+//! consequence — ADR-0028 X2.
 //!
 //! What `f14bb06` bought here: a leg in the `Cancelling` disposition is NOT
 //! resolved (`call::helpers::leg_is_resolved`), so finalization HOLDS the call

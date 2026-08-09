@@ -49,26 +49,57 @@ impl Owner {
             // 481s while Timer A keeps re-ringing the callee for a call that no
             // longer exists. If the txn instead takes a final or dies at Timer B,
             // the held CANCEL is dropped (nothing is owed to a dead transaction).
-            let hold = msg.method() == Method::Cancel
-                && msg
-                    .top_via()
-                    .branch()
-                    .and_then(|b| self.txns.get(b))
-                    .is_some_and(|t| {
-                        t.role == TxnRole::Client
-                            && t.kind == TxnKind::Invite
-                            && t.state == TxnState::Trying
-                    });
-            if hold {
-                let branch_key = msg.top_via().branch().unwrap_or_default().to_string();
-                if let Some(txn) = self.txns.get_mut(branch_key.as_str()) {
-                    txn.held_cancel = Some((buf, dest));
+            // A CANCEL whose txn already took its final (Completed, Timer-D hold)
+            // is suppressed outright: §9.1/§9.2 — a CANCEL has no effect on a
+            // request the UAS already answered, and sending it puts a pre-1xx
+            // CANCEL on the wire when the final raced the caller's decision.
+            // A CANCEL matching NO txn is still sent raw: an absent txn is not
+            // proof the INVITE ended — a takeover-restored call CANCELs a b-leg
+            // whose INVITE client txn lived on the failed peer, and dropping it
+            // would orphan a protected ringing callee (ADR-0014).
+            #[derive(PartialEq)]
+            enum CancelGate {
+                Hold,
+                Suppress,
+                Send,
+            }
+            let gate = if msg.method() == Method::Cancel {
+                match msg.top_via().branch().and_then(|b| self.txns.get(b)) {
+                    Some(t) if t.role == TxnRole::Client && t.kind == TxnKind::Invite => {
+                        match t.state {
+                            TxnState::Trying => CancelGate::Hold,
+                            TxnState::Completed => CancelGate::Suppress,
+                            _ => CancelGate::Send,
+                        }
+                    }
+                    _ => CancelGate::Send,
                 }
-                self.metrics
-                    .cancels_held
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             } else {
-                self.send_buffer(endpoint, &buf, dest).await;
+                CancelGate::Send
+            };
+            match gate {
+                CancelGate::Hold => {
+                    let branch_key = msg.top_via().branch().unwrap_or_default().to_string();
+                    if let Some(txn) = self.txns.get_mut(branch_key.as_str()) {
+                        // A newer CANCEL supersedes a still-held one — count the
+                        // displaced datagram so held counters reconcile
+                        // (held == flushed + dropped).
+                        if txn.held_cancel.replace((buf, dest)).is_some() {
+                            self.metrics
+                                .held_cancels_dropped
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    self.metrics
+                        .cancels_held
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                CancelGate::Suppress => {
+                    self.metrics
+                        .cancels_suppressed_on_final
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                CancelGate::Send => self.send_buffer(endpoint, &buf, dest).await,
             }
             let branch = msg.top_via().branch().unwrap_or_default().to_string();
             return match txn_type {
@@ -328,8 +359,13 @@ impl Owner {
         // so leave its timer running.
         if resp.status() == 100 {
             if !branch.is_empty() {
+                // Like the 1xx>100 path: a late 100 must not downgrade a txn
+                // that already took its final (Completed holds for Timer D).
                 let (key, held) = match self.txns.get_mut(branch) {
-                    Some(txn) if txn.role == TxnRole::Client => {
+                    Some(txn)
+                        if txn.role == TxnRole::Client
+                            && txn.state != TxnState::Completed =>
+                    {
                         txn.state = TxnState::Proceeding;
                         (
                             (txn.kind == TxnKind::Invite)
