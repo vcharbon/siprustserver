@@ -8,11 +8,17 @@
 //! what a refusal is diagnosed and billed on: the `Warning` behind the status
 //! code, the charging correlation, the vendor's own annotation of why.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
+use b2bua::limiter::CallLimiter;
+use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut, BOB_PORT};
+use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use sip_clock::Clock;
 use sip_message::header::HeaderName;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -256,6 +262,129 @@ async fn a_superseded_attempts_headers_do_not_answer_a_later_no_answer() {
         raw("P-Charging-Vector"),
         Vec::<String>::new(),
         "no charging correlation for a leg that produced no final"
+    );
+
+    settle_until(|| s.b2bua.active_calls() == 0).await;
+    s.b2bua.assert_fully_reaped();
+    let _report = s.finish().await;
+}
+
+/// A plan-authored redirect is a new instruction, not a relayed refusal: RFC
+/// 3261 §20.33 gives `Retry-After` a per-status meaning (on a 3xx it declares
+/// the redirect Contact's validity, not when the refusing callee frees up),
+/// so nothing the refusing peer stated rides the 302.
+#[tokio::test(start_paused = true)]
+async fn a_plan_authored_redirect_carries_none_of_the_refusals_headers() {
+    let s = plan_scene("failure-hdr-redirect").await;
+    let plan = plan(serde_json::json!({
+        "action": "redirect", "code": 302, "reason": "Moved Temporarily",
+        "contacts": [{"uri": "sip:backup@10.9.9.9:5062"}]
+    }));
+
+    let mut call =
+        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    s.bob
+        .receive("INVITE")
+        .await
+        .respond(486, "Busy Here")
+        .with_header("Warning", "399 gw.example \"Refused by ISUP\"")
+        .with_header("Retry-After", "3600")
+        .with_header("P-Charging-Vector", "icid-value=\"cv-bleg-4\"")
+        .await;
+    s.bob.receive("ACK").await;
+
+    let resp = call.expect(302).await;
+    let raw = |name: &str| -> Vec<String> {
+        resp.raw(HeaderName::from(name)).map(str::to_string).collect()
+    };
+    let contacts = raw("Contact");
+    assert_eq!(contacts.len(), 1, "the redirect carries its authored Contact");
+    assert!(
+        contacts[0].contains("sip:backup@10.9.9.9:5062"),
+        "the Contact names the plan's target: {contacts:?}"
+    );
+    assert_eq!(
+        raw("Retry-After"),
+        Vec::<String>::new(),
+        "a relayed Retry-After would redeclare the Contact's validity (RFC 3261 §20.33)"
+    );
+    assert_eq!(raw("Warning"), Vec::<String>::new(), "the redirect explains no refusal");
+    assert_eq!(
+        raw("P-Charging-Vector"),
+        Vec::<String>::new(),
+        "a new instruction correlates no peer's charging"
+    );
+
+    settle_until(|| s.b2bua.active_calls() == 0).await;
+    s.b2bua.assert_fully_reaped();
+    let _report = s.finish().await;
+}
+
+/// A resolution reached through the router's `call_limiter` re-consult answers
+/// the limiter refusal, not the failed peer's final: bob refuses with the full
+/// diagnostic set, the plan fails over to a hop whose limiter entry is already
+/// over cap, and the plan's exhaustion reject reaches alice — carrying nothing
+/// bob said about a gateway this failure is not about.
+#[tokio::test(start_paused = true)]
+async fn a_capacity_refusal_carries_none_of_the_failed_peers_headers() {
+    let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+    let http = SimulatedHttpNetwork::new();
+    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+    let _lh: Box<dyn HttpServerHandle> = http.serve(laddr, server).await.unwrap();
+    let limiter: Arc<dyn CallLimiter> = Arc::new(HttpCallLimiter::new(
+        Arc::new(http.clone()),
+        laddr,
+        Duration::from_millis(150),
+    ));
+    let s = B2buaScene::with_b2bua("failure-hdr-limiter-refusal", move |_bob_port| {
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::numbering_plan())).limiter(limiter)
+    })
+    .await;
+    // The failover hop's limiter entry admits nothing, so its refusal — not a
+    // peer final — is what exhausts the plan (carol is never dialed).
+    let plan = serde_json::json!({
+        "routes": [
+            {"destination": {"host": "127.0.0.1", "port": BOB_PORT}},
+            {
+                "destination": {"host": "127.0.0.1", "port": CAROL_PORT},
+                "call_limiter": [{"id": "capacity-trunk", "limit": 0}],
+            },
+        ],
+        "on_exhausted": {"action": "reject", "code": 480, "reason": "Temporarily Unavailable"},
+    })
+    .to_string();
+
+    let mut call =
+        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    s.bob
+        .receive("INVITE")
+        .await
+        .respond(486, "Busy Here")
+        .with_header("Warning", "399 gw.example \"Refused by ISUP\"")
+        .with_header("Retry-After", "300")
+        .with_header("P-Charging-Vector", "icid-value=\"cv-bleg-5\"")
+        .await;
+    s.bob.receive("ACK").await;
+
+    let resp = call.expect(480).await;
+    let raw = |name: &str| -> Vec<String> {
+        resp.raw(HeaderName::from(name)).map(str::to_string).collect()
+    };
+    assert_eq!(
+        raw("Warning"),
+        Vec::<String>::new(),
+        "bob's Warning does not explain the stack's own capacity statement"
+    );
+    assert_eq!(
+        raw("Retry-After"),
+        Vec::<String>::new(),
+        "a relayed Retry-After would speak for a gateway this failure is not about"
+    );
+    assert_eq!(
+        raw("P-Charging-Vector"),
+        Vec::<String>::new(),
+        "a capacity refusal correlates no peer's charging"
     );
 
     settle_until(|| s.b2bua.active_calls() == 0).await;

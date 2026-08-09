@@ -65,8 +65,13 @@ pub async fn apply_route(
     // parity, same as `features`).
     call.subscriptions = route.subscriptions.clone();
 
-    // Seed per-service ext slices (service-layer activation gate).
+    // Seed per-service ext slices (service-layer activation gate). A
+    // core-reserved key is not a service slice and no service id may collide
+    // with it (ADR-0016) — a decision response cannot write it.
     for (service_id, value) in route.service_ext {
+        if crate::rules::relay::is_core_reserved_ext(&service_id) {
+            continue;
+        }
         call = set_call_ext(call, &service_id, Some(value));
     }
 

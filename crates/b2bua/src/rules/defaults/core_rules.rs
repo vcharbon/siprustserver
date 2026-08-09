@@ -402,6 +402,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         status_code: Some(200),
                         reason: None,
                     },
+                    // The failure-headers image is consult-scoped (ADR-0017
+                    // X2); an answered call carries none of it in replicated
+                    // state.
+                    RuleAction::MergeCallExt {
+                        ext: crate::rules::relay::failure_headers_ext(None),
+                    },
                 ];
                 // RFC 3261 §13.3.1.4: arm the a-leg 2xx-without-ACK watchdog. The
                 // a-leg INVITE *server* txn went `Completed` on this final, so the

@@ -12,8 +12,10 @@ use super::passthrough::relay_response_passthrough_headers;
 /// trip IN FLIGHT — the `/call/failure` consult the caller is still waiting on.
 /// **Every** consult restates it, empty when that failure produced no peer
 /// final (a no-answer or transaction timeout), so a superseded attempt's
-/// headers can never outlive their own failure; only the final answering that
-/// consult folds it, under the decision's `header_updates` (ADR-0017 X2).
+/// headers can never outlive their own failure; an answer (`confirm-dialog`)
+/// clears it, so an established call replicates none of it. Only the final
+/// answering that consult folds it, under the decision's `header_updates`
+/// (ADR-0017 X2).
 pub const RELAYED_FAILURE_HEADERS_EXT: &str = "relayed-failure-headers";
 
 /// Is this `Call.ext` key the CORE's own slot rather than a service id? A
