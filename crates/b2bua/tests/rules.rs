@@ -183,6 +183,198 @@ fn no_answer_fire_on_own_pending_leg_fires_despite_other_leg_confirmed() {
 }
 
 #[test]
+fn no_answer_fire_on_a_cancelling_leg_absorbs_to_cancel_only() {
+    // A caller CANCEL leaves the b-leg at state=Trying, disposition=Cancelling
+    // (upstreamneed-068): state alone reads "still awaiting an answer", but the
+    // leg is already going away — the fire must not consult /calls/failure nor
+    // author a second final on the a-leg's completed transaction.
+    let mut call = test_call();
+    call.callback_context = Some("cb".into());
+    let mut b = b_leg_pending();
+    b.disposition = LegDisposition::Cancelling;
+    call = call::helpers::add_b_leg(call, b);
+    let actions = no_answer_result(&call, "b-1");
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RuleAction::CancelTimer { id }] if id == "NoAnswer:b-1"
+        ),
+        "absorb: exactly the canonical per-leg scrub, got {actions:?}",
+    );
+}
+
+#[test]
+fn no_answer_fire_on_a_terminating_call_absorbs_to_cancel_only() {
+    // Call-scoped discriminator: once the call is Terminating, no leg awaits an
+    // answer — a fire (e.g. a reclaim-restored stale entry) is spent even when
+    // the named leg's own disposition never recorded the CANCEL.
+    let mut call = test_call();
+    call.callback_context = Some("cb".into());
+    call.state = CallModelState::Terminating;
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+    let actions = no_answer_result(&call, "b-1");
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RuleAction::CancelTimer { id }] if id == "NoAnswer:b-1"
+        ),
+        "absorb: exactly the canonical per-leg scrub, got {actions:?}",
+    );
+}
+
+/// The `handle-timeout` rule's output for a b-leg INVITE transaction timeout
+/// naming `leg_id` on `call`.
+fn handle_timeout_result(call: &call::Call, leg_id: &str) -> Vec<RuleAction> {
+    let event = CallEvent::Timeout {
+        branch: "z9hG4bKb1".into(),
+        call_ref: Some(call.call_ref.clone()),
+        leg_id: Some(leg_id.into()),
+        method: Some("INVITE".into()),
+        destination: None,
+        timeout_kind: sip_txn::TimeoutKind::Transaction,
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: leg_id,
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, call, &ctx);
+    let handle_timeout =
+        ranked.iter().find(|r| r.id == "handle-timeout").expect("handle-timeout is a candidate");
+    (handle_timeout.handle)(&ctx).expect("handle-timeout handles the timeout").actions
+}
+
+#[test]
+fn invite_timeout_on_a_cancelling_leg_resolves_locally_without_consult() {
+    // A pending b-leg whose CANCEL is in flight owes nothing to its dead
+    // INVITE transaction: the timeout resolves the leg locally — no
+    // /calls/failure consult, no BeginTermination re-arm of the safety timer.
+    let mut call = test_call();
+    call.callback_context = Some("cb".into());
+    call.state = CallModelState::Terminating;
+    let mut b = b_leg_pending();
+    b.disposition = LegDisposition::Cancelling;
+    call = call::helpers::add_b_leg(call, b);
+    let actions = handle_timeout_result(&call, "b-1");
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RuleAction::TerminateLeg { leg_id, bye_disposition: Some(call::ByeDisposition::Cancelled) }]
+                if leg_id == "b-1"
+        ),
+        "going-away leg resolves locally on its timeout, got {actions:?}",
+    );
+}
+
+#[test]
+fn invite_timeout_on_a_live_pending_leg_still_consults() {
+    // The going-away guard is narrow: a live pending b-leg's transaction
+    // timeout keeps the failover consult.
+    let mut call = test_call();
+    call.callback_context = Some("cb".into());
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+    let actions = handle_timeout_result(&call, "b-1");
+    assert!(
+        actions.iter().any(|a| matches!(a, RuleAction::FailureAsyncHttp { .. })),
+        "live pending b-leg timeout consults /calls/failure, got {actions:?}",
+    );
+}
+
+#[test]
+fn setup_timeout_fire_on_a_terminating_call_absorbs_to_cancel_only() {
+    // A terminating call authors no new final on the a-leg's completed
+    // transaction: the fire is spent — absorb and scrub, no 408.
+    let mut call = test_call();
+    call.state = CallModelState::Terminating;
+    let event = CallEvent::Timer {
+        timer_type: TimerType::SetupTimeout,
+        call_ref: call.call_ref.clone(),
+        leg_id: None,
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, &call, &ctx);
+    let setup_timeout =
+        ranked.iter().find(|r| r.id == "setup-timeout").expect("setup-timeout is a candidate");
+    let actions = (setup_timeout.handle)(&ctx).expect("setup-timeout handles its timer").actions;
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RuleAction::CancelTimer { id }] if id == "SetupTimeout"
+        ),
+        "absorb: exactly the spent-entry scrub, got {actions:?}",
+    );
+}
+
+#[test]
+fn begin_termination_scrubs_per_leg_no_answer_entries() {
+    // Entering `terminating` cancels every per-leg NoAnswer ledger entry —
+    // including the entry of a leg the teardown loop skips as already
+    // `Cancelling` — so the fire is stopped at the source and a reclaim cannot
+    // restore it into the terminating window.
+    let mut call = test_call();
+    let mut b = b_leg_pending();
+    b.disposition = LegDisposition::Cancelling;
+    call = call::helpers::add_b_leg(call, b);
+    let no_answer_id = TimerType::NoAnswer.timer_id(Some("b-1"));
+    call.timers.push(call::TimerEntry {
+        id: no_answer_id.clone(),
+        timer_type: TimerType::NoAnswer,
+        fire_at: 5_000,
+        leg_id: Some("b-1".into()),
+    });
+    let event = CallEvent::Cancelled {
+        call_id: call.a_leg.call_id.clone(),
+        from_tag: call.a_leg.from_tag.clone(),
+        invite_cseq: None,
+        in_dialog: false,
+        headers: vec![],
+    };
+    let config = B2buaConfig::default();
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &config,
+    };
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let result = exec.execute(
+        &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }],
+        &call,
+        &ctx,
+    );
+    assert!(
+        !result.call.timers.iter().any(|t| t.timer_type == TimerType::NoAnswer),
+        "no NoAnswer entry survives BeginTermination: {:?}",
+        result.call.timers,
+    );
+    assert!(
+        result.effects.critical.iter().any(
+            |e| matches!(e, CriticalStateEffect::CancelTimer { id } if *id == no_answer_id)
+        ),
+        "the live NoAnswer fiber is cancelled, got {:?}",
+        result.effects.critical,
+    );
+}
+
+#[test]
 fn in_dialog_bye_selects_relay_bye() {
     let call = test_call();
     // An in-dialog BYE (carries a To-tag) on the active call.

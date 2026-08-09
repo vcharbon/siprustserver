@@ -960,6 +960,21 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     && matches!(l.state, LegState::Trying | LegState::Early)
             });
             if timed_out_invite && pending_b_leg {
+                // A leg already going away (caller-CANCELed → `Cancelling`, or
+                // the whole call Terminating) makes no forward progress on its
+                // transaction timeout: no /calls/failure consult, no
+                // BeginTermination re-arm of the safety timer. The dead
+                // transaction resolves the leg locally (TerminateLeg clears
+                // `Cancelling`), letting the deferred termination finalize.
+                let going_away = ctx
+                    .source_leg()
+                    .is_some_and(|l| call::helpers::leg_is_going_away(ctx.call.state(), l));
+                if going_away {
+                    return ok(vec![RuleAction::TerminateLeg {
+                        leg_id: ctx.source_leg_id.to_string(),
+                        bye_disposition: Some(ByeDisposition::Cancelled),
+                    }]);
+                }
                 if let Some(cbctx) = ctx.call.callback_context() {
                     let leg = ctx.source_leg_id.to_string();
                     return ok(vec![
@@ -989,12 +1004,17 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // ── timers ──────────────────────────────────────────────────────────
         rule("no-answer", &[], Match::timer().timer_type(TimerType::NoAnswer), |ctx| {
             // NoAnswer is armed PER B-LEG: a fire for leg X is spent iff X is
-            // no longer awaiting an answer — Confirmed, or absent from the call
+            // no longer awaiting an answer — Confirmed, absent from the call
             // (reclaim can restore a stale entry whose cancel died with the
-            // crashed node); absorb and scrub so a later reclaim cannot
-            // re-fire it. Other legs' states are irrelevant to X's fire.
+            // crashed node), or already going away (`leg_is_going_away`: a
+            // caller-CANCELed leg still reads `Trying` while its disposition is
+            // `Cancelling`, and a terminating call makes no forward progress —
+            // no /calls/failure consult, no new final on the a-leg's completed
+            // transaction). Absorb and scrub so a later reclaim cannot re-fire
+            // it. Other legs' states are irrelevant to X's fire.
             let spent = match ctx.source_leg() {
-                Some(leg) => leg.state == LegState::Confirmed,
+                Some(leg) => leg.state == LegState::Confirmed
+                    || call::helpers::leg_is_going_away(ctx.call.state(), leg),
                 None => true,
             };
             if spent {
@@ -1038,11 +1058,18 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // is process-local and dies with a crashed node; this one survives.
         rule("setup-timeout", &[], Match::timer().timer_type(TimerType::SetupTimeout), |ctx| {
             // Answer raced the fire (e.g. a reclaim restored a stale ledger
-            // entry whose cancel was lost with the crashed node): absorb, and
-            // scrub the spent entry so a later reclaim cannot re-fire it.
+            // entry whose cancel was lost with the crashed node), or the call
+            // is already going away (a terminating call authors no new final
+            // on the a-leg's completed transaction): absorb, and scrub the
+            // spent entry so a later reclaim cannot re-fire it.
             let answered = ctx.call.a_leg().state == LegState::Confirmed
                 || ctx.call.b_legs().iter().any(|b| b.state == LegState::Confirmed);
-            if answered {
+            let spent = answered
+                || matches!(
+                    ctx.call.state(),
+                    CallModelState::Terminating | CallModelState::Terminated
+                );
+            if spent {
                 return ok(vec![RuleAction::CancelTimer {
                     id: format!("{:?}", TimerType::SetupTimeout),
                 }]);
