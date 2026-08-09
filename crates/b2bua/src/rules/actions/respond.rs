@@ -94,8 +94,8 @@ impl ActionExecutor<'_> {
     /// When this final answers the `/call/failure` consult, the failing b-leg
     /// final's relayable headers ride UNDER the decision's own statements: a
     /// `header_updates` entry naming a header — set or removal — owns that name
-    /// (X2 precedence). A refused redirect is the stack's own diagnosis, so it
-    /// carries none of them.
+    /// (X2 precedence). A redirect (3xx) and a refused redirect are new
+    /// instructions, not relayed refusals, so they carry none of them.
     pub(super) fn respond_to_a_leg(
         &self,
         call: &mut Call,
@@ -121,7 +121,12 @@ impl ActionExecutor<'_> {
                     (500, err.to_string(), Vec::new(), true)
                 }
             };
-        if !refused {
+        // A 3xx is a new instruction, not a relayed refusal: RFC 3261 §20.33
+        // gives `Retry-After` a per-status meaning (on a 3xx it declares the
+        // redirect Contact's validity, not when the refusing callee frees up),
+        // so a plan-authored redirect carries none of the peer's image — like
+        // the refused-redirect 500, it speaks only for itself.
+        if !refused && !(300..400).contains(&status) {
             for h in failure_headers_answering(ctx, call) {
                 let name = HeaderName::from(h.name.as_str());
                 if !header_updates.iter().any(|(n, _)| name.matches(n)) {
@@ -428,11 +433,14 @@ pub(super) struct AuthoredFinal<'a> {
 /// `/call/failure` consult the image belongs to — the `call-failure-result`
 /// event. A setup deadline, a capacity refusal or a media-service failure mints
 /// its own diagnosis about a peer that is not the one being answered, so it
-/// carries none of them.
+/// carries none of them: a fold whose `origin` is `call_limiter` resolved a
+/// limiter refusal (the router's re-consult / terminal 486), not the peer's
+/// final, and folds nothing.
 fn failure_headers_answering(ctx: &RuleContext, call: &Call) -> Vec<SipHeader> {
     match ctx.event {
-        crate::event::CallEvent::InternalEvent { topic, .. }
-            if topic == "call-failure-result" =>
+        crate::event::CallEvent::InternalEvent { topic, payload, .. }
+            if topic == "call-failure-result"
+                && payload.get("origin").and_then(|v| v.as_str()) != Some("call_limiter") =>
         {
             relay::relayed_failure_headers(call.ext.as_ref())
         }

@@ -192,6 +192,11 @@ struct FailureRejectPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     update_headers: Option<SipHeaderUpdates>,
     failed_leg_id: String,
+    /// `call_limiter` when this resolution answers a limiter refusal rather
+    /// than the failed peer's final — the a-facing mint then carries none of
+    /// the peer's relayed headers (ADR-0017 X2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -210,6 +215,9 @@ struct FailureRedirectPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     update_headers: Option<SipHeaderUpdates>,
     failed_leg_id: String,
+    /// See [`FailureRejectPayload::origin`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<&'static str>,
 }
 
 /// Kick the async `/call/failure` decision (b-leg failover) and fold the
@@ -240,7 +248,11 @@ pub(super) fn spawn_failure_callout(
 /// re-consults `/call/failure` with origin `call_limiter` — the same bounded
 /// chain (`MAX_LIMITER_FAILOVER`) `apply_route` runs for the initial route.
 /// `failed_leg_id` is echoed on every fold so the resolution rule can cancel
-/// the right no-answer timer / relay the failure.
+/// the right no-answer timer / relay the failure. A reject/redirect resolved
+/// AFTER a `call_limiter` re-consult (and the terminal 486) answers the
+/// limiter refusal, not the failed peer's final — the fold says so via
+/// `origin`, so the a-facing mint carries none of the peer's relayed headers
+/// (ADR-0017 X2).
 async fn failure_outcome(
     ctx: &Arc<RouterCtx>,
     snapshot: CallSnapshot,
@@ -278,13 +290,15 @@ async fn failure_outcome(
                             continue;
                         }
                         // Chain exhausted / no context → the initial path's
-                        // terminal limiter treatment (486 Busy Here).
+                        // terminal limiter treatment (486 Busy Here) — the
+                        // stack's own capacity statement.
                         return (
                             "reject",
                             json!({
                                 "code": 486,
                                 "reason": "Busy Here",
                                 "failed_leg_id": failed_leg_id,
+                                "origin": "call_limiter",
                             }),
                         );
                     }
@@ -301,6 +315,7 @@ async fn failure_outcome(
                         reason: rj.reject_reason,
                         update_headers: rj.update_headers,
                         failed_leg_id,
+                        origin: (depth > 0).then_some("call_limiter"),
                     }),
                 );
             }
@@ -318,6 +333,7 @@ async fn failure_outcome(
                             .collect(),
                         update_headers: rd.update_headers,
                         failed_leg_id,
+                        origin: (depth > 0).then_some("call_limiter"),
                     }),
                 );
             }
