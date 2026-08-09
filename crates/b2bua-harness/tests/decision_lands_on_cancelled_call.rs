@@ -27,11 +27,16 @@ use async_trait::async_trait;
 use b2bua::decision::test_adapter::{reject, route_to};
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-    CallReferRequest, CallReferResponse, CallTreatment, NewCallRequest, NewCallResponse,
-    RejectDecision, ScriptedDecisionEngine,
+    CallLimiterEntry, CallReferRequest, CallReferResponse, CallTreatment, NewCallRequest,
+    NewCallResponse, RejectDecision, ScriptedDecisionEngine,
 };
-use b2bua_harness::{establish, hangup, settle_until, B2buaSut};
+use b2bua::limiter::CallLimiter;
+use b2bua::limiter_http::HttpCallLimiter;
+use b2bua_harness::{establish, hangup, invite_final_statuses, settle_until, B2buaSut};
+use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::{Harness, RunReport};
+use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipMessage, SipParser};
 
@@ -68,29 +73,6 @@ impl CallDecisionEngine for DelayedDecisionEngine {
     ) -> Result<CallReferResponse, CallDecisionError> {
         self.inner.call_refer(req).await
     }
-}
-
-/// The distinct final statuses delivered to `to` for its initial-INVITE
-/// transaction — the §17.2.1 one-final-per-transaction oracle. Retransmits of
-/// the SAME final dedup to one status; a regression's second, different final
-/// shows up as a second element.
-fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
-    let mut statuses: Vec<u16> = report
-        .entries()
-        .iter()
-        .filter(|e| e.to == to)
-        .filter_map(|e| match CustomParser::new().parse(&e.raw) {
-            Ok(SipMessage::Response(r))
-                if r.status() >= 200 && *r.cseq().method() == Method::Invite =>
-            {
-                Some(r.status())
-            }
-            _ => None,
-        })
-        .collect();
-    statuses.sort_unstable();
-    statuses.dedup();
-    statuses
 }
 
 /// The distinct Call-IDs of INVITE requests delivered to `to` — retransmits of
@@ -245,6 +227,86 @@ async fn reject_decision_landing_after_the_callers_cancel_is_dropped() {
         "the a-leg INVITE transaction carries exactly one final: the 487",
     );
     assert_eq!(distinct_invite_call_ids(&report, bob.addr()), 0, "bob was never dialed");
+}
+
+/// Limiter variant: `apply_route` INCRs the route's `call_limiter` holds
+/// BEFORE the drop seam runs, so the dropped result must still carry them onto
+/// the resident call — the queued termination's obligation discharge DECRs
+/// each one. A drop that discarded the holds would strand a cluster-visible
+/// slot for the whole limiter window on exactly the caller-gives-up-early
+/// path the spec calls common.
+#[tokio::test(start_paused = true)]
+async fn dropped_route_still_discharges_its_limiter_holds() {
+    let h = Harness::new("dropped-route-limiter-discharge");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    // A real `LimiterServer` on the simulated HTTP fabric (same rig as
+    // `limiter.rs`), so the INCR is a genuine cluster hold we can probe.
+    let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+    let http = SimulatedHttpNetwork::new();
+    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+    let _lh: Box<dyn HttpServerHandle> = http.serve(laddr, server).await.unwrap();
+    // Fail-open budget well above the paused-clock HTTP round trip: the 1 ms
+    // simulated transits quantize to the 100 ms advance chunks the admit rides
+    // through (it lands mid-`h.advance`, unlike the agent-pumped callflow
+    // steps), so a production-sized 150 ms budget would fail open here.
+    let limiter: Arc<dyn CallLimiter> = Arc::new(HttpCallLimiter::new(
+        Arc::new(http.clone()),
+        laddr,
+        Duration::from_secs(2),
+    ));
+
+    let decision = Arc::new(DelayedDecisionEngine {
+        new_call_delay: DECISION_DELAY,
+        failure_delay: Duration::ZERO,
+        inner: Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(|_req| {
+                    let mut r = route_to("127.0.0.1", 5070);
+                    r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 10 }];
+                    NewCallResponse::Route(r)
+                })
+                .build(),
+        ),
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter)
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    h.advance(Duration::from_millis(200)).await;
+
+    let mut cxl = call.cancel().await;
+    cxl.expect(200).await;
+    call.expect(487).await;
+
+    // Cross the decision's landing: the route INCRs its hold, then is dropped.
+    h.advance(Duration::from_secs(2)).await;
+    assert!(
+        bob.try_receive_tolerating("INVITE", &[]).await.is_none(),
+        "the dropped route must not dial a callee whose caller is gone",
+    );
+    assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 1);
+
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+
+    // The admit really happened (its window key is live) AND the termination
+    // discharged it — the INCR↔DECR pairing survives the drop.
+    settle_until(|| store.stats().current_total == 0).await;
+    let stats = store.stats();
+    assert_eq!(stats.live_keys, 1, "the dropped route's admit INCRed a real hold");
+    assert_eq!(stats.current_total, 0, "the termination DECRed the carried hold");
+
+    let report = h.finish().await;
+    assert_eq!(
+        invite_final_statuses(&report, alice.addr()),
+        vec![487],
+        "the a-leg INVITE transaction carries exactly one final: the 487",
+    );
 }
 
 /// The route-supplied per-b-leg ring deadline for the fold-seam scenarios.

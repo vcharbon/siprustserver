@@ -142,8 +142,15 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // turn ends — mark it here (the run loop) so the decision-application seam
     // (`process::initial_invite_turn`) drops a route/reject landing on the
     // cancelled call. An in-dialog CANCEL targets one re-INVITE transaction,
-    // never the call setup, and is not marked.
-    if matches!(&event, CallEvent::Cancelled { in_dialog: false, .. }) {
+    // never the call setup, and is not marked. Gated on the per-call queue
+    // existing: the racing INVITE created it synchronously in this same run
+    // loop (and a live call's worker exits only on teardown poison), so the
+    // 069 window always marks — while a stray CANCEL with no queue guards
+    // nothing, and `dispatch` may silently cap-drop its body, which would
+    // strand the mark forever (no teardown path would ever run to clear it).
+    if matches!(&event, CallEvent::Cancelled { in_dialog: false, .. })
+        && ctx.dispatcher.has_queue(&call_ref)
+    {
         ctx.state.mark_setup_cancelled(&call_ref);
     }
 

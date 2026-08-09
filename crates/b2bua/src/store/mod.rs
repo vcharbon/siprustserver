@@ -62,10 +62,12 @@ struct Inner {
     /// the INVITE) while the call's decision round trip is still parked on the
     /// per-call FIFO — the queued `Cancelled` event cannot reach the call model
     /// until that turn ends, so the model alone cannot tell the seam the caller
-    /// is gone. Set at `Cancelled` ingress (router run loop), read at the
-    /// decision-application seam (`router::process::initial_invite_turn`) to
-    /// drop a route/reject that lands on a cancelled call. Node-local, never
-    /// serialized; cleared on `remove`/`drop_local`/`discard_orphan`.
+    /// is gone. Set at `Cancelled` ingress (router run loop) — only while the
+    /// call's dispatch queue is live, so a cap-dropped body can never strand a
+    /// mark — read at the decision-application seam
+    /// (`router::process::initial_invite_turn`) to drop a route/reject that
+    /// lands on a cancelled call. Node-local, never serialized; cleared on
+    /// `remove`/`drop_local`/`discard_orphan`.
     setup_cancelled: HashSet<String>,
 }
 
@@ -448,8 +450,8 @@ impl CallState {
         let mut inner = self.inner.lock().unwrap();
         inner.locks.remove(call_ref);
         // A CANCEL can race an initial INVITE the admission ladder then sheds
-        // (Tier-3 / store-fault / at-cap): the mark was set with no call ever
-        // resident, and this is its only teardown path.
+        // (Tier-3 / store-fault): the mark was set with no call ever resident,
+        // and this is its only teardown path.
         inner.setup_cancelled.remove(call_ref);
     }
 

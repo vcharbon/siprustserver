@@ -271,9 +271,9 @@ async fn initial_invite_turn(
     // round-trips through HA hydration. Reject malformed at ingest instead.
     // Created-then-rejected mirrors the decision-reject path so the Terminated
     // invariant reaps the call + propagates the delete.
-    let result = if call.a_leg.from_tag.is_empty() {
+    let mut handled = if call.a_leg.from_tag.is_empty() {
         let a_invite = crate::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let rejected = crate::initial_invite::reject_call(
+        crate::initial_invite::reject_call(
             call.clone(),
             &a_invite,
             400,
@@ -282,13 +282,12 @@ async fn initial_invite_turn(
             &[],
             &ctx.id_gen,
             now_ms,
-        );
-        crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(rejected), now_ms, true)
+        )
     } else {
         // `req.image()` is the datagram this INVITE arrived as — the only place
         // it exists (the call carries a header snapshot, not bytes), and what a
         // trace activation backfills its `sip.in` from.
-        let mut handled = handle_initial_invite(
+        handle_initial_invite(
             call.clone(),
             ctx.decision.as_ref(),
             ctx.limiter.as_ref(),
@@ -299,28 +298,53 @@ async fn initial_invite_turn(
             &ctx.clock,
             now_ms,
         )
-        .await;
-        // ── Decision-application drop guard (069) ───────────────────────────
-        // The caller CANCELed while the decision round trip was parked: the txn
-        // layer already finalized the a-leg INVITE (200 + 487 — the
-        // transaction's ONE final, RFC 3261 §17.2.1) and the `Cancelled` event
-        // is queued right behind this turn. Whatever the decision resolved —
-        // route, reject, redirect, relay, error — is moot: drop the result
-        // whole. No b-leg launch, no authored final; the queued `handle-cancel`
-        // turn owns the termination (its Cancel CDR is what keeps the ADR-0022
-        // X2 synthesis silent). A limiter INCR the discarded route admitted
-        // ages out of its window.
-        if ctx.state.is_setup_cancelled(call_ref) {
-            ctx.metrics.bump_decision_dropped_cancelled();
-            tracing::debug!(
-                %call_ref,
-                "decision result dropped: caller CANCELed during the decision round trip"
-            );
-            handled = HandlerResult { call: call.clone(), effects: HandlerEffects::new() };
-        }
-        crate::rules::invariants::enforce(&ctx.obligations, &call, crate::rules::invariants::finalize(handled), now_ms, true)
+        .await
     };
-    Turn::Result(result)
+    // ── Decision-application drop guard (069) ───────────────────────────────
+    // The caller CANCELed while this turn was queued or parked on its decision
+    // round trip: the txn layer already finalized the a-leg INVITE (200 + 487 —
+    // the transaction's ONE final, RFC 3261 §17.2.1) and the `Cancelled` event
+    // is queued right behind this turn. Whatever this turn resolved — route,
+    // reject (decision-authored OR the malformed-INVITE 400 above), redirect,
+    // relay, error — is moot: drop the result whole. No b-leg launch, no
+    // authored final; the queued `handle-cancel` turn owns the termination (its
+    // Cancel CDR is what keeps the ADR-0022 X2 synthesis silent). The mark
+    // write (ingress run loop) and this read are not ordered by the per-call
+    // lock, so a marking that lands after this check reverts to the pre-drop
+    // path for that scheduler sliver — the b-leg is launched then CANCELed
+    // (§9.1-held until a provisional), indistinguishable from the unavoidable
+    // wire race.
+    if ctx.state.is_setup_cancelled(call_ref) {
+        ctx.metrics.bump_decision_dropped_cancelled();
+        tracing::debug!(
+            %call_ref,
+            "decision result dropped: caller CANCELed during the decision round trip"
+        );
+        handled = dropped_on_setup_cancel(&call, handled);
+    }
+    Turn::Result(crate::rules::invariants::enforce(
+        &ctx.obligations,
+        &call,
+        crate::rules::invariants::finalize(handled),
+        now_ms,
+        true,
+    ))
+}
+
+/// The 069 drop result: the pre-handler call — no b-leg, no wire effects —
+/// carrying ONLY what the discarded turn already committed *outside* the call.
+/// The limiter holds `apply_route` INCRemented ride over so the queued
+/// termination's standard obligation discharge still DECRs each one
+/// (the INCR↔DECR pairing survives the drop), and the trace stamp rides over
+/// so a sampled call's later turns (the CANCEL, the 487, the termination that
+/// closes its registry entry) still emit into its trace.
+fn dropped_on_setup_cancel(pre: &Call, handled: HandlerResult) -> HandlerResult {
+    let mut call = pre.clone();
+    call.limiter_entries = handled.call.limiter_entries;
+    call.trace_id = handled.call.trace_id;
+    call.root_span_id = handled.call.root_span_id;
+    call.sampled = handled.call.sampled;
+    HandlerResult { call, effects: HandlerEffects::new() }
 }
 
 /// Live-path store-fault probes for in-dialog events (ADR-0023), with the
