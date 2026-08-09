@@ -14,6 +14,8 @@
 //!   failover-injected) + strict From/To/CSeq invariants.
 //! - [`cookie`] — the proxy stickiness cookie read back off a forwarded
 //!   request, which names the primary and backup worker of a call.
+//! - [`rfc_acceptance`] — RFC-audit acceptance scoping: which recorded deviations
+//!   gate the run and which a scenario declared accepted for a bounded window.
 //! - the `transparent_failover!` matrix macro ([`matrix`]) — expands a
 //!   `(scenario × safe-point × fault × recovery)` table into one named
 //!   `#[tokio::test]` per legal cell (`tests/transparent_v1.rs`).
@@ -22,6 +24,7 @@ pub mod combine;
 pub mod cookie;
 mod harness;
 pub mod oracle;
+pub mod rfc_acceptance;
 pub mod runner;
 pub mod scenario;
 

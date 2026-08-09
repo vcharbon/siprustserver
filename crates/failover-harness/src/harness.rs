@@ -53,6 +53,8 @@ use sip_txn::IdGen;
 use tokio::task::JoinHandle;
 use topology::{Peer, SimulatedMembership};
 
+use crate::rfc_acceptance::{lane_details, Finding, RfcAcceptance};
+
 /// Changelog TTLs `(tombstone, dead_peer)`: long enough that a backed-up call
 /// survives the whole scenario, short enough that dead-peer auto-clean is
 /// reachable in a test budget.
@@ -741,16 +743,15 @@ pub struct FailoverHarness {
     /// uses it, so a replica it flushes stamps `origin_now_ms` in ITS frame and the
     /// receiver computes the true cross-node offset. Default 0 (no skew).
     worker_clock_offsets: HashMap<String, i64>,
-    /// RFC-audit rule `name()`s waived on the Drop-time hard gate (see
-    /// [`allow_rfc_violation`](Self::allow_rfc_violation)). Used ONLY to scope out
-    /// a KNOWN, separately-tracked SUT bug whose finding would otherwise flake the
-    /// test; every other rule still gates.
-    waived_rfc_rules: std::collections::HashSet<String>,
+    /// This run's declared RFC-audit scoping — lifetime waivers plus acceptance
+    /// windows (see [`crate::rfc_acceptance`]). Everything it does not cover
+    /// gates.
+    rfc_acceptance: RfcAcceptance,
 }
 
 /// The in-dialog CSeq-ordering audit rule (`sip_net::rfc_audit`), named here so
 /// the failover tests can waive it by a symbol rather than a bare string. See
-/// [`FailoverHarness::allow_rfc_violation`] and the KNOWN-BUG note there.
+/// [`FailoverHarness::accept_rfc_deviations_from_now`].
 pub const RULE_CSEQ_IN_DIALOG_ORDER: &str = "rfc3261.cseqInDialogOrder";
 
 /// `127.0.0.1:9400+n` — a stable per-ordinal repl listen address.
@@ -818,30 +819,82 @@ impl FailoverHarness {
             event_seq,
             harness: Arc::new(HarnessHandle::new(harness)),
             worker_clock_offsets: HashMap::new(),
-            waived_rfc_rules: std::collections::HashSet::new(),
+            rfc_acceptance: RfcAcceptance::default(),
         }
     }
 
     /// Waive one RFC-audit rule (by its `name()`) on this harness's Drop-time hard
-    /// gate — a scoped escape hatch mirroring `Harness::allow_violation`, for a
-    /// KNOWN, separately-tracked SUT bug whose finding would otherwise randomly
-    /// flake the test. Every OTHER rule still gates, and (for the transparent
-    /// matrix) the clean baseline run keeps the rule fully active, so a *new*
-    /// regression is still caught. `justification` documents WHY at the call site.
-    ///
-    /// The only current use is [`RULE_CSEQ_IN_DIALOG_ORDER`] on failover-VARIANT /
-    /// takeover runs: the pre-existing ADR-0014 dual-owner reclaim CSeq-desync (a
-    /// proxy-Dead-but-alive primary and/or a stale-hydrated backup both originate
-    /// an in-dialog request — keepalive OPTIONS / BYE — minting the same
-    /// `dialog.sip.local_cseq + 1`). Real-world impact: a UAS treats the reused-
-    /// CSeq request as a retransmission and drops it, so a keepalive/BYE can be
-    /// LOST on the reclaimed leg during the takeover window. Fix tracked separately
-    /// (ADR-0014 keepalive-origination ownership / CSeq high-water; cf.
-    /// `feat/fix-call-terminate-model-x`). Remove this waiver once that lands.
+    /// gate for the **whole harness lifetime** — establishment included, before any
+    /// fault exists. It leaves no baseline in this recording: nothing this run
+    /// emits is judged by `rule` again, so a NEW regression in the same rule is
+    /// invisible here. Use it ONLY for a deviation whose cause spans the entire run
+    /// (a peer fixture that is non-compliant by construction); for a deviation that
+    /// exists only after a fault is injected use
+    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now),
+    /// which keeps the rule gating everywhere outside the window. Every OTHER rule
+    /// gates either way. `justification` documents WHY at the call site.
     pub fn allow_rfc_violation(&mut self, rule: &str, justification: &str) {
         debug_assert!(!justification.trim().is_empty(), "waiver needs a justification");
         let _ = justification;
-        self.waived_rfc_rules.insert(rule.to_string());
+        self.rfc_acceptance.waive_lifetime(rule);
+    }
+
+    /// Accept `rule`'s findings on messages recorded from **now** until
+    /// [`resume_rfc_gate`](Self::resume_rfc_gate) (or the end of the run) — the
+    /// window-scoped counterpart of [`allow_rfc_violation`]. Call it at the instant
+    /// the scenario injects its fault: establishment, every message before the
+    /// injection, and every no-fault scenario keep the rule fully gating, so a new
+    /// regression outside the window still fails the test.
+    ///
+    /// The boundary is the recording's **capture order** (`seq`), not a timestamp:
+    /// under a paused clock a whole burst shares one `at_ms`, so a message captured
+    /// before this call is outside the window even when it carries the same
+    /// millisecond.
+    ///
+    /// A finding the rule cannot pin to a wire entry is unattributable and stays
+    /// gated (only [`allow_rfc_violation`] covers it).
+    ///
+    /// Accepted findings are classified, not masked: they leave the gate but land
+    /// in [`accepted_rfc_deviations`](Self::accepted_rfc_deviations) and in the
+    /// unified report as advisory anomalies, and the scenario still asserts the
+    /// accepted OUTCOME (call fully over, one CDR, limiter released).
+    ///
+    /// The one deviation this exists for is [`RULE_CSEQ_IN_DIALOG_ORDER`] across a
+    /// takeover window: ADR-0014's accepted keepalive-vs-backup-transaction
+    /// overlap. Two owners of one leg (a proxy-Dead-but-alive primary and/or a
+    /// stale-hydrated backup) each mint `dialog.sip.local_cseq + 1`; `(p,b)` rejects
+    /// the loser, but its mutation already reached the wire. The reused number rides
+    /// a FRESH `branch`, so a compliant UAS does not fold it away as a
+    /// retransmission: it sees a new server transaction whose sequence number did
+    /// not advance and rejects it out of order (RFC 3261 §12.2.2 — 500, or an
+    /// implementation-defined reject of the stale number). That one call drops
+    /// cleanly; nothing else on the dialog is affected.
+    pub fn accept_rfc_deviations_from_now(&mut self, rule: &str, justification: &str) {
+        debug_assert!(!justification.trim().is_empty(), "acceptance needs a justification");
+        let _ = justification;
+        let from = self.recorded_seq_high_water();
+        self.rfc_acceptance.open_window(rule, from);
+    }
+
+    /// Close EVERY open acceptance window for `rule` at this instant — the rule
+    /// gates in full again from here on. No-op when no window for `rule` is open.
+    pub fn resume_rfc_gate(&mut self, rule: &str) {
+        let until = self.recorded_seq_high_water();
+        self.rfc_acceptance.close_windows(rule, until);
+    }
+
+    /// The highest recording `seq` captured on the SIP channel so far — the
+    /// capture-order boundary an acceptance window is anchored on. `0` before the
+    /// first recorded event.
+    fn recorded_seq_high_water(&self) -> u64 {
+        self.harness
+            .recording()
+            .channel()
+            .snapshot()
+            .iter()
+            .map(|s| s.seq)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Set a worker's **wall-clock anchor offset** (ms) for a clock-skew test —
@@ -1367,9 +1420,15 @@ impl FailoverHarness {
     /// transactions (e.g. `rfc3261.via` §8.1.3/§17.1.3 response matching).
     pub fn assert_full_rfc_clean(&self, cell: &str) {
         let events = self.harness.recording().channel().snapshot();
+        // `offending` is a 1-based index into the AUDIT-visible wire entries — the
+        // same view `evaluate_rfc_findings` hands the rules — so a window must be
+        // resolved against `audit_wire_entries`, never the raw snapshot (whose
+        // extra ReEmit / invisible-disposition rows shift every later index).
+        let entries = sip_net::audit_wire_entries(&events);
         let findings: Vec<sip_net::RfcFinding> = sip_net::evaluate_rfc_findings(&events)
             .into_iter()
-            .filter(|f| !f.advisory && !self.waived_rfc_rules.contains(&f.rule))
+            .filter(|f| !f.advisory && !self.rfc_acceptance.waived(&f.rule))
+            .filter(|f| !self.rfc_acceptance.accepts(&f.rule, f.offending, &entries))
             .collect();
         assert!(
             findings.is_empty(),
@@ -1396,13 +1455,36 @@ impl FailoverHarness {
         );
     }
 
-    /// The raw RFC 3261 cross-message audit findings over the recorded SIP trace
-    /// (the `(lane, detail)` pairs `assert_sip_rfc_clean` panics on). Reads the
+    /// The RFC 3261 cross-message audit findings that GATE — everything the
+    /// recorded trace violated except what an acceptance window covers (the
+    /// `(lane, detail)` pairs `assert_sip_rfc_clean` panics on). Reads the
     /// recording channel snapshot NON-consuming, so it is safe to call mid-run AND
     /// from `Drop`. Empty ⇒ clean. Shared by the explicit `assert_sip_rfc_clean`
     /// and the automatic Drop-time enforcement so the SAME rule set runs on every
     /// FailoverHarness-based test with no per-test opt-in.
     fn rfc_audit_findings(&self) -> Vec<(String, String)> {
+        lane_details(self.partition_rfc_findings().0)
+    }
+
+    /// Split the endpoint-scoped cross-message audit into `(gating, accepted)` —
+    /// see [`RfcAcceptance::partition`].
+    #[allow(clippy::type_complexity)]
+    fn partition_rfc_findings(&self) -> (Vec<Finding>, Vec<Finding>) {
+        self.rfc_acceptance.partition(&self.audited_events())
+    }
+
+    /// The findings an acceptance window covered this run — the deviations the
+    /// scenario declared accepted via
+    /// [`accept_rfc_deviations_from_now`](Self::accept_rfc_deviations_from_now).
+    /// They do not gate, but they are recorded (advisory anomalies in the unified
+    /// report) so an accepted trade-off stays visible, and a test can assert on
+    /// them to prove its window matched something.
+    pub fn accepted_rfc_deviations(&self) -> Vec<(String, String)> {
+        lane_details(self.partition_rfc_findings().1)
+    }
+
+    /// The recorded SIP events the audit judges — the endpoint-scoped view.
+    fn audited_events(&self) -> Vec<layer_harness::Stamped<sip_net::SignalingNetworkEvent>> {
         // RFC 3261 conformance is only observable from OUTSIDE the proxy/LB — at
         // the real UAs (alice/bob). A *transparent* failover legitimately splits
         // ONE logical dialog across several cluster workers: alice's in-dialog
@@ -1426,31 +1508,12 @@ impl FailoverHarness {
             .map(|a| a.to_string())
             .collect();
         let snapshot = self.harness.recording().channel().snapshot();
-        let events: Vec<_> = snapshot
+        snapshot
             .into_iter()
             .filter(|s| {
                 !worker_binds.contains(s.event.bind_key()) && sip_net::audit_visible_event(&s.event)
             })
-            .collect();
-        let mut findings = Vec::new();
-        for rule in sip_net::rfc_cross_message_rules() {
-            // Honour the advisory tier exactly as the scenario-harness hard gate
-            // does: a `force_advisory` rule (a documented B2BUA-architectural
-            // divergence — per-leg SDP re-origin, OPTIONS-keepalive response
-            // headers, the un-timeable proxy-100 bound, …) is recorded, not
-            // gated. Skipping it here keeps the failover matrix from failing on
-            // the same architectural divergences the main gate already excuses.
-            if rule.force_advisory() {
-                continue;
-            }
-            // Scoped waiver (see `allow_rfc_violation`): a rule a test explicitly
-            // waived for a KNOWN, separately-tracked SUT bug is not gated here.
-            if self.waived_rfc_rules.contains(rule.name()) {
-                continue;
-            }
-            findings.extend(rule.check(&events));
-        }
-        findings
+            .collect()
     }
 
     /// Record a rebooted worker's NEW SIP address. Updates the report's
@@ -1521,22 +1584,32 @@ impl FailoverHarness {
             &repl,
             &self.worker_axes(),
         );
-        // RFC 3261 status MUST be reflected in the report: a trace that violates
-        // the in-dialog CSeq rule can NEVER show PASS. Fold the findings into the
-        // doc anomalies and force passed=false so the rendered report.html /
-        // global.txt show FAIL and list the violation(s).
-        let findings = self.rfc_audit_findings();
-        if !findings.is_empty() {
+        // RFC 3261 status MUST be reflected in the report: a trace that violates a
+        // gating rule can NEVER show PASS. Fold the findings into the doc anomalies
+        // and force passed=false so the rendered report.html / global.txt show FAIL
+        // and list the violation(s). A window-ACCEPTED deviation is listed too, as
+        // advisory: classified, not masked, and it does not fail the run.
+        let (gating, accepted) = self.partition_rfc_findings();
+        if !gating.is_empty() {
             doc.passed = false;
-            for (lane, detail) in findings {
-                doc.anomalies.push(seq_report::Anomaly {
-                    check: "rfc3261.cseqInDialogOrder".to_string(),
-                    detail,
-                    lane: Some(lane),
-                    endpoint: None,
-                    advisory: Some(false),
-                });
-            }
+        }
+        for (rule, lane, detail) in gating {
+            doc.anomalies.push(seq_report::Anomaly {
+                check: rule,
+                detail,
+                lane: Some(lane),
+                endpoint: None,
+                advisory: Some(false),
+            });
+        }
+        for (rule, lane, detail) in accepted {
+            doc.anomalies.push(seq_report::Anomaly {
+                check: rule,
+                detail: format!("ACCEPTED (declared deviation window): {detail}"),
+                lane: Some(lane),
+                endpoint: None,
+                advisory: Some(true),
+            });
         }
         doc
     }

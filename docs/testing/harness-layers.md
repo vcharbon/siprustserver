@@ -42,9 +42,20 @@ Automatic (you cannot opt out, only waive per-rule):
 - **RFC hard gate** — `Harness::finish()` runs the audit over the recorded
   trace and panics on any non-advisory, non-waived finding. A harness dropped
   without `finish()` still gets the gate via the `CseqGate` Drop backstop;
-  `FailoverHarness` gates in its own Drop. `allow_violation(rule,
-  justification)` is the **only** sanctioned waiver — see the default test
-  requirements in [CLAUDE.md](../../CLAUDE.md).
+  `FailoverHarness` gates in its own Drop. To take a **peer-side** deviation out
+  of the gate, `allow_violation(rule, justification)` is the only sanctioned
+  waiver — see the default test requirements in [CLAUDE.md](../../CLAUDE.md),
+  which also forbids waiving a finding the SUT caused.
+  `failover-harness` adds one narrower scope for a deviation an ADR declares an
+  **accepted trade-off** (today only ADR-0014's dual-owner in-dialog CSeq
+  overlap): `accept_rfc_deviations_from_now(rule, justification)` /
+  `resume_rfc_gate(rule)` accept the rule only on messages captured inside the
+  window (arm it at the fault injection), list what they accepted in
+  `accepted_rfc_deviations()` + the unified report as advisory, and leave the
+  rule gating on establishment and on every fault-free scenario — so the run
+  still has a baseline. It is not a waiver hatch: an accepted deviation needs
+  the ADR entry AND the scenario's own assertion on the accepted outcome. A
+  SUT-side deviation with no such ADR entry is a bug to fix, never a window.
 - **Panic trace** — on any panic before `finish()`, `PanicDump` prints the
   compact wire trace to stderr. Read it before adding instrumentation.
 

@@ -38,21 +38,26 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-/// A `FailoverHarness` for the limiter-HA cases with the known reclaim CSeq-desync
-/// audit waived. Every case here drives a backup TAKEOVER, which can randomly trip
-/// the in-dialog CSeq gate via the pre-existing ADR-0014 dual-owner desync (two
-/// nodes originate an in-dialog keepalive OPTIONS / BYE at the same `local_cseq +
-/// 1`) — a flake, not what these tests assert. Their limiter-count / call-over
-/// assertions still gate. Tracked separately (cf. feat/fix-call-terminate-model-x);
-/// remove this waiver once the reclaim CSeq high-water / ownership fix lands. See
-/// `FailoverHarness::allow_rfc_violation`.
+/// The `FailoverHarness` every limiter-HA case runs on. The RFC audit gates in
+/// full; a case whose fault gives one leg two owners declares ADR-0014's accepted
+/// overlap for that window with [`accept_takeover_cseq_overlap`].
 fn ha_harness(name: &str) -> FailoverHarness {
-    let mut fh = FailoverHarness::new(name, &["b1", "b2"]);
-    fh.allow_rfc_violation(
+    FailoverHarness::new(name, &["b1", "b2"])
+}
+
+/// Declare ADR-0014's accepted keepalive-vs-backup-transaction overlap from this
+/// instant on: while one leg has two potential owners, both can mint the same
+/// `local_cseq + 1` (the loser's mutation reaches the wire before `(p,b)` rejects
+/// it) and the accepted outcome is that one call dropping cleanly — which each case
+/// asserts through its limiter-drain / call-over checks. Call it at the fault
+/// injection: establishment, and any case that never hands a live call to a second
+/// owner, keep `cseqInDialogOrder` fully gating.
+fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
+    fh.accept_rfc_deviations_from_now(
         RULE_CSEQ_IN_DIALOG_ORDER,
-        "pre-existing ADR-0014 dual-owner reclaim CSeq-desync; tracked separately",
+        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
+         takeover window — one call drops cleanly",
     );
-    fh
 }
 
 fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
@@ -160,6 +165,7 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
 
     // Crash the primary; mark it dead so the proxy fails the in-dialog request
     // over to the backup.
+    accept_takeover_cseq_overlap(&mut fh);
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     fh.advance(Duration::from_millis(300)).await;
@@ -646,6 +652,7 @@ async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
     // CSeq, and reverse-propagates the takeover state to pri:{primary}. The
     // re-INVITE must NOT touch the limiter (no checkAndIncrement-on-reinvite path),
     // so the shared counter stays 1.
+    accept_takeover_cseq_overlap(&mut fh);
     {
         let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
             if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
