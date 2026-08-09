@@ -2,7 +2,9 @@
 //! disposition setters, termination-resolution predicates, and the per-leg
 //! tag readers.
 
-use crate::model::{ByeDisposition, Call, Dialog, Leg, LegDisposition, LegKind, LegState};
+use crate::model::{
+    ByeDisposition, Call, CallModelState, Dialog, Leg, LegDisposition, LegKind, LegState,
+};
 
 use super::lens::update_leg;
 
@@ -72,6 +74,27 @@ pub fn leg_is_resolved(leg: &Leg) -> bool {
         None => leg.state == LegState::Trying,
         Some(b) => b.is_terminal(),
     }
+}
+
+/// Whether a leg — or its whole call — is already going away, so an
+/// asynchronous trigger (a timer fire, a transaction timeout, a failure
+/// result) must drive NO forward progress through it: no failover consult,
+/// no new final on a transaction that already carries one. True when the
+/// call's lifecycle has entered `Terminating`/`Terminated`, when the leg's
+/// CANCEL is in flight (`Cancelling` — the leg's state still reads `Trying`,
+/// so state alone cannot discriminate), or when the leg itself is
+/// `Terminated`.
+///
+/// Distinct from [`leg_is_resolved`]: a `Cancelling` leg is *unresolved*
+/// (its callee still owes a 487 or a crossing 200, so finalization waits) yet
+/// already going away — resolution and progress-eligibility are different
+/// questions.
+pub fn leg_is_going_away(call_state: CallModelState, leg: &Leg) -> bool {
+    matches!(
+        call_state,
+        CallModelState::Terminating | CallModelState::Terminated
+    ) || leg.disposition == LegDisposition::Cancelling
+        || leg.state == LegState::Terminated
 }
 
 /// Whether all legs of a terminating call have reached a terminal resolution

@@ -15,7 +15,9 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{Method, SipHeader, SipMessage, SipParser};
 use sip_txn::TxnKind;
 
-use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{
+    CriticalStateEffect, HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode,
+};
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
 
@@ -121,6 +123,22 @@ impl ActionExecutor<'_> {
                     }
                 }
                 LegState::Terminated => {}
+            }
+        }
+        // Nothing awaits an answer once the call is terminating: scrub every
+        // per-leg `NoAnswer` ledger entry — including entries of legs the loop
+        // skipped as already `Cancelling` — so the fire never reaches a
+        // terminating call and a reclaim cannot restore it into one.
+        let no_answer_ids: Vec<String> = call
+            .timers
+            .iter()
+            .filter(|t| t.timer_type == TimerType::NoAnswer)
+            .map(|t| t.id.clone())
+            .collect();
+        if !no_answer_ids.is_empty() {
+            call.timers.retain(|t| t.timer_type != TimerType::NoAnswer);
+            for id in no_answer_ids {
+                fx.critical.push(CriticalStateEffect::CancelTimer { id });
             }
         }
         call.state = call::CallModelState::Terminating;
