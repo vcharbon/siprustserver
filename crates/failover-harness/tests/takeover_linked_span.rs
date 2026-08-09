@@ -94,14 +94,6 @@ async fn a_takeover_opens_this_nodes_own_root_span_linked_to_the_nominals() {
     let (_log_guard, log) = observe::test_buffer();
 
     let mut fh = FailoverHarness::new("takeover-linked-span", &["b1", "b2"]);
-    // KNOWN-BUG waiver (as every BYE-on-the-backup cell carries): the pre-existing
-    // ADR-0014 dual-owner reclaim CSeq-desync can reuse an in-dialog CSeq across the
-    // takeover window. Peer-side only; the span assertions gate deterministically.
-    fh.allow_rfc_violation(
-        failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
-        "pre-existing ADR-0014 dual-owner reclaim CSeq-desync; tracked separately",
-    );
-
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
@@ -173,6 +165,15 @@ async fn a_takeover_opens_this_nodes_own_root_span_linked_to_the_nominals() {
     assert_eq!(field(&nominal, "link.span_id"), "", "a first-hand call links nothing");
 
     // ── Crash the primary; the proxy fails alice's dialog over to the backup ─
+    // From here the leg has two potential owners, so ADR-0014's accepted
+    // keepalive-vs-backup-transaction overlap may reuse an in-dialog CSeq (one call
+    // drops cleanly). Accepted for the takeover window only — establishment above
+    // keeps `cseqInDialogOrder` fully gating.
+    fh.accept_rfc_deviations_from_now(
+        failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
+        "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
+         takeover window — one call drops cleanly",
+    );
     fh.mark(&primary_ord, None, "crash", "primary down");
     let hydrated_before = {
         let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
