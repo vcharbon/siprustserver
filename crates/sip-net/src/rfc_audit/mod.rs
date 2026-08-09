@@ -18,6 +18,7 @@
 //!   - [`cross_generic`] — generic per-dialog cross-message rules (TS `cross-message-rules.ts`).
 //!   - [`rfc3261_cross`] / [`rfc3262_cross`] / [`rfc3264_cross`] — per-RFC cross rules.
 //!   - [`offer_answer_state`] — the per-dialog offer/answer round state machine.
+//!   - [`server_txn_final`] — §17.2.1 one-final-per-server-transaction.
 //!
 //! Shared helpers (ports of the TS `_*.ts` helpers):
 //!   - [`dialog_model`]    — `_dialog-model.ts`: per-agent dialog state + per-dialog projector.
@@ -65,6 +66,7 @@ pub mod rfc3261_cross;
 pub mod offer_answer_state;
 pub mod rfc3262_cross;
 pub mod rfc3264_cross;
+pub mod server_txn_final;
 
 // Keep the original public name exported for back-compat.
 pub use cseq::CSeqInDialogOrderRule;
@@ -94,6 +96,7 @@ pub fn rfc_cross_message_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
     v.extend(rfc3262_cross::cross_rules());
     v.extend(rfc3264_cross::cross_rules());
     v.extend(offer_answer_state::cross_rules());
+    v.extend(server_txn_final::cross_rules());
     v
 }
 

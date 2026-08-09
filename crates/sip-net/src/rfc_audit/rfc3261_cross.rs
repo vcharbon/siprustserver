@@ -22,8 +22,9 @@ use crate::report::to_sip_entries;
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::types::UaRole;
 use crate::rfc_audit::dialog_model::{
-    call_id, cseq_method, from_tag, invite_forwarder_lanes, project_per_dialog, route_entries,
-    slot_is_relay, status, to_tag, to_uri, top_via_branch, value_of, EventKind, OrderedEvent,
+    call_id, cseq_method, from_tag, invite_forwarder_lanes, project_per_dialog, relay_lanes,
+    route_entries, slot_is_relay, status, to_tag, to_uri, top_via_branch, value_of, EventKind,
+    OrderedEvent,
 };
 use crate::rfc_audit::txn_correlation::{build_branch_index, header_values, Direction};
 
@@ -2049,12 +2050,7 @@ impl CrossMessageAuditRule for No1xxAfterFinalRule {
         // Relay faces merely FORWARD provisionals/finals — a 1xx a B2BUA relays
         // after a final is its upstream's emission, judged on the upstream lane,
         // not here (mirrors the reliable-1xx sibling's relay skip).
-        let relay_lanes: HashSet<LaneKey> = project_per_dialog(events)
-            .iter()
-            .flat_map(|slice| slice.per_agent.iter())
-            .filter(|slot| slot_is_relay(slot))
-            .map(|slot| slot.bind_key.clone())
-            .collect();
+        let relays = relay_lanes(events);
 
         // Per INVITE server transaction (sender, top-Via branch): the wire index
         // of the first final, and the (status, To-tag) of every 1xx whose FIRST
@@ -2070,7 +2066,7 @@ impl CrossMessageAuditRule for No1xxAfterFinalRule {
 
         for (i, entry) in to_sip_entries(events).into_iter().enumerate() {
             let Some(sender) = entry.from_lane.clone() else { continue };
-            if relay_lanes.contains(&sender) {
+            if relays.contains(&sender) {
                 continue;
             }
             let Ok(msg) = parser.parse(&entry.raw) else { continue };
