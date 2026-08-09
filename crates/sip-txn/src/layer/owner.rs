@@ -166,6 +166,13 @@ impl Owner {
             self.cancel_timer(old.timeout_key);
             self.cancel_timer(old.cleanup_key);
             self.untrack_call_ref(&old.call_ref, &branch);
+            // The displaced txn's held CANCEL dies with it — counted so the
+            // held counters reconcile (held == flushed + dropped).
+            if old.held_cancel.is_some() {
+                self.metrics
+                    .held_cancels_dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         self.track_call_ref(&new_call_ref, &branch);
         self.sync_active();
@@ -205,6 +212,14 @@ impl Owner {
                 self.cancel_timer(t.cleanup_key);
                 self.untrack_call_ref(&t.call_ref, branch);
                 self.sync_active();
+                // A txn dying with a CANCEL still held (Timer B, 2xx final,
+                // call evict) owes nothing to the wire — the CANCEL is dropped
+                // (RFC 3261 §9.1: no provisional ever arrived).
+                if t.held_cancel.is_some() {
+                    self.metrics
+                        .held_cancels_dropped
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 // ADR-0014 self-release: if this was the LAST transaction for a
                 // watched call, the consumer must hear CallQuiesced so it can shed
                 // its acting-backup takeover copy — but only AFTER this turn's

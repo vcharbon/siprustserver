@@ -81,6 +81,12 @@ pub(super) struct Transaction {
     pub(super) retransmit_key: Option<Key>,
     pub(super) timeout_key: Option<Key>,
     pub(super) cleanup_key: Option<Key>,
+    /// A CANCEL datagram held back because this INVITE client txn has received
+    /// no response yet (RFC 3261 §9.1 — the CANCEL MUST wait for the first
+    /// provisional). Flushed on the first 1xx; dropped when the txn takes a
+    /// final or dies at Timer B (no CANCEL is owed to a dead transaction).
+    /// Only ever set on a `Client`/`Invite` txn in `Trying`.
+    pub(super) held_cancel: Option<(Bytes, SocketAddr)>,
     // Retransmit progression.
     /// The request datagram Timer A/E re-sends — refcounted for the same reason
     /// as [`last_response`](Self::last_response).

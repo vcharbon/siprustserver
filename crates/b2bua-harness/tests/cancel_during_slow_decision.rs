@@ -124,9 +124,11 @@ async fn cancel_during_slow_decision_tears_down_cleanly() {
     // and CANCELs that b-leg. (We advance explicitly rather than letting
     // `bob.receive` auto-advance, because the paused runtime would otherwise trip
     // that call's internal 2 s recv-timeout before the 5 s decision returns.)
-    // bob therefore sees an INVITE immediately followed by a CANCEL.
+    // The CANCEL is HELD while bob's branch is response-less (RFC 3261 §9.1);
+    // bob's first provisional releases it.
     h.advance(DECISION_DELAY + Duration::from_secs(1)).await;
     let mut b_inv = bob.receive("INVITE").await;
+    b_inv.respond(180, "Ringing").await;
     let mut b_cxl = bob.receive("CANCEL").await;
     b_cxl.respond(200, "OK").await; // 200 to the CANCEL
     b_inv.respond(487, "Request Terminated").await; // 487 to the b-leg INVITE

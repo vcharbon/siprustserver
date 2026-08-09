@@ -7,7 +7,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::CallModelState;
-use sip_message::{serialize, SipMessage};
+use sip_message::{serialize, Method, SipMessage};
+use sip_txn::TxnKind;
 
 use super::callouts;
 use super::release::{release_call, ReleaseKind};
@@ -142,7 +143,16 @@ pub(super) async fn process_result(
                 let _ = ctx.txn.send_request(req.clone(), dest, *kind).await;
             }
             (OutboundBody::Request(req), OutboundTxnMode::Raw) => {
-                let _ = ctx.txn.send_raw(serialize(&SipMessage::Request(req.clone())), dest).await;
+                // A CANCEL reuses its INVITE's branch, and the INVITE client txn
+                // owns WHEN it may go on the wire (RFC 3261 §9.1: held until the
+                // branch's first provisional, dropped at Timer B) — so it goes
+                // through `send_request`, whose CANCEL path sends raw once the
+                // txn allows it. Other raw requests (ACK) bypass the txn map.
+                if req.method() == Method::Cancel {
+                    let _ = ctx.txn.send_request(req.clone(), dest, TxnKind::Invite).await;
+                } else {
+                    let _ = ctx.txn.send_raw(serialize(&SipMessage::Request(req.clone())), dest).await;
+                }
             }
             (OutboundBody::Request(req), OutboundTxnMode::ServerResponse) => {
                 // A request tagged ServerResponse is a misuse; send raw as a fallback.

@@ -16,8 +16,11 @@
 //! hop-by-hop (Timer A). Teardown is therefore driven **only** by the worker's
 //! OWN per-call `TimerType::NoAnswer` (armed at leg creation in
 //! `actions.rs::CreateLeg`, independent of any 18x), NOT by an 18x. When it
-//! fires the worker CANCELs the ringing b-leg; the callee's `200 OK` can then
-//! cross the CANCEL on the wire.
+//! fires the worker CANCELs the ringing b-leg — a CANCEL the transaction layer
+//! HOLDS (RFC 3261 §9.1: the branch never drew a provisional), so it never
+//! reaches the wire; the callee's `200 OK` then resolves the `Cancelling` leg.
+//! The never-CANCELable 100-only b-leg behind the LB is an accepted design
+//! consequence — ADR-0028 X2.
 //!
 //! What `f14bb06` bought here: a leg in the `Cancelling` disposition is NOT
 //! resolved (`call::helpers::leg_is_resolved`), so finalization HOLDS the call
@@ -125,13 +128,14 @@ async fn silent_callee_no_answer_via_lb__reject__reaps_crossing_200() {
     // ── Trip the worker's own NoAnswer timer → CANCEL the ringing b-leg ──────
     fh.advance(Duration::from_secs(NO_ANSWER_SEC as u64) + Duration::from_millis(300)).await;
 
-    // The CANCEL egresses through the proxy (cancel_lru matches the remembered
-    // b-leg INVITE → forwards to bob). The call MUST outlive the CANCEL.
-    let mut cancel = bob.receive_absorbing("CANCEL", &["INVITE"]).await;
-    cancel.respond(200, "OK").await;
+    // The worker's CANCEL is HELD (RFC 3261 §9.1): the proxy absorbed bob's
+    // bare 100 and never emits its own, so the b-leg branch is response-less —
+    // the CANCEL must not reach the wire. The call MUST still outlive the held
+    // CANCEL: the b-leg sits `Cancelling`, unresolved.
 
-    // ── CROSSING: bob answers 200 OK, crossing the CANCEL on the wire ────────
-    // The abandoned callee MUST be reaped — ACK then immediate BYE via the proxy.
+    // ── CROSSING: bob answers 200 OK against the held CANCEL ─────────────────
+    // The 2xx ends the b-leg client txn (dropping the held CANCEL) and the
+    // abandoned callee MUST be reaped — ACK then immediate BYE via the proxy.
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;
     let mut bye = bob.receive_absorbing("BYE", &["INVITE"]).await;
@@ -186,12 +190,13 @@ async fn silent_callee_no_answer_via_lb__reject__delayed_crossing_200_still_reap
     let mut bob_uas = bob.receive("INVITE").await;
 
     fh.advance(Duration::from_secs(NO_ANSWER_SEC as u64) + Duration::from_millis(300)).await;
-    let mut cancel = bob.receive_absorbing("CANCEL", &["INVITE"]).await;
-    cancel.respond(200, "OK").await;
+    // The CANCEL is HELD (§9.1 — the branch never drew a provisional through
+    // the absorbing proxy) and never reaches bob.
 
     // ── The call is now HELD Terminating (b-leg `Cancelling`, awaiting its 487
-    // or a crossing 200). Advance well past the CANCEL — the abandoned callee's
-    // answer is genuinely late — but stay inside the terminating-safety window. ─
+    // or a crossing 200). Advance well past the (held) CANCEL — the abandoned
+    // callee's answer is genuinely late — but stay inside the terminating-safety
+    // window. ─
     fh.advance(Duration::from_secs(10)).await;
 
     // ── CROSSING (late): bob finally answers 200 → still reaped ──────────────
@@ -268,12 +273,11 @@ async fn silent_callee_no_answer_via_lb__reroute__reaps_crossing_200_and_reroute
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
 
-    // NoAnswer fires → CANCEL bob + /call/failure consult (call stays Active).
+    // NoAnswer fires → CANCEL bob (held — §9.1, the branch is response-less
+    // through the absorbing proxy) + /call/failure consult (call stays Active).
     fh.advance(Duration::from_secs(NO_ANSWER_SEC as u64) + Duration::from_millis(300)).await;
-    let mut cancel = bob.receive_absorbing("CANCEL", &["INVITE"]).await;
-    cancel.respond(200, "OK").await;
 
-    // ── CROSSING: bob answers 200, crossing the CANCEL → reaped (ACK + BYE) ──
+    // ── CROSSING: bob answers 200 against the held CANCEL → reaped (ACK+BYE) ─
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     bob.receive_absorbing("ACK", &["INVITE"]).await;
     let mut bye = bob.receive_absorbing("BYE", &["INVITE"]).await;

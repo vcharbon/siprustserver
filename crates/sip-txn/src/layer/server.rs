@@ -258,6 +258,7 @@ impl Owner {
             retransmit_key: None,
             timeout_key: None,
             cleanup_key: None,
+            held_cancel: None,
             retransmit_buf: None,
             retransmit_interval_ms: T1,
             retransmit_elapsed_ms: T1,

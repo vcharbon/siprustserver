@@ -137,8 +137,10 @@ async fn non_invite_keeps_retransmitting_after_provisional() {
 }
 
 /// A CANCEL fed through `send_request` reusing the INVITE's branch (RFC 3261
-/// §9.1) is sent RAW and must NOT displace the live INVITE client txn at that
-/// shared branch — no second, never-completing CANCEL txn is created.
+/// §9.1) goes raw once the branch has a provisional and must NOT displace the
+/// live INVITE client txn at that shared branch — no second, never-completing
+/// CANCEL txn is created. (The pre-provisional hold itself is pinned in
+/// `cancel_hold.rs`.)
 #[tokio::test(start_paused = true)]
 async fn send_request_cancel_is_raw_and_does_not_displace_the_invite() {
     let stack = Stack::build(TRANSIT, 64, 64).await;
@@ -150,6 +152,10 @@ async fn send_request_cancel_is_raw_and_does_not_displace_the_invite() {
         .await
         .unwrap();
     assert_eq!(active(&stack), 1);
+    // A provisional lands first, so the CANCEL below owes no §9.1 wait.
+    stack
+        .inject(&response_bytes(180, "Ringing", "INVITE", branch, "handle-shape-test", true))
+        .await;
     elapse_ms(60).await;
     let _ = stack.drain_peer(); // the initial INVITE
 
@@ -161,13 +167,19 @@ async fn send_request_cancel_is_raw_and_does_not_displace_the_invite() {
         .unwrap();
     elapse_ms(60).await;
     assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "CANCEL sent raw");
-    assert_eq!(active(&stack), 1, "INVITE txn not displaced; no CANCEL txn created");
+    assert_eq!(active(&stack), 1, "no CANCEL txn created at the shared branch");
 
-    // The INVITE's Timer-A retransmit still fires → its txn is intact, not displaced.
-    elapse_ms(700).await;
-    assert!(
-        count_requests(&stack.drain_peer(), "INVITE") >= 1,
-        "INVITE retransmit intact (the CANCEL did not displace it)"
+    // Positive proof the INVITE txn survived (a same-branch displacement also
+    // leaves map size 1): only the intact INVITE client txn — holding its
+    // `original_request` — can auto-ACK the 487 final (§17.1.1.3).
+    stack
+        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .await;
+    elapse_ms(60).await;
+    assert_eq!(
+        count_requests(&stack.drain_peer(), "ACK"),
+        1,
+        "auto-ACK of the 487 proves the INVITE client txn was not displaced"
     );
 }
 
@@ -814,5 +826,47 @@ async fn call_quiesced_survives_a_full_event_queue() {
     assert!(
         drained_quiesced(&mut stack, cr),
         "deferred CallQuiesced is re-delivered once queue capacity returns"
+    );
+}
+
+/// A stray 100 arriving AFTER a non-2xx final must not downgrade the Completed
+/// client txn back to Proceeding: the Timer-D absorption window stays intact,
+/// so a retransmitted final is re-ACKed and absorbed — not re-surfaced to the
+/// TU as a duplicate first final.
+#[tokio::test(start_paused = true)]
+async fn late_100_does_not_reopen_a_completed_invite_txn() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let branch = "z9hG4bK-late-100";
+
+    stack
+        .txn
+        .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+    elapse_ms(60).await;
+    stack
+        .inject(&response_bytes(486, "Busy Here", "INVITE", branch, "handle-shape-test", true))
+        .await;
+    elapse_ms(60).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "first final auto-ACKed");
+    let _ = stack.drain_events();
+
+    // Stray/late 100, then the UAS retransmits its 486 (as if our ACK was lost).
+    stack
+        .inject(&response_bytes(100, "Trying", "INVITE", branch, "handle-shape-test", false))
+        .await;
+    elapse_ms(60).await;
+    stack
+        .inject(&response_bytes(486, "Busy Here", "INVITE", branch, "handle-shape-test", true))
+        .await;
+    elapse_ms(60).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "retransmitted final re-ACKed");
+    assert!(
+        !stack.drain_events().iter().any(|e| matches!(
+            e,
+            TransactionEvent::Message { message, .. }
+                if matches!(message.as_ref(), SipMessage::Response(r) if r.status() == 486)
+        )),
+        "the retransmitted 486 is absorbed, not re-surfaced"
     );
 }

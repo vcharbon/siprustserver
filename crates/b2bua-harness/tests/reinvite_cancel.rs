@@ -7,12 +7,14 @@
 //!
 //! ```text
 //!   cancel_reinvite_ends_renegotiation_keeps_call
-//!       alice re-INVITE → relayed to bob → alice CANCELs →
-//!       CANCEL relayed to bob (same txn), bob 200+487 →
-//!       alice 200(CANCEL)+487(INVITE) → call still up → BYE completes
+//!       alice re-INVITE → relayed to bob → alice CANCELs → the CANCEL is
+//!       held until bob's branch has a provisional (§9.1) → relayed to bob
+//!       (same txn), bob 200+487 → alice 200(CANCEL)+487(INVITE) →
+//!       call still up → BYE completes
 //!   cancel_reinvite_crossing_200_is_acked_and_absorbed
-//!       bob answers 200 while the CANCEL is in flight → B2BUA ACKs bob,
-//!       relays nothing to alice (she has her 487) → call still up
+//!       bob answers 200 while the CANCEL is still held → the CANCEL dies
+//!       with the answered txn (never on the wire); B2BUA ACKs bob, relays
+//!       nothing to alice (she has her 487) → call still up
 //!   cancel_after_reinvite_answered_is_481_and_keeps_call
 //!       the re-INVITE was already answered end-to-end → late CANCEL gets 481
 //!       (txn layer, §9.2), call untouched
@@ -67,9 +69,10 @@ async fn cancel_reinvite_ends_renegotiation_keeps_call() {
     cxl.expect(200).await;
     reinv.expect(487).await;
 
-    // ── the B2BUA CANCELs the relayed re-INVITE toward bob — the SAME
-    //    transaction it relayed (§9.1: CANCEL echoes the INVITE's branch and
-    //    CSeq number) ──
+    // ── the B2BUA CANCELs the relayed re-INVITE toward bob — HELD until bob's
+    //    branch has a provisional (§9.1), then the SAME transaction it relayed
+    //    (CANCEL echoes the INVITE's branch and CSeq number) ──
+    bob_reinv_uas.respond(100, "Trying").await;
     let mut bob_cxl = bob.receive("CANCEL").await;
     assert_eq!(
         bob_cxl.request().top_via().branch(),
@@ -149,16 +152,19 @@ async fn cancel_reinvite_crossing_200_is_acked_and_absorbed() {
     cxl.expect(200).await;
     reinv.expect(487).await;
 
-    // The relayed CANCEL arrives at bob — but bob had already committed his
-    // 200 OK (the crossing): he answers the re-INVITE 200 anyway, and the
-    // CANCEL "has no effect" beyond its own 200 (RFC 3261 §9.2).
-    let mut bob_cxl = bob.receive("CANCEL").await;
+    // The B2BUA's CANCEL is HELD — bob's branch has no response yet (§9.1) —
+    // and bob commits his 200 OK first (the crossing): the 200 ends the client
+    // transaction and the held CANCEL dies with it, never reaching the wire.
     bob_reinv_uas.respond(200, "OK").with_sdp(REANSWER).await;
-    bob_cxl.respond(200, "OK").await;
 
     // ── the B2BUA ACKs bob's crossing 200 on the confirmed dialog (re-INVITE
     //    CSeq, §13.2.2.4) instead of relaying it — alice already has her 487 ──
     bob.receive("ACK").await;
+    assert_eq!(
+        bob.drain().await,
+        0,
+        "the held CANCEL died with the answered transaction — never on the wire"
+    );
     assert_eq!(
         alice.drain().await,
         0,

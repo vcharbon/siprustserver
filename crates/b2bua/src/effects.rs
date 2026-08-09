@@ -17,7 +17,10 @@ pub enum OutboundTxnMode {
     NewClient(TxnKind),
     /// Send a UAS response through its server transaction.
     ServerResponse,
-    /// Send raw, bypassing transaction management (ACK-for-2xx, CANCEL).
+    /// No client transaction of its own (ACK-for-2xx, CANCEL). An ACK bypasses
+    /// the transaction layer outright; a CANCEL is routed through its INVITE
+    /// client txn, which owns WHEN it goes on the wire (RFC 3261 §9.1: held
+    /// until the branch's first provisional, dropped if the txn dies first).
     Raw,
 }
 

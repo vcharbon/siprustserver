@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 
 use layer_harness::{LaneKey, Stamped};
 use sip_message::header::{HeaderValue, RecordRouteEntry, RouteEntry};
-use sip_message::{SipMessage, SipParser, SipRequest};
+use sip_message::{sniff, SipMessage, SipParser, SipRequest};
 
 use crate::contracts::SignalingNetworkEvent;
 
@@ -384,6 +384,48 @@ pub fn slot_is_relay(slot: &AgentSlot) -> bool {
         }
     }
     sent_invite && recv_invite
+}
+
+/// Lanes that FORWARD dialog-establishing INVITEs: binds that both RECEIVED
+/// and SENT an initial (no-To-tag) INVITE anywhere in the recording. This is
+/// the whole-recording complement of [`slot_is_relay`]: a B2BUA gives each leg
+/// its own Call-ID, so within one dialog slice its slot only sends OR receives
+/// the establishing INVITE and the per-slice heuristic can never classify it —
+/// across the recording its a-leg (received) and b-leg (sent) meet. A pure
+/// originator (UAC fixture) or pure answerer never qualifies. `{Proxy}`-only
+/// lanes are NOT included — relays by declaration are [`AgentSlot::proxy_only`].
+pub fn invite_forwarder_lanes(
+    events: &[Stamped<SignalingNetworkEvent>],
+) -> std::collections::HashSet<LaneKey> {
+    let parser = super::lenient_parser();
+    let mut sent: std::collections::HashSet<LaneKey> = std::collections::HashSet::new();
+    let mut received: std::collections::HashSet<LaneKey> = std::collections::HashSet::new();
+    for s in events {
+        let (bind_key, raw, is_sent) = match &s.event {
+            SignalingNetworkEvent::SendCalled { bind_key, msg, .. } => {
+                (bind_key, msg.as_slice(), true)
+            }
+            SignalingNetworkEvent::RecvItem { bind_key, packet, .. } => {
+                (bind_key, packet.raw.as_slice(), false)
+            }
+            _ => continue,
+        };
+        // Cheap method gate before parsing — only initial INVITEs matter. Raw
+        // scanning is sip-message's job (`sniff` is the only home for it).
+        if !sniff::req_method(raw).is_some_and(|m| m == "INVITE") {
+            continue;
+        }
+        let side = if is_sent { &mut sent } else { &mut received };
+        if side.contains(bind_key) {
+            continue;
+        }
+        if let Ok(SipMessage::Request(r)) = parser.parse(raw) {
+            if r.to().tag().is_none_or(str::is_empty) {
+                side.insert(bind_key.clone());
+            }
+        }
+    }
+    sent.intersection(&received).cloned().collect()
 }
 
 /// All agent slots that share a `(Call-ID, unordered tag-pair)` dialog
