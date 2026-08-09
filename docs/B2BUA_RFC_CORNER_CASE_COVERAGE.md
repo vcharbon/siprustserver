@@ -84,6 +84,7 @@ Severity = operational risk if the behaviour is wrong.
 | CANCEL-7 | 9.1/16.10 | CANCEL Route echoes INVITE | Same Route set + B-leg branch | med | ✅ | rfc-audit `cancelRouteEchoesInvite` |
 | 487-1 | 9.1 | A-INVITE terminated after CANCEL | 487, server txn drives Timer G/H | high | ✅ | sip-txn `cancel_sends_200_and_487...` |
 | 487-3 | 9.1 | B-leg returns 487 | ACK it, map to A-leg | med | 🟡 | covered via failure relay; add explicit `bleg_487_acked_and_mapped` |
+| 487-4 | 17.2.1 | Late decision authors a second A-leg final after the 487 | Drop it: one final per server txn (only same-status retransmits) | high | ✅ | rfc-audit `singleFinalPerServerTxn`; b2bua `no_answer_cancelled_call`, `decision_lands_on_cancelled_call` |
 
 ### re-INVITE / glare
 

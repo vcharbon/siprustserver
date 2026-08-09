@@ -428,6 +428,22 @@ pub fn invite_forwarder_lanes(
     sent.intersection(&received).cloned().collect()
 }
 
+/// Lanes classified as a relay in ANY dialog slice of the recording — the
+/// whole-recording projection of [`slot_is_relay`] (declaration `{Proxy}`-only,
+/// or the sent-AND-received initial-INVITE heuristic). A rule that judges what a
+/// lane **authored** skips these: the responses on a relay lane are its
+/// upstream's emissions, judged on the upstream lane.
+pub fn relay_lanes(
+    events: &[Stamped<SignalingNetworkEvent>],
+) -> std::collections::HashSet<LaneKey> {
+    project_per_dialog(events)
+        .iter()
+        .flat_map(|slice| slice.per_agent.iter())
+        .filter(|slot| slot_is_relay(slot))
+        .map(|slot| slot.bind_key.clone())
+        .collect()
+}
+
 /// All agent slots that share a `(Call-ID, unordered tag-pair)` dialog
 /// identity (RFC 3261 §12 — the dialog id is direction-independent). The tags
 /// are reported in **establishing orientation**: `from_tag` is the caller's
