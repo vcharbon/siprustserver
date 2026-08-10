@@ -158,6 +158,17 @@ pub struct B2buaConfig {
     /// supervision, hunting chains) raise it. Overridable via
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`.
     pub invite_txn_timeout_sec: i64,
+    /// **Strict RFC 3261 §9.1 CANCEL wait** (ADR-0028). `false` (the default)
+    /// is the bounded-hold policy: a b-leg CANCEL for a response-less branch
+    /// waits for the first provisional at most the sip-txn grace window
+    /// (`CANCEL_HOLD_GRACE`, 1 s), then goes on the wire regardless — every
+    /// emitted CANCEL reaches the callee, so an abandoned setup can never ring
+    /// to the callee's own give-up (and behind the 100-absorbing LB, a
+    /// 100-only b-leg is still CANCELed). `true` is the literal §9.1 wait: no
+    /// CANCEL is ever sent pre-provisional — a callee that answers nothing is
+    /// never CANCELed and rides the terminating backstop instead. Overridable
+    /// via `B2BUA_CANCEL_STRICT_RFC_WAIT` (non-empty = strict).
+    pub cancel_strict_rfc3261_wait: bool,
     /// **ACK-timeout grace**, seconds (RFC 3261 §13.3.1.4 — the 2xx-without-ACK
     /// give-up window, RFC's `64·T1` = 32 s). Armed when the a-leg 2xx is relayed
     /// at dialog confirmation; cancelled when the a-leg ACK arrives. While it is
@@ -298,6 +309,7 @@ impl Default for B2buaConfig {
             reaper_idle_max_sec: 0,
             setup_timeout_sec: 150,
             invite_txn_timeout_sec: 158,
+            cancel_strict_rfc3261_wait: false,
             ack_timeout_sec: 32,
             // Tier-3 admission gate (migration/09). TS defaults
             // (CPS_BUCKET_SIZE / CPS_BUCKET_RATE / OVERLOAD_PANIC_ELU_THRESHOLD /

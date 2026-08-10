@@ -31,6 +31,16 @@ pub struct TransactionConfig {
     /// app-level setup deadline strictly below it, or the txn layer CANCELs
     /// the callee before the app gives up.
     pub invite_initial_timeout_ms: u64,
+    /// The held-CANCEL policy for a response-less INVITE client txn
+    /// (RFC 3261 §9.1 / ADR-0028). `Some(ms)` — the default,
+    /// [`CANCEL_HOLD_GRACE`](crate::timers::CANCEL_HOLD_GRACE) (1 s) — holds
+    /// the CANCEL for the branch's first provisional at most `ms`, then sends
+    /// it regardless: every emitted CANCEL reaches the wire; the grace is a
+    /// courtesy window, never a veto. `None` is the strict §9.1 wait: the
+    /// CANCEL is held until a provisional arrives and silently dropped if the
+    /// txn dies first — a callee that never sends one is never CANCELed
+    /// (ADR-0028 documents when that trade is acceptable).
+    pub cancel_hold_grace_ms: Option<u64>,
 }
 
 impl Default for TransactionConfig {
@@ -39,6 +49,7 @@ impl Default for TransactionConfig {
             udp_queue_max: 256,
             id_gen: Arc::new(IdGen::from_entropy()),
             invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
+            cancel_hold_grace_ms: Some(crate::timers::CANCEL_HOLD_GRACE),
         }
     }
 }
@@ -123,6 +134,7 @@ impl TransactionLayer {
             metrics_inner,
             config.id_gen,
             config.invite_initial_timeout_ms,
+            config.cancel_hold_grace_ms,
         );
         let owner_abort = tokio::spawn(run(owner, endpoint, cmd_rx)).abort_handle();
 

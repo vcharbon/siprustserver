@@ -18,9 +18,10 @@
 //! The third test pins the `handle-timeout` sibling: the b-leg INVITE
 //! transaction backstop firing on a caller-CANCELed leg resolves it locally.
 //!
-//! The b-leg CANCEL toward the response-less callee is HELD by sip-txn and
-//! never hits the wire (RFC 3261 §9.1, ADR-0028) — bob sees Timer-A INVITE
-//! retransmits only.
+//! The b-leg CANCEL toward the response-less callee is HELD by sip-txn for
+//! the grace window, then sent regardless (RFC 3261 §9.1 bounded per
+//! ADR-0028) — bob sees Timer-A INVITE retransmits plus exactly ONE
+//! grace-expiry CANCEL, which he (gone dark) never answers.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -168,10 +169,24 @@ async fn no_answer_deadline_on_a_caller_cancelled_call_is_inert() {
     cxl.expect(200).await;
     call.expect(487).await;
 
+    // ── cross exactly the held-CANCEL grace deadline ─────────────────────────
+    // The b-leg branch is response-less, so the CANCEL is held the full grace
+    // window and then sent regardless (ADR-0028). Bob — gone dark — receives
+    // it and answers nothing.
+    h.advance(Duration::from_millis(sip_txn::timers::CANCEL_HOLD_GRACE + 500)).await;
+    assert!(
+        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_some(),
+        "the grace expiry puts the b-leg CANCEL on the wire (ADR-0028)",
+    );
+
     // ── cross exactly the (scrubbed) NoAnswer deadline ───────────────────────
     // Armed at route time (~t0), so +NO_ANSWER_SEC from the CANCEL crosses it
     // and nothing else (the next deadline is the 32 s terminating backstop).
-    h.advance(Duration::from_secs(NO_ANSWER_SEC as u64)).await;
+    h.advance(
+        Duration::from_secs(NO_ANSWER_SEC as u64)
+            - Duration::from_millis(sip_txn::timers::CANCEL_HOLD_GRACE + 500),
+    )
+    .await;
     assert_eq!(consults.load(Ordering::SeqCst), 0, "no /calls/failure consult for an abandoned call");
     // No second final reaches alice: her queue is empty (a regression's 480
     // would surface here as an unexpected response).
@@ -179,11 +194,11 @@ async fn no_answer_deadline_on_a_caller_cancelled_call_is_inert() {
         alice.try_receive_tolerating("CANCEL", &[]).await.is_none(),
         "nothing may reach the caller after the 487",
     );
-    // The held b-leg CANCEL never hits the wire (ADR-0028): bob keeps seeing
-    // Timer-A INVITE retransmits only.
+    // And no SECOND CANCEL toward bob: the grace copy is sent exactly once
+    // (no provisional ever arrives, so no re-flush either).
     assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
-        "no CANCEL may reach a response-less b-leg branch (RFC 3261 §9.1)",
+        "exactly one grace-expiry CANCEL reaches the dead callee",
     );
 
     // ── the SUT's own dead-call detection reaps the call ─────────────────────
@@ -243,9 +258,20 @@ async fn stale_no_answer_fire_during_the_terminating_window_is_absorbed() {
     cxl.expect(200).await;
     call.expect(487).await;
 
-    // Cross ONLY the probe's inject deadline: the stale per-b-leg NoAnswer
+    // Cross the held-CANCEL grace deadline first (ADR-0028): bob — gone dark —
+    // receives the grace-expiry CANCEL and answers nothing.
+    h.advance(Duration::from_millis(sip_txn::timers::CANCEL_HOLD_GRACE + 500)).await;
+    assert!(
+        bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_some(),
+        "the grace expiry puts the b-leg CANCEL on the wire (ADR-0028)",
+    );
+    // Then cross ONLY the probe's inject deadline: the stale per-b-leg NoAnswer
     // entry is re-armed on the now-Terminating call (+STALE_FIRE_SEC).
-    h.advance(Duration::from_secs(stalerestore::INJECT_AT_SEC as u64)).await;
+    h.advance(
+        Duration::from_secs(stalerestore::INJECT_AT_SEC as u64)
+            - Duration::from_millis(sip_txn::timers::CANCEL_HOLD_GRACE + 500),
+    )
+    .await;
     // Cross ONLY the stale NoAnswer deadline. Pre-fix this consulted
     // /calls/failure and 480'd the a-leg's completed transaction.
     h.advance(Duration::from_secs(stalerestore::STALE_FIRE_SEC as u64 + 1)).await;
@@ -267,7 +293,7 @@ async fn stale_no_answer_fire_during_the_terminating_window_is_absorbed() {
     assert_eq!(consults.load(Ordering::SeqCst), 0, "still no consult through teardown");
     assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
-        "no CANCEL may reach a response-less b-leg branch (RFC 3261 §9.1)",
+        "exactly one grace-expiry CANCEL reaches the dead callee — never a second",
     );
     b2bua.assert_fully_reaped();
 

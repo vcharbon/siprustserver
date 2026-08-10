@@ -65,6 +65,10 @@ pub struct IndexedMessage {
     /// The fully parsed message; its `Request`/`Response` arm tells request from
     /// response.
     pub msg: SipMessage,
+    /// Capture timestamp (`Stamped::at_ms`) — lets timing-sensitive rules
+    /// (`rfc3261.cancelAfter1xx`'s ADR-0028 grace-floor acceptance) compare
+    /// when two branch messages hit the wire.
+    pub at_ms: u64,
 }
 
 /// All four directional buckets for a single top-Via branch — the TS
@@ -125,6 +129,7 @@ pub fn build_branch_index(events: &[Stamped<SignalingNetworkEvent>]) -> BranchIn
             bind_key: bind_key.clone(),
             direction,
             msg,
+            at_ms: s.at_ms,
         };
         let bucket = match (&indexed.msg, direction) {
             (SipMessage::Request(_), Direction::Sent) => &mut entry.sent_requests,
