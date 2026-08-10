@@ -266,6 +266,7 @@ async fn configured_invite_bound_moves_the_initial_invite_expiry() {
             udp_queue_max: 64,
             id_gen: std::sync::Arc::new(sip_txn::IdGen::seeded(0xC0FFEE)),
             invite_initial_timeout_ms: 300_000,
+            ..Default::default()
         },
     )
     .await;

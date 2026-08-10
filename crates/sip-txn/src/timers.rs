@@ -36,6 +36,16 @@ pub const TIMER_J: u64 = 64 * T1;
 /// retransmitted finals after a lost ACK rather than re-surfacing them.
 pub const TIMER_D: u64 = 64 * T1;
 
+/// DEFAULT for the held-CANCEL grace window
+/// ([`TransactionConfig::cancel_hold_grace_ms`](crate::TransactionConfig)) —
+/// how long a CANCEL for a response-less INVITE client txn waits for the
+/// branch's first provisional (RFC 3261 §9.1) before being sent regardless
+/// (ADR-0028). 2·T1: long enough for the original INVITE plus one Timer-A
+/// retransmit to reach a UAS and draw its 100, so the grace-expiry send is a
+/// rare fallback, not the common path. The RFC-audit acceptance floor
+/// (`rfc3261.cancelAfter1xx`) sits just below this value — keep them in step.
+pub const CANCEL_HOLD_GRACE: u64 = 2 * T1;
+
 /// Safety-net sweep cadence (ms).
 pub const TXN_SWEEP_INTERVAL: u64 = 10_000;
 /// Safety-net max txn age — just above Timer H/J (32 s) so the sweep only ever

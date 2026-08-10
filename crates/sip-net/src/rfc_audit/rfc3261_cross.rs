@@ -22,7 +22,7 @@ use crate::report::to_sip_entries;
 use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::types::UaRole;
 use crate::rfc_audit::dialog_model::{
-    call_id, cseq_method, from_tag, invite_forwarder_lanes, project_per_dialog, relay_lanes,
+    call_id, cseq_method, from_tag, project_per_dialog, relay_lanes,
     route_entries, slot_is_relay, status, to_tag, to_uri, top_via_branch, value_of, EventKind,
     OrderedEvent,
 };
@@ -1107,43 +1107,42 @@ impl CrossMessageAuditRule for CancelRouteEchoesInviteRule {
 }
 
 // ---------------------------------------------------------------------------
-// rfc3261.cancelAfter1xx  [gating on forwarder lanes; advisory on originators]
+// rfc3261.cancelAfter1xx  [informational on every lane — ADR-0028]
 // ---------------------------------------------------------------------------
 
-/// **RFC 3261 §9.1 — a UAC MUST NOT CANCEL before receiving a 1xx.** A CANCEL may
-/// only be sent for an INVITE once at least one provisional response has arrived.
-/// CANCEL shares the INVITE branch; we track the earliest received response per
-/// branch and fire when a sent CANCEL has no prior 1xx (no response or only a
-/// final).
+/// **RFC 3261 §9.1 — a UAC waits for a 1xx before CANCELing**, bounded by the
+/// ADR-0028 grace window — **informational, never gating**. The SUT's bounded
+/// hold deliberately sends a CANCEL pre-1xx once the branch stayed
+/// response-less past the grace window (a callee that answers nothing must
+/// still hear the cancellation; an unbounded wait leaves abandoned setups
+/// ringing forever), so a literal §9.1 breach is sanctioned policy here, not a
+/// defect class. CANCEL shares the INVITE branch; we track the earliest
+/// received response per branch and note a sent CANCEL with no prior 1xx (no
+/// response or only a final):
+/// - a CANCEL ≥ [`CANCEL_GRACE_FLOOR_MS`] after the lane's first INVITE on the
+///   branch is the sanctioned grace-expiry send — **no finding at all**;
+/// - an under-floor pre-1xx CANCEL (an eager-CANCEL regression toward a UAS
+///   that may not have built its server txn — the orphaned-ring defect
+///   ADR-0028 describes — or a scripted fixture race) surfaces as an
+///   **advisory** finding.
 ///
-/// Lane dispatch — two registered instances share this rule id, narrowed the
-/// way `recordRoutePlacement` narrows (by what the lane demonstrably is, not by
-/// a global advisory flag):
-/// - [`forwarder`](Self::forwarder) **GATES** INVITE-forwarding lanes
-///   ([`invite_forwarder_lanes`] — a B2BUA/AS bind that both received and sent
-///   initial INVITEs): its b-leg CANCEL timing is its own UAC obligation, and
-///   an early CANCEL orphans a callee still being rung by Timer-A retransmits.
-/// - [`originator`](Self::originator) stays **advisory** for pure-originator
-///   lanes: a UAC fixture firing CANCEL on a local timer before the first 1xx
-///   is a legitimate scripted race (transient failure injection, glare).
-/// - A `{Proxy}`-declared lane is skipped by both: a transparent relay forwards
-///   the upstream UAC's CANCEL at the upstream's timing.
-pub struct CancelAfter1xxRule {
-    /// `true` ⇒ judge only INVITE-forwarding lanes (gating); `false` ⇒ judge
-    /// only non-forwarding lanes (advisory).
-    forwarder_lanes: bool,
-}
+/// A `{Proxy}`-declared lane is skipped: a transparent relay forwards the
+/// upstream UAC's CANCEL at the upstream's timing.
+/// Acceptance floor (ms) for a pre-1xx CANCEL: a sent CANCEL at least this far
+/// after its branch's first sent INVITE is the deliberate ADR-0028 grace-expiry
+/// send, not the eager-CANCEL defect. Sits just below the transaction layer's
+/// `sip_txn::timers::CANCEL_HOLD_GRACE` (1 s — a floor equal to the window
+/// would false-fire on stamp granularity) — keep them in step.
+///
+/// Known blind spots of the timestamp heuristic (tolerable because the rule
+/// never gates and the layer/harness tests carry the real regression
+/// protection): the evict/timeout flush can legitimately send < floor after
+/// the INVITE (call torn down inside the grace window) → an advisory note on
+/// correct SUT behavior; and a lane with no hold machinery at all that
+/// happens to CANCEL ≥ floor after its INVITE is accepted without a finding.
+pub const CANCEL_GRACE_FLOOR_MS: u64 = 900;
 
-impl CancelAfter1xxRule {
-    /// The gating instance: INVITE-forwarding (B2BUA/AS) lanes only.
-    pub fn forwarder() -> Self {
-        Self { forwarder_lanes: true }
-    }
-    /// The advisory instance: pure-originator (UAC fixture) lanes only.
-    pub fn originator() -> Self {
-        Self { forwarder_lanes: false }
-    }
-}
+pub struct CancelAfter1xxRule;
 
 impl CrossMessageAuditRule for CancelAfter1xxRule {
     fn name(&self) -> &'static str {
@@ -1151,12 +1150,11 @@ impl CrossMessageAuditRule for CancelAfter1xxRule {
     }
 
     fn force_advisory(&self) -> bool {
-        !self.forwarder_lanes
+        true
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
         let mut out = Vec::new();
-        let forwarders = invite_forwarder_lanes(events);
         // Whole-recording branch index — the conservative backstop. The
         // projector splits a CANCEL (To-tag absent) into its own pending slice,
         // away from the INVITE+1xx that confirmed the dialog (To-tag present),
@@ -1172,16 +1170,19 @@ impl CrossMessageAuditRule for CancelAfter1xxRule {
         };
         for slice in project_per_dialog(events) {
             for slot in &slice.per_agent {
-                // Lane dispatch (see the rule doc): proxies are exempt; each
-                // instance judges only its own lane class.
-                if slot.proxy_only || forwarders.contains(&slot.bind_key) != self.forwarder_lanes
-                {
+                // Proxies are exempt (see the rule doc).
+                if slot.proxy_only {
                     continue;
                 }
                 // First received response status per branch, in walk order — a
                 // live walk enforces the "before" ordering a whole-stream lookup
                 // would lose.
                 let mut first_received_status: HashMap<String, u16> = HashMap::new();
+                // Per-branch count of sent CANCELs already walked in this slot,
+                // so the grace-floor check reads the JUDGED event's own stamp
+                // (the nth sent CANCEL in the index — same capture order as the
+                // walk), not the branch's earliest.
+                let mut cancels_walked: HashMap<String, usize> = HashMap::new();
                 for (kind, msg) in slot_events(&slot.ordered) {
                     let branch = branch_of(msg);
                     if branch.is_empty() {
@@ -1194,6 +1195,12 @@ impl CrossMessageAuditRule for CancelAfter1xxRule {
                         (EventKind::Sent, SipMessage::Request(req))
                             if req.method().as_str().eq_ignore_ascii_case("CANCEL") =>
                         {
+                            let nth = {
+                                let n = cancels_walked.entry(branch.clone()).or_insert(0);
+                                let nth = *n;
+                                *n += 1;
+                                nth
+                            };
                             if let Some(&earliest) = first_received_status.get(&branch) {
                                 if earliest < 200 {
                                     continue;
@@ -1204,6 +1211,30 @@ impl CrossMessageAuditRule for CancelAfter1xxRule {
                             // the in-slot view just lost it to a slice split.
                             if received_1xx_on_branch(&branch) {
                                 continue;
+                            }
+                            // ADR-0028 grace-expiry acceptance: THIS pre-1xx
+                            // CANCEL (the nth sent on the branch by this lane)
+                            // left the lane ≥ the grace floor after the lane's
+                            // first INVITE on the branch — the deliberate
+                            // bounded-hold send toward a response-less callee.
+                            let lane_sent_at = |method: &str, n: usize| -> Option<u64> {
+                                idx.requests_for(&branch, Direction::Sent)
+                                    .iter()
+                                    .filter(|m| m.bind_key == slot.bind_key)
+                                    .filter(|m| {
+                                        m.as_request().is_some_and(|r| {
+                                            r.method().as_str().eq_ignore_ascii_case(method)
+                                        })
+                                    })
+                                    .nth(n)
+                                    .map(|m| m.at_ms)
+                            };
+                            let invite_at = lane_sent_at("INVITE", 0);
+                            let cancel_at = lane_sent_at("CANCEL", nth);
+                            if let (Some(invite_at), Some(cancel_at)) = (invite_at, cancel_at) {
+                                if cancel_at.saturating_sub(invite_at) >= CANCEL_GRACE_FLOOR_MS {
+                                    continue;
+                                }
                             }
                             out.push((
                                 slot.bind_key.clone(),
@@ -2121,8 +2152,7 @@ pub(crate) fn cross_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
         Arc::new(UnsupportedExtension421Rule),
         Arc::new(AckRequireSubsetOfInviteRule),
         Arc::new(CancelRouteEchoesInviteRule),
-        Arc::new(CancelAfter1xxRule::forwarder()),
-        Arc::new(CancelAfter1xxRule::originator()),
+        Arc::new(CancelAfter1xxRule),
         Arc::new(SerialRegisterRule),
         Arc::new(NoReInviteWhileInviteInProgressRule),
         Arc::new(Proxy100WithinT100msRule),
@@ -2769,12 +2799,14 @@ mod tests {
         assert!(f[0].1.contains("differ"), "{}", f[0].1);
     }
 
-    // ---- cancelAfter1xx [gating forwarders / advisory originators] --------
+    // ---- cancelAfter1xx [informational on every lane] ---------------------
 
     #[test]
-    fn cancel_after_1xx_advisory_split_by_lane_class() {
-        assert!(CancelAfter1xxRule::originator().force_advisory());
-        assert!(!CancelAfter1xxRule::forwarder().force_advisory());
+    fn cancel_after_1xx_is_always_advisory() {
+        // The rule is informational everywhere (ADR-0028): a literal §9.1
+        // breach is sanctioned SUT policy past the grace floor and a visible
+        // note under it — never a gating non-compliance.
+        assert!(CancelAfter1xxRule.force_advisory());
     }
 
     #[test]
@@ -2784,52 +2816,57 @@ mod tests {
             recv("alice", resp(180, 1, "INVITE", A, B, "at", "bt", "z9hG4bK-i", ""), "127.0.0.1:5070", 1),
             sent("alice", req("CANCEL", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 2),
         ];
-        assert!(CancelAfter1xxRule::originator().check(&evs).is_empty());
-        assert!(CancelAfter1xxRule::forwarder().check(&evs).is_empty());
+        assert!(CancelAfter1xxRule.check(&evs).is_empty());
     }
 
     #[test]
-    fn cancel_before_1xx_flagged_advisory_on_originator_lane() {
-        // alice only SENDS initial INVITEs — a pure-originator (fixture) lane:
-        // the advisory instance fires, the gating (forwarder) instance stays out.
+    fn eager_cancel_before_1xx_is_noted_on_any_lane() {
+        // An under-floor pre-1xx CANCEL surfaces on an originator lane…
         let evs = vec![
             sent("alice", req("INVITE", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 0),
             sent("alice", req("CANCEL", "z9hG4bK-i", 1, A, B, "at", None, ""), "127.0.0.1:5070", 1),
         ];
-        let f = CancelAfter1xxRule::originator().check(&evs);
+        let f = CancelAfter1xxRule.check(&evs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].1.contains("before any received"), "{}", f[0].1);
-        assert!(CancelAfter1xxRule::forwarder().check(&evs).is_empty());
-    }
 
-    #[test]
-    fn cancel_before_1xx_gates_on_forwarder_lane() {
-        // The `as` bind RECEIVES the a-leg initial INVITE and SENDS the b-leg
-        // one (the B2BUA shape) — an INVITE-forwarding lane. Its pre-1xx b-leg
-        // CANCEL fires the gating instance; the advisory instance stays out.
+        // …and on a forwarding (B2BUA/AS) lane alike — same advisory note.
         let evs = vec![
             recv("as", req("INVITE", "z9hG4bK-a", 1, A, B, "at", None, ""), "127.0.0.1:5060", 0),
             sent("as", req("INVITE", "z9hG4bK-b", 1, A, B, "bt", None, ""), "127.0.0.1:5070", 1),
             sent("as", req("CANCEL", "z9hG4bK-b", 1, A, B, "bt", None, ""), "127.0.0.1:5070", 2),
         ];
-        let f = CancelAfter1xxRule::forwarder().check(&evs);
+        let f = CancelAfter1xxRule.check(&evs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].1.contains("before any received"), "{}", f[0].1);
-        assert!(CancelAfter1xxRule::originator().check(&evs).is_empty());
     }
 
     #[test]
-    fn cancel_before_1xx_forwarder_clean_after_provisional() {
-        // Same forwarding lane, but the b-leg CANCEL follows a received 180 —
-        // the §9.1 wait was honoured; neither instance fires.
+    fn cancel_before_1xx_clean_at_grace_floor() {
+        // Still NO received 1xx — but the CANCEL left the lane ≥
+        // CANCEL_GRACE_FLOOR_MS after its INVITE: the sanctioned ADR-0028
+        // grace-expiry send toward a response-less callee. No finding at all;
+        // an eager pre-1xx CANCEL under the floor is still noted
+        // (`eager_cancel_before_1xx_is_noted_on_any_lane` — at_ms gap 1 ms).
+        let evs = vec![
+            recv("as", req("INVITE", "z9hG4bK-a", 1, A, B, "at", None, ""), "127.0.0.1:5060", 0),
+            sent("as", req("INVITE", "z9hG4bK-b", 1, A, B, "bt", None, ""), "127.0.0.1:5070", 1),
+            sent("as", req("CANCEL", "z9hG4bK-b", 1, A, B, "bt", None, ""), "127.0.0.1:5070", 1 + CANCEL_GRACE_FLOOR_MS),
+        ];
+        assert!(CancelAfter1xxRule.check(&evs).is_empty());
+    }
+
+    #[test]
+    fn cancel_before_1xx_clean_after_provisional() {
+        // The b-leg CANCEL follows a received 180 — the §9.1 wait was
+        // honoured; no finding.
         let evs = vec![
             recv("as", req("INVITE", "z9hG4bK-a", 1, A, B, "at", None, ""), "127.0.0.1:5060", 0),
             sent("as", req("INVITE", "z9hG4bK-b", 1, A, B, "bt", None, ""), "127.0.0.1:5070", 1),
             recv("as", resp(180, 1, "INVITE", A, B, "bt", "bobtag", "z9hG4bK-b", ""), "127.0.0.1:5070", 2),
             sent("as", req("CANCEL", "z9hG4bK-b", 1, A, B, "bt", None, ""), "127.0.0.1:5070", 3),
         ];
-        assert!(CancelAfter1xxRule::forwarder().check(&evs).is_empty());
-        assert!(CancelAfter1xxRule::originator().check(&evs).is_empty());
+        assert!(CancelAfter1xxRule.check(&evs).is_empty());
     }
 
     // ---- serialRegister --------------------------------------------------
@@ -3224,8 +3261,6 @@ mod tests {
 
     #[test]
     fn all_cross_rules_registered() {
-        // cancelAfter1xx registers TWO instances (forwarder gating + originator
-        // advisory) under one rule id.
-        assert_eq!(cross_rules().len(), 24);
+        assert_eq!(cross_rules().len(), 23);
     }
 }

@@ -242,6 +242,11 @@ pub struct RunnerEnv {
     /// Timer C > 3 min, 180 s PSTN supervision). `validate()` refuses boot when
     /// `B2BUA_SETUP_TIMEOUT_SEC` does not sit strictly below it.
     pub invite_txn_timeout_sec: i64,
+    /// `B2BUA_CANCEL_STRICT_RFC_WAIT` — truthy (`1`/`true`/`yes`/`on`) selects
+    /// the literal RFC 3261 §9.1 CANCEL wait (a response-less b-leg is never
+    /// CANCELed); default is the ADR-0028 bounded hold — the CANCEL goes on
+    /// the wire at the grace expiry regardless.
+    pub cancel_strict_rfc_wait: bool,
     /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — decision-backend deadline per
     /// round-trip (default 5000; <= 0 disables — ADR-0022).
     pub call_control_timeout_ms: i64,
@@ -333,6 +338,7 @@ impl RunnerEnv {
             invite_txn_timeout_sec: env_or("B2BUA_INVITE_TXN_TIMEOUT_SEC", "158")
                 .parse()
                 .expect("B2BUA_INVITE_TXN_TIMEOUT_SEC"),
+            cancel_strict_rfc_wait: env_flag("B2BUA_CANCEL_STRICT_RFC_WAIT"),
             call_control_timeout_ms: env_or("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")
                 .parse()
                 .expect("B2BUA_CALL_CONTROL_TIMEOUT_MS"),
@@ -520,6 +526,7 @@ impl RunnerEnv {
             limiter_refresh_sec: self.limiter_refresh_sec,
             setup_timeout_sec: self.setup_timeout_sec,
             invite_txn_timeout_sec: self.invite_txn_timeout_sec,
+            cancel_strict_rfc3261_wait: self.cancel_strict_rfc_wait,
             call_control_timeout_ms: self.call_control_timeout_ms,
             ack_timeout_sec: self.ack_timeout_sec,
             cps_bucket_size: self.cps_bucket_size,

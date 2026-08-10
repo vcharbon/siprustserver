@@ -66,6 +66,12 @@ pub(super) struct Owner {
     /// the initial-INVITE client timeout and the pre-final INVITE sweep age both
     /// derive from it.
     pub(super) invite_initial_timeout_ms: u64,
+    /// The held-CANCEL policy
+    /// ([`TransactionConfig::cancel_hold_grace_ms`](crate::TransactionConfig)):
+    /// `Some(ms)` bounds the wait for the branch's first provisional — then
+    /// the CANCEL is sent regardless (ADR-0028); `None` is the strict §9.1
+    /// wait (hold until provisional, drop with the txn).
+    pub(super) cancel_hold_grace_ms: Option<u64>,
 }
 
 /// The next expired timer. Only ever awaited while `q` is non-empty — an empty
@@ -138,6 +144,7 @@ impl Owner {
         metrics: Arc<MetricsInner>,
         id_gen: Arc<IdGen>,
         invite_initial_timeout_ms: u64,
+        cancel_hold_grace_ms: Option<u64>,
     ) -> Self {
         Self {
             txns: HashMap::new(),
@@ -152,6 +159,7 @@ impl Owner {
             event_retry_armed: false,
             pending_quiesce: Vec::new(),
             invite_initial_timeout_ms,
+            cancel_hold_grace_ms,
         }
     }
 
@@ -172,10 +180,12 @@ impl Owner {
             self.cancel_timer(old.retransmit_key);
             self.cancel_timer(old.timeout_key);
             self.cancel_timer(old.cleanup_key);
+            self.cancel_timer(old.cancel_grace_key);
             self.untrack_call_ref(&old.call_ref, &branch);
-            // The displaced txn's held CANCEL dies with it — counted so the
-            // held counters reconcile (held == flushed + dropped).
-            if old.held_cancel.is_some() {
+            // The displaced txn's held CANCEL dies with it — a never-sent one
+            // is counted dropped so the held counters reconcile
+            // (held == flushed + flushed_pre1xx + dropped).
+            if old.held_cancel.is_some_and(|h| !h.sent_pre1xx) {
                 self.metrics
                     .held_cancels_dropped
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -217,12 +227,16 @@ impl Owner {
                 self.cancel_timer(t.retransmit_key);
                 self.cancel_timer(t.timeout_key);
                 self.cancel_timer(t.cleanup_key);
+                self.cancel_timer(t.cancel_grace_key);
                 self.untrack_call_ref(&t.call_ref, branch);
                 self.sync_active();
-                // A txn dying with a CANCEL still held (Timer B, 2xx final,
-                // call evict) owes nothing to the wire — the CANCEL is dropped
-                // (RFC 3261 §9.1: no provisional ever arrived).
-                if t.held_cancel.is_some() {
+                // A txn dying holding a never-sent CANCEL: under the bounded
+                // policy only the crossing-2xx final (cancellation moot), a
+                // same-branch displacement, and the safety-net sweep reach
+                // here un-flushed — grace expiry, evict, and timeout all send
+                // it first. Counted dropped only then; a grace-sent copy is
+                // already accounted.
+                if t.held_cancel.as_ref().is_some_and(|h| !h.sent_pre1xx) {
                     self.metrics
                         .held_cancels_dropped
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -306,13 +320,19 @@ impl Owner {
                 if let Some(t) = self.txns.get_mut(&branch) {
                     t.timeout_key = None;
                 }
-                self.fire_timeout(&branch)
+                self.fire_timeout(endpoint, &branch).await
             }
             Timer::Cleanup(branch) => {
                 if let Some(t) = self.txns.get_mut(&branch) {
                     t.cleanup_key = None;
                 }
                 self.delete_txn(&branch);
+            }
+            Timer::CancelGrace(branch) => {
+                if let Some(t) = self.txns.get_mut(&branch) {
+                    t.cancel_grace_key = None;
+                }
+                self.fire_cancel_grace(endpoint, &branch).await;
             }
             Timer::EventRetry => {
                 self.event_retry_armed = false;
@@ -373,7 +393,7 @@ impl Owner {
                 let _ = reply.send(());
             }
             Command::CancelTxnsForCall { call_ref, reply } => {
-                self.do_cancel_txns_for_call(&call_ref);
+                self.do_cancel_txns_for_call(endpoint, &call_ref).await;
                 let _ = reply.send(());
             }
             Command::ActiveTxnCount { call_ref, reply } => {

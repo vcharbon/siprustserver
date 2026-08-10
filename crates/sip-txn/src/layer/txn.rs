@@ -50,12 +50,27 @@ pub(super) enum Timer {
     /// AND Timer D (client non-2xx-final hold, §17.1.1.2). The fire handler just
     /// `delete_txn`s the branch, so it serves both roles.
     Cleanup(String),
+    /// Held-CANCEL grace expiry (ADR-0028): the branch's first provisional never
+    /// arrived inside the grace window, so the held CANCEL is sent regardless.
+    CancelGrace(String),
     /// Re-offer CRITICAL events (Timeout / Cancelled / CallQuiesced / a consumed
     /// non-2xx final / an inbound INVITE whose 100 silenced the UAC) that a full
     /// events queue deferred — never dropped. At most ONE in flight
     /// (`event_retry_armed`); its `Key` is never stored, so the CLAUDE.md
     /// stale-`Key` aliasing hazard cannot arise.
     EventRetry,
+}
+
+/// A CANCEL datagram parked on its INVITE client txn (see
+/// [`Transaction::held_cancel`]).
+pub(super) struct HeldCancel {
+    pub(super) buf: Bytes,
+    pub(super) dest: SocketAddr,
+    /// This datagram already went on the wire at grace expiry (pre-1xx). Kept
+    /// armed for ONE re-send on the first provisional — a UAS that 481'd the
+    /// pre-1xx copy has built its server txn by then — and excluded from the
+    /// dropped count (it is not "never sent").
+    pub(super) sent_pre1xx: bool,
 }
 
 pub(super) struct Transaction {
@@ -82,11 +97,17 @@ pub(super) struct Transaction {
     pub(super) timeout_key: Option<Key>,
     pub(super) cleanup_key: Option<Key>,
     /// A CANCEL datagram held back because this INVITE client txn has received
-    /// no response yet (RFC 3261 §9.1 — the CANCEL MUST wait for the first
-    /// provisional). Flushed on the first 1xx; dropped when the txn takes a
-    /// final or dies at Timer B (no CANCEL is owed to a dead transaction).
+    /// no response yet (RFC 3261 §9.1 — the CANCEL waits for the first
+    /// provisional). Flushed on the first 1xx, or sent regardless when the
+    /// grace window expires (ADR-0028: the wait is a courtesy, never a veto —
+    /// every emitted CANCEL reaches the wire). Cleared without sending only
+    /// when the txn takes a final first (the UAS already answered — §9.2).
     /// Only ever set on a `Client`/`Invite` txn in `Trying`.
-    pub(super) held_cancel: Option<(Bytes, SocketAddr)>,
+    pub(super) held_cancel: Option<HeldCancel>,
+    /// The [`Timer::CancelGrace`] wheel entry for a held CANCEL — cancelled in
+    /// lockstep whenever the hold resolves (flush/drop/txn death), nulled at
+    /// fire (the CLAUDE.md stale-`Key` discipline).
+    pub(super) cancel_grace_key: Option<Key>,
     // Retransmit progression.
     /// The request datagram Timer A/E re-sends — refcounted for the same reason
     /// as [`last_response`](Self::last_response).

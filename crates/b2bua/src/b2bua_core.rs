@@ -200,6 +200,10 @@ impl B2buaCore {
                 // `config.validate()` keeps `setup_timeout_sec` strictly below
                 // it, so the rules path always gives up before the txn layer.
                 invite_initial_timeout_ms: config.invite_txn_timeout_ms(),
+                // Held-CANCEL policy (ADR-0028): bounded grace by default;
+                // `cancel_strict_rfc3261_wait` selects the literal §9.1 wait.
+                cancel_hold_grace_ms: (!config.cancel_strict_rfc3261_wait)
+                    .then_some(sip_txn::timers::CANCEL_HOLD_GRACE),
             },
         );
         let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());
