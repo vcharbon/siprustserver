@@ -39,11 +39,12 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const LIMITER_ADDR: &str = "10.0.0.1:8080";
 
 /// The production default for the a-leg setup deadline (`B2buaConfig`
-/// `setup_timeout_sec`): below the sip-txn `INVITE_INITIAL_TIMEOUT` (158 s)
-/// so the rules path owns the teardown (clean 408 + CANCEL + obligations)
-/// while the txn timer stays the lower-layer backstop. The torn-down test
-/// rides the *default* deliberately: the regression is that a
-/// default-configured worker leaks setup-stalled calls.
+/// `setup_timeout_sec`): strictly below the configured initial-INVITE bound
+/// (`invite_txn_timeout_sec`, default 158 s) so the rules path owns the
+/// teardown (clean 408 + CANCEL + obligations) while the txn timer stays the
+/// lower-layer backstop. The torn-down test rides the *default* deliberately:
+/// the regression is that a default-configured worker leaks setup-stalled
+/// calls.
 const DEFAULT_SETUP_TIMEOUT: Duration = Duration::from_secs(150);
 
 fn laddr() -> SocketAddr {
@@ -119,8 +120,8 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
     );
 
     // ── At the setup deadline the call must resolve ──────────────────────────
-    // 151 s: past the 150 s SetupTimeout, before the 158 s sip-txn
-    // INVITE_INITIAL_TIMEOUT backstop — the ledger timer must own the teardown
+    // 151 s: past the 150 s SetupTimeout, before the configured 158 s (default)
+    // sip-txn initial-INVITE bound — the ledger timer must own the teardown
     // (it is the only one of the two that survives a crash → reclaim).
     h.advance(DEFAULT_SETUP_TIMEOUT + Duration::from_secs(1)).await;
 
@@ -185,15 +186,15 @@ async fn long_ring_that_answers_before_the_deadline_survives() {
     call.expect(180).await;
 
     // Ring for a long time (2 min), but answer inside the 150 s default
-    // deadline (and inside the 158 s sip-txn INVITE_INITIAL_TIMEOUT).
+    // deadline (and inside the default 158 s sip-txn initial-INVITE bound).
     h.advance(Duration::from_secs(120)).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
-    // Cross the (cancelled) 150 s deadline AND the 158 s txn mark: the
-    // answered call must stay up.
+    // Cross the (cancelled) 150 s deadline AND the default 158 s txn mark:
+    // the answered call must stay up.
     h.advance(Duration::from_secs(100)).await;
     assert_eq!(
         b2bua.metrics().creations_total() - b2bua.metrics().removals_total(),

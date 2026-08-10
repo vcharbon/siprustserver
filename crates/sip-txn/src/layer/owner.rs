@@ -61,6 +61,11 @@ pub(super) struct Owner {
     /// event it was about, orphaning it. Drained by `flush_pending_quiesce` at the
     /// end of every owner turn.
     pub(super) pending_quiesce: Vec<String>,
+    /// The configured out-of-dialog INVITE bound
+    /// ([`TransactionConfig::invite_initial_timeout_ms`](crate::TransactionConfig)):
+    /// the initial-INVITE client timeout and the pre-final INVITE sweep age both
+    /// derive from it.
+    pub(super) invite_initial_timeout_ms: u64,
 }
 
 /// The next expired timer. Only ever awaited while `q` is non-empty — an empty
@@ -132,6 +137,7 @@ impl Owner {
         events_tx: mpsc::Sender<TransactionEvent>,
         metrics: Arc<MetricsInner>,
         id_gen: Arc<IdGen>,
+        invite_initial_timeout_ms: u64,
     ) -> Self {
         Self {
             txns: HashMap::new(),
@@ -145,6 +151,7 @@ impl Owner {
             deferred_events: VecDeque::new(),
             event_retry_armed: false,
             pending_quiesce: Vec::new(),
+            invite_initial_timeout_ms,
         }
     }
 
@@ -318,7 +325,9 @@ impl Owner {
         let stale: Vec<String> = self
             .txns
             .iter()
-            .filter(|(_, t)| t.created_at.elapsed() > sweep_max_age(t))
+            .filter(|(_, t)| {
+                t.created_at.elapsed() > sweep_max_age(t, self.invite_initial_timeout_ms)
+            })
             .map(|(b, _)| b.clone())
             .collect();
         for branch in stale {

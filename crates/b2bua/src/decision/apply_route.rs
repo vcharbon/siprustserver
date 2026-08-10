@@ -168,9 +168,13 @@ pub async fn apply_route(
     // (set by the decision engine) straight through.
     let leg_id = "b-1";
     let dest = (route.destination.host.clone(), route.destination.port());
+    // A route-supplied ring deadline above `bound − margin` is held under the
+    // configured transaction bound so the CANCEL→487 exchange still completes
+    // inside the live b-leg client transaction (`relay::clamp_no_answer`).
     let no_answer = route
         .no_answer_timeout_sec
-        .or(route.features.no_answer_timeout_sec);
+        .or(route.features.no_answer_timeout_sec)
+        .map(|secs| relay::clamp_no_answer(config, &call.call_ref, secs));
     // Additive header rewrites (PAI, PANI, any X-*). Structural From/To/R-URI go
     // through the typed fields below, never this map (ADR-0017 X2).
     let header_updates: Vec<(String, Option<String>)> = route
@@ -431,7 +435,7 @@ fn arm_global_duration(call: &mut Call, fx: &mut HandlerEffects, max_duration_se
 /// at answer (`confirm-dialog` and the promote/18x confirm paths); fired by
 /// the CORE `setup-timeout` rule (408 to A, CANCEL pending b-legs). Lives in
 /// `call.timers`, so a reclaimed mid-setup call still carries its deadline —
-/// the sip-txn `INVITE_INITIAL_TIMEOUT` backstop dies with a crashed node and
+/// the configured sip-txn initial-INVITE bound dies with a crashed node and
 /// left such calls holding their limiter slots for the full GlobalDuration
 /// (endurance 2026-06-12). `setup_timeout_sec <= 0` disables.
 fn arm_setup_timeout(call: &mut Call, fx: &mut HandlerEffects, setup_timeout_sec: i64, now_ms: i64) {

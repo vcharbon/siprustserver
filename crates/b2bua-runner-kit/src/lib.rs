@@ -233,8 +233,15 @@ pub struct RunnerEnv {
     /// (default 600; `config.validate()` forces it to outlast the keepalive).
     pub reboot_budget_sec: i64,
     /// `B2BUA_SETUP_TIMEOUT_SEC` — a-leg total setup deadline, reroutes
-    /// included (default 150, below the 158 s txn backstop; <= 0 disables).
+    /// included (default 150; must stay strictly below
+    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`, enforced at boot; <= 0 disables).
     pub setup_timeout_sec: i64,
+    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC` — the sip-txn out-of-dialog INVITE bound
+    /// for BOTH call halves (b-leg client give-up + a-leg pre-final sweep age).
+    /// Default 158; supported range 33..=600 (telephony deployments raise it —
+    /// Timer C > 3 min, 180 s PSTN supervision). `validate()` refuses boot when
+    /// `B2BUA_SETUP_TIMEOUT_SEC` does not sit strictly below it.
+    pub invite_txn_timeout_sec: i64,
     /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — decision-backend deadline per
     /// round-trip (default 5000; <= 0 disables — ADR-0022).
     pub call_control_timeout_ms: i64,
@@ -323,6 +330,9 @@ impl RunnerEnv {
             setup_timeout_sec: env_or("B2BUA_SETUP_TIMEOUT_SEC", "150")
                 .parse()
                 .expect("B2BUA_SETUP_TIMEOUT_SEC"),
+            invite_txn_timeout_sec: env_or("B2BUA_INVITE_TXN_TIMEOUT_SEC", "158")
+                .parse()
+                .expect("B2BUA_INVITE_TXN_TIMEOUT_SEC"),
             call_control_timeout_ms: env_or("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")
                 .parse()
                 .expect("B2BUA_CALL_CONTROL_TIMEOUT_MS"),
@@ -509,6 +519,7 @@ impl RunnerEnv {
             reboot_budget_sec: self.reboot_budget_sec,
             limiter_refresh_sec: self.limiter_refresh_sec,
             setup_timeout_sec: self.setup_timeout_sec,
+            invite_txn_timeout_sec: self.invite_txn_timeout_sec,
             call_control_timeout_ms: self.call_control_timeout_ms,
             ack_timeout_sec: self.ack_timeout_sec,
             cps_bucket_size: self.cps_bucket_size,
@@ -519,9 +530,11 @@ impl RunnerEnv {
             relay_headers: self.relay_headers.clone(),
             ..Default::default()
         };
-        // Forbid booting with a config that would silently break HA: too-short a
-        // keepalive, or a reboot budget that cannot outlast a primary reboot / a
-        // keepalive refresh gap (which would self-evict healthy backups).
+        // Forbid booting with a config that would silently break HA (too-short a
+        // keepalive, a reboot budget that cannot outlast a primary reboot or a
+        // keepalive refresh gap) or call setup (an INVITE transaction bound
+        // outside its supported range, an app setup deadline / reaper idle
+        // window that does not sit strictly under that bound).
         config.validate().unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
 
         RunnerBase {

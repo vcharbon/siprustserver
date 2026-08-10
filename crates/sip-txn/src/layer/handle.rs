@@ -23,6 +23,14 @@ pub struct TransactionConfig {
     pub udp_queue_max: usize,
     /// Identifier seam (Via branch / To-tag generation).
     pub id_gen: Arc<IdGen>,
+    /// The INITIAL (out-of-dialog) INVITE transaction bound, ms — the client
+    /// txn's give-up timer AND the server-side sweep age for a pre-final INVITE
+    /// derive from this one value, so both halves of a call admit the same ring
+    /// window. Default [`INVITE_INITIAL_TIMEOUT`](crate::timers::INVITE_INITIAL_TIMEOUT)
+    /// (158 s); the consumer validates its own range and MUST keep every
+    /// app-level setup deadline strictly below it, or the txn layer CANCELs
+    /// the callee before the app gives up.
+    pub invite_initial_timeout_ms: u64,
 }
 
 impl Default for TransactionConfig {
@@ -30,6 +38,7 @@ impl Default for TransactionConfig {
         Self {
             udp_queue_max: 256,
             id_gen: Arc::new(IdGen::from_entropy()),
+            invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
         }
     }
 }
@@ -108,7 +117,13 @@ impl TransactionLayer {
         let metrics_inner = Arc::new(MetricsInner::new());
         let metrics = TransactionMetrics::new(metrics_inner.clone(), events_tx.clone());
 
-        let owner = Owner::new(parser, events_tx, metrics_inner, config.id_gen);
+        let owner = Owner::new(
+            parser,
+            events_tx,
+            metrics_inner,
+            config.id_gen,
+            config.invite_initial_timeout_ms,
+        );
         let owner_abort = tokio::spawn(run(owner, endpoint, cmd_rx)).abort_handle();
 
         (Self { cmd_tx, metrics, owner_abort }, events_rx)

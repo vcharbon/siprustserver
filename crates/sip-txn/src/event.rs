@@ -34,8 +34,9 @@ pub enum TransactionEvent {
         /// the canceller's cause is ever stated.
         headers: Vec<SipHeader>,
     },
-    /// A client transaction's Timer B/F (or the long INVITE_INITIAL_TIMEOUT
-    /// backstop) fired with no final response — the transaction timed out.
+    /// A client transaction's Timer B/F (or the configured out-of-dialog
+    /// INVITE bound, default 158 s) fired with no final response — the
+    /// transaction timed out.
     Timeout {
         branch: String,
         call_ref: Option<String>,
@@ -48,7 +49,8 @@ pub enum TransactionEvent {
         /// attribution rather than fabricate an address.
         destination: Option<SocketAddr>,
         /// Which timeout fired: the short response-detection timer (Timer B/F) vs
-        /// the long out-of-dialog INVITE backstop (INVITE_INITIAL_TIMEOUT). Lets
+        /// the configured out-of-dialog INVITE bound
+        /// (`TransactionConfig::invite_initial_timeout_ms`, default 158 s). Lets
         /// consumers split `response_timeout` from `transaction_timeout`.
         kind: TimeoutKind,
     },
@@ -131,8 +133,9 @@ pub enum TxnKind {
 
 /// Which client-transaction timeout fired, so a consumer can split the metric.
 /// `Response` is the RFC 3261 §17.1 failure-detection timer (Timer B for INVITE,
-/// Timer F for non-INVITE — both 64×T1); `Transaction` is the long out-of-dialog
-/// INVITE backstop (`INVITE_INITIAL_TIMEOUT`, the call-setup ring window).
+/// Timer F for non-INVITE — both 64×T1); `Transaction` is the configured
+/// out-of-dialog INVITE bound (`TransactionConfig::invite_initial_timeout_ms`,
+/// default 158 s — the call-setup ring window).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeoutKind {
     Response,

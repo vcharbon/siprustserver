@@ -164,6 +164,11 @@ pub struct ReplicatedB2buaSut {
     /// Call limiter (shared across reboots). Default `NoopLimiter`; a limiter
     /// scenario supplies an `HttpCallLimiter` over the shared HTTP fabric.
     limiter: Arc<dyn CallLimiter>,
+    /// Scenario config mutator (the failover twin of `B2buaSutBuilder::tune`),
+    /// applied LAST — after the harness parity defaults — on EVERY core spawn
+    /// of this node (initial spawn AND each reboot), so a tuned knob survives
+    /// crash/reboot cycles. Default no-op.
+    tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
 }
 
 /// A shared handle to the `scenario_harness::Harness` so a worker can re-bind its
@@ -595,6 +600,9 @@ impl ReplicatedB2buaSut {
             // (SIP-transparent failover), exercised instead by the dedicated
             // `unacked_2xx_reap` b2bua-harness test.
             config.ack_timeout_sec = 0;
+            // The scenario tune runs LAST so it can override any parity
+            // default above — on this spawn and on every reboot re-spawn.
+            (self.tune)(config);
         })
     }
 }
@@ -747,6 +755,10 @@ pub struct FailoverHarness {
     /// windows (see [`crate::rfc_acceptance`]). Everything it does not cover
     /// gates.
     rfc_acceptance: RfcAcceptance,
+    /// Worker config mutator applied on every node's core spawn AND reboot
+    /// (after the parity defaults) — set via
+    /// [`with_worker_tune`](Self::with_worker_tune) BEFORE spawning workers.
+    worker_tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
 }
 
 /// The in-dialog CSeq-ordering audit rule (`sip_net::rfc_audit`), named here so
@@ -820,7 +832,22 @@ impl FailoverHarness {
             harness: Arc::new(HarnessHandle::new(harness)),
             worker_clock_offsets: HashMap::new(),
             rfc_acceptance: RfcAcceptance::default(),
+            worker_tune: Arc::new(|_| {}),
         }
+    }
+
+    /// Set the worker config mutator (the failover twin of
+    /// `B2buaSutBuilder::tune`): applied to every worker's [`b2bua::B2buaConfig`]
+    /// after the harness parity defaults, on the initial spawn AND on every
+    /// reboot re-spawn — so a tuned knob (e.g. `invite_txn_timeout_sec`)
+    /// survives crash/reboot cycles. Call BEFORE spawning workers; workers
+    /// already spawned keep the tune they captured. Returns `self` for chaining.
+    pub fn with_worker_tune(
+        mut self,
+        tune: impl Fn(&mut b2bua::B2buaConfig) + Send + Sync + 'static,
+    ) -> Self {
+        self.worker_tune = Arc::new(tune);
+        self
     }
 
     /// Waive one RFC-audit rule (by its `name()`) on this harness's Drop-time hard
@@ -1208,6 +1235,7 @@ impl FailoverHarness {
             harness: self.harness.clone(),
             decision,
             limiter,
+            tune: self.worker_tune.clone(),
         };
         let (setup, store, membership) = sut.wiring.setup(1, &node_clock);
         sut.store = store;

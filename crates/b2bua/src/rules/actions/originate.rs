@@ -68,6 +68,13 @@ impl ActionExecutor<'_> {
         }
         let n = call.b_legs.len() + 1;
         let leg_id = format!("b-{n}");
+        // A rule-supplied ring deadline above `bound − margin` is held under
+        // the configured transaction bound so the CANCEL→487 exchange
+        // completes inside the live b-leg client transaction. After the
+        // admission gate: a rejected leg is never armed, so it takes no
+        // clamp note either.
+        let no_answer_timeout_sec = no_answer_timeout_sec
+            .map(|secs| relay::clamp_no_answer(self.config, &call.call_ref, secs));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         // Same refusal as the admission reject above, for the other way a
         // decision can name no destination: an address field that does not read

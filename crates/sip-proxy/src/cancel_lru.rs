@@ -44,6 +44,9 @@ use crate::observability::ProxyMetrics;
 /// old 32 s TTL made a CANCEL after half a minute of (perfectly legal) ringing
 /// miss the entry and go downstream with a FRESH branch → 481 Transaction Does
 /// Not Exist, while the callee kept ringing.
+/// Covers the DEFAULT b2bua bound; a deployment raising
+/// `B2BUA_INVITE_TXN_TIMEOUT_SEC` beyond this TTL degrades late-CANCEL /
+/// non-2xx-ACK hop memory.
 pub const INVITE_ENTRY_TTL_MS: u64 = INVITE_INITIAL_TIMEOUT + TIMER_H;
 
 /// TTL for retransmission branch memos (`rtx|` keys): upstream retransmits

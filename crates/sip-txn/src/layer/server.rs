@@ -13,7 +13,7 @@ use sip_message::param_codec::decode_param;
 use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
-use crate::event::{TransactionEvent, TxnKind};
+use crate::event::{TimeoutKind, TransactionEvent, TxnKind};
 use crate::timers::{ms, T1, T2, TIMER_B, TIMER_H, TIMER_J};
 
 use super::owner::Owner;
@@ -263,6 +263,8 @@ impl Owner {
             retransmit_interval_ms: T1,
             retransmit_elapsed_ms: T1,
             retransmit_max_ms: TIMER_B,
+            // Server txns arm no client give-up timer; the field is inert here.
+            timeout_kind: TimeoutKind::Response,
         };
         self.set_txn(txn);
 

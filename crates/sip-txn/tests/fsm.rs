@@ -216,7 +216,9 @@ async fn timer_b_emits_timeout_event() {
 /// callee may legitimately ring past it, and the upper layer's no-answer timer
 /// (≤180 s) owns that deadline (a clean CANCEL→487). We keep only a hard backstop
 /// at [`INVITE_INITIAL_TIMEOUT`] = 158 s (below the 180 s Timer-C mark), so the
-/// no-answer always fires first and the 3-minute timer never beats us.
+/// no-answer always fires first and the 3-minute timer never beats us. This pins
+/// the DEFAULT of the tunable bound — the raised-config twin is
+/// `configured_invite_bound_moves_the_initial_invite_expiry`.
 #[tokio::test(start_paused = true)]
 async fn initial_invite_outlives_the_no_answer_window() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -246,6 +248,74 @@ async fn initial_invite_outlives_the_no_answer_window() {
         kind,
         Some(sip_txn::TimeoutKind::Transaction),
         "the initial-INVITE backstop fires below the 3-minute mark and is a Transaction timeout"
+    );
+    assert_eq!(active(&stack), 0);
+}
+
+/// The out-of-dialog INVITE bound is a deployment tunable
+/// (`TransactionConfig::invite_initial_timeout_ms`): raised to 300 s, an
+/// initial INVITE survives the default 158 s mark and gives up only at the
+/// configured bound (a `Transaction` timeout) — while an in-dialog re-INVITE
+/// under the SAME config keeps the 32 s Timer B failure detection (`Response`).
+#[tokio::test(start_paused = true)]
+async fn configured_invite_bound_moves_the_initial_invite_expiry() {
+    let mut stack = Stack::build_with_config(
+        TRANSIT,
+        64,
+        sip_txn::TransactionConfig {
+            udp_queue_max: 64,
+            id_gen: std::sync::Arc::new(sip_txn::IdGen::seeded(0xC0FFEE)),
+            invite_initial_timeout_ms: 300_000,
+        },
+    )
+    .await;
+    stack
+        .txn
+        .send_request(outbound_request("INVITE", "z9hG4bK-cfg300"), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+
+    // Past the DEFAULT 158 s bound (~165 s): still ringing, no Timeout.
+    elapse_ms(165_000).await;
+    assert!(
+        !stack
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        "a 300 s-configured initial INVITE must not expire at the default 158 s mark"
+    );
+    assert_eq!(active(&stack), 1, "still live, ringing");
+
+    // The configured 300 s bound fires (total elapsed ~305 s).
+    elapse_ms(140_000).await;
+    let kind = stack.drain_events().into_iter().find_map(|e| match e {
+        TransactionEvent::Timeout { kind, .. } => Some(kind),
+        _ => None,
+    });
+    assert_eq!(
+        kind,
+        Some(sip_txn::TimeoutKind::Transaction),
+        "the configured bound fires as a Transaction timeout"
+    );
+    assert_eq!(active(&stack), 0);
+
+    // An in-dialog re-INVITE (To-tag present) under the SAME config keeps the
+    // 32 s Timer B and reports a Response timeout.
+    stack.drain_peer();
+    stack
+        .txn
+        .send_request(outbound_reinvite("z9hG4bK-cfg300-reinv"), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+    elapse_ms(35_000).await;
+    let kind = stack.drain_events().into_iter().find_map(|e| match e {
+        TransactionEvent::Timeout { kind, .. } => Some(kind),
+        _ => None,
+    });
+    assert_eq!(
+        kind,
+        Some(sip_txn::TimeoutKind::Response),
+        "an in-dialog re-INVITE still times out at Timer B with a Response timeout"
     );
     assert_eq!(active(&stack), 0);
 }

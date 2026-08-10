@@ -47,9 +47,9 @@ pub enum CallEvent {
         /// layer). `None` when the txn never stored a destination — the consumer
         /// then skips per-peer failure attribution.
         destination: Option<SocketAddr>,
-        /// Response-detection (Timer B/F) vs the long out-of-dialog INVITE
-        /// backstop (INVITE_INITIAL_TIMEOUT). Drives the per-peer metric's
-        /// `response_timeout` vs `transaction_timeout` split.
+        /// Response-detection (Timer B/F) vs the configured out-of-dialog
+        /// INVITE bound (`invite_txn_timeout_sec`, default 158 s). Drives the
+        /// per-peer metric's `response_timeout` vs `transaction_timeout` split.
         timeout_kind: TimeoutKind,
     },
     /// Re-entrant internal event (async result folded back into the call).

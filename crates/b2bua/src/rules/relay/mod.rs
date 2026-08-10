@@ -41,6 +41,7 @@ pub use a_leg_response::{response_to_a_leg, stamps_contact};
 pub use ack::ack_b_leg;
 pub(crate) use ack::acked_invite_cseq;
 pub use originate::{build_b_leg, rebuild_a_leg_invite};
+pub(crate) use originate::clamp_no_answer;
 
 // Wire routing for what those emit.
 pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};

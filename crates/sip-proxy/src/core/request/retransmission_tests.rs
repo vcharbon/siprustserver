@@ -185,9 +185,9 @@ async fn retransmitted_invite_is_not_regated_or_recounted() {
 }
 
 // Guards the entry TTL: it must cover the legal ringing window (B2BUA
-// SetupTimeout / sip-txn INVITE_INITIAL_TIMEOUT) — a TTL below it forwards
-// a CANCEL after half a minute of ringing via fresh selection with a fresh
-// branch → downstream 481 and the callee keeps ringing.
+// SetupTimeout / the default sip-txn initial-INVITE bound, 158 s) — a TTL
+// below it forwards a CANCEL after half a minute of ringing via fresh
+// selection with a fresh branch → downstream 481 and the callee keeps ringing.
 #[tokio::test(start_paused = true)]
 async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
     let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;

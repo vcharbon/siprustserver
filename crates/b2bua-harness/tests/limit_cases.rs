@@ -12,9 +12,10 @@
 //! Coverage map (the user's enumerated limit cases):
 //!   - ring forever / no-answer → setup timeout: ALREADY covered with a limiter
 //!     in `setup_timeout.rs::ringing_forever_is_torn_down_at_setup_timeout_and_
-//!     releases_the_limiter` (150 s a-leg deadline; >180 s is unreachable — the
-//!     sip-txn `INVITE_INITIAL_TIMEOUT` backstop is 158 s, below 180). Not
-//!     re-implemented here; see that file + the doc on the no-answer test below.
+//!     releases_the_limiter` (150 s a-leg deadline, under the configured
+//!     initial-INVITE bound — default 158 s; `long_ring.rs` covers deadlines
+//!     past it). Not re-implemented here; see that file + the doc on the
+//!     no-answer test below.
 //!   - call never hangs up → max-duration BYE: `max_duration_byes_both_legs_*`.
 //!   - too many 18x before connect → message cap: `provisional_storm_*`.
 //!   - too many in-dialog messages on an up call → message cap: `in_dialog_*`.

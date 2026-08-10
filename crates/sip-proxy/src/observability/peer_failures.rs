@@ -59,8 +59,8 @@ pub enum PeerFailureKind {
     /// Sent a request, NO final SIP response arrived: client Timer B (INVITE) /
     /// Timer F (non-INVITE) fired.
     ResponseTimeout,
-    /// The longer-horizon give-up: the INVITE_INITIAL_TIMEOUT out-of-dialog
-    /// backstop fired (distinct from [`Self::ResponseTimeout`]).
+    /// The longer-horizon give-up: the configured out-of-dialog INVITE bound
+    /// (default 158 s) fired (distinct from [`Self::ResponseTimeout`]).
     TransactionTimeout,
     /// In-dialog keepalive OPTIONS got no 200 within its deadline (b2bua only;
     /// peer = that leg's next hop).

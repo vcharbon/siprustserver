@@ -65,6 +65,25 @@ fn removed(header_updates: &[(String, Option<String>)], header: &HeaderName) -> 
     header_updates.iter().any(|(name, value)| value.is_none() && header.matches(name))
 }
 
+/// Clamp a decision-supplied ring deadline (s) for an originated leg under the
+/// configured INVITE transaction bound (`B2buaConfig::clamp_no_answer_sec`),
+/// with the per-call `debug!` note on a clamp — the ONE clamp site both
+/// `NoAnswer` arming paths (`decision::apply_route`, `actions::create_leg`)
+/// funnel through.
+pub(crate) fn clamp_no_answer(config: &B2buaConfig, call_ref: &str, requested: i64) -> i64 {
+    let clamped = config.clamp_no_answer_sec(requested);
+    if clamped != requested {
+        tracing::debug!(
+            %call_ref,
+            requested_sec = requested,
+            clamped_sec = clamped,
+            invite_txn_timeout_sec = config.invite_txn_timeout_sec,
+            "no_answer_timeout clamped under the INVITE transaction bound"
+        );
+    }
+    clamped
+}
+
 /// Build a fresh b-leg + its outbound INVITE effect (initial route + failover).
 ///
 /// Errs when a decision-supplied address (`new_ruri` / `new_from` / `new_to`)

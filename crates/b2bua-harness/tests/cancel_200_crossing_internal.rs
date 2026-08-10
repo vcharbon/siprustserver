@@ -302,7 +302,10 @@ async fn transaction_timeout_cancel_crossed_by_200_reaps_the_abandoned_callee() 
             .build(),
     );
     // Setup deadline past the sip-txn INVITE backstop (158 s) so the transaction
-    // timeout is what fires; keepalive far out; reaper off.
+    // timeout is what fires; keepalive far out; reaper off. This inversion is
+    // exactly what `B2buaConfig::validate` refuses at boot — the harness
+    // bypasses validate, and the test keeps it DELIBERATELY to exercise the
+    // txn-backstop treatment itself.
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
             c.setup_timeout_sec = 300;

@@ -196,6 +196,10 @@ impl B2buaCore {
                 // burst so in-dialog traffic is not starved.
                 udp_queue_max: 1024,
                 id_gen: id_gen.clone(),
+                // The deployment's initial-INVITE bound (default 158 s):
+                // `config.validate()` keeps `setup_timeout_sec` strictly below
+                // it, so the rules path always gives up before the txn layer.
+                invite_initial_timeout_ms: config.invite_txn_timeout_ms(),
             },
         );
         let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());

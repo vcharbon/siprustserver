@@ -16,13 +16,16 @@ pub const TIMER_B: u64 = 64 * T1;
 /// Non-INVITE client transaction timeout (Timer F = 64·T1 = 32 s).
 pub const TIMER_F: u64 = 64 * T1;
 
-/// INITIAL (out-of-dialog) INVITE client-transaction timeout — a call-setup
-/// backstop, NOT the 32 s Timer B. RFC 3261 §17.1.1.2 scopes Timer B to the
-/// Calling state; a ringing callee may legitimately take minutes, and the upper
-/// layer's no-answer timer owns that deadline. We keep a hard expiry but place it
-/// *below* the 180 s (3-minute) Timer-C mark and *above* any deployment no-answer
-/// timeout, so the no-answer always fires first (clean CANCEL→487) and the
-/// 3-minute timer never beats us — only this backstop, if no-answer is unset.
+/// DEFAULT for the INITIAL (out-of-dialog) INVITE transaction bound
+/// ([`TransactionConfig::invite_initial_timeout_ms`](crate::TransactionConfig)) —
+/// a call-setup backstop, NOT the 32 s Timer B. RFC 3261 §17.1.1.2 scopes
+/// Timer B to the Calling state; a ringing callee may legitimately take
+/// minutes, and the upper layer's no-answer timer owns that deadline. The
+/// configured bound is a hard expiry that must sit *above* every deployment
+/// setup/no-answer timeout, so the app deadline always fires first (clean
+/// CANCEL→487) and only this backstop remains when none is set. The default
+/// stays below the 180 s Timer-C mark; a telephony deployment raises the
+/// config field (up to ~600 s) rather than this const.
 pub const INVITE_INITIAL_TIMEOUT: u64 = 158_000;
 /// INVITE server txn cleanup after a final response (Timer H, RFC 3261 §17.2.1).
 pub const TIMER_H: u64 = 64 * T1;

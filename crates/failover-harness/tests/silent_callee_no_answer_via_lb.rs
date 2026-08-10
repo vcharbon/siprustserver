@@ -51,8 +51,8 @@ const B1: &str = "127.0.0.1:5091";
 
 // A short no-answer deadline keeps the paused-clock advance (and the b-leg's
 // Timer A retransmit churn) small; it fires FAR below the 150 s setup timeout and
-// the ~158 s sip-txn INVITE backstop, so `NoAnswer` is unambiguously what tears
-// the ringing b-leg down.
+// the configured initial-INVITE bound (default 158 s), so `NoAnswer` is
+// unambiguously what tears the ringing b-leg down.
 const NO_ANSWER_SEC: i64 = 5;
 
 /// Decision that routes every call to `dest_port`, arming the per-call

@@ -117,8 +117,11 @@ pub struct B2buaConfig {
     /// long-hold — receives its keepalive OPTIONS `200` each interval (only
     /// **real SIP traffic** stamps the ledger; self-generated housekeeping
     /// turns like `LimiterRefresh` do not), so a stamp older than 3 intervals
-    /// provably means a SIP-dead call, never quietness. An explicit value must
-    /// be ≥ `2 × keepalive_interval_sec` (enforced by
+    /// provably means a SIP-dead call, never quietness. The derived window is
+    /// additionally floored above
+    /// [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) — a ringing
+    /// call stamps nothing until its setup resolves. An explicit value must be
+    /// ≥ `2 × keepalive_interval_sec` AND > the transaction bound (enforced by
     /// [`validate`](Self::validate)). Liveness derives ONLY from the stamp —
     /// never `created_at`, never timer deadlines.
     pub reaper_idle_max_sec: i64,
@@ -127,16 +130,34 @@ pub struct B2buaConfig {
     /// reset by reroute/failover (each new b-leg gets its own `NoAnswer`; this
     /// caps the caller's *total* wait for a final response). It rides the
     /// replicated `call.timers` ledger, so it survives a crash → reclaim —
-    /// the sip-txn `INVITE_INITIAL_TIMEOUT` (158 s) backstop cannot (the
+    /// the sip-txn transaction bound
+    /// ([`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)) cannot (the
     /// transactions die with the node), which is how a worker kill stranded
     /// mid-setup calls holding limiter slots for the full 1 h GlobalDuration
-    /// (endurance 2026-06-12). Default **150 s**: below the txn backstop so
-    /// the rules path owns the teardown (408 to the caller, CANCEL to pending
-    /// b-legs, obligations settled), above any sane no-answer timeout so a
-    /// route-supplied `NoAnswer` still fires first. `<= 0` disables (the txn
-    /// backstop and GlobalDuration remain). Overridable via
+    /// (endurance 2026-06-12). Default **150 s**: strictly below the
+    /// configured transaction bound (enforced by [`validate`](Self::validate))
+    /// so the rules path owns the teardown (408 to the caller, CANCEL to
+    /// pending b-legs, obligations settled), above any sane no-answer timeout
+    /// so a route-supplied `NoAnswer` still fires first. `<= 0` disables (the
+    /// txn backstop and GlobalDuration remain). Overridable via
     /// `B2BUA_SETUP_TIMEOUT_SEC`.
     pub setup_timeout_sec: i64,
+    /// **Initial-INVITE transaction bound**, seconds — the sip-txn
+    /// out-of-dialog INVITE give-up window
+    /// (`TransactionConfig::invite_initial_timeout_ms`), bounding BOTH halves
+    /// of a call: the b-leg client txn's give-up AND the a-leg server txn's
+    /// pre-final sweep age derive from it. The last-resort backstop under every
+    /// app-level setup deadline: [`validate`](Self::validate) requires
+    /// `setup_timeout_sec < invite_txn_timeout_sec` (when enabled) and
+    /// range-checks [`MIN_INVITE_TXN_TIMEOUT_SEC`](Self::MIN_INVITE_TXN_TIMEOUT_SEC)
+    /// `..=` [`MAX_INVITE_TXN_TIMEOUT_SEC`](Self::MAX_INVITE_TXN_TIMEOUT_SEC);
+    /// a route-supplied `NoAnswer` above
+    /// `bound − `[`NO_ANSWER_CANCEL_MARGIN_SEC`](Self::NO_ANSWER_CANCEL_MARGIN_SEC)
+    /// is clamped to that ceiling.
+    /// Default **158 s**; telephony deployments (Timer C > 3 min, 180 s PSTN
+    /// supervision, hunting chains) raise it. Overridable via
+    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`.
+    pub invite_txn_timeout_sec: i64,
     /// **ACK-timeout grace**, seconds (RFC 3261 §13.3.1.4 — the 2xx-without-ACK
     /// give-up window, RFC's `64·T1` = 32 s). Armed when the a-leg 2xx is relayed
     /// at dialog confirmation; cancelled when the a-leg ACK arrives. While it is
@@ -276,6 +297,7 @@ impl Default for B2buaConfig {
             reaper_sweep_interval_sec: 30,
             reaper_idle_max_sec: 0,
             setup_timeout_sec: 150,
+            invite_txn_timeout_sec: 158,
             ack_timeout_sec: 32,
             // Tier-3 admission gate (migration/09). TS defaults
             // (CPS_BUCKET_SIZE / CPS_BUCKET_RATE / OVERLOAD_PANIC_ELU_THRESHOLD /
@@ -315,6 +337,17 @@ impl B2buaConfig {
     /// Absolute minimum reboot budget (s): a backup must survive a primary's
     /// reboot. The effective floor is usually higher — see [`validate`].
     pub const MIN_REBOOT_BUDGET_SEC: i64 = 60;
+    /// Floor for [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) (s):
+    /// the out-of-dialog bound must stay above the 32 s in-dialog Timer B.
+    pub const MIN_INVITE_TXN_TIMEOUT_SEC: i64 = 33;
+    /// Ceiling for [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) (s):
+    /// the top of the supported telephony setup range (~10 min hunting chains).
+    pub const MAX_INVITE_TXN_TIMEOUT_SEC: i64 = 600;
+    /// Margin (s) a route-supplied `NoAnswer` deadline must keep under
+    /// [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec): the room the
+    /// CANCEL→487 exchange needs to complete inside the still-live b-leg client
+    /// transaction (mirrors the default 150/158 gap).
+    pub const NO_ANSWER_CANCEL_MARGIN_SEC: i64 = 8;
 
     /// Validate operator-supplied tunables at **boot** (the runner calls this and
     /// refuses to start on `Err`; unit/sim harnesses construct configs directly
@@ -378,6 +411,45 @@ impl B2buaConfig {
                 self.overload_panic_elu_threshold
             ));
         }
+        // The transaction bound must sit in the supported range: above the 32 s
+        // in-dialog Timer B (the floor keeps the out-of-dialog window the LONG
+        // one), at most the telephony ceiling.
+        if !(Self::MIN_INVITE_TXN_TIMEOUT_SEC..=Self::MAX_INVITE_TXN_TIMEOUT_SEC)
+            .contains(&self.invite_txn_timeout_sec)
+        {
+            return Err(format!(
+                "invite_txn_timeout_sec={} outside the supported {}..={} s range",
+                self.invite_txn_timeout_sec,
+                Self::MIN_INVITE_TXN_TIMEOUT_SEC,
+                Self::MAX_INVITE_TXN_TIMEOUT_SEC
+            ));
+        }
+        // Above the transaction bound the ordering inverts: the txn layer
+        // CANCELs the b-leg on its own, the app give-up authors a SECOND final,
+        // and the callee's 487 lands on a dead client txn (never ACKed). The
+        // app setup deadline must therefore fire strictly first.
+        if self.setup_timeout_sec > 0 && self.setup_timeout_sec >= self.invite_txn_timeout_sec {
+            return Err(format!(
+                "setup_timeout_sec={} >= invite_txn_timeout_sec={}: the app setup \
+                 deadline must fire strictly before the transaction bound, or the \
+                 txn layer tears the b-leg down first and the caller takes two \
+                 finals on one INVITE",
+                self.setup_timeout_sec, self.invite_txn_timeout_sec
+            ));
+        }
+        // A ringing call stamps no ledger liveness until its setup resolves, so
+        // an explicit reaper idle window at or under the transaction bound would
+        // reap a call that is legitimately still ringing (the derived window is
+        // floored above the bound automatically — see `reaper_idle_max_ms`).
+        if self.reaper_idle_max_sec != 0 && self.reaper_idle_max_sec <= self.invite_txn_timeout_sec
+        {
+            return Err(format!(
+                "reaper_idle_max_sec={} <= invite_txn_timeout_sec={}: the reaper idle \
+                 window must outlast the longest configured ring, or a legitimately \
+                 still-ringing call is reaped before its own setup deadline",
+                self.reaper_idle_max_sec, self.invite_txn_timeout_sec
+            ));
+        }
         // The Tier-3 CPS bucket refills at `cps_bucket_rate` tokens/s up to
         // `cps_bucket_size`. If the gate is enabled (size > 0) but the rate is 0,
         // the bucket drains once and never refills — after the first burst EVERY
@@ -395,13 +467,39 @@ impl B2buaConfig {
         Ok(())
     }
 
+    /// The configured initial-INVITE transaction bound in ms — the value wired
+    /// into `TransactionConfig::invite_initial_timeout_ms`. `<= 0` is NOT
+    /// "disabled" (unlike [`setup_timeout_sec`](Self::setup_timeout_sec)):
+    /// a non-positive value falls back to the 158 s default rather than arming
+    /// a degenerate bound.
+    pub fn invite_txn_timeout_ms(&self) -> u64 {
+        let sec = if self.invite_txn_timeout_sec > 0 { self.invite_txn_timeout_sec } else { 158 };
+        u64::try_from(sec).unwrap_or(158).saturating_mul(1000)
+    }
+
+    /// Clamp a route-supplied `NoAnswer` deadline (s) under the transaction
+    /// bound: any value above `bound − `[`NO_ANSWER_CANCEL_MARGIN_SEC`](Self::NO_ANSWER_CANCEL_MARGIN_SEC)
+    /// — including one merely inside the margin band, which would equally
+    /// strand the CANCEL→487 exchange — is held to that ceiling so the
+    /// exchange completes inside the live b-leg client transaction. Values at
+    /// or under the ceiling pass through unchanged; the caller compares the
+    /// result to detect (and `debug!`-note) a clamp.
+    pub fn clamp_no_answer_sec(&self, requested: i64) -> i64 {
+        let ceiling = self.invite_txn_timeout_sec - Self::NO_ANSWER_CANCEL_MARGIN_SEC;
+        requested.min(ceiling)
+    }
+
     /// The effective reaper idle threshold, ms (ADR-0020 X4): the explicit
-    /// override, or the derived `3 × keepalive_interval_sec`.
+    /// override, or the derived `3 × keepalive_interval_sec` floored above
+    /// [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) — a
+    /// legitimately-ringing call stamps no ledger liveness until its setup
+    /// resolves, so the idle window must outlast the longest configured ring.
     pub fn reaper_idle_max_ms(&self) -> i64 {
         let sec = if self.reaper_idle_max_sec > 0 {
             self.reaper_idle_max_sec
         } else {
-            3 * self.keepalive_interval_sec
+            (3 * self.keepalive_interval_sec)
+                .max(self.invite_txn_timeout_sec + self.keepalive_interval_sec)
         };
         sec.saturating_mul(1000)
     }
@@ -463,5 +561,122 @@ mod tests {
             ..Default::default()
         };
         assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_setup_deadline_at_or_above_the_txn_bound() {
+        // 300 >= 158: the txn layer would CANCEL the b-leg before the app
+        // gives up (the ordering inversion) — refuse to start.
+        let c = B2buaConfig {
+            setup_timeout_sec: 300,
+            invite_txn_timeout_sec: 158,
+            ..Default::default()
+        };
+        let e = c.validate().expect_err("setup >= txn bound must be rejected");
+        assert!(e.contains("setup_timeout_sec"), "msg was: {e}");
+    }
+
+    #[test]
+    fn rejects_txn_bound_outside_the_supported_range() {
+        for bad in [700, 20] {
+            let c = B2buaConfig {
+                invite_txn_timeout_sec: bad,
+                setup_timeout_sec: 0,
+                ..Default::default()
+            };
+            let e = c
+                .validate()
+                .expect_err("out-of-range invite_txn_timeout_sec must be rejected");
+            assert!(e.contains("invite_txn_timeout_sec"), "msg was: {e}");
+        }
+    }
+
+    #[test]
+    fn allows_setup_deadline_strictly_below_a_raised_txn_bound() {
+        let c = B2buaConfig {
+            setup_timeout_sec: 300,
+            invite_txn_timeout_sec: 400,
+            ..Default::default()
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn disabled_setup_deadline_skips_the_ordering_check() {
+        // <= 0 disables the app deadline; only the range check applies.
+        let c = B2buaConfig {
+            setup_timeout_sec: 0,
+            invite_txn_timeout_sec: 158,
+            ..Default::default()
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn clamps_no_answer_above_the_margin_ceiling() {
+        let c = B2buaConfig {
+            invite_txn_timeout_sec: 200,
+            ..Default::default()
+        };
+        // Above `bound − margin` → held to the ceiling; at/under it → untouched.
+        assert_eq!(c.clamp_no_answer_sec(250), 192);
+        assert_eq!(c.clamp_no_answer_sec(200), 192);
+        // Inside the margin band (192 < 195 < 200): equally clamped — a value
+        // there would strand the CANCEL→487 exchange just the same.
+        assert_eq!(c.clamp_no_answer_sec(195), 192);
+        assert_eq!(c.clamp_no_answer_sec(192), 192);
+        assert_eq!(c.clamp_no_answer_sec(191), 191);
+        assert_eq!(c.clamp_no_answer_sec(30), 30);
+    }
+
+    #[test]
+    fn derived_reaper_idle_window_is_floored_above_the_txn_bound() {
+        // 3 × keepalive (360 s) would undercut a 400 s ring: the derived window
+        // must floor at bound + one keepalive interval.
+        let c = B2buaConfig {
+            invite_txn_timeout_sec: 400,
+            keepalive_interval_sec: 120,
+            reaper_idle_max_sec: 0,
+            ..Default::default()
+        };
+        assert_eq!(c.reaper_idle_max_ms(), 520_000);
+        // Default bound (158 s): the 3× derivation already clears it — unchanged.
+        let d = B2buaConfig::default();
+        assert_eq!(d.reaper_idle_max_ms(), 3 * d.keepalive_interval_sec * 1000);
+    }
+
+    #[test]
+    fn rejects_explicit_reaper_idle_window_at_or_under_the_txn_bound() {
+        // keepalive 150 keeps the 2×-keepalive rule satisfied (400 ≥ 300), so
+        // the txn-bound rule is what rejects the 400 s window against a 400 s
+        // ring.
+        let c = B2buaConfig {
+            invite_txn_timeout_sec: 400,
+            setup_timeout_sec: 300,
+            keepalive_interval_sec: 150,
+            reaper_idle_max_sec: 400,
+            ..Default::default()
+        };
+        let e = c
+            .validate()
+            .expect_err("an idle window a ringing call can outlive must be rejected");
+        assert!(e.contains("invite_txn_timeout_sec"), "msg was: {e}");
+        let ok = B2buaConfig {
+            reaper_idle_max_sec: 401,
+            ..c
+        };
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn nonpositive_txn_bound_falls_back_to_the_default_ms() {
+        // 0 is NOT "disabled" for the transaction bound (validate refuses it at
+        // boot); a harness config that writes it anyway gets the 158 s default,
+        // never a degenerate near-zero bound.
+        let c = B2buaConfig {
+            invite_txn_timeout_sec: 0,
+            ..Default::default()
+        };
+        assert_eq!(c.invite_txn_timeout_ms(), 158_000);
     }
 }

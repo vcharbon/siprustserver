@@ -51,6 +51,25 @@ impl Stack {
     /// `transit_ms` = simulated per-hop delay; `udp_queue_max` sizes the event
     /// queue (`max(64, ×4)`); `b2bua_queue` sizes the b2bua recv queue.
     pub async fn build(transit_ms: u64, udp_queue_max: usize, b2bua_queue: usize) -> Stack {
+        Self::build_with_config(
+            transit_ms,
+            b2bua_queue,
+            TransactionConfig {
+                udp_queue_max,
+                id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// [`build`](Self::build) with an explicit [`TransactionConfig`] — the seam
+    /// for exercising non-default tunables (e.g. `invite_initial_timeout_ms`).
+    pub async fn build_with_config(
+        transit_ms: u64,
+        b2bua_queue: usize,
+        config: TransactionConfig,
+    ) -> Stack {
         let net = SimulatedSignalingNetwork::new(transit_ms);
         let b2bua_ep = net
             .bind_udp(BindUdpOpts::new(addr(B2BUA), b2bua_queue))
@@ -62,15 +81,9 @@ impl Stack {
             .expect("bind peer");
 
         let parser = Arc::new(CustomParser::new());
-        let (txn, events) = TransactionLayer::spawn(
-            b2bua_ep,
-            parser,
-            TransactionConfig {
-                udp_queue_max,
-                // Deterministic ids so any tag/branch fabrication is stable.
-                id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
-            },
-        );
+        // Deterministic ids (the `build` default seeds 0xC0FFEE) so any
+        // tag/branch fabrication is stable.
+        let (txn, events) = TransactionLayer::spawn(b2bua_ep, parser, config);
 
         Stack { txn, events, peer, net }
     }

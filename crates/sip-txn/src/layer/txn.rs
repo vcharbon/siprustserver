@@ -9,8 +9,8 @@ use bytes::Bytes;
 use sip_message::SipRequest;
 use tokio_util::time::delay_queue::Key;
 
-use crate::event::TxnKind;
-use crate::timers::{ms, INVITE_INITIAL_TIMEOUT, TXN_MAX_AGE};
+use crate::event::{TimeoutKind, TxnKind};
+use crate::timers::{ms, TXN_MAX_AGE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TxnRole {
@@ -94,20 +94,31 @@ pub(super) struct Transaction {
     pub(super) retransmit_interval_ms: u64,
     pub(super) retransmit_elapsed_ms: u64,
     pub(super) retransmit_max_ms: u64,
+    /// Which [`TimeoutKind`] `fire_timeout` emits for this txn's give-up timer —
+    /// stored explicitly at arming (`Transaction` for the long out-of-dialog
+    /// INVITE bound, `Response` for Timer B/F) so the discrimination never
+    /// compares the armed window against a magic duration.
+    pub(super) timeout_kind: TimeoutKind,
 }
 
 /// Per-txn safety-net age for the sweep. A still-ringing INVITE (no final
 /// response yet — an inbound INVITE awaiting the app's answer, or an outbound
 /// INVITE past its retransmit window) legitimately outlives the 35 s net: a
-/// callee may ring for minutes and the no-answer timer / long initial-INVITE
-/// Timer B owns that deadline. Give it a backstop just above that long timeout so
-/// the net never reaps a live call. Everything else — completed txns governed by
-/// Timer H/J, all non-INVITE — keeps the tight 35 s net just above 32 s, so the
-/// sweep still only ever catches what a missing-cleanup bug would otherwise leak.
-pub(super) fn sweep_max_age(t: &Transaction) -> std::time::Duration {
+/// callee may ring for minutes and the no-answer timer / the configured
+/// initial-INVITE bound owns that deadline. Give it a backstop just above
+/// `invite_initial_timeout_ms` (the configured bound — BOTH roles: it is the
+/// ONLY pre-final bound on an INVITE server txn, so the a-leg admits the same
+/// ring window the b-leg client txn does) so the net never reaps a live call.
+/// Everything else — completed txns governed by Timer H/J, all non-INVITE —
+/// keeps the tight 35 s net just above 32 s, so the sweep still only ever
+/// catches what a missing-cleanup bug would otherwise leak.
+pub(super) fn sweep_max_age(
+    t: &Transaction,
+    invite_initial_timeout_ms: u64,
+) -> std::time::Duration {
     match (t.kind, t.state) {
         (TxnKind::Invite, TxnState::Trying | TxnState::Proceeding) => {
-            ms(INVITE_INITIAL_TIMEOUT + TXN_MAX_AGE)
+            ms(invite_initial_timeout_ms + TXN_MAX_AGE)
         }
         _ => ms(TXN_MAX_AGE),
     }

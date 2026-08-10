@@ -15,7 +15,7 @@ use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
 use crate::event::{ClientTransactionHandle, TimeoutKind, TransactionEvent, TxnKind};
-use crate::timers::{ms, INVITE_INITIAL_TIMEOUT, T1, T2, TIMER_B, TIMER_D, TIMER_F};
+use crate::timers::{ms, T1, T2, TIMER_B, TIMER_D, TIMER_F};
 
 use super::owner::Owner;
 use super::txn::{Timer, Transaction, TxnRole, TxnState};
@@ -147,11 +147,13 @@ impl Owner {
             retransmit_interval_ms: T1,
             retransmit_elapsed_ms: T1,
             retransmit_max_ms: TIMER_B,
+            timeout_kind: TimeoutKind::Response,
         };
         self.set_txn(txn);
 
         self.send_buffer(endpoint, &buf, dest).await;
-        self.start_client_retransmit(&branch, buf, dest, client_timeout_ms(txn_type, &msg));
+        let (max_ms, timeout_kind) = self.client_timeout(txn_type, &msg);
+        self.start_client_retransmit(&branch, buf, dest, max_ms, timeout_kind);
 
         match txn_type {
             TxnKind::Invite => ClientTransactionHandle::Invite {
@@ -189,6 +191,7 @@ impl Owner {
         buf: Bytes,
         dest: SocketAddr,
         max_ms: u64,
+        timeout_kind: TimeoutKind,
     ) {
         let r_key = self.timers.insert(Timer::ClientRetransmit(branch.to_string()), ms(T1));
         let t_key = self.timers.insert(Timer::ClientTimeout(branch.to_string()), ms(max_ms));
@@ -198,7 +201,11 @@ impl Owner {
             txn.retransmit_buf = Some(buf);
             txn.retransmit_interval_ms = T1;
             txn.retransmit_elapsed_ms = T1;
-            txn.retransmit_max_ms = max_ms;
+            // Retransmission stops at Timer B (RFC 3261 §17.1.1.2) even when
+            // the give-up timer runs longer: a raised initial-INVITE bound
+            // extends the wait for a response, never the retransmit storm.
+            txn.retransmit_max_ms = max_ms.min(TIMER_B);
+            txn.timeout_kind = timeout_kind;
             txn.destination = Some(dest);
         }
     }
@@ -250,16 +257,10 @@ impl Owner {
                         TxnKind::Invite => Some("INVITE".to_string()),
                         TxnKind::NonInvite => None,
                     });
-                // Discriminate WHICH timer fired from the txn's armed window
-                // (`retransmit_max_ms`, set in `start_client_retransmit` from
-                // `client_timeout_ms`): the long out-of-dialog INVITE backstop is
-                // `INVITE_INITIAL_TIMEOUT`; Timer B/F is the short 64×T1 window.
-                let timeout_kind = if t.retransmit_max_ms == INVITE_INITIAL_TIMEOUT {
-                    TimeoutKind::Transaction
-                } else {
-                    TimeoutKind::Response
-                };
-                (t.call_ref.clone(), t.leg_id.clone(), method, t.destination, timeout_kind)
+                // The kind was stored explicitly at arming (`client_timeout` →
+                // `start_client_retransmit`): `Transaction` for the long
+                // out-of-dialog INVITE bound, `Response` for Timer B/F.
+                (t.call_ref.clone(), t.leg_id.clone(), method, t.destination, t.timeout_kind)
             }
             _ => return,
         };
@@ -490,17 +491,23 @@ impl Owner {
     }
 }
 
-/// RFC 3261 §17.1 client-transaction timeout (Timer B/F). Differentiated for
-/// INVITE: an INITIAL (out-of-dialog — no To-tag) INVITE is a call setup whose
-/// ring time the upper layer's no-answer timer owns, so it gets the long
-/// [`INVITE_INITIAL_TIMEOUT`] backstop (below the 180 s Timer-C mark, above any
-/// deployment no-answer timeout). An in-dialog re-INVITE (To-tag present) and
-/// every non-INVITE keep the 32 s failure-detection timeout.
-fn client_timeout_ms(kind: TxnKind, req: &SipRequest) -> u64 {
-    match kind {
-        TxnKind::Invite if req.to().tag().is_none() => INVITE_INITIAL_TIMEOUT,
-        TxnKind::Invite => TIMER_B,
-        TxnKind::NonInvite => TIMER_F,
+impl Owner {
+    /// RFC 3261 §17.1 client-transaction timeout (Timer B/F) plus the
+    /// [`TimeoutKind`] its expiry emits. Differentiated for INVITE: an INITIAL
+    /// (out-of-dialog — no To-tag) INVITE is a call setup whose ring time the
+    /// upper layer's no-answer timer owns, so it gets the configured
+    /// out-of-dialog bound (`invite_initial_timeout_ms`, default 158 s — above
+    /// any deployment setup/no-answer timeout) and a `Transaction` timeout. An
+    /// in-dialog re-INVITE (To-tag present) and every non-INVITE keep the 32 s
+    /// failure-detection timeout (`Response`).
+    fn client_timeout(&self, kind: TxnKind, req: &SipRequest) -> (u64, TimeoutKind) {
+        match kind {
+            TxnKind::Invite if req.to().tag().is_none() => {
+                (self.invite_initial_timeout_ms, TimeoutKind::Transaction)
+            }
+            TxnKind::Invite => (TIMER_B, TimeoutKind::Response),
+            TxnKind::NonInvite => (TIMER_F, TimeoutKind::Response),
+        }
     }
 }
 
