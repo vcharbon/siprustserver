@@ -55,11 +55,20 @@ matches a Client/Invite txn:
   always-send rule: a final response resolves the leg on its own (487/486
   reject path, or the crossing-2xx reap), so no ring can persist.
 - whose txn **dies holding it**:
-  - **call evict** (`cancel_txns_for_call`) — a never-sent held CANCEL is
-    flushed to the wire *before* the txn is deleted; eviction must not swallow
-    a CANCEL still inside its grace window.
-  - **final / Timer B** — cleared; the callee answered (moot) or the 32 s
-    Timer B fired long after the ≤1 s grace already sent it.
+  - **call evict** (`cancel_txns_for_call`) and **client timeout** (Timer B /
+    the transaction bound) — a never-sent held CANCEL is flushed to the wire
+    *before* the txn is deleted: neither teardown path may swallow a CANCEL
+    still inside its grace window (a tight custom config can let the bound
+    outrun the grace).
+  - **final** — cleared unsent; the callee answered, cancellation is moot
+    (§9.2, and the crossing-2xx reap owns the late answer).
+  - Residual unsent-death paths, all pathological and counted in
+    `held_cancels_dropped`: a same-branch txn displacement and the safety-net
+    sweep (both indicate a bug elsewhere). And the grace/evict/timeout send is
+    a single raw datagram (CANCEL deliberately builds no client txn — branch
+    reuse): if that one datagram is lost AND no provisional ever arrives, the
+    callee still rides the terminating backstop; a later provisional re-sends
+    it (the re-flush), which covers every callee alive enough to respond.
 
 A CANCEL matching **no txn** is still sent raw: an absent txn is not proof the
 INVITE ended — a takeover-restored call (ADR-0014) CANCELs a b-leg whose

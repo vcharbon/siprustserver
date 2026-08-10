@@ -305,6 +305,56 @@ async fn held_cancel_is_dropped_when_a_final_arrives_first() {
     assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn held_cancel_is_flushed_when_the_timeout_outruns_the_grace_window() {
+    // A grace window configured LONGER than the txn's give-up timer: Timer B
+    // fires while the CANCEL is still held. The timeout death path must put it
+    // on the wire first — no teardown may swallow an emitted CANCEL (ADR-0028).
+    let mut stack = Stack::build_with_config(
+        5,
+        64,
+        sip_txn::TransactionConfig {
+            udp_queue_max: 64,
+            id_gen: std::sync::Arc::new(sip_txn::IdGen::seeded(0xC0FFEE)),
+            cancel_hold_grace_ms: Some(60_000),
+            ..Default::default()
+        },
+    )
+    .await;
+    let branch = "z9hG4bK-tb-outruns-grace";
+
+    // In-dialog re-INVITE (To-tag present) — 32 s Timer B, far below the grace.
+    stack
+        .txn
+        .send_request(outbound_reinvite(branch), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+    stack
+        .txn
+        .send_request(reinvite_cancel(branch), addr(PEER), TxnKind::Invite)
+        .await
+        .unwrap();
+    assert_eq!(stack.txn.metrics().cancels_held(), 1);
+
+    elapse_ms(35_000).await;
+    let msgs = stack.drain_peer();
+    assert_eq!(
+        count_requests(&msgs, "CANCEL"),
+        1,
+        "Timer B outrunning the grace window still sends the held CANCEL"
+    );
+    assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 1);
+    assert_eq!(stack.txn.metrics().held_cancels_dropped(), 0);
+    assert!(
+        stack
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        "Timer B timeout still surfaces to the caller"
+    );
+    assert_eq!(stack.txn.metrics().active_transactions(), 0);
+}
+
 /// A stack configured for the literal RFC 3261 §9.1 wait
 /// (`cancel_hold_grace_ms: None`) — the pre-amendment ADR-0028 behavior, kept
 /// selectable (`B2BUA_CANCEL_STRICT_RFC_WAIT`) so both policy families stay

@@ -167,7 +167,7 @@ pub struct B2buaConfig {
     /// 100-only b-leg is still CANCELed). `true` is the literal §9.1 wait: no
     /// CANCEL is ever sent pre-provisional — a callee that answers nothing is
     /// never CANCELed and rides the terminating backstop instead. Overridable
-    /// via `B2BUA_CANCEL_STRICT_RFC_WAIT` (non-empty = strict).
+    /// via `B2BUA_CANCEL_STRICT_RFC_WAIT` (truthy = strict).
     pub cancel_strict_rfc3261_wait: bool,
     /// **ACK-timeout grace**, seconds (RFC 3261 §13.3.1.4 — the 2xx-without-ACK
     /// give-up window, RFC's `64·T1` = 32 s). Armed when the a-leg 2xx is relayed

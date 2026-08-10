@@ -1107,7 +1107,7 @@ impl CrossMessageAuditRule for CancelRouteEchoesInviteRule {
 }
 
 // ---------------------------------------------------------------------------
-// rfc3261.cancelAfter1xx  [gating on forwarder lanes; advisory on originators]
+// rfc3261.cancelAfter1xx  [informational on every lane — ADR-0028]
 // ---------------------------------------------------------------------------
 
 /// **RFC 3261 §9.1 — a UAC waits for a 1xx before CANCELing**, bounded by the
@@ -1133,6 +1133,13 @@ impl CrossMessageAuditRule for CancelRouteEchoesInviteRule {
 /// send, not the eager-CANCEL defect. Sits just below the transaction layer's
 /// `sip_txn::timers::CANCEL_HOLD_GRACE` (1 s — a floor equal to the window
 /// would false-fire on stamp granularity) — keep them in step.
+///
+/// Known blind spots of the timestamp heuristic (tolerable because the rule
+/// never gates and the layer/harness tests carry the real regression
+/// protection): the evict/timeout flush can legitimately send < floor after
+/// the INVITE (call torn down inside the grace window) → an advisory note on
+/// correct SUT behavior; and a lane with no hold machinery at all that
+/// happens to CANCEL ≥ floor after its INVITE is accepted without a finding.
 pub const CANCEL_GRACE_FLOOR_MS: u64 = 900;
 
 pub struct CancelAfter1xxRule;
@@ -1171,6 +1178,11 @@ impl CrossMessageAuditRule for CancelAfter1xxRule {
                 // live walk enforces the "before" ordering a whole-stream lookup
                 // would lose.
                 let mut first_received_status: HashMap<String, u16> = HashMap::new();
+                // Per-branch count of sent CANCELs already walked in this slot,
+                // so the grace-floor check reads the JUDGED event's own stamp
+                // (the nth sent CANCEL in the index — same capture order as the
+                // walk), not the branch's earliest.
+                let mut cancels_walked: HashMap<String, usize> = HashMap::new();
                 for (kind, msg) in slot_events(&slot.ordered) {
                     let branch = branch_of(msg);
                     if branch.is_empty() {
@@ -1183,6 +1195,12 @@ impl CrossMessageAuditRule for CancelAfter1xxRule {
                         (EventKind::Sent, SipMessage::Request(req))
                             if req.method().as_str().eq_ignore_ascii_case("CANCEL") =>
                         {
+                            let nth = {
+                                let n = cancels_walked.entry(branch.clone()).or_insert(0);
+                                let nth = *n;
+                                *n += 1;
+                                nth
+                            };
                             if let Some(&earliest) = first_received_status.get(&branch) {
                                 if earliest < 200 {
                                     continue;
@@ -1194,25 +1212,26 @@ impl CrossMessageAuditRule for CancelAfter1xxRule {
                             if received_1xx_on_branch(&branch) {
                                 continue;
                             }
-                            // ADR-0028 grace-expiry acceptance: a pre-1xx CANCEL
-                            // that left this lane ≥ the grace floor after the
-                            // lane's first INVITE on the branch is the deliberate
+                            // ADR-0028 grace-expiry acceptance: THIS pre-1xx
+                            // CANCEL (the nth sent on the branch by this lane)
+                            // left the lane ≥ the grace floor after the lane's
+                            // first INVITE on the branch — the deliberate
                             // bounded-hold send toward a response-less callee.
-                            let sent_reqs = idx.requests_for(&branch, Direction::Sent);
-                            let first_at = |method: &str| {
-                                sent_reqs
+                            let lane_sent_at = |method: &str, n: usize| -> Option<u64> {
+                                idx.requests_for(&branch, Direction::Sent)
                                     .iter()
                                     .filter(|m| m.bind_key == slot.bind_key)
-                                    .find(|m| {
+                                    .filter(|m| {
                                         m.as_request().is_some_and(|r| {
                                             r.method().as_str().eq_ignore_ascii_case(method)
                                         })
                                     })
+                                    .nth(n)
                                     .map(|m| m.at_ms)
                             };
-                            if let (Some(invite_at), Some(cancel_at)) =
-                                (first_at("INVITE"), first_at("CANCEL"))
-                            {
+                            let invite_at = lane_sent_at("INVITE", 0);
+                            let cancel_at = lane_sent_at("CANCEL", nth);
+                            if let (Some(invite_at), Some(cancel_at)) = (invite_at, cancel_at) {
                                 if cancel_at.saturating_sub(invite_at) >= CANCEL_GRACE_FLOOR_MS {
                                     continue;
                                 }
@@ -2780,7 +2799,7 @@ mod tests {
         assert!(f[0].1.contains("differ"), "{}", f[0].1);
     }
 
-    // ---- cancelAfter1xx [gating forwarders / advisory originators] --------
+    // ---- cancelAfter1xx [informational on every lane] ---------------------
 
     #[test]
     fn cancel_after_1xx_is_always_advisory() {

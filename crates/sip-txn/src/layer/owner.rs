@@ -230,10 +230,12 @@ impl Owner {
                 self.cancel_timer(t.cancel_grace_key);
                 self.untrack_call_ref(&t.call_ref, branch);
                 self.sync_active();
-                // A txn dying holding a CANCEL that never made the wire is a
-                // narrow race (2xx final, or death inside the grace window —
-                // the grace expiry / evict flush sends it otherwise). Counted
-                // dropped only then; a grace-sent copy is already accounted.
+                // A txn dying holding a never-sent CANCEL: under the bounded
+                // policy only the crossing-2xx final (cancellation moot), a
+                // same-branch displacement, and the safety-net sweep reach
+                // here un-flushed — grace expiry, evict, and timeout all send
+                // it first. Counted dropped only then; a grace-sent copy is
+                // already accounted.
                 if t.held_cancel.as_ref().is_some_and(|h| !h.sent_pre1xx) {
                     self.metrics
                         .held_cancels_dropped
@@ -318,7 +320,7 @@ impl Owner {
                 if let Some(t) = self.txns.get_mut(&branch) {
                     t.timeout_key = None;
                 }
-                self.fire_timeout(&branch)
+                self.fire_timeout(endpoint, &branch).await
             }
             Timer::Cleanup(branch) => {
                 if let Some(t) = self.txns.get_mut(&branch) {

@@ -45,7 +45,7 @@
 //!   B2BUA_REBOOT_BUDGET_SEC replicated-backup TTL / reboot budget (default 600; min 60 and >= keepalive)
 //!   B2BUA_SETUP_TIMEOUT_SEC a-leg total setup deadline, reroutes included (default 150, strictly below B2BUA_INVITE_TXN_TIMEOUT_SEC; <= 0 disables)
 //!   B2BUA_INVITE_TXN_TIMEOUT_SEC out-of-dialog INVITE txn bound, both call halves (default 158; range 33..=600)
-//!   B2BUA_CANCEL_STRICT_RFC_WAIT non-empty = literal RFC 3261 §9.1 CANCEL wait; default = ADR-0028 bounded hold (CANCEL always sent at grace expiry)
+//!   B2BUA_CANCEL_STRICT_RFC_WAIT truthy (1/true/yes/on) = literal RFC 3261 §9.1 CANCEL wait; default = ADR-0028 bounded hold (CANCEL always sent at grace expiry)
 //!   B2BUA_CALL_CONTROL_TIMEOUT_MS decision-backend deadline per round-trip (default 5000; <= 0 disables — ADR-0022)
 //!   WORKER_ALLOWED_TARGET_SUFFIXES b-leg target-admission allow-list, comma-separated (default .svc.cluster.local; `*` = allow all, rollback sentinel; non-IP non-matching hosts are 503'd pre-leg)
 //!   B2BUA_RELAY_HEADERS opt-in transparent header relay, comma-separated names copied from the a-leg INVITE onto every originated b-leg INVITE (default empty = no relay; structural headers never relayable)

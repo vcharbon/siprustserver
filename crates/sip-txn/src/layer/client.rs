@@ -330,7 +330,7 @@ impl Owner {
         }
     }
 
-    pub(super) fn fire_timeout(&mut self, branch: &str) {
+    pub(super) async fn fire_timeout(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
         let (call_ref, leg_id, method, destination, timeout_kind) = match self.txns.get(branch) {
             Some(t) if t.state.is_active() => {
                 let method = t
@@ -348,6 +348,23 @@ impl Owner {
             }
             _ => return,
         };
+        // A never-sent held CANCEL dying with the timed-out txn goes on the
+        // wire first under the bounded policy (ADR-0028 — same duty as the
+        // evict flush): a grace window that a tight custom config lets Timer B
+        // / the transaction bound outrun must not swallow the CANCEL.
+        let flush = match self.txns.get_mut(branch).and_then(|t| t.held_cancel.as_mut()) {
+            Some(h) if !h.sent_pre1xx && self.cancel_hold_grace_ms.is_some() => {
+                h.sent_pre1xx = true;
+                Some((h.buf.clone(), h.dest))
+            }
+            _ => None,
+        };
+        if let Some((buf, dest)) = flush {
+            self.send_buffer(endpoint, &buf, dest).await;
+            self.metrics
+                .held_cancels_flushed_pre1xx
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         self.delete_txn(branch);
         // Critical: the txn is gone and Timer B/F cancelled, so nothing re-fires —
         // a dropped Timeout would strand the leg until the 1 h GlobalDuration.
