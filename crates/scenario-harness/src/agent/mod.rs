@@ -36,6 +36,11 @@
 //! - [`run_guards`] — Drop-armed backstops: panic-time trace dump, the
 //!   forgot-to-`finish` RFC gate.
 //! - [`log_dump`] — the panic-time dump of what the SUT logged and traced.
+//! - [`artifact_dump`] — the Drop-time report-artifact writer
+//!   (`SCENARIO_ARTIFACT_DIR`-gated), so a run that never reaches `finish()`
+//!   still leaves its SVG/HTML/text ladders.
+//! - [`panic_note`] — the chained process-wide panic hook that captures the
+//!   panic message the artifact writer stamps into its FAIL banner.
 //! - [`step`] — [`StepError`], the fallible-core step vocabulary.
 //! - [`ua`] + [`tolerant_recv`] — [`Agent`]: the send/receive cores and the
 //!   method-filtered receive policies.
@@ -53,6 +58,7 @@
 //!   parsing does NOT live here — the values come from `sip_message::header`.
 
 mod addressing;
+mod artifact_dump;
 mod client_invite;
 mod client_txn;
 mod dialog;
@@ -60,6 +66,7 @@ mod harness;
 mod invite;
 mod log_dump;
 mod out_of_dialog;
+mod panic_note;
 mod proxy;
 mod rr_fold;
 mod run_guards;

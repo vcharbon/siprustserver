@@ -18,6 +18,7 @@ use sip_net::{
     with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork, UdpEndpoint,
 };
 
+use super::artifact_dump::ArtifactDump;
 use super::log_dump::LogDump;
 use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate, PanicDump};
 use super::rr_fold::decide_rr_fold;
@@ -47,7 +48,11 @@ pub struct Harness {
     recorder: Recorder,
     ids: Arc<Ids>,
     name: String,
-    description: Option<String>,
+    /// Shared (`Rc`) with [`artifact_dump`](Self::artifact_dump) so the
+    /// Drop-path artifacts always carry the description
+    /// [`describe`](Harness::describe) set — one cell, no second copy to
+    /// drift.
+    description: Rc<RefCell<Option<String>>>,
     /// Dumps the recorded trace to stderr if the scenario task unwinds before
     /// [`finish`](Harness::finish) renders a report. `finish` disarms it.
     dump: PanicDump,
@@ -55,6 +60,13 @@ pub struct Harness {
     /// next to [`dump`](Self::dump)'s wire trace on the same panic path.
     /// Declared after `dump` so the wire trace prints first. `finish` disarms it.
     log_dump: LogDump,
+    /// Writes the full report artifacts (SVG/HTML/text ladders) when the
+    /// harness drops WITHOUT [`finish`](Harness::finish) — panic unwind or a
+    /// forgotten `finish` — under `SCENARIO_ARTIFACT_DIR` (unset ⇒ off).
+    /// Declared after the stderr dumps so the compact trace prints first.
+    /// `finish` disarms it only AFTER its RFC hard gate, so a gate failure
+    /// still writes settled FAIL artifacts.
+    artifact_dump: ArtifactDump,
     /// MANDATORY HARD GATE: fails the test on Drop if the recorded trace violates
     /// any non-advisory RFC rule — the backstop for a harness dropped WITHOUT
     /// [`finish`](Harness::finish) (which enforces the same gate inline).
@@ -158,6 +170,16 @@ impl Harness {
         );
         let dump = PanicDump::new(name.clone(), wrapped.recording.channel(), recorder.clone());
         let log_dump = LogDump::install(name.clone());
+        super::panic_note::install();
+        let anchors: Rc<RefCell<Vec<crate::anchors::AnchorTag>>> = Rc::new(RefCell::new(Vec::new()));
+        let description: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let artifact_dump = ArtifactDump::new(
+            name.clone(),
+            description.clone(),
+            wrapped.recording.channel(),
+            recorder.clone(),
+            anchors.clone(),
+        );
         let waivers: Rc<RefCell<Vec<WaiverState>>> = Rc::new(RefCell::new(Vec::new()));
         let cseq_gate = CseqGate::new(
             name.clone(),
@@ -171,13 +193,14 @@ impl Harness {
             recorder,
             ids: Arc::new(Ids(AtomicU64::new(1))),
             name,
-            description: None,
+            description,
             dump,
             log_dump,
+            artifact_dump,
             cseq_gate,
             waivers,
             recv_timeout,
-            anchors: Rc::new(RefCell::new(Vec::new())),
+            anchors,
         }
     }
 
@@ -216,9 +239,10 @@ impl Harness {
         });
     }
 
-    /// Set the report description.
-    pub fn describe(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
+    /// Set the report description (the cell is shared with the Drop-path
+    /// artifact writer, which therefore carries it too).
+    pub fn describe(self, description: impl Into<String>) -> Self {
+        *self.description.borrow_mut() = Some(description.into());
         self
     }
 
@@ -482,6 +506,27 @@ impl Harness {
         self.recording.clone()
     }
 
+    /// Project the CURRENT recording into a [`RunReport`] WITHOUT consuming
+    /// the harness — the seam a downstream Drop guard (or a mid-run inspector)
+    /// uses to render `report::write_all` artifacts for a run that never
+    /// reaches [`finish`](Self::finish). Reads only synchronous snapshots: the
+    /// network is not settled and the recording layer's `close()` does not run,
+    /// so the report's `audit` is `Ok(())` and the layer-close structural
+    /// anomalies (queue leaks, in-flight imbalance) are absent — unlike a
+    /// `finish()` report. `expects` is empty, so `passed()` is vacuously true;
+    /// a caller reporting a failure pushes a failed
+    /// [`ExpectOutcome`](crate::run::ExpectOutcome) to render the FAIL banner.
+    pub fn snapshot_report(&self) -> RunReport {
+        RunReport::from_recording(
+            self.name.clone(),
+            self.description.borrow().clone(),
+            self.recorder.clone(),
+            self.recording.channel().snapshot(),
+            Ok(()),
+            self.anchors.borrow().clone(),
+        )
+    }
+
     /// Close the recording layer and return the [`RunReport`] (trace projected
     /// from the recording). Failures in the fluent flow panic in-line, so a
     /// returned report is by construction a passing run.
@@ -498,6 +543,8 @@ impl Harness {
         // dump is no longer wanted: disarm it before tearing the session down. The
         // Drop-time cseq backstop is likewise disarmed — `finish` runs the SAME
         // gate inline just below, so the Drop guard would only double-check.
+        // The artifact writer stays armed THROUGH the gate: a gate panic unwinds
+        // with it live, so even a finish-time failure leaves its artifacts.
         self.dump.disarm();
         self.log_dump.disarm();
         self.cseq_gate.disarm();
@@ -534,9 +581,11 @@ impl Harness {
                 );
             }
         }
+        self.artifact_dump.disarm();
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
-        RunReport::from_recording(self.name, self.description, self.recorder, events, audit, anchors)
+        let description = self.description.borrow().clone();
+        RunReport::from_recording(self.name, description, self.recorder, events, audit, anchors)
     }
 
     /// [`finish`](Self::finish) that **collects** the hard-gate findings
@@ -553,6 +602,7 @@ impl Harness {
     pub async fn finish_collecting(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
         self.dump.disarm();
         self.log_dump.disarm();
+        self.artifact_dump.disarm();
         self.cseq_gate.disarm();
         self.settle_network().await;
         let events = self.recording.channel().snapshot();
@@ -572,9 +622,10 @@ impl Harness {
             .collect();
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
+        let description = self.description.borrow().clone();
         let report = RunReport::from_recording(
             self.name,
-            self.description,
+            description,
             self.recorder,
             events,
             audit,

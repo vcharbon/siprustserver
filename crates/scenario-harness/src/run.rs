@@ -59,10 +59,11 @@ pub struct RunReport {
 }
 
 impl RunReport {
-    /// Build a report straight from a recording — used by the fluent
-    /// [`crate::agent::Harness`], whose `expect`s assert (panic) in-line rather
-    /// than collecting outcomes, so `expects` is empty and `passed()` is
-    /// vacuously true (a failure would have panicked before `finish`).
+    /// Build a report straight from a recording — the fluent
+    /// [`crate::agent::Harness`] `finish`/`snapshot_report` path and its
+    /// Drop-time artifact writer. The constructor sets `expects` empty, so
+    /// `passed()` starts vacuously true; a caller reporting a failure (the
+    /// Drop-path writer stamping a panic) pushes a failed [`ExpectOutcome`].
     pub(crate) fn from_recording(
         scenario_name: String,
         description: Option<String>,

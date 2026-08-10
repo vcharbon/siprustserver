@@ -15,7 +15,7 @@ no real sockets, no real wall-clock dependence.
 | 1 | `sip-clock` | The one clock seam. `Clock::system()` / `Clock::test_at(0)`; `testkit::{advance_in_100ms_chunks, settle, pump}` — the primitives behind every harness `advance()`. |
 | 2 | `layer-harness` | SIP-agnostic recording substrate: `Recorder`, `RunContext`, `EventSequencer`, `RecordedAnomaly`. Tests record first, assert on the recording (ADR-0004/0006). |
 | 3 | `sip-net` | `SimulatedSignalingNetwork` — in-process datagram fabric keyed by `SocketAddr`, per-hop transit delay (0 is coerced to 1 ms — see the clock guide), `SendFault` + per-bind `PreIngress` hooks for drop/synthetic-reply injection. Plus `rfc_audit`: the RFC 3261/3262/3264 post-call rule suite (~77 rules, subject-dispatched per bind role, advisory/gating lanes) behind the single evaluator `evaluate_rfc_findings`. |
-| 4 | `scenario-harness` | The fluent dialog DSL. `Harness` owns the recording-wrapped sim net, `Clock::test_at(0)`, and two RAII guards (`PanicDump`: wire-trace dump on panic; `CseqGate`: RFC hard gate even if you forget `finish()`). `Agent` is a fake UA that auto-fills Via/tags/CSeq/Contact per RFC 3261. `callflow` is the canonical INVITE/180/200/ACK choreography (`establish`, `hangup`, `Call::new(..).no_ring()`). Default transit is **100 ms** (`Harness::new`), so traces show `received = sent + 100`. |
+| 4 | `scenario-harness` | The fluent dialog DSL. `Harness` owns the recording-wrapped sim net, `Clock::test_at(0)`, and three RAII guards (`PanicDump`: wire-trace dump on panic; `CseqGate`: RFC hard gate even if you forget `finish()`; `ArtifactDump`: full report artifacts on any drop without `finish()`, gated by `SCENARIO_ARTIFACT_DIR`). `Agent` is a fake UA that auto-fills Via/tags/CSeq/Contact per RFC 3261. `callflow` is the canonical INVITE/180/200/ACK choreography (`establish`, `hangup`, `Call::new(..).no_ring()`). Default transit is **100 ms** (`Harness::new`), so traces show `received = sent + 100`. |
 | 5 | `b2bua-harness` | Binds a **real `B2buaCore`** as the SUT. `B2buaSut` (`route_all_to`, metrics, `cdr_records`), `B2buaScene` (alice :5060 / bob :5070 / b2bua :5080; `establish`/`hangup`/`finish`), `settle_until` (bounded yield-poll to drain async teardown), and the **`assert_fully_reaped` leak oracle**: creations == removals, `active_calls == 0`, `lock_count == 0`, reaper touched-ledger empty. |
 | 6 | `failover-harness` | The full HA stack under ONE paused clock: a **real LB `ProxyCore`** + N replicating `b2bua` workers over a simulated replication fabric, one shared `EventSequencer` across the SIP + repl planes. Fault primitives: `crash()`, `reboot()` (fresh SIP IP, **hard-asserts pristine**), repl `partition`/`heal`, `set_health`, `with_worker_clock_offset` (deterministic inter-node wall skew — see the clock guide), and `with_worker_tune` (a `B2buaConfig` mutator re-applied on every worker spawn AND reboot). Cluster invariants: `assert_single_owner`, `assert_call_fully_over`, `assert_call_fully_released`, the `transparent_matrix!` differential oracle. Transit is 1 ms; its `advance` is `testkit::pump` (settle → advance → settle). |
 | 7 | `ha-harness` | The replication engine alone — **no SIP, no router, no rules**. `HaCluster`/`HaNode` with put/delete/crash/reboot/partition, convergence assertions, `ReplReport`. |
@@ -58,6 +58,12 @@ Automatic (you cannot opt out, only waive per-rule):
   SUT-side deviation with no such ADR entry is a bug to fix, never a window.
 - **Panic trace** — on any panic before `finish()`, `PanicDump` prints the
   compact wire trace to stderr. Read it before adding instrumentation.
+- **Failure artifacts** (env-gated) — with `SCENARIO_ARTIFACT_DIR=<dir>` set, a
+  harness dropped without `finish()` (panic unwind, a finish-time gate failure,
+  or a forgotten `finish`) writes the full SVG/HTML/text ladders under
+  `<dir>/<name>/`, FAIL-bannered and carrying the panic message. Unset ⇒ off,
+  so CI stays artifact-free. `Harness::snapshot_report(&self)` renders the same
+  report from a live harness without consuming it.
 
 NOT automatic (deliberately — timeout/reap/stall fixtures would false-fail):
 

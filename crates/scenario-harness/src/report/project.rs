@@ -40,7 +40,8 @@ pub struct TimelineOverlay {
 /// Build a single-plane (SIP) [`SeqDoc`] from a run's recording.
 ///
 /// `extra_anomalies` are folded into the doc on top of the recorder's structural
-/// anomalies — the RFC 3261 CSeq hard-gate findings are passed here so the report
+/// anomalies — the RFC hard-gate findings and any caller-supplied gating
+/// findings (e.g. a failed `ExpectOutcome`) are passed here so the report
 /// shows FAIL and lists the violation whenever the trace breaks the rule. If
 /// `extra_anomalies` is non-empty the doc is forced `passed = false`: a trace
 /// that violates the RFC can NEVER render PASS.
