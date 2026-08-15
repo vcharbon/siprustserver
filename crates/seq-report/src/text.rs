@@ -55,7 +55,8 @@ pub fn render_global_txt(doc: &SeqDoc) -> String {
         out.push_str(&format!("Anomalies ({}):\n", doc.anomalies.len()));
         for a in &doc.anomalies {
             let lane = a.lane.as_deref().map(|l| format!(" [{l}]")).unwrap_or_default();
-            out.push_str(&format!("  • {}{lane}: {}\n", a.check, a.detail));
+            let sev = if a.is_gating() { "GATING " } else { "advisory " };
+            out.push_str(&format!("  • {sev}{}{lane}: {}\n", a.check, a.detail));
         }
     }
 

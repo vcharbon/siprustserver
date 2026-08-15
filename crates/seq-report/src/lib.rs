@@ -174,6 +174,12 @@ pub struct Anomaly {
     /// advisory).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advisory: Option<bool>,
+    /// Global `seq` values ([`SeqRow::seq`]) of the message row(s) this finding
+    /// ties to — the offending message(s), when the producing rule can pinpoint
+    /// them. The HTML renderer links the finding to those rows (click-to-jump,
+    /// per-row badges); empty ⇒ the finding renders unlinked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_seqs: Vec<u64>,
 }
 
 impl Anomaly {
@@ -607,6 +613,7 @@ mod tests {
             lane: Some("b1".into()),
             endpoint: None,
             advisory: Some(false),
+            row_seqs: Vec::new(),
         });
         let html = render_html(&doc);
         assert!(html.contains("FAIL"));
@@ -614,6 +621,83 @@ mod tests {
         let txt = render_global_txt(&doc);
         assert!(txt.contains("FAIL"));
         assert!(txt.contains("rfc.cseqInDialogOrder"));
+    }
+
+    /// A finding with `row_seqs` renders as a clickable `.linked` list item
+    /// carrying the resolved diagram ordinals, the linked row gets a ⚠ badge in
+    /// the SVG, and its payload block carries the anomaly context — the three
+    /// pieces the anomaly↔message navigation is built from.
+    #[test]
+    fn linked_anomaly_ties_list_row_badge_and_payload_together() {
+        let mut doc = mixed_doc();
+        doc.passed = false;
+        doc.anomalies.push(Anomaly {
+            check: "rfc3262.rseqMonotonic".into(),
+            detail: "RSeq gap".into(),
+            lane: Some("b1".into()),
+            endpoint: None,
+            advisory: Some(false),
+            // The INVITE row: seq 1 → diagram ordinal 0.
+            row_seqs: vec![1],
+        });
+        let html = render_html(&doc);
+
+        // List: gating severity badge + the resolved data-rows ordinal + a jump
+        // affordance naming the linked message.
+        assert!(html.contains("class=\"anomaly gating linked\" data-rows=\"0\""), "{html}");
+        assert!(html.contains(">GATING</span>"), "{html}");
+        assert!(html.contains("→ INVITE sip:bob @ T+0.000s"), "{html}");
+        // SVG: the linked row's group carries the ⚠ badge in the gating color.
+        let svg_end = html.find("</svg>").unwrap();
+        assert!(html[..svg_end].contains(">⚠</text>"), "row badge present: {html}");
+        // Payload: the anomaly rides the row's hidden payload block, so the
+        // detail panel states the finding when the message is clicked.
+        let pay = html.find("id=\"evt-0\"").unwrap();
+        let pay_end = pay + html[pay..].find("</pre>").unwrap();
+        assert!(
+            html[pay..pay_end].contains("payload-anoms")
+                && html[pay..pay_end].contains("rfc3262.rseqMonotonic"),
+            "payload carries the anomaly context: {}",
+            &html[pay..pay_end]
+        );
+        // Header: severity split next to the raw count.
+        assert!(html.contains("1 gating"), "{html}");
+        assert!(html.contains("0 advisory"), "{html}");
+        // The click handler wires linked anomalies to the diagram.
+        assert!(html.contains("querySelectorAll('.anomaly.linked')"), "{html}");
+    }
+
+    /// Gating findings list before advisory ones regardless of recorded order,
+    /// and an unlinked / lifecycle-seq finding renders without a link.
+    #[test]
+    fn anomalies_sort_gating_first_and_unlinked_stay_unlinked() {
+        let mut doc = mixed_doc();
+        doc.passed = false;
+        doc.anomalies.push(Anomaly {
+            check: "rfc3261.rportEcho".into(),
+            detail: "empty rport".into(),
+            lane: None,
+            endpoint: None,
+            advisory: Some(true),
+            row_seqs: Vec::new(),
+        });
+        doc.anomalies.push(Anomaly {
+            check: "rfc3261.cseqInDialogOrder".into(),
+            detail: "reuse".into(),
+            lane: None,
+            endpoint: None,
+            advisory: Some(false),
+            // seq 2 is the lifecycle band — not a message row, so no link.
+            row_seqs: vec![2],
+        });
+        let html = render_html(&doc);
+        let gating = html.find("rfc3261.cseqInDialogOrder").unwrap();
+        let advisory = html.find("rfc3261.rportEcho").unwrap();
+        assert!(gating < advisory, "gating listed first: {html}");
+        // Neither resolves a row: no linked item, no data-rows.
+        assert!(!html.contains("anomaly gating linked"), "{html}");
+        assert!(!html.contains("anomaly advisory linked"), "{html}");
+        assert!(!html.contains("data-rows"), "{html}");
     }
 
     /// 036 ask C: consecutive lanes sharing a `group` render one bracketing

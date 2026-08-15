@@ -2315,6 +2315,7 @@ mod tests {
                 ordered: vec![OrderedEvent {
                     kind: EventKind::Received,
                     idx: 0,
+                    wire_pos: None,
                     msg: bye,
                     wire_peer: None,
                 }],

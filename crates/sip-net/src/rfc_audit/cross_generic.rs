@@ -428,6 +428,13 @@ impl CrossMessageAuditRule for SdpOriginContinuityRule {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>)> {
         let mut out = Vec::new();
         // Per-(bindKey, callId) history of this agent's sent SDP origin. Forked
         // early dialogs share Call-ID + From-tag and observe the same UAC
@@ -477,6 +484,7 @@ impl CrossMessageAuditRule for SdpOriginContinuityRule {
                                  \"{}\" — RFC 4566 §5.2 / RFC 3264 §8",
                                 prior.origin.raw_origin_line, origin.raw_origin_line,
                             ),
+                            ev.wire_pos,
                         ));
                         history.insert(
                             key,
@@ -498,6 +506,7 @@ impl CrossMessageAuditRule for SdpOriginContinuityRule {
                                  exactly +1) — RFC 3264 §8",
                                 prior.origin.session_version, origin.session_version,
                             ),
+                            ev.wire_pos,
                         ));
                     } else if !body_changed && version_delta != 0 {
                         out.push((
@@ -507,6 +516,7 @@ impl CrossMessageAuditRule for SdpOriginContinuityRule {
                                  unchanged for byte-identical SDP) — RFC 4566 §5.2",
                                 prior.origin.session_version, origin.session_version,
                             ),
+                            ev.wire_pos,
                         ));
                     } else if version_delta < 0 {
                         out.push((
@@ -515,6 +525,7 @@ impl CrossMessageAuditRule for SdpOriginContinuityRule {
                                 "SDP sess-version went backwards ({} → {}) — RFC 4566 §5.2",
                                 prior.origin.session_version, origin.session_version,
                             ),
+                            ev.wire_pos,
                         ));
                     }
                     history.insert(
@@ -638,6 +649,13 @@ impl CrossMessageAuditRule for RportEchoRule {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>)> {
         let mut out = Vec::new();
         for slice in project_per_dialog(events) {
             for slot in &slice.per_agent {
@@ -679,6 +697,7 @@ impl CrossMessageAuditRule for RportEchoRule {
                                  server to echo rport=<source-port>",
                                 status(&ev.msg),
                             ),
+                            ev.wire_pos,
                         ));
                         continue;
                     }
@@ -691,6 +710,7 @@ impl CrossMessageAuditRule for RportEchoRule {
                                  source port",
                                 status(&ev.msg),
                             ),
+                            ev.wire_pos,
                         ));
                     }
                 }
@@ -1229,6 +1249,45 @@ mod tests {
     }
 
     #[test]
+    fn sdp_origin_offending_points_at_the_reoffer() {
+        let inv = req_full(
+            "INVITE",
+            "sip:bob@127.0.0.1",
+            "z9hG4bK-i",
+            1,
+            "at",
+            None,
+            "",
+            &sdp("alice 1 1 IN IP4 10.0.0.1", ""),
+        );
+        let reinv = req_full(
+            "INVITE",
+            "sip:bob@127.0.0.1",
+            "z9hG4bK-r",
+            2,
+            "at",
+            Some("bt"),
+            "",
+            &sdp("alice 999 2 IN IP4 10.0.0.1", "a=sendonly\r\n"),
+        );
+        // Address-keyed bind so the events project into wire entries: INVITE 1,
+        // received 200 2, tuple-breaking re-INVITE 3.
+        let evs = vec![
+            sent("127.0.0.1:5060", inv, "127.0.0.1:5070", 0),
+            recv(
+                "127.0.0.1:5060",
+                resp_full(200, 1, "INVITE", "z9hG4bK-i", "bt", "", ""),
+                "127.0.0.1:5070",
+                1,
+            ),
+            sent("127.0.0.1:5060", reinv, "127.0.0.1:5070", 2),
+        ];
+        let out = SdpOriginContinuityRule.check_positioned(&evs);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].2, Some(3), "offending = the re-INVITE that broke the tuple (entry 3)");
+    }
+
+    #[test]
     fn sdp_origin_skips_relay_slots() {
         // A transparent proxy forwards alice's offer AND bob's answer on one
         // bind — its sent stream interleaves o=alice / o=bob for one Call-ID.
@@ -1394,6 +1453,19 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].1.contains("dropped the rport"), "{}", f[0].1);
         assert!(RportEchoRule.force_advisory());
+    }
+
+    #[test]
+    fn rport_offending_points_at_the_response() {
+        // Address-keyed bind so the events project into wire entries: the sent
+        // request is entry 1, the offending response (an external arrival) 2.
+        let evs = vec![
+            sent("127.0.0.1:5060", req_rport("z9hG4bK-o"), "127.0.0.1:5070", 0),
+            recv("127.0.0.1:5060", resp_via_rport("z9hG4bK-o", ""), "127.0.0.1:5070", 1),
+        ];
+        let out = RportEchoRule.check_positioned(&evs);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].2, Some(2), "offending = the received response (wire entry 2)");
     }
 
     // -- AllowSupportedOnInviteRule ------------------------------------------

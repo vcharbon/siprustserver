@@ -158,6 +158,34 @@ impl RecvHalf<'_> {
 ///     so it is NOT flagged lost. On the fully-recorded fabrics every
 ///     destination is a recorded bind and the strict semantics are unchanged.
 pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<RecordedSipEntry> {
+    paired_sip_entries(events).into_iter().map(|(e, _)| e).collect()
+}
+
+/// The 1-based wire-entry position (into [`to_sip_entries`] over the SAME
+/// events) keyed by the stamp `seq` of EITHER half of the entry: the
+/// `SendCalled`/`ReEmit` that created it AND the `RecvItem` that delivered it
+/// (orphan external arrivals key on their `RecvItem` alone). This is what lets
+/// an audit rule holding a stamped event — sent or received — name the wire
+/// entry it is judging, in the same index space a scoped waiver attributes on.
+pub fn wire_positions_by_stamp(
+    events: &[Stamped<SignalingNetworkEvent>],
+) -> std::collections::HashMap<u64, usize> {
+    let mut map = std::collections::HashMap::new();
+    for (i, (entry, recv_seq)) in paired_sip_entries(events).into_iter().enumerate() {
+        map.entry(entry.seq).or_insert(i + 1);
+        if let Some(r) = recv_seq {
+            map.entry(r).or_insert(i + 1);
+        }
+    }
+    map
+}
+
+/// [`to_sip_entries`] plus, per entry, the stamp `seq` of the `RecvItem` that
+/// delivered it (`None` when unpaired, or when the entry IS the receive —
+/// an orphan external arrival, whose `entry.seq` already is the recv stamp).
+fn paired_sip_entries(
+    events: &[Stamped<SignalingNetworkEvent>],
+) -> Vec<(RecordedSipEntry, Option<u64>)> {
     // Every bind the recording observed (BindAcquire plus any event's bind key
     // as a backstop) — the boundary between in-trace and external peers.
     let mut recorded_binds: std::collections::HashSet<SocketAddr> = std::collections::HashSet::new();
@@ -222,29 +250,32 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
             !r.paired && r.receiver == *to && r.src == from && r.raw == msg.as_slice() && r.seq >= s.seq
         });
 
-        let (received_ms, recv_note, to_lane) = match matched {
+        let (received_ms, recv_note, to_lane, recv_seq) = match matched {
             Some(r) => {
                 r.paired = true;
-                (Some(r.at_ms), r.note(), Some(r.bind_key.to_string()))
+                (Some(r.at_ms), r.note(), Some(r.bind_key.to_string()), Some(r.seq))
             }
-            None => (None, None, None),
+            None => (None, None, None, None),
         };
 
-        out.push(RecordedSipEntry {
-            from,
-            to: *to,
-            raw: msg.clone(),
-            sent_ms: s.at_ms,
-            received_ms,
-            // Unmatched + recorded destination ⇒ genuinely lost on the fabric;
-            // unmatched + external destination ⇒ left the recording's horizon.
-            delivered: received_ms.is_some() || !recorded_binds.contains(to),
-            recv_note,
-            reemit: None,
-            from_lane: Some(bind_key.clone()),
-            to_lane,
-            seq: s.seq,
-        });
+        out.push((
+            RecordedSipEntry {
+                from,
+                to: *to,
+                raw: msg.clone(),
+                sent_ms: s.at_ms,
+                received_ms,
+                // Unmatched + recorded destination ⇒ genuinely lost on the fabric;
+                // unmatched + external destination ⇒ left the recording's horizon.
+                delivered: received_ms.is_some() || !recorded_binds.contains(to),
+                recv_note,
+                reemit: None,
+                from_lane: Some(bind_key.clone()),
+                to_lane,
+                seq: s.seq,
+            },
+            recv_seq,
+        ));
     }
 
     // Re-emissions (loadgen retransmit engine): each is an OUTBOUND frame the
@@ -262,26 +293,29 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
         let matched = recvs.iter_mut().find(|r| {
             !r.paired && r.receiver == *to && r.src == from && r.raw == msg.as_slice() && r.seq >= s.seq
         });
-        let (received_ms, to_lane) = match matched {
+        let (received_ms, to_lane, recv_seq) = match matched {
             Some(r) => {
                 r.paired = true;
-                (Some(r.at_ms), Some(r.bind_key.to_string()))
+                (Some(r.at_ms), Some(r.bind_key.to_string()), Some(r.seq))
             }
-            None => (None, None),
+            None => (None, None, None),
         };
-        out.push(RecordedSipEntry {
-            from,
-            to: *to,
-            raw: msg.clone(),
-            sent_ms: s.at_ms,
-            received_ms,
-            delivered: received_ms.is_some() || !recorded_binds.contains(to),
-            recv_note: None,
-            reemit: Some(*kind),
-            from_lane: Some(bind_key.clone()),
-            to_lane,
-            seq: s.seq,
-        });
+        out.push((
+            RecordedSipEntry {
+                from,
+                to: *to,
+                raw: msg.clone(),
+                sent_ms: s.at_ms,
+                received_ms,
+                delivered: received_ms.is_some() || !recorded_binds.contains(to),
+                recv_note: None,
+                reemit: Some(*kind),
+                from_lane: Some(bind_key.clone()),
+                to_lane,
+                seq: s.seq,
+            },
+            recv_seq,
+        ));
     }
 
     // Orphan deliveries from EXTERNAL senders: one entry per packet, stamped at
@@ -292,21 +326,101 @@ pub fn to_sip_entries(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Recorded
         if r.paired || recorded_binds.contains(&r.src) {
             continue;
         }
-        out.push(RecordedSipEntry {
-            from: r.src,
-            to: r.receiver,
-            raw: r.raw.to_vec(),
-            sent_ms: r.at_ms,
-            received_ms: Some(r.at_ms),
-            delivered: true,
-            recv_note: r.note(),
-            reemit: None,
-            from_lane: None,
-            to_lane: Some(r.bind_key.to_string()),
-            seq: r.seq,
-        });
+        out.push((
+            RecordedSipEntry {
+                from: r.src,
+                to: r.receiver,
+                raw: r.raw.to_vec(),
+                sent_ms: r.at_ms,
+                received_ms: Some(r.at_ms),
+                delivered: true,
+                recv_note: r.note(),
+                reemit: None,
+                from_lane: None,
+                to_lane: Some(r.bind_key.to_string()),
+                seq: r.seq,
+            },
+            None,
+        ));
     }
 
-    out.sort_by(|a, b| a.sent_ms.cmp(&b.sent_ms).then(a.seq.cmp(&b.seq)));
+    out.sort_by(|a, b| a.0.sent_ms.cmp(&b.0.sent_ms).then(a.0.seq.cmp(&b.0.seq)));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::UdpPacket;
+
+    const A: &str = "127.0.0.1:5060";
+    const B: &str = "127.0.0.1:5070";
+
+    fn bind(key: &str, seq: u64) -> Stamped<SignalingNetworkEvent> {
+        Stamped {
+            event: SignalingNetworkEvent::BindAcquire {
+                bind_key: key.to_string(),
+                summary: crate::types::BindSummary {
+                    addr: key.parse().unwrap(),
+                    queue_max: 16,
+                    reuse_port: false,
+                    roles: Default::default(),
+                    has_pre_ingress: false,
+                },
+            },
+            seq,
+            at_ms: seq,
+        }
+    }
+
+    fn send(from: &str, to: &str, raw: &str, seq: u64) -> Stamped<SignalingNetworkEvent> {
+        Stamped {
+            event: SignalingNetworkEvent::SendCalled {
+                bind_key: from.to_string(),
+                to: to.parse().unwrap(),
+                msg: raw.as_bytes().to_vec(),
+            },
+            seq,
+            at_ms: seq,
+        }
+    }
+
+    fn arrive(at: &str, from: &str, raw: &str, seq: u64) -> Stamped<SignalingNetworkEvent> {
+        Stamped {
+            event: SignalingNetworkEvent::RecvItem {
+                bind_key: at.to_string(),
+                disposition: RecvDisposition::Delivered,
+                packet: UdpPacket {
+                    raw: raw.as_bytes().to_vec(),
+                    src: from.parse().unwrap(),
+                    arrival_ms: seq,
+                },
+            },
+            seq,
+            at_ms: seq,
+        }
+    }
+
+    /// Both halves of one wire message — the send stamp and its paired arrival
+    /// stamp — resolve to the SAME 1-based entry position, so a rule holding
+    /// either half names the same wire entry a waiver scopes on.
+    #[test]
+    fn wire_positions_key_both_halves_to_one_entry() {
+        let evs = vec![
+            bind(A, 0),
+            bind(B, 1),
+            send(A, B, "INVITE sip:b SIP/2.0\r\n", 2),
+            arrive(B, A, "INVITE sip:b SIP/2.0\r\n", 3),
+            send(B, A, "SIP/2.0 200 OK\r\n", 4),
+            arrive(A, B, "SIP/2.0 200 OK\r\n", 5),
+        ];
+        let entries = to_sip_entries(&evs);
+        assert_eq!(entries.len(), 2);
+        let pos = wire_positions_by_stamp(&evs);
+        assert_eq!(pos.get(&2), Some(&1), "send stamp of the INVITE → entry 1");
+        assert_eq!(pos.get(&3), Some(&1), "arrival stamp of the INVITE → entry 1");
+        assert_eq!(pos.get(&4), Some(&2), "send stamp of the 200 → entry 2");
+        assert_eq!(pos.get(&5), Some(&2), "arrival stamp of the 200 → entry 2");
+        assert_eq!(pos.get(&0), None, "a bind stamp maps to no entry");
+    }
 }

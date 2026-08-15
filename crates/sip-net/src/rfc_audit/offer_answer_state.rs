@@ -122,8 +122,14 @@ enum Transition<'a> {
         doc: SdpDoc,
     },
     /// `msg`, sent by this slot, carries a session description whose `o=` line
-    /// follows `previous` in the slot's own origin stream.
-    OriginAdvanced { msg: &'a SipMessage, body: SdpDoc, previous: Option<SdpDoc> },
+    /// follows `previous` in the slot's own origin stream. `wire_pos` is the
+    /// carrying message's 1-based wire-entry position ([`OrderedEvent::wire_pos`]).
+    OriginAdvanced {
+        msg: &'a SipMessage,
+        wire_pos: Option<usize>,
+        body: SdpDoc,
+        previous: Option<SdpDoc>,
+    },
 }
 
 /// Replay one agent slot's ordered stream through the offer/answer state
@@ -150,6 +156,7 @@ where
             if let Some(doc) = f.sdp.clone() {
                 on(Transition::OriginAdvanced {
                     msg: f.msg,
+                    wire_pos: ev.wire_pos,
                     body: doc.clone(),
                     previous: last_sent_sdp.clone(),
                 });
@@ -392,10 +399,19 @@ impl CrossMessageAuditRule for SdpOriginContinuityRule {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>)> {
         let mut out = Vec::new();
         for (call_id, slot) in judged_slots(events) {
             walk(&slot, |t| {
-                let Transition::OriginAdvanced { msg, body, previous } = t else { return };
+                let Transition::OriginAdvanced { msg, wire_pos, body, previous } = t else {
+                    return;
+                };
                 let Some(prev) = previous else { return };
                 let (Some(now), Some(before)) =
                     (parse_origin(body.raw.as_bytes()), parse_origin(prev.raw.as_bytes()))
@@ -416,6 +432,7 @@ impl CrossMessageAuditRule for SdpOriginContinuityRule {
                             before.username,
                             before.session_id,
                         ),
+                        wire_pos,
                     ));
                 } else if now.session_version < before.session_version {
                     out.push((
@@ -431,6 +448,7 @@ impl CrossMessageAuditRule for SdpOriginContinuityRule {
                             before.session_version,
                             before.session_version,
                         ),
+                        wire_pos,
                     ));
                 }
             });
@@ -705,6 +723,42 @@ m=audio 0 RTP/AVP 8\r\n";
         assert!(detail.contains("o=bob 1 1 IN IP4 127.0.0.1"), "{detail}");
         assert!(detail.contains("o=alice 424242 2 IN IP4 10.0.0.1"), "{detail}");
         assert!(detail.contains("RFC 4566 §5.2"), "{detail}");
+    }
+
+    #[test]
+    fn foreign_origin_offending_points_at_the_carrying_ack() {
+        // Address-keyed bind so the events project into wire entries (the
+        // symbolic "alice" bind of the shared helpers yields no positions).
+        fn sent_on(raw: Vec<u8>, seq: u64) -> Stamped<SignalingNetworkEvent> {
+            Stamped {
+                event: SignalingNetworkEvent::SendCalled {
+                    bind_key: "127.0.0.1:5091".to_string(),
+                    to: CALLEE.parse().unwrap(),
+                    msg: raw,
+                },
+                seq,
+                at_ms: seq,
+            }
+        }
+        fn recv_on(raw: Vec<u8>, seq: u64) -> Stamped<SignalingNetworkEvent> {
+            Stamped {
+                event: SignalingNetworkEvent::RecvItem {
+                    bind_key: "127.0.0.1:5091".to_string(),
+                    disposition: crate::types::RecvDisposition::Delivered,
+                    packet: UdpPacket { raw, src: CALLER.parse().unwrap(), arrival_ms: seq },
+                },
+                seq,
+                at_ms: seq,
+            }
+        }
+        let evs = vec![
+            sent_on(request("INVITE", 1, None, Some(AUDIO_OFFER)), 0),
+            recv_on(response(200, 1, "INVITE", Some(AUDIO_ANSWER)), 1),
+            sent_on(request("ACK", 1, Some("bt"), Some(STRAY_ANSWER)), 2),
+        ];
+        let out = SdpOriginContinuityRule.check_positioned(&evs);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].2, Some(3), "offending = the ACK carrying the foreign origin (entry 3)");
     }
 
     #[test]

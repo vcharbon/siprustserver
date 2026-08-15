@@ -634,6 +634,13 @@ impl CrossMessageAuditRule for RseqMonotonicRule {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>)> {
         let mut out = Vec::new();
         for slice in project_per_dialog(events) {
             for slot in &slice.per_agent {
@@ -666,6 +673,7 @@ impl CrossMessageAuditRule for RseqMonotonicRule {
                                          RSeq={prior} (callId {cid}) — RFC 3262 §3 / \
                                          RFC3262-MUST-013"
                                     ),
+                                    ev.wire_pos,
                                 ));
                                 prior_rseq.insert(cid.clone(), n);
                             }
@@ -1081,6 +1089,13 @@ impl CrossMessageAuditRule for UacRseqStrictnessRule {
     }
 
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>)> {
         let mut out = Vec::new();
         for slice in project_per_dialog(events) {
             for slot in &slice.per_agent {
@@ -1133,6 +1148,7 @@ impl CrossMessageAuditRule for UacRseqStrictnessRule {
                                      RFC3262-MUST-024)",
                                     rseq,
                                 ),
+                                ev.wire_pos,
                             ));
                         }
                     }
@@ -1597,6 +1613,19 @@ mod tests {
         assert!(f[0].1.contains("MUST-013"), "{}", f[0].1);
     }
 
+    #[test]
+    fn rseq_monotonic_offending_points_at_the_gap_1xx() {
+        // An address-keyed bind so the events project into wire entries (a
+        // symbolic bind key has no lane address and yields no positions).
+        let evs = vec![
+            sent("127.0.0.1:5091", invite_resp(180, "z9hG4bK-i", Some(5), true, false, false), 0),
+            sent("127.0.0.1:5091", invite_resp(183, "z9hG4bK-i", Some(8), true, false, false), 1),
+        ];
+        let out = RseqMonotonicRule.check_positioned(&evs);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].2, Some(2), "offending = the non-contiguous 183 (wire entry 2)");
+    }
+
     // ---- delay2xxOnUnackedReliable1xxWithSdp --------------------------------
 
     #[test]
@@ -1742,6 +1771,20 @@ mod tests {
         let f = UacRseqStrictnessRule.check(&evs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].1.contains("MUST-024"), "{}", f[0].1);
+    }
+
+    #[test]
+    fn uac_rseq_strictness_offending_points_at_the_prack() {
+        let evs = vec![
+            recv("127.0.0.1:5060", invite_resp(180, "z9hG4bK-i", Some(1), true, false, false), 0),
+            recv("127.0.0.1:5060", invite_resp(183, "z9hG4bK-i", Some(5), true, false, false), 1),
+            sent("127.0.0.1:5060", prack("z9hG4bK-p", "5 1 INVITE", false), 2),
+        ];
+        let out = UacRseqStrictnessRule.check_positioned(&evs);
+        assert_eq!(out.len(), 1, "{out:?}");
+        // The two external arrivals are entries 1–2; the out-of-order PRACK the
+        // UAC SENT is entry 3 — the offending message is the PRACK, not the 1xx.
+        assert_eq!(out[0].2, Some(3), "offending = the sent PRACK (wire entry 3)");
     }
 
     // ---- prackOfferAnswerModel ----------------------------------------------

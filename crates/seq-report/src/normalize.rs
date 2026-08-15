@@ -125,6 +125,9 @@ pub fn normalize(doc: &SeqDoc, role_map: &HashMap<String, String>) -> SeqDoc {
             lane: a.lane.as_deref().map(&resolve),
             endpoint: None,
             advisory: a.advisory,
+            // Row links are provenance onto the ORIGINAL seq axis, which the
+            // normalized doc re-numbers — dropped like the detail.
+            row_seqs: Vec::new(),
         })
         .collect();
     anomalies.sort_by(|a, b| a.check.cmp(&b.check).then(a.lane.cmp(&b.lane)));
@@ -221,6 +224,7 @@ mod tests {
                     lane: Some("10.0.0.9:5070#bob".into()),
                     endpoint: Some("bob".into()),
                     advisory: Some(false),
+                    row_seqs: vec![2],
                 },
                 Anomaly {
                     check: "queueLeak".into(),
@@ -228,6 +232,7 @@ mod tests {
                     lane: None,
                     endpoint: None,
                     advisory: Some(true),
+                    row_seqs: Vec::new(),
                 },
             ],
             epoch_base_ms: Some(1_782_802_100_000),

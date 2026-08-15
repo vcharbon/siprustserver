@@ -229,6 +229,11 @@ pub struct OrderedEvent {
     /// For `Sent`: the wire destination (`SendCalled.to`). For `Received`: the
     /// wire source (`RecvItem.packet.src`).
     pub wire_peer: Option<SocketAddr>,
+    /// The 1-based wire-entry position of this message (into
+    /// [`crate::to_sip_entries`] over the same events — both halves of one
+    /// entry share it). A rule that can pinpoint an offending message carries
+    /// this into its finding ([`RfcFinding::offending`](super::RfcFinding)).
+    pub wire_pos: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -591,6 +596,10 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
     }
     ordered.sort_by(|a, b| a.at_ms.cmp(&b.at_ms).then(a.seq.cmp(&b.seq)));
 
+    // Stamp seq → 1-based wire-entry position, so every OrderedEvent (sent or
+    // received half alike) can name the wire entry it came from.
+    let wire_positions = crate::report::wire_positions_by_stamp(events);
+
     let mut buckets: HashMap<String, Bucket> = HashMap::new();
     // Pending (single-tag) bucket keys that were replicated into ≥1 confirmed
     // pair — those emit no slice of their own (their content lives in every
@@ -661,6 +670,7 @@ pub fn project_per_dialog(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<Dial
         bucket.ordered.push(OrderedEvent {
             kind: e.kind,
             idx: position,
+            wire_pos: wire_positions.get(&e.seq).copied(),
             msg: e.msg,
             wire_peer: Some(e.wire_peer),
         });

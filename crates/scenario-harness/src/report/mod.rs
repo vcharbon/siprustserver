@@ -49,6 +49,7 @@ fn doc_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
             lane: None,
             endpoint: None, // the `[{agent}]` prefix in `detail` carries attribution
             advisory: Some(false),
+            row_seqs: Vec::new(),
         }
     }));
     anomalies
@@ -68,6 +69,11 @@ fn doc_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
 /// them; for the `run.rs` path, whose recorder carries no rules, this fold is
 /// the only source.)
 fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
+    // A finding's `offending` is a 1-based index into the AUDIT wire view;
+    // resolve it to that entry's global `seq` — the stable row identity the
+    // rendered doc keys on (the doc's rows are a superset view over the same
+    // recording, so seq equality is the join).
+    let wire = sip_net::audit_wire_entries(report.events());
     sip_net::evaluate_rfc_findings(report.events())
         .into_iter()
         .map(|f| seq_report::Anomaly {
@@ -76,6 +82,11 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
             lane: Some(f.lane),
             endpoint: None, // resolved against the recorder lanes by `sip_doc`
             advisory: Some(f.advisory),
+            row_seqs: f
+                .offending
+                .and_then(|i| wire.get(i - 1))
+                .map(|e| vec![e.seq])
+                .unwrap_or_default(),
         })
         .collect()
 }

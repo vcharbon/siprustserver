@@ -351,6 +351,7 @@ impl AgentBinder {
                 lane: None,
                 endpoint: None,
                 advisory: Some(false),
+                row_seqs: Vec::new(),
             }],
             None => Vec::new(),
         };
@@ -367,6 +368,7 @@ impl AgentBinder {
                 lane: None,
                 endpoint: None,
                 advisory: Some(c.passed),
+                row_seqs: Vec::new(),
             });
         }
         // The load binder records on `Clock::system()`, so `sent_ms` is real

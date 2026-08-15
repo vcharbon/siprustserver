@@ -127,6 +127,9 @@ pub fn sip_doc_with_overlay(
             detail: a.detail.clone(),
             lane: a.bind_key.clone(),
             endpoint: None,
+            // The recorder ledger carries no message reference; the evaluator
+            // extras (walked first in the dedup below) carry the links.
+            row_seqs: Vec::new(),
             // The structural layer-close kinds (queueLeak, inFlightImbalance,
             // undeliverable) are deliberately never gated by the harness even
             // when their recorded severity is deferred-fail (timeout / reap

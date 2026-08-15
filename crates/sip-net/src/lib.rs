@@ -33,7 +33,7 @@ pub use rfc_audit::{
 };
 pub use loss::RandomLoss;
 pub use net::{SignalingNetwork, UdpEndpoint};
-pub use report::{to_sip_entries, RecordedSipEntry, RecvNote};
+pub use report::{to_sip_entries, wire_positions_by_stamp, RecordedSipEntry, RecvNote};
 pub use real::RealSignalingNetwork;
 pub use simulated::SimulatedSignalingNetwork;
 pub use types::{

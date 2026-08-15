@@ -1628,6 +1628,7 @@ impl FailoverHarness {
                 lane: Some(lane),
                 endpoint: None,
                 advisory: Some(false),
+                row_seqs: Vec::new(),
             });
         }
         for (rule, lane, detail) in accepted {
@@ -1637,6 +1638,7 @@ impl FailoverHarness {
                 lane: Some(lane),
                 endpoint: None,
                 advisory: Some(true),
+                row_seqs: Vec::new(),
             });
         }
         doc

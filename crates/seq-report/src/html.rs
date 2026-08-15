@@ -13,7 +13,12 @@
 //!       so the whole row is clickable.
 //!     - RIGHT `.detail-panel` — a FIXED detail panel (`Message Detail`) whose
 //!       scrollable `.detail-body` shows the full payload of the clicked message.
-//!   - the anomalies list, under the diagram panel.
+//!   - the anomalies list, under the diagram panel — severity-ordered (gating
+//!     first, badge per finding, split counted in the header). A finding whose
+//!     [`Anomaly::row_seqs`] resolve to diagram rows is *linked*: clicking it
+//!     highlights those rows, scrolls to the first, and opens its payload; the
+//!     linked rows carry a ⚠ badge and their payload blocks embed the finding,
+//!     so the message↔anomaly join reads from either end.
 //!
 //! ## Payload carrying (robust — no JS string escaping)
 //! Per-message payloads are kept as HIDDEN, HTML-escaped blocks in the DOM:
@@ -30,7 +35,9 @@
 //! spaced rather than scaled by time, so a long quiescent gap does not blow up
 //! the page; the relative `T+…` stamp on each row carries the actual timing.
 
-use crate::{format_relative, Lane, LaneKind, RowKind, SeqDoc, SeqRow};
+use std::collections::HashMap;
+
+use crate::{format_relative, Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow};
 
 // SVG layout constants.
 const LANE_GAP: i64 = 150;
@@ -43,6 +50,8 @@ const SIP_COLOR: &str = "#2563eb"; // blue
 const REPL_COLOR: &str = "#9333ea"; // purple
 const BAND_COLOR: &str = "#b91c1c"; // red
 const LOST_COLOR: &str = "#dc2626"; // red — the "✗ lost in transit" cross
+const GATING_COLOR: &str = "#dc2626"; // red — gating-anomaly badge
+const ADVISORY_COLOR: &str = "#d97706"; // amber — advisory-anomaly badge
 
 /// Categorical palette for per-socket coloring of replication arrows. Each
 /// distinct connection (ephemeral socket) gets a stable hue so two flows to the
@@ -92,6 +101,61 @@ fn lane_color(kind: LaneKind) -> &'static str {
     }
 }
 
+/// One anomaly resolved for rendering: the doc anomaly plus the diagram
+/// ordinals (`data-idx`) of the rows its `row_seqs` link to. Views are in
+/// DISPLAY order — gating findings first, original order within each severity —
+/// and every rendered piece (the anomalies list, the per-row badges, the
+/// detail-panel context) indexes into the same vector so they stay consistent.
+struct AnomalyView<'a> {
+    anomaly: &'a Anomaly,
+    ords: Vec<usize>,
+}
+
+fn anomaly_views<'a>(doc: &'a SeqDoc, rows: &[&SeqRow]) -> Vec<AnomalyView<'a>> {
+    // Message rows only: a lifecycle band may BORROW a frame's seq (the chaos
+    // overlay does) and is not clickable, so it never resolves a link.
+    let mut ord_of: HashMap<u64, usize> = HashMap::new();
+    for (ord, row) in rows.iter().enumerate() {
+        if matches!(row.kind, RowKind::Sip { .. } | RowKind::Repl { .. }) {
+            ord_of.entry(row.seq).or_insert(ord);
+        }
+    }
+    let mut views: Vec<AnomalyView<'a>> = doc
+        .anomalies
+        .iter()
+        .map(|a| AnomalyView {
+            anomaly: a,
+            ords: a.row_seqs.iter().filter_map(|s| ord_of.get(s).copied()).collect(),
+        })
+        .collect();
+    // Gating first; the sort is stable, so recorded order survives within each
+    // severity tier.
+    views.sort_by_key(|v| !v.anomaly.is_gating());
+    views
+}
+
+/// Row ordinal → indices (into the display-ordered views) of the anomalies
+/// linked to that row.
+fn row_anomaly_map(views: &[AnomalyView<'_>]) -> HashMap<usize, Vec<usize>> {
+    let mut map: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, v) in views.iter().enumerate() {
+        for &ord in &v.ords {
+            map.entry(ord).or_default().push(i);
+        }
+    }
+    map
+}
+
+/// The severity class shared by list items, badges, and detail chips. `None`
+/// severity renders as advisory (pre-severity docs).
+fn severity_class(a: &Anomaly) -> &'static str {
+    if a.is_gating() {
+        "gating"
+    } else {
+        "advisory"
+    }
+}
+
 /// Render the whole [`SeqDoc`] as one HTML document string.
 pub fn render_html(doc: &SeqDoc) -> String {
     let rows = doc.sorted_rows();
@@ -103,12 +167,26 @@ pub fn render_html(doc: &SeqDoc) -> String {
         .map(|(i, l)| (l.id.as_str(), i))
         .collect();
 
-    let svg = svg_markup(doc, &rows, base, &lane_idx);
-    let payloads = render_payloads(doc, &rows, base);
-    let anomalies = render_anomalies(doc);
+    let views = anomaly_views(doc, &rows);
+    let anoms_of_row = row_anomaly_map(&views);
+    let svg = svg_markup(doc, &rows, base, &lane_idx, &anoms_of_row, &views);
+    let payloads = render_payloads(doc, &rows, base, &anoms_of_row, &views);
+    let anomalies = render_anomalies(doc, &rows, base, &views);
 
     let status = if doc.passed { "PASS" } else { "FAIL" };
     let status_color = if doc.passed { "#059669" } else { "#dc2626" };
+    // Severity split next to the raw count, so the header says how bad, not
+    // just how many.
+    let gating_n = views.iter().filter(|v| v.anomaly.is_gating()).count();
+    let severity_split = if doc.anomalies.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " (<span style=\"color:{GATING_COLOR}\">{gating_n} gating</span> · \
+             <span style=\"color:{ADVISORY_COLOR}\">{} advisory</span>)",
+            doc.anomalies.len() - gating_n,
+        )
+    };
     let desc = doc
         .description
         .as_deref()
@@ -189,6 +267,9 @@ pub fn render_html(doc: &SeqDoc) -> String {
   .seq-msg:hover text {{ text-decoration: underline; }}
   .seq-msg:hover rect {{ fill: rgba(37, 99, 235, 0.05); }}
   .seq-msg.selected rect {{ fill: rgba(37, 99, 235, 0.12); }}
+  /* Rows an anomaly links to, highlighted after clicking that anomaly. */
+  .seq-msg.anomaly-hit rect {{ fill: rgba(220, 38, 38, 0.10); }}
+  .seq-msg.anomaly-hit.selected rect {{ fill: rgba(220, 38, 38, 0.20); }}
   /* Hidden payload blocks: the click handler copies these into `.detail-body`.
      The `<pre>` shows the FULL content with no inner scrollbar / no height
      clamp — `white-space: pre-wrap` + `overflow-wrap: anywhere` wrap long header
@@ -200,11 +281,31 @@ pub fn render_html(doc: &SeqDoc) -> String {
         white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible;
         max-height: none; }}
   .anomalies {{ padding: 12px 20px; border-top: 1px solid #e5e7eb; }}
+  .anomalies ul {{ list-style: none; padding-left: 0; margin: 0.5rem 0 0; }}
+  .anomaly {{ margin: 3px 0; padding: 4px 8px; border-left: 3px solid transparent;
+             border-radius: 4px; font-size: 0.9rem; }}
+  .anomaly.gating {{ border-left-color: {GATING_COLOR}; background: #fef2f2; }}
+  .anomaly.advisory {{ border-left-color: {ADVISORY_COLOR}; background: #fffbeb; }}
+  .anomaly.linked {{ cursor: pointer; }}
+  .anomaly.linked:hover .jump {{ text-decoration: underline; }}
+  .anomaly.selected {{ outline: 2px solid #2563eb; }}
+  .sev {{ display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 6px;
+         border-radius: 8px; margin-right: 6px; vertical-align: 1px; }}
+  .sev.gating {{ background: {GATING_COLOR}; color: #fff; }}
+  .sev.advisory {{ background: #fbbf24; color: #451a03; }}
+  /* The "→ <first linked message>" affordance on a linked anomaly. */
+  .jump {{ color: #2563eb; font-family: monospace; font-size: 11px; margin-left: 6px;
+          white-space: nowrap; }}
+  /* Anomaly context shown with a message's payload in the detail panel. */
+  .payload-anoms .pa {{ border-left: 3px solid; padding: 4px 8px; margin: 6px 0;
+                       border-radius: 4px; font-size: 12px; }}
+  .pa.gating {{ border-color: {GATING_COLOR}; background: #fef2f2; }}
+  .pa.advisory {{ border-color: {ADVISORY_COLOR}; background: #fffbeb; }}
 </style></head>
 <body>
   <header>
     <h1>Unified sequence: {title}</h1>
-    <p>Status: <span class="status">{status}</span> &middot; {anomaly_count} anomalies recorded</p>
+    <p>Status: <span class="status">{status}</span> &middot; {anomaly_count} anomalies recorded{severity_split}</p>
     {desc}
     {timeref}
     <div class="legend">
@@ -228,12 +329,31 @@ pub fn render_html(doc: &SeqDoc) -> String {
        click handler copies the matching `#evt-{{N}}` innerHTML into .detail-body. -->
   {payloads}
   <script>
-    document.querySelectorAll('.seq-msg').forEach(g => g.addEventListener('click', () => {{
+    function showRow(g) {{
       document.querySelectorAll('.seq-msg.selected').forEach(s => s.classList.remove('selected'));
       g.classList.add('selected');
       const src = document.getElementById('evt-' + g.dataset.idx);
       document.querySelector('.detail-body').innerHTML = src ? src.innerHTML
           : '<div class="detail-placeholder">No payload recorded for this message</div>';
+    }}
+    document.querySelectorAll('.seq-msg').forEach(g => g.addEventListener('click', () => showRow(g)));
+    // A linked anomaly jumps to its offending message(s): highlight every
+    // linked row, scroll the first into view, and open its payload (which
+    // carries the anomaly context) in the detail panel.
+    document.querySelectorAll('.anomaly.linked').forEach(li => li.addEventListener('click', () => {{
+      document.querySelectorAll('.anomaly.selected').forEach(s => s.classList.remove('selected'));
+      li.classList.add('selected');
+      document.querySelectorAll('.seq-msg.anomaly-hit').forEach(s => s.classList.remove('anomaly-hit'));
+      const ords = li.dataset.rows.split(',');
+      ords.forEach(o => {{
+        const g = document.querySelector('.seq-msg[data-idx="' + o + '"]');
+        if (g) g.classList.add('anomaly-hit');
+      }});
+      const first = document.querySelector('.seq-msg[data-idx="' + ords[0] + '"]');
+      if (first) {{
+        first.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+        showRow(first);
+      }}
     }}));
   </script>
 </body></html>"#,
@@ -254,7 +374,8 @@ pub fn render_svg(doc: &SeqDoc) -> String {
         .enumerate()
         .map(|(i, l)| (l.id.as_str(), i))
         .collect();
-    svg_markup(doc, &rows, base, &lane_idx)
+    let views = anomaly_views(doc, &rows);
+    svg_markup(doc, &rows, base, &lane_idx, &row_anomaly_map(&views), &views)
 }
 
 /// Render the diagram as a SELF-CONTAINED, EMBEDDABLE fragment for a host page
@@ -275,8 +396,10 @@ pub fn render_embed(doc: &SeqDoc) -> String {
         .enumerate()
         .map(|(i, l)| (l.id.as_str(), i))
         .collect();
-    let svg = svg_markup(doc, &rows, base, &lane_idx);
-    let payloads = render_payloads(doc, &rows, base);
+    let views = anomaly_views(doc, &rows);
+    let anoms_of_row = row_anomaly_map(&views);
+    let svg = svg_markup(doc, &rows, base, &lane_idx, &anoms_of_row, &views);
+    let payloads = render_payloads(doc, &rows, base, &anoms_of_row, &views);
 
     format!(
         r#"<div class="seq-embed">
@@ -302,6 +425,10 @@ pub fn render_embed(doc: &SeqDoc) -> String {
   .seq-embed .seq-msg:hover rect {{ fill: rgba(37, 99, 235, 0.05); }}
   .seq-embed .seq-msg.selected rect {{ fill: rgba(37, 99, 235, 0.12); }}
   .seq-embed .payload {{ display: none; }}
+  .seq-embed .payload-anoms .pa {{ border-left: 3px solid; padding: 4px 8px; margin: 6px 0;
+        border-radius: 4px; font-size: 12px; }}
+  .seq-embed .pa.gating {{ border-color: {GATING_COLOR}; background: #fef2f2; }}
+  .seq-embed .pa.advisory {{ border-color: {ADVISORY_COLOR}; background: #fffbeb; }}
   .seq-embed .detail-body pre {{ background: #f9fafb; padding: 8px; border-radius: 4px; margin: 4px 0;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; max-height: none; }}
@@ -350,6 +477,8 @@ fn svg_markup(
     rows: &[&SeqRow],
     base: i64,
     lane_idx: &std::collections::HashMap<&str, usize>,
+    anoms_of_row: &HashMap<usize, Vec<usize>>,
+    views: &[AnomalyView<'_>],
 ) -> String {
     let n_lanes = doc.lanes.len().max(1);
     let width = LEFT_PAD + (n_lanes as i64) * LANE_GAP;
@@ -456,6 +585,17 @@ fn svg_markup(
                 };
                 let dash = if is_repl { " stroke-dasharray=\"5 3\"" } else { "" };
                 let plane_class = if is_repl { "seq-repl" } else { "seq-sip" };
+                // Anomaly badge: a row any finding links to carries a ⚠ at its
+                // left end, colored by the WORST linked severity, so the eye
+                // finds the offending messages without opening the list.
+                let row_anoms = anoms_of_row.get(&ord);
+                let badge_color = row_anoms.map(|idxs| {
+                    if idxs.iter().any(|&i| views[i].anomaly.is_gating()) {
+                        GATING_COLOR
+                    } else {
+                        ADVISORY_COLOR
+                    }
+                });
                 // The socket tag rendered inline so distinct connections are
                 // nameable, not just colored (e.g. `:40007` vs the live
                 // `:40011`). Repl-only: a SIP row's `conn` is its Call-ID —
@@ -521,6 +661,13 @@ fn svg_markup(
                         y + 5,
                     ));
                 }
+                if let Some(color) = badge_color {
+                    s.push_str(&format!(
+                        "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" fill=\"{color}\" font-size=\"13\" font-weight=\"bold\">⚠</text>\n",
+                        x1.min(x2) - 12,
+                        y + 4,
+                    ));
+                }
                 // The timestamp in the left gutter.
                 s.push_str(&format!(
                     "<text x=\"6\" y=\"{}\" fill=\"#6b7280\" font-family=\"monospace\" font-size=\"10\">{}</text>\n",
@@ -549,7 +696,13 @@ fn svg_markup(
 /// detail panel. `ord` MUST match the diagram ordinal in `render_svg` (both
 /// iterate the same sorted `rows` slice in lockstep). Lifecycle bands get no
 /// payload block (they are not clickable `.seq-msg` groups).
-fn render_payloads(doc: &SeqDoc, rows: &[&SeqRow], base: i64) -> String {
+fn render_payloads(
+    doc: &SeqDoc,
+    rows: &[&SeqRow],
+    base: i64,
+    anoms_of_row: &HashMap<usize, Vec<usize>>,
+    views: &[AnomalyView<'_>],
+) -> String {
     let mut out = String::new();
     for (ord, row) in rows.iter().enumerate() {
         let ts = ts_label(doc, row.at_ms, base);
@@ -594,8 +747,27 @@ fn render_payloads(doc: &SeqDoc, rows: &[&SeqRow], base: i64) -> String {
                     Some(d) => format!("<pre>{}</pre>", escape(d)),
                     None => "<div class=\"detail-placeholder\">No payload recorded for this message</div>".to_string(),
                 };
+                // Anomalies linked to this message, shown WITH the payload so a
+                // clicked row states its findings without a list round-trip.
+                let anoms = match anoms_of_row.get(&ord) {
+                    None => String::new(),
+                    Some(idxs) => {
+                        let mut s = String::from("<div class=\"payload-anoms\">");
+                        for &i in idxs {
+                            let a = views[i].anomaly;
+                            s.push_str(&format!(
+                                "<div class=\"pa {}\">⚠ <code>{}</code> {}</div>",
+                                severity_class(a),
+                                escape(&a.check),
+                                escape(&a.detail),
+                            ));
+                        }
+                        s.push_str("</div>");
+                        s
+                    }
+                };
                 out.push_str(&format!(
-                    "<div class=\"payload {class}\" id=\"evt-{ord}\" hidden><div class=\"payload-head\"><code>{from} → {to}</code>{conn_chip} &nbsp; <b>[{plane}] {}</b> &nbsp; <span class=\"ts\">{}</span>{badge}</div>{body}</div>\n",
+                    "<div class=\"payload {class}\" id=\"evt-{ord}\" hidden><div class=\"payload-head\"><code>{from} → {to}</code>{conn_chip} &nbsp; <b>[{plane}] {}</b> &nbsp; <span class=\"ts\">{}</span>{badge}</div>{anoms}{body}</div>\n",
                     escape(&row.label),
                     escape(&ts),
                 ));
@@ -605,15 +777,43 @@ fn render_payloads(doc: &SeqDoc, rows: &[&SeqRow], base: i64) -> String {
     out
 }
 
-fn render_anomalies(doc: &SeqDoc) -> String {
-    if doc.anomalies.is_empty() {
+/// The anomalies list, in display order (gating first). A finding whose
+/// `row_seqs` resolved to diagram rows renders as a clickable `.linked` item
+/// carrying `data-rows` (the ordinals) and a `→ <first linked message>` jump
+/// affordance; the click handler highlights the rows and opens the first one.
+fn render_anomalies(doc: &SeqDoc, rows: &[&SeqRow], base: i64, views: &[AnomalyView<'_>]) -> String {
+    if views.is_empty() {
         return String::new();
     }
     let mut out = String::from("<div class=\"anomalies\"><h2>Anomalies</h2>\n<ul>\n");
-    for a in &doc.anomalies {
+    for v in views {
+        let a = v.anomaly;
         let lane = a.lane.as_deref().map(|l| format!(" [{}]", escape(l))).unwrap_or_default();
+        let sev = severity_class(a);
+        let (link_class, data_rows, jump) = if v.ords.is_empty() {
+            (String::new(), String::new(), String::new())
+        } else {
+            let first = rows[v.ords[0]];
+            let more = match v.ords.len() {
+                1 => String::new(),
+                n => format!(" (+{} more)", n - 1),
+            };
+            (
+                " linked".to_string(),
+                format!(
+                    " data-rows=\"{}\"",
+                    v.ords.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(","),
+                ),
+                format!(
+                    "<span class=\"jump\">→ {} @ {}{more}</span>",
+                    escape(&first.label),
+                    escape(&ts_label(doc, first.at_ms, base)),
+                ),
+            )
+        };
         out.push_str(&format!(
-            "<li><code>{}</code>{lane}: {}</li>\n",
+            "<li class=\"anomaly {sev}{link_class}\"{data_rows}><span class=\"sev {sev}\">{}</span><code>{}</code>{lane}: {} {jump}</li>\n",
+            if a.is_gating() { "GATING" } else { "advisory" },
             escape(&a.check),
             escape(&a.detail),
         ));
