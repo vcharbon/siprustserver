@@ -21,7 +21,7 @@
 //! The test asserts both the call lifecycle (CDR with answer + bye) AND that
 //! the INVITE and BYE each really made all four hops on the recording.
 
-mod common;
+use crate::common;
 
 use call::CdrEventType;
 use b2bua_harness::{settle_until, B2buaSut};

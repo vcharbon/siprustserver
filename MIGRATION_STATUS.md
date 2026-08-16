@@ -764,7 +764,7 @@ ewmas_start_at_zero_before_the_sampler_fires,
 load_sampler_injection_drives_elu_ewma_once_sampled}`) with the end-to-end
 injected-value path in `x_overload_signal.rs::injected_sampler_drives_published_elu_through_the_running_task`
 — re-verified `cargo test -p b2bua --lib overload::` = 15/15 and
-`cargo test -p b2bua-harness --test x_overload_signal` = 3/3.
+`cargo test -p b2bua-harness --test it x_overload_signal::` = 3/3.
 
 **Tracked follow-up (carry-forward, was debt (1) on the overload row):** the real
 **tokio-`RuntimeMetrics` busy-ratio ELU** is its own future item.

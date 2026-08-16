@@ -98,6 +98,36 @@ live in the `justfile`: `just test` (default), `just test-slow`
 60 s rule but not free — before `#[ignore]`-ing a slow one, cut the timer churn
 at its source (see the clock guide, rule 5).
 
+## Compiling ([ADR-0029](docs/adr/0029-dev-build-cost.md))
+
+`just` is the entry point — run it bare to list the lanes. `just check` for the
+fast signal (no codegen), `just test [filter]` / `just test-slow`, `just lint`,
+`just image` for the k8s image, `just doctor` when a machine looks broken,
+`just disk` / `just clean-incremental` under disk pressure. Every recipe is a
+plain cargo call, so a hand-typed `cargo test` behaves identically.
+
+Prerequisites: mold and gcc >= 12. Do not:
+
+- set `RUSTFLAGS` — it replaces `[build] rustflags` wholesale, silently
+  dropping `tokio_unstable` *and* mold; anything that must set it re-states
+  both flags;
+- change `profile.dev`'s codegen backend — Cranelift is rejected (ADR-0029 X3),
+  and re-proposing it means re-running the three panic tests named there;
+- put profile settings in `.cargo/config.toml` — profile shape lives in
+  `Cargo.toml`, toolchain/linker wiring in `.cargo/config.toml`.
+
+## Adding an integration test ([ADR-0030](docs/adr/0030-one-integration-test-binary-per-crate.md))
+
+A crate's integration tests compile into ONE binary. In a crate that has a
+`tests/it/` directory, a new test file goes **inside it**, with a `mod` line
+added to `tests/it/main.rs`; a stray `tests/foo.rs` links a second copy of the
+whole dependency graph. Select one with
+`cargo test -p <crate> --test it <module>::<name>`.
+
+A test that installs process-global state (a trace registry, the allocation
+counter, a real socket, process env) stays a `tests/*.rs` target of its own —
+folded in, it does not fail the suite, it wedges it.
+
 ## Agent & build concurrency (WSL2 resource limits)
 
 **Never run more than ONE agent (subagent / workflow stage) at a time that

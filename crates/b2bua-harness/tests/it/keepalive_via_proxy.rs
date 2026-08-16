@@ -19,7 +19,7 @@
 //! Exercises `keepalive` + `absorb-options-200` over the proxy fabric. The source
 //! used a 15-min interval; the Rust default is 30 s, so we advance in 30 s steps.
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

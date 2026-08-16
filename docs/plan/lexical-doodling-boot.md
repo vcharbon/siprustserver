@@ -254,7 +254,7 @@ tolerance.
 - `cargo test -p media -p media-harness` — slices 0/1/2/3a green; framing cross-check proves the
   hand-rolled and webrtc-rs wire formats agree.
 - `cargo test -p media --test rtp_media_live` — real-UDP wire proof.
-- `cargo test -p b2bua-harness --test basic_call_media` — slice 3b: both peers hear each other
+- `cargo test -p b2bua-harness --test it basic_call_media::` — slice 3b: both peers hear each other
   through the real B2BUA; flipping in a deliberate SDP corruption turns the verdict to `Silence`,
   proving the test actually detects misnegotiation.
 - `cargo clippy --all-targets` clean for the new crates.
