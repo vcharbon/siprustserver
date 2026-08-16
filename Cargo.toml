@@ -200,6 +200,14 @@ debug = "line-tables-only"
 [profile.dev]
 debug = "line-tables-only"
 
+# Dependencies carry NO debuginfo. A triage backtrace is read for its
+# first-party frames; a dependency's file:line is never the thing acted on, and
+# dependency rlibs are the bulk of the bytes each of the ~190 test binaries
+# links. This glob covers dependencies only — workspace crates keep the line
+# tables set above.
+[profile.dev.package."*"]
+debug = false
+
 # First-party code is unsafe-free by policy. Every member crate opts in with
 # `[lints] workspace = true`, turning a stray `unsafe` block into a hard compile
 # error rather than a silent perf shortcut nobody reviewed. `forbid` (stronger

@@ -1,7 +1,11 @@
-# Workspace-wide tokio_unstable enablement.
+# Build wiring: what compiles the workspace, and with what.
+# (Profile *shape* — debuginfo, opt-level — lives in the root `Cargo.toml`.)
+
+# ── rustflags ──────────────────────────────────────────────────────────
 #
-# The worker-side faithful ELU signal (`b2bua::overload::LiveLoadSampler`) reads
-# per-worker busy time via `tokio::runtime::RuntimeMetrics::worker_total_busy_duration`
+# `tokio_unstable`: the worker-side faithful ELU signal
+# (`b2bua::overload::LiveLoadSampler`) reads per-worker busy time via
+# `tokio::runtime::RuntimeMetrics::worker_total_busy_duration`
 # (`tokio::runtime::Handle::current().metrics()`). On our x86_64 target with
 # tokio 1.52.3 that accessor is gated `cfg(target_has_atomic = "64")` and its
 # recording runs on tokio's STABLE path, so the signal already works without this
@@ -10,12 +14,14 @@
 # workspace-wide for uniformity + future-proofing (e.g. if tokio moves the
 # accessor under the unstable gate).
 #
-# GOTCHA: `[build] rustflags` here is IGNORED if a `RUSTFLAGS` env var is set in
-# the build environment. No build path in this repo sets RUSTFLAGS (verified:
-# justfile, deploy/docker/Dockerfile, and the worker manifests all use a bare
-# `cargo build`/`cargo test`). The worker image (`b2bua-runner`) is built by
-# `deploy/docker/Dockerfile` with `cargo build` over a `COPY . .` build context
-# (`.dockerignore` does NOT exclude `.cargo/`), so this file is copied into the
-# image build and the flag reaches the worker binary.
+# `-fuse-ld=mold`: linking is a first-order build cost here, so the linker is a
+# build requirement rather than a per-developer choice — on every machine and
+# in the deploy image (installed by `deploy/docker/Dockerfile`).
+# `just doctor` checks for it. Requires gcc >= 12.
+#
+# GOTCHA: `[build] rustflags` here is IGNORED wholesale if a `RUSTFLAGS` env var
+# is set — it replaces this list, it does not append. Nothing in this repo sets
+# it (justfile, Dockerfile, and the worker manifests all use a bare
+# `cargo build`/`cargo test`); anything that does must re-state BOTH flags.
 [build]
-rustflags = ["--cfg", "tokio_unstable"]
+rustflags = ["--cfg", "tokio_unstable", "-Clink-arg=-fuse-ld=mold"]

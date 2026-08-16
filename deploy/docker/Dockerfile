@@ -27,17 +27,22 @@
 
 FROM rust:1-slim-bookworm AS builder
 WORKDIR /src
-# tikv-jemalloc-sys (the jemalloc global allocator linked into b2bua-runner)
-# builds the bundled C jemalloc with `./configure && make`; the slim Rust image
-# ships cc but not make, so add build tooling. Discarded with the builder stage
-# (multi-stage) — no effect on the runtime image size.
+# `make`: tikv-jemalloc-sys (the jemalloc global allocator linked into
+# b2bua-runner) builds the bundled C jemalloc with `./configure && make`, and
+# the slim Rust image ships cc but not make.
+# `mold`: the workspace linker, set unconditionally in `.cargo/config.toml`.
+# Both are discarded with the builder stage — no effect on the runtime image.
 # Drop docker-clean (it wipes downloaded .debs post-install) and cache the apt
 # dirs so the package index + .debs survive across builds — hence no
 # `rm -rf /var/lib/apt/lists/*` here (the cache mount holds it instead).
 RUN rm -f /etc/apt/apt.conf.d/docker-clean
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends make
+    apt-get update && apt-get install -y --no-install-recommends make mold
+# Materialize the workspace toolchain in its own layer, keyed on the pin file
+# alone, so editing sources does not re-resolve it.
+COPY rust-toolchain.toml ./
+RUN rustup show active-toolchain
 # Copy the whole workspace (cheap on loopback; .dockerignore drops target/).
 COPY . .
 # Cache the cargo registry/git + the build `target/`. GOTCHA: a cache-mounted

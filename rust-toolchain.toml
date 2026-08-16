@@ -1,0 +1,12 @@
+# Workspace toolchain. Declared rather than left implicit so `rustup` installs
+# what the build needs on a fresh machine, and so a dependency that ships its
+# own `rust-toolchain.toml` in its crate tarball cannot decide which compiler
+# builds this workspace.
+#
+# Stable, deliberately: the Cranelift dev backend that would have justified a
+# nightly pin is rejected — it miscompiles the panic-containment path. See
+# docs/adr/0029-dev-build-cost.md.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["clippy", "rustfmt", "rust-src"]
