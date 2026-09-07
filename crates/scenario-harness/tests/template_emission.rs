@@ -348,7 +348,7 @@ async fn template_body_without_content_type_emits_no_content_type() {
     // The captured message is intentionally §7.4.1 non-compliant; alice is the
     // simulated peer replaying it (not a SUT), so the rule is sanctioned-waived.
     h.allow_violation(
-        "rfc3261.contentType",
+        "content-type",
         "faithful replay of a captured body-without-Content-Type message (peer side)",
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;

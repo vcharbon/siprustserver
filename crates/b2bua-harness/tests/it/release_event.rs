@@ -1,5 +1,5 @@
 //! The subscribed release-event decision seam + the established-call reroute
-//! treatment (upstreamneed-009):
+//! treatment:
 //!
 //!   1. UNSUBSCRIBED max-duration expiry → today's local teardown, and the
 //!      engine's `call_release` is NEVER consulted (even with a
@@ -77,7 +77,7 @@ fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
 /// clock, so the b-leg INVITE's first 500 ms retransmit usually beats the
 /// test's 200; answering it with a FRESH tag (what `receive_tolerating`'s
 /// auto-200 does) would fabricate a phantom fork dialog and trip the
-/// `rfc3261.unackedInvite2xxByed` audit. Non-blocking: if no retransmit is
+/// `unacked-2xx-not-cleared` audit. Non-blocking: if no retransmit is
 /// queued (timing shifted), this is a no-op — the ACK cannot be queued yet
 /// because it is only sent after the 200 above is processed.
 async fn absorb_invite_retransmit(

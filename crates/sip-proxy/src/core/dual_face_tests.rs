@@ -263,7 +263,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) = parse_msg(&raw) else { panic!("response") };
-    f.core.handle_response(resp).await;
+    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
     let sent = f.take_sent();
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0, "ext", "a caller-bound response must egress the EXTERNAL socket");
@@ -283,7 +283,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) = parse_msg(&raw) else { panic!("response") };
-    f.core.handle_response(resp).await;
+    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
     let sent = f.take_sent();
     assert_eq!(sent.len(), 1, "the external-face top Via must be recognised as ours");
     assert_eq!(sent[0].0, "int", "a worker-bound response must egress the INTERNAL socket");
@@ -315,7 +315,7 @@ CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
     );
     let SipMessage::Response(resp) = parse_msg(&raw) else { panic!("response") };
-    f.core.handle_response(resp).await;
+    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
 
     let sent = f.take_sent();
     // No synthesized hop ACK (ADR-0022 X4: the proxy is transaction-less; the

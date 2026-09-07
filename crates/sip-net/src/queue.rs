@@ -29,7 +29,7 @@ pub struct PacketQueue {
     inner: Mutex<Inner>,
     notify: Notify,
     cap: usize,
-    /// Delivery-time recording tap (upstreamneed-036 ask A). Installed once by
+    /// Delivery-time recording tap. Installed once by
     /// the recording decorator on sampled endpoints; `None` forever on the
     /// non-recording path (one atomic load per offer — no other overhead).
     tap: OnceLock<RecvTap>,

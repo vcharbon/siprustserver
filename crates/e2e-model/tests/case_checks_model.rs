@@ -25,9 +25,9 @@ fn parse_case(json: &str) -> TestCase {
 fn allow_violations_parses_defaults_empty_and_roundtrips() {
     let with = parse_case(
         r#"{ "id": "t", "compatibleShapes": ["basic_call"],
-             "allowViolations": ["rfc3261.noContactOnBye"] }"#,
+             "allowViolations": ["no-contact-on-bye"] }"#,
     );
-    assert_eq!(with.allow_violations, vec!["rfc3261.noContactOnBye"]);
+    assert_eq!(with.allow_violations, vec!["no-contact-on-bye"]);
 
     let without = parse_case(r#"{ "id": "t", "compatibleShapes": ["basic_call"] }"#);
     assert!(without.allow_violations.is_empty(), "default = full audit");

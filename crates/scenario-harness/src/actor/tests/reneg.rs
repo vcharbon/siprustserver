@@ -43,7 +43,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -58,7 +58,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -122,7 +122,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -137,7 +137,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -218,7 +218,7 @@ async fn early_update_on_the_reliable_early_dialog() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -232,7 +232,7 @@ async fn early_update_on_the_reliable_early_dialog() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -297,7 +297,7 @@ async fn actor_originates_in_dialog_info() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -313,7 +313,7 @@ async fn actor_originates_in_dialog_info() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],

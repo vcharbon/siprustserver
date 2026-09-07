@@ -18,6 +18,7 @@ use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
 use sip_proxy::{LoadBalancerConfig, LoadBalancerStrategy, ProxyAddr, ProxyMetrics, RoutingStrategy};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
+const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\n";
 
 #[tokio::test]
 async fn new_dialog_routes_to_worker_and_in_dialog_sticks() {
@@ -71,7 +72,7 @@ async fn new_dialog_routes_to_worker_and_in_dialog_sticks() {
         rrs[1]
     );
 
-    uas.respond(200, "OK").send().await;
+    uas.respond(200, "OK").with_sdp(ANSWER).send().await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
     // ACK reaches the same worker.

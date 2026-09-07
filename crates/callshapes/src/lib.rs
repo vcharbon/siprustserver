@@ -14,7 +14,7 @@
 //! a target, fail over on reject — [`RouteIntent`]); a per-platform
 //! [`RouteBinder`] turns that intent into concrete INVITE input. Upstream
 //! ships [`EgressBinder`] (the historic `EgressPolicy` / `X-Api-Call` seam);
-//! an external platform (e.g. upstreamsip's dialed-number plan) implements its
+//! an external platform (e.g. a dialed-number plan) implements its
 //! own binder without touching any shape.
 //!
 //! The shipped catalog ([`shapes`]) regenerates the historic hand-written

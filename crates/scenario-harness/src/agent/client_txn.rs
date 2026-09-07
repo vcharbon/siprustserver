@@ -23,7 +23,7 @@ use super::Agent;
 /// [`InDialogTxn`](super::InDialogTxn) for a re-INVITE) thread this into the
 /// shared expect helpers so EVERY non-2xx final they surface completes its
 /// transaction the way a real txn layer does — the
-/// `rfc3261.unackedInviteNon2xxFinal` audit rule gates on it.
+/// `unacked-invite-non-2xx-final` audit rule gates on it.
 pub(super) struct AckCtx<'a> {
     pub(super) agent: &'a Agent,
     pub(super) invite: &'a SipRequest,
@@ -42,7 +42,7 @@ impl AckCtx<'_> {
         {
             return Ok(());
         }
-        let ack = generate_ack_for_non_2xx(self.invite, resp);
+        let ack = generate_ack_for_non_2xx(self.invite, resp, &[]);
         self.agent.try_send(&SipMessage::Request(ack), self.wire_dst).await
     }
 }

@@ -13,7 +13,7 @@ use scenario_harness::{
 };
 use sip_message::generators::InDialogMethod;
 
-const RULE: &str = "rfc3261.cseqInDialogOrder";
+const RULE: &str = "cseq-in-dialog-order";
 
 /// Record a SUT-less two-party call on the fake fabric in which alice replays a
 /// captured CSeq REUSE on her first in-dialog request (OPTIONS reuses the

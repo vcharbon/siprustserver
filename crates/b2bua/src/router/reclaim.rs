@@ -5,11 +5,13 @@
 
 use std::sync::Arc;
 
-use call::{Call, CallModelState, TimerType};
+use call::{Call, CallModelState, LegState, TimerType};
 
 use super::interpret::process_result;
+use super::materialise::{materialise, Materialised, Origin, Reason};
 use super::restore_hygiene::{reanchor_timers, sanitize_restored_timers, Smoothing};
 use super::RouterCtx;
+use crate::store::MaterialiseOrigin;
 
 /// Apply a backup's reverse-flushed mutation that the puller just landed in our
 /// `pri:{self}` partition into our **live** map (ADR-0014 Reclaim-tail
@@ -29,25 +31,22 @@ use super::RouterCtx;
 /// discharge (no keepalive arming); anything else is the existing reactive
 /// straggler, materialised + re-armed by [`reclaim_into_live`].
 ///
-/// The reverse `(p,b)` gate (`p_in == p_cur && b_in > b_cur`) is re-checked under
-/// the per-call lock; a primary that mutated the call since the backup branched
-/// keeps its own copy — ADR-0014's accepted keepalive-vs-takeover CSeq-drop, not a
-/// fold. Idempotent: `update` bumps our `p`, so a re-delivered flush no longer
-/// dominates.
+/// The reverse gate ([`reverse_flush_dominates`]) is re-checked under the
+/// per-call lock; a primary that mutated the call since the backup branched
+/// keeps its own copy unless the flush carries lifecycle progress it could not
+/// have made itself. Idempotent: `update` bumps our `p` and the fold takes the
+/// progress, so a re-delivered flush no longer dominates.
 pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str) {
     // Non-evicting read: an expired reverse-flushed terminal must not be destroyed
     // on access — the backup-durable fallback still needs to discharge it (#7).
-    let Some(replica) = ctx.state.peek_reclaimable_raw(call_ref).await else {
+    let Some((mut replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
         return;
     };
     // Not-live + non-terminal is the original reactive-straggler path; it manages
     // its own per-call lock, so route it BEFORE taking the lock here (the guard is
     // not reentrant).
     if ctx.state.peek(call_ref).is_none() && replica.state != CallModelState::Terminated {
-        // Skew offset for this straggler (0 if none persisted); the seam re-anchors
-        // its timers before re-arm just like the bulk/reactive paths.
-        let skew = ctx.state.skew_offset_ms(call_ref);
-        reclaim_into_live(ctx, replica, skew, None).await;
+        reclaim_into_live(ctx, call_ref, None).await;
         return;
     }
     let _guard = ctx.state.lock(call_ref).await;
@@ -55,6 +54,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
     match ctx.state.peek(call_ref) {
         Some(live) => {
             if !reverse_flush_dominates(&replica, &live) {
+                ctx.metrics.bump_repl_reverse_flush_refused();
                 return;
             }
             // Rare by construction (a backup served an in-dialog request for a
@@ -76,10 +76,12 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
                 CallModelState::Terminated => {
                     discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
                 }
-                // A re-INVITE/UPDATE the backup re-originated: fold its state in
-                // (the bumped b-leg `local_cseq`) so OUR next request continues the
-                // dialog monotonically (C11). No discharge — the call continues.
+                // The backup served the call on: an answer, or a re-INVITE/UPDATE
+                // it re-originated (the bumped b-leg `local_cseq`, C11). Fold its
+                // state in and let the timer service follow the folded ledger. No
+                // discharge — the call continues.
                 CallModelState::Active => {
+                    resync_timers(ctx, call_ref, &live, &mut replica, skew_offset_ms, now_ms).await;
                     ctx.state.update(replica);
                 }
                 // Transient teardown-in-progress; wait for the Terminated flush.
@@ -112,14 +114,14 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
 /// Materialise-first so `backup_of` resolves and the propagated delete reaches the
 /// peer. The caller MUST hold the per-call lock. No-op if already resident
 /// (idempotent reclaim/reap re-pass — `materialize_if_absent` returns false).
-async fn discharge_materialized_terminal(
+pub(super) async fn discharge_materialized_terminal(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
     terminal: Call,
     now_ms: i64,
     force_terminal: bool,
 ) {
-    if !ctx.state.materialize_if_absent(terminal.clone()) {
+    if !ctx.state.materialize_if_absent(terminal.clone(), MaterialiseOrigin::Reclaim) {
         return;
     }
     let mut before = terminal.clone();
@@ -217,28 +219,115 @@ async fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
 
 /// The call's `(p,b)` version vector rendered for a lifecycle line
 /// (`-` when the call carries no topology and is therefore non-replicable).
-fn format_pb(call: &Call) -> String {
+pub(super) fn format_pb(call: &Call) -> String {
     match call.topology.as_ref() {
         Some(t) => format!("({},{})", t.gen, t.bak_gen),
         None => "-".to_string(),
     }
 }
 
-/// The ADR-0014 **Reverse** `(p,b)` apply rule for a live-map fold: the
-/// reverse-flushed `replica` dominates our `live` copy iff the primary counter is
-/// unchanged (`p_in == p_cur` — we have not mutated since the backup branched) and
-/// the backup counter genuinely advanced (`b_in > b_cur`). A call with no topology
-/// is non-replicable and never folds.
-fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
-    match (replica.topology.as_ref(), live.topology.as_ref()) {
-        (Some(r), Some(l)) => r.gen == l.gen && r.bak_gen > l.bak_gen,
-        _ => false,
+/// Fold a reverse flush the store's `(p,b)` gate refused (the body rides the
+/// command, the store never took it): the call model reads it for lifecycle
+/// progress ([`lifecycle_rank`]) our live copy lacks — a backup's answer or
+/// teardown of a call we reclaimed as still ringing — and folds exactly as an
+/// applied flush would. Anything else stays refused; a call we do not serve
+/// live is not resurrected from it.
+pub(super) async fn fold_refused_reverse_flush(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    body: &[u8],
+    origin_now_ms: i64,
+) {
+    let Some(mut replica) = ctx.state.decode_body(body) else {
+        return;
+    };
+    let _guard = ctx.state.lock(call_ref).await;
+    let now_ms = ctx.clock.now_ms();
+    let Some(live) = ctx.state.peek(call_ref) else {
+        return;
+    };
+    if lifecycle_rank(&replica) <= lifecycle_rank(&live) {
+        ctx.metrics.bump_repl_reverse_flush_refused();
+        return;
     }
+    tracing::info!(
+        node = observe::node(),
+        call_ref,
+        call_id = %live.a_leg.call_id,
+        state = ?replica.state,
+        replica_pb = %format_pb(&replica),
+        live_pb = %format_pb(&live),
+        "reverse-flush reconcile (lifecycle progress over the vector)"
+    );
+    let skew_offset_ms = if origin_now_ms > 0 { now_ms - origin_now_ms } else { 0 };
+    match replica.state {
+        CallModelState::Terminated => {
+            discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
+        }
+        CallModelState::Active => {
+            resync_timers(ctx, call_ref, &live, &mut replica, skew_offset_ms, now_ms).await;
+            ctx.state.update(replica);
+        }
+        CallModelState::Terminating => {}
+    }
+}
+
+/// The ADR-0014 **Reverse** apply rule for a live-map fold. The reverse-flushed
+/// `replica` dominates our `live` copy when the `(p,b)` vector says so (`p`
+/// unchanged since the backup branched, `b` advanced) OR when it carries
+/// lifecycle progress ([`lifecycle_rank`]) a reclaimed copy cannot have made on
+/// its own: a `p` bump from a turn on a stale record does not outrank the
+/// backup's answer or teardown. A call with no topology never folds.
+fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
+    let (Some(r), Some(l)) = (replica.topology.as_ref(), live.topology.as_ref()) else {
+        return false;
+    };
+    (r.gen == l.gen && r.bak_gen > l.bak_gen) || lifecycle_rank(replica) > lifecycle_rank(live)
+}
+
+/// Where a call stands on its lifecycle: unanswered, the caller answered,
+/// ending, ended. Only forward progress along this order is a fact a backup can
+/// carry that the primary lacks.
+fn lifecycle_rank(call: &Call) -> u8 {
+    match call.state {
+        CallModelState::Terminated => 3,
+        CallModelState::Terminating => 2,
+        CallModelState::Active => u8::from(call.a_leg.state == LegState::Confirmed),
+    }
+}
+
+/// The live timer service follows the folded ledger: every entry the folded
+/// body no longer carries is cancelled, every entry it carries is (re)armed in
+/// this node's clock frame through the restore-hygiene seam, and the folded
+/// body keeps the re-anchored ledger it was armed from.
+async fn resync_timers(
+    ctx: &Arc<RouterCtx>,
+    call_ref: &str,
+    live: &Call,
+    folded: &mut Call,
+    skew_offset_ms: i64,
+    now_ms: i64,
+) {
+    for stale in live.timers.iter().filter(|t| !folded.timers.iter().any(|f| f.id == t.id)) {
+        ctx.timers.cancel(call_ref.to_string(), stale.id.clone()).await;
+    }
+    sanitize_restored_timers(
+        &mut folded.timers,
+        call_ref,
+        now_ms,
+        Some(skew_offset_ms),
+        ctx.config.keepalive_interval_sec * 1000,
+        None,
+    );
+    ctx.timers.restore(folded.timers.clone(), call_ref.to_string()).await;
 }
 
 /// **Bulk reclaim** (ADR-0014): re-materialise every `pri:{self}`
 /// call into the live map + re-arm its timers — what makes a rebooted primary
-/// re-*serve* its partition, not just re-*store* it.
+/// re-*serve* its partition, not just re-*store* it. The scan decodes the
+/// partition to size the cohort; each body is then materialised through the
+/// evicting reclaim read, so a body whose TTL ran out is dead and is evicted,
+/// never re-served: it counts in `scanned` and not in `materialized`.
 ///
 /// **Keepalive smoothing (ADR-0014, performance-only).** Many keepalive timers in
 /// a just-rehydrated partition are past-due; firing them all at once floods the
@@ -258,12 +347,10 @@ pub(super) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     let active_before = ctx.state.active_count() as u64;
     let mut calls = ctx.state.reclaim_scan().await;
     let scanned = calls.len() as u64;
-    // Re-anchor EVERY call's timers by its own persisted skew offset FIRST, so the
-    // cohort classification below (past-due vs future-dated) and `l_max` are
-    // computed over SKEW-CORRECTED deadlines — a reclaimer anchored ahead of the
-    // origin would otherwise mis-classify a future cohort as past-due and compress
-    // it into the catch-up band. Applied here once; the per-call seam is then
-    // invoked with `skew_offset_ms = 0` (already done).
+    // The cohort classification below (past-due vs future-dated) and `l_max`
+    // read SKEW-CORRECTED deadlines: re-anchor every scanned copy by its own
+    // persisted offset first. These copies are discarded; `materialise` re-reads
+    // each body and re-anchors it once itself.
     for (call, skew) in calls.iter_mut() {
         reanchor_timers(&mut call.timers, *skew);
     }
@@ -284,8 +371,7 @@ pub(super) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     };
     let mut materialized = 0u64;
     for (call, _skew) in calls {
-        // Offset already applied above → 0 here (no double-correction).
-        if reclaim_into_live(ctx, call, 0, Some(smoothing)).await {
+        if reclaim_into_live(ctx, &call.call_ref, Some(smoothing)).await {
             materialized += 1;
         }
     }
@@ -307,82 +393,22 @@ pub(super) async fn reclaim_all(ctx: &Arc<RouterCtx>) {
     );
 }
 
-/// Materialise one reclaimed call into the live map + re-arm its timers (ADR-0011
-/// X11). `smoothing = Some(_)` re-spreads keepalives per
-/// `restore_hygiene::smooth_keepalives` for the bulk reboot sweep ([`reclaim_all`]):
-/// past-due ones oldest-first, future-dated ones de-correlated within
-/// `[now, fire_at]`. `None` (a single reactive straggler) restores verbatim — no
-/// cohort to smooth. Non-keepalive timers keep their absolute deadline either way.
-/// Returns `true` iff this call was freshly materialised into the live map (the
-/// caller meters per-pass reclaim completeness); `false` if it was already
-/// resident (idempotent re-pass).
+/// Reclaim one call of this node's `pri:{self}` partition into the live map
+/// under its per-call lock (ADR-0011 X11). `smoothing = Some(_)` is the bulk
+/// reboot sweep ([`reclaim_all`]); `None` a single straggler. Returns `true`
+/// iff this pass did the work — freshly materialised, or a deferred terminal
+/// discharged — so the caller meters per-pass reclaim completeness; `false`
+/// for a call already resident (idempotent re-pass) or gone from the store.
 async fn reclaim_into_live(
     ctx: &Arc<RouterCtx>,
-    mut call: Call,
-    skew_offset_ms: i64,
+    call_ref: &str,
     smoothing: Option<Smoothing>,
 ) -> bool {
-    let call_ref = call.call_ref.clone();
-    // Hold the per-call state lock across materialise + timer re-arm, exactly as
-    // `process` does, so a concurrent dispatcher handler for this call_ref cannot
-    // interleave and double-arm.
-    let _guard = ctx.state.lock(&call_ref).await;
-    // A reclaimed body that is already terminal is a backup's DEFERRED terminal
-    // (Model Y): the backup served the BYE/CANCEL while we were down and never
-    // discharged it (the primary is the sole discharge authority — ADR-0020 X3).
-    // Discharge it now on rehydration — write the CDR, release the limiter, propagate
-    // the delete — instead of re-serving a dead dialog (which would arm keepalives on
-    // it and leak). BOTH terminal shapes are handled here, which is the whole point
-    // of "proper management on re-hydration":
-    //   - `Terminated` (C6: the backup got the b-leg BYE 200) → discharge the body's
-    //     own real BYE CDR as-is (`force_terminal = false`).
-    //   - `Terminating` (C7: the b-leg peer was SILENT, so the backup deferred a
-    //     teardown-in-progress before self-releasing) → FORCE every leg terminal +
-    //     synthesise the CDR (`force_terminal = true`, via `reaper::discharge_result`),
-    //     so the half-torn-down dialog is completed on the primary rather than
-    //     re-served as a live call that would re-probe a dead peer.
-    if matches!(call.state, CallModelState::Terminated | CallModelState::Terminating) {
-        let force_terminal = call.state == CallModelState::Terminating;
-        discharge_materialized_terminal(ctx, &call_ref, call, ctx.clock.now_ms(), force_terminal)
-            .await;
-        return true;
-    }
-    // Single restore-hygiene seam (clock-skew hardening): re-anchor by the
-    // persisted skew offset, drop the stale keepalive-timeout, apply the
-    // deep-past-due defensive floor, then (bulk sweep only) cohort-smooth.
-    sanitize_restored_timers(
-        &mut call.timers,
-        &call_ref,
-        ctx.clock.now_ms(),
-        Some(skew_offset_ms),
-        ctx.config.keepalive_interval_sec * 1000,
-        smoothing,
-    );
-    let timers = call.timers.clone();
-    // Line the STRAGGLER only (`smoothing == None`): the bulk sweep folds into
-    // `reclaim_all`'s single summary, and its per-call fields are not even
-    // built — one line per reclaimed call would be a per-call info line
-    // (ADR-0026).
-    let line = smoothing
-        .is_none()
-        .then(|| (format_pb(&call), call.a_leg.call_id.clone(), timers.len()));
-    if ctx.state.materialize_if_absent(call) {
-        ctx.timers.restore(timers, call_ref.clone()).await;
-        ctx.metrics.bump_repl_reclaimed();
-        if let Some((pb, call_id, timer_count)) = line {
-            tracing::info!(
-                node = observe::node(),
-                call_ref,
-                call_id,
-                pb,
-                timers = timer_count,
-                "straggler reclaim"
-            );
-        }
-        true
-    } else {
-        false
-    }
+    let _guard = ctx.state.lock(call_ref).await;
+    matches!(
+        materialise(ctx, call_ref, Origin::Reclaim(smoothing)).await,
+        Materialised::Served(_) | Materialised::Refused(Reason::Terminated)
+    )
 }
 
 /// Force the last persisted snapshot of `call_ref` terminal and run it through

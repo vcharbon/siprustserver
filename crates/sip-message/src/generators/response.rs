@@ -129,6 +129,69 @@ pub fn generate_response(
         draft = draft.push(contact);
     }
 
+    // RFC 3261 §8.2.1: a 405 names the methods this stack accepts (`Allow`),
+    // so the requester can pick another instead of retrying into silence. A
+    // caller stating its own Allow owns it.
+    if status == 405 && !emit::carries(&opts.extra_headers, &HeaderName::Allow) {
+        draft = draft.push_raw(HeaderName::Allow, SipStr::owned(super::B2BUA_ALLOW));
+    }
+
     draft = emit::extra_headers(draft, &opts.extra_headers);
     emit::response(emit::framed(draft, opts.body.clone(), opts.content_type.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::custom::CustomParser;
+    use crate::SipParser;
+
+    fn notify() -> SipRequest {
+        let raw = "NOTIFY sip:as@127.0.0.1:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-n1\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@127.0.0.1:5070>;tag=a1\r\n\
+To: <sip:as@127.0.0.1:5060>;tag=b1\r\n\
+Call-ID: allow-405\r\n\
+CSeq: 2 NOTIFY\r\n\
+Content-Length: 0\r\n\r\n";
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            crate::SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        }
+    }
+
+    /// RFC 3261 §8.2.1 — a locally minted 405 names the accepted methods.
+    #[test]
+    fn a_405_carries_the_stack_allow_set() {
+        let resp =
+            generate_response(&notify(), 405, "Method Not Allowed", &Default::default());
+        let allow: Vec<_> = resp.raw_text(HeaderName::Allow).collect();
+        assert_eq!(allow.len(), 1);
+        assert_eq!(allow[0].as_str(), super::super::B2BUA_ALLOW);
+    }
+
+    /// A caller stating its own Allow owns the value — no second line.
+    #[test]
+    fn a_caller_stated_allow_owns_the_405() {
+        let opts = GenerateResponseOpts {
+            extra_headers: vec![SipHeader {
+                name: SipStr::owned("Allow"),
+                value: SipStr::owned("INVITE, ACK, BYE"),
+            }],
+            ..Default::default()
+        };
+        let resp = generate_response(&notify(), 405, "Method Not Allowed", &opts);
+        let allow: Vec<_> = resp.raw_text(HeaderName::Allow).collect();
+        assert_eq!(allow.len(), 1);
+        assert_eq!(allow[0].as_str(), "INVITE, ACK, BYE");
+    }
+
+    /// The stamp is the 405's alone — other statuses state Allow only where
+    /// their own mint points do.
+    #[test]
+    fn a_200_gains_no_allow_here() {
+        let resp = generate_response(&notify(), 200, "OK", &Default::default());
+        assert_eq!(resp.raw_text(HeaderName::Allow).count(), 0);
+    }
 }

@@ -188,7 +188,21 @@ impl SipRequest {
     pub fn thaw(&self) -> RequestDraft {
         RequestDraft::thaw(self)
     }
+
+    /// Whether this request offers reliable provisional responses (RFC 3262
+    /// §3): `100rel` listed in `Require` (the UAS MUST then answer reliably) or
+    /// in `Supported` (it MAY). A line that does not read offers nothing.
+    pub fn offers_100rel(&self) -> bool {
+        let required = self
+            .list::<header::Require>()
+            .is_ok_and(|values| values.iter().any(|v| v.contains("100rel")));
+        let supported = self
+            .list::<header::Supported>()
+            .is_ok_and(|values| values.iter().any(|v| v.contains("100rel")));
+        required || supported
+    }
 }
+
 
 impl SipResponse {
     pub fn status(&self) -> u16 {
@@ -287,5 +301,41 @@ impl SipMessage {
         &self,
     ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
         Ok(HeaderList::new(self.list::<header::RecordRouteEntry>()?))
+    }
+}
+
+#[cfg(test)]
+mod offers_100rel_tests {
+    use crate::parser::custom::CustomParser;
+    use crate::{SipMessage, SipParser};
+
+    fn request(extra: &str) -> crate::SipRequest {
+        let raw = format!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+Via: SIP/2.0/UDP 192.0.2.5:5060;branch=z9hG4bK-a\r\n\
+From: <sip:alice@example.com>;tag=a1\r\n\
+To: <sip:bob@example.com>\r\n\
+Call-ID: c1\r\n\
+CSeq: 1 INVITE\r\n\
+{extra}Content-Length: 0\r\n\r\n"
+        );
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        }
+    }
+
+    #[test]
+    fn supported_or_require_listing_100rel_offers_it() {
+        assert!(request("Supported: timer, 100rel\r\n").offers_100rel());
+        assert!(request("Require: 100REL\r\n").offers_100rel(), "option tags are case-insensitive");
+        assert!(request("Supported: timer\r\nSupported: 100rel\r\n").offers_100rel(), "every line counts");
+    }
+
+    #[test]
+    fn a_request_listing_it_nowhere_offers_nothing() {
+        assert!(!request("").offers_100rel());
+        assert!(!request("Supported: timer, replaces\r\n").offers_100rel());
+        assert!(!request("Allow: PRACK\r\n").offers_100rel(), "advertising the method is not offering the extension");
     }
 }

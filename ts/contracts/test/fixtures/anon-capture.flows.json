@@ -1,0 +1,1186 @@
+{
+  "schema": 5,
+  "emit_headers": [],
+  "decode_stats": {
+    "records": 24,
+    "non_ip": 0,
+    "non_udp": 0,
+    "snap_truncated": 0,
+    "datagrams": 24,
+    "fragments": 0,
+    "reassembled": 0,
+    "frag_dropped": 0,
+    "tail_truncated": 0
+  },
+  "flow_stats": {
+    "sip_messages": 20,
+    "capture_dups": 4,
+    "parse_failed": 0,
+    "non_sip": 0
+  },
+  "legs": [
+    {
+      "call_id": "004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197",
+      "hops": [
+        {
+          "a": "198.51.100.249:5060",
+          "b": "203.0.113.246:5162"
+        }
+      ],
+      "invite": {
+        "ruri": "sip:19999950633000900003@sbc.example.net;user=phone",
+        "from_uri": "tel:+33000900001",
+        "to_uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+        "cseq": 1
+      },
+      "final_status": 404,
+      "saw_180": false,
+      "terminated_by": null,
+      "tokens": [
+        "exampleicid1500000@198.51.100.37"
+      ],
+      "msgs": [
+        {
+          "ts_us": 1447696293702296,
+          "src": "198.51.100.249:5060",
+          "dst": "203.0.113.246:5162",
+          "hop": 0,
+          "retx": false,
+          "raw": "INVITE sip:19999950633000900003@sbc.example.net;user=phone SIP/2.0\r\nVia: SIP/2.0/UDP 198.51.100.249:5060;branch=z9hG4bK.iIiIiI.ac16eec5.4cd85b\r\nTo:  <sip:19999950633000900003@sbc.example.net;user=phone>\r\nFrom: <tel:+33000900001>;tag=004cd844-0007-0009-0000-0000\r\nCall-ID: 004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq:  1 INVITE\r\nRoute: <sip:203.0.113.246:5162;lr>\r\nMax-Forwards: 70\r\nContact: <sip:+33000900002.iIiIiI.ac16eec5.;tgrp=6;trunk-context=EXTRUNK%40sbc.example.net@198.51.100.249:5060>\r\nAllow:  INVITE, ACK, PRACK, CANCEL, BYE, OPTIONS, MESSAGE, NOTIFY, UPDATE, REGISTER, INFO, REFER, SUBSCRIBE, PUBLISH\r\nSupported: 100rel,uui\r\nP-Asserted-Identity:  tel:+33000900002\r\nP-Charging-Vector:  icid-value=\"exampleicid1500000@198.51.100.37\";icid-generated-at=198.51.100.249;orig-ioi=vendora.example.net\r\nAccept: application/sdp, application/isup, application/xml\r\nContent-Type: application/sdp\r\nContent-Length: 235\r\n\r\nv=0\r\no=- 258672 1 IN IP4 198.51.100.197\r\ns=example\r\nc=IN IP4 198.51.100.21\r\nt=0 0\r\nm=audio 45456 RTP/AVP 8 18 0 101\r\na=fmtp:18 annexb=no\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=sqn:0\r\na=cdsc: 1 image udptl t38\r\n",
+          "summary": {
+            "kind": "request",
+            "method": "INVITE",
+            "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+            "cseq": {
+              "seq": 1,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "tel:+33000900001",
+              "tag": "004cd844-0007-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+              "tag": null
+            }
+          },
+          "via": [
+            {
+              "sent_by": "198.51.100.249:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bK.iIiIiI.ac16eec5.4cd85b"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "tel:+33000900001",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+              "user": "19999950633000900003",
+              "digits": "19999950633000900003"
+            },
+            "ruri": {
+              "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+              "user": "19999950633000900003",
+              "digits": "19999950633000900003"
+            },
+            "pai": [
+              {
+                "uri": "tel:+33000900002",
+                "user": "+33000900002",
+                "digits": "33000900002"
+              }
+            ]
+          },
+          "body": {
+            "content_type": "application/sdp",
+            "len": 235
+          }
+        },
+        {
+          "ts_us": 1447696293703920,
+          "src": "203.0.113.246:5162",
+          "dst": "198.51.100.249:5060",
+          "hop": 0,
+          "retx": false,
+          "raw": "SIP/2.0 100 Trying\r\nVia: SIP/2.0/UDP 198.51.100.249:5060;branch=z9hG4bK.iIiIiI.ac16eec5.4cd85b\r\nFrom: <tel:+33000900001>;tag=004cd844-0007-0009-0000-0000\r\nTo: <sip:19999950633000900003@sbc.example.net;user=phone>\r\nCall-ID: 004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "response",
+            "status": 100,
+            "reason": "Trying",
+            "cseq": {
+              "seq": 1,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "tel:+33000900001",
+              "tag": "004cd844-0007-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+              "tag": null
+            }
+          },
+          "via": [
+            {
+              "sent_by": "198.51.100.249:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bK.iIiIiI.ac16eec5.4cd85b"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "tel:+33000900001",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+              "user": "19999950633000900003",
+              "digits": "19999950633000900003"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696294245666,
+          "src": "203.0.113.246:5162",
+          "dst": "198.51.100.249:5060",
+          "hop": 0,
+          "retx": false,
+          "raw": "SIP/2.0 404 Not Found\r\nVia: SIP/2.0/UDP 198.51.100.249:5060;branch=z9hG4bK.iIiIiI.ac16eec5.4cd85b\r\nTo: <sip:19999950633000900003@sbc.example.net;user=phone>;tag=004cd889-0007-0010-0000-0000\r\nFrom: <tel:+33000900001>;tag=004cd844-0007-0009-0000-0000\r\nCall-ID: 004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq: 1 INVITE\r\nReason: Q.850;cause=1\r\nServer: ExampleSW/0.0.0\r\nWarning: 399 vendora.example.net \" Release from ISUP  (UTRYING) \"\r\nP-Charging-Vector: icid-value=\"exampleicid1500000@198.51.100.37\";icid-generated-at=198.51.100.249;orig-ioi=vendora.example.net;term-ioi=vendora.example.net\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "response",
+            "status": 404,
+            "reason": "Not Found",
+            "cseq": {
+              "seq": 1,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "tel:+33000900001",
+              "tag": "004cd844-0007-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+              "tag": "004cd889-0007-0010-0000-0000"
+            }
+          },
+          "via": [
+            {
+              "sent_by": "198.51.100.249:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bK.iIiIiI.ac16eec5.4cd85b"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "tel:+33000900001",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+              "user": "19999950633000900003",
+              "digits": "19999950633000900003"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696294280468,
+          "src": "198.51.100.249:5060",
+          "dst": "203.0.113.246:5162",
+          "hop": 0,
+          "retx": false,
+          "raw": "ACK sip:19999950633000900003@sbc.example.net;user=phone SIP/2.0\r\nVia: SIP/2.0/UDP 198.51.100.249:5060;branch=z9hG4bK.iIiIiI.ac16eec5.4cd85b\r\nTo: <sip:19999950633000900003@sbc.example.net;user=phone>;tag=004cd889-0007-0010-0000-0000\r\nFrom: <tel:+33000900001>;tag=004cd844-0007-0009-0000-0000\r\nCall-ID: 004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq:  1 ACK\r\nRoute: <sip:203.0.113.246:5162;lr>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "request",
+            "method": "ACK",
+            "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+            "cseq": {
+              "seq": 1,
+              "method": "ACK"
+            },
+            "from": {
+              "uri": "tel:+33000900001",
+              "tag": "004cd844-0007-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+              "tag": "004cd889-0007-0010-0000-0000"
+            }
+          },
+          "via": [
+            {
+              "sent_by": "198.51.100.249:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bK.iIiIiI.ac16eec5.4cd85b"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "tel:+33000900001",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+              "user": "19999950633000900003",
+              "digits": "19999950633000900003"
+            },
+            "ruri": {
+              "uri": "sip:19999950633000900003@sbc.example.net;user=phone",
+              "user": "19999950633000900003",
+              "digits": "19999950633000900003"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "call_id": "1-004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197",
+      "hops": [
+        {
+          "a": "198.51.100.249:5060",
+          "b": "203.0.113.246:5162"
+        }
+      ],
+      "invite": {
+        "ruri": "sip:+04199990333000900003@198.51.100.249:5060",
+        "from_uri": "sip:+33000900001@bar.example.com;user=phone",
+        "to_uri": "sip:+33000900003@baz.example.com;user=phone",
+        "cseq": 264694
+      },
+      "final_status": 503,
+      "saw_180": false,
+      "terminated_by": null,
+      "tokens": [
+        "exampleicid1500000@198.51.100.37"
+      ],
+      "msgs": [
+        {
+          "ts_us": 1447696293930082,
+          "src": "203.0.113.246:5162",
+          "dst": "198.51.100.249:5060",
+          "hop": 0,
+          "retx": false,
+          "raw": "INVITE sip:+04199990333000900003@198.51.100.249:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 203.0.113.246:5162;oc-node=101;branch=z9hG4bKJ79JEz3tu9t3byzWbXVhZw;rport\r\nTo: <sip:+33000900003@baz.example.com;user=phone>\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=9WHw3A\r\nCall-ID: 1-004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq: 264694 INVITE\r\nMax-Forwards: 69\r\nContact: <sip:casting;tgrp=6;trunk-context=EXTRUNK%40sbc.example.net@203.0.113.246:5162;transport=udp;oc-node=101>\r\nAllow: INVITE,ACK,PRACK,CANCEL,BYE,OPTIONS,MESSAGE,NOTIFY,UPDATE,REGISTER,INFO,REFER,SUBSCRIBE,PUBLISH\r\nSupported: 100rel, uui\r\nP-Asserted-Identity: <sip:+33000900002@bar.example.com;user=phone>\r\nP-Charging-Vector: icid-value=\"exampleicid1500000@198.51.100.37\";icid-generated-at=198.51.100.249;orig-ioi=vendora.example.net\r\nAccept: application/sdp,application/isup,application/xml\r\nContent-Type: application/sdp\r\nContent-Length: 235\r\nDiversion: <sip:+33000900004@bar.example.com>;limit=10;reason=unconditional;counter=1\r\n\r\nv=0\r\no=- 258672 1 IN IP4 198.51.100.197\r\ns=example\r\nc=IN IP4 198.51.100.21\r\nt=0 0\r\nm=audio 45456 RTP/AVP 8 18 0 101\r\na=fmtp:18 annexb=no\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=sqn:0\r\na=cdsc: 1 image udptl t38\r\n",
+          "summary": {
+            "kind": "request",
+            "method": "INVITE",
+            "uri": "sip:+04199990333000900003@198.51.100.249:5060",
+            "cseq": {
+              "seq": 264694,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "9WHw3A"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "tag": null
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.246:5162",
+              "transport": "UDP",
+              "branch": "z9hG4bKJ79JEz3tu9t3byzWbXVhZw"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            },
+            "ruri": {
+              "uri": "sip:+04199990333000900003@198.51.100.249:5060",
+              "user": "+04199990333000900003",
+              "digits": "4199990333000900003"
+            },
+            "pai": [
+              {
+                "uri": "sip:+33000900002@bar.example.com;user=phone",
+                "user": "+33000900002",
+                "digits": "33000900002"
+              }
+            ]
+          },
+          "body": {
+            "content_type": "application/sdp",
+            "len": 235
+          }
+        },
+        {
+          "ts_us": 1447696293956640,
+          "src": "198.51.100.249:5060",
+          "dst": "203.0.113.246:5162",
+          "hop": 0,
+          "retx": false,
+          "raw": "SIP/2.0 100 Trying\r\nVia: SIP/2.0/UDP 203.0.113.246:5162;oc-node=101;branch=z9hG4bKJ79JEz3tu9t3byzWbXVhZw;rport\r\nTo: <sip:+33000900003@baz.example.com;user=phone>\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=9WHw3A\r\nCall-ID: 1-004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq: 264694 INVITE\r\nP-Charging-Vector:  icid-value=\"exampleicid1500000@198.51.100.37\";icid-generated-at=198.51.100.249;orig-ioi=vendora.example.net\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "response",
+            "status": 100,
+            "reason": "Trying",
+            "cseq": {
+              "seq": 264694,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "9WHw3A"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "tag": null
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.246:5162",
+              "transport": "UDP",
+              "branch": "z9hG4bKJ79JEz3tu9t3byzWbXVhZw"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696294022074,
+          "src": "198.51.100.249:5060",
+          "dst": "203.0.113.246:5162",
+          "hop": 0,
+          "retx": false,
+          "raw": "SIP/2.0 503 Service Unavailable\r\nVia: SIP/2.0/UDP 203.0.113.246:5162;oc-node=101;branch=z9hG4bKJ79JEz3tu9t3byzWbXVhZw;rport\r\nTo: <sip:+33000900003@baz.example.com;user=phone>;tag=004cd872-0007-000f-0000-0000\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=9WHw3A\r\nCall-ID: 1-004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq:  264694 INVITE\r\nReason: Q.850; cause=127\r\nServer: ExampleSW/0.0.0\r\nWarning: 399 vendora.example.net \" Release from ISUP  (UTRYING) \"\r\nP-Charging-Vector:  icid-value=\"exampleicid1500000@198.51.100.37\";icid-generated-at=198.51.100.249;orig-ioi=vendora.example.net;term-ioi=vendora.example.net\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "response",
+            "status": 503,
+            "reason": "Service Unavailable",
+            "cseq": {
+              "seq": 264694,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "9WHw3A"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "tag": "004cd872-0007-000f-0000-0000"
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.246:5162",
+              "transport": "UDP",
+              "branch": "z9hG4bKJ79JEz3tu9t3byzWbXVhZw"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696294023168,
+          "src": "203.0.113.246:5162",
+          "dst": "198.51.100.249:5060",
+          "hop": 0,
+          "retx": false,
+          "raw": "ACK sip:+04199990333000900003@198.51.100.249:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 203.0.113.246:5162;oc-node=101;branch=z9hG4bKJ79JEz3tu9t3byzWbXVhZw;rport\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=9WHw3A\r\nTo: <sip:+33000900003@baz.example.com;user=phone>;tag=004cd872-0007-000f-0000-0000\r\nCall-ID: 1-004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq: 264694 ACK\r\nMax-Forwards: 69\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "request",
+            "method": "ACK",
+            "uri": "sip:+04199990333000900003@198.51.100.249:5060",
+            "cseq": {
+              "seq": 264694,
+              "method": "ACK"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "9WHw3A"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "tag": "004cd872-0007-000f-0000-0000"
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.246:5162",
+              "transport": "UDP",
+              "branch": "z9hG4bKJ79JEz3tu9t3byzWbXVhZw"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            },
+            "ruri": {
+              "uri": "sip:+04199990333000900003@198.51.100.249:5060",
+              "user": "+04199990333000900003",
+              "digits": "4199990333000900003"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "call_id": "SDpdphd01-eb680442e738d98669af572861abeeef-cl5gu03090",
+      "hops": [
+        {
+          "a": "192.0.2.145:5060",
+          "b": "203.0.113.17:5060"
+        },
+        {
+          "a": "192.0.2.18:5060",
+          "b": "203.0.113.33:5060"
+        }
+      ],
+      "invite": {
+        "ruri": "sip:+04199990333000900003@203.0.113.17:5060;user=phone",
+        "from_uri": "sip:+33000900001@bar.example.com;user=phone",
+        "to_uri": "sip:+33000900003@baz.example.com;user=phone",
+        "cseq": 1
+      },
+      "final_status": 503,
+      "saw_180": false,
+      "terminated_by": null,
+      "tokens": [],
+      "msgs": [
+        {
+          "ts_us": 1447696293976470,
+          "src": "192.0.2.145:5060",
+          "dst": "203.0.113.17:5060",
+          "hop": 0,
+          "retx": false,
+          "raw": "INVITE sip:+04199990333000900003@203.0.113.17:5060;user=phone SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.145:5060;branch=z9hG4bKaojbgp10b8fmaqk3bf00.1\r\nTo: <sip:+33000900003@baz.example.com;user=phone>\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=SDpdphd01-009aad8e-0006-0009-0000-0000\r\nCall-ID: SDpdphd01-eb680442e738d98669af572861abeeef-cl5gu03090\r\nCSeq: 1 INVITE\r\nMax-Forwards: 67\r\nContact: <sip:192.0.2.145:5060;transport=udp>\r\nAllow: INVITE, ACK, PRACK, CANCEL, BYE, OPTIONS, MESSAGE, NOTIFY, UPDATE, REGISTER, INFO, REFER, SUBSCRIBE, PUBLISH\r\nSupported: 100rel,uui\r\nDiversion: <sip:+33000900004@198.51.100.248;user=phone>;reason=unconditional;privacy=off;counter=1\r\nP-Asserted-Identity: <sip:+33000900002@192.0.2.185;user=phone>\r\nAccept: application/sdp, application/isup, application/xml\r\nContent-Type: application/sdp\r\nContent-Length: 235\r\n\r\nv=0\r\no=- 258672 1 IN IP4 198.51.100.197\r\ns=example\r\nc=IN IP4 198.51.100.21\r\nt=0 0\r\nm=audio 45456 RTP/AVP 8 18 0 101\r\na=fmtp:18 annexb=no\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=sqn:0\r\na=cdsc: 1 image udptl t38\r\n",
+          "summary": {
+            "kind": "request",
+            "method": "INVITE",
+            "uri": "sip:+04199990333000900003@203.0.113.17:5060;user=phone",
+            "cseq": {
+              "seq": 1,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "SDpdphd01-009aad8e-0006-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "tag": null
+            }
+          },
+          "via": [
+            {
+              "sent_by": "192.0.2.145:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bKaojbgp10b8fmaqk3bf00.1"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            },
+            "ruri": {
+              "uri": "sip:+04199990333000900003@203.0.113.17:5060;user=phone",
+              "user": "+04199990333000900003",
+              "digits": "4199990333000900003"
+            },
+            "pai": [
+              {
+                "uri": "sip:+33000900002@192.0.2.185;user=phone",
+                "user": "+33000900002",
+                "digits": "33000900002"
+              }
+            ]
+          },
+          "body": {
+            "content_type": "application/sdp",
+            "len": 235
+          }
+        },
+        {
+          "ts_us": 1447696293978682,
+          "src": "203.0.113.17:5060",
+          "dst": "192.0.2.145:5060",
+          "hop": 0,
+          "retx": false,
+          "raw": "SIP/2.0 100 Trying\r\nVia: SIP/2.0/UDP 192.0.2.145:5060;branch=z9hG4bKaojbgp10b8fmaqk3bf00.1\r\nTo: <sip:+33000900003@baz.example.com;user=phone>\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=SDpdphd01-009aad8e-0006-0009-0000-0000\r\nCall-ID: SDpdphd01-eb680442e738d98669af572861abeeef-cl5gu03090\r\nCSeq: 1 INVITE\r\n\r\n",
+          "summary": {
+            "kind": "response",
+            "status": 100,
+            "reason": "Trying",
+            "cseq": {
+              "seq": 1,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "SDpdphd01-009aad8e-0006-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "tag": null
+            }
+          },
+          "via": [
+            {
+              "sent_by": "192.0.2.145:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bKaojbgp10b8fmaqk3bf00.1"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696293980057,
+          "src": "203.0.113.33:5060",
+          "dst": "192.0.2.18:5060",
+          "hop": 1,
+          "retx": false,
+          "raw": "INVITE sip:+33000900003@192.0.2.18:5060;user=phone SIP/2.0\r\nVia: SIP/2.0/UDP 203.0.113.33:5060;branch=z9hG4bK0t1dpd20do0fepbidd10.1\r\nTo: <sip:+33000900003@192.0.2.18;user=phone>\r\nFrom: <sip:+33000900001@203.0.113.33;user=phone>;tag=SDpdphd01-009aad8e-0006-0009-0000-0000\r\nCall-ID: SDpdphd01-eb680442e738d98669af572861abeeef-cl5gu03090\r\nCSeq: 1 INVITE\r\nMax-Forwards: 66\r\nContact: <sip:203.0.113.33:5060;transport=udp>\r\nAllow: INVITE, ACK, PRACK, CANCEL, BYE, NOTIFY, UPDATE, INFO,OPTIONS\r\nSupported: uui\r\nDiversion: <sip:+33000900004@203.0.113.33;user=phone>;reason=unconditional;privacy=off;counter=1\r\nAccept: application/sdp, application/isup, application/xml\r\nContent-Type: application/sdp\r\nContent-Length: 232\r\n\r\nv=0\r\no=- 557580812 1 IN IP4 203.0.113.33\r\ns=-\r\nc=IN IP4 203.0.113.33\r\nt=0 0\r\nm=audio 15276 RTP/AVP 8 18 101\r\na=fmtp:18 annexb=no\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sqn:0\r\na=cdsc: 1 image udptl t38\r\na=ptime:20\r\n",
+          "summary": {
+            "kind": "request",
+            "method": "INVITE",
+            "uri": "sip:+33000900003@192.0.2.18:5060;user=phone",
+            "cseq": {
+              "seq": 1,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@203.0.113.33;user=phone",
+              "tag": "SDpdphd01-009aad8e-0006-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:+33000900003@192.0.2.18;user=phone",
+              "tag": null
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.33:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bK0t1dpd20do0fepbidd10.1"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@203.0.113.33;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@192.0.2.18;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            },
+            "ruri": {
+              "uri": "sip:+33000900003@192.0.2.18:5060;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            }
+          },
+          "body": {
+            "content_type": "application/sdp",
+            "len": 232
+          }
+        },
+        {
+          "ts_us": 1447696293990304,
+          "src": "192.0.2.18:5060",
+          "dst": "203.0.113.33:5060",
+          "hop": 1,
+          "retx": false,
+          "raw": "SIP/2.0 100 Trying\r\nFrom: <sip:+33000900001@203.0.113.33;user=phone>;tag=SDpdphd01-009aad8e-0006-0009-0000-0000\r\nTo: <sip:+33000900003@192.0.2.18;user=phone>\r\nCall-ID: SDpdphd01-eb680442e738d98669af572861abeeef-cl5gu03090\r\nCSeq: 1 INVITE\r\nVia: SIP/2.0/UDP 203.0.113.33:5060;branch=z9hG4bK0t1dpd20do0fepbidd10.1\r\nSupported: timer,replaces,info\r\nUser-Agent: ShoreGear/19.46.1802.0 (ShoreTel 14.2)\r\nContact: <sip:+33000900003@192.0.2.18:5060;user=phone>\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "response",
+            "status": 100,
+            "reason": "Trying",
+            "cseq": {
+              "seq": 1,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@203.0.113.33;user=phone",
+              "tag": "SDpdphd01-009aad8e-0006-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:+33000900003@192.0.2.18;user=phone",
+              "tag": null
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.33:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bK0t1dpd20do0fepbidd10.1"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@203.0.113.33;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@192.0.2.18;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696293993530,
+          "src": "192.0.2.18:5060",
+          "dst": "203.0.113.33:5060",
+          "hop": 1,
+          "retx": false,
+          "raw": "SIP/2.0 503 Service Unavailable\r\nFrom: <sip:+33000900001@203.0.113.33;user=phone>;tag=SDpdphd01-009aad8e-0006-0009-0000-0000\r\nTo: <sip:+33000900003@192.0.2.18;user=phone>;tag=68342a0-0-13c4-6006-100b1c-52f9312f-100b1c\r\nCall-ID: SDpdphd01-eb680442e738d98669af572861abeeef-cl5gu03090\r\nCSeq: 1 INVITE\r\nVia: SIP/2.0/UDP 203.0.113.33:5060;branch=z9hG4bK0t1dpd20do0fepbidd10.1\r\nSupported: timer,replaces,info\r\nUser-Agent: ShoreGear/19.46.1802.0 (ShoreTel 14.2)\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "response",
+            "status": 503,
+            "reason": "Service Unavailable",
+            "cseq": {
+              "seq": 1,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@203.0.113.33;user=phone",
+              "tag": "SDpdphd01-009aad8e-0006-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:+33000900003@192.0.2.18;user=phone",
+              "tag": "68342a0-0-13c4-6006-100b1c-52f9312f-100b1c"
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.33:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bK0t1dpd20do0fepbidd10.1"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@203.0.113.33;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@192.0.2.18;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696293996945,
+          "src": "203.0.113.33:5060",
+          "dst": "192.0.2.18:5060",
+          "hop": 1,
+          "retx": false,
+          "raw": "ACK sip:+33000900003@192.0.2.18:5060;user=phone SIP/2.0\r\nVia: SIP/2.0/UDP 203.0.113.33:5060;branch=z9hG4bK0t1dpd20do0fepbidd10.1\r\nCSeq: 1 ACK\r\nTo: <sip:+33000900003@192.0.2.18;user=phone>;tag=68342a0-0-13c4-6006-100b1c-52f9312f-100b1c\r\nFrom: <sip:+33000900001@203.0.113.33;user=phone>;tag=SDpdphd01-009aad8e-0006-0009-0000-0000\r\nCall-ID: SDpdphd01-eb680442e738d98669af572861abeeef-cl5gu03090\r\nMax-Forwards: 66\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "request",
+            "method": "ACK",
+            "uri": "sip:+33000900003@192.0.2.18:5060;user=phone",
+            "cseq": {
+              "seq": 1,
+              "method": "ACK"
+            },
+            "from": {
+              "uri": "sip:+33000900001@203.0.113.33;user=phone",
+              "tag": "SDpdphd01-009aad8e-0006-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:+33000900003@192.0.2.18;user=phone",
+              "tag": "68342a0-0-13c4-6006-100b1c-52f9312f-100b1c"
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.33:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bK0t1dpd20do0fepbidd10.1"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@203.0.113.33;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@192.0.2.18;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            },
+            "ruri": {
+              "uri": "sip:+33000900003@192.0.2.18:5060;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696293996994,
+          "src": "203.0.113.17:5060",
+          "dst": "192.0.2.145:5060",
+          "hop": 0,
+          "retx": false,
+          "raw": "SIP/2.0 503 Service Unavailable\r\nVia: SIP/2.0/UDP 192.0.2.145:5060;branch=z9hG4bKaojbgp10b8fmaqk3bf00.1\r\nTo: <sip:+33000900003@baz.example.com;user=phone>;tag=68342a0-0-13c4-6006-100b1c-52f9312f-100b1c\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=SDpdphd01-009aad8e-0006-0009-0000-0000\r\nCall-ID: SDpdphd01-eb680442e738d98669af572861abeeef-cl5gu03090\r\nCSeq: 1 INVITE\r\nSupported: info\r\nUser-Agent: ShoreGear/19.46.1802.0 (ShoreTel 14.2)\r\nContent-Length: 0\r\nP-Identifier: 312233518\r\n\r\n",
+          "summary": {
+            "kind": "response",
+            "status": 503,
+            "reason": "Service Unavailable",
+            "cseq": {
+              "seq": 1,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "SDpdphd01-009aad8e-0006-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "tag": "68342a0-0-13c4-6006-100b1c-52f9312f-100b1c"
+            }
+          },
+          "via": [
+            {
+              "sent_by": "192.0.2.145:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bKaojbgp10b8fmaqk3bf00.1"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696293998567,
+          "src": "192.0.2.145:5060",
+          "dst": "203.0.113.17:5060",
+          "hop": 0,
+          "retx": false,
+          "raw": "ACK sip:+04199990333000900003@203.0.113.17:5060;user=phone SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.145:5060;branch=z9hG4bKaojbgp10b8fmaqk3bf00.1\r\nCSeq: 1 ACK\r\nTo: <sip:+33000900003@baz.example.com;user=phone>;tag=68342a0-0-13c4-6006-100b1c-52f9312f-100b1c\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=SDpdphd01-009aad8e-0006-0009-0000-0000\r\nCall-ID: SDpdphd01-eb680442e738d98669af572861abeeef-cl5gu03090\r\nMax-Forwards: 67\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "request",
+            "method": "ACK",
+            "uri": "sip:+04199990333000900003@203.0.113.17:5060;user=phone",
+            "cseq": {
+              "seq": 1,
+              "method": "ACK"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "SDpdphd01-009aad8e-0006-0009-0000-0000"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "tag": "68342a0-0-13c4-6006-100b1c-52f9312f-100b1c"
+            }
+          },
+          "via": [
+            {
+              "sent_by": "192.0.2.145:5060",
+              "transport": "UDP",
+              "branch": "z9hG4bKaojbgp10b8fmaqk3bf00.1"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900003@baz.example.com;user=phone",
+              "user": "+33000900003",
+              "digits": "33000900003"
+            },
+            "ruri": {
+              "uri": "sip:+04199990333000900003@203.0.113.17:5060;user=phone",
+              "user": "+04199990333000900003",
+              "digits": "4199990333000900003"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "call_id": "2-004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197",
+      "hops": [
+        {
+          "a": "198.51.100.249:5060",
+          "b": "203.0.113.246:5162"
+        }
+      ],
+      "invite": {
+        "ruri": "sip:00033000900005@198.51.100.249:5060",
+        "from_uri": "sip:+33000900001@bar.example.com;user=phone",
+        "to_uri": "sip:+33000900005@baz.example.com;user=phone",
+        "cseq": 821466
+      },
+      "final_status": 404,
+      "saw_180": false,
+      "terminated_by": null,
+      "tokens": [
+        "exampleicid1500000@198.51.100.37"
+      ],
+      "msgs": [
+        {
+          "ts_us": 1447696294168496,
+          "src": "203.0.113.246:5162",
+          "dst": "198.51.100.249:5060",
+          "hop": 0,
+          "retx": false,
+          "raw": "INVITE sip:00033000900005@198.51.100.249:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 203.0.113.246:5162;oc-node=101;branch=z9hG4bKKwwC3PL5H6Xxp1SjKeuyOA;rport\r\nTo: <sip:+33000900005@baz.example.com;user=phone>\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=9HDOww\r\nCall-ID: 2-004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq: 821466 INVITE\r\nMax-Forwards: 69\r\nContact: <sip:casting;tgrp=6;trunk-context=EXTRUNK%40sbc.example.net@203.0.113.246:5162;transport=udp;oc-node=101>\r\nAllow: INVITE,ACK,PRACK,CANCEL,BYE,OPTIONS,MESSAGE,NOTIFY,UPDATE,REGISTER,INFO,REFER,SUBSCRIBE,PUBLISH\r\nSupported: 100rel, uui\r\nP-Asserted-Identity: <sip:+33000900002@bar.example.com;user=phone>\r\nP-Charging-Vector: icid-value=\"exampleicid1500000@198.51.100.37\";icid-generated-at=198.51.100.249;orig-ioi=vendora.example.net\r\nAccept: application/sdp,application/isup,application/xml\r\nContent-Type: application/sdp\r\nContent-Length: 235\r\nDiversion: <sip:+33000900004@bar.example.com>;limit=10;reason=unconditional;counter=1\r\n\r\nv=0\r\no=- 258672 1 IN IP4 198.51.100.197\r\ns=example\r\nc=IN IP4 198.51.100.21\r\nt=0 0\r\nm=audio 45456 RTP/AVP 8 18 0 101\r\na=fmtp:18 annexb=no\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=sqn:0\r\na=cdsc: 1 image udptl t38\r\n",
+          "summary": {
+            "kind": "request",
+            "method": "INVITE",
+            "uri": "sip:00033000900005@198.51.100.249:5060",
+            "cseq": {
+              "seq": 821466,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "9HDOww"
+            },
+            "to": {
+              "uri": "sip:+33000900005@baz.example.com;user=phone",
+              "tag": null
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.246:5162",
+              "transport": "UDP",
+              "branch": "z9hG4bKKwwC3PL5H6Xxp1SjKeuyOA"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900005@baz.example.com;user=phone",
+              "user": "+33000900005",
+              "digits": "33000900005"
+            },
+            "ruri": {
+              "uri": "sip:00033000900005@198.51.100.249:5060",
+              "user": "00033000900005",
+              "digits": "033000900005"
+            },
+            "pai": [
+              {
+                "uri": "sip:+33000900002@bar.example.com;user=phone",
+                "user": "+33000900002",
+                "digits": "33000900002"
+              }
+            ]
+          },
+          "body": {
+            "content_type": "application/sdp",
+            "len": 235
+          }
+        },
+        {
+          "ts_us": 1447696294198527,
+          "src": "198.51.100.249:5060",
+          "dst": "203.0.113.246:5162",
+          "hop": 0,
+          "retx": false,
+          "raw": "SIP/2.0 100 Trying\r\nVia: SIP/2.0/UDP 203.0.113.246:5162;oc-node=101;branch=z9hG4bKKwwC3PL5H6Xxp1SjKeuyOA;rport\r\nTo: <sip:+33000900005@baz.example.com;user=phone>\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=9HDOww\r\nCall-ID: 2-004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq: 821466 INVITE\r\nP-Charging-Vector:  icid-value=\"exampleicid1500000@198.51.100.37\";icid-generated-at=198.51.100.249;orig-ioi=vendora.example.net\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "response",
+            "status": 100,
+            "reason": "Trying",
+            "cseq": {
+              "seq": 821466,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "9HDOww"
+            },
+            "to": {
+              "uri": "sip:+33000900005@baz.example.com;user=phone",
+              "tag": null
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.246:5162",
+              "transport": "UDP",
+              "branch": "z9hG4bKKwwC3PL5H6Xxp1SjKeuyOA"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900005@baz.example.com;user=phone",
+              "user": "+33000900005",
+              "digits": "33000900005"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696294200728,
+          "src": "198.51.100.249:5060",
+          "dst": "203.0.113.246:5162",
+          "hop": 0,
+          "retx": false,
+          "raw": "SIP/2.0 404 Not Found\r\nVia: SIP/2.0/UDP 203.0.113.246:5162;oc-node=101;branch=z9hG4bKKwwC3PL5H6Xxp1SjKeuyOA;rport\r\nTo: <sip:+33000900005@baz.example.com;user=phone>;tag=004cd889-0007-0010-0000-0000\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=9HDOww\r\nCall-ID: 2-004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq:  821466 INVITE\r\nReason: Q.850; cause=1\r\nServer: ExampleSW/0.0.0\r\nWarning: 399 vendora.example.net \" Release from ISUP  (UTRYING) \"\r\nP-Charging-Vector:  icid-value=\"exampleicid1500000@198.51.100.37\";icid-generated-at=198.51.100.249;orig-ioi=vendora.example.net;term-ioi=vendora.example.net\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "response",
+            "status": 404,
+            "reason": "Not Found",
+            "cseq": {
+              "seq": 821466,
+              "method": "INVITE"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "9HDOww"
+            },
+            "to": {
+              "uri": "sip:+33000900005@baz.example.com;user=phone",
+              "tag": "004cd889-0007-0010-0000-0000"
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.246:5162",
+              "transport": "UDP",
+              "branch": "z9hG4bKKwwC3PL5H6Xxp1SjKeuyOA"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900005@baz.example.com;user=phone",
+              "user": "+33000900005",
+              "digits": "33000900005"
+            }
+          }
+        },
+        {
+          "ts_us": 1447696294201740,
+          "src": "203.0.113.246:5162",
+          "dst": "198.51.100.249:5060",
+          "hop": 0,
+          "retx": false,
+          "raw": "ACK sip:00033000900005@198.51.100.249:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 203.0.113.246:5162;oc-node=101;branch=z9hG4bKKwwC3PL5H6Xxp1SjKeuyOA;rport\r\nFrom: <sip:+33000900001@bar.example.com;user=phone>;tag=9HDOww\r\nTo: <sip:+33000900005@baz.example.com;user=phone>;tag=004cd889-0007-0010-0000-0000\r\nCall-ID: 2-004cd7b9004cd7a-0007-0009-0000-0000@198.51.100.197\r\nCSeq: 821466 ACK\r\nMax-Forwards: 69\r\nContent-Length: 0\r\n\r\n",
+          "summary": {
+            "kind": "request",
+            "method": "ACK",
+            "uri": "sip:00033000900005@198.51.100.249:5060",
+            "cseq": {
+              "seq": 821466,
+              "method": "ACK"
+            },
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "tag": "9HDOww"
+            },
+            "to": {
+              "uri": "sip:+33000900005@baz.example.com;user=phone",
+              "tag": "004cd889-0007-0010-0000-0000"
+            }
+          },
+          "via": [
+            {
+              "sent_by": "203.0.113.246:5162",
+              "transport": "UDP",
+              "branch": "z9hG4bKKwwC3PL5H6Xxp1SjKeuyOA"
+            }
+          ],
+          "identities": {
+            "from": {
+              "uri": "sip:+33000900001@bar.example.com;user=phone",
+              "user": "+33000900001",
+              "digits": "33000900001"
+            },
+            "to": {
+              "uri": "sip:+33000900005@baz.example.com;user=phone",
+              "user": "+33000900005",
+              "digits": "33000900005"
+            },
+            "ruri": {
+              "uri": "sip:00033000900005@198.51.100.249:5060",
+              "user": "00033000900005",
+              "digits": "033000900005"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "legs": [
+        0,
+        1,
+        3
+      ],
+      "evidence": [
+        {
+          "kind": "shared_header_param",
+          "strategy": 1,
+          "header": "P-Charging-Vector",
+          "param": "icid-value",
+          "token": "exampleicid1500000@198.51.100.37",
+          "legs": [
+            0,
+            1,
+            3
+          ]
+        },
+        {
+          "kind": "derived_call_id",
+          "strategy": 2,
+          "legs": [
+            0,
+            1
+          ],
+          "prefix": "1-",
+          "as_socket": "203.0.113.246:5162",
+          "peer_socket": "198.51.100.249:5060",
+          "shared_hop": true,
+          "dt_us": 227786
+        },
+        {
+          "kind": "derived_call_id",
+          "strategy": 2,
+          "legs": [
+            0,
+            3
+          ],
+          "prefix": "2-",
+          "as_socket": "203.0.113.246:5162",
+          "peer_socket": "198.51.100.249:5060",
+          "shared_hop": true,
+          "dt_us": 466200
+        }
+      ],
+      "t0_us": 1447696293702296,
+      "initial_invite": {
+        "leg": 0,
+        "msg": 0
+      },
+      "final_us": 1447696294245666,
+      "final_status": 404,
+      "methods": {
+        "ACK": {
+          "requests": 3
+        },
+        "INVITE": {
+          "requests": 3,
+          "content_types": [
+            "application/sdp"
+          ]
+        }
+      }
+    },
+    {
+      "legs": [
+        2
+      ],
+      "evidence": [],
+      "t0_us": 1447696293976470,
+      "initial_invite": {
+        "leg": 2,
+        "msg": 0
+      },
+      "final_us": 1447696293996994,
+      "final_status": 503,
+      "methods": {
+        "ACK": {
+          "requests": 2
+        },
+        "INVITE": {
+          "requests": 2,
+          "content_types": [
+            "application/sdp"
+          ]
+        }
+      }
+    }
+  ]
+}

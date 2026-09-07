@@ -16,7 +16,7 @@ use crate::types::{SipHeader, SipRequest};
 /// of the CANCEL … MUST equal" the INVITE's — so its Route set is reproduced
 /// verbatim (load-bearing when the INVITE carried a preloaded outbound-proxy
 /// Route: without it the CANCEL bypasses the proxy the INVITE traversed, and the
-/// cross-message audit flags `cancelRouteEchoesInvite`). Panics when the INVITE
+/// cross-message audit flags `cancel-route-echoes-invite`). Panics when the INVITE
 /// is missing a required header.
 ///
 /// `extra_headers` ride after the generator's own, in the order given: RFC 3326

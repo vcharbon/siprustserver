@@ -1,4 +1,4 @@
-//! **Reclaim-hydration pin for the per-leg no-answer guard (upstreamneed-059).**
+//! **Reclaim-hydration pin for the per-leg no-answer guard.**
 //!
 //! The endurance defect: a `kill_worker` + reboot reclaim restores a CONFIRMED
 //! call whose replicated `call.timers` ledger still carries a live per-b-leg
@@ -184,6 +184,7 @@ async fn stale_no_answer_restored_by_reclaim_is_absorbed_and_scrubbed() {
     // ── reboot → bootstrap re-hydrates pri:{self} → REAL bulk reclaim ────────
     let b1_addr = b1.reboot().await; // NEW pod IP
     proxy.set_address(&primary_ord, b1_addr);
+    fh.note_worker_rebound(&primary_ord, b1_addr);
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     b2.simulate_peer_added(&primary_ord);
     for _ in 0..40 {

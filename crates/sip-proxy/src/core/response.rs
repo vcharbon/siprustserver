@@ -2,8 +2,8 @@
 //! route to the next Via (received/rport precedence); reverse-path failover
 //! to the cookie's `w_bak` when the destination worker is confirmed Dead; pop
 //! the top Via entry (comma-aware); forward; remember the ACK-relay hop for a
-//! non-2xx INVITE final (the ACK itself travels end-to-end — see
-//! `core/request`).
+//! non-2xx INVITE final — the final's sender + the INVITE's outbound branch
+//! (the ACK itself travels end-to-end — see `core/request`).
 
 use sip_message::header::Via;
 use sip_message::types::SipResponse;
@@ -27,7 +27,9 @@ fn rejects_the_setup(status: u16, method: &Method) -> bool {
 }
 
 impl ProxyCore {
-    pub(super) async fn handle_response(&self, resp: SipResponse) {
+    /// `src` is the datagram's source: the node that sent this final, which
+    /// is the hop a §17.1.1.3 ACK for it must reach.
+    pub(super) async fn handle_response(&self, resp: SipResponse, src: std::net::SocketAddr) {
         let cseq = resp.cseq();
         self.metrics.record_message(Direction::Inbound, MessageResult::Forwarded);
         self.metrics.record_response(cseq.method().as_str(), resp.status());
@@ -156,25 +158,19 @@ impl ProxyCore {
         }
 
         // ── Relayed non-2xx INVITE final: remember the ACK-relay hop ────────
-        // This transaction-less proxy (ADR-0022 X4) does NOT synthesize the
-        // §17.1.1.3 hop-by-hop ACK here — a synthesized hop ACK quenches the
-        // downstream UAS's Timer G (the only retransmitter in the system)
-        // while the relay above stays exactly-once: lose that one relayed
-        // copy and the caller never sees the final at all, wedging the reject
-        // until Timer B / the 32 s safety timer. Reliability is END-TO-END
-        // instead: the UAS retransmits the final through this stateless relay
-        // until the upstream's own ACK arrives, and the request path relays
-        // that ACK downstream on the INVITE's remembered hop (same target,
-        // same outbound branch) so the UAS's server transaction matches it.
+        // This transaction-less proxy (ADR-0022 X4) synthesizes no §17.1.1.3
+        // hop ACK: the UAS retransmits the final through this relay until the
+        // upstream's own ACK arrives, which the request path relays on the
+        // memo written here.
         //
-        // The marker written here is the routing memo for that relay: it says
-        // "a non-2xx final for this INVITE was relayed on this hop" and
-        // carries the hop to repeat. Gating the ACK-relay on it (rather than
-        // on the INVITE entry alone) keeps a takeover worker's 2xx ACK safe
-        // when its reset `IdGen` re-mints a branch aliasing the dead
-        // primary's INVITE (see `core/request`). Short TTL: the upstream
-        // ACKs within its final-retransmit window (a re-sent final refreshes
-        // the marker).
+        // The memo carries the hop to repeat: the node the final ARRIVED from
+        // — after a failover that is the survivor, not the INVITE's target —
+        // and the INVITE's outbound branch, which the sender's server
+        // transaction is keyed on. Gating the relay on the memo (not the
+        // INVITE entry alone) keeps a takeover worker's 2xx ACK safe when its
+        // reset `IdGen` re-mints a branch aliasing the dead primary's INVITE
+        // (see `core/request`). Short TTL: the upstream ACKs within its
+        // final-retransmit window (a re-sent final refreshes the memo).
         if (300..700).contains(&resp.status()) && cseq.method() == Method::Invite {
             // The response echoes the request's From (tag included), so this
             // re-builds exactly the key the INVITE was remembered under.
@@ -190,9 +186,10 @@ impl ProxyCore {
                         cseq.seq(),
                     ),
                     crate::cancel_lru::CancelEntry {
-                        target: found.target.clone(),
+                        target: ProxyAddr::from(src),
                         branch: found.branch.clone(),
                         upstream_branch,
+                        stickiness: None,
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );
@@ -366,7 +363,7 @@ Content-Length: 0\r\n\r\n"
     #[tokio::test]
     async fn response_to_a_dead_worker_fails_over_to_the_backup() {
         let (core, ep) = core_with(WorkerHealth::Dead);
-        core.handle_response(keepalive_200()).await;
+        core.handle_response(keepalive_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
         let sent = ep.sent.lock().unwrap();
         assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
@@ -378,7 +375,7 @@ Content-Length: 0\r\n\r\n"
     #[tokio::test]
     async fn response_to_an_alive_worker_keeps_the_received_rport_target() {
         let (core, ep) = core_with(WorkerHealth::Alive);
-        core.handle_response(keepalive_200()).await;
+        core.handle_response(keepalive_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
         let sent = ep.sent.lock().unwrap();
         assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
@@ -434,7 +431,7 @@ Content-Length: 0\r\n\r\n"
             panic!("expected response")
         };
         let outbound_forwarded_before = metrics.messages_total();
-        core.handle_response(resp).await;
+        core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
         // One inbound record, one outbound DROPPED record — never a forward.
         assert_eq!(metrics.messages_total(), outbound_forwarded_before + 2);
         let txt = metrics.prometheus_text();
@@ -480,8 +477,8 @@ Content-Length: 0\r\n\r\n"
     // retransmitter in the system) while the upstream relay stays
     // exactly-once, so one lost relayed copy wedged the caller until Timer B
     // / the 32 s safety timer. Reliability is end-to-end instead — the
-    // upstream's own ACK is relayed downstream on the INVITE's remembered
-    // hop: same target, same outbound Via branch (so the UAS's server
+    // upstream's own ACK is relayed downstream to the node the final arrived
+    // from, on the INVITE's outbound Via branch (so the UAS's server
     // transaction matches it, §17.2.3), the caller's message otherwise
     // verbatim (R-URI included — the downstream demux keys on it).
     #[tokio::test]
@@ -539,7 +536,7 @@ Content-Length: 0\r\n\r\n"
         else {
             panic!("expected response")
         };
-        core.handle_response(resp).await;
+        core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
         {
             let sent = ep.sent.lock().unwrap();
             assert_eq!(sent.len(), 1, "the 486 relay must be the ONLY send — no synthesized ACK");
@@ -570,7 +567,7 @@ Content-Length: 0\r\n\r\n"
         let sent = ep.sent.lock().unwrap();
         assert_eq!(sent.len(), 1, "the upstream's ACK must be relayed, not absorbed");
         let (dst, bytes) = &sent[0];
-        assert_eq!(*dst, format!("{W1}:5060").parse::<std::net::SocketAddr>().unwrap(), "the ACK must repeat the INVITE's forward");
+        assert_eq!(*dst, format!("{W1}:5060").parse::<std::net::SocketAddr>().unwrap(), "the ACK goes to the node the final came from (the INVITE's target here)");
         let ack = String::from_utf8_lossy(bytes).to_string();
         assert_eq!(
             ack.lines().next().unwrap(),

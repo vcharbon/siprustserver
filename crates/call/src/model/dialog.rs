@@ -1,10 +1,11 @@
 //! RFC 3261 §12 dialog state plus the B2BUA-only dialog extensions
-//! ([`B2buaDialogExt`]) — pending transparent relays, cached SDP, the re-INVITE
-//! 2xx retransmit obligation. The enclosing per-leg record is
-//! [`Leg`](crate::model::Leg).
+//! ([`B2buaDialogExt`]) — pending transparent relays, cached SDP, the retained
+//! emissions the dialog's retransmission obligations repeat. The enclosing
+//! per-leg record is [`Leg`](crate::model::Leg).
 
 use serde::{Deserialize, Serialize};
 
+use super::emission::RetainedEmission;
 use super::invite_txn::InviteTxnHandle;
 
 /// Direction of an original relayed request.
@@ -39,6 +40,16 @@ pub struct PendingRequest {
     /// (target answered before the CANCEL landed) is ACKed and absorbed.
     #[serde(default)]
     pub cancelled: bool,
+    /// The originator's request offered reliable provisionals — `100rel` in its
+    /// own `Require` or `Supported` (RFC 3262 §3). The request this stack built
+    /// toward the target may offer it where the originator did not (a declared
+    /// advertisement), so the originator's licence is recorded here: a
+    /// reliable provisional relays reliably only under it. `false` when
+    /// hydrated from a peer that recorded none: an unwitnessed offer is no
+    /// offer, so the provisional relays unreliably and this stack acknowledges
+    /// the responder itself. Trailing under the positional codec.
+    #[serde(default)]
+    pub offered_100rel: bool,
 }
 
 /// RFC 3261 §12 dialog state, stack-owned. `localTag` is the B2BUA's tag on this
@@ -59,31 +70,25 @@ pub struct StackDialog {
     pub route_set: Vec<String>,
 }
 
-/// The a-leg re-INVITE **2xx** the B2BUA relayed to the originator and is still
-/// awaiting the originator's ACK for (RFC 3261 §13.3.1.4, in-dialog). Cached at
-/// relay time on the a-leg dialog so the re-INVITE un-ACKed-2xx watchdog can
-/// re-send a **byte-faithful** copy raw until the ACK arrives — the re-INVITE
-/// analogue of the initial-INVITE retransmit, which rebuilds from the never-
-/// mutated `a_leg_invite` + `cached_sdp`. A re-INVITE 2xx *cannot* be rebuilt
-/// from the initial snapshot (wrong CSeq, different answer SDP), so the exact
-/// serialized outbound bytes are stored instead. Cleared when the a-leg ACK
-/// (matching [`cseq`](Self::cseq)) arrives; `None` when no a-leg re-INVITE
-/// awaits its ACK. Replicated like `cached_sdp`, so a takeover node keeps the
-/// retransmit obligation.
+/// A 2xx to an INVITE this side sent and still awaits the ACK for (RFC 3261
+/// §13.3.1.4), held on the dialog it was sent on: the retained emission its
+/// ladder repeats, with the two wire facts the discharging ACK carries — so
+/// the ACK is matched on what the 2xx said, not on what the dialog records.
+/// While set, the dialog's INVITE server transaction is in the RFC 6026
+/// *Accepted* state, so a new INVITE on either face is glare (§14.1) and gets
+/// 491. The ladder is always armed (ADR-0029 X5), so the marker lives exactly
+/// as long as its give-up: the discharging ACK, the give-up, or the call's end
+/// clears it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingReinvite2xx {
-    /// The exact serialized 2xx response emitted to the a-leg (byte-faithful
-    /// retransmit — same To-tag, SDP, Contact, Allow/Supported, CSeq).
-    #[serde(with = "serde_bytes")]
-    pub response: Vec<u8>,
-    /// Wire destination of the retransmit (the a-leg's address — the 2xx's
-    /// top-Via sent-by, computed once at relay time).
-    pub dest_host: String,
-    pub dest_port: u16,
-    /// CSeq the originator's ACK will carry (the a-leg re-INVITE's CSeq). The
-    /// watchdog is quiesced only by an ACK echoing this number, so a
-    /// retransmitted *initial* ACK cannot prematurely cancel it.
+pub struct Unacked2xx {
+    /// The To-tag the 2xx carried — the discharging ACK's To-tag.
+    pub dialog_tag: String,
+    /// The CSeq of the INVITE the 2xx answers — the discharging ACK's CSeq.
+    /// Only an ACK echoing this number discharges the obligation, so a
+    /// retransmitted *initial* ACK cannot discharge a re-INVITE's.
     pub cseq: i64,
+    /// The 2xx as it left, on the §13.3.1.4 ladder ([`super::Repeat::Paced`]).
+    pub emission: RetainedEmission,
 }
 
 /// B2BUA-only dialog extensions that never surface to the SIP stack.
@@ -100,19 +105,39 @@ pub struct B2buaDialogExt {
     /// SDP cached from a reliable 18x / UPDATE under the `fake-prack` strategy.
     #[serde(with = "serde_bytes")]
     pub cached_sdp: Option<Vec<u8>>,
-    /// RFC 3261 §13.3.1.4 (in-dialog) — the a-leg re-INVITE 2xx awaiting the
-    /// originator's ACK, on the a-leg dialog only. `None` normally; see
-    /// [`PendingReinvite2xx`]. Trailing field with `#[serde(default)]` so it is
-    /// decode-tolerant of a body encoded before it existed.
+    /// RFC 3261 §13.3.1.4 (in-dialog) — a re-INVITE 2xx this side sent that
+    /// still awaits the originator's ACK, on the originator's own dialog.
+    /// `None` normally; see [`Unacked2xx`].
     #[serde(default)]
-    pub pending_reinvite_2xx: Option<PendingReinvite2xx>,
-    /// The `(name, value)` advertisement lines the initial-INVITE 2xx carried to
-    /// the originator, cached beside `cached_sdp` at answer time. RFC 3261
-    /// §13.3.1.4 makes a retransmit a copy of the response it retransmits, and
-    /// the set resolved then — the callee's own relayed one, or a firing rule's
-    /// — is not derivable from the a-leg snapshot. Empty until answered.
+    pub pending_reinvite_2xx: Option<Unacked2xx>,
+    /// CSeq (in the acknowledging peer's own sequence space) of the ACK this
+    /// dialog's 2xx still awaits from that peer (RFC 3261 §13.2.2.4): armed when
+    /// the 2xx is taken, discharged by the ACK actually leaving — whether this
+    /// stack composed it on receipt or relayed the peer's. `None` = nothing owed,
+    /// so a further peer ACK is absorbed rather than put on a quiesced
+    /// transaction; a retransmitted 2xx re-ACKs via `ack_branch` without
+    /// consulting this.
     #[serde(default)]
-    pub answered_advert: Vec<(String, String)>,
+    pub awaited_ack_cseq: Option<i64>,
+    /// RFC 3261 §13.3.1.4 — the initial-INVITE 2xx this call answered the
+    /// caller with, as the exact datagram the retransmit ladder repeats
+    /// ([`Unacked2xx`]; a-leg dialog only). Captured at the one seam every
+    /// a-facing answer is emitted through. `None` until answered, and again
+    /// once the caller's ACK discharges it — retained bytes are never sent
+    /// after that, and a later re-answer through the seam retains its own
+    /// datagram afresh.
+    #[serde(default)]
+    pub answered_2xx: Option<Unacked2xx>,
+    /// RFC 3261 §13.2.2.4 — the ACK emitted on this dialog's current INVITE
+    /// transaction, as the exact datagram a retransmitted 2xx re-sends
+    /// (`re-ack-retransmitted-2xx`; [`RetainedEmission`] repeated on trigger).
+    /// §13.2.2.4 hands *the* ACK back to the transport for every copy of the
+    /// 2xx: on a delayed offer it carries the answer only that ACK supplied
+    /// (RFC 3264 §4). `None` until that ACK leaves, and again once a new INVITE
+    /// transaction resets it alongside `ack_branch` — the bytes belong to
+    /// exactly one INVITE's ACK.
+    #[serde(default)]
+    pub emitted_ack: Option<RetainedEmission>,
 }
 
 /// Composite Dialog = stack §12 state + B2BUA-only extensions.

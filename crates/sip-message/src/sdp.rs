@@ -125,6 +125,138 @@ pub fn validate_sdp_body(body: &[u8]) -> Result<(), SdpValidationError> {
     Ok(())
 }
 
+/// Validate a body against the RFC 3264 offer/answer MODEL on top of the
+/// RFC 4566 §5 grammar [`validate_sdp_body`] enforces. Returns `Ok(())`, or the
+/// FIRST concrete failure — the layers, in the order they are asked:
+///
+///   - exactly one session description (one `v=` line), and it is `v=0`;
+///   - the §5 grammar itself (`o=`/`s=`/`t=` presence, six-token `o=`, m-line
+///     arity);
+///   - `o=` sess-id and sess-version are non-negative integers, read as opaque
+///     digit strings — RFC 4566 §5.2 bounds neither below 64 bits, and the
+///     recommended NTP timestamp is exactly that wide;
+///   - every `m=` block has a `c=` — its own or the session's — and a
+///     non-negative-integer port;
+///   - every `a=ptime:N` states `N > 0`.
+///
+/// An EMPTY body passes: it carries no description to reject. Content-Type is
+/// the caller's responsibility — invoke only for `application/sdp`.
+pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError> {
+    if body.is_empty() {
+        return Ok(());
+    }
+    let text = String::from_utf8_lossy(body).into_owned();
+    let lines = split_lines(&text);
+
+    // Exactly one session description (one `v=` line), and it must be `v=0`.
+    let v_lines: Vec<&&str> = lines.iter().filter(|l| l.starts_with("v=")).collect();
+    if v_lines.is_empty() {
+        return Err(SdpValidationError::new("missing v= line"));
+    }
+    if v_lines.len() > 1 {
+        return Err(SdpValidationError::new(format!(
+            "{} session descriptions (v= lines) — exactly one required",
+            v_lines.len()
+        )));
+    }
+    if *v_lines[0] != "v=0" {
+        return Err(SdpValidationError::new(format!(
+            "unexpected v= value '{}' (expected v=0)",
+            v_lines[0]
+        )));
+    }
+
+    validate_sdp_body(body)?;
+
+    // o= sess-id / sess-version bounds. The six-token o= line is there:
+    // `validate_sdp_body` has just confirmed it.
+    let o_line = lines.iter().find(|l| l.starts_with("o=")).unwrap();
+    let o_tokens = ws_tokens(&o_line[2..]);
+    let fields = [("sess-id", o_tokens[1]), ("sess-version", o_tokens[2])];
+    for (label, token) in fields {
+        if token.is_empty() || !token.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(SdpValidationError::new(format!(
+                "o= {label} '{token}' is not a non-negative integer"
+            )));
+        }
+    }
+
+    // Walk m= blocks: a session-level c= (before the first m=) satisfies the
+    // c=-presence requirement for every block; otherwise each block needs its
+    // own c= before the next m= boundary. Each m= line needs an integer port.
+    let mut session_level_c = false;
+    let mut in_media = false;
+    let mut current_media_has_c = false;
+    let mut current_media_name = String::new();
+    let missing_c = |name: &str| {
+        SdpValidationError::new(format!("m={name} block has no c= line and no session-level c="))
+    };
+    for line in &lines {
+        if let Some(m_val) = line.strip_prefix("m=") {
+            if in_media && !current_media_has_c && !session_level_c {
+                return Err(missing_c(&current_media_name));
+            }
+            let m_tokens = ws_tokens(m_val);
+            if m_tokens.len() < 3 {
+                return Err(SdpValidationError::new(format!(
+                    "m= line '{line}' has fewer than 3 tokens (expected: media port proto fmt...)"
+                )));
+            }
+            let port_tok = m_tokens[1];
+            if port_tok.is_empty() || !port_tok.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(SdpValidationError::new(format!(
+                    "m= line port '{port_tok}' is not a non-negative integer"
+                )));
+            }
+            in_media = true;
+            current_media_has_c = false;
+            current_media_name = m_tokens[0].to_string();
+            continue;
+        }
+        if line.starts_with("c=") {
+            if in_media {
+                current_media_has_c = true;
+            } else {
+                session_level_c = true;
+            }
+        }
+        if let Some(raw) = line.strip_prefix("a=ptime:") {
+            // Digit string with a non-zero digit — positive without an integer
+            // width the value would have to fit.
+            let raw = raw.trim();
+            let positive_integer =
+                !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) && raw.bytes().any(|b| b != b'0');
+            if !positive_integer {
+                return Err(SdpValidationError::new(format!("a=ptime:{raw} is not > 0")));
+            }
+        }
+    }
+    if in_media && !current_media_has_c && !session_level_c {
+        return Err(missing_c(&current_media_name));
+    }
+    Ok(())
+}
+
+/// True iff a `c=` line VALUE (no leading `c=`) names the unspecified address —
+/// `IN IP4 0.0.0.0` or `IN IP6 ::`, the legacy hold idiom of RFC 3264 §8.4. A
+/// trailing `/ttl` or `/count` on the address still names it.
+pub fn c_line_is_unspecified(c_value: &str) -> bool {
+    let toks = ws_tokens(c_value);
+    if toks.len() < 3 || !toks[0].eq_ignore_ascii_case("IN") {
+        return false;
+    }
+    let addr = toks[2].split('/').next().unwrap_or_default();
+    (toks[1].eq_ignore_ascii_case("IP4") && addr == "0.0.0.0")
+        || (toks[1].eq_ignore_ascii_case("IP6") && ip6_is_unspecified(addr))
+}
+
+/// True iff `addr` spells the IPv6 unspecified address. RFC 4291 §2.2 compresses
+/// any run of zero groups to `::`, so `::` and `0:0:0:0:0:0:0:0` are one address:
+/// every group reads zero and nothing else is written.
+fn ip6_is_unspecified(addr: &str) -> bool {
+    addr.contains(':') && addr.bytes().all(|b| b == b':' || b == b'0')
+}
+
 // ===========================================================================
 // Codec profile extraction + held SDP construction (SdpUtils.ts)
 // ===========================================================================
@@ -577,5 +709,125 @@ pub fn sdp_session_id(now_ms: i64) -> i64 {
         sec
     } else {
         1
+    }
+}
+
+// ===========================================================================
+// Replay-owned field rewrite — connection addresses and media ports
+// ===========================================================================
+
+/// Rewrite an SDP body's replay-owned fields — connection addresses to `addr`
+/// where one is given, media ports to what `port_of` books — keeping every
+/// other byte of the body, line endings included, exactly as stored.
+///
+/// `port_of` is asked once per ACTIVE `m=` line, in body order, with the line's
+/// port-pair count (RFC 4566 §5.14); it returns the replacement port, or `None`
+/// to leave the line as stored. A port-0 stream is one the description rejected
+/// or disabled (RFC 3264 §5.1): it stays zero and is never offered for booking,
+/// so a caller indexing streams by booking skips it. A line the grammar does
+/// not fit rides verbatim rather than being guessed at.
+pub fn rewrite_connection_and_ports(
+    sdp: &str,
+    addr: Option<&str>,
+    mut port_of: impl FnMut(u16) -> Option<u16>,
+) -> String {
+    let mut out = String::with_capacity(sdp.len());
+    for line in sdp.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if let (Some(addr), true) = (addr, trimmed.starts_with("c=IN IP4 ")) {
+            out.push_str("c=IN IP4 ");
+            out.push_str(addr);
+        } else if trimmed.starts_with("m=") {
+            out.push_str(&rewrite_media_line(trimmed, &mut port_of));
+        } else {
+            out.push_str(trimmed);
+        }
+        if line.ends_with("\r\n") {
+            out.push_str("\r\n");
+        } else if line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// One `m=<media> <port>[/<count>] <proto> <fmt>…` line with the booked port in
+/// place of the stored one (RFC 4566 §5.14). Everything else on the line — the
+/// media kind, the port-pair count, the transport, the whole format list —
+/// rides byte-for-byte.
+fn rewrite_media_line(line: &str, port_of: &mut impl FnMut(u16) -> Option<u16>) -> String {
+    let Some((kind, tail)) = line["m=".len()..].split_once(' ') else { return line.to_string() };
+    let (port_field, rest) = match tail.split_once(' ') {
+        Some((port, rest)) => (port, Some(rest)),
+        None => (tail, None),
+    };
+    let (port, pair_count) = match port_field.split_once('/') {
+        Some((port, count)) => (port, Some(count)),
+        None => (port_field, None),
+    };
+    let Ok(port) = port.parse::<u16>() else { return line.to_string() };
+    if port == 0 {
+        return line.to_string();
+    }
+    let pairs = pair_count.and_then(|count| count.parse::<u16>().ok()).unwrap_or(1);
+    let Some(booked) = port_of(pairs) else { return line.to_string() };
+    let mut out = format!("m={kind} {booked}");
+    if let Some(count) = pair_count {
+        out.push('/');
+        out.push_str(count);
+    }
+    if let Some(rest) = rest {
+        out.push(' ');
+        out.push_str(rest);
+    }
+    out
+}
+
+#[cfg(test)]
+mod rewrite_tests {
+    use super::rewrite_connection_and_ports;
+
+    /// The grammar contract: only `c=IN IP4` addresses and active `m=` ports
+    /// move; the `o=` line's address, attributes, pair counts, format lists and
+    /// the mixed line endings all ride byte-for-byte.
+    #[test]
+    fn only_the_named_fields_move_and_every_other_byte_rides() {
+        let sdp = "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\nc=IN IP4 1.2.3.4\r\n\
+                   m=audio 5000/2 RTP/AVP 8 101 0\r\na=rtpmap:101 telephone-event/8000\n\
+                   m=image 5008 udptl t38\r\n";
+        let mut booked = vec![];
+        let out = rewrite_connection_and_ports(sdp, Some("127.0.0.9"), |pairs| {
+            booked.push(pairs);
+            Some(41000 + 10 * booked.len() as u16)
+        });
+        assert_eq!(
+            out,
+            "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\nc=IN IP4 127.0.0.9\r\n\
+             m=audio 41010/2 RTP/AVP 8 101 0\r\na=rtpmap:101 telephone-event/8000\n\
+             m=image 41020 udptl t38\r\n"
+        );
+        assert_eq!(booked, [2, 1], "each active line offers its own pair count");
+    }
+
+    /// A port-0 stream is never offered for booking (RFC 3264 §5.1), a `None`
+    /// booking leaves its line as stored, and no address means no `c=` rewrite.
+    #[test]
+    fn rejected_streams_and_declined_bookings_ride_verbatim() {
+        let sdp = "c=IN IP4 1.2.3.4\r\nm=audio 0 RTP/AVP 8\r\nm=image 6000 udptl t38\r\n";
+        let mut offers = 0;
+        let out = rewrite_connection_and_ports(sdp, None, |_| {
+            offers += 1;
+            None
+        });
+        assert_eq!(out, sdp);
+        assert_eq!(offers, 1, "only the live stream was offered");
+    }
+
+    /// A line the m= grammar does not fit is not guessed at.
+    #[test]
+    fn an_unparsable_media_line_rides_verbatim() {
+        let sdp = "m=audio\r\nm=audio five RTP/AVP 0\r\n";
+        let out = rewrite_connection_and_ports(sdp, None, |_| Some(41000));
+        assert_eq!(out, sdp);
     }
 }

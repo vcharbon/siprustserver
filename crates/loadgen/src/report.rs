@@ -744,6 +744,7 @@ mod tests {
             detail: detail.to_string(),
             advisory: false,
             offending: None,
+            charged: None,
         }])
     }
 
@@ -809,7 +810,7 @@ mod tests {
         let mk = |d: &str| {
             Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 1.0 })
         };
-        let unacked = rfc_fail("rfc3261.unackedInviteNon2xxFinal", "reject never ACKed");
+        let unacked = rfc_fail("unacked-invite-non-2xx-final", "reject never ACKed");
         let cseq = rfc_fail("rfc3261.cseq", "CSeq went backwards");
         let (case_a, case_b) = (unacked.case(None), cseq.case(None));
         assert_ne!(case_a, case_b, "different rules → different cases");

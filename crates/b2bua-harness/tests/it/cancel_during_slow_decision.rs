@@ -20,7 +20,7 @@
 //!     in-flight INVITE body and so queues strictly BEHIND it (`PerCallDispatcher`
 //!     runs one body at a time), and the run loop marks the setup as CANCELed.
 //!     When the slow decision finally returns, the decision-application seam
-//!     reads the mark and DROPS the result whole (upstreamneed-069) — no b-leg is
+//!     reads the mark and DROPS the result whole — no b-leg is
 //!     ever built toward a callee whose caller is gone — then the queued
 //!     `handle-cancel` rule runs and drives the call to Terminated. FIFO
 //!     ordering is what makes this deterministic — the cancel can never be

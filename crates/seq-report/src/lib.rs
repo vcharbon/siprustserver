@@ -80,8 +80,8 @@ pub struct Lane {
     /// What the lane represents (styling only).
     pub kind: LaneKind,
     /// Shared-resource header this lane belongs under (e.g. the `ip:port` of a
-    /// shared mux socket whose LOGICAL endpoints each get their own sub-lane —
-    /// upstreamneed-036 ask C). Consecutive lanes with the same `group` render
+    /// shared mux socket whose LOGICAL endpoints each get their own sub-lane).
+    /// Consecutive lanes with the same `group` render
     /// one bracketing header above their individual captions. `None` (the
     /// default, and every pre-existing doc) renders exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -180,6 +180,18 @@ pub struct Anomaly {
     /// per-row badges); empty ⇒ the finding renders unlinked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub row_seqs: Vec<u64>,
+    /// Whether the finding came from the RFC-rule audit registry, as opposed to
+    /// a structural layer-close finding or a harness note. The projector sets
+    /// it — `check` is an opaque token here, so this crate recognizes a rule by
+    /// the tag alone. Rule-sourced findings are the only class [`normalize`]
+    /// keeps.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub rule_sourced: bool,
+}
+
+/// `skip_serializing_if` for a `bool` that defaults to false.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Anomaly {
@@ -614,6 +626,7 @@ mod tests {
             endpoint: None,
             advisory: Some(false),
             row_seqs: Vec::new(),
+            rule_sourced: true,
         });
         let html = render_html(&doc);
         assert!(html.contains("FAIL"));
@@ -632,13 +645,14 @@ mod tests {
         let mut doc = mixed_doc();
         doc.passed = false;
         doc.anomalies.push(Anomaly {
-            check: "rfc3262.rseqMonotonic".into(),
+            check: "non-contiguous-rseq".into(),
             detail: "RSeq gap".into(),
             lane: Some("b1".into()),
             endpoint: None,
             advisory: Some(false),
             // The INVITE row: seq 1 → diagram ordinal 0.
             row_seqs: vec![1],
+            rule_sourced: true,
         });
         let html = render_html(&doc);
 
@@ -656,7 +670,7 @@ mod tests {
         let pay_end = pay + html[pay..].find("</pre>").unwrap();
         assert!(
             html[pay..pay_end].contains("payload-anoms")
-                && html[pay..pay_end].contains("rfc3262.rseqMonotonic"),
+                && html[pay..pay_end].contains("non-contiguous-rseq"),
             "payload carries the anomaly context: {}",
             &html[pay..pay_end]
         );
@@ -680,6 +694,7 @@ mod tests {
             endpoint: None,
             advisory: Some(true),
             row_seqs: Vec::new(),
+            rule_sourced: true,
         });
         doc.anomalies.push(Anomaly {
             check: "rfc3261.cseqInDialogOrder".into(),
@@ -689,6 +704,7 @@ mod tests {
             advisory: Some(false),
             // seq 2 is the lifecycle band — not a message row, so no link.
             row_seqs: vec![2],
+            rule_sourced: true,
         });
         let html = render_html(&doc);
         let gating = html.find("rfc3261.cseqInDialogOrder").unwrap();

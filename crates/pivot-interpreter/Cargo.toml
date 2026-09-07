@@ -1,0 +1,42 @@
+[package]
+name = "pivot-interpreter"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The pivot v3 scenario interpreter: compiles a scenario document to an immutable plan, runs a plan instance over the scenario harness with per-leg verbatim recording, and writes the run bundle (pivot.json, run-config.json, recording/*.jsonl, verdict.json, timing.json). Deliberately dumb: it holds no callflow knowledge — every corner case is document data."
+
+[lints]
+workspace = true
+
+[dependencies]
+pivot-schema = { path = "../pivot-schema" }
+# The wire layer: message rendering, parsing and header identity live in
+# `sip-message` and nowhere else.
+sip-message = { path = "../sip-message" }
+# The one schedule every ladder rides (ADR-0029): the audit paces a scripted
+# peer's ladder and counts the SUT's on it. `authored` admits the capture's own
+# measured gaps and the no-rung schedule — forms the SUT crates never enable.
+sip-retransmit = { path = "../sip-retransmit", features = ["authored"] }
+# The peer stack the interpreter drives: agents, dialogs, the §17.2 receive view
+# that absorbs a byte-identical retransmission before any expect sees it.
+scenario-harness = { path = "../scenario-harness" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures = "0.3"
+regex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+# The system under test the interpreter's integration ladder replays against.
+b2bua-harness = { path = "../b2bua-harness" }
+b2bua = { path = "../b2bua" }
+# The demo system's own feature vocabulary: a ladder rung selects the 18x
+# strategy the document it replays was written against.
+call = { path = "../call" }
+# The admission control a limiter document replays against: a real limiter
+# server on the simulated HTTP fabric, reached by the system's own client.
+call-limiter = { path = "../call-limiter" }
+http-net = { path = "../http-net" }
+sip-clock = { path = "../sip-clock" }

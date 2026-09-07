@@ -42,7 +42,7 @@ data:
     # FAULT if the external iface disappears (chaos cut_external_plane / carrier
     # loss) so the peer takes both VIPs together.
     #
-    # NO exec-based vrrp_script (upstreamneed-040 absorbed): the 038 chk_proxy
+    # NO exec-based vrrp_script (absorbed): the 038 chk_proxy
     # pgrep track_script latched a startup-window execve failure (exit 127) and
     # pinned BOTH nodes in FAULT — dead VIP. Interface tracking is native
     # netlink (nothing to exec, nothing to latch); the functional response-path
@@ -59,7 +59,7 @@ data:
         priority 100
         advert_int 0.5
         nopreempt
-        # GARP hardening (upstreamneed-038): on a FRESHLY-created docker bridge
+        # GARP hardening: on a FRESHLY-created docker bridge
         # the default single gratuitous-ARP burst at election is easily lost
         # while veth/FDB state is still settling, and it was never re-asserted —
         # neighbour ARP caches kept a dead VIP->MAC binding indefinitely.
@@ -116,7 +116,7 @@ spec:
       # are the only dual-homed components; `run.sh up` connects them to the
       # sipext bridge). The two pods must land on different edge nodes
       # (anti-affinity below). shareProcessNamespace REMOVED with chk_proxy
-      # (upstreamneed-040) — nothing pgreps across containers anymore.
+      # — nothing pgreps across containers anymore.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       affinity:
@@ -182,14 +182,14 @@ spec:
             # EndpointSlice informer over the headless worker Service.
             - { name: PROXY_WORKER_SERVICE, value: "b2bua-worker" }
             - { name: PROXY_WORKER_PORT,    value: "5060" }
-            # B-leg next-hop DNS warm cache (upstreamneed-037): the proxy resolves
+            # B-leg next-hop DNS warm cache: the proxy resolves
             # non-IP R-URI hosts off the forwarding path with a TTL cache +
             # pre-expiry refresh, and qualifies dotted names absolutely to dodge
             # the kube ndots:5 search-expansion tax. Overlays whose b-leg targets
             # are known Service FQDNs should pin them warm at startup so even the
             # FIRST call after a fresh deploy / CoreDNS restart forwards
             # warm-equivalent, e.g.:
-            # - { name: PROXY_RESOLVER_PREWARM, value: "upstream-loadgen.sip-test.svc.cluster.local:6001,sipp-uas.sip-test.svc.cluster.local:5060" }
+            # - { name: PROXY_RESOLVER_PREWARM, value: "downstream-loadgen.sip-test.svc.cluster.local:6001,sipp-uas.sip-test.svc.cluster.local:5060" }
             # The binary uses jemalloc (#[global_allocator], see sip-proxy-runner
             # src/main.rs); aggressive decay returns freed pages to the OS quickly.
             # Confirm it parsed via the jemalloc_opt_*_decay_ms gauges on /metrics
@@ -212,7 +212,7 @@ spec:
           # Readiness gates on >=1 routable (Alive) worker (ADR-0012 D4). Liveness
           # is separate (process up) so the warm backup is never killed for having
           # no traffic. kubelet probes node-IP:9090 (hostNetwork).
-          # NOTE (upstreamneed-038): /readyz deliberately does NOT gate on "this pod
+          # NOTE: /readyz deliberately does NOT gate on "this pod
           # is VRRP master / the VIP serves" — the warm backup must stay Ready or
           # the Deployment rollout could never complete. A same-node self-probe
           # also cannot observe the actual failure mode (stale VIP ARP on OTHER

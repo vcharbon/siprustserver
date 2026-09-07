@@ -17,7 +17,7 @@ use sip_message::SipResponse;
 use super::endpoint::{SUBFLOW_EARLY, SUBFLOW_REFER, SUBFLOW_RENEG};
 use super::goals::GoalStep;
 use super::ledger::{ObligationKey, ObligationKind};
-use super::runner::ActorState;
+use super::runner::{ActorState, HeldAck};
 use super::state::{Observation, ResponseFact, SubflowState};
 use crate::agent::InviteResponseFate;
 use crate::{ClientInvite, StepError};
@@ -156,6 +156,26 @@ pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, 
 
 pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<(), StepError> {
     let now = Instant::now();
+    // A 2xx RETRANSMITTED while this leg holds its ACK (RFC 3261 §13.3.1.4: the
+    // answerer re-passes its 2xx to the transport until the ACK arrives).
+    // Absorbed ABOVE the response log — the held ACK is the one answer
+    // (idempotent, §13.2.2.4), and a duplicate fact in the log would be consumed
+    // by a later expectation on the same transaction. Recorded, never silent.
+    if (200..300).contains(&resp.status())
+        && resp.cseq().method() == "INVITE"
+        && st.held_acks.iter().any(|h| h.cseq == resp.cseq().seq())
+    {
+        st.obs.record(
+            Observation::HeldFinalRetransmitted {
+                leg: st.role,
+                status: resp.status(),
+                cseq_method: resp.cseq().method().as_str().to_string(),
+                cseq: resp.cseq().seq(),
+            },
+            now,
+        );
+        return Ok(());
+    }
     record_response_fact(st, &resp, now);
     // A response to our still-pending caller INVITE drives the establish flow —
     // but ONLY a response whose CSeq method is INVITE. A PRACK's 200 (or any
@@ -218,18 +238,21 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
                 txn.ack_non_2xx(&resp).await?;
             }
             st.sent_reinvites.remove(&resp.cseq().seq());
+            st.reinvite_ordinals.remove(&resp.cseq().seq());
             st.obs.record(
                 Observation::ResponseObserved {
                     key: ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq().seq()),
                 },
                 now,
             );
-            if resp.status() == 491 {
+            if resp.status() == 491 && !st.automatics.suppress_491_retry {
                 // §14.1: the owner of the Call-ID (the dialog's original UAC —
                 // the ORIGINATING actor, keyed on its first goal) waits a random
                 // T in [2.1, 4] s; a non-owner in [0, 2] s. Fixed in-range
                 // values keep the paused-clock test deterministic while
                 // preserving the owner>non-owner ordering that breaks the glare.
+                // A replay plan suppresses the retry: the script carries the
+                // captured one (see [`Automatics::suppress_491_retry`]).
                 let dwell = if st.originates {
                     Duration::from_millis(2500)
                 } else {
@@ -288,36 +311,30 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
         // lost-datagram interleaving could strand (that stranding is the bug this
         // fixes — mirrors the mux's `(Call-ID, CSeq)` re-ACK). The body follows
         // the round's offer/answer state ([`delayed_offer_answer`]).
-        // Every such 2xx the reactor is handed is ACKed; closing the `ReInvite`
-        // obligation, advancing the `reneg` teardown barrier, and stamping the
-        // feed happen ONCE, keyed on the CSeq of a re-INVITE THIS leg originated.
+        // Every such 2xx the reactor is handed is ACKed (or scheduled, under a
+        // declared hold); the completion bookkeeping happens ONCE, keyed on the
+        // CSeq of a re-INVITE THIS leg originated.
         if (200..300).contains(&resp.status()) && st.dialogs.confirmed.is_some() {
+            let cseq = resp.cseq().seq();
             let default = delayed_offer_answer(st, &resp);
-            let sdp = resolve_ack_body(
-                &mut st.reinvite_ack_bodies,
-                st.goals.next_step(),
-                default,
-                resp.cseq().seq(),
-            );
+            let sdp =
+                resolve_ack_body(&mut st.reinvite_ack_bodies, st.goals.next_step(), default, cseq);
+            // A declared delayed automatic scoped to THIS transaction holds the
+            // ACK: schedule it on the reactor's own arm — the goal cursor keeps
+            // running, so the actor's traffic DURING the hold (the deviation's
+            // point) is not serialized behind it.
+            if st.sent_reinvites.contains(&cseq) {
+                if let Some(delay) =
+                    st.reinvite_ordinals.get(&cseq).copied().and_then(|o| st.ack_hold_for(o))
+                {
+                    st.held_acks.push(HeldAck { at: Instant::now() + delay, cseq, sdp });
+                    return Ok(());
+                }
+            }
             if let Some(dialog) = st.dialogs.confirmed.as_mut() {
-                dialog.ack_for(resp.cseq().seq(), sdp.as_deref()).await;
+                dialog.ack_for(cseq, sdp.as_deref()).await;
             }
-            if st.sent_reinvites.remove(&resp.cseq().seq()) {
-                st.sent_reinvite_txns.remove(&resp.cseq().seq());
-                let key = ObligationKey::new(st.role, ObligationKind::ReInvite, resp.cseq().seq());
-                st.obs.record(Observation::ResponseObserved { key }, now);
-                st.obs.record(
-                    Observation::Subflow { leg: st.role, name: SUBFLOW_RENEG, to: SubflowState::Confirmed },
-                    now,
-                );
-                // Count this completed cycle so an N-cycle re-INVITE script's
-                // per-cycle barrier (reneg_count >= i) releases the next one —
-                // serializing the chain (C6). Keyed on CSeq: a re-emitted 2xx
-                // (a retransmit under loss) cannot double-count, and the
-                // sent_reinvites guard already fires this block once per CSeq.
-                st.obs.record(Observation::RenegCompleted { leg: st.role, cseq: resp.cseq().seq() }, now);
-                st.feed.on_reinvite_ok.stamp(st.ctx);
-            }
+            complete_originated_reinvite(st, cseq, now);
             return Ok(());
         }
     }
@@ -336,12 +353,14 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
             },
             now,
         );
-        let dwell = if st.originates {
-            Duration::from_millis(2500)
-        } else {
-            Duration::from_millis(1000)
-        };
-        st.update_retry = Some(Instant::now() + dwell);
+        if !st.automatics.suppress_491_retry {
+            let dwell = if st.originates {
+                Duration::from_millis(2500)
+            } else {
+                Duration::from_millis(1000)
+            };
+            st.update_retry = Some(Instant::now() + dwell);
+        }
         return Ok(());
     }
 
@@ -413,6 +432,67 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
         }
     }
     Ok(())
+}
+
+/// Close the bookkeeping of an originated re-INVITE once its 2xx is ACKed —
+/// the `ReInvite` obligation, the `reneg` sub-flow, the completed-cycle count
+/// (an N-cycle script's per-cycle barrier, C6) and the declared feed. ONCE per
+/// CSeq (the `sent_reinvites` guard), so a re-emitted 2xx cannot double-count.
+fn complete_originated_reinvite(st: &mut ActorState<'_>, cseq: u32, now: Instant) {
+    if st.sent_reinvites.remove(&cseq) {
+        st.sent_reinvite_txns.remove(&cseq);
+        st.reinvite_ordinals.remove(&cseq);
+        let key = ObligationKey::new(st.role, ObligationKind::ReInvite, cseq);
+        st.obs.record(Observation::ResponseObserved { key }, now);
+        st.obs.record(
+            Observation::Subflow { leg: st.role, name: SUBFLOW_RENEG, to: SubflowState::Confirmed },
+            now,
+        );
+        st.obs.record(Observation::RenegCompleted { leg: st.role, cseq }, now);
+        st.feed.on_reinvite_ok.stamp(st.ctx);
+    }
+}
+
+/// Park until the earliest held ACK is due (or forever if none) — the delayed
+/// automatic's own reactor arm.
+pub(super) async fn wait_held_ack(held: &[HeldAck]) {
+    match held.iter().map(|h| h.at).min() {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Fire the earliest held ACK: send it on the confirmed dialog (idempotent,
+/// re-derivable — §13.2.2.4) and complete the bookkeeping the hold deferred.
+pub(super) async fn fire_due_held_ack(st: &mut ActorState<'_>) {
+    let Some(pos) = st
+        .held_acks
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, h)| h.at)
+        .map(|(i, _)| i)
+    else {
+        return;
+    };
+    let held = st.held_acks.swap_remove(pos);
+    send_held_ack(st, held).await;
+}
+
+/// Flush every held ACK NOW, out of schedule: a leg about to originate its
+/// teardown BYE must not leave a 2xx un-ACKed behind it (RFC 3261 §15 — the
+/// renegotiation completes before the dialog ends).
+pub(super) async fn flush_held_acks(st: &mut ActorState<'_>) {
+    while let Some(held) = st.held_acks.pop() {
+        send_held_ack(st, held).await;
+    }
+}
+
+/// Send one held ACK and close its deferred bookkeeping.
+async fn send_held_ack(st: &mut ActorState<'_>, held: HeldAck) {
+    if let Some(dialog) = st.dialogs.confirmed.as_mut() {
+        dialog.ack_for(held.cseq, held.sdp.as_deref()).await;
+    }
+    complete_originated_reinvite(st, held.cseq, Instant::now());
 }
 
 /// Whether a message carries a session description: a non-empty body typed

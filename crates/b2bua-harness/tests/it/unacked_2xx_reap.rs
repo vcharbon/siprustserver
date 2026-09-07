@@ -20,10 +20,14 @@
 //! deadline is reached in a handful of `advance`s (CLAUDE.md test-runtime policy:
 //! cut churn at the source — the window, not real time).
 
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::Harness;
+use scenario_harness::{Harness, RunReport};
+use sip_message::{CustomParser, Method, SipMessage, SipParser};
+use sip_retransmit::{Class, Ladder, Schedule};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -36,6 +40,13 @@ const ACK_TIMEOUT_SEC: i64 = 6;
 #[tokio::test(start_paused = true)]
 async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     let h = Harness::new("b2bua-unacked-2xx-reap");
+    // ONE knowingly-unmet §13.2.2.4 obligation, and it is alice's: her silence IS
+    // the reap under test. The b-leg keeps its own — the SUT ACKs bob on receipt
+    // of his 200, so nothing there waits on the caller.
+    h.allow_violation(
+        "no-ack-to-dialog-creating-2xx",
+        "alice deliberately never ACKs — the reap under test",
+    );
     let alice = h.agent("alice", "127.0.0.1:5067").await;
     let bob = h.agent("bob", "127.0.0.1:5077").await;
     let b2bua = b2bua_with_ack_timeout(&h, "b2bua", "127.0.0.1:5087", 5077, ACK_TIMEOUT_SEC).await;
@@ -47,7 +58,9 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
-    // alice never ACKs, so the B2BUA never relays an ACK to bob (no `bob.receive("ACK")`).
+    // bob is ACKed regardless: the ACK for his 2xx is drawn by the response the
+    // UAC core received, not by anything alice does (§13.2.2.4).
+    bob.receive("ACK").await;
 
     assert_eq!(
         b2bua.metrics().creations_total() - b2bua.metrics().removals_total(),
@@ -64,6 +77,12 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
         retransmits >= 1,
         "RFC 3261 §13.3.1.4: the un-ACKed 2xx must be retransmitted to alice, got {retransmits}",
     );
+    // Each rung that left is counted once, under the ladder that paced it and
+    // the response it repeated: the two rungs inside 2 s (T1, then 2·T1).
+    let counted = || b2bua.metrics().retransmits_total("final-2xx", "INVITE", Some(200));
+    assert_eq!(counted(), 2, "b2bua_retransmits_total{{final-2xx,INVITE,200}} climbs with the rungs");
+    assert_eq!(counted(), retransmits as u64, "one increment per copy alice received");
+    assert_eq!(b2bua.metrics().repeat_give_ups_total("ack-of-2xx"), 0, "no give-up yet");
 
     // ── (b) At the ACK-timeout deadline the B2BUA clears BOTH legs ───────────
     // Advance past the give-up deadline (armed when the 2xx was relayed). The
@@ -81,6 +100,258 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 
+    // The third rung (at 3.5 s) fell inside the 6 s bound; the fourth (7.5 s)
+    // did not. The give-up is counted once, under the obligation left
+    // undischarged.
+    assert_eq!(counted(), 3, "every rung inside the bound, and none past it");
+    assert_eq!(b2bua.metrics().repeat_give_ups_total("ack-of-2xx"), 1, "one give-up: alice's ACK never came");
+    assert_eq!(b2bua.metrics().repeat_give_ups_total("prack-of"), 0);
+
+    let _report = h.finish().await;
+}
+
+/// A deployment that waits longer than Timer L before acting on the silence.
+const LATE_ACK_TIMEOUT_SEC: i64 = 60;
+
+/// Every rung a `Final2xx` ladder owes inside Timer L, from the one schedule
+/// the stack itself walks (ADR-0029 X1).
+fn rungs_inside_timer_l() -> usize {
+    let (mut ladder, _) = Ladder::armed(Schedule::rfc(Class::Final2xx)).expect("a 2xx owes its first re-send");
+    let mut rungs = 1;
+    while ladder.advance().is_some() {
+        rungs += 1;
+    }
+    rungs
+}
+
+/// When each INVITE 2xx datagram left the SUT toward `caller`, in send order —
+/// the original and every rung; a BYE's 200 never counts.
+fn a_leg_invite_2xx_sent_ms(report: &RunReport, sut: SocketAddr, caller: SocketAddr) -> Vec<u64> {
+    report
+        .entries()
+        .iter()
+        .filter(|e| e.from == sut && e.to == caller)
+        .filter(|e| match CustomParser::new().parse(&e.raw) {
+            Ok(SipMessage::Response(r)) => r.status() == 200 && *r.cseq().method() == Method::Invite,
+            _ => false,
+        })
+        .map(|e| e.sent_ms)
+        .collect()
+}
+
+/// RFC 3261 §13.3.1.4 ceases retransmitting at Timer L (64·T1) whatever the
+/// deployment's ACK deadline says: a 60 s `ack_timeout_sec` waits longer
+/// before tearing down, and adds no rung past 32 s. The two bounds are
+/// distinct — the ladder's is protocol, the give-up's is policy.
+#[tokio::test(start_paused = true)]
+async fn a_deadline_past_timer_l_does_not_extend_the_2xx_ladder() {
+    let h = Harness::new("b2bua-unacked-2xx-ceases-at-timer-l");
+    h.allow_violation(
+        "no-ack-to-dialog-creating-2xx",
+        "alice deliberately never ACKs — the ladder's bound under test",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5068").await;
+    let bob = h.agent("bob", "127.0.0.1:5078").await;
+    let decision = Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", 5078));
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.ack_timeout_sec = LATE_ACK_TIMEOUT_SEC;
+            // The subject is the 2xx ladder's bound against a late deadline; the
+            // harness's 30 s keepalive would otherwise tear the call down first.
+            c.keepalive_interval_sec = 600;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5088")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
+    bob.receive("ACK").await;
+
+    // ── Past Timer L, well short of the deadline: the ladder has ceased and
+    //    the deployment has not yet acted ──
+    h.advance(Duration::from_secs(53)).await;
+    alice.drain().await;
+    assert_eq!(
+        b2bua.metrics().creations_total() - b2bua.metrics().removals_total(),
+        1,
+        "the call stands until the deployment's own deadline",
+    );
+
+    // ── The deadline (60 s): the deployment acts on the silence and clears
+    //    both legs ──
+    h.advance(Duration::from_secs(9)).await;
+    alice.drain().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+
+    let report = h.finish().await;
+    let sent = a_leg_invite_2xx_sent_ms(&report, b2bua.addr, alice.addr());
+    assert_eq!(
+        sent.len(),
+        1 + rungs_inside_timer_l(),
+        "the original plus every rung the RFC prescribes inside Timer L, and none past it: {sent:?}",
+    );
+    assert_eq!(
+        b2bua.metrics().retransmits_total("final-2xx", "INVITE", Some(200)) as usize,
+        rungs_inside_timer_l(),
+        "the counter is the rungs on the wire — the original is not a repeat",
+    );
+    // Each rung fires on the next 100 ms tick of the paused clock, so the
+    // tenth lands within about a second of its 31.5 s mark — and the eleventh,
+    // due at 35.5 s, is never sent.
+    let first = sent[0];
+    let last = *sent.last().unwrap();
+    assert!(
+        last - first < 34_000,
+        "the last copy leaves inside Timer L (+ tick slack), got {} ms after the first",
+        last - first,
+    );
+}
+
+/// ADR-0029 X5: the give-up is a deadline, not a switch. A config that writes a
+/// non-positive `ack_timeout_sec` — bypassing `validate`, as a harness does —
+/// still ends the session, at the 32 s default (Timer L).
+#[tokio::test(start_paused = true)]
+async fn a_nonpositive_deadline_still_ends_the_session_at_timer_l() {
+    let h = Harness::new("b2bua-unacked-2xx-nonpositive-deadline");
+    h.allow_violation(
+        "no-ack-to-dialog-creating-2xx",
+        "alice deliberately never ACKs — the unconditional teardown under test",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5066").await;
+    let bob = h.agent("bob", "127.0.0.1:5076").await;
+    let decision = Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", 5076));
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.ack_timeout_sec = 0;
+            // The subject is the give-up's floor; the harness's 30 s keepalive
+            // would otherwise tear the call down first.
+            c.keepalive_interval_sec = 600;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5086")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
+    bob.receive("ACK").await;
+
+    // Short of Timer L the call stands; at it the session ends on both legs.
+    h.advance(Duration::from_secs(31)).await;
+    alice.drain().await;
+    assert_eq!(
+        b2bua.metrics().creations_total() - b2bua.metrics().removals_total(),
+        1,
+        "the call stands until the default deadline",
+    );
+    h.advance(Duration::from_secs(1)).await;
+    alice.drain().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+
+    let _report = h.finish().await;
+}
+
+/// A service that answers the un-ACKed 2xx give-up and deliberately declines to
+/// end anything — it notes the silence in the CDR and parks the call.
+mod parking {
+    use b2bua::rules::{
+        Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceSeed,
+    };
+    use b2bua::{define_service, sm_rule};
+    use call::{CdrEventType, Obligation, TimerType};
+
+    define_service! {
+        id: "parking",
+        machine: PARKING,
+        states: ParkingState { Parked },
+        init: |_call: &RuleCall| Some(ServiceSeed::new(ParkingState::Parked.label())),
+        rules: [ park_the_give_up() ],
+    }
+
+    fn is_2xx_give_up(ctx: &RuleContext) -> bool {
+        matches!(ctx.timer_type(), Some(TimerType::RepeatGiveUp { obligation: Obligation::AckOf2xx { .. } }))
+    }
+
+    fn park_the_give_up() -> RuleDefinition {
+        sm_rule! {
+            id: "parking-declines-the-give-up",
+            machine: PARKING,
+            active: [ ParkingState::Parked ],
+            transitions: [],
+            effects: [],
+            matcher: Match::timer().filter(is_2xx_give_up),
+            handle: |ctx: &RuleContext| {
+                Some(RuleHandleResult::new(vec![RuleAction::AddCdrEvent {
+                    event_type: CdrEventType::Timeout,
+                    leg_id: ctx.call.a_leg().leg_id.clone(),
+                    status_code: None,
+                    reason: Some("parked".into()),
+                }]))
+            },
+        }
+    }
+}
+
+/// ADR-0029 X5: a service may re-author the give-up's teardown, not decline it.
+/// With the parking service outranking `unacked-2xx-give-up`, the session still
+/// ends at the deadline on both legs, under the CORE CDR marker.
+#[tokio::test(start_paused = true)]
+async fn a_service_that_parks_the_give_up_does_not_keep_the_session() {
+    let h = Harness::new("b2bua-unacked-2xx-parked-give-up");
+    h.allow_violation(
+        "no-ack-to-dialog-creating-2xx",
+        "alice deliberately never ACKs — the give-up a service may not decline",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5065").await;
+    let bob = h.agent("bob", "127.0.0.1:5075").await;
+    let decision = Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", 5075));
+    let b2bua = B2buaSut::builder(decision)
+        .services(vec![parking::service_def()])
+        .tune(|c| {
+            c.ack_timeout_sec = ACK_TIMEOUT_SEC;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5085")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
+    bob.receive("ACK").await;
+
+    h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
+    alice.drain().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+
+    let records = b2bua.cdr_records();
+    assert_eq!(records.len(), 1, "one CDR");
+    let reasons: Vec<&str> = records[0].events.iter().filter_map(|e| e.reason.as_deref()).collect();
+    assert!(reasons.contains(&"parked"), "the service rule answered the give-up: {reasons:?}");
+    assert!(
+        reasons.contains(&"ack_timeout"),
+        "and the framework still ended the session under the CORE marker: {reasons:?}",
+    );
+
     let _report = h.finish().await;
 }
 
@@ -93,7 +364,6 @@ async fn b2bua_with_ack_timeout(
     dest_port: u16,
     ack_timeout_sec: i64,
 ) -> B2buaSut {
-    use std::sync::Arc;
     let decision = Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", dest_port));
     B2buaSut::builder(decision)
         .tune(move |c| {

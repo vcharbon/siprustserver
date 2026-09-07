@@ -64,8 +64,16 @@ impl<E> Channel<E> {
     /// the ordering authority; `at_ms` is for the renderer's `(at_ms, seq)`
     /// sort and the relative-time labels.
     pub fn record(&self, event: E) {
+        self.record_with(|_| event)
+    }
+
+    /// [`record`](Self::record), handing the builder the `seq` this event is
+    /// stamped with — for an event that carries a reference to its own or an
+    /// earlier record (e.g. a repeat mark naming the first sighting's seq).
+    pub fn record_with(&self, build: impl FnOnce(u64) -> E) {
         let seq = self.seq.next();
         let at_ms = self.clock.now_ms().max(0) as u64;
+        let event = build(seq);
         self.buf
             .lock()
             .unwrap()
@@ -230,7 +238,7 @@ impl Recorder {
     }
 
     /// [`register_lane`](Self::register_lane) under an explicit key — the
-    /// logical-sub-lane form `ip:port#<label>` (upstreamneed-036 ask C), so
+    /// logical-sub-lane form `ip:port#<label>`, so
     /// several logical endpoints sharing one socket each get their own lane
     /// instead of colliding (and `nameConflict`-ing) on the socket's key. The
     /// key must match the `bind_key` the recording decorator stamps on the

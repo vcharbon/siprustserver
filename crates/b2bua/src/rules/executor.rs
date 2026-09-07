@@ -91,7 +91,7 @@ pub fn execute_rules(
 }
 
 /// Report the inputs the winning rule refused to read. This is the engine end
-/// of the rule SDK's diagnostic seam (upstreamneed-055): a rule that cannot read
+/// of the rule SDK's diagnostic seam: a rule that cannot read
 /// an input says so here and emits its own refusal, instead of choosing between
 /// silence and acting as if the input were fine. The diagnostic itself produces
 /// no wire traffic — the rule's actions do.

@@ -50,19 +50,21 @@ fn doc_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
             endpoint: None, // the `[{agent}]` prefix in `detail` carries attribution
             advisory: Some(false),
             row_seqs: Vec::new(),
+            rule_sourced: false, // a step's expect, not an audit rule
         }
     }));
     anomalies
 }
 
-/// RFC status reaches the report: run the full suite over the raw recording via
-/// the SHARED role-aware evaluator (`sip_net::evaluate_rfc_findings`) and fold
-/// the findings into the doc anomalies, each tagged with its rule name and its
-/// advisory/gating severity. The evaluator applies **subject dispatch** — a
-/// finding is kept only when the rule's `subject()` intersects the originating
-/// bind's declared roles — so the report can no longer list a proxy-subject
-/// rule against a UA lane (the e2e false-positive class). This is the same
-/// pass the `agent.rs` hard gate panics on; the two can never disagree.
+/// RFC status reaches the report: fold the report's full-suite finding set
+/// ([`RunReport::rfc_findings`] — the SHARED role-aware evaluator
+/// `sip_net::evaluate_rfc_findings`, run once per report) into the doc
+/// anomalies, each tagged with its rule name and its advisory/gating severity.
+/// The evaluator applies **subject dispatch** — a finding is kept only when
+/// the rule's `subject()` intersects the originating bind's declared roles —
+/// so the report can no longer list a proxy-subject rule against a UA lane
+/// (the e2e false-positive class). This is the same pass the `agent.rs` hard
+/// gate panics on; the two can never disagree.
 ///
 /// (For the `agent.rs` path the recorder also carries these rules natively, so
 /// findings duplicate the recorder's ledger entries — the projector dedupes
@@ -74,12 +76,13 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
     // rendered doc keys on (the doc's rows are a superset view over the same
     // recording, so seq equality is the join).
     let wire = sip_net::audit_wire_entries(report.events());
-    sip_net::evaluate_rfc_findings(report.events())
-        .into_iter()
+    report
+        .rfc_findings()
+        .iter()
         .map(|f| seq_report::Anomaly {
-            check: f.rule,
-            detail: f.detail,
-            lane: Some(f.lane),
+            check: f.rule.clone(),
+            detail: f.detail.clone(),
+            lane: Some(f.lane.clone()),
             endpoint: None, // resolved against the recorder lanes by `sip_doc`
             advisory: Some(f.advisory),
             row_seqs: f
@@ -87,6 +90,7 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
                 .and_then(|i| wire.get(i - 1))
                 .map(|e| vec![e.seq])
                 .unwrap_or_default(),
+            rule_sourced: true, // straight off the audit registry
         })
         .collect()
 }

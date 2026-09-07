@@ -166,6 +166,13 @@ async fn silent_callee_no_answer_via_lb__reject__reaps_crossing_200() {
 #[allow(non_snake_case)]
 async fn silent_callee_no_answer_via_lb__reject__delayed_crossing_200_still_reaped() {
     let mut fh = FailoverHarness::new("s10b-silent-callee-noanswer-reject-delayed", &["b1"]);
+    // The deliberate corner this case is built on: bob's CANCEL handling is
+    // dead, so it TAKES the CANCEL and answers 200 ten seconds later instead of
+    // 487. The worker's own reap (ACK + BYE) is what the test gates.
+    fh.allow_rfc_violation(
+        "no-200-after-cancel",
+        "bob deliberately ignores the CANCEL it took and answers 200 much later (RFC 3261 §9.2) — the delayed crossing under test",
+    );
 
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;

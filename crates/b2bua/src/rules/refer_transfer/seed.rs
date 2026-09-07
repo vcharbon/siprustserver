@@ -1,14 +1,19 @@
-//! The seed (CORE_LAYER, always-active) REFER rules — they run before the
-//! transfer slice exists: intercept the first in-dialog REFER on a bridged B
-//! leg (202 + slice seed + `/call/refer` consult), reject an attended-transfer
-//! REFER (`?Replaces=`, 501) and any a-leg REFER (501).
+//! The seed (CORE_LAYER) REFER rules — they run before the transfer slice
+//! exists: intercept the first in-dialog REFER on a bridged B leg (202 + slice
+//! seed + `/call/refer` consult), refuse an unreadable Refer-To (400), reject
+//! an attended-transfer REFER (`?Replaces=`, 501) and any a-leg REFER (501).
+//!
+//! Every one of them is gated on the decision layer's LOCAL-processing
+//! directive (`features.refer`): without it this platform terminates no REFER
+//! at all and the CORE `relay-refer` forwards it to the peer leg like any other
+//! in-dialog method, Refer-To or not (RFC 3515 rides end to end).
 
 use call::{Direction, LegState, TransferPhase, TransferState};
 use sip_message::header::{HeaderName, ReferTo};
 
 use super::notify::{notify, SUB_STATE_ACTIVE_60};
 use super::ok;
-use crate::rules::model::{Match, RuleAction, RuleContext, RuleDefinition, CORE_LAYER};
+use crate::rules::model::{Match, RuleAction, RuleContext, RuleDefinition, TimerDelay, CORE_LAYER};
 
 fn core_rule(
     id: &'static str,
@@ -21,6 +26,20 @@ fn core_rule(
 
 fn transfer_active(ctx: &RuleContext) -> bool {
     ctx.call.transfer_active()
+}
+
+/// The routing decision directed LOCAL REFER processing for this call
+/// (`features.refer`) — the precondition of every rule in this module.
+fn local_refer(ctx: &RuleContext) -> bool {
+    ctx.call.refer_processed_locally()
+}
+
+/// The REFER carries a Refer-To this stack can read: present, and a name-addr /
+/// addr-spec whose URI parses (RFC 3515 §2, RFC 3261 §20.30 / §25.1). The
+/// judgement is `sip-message`'s — `Refer-To` is parsed eagerly and non-fatally
+/// at intake, so an unreadable one reaches here as a parse error.
+fn refer_to_readable(ctx: &RuleContext) -> bool {
+    ctx.request().and_then(|r| r.header::<ReferTo>()).is_some_and(|h| h.is_ok())
 }
 
 /// Refer-To names a dialog to replace (`?Replaces=`, RFC 3891 §3) → attended
@@ -73,8 +92,8 @@ fn state_dialog_id(ctx: &RuleContext, leg_id: &str) -> String {
     format!("{call_id};to-tag={to_tag};from-tag={from_tag}")
 }
 
-/// The seed (CORE_LAYER, alwaysActive-equivalent) REFER rules — they run before
-/// the transfer slice exists.
+/// The seed (CORE_LAYER) REFER rules — they run before the transfer slice
+/// exists, and only on a call whose route activated local REFER processing.
 pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
     vec![
         // ── transfer-reject-replaces — REFER (from-b) with Replaces → 501.
@@ -83,7 +102,10 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
         core_rule(
             "transfer-reject-replaces",
             &["transfer-reject-second-refer"],
-            Match::request().method("REFER").direction(Direction::FromB).filter(refer_to_has_replaces),
+            Match::request()
+                .method("REFER")
+                .direction(Direction::FromB)
+                .filter(|ctx| local_refer(ctx) && refer_to_has_replaces(ctx)),
             |_ctx| {
                 ok(vec![RuleAction::Respond {
                     status: 501,
@@ -93,15 +115,39 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                 }])
             },
         ),
-        // ── transfer-reject-a-leg-refer — REFER from the A leg → 501.
+        // ── transfer-reject-a-leg-refer — REFER from the A leg → 501. Local
+        // processing is the b-leg transferor's; the a-leg has no transfer here.
         core_rule(
             "transfer-reject-a-leg-refer",
             &[],
-            Match::request().method("REFER").direction(Direction::FromA),
+            Match::request().method("REFER").direction(Direction::FromA).filter(local_refer),
             |_ctx| {
                 ok(vec![RuleAction::Respond {
                     status: 501,
                     reason: "Not Implemented".to_string(),
+                    body: vec![],
+                    content_type: None,
+                }])
+            },
+        ),
+        // ── transfer-refuse-unreadable-refer-to — a REFER this platform is to
+        // process itself, whose Refer-To is absent or unreadable → 400. The
+        // transfer target is the request's whole point (RFC 3515 §2), so there
+        // is nothing to authorize and nothing to accept: refusing the request
+        // is the answer, never a 202 for a transfer that cannot start.
+        core_rule(
+            "transfer-refuse-unreadable-refer-to",
+            &[],
+            Match::request()
+                .method("REFER")
+                .direction(Direction::FromB)
+                .leg_states(&[LegState::Confirmed])
+                .leg_disposition(call::LegDisposition::Bridged)
+                .filter(|ctx| local_refer(ctx) && !refer_to_readable(ctx) && !transfer_active(ctx)),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 400,
+                    reason: "Bad Request".to_string(),
                     body: vec![],
                     content_type: None,
                 }])
@@ -116,7 +162,12 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                 .direction(Direction::FromB)
                 .leg_states(&[LegState::Confirmed])
                 .leg_disposition(call::LegDisposition::Bridged)
-                .filter(|ctx| !refer_to_has_replaces(ctx) && !transfer_active(ctx)),
+                .filter(|ctx| {
+                    local_refer(ctx)
+                        && refer_to_readable(ctx)
+                        && !refer_to_has_replaces(ctx)
+                        && !transfer_active(ctx)
+                }),
             |ctx| {
                 let req = ctx.request()?;
                 let leg_id = ctx.source_leg_id.to_string();
@@ -136,6 +187,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                     started_at_ms: ctx.now_ms,
                     last_c_leg_notified_status: None,
                     c_initial_sdp: None,
+                    subscription_terminated: false,
                 };
 
                 // Build the /call/refer request JSON the interpreter reposts.
@@ -149,7 +201,8 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                 }
                 request.insert("sip_headers".into(), serde_json::Value::Object(extract_sip_headers(req)));
 
-                ok(vec![
+                let first_notify = notify(&seed, SUB_STATE_ACTIVE_60, 100, "Trying");
+                let mut actions = vec![
                     RuleAction::Respond {
                         status: 202,
                         reason: "Accepted".to_string(),
@@ -159,19 +212,20 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                     RuleAction::SetTransfer { state: Some(seed) },
                     RuleAction::ScheduleTimer {
                         timer_type: call::TimerType::ReferSubscriptionExpiry,
-                        delay_sec: ctx.config.refer_subscription_expiry_sec,
+                        delay: TimerDelay::secs(ctx.config.refer_subscription_expiry_sec),
                         leg_id: None,
                     },
                     RuleAction::ScheduleTimer {
                         timer_type: call::TimerType::ReferOverallSafety,
-                        delay_sec: ctx.config.refer_overall_safety_sec,
+                        delay: TimerDelay::secs(ctx.config.refer_overall_safety_sec),
                         leg_id: None,
                     },
-                    notify(&leg_id, SUB_STATE_ACTIVE_60, 100, "Trying"),
-                    RuleAction::ReferAsyncHttp {
-                        request: serde_json::Value::Object(request),
-                    },
-                ])
+                ];
+                actions.extend(first_notify);
+                actions.push(RuleAction::ReferAsyncHttp {
+                    request: serde_json::Value::Object(request),
+                });
+                ok(actions)
             },
         ),
     ]

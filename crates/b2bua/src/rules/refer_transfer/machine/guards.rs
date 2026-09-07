@@ -1,7 +1,8 @@
-//! Cross-phase request guards + the overall-safety watchdog: a second REFER
-//! (491), glare re-INVITEs from C or A during realign (491), the referrer B's
-//! non-BYE in-dialog requests during realign (481), and the whole-transfer
-//! safety timeout (rollback).
+//! Cross-phase guards + the overall-safety watchdog: a second REFER (491),
+//! glare re-INVITEs from C or A during realign (491), the referrer B's non-BYE
+//! in-dialog requests during realign (481), the referrer's 481 to a refer
+//! NOTIFY (subscription ended), and the whole-transfer safety timeout
+//! (rollback).
 
 use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction};
@@ -123,6 +124,38 @@ pub(super) fn overall_timeout() -> RuleDefinition {
             });
             actions.push(RuleAction::BeginTermination { reason: None });
             ok(actions)
+        },
+    }
+}
+
+/// transfer-notify-481 — the referrer answers a refer NOTIFY 481: the implicit
+/// subscription is over (RFC 6665 §4.4.1) and no further NOTIFY leaves on it;
+/// the dialog and the transfer's own outcome are untouched (RFC 3515 §2.4.6).
+/// Active in every phase because the first NOTIFY is on the wire before the
+/// `/call/refer` consult resolves. Claims only a NOTIFY this stack originated
+/// (no pending-relay snapshot): a RELAYED NOTIFY's 481 answers the peer's
+/// subscription and stays CORE `relay-non-invite-failure`'s to relay. Beats
+/// CORE `absorb-own-request-failure`, the fallback for any other
+/// stack-originated NOTIFY failure.
+pub(super) fn referrer_notify_481() -> RuleDefinition {
+    sm_rule! {
+        id: "transfer-notify-481",
+        machine: TRANSFER_MACHINE,
+        active: [ Phase::ReferAuthorizing, Phase::CRinging, Phase::CRealigning, Phase::ARealigning ],
+        transitions: [],
+        effects: [],
+        matcher: Match::response()
+            .method("NOTIFY")
+            .status_code(481)
+            .direction(Direction::FromB)
+            .filter(|ctx| {
+                state(ctx).map(|s| s.referrer_leg_id.as_str()) == Some(ctx.source_leg_id)
+                    && !ctx.answers_relayed_request()
+            }),
+        handle: |ctx| {
+            let mut st = state(ctx)?.clone();
+            st.subscription_terminated = true;
+            ok(vec![RuleAction::SetTransfer { state: Some(st) }])
         },
     }
 }

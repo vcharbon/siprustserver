@@ -7,7 +7,7 @@ use call::{CdrEventType, Direction, LegState, TransferPhase};
 use sip_message::Method;
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
-use crate::rules::model::{Effect, Match, RuleAction, RuleDefinition};
+use crate::rules::model::{Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 use crate::rules::refer_transfer::notify::{
     notify, SUB_STATE_ACTIVE_60, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
 };
@@ -38,13 +38,12 @@ pub(super) fn c_1xx_to_notify() -> RuleDefinition {
             if st.last_c_leg_notified_status == Some(resp.status()) {
                 return ok(vec![]);
             }
-            let leg = st.referrer_leg_id.clone();
             let mut new_state = st.clone();
             new_state.last_c_leg_notified_status = Some(resp.status());
-            ok(vec![
-                notify(&leg, SUB_STATE_ACTIVE_60, resp.status(), resp.reason()),
-                RuleAction::SetTransfer { state: Some(new_state) },
-            ])
+            let mut actions = Vec::new();
+            actions.extend(notify(&st, SUB_STATE_ACTIVE_60, resp.status(), resp.reason()));
+            actions.push(RuleAction::SetTransfer { state: Some(new_state) });
+            ok(actions)
         },
     }
 }
@@ -76,7 +75,6 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             let st = state(ctx)?.clone();
             let resp = ctx.response()?;
             let c_leg_id = st.c_leg_id.clone()?;
-            let leg = st.referrer_leg_id.clone();
 
             // Capture C's 200 SDP (drives the a-realign re-INVITE).
             let c_initial_sdp = (!resp.body().is_empty()).then(|| resp.body().to_vec());
@@ -88,7 +86,7 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             new_state.phase = TransferPhase::CRealigning;
             new_state.c_initial_sdp = c_initial_sdp;
 
-            ok(vec![
+            let mut actions = vec![
                 RuleAction::UpdateLegState {
                     leg_id: c_leg_id.clone(),
                     state: LegState::Confirmed,
@@ -96,12 +94,14 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                 },
                 RuleAction::ConfirmDialog { leg_id: c_leg_id.clone() },
                 RuleAction::AckLeg { leg_id: c_leg_id.clone(), body: Vec::new(), content_type: None },
-                notify(&leg, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"),
+            ];
+            actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, 200, "OK"));
+            actions.extend([
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::NoAnswer, Some(&c_leg_id)) },
                 RuleAction::ScheduleTimer {
                     timer_type: call::TimerType::ReferReinviteAnswer,
-                    delay_sec: ctx.config.refer_reinvite_answer_sec,
+                    delay: TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
                     leg_id: Some(c_leg_id.clone()),
                 },
                 RuleAction::SendReinvite {
@@ -116,7 +116,8 @@ pub(super) fn c_200_initial() -> RuleDefinition {
                     reason: None,
                 },
                 RuleAction::SetTransfer { state: Some(new_state) },
-            ])
+            ]);
+            ok(actions)
         },
     }
 }
@@ -145,12 +146,12 @@ pub(super) fn c_fail_initial() -> RuleDefinition {
         handle: |ctx| {
             let st = state(ctx)?.clone();
             let resp = ctx.response()?;
-            let leg = st.referrer_leg_id.clone();
-            let mut actions = vec![
-                notify(&leg, SUB_STATE_TERMINATED_NORESOURCE, resp.status(), resp.reason()),
+            let mut actions = Vec::new();
+            actions.extend(notify(&st, SUB_STATE_TERMINATED_NORESOURCE, resp.status(), resp.reason()));
+            actions.extend([
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
-            ];
+            ]);
             if let Some(c_leg_id) = st.c_leg_id.clone() {
                 actions.push(RuleAction::CancelTimer { id: timer_id(call::TimerType::NoAnswer, Some(&c_leg_id)) });
                 actions.push(RuleAction::AddCdrEvent {
@@ -194,10 +195,10 @@ pub(super) fn c_no_answer() -> RuleDefinition {
             }),
         handle: |ctx| {
             let st = state(ctx)?.clone();
-            let leg = st.referrer_leg_id.clone();
             let c_leg_id = st.c_leg_id.clone()?;
-            ok(vec![
-                notify(&leg, SUB_STATE_TERMINATED_TIMEOUT, 408, "Request Timeout"),
+            let mut actions = Vec::new();
+            actions.extend(notify(&st, SUB_STATE_TERMINATED_TIMEOUT, 408, "Request Timeout"));
+            actions.extend([
                 RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Timeout,
                     leg_id: c_leg_id.clone(),
@@ -208,7 +209,8 @@ pub(super) fn c_no_answer() -> RuleDefinition {
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
                 RuleAction::SetTransfer { state: None },
-            ])
+            ]);
+            ok(actions)
         },
     }
 }

@@ -1,7 +1,7 @@
 //! Which leg talks to which: the tag-map dialog-identity index, the active
 //! peer pair (INAP-style split/merge), and transparent-relay peer resolution.
 
-use crate::model::{ActivePeer, Call, LegState, TagMapping};
+use crate::model::{ActivePeer, Call, Dialog, Leg, LegState, TagMapping};
 
 use super::leg::{find_b_leg, find_dialog_by_to_tag, is_adopted};
 
@@ -140,25 +140,30 @@ pub fn relay_peer_dialog_ready(
     source_leg_id: &str,
     request_to_tag: Option<&str>,
 ) -> bool {
+    relay_peer_dialog(call, source_leg_id, request_to_tag)
+        .is_some_and(|(leg, d)| leg.state != LegState::Terminated && !d.sip.remote_tag.is_empty())
+}
+
+/// The `(leg, dialog)` a relayed in-dialog request from `source_leg_id` would
+/// be regenerated on: [`resolve_relay_peer`]'s leg pick, then the relay path's
+/// dialog pick (the fork tag's dialog, else the first). The single resolver
+/// behind both [`relay_peer_dialog_ready`] and the rule-vocabulary peer-dialog
+/// reads, so match and action never disagree.
+pub fn relay_peer_dialog<'a>(
+    call: &'a Call,
+    source_leg_id: &str,
+    request_to_tag: Option<&str>,
+) -> Option<(&'a Leg, &'a Dialog)> {
     let (peer, fork_tag) = resolve_relay_peer(call, source_leg_id, request_to_tag);
-    let Some(peer_id) = peer else {
-        return false;
-    };
+    let peer_id = peer?;
     let leg = if peer_id == call.a_leg.leg_id {
         &call.a_leg
     } else {
-        match find_b_leg(call, &peer_id) {
-            Some(l) => l,
-            None => return false,
-        }
+        find_b_leg(call, &peer_id)?
     };
-    if leg.state == LegState::Terminated {
-        return false;
-    }
-    // Mirror the relay path's dialog pick: the fork tag's dialog, else the first.
     let dialog = fork_tag
         .as_deref()
         .and_then(|tt| find_dialog_by_to_tag(leg, tt))
-        .or_else(|| leg.dialogs.first());
-    dialog.is_some_and(|d| !d.sip.remote_tag.is_empty())
+        .or_else(|| leg.dialogs.first())?;
+    Some((leg, dialog))
 }

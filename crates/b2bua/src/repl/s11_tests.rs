@@ -7,9 +7,12 @@
 //! 2. **local-only self-release** — `drop_local` sheds the live copy WITHOUT
 //!    propagating a delete: the backup `Element` survives (the call lives on at
 //!    its reclaiming primary) and the takeover flag clears;
-//! 3. **active reclaim read-paths** — `reclaim_scan` (bulk) + `peek_reclaimable`
-//!    (reactive straggler) decode this node's `pri:` partition, and
-//!    `materialize_if_absent` inserts idempotently.
+//! 3. **narrow read-paths** — `reclaim_scan` (bulk) + `peek_reclaimable`
+//!    (reactive straggler) decode this node's `pri:` partition, `peek_replica`
+//!    the `bak:` takeover source, and `materialize_if_absent` inserts
+//!    idempotently. The decision over what they return (the `Terminated`
+//!    refusal, the timer re-arm, the takeover mark) is `router::materialise`,
+//!    pinned by its own unit tests.
 //!
 //! These exercise the seams directly (no full SIP failover harness — that is the
 //! `failover-harness` acceptance). The `Deactivate` watermark handshake these
@@ -18,7 +21,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{Call, CallBodyCodec, MsgpackCodec};
+use call::{Call, CallBodyCodec, CallModelState, MsgpackCodec};
 use sip_clock::Clock;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 
@@ -30,7 +33,8 @@ use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
 use crate::store::{
-    BufferedTerminateWriter, CallState, CallStore, InMemoryCallStore, PartitionRole, PutOpts,
+    BufferedTerminateWriter, CallState, CallStore, InMemoryCallStore, MaterialiseOrigin,
+    PartitionRole, PutOpts, ReplicaMiss,
 };
 
 const PRI: PartitionRole = PartitionRole::Primary;
@@ -92,9 +96,19 @@ fn bye(cid: &str) -> SipRequest {
 /// A `CallState` for `ordinal` wired to `repl` as its replicating store (mirrors
 /// how `B2buaCore` builds it: an in-memory `store` + the replicating one).
 fn call_state(ordinal: &str, repl: Arc<ReplicatingCallStore>) -> CallState {
+    call_state_metered(ordinal, repl, B2buaMetrics::new())
+}
+
+/// [`call_state`] over a caller-held counter set, for the tests that read what a
+/// store path counted.
+fn call_state_metered(
+    ordinal: &str,
+    repl: Arc<ReplicatingCallStore>,
+    metrics: B2buaMetrics,
+) -> CallState {
     let store = Arc::new(InMemoryCallStore::new()) as Arc<dyn CallStore>;
     let writer = BufferedTerminateWriter::spawn(store.clone(), 1024);
-    CallState::new(store, writer, ordinal, B2buaMetrics::new()).with_replication(repl)
+    CallState::new(store, writer, ordinal, metrics).with_replication(repl)
 }
 
 /// Seed a call body into `(role, primary)` of the replicating store.
@@ -135,13 +149,16 @@ async fn drop_local_sheds_live_copy_but_keeps_backup_element() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = call_state("w1", repl.clone());
 
-    // A call w0 owns + we (w1) back up: seed bak:w0, then hydrate the takeover.
+    // A call w0 owns + we (w1) back up: seed bak:w0, then materialise the takeover.
     let call = build_initial_call(&invite("w0", "w1", "cid-h"), src(), &config_for("w0"), 0);
     let r = call.call_ref.clone();
     put(&repl, BAK, "w0", &call).await;
 
-    let (_c, fresh, _skew) = state.hydrate_from_replica(&r).await.expect("hydrate from bak:w0");
-    assert!(fresh, "first hydrate materialises a fresh takeover copy");
+    let (c, _skew) = state.peek_replica(&r).await.expect("read from bak:w0");
+    assert!(
+        state.materialize_if_absent(c, MaterialiseOrigin::Takeover),
+        "first materialise inserts a fresh takeover copy"
+    );
     state.mark_takeover(&r);
     assert!(state.peek(&r).is_some(), "takeover copy is live");
     assert!(state.is_takeover(&r), "flagged as a takeover copy");
@@ -222,15 +239,14 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
     assert_eq!(peeked.call_ref, r);
     assert_eq!(skew, 30_000, "peek_reclaimable surfaces the skew offset");
 
-    // A backup-partition takeover hydrate surfaces it via the 3-tuple.
+    // The backup-partition takeover read surfaces it too.
     let repl_b = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
     let state_b = call_state("w1", repl_b.clone());
     let call_b = build_initial_call(&invite("w0", "w1", "cid-skew-b"), src(), &config_for("w0"), 0);
     let rb = call_b.call_ref.clone();
     put_with_origin(&repl_b, BAK, "w0", &call_b, 55_000).await; // origin 45 s behind
-    let (_c, fresh, skew_b) = state_b.hydrate_from_replica(&rb).await.expect("hydrate bak:w0");
-    assert!(fresh);
-    assert_eq!(skew_b, 45_000, "hydrate_from_replica surfaces the skew offset (100_000 − 55_000)");
+    let (_c, skew_b) = state_b.peek_replica(&rb).await.expect("read bak:w0");
+    assert_eq!(skew_b, 45_000, "peek_replica surfaces the skew offset (100_000 − 55_000)");
 
     // A locally-originated write (no origin stamp) carries NO offset.
     let repl_local = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
@@ -241,6 +257,44 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
         None,
         "a local write records no skew offset (deadline already in our frame)",
     );
+}
+
+// ---------------------------------------------------------------------------
+// (2c) the takeover read is narrow: it decodes, it decides nothing, it inserts
+//      nothing.
+// ---------------------------------------------------------------------------
+/// `peek_replica` hands back the `bak:` body whatever its state — the
+/// `Terminated` refusal is the router's decision (`router::materialise`), not
+/// the store's — leaves the replica in place, counts nothing and makes nothing
+/// live. A primary-role ref and an absent body are typed misses.
+#[tokio::test]
+async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
+    let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
+    let metrics = B2buaMetrics::new();
+    let state = call_state_metered("w1", repl.clone(), metrics.clone());
+
+    // The image w1 reverse-flushed when its takeover copy of a w0 call released.
+    let mut ended = build_initial_call(&invite("w0", "w1", "cid-ended"), src(), &config_for("w0"), 0);
+    ended.state = CallModelState::Terminated;
+    let r_ended = ended.call_ref.clone();
+    put(&repl, BAK, "w0", &ended).await;
+
+    let (read, skew) = state.peek_replica(&r_ended).await.expect("the body is read as-is");
+    assert_eq!(read.state, CallModelState::Terminated, "the state is the caller's to judge");
+    assert_eq!(skew, 0, "a local write carries no skew offset");
+    assert_eq!(metrics.repl_takeover_refused_terminated_total(), 0, "the store counts no refusal");
+    assert_eq!(metrics.repl_takeover_hydrated_total(), 0, "the store counts no hydration");
+    assert!(state.live_call_refs().is_empty(), "the read inserts nothing");
+    assert!(
+        repl.get_call(BAK, "w0", &r_ended).await.unwrap().is_some(),
+        "the read leaves the replica in place for the primary to fold/reclaim",
+    );
+
+    // A ref this node is primary for is not a takeover source; an unknown
+    // backup-role ref is simply absent.
+    let own = build_initial_call(&invite("w1", "w0", "cid-own"), src(), &config_for("w1"), 0);
+    assert_eq!(state.peek_replica(&own.call_ref).await.err(), Some(ReplicaMiss::WrongRole));
+    assert_eq!(state.peek_replica("w0|nobody|t").await.err(), Some(ReplicaMiss::Absent));
 }
 
 // ---------------------------------------------------------------------------
@@ -262,14 +316,21 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
     assert_eq!(scanned[0].0.call_ref, r);
 
     // Materialise into the live map: first inserts, second is a no-op.
-    assert!(state.materialize_if_absent(scanned[0].0.clone()), "first materialise inserts");
+    assert!(
+        state.materialize_if_absent(scanned[0].0.clone(), MaterialiseOrigin::Reclaim),
+        "first materialise inserts"
+    );
     assert!(state.peek(&r).is_some(), "now live + routable");
-    assert!(!state.materialize_if_absent(scanned[0].0.clone()), "second materialise is a no-op");
+    assert!(
+        !state.materialize_if_absent(scanned[0].0.clone(), MaterialiseOrigin::Reclaim),
+        "second materialise is a no-op"
+    );
 
     // Reactive read-path returns the same call; a backup-role ref never reclaims.
-    assert_eq!(state.peek_reclaimable(&r).await.map(|(c, _)| c.call_ref), Some(r.clone()));
-    assert!(
-        state.peek_reclaimable("w5|other|t").await.is_none(),
+    assert_eq!(state.peek_reclaimable(&r).await.ok().map(|(c, _)| c.call_ref), Some(r.clone()));
+    assert_eq!(
+        state.peek_reclaimable("w5|other|t").await.err(),
+        Some(ReplicaMiss::WrongRole),
         "a ref whose primary isn't us is not reclaimable here"
     );
 }
@@ -283,10 +344,10 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
 // the failure into its TWO underlying conditions so we can reason about the fix
 // separately — because the recommended fix only addresses ONE of them.
 //
-// Causal chain (verified in the study, store/mod.rs:160 + router.rs:496,636):
+// Causal chain (verified in the study):
 //   reboot → reclaim incomplete → BYE routed back to the (Ready) primary →
-//   hydrate_from_replica sees a PRIMARY-role miss → returns None (store/mod.rs:170)
-//   → process() falls into maybe_reject_orphan (router.rs:527,636) → 481.
+//   the takeover read sees a PRIMARY-role miss (`ReplicaMiss::WrongRole`)
+//   → process() falls into maybe_reject_orphan → 481.
 // ===========================================================================
 
 /// CASE A — the body WAS pulled into `pri:{self}` but never materialised (the
@@ -294,12 +355,12 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
 /// import landed, and only a backup reverse-flush `ReclaimCall` — never an
 /// arriving in-dialog request — re-materialised a post-sweep straggler).
 ///
-/// FIXED at the router: `process()` now wires `peek_reclaimable` into the
-/// hydrate-miss path (ON-DEMAND reclaim — router.rs, "REBOOTED-PRIMARY
-/// on-demand reclaim"), so the arriving BYE materialises + serves the call
-/// instead of orphan-481ing. This test pins the STATE-LEVEL seam contract the
-/// router fix builds on: `hydrate_from_replica` itself still (correctly)
-/// refuses a primary-role miss — the backup partition is a takeover source,
+/// FIXED at the router: `router::process`'s in-dialog lookup follows a
+/// `NotBackupRole` takeover refusal from `router::materialise` with an
+/// on-demand reclaim through the same module, so the arriving BYE
+/// materialises + serves the call instead of orphan-481ing. This test pins the
+/// STATE-LEVEL seam contract the router builds on: `peek_replica` (correctly)
+/// refuses a primary-role ref — the backup partition is a takeover source,
 /// `pri:{self}` is a reclaim source read by `peek_reclaimable` — and the body
 /// is reachable through the latter. The end-to-end recovery is asserted by
 /// `failover-harness::in_dialog_bye_races_bulk_reclaim_served_on_demand`.
@@ -317,17 +378,17 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
     put(&repl, PRI, "w0", &call).await; // pri:w0 body present …
     assert!(state.peek(&r).is_none(), "… but the live map MISSES it (un-reclaimed)");
 
-    // The end-of-hold BYE arrives. The router resolves it through exactly this
-    // call — `process()` (router.rs:496) on an in-dialog request.
-    let resolved = state.hydrate_from_replica(&r).await;
-    assert!(
-        resolved.is_none(),
-        "REPRO: a primary-role miss returns None (store/mod.rs:170) → \
+    // The end-of-hold BYE arrives. The router's takeover read is exactly this
+    // call, on an in-dialog request.
+    assert_eq!(
+        state.peek_replica(&r).await.err(),
+        Some(ReplicaMiss::WrongRole),
+        "REPRO: a primary-role miss is no takeover source → \
          maybe_reject_orphan → 481 on the BYE — the endurance long-call loss"
     );
 
     // Render the LITERAL response the UAC receives — exactly what
-    // `maybe_reject_orphan` (router.rs:640) emits when the resolve above is None.
+    // `maybe_reject_orphan` emits when the read above misses.
     // This is the message in the endurance `/uac-long-options_1_errors.log`.
     let the_481 = generate_response(
         &bye("cid-long"),
@@ -347,12 +408,11 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
     );
     assert_eq!(the_481.status(), 481, "the UAC gets 481, not the 200 it expects");
 
-    // The body IS locally present and reclaimable: the resolve path simply
-    // refuses to look. `peek_reclaimable` (today reachable ONLY via a backup's
-    // reverse-flush ReclaimCall push, router.rs:121 — never from an arriving
-    // request) WOULD recover it. This is what the recommended fix wires in.
+    // The body IS locally present and reclaimable: the takeover read simply
+    // refuses to look. `peek_reclaimable` recovers it — the read the on-demand
+    // reclaim wires in.
     assert_eq!(
-        state.peek_reclaimable(&r).await.map(|(c, _)| c.call_ref),
+        state.peek_reclaimable(&r).await.ok().map(|(c, _)| c.call_ref),
         Some(r.clone()),
         "the call sits fully reclaimable in pri:w0 on THIS node"
     );
@@ -379,14 +439,18 @@ async fn reboot_primary_481s_bye_when_pri_body_was_never_pulled() {
     let r = call.call_ref.clone();
     assert!(state.peek(&r).is_none(), "not live (never reclaimed)");
 
-    let resolved = state.hydrate_from_replica(&r).await;
-    assert!(resolved.is_none(), "REPRO: same 481 on the BYE");
+    assert_eq!(
+        state.peek_replica(&r).await.err(),
+        Some(ReplicaMiss::WrongRole),
+        "REPRO: same 481 on the BYE"
+    );
 
-    // CRUX: pri:w0 is EMPTY on this node, so the recommended fix (read local
-    // pri:{self} on a primary-role miss) would ALSO return None → still 481.
-    assert!(
-        state.peek_reclaimable(&r).await.is_none(),
-        "the recommended local-read fix is BLIND to this population: the body \
+    // CRUX: pri:w0 is EMPTY on this node, so the on-demand reclaim read (local
+    // pri:{self} on a primary-role miss) ALSO misses → still 481.
+    assert_eq!(
+        state.peek_reclaimable(&r).await.err(),
+        Some(ReplicaMiss::Absent),
+        "the local read is BLIND to this population: the body \
          was never imported into pri:w0 — it survives only as bak:w0 on the peer"
     );
 }
@@ -435,7 +499,10 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
     // denormalised backup from `topology.bak`.
     let scanned = state.reclaim_scan().await;
     assert_eq!(scanned.len(), 1);
-    assert!(state.materialize_if_absent(scanned[0].0.clone()), "first materialise inserts");
+    assert!(
+        state.materialize_if_absent(scanned[0].0.clone(), MaterialiseOrigin::Reclaim),
+        "first materialise inserts"
+    );
 
     // The reclaimed call is now visible to w1's Backup-flow bootstrap — a peer
     // re-pulling what it must back up receives it immediately, not one keepalive late.
@@ -484,7 +551,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
             for (call, _skew) in state.reclaim_scan().await {
                 let cr = call.call_ref.clone();
                 let _g = state.lock(&cr).await;
-                state.materialize_if_absent(call);
+                state.materialize_if_absent(call, MaterialiseOrigin::Reclaim);
             }
         })
     };

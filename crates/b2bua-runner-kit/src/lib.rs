@@ -242,6 +242,15 @@ pub struct RunnerEnv {
     /// Timer C > 3 min, 180 s PSTN supervision). `validate()` refuses boot when
     /// `B2BUA_SETUP_TIMEOUT_SEC` does not sit strictly below it.
     pub invite_txn_timeout_sec: i64,
+    /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC` — how long a b-leg initial
+    /// INVITE waits for a response of ANY kind before its transaction gives up
+    /// and the `call_failure` consult carries `timeout_kind: "response"`.
+    /// Default 32 (RFC 3261 Timer B); supported range 2..=32 — tightening it
+    /// is a deliberate §17.1.1.2 deviation (telephony policy: a hop drawing
+    /// nothing is dead, and the reroute must not wait 64·T1). In-dialog INVITE
+    /// and non-INVITE keep 64·T1; the first provisional swaps in
+    /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`.
+    pub invite_first_response_timeout_sec: i64,
     /// `B2BUA_CANCEL_STRICT_RFC_WAIT` — truthy (`1`/`true`/`yes`/`on`) selects
     /// the literal RFC 3261 §9.1 CANCEL wait (a response-less b-leg is never
     /// CANCELed); default is the ADR-0028 bounded hold — the CANCEL goes on
@@ -250,8 +259,9 @@ pub struct RunnerEnv {
     /// `B2BUA_CALL_CONTROL_TIMEOUT_MS` — decision-backend deadline per
     /// round-trip (default 5000; <= 0 disables — ADR-0022).
     pub call_control_timeout_ms: i64,
-    /// `B2BUA_ACK_TIMEOUT_SEC` — 2xx-without-ACK give-up window (RFC 3261
-    /// §13.3.1.4, 64·T1 = 32 s; <= 0 disables).
+    /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261
+    /// §13.3.1.4, 64·T1 = 32 s; <= 0 tears nothing down — the ladder itself
+    /// always runs, ADR-0029 X5).
     pub ack_timeout_sec: i64,
     /// `B2BUA_CPS_BUCKET_SIZE` — Tier-3 admission gate bucket size (default 1000).
     pub cps_bucket_size: u32,
@@ -338,6 +348,9 @@ impl RunnerEnv {
             invite_txn_timeout_sec: env_or("B2BUA_INVITE_TXN_TIMEOUT_SEC", "158")
                 .parse()
                 .expect("B2BUA_INVITE_TXN_TIMEOUT_SEC"),
+            invite_first_response_timeout_sec: env_or("B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC", "32")
+                .parse()
+                .expect("B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC"),
             cancel_strict_rfc_wait: env_flag("B2BUA_CANCEL_STRICT_RFC_WAIT"),
             call_control_timeout_ms: env_or("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")
                 .parse()
@@ -526,6 +539,7 @@ impl RunnerEnv {
             limiter_refresh_sec: self.limiter_refresh_sec,
             setup_timeout_sec: self.setup_timeout_sec,
             invite_txn_timeout_sec: self.invite_txn_timeout_sec,
+            invite_first_response_timeout_sec: self.invite_first_response_timeout_sec,
             cancel_strict_rfc3261_wait: self.cancel_strict_rfc_wait,
             call_control_timeout_ms: self.call_control_timeout_ms,
             ack_timeout_sec: self.ack_timeout_sec,
@@ -657,6 +671,7 @@ impl RunnerBase {
             // No injected store faults in production (ADR-0023: the live-path
             // probe is a no-op while disarmed).
             store_faults: Default::default(),
+            wire_faults: Default::default(),
             clock: self.clock.clone(),
             id_gen: Arc::new(IdGen::from_entropy()),
             replication: None,
@@ -667,7 +682,7 @@ impl RunnerBase {
             // Every built-in CORE machine included by default; a downstream that
             // ships its own transfer machine swaps this for
             // `ComposeOptions::default().without_core_refer_transfer()` before
-            // `spawn` (every field is pub) — ADR-0016 opt-out seam, upstreamneed-019.
+            // `spawn` (every field is pub) — ADR-0016 opt-out seam.
             compose: b2bua::rules::ComposeOptions::default(),
         }
     }
@@ -836,6 +851,20 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
             r.label(),
             m.event_queue_drops(r)
         ));
+    }
+    s.push_str("# HELP b2bua_txn_retransmits_total transaction-ladder rungs the txn layer put on the wire (Timer A/E, the CANCEL sub-ladder, Timer G), by what paced them (ladder), the request's method, and the final's status on a Timer G row; the dialog-level ladders are b2bua_retransmits_total.\n");
+    s.push_str("# TYPE b2bua_txn_retransmits_total counter\n");
+    for row in m.retransmit_rows() {
+        match row.code {
+            Some(code) => s.push_str(&format!(
+                "b2bua_txn_retransmits_total{{ladder=\"{}\",method=\"{}\",code=\"{code}\"}} {}\n",
+                row.ladder, row.method, row.count
+            )),
+            None => s.push_str(&format!(
+                "b2bua_txn_retransmits_total{{ladder=\"{}\",method=\"{}\"}} {}\n",
+                row.ladder, row.method, row.count
+            )),
+        }
     }
     s
 }

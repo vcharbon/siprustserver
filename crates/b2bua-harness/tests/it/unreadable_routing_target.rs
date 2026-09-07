@@ -1,4 +1,4 @@
-//! upstreamneed-055 — a routing decision naming an address no reader accepts is
+//! A routing decision naming an address no reader accepts is
 //! answered as a call outcome, never by inventing a destination.
 //!
 //! The failure mode these pin out: the B2BUA used to answer a malformed decision

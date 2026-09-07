@@ -1,11 +1,11 @@
-//! §17.1.1.3 UAS-side ACK obligation (upstreamneed-036 ask B) — the server
+//! §17.1.1.3 UAS-side ACK obligation — the server
 //! transaction OWNS the hop ACK to a non-2xx INVITE final. Matching is keyed
 //! `(Call-ID, INVITE top-Via branch)`, never positional, so the ACK may land
 //! **before or after** the body's next receive (the reroute interleave) with
 //! an identical body; `expect_ack` asserts it at a chosen point; and a body
 //! that never consumes it at all still passes `finish()` because the arrival
 //! is recorded at delivery (036 ask A) and discharges the gating
-//! `rfc3261.unackedInviteNon2xxFinal` wire rule.
+//! `unacked-invite-non-2xx-final` wire rule.
 
 use scenario_harness::Harness;
 
@@ -101,7 +101,7 @@ async fn missing_ack_times_out_and_gates() {
     // Deliberate peer bug under test: alice never ACKs bob's 486. The waiver
     // sanctions the peer-side violation; bob's own output stays compliant.
     h.allow_violation(
-        "rfc3261.unackedInviteNon2xxFinal",
+        "unacked-invite-non-2xx-final",
         "the test's PURPOSE is a peer that never ACKs a non-2xx final",
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;

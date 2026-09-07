@@ -1,0 +1,596 @@
+{
+  "actors": [
+    {
+      "endpoint": "ep-caller",
+      "id": "uac1",
+      "identity": "c1-caller",
+      "kind": "uac"
+    },
+    {
+      "claim": {
+        "by": "ruri-pos"
+      },
+      "endpoint": "ep-callee",
+      "id": "uas1",
+      "kind": "uas"
+    },
+    {
+      "claim": {
+        "by": "ruri-pos"
+      },
+      "endpoint": "ep-a-second",
+      "id": "uas2",
+      "kind": "uas"
+    }
+  ],
+  "calls": [
+    {
+      "attempts": [
+        {
+          "branch": 0,
+          "callee": {
+            "identity": "c1-called-0-0"
+          },
+          "leg": "B",
+          "position": 0
+        }
+      ],
+      "caller_leg": "A",
+      "id": "c1"
+    },
+    {
+      "attempts": [
+        {
+          "branch": 0,
+          "callee": {
+            "identity": "c2-called-0-0"
+          },
+          "leg": "D",
+          "position": 0
+        }
+      ],
+      "caller_leg": "C",
+      "id": "c2"
+    }
+  ],
+  "case": {
+    "annotations": {
+      "notes": [
+        "The two calls are dialled at DIFFERENT sockets through the deployment's own egress control header, so both callee legs really receive an INVITE and each `ruri-pos` claim has to land on its own endpoint. A claim offered to every endpoint instead of to the one the datagram arrived on delivers call two to leg B and fails the run."
+      ]
+    },
+    "family": "transparent",
+    "id": "two-endpoint-claim",
+    "lanes": {
+      "upstream-fake": "ok"
+    },
+    "origin": "authored",
+    "title": "two sockets, two claims: each lands where its INVITE arrived",
+    "variant": "repro"
+  },
+  "endpoints": [
+    {
+      "binding": "dedicated",
+      "id": "ep-caller",
+      "observed": "127.0.0.1:5060",
+      "side": "peer"
+    },
+    {
+      "binding": "dedicated",
+      "id": "ep-a-second",
+      "observed": "127.0.0.1:5090",
+      "side": "peer"
+    },
+    {
+      "binding": "dedicated",
+      "id": "ep-callee",
+      "observed": "127.0.0.1:5070",
+      "side": "peer"
+    }
+  ],
+  "flow": [
+    {
+      "delay": {
+        "compressible": true,
+        "from": "trigger",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s1",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "ref": "resources/uac1_offer.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "from": {
+          "form": "private",
+          "pos": "c1.caller"
+        },
+        "headers": [
+          {
+            "name": "X-Api-Call",
+            "value": "{\"destination\":{\"host\":\"127.0.0.1\",\"port\":5070,\"user\":\"bob5070\"}}"
+          }
+        ],
+        "method": "INVITE",
+        "ruri": {
+          "form": "e164",
+          "pos": "c1.called[0][0]"
+        },
+        "to": {
+          "form": "e164",
+          "pos": "c1.called[0][0]"
+        }
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s2",
+      "leg": "A",
+      "msg": {
+        "cseq": 1,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s3",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "method": "INVITE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s3",
+        "ms": 20,
+        "timer_linked": false
+      },
+      "id": "s4",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "ref": "resources/uas1_answer.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "cseq-method": "INVITE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "send"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s4",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s5",
+      "leg": "A",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s5",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s6",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s6",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s7",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "op": "expect"
+    },
+    {
+      "after": [
+        "s7"
+      ],
+      "delay": {
+        "compressible": true,
+        "from": "trigger",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s8",
+      "leg": "C",
+      "msg": {
+        "body": {
+          "ref": "resources/uac1_offer.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "from": {
+          "form": "private",
+          "pos": "c2.caller"
+        },
+        "headers": [
+          {
+            "name": "X-Api-Call",
+            "value": "{\"destination\":{\"host\":\"127.0.0.1\",\"port\":5090,\"user\":\"idle5090\"}}"
+          }
+        ],
+        "method": "INVITE",
+        "ruri": {
+          "form": "e164",
+          "pos": "c2.called[0][0]"
+        },
+        "to": {
+          "form": "e164",
+          "pos": "c2.called[0][0]"
+        }
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s8",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s9",
+      "leg": "C",
+      "msg": {
+        "cseq": 1,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s8",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s10",
+      "leg": "D",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "method": "INVITE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s10",
+        "ms": 20,
+        "timer_linked": false
+      },
+      "id": "s11",
+      "leg": "D",
+      "msg": {
+        "body": {
+          "ref": "resources/uas1_answer.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "cseq-method": "INVITE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "send"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s11",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s12",
+      "leg": "C",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s12",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s13",
+      "in_dialog": true,
+      "leg": "C",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s13",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s14",
+      "in_dialog": true,
+      "leg": "D",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s14",
+        "ms": 20,
+        "timer_linked": false
+      },
+      "id": "s15",
+      "in_dialog": true,
+      "leg": "C",
+      "msg": {
+        "method": "BYE"
+      },
+      "op": "send"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s15",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s16",
+      "in_dialog": true,
+      "leg": "D",
+      "msg": {
+        "method": "BYE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s16",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s17",
+      "in_dialog": true,
+      "leg": "D",
+      "msg": {
+        "cseq-method": "BYE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "send"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s17",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s18",
+      "in_dialog": true,
+      "leg": "C",
+      "msg": {
+        "cseq-method": "BYE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s7",
+        "ms": 30,
+        "timer_linked": false
+      },
+      "id": "s19",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "method": "BYE"
+      },
+      "op": "send"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s19",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s20",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "method": "BYE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s20",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s21",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "cseq-method": "BYE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "send"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s21",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s22",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "cseq-method": "BYE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "expect"
+    }
+  ],
+  "identities": [
+    {
+      "forms": [
+        "private"
+      ],
+      "kind": "external-caller",
+      "name": "c1-caller"
+    },
+    {
+      "forms": [
+        "e164"
+      ],
+      "kind": "site",
+      "name": "c1-called-0-0"
+    },
+    {
+      "forms": [
+        "private"
+      ],
+      "kind": "external-caller",
+      "name": "c2-caller"
+    },
+    {
+      "forms": [
+        "e164"
+      ],
+      "kind": "site",
+      "name": "c2-called-0-0"
+    }
+  ],
+  "legs": [
+    {
+      "actor": "uac1",
+      "dir": "out",
+      "id": "A"
+    },
+    {
+      "actor": "uas1",
+      "dir": "in",
+      "id": "B"
+    },
+    {
+      "actor": "uac1",
+      "dir": "out",
+      "id": "C"
+    },
+    {
+      "actor": "uas2",
+      "dir": "in",
+      "id": "D"
+    }
+  ],
+  "pivot_version": 3,
+  "postconditions": {
+    "cdr": {
+      "count": 2
+    }
+  },
+  "timing": {
+    "expect_budget_ms": 5000,
+    "settle_budget_ms": 10000
+  }
+}

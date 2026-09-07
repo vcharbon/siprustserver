@@ -54,14 +54,18 @@ async fn promote_pem_happy_no_resync() {
 
     let mut uas = bob.receive("INVITE").await;
 
-    // Bob: 183 + SDP + P-Early-Media → promotion fires.
+    // Bob: 183 + SDP + P-Early-Media → promotion fires. Bob advertises a set
+    // of his own, which is what the promoted 200 relays to alice.
     uas.respond(183, "Session Progress")
         .with_header("P-Early-Media", "sendrecv")
+        .with_header("Allow", "INVITE, ACK, BYE, CANCEL")
+        .with_header("Supported", "100rel, timer")
         .with_sdp(EARLY)
         .await;
 
     // Alice sees a 200 OK carrying bob's early SDP, P-Early-Media stripped,
-    // explicit Allow + Supported (no 100rel).
+    // bob's Allow verbatim and his Supported minus the 100rel the service may
+    // not claim on her behalf (no reliable provisional reached her).
     let ok = call.expect(200).await;
     assert!(!ok.body().is_empty(), "synthetic 200 carries bob's early SDP");
     assert_eq!(ok.body(), EARLY.as_bytes(), "early SDP relayed verbatim");
@@ -70,12 +74,9 @@ async fn promote_pem_happy_no_resync() {
         "P-Early-Media stripped"
     );
     let allow = ok.header::<Allow>().expect("an Allow").expect("readable Allow");
-    assert!(
-        allow.contains("INVITE") && allow.contains("BYE"),
-        "Allow on synthetic 200, got {}",
-        allow.to_wire()
-    );
+    assert_eq!(allow.to_wire(), "INVITE, ACK, BYE, CANCEL", "bob's Allow relayed verbatim");
     assert!(!has_token(ok.header::<Supported>(), "100rel"), "no 100rel");
+    assert!(has_token(ok.header::<Supported>(), "timer"), "bob's other tag relayed");
 
     // Alice ACKs — absorbed locally; bob receives nothing yet.
     let mut dialog = call.ack().await;

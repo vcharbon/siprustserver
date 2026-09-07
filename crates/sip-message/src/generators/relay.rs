@@ -18,30 +18,56 @@ pub enum RelayTarget {
     Response,
 }
 
+/// What the minted message carries where the source had a body. A header that
+/// describes a body must not outlive the body it describes, and a replacement
+/// is not an absence: the two are distinct outcomes here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceBody {
+    /// The source's own body, byte for byte.
+    Verbatim,
+    /// A body the relay staged in the source's place, filling the same role.
+    Replaced,
+    /// No body at all.
+    Dropped,
+}
+
 /// The message being minted, as far as transparency is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RelayScope {
     /// Which side of the transaction the minted message sits on.
     pub target: RelayTarget,
-    /// Whether the minted message carries the source's own body — a header
-    /// that describes a body must not outlive the body it describes.
-    pub carries_source_body: bool,
+    /// What the minted message carries where the source had a body.
+    pub body: SourceBody,
 }
 
 impl RelayScope {
     /// A request minted toward the peer, carrying the source's body.
     pub const fn request() -> Self {
-        Self { target: RelayTarget::Request, carries_source_body: true }
+        Self { target: RelayTarget::Request, body: SourceBody::Verbatim }
     }
 
     /// A response minted on the peer's transaction, carrying the source's body.
     pub const fn response() -> Self {
-        Self { target: RelayTarget::Response, carries_source_body: true }
+        Self { target: RelayTarget::Response, body: SourceBody::Verbatim }
     }
 
-    /// The same message with the source's body dropped or replaced.
+    /// A response minted on the peer's transaction, `body` stating what it
+    /// carries where the source had one.
+    pub const fn response_carrying(body: SourceBody) -> Self {
+        Self { target: RelayTarget::Response, body }
+    }
+
+    /// The same message with the source's body dropped: nothing describing a
+    /// body rides, because the minted message has none.
     pub const fn without_source_body(self) -> Self {
-        Self { carries_source_body: false, ..self }
+        Self { body: SourceBody::Dropped, ..self }
+    }
+
+    /// The same message carrying a body the relay staged in the source's
+    /// place. The body's role is unchanged, so the header stating that role
+    /// still describes it truthfully; the octets are the relay's own.
+    pub const fn with_replaced_body(self) -> Self {
+        Self { body: SourceBody::Replaced, ..self }
     }
 }
 
@@ -78,6 +104,14 @@ const WITHHELD: &[HeaderName] = &[
     HeaderName::Replaces,
 ];
 
+/// True iff `name` states when THIS message was sent (RFC 3261 §20.17 / §20.38),
+/// so the stack that mints a message writes its own and a relay never carries a
+/// peer's — the [`WITHHELD`] clock-stamp pair, as a name predicate for callers
+/// that hold a wire name rather than a message.
+pub fn states_send_time(name: &str) -> bool {
+    matches!(HeaderName::known(name), Some(HeaderName::Date | HeaderName::Timestamp))
+}
+
 /// Additionally withheld from a relayed REQUEST.
 const WITHHELD_ON_REQUEST: &[HeaderName] = &[
     // RFC 3261 §20.32 / §20.29: an imposition on whoever receives the request.
@@ -92,10 +126,15 @@ const WITHHELD_ON_REQUEST: &[HeaderName] = &[
     HeaderName::RAck,
 ];
 
-/// Describes the body, so it rides only where that body rides (RFC 3261 §20.11
-/// / §20.12 / §20.15, RFC 2045 §4).
-const DESCRIBES_BODY: &[HeaderName] = &[
-    HeaderName::ContentDisposition,
+/// States what the body is FOR and how a recipient that cannot process it must
+/// answer (RFC 3261 §20.11). It describes the body's role rather than its
+/// octets, so it rides wherever a body of that role rides — including onto a
+/// body the relay staged in the source's place.
+const DESCRIBES_BODY_ROLE: &[HeaderName] = &[HeaderName::ContentDisposition];
+
+/// States a property of the body's OCTETS (RFC 3261 §20.12 / §20.15, RFC 2045
+/// §4), so it rides only where those octets themselves ride.
+const DESCRIBES_BODY_OCTETS: &[HeaderName] = &[
     HeaderName::ContentEncoding,
     HeaderName::ContentLanguage,
     HeaderName::MimeVersion,
@@ -144,8 +183,17 @@ pub fn relayable(name: &str, scope: RelayScope) -> bool {
     if scope.target == RelayTarget::Request && WITHHELD_ON_REQUEST.contains(&known) {
         return false;
     }
-    if !scope.carries_source_body && DESCRIBES_BODY.contains(&known) {
-        return false;
+    match scope.body {
+        SourceBody::Verbatim => {}
+        SourceBody::Replaced if DESCRIBES_BODY_OCTETS.contains(&known) => return false,
+        SourceBody::Replaced => {}
+        SourceBody::Dropped
+            if DESCRIBES_BODY_ROLE.contains(&known)
+                || DESCRIBES_BODY_OCTETS.contains(&known) =>
+        {
+            return false
+        }
+        SourceBody::Dropped => {}
     }
     true
 }
@@ -232,4 +280,23 @@ pub fn generate_relayed_response(
     }
 
     emit::response(emit::framed(draft, opts.body.clone(), opts.content_type.clone()))
+}
+
+#[cfg(test)]
+mod clock_stamp_tests {
+    use super::*;
+
+    /// [`states_send_time`] and [`WITHHELD`] name the same clock stamps — the
+    /// predicate is the table's name-shaped form, not a second policy.
+    #[test]
+    fn the_predicate_names_exactly_the_withheld_clock_stamps() {
+        for name in ["Date", "date", "Timestamp"] {
+            assert!(states_send_time(name), "{name} states send time");
+            let known = HeaderName::known(name).expect("a known header");
+            assert!(WITHHELD.contains(&known), "{name} is withheld from a relay");
+        }
+        for name in ["Allow", "Supported", "P-Term", "Content-Disposition"] {
+            assert!(!states_send_time(name), "{name} does not state send time");
+        }
+    }
 }

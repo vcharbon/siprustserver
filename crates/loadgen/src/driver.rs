@@ -495,7 +495,7 @@ async fn run_one(
     }
     let agent_for =
         |role: &str| callee_agents.iter().find(|(r, _)| *r == role).map(|(_, a)| a);
-    // The primary callee: the "bob" role (every derived spec — and every upstream
+    // The primary callee: the "bob" role (every derived spec — and every downstream
     // shape — declares it), falling back to the first declared leg for an
     // exotic spec that names its primary differently.
     let bob = agent_for("bob").unwrap_or(&callee_agents[0].1);

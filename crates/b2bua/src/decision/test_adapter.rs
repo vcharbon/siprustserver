@@ -23,7 +23,7 @@ type NewCallRule = Box<dyn Fn(&NewCallRequest) -> Option<NewCallResponse> + Send
 /// A scripted `/call/refer` outcome a test can request. `Hang` models an HTTP
 /// request that never resolves (the sub-expiry timer is what fires).
 type ReferRule = Box<dyn Fn(&CallReferRequest) -> ReferOutcome + Send + Sync>;
-/// A scripted `call_release` outcome (upstreamneed-009).
+/// A scripted `call_release` outcome.
 type ReleaseRule = Box<dyn Fn(&CallReleaseRequest) -> ReleaseOutcome + Send + Sync>;
 
 /// A scripted decision backend. Build with [`ScriptedDecisionEngine::route_all_to`]
@@ -64,8 +64,10 @@ impl ScriptedDecisionEngine {
     pub fn route_all_to(host: impl Into<String>, port: u16) -> Self {
         let dest = (host.into(), port);
         Self::builder()
-            .fallback(move |_req| {
-                NewCallResponse::Route(route_to(&dest.0, dest.1))
+            .fallback(move |req| {
+                let mut r = route_to(&dest.0, dest.1);
+                r.new_ruri = Some(routed_ruri(req, &dest.0, dest.1));
+                NewCallResponse::Route(r)
             })
             .build()
     }
@@ -83,6 +85,27 @@ impl ScriptedDecisionEngine {
         host: impl Into<String>,
         port: u16,
         stress: Option<CallLimiterEntry>,
+    ) -> Self {
+        // Every route states the REFER arm: this engine answers `/call/refer`
+        // (`.on_refer` below), i.e. it stands for a deployment whose backend
+        // processes transfers itself.
+        Self::api_call_engine(host, port, stress, true)
+    }
+
+    /// [`route_all_to_with_limiter`](Self::route_all_to_with_limiter) whose
+    /// routes state NO feature of their own: a call is processed locally for
+    /// REFER only when its own `X-Api-Call` says `features.refer`. The REPLAY
+    /// lane's engine — a replayed document must state everything it wants the
+    /// platform to do, so nothing may be implied by the backend's identity.
+    pub fn route_by_api_call(host: impl Into<String>, port: u16) -> Self {
+        Self::api_call_engine(host, port, None, false)
+    }
+
+    fn api_call_engine(
+        host: impl Into<String>,
+        port: u16,
+        stress: Option<CallLimiterEntry>,
+        refer_by_default: bool,
     ) -> Self {
         let dest = (host.into(), port);
         Self::builder()
@@ -102,6 +125,9 @@ impl ScriptedDecisionEngine {
                             r.call_limiter.push(s.clone());
                         }
                         r.call_limiter.extend(limiter_entries_from_api_call(req));
+                        if refer_by_default {
+                            r.features.refer.get_or_insert_with(Default::default);
+                        }
                     }
                     return resp;
                 }
@@ -142,6 +168,10 @@ impl ScriptedDecisionEngine {
                     r.call_limiter.push(s.clone());
                 }
                 r.call_limiter.extend(limiter_entries_from_api_call(req));
+                r.features.refer = refer_feature_from_api_call(req);
+                if refer_by_default {
+                    r.features.refer.get_or_insert_with(Default::default);
+                }
                 NewCallResponse::Route(r)
             })
             // Reroute/failover walker (no-op unless a `routes` plan set a
@@ -158,13 +188,15 @@ impl ScriptedDecisionEngine {
             .build()
     }
 
-    /// Route every call to `host:port` and authorize REFER transfers via the
-    /// default `X-Api-Call`-keyed behavior (port of `mockCallReferBehavior`).
-    /// This is the common REFER-scenario constructor.
+    /// Route every call to `host:port` with LOCAL REFER processing activated,
+    /// and authorize the transfers via the default `X-Api-Call`-keyed behavior
+    /// (port of `mockCallReferBehavior`). This is the common REFER-scenario
+    /// constructor: the two halves belong together — a backend that answers
+    /// `/call/refer` is one whose routes state `features.refer`.
     pub fn route_all_with_refer(host: impl Into<String>, port: u16) -> Self {
         let dest = (host.into(), port);
         Self::builder()
-            .fallback(move |_req| NewCallResponse::Route(route_to(&dest.0, dest.1)))
+            .fallback(move |_req| NewCallResponse::Route(route_to_processing_refer(&dest.0, dest.1)))
             .on_refer(default_call_refer)
             .build()
     }
@@ -245,7 +277,11 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
     let host = dest.get("host")?.as_str()?.to_string();
     let port = super::read_stated_port(dest.get("port"))?;
     let mut r = route_to(&host, port);
-    r.new_ruri = obj.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string);
+    // A plan route that states its own Request-URI wins; one that states none
+    // keeps the routed-target default rather than falling back to the a-leg's.
+    if let Some(text) = obj.get("new_ruri").and_then(|v| v.as_str()) {
+        r.new_ruri = Some(text.to_string());
+    }
     r.new_from = obj.get("new_from").and_then(|v| v.as_str()).map(str::to_string);
     r.new_to = obj.get("new_to").and_then(|v| v.as_str()).map(str::to_string);
     // Per-route no-answer ring timer (047): `apply_route` arms
@@ -253,6 +289,9 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
     // the plan (the `no-answer` rule POSTs /call/failure) like a reject would.
     r.no_answer_timeout_sec = obj.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
     r.update_headers = parse_update_headers(obj.get("update_headers"));
+    // The REFER arm: a plan states per call whether the platform processes a
+    // transfer itself or relays the REFER on.
+    r.features.refer = refer_feature_from_obj(obj);
     // The engine force-enable (ADR-0026 §3). Read here or an e2e/endurance rig
     // could never reach it: this is the only JSON → `RouteDecision` decoder, so
     // dropping the field makes `"trace": true` in an `X-Api-Call` plan a no-op.
@@ -439,6 +478,27 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
     }
 }
 
+/// The `features.refer` arm a plan/destination object states —
+/// `{"…","features":{"refer":{}}}`. Its PRESENCE directs LOCAL REFER
+/// processing on the routed call; absent (or `null`), a REFER relays to the peer
+/// leg like any other in-dialog method.
+fn refer_feature_from_obj(obj: &serde_json::Value) -> Option<call::features::ReferFeature> {
+    let refer = obj.get("features")?.get("refer")?;
+    if refer.is_null() {
+        return None;
+    }
+    Some(call::features::ReferFeature {
+        max_chain_depth: refer.get("max_chain_depth").and_then(|v| v.as_i64()),
+    })
+}
+
+/// The `features.refer` arm an inbound `X-Api-Call` states (the single-
+/// destination shape, which is not a plan route). Absent header / non-JSON →
+/// `None`.
+fn refer_feature_from_api_call(req: &NewCallRequest) -> Option<call::features::ReferFeature> {
+    refer_feature_from_obj(&parse_api_call_plan(req)?)
+}
+
 /// Parse an inbound `X-Api-Call` JSON header into call-limiter admission
 /// entries — `{"...","call_limiter":[{"id":"x","limit":20}]}`. Absent header,
 /// non-JSON, or a missing/!array `call_limiter` field all yield an empty vec
@@ -514,11 +574,39 @@ pub fn route_user_from_api_call(req: &NewCallRequest) -> Option<String> {
     }
 }
 
+/// The b-leg Request-URI for a call routed to `host:port`: the ROUTED TARGET,
+/// carrying the userpart the a-leg named where it named one.
+///
+/// Keeping the userpart is what makes the rewrite lossless — the callee's own
+/// identity is what a Request-URI is for, and a downstream registrar front
+/// proxy resolves the AOR from it — while the host:port is non-negotiable (the
+/// anti-loop invariant on [`route_to`]). URI reading is `sip-message`'s; this
+/// module never parses one itself.
+fn routed_ruri(req: &NewCallRequest, host: &str, port: u16) -> String {
+    let user = sip_message::header::Uri::parse(&sip_message::SipStr::owned(&req.ruri))
+        .ok()
+        .and_then(|uri| uri.user().map(str::to_string));
+    match user {
+        Some(user) if !user.is_empty() => format!("sip:{user}@{host}:{port}"),
+        _ => format!("sip:{host}:{port}"),
+    }
+}
+
 /// Build a [`RouteDecision`] to `host:port` with default platform features.
+///
+/// The b-leg Request-URI names the ROUTED TARGET. Left unrewritten it defaults
+/// to the a-leg's (`relay::originate`), which — the caller having dialled this
+/// system's own ingress — is this system's own address: a Request-URI a strict
+/// UAS rejects under RFC 3261 §8.1.2, and behind a front proxy the anti-loop
+/// hazard `route_all_to_with_limiter` documents (a request forwarded to its own
+/// R-URI bounces back to a worker, which re-INVITEs a fresh b-leg with
+/// Max-Forwards reset, so it never 483s). A caller that means something else —
+/// a userpart for a downstream registrar, a plan route's own rewrite — sets
+/// `new_ruri` after this.
 pub fn route_to(host: &str, port: u16) -> RouteDecision {
     RouteDecision {
         destination: SipDestination::new(host, port),
-        new_ruri: None,
+        new_ruri: Some(format!("sip:{host}:{port}")),
         new_from: None,
         new_to: None,
         update_headers: None,
@@ -531,6 +619,15 @@ pub fn route_to(host: &str, port: u16) -> RouteDecision {
         subscriptions: Vec::new(),
         trace: false,
     }
+}
+
+/// Build a [`RouteDecision`] to `host:port` whose `features.refer` arm directs
+/// LOCAL REFER processing — the scripted equivalent of the wire `features.refer`
+/// field. Without it the routed call relays a REFER to its peer leg.
+pub fn route_to_processing_refer(host: &str, port: u16) -> RouteDecision {
+    let mut r = route_to(host, port);
+    r.features.refer = Some(call::features::ReferFeature::default());
+    r
 }
 
 /// Build a [`RouteDecision`] to `host:port` with the `relayFirst18xTo180`
@@ -613,8 +710,8 @@ impl ScriptedBuilder {
         self
     }
 
-    /// Script the `call_release` consult (subscribed release events,
-    /// upstreamneed-009). Unset = the trait's back-compat default (`Release` —
+    /// Script the `call_release` consult (subscribed release events).
+    /// Unset = the trait's back-compat default (`Release` —
     /// local teardown).
     pub fn on_release(
         mut self,
@@ -1138,7 +1235,7 @@ mod tests {
         }
     }
 
-    // upstreamneed-055: an absent port is RFC 3261 §19.1.2's default; a port that
+    // An absent port is RFC 3261 §19.1.2's default; a port that
     // is STATED and does not read is a refusal. Collapsing the second onto 5060
     // dials the default port of a host the plan never named — the same
     // fabricated-default class as an opaque routing URI.

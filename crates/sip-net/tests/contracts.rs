@@ -226,7 +226,7 @@ async fn real_run_silences_rules() {
 }
 
 // ---------------------------------------------------------------------------
-// Record-at-demux (upstreamneed-036 ask A): arrivals are recorded at DELIVERY
+// Record-at-demux: arrivals are recorded at DELIVERY
 // into the inbox, consumption separately at recv — so a message the body never
 // reads is still on the trace, distinguishably.
 // ---------------------------------------------------------------------------
@@ -381,6 +381,7 @@ fn audit_view_hides_consumption_markers_and_modeled_loss() {
         bind_key: "10.0.0.2:5060".to_string(),
         packet: pkt.clone(),
         disposition,
+        wire: sip_net::WireStamp::of_bytes(b"BYE sip:x SIP/2.0\r\n"),
     };
     assert!(sip_net::audit_visible_event(&item(RecvDisposition::Delivered)));
     assert!(sip_net::audit_visible_event(&item(RecvDisposition::InboxOverflow)));
@@ -391,4 +392,96 @@ fn audit_view_hides_consumption_markers_and_modeled_loss() {
         bind_key: "10.0.0.2:5060".to_string(),
         packet: pkt,
     }));
+}
+
+// ---------------------------------------------------------------------------
+// The wire stamp: parse-once + §17.2 repeat mark at event production
+// ---------------------------------------------------------------------------
+
+const STAMPED_INVITE: &str = "INVITE sip:bob@10.0.0.2 SIP/2.0\r\n\
+    Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-w0\r\n\
+    From: <sip:alice@10.0.0.1>;tag=a1\r\n\
+    To: <sip:bob@10.0.0.2>\r\n\
+    Call-ID: w0\r\n\
+    CSeq: 1 INVITE\r\n\
+    Content-Length: 0\r\n\r\n";
+
+/// Every `RecvItem` on a bind's lane, in capture order.
+fn recv_items(
+    wrapped: &sip_net::WrappedNetwork,
+) -> Vec<Stamped<SignalingNetworkEvent>> {
+    wrapped
+        .recording
+        .channel()
+        .snapshot()
+        .into_iter()
+        .filter(|s| matches!(&s.event, SignalingNetworkEvent::RecvItem { .. }))
+        .collect()
+}
+
+fn wire_of(s: &Stamped<SignalingNetworkEvent>) -> &sip_net::WireStamp {
+    match &s.event {
+        SignalingNetworkEvent::RecvItem { wire, .. } => wire,
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn a_retransmitted_request_arrival_is_stamped_as_a_repeat_of_the_first() {
+    let recorder = Recorder::fake();
+    let wrapped = with_all_contracts(
+        sim(),
+        recorder,
+        RunContext::TestWithRecorder,
+        ScopedAuditOptions::default(),
+        false,
+    );
+    let net = wrapped.network.clone();
+    let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
+    let b = net.bind_udp(opts("10.0.0.2:5060", 64)).await.unwrap();
+
+    a.send_to(STAMPED_INVITE.as_bytes(), b.local_addr()).await.unwrap();
+    net.await_in_flight(Duration::from_secs(1)).await;
+    a.send_to(STAMPED_INVITE.as_bytes(), b.local_addr()).await.unwrap();
+    net.await_in_flight(Duration::from_secs(1)).await;
+
+    let recvs = recv_items(&wrapped);
+    assert_eq!(recvs.len(), 2);
+    let first = wire_of(&recvs[0]);
+    assert!(first.parsed.is_some(), "the arrival is parsed once, at production");
+    assert_eq!(first.repeat_of, None);
+    let second = wire_of(&recvs[1]);
+    assert_eq!(
+        second.repeat_of,
+        Some(recvs[0].seq),
+        "the repeat mark names the first sighting's seq"
+    );
+}
+
+#[tokio::test]
+async fn an_unparseable_arrival_is_stamped_unparsed_and_never_a_repeat() {
+    let recorder = Recorder::fake();
+    let wrapped = with_all_contracts(
+        sim(),
+        recorder,
+        RunContext::TestWithRecorder,
+        ScopedAuditOptions::default(),
+        false,
+    );
+    let net = wrapped.network.clone();
+    let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
+    let b = net.bind_udp(opts("10.0.0.2:5060", 64)).await.unwrap();
+
+    a.send_to(b"garbage\r\n\r\n", b.local_addr()).await.unwrap();
+    net.await_in_flight(Duration::from_secs(1)).await;
+    a.send_to(b"garbage\r\n\r\n", b.local_addr()).await.unwrap();
+    net.await_in_flight(Duration::from_secs(1)).await;
+
+    let recvs = recv_items(&wrapped);
+    assert_eq!(recvs.len(), 2);
+    for s in &recvs {
+        let wire = wire_of(s);
+        assert!(wire.parsed.is_none());
+        assert_eq!(wire.repeat_of, None, "a datagram that keys nothing is never a repeat");
+    }
 }

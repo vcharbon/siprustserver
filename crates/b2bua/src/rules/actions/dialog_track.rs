@@ -39,8 +39,10 @@ impl ActionExecutor<'_> {
     /// subsequent in-dialog request (PRACK/UPDATE) can target the callee with
     /// the right To-tag (RFC 3261 §12.1.2). One early dialog per distinct
     /// callee To-tag (downstream forking → several per b-leg); called from the
-    /// b-leg 1xx/2xx relay path and from [`Self::ensure_b_early_dialog`] (the
-    /// suppressed-provisional seam). Idempotent per tag.
+    /// b-leg 1xx/2xx relay path, from [`Self::ensure_b_early_dialog`] (the
+    /// suppressed-provisional seam), and from [`Self::confirm_dialog`] (a 2xx
+    /// answering under a tag that never rang). Idempotent per tag; b-leg only
+    /// (the a-leg id is refused here — its UAS dialog is never tracked this way).
     pub(super) fn track_b_early_dialog(
         &self,
         call: &mut Call,
@@ -48,6 +50,18 @@ impl ActionExecutor<'_> {
         resp: &sip_message::SipResponse,
         to_tag: &str,
     ) {
+        if source_leg_id == "a" {
+            return;
+        }
+        let already = call
+            .b_legs
+            .iter()
+            .find(|l| l.leg_id == source_leg_id)
+            .map(|l| l.dialogs.iter().any(|d| d.sip.remote_tag == to_tag))
+            .unwrap_or(false);
+        if already {
+            return;
+        }
         let contact =
             contact_uri(resp.header::<header::Contact>(), &call.call_ref, source_leg_id)
                 .unwrap_or_default();
@@ -62,15 +76,6 @@ impl ActionExecutor<'_> {
         // The response echoes the INVITE's CSeq (§8.1.3.3); seed each forked
         // early dialog's sequence from it so they advance independently.
         let invite_cseq = resp.cseq().seq() as i64;
-        let already = call
-            .b_legs
-            .iter()
-            .find(|l| l.leg_id == source_leg_id)
-            .map(|l| l.dialogs.iter().any(|d| d.sip.remote_tag == to_tag))
-            .unwrap_or(false);
-        if already {
-            return;
-        }
         *call = call::helpers::update_leg(call.clone(), source_leg_id, |leg| {
             leg.state = LegState::Early;
             if let Some(d) = leg.dialogs.iter_mut().find(|d| d.sip.remote_tag.is_empty()) {
@@ -142,6 +147,17 @@ impl ActionExecutor<'_> {
         // intrinsic to its Record-Route — no `;outbound` worker-stamp and no
         // Via/registry rescue.
         let route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
+        // The CSeq the caller's §13.2.2.4 ACK will carry — its own INVITE's.
+        let awaited_ack_cseq =
+            relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
+        // §12.1.2: a 2xx whose To-tag no provisional ever carried answers on a
+        // dialog of its OWN — an accepting branch that never rang. Track it
+        // before promotion (idempotent for a known tag) so it exists with the
+        // INVITE-seeded CSeq and inherited pending-INVITE handle, instead of
+        // inheriting another fork's already-advanced record (§12.2.1.1 skip).
+        if !remote_tag.is_empty() {
+            self.track_b_early_dialog(call, leg_id, resp, &remote_tag);
+        }
         if let Some(leg) = call.b_legs.iter_mut().find(|l| l.leg_id == leg_id) {
             // Forking (RFC 3261 §12.1.2): the 2xx confirms exactly ONE early
             // dialog — the one whose callee tag it carries. Promote *that* fork
@@ -150,6 +166,8 @@ impl ActionExecutor<'_> {
             // `dialogs.first()` unconditionally would resurrect fork 1's stale
             // CSeq under fork 2's tag, so the next in-dialog request re-uses a
             // number the winning fork already spent (§12.2.1.1 violation).
+            // Every tagged 2xx is tracked above, so the two fallbacks serve
+            // only the degenerate tagless 2xx (§12.1.2 requires a To-tag).
             let idx = leg
                 .dialogs
                 .iter()
@@ -177,6 +195,24 @@ impl ActionExecutor<'_> {
             }
             leg.state = LegState::Confirmed;
             leg.disposition = LegDisposition::Bridged;
+            // RFC 3261 §13.2.2.4: taking a 2xx mints the ACK's client transaction,
+            // so every 2xx copy is re-ACKed on this one branch
+            // (`re-ack-retransmitted-2xx`). Minted only when the ACK owes no answer
+            // body; a delayed-offer INVITE's ACK is composable only once the
+            // caller's own ACK supplies the answer.
+            //
+            // The relay-ACK obligation is armed for the caller's ACK CSeq
+            // REGARDLESS: confirming a dialog cannot know who will compose the
+            // ACK — `ack_on_answer` composes it here for a plain answered call,
+            // several service rules compose their own, and a rule that composes
+            // none (an MRF-answered callee) still needs the caller's relayed on.
+            // Whichever emission wins discharges it (`ack_leg`).
+            if let Some(d) = leg.dialogs.first_mut() {
+                if d.ext.ack_branch.is_none() && relay::acked_invite_carries_offer(d) {
+                    d.ext.ack_branch = Some(self.id_gen.new_branch());
+                }
+                d.ext.awaited_ack_cseq = Some(awaited_ack_cseq);
+            }
         }
         // Reuse the a-facing tag pre-seeded for this callee (relayFirst18x's
         // `force-tag-consistency`) so the 200 OK To-tag matches the first 180.
@@ -191,10 +227,10 @@ impl ActionExecutor<'_> {
                 d.sip.local_tag = pref;
             }
         }
-        // Stash the answer SDP that was relayed toward alice on the 2xx so an
-        // un-ACKed-2xx retransmit (RFC 3261 §13.3.1.4) re-sends a faithful copy —
-        // the caller that lost the original 200 needs its answer. Mirror the relay
-        // body choice (policy override else the callee's 200 body).
+        // Keep the answer SDP relayed toward alice on the 2xx as the a-dialog's
+        // `cached_sdp` (the relayFirst18x / fake-PRACK cache). The §13.3.1.4
+        // repeat does not read it — it re-sends the retained datagram. Mirror
+        // the relay body choice (policy override else the callee's 200 body).
         let answer_body = match call.policy_update_body.clone() {
             Some(call::PolicyUpdateBody::Bytes(b)) => Some(b),
             _ if !resp.body().is_empty() => Some(resp.body().to_vec()),
@@ -284,7 +320,9 @@ impl ActionExecutor<'_> {
                 pending_invite_txn: None,
                 cached_sdp: None,
                 pending_reinvite_2xx: None,
-                answered_advert: Vec::new(),
+                answered_2xx: None,
+                emitted_ack: None,
+                awaited_ack_cseq: None,
             },
         };
         call.a_leg.dialogs = vec![dialog];
@@ -439,7 +477,8 @@ Content-Length: 0\r\n\r\n"
     fn an_unreadable_record_route_never_yields_an_empty_route_set() {
         let config = proxied_config();
         let id_gen = IdGen::seeded(0xD1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+        let wire_faults = crate::wire_faults::WireFaults::none();
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &wire_faults };
 
         let resp = ok_200(UNREADABLE_RR);
         assert!(uac_route_set(&resp).is_err(), "the fixture's recorded route must not read");
@@ -465,7 +504,8 @@ Content-Length: 0\r\n\r\n"
     fn without_a_front_proxy_the_fallback_is_empty_but_the_read_still_fails() {
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(0xD2);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+        let wire_faults = crate::wire_faults::WireFaults::none();
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &wire_faults };
         let resp = ok_200(UNREADABLE_RR);
         assert!(uac_route_set(&resp).is_err());
         assert!(exec.dialog_route_set(uac_route_set(&resp), "call-1", "b-1").is_empty());
@@ -478,7 +518,8 @@ Content-Length: 0\r\n\r\n"
     fn readable_recorded_routes_keep_their_dialog_order() {
         let config = proxied_config();
         let id_gen = IdGen::seeded(0xD3);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+        let wire_faults = crate::wire_faults::WireFaults::none();
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &wire_faults };
         let combined = "<sip:10.0.0.9:5060;outbound;lr>,<sip:10.0.0.9:5060;target=1;lr>";
 
         let resp = ok_200(combined);

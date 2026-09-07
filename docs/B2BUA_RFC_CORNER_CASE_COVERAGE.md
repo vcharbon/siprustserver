@@ -78,10 +78,10 @@ Severity = operational risk if the behaviour is wrong.
 | CANCEL-1 | 9.1 | A-leg CANCEL while B-leg pending | 200 to CANCEL, 487 to A-INVITE, mint B-leg CANCEL | high | ✅ | sip-txn `cancel_sends_200_and_487_and_emits_cancelled` + cancel_during_slow_decision |
 | CANCEL-2 | 9.2 | A-leg CANCEL after B-leg 2xx | Too late: no B-CANCEL, BYE the new leg | high | ❌ | add `cancel_after_2xx_no_bleg_cancel_bye_instead` |
 | CANCEL-3 | 9.2 | CANCEL for unknown txn | 481, never forward | med | ✅ | sip-txn `unmatched_cancel_gets_481_and_emits_nothing` |
-| CANCEL-4 | 9.1 | B-leg CANCEL before any 1xx | Defer CANCEL until provisional | high | ✅ | rfc-audit `cancelAfter1xx`; suppress_18x `failover_no_answer` |
+| CANCEL-4 | 9.1 | B-leg CANCEL before any 1xx | Defer CANCEL until provisional | high | ✅ | rfc-audit `cancel-after-1xx`; suppress_18x `failover_no_answer` |
 | CANCEL-5 | 9.2 | CANCEL matching by branch | Matches INVITE server txn by top-Via | high | ✅ | proxy `cancel_after_a_minute...follows_the_invite`, generators CANCEL Via verbatim |
 | CANCEL-6 | 9.1 | B-leg 2xx after B-leg CANCEL (glare) | 2xx wins: ACK then BYE, no leak | high | ❌ | add `bleg_cancel_glare_2xx_ack_then_bye` |
-| CANCEL-7 | 9.1/16.10 | CANCEL Route echoes INVITE | Same Route set + B-leg branch | med | ✅ | rfc-audit `cancelRouteEchoesInvite` |
+| CANCEL-7 | 9.1/16.10 | CANCEL Route echoes INVITE | Same Route set + B-leg branch | med | ✅ | rfc-audit `cancel-route-echoes-invite` |
 | 487-1 | 9.1 | A-INVITE terminated after CANCEL | 487, server txn drives Timer G/H | high | ✅ | sip-txn `cancel_sends_200_and_487...` |
 | 487-3 | 9.1 | B-leg returns 487 | ACK it, map to A-leg | med | 🟡 | covered via failure relay; add explicit `bleg_487_acked_and_mapped` |
 | 487-4 | 17.2.1 | Late decision authors a second A-leg final after the 487 | Drop it: one final per server txn (only same-status retransmits) | high | ✅ | rfc-audit `singleFinalPerServerTxn`; b2bua `no_answer_cancelled_call`, `decision_lands_on_cancelled_call` |
@@ -91,7 +91,7 @@ Severity = operational risk if the behaviour is wrong.
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
 | REINV-1 | 14.1 | re-INVITE forwarded per leg | Per-leg CSeq++/new branch, target preserved | high | ✅ | reinvite `alice_reinvite`/`bob_reinvite` |
-| REINV-2 | 14.2 | Both legs re-INVITE (glare) | Incoming gets 491, no deadlock | high | ✅ | reinvite `crossing_reinvite_glare`; rfc-audit `concurrentReInvite500or491` |
+| REINV-2 | 14.2 | Both legs re-INVITE (glare) | Incoming gets 491, no deadlock | high | ✅ | reinvite `crossing_reinvite_glare`; rfc-audit `concurrent-re-invite-500-or-491` |
 | REINV-3 | 14.1 | B-leg returns 491 | Back off + retry, no instant loop | med | ❌ | add `bleg_491_backoff_before_retry` |
 | REINV-4 | 14.1 | Failed re-INVITE (4xx/5xx) | Keep prior session, don't drop call | high | 🟡 | fake_prack `update_codec_mismatch` (UPDATE); add re-INVITE `failed_reinvite_keeps_dialog_state` |
 
@@ -100,8 +100,8 @@ Severity = operational risk if the behaviour is wrong.
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
 | BYE-1 | 15.1 | A-leg BYE | 200 to A, mint B-leg BYE, tear both | high | ✅ | basic_call, rules `in_dialog_bye_selects_relay_bye` |
-| BYE-2 | 15.1.2 | BYE unknown dialog | 481 | high | ✅ | orphan_reject_no_leak; rfc-audit `unknownDialog481` |
-| BYE-3 | 15 | BYE on early dialog | Use CANCEL not BYE | med | ✅ | rfc-audit `noByeOutsideOrEarlyDialog` |
+| BYE-2 | 15.1.2 | BYE unknown dialog | 481 | high | ✅ | orphan_reject_no_leak; rfc-audit `unknown-dialog-481` |
+| BYE-3 | 15 | BYE on early dialog | Use CANCEL not BYE | med | ✅ | rfc-audit `no-bye-outside-or-early-dialog` |
 | BYE-4 | 12.2 | Simultaneous double BYE | Idempotent teardown | high | 🟡 | reaper covers wedge; add `simultaneous_double_bye_idempotent` |
 | BYE-5 | 12.2 | In-dialog request per-leg routing | Uses leg's remote target + route set | high | ✅ | b2bua `confirm_dialog_captures_b_leg_route_set...`, relay tests |
 | BYE-6 | 12.2.1.1 | Per-leg CSeq monotonic | Each leg own CSeq counter | med | ✅ | rfc-audit `cseq` rules, generators |
@@ -114,7 +114,7 @@ Severity = operational risk if the behaviour is wrong.
 | ID-1 | 12.1.1 | Independent tags per leg | A To-tag & B From-tag minted independently | high | 🟡 | implicit in basic_call; add explicit `tags_independent_per_leg` |
 | ID-2 | 8.1.1.4 | New Call-ID on B-leg | Never reuse A-leg Call-ID | high | 🟡 | implicit in basic_call; add `bleg_new_callid` |
 | ID-3 | 8.1.1.5 | Independent CSeq spaces | A CSeq must not leak to B | high | 🟡 | rfc-audit cseq per-dialog; add `cseq_independent_per_leg` |
-| ID-4 | 8.1.1.2 | B-leg initial INVITE tagless To | No A To-tag copied into B initial | high | ✅ | rfc-audit `noToTagOnInitialRequest` |
+| ID-4 | 8.1.1.2 | B-leg initial INVITE tagless To | No A To-tag copied into B initial | high | ✅ | rfc-audit `no-to-tag-on-initial-request` |
 | VIA-1 | 8.1.1.7 | Own Via/branch per leg | Fresh z9hG4bK per outgoing request | high | ✅ | sip-txn `branch_has_magic_cookie_and_is_unique`, stack_identity |
 | VIA-3 | 8.1.1.5 | Max-Forwards reset to 70 | B2BUA originates, not decrements | med | 🟡 | proxy decrements; add B2BUA `bleg_maxforwards_reset_70` |
 | HDR-2 | 20.5 | **Contact rewritten to B2BUA per leg** | Far-end Contact never passed through | high | 🟡 | implicit (in-dialog returns to B2BUA works); add explicit `contact_rewritten_to_b2bua_per_leg` |
@@ -126,13 +126,13 @@ Severity = operational risk if the behaviour is wrong.
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
 | RR-1 | 12/16.6 | B2BUA does NOT Record-Route | It's a UA, not a proxy | high | ✅ | rfc-audit `recordRouteOnlyOnDialogCreating` (proxy RRs, B2BUA doesn't) |
-| RR-4 | 16.6 | Strict-route first-hop swap | Apply strict-route shuffle on send | med | ✅ | rfc-audit `strictRouteShuffleOnSend`/`strictRouteRewriteHandled`, generators |
+| RR-4 | 16.6 | Strict-route first-hop swap | Apply strict-route shuffle on send | med | ✅ | rfc-audit `strict-route-shuffle-on-send`/`strict-route-rewrite-handled`, generators |
 | LOOP-1 | 16.3 | B-leg target loops to B2BUA (self) | App-level loop guard (Via blind due to new Call-ID) | med | ❌ | add `b2bua_self_loop_detected` |
 | MERGE-1 | 8.2.2.2 | Forked dup A-INVITE | 482 Loop Detected on 2nd copy | med | ❌ | add `merged_invite_482_second_copy` |
 | RDR-1 | 8.1.3.4 | B-leg returns 3xx | Follow redirect or map; don't leak B Contacts to A | high | 🟡 | numbering_plan B2BUA-emitted 302 only; add `bleg_3xx_followed_not_leaked_to_aleg` |
 | RDR-2 | 8.1.3.4 | 3xx loop | Bounded redirect recursion | med | ❌ | add `redirect_recursion_bounded` |
-| OOD-2 | 8.2.1 | Unknown method on a leg | 405 + Allow | med | ✅ | rfc-audit `unsupportedMethod405Allow` |
-| HDR-1 | 8.2.2 | Unsupported Require/Proxy-Require | 420 + Unsupported, don't forward | high | ✅ | rfc-audit `unsupportedExtension420` |
+| OOD-2 | 8.2.1 | Unknown method on a leg | 405 + Allow | med | ✅ | rfc-audit `unsupported-method-405-allow` |
+| HDR-1 | 8.2.2 | Unsupported Require/Proxy-Require | 420 + Unsupported, don't forward | high | ✅ | rfc-audit `unsupported-extension-420` |
 | HDR-3 | 20.2 | Allow/Supported reflect B2BUA | Advertise own caps, not peer's | med | ❌ | add `capabilities_reflect_b2bua_not_peer` |
 | AUTH-1 | 22.1 | B-leg 401/407 | Answer locally with creds or map; don't leak nonce | high | ❌ | add `bleg_401_answered_locally_with_creds` |
 | AUTH-2 | 22.2 | B2BUA challenges A-leg | Validate credentialed retry before B-leg | med | ❌ | add `aleg_challenge_validated_before_bleg` |
@@ -150,28 +150,28 @@ Severity = operational risk if the behaviour is wrong.
 | OA-PLACE-1 | 3264 §5 | Offer in INVITE / answer in 2xx | Own O/A per leg | high | ✅ | basic_call, sdp_answer |
 | OA-PLACE-2 | 3264 §5 | Delayed offer (offer in 2xx / answer in ACK) | Form 2xx offer, consume ACK answer | high | ✅ | reinvite `alice_reinvite`, fake_prack `delayed_offer_fallback`, suppress_18x `failover_no_answer` |
 | OA-PLACE-3 | 3262 §5 | Offerless INVITE + reliable 1xx → offer in rel-1xx | First reliable provisional carries offer | high | ❌ | add `offerless_invite_offer_in_rel1xx` |
-| OA-PLACE-4 | 3262 §5 | Offer in reliable 1xx → answer in PRACK | Answer rides PRACK | high | ✅ | prack, fake_prack; rfc-audit `prackOfferAnswerModel` |
-| OA-PLACE-5 | 3262 §5 | Offer in PRACK → answer in 2xx-of-PRACK | Answer in PRACK 2xx | high | 🟡 | rfc-audit `prackResponseSemantics`; add explicit scenario |
+| OA-PLACE-4 | 3262 §5 | Offer in reliable 1xx → answer in PRACK | Answer rides PRACK | high | ✅ | prack, fake_prack; rfc-audit `prack-answers-1xx-offer` |
+| OA-PLACE-5 | 3262 §5 | Offer in PRACK → answer in 2xx-of-PRACK | Answer in PRACK 2xx | high | 🟡 | rfc-audit `prack-2xx-or-481`; add explicit scenario |
 | OA-ANSWER-UNREL-1 | 3262 §5 | Answer in unreliable 18x | Forbidden; only reliable carriers | high | 🟡 | rfc-audit reliability rules; add negative test |
-| OA-NO-PENDING-1 | 3264 §4 | New offer while one outstanding (same leg) | Queue until answered | high | ✅ (advisory) | rfc-audit `noNewOfferWhileOfferPending` |
+| OA-NO-PENDING-1 | 3264 §4 | New offer while one outstanding (same leg) | Queue until answered | high | ✅ (advisory) | rfc-audit `no-new-offer-while-offer-pending` |
 | OA-EMPTY-2XX-1 | 3264 §5 | 2xx to offered INVITE has empty body | Must answer | high | 🟡 | sdp_answer NoAliceSdp; add wire-level assert |
 
 ### 100rel negotiation & PRACK mechanics
 
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
-| REL-NEG-1 | 3262 §3 | `Require:100rel` on INVITE | Reliable 1xx or 420 | high | ✅ | rfc-audit `requireReliable1xxOnRequire` |
+| REL-NEG-1 | 3262 §3 | `Require:100rel` on INVITE | Reliable 1xx or 420 | high | ✅ | rfc-audit `require-reliable-1xx-on-require` |
 | REL-NEG-3 | 3262 §4 | 100rel chosen on one leg only | Drive PRACK per leg, asymmetric ok | high | ✅ | fake_prack/suppress_18x (B2BUA PRACKs bob, downgrades A) |
-| REL-NEG-4 | 3262 §3 | 100 Trying must not be reliable | Never stamp 100rel on 100 | med | ✅ | rfc-audit `reliable1xxHeaders` |
+| REL-NEG-4 | 3262 §3 | 100 Trying must not be reliable | Never stamp 100rel on 100 | med | ✅ | rfc-audit `reliable-1xx-headers` |
 | RSEQ-MONO-1 | 3262 §3 | RSeq +1 per leg, own space | Per-leg RSeq increment | high | ✅ | rfc-audit `rseqMonotonic` |
 | RSEQ-MAP-1 | 3262 §3/4 | RSeq re-minted across legs | A-leg RSeq unrelated to B-leg | high | ❌ | add cross-leg `rseq_reminted_across_legs` (audit is per-slice blind) |
 | RACK-MAP-1 | 3262 §7.2 | RAck triple translated across legs | Per-leg (RSeq,CSeq,INVITE) | high | 🟡 | prack_forking rewrites RAck CSeq; add explicit cross-leg assert |
-| PRACK-RESP-1 | 3262 §3 | PRACK match→2xx, no match→481 | UAS semantics | high | ✅ | rfc-audit `prackResponseSemantics` |
+| PRACK-RESP-1 | 3262 §3 | PRACK match→2xx, no match→481 | UAS semantics | high | ✅ | rfc-audit `prack-2xx-or-481` |
 | PRACK-SERIAL-1 | 3262 §3 | 2nd reliable 1xx before 1st PRACKed | Serialize on PRACK | high | ✅ | rfc-audit `serialReliable1xx` |
 | PRACK-RTX-1 | 3262 §4 | Dup reliable 1xx (same RSeq) | No duplicate PRACK | med | ✅ | rfc-audit `uacRseqStrictness` |
 | PRACK-RTX-2 | 3262 §3 | Retransmitted PRACK after 2xx | Resend cached 2xx, no re-process | med | ❌ | add `prack_rtx_absorbed` |
-| PRACK-LATE-1 | 3262 §3 | PRACK after INVITE final | Still 2xx it | med | ✅ | rfc-audit `prackAcceptedAfterFinal` |
-| DELAY-2XX-1 | 3262 §3 | Un-PRACKed reliable 1xx with SDP | Delay 2xx until PRACK lands | high | ✅ | rfc-audit `delay2xxOnUnackedReliable1xxWithSdp` |
+| PRACK-LATE-1 | 3262 §3 | PRACK after INVITE final | Still 2xx it | med | ✅ | rfc-audit `prack-accepted-after-final` |
+| DELAY-2XX-1 | 3262 §3 | Un-PRACKed reliable 1xx with SDP | Delay 2xx until PRACK lands | high | ✅ | rfc-audit `delay-2xx-on-unacked-reliable-1xx-with-sdp` |
 
 ### Forking & early media
 
@@ -182,7 +182,7 @@ Severity = operational risk if the behaviour is wrong.
 | PRACK-FORK-4 | 3264 §5 | Collapse to single A-leg O/A | One consistent answer to A | high | ✅ | prack_forking / prack_update_forking (answer on chosen fork) |
 | EARLY-MEDIA-1 | 3262 §5 | Reliable 183+SDP early media | Bridge to A-leg before 200 | high | ✅ | promote_pem suite, fake_prack |
 | EARLY-MEDIA-2 | 3264 §8 | Early→final SDP change | Re-anchor without dropping media | med | ✅ | promote_pem `resync_sdp_changed` |
-| EARLY-MEDIA-4 | 3262 §5 | 183-SDP is the answer (not offer) | PRACK carries no body | high | ✅ | rfc-audit `prackOfferAnswerModel` |
+| EARLY-MEDIA-4 | 3262 §5 | 183-SDP is the answer (not offer) | PRACK carries no body | high | ✅ | rfc-audit `prack-answers-1xx-offer` |
 
 ### UPDATE (RFC 3311) & glare
 
@@ -199,15 +199,15 @@ Severity = operational risk if the behaviour is wrong.
 
 | ID | § | Scenario | Expected B2BUA behaviour | Sev | Status | Where / suggested test |
 |----|---|----------|--------------------------|-----|--------|------------------------|
-| SDP-HOLD-1 | 3264 §6.1 | `a=sendonly` hold | Answer recvonly/inactive, translate cross-leg | high | ✅ | media sdp_negotiation, rfc-audit `directionPairValid` |
-| SDP-HOLD-3 | 3264 §8.4 | `c=0.0.0.0` non-zero port | Recognize hold, not reject | med | ✅ | rfc-audit `c0PortNonZero`, media port-0 hold |
-| SDP-MLINE-COUNT-1 | 3264 §6 | Answer m-line count = offer | Preserve count, port-0 rejects | high | ✅ | rfc-audit `answerMLineCountMatchesOffer`, media |
-| SDP-MLINE-ORDER-1 | 3264 §8 | Re-offer m-line count monotonic | Don't drop slots | high | ✅ | rfc-audit `reOfferMLineCountMonotonic` |
+| SDP-HOLD-1 | 3264 §6.1 | `a=sendonly` hold | Answer recvonly/inactive, translate cross-leg | high | ✅ | media sdp_negotiation, rfc-audit `direction-pair-valid` |
+| SDP-HOLD-3 | 3264 §8.4 | `c=0.0.0.0` non-zero port | Recognize hold, not reject | med | ✅ | rfc-audit `c0-port-non-zero`, media port-0 hold |
+| SDP-MLINE-COUNT-1 | 3264 §6 | Answer m-line count = offer | Preserve count, port-0 rejects | high | ✅ | rfc-audit `answer-m-line-count-matches-offer`, media |
+| SDP-MLINE-ORDER-1 | 3264 §8 | Re-offer m-line count monotonic | Don't drop slots | high | ✅ | rfc-audit `re-offer-m-line-count-monotonic` |
 | SDP-NOINTERSECT-1 | 3264 §6.1 | Empty codec intersection | Reject stream; all-reject → 488 | high | 🟡 | sdp_answer `no_common_codec_returns_offending_index` (unit); add call-level 488 |
 | SDP-CANTBRIDGE-1 | 3264 §6 | Unbridgeable transport (e.g. SCTP) | Reject/488, never relay dead media | high | ❌ | add `unbridgeable_media_488` |
-| SDP-PT-STABLE-1 | 3264 §8.3.2 | Re-offer rebinds dynamic PT | PT→codec map stable for session | med | ✅ | rfc-audit `payloadTypeMappingStable` |
-| SDP-ORIGIN-1 | 3264 §8 | `o=` continuity per leg | Same username/sess-id, version+1 | med | ✅ (advisory) | rfc-audit `sdpOriginContinuity`, sdp_diff |
-| SDP-PARSE-1 | 3264 §5 | Malformed SDP | 488, don't relay invalid | med | ✅ | rfc-audit `sdpBodyParseable`, parser torture |
+| SDP-PT-STABLE-1 | 3264 §8.3.2 | Re-offer rebinds dynamic PT | PT→codec map stable for session | med | ✅ | rfc-audit `payload-type-mapping-stable` |
+| SDP-ORIGIN-1 | 3264 §8 | `o=` continuity per leg | Same username/sess-id, version+1 | med | ✅ (advisory) | rfc-audit `sdp-origin-continuity`, sdp_diff |
+| SDP-PARSE-1 | 3264 §5 | Malformed SDP | 488, don't relay invalid | med | ✅ | rfc-audit `sdp-body-parseable`, parser torture |
 
 ---
 

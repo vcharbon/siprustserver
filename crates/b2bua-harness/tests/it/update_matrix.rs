@@ -115,7 +115,8 @@ async fn early_not_pracked_a_to_b(name: &str, alice_port: &str, bob_port_n: u16,
     update.expect(200).await;
 
     // Answer (reusing the 180's To-tag → the early dialog is confirmed) + teardown.
-    uas.respond(200, "OK").await;
+    // The 180 carried no body, so the INVITE's offer is answered here (§13.2.1).
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -495,6 +496,104 @@ async fn fake_prack_early_bodyless_update_answered_locally() {
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    let _ = h.finish().await;
+}
+
+// ── fake-prack (18x masking): b-leg UPDATE on the CONFIRMED dialog ───────────
+
+/// Under `fake-prack`, once the call is answered the 18x mask is spent: alice
+/// holds bob's SDP (injected into the 200) and the two ends negotiate directly.
+/// A **bodyless** b-leg UPDATE on the confirmed dialog is therefore an ordinary
+/// in-dialog request and must relay to alice verbatim — the fake-prack local
+/// answer belongs to the early window only (RFC 3311 §5.1 is what it serves).
+#[tokio::test]
+async fn fake_prack_confirmed_bodyless_update_from_b_relays_to_alice() {
+    let h = Harness::with_transit_delay("upd-fakeprack-b-confirmed-nosdp", 1);
+    let alice = h.agent("alice", "127.0.0.1:5763").await;
+    let bob = h.agent("bob", "127.0.0.1:5773").await;
+    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5773, RelayFirst18xStrategy::FakePrack)
+        .start(&h, "b2bua", "127.0.0.1:5783")
+        .await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).await;
+    call.expect(180).await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = uas.dialog();
+
+    // Confirmed dialog: bob's bodyless refresh must reach alice, not be absorbed.
+    let mut update = bob_dialog.request(InDialogMethod::Update, None).await;
+    let mut at_alice = alice.receive("UPDATE").await;
+    assert!(at_alice.request().body().is_empty(), "bodyless UPDATE relayed to alice with no body");
+    at_alice.respond(200, "OK").await;
+    let resp = update.expect(200).await;
+    assert!(resp.body().is_empty(), "alice's bodyless 200 relayed back to bob");
+
+    let mut bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    let _ = h.finish().await;
+}
+
+/// Same window, SDP arm: a b-leg UPDATE carrying a re-offer on the confirmed
+/// dialog must relay to alice and bring back HER answer. Answering it locally
+/// with a skeleton-fit body (the early-window behaviour) would leave alice's
+/// media view stale while bob believes the session was renegotiated.
+#[tokio::test]
+async fn fake_prack_confirmed_update_with_offer_from_b_relays_to_alice() {
+    let h = Harness::with_transit_delay("upd-fakeprack-b-confirmed-sdp", 1);
+    let alice = h.agent("alice", "127.0.0.1:5764").await;
+    let bob = h.agent("bob", "127.0.0.1:5774").await;
+    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5774, RelayFirst18xStrategy::FakePrack)
+        .start(&h, "b2bua", "127.0.0.1:5784")
+        .await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(183, "Session Progress").reliable(1).with_sdp(ANSWER).await;
+    call.expect(180).await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = uas.dialog();
+
+    let mut update = bob_dialog.request(InDialogMethod::Update, Some(REANSWER_HELD)).await;
+    let mut at_alice = alice.receive("UPDATE").await;
+    assert!(
+        String::from_utf8_lossy(at_alice.request().body()).contains("a=recvonly"),
+        "bob's re-offer relayed to alice",
+    );
+    at_alice.respond(200, "OK").with_sdp(REOFFER_HOLD).await;
+    let resp = update.expect(200).await;
+    assert!(
+        String::from_utf8_lossy(resp.body()).contains("a=sendonly"),
+        "alice's own answer relayed back to bob (not a locally built one)",
+    );
+
+    let mut bye = alice_dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     let _ = h.finish().await;

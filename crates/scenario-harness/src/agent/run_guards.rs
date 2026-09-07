@@ -45,16 +45,18 @@ pub(super) fn addr_names(recorder: &Recorder) -> HashMap<SocketAddr, String> {
 /// and the `Harness` Drop guard so the SAME suite runs on every run with no
 /// per-test opt-in. Empty ⇒ clean.
 pub(super) fn rfc_hard_gate_findings(
+    findings: &[sip_net::RfcFinding],
     events: &[layer_harness::Stamped<SignalingNetworkEvent>],
     waivers: &[WaiverState],
     addr_names: &HashMap<SocketAddr, String>,
 ) -> Vec<(String, String)> {
-    // One shared evaluator (sip-net) runs the suite with subject dispatch — the
-    // SAME pass the report projection lists — so the gate and the report can
-    // never disagree on which endpoint a rule applies to. Scoped waivers drop
-    // the covered non-advisory findings (attribution resolves the emitting party
+    // `findings` is the output of the ONE shared evaluator
+    // (`sip_net::evaluate_rfc_findings`, subject dispatch applied) — the SAME
+    // set the report projection lists — so the gate and the report can never
+    // disagree on which endpoint a rule applies to. Scoped waivers drop the
+    // covered non-advisory findings (attribution resolves the emitting party
     // from the recorded `from_lane`).
-    apply_waivers(events, waivers, addr_names)
+    apply_waivers(findings, events, waivers, addr_names)
 }
 
 /// Format the hard-gate panic message listing every RFC audit violation.
@@ -210,7 +212,9 @@ impl Drop for CseqGate {
         let waivers = self.waivers.borrow();
         let names = addr_names(&self.recorder);
         let findings = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rfc_hard_gate_findings(&self.channel.snapshot(), &waivers, &names)
+            let events = self.channel.snapshot();
+            let suite = sip_net::evaluate_rfc_findings(&events);
+            rfc_hard_gate_findings(&suite, &events, &waivers, &names)
         })) {
             Ok(f) => f,
             Err(_) => return,

@@ -31,14 +31,45 @@ pub type EarlyId = &'static str;
 pub enum BodyExpect {
     /// No body requirement.
     Any,
+    /// The message MUST carry no body — the delayed-offer shape (RFC 3261
+    /// §14.2 / RFC 3264 §5: an offerless INVITE hands the offer to its
+    /// recipient), and the discriminator between two same-method messages on
+    /// one leg when only one of them carries a session description.
+    Absent,
     /// A non-empty body of any type.
     Present,
     /// A non-empty body whose Content-Type is a session description.
     SdpPresent,
 }
 
+impl BodyExpect {
+    /// Whether a body of `body_len` bytes, a session description or not,
+    /// satisfies this claim. The ONE place the vocabulary is interpreted: the
+    /// reception goals assert through it and the parked-request pick
+    /// ([`super::select`]) discriminates through it.
+    pub fn satisfied_by(self, body_len: usize, body_is_sdp: bool) -> bool {
+        match self {
+            BodyExpect::Any => true,
+            BodyExpect::Absent => body_len == 0,
+            BodyExpect::Present => body_len > 0,
+            BodyExpect::SdpPresent => body_is_sdp,
+        }
+    }
+
+    /// The bounded lowercase label a divergence record names this claim by
+    /// (see [`super::state::ReplayEntry::BodyExpectMiss`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            BodyExpect::Any => "any",
+            BodyExpect::Absent => "absent",
+            BodyExpect::Present => "present",
+            BodyExpect::SdpPresent => "sdp",
+        }
+    }
+}
+
 /// Which kind of request an [`GoalStep::ExpectRequest`] consumes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestKind {
     /// The dialog-creating INVITE (no To-tag).
     Initial,
@@ -253,21 +284,36 @@ pub enum GoalStep {
         ack_body: Option<Vec<u8>>,
         matcher: Option<MessageTemplate>,
     },
-    /// Strict reception: consume the next parked request of this kind into the
-    /// actor's bound server transaction (the `RespondTemplate`/`Respond` that
-    /// follows answers it). [`RequestKind::Cancel`] consumes WITHOUT rebinding
-    /// — the binding stays the INVITE the CANCEL targets. `matcher` runs at
-    /// consume time on the parked transaction's request.
-    ExpectRequest { kind: RequestKind, body: BodyExpect, matcher: Option<MessageTemplate> },
+    /// Strict reception: consume a parked request of this kind into the actor's
+    /// bound server transaction (the `RespondTemplate`/`Respond` that follows
+    /// answers it). [`RequestKind::Cancel`] consumes WITHOUT rebinding — the
+    /// binding stays the INVITE the CANCEL targets. `matcher` runs at consume
+    /// time on the parked transaction's request. WHICH parked request is
+    /// [`super::select::select_parked`]: `rank`, then `body`, then arrival.
+    ExpectRequest {
+        kind: RequestKind,
+        body: BodyExpect,
+        matcher: Option<MessageTemplate>,
+        /// Which request of its kind on this leg the step is about — a 0-based
+        /// ordinal in the leg's CSeq order, supplied by the CALLER (upstream
+        /// owns the correlation mechanics, never the policy that derives the
+        /// number). `None`, and a rank no parked request carries, fall back to
+        /// arrival order.
+        rank: Option<usize>,
+    },
     /// Observed, never asserted: wait for the next final on this leg, record
     /// `(key, expected, observed)` into the replay record, and key the
     /// RFC-compliant follow-up on the OBSERVED status (the reactor's normal
-    /// handling — ACK a 2xx, hop-ACK a non-2xx INVITE final).
-    ObserveFinal { key: u32, expected: Option<u16> },
+    /// handling — ACK a 2xx, hop-ACK a non-2xx INVITE final). `cseq_method`
+    /// pins the observation to ONE transaction: another transaction's final
+    /// (a stack-automatic PRACK/CANCEL 2xx) is skipped, never recorded as
+    /// this observation's final. `None` takes the leg's next final whatever
+    /// transaction carried it.
+    ObserveFinal { key: u32, expected: Option<u16>, cseq_method: Option<String> },
     /// Strict with a class-shaped assertion — the truncated-variant anchor.
-    /// Follow-up keyed on the observed final like
-    /// [`ObserveFinal`](Self::ObserveFinal).
-    ExpectFinal { assert: FinalAssert },
+    /// Follow-up keyed on the observed final, and `cseq_method` pins the
+    /// transaction, like [`ObserveFinal`](Self::ObserveFinal).
+    ExpectFinal { assert: FinalAssert, cseq_method: Option<String> },
 }
 
 impl GoalStep {

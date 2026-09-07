@@ -8,18 +8,12 @@ use std::net::SocketAddr;
 use sip_message::generators::StackDialog;
 use sip_message::header::{HostPort, NameAddr, Via};
 use sip_message::sip_str::SipStr;
-use sip_message::{SipRequest, SipResponse};
+use sip_message::SipRequest;
 
 /// The `branch` parameter of a request's topmost Via — the transaction key
 /// (RFC 3261 §8.1.1.7).
 pub(crate) fn top_via_branch(req: &SipRequest) -> Option<String> {
     req.top_via().branch().map(str::to_string)
-}
-
-/// The `branch` of a response's topmost Via — the transaction the response
-/// answers (RFC 3261 §17.1.3).
-pub(crate) fn response_via_branch(resp: &SipResponse) -> Option<String> {
-    resp.top_via().branch().map(str::to_string)
 }
 
 /// The socket address a sent-by / URI authority names (IPv4 fixtures only,

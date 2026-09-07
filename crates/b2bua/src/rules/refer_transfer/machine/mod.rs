@@ -7,8 +7,9 @@
 //! `Call.transfer.phase` via `SetTransfer`, which the projection mirrors.
 //!
 //! The rules live phase-per-file — [`authorizing`], [`c_ringing`],
-//! [`realign`] — with the cross-phase request guards and watchdog in
-//! [`guards`]; the `define_service!` list below is the registration index.
+//! [`realign`] — with the cross-phase guards (requests, the referrer's NOTIFY
+//! 481) and watchdog in [`guards`]; the `define_service!` list below is the
+//! registration index.
 
 use b2bua_sdk::define_service;
 use call::{Call, StateLabel, TransferPhase, TransferState};
@@ -45,6 +46,7 @@ define_service! {
     init: |_call| None,
     rules: [
         guards::reject_second_refer(),
+        guards::referrer_notify_481(),
         authorizing::http_reject(),
         authorizing::http_allow(),
         authorizing::http_timeout(),

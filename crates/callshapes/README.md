@@ -11,8 +11,8 @@ implements `ActorScenario`, so the same definition drives the loadgen fleet, the
 in-process fake-net tests, and the functional leak gate — unchanged.
 
 This crate is consumed **upstream** (siprustserver's loadgen + e2e model) and by
-**external platforms** that do not use siprustserver's `X-Api-Call` routing —
-upstreamsip, which routes by *dialed number*, is the worked example throughout.
+**external platforms** that do not use siprustserver's `X-Api-Call` routing — a
+platform that routes by *dialed number* is the worked example throughout.
 Nothing platform-specific lives here: a downstream platform picks up the crate on
 its next submodule pin and writes one small adapter (a `RouteBinder`) plus a
 ~30-LOC bin.
@@ -96,15 +96,15 @@ pub trait RouteBinder: Send + Sync {
 Upstream ships `EgressBinder` (the historic `EgressPolicy` / `X-Api-Call` seam;
 `invite_plan` just delegates to `env.invite_plan(intent.targets())`).
 
-### Worked example — upstreamsip's dial-plan binder
+### Worked example — a dial-plan binder
 
-upstreamsip routes by *dialed number* (an R-URI user mapped from
-`routing-mock/config/numbers.json`), not `X-Api-Call`. It implements the trait
-by building an `InvitePlan` with its own R-URI (the `InvitePlan` fields — `via`,
+A platform that routes by *dialed number* (an R-URI user mapped from its own
+number plan), not `X-Api-Call`, implements the trait by building an
+`InvitePlan` with its own R-URI (the `InvitePlan` fields — `via`,
 `from`, `to`, `ruri`, `headers`, `rewrite` — are public):
 
 ```rust
-struct DialPlanBinder { plan: NumberPlan }        // loaded from numbers.json
+struct DialPlanBinder { plan: NumberPlan }        // loaded from the platform's plan
 
 impl RouteBinder for DialPlanBinder {
     fn invite_plan(&self, env: &CallEnv<'_>, intent: RouteIntent<'_>) -> InvitePlan {
@@ -122,7 +122,7 @@ impl RouteBinder for DialPlanBinder {
 }
 ```
 
-The same shapes now run on upstreamsip with zero changes — only the binder differs.
+The same shapes now run on that platform with zero changes — only the binder differs.
 Per-run values (numbers, header names, `refer_key`) come from the case JSON /
 `ScenarioInputs`.
 

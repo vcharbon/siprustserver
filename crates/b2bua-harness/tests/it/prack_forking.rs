@@ -166,3 +166,103 @@ async fn prack_forking_two_early_dialogs() {
 
     let _report = h.finish().await;
 }
+
+/// RFC 3262 §3 (errata 4600) numbers each fork's `RSeq` space independently, and
+/// §4 (errata 4603/4604) scopes the caller's sequence to ONE early dialog. So a
+/// number shown in fork 2's dialog names nothing in fork 1's: the `RAck` carrying
+/// it matches no unacknowledged provisional there, and §4 owes it a `481` from
+/// the face that showed both — this stack.
+///
+/// Relaying it would hand the decision to bob, whose two forks each keep their
+/// own sequence: the number IS live for him, one dialog over, so he would
+/// acknowledge a provisional alice never claimed to have taken there.
+#[tokio::test]
+async fn a_prack_naming_another_forks_rseq_takes_481() {
+    let h = Harness::with_transit_delay("b2bua-prack-forking-cross-fork", 0);
+    let alice = h.agent("alice", "127.0.0.1:5503").await;
+    let bob = h.agent("bob", "127.0.0.1:5513").await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5513).start(&h, "b2bua", "127.0.0.1:5523").await;
+
+    let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    // Both forks ring and are PRACKed properly, so no offer is left outstanding
+    // and the one stray below is the only thing on the wire to explain.
+    uas.respond(183, "Session Progress")
+        .with_to_tag("bobfork1")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "1")
+        .with_sdp(OFFER)
+        .await;
+    let p1 = call.expect(183).await;
+    let fork1_atag = p1.to().tag().expect("fork1 a-facing tag").to_string();
+    let mut prack1 = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&fork1_atag)
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
+        .with_sdp(ANSWER)
+        .send()
+        .await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    prack1.expect(200).await;
+
+    uas.respond(183, "Session Progress")
+        .with_to_tag("bobfork2")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "200")
+        .with_sdp(OFFER)
+        .await;
+    let p2 = call.expect(183).await;
+    let fork2_atag = p2.to().tag().expect("fork2 a-facing tag").to_string();
+    assert_ne!(fork1_atag, fork2_atag, "each callee fork maps to a distinct a-facing tag");
+    assert_ne!(
+        rseq_of(&p1),
+        rseq_of(&p2),
+        "the two ladders seed independently — a collision would make the stray below a match",
+    );
+    let mut prack2 = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&fork2_atag)
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .with_sdp(ANSWER)
+        .send()
+        .await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+    prack2.expect(200).await;
+
+    // The stray: fork 1's early dialog, fork 2's number. Well formed in every
+    // other respect — only the dialog it names it in is wrong.
+    let (mut stray, sent) = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&fork1_atag)
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .try_send_with_request()
+        .await
+        .expect("the PRACK goes out");
+    assert_eq!(
+        sent.to().tag(),
+        Some(fork1_atag.as_str()),
+        "the stray rides fork 1's early dialog, where fork 2's number means nothing",
+    );
+    stray.expect(481).await;
+
+    // Bob answers on fork 1; the call completes.
+    uas.respond(200, "OK").with_to_tag("bobfork1").await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    // Two PRACKs crossed onto the b leg, one per fork — never the stray.
+    let bob_addr: std::net::SocketAddr = "127.0.0.1:5513".parse().unwrap();
+    let relayed = h
+        .wire_entries()
+        .into_iter()
+        .filter(|e| e.to == bob_addr && e.raw.starts_with(b"PRACK "))
+        .count();
+    assert_eq!(relayed, 2, "the callee saw {relayed} PRACKs — one per fork, and no stray");
+
+    let _report = h.finish().await;
+}

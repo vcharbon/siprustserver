@@ -1,0 +1,516 @@
+import type { Bundle, Flow, Flows, Pivot } from "@sip/contracts"
+import { describe, expect, it } from "vitest"
+import { confront, diffHeaders, recordOf, retransmissionProbes, scopeOfRaw, shapeProbes } from "../src/confront.js"
+import type { MsgScope } from "../src/probe.js"
+import { signature } from "../src/probe.js"
+import { headersInOrderRaw } from "../src/wire.js"
+
+const crlf = (lines: ReadonlyArray<string>): string => `${lines.join("\r\n")}\r\n\r\n`
+
+const invite = crlf([
+  "INVITE sip:+331@h.fr SIP/2.0",
+  "Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK1",
+  "From: <sip:+332@h.fr>;tag=a",
+  "To: <sip:+331@h.fr>",
+  "Call-ID: cid-1",
+  "CSeq: 1 INVITE",
+  "Allow: INVITE, ACK"
+])
+
+const ok200 = (callId: string, cseq: number, toTag: string): string =>
+  crlf([
+    "SIP/2.0 200 OK",
+    `From: <sip:+332@h.fr>;tag=a`,
+    `To: <sip:+331@h.fr>;tag=${toTag}`,
+    `Call-ID: ${callId}`,
+    `CSeq: ${cseq} INVITE`
+  ])
+
+const ack = (callId: string, cseq: number): string =>
+  crlf(["ACK sip:+331@h.fr SIP/2.0", `Call-ID: ${callId}`, `CSeq: ${cseq} ACK`])
+
+describe("scopeOfRaw", () => {
+  it("an INVITE with no To tag is the initial INVITE", () => {
+    expect(scopeOfRaw(invite)).toEqual({ kind: "initial-invite" })
+  })
+  it("a response carries its status and its transaction's method", () => {
+    expect(scopeOfRaw(ok200("c", 1, "t"))).toEqual({
+      kind: "response",
+      status: 200,
+      cseqMethod: "INVITE"
+    })
+  })
+  it("a tagged request is in-dialog", () => {
+    const bye = crlf(["BYE sip:x@h SIP/2.0", "To: <sip:a@h>;tag=t", "CSeq: 2 BYE"])
+    expect(scopeOfRaw(bye)).toEqual({ kind: "request", method: "BYE", inDialog: true })
+  })
+})
+
+describe("diffHeaders", () => {
+  const scope: MsgScope = { kind: "initial-invite" }
+  const none = new Map<string, ReadonlyArray<string>>()
+
+  it("an equal message under the folds produces nothing", () => {
+    const headers = headersInOrderRaw(invite)
+    expect(diffHeaders(headers, headers, scope, none)).toEqual([])
+  })
+
+  it("a differing name produces one probe carrying both sides", () => {
+    const captured = headersInOrderRaw(invite)
+    const replayed = headersInOrderRaw(invite.replace("Allow: INVITE, ACK", "Allow: INVITE, BYE"))
+    const probes = diffHeaders(captured, replayed, scope, none)
+    expect(probes).toHaveLength(1)
+    expect(probes[0]?.name).toBe("Allow")
+    expect(signature(probes[0]!)).toBe("header:allow:initial-invite")
+  })
+
+  it("a captured-only header is a probe with an empty replayed side", () => {
+    const captured = headersInOrderRaw(invite.replace("Allow: INVITE, ACK", "Reason: Q.850;cause=16"))
+    const replayed = headersInOrderRaw(invite)
+    const probes = diffHeaders(captured, replayed, scope, none)
+    expect(probes.map((p) => [p.name, p.captured, p.replayed])).toEqual([
+      ["Reason", ["Q.850;cause=16"], []],
+      ["Allow", [], ["INVITE, ACK"]]
+    ])
+  })
+
+  it("the driven set rides the probe, and no set at all states no input", () => {
+    const captured = headersInOrderRaw(invite)
+    const replayed = headersInOrderRaw(invite.replace("Allow: INVITE, ACK", "Allow: INVITE, BYE"))
+    expect(diffHeaders(captured, replayed, scope, none)[0]?.driven).toBeUndefined()
+    expect(diffHeaders(captured, replayed, scope, none, new Set(["allow"]))[0]?.driven).toBe(true)
+    expect(diffHeaders(captured, replayed, scope, none, new Set())[0]?.driven).toBe(false)
+  })
+
+  it("inbound evidence rides the probe", () => {
+    const inbound = new Map([["reason", ["Q.850;cause=16"]]])
+    const captured = headersInOrderRaw(invite.replace("Allow: INVITE, ACK", "Reason: Q.850;cause=16"))
+    const replayed = headersInOrderRaw(invite)
+    const probe = diffHeaders(captured, replayed, scope, inbound).find((p) => p.name === "Reason")
+    expect(probe?.inbound).toBe(true)
+    expect(probe?.inboundValues).toEqual(["Q.850;cause=16"])
+  })
+})
+
+const step = (id: string, over: Partial<Flow.Step> = {}): Flow.Step => ({
+  id,
+  leg: "A",
+  op: "expect",
+  msg: { "cseq-method": "INVITE", status: 486, headers: [], "headers-present": [] },
+  delay: { ms: 0, from: "trigger" as Flow.Delay["from"], compressible: true, timer_linked: false },
+  ...over
+})
+
+const verdictWith = (failures: Bundle.RunVerdict["failures"]): Bundle.RunVerdict => ({
+  case: "c",
+  lane: "fake",
+  status: "failed",
+  failures
+})
+
+describe("the relay input a reception was driven from", () => {
+  // One relay, twice: the run sends on leg A, the system emits on leg B. The
+  // captured pair carries P-Orig both ways; what differs is what the run drove.
+  const capturedPrack = crlf([
+    "PRACK sip:callee@platform SIP/2.0",
+    "To: <sip:+331@h.fr>;tag=b",
+    "CSeq: 2 PRACK",
+    "P-Orig: sbc.113"
+  ])
+  const bare = crlf(["PRACK sip:b2bua@127.0.0.1 SIP/2.0", "To: <sip:+331@h.fr>;tag=b", "CSeq: 2 PRACK"])
+  const dressed = crlf([
+    "PRACK sip:b2bua@127.0.0.1 SIP/2.0",
+    "To: <sip:+331@h.fr>;tag=b",
+    "CSeq: 2 PRACK",
+    "P-Orig: sbc.113"
+  ])
+
+  const pivot = (): Pivot.PivotV3 => ({
+    pivot_version: 3,
+    case: { id: "c", title: "t", family: "f", variant: "repro", origin: "capture", lanes: {} },
+    identities: [],
+    calls: [],
+    endpoints: [],
+    actors: [],
+    legs: [],
+    flow: [step("s2", { leg: "B", msg: { method: "PRACK", headers: [], "headers-present": [] } })],
+    timing: { expect_budget_ms: 1000, settle_budget_ms: 1000 }
+  })
+
+  const flows = (): Flows.FlowsDoc =>
+    ({
+      schema: 5,
+      legs: [{ msgs: [{ raw: capturedPrack }] }]
+    }) as unknown as Flows.FlowsDoc
+
+  const recordings = (sent: string): ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>> =>
+    new Map([
+      ["A", [{ seq: 1, dir: "out", at_us: 1000, step: "s1", raw: sent }] as Array<Bundle.RecordedMessage>],
+      ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s2", raw: bare }] as Array<Bundle.RecordedMessage>]
+    ])
+
+  const observed = { leg: 0, msg: 0, at_us: 0 }
+
+  const run = (sent: string) => {
+    const doc = pivot()
+    const flow = [{ ...(doc.flow[0] as Flow.Step), observed }]
+    return confront({ pivot: { ...doc, flow }, verdict: verdictWith([]), recordings: recordings(sent), flows: flows() })
+  }
+
+  it("a bare input leaves the captured header undriven", () => {
+    const probe = run(bare).probes.find((p) => p.probe.kind === "header" && p.probe.name === "P-Orig")
+    expect(probe?.probe.kind === "header" && probe.probe.driven).toBe(false)
+  })
+
+  it("an input that carried the header drove it", () => {
+    const probe = run(dressed).probes.find((p) => p.probe.kind === "header" && p.probe.name === "P-Orig")
+    expect(probe?.probe.kind === "header" && probe.probe.driven).toBe(true)
+  })
+
+  it("a message the run drove no input for states no relay input at all", () => {
+    const doc = pivot()
+    const flow = [{ ...(doc.flow[0] as Flow.Step), observed }]
+    const minted = new Map([
+      ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s2", raw: bare }] as Array<Bundle.RecordedMessage>]
+    ])
+    const confronted = confront({ pivot: { ...doc, flow }, verdict: verdictWith([]), recordings: minted, flows: flows() })
+    const probe = confronted.probes.find((p) => p.probe.kind === "header" && p.probe.name === "P-Orig")
+    expect(probe?.probe.kind === "header" && probe.probe.driven).toBeUndefined()
+  })
+
+  it("an input of another message is no input for this one", () => {
+    const other = crlf(["BYE sip:b2bua@127.0.0.1 SIP/2.0", "To: <sip:+331@h.fr>;tag=b", "CSeq: 3 BYE"])
+    const probe = run(other).probes.find((p) => p.probe.kind === "header" && p.probe.name === "P-Orig")
+    expect(probe?.probe.kind === "header" && probe.probe.driven).toBeUndefined()
+  })
+})
+
+describe("shapeProbes", () => {
+  it("an unmatched final becomes a scoped status substitution", () => {
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "unmatched-datagram",
+          step: "s7",
+          leg: "A",
+          gated_on: { kind: "response", status: 486, cseq_method: "INVITE" },
+          reason: "gated on response 486; 480 arrived",
+          arrived: { kind: "response", status: 480, reason: "Temporarily Unavailable", cseq_method: "INVITE", cseq: 1 }
+        }
+      ]),
+      new Map([["s7", step("s7")]]),
+      new Map()
+    )
+    expect(probes).toHaveLength(1)
+    expect(signature(probes[0]!.probe)).toBe("shape:status-substitution:486->480:initial-invite")
+    expect(probes[0]?.step).toBe("s7")
+  })
+
+  it("an in-dialog substitution pins the answered transaction, not the initial final", () => {
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "unmatched-datagram",
+          step: "s9",
+          leg: "A",
+          gated_on: { kind: "response", status: 200 },
+          reason: "gated on response 200; 481 arrived",
+          arrived: { kind: "response", status: 481, reason: "Call/Transaction Does Not Exist", cseq_method: "BYE", cseq: 2 }
+        }
+      ]),
+      new Map([["s9", step("s9", { in_dialog: true, msg: { "cseq-method": "BYE", status: 200, headers: [], "headers-present": [] } })]]),
+      new Map()
+    )
+    expect(signature(probes[0]!.probe)).toBe("shape:status-substitution:200->481:response:481:BYE")
+  })
+
+  it("an unmatched request becomes a method substitution", () => {
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "unmatched-datagram",
+          step: "s4",
+          leg: "B",
+          gated_on: { kind: "request", method: "ACK" },
+          reason: "gated on request ACK; BYE arrived",
+          arrived: { kind: "request", method: "BYE", cseq: 2 }
+        }
+      ]),
+      new Map(),
+      new Map()
+    )
+    expect(signature(probes[0]!.probe)).toBe("shape:method-substitution:ACK->BYE")
+  })
+
+  it("an unmatched datagram of the other kind than the gate falls back to an extra message", () => {
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "unmatched-datagram",
+          step: "s4",
+          leg: "B",
+          gated_on: { kind: "response", status: 200, cseq_method: "INVITE" },
+          reason: "gated on response 200; a BYE request arrived",
+          arrived: { kind: "request", method: "BYE", cseq: 2 }
+        }
+      ]),
+      new Map(),
+      new Map()
+    )
+    expect(signature(probes[0]!.probe)).toBe("shape:extra-message:BYE")
+  })
+
+  it("a stray request the leg answered is a serviced stray", () => {
+    const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+331@h.fr>;tag=b", "Call-ID: cid-1", "CSeq: 2 BYE"])
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "unmatched-datagram",
+          step: "s4",
+          leg: "B",
+          gated_on: { kind: "response", status: 200, cseq_method: "INVITE" },
+          reason: "gated on response 200; a BYE request arrived",
+          arrived: { kind: "request", method: "BYE", cseq: 2 }
+        }
+      ]),
+      new Map(),
+      new Map([
+        ["B", [{ seq: 1, dir: "out", at_us: 10, raw: answer }] as Array<Bundle.RecordedMessage>]
+      ])
+    )
+    expect(signature(probes[0]!.probe)).toBe("shape:serviced-stray:BYE:auto-reacted")
+  })
+
+  it("an answer on another leg does not service the stray", () => {
+    const answer = crlf(["SIP/2.0 200 OK", "To: <sip:+331@h.fr>;tag=b", "Call-ID: cid-1", "CSeq: 2 BYE"])
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "unmatched-datagram",
+          step: "s4",
+          leg: "B",
+          gated_on: { kind: "response", status: 200, cseq_method: "INVITE" },
+          reason: "gated on response 200; a BYE request arrived",
+          arrived: { kind: "request", method: "BYE", cseq: 2 }
+        }
+      ]),
+      new Map(),
+      new Map([
+        ["A", [{ seq: 1, dir: "out", at_us: 10, raw: answer }] as Array<Bundle.RecordedMessage>]
+      ])
+    )
+    expect(signature(probes[0]!.probe)).toBe("shape:extra-message:BYE")
+  })
+
+  it("an answer to another transaction on the leg does not service the stray", () => {
+    const other = crlf(["SIP/2.0 200 OK", "To: <sip:+331@h.fr>;tag=b", "Call-ID: cid-1", "CSeq: 5 BYE"])
+    const probes = shapeProbes(
+      verdictWith([
+        {
+          failure: "unexpected-datagram",
+          leg: "B",
+          arrived: { kind: "request", method: "BYE", cseq: 2 }
+        }
+      ]),
+      new Map(),
+      new Map([
+        ["B", [{ seq: 1, dir: "out", at_us: 10, raw: other }] as Array<Bundle.RecordedMessage>]
+      ])
+    )
+    expect(signature(probes[0]!.probe)).toBe("shape:extra-message:BYE")
+  })
+
+  it("a datagram nothing expected is an extra message", () => {
+    const probes = shapeProbes(
+      verdictWith([
+        { failure: "unexpected-datagram", leg: "B", arrived: { kind: "request", method: "OPTIONS", cseq: 9 } }
+      ]),
+      new Map(),
+      new Map()
+    )
+    expect(signature(probes[0]!.probe)).toBe("shape:extra-message:OPTIONS")
+  })
+
+  it("an expectation nothing satisfied is a missing message", () => {
+    const probes = shapeProbes(
+      verdictWith([
+        { failure: "expect-timed-out", step: "s7", leg: "A", gated_on: "response 486", within_ms: 32000 }
+      ]),
+      new Map(),
+      new Map()
+    )
+    expect(signature(probes[0]!.probe)).toBe("shape:missing-message:response-486")
+  })
+
+  it("a passing verdict produces nothing", () => {
+    expect(shapeProbes({ case: "c", lane: "fake", status: "ok" }, new Map(), new Map())).toEqual([])
+  })
+})
+
+describe("retransmissionProbes", () => {
+  const hold = { id: "d1", kind: "delayed-automatic", step: "s3", retransmits: 1 }
+  const recording = (messages: ReadonlyArray<[Bundle.Dir, string, number, number | undefined]>) =>
+    new Map([
+      [
+        "A",
+        messages.map(([dir, raw, at_us, repeat], i) => ({
+          seq: i + 1,
+          dir,
+          at_us,
+          raw,
+          ...(repeat === undefined ? {} : { repeat_of: repeat })
+        })) satisfies ReadonlyArray<Bundle.RecordedMessage>
+      ]
+    ])
+
+  it("a hold whose re-pass count matches the evidence produces nothing", () => {
+    const recordings = recording([
+      ["in", ok200("c1", 1, "t1"), 1000, undefined],
+      ["in", ok200("c1", 1, "t1"), 2000, 1],
+      ["out", ack("c1", 1), 3000, undefined]
+    ])
+    expect(retransmissionProbes([hold], recordings)).toEqual([])
+  })
+
+  it("a hold the capture evidences that provoked no re-pass is the probe", () => {
+    const recordings = recording([
+      ["in", ok200("c1", 1, "t1"), 1000, undefined],
+      ["out", ack("c1", 1), 3000, undefined]
+    ])
+    const probes = retransmissionProbes([hold], recordings)
+    expect(probes).toHaveLength(1)
+    expect(signature(probes[0]!.probe)).toBe("shape:retransmission:INVITE:2xx")
+    expect(probes[0]?.step).toBe("s3")
+    const probe = probes[0]!.probe
+    expect(probe.kind === "shape" && probe.shapeKind.shape === "retransmission" && probe.shapeKind.replayed).toBe(0)
+  })
+
+  it("a re-pass after the ACK counts for nothing", () => {
+    const recordings = recording([
+      ["in", ok200("c1", 1, "t1"), 1000, undefined],
+      ["out", ack("c1", 1), 2000, undefined],
+      ["in", ok200("c1", 1, "t1"), 3000, 1]
+    ])
+    const probes = retransmissionProbes([hold], recordings)
+    const probe = probes[0]!.probe
+    expect(probe.kind === "shape" && probe.shapeKind.shape === "retransmission" && probe.shapeKind.replayed).toBe(0)
+  })
+
+  it("a forked second 2xx is a distinct final, not a re-pass", () => {
+    const recordings = recording([
+      ["in", ok200("c1", 1, "t1"), 1000, undefined],
+      ["in", ok200("c1", 1, "t2"), 1500, undefined],
+      ["out", ack("c1", 1), 3000, undefined]
+    ])
+    const probes = retransmissionProbes([{ ...hold, retransmits: 0 }], recordings)
+    expect(probes).toEqual([])
+  })
+
+  it("no declared hold, no probe — agreement produces nothing", () => {
+    expect(retransmissionProbes([], new Map())).toEqual([])
+  })
+})
+
+describe("recordOf", () => {
+  it("fills every key of the flat record", () => {
+    const record = recordOf(
+      { lane: "fake", capture: "cap.pcap.gz", case: "cap-case1", run: 0 },
+      {
+        step: "s2",
+        probe: {
+          kind: "header",
+          step: "s2",
+          name: "Allow",
+          scope: { kind: "initial-invite" },
+          captured: ["INVITE, ACK"],
+          replayed: ["INVITE, ACK, BYE"],
+          inbound: true,
+          inboundValues: ["INVITE, ACK"],
+          driven: true
+        }
+      },
+      { class: "accepted", rule: "capability-set-added-by-stack", ticket: "" }
+    )
+    expect(record).toEqual({
+      lane: "fake",
+      capture: "cap.pcap.gz",
+      case: "cap-case1",
+      run: 0,
+      step: "s2",
+      kind: "header",
+      signature: "header:allow:initial-invite",
+      name: "Allow",
+      scope: "initial-invite",
+      captured: ["INVITE, ACK"],
+      replayed: ["INVITE, ACK, BYE"],
+      inbound: true,
+      added: ["BYE"],
+      removed: [],
+      class: "accepted",
+      rule: "capability-set-added-by-stack",
+      ticket: ""
+    })
+  })
+})
+
+describe("the document's own shape", () => {
+  const doc = (flow: ReadonlyArray<Flow.Step>): Pivot.PivotV3 => ({
+    pivot_version: 3,
+    case: { id: "c", title: "t", family: "f", variant: "repro", origin: "capture", lanes: {} },
+    identities: [],
+    calls: [],
+    endpoints: [],
+    actors: [],
+    legs: [],
+    flow,
+    timing: { expect_budget_ms: 1000, settle_budget_ms: 1000 }
+  })
+
+  const sendFinal = (id: string, leg: string, status: number): Flow.Step =>
+    step(id, { leg, op: "send", msg: { "cseq-method": "INVITE", status, headers: [], "headers-present": [] } })
+
+  const expectAck = (id: string, leg: string): Flow.Step =>
+    step(id, { leg, op: "expect", auto: true, msg: { method: "ACK", headers: [], "headers-present": [] } })
+
+  const read = (flow: ReadonlyArray<Flow.Step>) =>
+    confront({ pivot: doc(flow), verdict: verdictWith([]), recordings: new Map() }).context.document
+
+  it("names the final a leg ENDS on, with no ACK expect after it", () => {
+    const finals = read([sendFinal("s5", "B", 500), expectAck("s6", "B"), sendFinal("s19", "D", 487)])
+      .unackedFinals
+    expect(finals).toEqual([{ step: "s19", leg: "D", status: 487, legTail: true, repeated: false }])
+  })
+
+  it("a final the flow goes on past is named, and marked as no leg tail", () => {
+    const finals = read([sendFinal("s5", "B", 500), step("s7", { leg: "B", op: "expect" })]).unackedFinals
+    expect(finals).toEqual([{ step: "s5", leg: "B", status: 500, legTail: false, repeated: false }])
+  })
+
+  it("a re-INVITE's ACK never stands in for the transaction before it", () => {
+    const finals = read([
+      sendFinal("s3", "B", 200),
+      sendFinal("s9", "B", 200),
+      expectAck("s10", "B")
+    ]).unackedFinals
+    expect(finals).toEqual([{ step: "s3", leg: "B", status: 200, legTail: false, repeated: false }])
+  })
+
+  it("a provisional is no final, and another leg's ACK is not this leg's", () => {
+    const provisional = step("s2", {
+      leg: "B",
+      op: "send",
+      msg: { "cseq-method": "INVITE", status: 180, headers: [], "headers-present": [] }
+    })
+    expect(read([provisional]).unackedFinals).toEqual([])
+    expect(read([sendFinal("s5", "B", 500), expectAck("s6", "C")]).unackedFinals).toEqual([
+      { step: "s5", leg: "B", status: 500, legTail: true, repeated: false }
+    ])
+  })
+
+  it("marks a final the document states a retransmit ladder for", () => {
+    const laddered = { ...sendFinal("s5", "B", 200), retransmits: 2 }
+    expect(read([laddered]).unackedFinals).toEqual([
+      { step: "s5", leg: "B", status: 200, legTail: true, repeated: true }
+    ])
+  })
+})

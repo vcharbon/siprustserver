@@ -189,6 +189,11 @@ fn src() -> std::net::SocketAddr {
     format!("{UAC}:5060").parse().expect("fixture address")
 }
 
+/// The worker a response arrives from.
+fn worker_src() -> std::net::SocketAddr {
+    format!("{W1}:5060").parse().unwrap()
+}
+
 /// The proxy's outbound Via branch on the datagram it just forwarded — what the
 /// downstream's response must echo for the relay to match.
 fn forwarded_branch(sent: &Arc<Sent>) -> String {
@@ -280,7 +285,7 @@ async fn a_rejected_call_closes_its_span_when_the_ack_relays() {
     assert_eq!(traces.active(), 1);
     let proxy_branch = forwarded_branch(&ep);
 
-    core.handle_response(response(CALL_ID, "486 Busy Here", &proxy_branch, "z9hG4bK-rej", "1 INVITE")).await;
+    core.handle_response(response(CALL_ID, "486 Busy Here", &proxy_branch, "z9hG4bK-rej", "1 INVITE"), worker_src()).await;
     assert_eq!(traces.active(), 1, "the call is not over until its ACK is on the wire");
 
     core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-rej", 1), src()).await;
@@ -305,18 +310,18 @@ async fn a_rejected_re_invite_leaves_the_live_call_its_span() {
 
     core.handle_request(invite(CALL_ID, "z9hG4bK-setup", 1), src()).await;
     let setup = forwarded_branch(&ep);
-    core.handle_response(response(CALL_ID, "200 OK", &setup, "z9hG4bK-setup", "1 INVITE")).await;
+    core.handle_response(response(CALL_ID, "200 OK", &setup, "z9hG4bK-setup", "1 INVITE"), worker_src()).await;
     core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-ack", 1), src()).await;
 
     core.handle_request(in_dialog("INVITE", CALL_ID, "z9hG4bK-hold", 2), src()).await;
     let hold = forwarded_branch(&ep);
-    core.handle_response(response(CALL_ID, "488 Not Acceptable Here", &hold, "z9hG4bK-hold", "2 INVITE")).await;
+    core.handle_response(response(CALL_ID, "488 Not Acceptable Here", &hold, "z9hG4bK-hold", "2 INVITE"), worker_src()).await;
     core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-hold", 2), src()).await;
     assert_eq!(traces.active(), 1, "a rejected re-INVITE ends a transaction, not the dialog");
 
     core.handle_request(in_dialog("BYE", CALL_ID, "z9hG4bK-bye", 3), src()).await;
     let bye = forwarded_branch(&ep);
-    core.handle_response(response(CALL_ID, "200 OK", &bye, "z9hG4bK-bye", "3 BYE")).await;
+    core.handle_response(response(CALL_ID, "200 OK", &bye, "z9hG4bK-bye", "3 BYE"), worker_src()).await;
 
     assert!(
         log.matching("kind=sip.in").iter().any(|e| e.contains("BYE sip:")),
@@ -340,7 +345,7 @@ async fn an_auth_challenge_keeps_the_span_for_the_credentialed_retry() {
     core.handle_request(invite(CALL_ID, "z9hG4bK-chal", 1), src()).await;
     let challenged = forwarded_branch(&ep);
     let challenge = response(CALL_ID, "407 Proxy Authentication Required", &challenged, "z9hG4bK-chal", "1 INVITE");
-    core.handle_response(challenge).await;
+    core.handle_response(challenge, worker_src()).await;
     core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-chal", 1), src()).await;
     assert_eq!(traces.active(), 1, "the caller answers a challenge with credentials, on the same call");
 
@@ -348,7 +353,7 @@ async fn an_auth_challenge_keeps_the_span_for_the_credentialed_retry() {
     // the one that ends the call.
     core.handle_request(invite(CALL_ID, "z9hG4bK-cred", 2), src()).await;
     let credentialed = forwarded_branch(&ep);
-    core.handle_response(response(CALL_ID, "486 Busy Here", &credentialed, "z9hG4bK-cred", "2 INVITE")).await;
+    core.handle_response(response(CALL_ID, "486 Busy Here", &credentialed, "z9hG4bK-cred", "2 INVITE"), worker_src()).await;
     core.handle_request(in_dialog("ACK", CALL_ID, "z9hG4bK-cred", 2), src()).await;
 
     assert_eq!(traces.active(), 0);

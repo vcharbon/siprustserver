@@ -77,6 +77,11 @@ async fn in_dialog_bye_store_fault_500_then_retry_succeeds() {
     let s = scene_with_faults("store-fault-bye", &faults).await;
 
     let mut dialog = s.establish().await;
+    // `establish` returns on the ACK the SUT owes BOB (sent on receipt of his
+    // 200), which no longer implies alice's own ACK has been consumed — it is
+    // still one transit hop away. Let it land, so the armed window holds the BYE
+    // alone and the rejection count means what it says.
+    s.h.advance(Duration::from_millis(500)).await;
 
     // Store goes down mid-call.
     faults.arm(StoreFaultPoint::LiveInDialog);

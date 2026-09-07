@@ -5,7 +5,7 @@
 /// Methods the in-dialog generator accepts (ACK excluded — it has its own
 /// primitive [`generate_ack_for_2xx`](super::generate_ack_for_2xx), a
 /// compile-time guarantee).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InDialogMethod {
     Bye,
     Invite,

@@ -95,6 +95,13 @@ pub fn set_promote_pem(mut call: Call, state: Option<crate::model::PromotePemSta
 
 // ── REFER transfer ──────────────────────────────────────────────────────────
 
+/// Whether the routing decision directed LOCAL REFER processing for this call
+/// (the [`crate::features::ReferFeature`] arm). Absent, the platform relays a
+/// REFER to the peer leg like any other in-dialog method.
+pub fn refer_processed_locally(call: &Call) -> bool {
+    call.features.as_ref().is_some_and(|f| f.refer.is_some())
+}
+
 /// The current REFER transfer runtime slice, if any.
 pub fn transfer_state(call: &Call) -> Option<&crate::model::TransferState> {
     call.transfer.as_ref()

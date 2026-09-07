@@ -37,7 +37,22 @@ use sip_message::SipMessage;
 use sip_pcap::flow::{
     build_flows, CallGroup, CorrelateStrategy, FlowConfig, FlowLeg, DEFAULT_DEDUP_WINDOW_US,
 };
+use sip_pcap::doc::FlowsDoc;
+use sip_pcap::enrich::{enrich_str, EnrichOptions};
 use sip_pcap::query::{neighbours_of, select_groups, summary_row, Projection, Query};
+use sip_pcap::rfc::Census;
+
+/// Serialize an emitted document, exiting with the derivation error a
+/// document that cannot be re-derived must never be printed past.
+fn emit_json(doc: Result<FlowsDoc, String>) -> String {
+    match doc {
+        Ok(doc) => serde_json::to_string_pretty(&doc).expect("model JSON serializes"),
+        Err(e) => {
+            eprintln!("flows enrichment failed: {e}");
+            std::process::exit(2);
+        }
+    }
+}
 
 #[derive(ClapParser, Debug)]
 #[command(
@@ -47,8 +62,8 @@ use sip_pcap::query::{neighbours_of, select_groups, summary_row, Projection, Que
 struct Args {
     /// Capture files or directories — pcap/pcapng, plain or `.gz` (a directory
     /// expands to its capture files). Ring files are ordered oldest-first
-    /// automatically.
-    #[arg(required = true)]
+    /// automatically. Required except with `--schema` / `--enrich`, which read
+    /// no capture.
     inputs: Vec<PathBuf>,
 
     /// Select call groups containing a leg whose Call-ID contains this substring.
@@ -125,9 +140,10 @@ struct Args {
 
     /// Emit the FULL flow model (raw payloads as text where valid UTF-8,
     /// base64 for binary parts, parsed summaries, hops, match evidence,
-    /// decode counters) as pretty-printed JSON on stdout — schema documented
-    /// on `sip_pcap::emit::flows_to_json`. Whole-capture emit: selection
-    /// filters and text layout flags do not apply.
+    /// per-message and per-call enrichment, decode counters) as pretty-printed
+    /// JSON on stdout — the document is `sip_pcap::doc::FlowsDoc`, whose JSON
+    /// Schema `--schema` prints. Whole-capture emit: selection filters and text
+    /// layout flags do not apply.
     #[arg(
         long,
         default_value_t = false,
@@ -137,6 +153,47 @@ struct Args {
         ]
     )]
     json: bool,
+
+    /// Headers projected onto every emitted message as structured
+    /// `msgs[].headers` entries, comma-separated. Matching is by header
+    /// IDENTITY, so casing and RFC 3261 §7.3.3 compact forms collapse. A
+    /// consumer that needs a header a correlation rule names passes it here
+    /// instead of re-parsing the wire text.
+    #[arg(long = "emit-headers", value_delimiter = ',')]
+    emit_headers: Vec<String>,
+
+    /// Re-derive the enrichment of an ALREADY EMITTED flows document and print
+    /// it. The pass is a pure function of the message bytes, so a document a
+    /// tool rewrote (anonymized, filtered) comes back in step with its bytes.
+    #[arg(long, conflicts_with_all = ["json", "query", "query_json", "list", "full"])]
+    enrich: Option<PathBuf>,
+
+    /// Print the JSON Schema of the emitted flows document and exit.
+    #[arg(long, default_value_t = false)]
+    schema: bool,
+
+    /// Run the RFC-violation census (`sip_pcap::rfc`) over ALREADY EMITTED
+    /// flows documents — files, or directories walked recursively for
+    /// `*.flows.json` — and print the report as JSON on stdout with its
+    /// summary on stderr. Reads no capture, and modifies no document.
+    #[arg(
+        long = "rfc-census",
+        value_delimiter = ',',
+        conflicts_with_all = ["json", "query", "query_json", "list", "full", "enrich"]
+    )]
+    rfc_census: Vec<PathBuf>,
+
+    /// Worker threads the census sweep runs, each parsing one document at a
+    /// time.
+    #[arg(long, default_value_t = 4)]
+    rfc_census_jobs: usize,
+
+    /// Rule tokens (`rfc_rules::RuleId`) to run BESIDE the WIRE vocabulary in
+    /// the census — a rule with a body but no corpus numbers yet, whose
+    /// baseline this sweep takes. The report then carries its token too, so it
+    /// is not a dated run the cut may read.
+    #[arg(long = "rfc-census-with", value_delimiter = ',', requires = "rfc_census")]
+    rfc_census_with: Vec<rfc_rules::RuleId>,
 
     /// Run a JSON query (see `sip_pcap::query`): a predicate tree over calls,
     /// legs, transactions and messages, plus the projection of a match. The
@@ -164,6 +221,30 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+    if args.schema {
+        let schema = schemars::schema_for!(sip_pcap::doc::FlowsDoc);
+        println!("{}", serde_json::to_string_pretty(&schema).expect("schema serializes"));
+        return;
+    }
+    let opts = EnrichOptions::with_headers(&args.emit_headers);
+    if let Some(path) = &args.enrich {
+        match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| enrich_str(&t, &opts)) {
+            Ok(out) => println!("{out}"),
+            Err(e) => {
+                eprintln!("cannot re-enrich {}: {e}", path.display());
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+    if !args.rfc_census.is_empty() {
+        run_rfc_census(&args.rfc_census, args.rfc_census_jobs, &args.rfc_census_with);
+        return;
+    }
+    if args.inputs.is_empty() {
+        eprintln!("no capture given (see --help; --schema, --enrich and --rfc-census read no capture)");
+        std::process::exit(2);
+    }
     let files = expand_inputs(&args.inputs);
     if files.is_empty() {
         eprintln!("no capture files found under {:?}", args.inputs);
@@ -210,7 +291,7 @@ fn main() {
         // part of what a recorded query means, not ambient CLI state.
         let cfg = query.correlate.clone().unwrap_or(cfg);
         let flows = build_flows(&datagrams, &cfg);
-        run_query(&flows, &stats, &query);
+        run_query(&flows, &stats, &query, &opts);
         return;
     }
 
@@ -219,8 +300,7 @@ fn main() {
     if args.json {
         // Pretty + deterministic field order: the emit is committed as
         // fixtures downstream, so its git/jq diffs must stay line-readable.
-        let v = sip_pcap::emit::flows_to_json(&flows, &stats);
-        println!("{}", serde_json::to_string_pretty(&v).expect("model JSON serializes"));
+        println!("{}", emit_json(sip_pcap::emit::flows_to_doc(&flows, &stats, &opts)));
         return;
     }
 
@@ -288,7 +368,12 @@ fn load_query(args: &Args) -> Option<Query> {
 
 /// Select, expand to neighbours, project. The three phases stay visible here
 /// because they are what the query document is made of.
-fn run_query(flows: &sip_pcap::flow::Flows, decode: &sip_pcap::DecodeStats, query: &Query) {
+fn run_query(
+    flows: &sip_pcap::flow::Flows,
+    decode: &sip_pcap::DecodeStats,
+    query: &Query,
+    opts: &EnrichOptions,
+) {
     let hits = select_groups(flows, query);
     eprintln!(
         "# legs={} call-groups={} matched={}{}",
@@ -324,10 +409,112 @@ fn run_query(flows: &sip_pcap::flow::Flows, decode: &sip_pcap::DecodeStats, quer
             }
             wanted.sort_unstable();
             wanted.dedup();
-            let v = sip_pcap::emit::flows_to_json_selected(flows, decode, &wanted);
-            println!("{}", serde_json::to_string_pretty(&v).expect("model JSON serializes"));
+            println!(
+                "{}",
+                emit_json(sip_pcap::emit::flows_to_doc_selected(flows, decode, &wanted, opts))
+            );
         }
     }
+}
+
+/// Every flows document under `inputs`: a named file is taken as given, a
+/// directory is walked recursively for `*.flows.json`.
+///
+/// The recursion does NOT descend a symlinked directory, and the result is
+/// deduplicated by canonical path: a corpus that classifies its captures by
+/// symlinking them into bucket directories would otherwise present the same
+/// document several times and inflate every count the census reports. A path
+/// named DIRECTLY on the command line is still followed — that one is a
+/// deliberate choice.
+///
+/// Sorted, so the sweep's work order — and therefore its report — does not
+/// depend on the filesystem.
+fn expand_flows_documents(inputs: &[PathBuf]) -> Vec<PathBuf> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(kind) = entry.file_type() else { continue };
+            let path = entry.path();
+            if kind.is_dir() {
+                walk(&path, out);
+            } else if kind.is_file()
+                && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".flows.json"))
+            {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    for input in inputs {
+        if input.is_dir() {
+            walk(input, &mut files);
+        } else {
+            files.push(input.clone());
+        }
+    }
+    files.sort();
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
+    files
+}
+
+/// Sweep the census over flows documents and print it.
+///
+/// Every document is either scanned or recorded as a read failure: a census
+/// that dropped a document it could not parse would understate its own counts.
+fn run_rfc_census(inputs: &[PathBuf], jobs: usize, candidates: &[rfc_rules::RuleId]) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let files = expand_flows_documents(inputs);
+    if files.is_empty() {
+        eprintln!("no *.flows.json found under {inputs:?}");
+        std::process::exit(2);
+    }
+    let workers = jobs.clamp(1, files.len());
+    eprintln!("# rfc-census: {} document(s), {workers} worker(s)", files.len());
+
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let census = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let (next, done, files) = (&next, &done, &files);
+                scope.spawn(move || {
+                    let mut local = Census::with_candidates(candidates);
+                    while let Some(path) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let name = path.display().to_string();
+                        let capture = path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        match std::fs::read_to_string(path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|t| serde_json::from_str::<FlowsDoc>(&t).map_err(|e| e.to_string()))
+                        {
+                            Ok(doc) => local.absorb(&name, &capture, &doc),
+                            Err(reason) => local.fail(&name, reason),
+                        }
+                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n % 500 == 0 {
+                            eprintln!("# {n}/{} scanned", files.len());
+                        }
+                    }
+                    local
+                })
+            })
+            .collect();
+        let mut merged = Census::with_candidates(candidates);
+        for handle in handles {
+            merged.merge(handle.join().expect("a census worker panicked"));
+        }
+        merged
+    });
+    let mut census = census;
+    census.sort();
+
+    eprint!("{}", census.summary());
+    println!("{}", serde_json::to_string_pretty(&census).expect("census serializes"));
 }
 
 fn expand_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
@@ -565,5 +752,35 @@ fn print_ladder(n: usize, group: &CallGroup, legs: &[FlowLeg], full: bool) {
         if let Some(b) = body {
             println!("{b}");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::expand_flows_documents;
+    use std::path::PathBuf;
+
+    /// A corpus that classifies captures by symlinking their directories into
+    /// buckets yields each document ONCE: the sweep walks the real tree and
+    /// declines to descend the aliases, so no count is doubled.
+    #[test]
+    fn a_symlinked_bucket_directory_does_not_present_a_document_twice() {
+        let root = std::env::temp_dir().join(format!("sipflow-walk-{}", std::process::id()));
+        let capture = root.join("capture_1");
+        let bucket = root.join("_diverge");
+        std::fs::create_dir_all(&capture).expect("capture dir");
+        std::fs::create_dir_all(&bucket).expect("bucket dir");
+        std::fs::write(capture.join("capture_1.anon.flows.json"), "{}").expect("document");
+        std::fs::write(capture.join("notes.txt"), "not a document").expect("decoy");
+        std::os::unix::fs::symlink(&capture, bucket.join("capture_1")).expect("bucket alias");
+
+        let found = expand_flows_documents(std::slice::from_ref(&root));
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(
+            found,
+            vec![PathBuf::from(&capture).join("capture_1.anon.flows.json")],
+            "one document, reached by its real path"
+        );
     }
 }

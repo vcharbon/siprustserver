@@ -1,0 +1,220 @@
+{
+  "actors": [
+    {
+      "endpoint": "ep-caller",
+      "id": "uac1",
+      "identity": "caller",
+      "kind": "uac"
+    },
+    {
+      "claim": {
+        "by": "ruri-pos"
+      },
+      "endpoint": "ep-callee",
+      "id": "uas1",
+      "kind": "uas"
+    }
+  ],
+  "calls": [
+    {
+      "attempts": [
+        {
+          "branch": 0,
+          "callee": {
+            "identity": "called-0-0"
+          },
+          "leg": "B",
+          "position": 0
+        }
+      ],
+      "caller_leg": "A",
+      "id": "c1"
+    }
+  ],
+  "case": {
+    "annotations": {
+      "notes": [
+        "A 486 to an INVITE is a final a compliant callee CAN send, so this pins the gate rejecting a PLAUSIBLE wrong assertion rather than an impossible one.",
+        "The settle budget is long enough for the system's own RFC 3261 §13.3.1.4 give-up: the run aborts before its ACK, so the answered dialog is the system's to tear down, and the settle window is where that teardown is recorded."
+      ]
+    },
+    "family": "transparent",
+    "id": "wrong-final-status",
+    "lanes": {
+      "upstream-fake": "ok"
+    },
+    "origin": "authored",
+    "title": "the document expects a busy final and the callee answers",
+    "variant": "repro"
+  },
+  "endpoints": [
+    {
+      "binding": "dedicated",
+      "id": "ep-caller",
+      "observed": "127.0.0.1:5060",
+      "side": "peer"
+    },
+    {
+      "binding": "dedicated",
+      "id": "ep-callee",
+      "observed": "127.0.0.1:5070",
+      "side": "peer"
+    }
+  ],
+  "flow": [
+    {
+      "delay": {
+        "compressible": true,
+        "from": "trigger",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s1",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "ref": "resources/uac1_offer.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "from": {
+          "form": "private",
+          "pos": "caller"
+        },
+        "headers": [
+          {
+            "name": "X-Api-Call",
+            "value": "{\"destination\":{\"host\":\"127.0.0.1\",\"port\":5070,\"user\":\"bob5070\"}}"
+          }
+        ],
+        "method": "INVITE",
+        "ruri": {
+          "form": "e164",
+          "pos": "called[0][0]"
+        },
+        "to": {
+          "form": "e164",
+          "pos": "called[0][0]"
+        }
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s2",
+      "leg": "A",
+      "msg": {
+        "cseq": 1,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s3",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "method": "INVITE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s3",
+        "ms": 20,
+        "timer_linked": false
+      },
+      "id": "s4",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "ref": "resources/uas1_answer.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "cseq-method": "INVITE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "send"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s4",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s5",
+      "leg": "A",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "Busy Here",
+        "status": 486
+      },
+      "op": "expect"
+    }
+  ],
+  "identities": [
+    {
+      "forms": [
+        "private"
+      ],
+      "kind": "external-caller",
+      "name": "caller"
+    },
+    {
+      "forms": [
+        "e164"
+      ],
+      "kind": "site",
+      "name": "called-0-0"
+    }
+  ],
+  "legs": [
+    {
+      "actor": "uac1",
+      "dir": "out",
+      "id": "A"
+    },
+    {
+      "actor": "uas1",
+      "dir": "in",
+      "id": "B"
+    }
+  ],
+  "pivot_version": 3,
+  "postconditions": {
+    "cdr": {
+      "count": 1
+    }
+  },
+  "timing": {
+    "expect_budget_ms": 5000,
+    "settle_budget_ms": 40000
+  }
+}

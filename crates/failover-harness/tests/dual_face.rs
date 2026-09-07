@@ -434,7 +434,12 @@ async fn dual_face_takeover_moves_both_faces_together() {
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
+    // bob's ACK is the SUT's own, owed on receipt of his 200 (§13.2.2.4), so it
+    // no longer proves alice's ACK crossed the box — that one is still in
+    // flight. Land it before the proxy dies, or the handshake it completes is
+    // lost with the face it was traversing.
     bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(100)).await;
 
     // ── proxy A dies; BOTH VIPs move to the peer proxy ───────────────────────
     fh.mark("proxy", None, "crash", "dual-face proxy killed; VIPs move to peer");

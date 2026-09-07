@@ -257,12 +257,7 @@ impl Dialog {
         if let Some(s) = sdp {
             builder = builder.with_sdp(s);
         }
-        let (_txn, request) = unwrap_step(builder.try_send_with_request().await);
-        ClientReinvite {
-            agent: self.agent.clone(),
-            wire_dst: next_hop(&self.dialog, self.fallback_addr),
-            original_invite: request,
-        }
+        builder.send_cancellable().await
     }
 }
 
@@ -488,6 +483,23 @@ impl<'a> InDialogRequest<'a> {
     /// path pays nothing for it (`try_send` discards the clone-free original).
     pub async fn try_send_with_request(mut self) -> Result<(InDialogTxn, SipRequest), StepError> {
         self.try_send_inner().await
+    }
+
+    /// Send this in-dialog **re-INVITE** and keep the handle that can CANCEL it
+    /// (RFC 3261 §9.1) — [`Dialog::reinvite`] with this builder's header hooks,
+    /// so a renegotiation offering `Supported: 100rel` is CANCELlable too.
+    /// Panics unless the method is `INVITE`.
+    pub async fn send_cancellable(mut self) -> ClientReinvite {
+        assert!(
+            matches!(self.method, InDialogMethod::Invite),
+            "send_cancellable is the re-INVITE terminal (RFC 3261 §9.1 CANCELs an INVITE), \
+             not {:?}",
+            self.method,
+        );
+        let wire_dst = next_hop(self.dialog, self.fallback);
+        let agent = self.agent.clone();
+        let (_txn, request) = unwrap_step(self.try_send_inner().await);
+        ClientReinvite { agent, wire_dst, original_invite: request }
     }
 
     async fn try_send_inner(&mut self) -> Result<(InDialogTxn, SipRequest), StepError> {

@@ -25,7 +25,11 @@ pub struct B2buaConfig {
     pub per_call_queue_depth: usize,
     /// Max number of live per-call queues (memory bound).
     pub per_call_queue_cap: usize,
-    /// Auto-terminate a call after this many processed messages (loop guard).
+    /// Auto-terminate a call whose in-dialog event count exceeds this WITHIN
+    /// one keepalive interval (loop guard). The keepalive tick resets the
+    /// counter, so the budget is a rate: a runaway dialog lands >cap events
+    /// inside one window and is torn down, while a healthy call outlasting any
+    /// number of intervals never consumes the defense.
     pub max_messages_per_call: u64,
     /// Bounded CDR submit queue; `0` disables buffering (passthrough).
     pub cdr_buffer_queue_max: usize,
@@ -37,7 +41,7 @@ pub struct B2buaConfig {
     /// Overall REFER safety timer covering the whole transfer FSM, seconds. TS default 120.
     pub refer_overall_safety_sec: i64,
     /// Overall safety timer covering the whole **established-call reroute**
-    /// (a `Route`-shaped `call_release` decision, upstreamneed-009): replacement
+    /// (a `Route`-shaped `call_release` decision): replacement
     /// b-leg dial + a-leg re-INVITE realign + old-leg BYE. Armed when the
     /// reroute is applied, cancelled on completion; on expiry the call is torn
     /// down (the release event stands — a wedged reroute must never extend the
@@ -158,6 +162,26 @@ pub struct B2buaConfig {
     /// supervision, hunting chains) raise it. Overridable via
     /// `B2BUA_INVITE_TXN_TIMEOUT_SEC`.
     pub invite_txn_timeout_sec: i64,
+    /// **Initial-INVITE first-response bound**, seconds — how long a b-leg
+    /// initial INVITE waits for a response of ANY kind (not even a `100
+    /// Trying`) before its client transaction gives up with a
+    /// `TimeoutKind::Response` and the `call_failure` consult carries
+    /// `timeout_kind: "response"` — the "is this hop alive?" question, distinct
+    /// from [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec)'s "how
+    /// long may it ring?": the first provisional swaps the long bound in. A
+    /// **deliberate RFC 3261 §17.1.1.2 deviation, telephony policy**: the RFC's
+    /// Timer B is 64·T1 = 32 s, and a caller must not hear silence for half a
+    /// minute before the reroute to an alternate hop. Only the initial INVITE
+    /// reads it — an in-dialog INVITE keeps Timer B and a non-INVITE Timer F.
+    /// The Timer A ladder is cut at the bound, so the bound buys a rung count:
+    /// 2 s → 2 re-sends (0.5/1.5), 5 s → 3 (0.5/1.5/3.5), 10 s → 4, 32 s → 6.
+    /// [`validate`](Self::validate) range-checks
+    /// [`MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`](Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC)
+    /// `..=` [`MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`](Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC).
+    /// Default **32 s** (Timer B: no deviation until a deployment asks).
+    /// Overridable via
+    /// `B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC`.
+    pub invite_first_response_timeout_sec: i64,
     /// **Strict RFC 3261 §9.1 CANCEL wait** (ADR-0028). `false` (the default)
     /// is the bounded-hold policy: a b-leg CANCEL for a response-less branch
     /// waits for the first provisional at most the sip-txn grace window
@@ -169,16 +193,17 @@ pub struct B2buaConfig {
     /// never CANCELed and rides the terminating backstop instead. Overridable
     /// via `B2BUA_CANCEL_STRICT_RFC_WAIT` (truthy = strict).
     pub cancel_strict_rfc3261_wait: bool,
-    /// **ACK-timeout grace**, seconds (RFC 3261 §13.3.1.4 — the 2xx-without-ACK
-    /// give-up window, RFC's `64·T1` = 32 s). Armed when the a-leg 2xx is relayed
-    /// at dialog confirmation; cancelled when the a-leg ACK arrives. While it is
-    /// pending the B2BUA retransmits the stored 2xx toward the caller (T1,
-    /// doubling, capped T2). If no ACK has arrived by this deadline the caller is
-    /// presumed gone: the B2BUA BYEs the (just-created) a-leg dialog AND tears
-    /// down the b-leg — without this an answered-but-un-ACKed bridged call leaks
-    /// until the 1 h `GlobalDuration` cap (the a-leg INVITE server txn goes
-    /// `Completed` on the 2xx and is deleted silently at Timer H — no BYE). `<= 0`
-    /// disables the watchdog. Overridable via `B2BUA_ACK_TIMEOUT_SEC`.
+    /// **Un-ACKed 2xx give-up deadline**, seconds (RFC 3261 §13.3.1.4; the
+    /// RFC's `64·T1` = 32 s is the default). When it elapses with no ACK for a
+    /// 2xx to an INVITE — initial or re-INVITE — the peer is gone and the
+    /// session ends: the B2BUA BYEs the a-leg dialog and the b-leg it bridges.
+    /// Only the deadline is configured: the 2xx ladder always runs to Timer L
+    /// and the teardown always acts (ADR-0029 X5). `<= 0` is NOT allowed —
+    /// [`validate`](Self::validate) refuses it, and a harness config that
+    /// writes it anyway gets the default
+    /// ([`ack_timeout_ms`](Self::ack_timeout_ms)), as
+    /// [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) does.
+    /// Overridable via `B2BUA_ACK_TIMEOUT_SEC`.
     pub ack_timeout_sec: i64,
     /// **Tier-3 CPS token-bucket capacity** (migration/09 — port of
     /// `AppConfig.cpsBucketSize`). The hard ceiling on a *burst* of new-dialog
@@ -284,14 +309,12 @@ impl Default for B2buaConfig {
             event_dispatch_concurrency: 1024,
             per_call_queue_depth: 64,
             per_call_queue_cap: 200_000,
-            // Loop/runaway guard: terminate a call after this many in-dialog
-            // events. TS default is 100 (MAX_MESSAGES_PER_CALL); kept a touch
-            // higher (200) so a legitimate long-hold call — keepalive OPTIONS at
-            // a 300 s cadence over a multi-hour hold (~2 events/cycle) — stays
-            // well under it, while a flood/glare loop is still capped. The Rust
-            // port previously set 5_000 AND never enforced it, so a call grew its
-            // txn/clone/store churn unbounded (the no-chaos RSS climb). Override
-            // with `B2BUA_MAX_MESSAGES_PER_CALL`.
+            // Loop/runaway guard, per keepalive interval (the tick resets the
+            // counter — see the field doc). TS default is 100
+            // (MAX_MESSAGES_PER_CALL); kept a touch higher (200) so any
+            // legitimate per-interval burst stays well under it while a
+            // flood/glare loop is still capped inside one window. Override with
+            // `B2BUA_MAX_MESSAGES_PER_CALL`.
             max_messages_per_call: 200,
             cdr_buffer_queue_max: 1_024,
             refer_subscription_expiry_sec: 60,
@@ -309,8 +332,9 @@ impl Default for B2buaConfig {
             reaper_idle_max_sec: 0,
             setup_timeout_sec: 150,
             invite_txn_timeout_sec: 158,
+            invite_first_response_timeout_sec: Self::DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC,
             cancel_strict_rfc3261_wait: false,
-            ack_timeout_sec: 32,
+            ack_timeout_sec: Self::DEFAULT_ACK_TIMEOUT_SEC,
             // Tier-3 admission gate (migration/09). TS defaults
             // (CPS_BUCKET_SIZE / CPS_BUCKET_RATE / OVERLOAD_PANIC_ELU_THRESHOLD /
             // RETRY_AFTER_BASE_SEC). The hard CPS ceiling is 1000-burst @ 500/s;
@@ -355,11 +379,28 @@ impl B2buaConfig {
     /// Ceiling for [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec) (s):
     /// the top of the supported telephony setup range (~10 min hunting chains).
     pub const MAX_INVITE_TXN_TIMEOUT_SEC: i64 = 600;
+    /// Floor for
+    /// [`invite_first_response_timeout_sec`](Self::invite_first_response_timeout_sec)
+    /// (s): two Timer A re-sends (rungs at 0.5 s and 1.5 s) precede the
+    /// give-up, so a lossy path still gets more than one chance.
+    pub const MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 2;
+    /// Ceiling for
+    /// [`invite_first_response_timeout_sec`](Self::invite_first_response_timeout_sec)
+    /// (s): Timer B itself (RFC 3261 §17.1.1.2, 64·T1) — nothing above the RFC
+    /// value is expressible.
+    pub const MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 32;
+    /// Default
+    /// [`invite_first_response_timeout_sec`](Self::invite_first_response_timeout_sec)
+    /// (s): Timer B, the RFC value.
+    pub const DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC: i64 = 32;
     /// Margin (s) a route-supplied `NoAnswer` deadline must keep under
     /// [`invite_txn_timeout_sec`](Self::invite_txn_timeout_sec): the room the
     /// CANCEL→487 exchange needs to complete inside the still-live b-leg client
     /// transaction (mirrors the default 150/158 gap).
     pub const NO_ANSWER_CANCEL_MARGIN_SEC: i64 = 8;
+    /// Default [`ack_timeout_sec`](Self::ack_timeout_sec) (s): RFC 3261
+    /// §13.3.1.4's `64·T1`, Timer L.
+    pub const DEFAULT_ACK_TIMEOUT_SEC: i64 = 32;
 
     /// Validate operator-supplied tunables at **boot** (the runner calls this and
     /// refuses to start on `Err`; unit/sim harnesses construct configs directly
@@ -436,6 +477,19 @@ impl B2buaConfig {
                 Self::MAX_INVITE_TXN_TIMEOUT_SEC
             ));
         }
+        // The first-response bound is a deadline between the two-rung floor
+        // and Timer B: below the floor the INVITE is effectively sent once,
+        // above Timer B the RFC value already owns the give-up.
+        if !(Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC..=Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC)
+            .contains(&self.invite_first_response_timeout_sec)
+        {
+            return Err(format!(
+                "invite_first_response_timeout_sec={} outside the supported {}..={} s range",
+                self.invite_first_response_timeout_sec,
+                Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC,
+                Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC
+            ));
+        }
         // Above the transaction bound the ordering inverts: the txn layer
         // CANCELs the b-leg on its own, the app give-up authors a SECOND final,
         // and the callee's 487 lands on a dead client txn (never ACKed). The
@@ -460,6 +514,17 @@ impl B2buaConfig {
                  window must outlast the longest configured ring, or a legitimately \
                  still-ringing call is reaped before its own setup deadline",
                 self.reaper_idle_max_sec, self.invite_txn_timeout_sec
+            ));
+        }
+        // The un-ACKed 2xx give-up is a deadline, never a switch (RFC 3261
+        // §13.3.1.4): a non-positive value would configure a leaking session.
+        if self.ack_timeout_sec <= 0 {
+            return Err(format!(
+                "ack_timeout_sec={} is not a positive deadline: an un-ACKed 2xx \
+                 always ends the session (RFC 3261 §13.3.1.4), the knob only says \
+                 how many seconds to wait first (default {})",
+                self.ack_timeout_sec,
+                Self::DEFAULT_ACK_TIMEOUT_SEC
             ));
         }
         // The Tier-3 CPS bucket refills at `cps_bucket_rate` tokens/s up to
@@ -487,6 +552,30 @@ impl B2buaConfig {
     pub fn invite_txn_timeout_ms(&self) -> u64 {
         let sec = if self.invite_txn_timeout_sec > 0 { self.invite_txn_timeout_sec } else { 158 };
         u64::try_from(sec).unwrap_or(158).saturating_mul(1000)
+    }
+
+    /// The configured initial-INVITE first-response bound in ms — the value
+    /// wired into `TransactionConfig::invite_first_response_timeout_ms`. `<= 0`
+    /// is NOT "disabled": a non-positive value falls back to the 32 s Timer B
+    /// default rather than arming a degenerate bound.
+    pub fn invite_first_response_timeout_ms(&self) -> u64 {
+        let default = Self::DEFAULT_INVITE_FIRST_RESPONSE_TIMEOUT_SEC;
+        let sec = if self.invite_first_response_timeout_sec > 0 {
+            self.invite_first_response_timeout_sec
+        } else {
+            default
+        };
+        u64::try_from(sec).unwrap_or(default as u64).saturating_mul(1000)
+    }
+
+    /// The un-ACKed 2xx give-up deadline in ms — what arms a 2xx ladder's
+    /// give-up. `<= 0` is NOT "disabled" (unlike
+    /// [`setup_timeout_sec`](Self::setup_timeout_sec)): a non-positive value
+    /// falls back to the 32 s default rather than leaving a 2xx's silence
+    /// unanswered (RFC 3261 §13.3.1.4).
+    pub fn ack_timeout_ms(&self) -> u64 {
+        let sec = if self.ack_timeout_sec > 0 { self.ack_timeout_sec } else { Self::DEFAULT_ACK_TIMEOUT_SEC };
+        u64::try_from(sec).unwrap_or(Self::DEFAULT_ACK_TIMEOUT_SEC as u64).saturating_mul(1000)
     }
 
     /// Clamp a route-supplied `NoAnswer` deadline (s) under the transaction
@@ -604,6 +693,42 @@ mod tests {
     }
 
     #[test]
+    fn first_response_bound_is_a_deadline_between_two_rungs_and_timer_b() {
+        // Default is Timer B itself: no deviation until a deployment asks for
+        // one.
+        assert_eq!(B2buaConfig::default().invite_first_response_timeout_sec, 32);
+        assert_eq!(B2buaConfig::default().invite_first_response_timeout_ms(), 32_000);
+        // 1 s would send the INVITE effectively once; 33 s is above the RFC
+        // value the class already gives up at.
+        for bad in [1, 33, 0, -5] {
+            let c = B2buaConfig {
+                invite_first_response_timeout_sec: bad,
+                ..Default::default()
+            };
+            let e = c
+                .validate()
+                .expect_err("out-of-range invite_first_response_timeout_sec must be rejected");
+            assert!(e.contains("invite_first_response_timeout_sec"), "msg was: {e}");
+        }
+        // The floor (two re-sends) and the ceiling (Timer B) are both allowed.
+        for ok in [2, 5, 32] {
+            let c = B2buaConfig {
+                invite_first_response_timeout_sec: ok,
+                ..Default::default()
+            };
+            assert!(c.validate().is_ok(), "{ok} s must be accepted");
+            assert_eq!(c.invite_first_response_timeout_ms(), ok as u64 * 1000);
+        }
+        // A harness config that writes a non-positive value anyway arms the
+        // Timer B default, never a degenerate bound.
+        let c = B2buaConfig {
+            invite_first_response_timeout_sec: 0,
+            ..Default::default()
+        };
+        assert_eq!(c.invite_first_response_timeout_ms(), 32_000);
+    }
+
+    #[test]
     fn allows_setup_deadline_strictly_below_a_raised_txn_bound() {
         let c = B2buaConfig {
             setup_timeout_sec: 300,
@@ -678,6 +803,35 @@ mod tests {
             ..c
         };
         assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_a_nonpositive_ack_deadline() {
+        // RFC 3261 §13.3.1.4: the give-up is a deadline, not a switch — no
+        // value may configure an un-ACKed 2xx that never ends the session.
+        for bad in [0, -5] {
+            let c = B2buaConfig {
+                ack_timeout_sec: bad,
+                ..Default::default()
+            };
+            let e = c.validate().expect_err("a non-positive ACK deadline must be rejected");
+            assert!(e.contains("ack_timeout_sec"), "msg was: {e}");
+        }
+        assert!(B2buaConfig { ack_timeout_sec: 1, ..Default::default() }.validate().is_ok());
+    }
+
+    #[test]
+    fn nonpositive_ack_deadline_falls_back_to_the_default_ms() {
+        // A harness config that writes 0 anyway arms the 32 s default, never a
+        // ladder whose give-up tears nothing down.
+        for bad in [0, -5] {
+            let c = B2buaConfig {
+                ack_timeout_sec: bad,
+                ..Default::default()
+            };
+            assert_eq!(c.ack_timeout_ms(), 32_000);
+        }
+        assert_eq!(B2buaConfig { ack_timeout_sec: 6, ..Default::default() }.ack_timeout_ms(), 6_000);
     }
 
     #[test]

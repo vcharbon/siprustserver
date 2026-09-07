@@ -7,6 +7,7 @@ mod common;
 use call::helpers::*;
 use call::model::*;
 use common::representative_call;
+use sip_retransmit::Class;
 
 const A_TAG: &str = "b2bua-to-tag-aleg-9876"; // a-leg dialog identity (localTag)
 const B_TAG: &str = "bob-to-tag-007"; // b-1 dialog identity (remoteTag)
@@ -69,6 +70,7 @@ fn pending_request_lifecycle() {
         source_timestamp: None,
         direction: Direction::FromB,
         cancelled: false,
+        offered_100rel: false,
     };
     let call = add_pending_request(call, "b-1", B_TAG, entry);
     let d = &call.b_legs[0].dialogs[0];
@@ -221,9 +223,9 @@ fn dump_cursors_renders_sorted_or_dash() {
 
 #[test]
 fn a_fresh_reliable_provisional_takes_the_next_number() {
-    let (call, first) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 4711, 9_000);
+    let (call, first) = assign_a_rseq(representative_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000);
     assert_eq!(first, 9_000, "the first relayed provisional takes the random start");
-    let (call, second) = assign_a_rseq(call, "a1", "b-1", "bf1", 1, 4712, 9_000);
+    let (call, second) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 1, 4712, 9_000);
     assert_eq!(second, 9_001, "RFC 3262 §4: the next in this dialog is greater by exactly one");
     assert_eq!(call.reliable_provisionals.len(), 2);
     assert_eq!(b_rseq_for(&call, "a1", 9_001), Some(("b-1", 4712)));
@@ -231,10 +233,224 @@ fn a_fresh_reliable_provisional_takes_the_next_number() {
 
 #[test]
 fn relaying_the_same_reliable_provisional_again_is_the_same_number() {
-    let (call, first) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 4711, 9_000);
-    let (call, again) = assign_a_rseq(call, "a1", "b-1", "bf1", 1, 4711, 9_000);
+    let (call, first) = assign_a_rseq(representative_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000);
+    let (call, again) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 1, 4711, 9_000);
     assert_eq!(again, first, "a retransmission is a retransmission, not a new provisional");
     assert_eq!(call.reliable_provisionals.len(), 1);
+}
+
+/// `representative_call` deliberately seeds pending INVITE snapshots for
+/// round-trip coverage; the reliable-provisional books are only readable on a
+/// call with no in-dialog INVITE in flight, so these start from a settled one.
+fn settled_call() -> Call {
+    let mut call = representative_call();
+    for leg in std::iter::once(&mut call.a_leg).chain(call.b_legs.iter_mut()) {
+        for d in leg.dialogs.iter_mut() {
+            d.ext.inbound_pending_requests.clear();
+        }
+    }
+    call
+}
+
+/// The a-facing `RAck` tokens a well-formed PRACK carries for `rseq` under the
+/// initial INVITE's CSeq.
+fn rack(rseq: i64, cseq: i64) -> RAckTokens {
+    RAckTokens { rseq, cseq, names_invite: true }
+}
+
+/// RFC 3262 §4: a PRACK matching no unacknowledged reliable provisional takes
+/// 481, and the a-facing sequence is this stack's own — so what the CALLEE
+/// numbered says nothing about whether the caller's RAck acknowledges anything.
+#[test]
+fn an_rseq_this_dialog_never_showed_acknowledges_nothing() {
+    let (call, shown) = assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 13_213_449, 625_707);
+    assert_eq!(shown, 625_707, "the caller is shown this stack's number, not the callee's");
+    assert!(
+        !unacknowledgeable_rack(&call, "a", "a1", rack(625_707, 1)),
+        "the number it was shown acknowledges it"
+    );
+    assert!(
+        unacknowledgeable_rack(&call, "a", "a1", rack(13_213_449, 1)),
+        "the CALLEE's number means nothing on this face, however well it means something on the other"
+    );
+}
+
+/// RFC 3262 §7.2: the `RAck` is three tokens, and a PRACK matches only where
+/// all three name the provisional — the right `RSeq` under a CSeq no a-facing
+/// INVITE carried, or under a method no reliable provisional answers, names
+/// nothing.
+#[test]
+fn a_shown_rseq_under_the_wrong_cseq_or_method_acknowledges_nothing() {
+    let (call, shown) = assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 7, 4711, 9_000);
+    assert!(!unacknowledgeable_rack(&call, "a", "a1", rack(shown, 1)));
+    assert!(unacknowledgeable_rack(&call, "a", "a1", rack(shown, 101)), "the CSeq token is a stranger");
+    assert!(
+        unacknowledgeable_rack(&call, "a", "a1", rack(shown, 7)),
+        "the b-leg INVITE's CSeq is the callee's number, not the caller's"
+    );
+    assert!(
+        unacknowledgeable_rack(&call, "a", "a1", RAckTokens { rseq: shown, cseq: 1, names_invite: false }),
+        "no reliable provisional answers anything but an INVITE"
+    );
+}
+
+/// An entry hydrated from a peer that recorded no a-facing CSeq cannot
+/// disprove the token: the 481 fires only on a PROVABLE mismatch, and an
+/// absent book proves nothing.
+#[test]
+fn an_entry_without_a_recorded_cseq_admits_any_cseq_token() {
+    let (mut call, shown) = assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000);
+    call.reliable_provisionals[0].a_cseq = None;
+    assert!(!unacknowledgeable_rack(&call, "a", "a1", rack(shown, 1)));
+    assert!(!unacknowledgeable_rack(&call, "a", "a1", rack(shown, 101)));
+    assert!(unacknowledgeable_rack(&call, "a", "a1", rack(shown + 1, 1)), "the RSeq token still has to match");
+}
+
+/// Another early dialog's number is another dialog's business: the ladders are
+/// independent (§3, errata 4600), so one dialog's RSeq acknowledges nothing in
+/// the next.
+#[test]
+fn an_rseq_from_another_early_dialog_acknowledges_nothing_here() {
+    let (call, _) = assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 1, 5);
+    let (call, other) = assign_a_rseq(call, "a2", 1, "b-1", "bf2", 1, 200, 40);
+    assert!(unacknowledgeable_rack(&call, "a", "a1", rack(other, 1)));
+    assert!(!unacknowledgeable_rack(&call, "a", "a2", rack(other, 1)));
+}
+
+/// Every face's numbering is this stack's own — a reliable provisional leaves
+/// toward a face only under a minted number, whichever end sent the INVITE —
+/// so each face refuses a PRACK naming nothing, whether or not its dialog has
+/// shown a reliable provisional: a masking profile strips the `RSeq` before
+/// the caller sees it, and a PRACK into that dialog names nothing all the
+/// same. A leg the call does not have owns nothing.
+#[test]
+fn each_face_refuses_and_it_refuses_into_a_dialog_shown_no_reliable_provisional() {
+    assert!(owns_rseq_numbering(&settled_call(), "a"));
+    assert!(owns_rseq_numbering(&settled_call(), "b-1"));
+    assert!(!owns_rseq_numbering(&settled_call(), "b-9"));
+    assert!(unacknowledgeable_rack(&settled_call(), "a", "a1", rack(999, 1)));
+    assert!(unacknowledgeable_rack(&settled_call(), "b-1", "bt1", rack(999, 1)));
+    assert!(!unacknowledgeable_rack(&settled_call(), "b-9", "bt1", rack(999, 1)));
+    // A callee re-INVITE's provisional is shown on the b-face under the b-leg
+    // dialog's own tag, and bob's PRACK is matched there.
+    let (call, shown) = assign_a_rseq(settled_call(), "bt1", 3, "a", "alice-tag", 4, 9271, 700);
+    assert!(!unacknowledgeable_rack(&call, "b-1", "bt1", rack(shown, 3)));
+    assert!(unacknowledgeable_rack(&call, "b-1", "bt1", rack(9271, 3)), "alice's own number means nothing to bob");
+    assert!(unacknowledgeable_rack(&call, "a", "a1", rack(shown, 3)), "the b-face's ladder is not the a-face's");
+}
+
+/// RFC 3262 §3 admits a reliable provisional toward a relayed request's
+/// originator only for an INVITE, and only one whose originator offered
+/// `100rel` itself; the request this stack built toward the target may offer
+/// it where the originator did not. A snapshot hydrated without the offer
+/// recorded admits nothing.
+#[test]
+fn a_relayed_provisional_is_reliable_only_to_an_invite_whose_originator_offered_100rel() {
+    let pending = |method: &str, offered_100rel: bool| PendingRequest {
+        method: method.to_string(),
+        outbound_cseq: 2,
+        inbound_cseq: 2,
+        source_vias: Vec::new(),
+        source_call_id: String::new(),
+        source_from: String::new(),
+        source_to: String::new(),
+        source_timestamp: None,
+        direction: Direction::FromA,
+        cancelled: false,
+        offered_100rel,
+    };
+    assert!(admits_reliable_provisional(&pending("INVITE", true)));
+    assert!(!admits_reliable_provisional(&pending("INVITE", false)), "no offer, no reliable provisional");
+    assert!(!admits_reliable_provisional(&pending("UPDATE", true)), "the mechanism serves INVITE alone");
+    assert!(!admits_reliable_provisional(&pending("OPTIONS", false)));
+}
+
+/// The leg a number was shown on is the one whose dialog carries the shown
+/// tag as this stack's own; an a-facing fork tag lives only in the tag map and
+/// names no leg here.
+#[test]
+fn the_shown_leg_is_the_one_whose_dialog_carries_the_shown_tag() {
+    let call = settled_call();
+    assert_eq!(leg_shown(&call, "b2bua-to-tag-aleg-9876"), Some("a"));
+    assert_eq!(leg_shown(&call, "b2bua-from-tag-bleg-5544"), Some("b-1"));
+    assert_eq!(leg_shown(&call, "alice-from-tag-001"), None, "the peer's tag is not a shown one");
+    assert_eq!(leg_shown(&call, "fork-2-a-tag"), None);
+}
+
+/// A relayed re-INVITE snapshot on the b-leg dialog: the request left toward
+/// bob under `outbound_cseq`, offering `100rel` or not.
+fn relayed_reinvite(mut call: Call, outbound_cseq: i64, cancelled: bool) -> Call {
+    let d = call.b_legs[0].dialogs.first_mut().expect("a b-leg dialog");
+    d.ext.inbound_pending_requests.push(PendingRequest {
+        method: "INVITE".to_string(),
+        outbound_cseq,
+        inbound_cseq: 7,
+        source_vias: Vec::new(),
+        source_call_id: String::new(),
+        source_from: String::new(),
+        source_to: String::new(),
+        source_timestamp: None,
+        direction: Direction::FromA,
+        cancelled,
+        offered_100rel: true,
+    });
+    call
+}
+
+/// The books are complete on both faces, so an in-dialog INVITE in flight
+/// proves nothing about a PRACK: what this stack showed is what it recorded,
+/// and a `RAck` naming none of it is refused whatever else is pending.
+#[test]
+fn a_pending_reinvite_does_not_shield_an_unshown_rack() {
+    let (call, _) = assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 13_213_449, 625_707);
+    assert!(unacknowledgeable_rack(&call, "a", "a1", rack(13_213_449, 1)), "settled: the books are complete");
+    assert!(unacknowledgeable_rack(&relayed_reinvite(call.clone(), 2, false), "a", "a1", rack(13_213_449, 1)));
+    assert!(unacknowledgeable_rack(&relayed_reinvite(call, 2, true), "a", "a1", rack(13_213_449, 1)));
+}
+
+/// RFC 3262 §3's give-up rejects the ORIGINAL REQUEST: the provisional of a
+/// relayed re-INVITE still pending toward its target names that transaction,
+/// while the initial INVITE's — no pending relay, the setup is the call — and
+/// a transaction already CANCELled or resolved name none.
+#[test]
+fn the_give_up_finds_the_pending_reinvite_a_provisional_answers() {
+    // Bob's 183 to the re-INVITE this stack sent him as CSeq 2.
+    let (call, shown) = assign_a_rseq(settled_call(), "a1", 7, "b-1", "bf1", 2, 4711, 900);
+    assert_eq!(pending_invite_answered_by(&call, "a1", shown), None, "no relay pending: the setup's own");
+    assert_eq!(
+        pending_invite_answered_by(&relayed_reinvite(call.clone(), 2, false), "a1", shown),
+        Some(("b-1".to_string(), 2)),
+    );
+    assert_eq!(
+        pending_invite_answered_by(&relayed_reinvite(call.clone(), 2, true), "a1", shown),
+        None,
+        "a CANCELled transaction has its final already",
+    );
+    assert_eq!(
+        pending_invite_answered_by(&relayed_reinvite(call.clone(), 3, false), "a1", shown),
+        None,
+        "another transaction's snapshot is not this provisional's",
+    );
+    assert_eq!(pending_invite_answered_by(&call, "a1", shown + 1), None, "a number never minted");
+}
+
+/// A provisional this stack PRACKed itself is on the books once: the first
+/// acknowledgement records it, a repeat is recognised as the responder's
+/// retransmission (RFC 3262 §4), and another provisional — a new `RSeq`, a
+/// later INVITE transaction, another fork's tag — is its own.
+#[test]
+fn a_stack_pracked_provisional_is_acknowledged_once() {
+    let call = settled_call();
+    assert!(!pracked_provisional(&call, "b-1", "bf1", 2, 4711));
+    let (call, first) = record_pracked_provisional(call, "b-1", "bf1", 2, 4711);
+    assert!(first, "the first acknowledgement is the one to send");
+    assert!(pracked_provisional(&call, "b-1", "bf1", 2, 4711));
+    let (call, again) = record_pracked_provisional(call, "b-1", "bf1", 2, 4711);
+    assert!(!again, "a repeat is a retransmission, not a second PRACK");
+    assert_eq!(call.pracked_provisionals.len(), 1);
+    assert!(!pracked_provisional(&call, "b-1", "bf1", 2, 4712), "the next RSeq is a new provisional");
+    assert!(!pracked_provisional(&call, "b-1", "bf1", 3, 4711), "a later INVITE restarts the sequence (§7.1)");
+    assert!(!pracked_provisional(&call, "b-1", "bf2", 2, 4711), "another fork's provisional");
 }
 
 /// Forks mirrored as DISTINCT a-facing early dialogs each carry their own
@@ -242,10 +458,10 @@ fn relaying_the_same_reliable_provisional_again_is_the_same_number() {
 /// either caller dialog a gap — the failure a single call-wide ladder produces.
 #[test]
 fn each_a_facing_early_dialog_carries_its_own_ladder() {
-    let (call, one) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 1, 5);
-    let (call, two) = assign_a_rseq(call, "a2", "b-1", "bf2", 1, 200, 40);
-    let (call, three) = assign_a_rseq(call, "a1", "b-1", "bf1", 1, 2, 5);
-    let (call, four) = assign_a_rseq(call, "a2", "b-1", "bf2", 1, 201, 40);
+    let (call, one) = assign_a_rseq(representative_call(), "a1", 1, "b-1", "bf1", 1, 1, 5);
+    let (call, two) = assign_a_rseq(call, "a2", 1, "b-1", "bf2", 1, 200, 40);
+    let (call, three) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 1, 2, 5);
+    let (call, four) = assign_a_rseq(call, "a2", 1, "b-1", "bf2", 1, 201, 40);
     assert_eq!((one, three), (5, 6), "dialog a1 rises by exactly one across the interleave");
     assert_eq!((two, four), (40, 41), "dialog a2 rises by exactly one across the interleave");
     assert_eq!(b_rseq_for(&call, "a1", 6), Some(("b-1", 2)));
@@ -259,8 +475,8 @@ fn each_a_facing_early_dialog_carries_its_own_ladder() {
 /// shown verbatim in a single caller dialog.
 #[test]
 fn forks_collapsed_behind_one_tag_share_that_dialogs_ladder() {
-    let (call, one) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 1, 5);
-    let (call, two) = assign_a_rseq(call, "a1", "b-2", "bf2", 1, 1, 5);
+    let (call, one) = assign_a_rseq(representative_call(), "a1", 1, "b-1", "bf1", 1, 1, 5);
+    let (call, two) = assign_a_rseq(call, "a1", 1, "b-2", "bf2", 1, 1, 5);
     assert_eq!((one, two), (5, 6), "one caller dialog, one ladder rising by exactly one");
     assert_eq!(b_rseq_for(&call, "a1", 5), Some(("b-1", 1)));
     assert_eq!(b_rseq_for(&call, "a1", 6), Some(("b-2", 1)), "the PRACK reaches the right fork");
@@ -271,8 +487,8 @@ fn forks_collapsed_behind_one_tag_share_that_dialogs_ladder() {
 /// used on the same leg. That is a NEW provisional, never a retransmission.
 #[test]
 fn the_same_b_sequence_on_a_later_transaction_is_a_new_provisional() {
-    let (call, initial) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 4711, 9_000);
-    let (call, reinvite) = assign_a_rseq(call, "a1", "b-1", "bf1", 2, 4711, 9_000);
+    let (call, initial) = assign_a_rseq(representative_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000);
+    let (call, reinvite) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 2, 4711, 9_000);
     assert_ne!(reinvite, initial, "a later INVITE transaction restarts the callee's sequence");
     assert_eq!(reinvite, initial + 1, "RFC 3262 §4: this dialog's ladder still rises by one");
     assert_eq!(call.reliable_provisionals.len(), 2);
@@ -280,6 +496,63 @@ fn the_same_b_sequence_on_a_later_transaction_is_a_new_provisional() {
 
 #[test]
 fn an_a_facing_sequence_number_is_never_below_one() {
-    let (_, a_rseq) = assign_a_rseq(representative_call(), "a1", "b-1", "bf1", 1, 1, 0);
+    let (_, a_rseq) = assign_a_rseq(representative_call(), "a1", 1, "b-1", "bf1", 1, 1, 0);
     assert_eq!(a_rseq, 1, "RFC 3262 §3: zero is not a sequence number");
+}
+
+// ── Retained-emission ladders (ADR-0029 X3/X5) ───────────────────────────────
+
+/// Every rung a `Final2xx` emission owes under `deadline`, walked from its
+/// first rung the way the executor walks it.
+fn rungs_of_a_2xx_under(deadline: Option<std::time::Duration>) -> u32 {
+    let mut emission = common::paced_emission(common::ANSWERED_2XX, ("192.0.2.10", 5060), Class::Final2xx, 1);
+    let mut rungs = 1;
+    while emission.advance(deadline).is_some() {
+        rungs += 1;
+        assert!(rungs < 100, "a bounded ladder must stop");
+    }
+    rungs
+}
+
+/// RFC 3261 §13.3.1.4 ceases at Timer L whatever the deployment's ACK
+/// deadline: a 60 s policy does not add rungs past 64·T1, a 10 s one cuts
+/// the ladder short, and no deadline at all is the class's own bound.
+#[test]
+fn a_2xx_ladder_never_runs_past_timer_l() {
+    use std::time::Duration;
+    let timer_l = rungs_of_a_2xx_under(None);
+    assert_eq!(timer_l, 10, "rungs at 0.5, 1.5, 3.5, 7.5, then every 4 s to 31.5 s");
+    assert_eq!(rungs_of_a_2xx_under(Some(Duration::from_secs(60))), timer_l, "a later deadline adds no rung");
+    assert_eq!(rungs_of_a_2xx_under(Some(Duration::from_secs(10))), 4, "a sooner deadline cuts the ladder short");
+}
+
+/// `Scope::Provisionals` names every reliable provisional and no 2xx: the
+/// final toward the caller ends the setup's §3 ladders and leaves a 2xx still
+/// awaiting its ACK — on either face — repeating.
+#[test]
+fn the_provisionals_scope_leaves_every_unacked_2xx_alone() {
+    let mut call = representative_call();
+    call.b_legs[0].dialogs[0].ext.pending_reinvite_2xx = Some(Unacked2xx {
+        dialog_tag: B_TAG.into(),
+        cseq: 4002,
+        emission: common::paced_emission(common::ANSWERED_2XX, ("203.0.113.42", 5060), Class::Final2xx, 1),
+    });
+    call.reliable_provisionals.push(ReliableProvisional {
+        a_tag: A_TAG.into(),
+        a_rseq: 1,
+        a_cseq: Some(1),
+        b_leg_id: "b-1".into(),
+        b_tag: B_TAG.into(),
+        b_cseq: 1,
+        b_rseq: 7,
+        acknowledged: false,
+        emission: None,
+    });
+
+    let provisionals = obligations_in(&call, &Scope::Provisionals);
+    assert_eq!(provisionals, vec![Obligation::PrackOf { a_tag: A_TAG.into(), a_rseq: 1 }]);
+
+    let everything = obligations_in(&call, &Scope::Call);
+    assert_eq!(everything.len(), 3, "the a-leg answer, the b-leg re-INVITE 2xx and the provisional");
+    assert!(everything.iter().filter(|o| matches!(o, Obligation::AckOf2xx { .. })).count() == 2);
 }

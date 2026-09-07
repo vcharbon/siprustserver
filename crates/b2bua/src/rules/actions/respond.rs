@@ -1,30 +1,36 @@
 //! Response synthesis toward a leg: answering the current request in place
 //! (`Respond`), decision-authored a-leg finals (reject / redirect / failure),
 //! the a-side fork-confirm (`AnswerALegNewDialog`), brokered early-media
-//! provisionals, and the §13.3.1.4 un-ACKed-2xx retransmits. Relaying a
-//! *peer's* response does NOT live here — see [`super::relay_response`].
+//! provisionals. Relaying a *peer's* response does NOT live here — see
+//! [`super::relay_response`]; the ladder an a-facing 2xx arms lives in
+//! [`super::ladder`].
 
-use call::helpers::set_leg_state;
+use call::helpers::{set_leg_state, Scope};
 use call::{Call, LegState};
 use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateResponseOpts};
 use sip_message::header::{HeaderClass, HeaderName};
-use sip_message::parser::custom::CustomParser;
-use sip_message::{SipHeader, SipMessage, SipParser, SipStr};
+use sip_message::{SipHeader, SipStr};
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
 use crate::rules::capabilities::{self, Face};
 use crate::rules::model::RuleContext;
+use crate::rules::RelayedFinal;
 use crate::rules::relay;
 
+use super::select::dialog_identity_tag;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
-    /// Answer the current request event in place with `status` (no relay, no
-    /// dialog bookkeeping) — the response goes back to the request's top-Via
-    /// sent-by on the source leg's server transaction.
+    /// Answer the current request event in place with `status` (no relay) —
+    /// the response goes back to the request's top-Via sent-by on the source
+    /// leg's server transaction. A locally answered **in-dialog** request still
+    /// advances the source dialog's highest-seen CSeq (RFC 3261 §12.2.2), so
+    /// the next relayed request's `relay_cseq_delta` does not reproduce the
+    /// gap on the peer dialog (§12.2.1.1 — its CSeq increments by exactly one).
     pub(super) fn respond(
         &self,
+        call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
         status: u16,
@@ -33,6 +39,20 @@ impl ActionExecutor<'_> {
         content_type: Option<&str>,
     ) {
         if let Some(req) = ctx.request() {
+            if req.to().tag().is_some() {
+                if let Some(sd) = ctx.source_dialog() {
+                    let inbound_cseq = req.cseq().seq() as i64;
+                    if sd.ext.remote_cseq.map_or(true, |c| inbound_cseq > c) {
+                        let s_id = dialog_identity_tag(ctx.source_leg_id, sd);
+                        *call = call::helpers::update_remote_cseq(
+                            call.clone(),
+                            ctx.source_leg_id,
+                            &s_id,
+                            inbound_cseq,
+                        );
+                    }
+                }
+            }
             let opts = GenerateResponseOpts {
                 body: body.to_vec(),
                 content_type: content_type.and_then(relay::media_type),
@@ -56,7 +76,8 @@ impl ActionExecutor<'_> {
 
     /// Answer the a-leg INVITE with a failure final under the B2BUA's own
     /// a-dialog tag ([`crate::rules::model::RuleAction::RelayFailureToALeg`]);
-    /// the Contact rides only where [`relay::stamps_contact`] allows it.
+    /// the Contact rides only where
+    /// [`sip_message::generators::response_states_contact`] states it.
     /// A final that answers the `/call/failure` consult restates the failing
     /// b-leg final's relayable headers (RFC 3261 §16.6), so what the refusing
     /// peer stated — its `Warning`, charging correlation, vendor annotations —
@@ -70,6 +91,9 @@ impl ActionExecutor<'_> {
         status: u16,
         reason: &str,
     ) {
+        // A failure final ends the setup: every §3 ladder stops with it
+        // (RFC 3261 §17.2.1 — no 1xx after the transaction's final).
+        self.retire(call, fx, Scope::Provisionals);
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
@@ -90,7 +114,8 @@ impl ActionExecutor<'_> {
     /// Answer the a-leg INVITE with a decision-authored Reject/Redirect final
     /// ([`crate::rules::model::RuleAction::RespondToALeg`]). No B2BUA Contact: a
     /// redirect carries its own Contact list (via the built headers), a reject
-    /// carries none (ADR-0017 header-ownership X2, [`relay::stamps_contact`]).
+    /// carries none (ADR-0017 header-ownership X2,
+    /// [`sip_message::generators::response_states_contact`]).
     /// When this final answers the `/call/failure` consult, the failing b-leg
     /// final's relayable headers ride UNDER the decision's own statements: a
     /// `header_updates` entry naming a header — set or removal — owns that name
@@ -104,6 +129,9 @@ impl ActionExecutor<'_> {
         authored: AuthoredFinal<'_>,
     ) {
         let AuthoredFinal { status, reason, header_updates, contacts } = authored;
+        // A decision-authored final ends the setup: every §3 ladder stops with
+        // it (RFC 3261 §17.2.1 — no 1xx after the transaction's final).
+        self.retire(call, fx, Scope::Provisionals);
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         // A redirect target that does not read is refused, not invented: the
@@ -147,102 +175,24 @@ impl ActionExecutor<'_> {
         ));
     }
 
-    /// Record the `Allow`/`Supported` an a-facing INVITE 2xx states, so the
-    /// §13.3.1.4 retransmit re-emits the response it retransmits instead of
-    /// re-resolving the face — the two differ whenever the answer relayed the
-    /// callee's own set or a firing rule stamped one.
-    pub(super) fn cache_answered_advert(call: &mut Call, headers: &[SipHeader]) {
-        let advert: Vec<(String, String)> = headers
-            .iter()
-            .filter(|h| {
-                HeaderName::Allow.matches(&h.name) || HeaderName::Supported.matches(&h.name)
-            })
-            .map(|h| (h.name.to_string(), h.value.to_string()))
-            .collect();
-        if let Some(d) = call.a_leg.dialogs.first_mut() {
-            d.ext.answered_advert = advert;
-        }
-    }
-
-    /// RFC 3261 §13.3.1.4 — re-send the a-leg INVITE 2xx toward the caller while
-    /// its ACK is missing. The a-leg INVITE server txn is already `Completed`, so
-    /// the txn layer would DROP a second final on the `ServerResponse` path; we
-    /// send a faithful copy **raw** instead (same confirmed To-tag, same cached
-    /// answer SDP, the B2BUA Contact). No-op until the a-dialog is confirmed.
-    pub(super) fn retransmit_a_leg_2xx(&self, call: &Call, fx: &mut HandlerEffects) {
-        let Some(d) = call.a_leg.dialogs.first() else { return };
-        let a_tag = d.sip.local_tag.clone();
-        if a_tag.is_empty() {
-            return;
-        }
-        let body = d.ext.cached_sdp.clone().unwrap_or_default();
-        let content_type = (!body.is_empty()).then(relay::sdp);
-        let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
-        // §13.3.1.4 makes this a copy of the 2xx it retransmits, so it restates
-        // the advertisement that 2xx carried — recorded at answer time, since a
-        // set relayed from the callee is not derivable from the a-leg snapshot.
-        let mut extra: Vec<SipHeader> = d
-            .ext
-            .answered_advert
-            .iter()
-            .map(|(name, value)| SipHeader {
-                name: SipStr::owned(name),
-                value: SipStr::owned(value),
-            })
-            .collect();
-        if extra.is_empty() {
-            relay::stamp_a_facing_invite_advert(
-                &mut extra,
-                &[],
-                &capabilities::advertised(call, Face::Originator),
-            );
-        }
-        let mut effect = relay::response_to_a_leg(
-            &a_invite,
-            200,
-            "OK",
-            Some(a_tag),
-            Some(contact),
-            body,
-            content_type,
-            None,
-            extra,
-        );
-        // Bypass the (Completed) a-leg server txn — it would drop a second final.
-        effect.mode = OutboundTxnMode::Raw;
-        effect.label = "200 (2xx retransmit, no ACK) → a-leg".to_string();
+    /// The one seam every a-facing initial-INVITE **2xx** leaves through — the
+    /// plain relay, the masked `relayFirst18xTo180` relays, and the
+    /// B2BUA-minted answer alike. The final ends every caller-facing
+    /// provisional at once (RFC 3261 §17.2.1 — a §3 rung after it would put a
+    /// 1xx behind the transaction's final, a losing fork's included) and no
+    /// other ladder: a b-leg's re-INVITE 2xx still awaiting its ACK keeps
+    /// repeating. Then the answer is retained and its §13.3.1.4 ladder armed
+    /// (`retain_a_leg_answer`) — every path that answers the caller owes that,
+    /// so no rule arms it.
+    pub(super) fn send_a_leg_answer(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        effect: OutboundSipEffect,
+    ) {
+        self.retire(call, fx, Scope::Provisionals);
+        self.retain_a_leg_answer(call, fx, &effect);
         fx.outbound.push(effect);
-    }
-
-    /// RFC 3261 §13.3.1.4 (in-dialog) — re-send the a-leg **re-INVITE** 2xx
-    /// toward the originator while its ACK is missing. Unlike the initial-INVITE
-    /// twin above (which rebuilds from the never-mutated `a_leg_invite` +
-    /// `cached_sdp`), a re-INVITE 2xx cannot be reconstructed from the initial
-    /// snapshot, so the exact bytes captured at relay time
-    /// (`pending_reinvite_2xx`, on the a-leg dialog) are re-parsed and re-emitted
-    /// **raw** — byte-faithful to the 2xx the originator must ACK. No-op when no
-    /// a-leg re-INVITE awaits an ACK.
-    pub(super) fn retransmit_a_leg_reinvite_2xx(&self, call: &Call, fx: &mut HandlerEffects) {
-        let Some(pending) = call
-            .a_leg
-            .dialogs
-            .first()
-            .and_then(|d| d.ext.pending_reinvite_2xx.as_ref())
-        else {
-            return;
-        };
-        let parsed = CustomParser::new().parse(&pending.response).ok();
-        let Some(SipMessage::Response(resp)) = parsed else { return };
-        fx.outbound.push(OutboundSipEffect {
-            body: OutboundBody::Response(resp),
-            // Bypass the (Completed) a-leg re-INVITE server txn — a second final
-            // on the ServerResponse path would be dropped.
-            mode: OutboundTxnMode::Raw,
-            destination: (pending.dest_host.clone(), pending.dest_port),
-            label: "200 (re-INVITE 2xx retransmit, no ACK) → a-leg".to_string(),
-            leg_id: Some(call.a_leg.leg_id.clone()),
-        });
     }
 
     /// Broker an unadopted leg's SDP onto the a-leg as an unreliable provisional
@@ -310,10 +260,18 @@ impl ActionExecutor<'_> {
     /// abandoned early dialog / the ADR-0022 `invariants::enforce` unanswered-a-leg
     /// funnel own the failure paths). Steps: mint/adopt A2, OVERWRITE the a-dialog
     /// `local_tag` to A2 (the MRF `ConfirmDialog` / an earlier 18x pinned A1),
-    /// relay the final/SDP under A2, confirm the a-leg, and cache the answer SDP
-    /// for a §13.3.1.4 un-ACKed-2xx retransmit (mirrors `confirm_dialog`,
-    /// including the B2BUA's own `Allow`/`Supported` advert on the 2xx — a
-    /// `header_updates` entry naming either overrides it).
+    /// relay the final/SDP under A2, and confirm the a-leg. The answer SDP is
+    /// kept as the dialog's `cached_sdp` (the relayFirst18x / fake-PRACK
+    /// cache, mirroring `confirm_dialog`); the §13.3.1.4 repeat needs none of
+    /// it — it re-sends the retained datagram.
+    ///
+    /// The 2xx carries what the plain relay would (RFC 3261 §16.6): every line of
+    /// `relayed` — the callee final this answer delivers — and, for the
+    /// `Allow`/`Supported`/`Accept` advert, the face's DECLARED halves over the
+    /// callee's relayed ones (RFC 3261 §13.2.1). A `header_updates` entry naming a
+    /// header owns it over both: a set value is kept verbatim, a removal keeps it
+    /// absent. A [`RelayedFinal::none`] answer is the B2BUA's own and relays
+    /// nothing.
     ///
     /// The sip-txn layer only *stores* `uas_to_tag` from the first >100 response
     /// (the 183's A1) and never rewrites a later final's `to.tag`, so the `200`
@@ -330,6 +288,7 @@ impl ActionExecutor<'_> {
         content_type: Option<&str>,
         to_tag: Option<&str>,
         header_updates: &[(String, Option<String>)],
+        relayed: &RelayedFinal,
     ) {
         // Only a 2xx establishes the new a-dialog (RFC 3261 §12.1). A non-2xx
         // final does not create a dialog and is not this primitive's job.
@@ -343,8 +302,8 @@ impl ActionExecutor<'_> {
         // Seed the a-dialog if absent (fresh minting adopts A2 directly); when it
         // already exists under the early-media A1, `ensure_a_dialog_with` returns
         // A1 unchanged, so re-stamp local_tag to A2 explicitly — the early dialog
-        // is superseded, not kept. Also cache the answer SDP under A2 for a
-        // §13.3.1.4 un-ACKed-2xx retransmit.
+        // is superseded, not kept. The answer SDP becomes the dialog's
+        // `cached_sdp`, as `confirm_dialog` keeps it.
         self.ensure_a_dialog_with(call, Some(a2.clone()));
         if let Some(d) = call.a_leg.dialogs.first_mut() {
             d.sip.local_tag = a2.clone();
@@ -357,13 +316,23 @@ impl ActionExecutor<'_> {
             content_type.and_then(relay::media_type).or_else(|| (!body.is_empty()).then(relay::sdp));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
         let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
-        let mut extra_headers = header_update_lines(header_updates);
-        // An a-facing INVITE 2xx carries the B2BUA's own Allow/Supported (RFC
-        // 3261 §13.2.1/§20.37), same as the confirm-dialog relay. A
-        // `header_updates` entry naming either owns it: a set value is kept
-        // verbatim, a removal keeps it absent (`build_a_leg_response_headers`
-        // already dropped it).
-        let service_owned: Vec<Entry> = [HeaderName::Allow, HeaderName::Supported]
+        // §16.6: the delivered final's lines ride as received, except the names
+        // the service's `header_updates` state — those are the service's, set
+        // or removed, and a relayed line of the same name never competes.
+        let mut extra_headers: Vec<SipHeader> = relayed
+            .headers()
+            .iter()
+            .filter(|h| !header_updates.iter().any(|(n, _)| HeaderName::from(n.as_str()).matches(&h.name)))
+            .cloned()
+            .collect();
+        // The advert (RFC 3261 §13.2.1): a DECLARED half stands, an undeclared
+        // one states what the delivered final advertised, and none where
+        // neither does — the ordinary relay's rule. A `header_updates` entry
+        // naming a half owns it: a set value is kept verbatim, a removal keeps
+        // it absent (`header_update_lines` already dropped it).
+        let advert = capabilities::relaying(call, Face::Originator, &extra_headers);
+        extra_headers.extend(header_update_lines(header_updates));
+        let service_owned: Vec<Entry> = [HeaderName::Allow, HeaderName::Supported, HeaderName::Accept]
             .into_iter()
             .filter_map(|name| {
                 header_updates
@@ -374,13 +343,8 @@ impl ActionExecutor<'_> {
                     })
             })
             .collect();
-        relay::stamp_a_facing_invite_advert(
-            &mut extra_headers,
-            &service_owned,
-            &capabilities::advertised(call, Face::Originator),
-        );
-        Self::cache_answered_advert(call, &extra_headers);
-        fx.outbound.push(relay::response_to_a_leg(
+        relay::stamp_a_facing_invite_advert(&mut extra_headers, &service_owned, &advert);
+        let effect = relay::response_to_a_leg(
             &a_invite,
             status,
             reason,
@@ -390,7 +354,10 @@ impl ActionExecutor<'_> {
             content_type,
             None,
             extra_headers,
-        ));
+        );
+        // This 2xx answers the caller: it goes through the one seam that
+        // retains the datagram + arms the §13.3.1.4 ladder.
+        self.send_a_leg_answer(call, fx, effect);
         // The caller now holds a confirmed dialog under A2 — confirm the a-leg.
         *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
     }

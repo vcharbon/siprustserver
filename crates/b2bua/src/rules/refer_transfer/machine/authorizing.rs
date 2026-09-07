@@ -40,22 +40,24 @@ fn refuse_transfer(
     field: &str,
     reason: &str,
 ) -> Option<RuleHandleResult> {
-    let leg = state(ctx)?.referrer_leg_id.clone();
+    let st = state(ctx)?;
+    let mut actions = Vec::new();
+    actions.extend(notify(
+        st,
+        SUB_STATE_TERMINATED_NORESOURCE,
+        502,
+        &format!("Unreadable Transfer Target ({field})"),
+    ));
+    actions.extend([
+        RuleAction::CancelTimer {
+            id: timer_id(call::TimerType::ReferSubscriptionExpiry, None),
+        },
+        RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
+        RuleAction::SetTransfer { state: None },
+    ]);
     Some(
-        RuleHandleResult::new(vec![
-            notify(
-                &leg,
-                SUB_STATE_TERMINATED_NORESOURCE,
-                502,
-                &format!("Unreadable Transfer Target ({field})"),
-            ),
-            RuleAction::CancelTimer {
-                id: timer_id(call::TimerType::ReferSubscriptionExpiry, None),
-            },
-            RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
-            RuleAction::SetTransfer { state: None },
-        ])
-        .with_diagnostic(RuleDiagnostic::unreadable(field, reason)),
+        RuleHandleResult::new(actions)
+            .with_diagnostic(RuleDiagnostic::unreadable(field, reason)),
     )
 }
 
@@ -103,14 +105,15 @@ pub(super) fn http_reject() -> RuleDefinition {
             }),
         handle: |ctx| {
             let st = state(ctx)?;
-            let leg = st.referrer_leg_id.clone();
             let (code, reason) = reject_code_reason(ctx);
-            ok(vec![
-                notify(&leg, SUB_STATE_TERMINATED_NORESOURCE, code, &reason),
+            let mut actions = Vec::new();
+            actions.extend(notify(st, SUB_STATE_TERMINATED_NORESOURCE, code, &reason));
+            actions.extend([
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
                 RuleAction::SetTransfer { state: None },
-            ])
+            ]);
+            ok(actions)
         },
     }
 }
@@ -234,12 +237,13 @@ pub(super) fn http_timeout() -> RuleDefinition {
             .timer_type(call::TimerType::ReferSubscriptionExpiry),
         handle: |ctx| {
             let st = state(ctx)?;
-            let leg = st.referrer_leg_id.clone();
-            ok(vec![
-                notify(&leg, SUB_STATE_TERMINATED_TIMEOUT, 500, "Server Internal Error"),
+            let mut actions = Vec::new();
+            actions.extend(notify(st, SUB_STATE_TERMINATED_TIMEOUT, 500, "Server Internal Error"));
+            actions.extend([
                 RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
                 RuleAction::SetTransfer { state: None },
-            ])
+            ]);
+            ok(actions)
         },
     }
 }

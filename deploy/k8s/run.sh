@@ -331,9 +331,9 @@ deploy() {
   # generator containers (lib/sipext-gen.sh); nothing in-cluster consumes them.
 
   # KIND-MASQ-AGENT exemptions FIRST (manifests/05): the RETURN rules must be
-  # in place before the first SIP flows or early calls hit the upstreamneed-041
+  # in place before the first SIP flows or early calls hit the
   # masquerade drop. Call-path load-bearing — gate on the rollout.
-  log "deploying masq-exempt DaemonSet (KIND-MASQ-AGENT RETURN rules, upstreamneed-041 contract)"
+  log "deploying masq-exempt DaemonSet (KIND-MASQ-AGENT RETURN rules contract)"
   subst_manifest "$MANIFEST_DIR/05-masq-exempt.yaml"
   kubectl -n "$NS" rollout status ds/masq-exempt --timeout="$ROLLOUT_TIMEOUT"
 
@@ -383,12 +383,12 @@ deploy() {
   subst_manifest "$MANIFEST_DIR/30-proxy.yaml"
   kubectl -n "$NS" rollout status deploy/sip-front-proxy --timeout="$ROLLOUT_TIMEOUT"
   # Proxy "Ready" means process-up + >=1 Alive worker — NOT "the VIP response
-  # path works" (upstreamneed-038: a fresh bring-up once passed Ready with ~99% of
+  # path works" (a fresh bring-up once passed Ready with ~99% of
   # responses never returning through the VIP until a manual proxy restart).
   # Gate the deploy on a real call-path round-trip before declaring the stack
   # ready. Skippable via VIP_SMOKE=0 for hosts without the sipext bridge.
   if [ "${VIP_SMOKE:-1}" = "1" ]; then
-    vip_smoke || die "vip-smoke: external VIP ${SIPEXT_VIP}:${SIP_PORT} response path is DEAD after deploy (upstreamneed-038). Check keepalived GARP convergence + track_interface: kubectl -n $NS logs deploy/sip-front-proxy -c keepalived; a 'kubectl -n $NS rollout restart deploy/sip-front-proxy' forces a clean re-election."
+    vip_smoke || die "vip-smoke: external VIP ${SIPEXT_VIP}:${SIP_PORT} response path is DEAD after deploy. Check keepalived GARP convergence + track_interface: kubectl -n $NS logs deploy/sip-front-proxy -c keepalived; a 'kubectl -n $NS rollout restart deploy/sip-front-proxy' forces a clean re-election."
   fi
   # Isolation invariant gate (sipext layout): only the proxy bridges the two
   # planes; workers can neither be reached from sipext nor reach it, and the
@@ -406,7 +406,7 @@ deploy() {
 # A dedicated docker bridge with masquerade DISABLED: callers (loadgen / sipp
 # containers / the WSL host itself via the bridge interface) reach the proxy's
 # EXTERNAL face (SIPEXT_VIP) same-L2 — zero SNAT/DNAT/conntrack rewrite on the
-# SIP path (the upstreamneed-041 failure class is structurally impossible here).
+# SIP path (the masquerade-drop failure class is structurally impossible here).
 # Only the two tier=edge kind nodes are dual-homed; app nodes/workers have no
 # interface or route to this plane (isolation_smoke gates that).
 sipext_up() {
@@ -486,7 +486,7 @@ sipp_uas_up() {
   done
 }
 
-# Functional VIP response-path gate (upstreamneed-038). Sends a SIP OPTIONS to
+# Functional VIP response-path gate. Sends a SIP OPTIONS to
 # SIPEXT_VIP:SIP_PORT from a one-shot docker container on the sipext bridge —
 # the same vantage as real callers, so the reply (worker 200 relayed back OUT
 # of the external-face socket) exercises exactly the path that a lost

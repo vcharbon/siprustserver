@@ -56,6 +56,10 @@ pub struct RunReport {
     /// [`Harness::tag_anchor`](crate::agent::Harness::tag_anchor) (the data-DSL
     /// driver tags nothing). See [`crate::anchors`].
     anchors: Vec<AnchorTag>,
+    /// The full RFC-suite finding set over `events`, computed at most once per
+    /// report — the suite re-parses every recorded frame, so every consumer
+    /// (gate, report projection) shares this set via [`Self::rfc_findings`].
+    rfc_findings: std::sync::OnceLock<Vec<sip_net::RfcFinding>>,
 }
 
 impl RunReport {
@@ -80,7 +84,22 @@ impl RunReport {
             recorder,
             events,
             anchors,
+            rfc_findings: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Seed the memoized RFC finding set with one already evaluated over the
+    /// SAME `events` this report carries (the `finish` paths run the suite for
+    /// the hard gate and hand the result here). No-op if already seeded.
+    pub(crate) fn seed_rfc_findings(&self, findings: Vec<sip_net::RfcFinding>) {
+        let _ = self.rfc_findings.set(findings);
+    }
+
+    /// The full RFC-suite finding set (advisory tags included) over the
+    /// recorded events — `sip_net::evaluate_rfc_findings`, evaluated at most
+    /// once per report and shared by every consumer.
+    pub fn rfc_findings(&self) -> &[sip_net::RfcFinding] {
+        self.rfc_findings.get_or_init(|| sip_net::evaluate_rfc_findings(&self.events))
     }
 
     /// `true` when every `Expect` matched.
@@ -198,6 +217,7 @@ pub async fn run(scenario: &Scenario) -> RunReport {
         recorder,
         events,
         anchors: Vec::new(),
+        rfc_findings: std::sync::OnceLock::new(),
     }
 }
 

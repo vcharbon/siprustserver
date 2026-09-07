@@ -81,6 +81,13 @@ async fn cancel_for_responseless_invite_is_held_then_flushed_on_180() {
     assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 0);
     assert_eq!(stack.txn.metrics().held_cancels_dropped(), 0);
 
+    // The callee answers the CANCEL (§9.2) — its Timer-E ladder goes
+    // quiescent, so the only datagram this window could show is a grace copy.
+    stack
+        .inject(&response_bytes(200, "OK", "CANCEL", branch, "handle-shape-test", true))
+        .await;
+    elapse_ms(20).await;
+
     // Cross the (disarmed) grace deadline: no second CANCEL may appear.
     elapse_ms(CANCEL_HOLD_GRACE + 100).await;
     assert_eq!(
@@ -166,13 +173,17 @@ async fn held_cancel_is_sent_at_grace_expiry_when_no_response_ever() {
     );
     assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 1);
 
-    // The peer never responds at all: Timer B (32 s) still kills the
-    // transaction and the caller hears the Timeout — with no CANCEL dropped
-    // (it already made the wire) and no second copy.
+    // The peer never responds at all: the grace copy rides the Timer-E ladder
+    // (a lost CANCEL toward a silent callee is re-sent — §17.1.2.2) until
+    // Timer B (32 s) kills the transaction, ladder included, and the caller
+    // hears the Timeout — with no CANCEL dropped (it already made the wire).
+    // Ladder fires at 0.5/1.5/3.5/7.5 s after the grace copy, then the T2
+    // plateau: 9 re-sends before the txn dies at 32 s.
     elapse_ms(35_000).await;
     let msgs = stack.drain_peer();
     assert!(count_requests(&msgs, "INVITE") >= 1, "Timer A retransmits ran");
-    assert_eq!(count_requests(&msgs, "CANCEL"), 0, "one grace copy only");
+    assert_eq!(count_requests(&msgs, "CANCEL"), 9, "the ladder re-sends until the txn dies");
+    assert_eq!(stack.txn.metrics().cancel_retransmits(), 9);
     assert_eq!(stack.txn.metrics().held_cancels_dropped(), 0);
     assert_eq!(stack.txn.metrics().held_cancels_flushed(), 0);
     assert!(

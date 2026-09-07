@@ -9,7 +9,7 @@
 FROM alpine:3.20
 # iptables: also reused by the masq-exempt DaemonSet (manifests/05-masq-exempt
 # .yaml) so ONE side-loaded image serves keepalived, the vip-smoke probe and the
-# KIND-MASQ-AGENT RETURN-rule asserter (upstreamneed-041 deploy contract).
+# KIND-MASQ-AGENT RETURN-rule asserter (deploy contract).
 RUN apk add --no-cache keepalived iproute2 iptables
 # keepalived → /usr/sbin/keepalived ; ip → /sbin/ip ; sh → busybox /bin/sh.
 ENTRYPOINT []

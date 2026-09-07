@@ -16,6 +16,12 @@ pub enum CallEvent {
     Sip {
         message: Box<SipMessage>,
         src: SocketAddr,
+        /// A response: whether it answered a client transaction this node's
+        /// txn layer holds — so a non-2xx INVITE final it carries is already
+        /// ACKed hop-by-hop (RFC 3261 §17.1.1.3). `false` for a response to a
+        /// request another node sent (a call taken over from it), and always
+        /// for a request.
+        matched_client_txn: bool,
     },
     /// A B2BUA timer fired (keepalive, no-answer, max-duration, …).
     Timer {
@@ -47,9 +53,13 @@ pub enum CallEvent {
         /// layer). `None` when the txn never stored a destination — the consumer
         /// then skips per-peer failure attribution.
         destination: Option<SocketAddr>,
-        /// Response-detection (Timer B/F) vs the configured out-of-dialog
-        /// INVITE bound (`invite_txn_timeout_sec`, default 158 s). Drives the
-        /// per-peer metric's `response_timeout` vs `transaction_timeout` split.
+        /// Response-detection (Timer B/F, or an initial INVITE's
+        /// `invite_first_response_timeout_sec`: nothing at all answered, the
+        /// hop is dead) vs the configured out-of-dialog INVITE bound
+        /// (`invite_txn_timeout_sec`, default 158 s: it answered, then went
+        /// silent). Drives the per-peer metric's `response_timeout` vs
+        /// `transaction_timeout` split and the `call_failure` consult's
+        /// `timeout_kind`.
         timeout_kind: TimeoutKind,
     },
     /// Re-entrant internal event (async result folded back into the call).
@@ -78,7 +88,9 @@ impl CallEvent {
     /// Map a transaction-layer event into a `CallEvent`. Pure.
     pub fn from_txn(event: TransactionEvent) -> Self {
         match event {
-            TransactionEvent::Message { message, src } => CallEvent::Sip { message, src },
+            TransactionEvent::Message { message, src, matched_client_txn } => {
+                CallEvent::Sip { message, src, matched_client_txn }
+            }
             TransactionEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers } => {
                 CallEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers }
             }

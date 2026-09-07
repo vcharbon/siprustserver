@@ -1,6 +1,6 @@
 //! Service-owned per-call timers (`TimerType::Service`) end-to-end — the
 //! ADR-0016 watchdog seam that unblocks the Routing API's `callTimers.timer18x`
-//! downstream (upstreamneed 007).
+//! downstream.
 //!
 //! A test-only **ringwatch** service models the real 18x deadline: `init` arms
 //! `Service{ringwatch, timer18x}`; a rule disarms it on the first 18x
@@ -29,7 +29,7 @@ fn reasons_of(cdr: &b2bua::cdr::CdrRecord) -> Vec<String> {
 mod ringwatch {
     use b2bua::rules::{
         Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, RuleCall,
-        ServiceSeed, Terminal,
+        ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
     use call::{CdrEventType, Direction, LegState, TimerType};
@@ -47,7 +47,7 @@ mod ringwatch {
             Some(ServiceSeed::new(RwState::Armed.label()).with_actions(vec![
                 RuleAction::ScheduleTimer {
                     timer_type: TimerType::service(RINGWATCH, "timer18x"),
-                    delay_sec: DEADLINE_SEC,
+                    delay: TimerDelay::secs(DEADLINE_SEC),
                     leg_id: None,
                 },
             ]))
@@ -136,7 +136,7 @@ mod ringwatch {
 mod dualkeys {
     use b2bua::rules::{
         Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, RuleCall,
-        ServiceSeed, Terminal,
+        ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
     use call::{CdrEventType, TimerType};
@@ -150,12 +150,12 @@ mod dualkeys {
             Some(ServiceSeed::new(DkState::Watching.label()).with_actions(vec![
                 RuleAction::ScheduleTimer {
                     timer_type: TimerType::service(DUALKEYS, "fast"),
-                    delay_sec: 3,
+                    delay: TimerDelay::secs(3),
                     leg_id: None,
                 },
                 RuleAction::ScheduleTimer {
                     timer_type: TimerType::service(DUALKEYS, "slow"),
-                    delay_sec: 6,
+                    delay: TimerDelay::secs(6),
                     leg_id: None,
                 },
             ]))
@@ -193,7 +193,7 @@ mod dualkeys {
                         },
                         RuleAction::ScheduleTimer {
                             timer_type: TimerType::service(DUALKEYS, "fast"),
-                            delay_sec: 2,
+                            delay: TimerDelay::secs(2),
                             leg_id: None,
                         },
                     ])),

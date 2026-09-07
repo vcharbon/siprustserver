@@ -4,8 +4,6 @@
 //! requests, and the §14.1 / RFC 3311 §5.2 glare-retry wait arms. What happens
 //! to their RESPONSES lives in [`super::response`].
 
-use std::time::Duration;
-
 use tokio::time::Instant;
 
 use sip_message::generators::InDialogMethod;
@@ -86,10 +84,14 @@ pub(super) async fn originate_initial_invite(
     if let Some(offer) = st.media.offer_sdp() {
         builder = builder.with_sdp(offer);
     }
-    // A declared delayed automatic (ADR-0024 §6): hold this INVITE's automatic
-    // ACK-to-2xx for the declared duration (the reactor's `inv.ack()` honours it).
-    if let Some(d) = st.delayed {
-        builder = builder.delayed_ack(Duration::from_millis(d.delay_ms));
+    // The establishing INVITE consumes one ordinal in this actor's
+    // originated-INVITE space; a declared delayed automatic covering it
+    // (scoped here, or unscoped) holds its automatic ACK-to-2xx for the
+    // declared duration (the reactor's `inv.ack()` honours it).
+    let ordinal = st.originated_invites;
+    st.originated_invites += 1;
+    if let Some(delay) = st.ack_hold_for(ordinal) {
+        builder = builder.delayed_ack(delay);
     }
     if let Some((tmpl, opts)) = &template {
         builder = builder.template(tmpl, *opts);
@@ -159,8 +161,10 @@ pub(super) async fn send_request_template(
             detail: "RequestTemplate requires an in-dialog request template".to_string(),
         })?;
     if method == InDialogMethod::Bye && !early {
-        // A hangup subsumes this leg's pending in-dialog acks (§15) exactly
-        // like the semantic `Bye` goal.
+        // A held ACK is sent BEFORE our own BYE (§15 — the renegotiation
+        // completes before the dialog ends), then the hangup subsumes this
+        // leg's pending in-dialog acks exactly like the semantic `Bye` goal.
+        super::response::flush_held_acks(st).await;
         discharge_on_teardown(st, now);
     }
     let (txn, req, dialog_clone) = if early {
@@ -194,6 +198,10 @@ pub(super) async fn send_request_template(
         InDialogMethod::Invite => {
             st.sent_reinvites.insert(cseq);
             st.sent_reinvite_txns.insert(cseq, txn);
+            // Consumes an ordinal in the actor's originated-INVITE space — a
+            // scoped delayed automatic resolves against it at the 2xx.
+            st.reinvite_ordinals.insert(cseq, st.originated_invites);
+            st.originated_invites += 1;
         }
         InDialogMethod::Update => {
             st.sent_updates.insert(cseq);
@@ -233,6 +241,10 @@ pub(super) async fn originate_reinvite(st: &mut ActorState<'_>) -> Result<(), St
     };
     st.sent_reinvites.insert(key.cseq);
     st.sent_reinvite_txns.insert(key.cseq, txn);
+    // This origination consumes an ordinal in the actor's originated-INVITE
+    // space — a scoped delayed automatic resolves against it at the 2xx.
+    st.reinvite_ordinals.insert(key.cseq, st.originated_invites);
+    st.originated_invites += 1;
     st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
     st.obs.record(
         Observation::RequestSent { key, detail: "re-INVITE awaiting 2xx".to_string() },

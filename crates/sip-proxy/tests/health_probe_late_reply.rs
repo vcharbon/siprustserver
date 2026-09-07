@@ -357,7 +357,7 @@ async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
     // Step 1 injects a synthetic 200 from the worker bind that never matched an
     // inbound request on that lane → the locally-minted-tag audit fires on the
     // fixture. The probe (not a real UA) is the SUT; waive that UA-side rule.
-    h.allow_violation("rfc3261.tags", "raw-injected spoof response; probe is the SUT, not a real UA");
+    h.allow_violation("mid-dialog-tags", "raw-injected spoof response; probe is the SUT, not a real UA");
 
     let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5075").await;
     let probe_sock: std::net::SocketAddr = "127.0.0.1:5097".parse().unwrap();

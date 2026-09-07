@@ -14,7 +14,6 @@ use sip_message::{SipMessage, SipParser, SipRequest};
 use super::addressing::top_via_addr;
 use super::server_txn::ServerTxn;
 use super::step::StepError;
-use super::txn_view::TxnVerdict;
 use super::Agent;
 
 /// The stateless answer a UA with **no remaining dialog state** owes an
@@ -151,14 +150,12 @@ impl Agent {
         method: &str,
         tolerate: &[&str],
     ) -> Option<ServerTxn> {
-        while let Some(pkt) = self.ep.try_recv() {
-            let msg = CustomParser::new()
-                .parse(&pkt.raw)
-                .unwrap_or_else(|e| panic!("{} received an unparseable datagram: {e}", self.name));
-            match self.txn.verdict(&pkt.raw, &msg) {
-                TxnVerdict::Surface => {}
-                TxnVerdict::Absorb => continue,
-            }
+        loop {
+            let msg = match self.take_held_or_queued().await {
+                None => return None,
+                Some(Err(e)) => panic!("{} received an unparseable datagram: {e}", self.name),
+                Some(Ok(msg)) => msg,
+            };
             let r = match msg {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(r) => panic!(
@@ -182,7 +179,6 @@ impl Agent {
                 self.name, txn.request.method()
             );
         }
-        None
     }
 
     /// **Blocking**, fallible, tolerant receive — the assertable load-lane
@@ -291,10 +287,10 @@ impl Agent {
     /// response) any queued requests whose method is in `absorb` before returning
     /// the first request matching `method`.
     ///
-    /// The §17.2 receive view ([`super::txn_view::TxnView`]) already absorbs
+    /// The §17.2 receive view ([`crate::absorption::Absorption`]) already absorbs
     /// **byte-identical retransmissions** automatically, so most flows need a
     /// plain [`receive`](Agent::receive). This remains for (a)
-    /// [`wire_view`](Agent::wire_view) agents, and (b) absorbing *distinct*
+    /// [`drop_to_raw_wire`](Agent::drop_to_raw_wire) agents, and (b) absorbing *distinct*
     /// same-method requests — which it matches by METHOD NAME ONLY, so a
     /// genuinely unexpected request of that method is masked too. Prefer a
     /// plain [`receive`](Agent::receive) first.

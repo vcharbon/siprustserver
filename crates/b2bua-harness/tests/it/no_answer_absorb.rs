@@ -1,4 +1,4 @@
-//! The `no-answer` timer on an ALREADY-ANSWERED call (upstreamneed-059).
+//! The `no-answer` timer on an ALREADY-ANSWERED call.
 //!
 //! A `kill_worker` reclaim can restore a stale per-b-leg `NoAnswer` ledger
 //! entry whose cancel died with the crashed node; pre-fix its fire tore a
@@ -28,7 +28,7 @@ const NO_ANSWER_SEC: i64 = 15;
 mod stalerestore {
     use b2bua::rules::{
         Effect, Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
-        ServiceSeed, Terminal,
+        ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
     use call::TimerType;
@@ -47,7 +47,7 @@ mod stalerestore {
             Some(ServiceSeed::new(SrState::Waiting.label()).with_actions(vec![
                 RuleAction::ScheduleTimer {
                     timer_type: TimerType::service(STALERESTORE, "inject"),
-                    delay_sec: INJECT_AT_SEC,
+                    delay: TimerDelay::secs(INJECT_AT_SEC),
                     leg_id: None,
                 },
             ]))
@@ -81,7 +81,7 @@ mod stalerestore {
                 Some(RuleHandleResult::new(vec![
                     RuleAction::ScheduleTimer {
                         timer_type: TimerType::NoAnswer,
-                        delay_sec: STALE_FIRE_SEC,
+                        delay: TimerDelay::secs(STALE_FIRE_SEC),
                         leg_id: Some(b),
                     },
                     RuleAction::ClearState { machine: STALERESTORE },

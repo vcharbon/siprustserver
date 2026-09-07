@@ -29,8 +29,13 @@ pub struct PlatformActivations {
     pub keepalive: KeepaliveActivation,
 }
 
-/// Optional REFER feature arm.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Optional REFER feature arm. Its **presence** is the decision layer's
+/// directive that this call's transfers are processed LOCALLY — the platform
+/// terminates the REFER (202 + `/call/refer` authorization + the transfer
+/// slice) instead of passing it on. Absent, a REFER is an ordinary in-dialog
+/// request relayed to the peer leg like INFO, and the RFC 3515 exchange
+/// (202 / NOTIFY) rides end to end between the two peers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReferFeature {
     /// Caps REFER chain depth across attended transfers. `None` → unlimited.
     pub max_chain_depth: Option<i64>,
@@ -156,4 +161,81 @@ pub struct FeatureActivations {
     /// decodes as no activation.
     #[serde(default)]
     pub charging_vector: Option<ChargingVectorFeature>,
+    /// Option tags the B2BUA WITHHOLDS from every leg it originates: whatever
+    /// `Supported` set would ride the originated INVITE is narrowed by these
+    /// tags (an emptied set stays as the value-less line) and a relayed
+    /// `Require` naming one is narrowed or dropped. Independent of the
+    /// 18x-downgrade strategies — a declaration that never offers `100rel`
+    /// leaves 18x relay untouched. The declaration is a call-lifetime LATCH:
+    /// every applied route's list unions into the standing one
+    /// ([`FeatureActivations::latch_withheld_option_tags`], run by
+    /// `apply_route` and `SetFeatures`), so a failover route whose decision
+    /// does not restate it cannot restore a withheld tag. `#[serde(default)]`
+    /// so a body encoded before this arm decodes as no withhold.
+    #[serde(default)]
+    pub withhold_option_tags: Option<Vec<String>>,
+}
+
+impl FeatureActivations {
+    /// The withhold latch: union `previous`'s withheld option tags into this
+    /// route's declaration. A route can widen the withhold; none can restore a
+    /// withheld tag — the property belongs to the call, not to the leg the
+    /// declaring route dialled.
+    pub fn latch_withheld_option_tags(&mut self, previous: Option<&FeatureActivations>) {
+        let standing = previous.and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]);
+        if standing.is_empty() {
+            return;
+        }
+        let mine = self.withhold_option_tags.get_or_insert_with(Vec::new);
+        for tag in standing {
+            if !mine.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                mine.push(tag.clone());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn features(withheld: Option<&[&str]>) -> FeatureActivations {
+        FeatureActivations {
+            platform: PlatformActivations {
+                max_duration_sec: 3_600,
+                keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
+            },
+            refer: None,
+            relay_first_18x_to_180: None,
+            no_answer_timeout_sec: None,
+            call_limiters: None,
+            advertise_capabilities: None,
+            charging_vector: None,
+            withhold_option_tags: withheld.map(|w| w.iter().map(|t| t.to_string()).collect()),
+        }
+    }
+
+    /// The withhold latch: a route that does not restate the withheld tags
+    /// inherits the standing list; one that widens it keeps both, deduplicated
+    /// case-insensitively (option tags are case-insensitive, RFC 3261 §7.3.1);
+    /// and with nothing standing, nothing is invented.
+    #[test]
+    fn the_withhold_latch_unions_and_never_narrows() {
+        let mut inherited = features(None);
+        inherited.latch_withheld_option_tags(Some(&features(Some(&["100rel"]))));
+        assert_eq!(inherited.withhold_option_tags.as_deref(), Some(["100rel".to_string()].as_slice()));
+
+        let mut widened = features(Some(&["timer", "100REL"]));
+        widened.latch_withheld_option_tags(Some(&features(Some(&["100rel"]))));
+        assert_eq!(
+            widened.withhold_option_tags.as_deref(),
+            Some(["timer".to_string(), "100REL".into()].as_slice()),
+        );
+
+        let mut untouched = features(None);
+        untouched.latch_withheld_option_tags(Some(&features(None)));
+        assert_eq!(untouched.withhold_option_tags, None);
+        untouched.latch_withheld_option_tags(None);
+        assert_eq!(untouched.withhold_option_tags, None);
+    }
 }

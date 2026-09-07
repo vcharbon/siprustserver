@@ -6,7 +6,10 @@
 //!      decision backend derives `prov18x` / Q.850 causes / anything else from.
 //!   2. A **pending b-leg INVITE transaction timeout** (the dead-gateway case)
 //!      consults `/call/failure` (origin `transaction_timeout`) instead of
-//!      unconditionally terminating, so the backend can reroute.
+//!      unconditionally terminating, so the backend can reroute — and the
+//!      consult says which timeout fired (`timeout_kind`): `response` when the
+//!      hop answered nothing at all (the tightened first-response bound,
+//!      ADR-0029 X1 amendment), `transaction` when it rang and went silent.
 //!   3. A failover **Route is honored like an initial route**: its
 //!      `call_limiter` entries are admitted against the reroute target and the
 //!      holds are released at termination; a limiter reject on the failover
@@ -212,7 +215,7 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     // leg. carol is the DEAD gateway (it never sent a final — that silence is
     // what timed the b-leg INVITE client txn out and triggered the reroute), so
     // it stays dead air and does not answer the CANCEL. This also keeps the trace
-    // genuinely RFC-clean under rfc3261.unackedInviteNon2xxFinal: the b2bua's
+    // genuinely RFC-clean under unacked-invite-non-2xx-final: the b2bua's
     // carol INVITE client txn was already DELETED when the 158 s backstop fired
     // (sip-txn `fire_timeout` → `delete_txn`), so a late 487 here would land on
     // the unmatched-response path and never be hop-ACKed — an un-ACKable non-2xx
@@ -223,10 +226,193 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     let reqs = captured.lock().unwrap();
     assert_eq!(reqs.len(), 1, "one failure consult");
     assert_eq!(reqs[0].failure.origin, "transaction_timeout");
+    assert_eq!(
+        reqs[0].failure.timeout_kind.as_deref(),
+        Some("transaction"),
+        "carol rang, then went silent past the INVITE bound"
+    );
     assert_eq!(reqs[0].failure.failed_leg_id.as_deref(), Some("b-1"));
     assert!(reqs[0].failure.sip_headers.is_empty(), "internal origin: no response headers");
     assert_eq!(reqs[0].snapshot.callback_context.as_deref(), Some("ctx-timeout"));
     drop(reqs);
+
+    let _ = h.finish().await;
+}
+
+/// INVITE requests the recorded wire delivered to `to` — the original send
+/// plus every Timer A rung.
+fn invites_delivered_to(report: &scenario_harness::RunReport, to: SocketAddr) -> usize {
+    report
+        .entries()
+        .iter()
+        .filter(|e| e.to == to && e.raw.starts_with(b"INVITE "))
+        .count()
+}
+
+/// The dead-hop case under a tightened first-response bound
+/// (`invite_first_response_timeout_sec = 5`, ADR-0029 X1 amendment): carol
+/// answers NOTHING — not even a `100` — so the b-leg gives up at 5 s, not at
+/// Timer B, after exactly the three Timer A re-sends the bound buys
+/// (0.5 / 1.5 / 3.5 s), and the `/call/failure` consult says
+/// `timeout_kind: "response"` so the backend can route a dead hop apart from a
+/// silent callee. The reroute lands on bob, the call is bridged, hung up, and
+/// fully reaped.
+#[tokio::test(start_paused = true)]
+async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response() {
+    let h = Harness::with_transit_delay("first-response-bound-dead-hop", 1);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let carol = h.agent("carol", "127.0.0.1:5070").await; // dead air from the start
+    let bob = h.agent("bob", "127.0.0.1:5071").await; // reroute target
+    let carol_addr: SocketAddr = "127.0.0.1:5070".parse().unwrap();
+
+    let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+    let cap = captured.clone();
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.callback_context = Some("ctx-dead-hop".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(move |req| {
+                cap.lock().unwrap().push(req.clone());
+                CallTreatment::Route(route_to("127.0.0.1", 5071))
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.invite_first_response_timeout_sec = 5;
+            c.keepalive_interval_sec = 3_600;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let carol_uas = carol.receive("INVITE").await;
+    let _ = &carol_uas; // never responds: the hop is dead
+
+    // The tightened bound fires at 5 s; advance just past it so the reroute
+    // INVITE is answered inside its own Timer A window.
+    h.advance(Duration::from_secs(5) + Duration::from_millis(300)).await;
+
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    // The dead leg is cleared with a CANCEL carol never answers.
+    let _cancel = carol.receive("CANCEL").await;
+
+    {
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1, "one failure consult");
+        assert_eq!(reqs[0].failure.origin, "transaction_timeout", "the origin is unchanged");
+        assert_eq!(
+            reqs[0].failure.timeout_kind.as_deref(),
+            Some("response"),
+            "nothing at all answered: the hop is dead"
+        );
+        assert_eq!(reqs[0].failure.failed_leg_id.as_deref(), Some("b-1"));
+    }
+
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    // carol never answers her CANCEL, so the call rides the terminating
+    // backstop out: advance exactly past it, then assert release.
+    h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+
+    let report = h.finish().await;
+    assert_eq!(
+        invites_delivered_to(&report, carol_addr),
+        4,
+        "original send + the three rungs a 5 s bound buys (0.5 / 1.5 / 3.5 s), none past it"
+    );
+}
+
+/// A ringing callee is unaffected by the tightened first-response bound: under
+/// the SAME 5 s bound carol's `180` at ~1 s swaps in the long INVITE bound
+/// (`invite_txn_timeout_sec`, shortened to 40 s here), so the b-leg survives
+/// the 5 s mark and gives up at 40 s with `timeout_kind: "transaction"` — it
+/// answered, then went silent. Reroute, bridge, hang up, reap.
+#[tokio::test(start_paused = true)]
+async fn b_leg_that_rang_under_the_first_response_bound_fails_at_the_long_bound_as_transaction() {
+    let h = Harness::with_transit_delay("first-response-bound-silent-callee", 1);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let carol = h.agent("carol", "127.0.0.1:5070").await; // rings, then dead air
+    let bob = h.agent("bob", "127.0.0.1:5071").await; // reroute target
+
+    let captured: Captured = Arc::new(Mutex::new(Vec::new()));
+    let cap = captured.clone();
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.callback_context = Some("ctx-silent-callee".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(move |req| {
+                cap.lock().unwrap().push(req.clone());
+                CallTreatment::Route(route_to("127.0.0.1", 5071))
+            })
+            .build(),
+    );
+    // The setup deadline stays strictly above the (shortened) INVITE bound so
+    // the transaction timeout is what fires.
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.invite_first_response_timeout_sec = 5;
+            c.invite_txn_timeout_sec = 40;
+            c.setup_timeout_sec = 60;
+            c.keepalive_interval_sec = 3_600;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut carol_uas = carol.receive("INVITE").await;
+    // Ring inside the first-response bound, after one Timer A rung.
+    h.advance(Duration::from_secs(1)).await;
+    carol_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    // Past the 5 s first-response bound: nothing fires, carol is ringing.
+    h.advance(Duration::from_secs(6)).await;
+    assert!(captured.lock().unwrap().is_empty(), "a ringing callee is not on the first-response bound");
+    assert_eq!(b2bua.active_calls(), 1);
+
+    // The long bound is measured from the original send: it fires at 40 s.
+    // Advance just past it so the reroute INVITE is answered inside its own
+    // Timer A window.
+    h.advance(Duration::from_secs(33) + Duration::from_millis(300)).await;
+
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    // The silent leg is cleared with a CANCEL carol never answers.
+    let _cancel = carol.receive("CANCEL").await;
+
+    {
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1, "one failure consult");
+        assert_eq!(reqs[0].failure.origin, "transaction_timeout", "the origin is unchanged");
+        assert_eq!(
+            reqs[0].failure.timeout_kind.as_deref(),
+            Some("transaction"),
+            "carol answered a provisional, then went silent past the INVITE bound"
+        );
+        assert_eq!(reqs[0].failure.failed_leg_id.as_deref(), Some("b-1"));
+    }
+
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    // carol never answers her CANCEL, so the call rides the terminating
+    // backstop out: advance exactly past it, then assert release.
+    h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
 
     let _ = h.finish().await;
 }

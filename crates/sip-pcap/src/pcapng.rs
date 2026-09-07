@@ -13,7 +13,7 @@
 use crate::bytes::{u16at, u32at};
 use crate::frame::decode_frame;
 use crate::reassembly::Reassembler;
-use crate::{Datagram, DecodeStats};
+use crate::{stamp_probe, Datagram, DecodeStats, Probes};
 
 /// Section Header Block type — also the file magic of a pcapng capture.
 pub const SHB_TYPE: u32 = 0x0a0d_0d0a;
@@ -41,12 +41,16 @@ struct Iface {
     tsresol: u8,
     /// `if_tsoffset`, seconds.
     tsoffset_s: u64,
+    /// The observation point this interface IS. A `mergecap` output keeps one
+    /// interface per input file, so this is what tells one probe's copy of a
+    /// packet from another's.
+    probe: u32,
 }
 
 impl Iface {
     /// pcapng default when the interface declares no `if_tsresol`: microseconds.
     fn new(linktype: u32) -> Self {
-        Self { linktype, tsresol: 6, tsoffset_s: 0 }
+        Self { linktype, tsresol: 6, tsoffset_s: 0, probe: 0 }
     }
 
     /// Raw tick count → microseconds since the epoch.
@@ -78,6 +82,7 @@ pub fn walk(
     out: &mut Vec<Datagram>,
     stats: &mut DecodeStats,
     reasm: &mut Reassembler,
+    probes: &mut Probes,
 ) -> Result<(), String> {
     let mut off = 0usize;
     let mut le = true;
@@ -116,7 +121,13 @@ pub fn walk(
         }
         let body = &bytes[off + 8..off + total - 4];
         match btype {
-            IDB_TYPE => ifaces.push(parse_idb(body, le)),
+            IDB_TYPE => {
+                // Interface ids are section-scoped, so each one takes its own
+                // probe id: two sections' interface 0 are two probes.
+                let mut iface = parse_idb(body, le);
+                iface.probe = probes.next();
+                ifaces.push(iface);
+            }
             EPB_TYPE | PB_TYPE | SPB_TYPE => {
                 packet_block(btype, body, le, &ifaces, out, stats, reasm)
             }
@@ -223,5 +234,7 @@ fn packet_block(
         stats.tail_truncated += 1;
         return;
     };
+    let before = out.len();
     decode_frame(iface.linktype, frame, iface.ts_us(ticks), out, stats, reasm);
+    stamp_probe(out, before, iface.probe);
 }

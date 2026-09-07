@@ -8,14 +8,19 @@
 //! update carried on the message (a decision's `header_updates`, a firing
 //! rule's own `Allow`/`Supported`) beats the call's declared set for that face,
 //! which beats the set RELAYED from the peer (RFC 3261 §16.6, [`relaying`]),
-//! which beats [`CapabilitySet::default`] — the stack set, advertised where the
-//! peer advertised nothing. A relayed value is not an explicit update and never
-//! outranks a declaration: the messages that carry one, the relayed requests,
-//! drop it (see [`declared_advert_headers`]).
+//! and where nothing was declared and nothing was received the face states
+//! NO line. An advertisement is a claim about the party that makes it: a
+//! back-to-back UA relays the peer's verbatim and never widens, narrows or
+//! invents one, and what a peer left unsaid stays unsaid. The stack's own set
+//! ([`CapabilitySet::default`]) is for the messages the stack answers on its
+//! own behalf — the out-of-dialog OPTIONS — and for nothing it relays. A
+//! relayed value is not an explicit update and never outranks a declaration:
+//! the messages that carry one, the relayed requests, drop it (see
+//! [`declared_advert_headers`]).
 //!
-//! The two halves resolve independently — an undeclared `Allow` keeps the stack
-//! methods while a declared `Supported` narrows the option tags — and an empty
-//! declared half advertises the empty set rather than falling back.
+//! The halves resolve independently — an undeclared `Allow` is relayed while
+//! a declared `Supported` narrows the option tags — and an empty declared half
+//! advertises the empty set rather than nothing.
 //!
 //! A DECLARED set is read through the token grammar, so nothing it states can
 //! reach the wire as anything but option tags. An explicit `header_updates`
@@ -55,9 +60,9 @@ impl Face {
 
 /// The set `features` DECLARE for `face`, or `None` when they declare none. A
 /// service that owns a different default reads this and keeps its own value
-/// when nothing is declared. An undeclared HALF of a declared face resolves to
-/// the stack's value for that half, so a caller narrows the methods without
-/// pinning a copy of the stack's option tags.
+/// when nothing is declared. An undeclared HALF of a declared face carries no
+/// line of its own — on a relayed message it is the peer's, on a minted one
+/// it is absent — so a declaration narrows exactly what it names.
 pub fn declared_in(features: Option<&FeatureActivations>, face: Face) -> Option<CapabilitySet> {
     Some(typed(declared_face(features, face)?))
 }
@@ -103,12 +108,15 @@ pub fn declared(call: &Call, face: Face) -> Option<CapabilitySet> {
     declared_in(call.features.as_ref(), face)
 }
 
-/// The set advertised on `face`: the declared one, else the stack default.
+/// The set advertised on `face` for a message the B2BUA mints with NO peer
+/// advertisement to relay — a re-INVITE it originates, a 2xx it answers on a
+/// leg of its own: the declared one, else no line at all. The captured
+/// platform states nothing on these, and neither does this stack.
 pub fn advertised(call: &Call, face: Face) -> CapabilitySet {
-    declared(call, face).unwrap_or_default()
+    declared(call, face).unwrap_or_else(CapabilitySet::silent)
 }
 
-/// The set advertised on whichever face `leg_id` sits on.
+/// [`advertised`] on whichever face `leg_id` sits on.
 pub fn for_leg(call: &Call, leg_id: &str) -> CapabilitySet {
     advertised(call, Face::of_leg(leg_id))
 }
@@ -116,25 +124,25 @@ pub fn for_leg(call: &Call, leg_id: &str) -> CapabilitySet {
 /// The set advertised on `face` for a message that carries the peer's own
 /// advertisement across the back-to-back UA, `received` being that peer's
 /// header lines. Per half: a DECLARED half is the more specific statement and
-/// stands; an undeclared half states what the peer advertised
-/// ([`CapabilitySet::relaying`]) and falls back to the stack's half when the
-/// peer advertised none.
+/// stands; an undeclared half states exactly what the peer advertised
+/// ([`CapabilitySet::relayed`]), and no line where the peer advertised none.
 pub fn relaying_in(
     features: Option<&FeatureActivations>,
     face: Face,
     received: &[SipHeader],
 ) -> CapabilitySet {
     let declared_halves = declared_advert_headers(features, face);
-    let declared_set = declared_in(features, face).unwrap_or_default();
-    let relayed = CapabilitySet::default().relaying(received);
+    let declared_set = declared_in(features, face).unwrap_or_else(CapabilitySet::silent);
+    let relayed = CapabilitySet::relayed(received);
     let half = |name: HeaderName| declared_halves.contains(&name);
-    CapabilitySet::new(
-        if half(HeaderName::Allow) { declared_set.allow().clone() } else { relayed.allow().clone() },
+    CapabilitySet::stating(
+        if half(HeaderName::Allow) { declared_set.allow().cloned() } else { relayed.allow().cloned() },
         if half(HeaderName::Supported) {
-            declared_set.supported().clone()
+            declared_set.supported().cloned()
         } else {
-            relayed.supported().clone()
+            relayed.supported().cloned()
         },
+        relayed.accept().map(<[_]>::to_vec),
     )
 }
 
@@ -149,21 +157,17 @@ pub fn relaying_for_leg(call: &Call, leg_id: &str, received: &[SipHeader]) -> Ca
 }
 
 /// Read the replicated token lists into the typed value the SIP layer stamps.
-/// A half the declaration omits keeps the stack's value for that half; a half
-/// it states EMPTY advertises the empty set. Tokens that are not RFC 3261
-/// §25.1 `token`s are dropped by the typed set, so nothing a decision states
-/// can reach the wire as anything but option tags.
+/// A half the declaration omits is unstated; a half it states EMPTY advertises
+/// the empty set. Tokens that are not RFC 3261 §25.1 `token`s are dropped by
+/// the typed set, so nothing a decision states can reach the wire as anything
+/// but option tags. A declaration states no `Accept`: that half is only ever
+/// relayed.
 fn typed(declared: &AdvertisedCapabilities) -> CapabilitySet {
-    let stack = CapabilitySet::default();
-    let allow = match &declared.allow {
-        Some(tokens) => Allow::of(tokens.iter().map(String::as_str)),
-        None => stack.allow().clone(),
-    };
-    let supported = match &declared.supported {
-        Some(tokens) => Supported::of(tokens.iter().map(String::as_str)),
-        None => stack.supported().clone(),
-    };
-    CapabilitySet::new(allow, supported)
+    CapabilitySet::stating(
+        declared.allow.as_ref().map(|tokens| Allow::of(tokens.iter().map(String::as_str))),
+        declared.supported.as_ref().map(|tokens| Supported::of(tokens.iter().map(String::as_str))),
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -185,6 +189,7 @@ mod tests {
             no_answer_timeout_sec: None,
             call_limiters: None,
             charging_vector: None,
+            withhold_option_tags: None,
             advertise_capabilities: Some(AdvertiseCapabilitiesFeature {
                 toward_originator: None,
                 toward_originated: Some(caps),
@@ -197,48 +202,48 @@ mod tests {
     }
 
     /// The motivating narrowing — "the same methods, minus REFER and INFO" —
-    /// states `allow` alone and keeps the stack's option tags, so a caller
-    /// never freezes a copy of `B2BUA_SUPPORTED` in its configuration.
+    /// states `allow` alone and leaves the option tags unstated: nothing of
+    /// the stack's own is filled in beside a declaration.
     #[test]
-    fn declaring_the_method_half_alone_keeps_the_stack_option_tags() {
+    fn declaring_the_method_half_alone_leaves_the_option_tags_unstated() {
         let features = declaring(AdvertisedCapabilities {
             allow: Some(vec!["INVITE".into(), "ACK".into(), "CANCEL".into(), "BYE".into()]),
             supported: None,
         });
         let caps = originated(&features);
-        assert_eq!(caps.allow_text(), "INVITE, ACK, CANCEL, BYE");
-        assert_eq!(caps.supported_text(), CapabilitySet::default().supported_text());
+        assert_eq!(caps.allow_text().as_deref(), Some("INVITE, ACK, CANCEL, BYE"));
+        assert_eq!(caps.supported(), None);
         assert_eq!(declared_advert_headers(Some(&features), Face::Originated), [HeaderName::Allow]);
     }
 
-    /// …and the mirror: option tags alone leave the methods at the stack set.
+    /// …and the mirror: option tags alone leave the methods unstated.
     #[test]
-    fn declaring_the_option_tag_half_alone_keeps_the_stack_methods() {
+    fn declaring_the_option_tag_half_alone_leaves_the_methods_unstated() {
         let features =
             declaring(AdvertisedCapabilities { allow: None, supported: Some(vec!["timer".into()]) });
         let caps = originated(&features);
-        assert_eq!(caps.allow_text(), CapabilitySet::default().allow_text());
-        assert_eq!(caps.supported_text(), "timer");
+        assert_eq!(caps.allow(), None);
+        assert_eq!(caps.supported_text().as_deref(), Some("timer"));
         assert_eq!(
             declared_advert_headers(Some(&features), Face::Originated),
             [HeaderName::Supported]
         );
     }
 
-    /// An EMPTY half is "advertise nothing", NOT "fall back to the stack" —
-    /// the two are different statements and resolve differently.
+    /// An EMPTY half states the empty set (a value-less line); an ABSENT half
+    /// states no line — two different statements.
     #[test]
-    fn an_empty_half_advertises_nothing_where_an_absent_half_falls_back() {
+    fn an_empty_half_states_the_empty_set_where_an_absent_half_states_no_line() {
         let empty = declaring(AdvertisedCapabilities {
             allow: Some(Vec::new()),
             supported: Some(Vec::new()),
         });
         let caps = originated(&empty);
-        assert_eq!(caps.allow_text(), "");
-        assert_eq!(caps.supported_text(), "");
+        assert_eq!(caps.allow_text().as_deref(), Some(""));
+        assert_eq!(caps.supported_text().as_deref(), Some(""));
 
         let absent = declaring(AdvertisedCapabilities { allow: None, supported: None });
-        assert_eq!(originated(&absent), CapabilitySet::default());
+        assert_eq!(originated(&absent), CapabilitySet::silent());
     }
 
     /// A declaration a decision supplied is still read through the token
@@ -249,15 +254,44 @@ mod tests {
             allow: Some(vec!["INVITE".into(), "ACK\r\nX-Evil: injected".into()]),
             supported: None,
         });
-        assert_eq!(originated(&features).allow_text(), "INVITE");
+        assert_eq!(originated(&features).allow_text().as_deref(), Some("INVITE"));
     }
 
-    /// Nothing declared anywhere: every face resolves to the stack set.
+    /// Nothing declared anywhere: an undeclared face states NO line on a
+    /// message it mints with nothing to relay, and exactly the peer's lines
+    /// on one that carries the peer's advertisement.
     #[test]
-    fn an_undeclared_face_resolves_to_the_stack_set() {
+    fn an_undeclared_face_states_nothing_of_its_own() {
         let features = declaring(AdvertisedCapabilities { allow: None, supported: None });
         assert_eq!(declared_in(Some(&features), Face::Originator), None);
         assert_eq!(declared_in(None, Face::Originated), None);
         assert!(declared_advert_headers(None, Face::Originated).is_empty());
+        assert_eq!(relaying_in(None, Face::Originator, &[]), CapabilitySet::silent());
+        let peer = vec![
+            SipHeader { name: "Allow".into(), value: "INVITE, ACK, BYE".into() },
+            SipHeader { name: "Accept".into(), value: "application/sdp, application/isup".into() },
+        ];
+        let relayed = relaying_in(None, Face::Originator, &peer);
+        assert_eq!(relayed.allow_text().as_deref(), Some("INVITE, ACK, BYE"));
+        assert_eq!(relayed.supported(), None);
+        assert_eq!(relayed.accept_text().as_deref(), Some("application/sdp, application/isup"));
+    }
+
+    /// A declared half stands over the peer's; the undeclared halves are the
+    /// peer's verbatim, `Accept` included.
+    #[test]
+    fn a_declared_half_stands_over_the_relayed_one() {
+        let features = declaring(AdvertisedCapabilities {
+            allow: Some(vec!["INVITE".into(), "ACK".into(), "BYE".into()]),
+            supported: None,
+        });
+        let peer = vec![
+            SipHeader { name: "Allow".into(), value: "INVITE, ACK, BYE, REFER".into() },
+            SipHeader { name: "Supported".into(), value: "timer".into() },
+        ];
+        let caps = relaying_in(Some(&features), Face::Originated, &peer);
+        assert_eq!(caps.allow_text().as_deref(), Some("INVITE, ACK, BYE"));
+        assert_eq!(caps.supported_text().as_deref(), Some("timer"));
+        assert_eq!(caps.accept(), None);
     }
 }

@@ -1,0 +1,38 @@
+{
+  "call_headers": {
+    "c1": {
+      "X-Api-Call": "{\"destination\":\"called-0-0\"}"
+    },
+    "c2": {
+      "X-Api-Call": "{\"destination\":\"called-1-0\"}"
+    }
+  },
+  "check_scoping": {
+    "cdr-vocabulary": "gating",
+    "origin-platform-header": "informative"
+  },
+  "claim_numbers": {
+    "called-0-0": [
+      "19999990009004"
+    ]
+  },
+  "clock": "virtual",
+  "endpoint_addresses": {
+    "uas1": "127.0.0.1:5070"
+  },
+  "identities": {
+    "called-0-0": {
+      "e164": "+33000900004"
+    },
+    "caller": {
+      "e164": "+33000900001",
+      "private": "0009001"
+    }
+  },
+  "injected_headers": {
+    "X-Example-Test": "replay"
+  },
+  "lane": "upstream-fake",
+  "route_target": "127.0.0.1:5080",
+  "timing_tolerance_ms": 700
+}

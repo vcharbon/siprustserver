@@ -1,0 +1,26 @@
+{
+  "name": "@sip/pipeline",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The generic extraction engine: flows ingest, the correlation rule engine, the cut, and case assembly. Deployment knowledge arrives as injected data or a substituted Layer.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sip/contracts": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

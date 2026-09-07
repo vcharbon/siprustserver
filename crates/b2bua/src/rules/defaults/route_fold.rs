@@ -7,7 +7,7 @@
 
 use call::{CallModelState, TimerType};
 
-use crate::rules::model::{RuleAction, RuleContext};
+use crate::rules::model::{RuleAction, RuleContext, TimerDelay};
 
 /// Whether a decision fold has landed on a call already going away — the
 /// call-scoped clause of [`call::helpers::leg_is_going_away`]. A `/calls`
@@ -140,7 +140,7 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
         // path does at route time (ScheduleTimer id-dedups).
         actions.push(RuleAction::ScheduleTimer {
             timer_type: TimerType::GlobalDuration,
-            delay_sec: f.platform.max_duration_sec,
+            delay: TimerDelay::secs(f.platform.max_duration_sec),
             leg_id: None,
         });
         actions.push(RuleAction::SetFeatures { features: f.clone() });
@@ -160,7 +160,7 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
         });
         actions.push(RuleAction::ScheduleTimer {
             timer_type: TimerType::LimiterRefresh,
-            delay_sec: ctx.config.limiter_refresh_sec,
+            delay: TimerDelay::secs(ctx.config.limiter_refresh_sec),
             leg_id: None,
         });
     }

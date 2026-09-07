@@ -96,6 +96,7 @@ impl ActionExecutor<'_> {
             header_updates,
             &capabilities::relaying_for_leg(call, &leg_id, a_invite.headers()),
             call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
+            call.features.as_ref().and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]),
             kind,
         ) {
             Ok(built) => built,
@@ -241,6 +242,8 @@ impl ActionExecutor<'_> {
             content_type: (!body.is_empty()).then(relay::sdp),
             cseq: Some(outbound_cseq as u32),
             extra_headers: extra,
+            // A re-INVITE this stack originates states only a DECLARED set;
+            // the captured platform advertises nothing on its own re-INVITEs.
             capabilities: Some(capabilities::for_leg(call, leg_id)),
             ..Default::default()
         };
@@ -250,9 +253,9 @@ impl ActionExecutor<'_> {
             relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
 
         // Cache the re-INVITE's client-transaction handle so the ACK-for-2xx
-        // echoes its CSeq (§13.2.2.4). Reset the retained ACK branch: this new
-        // INVITE transaction's 2xx will mint its own (the old branch belonged to
-        // the prior CSeq).
+        // echoes its CSeq (§13.2.2.4). Reset the retained ACK branch, its
+        // retained datagram, and any armed ACK obligation: all belonged to the
+        // prior CSeq — this new INVITE transaction's 2xx mints/arms its own.
         *call = call::helpers::update_dialog(call.clone(), leg_id, &t_id, |d| {
             d.ext.pending_invite_txn = Some(call::InviteTxnHandle {
                 branch: branch.clone(),
@@ -260,6 +263,8 @@ impl ActionExecutor<'_> {
                 destination: call::HostPort { host: dest.0.clone(), port: dest.1 },
             });
             d.ext.ack_branch = None;
+            d.ext.emitted_ack = None;
+            d.ext.awaited_ack_cseq = None;
         });
 
         fx.outbound.push(OutboundSipEffect {
@@ -332,8 +337,15 @@ impl ActionExecutor<'_> {
         // keepalive OPTIONS re-derives the same CSeq every cycle and the later
         // relayed BYE collides on it — an RFC 3261 violation a real UAS rejects.
         let t_id = dialog_identity_tag(leg_id, &dialog);
-        let outbound_cseq = dialog.sip.local_cseq + 1;
-        *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
+        // `KeepaliveCseqReuse` (the wire-fault seam) emits the keepalive at the
+        // CSeq the dialog already used and leaves the dialog un-advanced: the
+        // exact defect `cseq-in-dialog-order` gates on, on purpose.
+        let reuse = m == InDialogMethod::Options
+            && self.wire_faults.is_armed(crate::wire_faults::WireFaultPoint::KeepaliveCseqReuse);
+        let outbound_cseq = if reuse { dialog.sip.local_cseq } else { dialog.sip.local_cseq + 1 };
+        if !reuse {
+            *call = bump_local_cseq(call.clone(), leg_id, &t_id, 1);
+        }
 
         // Opaque body carrier (MSCML INFO rides here): default the content type
         // to `application/sdp` when a body is present and none was given.
@@ -381,8 +393,11 @@ impl ActionExecutor<'_> {
     /// Originate a PRACK toward the b-leg early dialog (selected by callee tag)
     /// acknowledging a reliable 1xx (RFC 3262 §4). The RAck is
     /// `<rseq> <invite_cseq> INVITE`; the dialog's local CSeq advances by one.
-    /// Used by `relayFirst18xTo180` (B2BUA PRACKs bob since alice never saw the
-    /// reliable provisional).
+    /// This stack PRACKs on the originator's behalf wherever it never saw the
+    /// reliable provisional (a masking policy, or no `100rel` offered). Once
+    /// per provisional: the acknowledgement is recorded, and a repeat of it —
+    /// the responder's §3 retransmission — sends nothing (§4), so no second
+    /// PRACK names the same `RAck` on a fresh CSeq.
     pub(super) fn send_prack_to_leg(
         &self,
         call: &mut Call,
@@ -412,6 +427,12 @@ impl ActionExecutor<'_> {
         // replica captured before its provisional To-tag landed) → skip rather
         // than build a tag-less in-dialog PRACK and panic in `make_request`.
         if dialog.sip.remote_tag.is_empty() {
+            return;
+        }
+        let (updated, first) =
+            call::helpers::record_pracked_provisional(call.clone(), leg_id, b_tag, invite_cseq, rseq);
+        *call = updated;
+        if !first {
             return;
         }
         let t_id = dialog_identity_tag(leg_id, &dialog);

@@ -131,7 +131,7 @@ impl RfcAcceptance {
                 );
                 continue;
             }
-            for (lane, detail, offending) in rule.check_positioned(events) {
+            for (lane, detail, offending, _charged) in rule.check_positioned(events) {
                 let finding = (rule.name().to_string(), lane, detail);
                 if self.accepts(rule.name(), offending, &entries) {
                     accepted.push(finding);

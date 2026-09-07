@@ -213,7 +213,7 @@ pub(super) fn sanitize_restored_timers(
 /// Cohort-smoothing parameters for the bulk reboot sweep, passed through the
 /// [`sanitize_restored_timers`] seam. `None` (a single reactive straggler /
 /// on-demand reclaim) skips smoothing — there is no cohort to de-correlate.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(super) struct Smoothing {
     pub(super) now_ms: i64,
     pub(super) l_max: i64,

@@ -8,6 +8,7 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
+use super::obligation::Obligation;
 use super::sm::MachineId;
 
 /// Union of known timer types. Closed for the CORE-claimed variants; the one
@@ -35,31 +36,26 @@ pub enum TimerType {
     LimiterRefresh,
     Keepalive,
     KeepaliveTimeout,
-    /// RFC 3261 §13.3.1.4 — periodic retransmit of the a-leg INVITE **2xx** while
-    /// the caller's ACK is missing (re-armed each fire; cancelled on the a-leg
-    /// ACK). Paired with [`AckTimeout`](Self::AckTimeout), which bounds the window.
-    AckRetransmit,
-    /// RFC 3261 §13.3.1.4 — the a-leg 2xx-without-ACK **give-up** deadline (RFC's
-    /// 64·T1). Single-shot, armed when the a-leg 2xx is relayed at dialog
-    /// confirmation, cancelled on the a-leg ACK; on expiry the B2BUA BYEs the
-    /// just-created a-leg dialog AND tears down the b-leg (the answered-call leak
-    /// fix). Distinct from [`AckRetransmit`](Self::AckRetransmit), the on-wire
-    /// re-send cadence.
-    AckTimeout,
-    /// RFC 3261 §13.3.1.4 (in-dialog) — periodic retransmit of the a-leg
-    /// **re-INVITE** 2xx while the originator's ACK is missing (re-armed each
-    /// fire; cancelled on the a-leg ACK matching the re-INVITE CSeq). The
-    /// re-INVITE twin of [`AckRetransmit`](Self::AckRetransmit); distinct so it
-    /// never collides with the initial-INVITE watchdog and re-sends the cached
-    /// re-INVITE 2xx (not the initial 2xx). Paired with
-    /// [`ReinviteAckTimeout`](Self::ReinviteAckTimeout).
-    ReinviteAckRetransmit,
-    /// RFC 3261 §13.3.1.4 (in-dialog) — the a-leg re-INVITE 2xx-without-ACK
-    /// **give-up** deadline (64·T1). Single-shot, armed when the re-INVITE 2xx
-    /// is relayed to the originator, cancelled on the a-leg ACK; on expiry the
-    /// B2BUA tears the call down (a permanently-lost re-INVITE ACK must never
-    /// retransmit forever). The re-INVITE twin of [`AckTimeout`](Self::AckTimeout).
-    ReinviteAckTimeout,
+    /// The next rung of the ladder repeating the retained emission
+    /// `obligation` is owed for (ADR-0029 X4): the un-ACKed 2xx (RFC 3261
+    /// §13.3.1.4) or the un-PRACKed reliable provisional (RFC 3262 §3). The
+    /// framework re-sends the retained datagram and re-arms the next rung
+    /// itself — no rule sees a rung. Retired with the obligation: by the
+    /// discharging ACK or PRACK, by the give-up, or with the leg, transaction
+    /// or call the emission belonged to.
+    Rung { obligation: Obligation },
+    /// The give-up deadline of `obligation`'s ladder — the one ladder event a
+    /// rule sees: 64·T1 for a reliable provisional, the deployment's ACK
+    /// deadline for a 2xx (Timer L where it states none). Armed once with the
+    /// first rung, so a re-emission cannot push the deadline out, and in the
+    /// ledger for as long as the retained emission is; the framework scrubs
+    /// the ladder when it fires and a CORE rule (which a service may
+    /// re-author) says what the silence means. For a 2xx the session ends
+    /// whatever the rule decides (RFC 3261 §13.3.1.4) — a service authors the
+    /// teardown's shape, never whether it happens; a reliable provisional's is
+    /// the rule's alone — a teardown, an in-dialog reject, or nothing (RFC
+    /// 3262 §3).
+    RepeatGiveUp { obligation: Obligation },
     /// Safety-net timer scheduled when entering "terminating" state.
     TerminatingTimeout,
     /// REFER subscription expiry (RFC 3515).
@@ -122,10 +118,8 @@ impl std::fmt::Debug for TimerType {
             TimerType::LimiterRefresh => f.write_str("LimiterRefresh"),
             TimerType::Keepalive => f.write_str("Keepalive"),
             TimerType::KeepaliveTimeout => f.write_str("KeepaliveTimeout"),
-            TimerType::AckRetransmit => f.write_str("AckRetransmit"),
-            TimerType::AckTimeout => f.write_str("AckTimeout"),
-            TimerType::ReinviteAckRetransmit => f.write_str("ReinviteAckRetransmit"),
-            TimerType::ReinviteAckTimeout => f.write_str("ReinviteAckTimeout"),
+            TimerType::Rung { obligation } => write!(f, "Rung:{obligation:?}"),
+            TimerType::RepeatGiveUp { obligation } => write!(f, "RepeatGiveUp:{obligation:?}"),
             TimerType::TerminatingTimeout => f.write_str("TerminatingTimeout"),
             TimerType::ReferSubscriptionExpiry => f.write_str("ReferSubscriptionExpiry"),
             TimerType::ReferReinviteAnswer => f.write_str("ReferReinviteAnswer"),

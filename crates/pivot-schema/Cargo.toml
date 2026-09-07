@@ -1,0 +1,25 @@
+[package]
+name = "pivot-schema"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The wire contract for the replay PIVOT: serde structs + schemars JSON Schema for the pivot v3 scenario document, the correlation-rule file and the four record kinds a run bundle holds (run config, verdict, timing, per-leg recording), the canonical formatter (sorted keys, two-space indent, trailing newline; one line per JSON Lines record), the semantic linter (referential integrity, alt discriminability, the generator-subset gate), and the normative tier/body-handling data export that generators and interpreters consume instead of reverse-engineering it. Schema-only: no capture decoding, no replay machinery — `sip-message` is the single dependency, for the RFC 3261 §7.3.3 compact-form table."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The one SIP-header authority: the compact-form table the tier export
+# publishes is enumerated from it, never transcribed.
+sip-message = { path = "../sip-message" }
+rfc-rules = { path = "../rfc-rules" }
+# The one schedule every ladder rides (ADR-0029): the `schedules` export walks
+# each class to its give-up, never restating T1/T2.
+sip-retransmit = { path = "../sip-retransmit" }
+serde = { workspace = true }
+# `raw_value`: a flow node is dispatched on `op` from its raw text, so a
+# duplicate key is refused at every depth instead of collapsing to the last.
+serde_json = { workspace = true, features = ["raw_value"] }
+schemars = { workspace = true }
+clap = { version = "4", features = ["derive"] }

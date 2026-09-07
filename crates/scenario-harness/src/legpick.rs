@@ -230,7 +230,7 @@ mod tests {
     /// The labelled picker routes number-plan prefixes to their ROLE: the leg's
     /// on-wire key (`+041…`, `0491…` — a Business-Layer number rewrite) never
     /// contains the receiver's name, several prefixes select one leg, and the
-    /// longest matching prefix beats a nested sibling (the upstream transfer
+    /// longest matching prefix beats a nested sibling (a transfer
     /// target vs its `0650033033…` prefix).
     #[test]
     fn labelled_prefix_leg_picker_routes_number_prefixes_to_roles() {

@@ -24,7 +24,7 @@ use super::delta::AcceptedDeltaPolicy;
 use super::drive::drive_goal;
 use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, MediaState};
 use super::shared_endpoint::{EndpointHandle, Inbox};
-use super::goals::{GoalCursor, GoalStep};
+use super::goals::{GoalCursor, GoalStep, RequestKind};
 use super::ledger::ObligationKey;
 use super::observe::ReceptionObserver;
 use super::originate::{originate_reinvite, originate_update, wait_reinvite_retry, wait_update_retry};
@@ -63,6 +63,19 @@ pub(super) struct TimedAnswer {
     /// A forking callee's answer plan (`None` for the plain ring→answer): the
     /// `200` goes out under the winning fork's tag (+ optional loser late 200).
     pub(super) fork: Option<ForkAnswer>,
+}
+
+/// One ACK-to-2xx a declared delayed automatic is holding: its own `select!`
+/// arm sends it (idempotent, re-derivable — RFC 3261 §13.2.2.4) when `at`
+/// elapses and completes the re-INVITE bookkeeping the hold deferred. A 2xx
+/// retransmitted while the entry is pending is absorbed, never ACKed early.
+pub(super) struct HeldAck {
+    pub(super) at: Instant,
+    /// The held transaction — the originated in-dialog INVITE's CSeq.
+    pub(super) cseq: u32,
+    /// The ACK body resolved when the 2xx first arrived (byte-identical on the
+    /// eventual send, §13.2.2.4).
+    pub(super) sdp: Option<String>,
 }
 
 /// A non-2xx final we sent to an initial INVITE, awaiting its §17.1.1.3
@@ -221,6 +234,10 @@ pub struct ActorState<'c> {
     /// This actor's cursor into its leg's ordered response-fact log — the
     /// consumption point of the reception goals.
     pub(super) resp_seen: usize,
+    /// How many requests of each kind the script has consumed on this leg — the
+    /// anchor a parked request's CSeq rank is counted from
+    /// ([`super::select::select_parked`]).
+    pub(super) consumed_requests: HashMap<RequestKind, usize>,
     /// The ACK body resolved for each in-dialog INVITE 2xx we ACKed, keyed by
     /// CSeq (`None` = the bodyless ACK a complete offer/answer round takes) —
     /// the ACK to a RETRANSMITTED 2xx must be byte-identical (RFC 3261
@@ -234,9 +251,21 @@ pub struct ActorState<'c> {
     /// their scope-refresh clones number from one step sequence. `None` = stack
     /// numbering.
     pub(super) cseq_dev: Option<Arc<Mutex<CseqDeviation>>>,
-    /// A declared delayed automatic (ADR-0024 §6) wired onto this actor's
-    /// originated INVITE's ACK-to-2xx. `None` = the ACK fires immediately.
-    pub(super) delayed: Option<DelayedAutomatic>,
+    /// Declared delayed automatics (ADR-0024 §6) on this actor's ACK-to-2xx —
+    /// per-transaction scoped or unscoped ([`DelayedAutomatic::invite_ordinal`]).
+    /// Empty = every ACK fires immediately.
+    pub(super) delayed: Vec<DelayedAutomatic>,
+    /// Count of INVITE transactions this actor has ORIGINATED (establishing
+    /// INVITE, then each in-dialog INVITE, retries included) — the ordinal
+    /// space a scoped [`DelayedAutomatic`] names.
+    pub(super) originated_invites: usize,
+    /// Each outstanding originated re-INVITE's ordinal in that space, by CSeq —
+    /// how the 2xx ACK path resolves whether ITS automatic is held.
+    pub(super) reinvite_ordinals: HashMap<u32, usize>,
+    /// ACKs to re-INVITE 2xx currently HELD by a delayed automatic, fired by
+    /// their own reactor arm — so goal progress (the deviation's point: traffic
+    /// DURING the hold) never blocks on the hold.
+    pub(super) held_acks: Vec<HeldAck>,
     /// Whether this actor ORIGINATES the dialog — its first goal is an
     /// `Invite`/`InviteTemplate` (fallback: `Disposition::Caller`). Keys the
     /// §14.1 glare owner dwell and the caller attribution.
@@ -329,6 +358,7 @@ impl<'c> ActorState<'c> {
             parked_initial_consumed: None,
             bound: None,
             resp_seen: 0,
+            consumed_requests: HashMap::new(),
             reinvite_ack_bodies: HashMap::new(),
             automatics,
             cseq_dev: spec
@@ -336,6 +366,9 @@ impl<'c> ActorState<'c> {
                 .filter(|p| !p.is_identity())
                 .map(|p| Arc::new(Mutex::new(CseqDeviation::new(p)))),
             delayed: spec.delayed,
+            originated_invites: 0,
+            reinvite_ordinals: HashMap::new(),
+            held_acks: Vec::new(),
             originates,
             delta_policy,
             reception_observer,
@@ -352,6 +385,19 @@ impl<'c> ActorState<'c> {
         self.inbox = Some(inbox);
         self.endpoint = Some(handle);
         self
+    }
+
+    /// The declared hold for the `ordinal`-th INVITE transaction this actor
+    /// originates: a deviation scoped to that ordinal wins over an unscoped one
+    /// (which holds every ACK-to-2xx). `None` = the ACK fires promptly.
+    pub(super) fn ack_hold_for(&self, ordinal: usize) -> Option<Duration> {
+        let acks = || {
+            self.delayed.iter().filter(|d| d.which == sip_message::Automatic::AckTo2xx)
+        };
+        acks()
+            .find(|d| d.invite_ordinal == Some(ordinal))
+            .or_else(|| acks().find(|d| d.invite_ordinal.is_none()))
+            .map(|d| Duration::from_millis(d.delay_ms))
     }
 
     /// The SDP body to answer an INVITE/UPDATE with — this endpoint's answer (or
@@ -429,6 +475,12 @@ pub async fn run_actor(mut st: ActorState<'_>) -> Result<(), StepError> {
             _ = wait_update_retry(&st.update_retry), if st.update_retry.is_some() => {
                 st.update_retry = None;
                 originate_update(&mut st).await?;
+            }
+            // A held ACK-to-2xx (a declared delayed automatic) coming due: send
+            // it and complete the bookkeeping the hold deferred — the eventual
+            // send is THIS arm's obligation, so no call finishes un-ACKed.
+            _ = super::response::wait_held_ack(&st.held_acks), if !st.held_acks.is_empty() => {
+                super::response::fire_due_held_ack(&mut st).await;
             }
         }
         // `ledger_closed` keeps a leg with an outstanding acknowledgement (its

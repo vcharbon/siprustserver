@@ -71,6 +71,7 @@ impl ProxyCore {
                         target: self.advertised.clone(),
                         branch: String::new(),
                         upstream_branch,
+                        stickiness: None,
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );

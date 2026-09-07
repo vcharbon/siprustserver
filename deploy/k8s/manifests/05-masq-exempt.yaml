@@ -1,5 +1,5 @@
-# KIND-MASQ-AGENT exemption — the upstreamneed-041 fix as a FIRST-CLASS deploy
-# contract (replaces the upstreamsip overlay's post-deploy `vip_masq_exempt`
+# KIND-MASQ-AGENT exemption — the masquerade-drop fix as a FIRST-CLASS deploy
+# contract (replaces a downstream overlay's post-deploy `vip_masq_exempt`
 # iptables poke).
 #
 # kindnetd's KIND-MASQ-AGENT chain (nat POSTROUTING) exempts only the pod CIDR
@@ -9,7 +9,7 @@
 #     source gets SNAT'd to a node IP with the source PORT REMAPPED under load,
 #     and the proxy's VIP-sourced replies get re-SNAT'd VIP -> node-IP so they
 #     no longer match the peer's egress conntrack reply tuple -> silently
-#     dropped (~95% caller timeouts, upstreamneed-041).
+#     dropped (~95% caller timeouts).
 #   - proxy external-face traffic toward ${SIPEXT_SUBNET} must never be
 #     masqueraded either (defensive: the sipext bridge itself has docker
 #     masquerade disabled, but the node's own POSTROUTING still applies).

@@ -1,7 +1,7 @@
 //! Regression: an **orphan-reject (481) must not leak per-call dispatch state**.
 //!
 //! When an in-dialog request resolves to a callRef but hydrates **no** live call
-//! (`hydrate_from_replica` → None), the B2BUA answers `481 Call/Transaction Does
+//! (`router::materialise` refuses), the B2BUA answers `481 Call/Transaction Does
 //! Not Exist`. Before the fix that path `return`ed without tearing down the
 //! per-call state the dispatch had just created — the per-call queue + its idle
 //! worker task, the `creations` bump (→ `b2bua_active_calls`), and the per-call
@@ -76,7 +76,7 @@ async fn orphan_in_dialog_481_does_not_leak_dispatch_state() {
     assert_eq!(b2bua.lock_count(), 0, "no lock survives a clean teardown");
 
     // ── Fire ONE in-dialog BYE at each now-dead dialog. Each resolves to a gone
-    //    callRef → `hydrate_from_replica` misses → 481. Pre-fix each leaks a
+    //    callRef → `materialise` refuses → 481. Pre-fix each leaks a
     //    queue + lock + an unmatched creation. (Distinct callRefs, so they never
     //    contend on one queue.)
     for dialog in dead_dialogs.iter_mut() {

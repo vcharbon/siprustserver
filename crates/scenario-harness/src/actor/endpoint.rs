@@ -112,6 +112,11 @@ pub enum Disposition {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Automatics {
     pub answer_100_trying: bool,
+    /// Do NOT auto-retry a 491'd re-INVITE/UPDATE after the §14.1 dwell. A
+    /// capture replay sets it: the pivot scripts the captured retry itself, so
+    /// the automatic one would glare with it (two concurrent re-INVITEs the
+    /// capture never held).
+    pub suppress_491_retry: bool,
 }
 
 /// The offer/answer SDP an endpoint negotiates with.
@@ -256,9 +261,11 @@ pub struct ActorSpec {
     /// EVERY dialog-formation point of this actor with ONE shared step counter,
     /// so a scope-refresh clone never forks it. `None` = stack numbering.
     pub cseq: Option<CseqPattern>,
-    /// A declared delayed automatic (ADR-0024 §6): hold this actor's originated
-    /// INVITE's automatic ACK-to-2xx for a duration. `None` = fire immediately.
-    pub delayed: Option<DelayedAutomatic>,
+    /// Declared delayed automatics (ADR-0024 §6): each holds an ACK-to-2xx this
+    /// actor owes — scoped via [`DelayedAutomatic::invite_ordinal`] to ONE of
+    /// its originated INVITE transactions, or unscoped (every ACK-to-2xx).
+    /// Empty = every automatic fires immediately.
+    pub delayed: Vec<DelayedAutomatic>,
     /// The rule by which an inbound INITIAL INVITE arriving on this actor's
     /// endpoint is THIS actor's, when several actors share the endpoint (see
     /// [`crate::actor::shared_endpoint`]). `None` = the actor claims no inbound

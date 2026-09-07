@@ -6,9 +6,13 @@
 //! compose around this list — and in what order — is owned by
 //! [`super::compose`].
 
-use call::{ByeDisposition, CdrEventType, Direction, CallModelState, LegDisposition, LegState, TimerType};
+use call::{ByeDisposition, CdrEventType, Direction, CallModelState, LegDisposition, LegState, Obligation, TimerType};
+use call::helpers::RAckTokens;
+use sip_message::header::RAck;
+use sip_message::Method;
+use sip_txn::TimeoutKind;
 
-use crate::rules::model::{CORE_LAYER, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult};
+use crate::rules::model::{CORE_LAYER, Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay};
 
 use super::route_fold::{
     fold_lands_on_going_away_call, parse_header_updates, parse_route_fold,
@@ -30,6 +34,28 @@ fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
 
 fn no_transform() -> MessageTransform {
     MessageTransform::default()
+}
+
+/// What an un-ACKed 2xx's silence means (RFC 3261 §13.3.1.4): the peer that
+/// owed the ACK is gone, so the session ends — `BeginTermination` BYEs every
+/// confirmed leg and the → terminated invariant settles the obligations. The
+/// CDR names the leg that owed the ACK under the marker of the 2xx it never
+/// acknowledged: the call's own answer, or a relayed re-INVITE's. The verdict
+/// of both CORE give-up rules, and the framework's when a service rule
+/// re-authored the give-up without ending the session (ADR-0029 X5).
+pub(crate) fn unacked_2xx_give_up_actions(call: &RuleCall, obligation: &Obligation) -> Vec<RuleAction> {
+    let Obligation::AckOf2xx { leg, .. } = obligation else {
+        return vec![];
+    };
+    let (marker, reason) = if call.answers_initial_invite(obligation) {
+        ("ack_timeout", "ack-timeout")
+    } else {
+        ("reinvite_ack_timeout", "reinvite-ack-timeout")
+    };
+    vec![
+        RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: leg.clone(), status_code: None, reason: Some(marker.into()) },
+        RuleAction::BeginTermination { reason: Some(reason.into()) },
+    ]
 }
 
 /// Locate the leg carrying the still-pending relayed re-INVITE a CANCEL
@@ -76,23 +102,6 @@ fn keepalive_timeout(ctx: &RuleContext) -> i64 {
 fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call.features().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
 }
-fn ack_timeout(ctx: &RuleContext) -> i64 {
-    // RFC 3261 §13.3.1.4 — the a-leg 2xx-without-ACK give-up window (operator knob
-    // `B2BUA_ACK_TIMEOUT_SEC`, default 32 s = 64·T1). `<= 0` disables the watchdog.
-    ctx.config.ack_timeout_sec
-}
-/// First a-leg 2xx-retransmit interval (RFC 3261 T1 = 500 ms). The
-/// [`TimerType::AckRetransmit`](call::TimerType::AckRetransmit) timer re-arms at a
-/// fixed cadence (a faithful simplification of T1→T2 doubling — it retransmits no
-/// less often than RFC requires); [`TimerType::AckTimeout`](call::TimerType::AckTimeout)
-/// bounds the whole window. Seconds for the `ScheduleTimer` delay_sec contract is
-/// integer, so the cadence is kept as a whole second (1 s) to stay on the
-/// existing seconds-granularity timer plumbing without a finer-grained API.
-/// `pub(crate)` so the re-INVITE watchdog's first arm (in
-/// `actions::relay_response`) shares the one cadence constant with the re-arm
-/// rule below.
-pub(crate) const ACK_RETRANSMIT_SEC: i64 = 1;
-
 /// Shared body of the reaper-verdict rules (ADR-0020 X1): force every
 /// still-unresolved leg terminal (mirroring `is_fully_resolved`, like
 /// `terminating-safety-timeout`), record the reason on the CDR, and command
@@ -139,6 +148,23 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(vec![
                     RuleAction::ConfirmDialog { leg_id: b.clone() },
                     RuleAction::AckLeg { leg_id: b.clone(), body: Vec::new(), content_type: None },
+                    // The crossing 200 answered the callee's dialog and the
+                    // DestroyLeg below BYEs it: the CDR records both, so a
+                    // b-leg reading `Confirmed`/`Bridged` at a cancelled call's
+                    // terminal is explained by its own event stream rather than
+                    // ending at the `Cancel` the caller's CANCEL wrote.
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Answer,
+                        leg_id: b.clone(),
+                        status_code: Some(200),
+                        reason: Some("cancel_crossing".into()),
+                    },
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Bye,
+                        leg_id: b.clone(),
+                        status_code: None,
+                        reason: Some("cancel_crossing".into()),
+                    },
                     RuleAction::DestroyLeg { leg_id: b },
                 ])
             },
@@ -186,18 +212,21 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .filter(|ctx| ctx.response().map(|r| r.status() >= 300).unwrap_or(false)),
             |_ctx| ok(vec![]),
         ),
-        // Re-INVITE glare (RFC 3261 §14.1 / §3.1 of RFC 5407): an INVITE arrives
-        // on a dialog that already carries an in-flight inbound INVITE (a
-        // re-INVITE we relayed onto this dialog and have not yet seen a final
-        // response for) → reject the newcomer 491 Request Pending. More specific
-        // than `relay-reinvite` (no filter), so it wins on glare.
+        // Re-INVITE glare (RFC 3261 §14.1 / RFC 5407 §3.1): an INVITE arrives
+        // while an INVITE transaction is still open on the dialog it arrived on
+        // OR on the dialog its relay would be regenerated on — a relayed
+        // re-INVITE awaiting its final (§14.1 rule 1) or a 2xx we sent still
+        // awaiting its ACK (§14.1 rule 2; RFC 6026 *Accepted*) → reject the
+        // newcomer 491 Request Pending. The peer-dialog arm keeps the B2BUA
+        // from emitting its own overtaking INVITE toward a face whose prior
+        // INVITE transaction has not finished. More specific than
+        // `relay-reinvite` (no filter), so it wins on glare.
         rule(
             "reinvite-glare",
             &["relay-reinvite"],
             Match::request().method("INVITE").filter(|ctx| {
-                ctx.source_dialog()
-                    .map(|d| d.ext.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE")))
-                    .unwrap_or(false)
+                ctx.source_dialog().is_some_and(call::helpers::invite_transaction_open)
+                    || ctx.peer_dialog().is_some_and(call::helpers::invite_transaction_open)
             }),
             |_ctx| ok(vec![RuleAction::Respond { status: 491, reason: "Request Pending".into(), body: vec![], content_type: None }]),
         ),
@@ -309,30 +338,47 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // confirmed call is never fully reaped (leak) or times out late under
         // real-network packet loss. This is the b-leg / realign twin of the
         // a-leg `unacked-2xx-retransmit` (which retransmits the B2BUA's *own* 2xx
-        // to a silent caller). Delayed-offer answer bodies are not replayed on the
-        // re-ACK (the realign/reroute leak paths are all offer-in-INVITE, so their
-        // ACKs are bodyless); the branch + CSeq are what quiesce the answerer.
+        // to a silent caller). The re-ACK is THE ACK the 2xx triggered: `ack_leg`
+        // re-passes the retained datagram (`emitted_ack`) raw, so a delayed-offer
+        // answer rides every repeat; where none is retained yet it composes a
+        // bare ACK on the retained branch — branch + CSeq quiesce the answerer.
         //
         // Fires ONLY on a genuine retransmit that nothing else claims: the source
-        // dialog has a retained `ack_branch` (so its current INVITE's 2xx was
-        // already ACKed — the field is reset on every new INVITE txn), the
-        // response echoes that INVITE's CSeq, and no pending-relay snapshot is open
-        // (a first-time re-INVITE final is claimed by `relay-reinvite-response` /
-        // the realign-200 rules, whose `ack_branch` is still `None`). Absorbs
-        // (AckLeg only — no relay to the peer, which already saw the first final).
+        // dialog holds an `ack_branch` — its ACK client transaction, armed when the
+        // 2xx was taken (`confirm_dialog`) or minted by the first ACK, and reset on
+        // every new INVITE txn — the response echoes that INVITE's CSeq, and no
+        // pending-relay snapshot is open (a first-time re-INVITE final is claimed by
+        // `relay-reinvite-response` / the realign-200 rules, whose `ack_branch` is
+        // still `None`). A delayed-offer initial 2xx is the one shape whose copies
+        // draw nothing before the caller's ACK: no ACK is composable yet, so no
+        // branch exists to re-send. Everywhere else the obligation is one ACK per
+        // 2xx received, not one per lost ACK.
+        // Absorbs (AckLeg only — no relay to the peer, which already saw the first
+        // final).
+        //
+        // A leg the BYE already Terminated still owes it (RFC 5407 §2 + App. D:
+        // a Mortal UA keeps the invite usage for exactly this, and §13.2.2.4's
+        // "every time a retransmission arrives" does not lapse with the dialog).
         rule(
             "re-ack-retransmitted-2xx",
             &[],
             Match::response()
                 .method("INVITE")
                 .status_class(2)
-                .leg_states(&[LegState::Confirmed])
+                .leg_states(&[LegState::Confirmed, LegState::Terminated])
                 .filter(|ctx| {
                     let Some(d) = ctx.source_dialog() else { return false };
                     if d.ext.ack_branch.is_none() {
                         return false;
                     }
                     let Some(resp) = ctx.response() else { return false };
+                    // A retransmission is the SAME dialog's 2xx: every fork of one
+                    // INVITE answers on that INVITE's CSeq (§12.1.2), so the CSeq
+                    // alone would take a losing fork's late 2xx for a repeat and
+                    // ACK it with the WINNER's tag, at the winner's target.
+                    if resp.to().tag().unwrap_or_default() != d.sip.remote_tag {
+                        return false;
+                    }
                     let cseq = resp.cseq().seq() as i64;
                     crate::rules::relay::acked_invite_cseq(d) == Some(resp.cseq().seq())
                         && call::helpers::find_pending_request(d, cseq).is_none()
@@ -384,16 +430,23 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     RuleAction::ConfirmDialog { leg_id: b.clone() },
                     RuleAction::Merge { leg_a: a, leg_b: b.clone() },
                     RuleAction::RelayToPeer { transform: no_transform() },
+                ];
+                // RFC 3261 §13.2.2.4: the b-leg UAC core ACKs this 2xx on
+                // receipt, after the caller has its answer. Only a delayed-offer
+                // INVITE's ACK waits for the caller's (it carries the answer),
+                // and `ack_on_answer` is empty for it.
+                actions.extend(crate::rules::relay::ack_on_answer(ctx, &b));
+                actions.extend(vec![
                     RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
                     RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },
                     RuleAction::ScheduleTimer {
                         timer_type: TimerType::GlobalDuration,
-                        delay_sec: max_duration(ctx),
+                        delay: TimerDelay::secs(max_duration(ctx)),
                         leg_id: None,
                     },
                     RuleAction::ScheduleTimer {
                         timer_type: TimerType::Keepalive,
-                        delay_sec: keepalive_interval(ctx),
+                        delay: TimerDelay::secs(keepalive_interval(ctx)),
                         leg_id: None,
                     },
                     RuleAction::AddCdrEvent {
@@ -408,27 +461,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     RuleAction::MergeCallExt {
                         ext: crate::rules::relay::failure_headers_ext(None),
                     },
-                ];
-                // RFC 3261 §13.3.1.4: arm the a-leg 2xx-without-ACK watchdog. The
-                // a-leg INVITE *server* txn went `Completed` on this final, so the
-                // txn layer will NOT retransmit the 2xx proactively and at Timer H
-                // deletes the un-ACKed txn silently — without this an answered call
-                // whose caller never ACKs leaks until the 1 h GlobalDuration cap.
-                // `AckRetransmit` re-sends the stored 2xx each cadence; `AckTimeout`
-                // bounds the window and, on expiry, BYEs both legs. Both are
-                // cancelled by `relay-ack` when the a-leg ACK arrives.
-                if ack_timeout(ctx) > 0 {
-                    actions.push(RuleAction::ScheduleTimer {
-                        timer_type: TimerType::AckRetransmit,
-                        delay_sec: ACK_RETRANSMIT_SEC,
-                        leg_id: None,
-                    });
-                    actions.push(RuleAction::ScheduleTimer {
-                        timer_type: TimerType::AckTimeout,
-                        delay_sec: ack_timeout(ctx),
-                        leg_id: None,
-                    });
-                }
+                ]);
+                // RFC 3261 §13.3.1.4: the a-leg 2xx's ladder is armed where
+                // the a-facing 2xx is emitted (`actions::respond::send_a_leg_answer`),
+                // not here — every path that answers the caller owes it,
+                // including the service rules that replay this rule's actions.
                 ok(actions)
             },
         ),
@@ -462,22 +499,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             Match::response()
                 .methods(&["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE", "NOTIFY"])
                 .filter(|ctx| {
-                    let Some(resp) = ctx.response() else {
-                        return false;
-                    };
-                    if resp.status() < 300 {
-                        return false;
-                    }
-                    let cseq = resp.cseq().seq() as i64;
-                    // Fork-correct dialog pick (mirrors `relay_response`): the
-                    // responder's To-tag selects the exact source dialog, else
-                    // the confirmed/first one.
-                    let to_tag = resp.to().tag().map(str::to_owned).unwrap_or_default();
-                    ctx.source_leg()
-                        .and_then(|leg| call::helpers::find_dialog_by_to_tag(leg, &to_tag))
-                        .or_else(|| ctx.source_dialog())
-                        .and_then(|d| call::helpers::find_pending_request(d, cseq))
-                        .is_some()
+                    ctx.response().is_some_and(|r| r.status() >= 300) && ctx.answers_relayed_request()
                 }),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
@@ -731,10 +753,28 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
+        // A `481` denies what the request it answers named. For a re-INVITE,
+        // UPDATE, INFO, MESSAGE, REFER or the keepalive OPTIONS that is the
+        // DIALOG — the peer has forgotten the call (RFC 3261 §12.2.1.2: "the
+        // UAC SHOULD terminate the dialog") — so the call is torn down. For a
+        // PRACK it is one TRANSACTION (RFC 3262 §3: the ordinary answer to a
+        // PRACK matching no unacknowledged reliable provisional), for a CANCEL
+        // one transaction too (§9.2: it lost the race with the final), and for
+        // a NOTIFY one SUBSCRIPTION (RFC 6665 §4.4.1: the implicit REFER
+        // subscription is gone); the dialog those ride in stands, and this
+        // rule declines them. `relay-non-invite-failure` outranks it for a
+        // relayed transaction; `absorb-own-request-failure` takes the rest.
         rule(
             "handle-481",
             &[],
-            Match::response().status_code(481).call_state(CallModelState::Active),
+            Match::response()
+                .status_code(481)
+                .call_state(CallModelState::Active)
+                .filter(|ctx| {
+                    ctx.response().is_some_and(|r| {
+                        !matches!(r.cseq().method(), Method::Prack | Method::Cancel | Method::Notify)
+                    })
+                }),
             |ctx| {
                 let src = ctx.source_leg_id.to_string();
                 ok(vec![
@@ -743,6 +783,24 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     RuleAction::BeginTermination { reason: Some("481".into()) },
                 ])
             },
+        ),
+        // A non-2xx final to a request THIS STACK originated — its own PRACK
+        // toward a responder whose provisional the originator was never shown
+        // reliably, or a REFER-progress NOTIFY — leaves no pending-relay
+        // snapshot, and denies one transaction or one subscription, never the
+        // dialog: a PRACK's 481 is RFC 3262 §3's ordinary answer once the
+        // responder no longer holds that provisional unacknowledged. A refer
+        // NOTIFY's 481 is the transfer machine's (`transfer-notify-481` ends
+        // the subscription, RFC 6665 §4.4.1); this rule keeps the remainder,
+        // where nothing is owed and nothing moves. A RELAYED request's failure
+        // has its snapshot and is `relay-non-invite-failure`'s to relay.
+        rule(
+            "absorb-own-request-failure",
+            &[],
+            Match::response().methods(&["PRACK", "NOTIFY"]).filter(|ctx| {
+                ctx.response().is_some_and(|r| r.status() >= 300) && !ctx.answers_relayed_request()
+            }),
+            |_ctx| ok(vec![]),
         ),
         // ── absorption ──────────────────────────────────────────────────────
         rule(
@@ -822,43 +880,37 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
+        // A dialog whose BYE is in flight answers in-dialog requests 481 locally:
+        // BYE terminates the session (RFC 3261 §15.1.2, §12.2.2), so relaying would
+        // offer the request to a peer that already hung up. ACK passes (`relay-ack`),
+        // the BYE resolves via `resolve-bye-response`/`resolve-cross-bye`, CANCEL keeps
+        // txn semantics; the plain `Respond` leaves the teardown/CDR/reap path intact.
+        // OPTIONS is exempt: an in-dialog OPTIONS is a liveness probe answered like
+        // any request while the dialog exists (RFC 3261 §11.2) — the dialog dies
+        // only when the BYE transaction completes — so it keeps `relay-options`.
+        rule(
+            "post-bye-481",
+            &["reinvite-glare", "update-peer-unavailable"],
+            Match::request()
+                .methods(&["INVITE", "UPDATE", "PRACK", "INFO", "MESSAGE", "REFER", "NOTIFY"])
+                .call_state(CallModelState::Terminating)
+                .call_state(CallModelState::Terminated),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 481,
+                    reason: "Call/Transaction Does Not Exist".into(),
+                    body: vec![],
+                    content_type: None,
+                }])
+            },
+        ),
         // ── relay (broad) ───────────────────────────────────────────────────
-        rule("relay-ack", &[], Match::request().method("ACK"), |ctx| {
-            let mut actions = vec![RuleAction::RelayToPeer { transform: no_transform() }];
-            // The a-leg ACK (Direction::FromA) arrived → the caller confirmed the
-            // 2xx, so cancel the RFC 3261 §13.3.1.4 un-ACKed-2xx watchdog
-            // (retransmit cadence + give-up). A b-leg ACK (FromB) leaves them
-            // untouched — they only ever guard the a-leg dialog. Cancelling a timer
-            // that was never armed (ack_timeout disabled, or this is a b-leg ACK)
-            // is a harmless no-op in the driver.
-            if ctx.direction == Direction::FromA {
-                actions.push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::AckRetransmit) });
-                actions.push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::AckTimeout) });
-                // RFC 3261 §13.3.1.4 (in-dialog): if this a-leg ACK is for the
-                // pending re-INVITE 2xx (its CSeq matches the cached snapshot),
-                // quiesce the re-INVITE un-ACKed-2xx watchdog and discharge the
-                // obligation. CSeq-matched so a retransmitted *initial* ACK
-                // (a lower CSeq) cannot prematurely cancel it; at most one
-                // re-INVITE is ever pending (`reinvite-glare` 491s a second).
-                let acks_pending_reinvite = ctx
-                    .request()
-                    .map(|r| r.cseq().seq() as i64)
-                    .and_then(|c| {
-                        ctx.call
-                            .a_leg()
-                            .dialogs
-                            .first()
-                            .and_then(|d| d.ext.pending_reinvite_2xx.as_ref())
-                            .map(|p| p.cseq == c)
-                    })
-                    .unwrap_or(false);
-                if acks_pending_reinvite {
-                    actions.push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::ReinviteAckRetransmit) });
-                    actions.push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::ReinviteAckTimeout) });
-                    actions.push(RuleAction::ClearPendingReinvite2xx);
-                }
-            }
-            ok(actions)
+        // An ACK relays to the peer. The ladder it discharges — the a-leg's
+        // initial 2xx or a re-INVITE 2xx on either face (RFC 3261 §13.3.1.4)
+        // — the engine already retired before this rule ran, matched on the
+        // ACK's To-tag and CSeq (`ctx.discharged`); no rule cancels a ladder.
+        rule("relay-ack", &[], Match::request().method("ACK"), |_ctx| {
+            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
         rule("relay-bye", &[], Match::request().method("BYE").call_state(CallModelState::Active), |ctx| {
             // Pre-mark the BYE-sending leg `bye_received` (RFC 3261 §15.1.2) so the
@@ -874,8 +926,39 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-reinvite", &[], Match::request().method("INVITE"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
-        rule("relay-prack", &[], Match::request().method("PRACK"), |_| {
-            ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
+        // A PRACK is answered here where it names nothing this stack showed
+        // on its face (481, RFC 3262 §4) or carries no readable `RAck` (400,
+        // RFC 3261 §21.4.1); why this stack and not the far party is
+        // `call::helpers::unacknowledgeable_rack`. A SERVICE_LAYER rule
+        // matching PRACK would out-rank this and bypass the check; none does.
+        rule("relay-prack", &[], Match::request().method("PRACK"), |ctx| {
+            let relay = || ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]);
+            let refuse = |status: u16, reason: &str| {
+                ok(vec![RuleAction::Respond {
+                    status,
+                    reason: reason.into(),
+                    body: vec![],
+                    content_type: None,
+                }])
+            };
+            let Some(req) = ctx.request() else { return relay() };
+            let Some(rack) = req.header::<RAck>().and_then(Result::ok) else {
+                return if ctx.call.owns_rseq_numbering(ctx.source_leg_id) {
+                    refuse(400, "Bad Request")
+                } else {
+                    relay()
+                };
+            };
+            let tokens = RAckTokens {
+                rseq: i64::from(rack.rseq()),
+                cseq: i64::from(rack.seq()),
+                names_invite: *rack.method() == Method::Invite,
+            };
+            let a_tag = req.to().tag().unwrap_or_default();
+            if ctx.call.unacknowledgeable_rack(ctx.source_leg_id, a_tag, tokens) {
+                return refuse(481, "Call/Transaction Does Not Exist");
+            }
+            relay()
         }),
         rule("relay-options", &[], Match::request().method("OPTIONS"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
@@ -889,15 +972,15 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-message", &[], Match::request().method("MESSAGE"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
-        // Transparent in-dialog REFER relay: forward a
-        // REFER to the peer leg like INFO/MESSAGE. This is the FALLBACK for an
-        // *unsubscribed* transfer — with the `refer_transfer` seed PRESENT (default
-        // composition) `transfer-intercept-refer` (also CORE, registered earlier)
-        // out-ranks this by registration order and still intercepts; with the seed
-        // excluded (a downstream owns REFER), this relays it transparently. The
-        // 202/failure finals ride `relay-non-invite-200` / `relay-non-invite-failure`
-        // (REFER is in both method sets), and the transferee's implicit-subscription
-        // NOTIFYs ride `relay-notify` — the whole RFC 3515 exchange passes through.
+        // Transparent in-dialog REFER relay: forward a REFER to the peer leg
+        // like INFO/MESSAGE — the DEFAULT for any call whose routing decision did
+        // not activate local REFER processing (`features.refer`), Refer-To
+        // readable or not. On a call that did activate it, the `refer_transfer`
+        // seed (also CORE, registered earlier) out-ranks this and terminates the
+        // REFER instead. The 202/failure finals ride `relay-non-invite-200` /
+        // `relay-non-invite-failure` (REFER is in both method sets), and the
+        // transferee's implicit-subscription NOTIFYs ride `relay-notify` — the
+        // whole RFC 3515 exchange passes through.
         rule("relay-refer", &[], Match::request().method("REFER"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
@@ -989,24 +1072,40 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 l.leg_id != ctx.call.a_leg().leg_id
                     && matches!(l.state, LegState::Trying | LegState::Early)
             });
-            if timed_out_invite && pending_b_leg {
-                // A leg already going away (caller-CANCELed → `Cancelling`, or
-                // the whole call Terminating) makes no forward progress on its
-                // transaction timeout: no /calls/failure consult, no
-                // BeginTermination re-arm of the safety timer. The dead
-                // transaction resolves the leg locally (TerminateLeg clears
-                // `Cancelling`), letting the deferred termination finalize.
-                let going_away = ctx
-                    .source_leg()
-                    .is_some_and(|l| call::helpers::leg_is_going_away(ctx.call.state(), l));
-                if going_away {
+            // A leg already going away (caller-CANCELed → `Cancelling`, its own
+            // state `Terminated`, or the whole call `Terminating`) makes no
+            // forward progress on its transaction timeout: no /calls/failure
+            // consult, and above all no `BeginTermination`, which re-schedules
+            // `TerminatingTimeout` and slides the safety backstop a further
+            // `TERMINATING_TIMEOUT_MS` out on a call that is already tearing
+            // down. The dead transaction resolves the leg locally instead
+            // (`TerminateLeg` clears `Cancelling`), letting the deferred
+            // termination finalize on the deadline it already has.
+            if let Some(leg) = ctx.source_leg() {
+                if call::helpers::leg_is_going_away(ctx.call.state(), leg) {
+                    // What the leg was awaiting names the disposition: an
+                    // unanswered BYE times out, everything else ends cancelled.
+                    let bye_disposition = match leg.bye_disposition {
+                        Some(ByeDisposition::ByeSent) => ByeDisposition::ByeTimeout,
+                        _ => ByeDisposition::Cancelled,
+                    };
                     return ok(vec![RuleAction::TerminateLeg {
                         leg_id: ctx.source_leg_id.to_string(),
-                        bye_disposition: Some(ByeDisposition::Cancelled),
+                        bye_disposition: Some(bye_disposition),
                     }]);
                 }
+            }
+            if timed_out_invite && pending_b_leg {
                 if let Some(cbctx) = ctx.call.callback_context() {
                     let leg = ctx.source_leg_id.to_string();
+                    // Which timeout fired rides beside the origin so the
+                    // decision service can route a dead hop ("response":
+                    // nothing answered) apart from a callee that rang and
+                    // went silent ("transaction").
+                    let timeout_kind = match ctx.timeout_kind() {
+                        Some(TimeoutKind::Response) => "response",
+                        Some(TimeoutKind::Transaction) | None => "transaction",
+                    };
                     return ok(vec![
                         RuleAction::AddCdrEvent {
                             event_type: CdrEventType::Timeout,
@@ -1023,6 +1122,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                             request: serde_json::json!({
                                 "callback_context": cbctx,
                                 "origin": "transaction_timeout",
+                                "timeout_kind": timeout_kind,
                                 "failed_leg_id": leg,
                             }),
                         },
@@ -1040,13 +1140,19 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // caller-CANCELed leg still reads `Trying` while its disposition is
             // `Cancelling`, and a terminating call makes no forward progress —
             // no /calls/failure consult, no new final on the a-leg's completed
-            // transaction). Absorb and scrub so a later reclaim cannot re-fire
-            // it. Other legs' states are irrelevant to X's fire.
-            let spent = match ctx.source_leg() {
-                Some(leg) => leg.state == LegState::Confirmed
-                    || call::helpers::leg_is_going_away(ctx.call.state(), leg),
-                None => true,
-            };
+            // transaction) — or the CALLER is answered: the a-leg's INVITE
+            // transaction took its 2xx (from X or a sibling X's fire cannot
+            // see), so no final may be authored on it (RFC 3261 §17.2.1). A
+            // sibling b-leg's `Confirmed` alone is not that: an MRF media leg
+            // answers while the callee still rings, and its fire must stand.
+            // Absorb and scrub so a later reclaim cannot re-fire it.
+            let caller_answered = ctx.call.a_leg().state == LegState::Confirmed;
+            let spent = caller_answered
+                || match ctx.source_leg() {
+                    Some(leg) => leg.state == LegState::Confirmed
+                        || call::helpers::leg_is_going_away(ctx.call.state(), leg),
+                    None => true,
+                };
             if spent {
                 return ok(vec![RuleAction::cancel_timer(
                     &TimerType::NoAnswer,
@@ -1179,9 +1285,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             let mut actions = Vec::new();
             for leg_id in ctx.call.all_peered_legs() {
                 actions.push(RuleAction::SendRequestToLeg { leg_id: leg_id.clone(), method: "OPTIONS".into(), body: vec![], content_type: None, headers: vec![] });
-                actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::KeepaliveTimeout, delay_sec: keepalive_timeout(ctx), leg_id: Some(leg_id) });
+                actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::KeepaliveTimeout, delay: TimerDelay::secs(keepalive_timeout(ctx)), leg_id: Some(leg_id) });
             }
-            actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::Keepalive, delay_sec: keepalive_interval(ctx), leg_id: None });
+            actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::Keepalive, delay: TimerDelay::secs(keepalive_interval(ctx)), leg_id: None });
             ok(actions)
         }),
         rule("keepalive-timeout", &[], Match::timer().timer_type(TimerType::KeepaliveTimeout).call_state(CallModelState::Active), |ctx| {
@@ -1191,55 +1297,130 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 RuleAction::BeginTermination { reason: Some("keepalive-timeout".into()) },
             ])
         }),
-        // ── un-ACKed 2xx watchdog (RFC 3261 §13.3.1.4) ───────────────────────
-        // The caller's ACK has not yet arrived: retransmit the a-leg 2xx and
-        // re-arm the cadence. Cancelled by `relay-ack` on the a-leg ACK; bounded
-        // by `unacked-2xx-give-up` (the AckTimeout). Only fires while Active.
-        rule("unacked-2xx-retransmit", &[], Match::timer().timer_type(TimerType::AckRetransmit).call_state(CallModelState::Active), |_ctx| {
-            ok(vec![
-                RuleAction::RetransmitALeg2xx,
-                RuleAction::ScheduleTimer { timer_type: TimerType::AckRetransmit, delay_sec: ACK_RETRANSMIT_SEC, leg_id: None },
-            ])
-        }),
-        // The give-up deadline (64·T1) elapsed with no a-leg ACK: the caller is
-        // gone. Clear the just-created a-leg dialog with a BYE AND tear down the
-        // b-leg — without this the answered, bridged call leaks until the 1 h
-        // GlobalDuration cap. BeginTermination BYEs every confirmed leg (a-leg +
-        // b-leg) and the → terminated invariant settles the obligations; the
-        // companion AckRetransmit cadence is reclaimed by the terminal CancelAll.
-        rule("unacked-2xx-give-up", &[], Match::timer().timer_type(TimerType::AckTimeout).call_state(CallModelState::Active), |ctx| {
-            ok(vec![
-                RuleAction::CancelTimer { id: format!("{:?}", TimerType::AckRetransmit) },
-                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.call.a_leg().leg_id.clone(), status_code: None, reason: Some("ack_timeout".into()) },
-                RuleAction::BeginTermination { reason: Some("ack-timeout".into()) },
-            ])
-        }),
-        // ── un-ACKed re-INVITE 2xx watchdog (RFC 3261 §13.3.1.4, in-dialog) ──
-        // The re-INVITE twin of `unacked-2xx-retransmit`: the originator's ACK
-        // for the relayed re-INVITE 2xx has not yet arrived, so retransmit the
-        // cached a-leg re-INVITE 2xx (raw, byte-faithful) and re-arm the cadence.
-        // Cancelled by `relay-ack` on the CSeq-matched a-leg ACK; bounded by
-        // `unacked-reinvite-2xx-give-up`. Only fires while Active — a `Terminating`
-        // call's cadence stops here and the terminal CancelAll reclaims it.
-        rule("unacked-reinvite-2xx-retransmit", &[], Match::timer().timer_type(TimerType::ReinviteAckRetransmit).call_state(CallModelState::Active), |_ctx| {
-            ok(vec![
-                RuleAction::RetransmitALegReinvite2xx,
-                RuleAction::ScheduleTimer { timer_type: TimerType::ReinviteAckRetransmit, delay_sec: ACK_RETRANSMIT_SEC, leg_id: None },
-            ])
-        }),
-        // The re-INVITE 2xx give-up deadline (64·T1) elapsed with no a-leg ACK: a
-        // permanently-lost re-INVITE ACK must never retransmit forever. Cancel the
-        // cadence and tear the call down (BeginTermination BYEs both confirmed
-        // legs; the → terminated invariant settles the obligations). The re-INVITE
-        // twin of `unacked-2xx-give-up`.
-        rule("unacked-reinvite-2xx-give-up", &[], Match::timer().timer_type(TimerType::ReinviteAckTimeout).call_state(CallModelState::Active), |ctx| {
-            ok(vec![
-                RuleAction::CancelTimer { id: format!("{:?}", TimerType::ReinviteAckRetransmit) },
-                RuleAction::ClearPendingReinvite2xx,
-                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.call.a_leg().leg_id.clone(), status_code: None, reason: Some("reinvite_ack_timeout".into()) },
-                RuleAction::BeginTermination { reason: Some("reinvite-ack-timeout".into()) },
-            ])
-        }),
+        // ── ladder give-ups (ADR-0029 X4/X5) ─────────────────────────────────
+        // The one ladder event a rule sees is `RepeatGiveUp { obligation }`,
+        // its timers already scrubbed; these CORE rules say what the silence
+        // means, per obligation, and a service may re-author them. For a 2xx
+        // the re-authoring is of the teardown's shape only: the router ends a
+        // session the rules left Active (`settle_give_up`).
+        //
+        // RFC 3261 §13.3.1.4 — no ACK for the a-leg's INITIAL 2xx by the
+        // deadline: the caller is gone.
+        rule(
+            "unacked-2xx-give-up",
+            &[],
+            Match::timer().call_state(CallModelState::Active).filter(|ctx| {
+                matches!(
+                    ctx.timer_type(),
+                    Some(TimerType::RepeatGiveUp { obligation: o @ Obligation::AckOf2xx { .. } })
+                        if ctx.call.answers_initial_invite(o)
+                )
+            }),
+            |ctx| {
+                let Some(TimerType::RepeatGiveUp { obligation }) = ctx.timer_type() else {
+                    return ok(vec![]);
+                };
+                ok(unacked_2xx_give_up_actions(&ctx.call, obligation))
+            },
+        ),
+        // RFC 3261 §13.3.1.4 (in-dialog) — the give-up deadline elapsed with no
+        // originator ACK for a relayed **re-INVITE** 2xx: a permanently-lost
+        // re-INVITE ACK must never retransmit forever. The re-INVITE twin of
+        // `unacked-2xx-give-up`; the CDR names the leg that owed the ACK.
+        rule(
+            "unacked-reinvite-2xx-give-up",
+            &[],
+            Match::timer().call_state(CallModelState::Active).filter(|ctx| {
+                matches!(
+                    ctx.timer_type(),
+                    Some(TimerType::RepeatGiveUp { obligation: o @ Obligation::AckOf2xx { .. } })
+                        if !ctx.call.answers_initial_invite(o)
+                )
+            }),
+            |ctx| {
+                let Some(TimerType::RepeatGiveUp { obligation }) = ctx.timer_type() else {
+                    return ok(vec![]);
+                };
+                ok(unacked_2xx_give_up_actions(&ctx.call, obligation))
+            },
+        ),
+        // RFC 3262 §3 — the give-up deadline (64·T1) elapsed with no PRACK for
+        // the reliable provisional this stack showed: the PRACKing party is
+        // gone, or does not honour the `100rel` it advertised. §3 has the UAS
+        // reject the ORIGINAL REQUEST with a 5xx. On the initial INVITE that
+        // request is the call, so on a B2BUA the reject is a teardown:
+        // `BeginTermination` CANCELs the pending b-legs and the → terminated
+        // invariant settles the obligations and the CDR. On a relayed
+        // re-INVITE it is one in-dialog transaction: the 5xx answers it and
+        // the relay toward its target is CANCELled with it, while the
+        // established dialogs stay as they were (RFC 3261 §14.1). Ranked CORE
+        // so a service may re-author the status, as a downstream re-authors the
+        // setup-timeout final. Every retirement of the ladder (PRACK, the
+        // answered transaction's final, fork or call teardown) takes this
+        // deadline with the rungs, so a fire here means the silence really
+        // lasted 64·T1.
+        rule(
+            "unacked-reliable-1xx-give-up",
+            &[],
+            Match::timer().call_state(CallModelState::Active).filter(|ctx| {
+                matches!(
+                    ctx.timer_type(),
+                    Some(TimerType::RepeatGiveUp { obligation: Obligation::PrackOf { .. } })
+                )
+            }),
+            |ctx| {
+                let Some(TimerType::RepeatGiveUp { obligation: Obligation::PrackOf { a_tag, a_rseq } }) =
+                    ctx.timer_type()
+                else {
+                    return ok(vec![]);
+                };
+                // A re-INVITE's provisional: §3's reject answers that transaction
+                // alone, on both faces.
+                if let Some((leg_id, outbound_cseq)) = ctx.call.pending_invite_answered_by(a_tag, *a_rseq) {
+                    let silent = ctx
+                        .call
+                        .leg_shown(a_tag)
+                        .unwrap_or(ctx.call.a_leg().leg_id.as_str())
+                        .to_string();
+                    return ok(vec![
+                        RuleAction::AddCdrEvent {
+                            event_type: CdrEventType::Timeout,
+                            leg_id: silent,
+                            status_code: Some(504),
+                            reason: Some("prack_timeout".into()),
+                        },
+                        RuleAction::RejectPendingReinvite {
+                            leg_id,
+                            outbound_cseq,
+                            status: 504,
+                            reason: "Server Time-out".into(),
+                        },
+                    ]);
+                }
+                // Answered: the setup this provisional belonged to is over, and
+                // with it the number's life — absorb.
+                let answered = ctx.call.a_leg().state == LegState::Confirmed
+                    || ctx.call.b_legs().iter().any(|b| b.state == LegState::Confirmed);
+                if answered {
+                    return ok(vec![]);
+                }
+                ok(vec![
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Timeout,
+                        leg_id: ctx.call.a_leg().leg_id.clone(),
+                        status_code: Some(504),
+                        reason: Some("prack_timeout".into()),
+                    },
+                    RuleAction::RespondToALeg {
+                        status: 504,
+                        reason: "Server Time-out".into(),
+                        header_updates: vec![],
+                        contacts: vec![],
+                    },
+                    RuleAction::BeginTermination { reason: Some("prack-timeout".into()) },
+                ])
+            },
+        ),
         // ── call reaper verdicts (ADR-0020 X1/X6) ───────────────────────────
         // The reaper's sweep / panic-strike verdicts arrive as ordinary
         // InternalEvents and are handled by ordinary CORE rules — the single

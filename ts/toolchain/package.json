@@ -1,0 +1,27 @@
+{
+  "name": "@sip/toolchain",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Typed adapters over the Rust CLIs (sipflow, pivot-schema, replay). The only package that knows subprocesses exist.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0-rc.111",
+    "@sip/contracts": "workspace:*",
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

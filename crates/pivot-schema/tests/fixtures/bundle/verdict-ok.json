@@ -1,0 +1,60 @@
+{
+  "branches": {
+    "a1": "answered"
+  },
+  "case": "transparent-answered",
+  "completed_steps": [
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "s5",
+    "s6",
+    "s7"
+  ],
+  "informative": [
+    {
+      "class": "origin-platform-header",
+      "finding": {
+        "expected": "present",
+        "failure": "check-failed",
+        "field": "header:P-Charging-Vector",
+        "observed": "absent",
+        "op": "present",
+        "site": "flow[id:s3]"
+      }
+    }
+  ],
+  "lane": "upstream-fake",
+  "released_optional": [
+    "s4"
+  ],
+  "retransmits": [
+    {
+      "declared": 2,
+      "leg": "A",
+      "observed": 2,
+      "side": "send",
+      "step": "s6"
+    }
+  ],
+  "rfc_violations": [
+    {
+      "emitter": "uas1",
+      "gating": false,
+      "rule": "no-200-after-cancel",
+      "step": "s11"
+    }
+  ],
+  "status": "ok",
+  "timings": [
+    {
+      "declared_ms": 15000,
+      "delta_ms": 240,
+      "leg": "A",
+      "observed_ms": 15240,
+      "step": "s7",
+      "tolerance_ms": 700
+    }
+  ]
+}

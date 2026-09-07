@@ -31,7 +31,7 @@ fn cancel_crossing_plan(
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -55,7 +55,7 @@ fn cancel_crossing_plan(
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -157,7 +157,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -171,7 +171,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],

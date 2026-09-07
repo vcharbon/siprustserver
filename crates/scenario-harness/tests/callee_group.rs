@@ -1,5 +1,5 @@
 //! Multi-callee routing — several logical agents on ONE bound socket
-//! (upstreamneed-022).
+//!.
 //!
 //! A call-transfer fabric has three callee-side UAs (Bob the transferor, Charlie
 //! the transferee, David the reroute target) and the B2BUA egresses every callee

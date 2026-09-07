@@ -775,7 +775,7 @@ async fn loadgen_mux_prefix_picker_shares_callee_port() {
     assert_eq!(core.registry_size(), 0, "shared-socket slot leaked after receivers dropped");
 }
 
-/// upstreamneed-033 ask A: a HOP-ROUTED in-dialog/in-transaction request that
+/// A HOP-ROUTED in-dialog/in-transaction request that
 /// reaches the shared UAS socket with its R-URI user-part STRIPPED, its Via
 /// stack replaced by a single proxy Via, and (being an ACK) no correlation
 /// token — the exact wire shape the LB's synthesized §17.1.1.3 non-2xx ACK has
@@ -840,7 +840,7 @@ async fn loadgen_mux_tokenless_in_dialog_ack_demuxes_by_dialog() {
     assert_eq!(core.stats().orphan_stray.load(Relaxed), 0, "no stray orphan for the ACK");
 }
 
-/// upstreamneed-036 ask A: the mux inbox reports every demuxed datagram to an
+/// The mux inbox reports every demuxed datagram to an
 /// installed delivery tap AT DELIVERY — independent of whether the scenario
 /// body ever `recv`s it — and a datagram the per-call loss model discards is
 /// still reported, tagged as modeled loss. This is the seam the recording
@@ -941,7 +941,7 @@ async fn loadgen_mux_recorded_inbox_taps_delivery_and_modeled_loss() {
     assert!(ep2.try_recv().is_none(), "the loss model kept it out of the inbox");
 }
 
-/// upstreamneed-036 ask C (`noendpoint` sub-lane): a datagram that CORRELATES to
+/// The `noendpoint` sub-lane: a datagram that CORRELATES to
 /// the call (its token matches the slot) but that no logical endpoint accepts
 /// (picker miss) is a `NoRoute` orphan on the counters — and, on a recorded
 /// call, is still reported to the delivery tap tagged `Unrouted`, so the
@@ -1263,7 +1263,7 @@ async fn loadgen_refer_drop_without_retransmit_breaks_transfers() {
 ///
 /// 1. a REFER-progress NOTIFY dropped toward bob, whose re-emission landed
 ///    after the coroutine had already torn down → a §12.2.1.1 CSeq gap charged
-///    to the SUT (`rfc_audit_fail/rfc3261.cseqInDialogOrder` — a TEST-MODEL
+///    to the SUT (`rfc_audit_fail/cseq-in-dialog-order` — a TEST-MODEL
 ///    false positive: the SUT emitted a contiguous stream, the harness saw a
 ///    hole);
 /// 2. the SUT's realign ACK dropped, stranding the coroutine at
@@ -1453,7 +1453,7 @@ async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
 /// until the SUT's txn layer re-ACKs (§17.1.1.2). Drop the FIRST ACK the callee
 /// receives — the SUT's hop-ACK for the 486 — one-shot inbound. Without the
 /// loadgen non-2xx resender the reject is stranded as an unACKed final and the SUT
-/// is wrongly charged `unackedInviteNon2xxFinal`; with it the callee resends the
+/// is wrongly charged `unacked-invite-non-2xx-final`; with it the callee resends the
 /// 486, the SUT re-ACKs, and the audit stays clean.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "real-clock UDP — slow lane (just test-slow); avoids default-lane bind contention"]
@@ -1493,7 +1493,7 @@ async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
 /// The recovery (bob's Timer-G 486 retransmit, §17.2.1, + the SUT's §17.1.1.2
 /// re-ACK) fires at ~500 ms; without the reject-final ledger obligation the
 /// per-call verdict (and the RFC-audit snapshot) is computed before it lands —
-/// off-recording — and the audit falsely charges `unackedInviteNon2xxFinal`.
+/// off-recording — and the audit falsely charges `unacked-invite-non-2xx-final`.
 /// With the obligation, the settle barrier holds the verdict (Timer-H-bounded)
 /// until the hop-ACK is claimed, so the recording spans the recovery and the
 /// audit stays clean.
@@ -1539,7 +1539,7 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
     b2bua.assert_fully_reaped();
     assert_eq!(
         audit, 0,
-        "the abandoned reject leg's recovery landed OFF-recording — `unackedInviteNon2xxFinal` falsely charged:\n{}",
+        "the abandoned reject leg's recovery landed OFF-recording — `unacked-invite-non-2xx-final` falsely charged:\n{}",
         reporter.render_prometheus()
     );
     assert_eq!(
@@ -2002,7 +2002,7 @@ async fn loadgen_failing_check_reclassifies_to_check_fail() {
 
 /// A scenario that legitimately deviates from RFC 3261 §15.1: its BYE carries a
 /// Contact header (BYE terminates the dialog, target refresh is meaningless),
-/// deterministically tripping the non-advisory `rfc3261.noContactOnBye` audit
+/// deterministically tripping the non-advisory `no-contact-on-bye` audit
 /// rule on every sampled call.
 struct ByeWithContact;
 
@@ -2025,7 +2025,7 @@ impl ActorScenario for ByeWithContact {
                     // The deliberate deviation: a BYE carrying a `Contact` header
                     // (RFC 3261 §15.1 forbids it — the dialog is ending, target
                     // refresh is meaningless), which trips the non-advisory
-                    // `rfc3261.noContactOnBye` audit rule on every sampled call.
+                    // `no-contact-on-bye` audit rule on every sampled call.
                     Goal::new(
                         Barrier::AllConfirmed(&["alice", "bob"]),
                         GoalStep::ByeWith {
@@ -2047,7 +2047,7 @@ impl ActorScenario for ByeWithContact {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -2061,7 +2061,7 @@ impl ActorScenario for ByeWithContact {
                 feed: CtxFeed { on_ack_rx: Feed::new(None, Some("connected")), ..CtxFeed::default() },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -2086,7 +2086,7 @@ impl ActorScenario for ByeWithContact {
 /// (c) `allowViolations` waives a NAMED RFC audit rule per call. Baseline: the
 /// deviating scenario (BYE + Contact) reclassifies every sampled call to
 /// `rfc_audit_fail`. With a case carrying
-/// `allowViolations: ["rfc3261.noContactOnBye"]` the SAME flow stays OK —
+/// `allowViolations: ["no-contact-on-bye"]` the SAME flow stays OK —
 /// the load-surface analogue of `Harness::allow_violation`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_allow_violations_waives_named_rfc_rule() {
@@ -2111,7 +2111,7 @@ async fn loadgen_allow_violations_waives_named_rfc_rule() {
     // Waived: the case exempts exactly that rule → the same flow stays OK.
     let case = check_case(
         r#"{ "id": "waived-bye", "compatibleShapes": ["basic_call"],
-             "allowViolations": ["rfc3261.noContactOnBye"] }"#,
+             "allowViolations": ["no-contact-on-bye"] }"#,
     );
     let case = Arc::new(LoadCase::new(case, &Default::default(), 0x30B).unwrap());
     let waived = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
@@ -2144,12 +2144,12 @@ async fn loadgen_allow_violations_waives_named_rfc_rule() {
 
 /// The transfer target's full number form — the SUT copies it from the Refer-To
 /// onto the C-leg Request-URI, so it is ALL the wire carries: the receiving
-/// leg's role label never appears in any R-URI (the upstream Business-Layer
+/// leg's role label never appears in any R-URI (a Business-Layer
 /// number rewrite).
 const XFER_NUMBER: &str = "065003303312345";
 
 /// A blind transfer whose transfer leg is addressed by NUMBER, not by role —
-/// the demux problem of the upstream multi-callee-leg shapes (`nk_ct_refer`).
+/// the demux problem of a multi-callee-leg shape (`nk_ct_refer`).
 /// The body resolves the leg by its declared role (`callee_agent("xfer")`)
 /// while the wire carries only digits. Flow mirrors the shipped `refer`
 /// scenario (including its ordered merge-settle before the BYE).
@@ -2213,7 +2213,7 @@ impl ActorScenario for NumberPlanRefer {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // Bob rings then answers, then — established + a talk dwell — REFERs
@@ -2236,7 +2236,7 @@ impl ActorScenario for NumberPlanRefer {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // The number-addressed transfer target answers the transfer INVITE
@@ -2255,7 +2255,7 @@ impl ActorScenario for NumberPlanRefer {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -2366,7 +2366,7 @@ async fn settle_secs(secs: u64, cond: impl Fn() -> bool) {
 ///   - real OK calls happened (`ok > 100` — the body was actually driven);
 ///   - ZERO loss-induced NOK: no `timeout` (a drop retransmit failed to recover),
 ///     no `rfc_audit_fail` (a recovered drop that looked like a false
-///     `cseqInDialogOrder`/order charge — the exact anomaly the actor redesign
+///     `cseq-in-dialog-order`/order charge — the exact anomaly the actor redesign
 ///     eliminated), no `panic`.
 /// Plus, once over the whole soak: the loss model actually bit (`drops > 0`, so
 /// the run is not vacuous) and there is NO mux/SUT leak.
@@ -2506,7 +2506,7 @@ async fn loadgen_loss_soak_all_bodies_recover() {
 
     // What P4 + the actor executor GUARANTEE under loss (STRICT): `rfc_audit_fail
     // == 0` (a datagram RECOVERED by re-emission must never look like a false
-    // `cseqInDialogOrder`/order charge — the anomaly the actor redesign
+    // `cseq-in-dialog-order`/order charge — the anomaly the actor redesign
     // eliminated) and `panic == 0`. The `timeout` class is now ONLY host CPU
     // jitter overrunning the recv window — every SUT-side reliability gap the loss
     // soak used to bleed is fixed at the source:
@@ -2546,7 +2546,7 @@ async fn loadgen_loss_soak_all_bodies_recover() {
         // `loadgen_abandoned_reject_leg_recovery_lands_on_recording`.
         assert_eq!(
             audit, 0,
-            "body {id}: {audit} rfc_audit_fail under loss — a retransmitted INVITE final never re-ACKed (§13.2.2.4 2xx / §17.1.1.3 non-2xx → `unackedInviteNon2xxFinal`):\n{}",
+            "body {id}: {audit} rfc_audit_fail under loss — a retransmitted INVITE final never re-ACKed (§13.2.2.4 2xx / §17.1.1.3 non-2xx → `unacked-invite-non-2xx-final`):\n{}",
             reporter.render_prometheus()
         );
         assert_eq!(panic, 0, "body {id}: {panic} panic:\n{}", reporter.render_prometheus());

@@ -110,7 +110,7 @@ async fn actor_caller_retries_through_a_401_challenge() {
             feed: CtxFeed::default(),
         
             cseq: None,
-            delayed: None,
+            delayed: vec![],
             claim: None,
         }],
         plan: vec![phase("confirmed", alice_confirmed)],
@@ -166,7 +166,7 @@ async fn actor_caller_without_responder_classifies_401_unchanged() {
 
     // The challenger 401s and — since no retry follows — only reads the ACK
     // the reactor auto-sends (§17.1.1.3), so the reject transaction completes
-    // on the recorded trace (rfc3261.unackedInviteNon2xxFinal gates).
+    // on the recorded trace (unacked-invite-non-2xx-final gates).
     let bob_srv = bob.clone();
     let server = tokio::spawn(async move {
         let bob = bob_srv;
@@ -200,7 +200,7 @@ async fn actor_caller_without_responder_classifies_401_unchanged() {
             feed: CtxFeed::default(),
         
             cseq: None,
-            delayed: None,
+            delayed: vec![],
             claim: None,
         }],
         plan: vec![phase("confirmed", alice_confirmed)],

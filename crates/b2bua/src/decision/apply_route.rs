@@ -56,9 +56,14 @@ pub async fn apply_route(
         crate::trace::intake::force_enable(&mut call, invite_wire, now_ms);
     }
 
-    call.features = Some(route.features.clone());
+    // The withhold latch: a failover route that does not restate the withheld
+    // option tags cannot restore one — union the standing list into this
+    // route's declaration before it replaces the features (SetFeatures parity).
+    let mut features = route.features.clone();
+    features.latch_withheld_option_tags(call.features.as_ref());
+    call.features = Some(features);
     call.callback_context = route.callback_context.clone();
-    // Release-event subscription registry (upstreamneed-009): recorded like
+    // Release-event subscription registry: recorded like
     // `features`, so it replicates and survives takeover. The latest applied
     // route owns the set (a limiter-reject failover recursion re-enters here
     // and overwrites with ITS route's subscriptions — decision-response
@@ -202,6 +207,7 @@ pub async fn apply_route(
         &header_updates,
         &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
         call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
+        call.features.as_ref().and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]),
         None,
     ) {
         Ok(built) => built,
@@ -373,6 +379,7 @@ fn limiter_failure_request(call: &Call, limiter_id: &str) -> CallFailureRequest 
             status_code: None,
             limiter_id: Some(limiter_id.to_string()),
             failed_leg_id: None,
+            timeout_kind: None,
             sip_headers: Vec::new(),
         },
         snapshot: crate::decision::CallSnapshot::of(call),
@@ -475,6 +482,7 @@ fn defers_routing(call: &Call) -> bool {
 ///     originate PRACK + cache his SDP).
 ///   - `fake-prack` with NO alice SDP (delayed offer): strip `100rel` AND
 ///     disable the policy (fall back to plain relay; no half-active state).
+///
 /// `promote-pem-to-200` is owned by the PEM service (Slice 4) and is left alone.
 fn apply_supported_for_18x(
     draft: RequestDraft,
@@ -498,6 +506,11 @@ fn apply_supported_for_18x(
             .is_some_and(|ct| ct.is("application/sdp"));
 
     let keep_100rel = strategy == RelayFirst18xStrategy::FakePrack && alice_has_sdp;
+    let withheld = call
+        .features
+        .as_ref()
+        .and_then(|f| f.withhold_option_tags.clone())
+        .unwrap_or_default();
 
     // Self-disable on the fake-prack delayed-offer fallback.
     if strategy == RelayFirst18xStrategy::FakePrack && !alice_has_sdp {
@@ -506,14 +519,17 @@ fn apply_supported_for_18x(
         }
     }
 
-    // Compute the Supported value to forward to bob.
+    // Compute the Supported value to forward to bob. The call-scoped withhold
+    // (`features.withhold_option_tags`) outranks the strategy's own keep: a
+    // withheld tag never rides, whichever machine states the line.
     let supported_out = alice_supported.and_then(|offered| {
         let kept = if keep_100rel { offered } else { offered.without("100rel") };
+        let kept = withheld.iter().fold(kept, |set, tag| set.without(tag));
         (!kept.is_empty()).then_some(kept)
     });
 
-    // build_b_leg stamped a default Supported; this strategy path rewrites it
-    // from alice's value (or drops it entirely).
+    // This strategy path owns `Supported` on the b-leg INVITE: whatever
+    // build_b_leg stated is replaced by alice's value (or dropped entirely).
     let draft = draft.remove(&HeaderName::Supported);
     match supported_out {
         Some(val) => draft.push(val),

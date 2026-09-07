@@ -17,6 +17,7 @@ use super::ledger::{ObligationKey, ObligationKind};
 use super::observe::{observe_reception, ReceivedMessage};
 use super::react::{cancel_pending_initial, react_in_dialog_request};
 use super::runner::{ActorState, ParkedRequest};
+use super::select::{body_facts, select_parked};
 use super::state::{Observation, ResponseFact, SubflowState};
 use crate::StepError;
 use sip_message::{EmitOpts, MatchOpts, MessageTemplate, SipMessage, SipRequest};
@@ -42,8 +43,12 @@ pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
             st.obs
                 .with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, need_final, pin))
         }
-        Some(GoalStep::ObserveFinal { .. } | GoalStep::ExpectFinal { .. }) => {
-            st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, true, None))
+        Some(
+            GoalStep::ObserveFinal { cseq_method, .. }
+            | GoalStep::ExpectFinal { cseq_method, .. },
+        ) => {
+            let pin = cseq_method.as_deref();
+            st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, true, pin))
         }
         _ => true,
     }
@@ -299,13 +304,22 @@ pub(super) async fn drive_respond(
 }
 
 /// Consume this actor's next response facts up to (and including) the first
-/// FINAL on its leg — provisionals before it are passed over. The goal-arm
-/// gate guarantees one exists when a final-consuming goal fires.
-pub(super) fn consume_final_fact(st: &mut ActorState<'_>) -> Result<ResponseFact, StepError> {
+/// FINAL on its leg — provisionals before it are passed over. A `cseq_method`
+/// pin scopes the observation to ONE transaction: another transaction's final
+/// (a stack-automatic PRACK/CANCEL 2xx) is passed over, never returned as
+/// this goal's final. The goal-arm gate guarantees a consumable exists when a
+/// final-consuming goal fires.
+pub(super) fn consume_final_fact(
+    st: &mut ActorState<'_>,
+    cseq_method: Option<&str>,
+) -> Result<ResponseFact, StepError> {
     let facts: Vec<ResponseFact> =
         st.obs.with_snapshot(|s| s.leg(st.role).responses()[st.resp_seen..].to_vec());
+    let other_txn = |f: &ResponseFact| {
+        cseq_method.is_some_and(|m| !f.cseq_method.eq_ignore_ascii_case(m))
+    };
     for (i, f) in facts.iter().enumerate() {
-        if f.status >= 200 {
+        if f.status >= 200 && !other_txn(f) {
             st.resp_seen += i + 1;
             if let Some(resp) = f.typed.as_deref() {
                 observe_reception(st, ReceivedMessage::Response(resp));
@@ -409,7 +423,15 @@ pub(super) fn expect_response(
             });
         }
     }
-    check_body_expect(st.role, body, fact.body_len, fact.body_is_sdp)?;
+    confront_body_expect(
+        st,
+        body,
+        fact.body_len,
+        fact.body_is_sdp,
+        Some(fact.status),
+        &fact.cseq_method,
+        false,
+    );
     if let Some(tmpl) = matcher {
         let Some(resp) = &fact.typed else {
             return Err(StepError::UnexpectedKind {
@@ -427,16 +449,19 @@ pub(super) fn expect_response(
     Ok(())
 }
 
-/// `ExpectRequest`: consume the next parked request of this kind into the
-/// actor's bound transaction; the matcher runs at consume time on the parked
-/// transaction's request.
+/// `ExpectRequest`: consume ONE parked request of this kind into the actor's
+/// bound transaction; the matcher runs at consume time on the parked
+/// transaction's request. WHICH one is [`select_parked`] — the step's `rank`,
+/// then its [`BodyExpect`], then arrival order.
 pub(super) fn expect_request(
     st: &mut ActorState<'_>,
     kind: &RequestKind,
     body: BodyExpect,
+    rank: Option<usize>,
     matcher: Option<&MessageTemplate>,
 ) -> Result<(), StepError> {
-    let Some(idx) = st.parked.iter().position(|p| parked_matches(p, kind)) else {
+    let of_kind = st.consumed_requests.get(kind).copied().unwrap_or(0);
+    let Some(idx) = select_parked(&st.parked, kind, body, rank, of_kind) else {
         let detail = match (kind, st.parked_initial_consumed) {
             (RequestKind::Initial, Some(consumed)) => format!(
                 "ExpectRequest: the parked initial INVITE was consumed by an automatic ({consumed})"
@@ -446,15 +471,21 @@ pub(super) fn expect_request(
         return Err(StepError::UnexpectedKind { who: st.role.to_string(), detail });
     };
     let entry = st.parked.remove(idx);
+    *st.consumed_requests.entry(*kind).or_default() += 1;
     let req = entry.txn.request();
     // Same contract as `expect_response`: observed before the assertions.
     observe_reception(st, ReceivedMessage::Request(req));
-    let body_is_sdp = !req.body().is_empty()
-        && req
-            .header::<sip_message::header::MediaType>()
-            .and_then(Result::ok)
-            .is_some_and(|media| media.token().to_ascii_lowercase().contains("sdp"));
-    check_body_expect(st.role, body, req.body().len(), body_is_sdp)?;
+    let (body_len, body_is_sdp) = body_facts(req);
+    let method = req.method().as_str().to_string();
+    confront_body_expect(
+        st,
+        body,
+        body_len,
+        body_is_sdp,
+        None,
+        &method,
+        matches!(kind, RequestKind::Initial),
+    );
     if let Some(tmpl) = matcher {
         entry.txn.expect_template(tmpl, &MatchOpts::default()).map_err(|m| {
             StepError::UnexpectedKind {
@@ -473,24 +504,34 @@ pub(super) fn expect_request(
     Ok(())
 }
 
-/// Enforce a reception goal's [`BodyExpect`], fail-fast with a bounded detail.
-pub(super) fn check_body_expect(
-    role: &'static str,
+/// Confront a reception goal's [`BodyExpect`] with the body that arrived: a
+/// miss records [`Observation::BodyExpectMiss`] and the run continues — the
+/// miss is divergence DATA the report side classifies, never a step failure
+/// that would delete the case's other records. `status` is `Some` for a
+/// response (`method` its CSeq method), `None` for a request.
+pub(super) fn confront_body_expect(
+    st: &mut ActorState<'_>,
     body: BodyExpect,
     body_len: usize,
     body_is_sdp: bool,
-) -> Result<(), StepError> {
-    let ok = match body {
-        BodyExpect::Any => true,
-        BodyExpect::Present => body_len > 0,
-        BodyExpect::SdpPresent => body_is_sdp,
-    };
-    if ok {
-        Ok(())
-    } else {
-        Err(StepError::UnexpectedKind {
-            who: role.to_string(),
-            detail: format!("body expectation {body:?} not met (len {body_len})"),
-        })
+    status: Option<u16>,
+    method: &str,
+    initial: bool,
+) {
+    if body.satisfied_by(body_len, body_is_sdp) {
+        return;
     }
+    st.obs.record(
+        Observation::BodyExpectMiss {
+            leg: st.role,
+            step: st.goals.position(),
+            expected: body.label(),
+            body_len,
+            body_is_sdp,
+            status,
+            method: method.to_string(),
+            initial,
+        },
+        Instant::now(),
+    );
 }

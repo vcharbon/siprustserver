@@ -11,8 +11,9 @@
 #
 # Env: INTERVAL (s, default 5), OUT (log path).
 set -u
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INTERVAL="${INTERVAL:-5}"
-OUT="${OUT:-/home/vince/siprustserver/deploy/k8s/results/sysmon/sysmon-$(date +%Y%m%d-%H%M%S).log}"
+OUT="${OUT:-${REPO_ROOT}/deploy/k8s/results/sysmon/sysmon-$(date +%Y%m%d-%H%M%S).log}"
 mkdir -p "$(dirname "$OUT")"
 
 # total jiffies, idle jiffies from /proc/stat's aggregate cpu line.

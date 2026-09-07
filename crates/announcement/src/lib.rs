@@ -26,7 +26,7 @@
 //! 4. **@Announcing**, on a `<response>` **failure** (max-duration abort, no-answer,
 //!    a final-announcement reject): a reject-teardown — send the caller its 4xx on
 //!    the early dialog and terminate. The caller never got a 2xx, so this leans on
-//!    the generic layer keeping the a-leg `Early` (upstreamneed-027): the parked leg
+//!    the generic layer keeping the a-leg `Early`: the parked leg
 //!    is an unadopted `Media` leg, so core `confirm-dialog` does not confirm the
 //!    a-leg off its 200, and `BeginTermination` resolves the unanswered a-leg with
 //!    its 4xx (no BYE) — no service-side a-leg un-confirm repair.
@@ -172,11 +172,11 @@ fn mscml_reject_status(code: u16) -> (u16, &'static str) {
 /// caller only ever saw a `183` early dialog, so this is a reject-teardown: answer
 /// the INFO, send the caller its 4xx final, and terminate.
 ///
-/// This path is the whole point of upstreamneed-027. The parked media leg is an
+/// This path is the whole point of announce-then-reject. The parked media leg is an
 /// **unadopted** `Media` leg, so core `confirm-dialog` (correctly, since the fix)
 /// does NOT mark the a-leg `Confirmed` off its 200 — the a-leg is still `Early`.
 /// `BeginTermination` sees the 4xx among the turn's effects and resolves the
-/// a-leg (`ByeDisposition::None` + `Terminated`, upstreamneed-028) — no BYE toward
+/// a-leg (`ByeDisposition::None` + `Terminated`) — no BYE toward
 /// the caller, and no spurious ADR-0022 503 on a later turn (e.g. a crossing BYE
 /// from the media leg). No un-confirm repair (a wire-silent
 /// `TerminateLeg{Rejected}` on the a-leg) is needed — the generic layer keeps

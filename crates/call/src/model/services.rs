@@ -55,6 +55,11 @@ pub struct TransferState {
     /// a-realign re-INVITE can offer it back to A.
     #[serde(with = "serde_bytes")]
     pub c_initial_sdp: Option<Vec<u8>>,
+    /// The referrer answered a refer NOTIFY 481: the implicit subscription is
+    /// over (RFC 6665 §4.4.1) and no further NOTIFY leaves on it; the transfer
+    /// itself runs on to its own outcome.
+    #[serde(default)]
+    pub subscription_terminated: bool,
 }
 
 /// An internal release event the decision backend can subscribe to on a

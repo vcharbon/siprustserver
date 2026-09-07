@@ -11,7 +11,9 @@ use sip_message::draft::RequestDraft;
 use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope,
 };
-use sip_message::header::{self, ChargingVector, HeaderName, HeaderValue, MaxForwards, Uri};
+use sip_message::header::{
+    self, ChargingVector, HeaderName, HeaderValue, MaxForwards, TokenListHeader, Uri,
+};
 use sip_message::{Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
 
@@ -48,12 +50,14 @@ pub fn rebuild_a_leg_invite(snap: &call::ALegInviteSnapshot) -> SipRequest {
 }
 
 /// The transparency scope of the INVITE this B2BUA originates: a decision that
-/// replaces the originator's body (a held REFER offer, or none) takes the
-/// headers describing that body with it.
+/// replaces the originator's body states a body of the same role (a held REFER
+/// offer) or none at all, and the set describing the originator's body rides
+/// only as far as what replaced it still answers for.
 fn relay_scope(body_override: Option<&[u8]>) -> RelayScope {
     let scope = RelayScope::request();
     match body_override {
-        Some(_) => scope.without_source_body(),
+        Some(body) if body.is_empty() => scope.without_source_body(),
+        Some(_) => scope.with_replaced_body(),
         None => scope,
     }
 }
@@ -63,6 +67,51 @@ fn relay_scope(body_override: Option<&[u8]>) -> RelayScope {
 /// carry-through both honour so a withheld name has one meaning on every path.
 fn removed(header_updates: &[(String, Option<String>)], header: &HeaderName) -> bool {
     header_updates.iter().any(|(name, value)| value.is_none() && header.matches(name))
+}
+
+/// The call-scoped withhold on an originated leg's assembled headers: the
+/// `Supported` and `Require` sets are narrowed by `withheld`, and a set the
+/// narrowing empties drops its header — a withheld tag leaves ONE wire form on
+/// every leg the call originates, whichever mint assembled it. Lines not naming
+/// a withheld tag are left byte-identical.
+fn apply_withheld_option_tags(extra_headers: &mut Vec<MsgHeader>, withheld: &[String]) {
+    if withheld.is_empty() {
+        return;
+    }
+    narrow_token_set::<header::kind::Supported>(extra_headers, withheld);
+    narrow_token_set::<header::kind::Require>(extra_headers, withheld);
+}
+
+/// Narrow one token-set header's lines by `withheld`, in place: no line, or
+/// none naming a withheld tag, leaves the headers untouched; otherwise the
+/// lines collapse to ONE restated line without the withheld tags (several
+/// lines of a set-like header are one set, RFC 3261 §7.3.1), and a set left
+/// empty drops its header — an emptied set claims nothing, which is what an
+/// absent line already says (§20.37).
+fn narrow_token_set<K: header::kind::TokenKind>(
+    extra_headers: &mut Vec<MsgHeader>,
+    withheld: &[String],
+) {
+    let name = K::name();
+    let lines: Vec<TokenListHeader<K>> = extra_headers
+        .iter()
+        .filter(|h| name.matches(&h.name))
+        .filter_map(|h| TokenListHeader::<K>::parse(&h.value).ok())
+        .collect();
+    let Some(set) = TokenListHeader::combine(lines) else {
+        return;
+    };
+    if !withheld.iter().any(|tag| set.contains(tag)) {
+        return;
+    }
+    let kept = withheld.iter().fold(set, |s, tag| s.without(tag));
+    extra_headers.retain(|h| !name.matches(&h.name));
+    if !kept.is_empty() {
+        extra_headers.push(MsgHeader {
+            name: SipStr::owned(name.as_wire_str()),
+            value: SipStr::owned(&kept.to_wire()),
+        });
+    }
 }
 
 /// Clamp a decision-supplied ring deadline (s) for an originated leg under the
@@ -115,16 +164,22 @@ pub fn build_b_leg(
     // the transfer INVITE. The basic-B2BUA path passes `(None, &[])`.
     body_override: Option<&[u8]>,
     header_updates: &[(String, Option<String>)],
-    // Capability set advertised on this originated leg (`Allow`/`Supported`),
-    // resolved by the caller: declared, else relayed from the originator, else
-    // the stack set (`rules::capabilities`). A `header_updates` entry naming
-    // either header is more specific and wins.
+    // Capability set advertised on this originated leg
+    // (`Allow`/`Supported`/`Accept`), resolved by the caller: declared, else
+    // relayed from the originator, else no line (`rules::capabilities`). A
+    // `header_updates` entry naming a half is more specific and wins.
     capabilities: &CapabilitySet,
     // RFC 7315 §5.6 charging correlation. `Some` stamps an icid identifying
     // this leg's charging session; `None` stamps none. A vector the originator
     // sent is relayed either way and never re-minted — re-minting it breaks the
     // correlation between the two operators' records.
     charging: Option<&call::features::ChargingVectorFeature>,
+    // The call-scoped withhold (`features.withhold_option_tags`, latched across
+    // reroutes): option tags this call never offers a leg it originates. The
+    // assembled `Supported`/`Require` lines are narrowed by them, whatever
+    // source stated them — the withhold is the call's declared incapability
+    // and outranks every advertisement.
+    withheld_option_tags: &[String],
     // Leg role (ADR-0014/0016). `None` ⇒ [`LegKind::Destination`]. `adopted` is
     // left `None` so it derives from the kind (`is_adopted`): a `media` leg is
     // unadopted and thus gated out of the generic relay-to-peer fallback.
@@ -169,17 +224,14 @@ pub fn build_b_leg(
             v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
         })
         .collect();
-    // Advertise accepted methods + understood extensions on the originated b-leg
-    // INVITE so the callee can negotiate UPDATE/PRACK/etc. (RFC 3261 §20.5/§20.37,
-    // RFC 3311 §5) and the 2xx/re-INVITE audit (§13.2.1) sees a capability set.
-    // `Supported` is a *default*: when a `relayFirst18x` strategy is active,
-    // `apply_supported_for_18x` runs after this and rewrites it from alice's value
-    // (stripping `100rel` as the strategy dictates). Neither clobbers a
-    // caller-supplied value from `header_updates`.
-    for (name, value) in [
-        (HeaderName::Allow, capabilities.allow_text()),
-        (HeaderName::Supported, capabilities.supported_text()),
-    ] {
+    // Advertise this face's capability set on the originated b-leg INVITE (RFC
+    // 3261 §20.5/§20.37/§20.1) — the originator's own, relayed, unless the
+    // call declares one; a half nobody stated carries no line. When a
+    // `relayFirst18x` strategy is active, `apply_supported_for_18x` runs after
+    // this and rewrites `Supported` from alice's value (stripping `100rel` as
+    // the strategy dictates). Neither clobbers a caller-supplied value from
+    // `header_updates`.
+    for (name, value) in capabilities.lines() {
         if !extra_headers.iter().any(|h| name.matches(&h.name)) {
             extra_headers.push(MsgHeader {
                 name: SipStr::owned(name.as_wire_str()),
@@ -200,7 +252,9 @@ pub fn build_b_leg(
         {
             continue;
         }
-        if let Some(v) = a_leg_invite.raw_text(name.clone()).next() {
+        // Every line of the name rides: a set-like header the originator split
+        // over several lines is one set (RFC 3261 §7.3.1).
+        for v in a_leg_invite.raw_text(name.clone()) {
             extra_headers.push(MsgHeader { name: SipStr::owned(configured), value: v });
         }
     }
@@ -219,6 +273,11 @@ pub fn build_b_leg(
             extra_headers.push(header);
         }
     }
+
+    // The call-scoped withhold: narrow the assembled option-tag sets by the
+    // tags the call never offers an originated leg — after every source has
+    // stated its lines, so no later mint of the same names can resurface one.
+    apply_withheld_option_tags(&mut extra_headers, withheld_option_tags);
 
     // RFC 7315 §5.6: the element that STARTS a leg generates the identifier its
     // charging session is correlated on. One already on the message — relayed
@@ -290,7 +349,9 @@ pub fn build_b_leg(
             }),
             cached_sdp: None,
             pending_reinvite_2xx: None,
-            answered_advert: Vec::new(),
+            answered_2xx: None,
+            emitted_ack: None,
+            awaited_ack_cseq: None,
         },
     };
 

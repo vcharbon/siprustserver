@@ -144,12 +144,25 @@ pub enum Automatic {
 pub struct DelayedAutomatic {
     pub which: Automatic,
     pub delay_ms: u64,
+    /// The ONE transaction whose automatic is held: the 0-based ordinal in the
+    /// owning endpoint's originated-INVITE space — its establishing INVITE
+    /// first when it originates one, then each in-dialog INVITE, in
+    /// origination order (retries of a rejected offer included). `None` holds
+    /// EVERY ACK-to-2xx the endpoint owes.
+    pub invite_ordinal: Option<usize>,
 }
 
 impl DelayedAutomatic {
-    /// Hold the automatic ACK to a 2xx for `delay_ms` milliseconds.
+    /// Hold every automatic ACK to a 2xx for `delay_ms` milliseconds.
     pub fn ack_after(delay_ms: u64) -> Self {
-        DelayedAutomatic { which: Automatic::AckTo2xx, delay_ms }
+        DelayedAutomatic { which: Automatic::AckTo2xx, delay_ms, invite_ordinal: None }
+    }
+
+    /// Scope the hold to the endpoint's `ordinal`-th originated INVITE
+    /// transaction; every other automatic fires promptly.
+    pub fn on_invite(mut self, ordinal: usize) -> Self {
+        self.invite_ordinal = Some(ordinal);
+        self
     }
 }
 

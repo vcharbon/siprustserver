@@ -141,9 +141,9 @@ impl ProxyCore {
         // exists and the ACK flows.
         //
         // What a match means depends on who generated the final:
-        //  • relayed final (memo carries the INVITE's forward) — RELAY the ACK
-        //    on that exact hop, same target + same outbound branch, so the
-        //    downstream server transaction (§17.2.3) matches it and stops
+        //  • relayed final (memo names the node the final arrived from and the
+        //    INVITE's outbound branch) — RELAY the ACK there on that branch, so
+        //    the downstream server transaction (§17.2.3) matches it and stops
         //    retransmitting the final (Timer G). This transaction-less proxy
         //    never synthesizes the hop ACK itself (ADR-0022 X4; see
         //    `core/response.rs`) — the upstream's ACK is the only quench,
@@ -332,7 +332,24 @@ impl ProxyCore {
         if method == Method::Cancel {
             let key = call_id_cseq_key(call_id.as_str(), from.tag(), cseq.seq());
             if let Some(found) = self.cancel_lru.lookup(&key) {
-                target = Some(found.target);
+                // RFC 3261 §9.1 puts the CANCEL where the INVITE went, on the
+                // INVITE's branch. Behind this proxy the workers are ONE logical
+                // UAS, so a CANCEL toward a worker follows the INVITE's own
+                // stickiness cookie through the ladder every in-dialog request
+                // takes — the alive primary, else the backup holding the call's
+                // replica (ADR-0014) — while the branch is kept: the survivor's
+                // rebuilt INVITE transaction is keyed by it. A cookie the
+                // strategy cannot place (no usable backup) and a downstream
+                // target (a worker's own b-leg CANCEL) go where the INVITE went.
+                let mut cancel_target = found.target;
+                if let Some(cookie) = &found.stickiness {
+                    match self.strategy.decode_stickiness(cookie, msg).await {
+                        DecodeResult::Forward { target: t, .. }
+                        | DecodeResult::ForwardBackup { target: t, .. } => cancel_target = t,
+                        DecodeResult::Reject { .. } | DecodeResult::Unknown { .. } => {}
+                    }
+                }
+                target = Some(cancel_target);
                 reuse_branch = Some(found.branch);
                 decision = RoutingDecisionKind::Cancel;
                 self.metrics.record_cancel_lookup("hit");
@@ -345,8 +362,9 @@ impl ProxyCore {
                 }
             }
         } else if let Some(found) = ack_hop {
-            // The §17.1.1.3 ACK for a relayed non-2xx final: repeat the
-            // INVITE's forward exactly (see the hop-decision block above).
+            // The §17.1.1.3 ACK for a relayed non-2xx final: to the node the
+            // final arrived from, on the INVITE's outbound branch (see the
+            // hop-decision block above).
             target = Some(found.target);
             reuse_branch = Some(found.branch);
             decision = RoutingDecisionKind::AckHop;
@@ -435,7 +453,9 @@ impl ProxyCore {
         };
         draft = draft.set(mf_next);
 
-        draft = self.insert_double_record_route(draft, msg, req, src, &target, is_worker_outbound, &via_worker_addr);
+        let (routed, minted_cookie) =
+            self.insert_double_record_route(draft, msg, req, src, &target, is_worker_outbound, &via_worker_addr);
+        draft = routed;
 
         // ── §16.6 / §17.2.3 retransmission branch reuse ─────────────────────
         // A retransmission carries the SAME outbound top-Via branch the
@@ -472,6 +492,7 @@ impl ProxyCore {
                         target: target.clone(),
                         branch: our_branch.clone(),
                         upstream_branch: incoming_branch.clone().unwrap_or_default(),
+                        stickiness: None,
                     },
                     crate::cancel_lru::RTX_ENTRY_TTL_MS,
                 );
@@ -483,12 +504,22 @@ impl ProxyCore {
             // inside the downstream UA's INVITE window (B2BUA SetupTimeout /
             // sip-txn INVITE_INITIAL_TIMEOUT) — see cancel_lru.rs.
             let key = call_id_cseq_key(call_id.as_str(), from.tag(), cseq.seq());
+            // The cookie a CANCEL re-resolves a dead worker through: the one the
+            // re-INVITE carried in its Route, else the one this initial INVITE's
+            // Record-Route was minted with. A worker-outbound INVITE's cookie
+            // names the worker, not the downstream target, so it is not kept.
+            let stickiness = if is_worker_outbound {
+                None
+            } else {
+                stripped_route_params.clone().or(minted_cookie)
+            };
             self.cancel_lru.remember(
                 &key,
                 CancelEntry {
                     target: target.clone(),
                     branch: our_branch,
                     upstream_branch: incoming_branch.clone().unwrap_or_default(),
+                    stickiness,
                 },
                 crate::cancel_lru::INVITE_ENTRY_TTL_MS,
             );

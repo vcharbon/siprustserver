@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use layer_harness::time::now_ms;
+use sip_clock::Clock;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
@@ -92,6 +92,7 @@ impl SignalingNetwork for RealSignalingNetwork {
             queue.clone(),
             counters.clone(),
             opts.pre_ingress.clone(),
+            opts.clock.clone(),
         ));
 
         Ok(Box::new(RealEndpoint {
@@ -142,6 +143,7 @@ async fn recv_loop(
     queue: Arc<PacketQueue>,
     counters: Arc<Counters>,
     pre_ingress: Option<PreIngressHook>,
+    clock: Clock,
 ) {
     let mut buf = vec![0u8; RECV_BUF_LEN];
     // A `recv_from` error is treated as terminal (socket closed) and ends the
@@ -172,7 +174,7 @@ async fn recv_loop(
                 let pkt = UdpPacket {
                     raw,
                     src,
-                    arrival_ms: now_ms(),
+                    arrival_ms: clock.now_ms().max(0) as u64,
                 };
                 if queue.offer(pkt) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);

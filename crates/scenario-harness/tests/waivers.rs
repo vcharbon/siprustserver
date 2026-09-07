@@ -10,7 +10,7 @@ use sip_message::generators::InDialogMethod;
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
 
-const CSEQ_RULE: &str = "rfc3261.cseqInDialogOrder";
+const CSEQ_RULE: &str = "cseq-in-dialog-order";
 
 /// A complete alice→bob call in which alice commits a CSeq reuse (two INFOs on
 /// the same number) via the declared deviation, then tears down. Does NOT call

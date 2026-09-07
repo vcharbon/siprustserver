@@ -1,0 +1,105 @@
+{
+  "classes": [
+    {
+      "class": "invite-client",
+      "give_up_ms": 32000,
+      "rung_intervals_ms": [
+        500,
+        1000,
+        2000,
+        4000,
+        8000,
+        16000
+      ]
+    },
+    {
+      "class": "non-invite-client",
+      "give_up_ms": 32000,
+      "rung_intervals_ms": [
+        500,
+        1000,
+        2000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000
+      ]
+    },
+    {
+      "class": "non-invite-proceeding",
+      "give_up_ms": 32000,
+      "rung_intervals_ms": [
+        4000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000
+      ]
+    },
+    {
+      "class": "cancel-client",
+      "give_up_ms": 32000,
+      "rung_intervals_ms": [
+        500,
+        1000,
+        2000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000
+      ]
+    },
+    {
+      "class": "invite-server-final",
+      "give_up_ms": 32000,
+      "rung_intervals_ms": [
+        500,
+        1000,
+        2000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000
+      ]
+    },
+    {
+      "class": "final-2xx",
+      "give_up_ms": 32000,
+      "rung_intervals_ms": [
+        500,
+        1000,
+        2000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000,
+        4000
+      ]
+    },
+    {
+      "class": "reliable-provisional",
+      "give_up_ms": 32000,
+      "rung_intervals_ms": [
+        500,
+        1000,
+        2000,
+        4000,
+        8000,
+        16000
+      ]
+    }
+  ]
+}

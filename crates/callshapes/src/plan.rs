@@ -40,7 +40,7 @@ pub enum Establishment {
     /// The primary callee rejects with `reject` (no 18x) and the SUT fails
     /// over to `bob2`, which answers reliably (`winner_reliable`) or plainly.
     RerouteOnReject { reject: u16, winner_reliable: bool },
-    /// NO-ANSWER-triggered failover (upstreamneed-047): the primary callee rings
+    /// NO-ANSWER-triggered failover: the primary callee rings
     /// (`180`) then NEVER answers ([`Disposition::RingThenSilent`]); the SUT's
     /// own no-answer timer fires, CANCELs the primary (whose `487` settles the
     /// leg cleanly) and fails over to `bob2`, which answers reliably
@@ -373,7 +373,7 @@ impl ShapePlan {
             feed: b.caller_feed,
 
             cseq: None,
-            delayed: None,
+            delayed: vec![],
             claim: None,
         }];
         actors.extend(b.callees);
@@ -428,7 +428,7 @@ impl ShapePlan {
                     feed: connected_feed(self.stamp_connected),
 
                     cseq: None,
-                    delayed: None,
+                    delayed: vec![],
                     claim: None,
                 });
                 let est = established_pred("bob");
@@ -497,7 +497,7 @@ impl ShapePlan {
                     feed: CtxFeed::default(),
 
                     cseq: None,
-                    delayed: None,
+                    delayed: vec![],
                     claim: None,
                 });
                 b.callees.push(ActorSpec {
@@ -523,7 +523,7 @@ impl ShapePlan {
                     },
 
                     cseq: None,
-                    delayed: None,
+                    delayed: vec![],
                     claim: None,
                 });
                 b.winner = "bob2";
@@ -566,7 +566,7 @@ impl ShapePlan {
                     feed: connected_feed(self.stamp_connected),
 
                     cseq: None,
-                    delayed: None,
+                    delayed: vec![],
                     claim: None,
                 });
                 let est = established_pred("bob");
@@ -590,7 +590,7 @@ impl ShapePlan {
                     feed: CtxFeed::default(),
 
                     cseq: None,
-                    delayed: None,
+                    delayed: vec![],
                     claim: None,
                 });
                 b.phases
@@ -617,7 +617,7 @@ impl ShapePlan {
                     feed: CtxFeed::default(),
 
                     cseq: None,
-                    delayed: None,
+                    delayed: vec![],
                     claim: None,
                 });
                 b.phases.push(phase("ringing", ringing));
@@ -663,7 +663,7 @@ impl ShapePlan {
                     feed: CtxFeed::default(),
 
                     cseq: None,
-                    delayed: None,
+                    delayed: vec![],
                     claim: None,
                 });
                 b.phases.push(phase("ringing", ringing));
@@ -793,7 +793,7 @@ impl ShapePlan {
             },
 
             cseq: None,
-            delayed: None,
+            delayed: vec![],
             claim: None,
         });
 

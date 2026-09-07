@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crate::egress::{CalleeTarget, EgressPolicy};
-use b2bua::decision::test_adapter::{default_call_refer, route_to};
+use b2bua::decision::test_adapter::{default_call_refer, route_to_processing_refer};
 use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::B2buaSut;
 use scenario_harness::{Agent, Harness, RunReport};
@@ -269,7 +269,7 @@ impl InfraShape for FakeLsbcB2bua {
         let proxy = spawn_lb_proxy(&h, lb, "b2bua", b2bua_addr).await;
         let decision = ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
-                let mut r = route_to(&bob1.ip().to_string(), bob1.port());
+                let mut r = route_to_processing_refer(&bob1.ip().to_string(), bob1.port());
                 if bob2.is_some() {
                     r.callback_context = Some("reroute:bob2".into());
                 }
@@ -277,7 +277,7 @@ impl InfraShape for FakeLsbcB2bua {
             })
             .on_failure(move |req| match (req.callback_context.as_deref(), bob2) {
                 (Some("reroute:bob2"), Some(b2)) => {
-                    let mut r = route_to(&b2.ip().to_string(), b2.port());
+                    let mut r = route_to_processing_refer(&b2.ip().to_string(), b2.port());
                     // The b-leg egresses through the LB, which forwards by
                     // R-URI — it MUST name the rerouted callee, not bob1.
                     r.new_ruri = Some(format!("sip:{}:{}", b2.ip(), b2.port()));
@@ -287,8 +287,10 @@ impl InfraShape for FakeLsbcB2bua {
             })
             // REFER blind-transfer authorization (the `transfer-refer-media`
             // shape): the scripted `/call/refer` backend keyed on the REFER's
-            // `X-Api-Call.refer_key` / `destination`. Inert for the other shapes
-            // (they never REFER); composes with the failover wiring above.
+            // `X-Api-Call.refer_key` / `destination`, paired with the routes'
+            // `features.refer` arm above — without the arm this platform would
+            // relay the REFER on instead of consulting. Inert for the other
+            // shapes (they never REFER); composes with the failover wiring.
             .on_refer(default_call_refer)
             .build();
         let b2bua = B2buaSut::builder(Arc::new(decision))

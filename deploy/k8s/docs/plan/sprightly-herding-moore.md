@@ -32,7 +32,7 @@ So with `PROXY_LISTEN=VIP` the master sources forwarded SIP from the VIP, but
 *both* proxies keep health-probing workers from their own node IPs — the backup
 stays warm and its `/readyz` passes. This is exactly the active/passive keepalived
 VRRP VIP design sipjsserver uses
-(`/home/vince/sipjsserver/deploy/helm/sip-front-proxy/`), and it ports as
+(the `sipjsserver` repo, `deploy/helm/sip-front-proxy/`), and it ports as
 **manifests + a keepalived sidecar only**.
 
 ## 1. Front-proxy HA — keepalived VRRP VIP (active/passive)

@@ -83,9 +83,10 @@ async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
     // as the sibling §16.7 tests). The proxy is the SUT; waive the UA-side
     // rules: locally-minted tag, the 200-terminus that is never ACKed/BYE'd,
     // and Allow/Supported absence on the bare INVITE.
-    h.allow_violation("rfc3261.tags", "raw-injected responses; proxy is the SUT, not a real UA");
-    h.allow_violation("rfc3261.unackedInvite2xxByed", "bob's 200 is a fixture terminus; testing relay, not the dialog");
-    h.allow_violation("rfc3261.allowSupportedOnInvite", "bare INVITE fixture; proxy relay is the SUT");
+    h.allow_violation("mid-dialog-tags", "raw-injected responses; proxy is the SUT, not a real UA");
+    h.allow_violation("unacked-2xx-not-cleared", "bob's 200 is a fixture terminus; testing relay, not the dialog");
+    h.allow_violation("no-ack-to-dialog-creating-2xx", "alice never ACKs the fixture terminus; testing relay, not the dialog");
+    h.allow_violation("allow-supported-on-invite", "bare INVITE fixture; proxy relay is the SUT");
     let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;
@@ -141,10 +142,6 @@ async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
 #[tokio::test]
 async fn blackholed_worker_leaves_caller_silent_and_retransmits_reforward() {
     let h = Harness::with_transit_delay("stateless-blackhole", 0);
-    // The Timer-A retransmit is a byte-identical INVITE resend; the audit sees a
-    // second INVITE and flags Allow/Supported absence on the bare fixture. The
-    // proxy is the SUT (we assert on its forwarding + silence), so waive it.
-    h.allow_violation("rfc3261.allowSupportedOnInvite", "bare INVITE fixture; proxy forwarding is the SUT");
     let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
     let proxy = spawn_proxy(&h, "127.0.0.1:5080", strategy, registry).await;

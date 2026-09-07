@@ -12,8 +12,20 @@
 //!    no held context on either node, a CDR was written, and the limiter drained.
 //!
 //! The captures are built *inline* as the scenario drives (each `expect`/`receive`
-//! appends a token), so retransmits the scenario does not explicitly consume are
-//! not in the trace — the comparison is of logical observations, not raw wire.
+//! appends a token), so a datagram the scenario never pulls is not in the trace —
+//! the comparison is of logical observations, not raw wire.
+//!
+//! **The retransmission fold (ADR-0029 X3, X5).** A rung of a retransmission
+//! ladder is THE datagram it repeats, byte for byte — so a datagram byte-identical
+//! to the one a UA observed last from the same emitter is a rung, and folds into
+//! the token that datagram already produced. How many rungs a window held open
+//! collects (the failover injection advances the clock, the clean baseline does
+//! not) therefore never shows in the compare, while a "repeat" that differs by a
+//! byte — a takeover node re-composing a 2xx instead of re-sending it — is a
+//! token of its own and fails the cell. The fold is the oracle asserting X3, not
+//! tolerating retransmission.
+
+use sip_message::{SipRequest, SipResponse};
 
 /// What one UA logically observed during a scenario, in order. Tokens embed the
 /// dialog identifiers so the differential compare is strict on From/To/CSeq.
@@ -26,6 +38,9 @@ pub struct Observation {
     /// Final call disposition as recorded in the CDR end-event (the externally
     /// meaningful outcome: normal hangup / cancelled / etc.).
     pub disposition: String,
+    /// Per UA, the datagram its last token was read from — what a rung is
+    /// byte-identical to.
+    last_datagram: [Option<Vec<u8>>; 2],
 }
 
 impl Observation {
@@ -33,25 +48,44 @@ impl Observation {
         Self::default()
     }
 
-    /// Record a response a UA observed: `RESP <status> cseq=<n>/<method>`.
-    pub fn resp(&mut self, who: Who, status: u16, cseq: &str) {
-        self.push(who, format!("RESP {status} cseq={cseq}"));
+    /// Record a response a UA observed, as `RESP <status> cseq=<n>` — or fold
+    /// it into the previous token when it is that datagram again (a rung).
+    /// Returns whether a token was appended.
+    pub fn resp(&mut self, who: Who, r: &SipResponse) -> bool {
+        let tok = format!("RESP {} cseq={}", r.status(), r.cseq().seq());
+        self.observe(who, r.image(), tok)
     }
 
-    /// Record a request a UA observed, with its dialog identifiers:
-    /// `REQ <method> cseq=<n> from=<tag> to=<tag>`.
-    pub fn req(&mut self, who: Who, method: &str, cseq: &str, from_tag: &str, to_tag: &str) {
-        self.push(
-            who,
-            format!("REQ {method} cseq={cseq} from={from_tag} to={to_tag}"),
+    /// Record a request a UA observed with its dialog identifiers, as
+    /// `REQ <method> cseq=<n> from=<tag> to=<tag>` — or fold it into the
+    /// previous token when it is that datagram again (a rung). Returns whether
+    /// a token was appended.
+    pub fn req(&mut self, who: Who, r: &SipRequest) -> bool {
+        let tok = format!(
+            "REQ {} cseq={} from={} to={}",
+            r.method().as_str(),
+            r.cseq().seq(),
+            r.from().tag().unwrap_or_default(),
+            r.to().tag().unwrap_or_default(),
         );
+        self.observe(who, r.image(), tok)
     }
 
-    fn push(&mut self, who: Who, tok: String) {
+    /// The fold: a datagram byte-identical to the one `who` observed last is a
+    /// rung of that token's ladder and appends nothing; any other datagram —
+    /// including one that differs from its predecessor by a single byte — is
+    /// the next token.
+    fn observe(&mut self, who: Who, datagram: &[u8], tok: String) -> bool {
+        let last = &mut self.last_datagram[who as usize];
+        if last.as_deref() == Some(datagram) {
+            return false;
+        }
+        *last = Some(datagram.to_vec());
         match who {
             Who::Alice => self.alice.push(tok),
             Who::Bob => self.bob.push(tok),
         }
+        true
     }
 }
 
@@ -184,15 +218,82 @@ impl TeardownSweep {
 
 #[cfg(test)]
 mod tests {
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser};
+
     use super::*;
+
+    const INVITE: &str = "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK1\r\nFrom: <sip:alice@127.0.0.1>;tag=ftag\r\nTo: <sip:bob@127.0.0.1>\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+    const OK_200: &str = "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK1\r\nFrom: <sip:alice@127.0.0.1>;tag=ftag\r\nTo: <sip:bob@127.0.0.1>;tag=btag\r\nCall-ID: c1\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
+    const ACK: &str = "ACK sip:bob@127.0.0.1:5070 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK2\r\nFrom: <sip:alice@127.0.0.1>;tag=ftag\r\nTo: <sip:bob@127.0.0.1>;tag=btag\r\nCall-ID: c1\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n";
+
+    fn request(raw: &str) -> SipRequest {
+        match CustomParser::new().parse(raw.as_bytes()).expect("fixture parses") {
+            SipMessage::Request(r) => r,
+            SipMessage::Response(_) => panic!("fixture is a request"),
+        }
+    }
+
+    fn response(raw: &str) -> SipResponse {
+        match CustomParser::new().parse(raw.as_bytes()).expect("fixture parses") {
+            SipMessage::Response(r) => r,
+            SipMessage::Request(_) => panic!("fixture is a response"),
+        }
+    }
 
     fn sample() -> Observation {
         let mut o = Observation::new();
-        o.req(Who::Bob, "INVITE", "1", "ftag", "");
-        o.resp(Who::Alice, 200, "1");
-        o.req(Who::Bob, "ACK", "1", "ftag", "btag");
+        o.req(Who::Bob, &request(INVITE));
+        o.resp(Who::Alice, &response(OK_200));
+        o.req(Who::Bob, &request(ACK));
         o.disposition = "terminated".into();
         o
+    }
+
+    #[test]
+    fn tokens_carry_the_dialog_identifiers() {
+        let o = sample();
+        assert_eq!(o.alice, vec!["RESP 200 cseq=1"]);
+        assert_eq!(
+            o.bob,
+            vec!["REQ INVITE cseq=1 from=ftag to=", "REQ ACK cseq=1 from=ftag to=btag"]
+        );
+    }
+
+    /// The rungs of a ladder — the same datagram again, however many times —
+    /// fold into the token the original produced, so a window that held open
+    /// for more rungs compares equal to one that held open for fewer.
+    #[test]
+    fn byte_identical_rungs_fold_into_one_token() {
+        let mut variant = sample();
+        for _ in 0..4 {
+            assert!(!variant.resp(Who::Alice, &response(OK_200)), "a rung appends no token");
+        }
+        assert_eq!(variant.alice, sample().alice);
+        assert_transparent("self", &sample(), &variant, true); // does not panic
+    }
+
+    /// A repeat that is not the datagram — a re-composed 2xx — is a token of
+    /// its own and fails the compare against a baseline that saw one.
+    #[test]
+    #[should_panic(expected = "TRANSPARENCY VIOLATION on the caller")]
+    fn a_differing_repeat_is_its_own_token_and_fails_the_oracle() {
+        let mut variant = sample();
+        let recomposed = OK_200.replace("branch=z9hG4bK1", "branch=z9hG4bK1;rport");
+        assert!(variant.resp(Who::Alice, &response(&recomposed)), "a differing datagram is a token");
+        assert_eq!(variant.alice, vec!["RESP 200 cseq=1", "RESP 200 cseq=1"]);
+        assert_transparent("self", &sample(), &variant, true);
+    }
+
+    /// The fold reads one emitter's stream: the same datagram again after
+    /// another one intervened is not consecutive, and is a token.
+    #[test]
+    fn only_a_consecutive_repeat_folds() {
+        let mut o = Observation::new();
+        o.req(Who::Bob, &request(INVITE));
+        o.req(Who::Bob, &request(ACK));
+        assert!(o.req(Who::Bob, &request(INVITE)), "not consecutive, so not a rung");
+        assert_eq!(o.bob.len(), 3);
     }
 
     #[test]

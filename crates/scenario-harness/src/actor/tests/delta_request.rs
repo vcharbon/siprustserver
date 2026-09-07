@@ -47,6 +47,7 @@ fn bye_expecting_cancel_plan(
                             kind: RequestKind::Initial,
                             body: BodyExpect::SdpPresent,
                             matcher: None,
+                            rank: None,
                         },
                     ),
                     Goal::new(
@@ -65,6 +66,7 @@ fn bye_expecting_cancel_plan(
                             kind: RequestKind::InDialog(InDialogMethod::Bye),
                             body: BodyExpect::Any,
                             matcher: None,
+                            rank: None,
                         },
                     ),
                     Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
@@ -321,6 +323,7 @@ async fn forked_early_dialogs_decline_bye_for_cancel() {
                             kind: RequestKind::Initial,
                             body: BodyExpect::SdpPresent,
                             matcher: None,
+                            rank: None,
                         },
                     ),
                     // Two early dialogs on the ONE transaction (§12.1.2).
@@ -332,6 +335,7 @@ async fn forked_early_dialogs_decline_bye_for_cancel() {
                             kind: RequestKind::InDialog(InDialogMethod::Bye),
                             body: BodyExpect::Any,
                             matcher: None,
+                            rank: None,
                         },
                     ),
                     Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),

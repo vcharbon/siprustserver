@@ -6,7 +6,7 @@
 //! tests use [`EgressBinder`] (the historic `CallEnv::invite_plan` seam:
 //! `EgressPolicy::Transparent` route-by-config or the `X-Api-Call`
 //! pin/failover plan). A downstream platform binds the same intents its own
-//! way — e.g. upstreamsip maps a `FailoverOnReject` intent to a dialed number
+//! way — e.g. a dial-plan platform maps a `FailoverOnReject` intent to a dialed
 //! whose BL scenario is a reroute, by building an
 //! [`InvitePlan`](scenario_harness::realcall::InvitePlan) with its own R-URI
 //! user (and any extra headers) instead.
@@ -47,9 +47,9 @@ pub trait RouteBinder: Send + Sync {
     fn invite_plan(&self, env: &CallEnv<'_>, intent: RouteIntent<'_>) -> InvitePlan;
 
     /// The initial-INVITE plan for a **no-answer-triggered** failover
-    /// (`Establishment::RerouteOnNoAnswer`, upstreamneed-047): the SAME routing
+    /// (`Establishment::RerouteOnNoAnswer`): the SAME routing
     /// intent as the reject-triggered failover — a downstream platform whose
-    /// SUT arms its own ring timer from the dialed plan (e.g. the upstream BC_02
+    /// SUT arms its own ring timer from the dialed plan (e.g. a dedicated
     /// reroute number) needs no override, so the default just delegates to
     /// [`Self::invite_plan`] and IGNORES `no_answer_sec`. A binder whose SUT
     /// timer is client-armed (the upstream [`EgressBinder`]) overrides this to

@@ -1,93 +1,31 @@
-//! Structured (JSON) emit of the flow model — the machine-readable twin of
-//! the `sipflow` text presenter, for downstream extraction tooling that must
-//! not scrape human-oriented output. Serialization only; the model itself
-//! lives in [`crate::flow`].
+//! Build the emitted document from the flow model — the machine-readable twin
+//! of the `sipflow` text presenter, for downstream extraction tooling that must
+//! not scrape human-oriented output.
+//!
+//! Projection only. The document's shape is [`crate::doc`], its derived fields
+//! are [`crate::enrich`], and the model itself is [`crate::flow`].
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
-use serde_json::{json, Value};
 use sip_message::SipMessage;
 
+use crate::doc::{
+    CSeqJson, DecodeStatsJson, Evidence, FlowStatsJson, FlowsDoc, GroupJson, HopJson, InviteJson,
+    LegJson, MsgJson, Party, Payload, Summary,
+};
+use crate::enrich::{enrich, EnrichOptions};
 use crate::flow::{CallGroup, FlowLeg, FlowMsg, Flows, MatchEvidence};
 use crate::DecodeStats;
 
-/// Value of the top-level `"schema"` field. Bumped on any breaking change to
-/// the emitted shape; consumers reject versions they do not know.
-pub const EMIT_SCHEMA_VERSION: u32 = 4;
+pub use crate::doc::EMIT_SCHEMA_VERSION;
 
-/// Serialize the full flow model, plus the pcap decode counters, to JSON.
-///
-/// Emitted schema (version [`EMIT_SCHEMA_VERSION`]; stable contract for
-/// downstream consumers). Socket addresses are `"ip:port"` strings (IPv6
-/// bracketed); indices are 0-based; absent optionals are `null`:
-///
-/// ```text
-/// {
-///   "schema": 4,
-///   "decode_stats": { records, non_ip, non_udp, snap_truncated, datagrams,
-///                     fragments, reassembled, frag_dropped, tail_truncated },
-///   "flow_stats":   { sip_messages, capture_dups, parse_failed, non_sip },
-///   "legs": [ {                     // index = leg id referenced by groups
-///     "call_id": str,
-///     "hops": [ { "a": addr, "b": addr } ],   // ordered by first observation
-///     "invite": { "ruri", "from_uri", "to_uri", "cseq" } | null,
-///     "final_status": u16 | null,
-///     "saw_180": bool,
-///     "terminated_by": "BYE" | "CANCEL" | null,
-///     "tokens": [ str ],            // union over all token strategies
-///                                   // (sorted, deduped); which strategy a
-///                                   // value came from is in the evidence
-///     "msgs": [ {                   // capture-time order across all hops
-///       "ts_us": u64,
-///       "src": addr, "dst": addr,
-///       "hop": idx,                 // into "hops" — filter on it for the
-///                                   // per-hop stream (one vantage per leg)
-///       "retx": bool,
-///       // Exact wire bytes (header order and casing preserved) as EXACTLY
-///       // ONE of three forms, chosen purely from the bytes so re-emitting
-///       // a transformed model is deterministic. Reassembly: `raw` as UTF-8
-///       // | `head` as UTF-8 ++ decode(`body_b64`) | decode(`raw_b64`).
-///       "raw": str                  // whole payload is valid UTF-8 (JSON
-///                                   //   escaping is lossless) — the common,
-///                                   //   diff-readable case
-///       | "head": str,              // start line + headers + blank line …
-///         "body_b64": str           //   … and a binary body, standard base64
-///       | "raw_b64": str,           // even the head is not UTF-8 — opaque
-///       "summary": {
-///         "kind": "request" | "response",
-///         "method": str, "uri": str,          // request only
-///         "status": u16, "reason": str,       // response only
-///         "cseq": { "seq": u32, "method": str },
-///         "from": { "uri": str, "tag": str|null },
-///         "to":   { "uri": str, "tag": str|null }
-///       }
-///     } ]
-///   } ],
-///   "groups": [ {                   // ordered by first activity;
-///     "legs": [ idx ],              // every leg is in exactly one group
-///     "evidence": [                 // why members were joined (empty for a
-///                                   // single-leg group) — heuristic, meant
-///                                   // for human confirm/override downstream.
-///                                   // "strategy" = index into the correlation
-///                                   // pipeline that fired (first wins)
-///       { "kind": "shared_token", "strategy": idx, "token": str,
-///         "legs": [idx] }
-///       | { "kind": "shared_header_param", "strategy": idx, "header": str,
-///           "param": str, "token": str, "legs": [idx] }
-///       | { "kind": "derived_call_id", "strategy": idx,
-///           "legs": [base, derived], "prefix": str,
-///           "as_socket": addr,      // emitted the derived INVITE
-///           "peer_socket": addr,    // received it — the loopback peer
-///           "shared_hop": bool, "dt_us": u64 }
-///       | { "kind": "identity_adjacency", "strategy": idx,
-///           "legs": [idx, idx], "shared_host": ip, "dt_us": u64 }
-///     ]
-///   } ]
-/// }
-/// ```
-pub fn flows_to_json(flows: &Flows, decode: &DecodeStats) -> Value {
+/// Serialize the full flow model, plus the pcap decode counters, as an
+/// enriched document.
+pub fn flows_to_doc(
+    flows: &Flows,
+    decode: &DecodeStats,
+    opts: &EnrichOptions,
+) -> Result<FlowsDoc, String> {
     let all: Vec<usize> = (0..flows.groups.len()).collect();
-    flows_to_json_selected(flows, decode, &all)
+    flows_to_doc_selected(flows, decode, &all, opts)
 }
 
 /// The same document restricted to `groups` — the extraction phase, where a
@@ -99,168 +37,140 @@ pub fn flows_to_json(flows: &Flows, decode: &DecodeStats) -> Value {
 /// the emitted `legs`, and each emitted leg belongs to exactly one group.
 /// Decode and flow counters describe the WHOLE capture regardless — they
 /// report what was read, not what was selected.
-pub fn flows_to_json_selected(flows: &Flows, decode: &DecodeStats, groups: &[usize]) -> Value {
+pub fn flows_to_doc_selected(
+    flows: &Flows,
+    decode: &DecodeStats,
+    groups: &[usize],
+    opts: &EnrichOptions,
+) -> Result<FlowsDoc, String> {
     let mut keep: Vec<usize> =
         groups.iter().filter_map(|&g| flows.groups.get(g)).flat_map(|g| g.legs.clone()).collect();
     keep.sort_unstable();
     keep.dedup();
     let remap = |old: usize| keep.binary_search(&old).unwrap_or(usize::MAX);
 
-    json!({
-        "schema": EMIT_SCHEMA_VERSION,
-        "decode_stats": {
-            "records": decode.records,
-            "non_ip": decode.non_ip,
-            "non_udp": decode.non_udp,
-            "snap_truncated": decode.snap_truncated,
-            "datagrams": decode.datagrams,
-            "fragments": decode.fragments,
-            "reassembled": decode.reassembled,
-            "frag_dropped": decode.frag_dropped,
-            "tail_truncated": decode.tail_truncated,
+    let mut doc = FlowsDoc {
+        schema: EMIT_SCHEMA_VERSION,
+        emit_headers: Vec::new(),
+        decode_stats: DecodeStatsJson {
+            records: decode.records,
+            non_ip: decode.non_ip,
+            non_udp: decode.non_udp,
+            snap_truncated: decode.snap_truncated,
+            datagrams: decode.datagrams,
+            fragments: decode.fragments,
+            reassembled: decode.reassembled,
+            frag_dropped: decode.frag_dropped,
+            tail_truncated: decode.tail_truncated,
         },
-        "flow_stats": {
-            "sip_messages": flows.stats.sip_messages,
-            "capture_dups": flows.stats.capture_dups,
-            "parse_failed": flows.stats.parse_failed,
-            "non_sip": flows.stats.non_sip,
+        flow_stats: FlowStatsJson {
+            sip_messages: flows.stats.sip_messages,
+            capture_dups: flows.stats.capture_dups,
+            parse_failed: flows.stats.parse_failed,
+            non_sip: flows.stats.non_sip,
         },
-        "legs": keep.iter().map(|&l| leg_json(&flows.legs[l])).collect::<Vec<_>>(),
-        "groups": groups
+        legs: keep.iter().map(|&l| leg_json(&flows.legs[l])).collect(),
+        groups: groups
             .iter()
             .filter_map(|&g| flows.groups.get(g))
             .map(|g| group_json(g, &remap))
-            .collect::<Vec<_>>(),
-    })
+            .collect(),
+    };
+    enrich(&mut doc, opts)?;
+    Ok(doc)
 }
 
-fn leg_json(leg: &FlowLeg) -> Value {
-    json!({
-        "call_id": leg.call_id,
-        "hops": leg
+fn leg_json(leg: &FlowLeg) -> LegJson {
+    LegJson {
+        call_id: leg.call_id.clone(),
+        hops: leg
             .hops
             .iter()
-            .map(|h| json!({ "a": h.a.to_string(), "b": h.b.to_string() }))
-            .collect::<Vec<_>>(),
-        "invite": leg.invite.as_ref().map(|inv| json!({
-            "ruri": inv.ruri.text(),
-            "from_uri": inv.from_uri.text(),
-            "to_uri": inv.to_uri.text(),
-            "cseq": inv.cseq,
-        })),
-        "final_status": leg.final_status,
-        "saw_180": leg.saw_180,
-        "terminated_by": leg.terminated_by.map(|t| t.as_str()),
-        "tokens": leg.tokens().iter().collect::<Vec<_>>(),
-        "msgs": leg.msgs.iter().map(msg_json).collect::<Vec<_>>(),
-    })
-}
-
-fn msg_json(m: &FlowMsg) -> Value {
-    let mut v = json!({
-        "ts_us": m.ts_us,
-        "src": m.src.to_string(),
-        "dst": m.dst.to_string(),
-        "hop": m.hop,
-        "retx": m.retx,
-        "summary": summary_json(&m.parsed),
-    });
-    let obj = v.as_object_mut().expect("msg_json builds an object");
-    match payload_repr(m) {
-        Repr::Text(s) => {
-            obj.insert("raw".into(), Value::String(s.to_string()));
-        }
-        Repr::HeadBody { head, body } => {
-            obj.insert("head".into(), Value::String(head.to_string()));
-            obj.insert("body_b64".into(), Value::String(BASE64.encode(body)));
-        }
-        Repr::Opaque(raw) => {
-            obj.insert("raw_b64".into(), Value::String(BASE64.encode(raw)));
-        }
+            .map(|h| HopJson { a: h.a.to_string(), b: h.b.to_string() })
+            .collect(),
+        invite: leg.invite.as_ref().map(|inv| InviteJson {
+            ruri: inv.ruri.text().into_owned(),
+            from_uri: inv.from_uri.text().into_owned(),
+            to_uri: inv.to_uri.text().into_owned(),
+            cseq: inv.cseq,
+        }),
+        final_status: leg.final_status,
+        saw_180: leg.saw_180,
+        terminated_by: leg.terminated_by.map(|t| t.as_str().to_string()),
+        tokens: leg.tokens().iter().map(|t| (*t).to_string()).collect(),
+        msgs: leg.msgs.iter().map(msg_json).collect(),
     }
-    v
 }
 
-/// Payload representation, a pure function of the wire bytes (so re-emitting
-/// a transformed model is deterministic and idempotent downstream).
-enum Repr<'a> {
-    /// Whole payload is valid UTF-8.
-    Text(&'a str),
-    /// UTF-8 head (start line through the blank line), binary body.
-    HeadBody { head: &'a str, body: &'a [u8] },
-    /// Not splittable losslessly — emitted whole as base64.
-    Opaque(&'a [u8]),
-}
-
-fn payload_repr(m: &FlowMsg) -> Repr<'_> {
-    let raw = m.raw();
-    if let Ok(s) = std::str::from_utf8(raw) {
-        return Repr::Text(s);
-    }
+fn msg_json(m: &FlowMsg) -> MsgJson {
     let body = match &m.parsed {
-        SipMessage::Request(r) => &r.body(),
-        SipMessage::Response(r) => &r.body(),
+        SipMessage::Request(r) => r.body().clone(),
+        SipMessage::Response(r) => r.body().clone(),
     };
-    // The split is trusted only when the parsed body is literally the raw
-    // tail — reassembly (head ++ body) must reproduce the exact wire bytes.
-    let head_len = raw.len().saturating_sub(body.len());
-    if !body.is_empty() && raw[head_len..] == body[..] {
-        if let Ok(head) = std::str::from_utf8(&raw[..head_len]) {
-            return Repr::HeadBody { head, body };
-        }
-    }
-    Repr::Opaque(raw)
+    let mut json = MsgJson::new(
+        m.ts_us,
+        m.src.to_string(),
+        m.dst.to_string(),
+        m.hop,
+        Payload::of(m.raw(), &body),
+        summary_json(&m.parsed),
+    );
+    json.probe = m.probe;
+    json
 }
 
-fn summary_json(msg: &SipMessage) -> Value {
+fn summary_json(msg: &SipMessage) -> Summary {
     let (from, to, cseq) = (msg.from(), msg.to(), msg.cseq());
-    let from = json!({ "uri": from.uri().text(), "tag": from.tag() });
-    let to = json!({ "uri": to.uri().text(), "tag": to.tag() });
-    let cseq = json!({ "seq": cseq.seq(), "method": cseq.method().as_str() });
+    let from = Party { uri: from.uri().text().into_owned(), tag: from.tag().map(str::to_string) };
+    let to = Party { uri: to.uri().text().into_owned(), tag: to.tag().map(str::to_string) };
+    let cseq = CSeqJson { seq: cseq.seq(), method: cseq.method().as_str().to_string() };
     match msg {
-        SipMessage::Request(r) => json!({
-            "kind": "request",
-            "method": r.method().as_str(),
-            "uri": r.request_uri().text(),
-            "cseq": cseq,
-            "from": from,
-            "to": to,
-        }),
-        SipMessage::Response(r) => json!({
-            "kind": "response",
-            "status": r.status(),
-            "reason": r.reason(),
-            "cseq": cseq,
-            "from": from,
-            "to": to,
-        }),
+        SipMessage::Request(r) => Summary::Request {
+            method: r.method().as_str().to_string(),
+            uri: r.request_uri().text().into_owned(),
+            cseq,
+            from,
+            to,
+        },
+        SipMessage::Response(r) => Summary::Response {
+            status: r.status(),
+            reason: r.reason().to_string(),
+            cseq,
+            from,
+            to,
+        },
     }
 }
 
-fn group_json(group: &CallGroup, remap: &impl Fn(usize) -> usize) -> Value {
-    json!({
-        "legs": group.legs.iter().map(|&l| remap(l)).collect::<Vec<_>>(),
-        "evidence": group.evidence.iter().map(|e| evidence_json(e, remap)).collect::<Vec<_>>(),
-    })
+fn group_json(group: &CallGroup, remap: &impl Fn(usize) -> usize) -> GroupJson {
+    GroupJson {
+        legs: group.legs.iter().map(|&l| remap(l)).collect(),
+        evidence: group.evidence.iter().map(|e| evidence_json(e, remap)).collect(),
+        t0_us: 0,
+        initial_invite: None,
+        final_us: None,
+        final_status: None,
+        methods: Default::default(),
+    }
 }
 
-fn evidence_json(ev: &MatchEvidence, remap: &impl Fn(usize) -> usize) -> Value {
+fn evidence_json(ev: &MatchEvidence, remap: &impl Fn(usize) -> usize) -> Evidence {
     let legs_of = |ls: &[usize]| ls.iter().map(|&l| remap(l)).collect::<Vec<_>>();
     match ev {
-        MatchEvidence::SharedToken { strategy, token, legs } => json!({
-            "kind": "shared_token",
-            "strategy": strategy,
-            "token": token,
-            "legs": legs_of(legs),
-        }),
-        MatchEvidence::SharedHeaderParam { strategy, header, param, token, legs } => json!({
-            "kind": "shared_header_param",
-            "strategy": strategy,
-            "header": header,
-            "param": param,
-            "token": token,
-            "legs": legs_of(legs),
-        }),
+        MatchEvidence::SharedToken { strategy, token, legs } => Evidence::SharedToken {
+            strategy: *strategy,
+            token: token.clone(),
+            legs: legs_of(legs),
+        },
+        MatchEvidence::SharedHeaderParam { strategy, header, param, token, legs } => {
+            Evidence::SharedHeaderParam {
+                strategy: *strategy,
+                header: header.clone(),
+                param: param.clone(),
+                token: token.clone(),
+                legs: legs_of(legs),
+            }
+        }
         MatchEvidence::DerivedCallId {
             strategy,
             legs,
@@ -269,23 +179,23 @@ fn evidence_json(ev: &MatchEvidence, remap: &impl Fn(usize) -> usize) -> Value {
             peer_socket,
             shared_hop,
             dt_us,
-        } => json!({
-            "kind": "derived_call_id",
-            "strategy": strategy,
-            "legs": legs_of(legs),
-            "prefix": prefix,
-            "as_socket": as_socket.to_string(),
-            "peer_socket": peer_socket.to_string(),
-            "shared_hop": shared_hop,
-            "dt_us": dt_us,
-        }),
-        MatchEvidence::IdentityAdjacency { strategy, legs, shared_host, dt_us } => json!({
-            "kind": "identity_adjacency",
-            "strategy": strategy,
-            "legs": legs_of(legs),
-            "shared_host": shared_host.to_string(),
-            "dt_us": dt_us,
-        }),
+        } => Evidence::DerivedCallId {
+            strategy: *strategy,
+            legs: legs_of(legs),
+            prefix: prefix.clone(),
+            as_socket: as_socket.to_string(),
+            peer_socket: peer_socket.to_string(),
+            shared_hop: *shared_hop,
+            dt_us: *dt_us,
+        },
+        MatchEvidence::IdentityAdjacency { strategy, legs, shared_host, dt_us } => {
+            Evidence::IdentityAdjacency {
+                strategy: *strategy,
+                legs: legs_of(legs),
+                shared_host: shared_host.to_string(),
+                dt_us: *dt_us,
+            }
+        }
     }
 }
 
@@ -294,6 +204,7 @@ mod tests {
     use super::*;
     use crate::flow::{build_flows, FlowConfig};
     use crate::Datagram;
+    use serde_json::Value;
 
     fn dg(ts_us: u64, src: &str, dst: &str, payload: &[u8]) -> Datagram {
         Datagram {
@@ -301,7 +212,13 @@ mod tests {
             src: src.parse().unwrap(),
             dst: dst.parse().unwrap(),
             payload: payload.to_vec(),
+        probe: 0,
         }
+    }
+
+    fn json(flows: &Flows, decode: &DecodeStats) -> Value {
+        let doc = flows_to_doc(flows, decode, &EnrichOptions::default()).expect("model enriches");
+        serde_json::to_value(&doc).expect("document serializes")
     }
 
     fn sip_request(method: &str, call_id: &str, cseq: u32, branch: &str, extra: &str) -> Vec<u8> {
@@ -346,7 +263,7 @@ mod tests {
         ];
         let flows = build_flows(&datagrams, &FlowConfig::default());
         let decode = DecodeStats { records: 4, datagrams: 4, ..Default::default() };
-        let v = flows_to_json(&flows, &decode);
+        let v = json(&flows, &decode);
 
         assert_eq!(v["schema"], EMIT_SCHEMA_VERSION);
         assert_eq!(v["decode_stats"]["records"], 4);
@@ -382,7 +299,7 @@ mod tests {
         let inv = sip_request("INVITE", "emit-raw", 1, "b1", "X-Mixed-Case-HDR: kept\r\n");
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
         let flows = build_flows(&datagrams, &FlowConfig::default());
-        let v = flows_to_json(&flows, &DecodeStats::default());
+        let v = json(&flows, &DecodeStats::default());
         let m = &v["legs"][0]["msgs"][0];
         assert_eq!(m["raw"].as_str().unwrap().as_bytes(), &inv[..]);
         assert!(m.get("raw_b64").is_none());
@@ -416,12 +333,15 @@ mod tests {
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
         let flows = build_flows(&datagrams, &FlowConfig::default());
         assert_eq!(flows.stats.sip_messages, 1, "binary-body INVITE must parse");
-        let v = flows_to_json(&flows, &DecodeStats::default());
+        let v = json(&flows, &DecodeStats::default());
         let m = &v["legs"][0]["msgs"][0];
         let head = m["head"].as_str().unwrap();
         assert_eq!(head.as_bytes(), &inv[..head_len]);
         assert!(head.ends_with("\r\n\r\n"));
-        let decoded = BASE64.decode(m["body_b64"].as_str().unwrap()).unwrap();
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(m["body_b64"].as_str().unwrap())
+            .unwrap();
         assert_eq!(decoded, body);
         let mut reassembled = head.as_bytes().to_vec();
         reassembled.extend_from_slice(&decoded);
@@ -455,24 +375,24 @@ mod tests {
             dg(8_000, "10.0.1.5:5062", "10.0.1.9:5060", &adj_b),
         ];
         let flows = build_flows(&datagrams, &FlowConfig::default());
-        let v = flows_to_json(&flows, &DecodeStats::default());
+        let v = json(&flows, &DecodeStats::default());
         assert_eq!(v["groups"].as_array().unwrap().len(), 4);
         let tok_ev = &v["groups"][0]["evidence"][0];
         assert_eq!(tok_ev["kind"], "shared_token");
         assert_eq!(tok_ev["strategy"], 0);
         assert_eq!(tok_ev["token"], "call-9");
-        assert_eq!(tok_ev["legs"], json!([0, 1]));
+        assert_eq!(tok_ev["legs"], serde_json::json!([0, 1]));
         let icid_ev = &v["groups"][1]["evidence"][0];
         assert_eq!(icid_ev["kind"], "shared_header_param");
         assert_eq!(icid_ev["strategy"], 1);
         assert_eq!(icid_ev["header"], "P-Charging-Vector");
         assert_eq!(icid_ev["param"], "icid-value");
         assert_eq!(icid_ev["token"], "icid-7");
-        assert_eq!(icid_ev["legs"], json!([2, 3]));
+        assert_eq!(icid_ev["legs"], serde_json::json!([2, 3]));
         let der_ev = &v["groups"][2]["evidence"][0];
         assert_eq!(der_ev["kind"], "derived_call_id");
         assert_eq!(der_ev["strategy"], 2);
-        assert_eq!(der_ev["legs"], json!([4, 5]));
+        assert_eq!(der_ev["legs"], serde_json::json!([4, 5]));
         assert_eq!(der_ev["prefix"], "1-");
         assert_eq!(der_ev["as_socket"], "10.0.3.5:5060");
         assert_eq!(der_ev["peer_socket"], "10.0.3.1:5060");
@@ -481,20 +401,23 @@ mod tests {
         let adj_ev = &v["groups"][3]["evidence"][0];
         assert_eq!(adj_ev["kind"], "identity_adjacency");
         assert_eq!(adj_ev["strategy"], 3);
-        assert_eq!(adj_ev["legs"], json!([6, 7]));
+        assert_eq!(adj_ev["legs"], serde_json::json!([6, 7]));
         assert_eq!(adj_ev["shared_host"], "10.0.1.5");
         assert_eq!(adj_ev["dt_us"], 1_000);
     }
 
-    /// Serialized output parses back (serde round-trip) — the `--json` CLI
-    /// contract downstream tooling pipes into.
+    /// Serialized output parses back into the typed document — the `--json`
+    /// CLI contract downstream tooling reads.
     #[test]
     fn string_form_parses_back() {
         let inv = sip_request("INVITE", "emit-rt", 1, "b1", "");
         let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
         let flows = build_flows(&datagrams, &FlowConfig::default());
-        let s = flows_to_json(&flows, &DecodeStats::default()).to_string();
-        let back: Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(back["legs"][0]["call_id"], "emit-rt");
+        let s = serde_json::to_string(
+            &flows_to_doc(&flows, &DecodeStats::default(), &EnrichOptions::default()).unwrap(),
+        )
+        .unwrap();
+        let back: FlowsDoc = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.legs[0].call_id, "emit-rt");
     }
 }

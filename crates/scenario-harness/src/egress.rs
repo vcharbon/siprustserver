@@ -68,7 +68,7 @@ pub struct ApiCallRoute {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_ruri: Option<String>,
     /// Per-route no-answer ring timer (seconds) the SUT arms on the b-leg it
-    /// dials for this route — the NO-ANSWER failover trigger (upstreamneed-047):
+    /// dials for this route — the NO-ANSWER failover trigger:
     /// when the callee rings but never answers, the timer fires and the SUT
     /// walks to the next route exactly as it would on a reject final. `None`
     /// (the default, and the historic wire shape byte-for-byte) arms nothing —

@@ -34,7 +34,7 @@ pub(super) fn response(draft: ResponseDraft) -> SipResponse {
 /// from an address it already read, re-read here because the dialog layer keeps
 /// it as a string (ADR-0008). A caller that has the address as a value passes it
 /// through `opts.request_uri`, which is typed. Nothing routes a *decision* here:
-/// there an unreadable address is an `Err` (upstreamneed-055).
+/// there an unreadable address is an `Err`.
 pub(super) fn uri(text: &str) -> Uri {
     Uri::parse_or_verbatim(&SipStr::owned(text))
 }

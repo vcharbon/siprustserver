@@ -82,6 +82,26 @@ pub enum ReplayEntry {
     /// it arrived on, `detail` the message. Counted and recorded, never
     /// silently dropped.
     UnclaimedInbound { endpoint: String, detail: String },
+    /// A final RETRANSMITTED on `leg` while this endpoint holds its ACK (a
+    /// declared delayed automatic): the peer's own RFC 3261 §13.3.1.4
+    /// re-passing, absorbed by the scheduled ACK. ONE entry per retransmission,
+    /// so a run states how many the hold provoked instead of hiding them.
+    HeldFinalRetransmitted { leg: &'static str, status: u16, cseq_method: String, cseq: u32 },
+    /// A reception goal's [`super::goals::BodyExpect`] was not met by the
+    /// message that otherwise satisfied the goal: divergence DATA, never a step
+    /// failure — the run continues and the report side classifies the record.
+    /// `status` is `Some` for a response (with `method` its CSeq method), `None`
+    /// for a request (`method` the request's own, `initial` its dialog axis).
+    BodyExpectMiss {
+        leg: &'static str,
+        step: usize,
+        expected: &'static str,
+        body_len: usize,
+        body_is_sdp: bool,
+        status: Option<u16>,
+        method: String,
+        initial: bool,
+    },
 }
 
 /// One endpoint leg's observed dialog lifecycle. Ordered so `max` gives the
@@ -355,6 +375,22 @@ pub enum Observation {
     /// A shared endpoint's demux found no actor for an inbound (see
     /// [`ReplayEntry::UnclaimedInbound`]).
     UnclaimedInbound { endpoint: String, detail: String },
+    /// A final the peer retransmitted while `leg` held its ACK for it (see
+    /// [`ReplayEntry::HeldFinalRetransmitted`]).
+    HeldFinalRetransmitted { leg: &'static str, status: u16, cseq_method: String, cseq: u32 },
+    /// A reception goal's body expectation missed (see
+    /// [`ReplayEntry::BodyExpectMiss`]) — appended to the replay record so the
+    /// miss is never silent.
+    BodyExpectMiss {
+        leg: &'static str,
+        step: usize,
+        expected: &'static str,
+        body_len: usize,
+        body_is_sdp: bool,
+        status: Option<u16>,
+        method: String,
+        initial: bool,
+    },
 }
 
 impl StateInner {
@@ -402,6 +438,35 @@ impl StateInner {
             }
             Observation::UnclaimedInbound { endpoint, detail } => {
                 self.replay.push(ReplayEntry::UnclaimedInbound { endpoint, detail });
+            }
+            Observation::HeldFinalRetransmitted { leg, status, cseq_method, cseq } => {
+                self.replay.push(ReplayEntry::HeldFinalRetransmitted {
+                    leg,
+                    status,
+                    cseq_method,
+                    cseq,
+                });
+            }
+            Observation::BodyExpectMiss {
+                leg,
+                step,
+                expected,
+                body_len,
+                body_is_sdp,
+                status,
+                method,
+                initial,
+            } => {
+                self.replay.push(ReplayEntry::BodyExpectMiss {
+                    leg,
+                    step,
+                    expected,
+                    body_len,
+                    body_is_sdp,
+                    status,
+                    method,
+                    initial,
+                });
             }
         }
     }

@@ -11,14 +11,15 @@
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
 use call::{CdrEventType, Direction, LegDisposition, LegState, PromotePemState, TimerType};
 use sip_message::draft::Entry;
-use sip_message::header::{HeaderName, RSeq, Require};
+use sip_message::header::HeaderName;
 use sip_message::sdp_media_equivalent;
 use sip_message::{SipHeader, SipResponse};
 
 use super::capabilities::{self, Face};
+use super::relay;
 use super::model::{
     Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
-    SERVICE_LAYER,
+    TimerDelay, SERVICE_LAYER,
 };
 
 fn rule(
@@ -32,15 +33,6 @@ fn rule(
 
 fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
     Some(RuleHandleResult::new(actions))
-}
-
-/// RFC 3262: a reliable 1xx carries `Require: 100rel` and a numeric `RSeq`.
-fn reliable_rseq(resp: &SipResponse) -> Option<i64> {
-    let requires = resp.header::<Require>()?.ok()?;
-    if !requires.contains("100rel") {
-        return None;
-    }
-    Some(resp.header::<RSeq>()?.ok()?.value() as i64)
 }
 
 fn has_p_early_media(resp: &SipResponse) -> bool {
@@ -67,11 +59,12 @@ fn window_open(ctx: &RuleContext) -> bool {
     ctx.call.promote_pem_window_open()
 }
 
-/// Allow + Supported header updates for messages we mint toward Alice: the
-/// originator face's set (declared, else Bob's own relayed advertisement, else
-/// the stack set) narrowed by `100rel` — the one claim this service must never
-/// make, since Alice saw no reliable provisional from us. Every mint point of
-/// the call therefore advertises the same set but for that narrowing.
+/// Allow + Supported + Accept header updates for messages we mint toward
+/// Alice: the originator face's set (declared, else Bob's own relayed
+/// advertisement, else no line) narrowed by `100rel` — the one claim this
+/// service must never make, since Alice saw no reliable provisional from us.
+/// Every mint point of the call therefore advertises the same set but for
+/// that narrowing.
 fn a_facing_advert(features: Option<&FeatureActivations>, received: &[SipHeader]) -> Vec<Entry> {
     capabilities::relaying_in(features, Face::Originator, received)
         .without_option_tag("100rel")
@@ -104,7 +97,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let resp = ctx.response()?;
                 let b_tag = resp.to().tag().unwrap_or_default().to_string();
-                let rseq = reliable_rseq(resp);
+                let rseq = relay::reliable_rseq(resp);
                 let invite_cseq = resp.cseq().seq() as i64;
                 let leg = ctx.source_leg_id.to_string();
                 let promoted_sdp = resp.body().clone();
@@ -177,9 +170,14 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let resp = ctx.response()?;
                 let b_tag = resp.to().tag().unwrap_or_default().to_string();
-                let rseq = reliable_rseq(resp);
+                let rseq = relay::reliable_rseq(resp);
                 let invite_cseq = resp.cseq().seq() as i64;
                 let leg = ctx.source_leg_id.to_string();
+                // The responder's retransmission of a provisional this stack
+                // already acknowledged: discarded outright (RFC 3262 §4).
+                if rseq.is_some_and(|rseq| ctx.call.pracked_provisional(&leg, &b_tag, invite_cseq, rseq)) {
+                    return ok(vec![]);
+                }
                 let mut actions = vec![RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Provisional,
                     leg_id: leg.clone(),
@@ -258,12 +256,12 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 });
                 actions.push(RuleAction::ScheduleTimer {
                     timer_type: TimerType::GlobalDuration,
-                    delay_sec: max_duration(ctx),
+                    delay: TimerDelay::secs(max_duration(ctx)),
                     leg_id: None,
                 });
                 actions.push(RuleAction::ScheduleTimer {
                     timer_type: TimerType::Keepalive,
-                    delay_sec: keepalive_interval(ctx),
+                    delay: TimerDelay::secs(keepalive_interval(ctx)),
                     leg_id: None,
                 });
                 actions.push(RuleAction::AddCdrEvent {
@@ -467,7 +465,6 @@ mod tests {
         AdvertiseCapabilitiesFeature, AdvertisedCapabilities, KeepaliveActivation,
         PlatformActivations,
     };
-    use sip_message::generators::CapabilitySet;
     use sip_message::SipStr;
 
     fn received(lines: &[(&str, &str)]) -> Vec<SipHeader> {
@@ -480,17 +477,15 @@ mod tests {
             .collect()
     }
 
-    /// The `(Allow, Supported)` values the advert stamps, as they reach Alice.
-    fn advert_relaying(features: Option<&FeatureActivations>, from_bob: &[SipHeader]) -> (String, String) {
+    /// The `(Allow, Supported)` values the advert stamps, as they reach Alice;
+    /// `None` where the advert carries no such line.
+    fn advert_relaying(
+        features: Option<&FeatureActivations>,
+        from_bob: &[SipHeader],
+    ) -> (Option<String>, Option<String>) {
         let entries = a_facing_advert(features, from_bob);
         let text = |name: HeaderName| {
-            entries
-                .iter()
-                .find(|e| e.is(&name))
-                .unwrap_or_else(|| panic!("advert carries {name:?}"))
-                .text()
-                .as_str()
-                .to_string()
+            entries.iter().find(|e| e.is(&name)).map(|e| e.text().as_str().to_string())
         };
         (text(HeaderName::Allow), text(HeaderName::Supported))
     }
@@ -506,6 +501,7 @@ mod tests {
             no_answer_timeout_sec: None,
             call_limiters: None,
             charging_vector: None,
+            withhold_option_tags: None,
             advertise_capabilities: Some(AdvertiseCapabilitiesFeature {
                 toward_originator: Some(AdvertisedCapabilities {
                     allow: Some(allow.iter().map(|s| s.to_string()).collect()),
@@ -516,30 +512,27 @@ mod tests {
         }
     }
 
-    fn advert(features: Option<&FeatureActivations>) -> (String, String) {
+    fn advert(features: Option<&FeatureActivations>) -> (Option<String>, Option<String>) {
         advert_relaying(features, &[])
     }
 
-    /// Nothing declared and nothing advertised by Bob: the stack set, minus the
-    /// one tag the service may not claim. No set of its own to diverge from.
+    /// Nothing declared and nothing advertised by Bob: no line at all. The
+    /// service claims no set of its own, exactly like every other mint point.
     #[test]
-    fn an_undeclared_call_gets_the_stack_set_without_100rel() {
-        let (allow, supported) = advert(None);
-        let stack = CapabilitySet::default();
-        assert_eq!(allow, stack.allow_text());
-        assert_eq!(supported, stack.without_option_tag("100rel").supported_text());
+    fn an_undeclared_call_with_a_silent_bob_advertises_nothing() {
+        assert_eq!(advert(None), (None, None));
     }
 
-    /// Bob's own advertisement travels to Alice, so the promoted 200 states
-    /// what the generic relay would have stated — `100rel` excepted.
+    /// Bob's own advertisement travels to Alice verbatim, so the promoted 200
+    /// states what the generic relay would have stated — `100rel` excepted.
     #[test]
     fn bobs_advertisement_reaches_alice_but_never_100rel() {
         let (allow, supported) = advert_relaying(
             None,
             &received(&[("Allow", "INVITE, ACK, BYE"), ("Supported", "100rel, timer, foo")]),
         );
-        assert!(allow.starts_with("INVITE, ACK, BYE"));
-        assert_eq!(supported, "timer, foo");
+        assert_eq!(allow.as_deref(), Some("INVITE, ACK, BYE"));
+        assert_eq!(supported.as_deref(), Some("timer, foo"));
     }
 
     /// The advertised set does not depend on which rule minted the message:
@@ -565,7 +558,7 @@ mod tests {
         );
         let (allow, supported) =
             advert_relaying(Some(&features), &received(&[("Allow", "MESSAGE")]));
-        assert_eq!(allow, "INVITE, ACK, CANCEL, BYE");
-        assert_eq!(supported, "timer");
+        assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE"));
+        assert_eq!(supported.as_deref(), Some("timer"));
     }
 }

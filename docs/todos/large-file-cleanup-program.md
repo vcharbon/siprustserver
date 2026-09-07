@@ -123,13 +123,21 @@ the 18x-satellite scrub). One deliberate >500 L survivor:
 `defaults/core_rules.rs` (~1220 L) — the exhaustive CORE registration
 list stays one file by design, like the `define_service!` index.
 
-- [ ] **4. `crates/sip-net/src/rfc_audit/` suite** — gates EVERY test; split
-  rule-family-per-file so a failing rule name maps to one file. Waiver text
-  (`allow_violation` justifications) is contract, not history — keep.
-  Multi-session: `rfc3261_cross.rs` (3167), `starter_peer.rs` (1895),
-  `rfc3262_cross.rs` (1833), `cross_generic.rs` (1462), `rfc3264_cross.rs`
-  (1043), `cseq.rs` (980), `dialog_model.rs` (964), `rfc3261_peer.rs` (915),
-  `offer_answer_state.rs` (739), `rfc3264_peer.rs` (507).
+- [ ] **4. The RFC rule suite** — gates EVERY test. Rule-family-per-file is
+  already the layout in `crates/rfc-rules/src/rules/`, so a failing rule name
+  maps to one file; what is left is size. Waiver text (`allow_violation`
+  justifications) is contract, not history — keep.
+  Multi-session, biggest first:
+  `sip-net/src/rfc_audit/wire_adapter.rs` (6639 — ~4300 code: one
+  `CrossMessageAuditRule` shim + finding text per rule; split by family so it
+  mirrors `rfc-rules::rules`), `rfc-rules/src/verdict.rs` (2339, all code —
+  `RuleId` + `Evidence` + the registries are three concerns in one file),
+  then the family files whose bulk is their own `#[cfg(test)]` mod (split the
+  tests out first): `rules/prack.rs` (2385/1529 code), `rules/offer_answer.rs`
+  (2392/1335), `rules/dialog.rs` (1850/865), `rules/correlation.rs`
+  (1581/937), `rules/capability.rs` (1330), `rules/proxy.rs` (1168),
+  `rules/wellformed.rs` (1159), `rules/ack.rs` (1132), `rules/reinvite.rs`
+  (1116), `rules/cseq.rs` (1049).
 - [ ] **5. `crates/failover-harness/src/harness.rs`** — 1782 L (+
   `runner.rs` 685). ha-acceptance.md danger zone.
 - [ ] **6. `crates/sip-proxy-runner/src/main.rs`** — 1583 L and still

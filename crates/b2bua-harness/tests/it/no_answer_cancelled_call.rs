@@ -1,5 +1,5 @@
 //! The `no-answer` timer on a call the CALLER already CANCELed
-//! (upstreamneed-068).
+//!.
 //!
 //! Caller CANCELs the initial INVITE pre-18x and the callee answers NOTHING —
 //! ever (a callee host gone dark mid-setup). The caller's CANCEL leaves the
@@ -79,7 +79,7 @@ fn reasons_of(cdr: &CdrRecord) -> Vec<String> {
 mod stalerestore {
     use b2bua::rules::{
         Effect, Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
-        ServiceSeed, Terminal,
+        ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
     use call::TimerType;
@@ -98,7 +98,7 @@ mod stalerestore {
             Some(ServiceSeed::new(SrState::Waiting.label()).with_actions(vec![
                 RuleAction::ScheduleTimer {
                     timer_type: TimerType::service(STALERESTORE, "inject"),
-                    delay_sec: INJECT_AT_SEC,
+                    delay: TimerDelay::secs(INJECT_AT_SEC),
                     leg_id: None,
                 },
             ]))
@@ -133,7 +133,7 @@ mod stalerestore {
                 Some(RuleHandleResult::new(vec![
                     RuleAction::ScheduleTimer {
                         timer_type: TimerType::NoAnswer,
-                        delay_sec: STALE_FIRE_SEC,
+                        delay: TimerDelay::secs(STALE_FIRE_SEC),
                         leg_id: Some(b),
                     },
                     RuleAction::ClearState { machine: STALERESTORE },

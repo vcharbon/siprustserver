@@ -12,8 +12,9 @@ use base64::Engine;
 use call::{
     CallBodyCodec, CallDecodeError, LegKind, MachineId, MsgpackCodec, PolicyUpdateBody, StateLabel,
 };
-use common::{arb_call, representative_call};
+use common::{arb_call, paced_emission, representative_call};
 use proptest::prelude::*;
+use sip_retransmit::Class;
 
 #[test]
 fn representative_round_trips() {
@@ -58,7 +59,7 @@ fn service_timer_entry_round_trips_and_id_recipe_is_stable() {
     assert_eq!(restored.timer_type, t, "owned-Cow deserialisation compares equal to the borrowed declaration");
 }
 
-/// upstreamneed-009 replication sanity: the release-event `subscriptions` and
+/// Replication sanity: the release-event `subscriptions` and
 /// the in-flight `reroute` slice are ordinary replicated `Call` fields — a
 /// takeover node must keep honoring the subscription and be able to resume /
 /// tear down a mid-reroute call. Round-trips through the production msgpack
@@ -106,12 +107,168 @@ fn the_reliable_provisional_map_round_trips() {
     assert_eq!(decoded, call, "no reliable provisional relayed yet");
 
     call.reliable_provisionals = vec![
-        ReliableProvisional { a_tag: "a1".into(), a_rseq: 9_000, b_leg_id: "b-1".into(), b_tag: "bf1".into(), b_cseq: 1, b_rseq: 4711 },
-        ReliableProvisional { a_tag: "a2".into(), a_rseq: 40, b_leg_id: "b-2".into(), b_tag: "bf2".into(), b_cseq: 1, b_rseq: 1 },
+        ReliableProvisional { a_tag: "a1".into(), a_rseq: 9_000, b_leg_id: "b-1".into(), b_tag: "bf1".into(), b_cseq: 1, b_rseq: 4711, acknowledged: true, emission: None, a_cseq: Some(1) },
+        ReliableProvisional { a_tag: "a2".into(), a_rseq: 40, b_leg_id: "b-2".into(), b_tag: "bf2".into(), b_cseq: 1, b_rseq: 1, acknowledged: false, emission: None, a_cseq: Some(1) },
     ];
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call, "both early dialogs' provisionals survive");
     assert_eq!(decoded.reliable_provisionals[1].b_rseq, 1);
+    assert!(
+        decoded.reliable_provisionals[0].acknowledged,
+        "the retirement survives a takeover — the survivor must not re-relay a repeat",
+    );
+
+    // A live §3 ladder emission is replicated state too: the exact datagram a
+    // takeover node re-sends, its destination, and the rung the ladder stands on.
+    let datagram = b"SIP/2.0 183 Session Progress\r\nRSeq: 40\r\n\r\n";
+    call.reliable_provisionals[1].emission =
+        Some(paced_emission(datagram, ("10.0.0.7", 5060), Class::ReliableProvisional, 3));
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "the retained emission survives byte-exact");
+    let emission = decoded.reliable_provisionals[1].emission.as_ref().unwrap();
+    assert_eq!(emission.wire(), (&datagram[..], ("10.0.0.7", 5060)));
+    assert_eq!(
+        emission.repeat(),
+        call::Repeat::Paced { class: Class::ReliableProvisional, rung: 3 },
+        "the ladder resumes where it stood",
+    );
+}
+
+/// The replication body is positional: an entry a peer encoded before the
+/// a-facing INVITE CSeq was recorded is short of that trailing element — seven
+/// elements from the common older peer, whose encoder skipped an absent
+/// emission, eight from one with a live ladder — and either hydrates with
+/// `a_cseq = None`: the state that admits any CSeq token rather than refusing
+/// a PRACK on books that never held the fact.
+#[test]
+fn a_reliable_provisional_encoded_without_a_cseq_hydrates_without_one() {
+    use call::ReliableProvisional;
+
+    #[derive(serde::Serialize)]
+    struct BeforeCseqNoEmission<'a> {
+        a_tag: &'a str,
+        a_rseq: i64,
+        b_leg_id: &'a str,
+        b_tag: &'a str,
+        b_cseq: i64,
+        b_rseq: i64,
+        acknowledged: bool,
+    }
+    #[derive(serde::Serialize)]
+    struct BeforeCseqWithEmission<'a> {
+        a_tag: &'a str,
+        a_rseq: i64,
+        b_leg_id: &'a str,
+        b_tag: &'a str,
+        b_cseq: i64,
+        b_rseq: i64,
+        acknowledged: bool,
+        emission: Option<call::RetainedEmission>,
+    }
+    let common = BeforeCseqNoEmission {
+        a_tag: "a1",
+        a_rseq: 9_000,
+        b_leg_id: "b-1",
+        b_tag: "bf1",
+        b_cseq: 1,
+        b_rseq: 4711,
+        acknowledged: false,
+    };
+    let decoded: ReliableProvisional = rmp_serde::from_slice(&rmp_serde::to_vec(&common).unwrap()).unwrap();
+    assert_eq!((decoded.a_tag.as_str(), decoded.a_rseq, decoded.b_rseq), ("a1", 9_000, 4711));
+    assert_eq!(decoded.emission, None);
+    assert_eq!(decoded.a_cseq, None, "no CSeq was recorded, none is invented");
+
+    let with_ladder = BeforeCseqWithEmission {
+        a_tag: "a1",
+        a_rseq: 9_000,
+        b_leg_id: "b-1",
+        b_tag: "bf1",
+        b_cseq: 1,
+        b_rseq: 4711,
+        acknowledged: false,
+        emission: Some(paced_emission(
+            b"SIP/2.0 183 Session Progress\r\nRSeq: 9000\r\n\r\n",
+            ("10.0.0.7", 5060),
+            Class::ReliableProvisional,
+            1,
+        )),
+    };
+    let decoded: ReliableProvisional =
+        rmp_serde::from_slice(&rmp_serde::to_vec(&with_ladder).unwrap()).unwrap();
+    assert_eq!(
+        decoded.emission.as_ref().map(|e| e.repeat()),
+        Some(call::Repeat::Paced { class: Class::ReliableProvisional, rung: 1 }),
+        "the ladder rides along",
+    );
+    assert_eq!(decoded.a_cseq, None, "no CSeq was recorded, none is invented");
+}
+
+/// RFC 3261 §13.2.2.4: the retained ACK-for-2xx datagram (`emitted_ack`) is
+/// replicated dialog state — a takeover node re-ACKs a retransmitted 2xx with
+/// the SAME bytes the failed node sent, at the same destination (on a delayed
+/// offer they carry the answer) — so it must survive the replication codec
+/// byte-exact, in both the retained and the not-yet-retained shape.
+#[test]
+fn the_retained_emitted_ack_round_trips() {
+    use call::{Repeat, RetainedEmission};
+
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+
+    if let Some(d) = call.b_legs[0].dialogs.first_mut() {
+        d.ext.emitted_ack = None;
+    }
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "no ACK emitted yet on the b-leg dialog");
+
+    let datagram = b"ACK sip:bob@10.0.0.7 SIP/2.0\r\nCSeq: 8005 ACK\r\n\r\nanswer";
+    if let Some(d) = call.b_legs[0].dialogs.first_mut() {
+        d.ext.emitted_ack = Some(RetainedEmission::on_trigger(
+            datagram.to_vec(),
+            ("10.0.0.7".into(), 5060),
+            call::Repeated::request("ACK"),
+        ));
+    }
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "the retained ACK survives byte-exact");
+    let ack = decoded.b_legs[0].dialogs[0].ext.emitted_ack.as_ref().unwrap();
+    assert_eq!(
+        ack.wire(),
+        (&datagram[..], ("10.0.0.7", 5060)),
+        "the takeover node re-sends the same bytes at the destination the ACK first took",
+    );
+    assert_eq!(ack.repeat(), Repeat::OnTrigger, "an ACK is repeated only when a 2xx copy provokes it");
+    assert_eq!(
+        ack.repeated(),
+        &call::Repeated::request("ACK"),
+        "the label captured at retention rides with the datagram: a takeover node counts its re-ACK as one",
+    );
+}
+
+/// RFC 3261 §13.3.1.4: the a-leg 2xx the representative call is still owed an
+/// ACK for rides the body with its ladder position, so a takeover node repeats
+/// the SAME bytes on the rung the failed node stood on — never from rung one.
+#[test]
+fn the_retained_answered_2xx_round_trips_with_its_rung() {
+    use call::Repeat;
+
+    let codec = MsgpackCodec::new();
+    let call = representative_call();
+    let answered = call.a_leg.dialogs[0].ext.answered_2xx.as_ref().expect("the fixture answered the caller");
+    assert_eq!(answered.emission.repeat(), Repeat::Paced { class: Class::Final2xx, rung: 3 });
+
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "the retained 2xx survives byte-exact");
+    let restored = decoded.a_leg.dialogs[0].ext.answered_2xx.as_ref().unwrap();
+    assert_eq!((restored.dialog_tag.as_str(), restored.cseq), ("b2bua-to-tag-aleg-9876", 1), "the ACK's key rides with it");
+    assert_eq!(restored.emission.wire(), (common::ANSWERED_2XX, ("192.0.2.10", 5060)));
+    assert_eq!(restored.emission.repeat(), Repeat::Paced { class: Class::Final2xx, rung: 3 }, "the ladder resumes where it stood");
+    assert_eq!(
+        restored.emission.repeated(),
+        &call::Repeated::response("INVITE", 200),
+        "the label captured at retention survives: a takeover node's rungs count as INVITE/200",
+    );
 }
 
 /// PA2 (source paranoid-decode precondition): empty input is a typed error.

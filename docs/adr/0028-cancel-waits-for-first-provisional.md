@@ -2,7 +2,8 @@
 
 **Status:** accepted (2026-08-09, amended 2026-08-10: the hold is bounded by
 default — a grace expiry sends the CANCEL unconditionally; the literal §9.1
-wait remains available as a configuration)
+wait remains available as a configuration; amended 2026-08-26: an on-wire
+CANCEL retransmits on a Timer-E ladder, X4)
 
 ## Context
 
@@ -11,8 +12,7 @@ request MUST NOT be sent; rather, the client MUST wait for the arrival of a
 provisional response before sending the request."* The wait is what makes the
 CANCEL matchable: a UAS that has not yet responded may not have built the
 INVITE server transaction — the early CANCEL draws a 481 while Timer-A INVITE
-retransmits keep ringing a call that no longer exists (the orphaned ring,
-upstreamneed-070).
+retransmits keep ringing a call that no longer exists — the orphaned ring.
 
 The B2BUA's rules emit `cancel_to_leg` / `cancel_pending_reinvite` eagerly
 (caller CANCEL, NoAnswer, service watchdogs) — the rule layer cannot know the
@@ -49,7 +49,7 @@ matches a Client/Invite txn:
   datagram stays armed for **one** re-send on a late first provisional — a UAS
   that 481'd the pre-1xx copy (it had not built the server txn) has it by
   then, so the re-send is the matchable one and the orphaned-ring defect
-  (upstreamneed-070) stays fixed even when the original INVITE was lost.
+  stays fixed even when the original INVITE was lost.
 - **in `Completed` (final already taken)** — is SUPPRESSED: §9.1/§9.2, a
   CANCEL has no effect on an answered request. Not an exception to the
   always-send rule: a final response resolves the leg on its own (487/486
@@ -64,11 +64,10 @@ matches a Client/Invite txn:
     (§9.2, and the crossing-2xx reap owns the late answer).
   - Residual unsent-death paths, all pathological and counted in
     `held_cancels_dropped`: a same-branch txn displacement and the safety-net
-    sweep (both indicate a bug elsewhere). And the grace/evict/timeout send is
-    a single raw datagram (CANCEL deliberately builds no client txn — branch
-    reuse): if that one datagram is lost AND no provisional ever arrives, the
-    callee still rides the terminating backstop; a later provisional re-sends
-    it (the re-flush), which covers every callee alive enough to respond.
+    sweep (both indicate a bug elsewhere). And the evict/timeout death send is
+    a single raw datagram (the txn is deleted in the same turn, so no ladder
+    can ride it): if that one datagram is lost, the callee still rides the
+    terminating backstop.
 
 A CANCEL matching **no txn** is still sent raw: an absent txn is not proof the
 INVITE ended — a takeover-restored call (ADR-0014) CANCELs a b-leg whose
@@ -102,25 +101,45 @@ leg and is reaped with ACK + immediate BYE; a **fully silent** callee (never
 answers even the CANCEL) is still bounded by the worker's own dead-call
 detection (terminating backstop / setup timers).
 
-### X3 — `rfc3261.cancelAfter1xx` is informational, never gating
+### X3 — `cancel-after-1xx` is informational, never gating
 
 With the bounded hold sanctioned as SUT policy, a literal §9.1 breach is no
 longer a defect class: the audit rule is **advisory on every lane**
 (`{Proxy}`-declared lanes stay exempt — a relay forwards the upstream's CANCEL
 at the upstream's timing). Severity split by timing:
 
-- a pre-1xx CANCEL ≥ `CANCEL_GRACE_FLOOR_MS` (900 ms, just under the 1 s
+- a pre-1xx CANCEL ≥ `CANCEL_GRACE_FLOOR_US` (900 ms, just under the 1 s
   grace) after the lane's first INVITE on the branch is the deliberate
   grace-expiry send — **no finding at all**;
 - an under-floor pre-1xx CANCEL (an eager-CANCEL regression toward a UAS that
-  may not have built its server txn — the upstreamneed-070 orphaned ring — or a
+  may not have built its server txn — the orphaned ring — or a
   scripted fixture race) surfaces as an **informational advisory**, not a
   gating non-compliance.
 
 The floor and the grace default must move together.
 
+### X4 — An on-wire CANCEL retransmits on a Timer-E ladder
+
+A CANCEL is a non-INVITE request (RFC 3261 §9.1) and owes §17.1.2.2
+retransmission over UDP, but it reuses its INVITE's branch and the txns map is
+branch-keyed, so it deliberately builds no client transaction of its own (a map
+entry would displace the live INVITE client txn). Instead the ladder rides the
+INVITE client txn as a sub-state of the parked datagram: every send that leaves
+a live txn behind it — the direct pass-through, the grace expiry, the
+first-provisional flush — arms a `CancelRetransmit` timer paced T1 → doubling →
+capped at T2. The ladder stops on the first response whose CSeq method is
+CANCEL, on the INVITE txn taking a final, on txn death (evict / timeout /
+displacement), and at its own 64·T1 ceiling — and the ceiling gives up on the
+CANCEL only: the INVITE client txn continues under its own bound and still owes
+a final. A superseding CANCEL replaces the parked datagram, so the ladder
+always replays the newest copy; a CANCEL matching no txn stays a raw single
+send (nothing to hang a ladder on without re-keying the map). ACK is exempt —
+a 2xx ACK is TU-owned and rides no timer (§13.2.2.4). Counter:
+`cancel_retransmits`.
+
 ## Pinned by
 
-`sip-txn/tests/cancel_hold.rs`, `b2bua-harness/tests/cancel_before_provisional.rs`,
+`sip-txn/tests/cancel_hold.rs`, `sip-txn/tests/cancel_retransmit.rs` (X4),
+`b2bua-harness/tests/cancel_before_provisional.rs`,
 `b2bua-harness/tests/no_answer_cancelled_call.rs`,
 `failover-harness/tests/silent_callee_no_answer_via_lb.rs` (via-LB shape, X2).

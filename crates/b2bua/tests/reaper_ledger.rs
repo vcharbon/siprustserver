@@ -10,7 +10,7 @@ use std::time::Duration;
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::metrics::B2buaMetrics;
-use b2bua::store::{BufferedTerminateWriter, CallState, InMemoryCallStore};
+use b2bua::store::{BufferedTerminateWriter, CallState, InMemoryCallStore, MaterialiseOrigin};
 use sip_clock::Clock;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
@@ -120,7 +120,7 @@ async fn reclaim_restarts_the_idle_clock() {
     // A 2 h-old long-hold call arrives via reclaim (materialize_if_absent).
     tokio::time::advance(Duration::from_secs(7_200)).await;
     let old_call = call("longhold@x", 0); // created_at = epoch 0, hours ago
-    assert!(s.materialize_if_absent(old_call.clone()));
+    assert!(s.materialize_if_absent(old_call.clone(), MaterialiseOrigin::Reclaim));
 
     // The idle clock starts at RECLAIM time, never created_at (ADR-0020 X4):
     // the freshly reclaimed call is NOT reap-stale.

@@ -1,4 +1,4 @@
-//! Ringing held PAST the default 158 s initial-INVITE bound (upstreamneed-073).
+//! Ringing held PAST the default 158 s initial-INVITE bound.
 //!
 //! With `invite_txn_timeout_sec` raised into the telephony range the b-leg
 //! client transaction must keep the callee ringing beyond the old const: the

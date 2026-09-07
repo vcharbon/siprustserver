@@ -5,6 +5,7 @@ members = [
     "crates/observe",
     "crates/alloc-counter",
     "crates/sip-clock",
+    "crates/sip-retransmit",
     "crates/layer-harness",
     "crates/sip-net",
     "crates/sip-txn",
@@ -38,7 +39,10 @@ members = [
     "crates/e2e-cli",
     "crates/e2e-web",
     "crates/loadgen",
+    "crates/rfc-rules",
     "crates/sip-pcap",
+    "crates/pivot-schema",
+    "crates/pivot-interpreter",
     "xtask",
 ]
 
@@ -51,6 +55,13 @@ members = [
 # types crate" reasoning (that is about *production* cross-layer cycles). A
 # shared *production* foundation/types crate is still extracted only when the
 # first production cross-layer cycle forces it. See ADR-0002 + ADR-0004.
+#
+# `sip-retransmit` is a leaf crate on the same footing: the RFC §17 timer
+# constants and the schedule every retransmission ladder rides — transaction
+# and dialog-level alike (ADR-0029). Pure (no clock, no timers, no I/O) and
+# depended on by sip-txn, call, b2bua and pivot-interpreter, with nothing
+# depending back, so it sidesteps ADR-0002's cross-layer-cycle concern the same
+# way sip-clock does.
 #
 # `sip-clock` is a leaf utility crate (depends only on tokio): the injectable
 # wall-clock `now_ms()` timestamp seam. It is *production* code but creates no

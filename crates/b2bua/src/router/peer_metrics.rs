@@ -173,7 +173,9 @@ mod tests {
                 pending_invite_txn: None,
                 cached_sdp: None,
                 pending_reinvite_2xx: None,
-                answered_advert: Vec::new(),
+                answered_2xx: None,
+                emitted_ack: None,
+                awaited_ack_cseq: None,
             },
         }
     }

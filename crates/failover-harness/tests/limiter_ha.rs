@@ -51,7 +51,7 @@ fn ha_harness(name: &str) -> FailoverHarness {
 /// it) and the accepted outcome is that one call dropping cleanly — which each case
 /// asserts through its limiter-drain / call-over checks. Call it at the fault
 /// injection: establishment, and any case that never hands a live call to a second
-/// owner, keep `cseqInDialogOrder` fully gating.
+/// owner, keep `cseq-in-dialog-order` fully gating.
 fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
     fh.accept_rfc_deviations_from_now(
         RULE_CSEQ_IN_DIALOG_ORDER,
@@ -71,18 +71,21 @@ fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
 /// The limiter-carrying decision shared by every worker in this file: route the
 /// b-leg through the worker's outbound proxy with a `limit:1` `trunk-A` hold.
 ///
-/// Note this sets only the wire hop (`route_to` leaves `new_ruri = None`), NOT a
-/// per-worker callee — so the decision's `destination` port does NOT pick which
-/// bob the b-leg lands on. The outbound proxy forwards the b-leg by the preserved
-/// a-leg R-URI, so where two calls' b-legs land (and thus how they stay on
-/// distinct RFC-audit Call-ID lanes) is set by the a-leg target each call dials,
-/// not by anything here. See the `leaked_…` test's lower comment for how Call A
-/// (bob1) and Call B (bob2) are kept on separate lanes.
+/// This sets only the wire hop, NOT a per-worker callee — so the decision's
+/// `destination` port does NOT pick which bob the b-leg lands on. **The
+/// preserved a-leg Request-URI IS the subject here**: the outbound proxy
+/// forwards the b-leg by it, so where two calls' b-legs land (and thus how they
+/// stay on distinct RFC-audit Call-ID lanes) is set by the a-leg target each
+/// call dials. That is why `new_ruri` is cleared back to `None` — the routed-
+/// target default [`route_to`] otherwise applies would send both calls' b-legs
+/// to one bob. See the `leaked_…` test's lower comment for how Call A (bob1)
+/// and Call B (bob2) are kept on separate lanes.
 fn limited_decision() -> Arc<dyn CallDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", 5070);
+                r.new_ruri = None;
                 r.call_limiter = vec![CallLimiterEntry {
                     id: "trunk-A".into(),
                     limit: 1,
@@ -226,7 +229,7 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
     // INVITE client transaction's own Timer B (~32 s), so no real UAC would
     // ACK it — the un-ACKed a-leg final IS the scenario, not a defect.
     fh.allow_rfc_violation(
-        "rfc3261.unackedInviteNon2xxFinal",
+        "unacked-invite-non-2xx-final",
         "abandoned caller: the a-leg final lands past Timer B; no UAC ACKs it",
     );
     let alice = fh.agent("alice", ALICE).await;
@@ -290,6 +293,7 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
     }
     assert!(primary.is_ready(), "rebooted primary re-hydrated from the backup");
     proxy.set_address(&primary_ord, new_addr);
+    fh.note_worker_rebound(&primary_ord, new_addr);
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
 
     fh.advance(Duration::from_millis(500)).await;
@@ -380,11 +384,8 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
     let alice = fh.agent("alice", ALICE).await;
     // Two callees: Call A dials bob1, Call B dials bob2. The b-leg keeps the a-leg
     // R-URI (the decision sets only the wire hop — see `limited_decision`) and the
-    // worker's outbound proxy forwards by that R-URI, so dialing two distinct bobs
-    // is what puts the two b-legs on distinct RFC-audit Call-ID lanes. A single
-    // `bob` would collide them: both workers seed `IdGen::seeded(0xB2B0 + gen)`
-    // with gen=1 and mint the SAME deterministic b-leg ids, which the Drop-time
-    // RFC 3261 §12.2.1.1 audit rejects as in-dialog CSeq reuse on the shared peer.
+    // worker's outbound proxy forwards by that R-URI, so each call's b-leg lands
+    // on its own callee and the two calls audit as independent peers.
     let bob1 = fh.agent("bob1", BOB).await;
     let bob2 = fh.agent("bob2", BOB2).await;
 
@@ -417,7 +418,7 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
     // ── Call A — established through the proxy, slot consumed ──────────────────
     // Hand-rolled (not `callflow::establish`) because the cookie read + the crash
     // injection ARE the subject of this test. The b-leg keeps the a-leg R-URI
-    // (the decision sets only the wire hop, not `new_ruri`), and the worker's
+    // (`limited_decision` clears `new_ruri` for exactly this reason), and the worker's
     // outbound proxy forwards the b-leg by R-URI — so calling `bob1` lands the
     // b-leg on bob1 regardless of which worker the LB picked. Call B targets a
     // SECOND callee (bob2) so the two b-legs sit on distinct RFC-audit lanes.
@@ -711,6 +712,7 @@ async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
         fh.mark(&primary_ord, None, "reboot", "switchback: restart empty, higher gen, new pod IP");
         let new_addr = primary.reboot().await;
         proxy.set_address(&primary_ord, new_addr);
+        fh.note_worker_rebound(&primary_ord, new_addr);
         backup.simulate_peer_added(&primary_ord);
         for _ in 0..120 {
             fh.advance(Duration::from_millis(500)).await;

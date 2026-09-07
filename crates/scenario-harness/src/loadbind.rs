@@ -157,7 +157,6 @@ impl AgentBinder {
         // so a sampled call's trace can be projected and RFC-audited.
         let recorder = Recorder::with_clock(transport_kind, clock);
         let audit_opts = ScopedAuditOptions {
-            rules: sip_net::rfc_peer_rules(),
             cross_message_rules: sip_net::rfc_cross_message_rules(),
             ..Default::default()
         };
@@ -196,8 +195,19 @@ impl AgentBinder {
     /// assign a free port against a real network, then read [`Agent::addr`].
     pub async fn agent(&self, name: impl Into<String>, addr: &str) -> Agent {
         let name = name.into();
-        let addr: SocketAddr =
+        let requested: SocketAddr =
             addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
+        let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
+        let ep = self
+            .network
+            .bind_udp(BindUdpOpts::new(requested, 64).with_roles(roles).with_lane_label(&name))
+            .await
+            .unwrap_or_else(|e| panic!("bind {requested} failed: {e}"));
+        // A port-`0` bind means "whichever port is free". The UA advertises
+        // itself in Via and Contact and the recorder keys its lane on the same
+        // socket, so both take the port the OS actually gave it — which is why
+        // the lane is registered AFTER the bind, not before.
+        let addr = if requested.port() == 0 { ep.local_addr() } else { requested };
         // Per-logical-endpoint sub-lane (036 ask C): load agents may SHARE a
         // mux socket (callee + alt legs), so each registers — and binds — under
         // `ip:port#<name>` instead of colliding on the socket's lane. The
@@ -210,12 +220,6 @@ impl AgentBinder {
                 NetworkTag::Ext,
             );
         }
-        let roles = HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]);
-        let ep = self
-            .network
-            .bind_udp(BindUdpOpts::new(addr, 64).with_roles(roles).with_lane_label(&name))
-            .await
-            .unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         Agent {
             uri: format!("sip:{name}@{}", addr.ip()),
             rr_fold: decide_rr_fold(&name),
@@ -227,11 +231,12 @@ impl AgentBinder {
             // Load lane stays on the RAW wire surface: `loadgen::mux::CallTxns`
             // already owns retransmit dedup ahead of the agent, and a second
             // (differently-keyed) dedup here would silently change load
-            // semantics (upstreamneed-034). The §17.1.1.3 ACK obligations (036
-            // ask B) are independent of the view and apply here too — a load
-            // body that rejects an INVITE never trips over the hop ACK.
-            txn: Arc::new(crate::agent::TxnView::wire()),
-            acks: Arc::new(crate::agent::AckObligations::default()),
+            // semantics. Hop-ACK ownership (§17.1.1.3) is independent of the
+            // view and applies here too — a load body that rejects an INVITE
+            // never trips over the hop ACK.
+            txn: Arc::new(crate::absorption::Absorption::raw_wire()),
+            two_xx_acks: Arc::default(),
+            holdback: Arc::default(),
         }
     }
 
@@ -313,6 +318,19 @@ impl AgentBinder {
     /// `RunReport::entries` (empty when the call was not sampled) — the entries
     /// half of what the e2e check engine evaluates over (the anchors half rides
     /// the per-call `CallCtx`).
+    /// The FULL RFC-suite finding set over this call's recorded trace, advisory
+    /// tags included (`sip_net::evaluate_rfc_findings`), with the audit-view
+    /// wire entries a finding's `offending` index lands in — what a bundle
+    /// writes beside the gating subset [`rfc_findings`](Self::rfc_findings)
+    /// returns. `None` when not recording: an absence the caller states, never
+    /// an empty audit it reports.
+    pub fn rfc_audit(&self) -> Option<(Vec<sip_net::RfcFinding>, Vec<sip_net::RecordedSipEntry>)> {
+        self.recording.as_ref().map(|rec| {
+            let events = rec.channel().snapshot();
+            (sip_net::evaluate_rfc_findings(&events), sip_net::audit_wire_entries(&events))
+        })
+    }
+
     pub fn recorded_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
         match &self.recording {
             Some(rec) => sip_net::to_sip_entries(&rec.channel().snapshot()),
@@ -352,6 +370,7 @@ impl AgentBinder {
                 endpoint: None,
                 advisory: Some(false),
                 row_seqs: Vec::new(),
+                rule_sourced: false, // the call's own verdict, not an audit rule
             }],
             None => Vec::new(),
         };
@@ -369,6 +388,7 @@ impl AgentBinder {
                 endpoint: None,
                 advisory: Some(c.passed),
                 row_seqs: Vec::new(),
+                rule_sourced: false, // a case check verdict, not an audit rule
             });
         }
         // The load binder records on `Clock::system()`, so `sent_ms` is real

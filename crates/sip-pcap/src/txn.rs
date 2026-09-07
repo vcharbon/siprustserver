@@ -200,6 +200,7 @@ mod tests {
             src: src.parse().unwrap(),
             dst: dst.parse().unwrap(),
             payload: payload.to_vec(),
+        probe: 0,
         }
     }
 

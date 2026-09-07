@@ -23,11 +23,15 @@ use super::log_dump::LogDump;
 use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate, PanicDump};
 use super::rr_fold::decide_rr_fold;
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
-use super::txn_view::{AckObligations, TxnView};
+use crate::absorption::Absorption;
 use super::{Agent, Proxy};
 use crate::run::RunReport;
 
-const RECV_TIMEOUT: Duration = Duration::from_secs(2);
+/// Fake-fabric per-`recv` silent-wait bound (virtual time — a paused clock
+/// auto-advances to it, so it costs no wall time). Sits above the longest
+/// RFC-legitimate silence a compliant SUT produces while still owing traffic:
+/// the §13.3.1.4 retransmit ladder's T2 plateau (4 s between rungs).
+const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Monotonic id source for branches / tags / Call-IDs. Deterministic (no RNG),
 /// so report bytes are stable across runs. `pub(crate)` so the Send
@@ -143,11 +147,11 @@ impl Harness {
     }
 
     /// Shared constructor body: wrap the raw network in the recorder + the full
-    /// default RFC 3261 / 3262 / 3264 wire-invariant suite (per-message peer rules
-    /// + cross-message rules) so every harness run gets the same post-run "all
-    /// clean" RFC check the live SIPp endpoints apply — a stale-CSeq probe, a
-    /// mid-dialog tag/route mutation, an RFC 3262/3264 PRACK/offer-answer slip that
-    /// a test UA would silently answer is caught at layer close.
+    /// default RFC 3261 / 3262 / 3264 wire-invariant suite so every harness run
+    /// gets the same post-run "all clean" RFC check the live SIPp endpoints
+    /// apply — a stale-CSeq probe, a mid-dialog tag/route mutation, an RFC
+    /// 3262/3264 PRACK/offer-answer slip that a test UA would silently answer is
+    /// caught at layer close.
     fn build(
         name: String,
         raw_network: Arc<dyn SignalingNetwork>,
@@ -157,7 +161,6 @@ impl Harness {
     ) -> Self {
         let recorder = Recorder::with_clock(transport_kind, clock);
         let audit_opts = ScopedAuditOptions {
-            rules: sip_net::rfc_peer_rules(),
             cross_message_rules: sip_net::rfc_cross_message_rules(),
             ..Default::default()
         };
@@ -255,7 +258,7 @@ impl Harness {
     /// is mandatory and logged. It is **not** an escape hatch for a finding that
     /// reflects a real B2BUA bug — fix the B2BUA (or the test peer) instead.
     ///
-    /// `rule` is the rule's `name()` (e.g. `"rfc3261.byeOnlyInDialog"`). The
+    /// `rule` is the rule's `name()` (e.g. `"no-bye-outside-or-early-dialog"`). The
     /// finding is still recorded (advisory) so the report shows what was waived.
     ///
     /// This is the COARSE form, reimplemented over the scoped machinery: it
@@ -380,8 +383,9 @@ impl Harness {
             ids: self.ids.clone(),
             rr_fold,
             recv_timeout: self.recv_timeout,
-            txn: Arc::new(TxnView::functional()),
-            acks: Arc::new(AckObligations::default()),
+            txn: Arc::new(Absorption::transaction_view()),
+            two_xx_acks: Arc::default(),
+            holdback: Arc::default(),
         }
     }
 
@@ -550,6 +554,9 @@ impl Harness {
         self.cseq_gate.disarm();
         self.settle_network().await;
         let events = self.recording.channel().snapshot();
+        // The full RFC suite runs ONCE per finished run: this set feeds the hard
+        // gate below and is seeded into the report so the projection reuses it.
+        let rfc_findings = sip_net::evaluate_rfc_findings(&events);
         // Hard gate on the RFC CSeq rule(s) BEFORE the structural close: a CSeq
         // violation must fail the test (a real UA would reject these). Skip if the
         // test is already unwinding so we never double-panic. The structural
@@ -559,7 +566,7 @@ impl Harness {
         {
             let waivers = self.waivers.borrow();
             let names = super::run_guards::addr_names(&self.recorder);
-            let cseq_findings = rfc_hard_gate_findings(&events, &waivers, &names);
+            let cseq_findings = rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names);
             if !cseq_findings.is_empty() && !std::thread::panicking() {
                 panic!("{}", render_rfc_panic(&self.name, &cseq_findings));
             }
@@ -585,7 +592,10 @@ impl Harness {
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
         let description = self.description.borrow().clone();
-        RunReport::from_recording(self.name, description, self.recorder, events, audit, anchors)
+        let report =
+            RunReport::from_recording(self.name, description, self.recorder, events, audit, anchors);
+        report.seed_rfc_findings(rfc_findings);
+        report
     }
 
     /// [`finish`](Self::finish) that **collects** the hard-gate findings
@@ -606,19 +616,25 @@ impl Harness {
         self.cseq_gate.disarm();
         self.settle_network().await;
         let events = self.recording.channel().snapshot();
-        // The gating set the scoped waivers leave unwaived — re-run the audit and
-        // drop the (lane, detail) pairs `rfc_hard_gate_findings` would waive, then
-        // keep the matching `RfcFinding`s so the caller gets the full objects.
+        // The full RFC suite runs ONCE per finished run: this set feeds the gate,
+        // the returned gating findings, and (seeded) the report projection.
+        let rfc_findings = sip_net::evaluate_rfc_findings(&events);
+        // The gating set the scoped waivers leave unwaived — drop the
+        // (lane, detail) pairs `rfc_hard_gate_findings` would waive, then keep
+        // the matching `RfcFinding`s so the caller gets the full objects.
         // Compute the gating set in a scope so the borrow is released before the
         // `close().await` below.
         let gate: std::collections::HashSet<(String, String)> = {
             let waivers = self.waivers.borrow();
             let names = super::run_guards::addr_names(&self.recorder);
-            rfc_hard_gate_findings(&events, &waivers, &names).into_iter().collect()
+            rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names)
+                .into_iter()
+                .collect()
         };
-        let gating: Vec<sip_net::RfcFinding> = sip_net::evaluate_rfc_findings(&events)
-            .into_iter()
+        let gating: Vec<sip_net::RfcFinding> = rfc_findings
+            .iter()
             .filter(|f| !f.advisory && gate.contains(&(f.lane.clone(), f.detail.clone())))
+            .cloned()
             .collect();
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
@@ -631,6 +647,7 @@ impl Harness {
             audit,
             anchors,
         );
+        report.seed_rfc_findings(rfc_findings);
         (report, gating)
     }
 }

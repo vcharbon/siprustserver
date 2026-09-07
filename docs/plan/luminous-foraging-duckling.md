@@ -2,7 +2,7 @@
 
 ## Context
 
-The TypeScript reference server (`/home/vince/sipjsserver`) audits **every call test by
+The TypeScript reference server (the `sipjsserver` repo) audits **every call test by
 default** against a 73-rule RFC-compliance suite (RFC 3261 / 3262 / 3264) that runs over the
 recorded SIP wire trace at layer close. These are *post-call-treatment* rules: they validate
 that the on-wire behaviour the B2BUA produced obeys protocol invariants that a real UAC/UAS
@@ -10,7 +10,7 @@ would enforce but the **test peers (Alice/Bob) do not** — the test UAs answer 
 are handed (any CSeq, any tag, any Route), so without the audit a B2BUA bug is silently
 masked by a compliant-looking `expect(200)`.
 
-The Rust port (`/home/vince/siprustserver`) already has the **entire audit framework** — the
+The Rust port (this repo) already has the **entire audit framework** — the
 `PeerAuditRule` / `CrossMessageAuditRule` traits, subject dispatch, `force_advisory`,
 `should_audit_bind`, and default wiring through `Harness::finish()` — but ships only **3
 rules** (the in-dialog CSeq family in `crates/sip-net/src/rfc_audit.rs`). The other ~70 RFC

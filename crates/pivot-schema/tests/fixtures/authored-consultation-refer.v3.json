@@ -1,0 +1,667 @@
+{
+  "actors": [
+    {
+      "endpoint": "ep0",
+      "id": "uac1",
+      "identity": "c1-caller",
+      "kind": "uac"
+    },
+    {
+      "claim": {
+        "by": "ruri-pos"
+      },
+      "endpoint": "ep1",
+      "id": "uas1",
+      "kind": "uas"
+    },
+    {
+      "claim": {
+        "by": "ruri-pos"
+      },
+      "endpoint": "ep0",
+      "id": "uas2",
+      "kind": "uas"
+    }
+  ],
+  "calls": [
+    {
+      "attempts": [
+        {
+          "branch": 0,
+          "callee": {
+            "identity": "c1-called-0-0"
+          },
+          "final": {
+            "at_ms": 1200,
+            "status": 200
+          },
+          "leg": "B",
+          "position": 0
+        }
+      ],
+      "caller_leg": "A",
+      "id": "c1"
+    },
+    {
+      "attempts": [
+        {
+          "branch": 0,
+          "callee": {
+            "identity": "c2-called-0-0"
+          },
+          "final": {
+            "at_ms": 4300,
+            "status": 200
+          },
+          "leg": "D",
+          "position": 0
+        }
+      ],
+      "caller_leg": "C",
+      "id": "c2"
+    }
+  ],
+  "case": {
+    "annotations": {
+      "notes": [
+        "the consultation call is placed while the first is on hold"
+      ]
+    },
+    "family": "refer",
+    "id": "authored-consultation-refer",
+    "lanes": {
+      "kind": "blocked:number-unclassified",
+      "upstream-fake": "ok"
+    },
+    "origin": "authored",
+    "requires": [
+      "proxy",
+      "store-faults"
+    ],
+    "title": "Two calls at once, then a REFER on the first naming the consultation call’s callee",
+    "variant": "target"
+  },
+  "deviations": [
+    {
+      "id": "d1",
+      "kind": "cseq-override",
+      "leg": "A",
+      "step": "s22",
+      "value": {
+        "delta": 3,
+        "from": "${step:s11.cseq}"
+      }
+    },
+    {
+      "id": "d2",
+      "kind": "raw-order",
+      "leg": "A",
+      "preserve": [
+        "header-order"
+      ],
+      "step": "s11"
+    }
+  ],
+  "endpoints": [
+    {
+      "binding": "loopback",
+      "id": "ep0",
+      "observed": "127.0.0.1:5060",
+      "side": "peer"
+    },
+    {
+      "binding": "dedicated",
+      "id": "ep1",
+      "observed": "127.0.0.1:5070",
+      "side": "peer"
+    }
+  ],
+  "flow": [
+    {
+      "delay": {
+        "compressible": false,
+        "from": "trigger",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s1",
+      "leg": "A",
+      "msg": {
+        "from": {
+          "form": "private",
+          "pos": "c1.caller"
+        },
+        "method": "INVITE",
+        "ruri": {
+          "form": "trunk-composed",
+          "pos": "c1.called[0][0]"
+        },
+        "to": {
+          "form": "trunk-composed",
+          "pos": "c1.called[0][0]"
+        }
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s2",
+      "leg": "B",
+      "msg": {
+        "method": "INVITE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s2",
+        "ms": 30,
+        "timer_linked": false
+      },
+      "id": "s3",
+      "leg": "B",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s3",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s4",
+      "leg": "A",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s4",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s5",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "op": "send"
+    },
+    {
+      "after": [
+        "s5"
+      ],
+      "delay": {
+        "compressible": true,
+        "from": "step:s5",
+        "ms": 500,
+        "timer_linked": false
+      },
+      "id": "s6",
+      "leg": "C",
+      "msg": {
+        "from": {
+          "form": "private",
+          "pos": "c2.caller"
+        },
+        "method": "INVITE",
+        "ruri": {
+          "form": "trunk-composed",
+          "pos": "c2.called[0][0]"
+        },
+        "to": {
+          "form": "trunk-composed",
+          "pos": "c2.called[0][0]"
+        }
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s6",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s7",
+      "leg": "D",
+      "msg": {
+        "method": "INVITE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s7",
+        "ms": 30,
+        "timer_linked": false
+      },
+      "id": "s8",
+      "leg": "D",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s8",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s9",
+      "leg": "C",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s9",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s10",
+      "in_dialog": true,
+      "leg": "C",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "op": "send"
+    },
+    {
+      "action": "store-fault:LiveAudit",
+      "after": [
+        "s10"
+      ],
+      "delay": {
+        "compressible": true,
+        "from": "step:s10",
+        "ms": 100,
+        "timer_linked": false
+      },
+      "id": "i1",
+      "op": "inject",
+      "target": "consultation-dialog"
+    },
+    {
+      "after": [
+        "i1"
+      ],
+      "delay": {
+        "compressible": true,
+        "from": "step:s10",
+        "ms": 200,
+        "timer_linked": false
+      },
+      "id": "s11",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "headers": [
+          {
+            "name": "Refer-To",
+            "value": "<sip:${num:c2-called-0-0:e164}@example.invalid>"
+          },
+          {
+            "name": "Referred-By",
+            "value": "<sip:0009001@example.invalid>"
+          }
+        ],
+        "method": "REFER"
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "checks": [
+        {
+          "field": "header(Refer-To)",
+          "op": "eq",
+          "value": "<sip:${num:c2-called-0-0:e164}@example.invalid>"
+        }
+      ],
+      "delay": {
+        "compressible": true,
+        "from": "step:s11",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s12",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "method": "REFER"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s12",
+        "ms": 10,
+        "timer_linked": false
+      },
+      "id": "s13",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "cseq-method": "REFER",
+        "reason": "Accepted",
+        "status": 202
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s13",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s14",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "cseq-method": "REFER",
+        "reason": "Accepted",
+        "status": 202
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s13",
+        "ms": 40,
+        "timer_linked": false
+      },
+      "id": "s15",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "headers": [
+          {
+            "name": "Event",
+            "value": "refer"
+          }
+        ],
+        "method": "NOTIFY"
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s15",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s16",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "method": "NOTIFY"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s16",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s17",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "cseq-method": "NOTIFY",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "send"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s17",
+        "ms": 100,
+        "timer_linked": false
+      },
+      "id": "s18",
+      "in_dialog": true,
+      "leg": "C",
+      "msg": {
+        "method": "BYE"
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s18",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s19",
+      "in_dialog": true,
+      "leg": "D",
+      "msg": {
+        "method": "BYE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s19",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s20",
+      "in_dialog": true,
+      "leg": "D",
+      "msg": {
+        "cseq-method": "BYE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s20",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s21",
+      "in_dialog": true,
+      "leg": "C",
+      "msg": {
+        "cseq-method": "BYE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s21",
+        "ms": 100,
+        "timer_linked": false
+      },
+      "id": "s22",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "method": "BYE"
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s22",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s23",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "method": "BYE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s23",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s24",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "cseq-method": "BYE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s24",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s25",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "cseq-method": "BYE",
+        "reason": "OK",
+        "status": 200
+      },
+      "op": "expect"
+    }
+  ],
+  "identities": [
+    {
+      "forms": [
+        "private"
+      ],
+      "kind": "external-caller",
+      "name": "c1-caller",
+      "observed": "0009001"
+    },
+    {
+      "forms": [
+        "e164"
+      ],
+      "kind": "site",
+      "name": "c1-called-0-0",
+      "observed": "+33000900004"
+    },
+    {
+      "forms": [
+        "e164"
+      ],
+      "kind": "site",
+      "name": "c2-called-0-0",
+      "observed": "+33000900005"
+    }
+  ],
+  "legs": [
+    {
+      "actor": "uac1",
+      "dir": "out",
+      "id": "A"
+    },
+    {
+      "actor": "uas1",
+      "dir": "in",
+      "id": "B"
+    },
+    {
+      "actor": "uac1",
+      "dir": "out",
+      "id": "C"
+    },
+    {
+      "actor": "uas2",
+      "dir": "in",
+      "id": "D"
+    }
+  ],
+  "media": {
+    "profiles": {
+      "book": {
+        "codec": "PCMA"
+      }
+    }
+  },
+  "pivot_version": 3,
+  "postconditions": {
+    "cdr": {
+      "checks": [
+        {
+          "field": "disposition",
+          "op": "eq",
+          "value": "ANSWERED"
+        }
+      ],
+      "count": 2
+    }
+  },
+  "timing": {
+    "expect_budget_ms": 32000,
+    "settle_budget_ms": 32000
+  }
+}

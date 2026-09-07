@@ -88,7 +88,7 @@ impl HttpService for EchoServer {
 //    records each raw response body keyed by correlation. ───────────────────────
 mod binprobe {
     use b2bua::rules::{
-        Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, RuleCall, ServiceSeed,
+        Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, RuleCall, ServiceSeed, TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
     use call::TimerType;
@@ -111,7 +111,7 @@ mod binprobe {
             Some(ServiceSeed::new(BpState::Working.label()).with_actions(vec![
                 RuleAction::ScheduleTimer {
                     timer_type: TimerType::service(BINPROBE, "kick"),
-                    delay_sec: 1,
+                    delay: TimerDelay::secs(1),
                     leg_id: None,
                 },
             ]))
@@ -205,7 +205,7 @@ mod binprobe {
 //    `outcome:"error"` re-entry (the machine is never stranded). ────────────────
 mod errprobe {
     use b2bua::rules::{
-        Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, RuleCall, ServiceSeed,
+        Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, RuleCall, ServiceSeed, TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
     use call::TimerType;
@@ -227,7 +227,7 @@ mod errprobe {
             Some(ServiceSeed::new(EpState::Working.label()).with_actions(vec![
                 RuleAction::ScheduleTimer {
                     timer_type: TimerType::service(ERRPROBE, "kick"),
-                    delay_sec: 1,
+                    delay: TimerDelay::secs(1),
                     leg_id: None,
                 },
             ]))

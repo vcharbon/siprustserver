@@ -14,7 +14,7 @@ use std::sync::Arc;
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::metrics::B2buaMetrics;
-use b2bua::store::{BufferedTerminateWriter, CallState, InMemoryCallStore};
+use b2bua::store::{BufferedTerminateWriter, CallState, InMemoryCallStore, MaterialiseOrigin};
 use b2bua::trace::{install_process_traces, traces, CallTraces};
 use observe::{RateDraw, SampleAdmission, TokenBucket};
 use sip_clock::Clock;
@@ -88,7 +88,10 @@ async fn materialising_adopts_the_call_it_serves_and_only_that_call() {
     //    store keeps, and the registry agrees with it ──────────────────────────
     let served = replicated("served@x", Some(true));
     let served_ref = served.call_ref.clone();
-    assert!(s.materialize_if_absent(served), "a call absent here is materialised");
+    assert!(
+        s.materialize_if_absent(served, MaterialiseOrigin::Reclaim),
+        "a call absent here is materialised"
+    );
 
     let stored = s.peek(&served_ref).expect("the materialised call is resident");
     assert_eq!(stored.trace_id.as_deref(), Some(NOMINAL_TRACE), "one trace across the takeover");
@@ -107,11 +110,14 @@ async fn materialising_adopts_the_call_it_serves_and_only_that_call() {
     //    over here; the registry never outruns the stored state ────────────────
     let resident = replicated("resident@x", None);
     let resident_ref = resident.call_ref.clone();
-    assert!(s.materialize_if_absent(resident), "first materialise inserts");
+    assert!(s.materialize_if_absent(resident, MaterialiseOrigin::Reclaim), "first materialise inserts");
     assert_eq!(traces().active(), 1, "an unsampled call opens no span");
 
     let again = replicated("resident@x", Some(true));
-    assert!(!s.materialize_if_absent(again), "a resident call is left untouched");
+    assert!(
+        !s.materialize_if_absent(again, MaterialiseOrigin::Reclaim),
+        "a resident call is left untouched"
+    );
     assert_eq!(
         traces().active(),
         1,

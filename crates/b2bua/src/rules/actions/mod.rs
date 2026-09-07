@@ -9,13 +9,15 @@
 //! - [`dialog_track`] — early-dialog tracking, 2xx confirmation, the a-dialog
 //! - [`originate`] — requests the B2BUA sends itself (CreateLeg, re-INVITE,
 //!   NOTIFY, PRACK, in-dialog probes)
-//! - [`respond`] — response synthesis toward a leg (finals, provisionals,
-//!   un-ACKed-2xx retransmits)
+//! - [`respond`] — response synthesis toward a leg (finals, provisionals)
+//! - [`ladder`] — the dialog-level retransmission ladders the framework owns
+//!   (ADR-0029 X4): arm / repeat / discharge / retire, keyed by obligation
 //! - [`teardown`] — termination policy + BYE/CANCEL builders
 //! - [`select`] — shared leg/dialog selection views
 
 mod dialog_track;
 mod dispatch;
+mod ladder;
 mod originate;
 mod relay_request;
 mod relay_response;
@@ -37,6 +39,8 @@ pub struct ActionExecutor<'a> {
     pub config: &'a B2buaConfig,
     pub id_gen: &'a IdGen,
     pub now_ms: i64,
+    /// The wire-fault seam; consulted where a guarded emission is built.
+    pub wire_faults: &'a crate::wire_faults::WireFaults,
 }
 
 impl ActionExecutor<'_> {

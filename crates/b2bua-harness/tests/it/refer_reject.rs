@@ -8,6 +8,11 @@
 //!   3. referReplacesRejected — Refer-To carries Replaces= → REFER 501 (seed rule).
 //!   4. referOutOfDialog    — REFER on an unknown Call-ID → 481 (router pre-rule path).
 //!   5. referSecondDuringAuthorizing — second REFER while refer-authorizing → 491.
+//!   6. referUnreadableReferTo — Refer-To absent / unreadable → 400 (seed rule).
+//!
+//! Each routes with `features.refer` active, so this platform terminates the
+//! REFER; without that directive a REFER is relayed to the peer leg
+//! (`refer_transparent_relay.rs`).
 
 use std::time::Duration;
 
@@ -193,7 +198,7 @@ async fn refer_out_of_dialog() {
     // `allow_violation` waiver exists for. The stranger, not the B2BUA, is the
     // non-conformant party here.
     h.allow_violation(
-        "rfc3261.noToTagOnInitialRequest",
+        "no-to-tag-on-initial-request",
         "stranger deliberately sends an out-of-dialog REFER with a bogus To-tag to \
          exercise the router's unknown-dialog 481 reject",
     );
@@ -284,4 +289,57 @@ async fn refer_second_during_authorizing() {
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
     let _ = h.finish().await;
+}
+
+// ── 6. Unreadable Refer-To on the LOCAL path → 400 Bad Request ────────────
+
+/// A REFER this platform processes itself (`features.refer`) whose Refer-To is
+/// an unclosed name-addr no reader accepts (RFC 3261 §20.30 / §25.1) is refused
+/// 400: the target is the request's whole point (RFC 3515 §2), so there is
+/// nothing to authorize and no transfer to start — never a 202 for a transfer
+/// that cannot happen.
+///
+/// The malformed header is the transferor's and IS the subject of the test; the
+/// SUT's own output stays compliant throughout.
+#[tokio::test]
+async fn refer_unreadable_refer_to_rejected_400() {
+    let h = Harness::with_transit_delay("refer-unreadable-refer-to", 1);
+    let alice = h.agent("alice", "127.0.0.1:5707").await;
+    let bob = h.agent("bob", "127.0.0.1:5717").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5717).start(&h, "b2bua", "127.0.0.1:5727").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = bob_uas.dialog();
+
+    let mut refer = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("Refer-To", "<sip:charlie@example.com")
+        .with_header("X-Api-Call", &x_api_call("refer-allow-c"))
+        .send()
+        .await;
+    refer.expect(400).await;
+
+    // A REFER with no Refer-To at all is the same refusal, and the refusals
+    // seeded no transfer: no NOTIFY toward the transferor, no C leg dialled.
+    let mut no_target = bob_dialog
+        .send_request(InDialogMethod::Refer)
+        .with_header("X-Api-Call", &x_api_call("refer-allow-c"))
+        .send()
+        .await;
+    no_target.expect(400).await;
+
+    // A↔B undisturbed — the refused REFERs left the call exactly as it was.
+    let mut alice_bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
+
+    let _ = h.finish().await;
+    b2bua.assert_fully_reaped();
 }

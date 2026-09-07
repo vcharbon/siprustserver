@@ -45,7 +45,7 @@ pub enum TransportKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lane {
     /// The registry key — the bare `ip:port`, or `ip:port#<label>` for a
-    /// logical sub-lane on a shared socket (upstreamneed-036 ask C). Matches the
+    /// logical sub-lane on a shared socket. Matches the
     /// `bind_key` recorded on the signaling events of this lane's endpoint.
     pub key: LaneKey,
     pub addr: SocketAddr,

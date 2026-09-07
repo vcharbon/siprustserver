@@ -1,7 +1,8 @@
 //! The per-call handler body: runs on the per-call FIFO with the state lock
-//! held — reaper verdict gate, initial-INVITE admission, in-dialog hydration
-//! (including takeover / on-demand reclaim), the rule chain, and the
-//! message-cap defense.
+//! held — reaper verdict gate, initial-INVITE admission, the in-dialog lookup
+//! (resident, or materialised as a takeover / on-demand reclaim), the re-offer
+//! of an unmatched datagram to the transactions the call seeded, the CANCEL
+//! the layer matched nothing for, the rule chain, and the message-cap defense.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,15 +11,17 @@ use call::helpers::cap_keepalive_fire_at;
 use call::{Call, CallModelState, LegState, TimerEntry, TimerType};
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::emergency::is_emergency_request;
-use sip_message::SipMessage;
+use sip_message::{Method, SipMessage};
 
 use super::interpret::process_result;
+use sip_txn::Reoffer;
+
+use super::materialise::{materialise, reoffer_trigger, Materialised, Origin, Reason};
 use super::peer_metrics::{classify_b2bua_peer, keepalive_timeout_peer};
 use super::reclaim::discharge_as_own;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
-use super::responses::build_store_fault_500;
-use super::restore_hygiene::sanitize_restored_timers;
+use super::responses::{build_481, build_store_fault_500};
 use super::RouterCtx;
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 use crate::event::CallEvent;
@@ -45,7 +48,7 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
 
     let result = if res.initial_invite {
         let (req, src) = match &event {
-            CallEvent::Sip { message, src } => match message.as_ref() {
+            CallEvent::Sip { message, src, .. } => match message.as_ref() {
                 SipMessage::Request(r) => (r.clone(), *src),
                 _ => return,
             },
@@ -70,7 +73,7 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
         if in_dialog_store_fault_gate(ctx, &event, &call_ref, now_ms).await {
             return;
         }
-        let Some(call) = hydrate_or_reclaim(ctx, &call_ref).await else {
+        let Some(call) = resident_or_materialised(ctx, &call_ref).await else {
             maybe_reject_orphan(ctx, &event).await;
             // This event was dispatched into a fresh per-call queue (one
             // `bump_creation`) and took the per-call lock, but resolved to NO
@@ -87,15 +90,31 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             release_call(ctx, &call_ref, ReleaseKind::Orphan).await;
             return;
         };
-        // Traced call: the message as it arrived, raw (ADR-0026). `image()` is
-        // the received datagram itself, so a lenient-parser normalization — a
+        // Traced call: the message as it arrived, raw (ADR-0026), before any
+        // answer to it — the re-offer's or the stray-CANCEL 481 — so the
+        // datagram that triggered a takeover is in the trace. `image()` is the
+        // received datagram itself, so a lenient-parser normalization — a
         // folded header, an odd-cased name, a rewritten URI — stays visible in
         // the very artifact that exists to diagnose it; re-serializing the
         // parse would hide it. Guarded, and it borrows: no copy either way.
-        if let CallEvent::Sip { message, src } = &event {
+        if let CallEvent::Sip { message, src, .. } = &event {
             if crate::trace::sampled(&call) {
                 crate::trace::emit::sip_in(&call, now_ms, *src, message.image());
             }
+        }
+        // The layer emitted this datagram with no transaction to match it; a
+        // materialisation — this turn's or an earlier one's, whose seeds went in
+        // after the datagram was emitted — may hold one now. Re-offered, a match
+        // is the layer's to answer and re-emit; this turn ends.
+        if reoffer_trigger(ctx, &call, &event).await == Reoffer::Matched {
+            return;
+        }
+        // A CANCEL reaches the router only when the transaction layer matched
+        // no active INVITE for it; the re-offer above was the seeded INVITE's
+        // chance. Otherwise RFC 3261 §9.2: 481, and no effect on the call. The
+        // rules never see a CANCEL request.
+        if reject_stray_cancel(ctx, &event).await {
+            return;
         }
         // The limiter-refresh timer is async (an HTTP call to migrate holds), so
         // it is handled outside the synchronous rule chain — like initial-INVITE.
@@ -139,12 +158,13 @@ enum Turn {
     Result(HandlerResult),
 }
 
-/// The call-reaper verdict gate (ADR-0020 X5/X6) — runs BEFORE any hydration,
-/// plus the last-touched liveness stamp. A verdict is check-then-act made safe:
-/// it applies only if the call's last-touched stamp still matches what the
-/// sweep observed (stale) or the call is still resident (fatal-error/discharge).
-/// Running before the in-dialog hydrate means a late verdict for a RELEASED
-/// call can never resurrect it from the replica store via on-demand reclaim.
+/// The call-reaper verdict gate (ADR-0020 X5/X6) — runs BEFORE any
+/// materialisation, plus the last-touched liveness stamp. A verdict is
+/// check-then-act made safe: it applies only if the call's last-touched stamp
+/// still matches what the sweep observed (stale) or the call is still resident
+/// (fatal-error/discharge). Running before the in-dialog lookup means a late
+/// verdict for a RELEASED call can never resurrect it from the replica store
+/// via on-demand reclaim.
 async fn reaper_verdict_gate(
     ctx: &Arc<RouterCtx>,
     event: &CallEvent,
@@ -294,6 +314,7 @@ async fn initial_invite_turn(
             ctx.limiter.as_ref(),
             &ctx.config,
             &ctx.id_gen,
+            &ctx.wire_faults,
             &ctx.services,
             req.image(),
             &ctx.clock,
@@ -370,7 +391,7 @@ async fn in_dialog_store_fault_gate(
     call_ref: &str,
     now_ms: i64,
 ) -> bool {
-    if let CallEvent::Sip { message, src } = event {
+    if let CallEvent::Sip { message, src, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
             if ctx.store_faults.check(StoreFaultPoint::LiveInDialog).is_err() {
                 if req.method() != "ACK" {
@@ -410,93 +431,35 @@ async fn in_dialog_store_fault_gate(
     false
 }
 
-/// Hydrate the call for an in-dialog event: the in-memory map, falling back to
-/// the acting-backup takeover read-path (S10b), then the rebooted-primary
-/// on-demand reclaim. `None` = a genuine orphan (no replica anywhere).
-async fn hydrate_or_reclaim(ctx: &Arc<RouterCtx>, call_ref: &str) -> Option<Call> {
-    match ctx.state.hydrate_from_replica(call_ref).await {
-        Some((c, fresh, skew_offset_ms)) => {
-            // Failover timer re-arm: per-call timers (keepalive, global
-            // duration, …) live in this node's in-memory `TimerService`, NOT in
-            // the replicated call state — so a call freshly materialized from a
-            // backup arrives with no live timers on THIS node. Re-arm its
-            // serialized timer intents (`call.timers`, which IS replicated)
-            // into the local driver, exactly once, on the hydration that
-            // created it. Without this the hydrated call has no keepalive (a
-            // dead peer is never probed) and no duration cap (never reaped) →
-            // `b2bua_active_calls` leaks on the takeover node. `restore`
-            // past-due entries fire immediately (the keepalive then re-arms
-            // itself on the next interval via the `keepalive` rule); re-arming
-            // is idempotent — any subsequent rule-emitted `ScheduleTimer` for
-            // the same id supersedes it via the driver's epoch bump. Skipped
-            // for `fresh == false` (the call was already resident and its
-            // timers are already live) to avoid double-arm.
-            if fresh {
-                // Mark this as a live acting-backup takeover copy (ADR-0014)
-                // and ARM the self-release notice: the txn layer will send a
-                // `CallQuiesced` once the transaction(s) we serve for this call
-                // all reach a terminal state, at which point the router sheds
-                // the live copy (keeping the `bak:` replica).
-                ctx.state.mark_takeover(call_ref);
-                // Restore-hygiene seam (clock-skew hardening): re-anchor the
-                // failed-over timers by the persisted receive-time skew offset,
-                // drop the stale in-flight `KeepaliveTimeout` (the OPTIONS it
-                // guarded died with the crashed primary), and apply the
-                // deep-past-due keepalive floor — so no immediate OPTIONS races
-                // the failed-over re-INVITE. No cohort here (single call), so
-                // no smoothing.
-                let mut takeover_timers = c.timers.clone();
-                sanitize_restored_timers(
-                    &mut takeover_timers,
-                    call_ref,
-                    ctx.clock.now_ms(),
-                    Some(skew_offset_ms),
-                    ctx.config.keepalive_interval_sec * 1000,
-                    None,
-                );
-                ctx.timers.restore(takeover_timers, call_ref.to_string()).await;
-                let _ = ctx.txn.watch_self_release(call_ref).await;
-            }
-            Some(c)
-        }
-        // REBOOTED-PRIMARY on-demand reclaim (ADR-0014). An in-dialog request
-        // (BYE / re-INVITE / UPDATE) can race the bulk `ReclaimAll` sweep on a
-        // rebooted primary: the body sits fully reclaimable in `pri:{self}`
-        // (the bootstrap imported it) but the serial sweep has not materialised
-        // it yet — and the only other materialisation trigger was a backup's
-        // reverse-flush `ReclaimCall` push, never an arriving request. Refusing
-        // to look would 481 a healthy long-hold call whose state lives RIGHT
-        // HERE. Materialise on demand, exactly as the reactive straggler path
-        // does (timers restored, no smoothing — one call), under the per-call
-        // guard the caller already holds; the bulk sweep's own
-        // `materialize_if_absent` keeps the two passes idempotent. NOT a
-        // takeover: this is our own call — no mark, no self-release watch. A
-        // call never imported into `pri:{self}` (its only copy is the peer's
-        // `bak:{self}`) still orphans — recovering THAT population needs an
-        // on-demand pull from the peer (s11 CASE B, open).
-        None => {
-            let (call, skew_offset_ms) = ctx.state.peek_reclaimable(call_ref).await?;
-            let mut timers = call.timers.clone();
-            // Same restore-hygiene seam as the bulk/reactive reclaim paths:
-            // re-anchor by the skew offset, drop the stale timeout, apply the
-            // deep-past-due floor. No cohort (one call) → no smoothing.
-            sanitize_restored_timers(
-                &mut timers,
-                call_ref,
-                ctx.clock.now_ms(),
-                Some(skew_offset_ms),
-                ctx.config.keepalive_interval_sec * 1000,
-                None,
-            );
-            if ctx.state.materialize_if_absent(call.clone()) {
-                ctx.timers.restore(timers, call_ref.to_string()).await;
-                ctx.metrics.bump_repl_reclaimed();
-            }
-            // The materialised copy is the authoritative one — it carries this
-            // node's own root span ids when the call is traced (ADR-0026 §5).
-            Some(ctx.state.peek(call_ref).unwrap_or(call))
-        }
+/// The live call for an in-dialog event: resident, or materialised as an
+/// acting-backup takeover (`bak:`), or — for a ref this node is primary for —
+/// as an on-demand reclaim (`pri:`), the in-dialog request that races the bulk
+/// sweep on a rebooted primary. `None` = a genuine orphan, or a deferred
+/// terminal this call just discharged through the reclaim funnel (CDR written,
+/// delete propagated); the request then draws the orphan 481 (ADR-0020 X3).
+async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Option<Call> {
+    let first = materialise(ctx, call_ref, Origin::Takeover).await;
+    let disposition = match first {
+        Materialised::Refused(Reason::NotBackupRole) => materialise(ctx, call_ref, Origin::Reclaim(None)).await,
+        other => other,
+    };
+    match disposition {
+        Materialised::Served(call) | Materialised::Resident(call) => Some(call),
+        Materialised::Refused(_) => None,
     }
+}
+
+/// RFC 3261 §9.2 for a CANCEL that matched no INVITE transaction in the layer
+/// and none a call here could rebuild: 481, and no effect on any call. `true`
+/// when `event` was such a CANCEL and has been answered.
+pub(super) async fn reject_stray_cancel(ctx: &RouterCtx, event: &CallEvent) -> bool {
+    let CallEvent::Sip { message, src, .. } = event else { return false };
+    let SipMessage::Request(req) = message.as_ref() else { return false };
+    if req.method() != Method::Cancel {
+        return false;
+    }
+    let _ = ctx.txn.send_response(build_481(req), *src).await;
+    true
 }
 
 /// Run the synchronous rule chain for one in-dialog event, with the
@@ -522,13 +485,65 @@ fn rule_chain_turn(
     call_ref: &str,
     now_ms: i64,
 ) -> HandlerResult {
-    let bumped = call.message_count.unwrap_or(0) + 1;
+    // The cap budget is a PER-LIVENESS-INTERVAL rate, not a lifetime total: the
+    // keepalive tick RESETS the counter, opening a fresh window. A runaway
+    // dialog still lands >cap events inside one window and is torn down; a
+    // healthy long call — whose per-interval traffic is its own self-paced
+    // probes plus a bounded trickle — never consumes the defense meant for
+    // runaway peers. A lifetime reading tore down every hour-long keepalive
+    // call around message 200, BYEing a healthy dialog mid-call.
+    let bumped = match event {
+        CallEvent::Timer { timer_type: TimerType::Keepalive, .. } => 0,
+        _ => call.message_count.unwrap_or(0) + 1,
+    };
     call.message_count = Some(bumped);
     let cap_exceeded = bumped > ctx.config.max_messages_per_call as i64
         && !matches!(
             call.state,
             CallModelState::Terminating | CallModelState::Terminated
         );
+    let exec = ActionExecutor {
+        config: &ctx.config,
+        id_gen: &ctx.id_gen,
+        now_ms,
+        wire_faults: &ctx.wire_faults,
+    };
+    // The dialog-level ladders are the framework's (ADR-0029 X4): a rung is
+    // repeated here and never reaches a rule; the discharging ACK or PRACK
+    // retires its ladder before the rules run and they read the fact; a
+    // give-up's timers are scrubbed before the CORE give-up rule decides, and
+    // its verdict is settled after (`settle_give_up`: an un-ACKed 2xx ends the
+    // session whatever the rules made of it).
+    let mut ladder_fx = HandlerEffects::new();
+    if let CallEvent::Timer { timer_type: TimerType::Rung { obligation }, .. } = event {
+        let before = call.clone();
+        exec.repeat(&mut call, &mut ladder_fx, obligation);
+        let repeated = HandlerResult { call, effects: ladder_fx };
+        return crate::rules::invariants::enforce(
+            &ctx.obligations,
+            &before,
+            crate::rules::invariants::finalize(repeated),
+            now_ms,
+            true,
+        );
+    }
+    let discharged = exec.discharge(&mut call, &mut ladder_fx, event, &res.source_leg_id);
+    // A non-2xx INVITE final ends the transaction it answers (RFC 3261
+    // §17.1.1.3, hop-ACKed below the TU): the record stops naming that round
+    // as in flight before the rules read it.
+    if let CallEvent::Sip { message, .. } = event {
+        if let SipMessage::Response(resp) = message.as_ref() {
+            if resp.status() >= 300 && resp.cseq().method() == Method::Invite {
+                if let Some(branch) = resp.top_via().branch() {
+                    call = call::helpers::close_rejected_invite_round(call, &res.source_leg_id, branch);
+                }
+            }
+        }
+    }
+    if let CallEvent::Timer { timer_type: TimerType::RepeatGiveUp { obligation }, .. } = event {
+        ctx.metrics.record_repeat_give_up(obligation.kind());
+        exec.give_up(&mut call, &mut ladder_fx, obligation);
+    }
     let rule_ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref,
@@ -537,13 +552,23 @@ fn rule_chain_turn(
         direction: res.direction,
         now_ms,
         config: &ctx.config,
-    };
-    let exec = ActionExecutor {
-        config: &ctx.config,
-        id_gen: &ctx.id_gen,
-        now_ms,
+        discharged: discharged.as_ref(),
     };
     let mut result = execute_rules(&ctx.rules, &call, &rule_ctx, &exec, &ctx.obligations);
+    // The ladder's own effects (its cancels) precede the rule's.
+    ladder_fx.extend(std::mem::take(&mut result.effects));
+    result.effects = ladder_fx;
+    if let CallEvent::Timer { timer_type: TimerType::RepeatGiveUp { obligation }, .. } = event {
+        let before = result.call.clone();
+        let settled = exec.settle_give_up(result, obligation, &rule_ctx);
+        result = crate::rules::invariants::enforce(
+            &ctx.obligations,
+            &before,
+            crate::rules::invariants::finalize(settled),
+            now_ms,
+            true,
+        );
+    }
     if cap_exceeded
         && !matches!(
             result.call.state,
@@ -552,7 +577,10 @@ fn rule_chain_turn(
     {
         // Tear the runaway call down through the standard executor so per-leg
         // BYE/CANCEL, dialog-tag ownership and the safety-timer contract apply
-        // exactly as a rule-driven termination would. The RFC-3326 cause rides
+        // exactly as a rule-driven termination would, and close the turn with
+        // the terminal invariants as a rule-driven termination does: a call
+        // whose legs are all resolved here is `Terminated` — CDR written,
+        // limiter released, removed — in this turn. The RFC-3326 cause rides
         // the reason (must start with "SIP").
         let cap_ctx = RuleContext {
             call: RuleCall::new(&result.call),
@@ -562,6 +590,7 @@ fn rule_chain_turn(
             direction: res.direction,
             now_ms,
             config: &ctx.config,
+            discharged: discharged.as_ref(),
         };
         // An UNANSWERED a-leg (still trying/early) has no final response yet:
         // `begin_termination` assumes the firing *rule* already replied (as
@@ -585,6 +614,7 @@ fn rule_chain_turn(
         cap_actions.push(RuleAction::BeginTermination {
             reason: Some("SIP;cause=503;text=\"message-cap-exceeded\"".into()),
         });
+        let before = result.call.clone();
         let cap = exec.execute(&cap_actions, &result.call, &cap_ctx);
         result.call = cap.call;
         result.effects.critical.extend(cap.effects.critical);
@@ -593,6 +623,13 @@ fn rule_chain_turn(
         result.effects.buffered.extend(cap.effects.buffered);
         result.effects.fire_and_forget.extend(cap.effects.fire_and_forget);
         ctx.metrics.bump_message_cap_terminated();
+        result = crate::rules::invariants::enforce(
+            &ctx.obligations,
+            &before,
+            crate::rules::invariants::finalize(result),
+            now_ms,
+            true,
+        );
     }
     result
 }
@@ -676,16 +713,10 @@ async fn handle_limiter_refresh(ctx: &Arc<RouterCtx>, mut call: Call, now_ms: i6
 
 /// A request for a vanished call → 481 (ACK/responses are silently dropped).
 async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
-    if let CallEvent::Sip { message, src } = event {
+    if let CallEvent::Sip { message, src, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method() != "ACK" {
-                let resp = generate_response(
-                    req,
-                    481,
-                    "Call/Transaction Does Not Exist",
-                    &GenerateResponseOpts::default(),
-                );
-                let _ = ctx.txn.send_response(resp, *src).await;
+                let _ = ctx.txn.send_response(build_481(req), *src).await;
             }
         }
     }

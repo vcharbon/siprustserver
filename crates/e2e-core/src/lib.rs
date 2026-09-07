@@ -6,6 +6,7 @@
 //! the web site and the CI CLI.
 
 pub mod checks;
+pub mod differential;
 pub mod egress;
 pub mod infra;
 pub mod media;

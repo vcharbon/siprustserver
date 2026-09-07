@@ -18,7 +18,7 @@
 set -u
 cd "$(dirname "$0")"
 
-BIN="${B2BUA_BIN:-/home/vince/siprustserver/target/release/b2bua-runner}"
+BIN="${B2BUA_BIN:-$(cd ../.. && pwd)/target/release/b2bua-runner}"
 RESULTS="results"
 SCN="scenarios"
 RAMP="${RAMP:-8}"        # seconds to reach steady state before sampling

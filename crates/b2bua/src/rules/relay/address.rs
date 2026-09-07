@@ -120,6 +120,7 @@ Content-Length: 0\r\n\r\n";
             &[],
             &CapabilitySet::default(),
             None, // no charging vector
+            &[], // no withheld option tags
             None,
         )
     }
@@ -169,7 +170,7 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(leg.invite_request_uri.as_deref(), Some("sip:charlie@10.244.2.9:5060"));
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
         };
         assert_eq!(invite.from().uri().host(), "carrier.example");
         assert_eq!(invite.to().uri().user(), Some("+15559876"));
@@ -182,7 +183,7 @@ Content-Length: 0\r\n\r\n";
         let (_leg, effect) = build(None, None, None).expect("relayed a-leg values must route");
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
         };
         assert_eq!(invite.request_uri().host_port(), ("10.244.2.7", 5060));
     }

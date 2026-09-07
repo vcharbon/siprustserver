@@ -222,7 +222,7 @@ pub struct ProxyMetrics {
     /// Proactive resolver refresh + startup prewarm events, keyed outcome
     /// (crate::resolver::refresh_outcome — closed set:
     /// refreshed|failed|idle_stopped|prewarmed|prewarm_failed). The
-    /// cold-cache-kill visibility for upstreamneed-037: `refreshed` moving means
+    /// cold-cache-kill visibility: `refreshed` moving means
     /// active names never expire cold; `prewarm_failed`/`failed` climbing
     /// means DNS is unhealthy while the old entries keep serving.
     resolver_refresh: LabeledCounter,

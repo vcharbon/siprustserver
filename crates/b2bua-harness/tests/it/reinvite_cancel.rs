@@ -25,7 +25,7 @@
 //! `teardown_races.rs`.
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -190,6 +190,18 @@ async fn cancel_reinvite_crossing_200_is_acked_and_absorbed() {
 #[tokio::test]
 async fn cancel_after_reinvite_answered_is_481_and_keeps_call() {
     let h = Harness::with_transit_delay("b2bua-reinvite-cancel-late", 0);
+    // Alice's post-ACK CANCEL of the completed re-INVITE violates RFC 3261
+    // §9.1 by design — the buggy caller this test exists to absorb — so it is
+    // waived on alice only and every B2BUA-side finding stays gated.
+    h.waive(
+        WaiverScope::rule(
+            "no-cancel-after-final",
+            "alice deliberately CANCELs a re-INVITE she already ACKed the 200 for \
+             (RFC 3261 §9.1) — the late-CANCEL misbehaviour whose absorption this \
+             test pins",
+        )
+        .on_party("alice"),
+    );
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
     let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;

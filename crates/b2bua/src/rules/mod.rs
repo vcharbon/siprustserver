@@ -29,8 +29,9 @@ pub use docgen::{check_registry, render_registry, render_registry_html, MachineG
 pub use service::{compose_rules, seed_services, ServiceDef, ServiceSeed, Terminal};
 pub use model::{
     Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleCall, RuleContext,
-    RuleDefinition, RuleHandleResult, StatusMatch, CORE_LAYER, SERVICE_LAYER,
+    RuleDefinition, RuleHandleResult, StatusMatch, TimerDelay, CORE_LAYER, SERVICE_LAYER,
 };
+pub use b2bua_sdk::relayed_final::RelayedFinal;
 
 // Re-exported for the `define_service!` / `sm_rule!` macros (and the public Rule
 // SDK, slice 6) so authored services reference framework types through `$crate`.

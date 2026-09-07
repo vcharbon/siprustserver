@@ -155,7 +155,7 @@ pub struct TestCase {
     /// Case-local check blocks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckBlock>,
-    /// RFC audit rule names (e.g. `rfc3261.noContactOnBye`) this case is
+    /// RFC audit rule names (e.g. `no-contact-on-bye`) this case is
     /// ALLOWED to violate — the authored analogue of the harness
     /// `allow_violation` waiver, for a case whose flow legitimately deviates
     /// (a deliberate non-compliance fixture). On the load surface a sampled

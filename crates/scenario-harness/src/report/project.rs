@@ -136,6 +136,8 @@ pub fn sip_doc_with_overlay(
             // fixtures legitimately produce them) — surface them as advisory.
             // Only a signalingAudit (RFC-rule) entry carries a gating severity.
             advisory: Some(a.kind != "signalingAudit" || !a.severity.fails()),
+            // …and it is the one ledger kind sourced from the audit registry.
+            rule_sourced: a.kind == "signalingAudit",
         })
         .collect();
     // The recorder's native findings and the re-folded `extra_anomalies` (same
@@ -317,7 +319,7 @@ fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
             seq_report::format_relative(rcvd as i64 - base),
         ));
     }
-    // True-wire receive note (upstreamneed-036 ask A): a message that arrived but
+    // True-wire receive note: a message that arrived but
     // was never consumed by the scenario body (or was refused by the inbox /
     // discarded by the loadgen loss model) is visibly distinguishable from one
     // the body expected and matched — on the arrow label AND in the detail.

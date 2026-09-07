@@ -38,6 +38,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use sip_message::SipParser;
 use layer_harness::recording::{record_call, CallOutcome};
 use layer_harness::time::now_ms;
 use layer_harness::{lane_key, Channel, LaneKey, RecordedAnomaly, Recorder, RunContext, Severity, Stamped};
@@ -65,7 +66,7 @@ pub const SIGNALING_TAG: &str = "sip-net/SignalingNetwork";
 /// `RecvConsumed` is the CONSUMPTION fact, recorded when the endpoint's
 /// `recv`/`try_recv` returns the packet. A `RecvItem` with no matching
 /// `RecvConsumed` is a message that really crossed the wire but the scenario
-/// body never read (upstreamneed-036 ask A) — still on the ladder, still seen by
+/// body never read — still on the ladder, still seen by
 /// the RFC audit. On an impl with no tappable inbox the decorator falls back to
 /// recording both, adjacently, at recv time.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,7 +75,7 @@ pub enum SignalingNetworkEvent {
     BindRelease { bind_key: LaneKey },
     SendCalled { bind_key: LaneKey, to: SocketAddr, msg: Vec<u8> },
     SendResult { bind_key: LaneKey, outcome: SendOutcome },
-    RecvItem { bind_key: LaneKey, packet: UdpPacket, disposition: RecvDisposition },
+    RecvItem { bind_key: LaneKey, packet: UdpPacket, disposition: RecvDisposition, wire: WireStamp },
     RecvConsumed { bind_key: LaneKey, packet: UdpPacket },
     /// An outbound datagram the endpoint's retransmit engine re-emitted below
     /// the recording layer (loadgen `--auto-retransmit`). Projection-only — it
@@ -87,6 +88,42 @@ pub enum SignalingNetworkEvent {
 pub enum SendOutcome {
     Ok,
     Err,
+}
+
+/// The wire facts of one arrival, computed ONCE at event production: the
+/// lenient parse every downstream reader shares, and the §17.2 wire-view
+/// repeat mark from [`crate::repeat`] — the same classification the harness
+/// absorption seam runs, so the recorded stream and the TU's surfacing can
+/// never disagree on what a repeat is. Stamped for EVERY arrival, audit-visible
+/// or not: a repeat of a modeled-loss delivery is still a repeat on the wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WireStamp {
+    /// The datagram parsed leniently (the wire is allowed to be malformed —
+    /// flagging that is a rule's job, not the parser's); `None` when the bytes
+    /// do not parse at all.
+    pub parsed: Option<Arc<sip_message::SipMessage>>,
+    /// The `seq` of the `RecvItem` this datagram byte-identically repeats
+    /// under its §17.2 transaction key, on the same bind.
+    pub repeat_of: Option<u64>,
+}
+
+impl WireStamp {
+    /// Parse `raw` and classify it against `tables` as the arrival stamped
+    /// with `seq` — the production path, one call per recorded arrival.
+    fn classify(tables: &crate::repeat::RepeatTables, raw: &[u8], seq: u64) -> Self {
+        let parsed = crate::rfc_audit::lenient_parser().parse(raw).ok().map(Arc::new);
+        let repeat_of = parsed.as_ref().and_then(|m| tables.note(raw, m, seq));
+        WireStamp { parsed, repeat_of }
+    }
+
+    /// A stamp for a hand-built arrival outside a recording bind (test
+    /// fixtures): the lenient parse, and never a repeat.
+    pub fn of_bytes(raw: &[u8]) -> Self {
+        WireStamp {
+            parsed: crate::rfc_audit::lenient_parser().parse(raw).ok().map(Arc::new),
+            repeat_of: None,
+        }
+    }
 }
 
 impl SignalingNetworkEvent {
@@ -151,7 +188,11 @@ pub struct SignalingAuditViolation {
 /// A per-peer rule. Sees the events captured for a single `bind_key` and
 /// returns zero or more violation detail strings. `subject` is the SIP role(s)
 /// it covers; it runs on a bind only when `subject` intersects the bind's
-/// declared roles. (Port of `PeerAuditRule`.)
+/// declared roles, and it reports at BIND DROP — the deferred-fail tier, which
+/// is what this seam is for. The RFC 3261/3262/3264 suite states every rule as
+/// a [`CrossMessageAuditRule`] instead: a per-message obligation is one message
+/// at one vantage, which that trait already expresses, and only it can name the
+/// offending wire position a scoped waiver attributes on.
 pub trait PeerAuditRule: Send + Sync {
     fn name(&self) -> &'static str;
     fn subject(&self) -> HashSet<UaRole> {
@@ -176,15 +217,19 @@ pub trait CrossMessageAuditRule: Send + Sync {
     fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)>;
 
     /// The findings with the 1-based wire-entry index of the OFFENDING message
-    /// (into `to_sip_entries(events)`), when the rule can pinpoint it. The
-    /// default derives from [`check`](Self::check) with no index; a rule that
-    /// knows the exact entry overrides THIS instead. Consumers scope waivers on
-    /// the index; a `None` finding is unattributable to a party/position.
+    /// (into `to_sip_entries(events)`), when the rule can pinpoint it, and the
+    /// bind the rule holds RESPONSIBLE — the one that emitted the offending
+    /// message, or owed the one never emitted — when it can name it. The
+    /// reporting lane is the vantage and is not always the culprit: an
+    /// out-of-order request is reported where it was taken, an un-ACKed 2xx
+    /// where the ACK was owed. The default derives from [`check`](Self::check)
+    /// with neither; a rule that knows overrides THIS instead. Consumers scope
+    /// waivers on the index; a finding with neither is unattributable.
     fn check_positioned(
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
-    ) -> Vec<(LaneKey, String, Option<usize>)> {
-        self.check(events).into_iter().map(|(b, d)| (b, d, None)).collect()
+    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        self.check(events).into_iter().map(|(b, d)| (b, d, None, None)).collect()
     }
 }
 
@@ -199,6 +244,8 @@ pub type ShouldAuditBind = Arc<dyn Fn(&LaneKey) -> bool + Send + Sync>;
 /// the per-test `exceptions` ledger is deferred — see MIGRATION_STATUS.)
 #[derive(Default, Clone)]
 pub struct ScopedAuditOptions {
+    /// Per-bind rules, evaluated at bind drop. The default RFC suite fills none
+    /// of these — see [`PeerAuditRule`].
     pub rules: Vec<Arc<dyn PeerAuditRule>>,
     pub cross_message_rules: Vec<Arc<dyn CrossMessageAuditRule>>,
     pub should_audit_bind: Option<ShouldAuditBind>,
@@ -416,17 +463,22 @@ impl SignalingNetwork for RecordingSignalingNetwork {
             summary,
         });
         let endpoint = self.0.inner.bind_udp(opts).await?;
-        // Delivery-time recording (upstreamneed-036 ask A): arrivals are recorded
+        // Delivery-time recording: arrivals are recorded
         // the moment the inner inbox accepts (or overflows/refuses) them, so a
         // packet the body never reads is still on the trace. Falls back to
         // recv-time recording on impls with no tappable inbox.
         let tap_channel = self.0.channel.clone();
         let tap_key = bind_key.clone();
+        // Per-bind §17.2 tables: the tap classifies every arrival at delivery
+        // (shared with the recv-time fallback below, which runs instead of it).
+        let repeat_tables = Arc::new(crate::repeat::RepeatTables::default());
+        let tap_tables = repeat_tables.clone();
         let tapped = endpoint.install_recv_tap(Arc::new(move |pkt, disposition| {
-            tap_channel.record(SignalingNetworkEvent::RecvItem {
+            tap_channel.record_with(|seq| SignalingNetworkEvent::RecvItem {
                 bind_key: tap_key.clone(),
                 packet: pkt.clone(),
                 disposition,
+                wire: WireStamp::classify(&tap_tables, &pkt.raw, seq),
             });
         }));
         // Send-side twin (loadgen mux only): re-emitted recovery frames go on the
@@ -452,6 +504,7 @@ impl SignalingNetwork for RecordingSignalingNetwork {
             rules: self.0.rules.clone(),
             should_audit: self.0.should_audit.clone(),
             tapped,
+            repeat_tables,
         }))
     }
 
@@ -488,15 +541,19 @@ struct RecordedEndpoint {
     /// are recorded at delivery and `recv` records only consumption; `false` →
     /// legacy fallback, `recv` records arrival + consumption adjacently.
     tapped: bool,
+    /// The bind's §17.2 tables — the tap's, so whichever path records the
+    /// arrival classifies against the same first-sightings.
+    repeat_tables: Arc<crate::repeat::RepeatTables>,
 }
 
 impl RecordedEndpoint {
     fn record_read(&self, p: &UdpPacket) {
         if !self.tapped {
-            self.channel.record(SignalingNetworkEvent::RecvItem {
+            self.channel.record_with(|seq| SignalingNetworkEvent::RecvItem {
                 bind_key: self.bind_key.clone(),
                 packet: p.clone(),
                 disposition: RecvDisposition::Delivered,
+                wire: WireStamp::classify(&self.repeat_tables, &p.raw, seq),
             });
         }
         self.channel.record(SignalingNetworkEvent::RecvConsumed {

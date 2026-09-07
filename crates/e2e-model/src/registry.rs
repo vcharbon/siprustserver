@@ -690,7 +690,7 @@ mod tests {
     }
 
     /// An explicit `legs` declaration wins over the boolean sugar — the open
-    /// form a third-party (upstream) shape uses: roles addressed on the wire by
+    /// form a third-party shape uses: roles addressed on the wire by
     /// number-plan prefixes, multiple prefixes per leg.
     #[test]
     fn explicit_legs_override_the_boolean_sugar() {

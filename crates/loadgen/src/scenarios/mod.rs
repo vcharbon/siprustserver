@@ -15,7 +15,7 @@
 //!
 //! # Shape-authoring caveat: repeated identical provisionals are invisible
 //!
-//! (upstreamneed-033 ask D2.) A B2BUA presents ONE a-leg early dialog, so when
+//! A B2BUA presents ONE a-leg early dialog, so when
 //! it relays a *second* ringing leg's 180 (a reroute, a sequential fork) the
 //! relayed 180 is **byte-identical** to the first — same Via branch, same
 //! To-tag. Under `--auto-retransmit` the mux's per-call engine dedups inbound

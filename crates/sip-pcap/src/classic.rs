@@ -6,7 +6,7 @@
 use crate::bytes::u32at;
 use crate::frame::decode_frame;
 use crate::reassembly::Reassembler;
-use crate::{Datagram, DecodeStats};
+use crate::{stamp_probe, Datagram, DecodeStats, Probes};
 
 /// Classic-pcap magics, little/big endian × microsecond/nanosecond.
 pub const MAGICS: [u32; 4] = [0xa1b2_c3d4, 0xa1b2_3c4d, 0xd4c3_b2a1, 0x4d3c_b2a1];
@@ -18,6 +18,7 @@ pub fn walk(
     out: &mut Vec<Datagram>,
     stats: &mut DecodeStats,
     reasm: &mut Reassembler,
+    probes: &mut Probes,
 ) -> Result<(), String> {
     if bytes.len() < 24 {
         return Err("file shorter than a pcap global header".into());
@@ -31,6 +32,9 @@ pub fn walk(
         m => return Err(format!("not a classic pcap file (magic {m:#010x})")),
     };
     let linktype = u32at(bytes, 20, le).ok_or("bad global header")?;
+    // A classic-pcap file declares no interfaces: the file IS the observation
+    // point.
+    let probe = probes.next();
 
     let mut off = 24usize;
     loop {
@@ -59,6 +63,8 @@ pub fn walk(
             stats.snap_truncated += 1;
             continue;
         }
+        let before = out.len();
         decode_frame(linktype, frame, ts_us, out, stats, reasm);
+        stamp_probe(out, before, probe);
     }
 }

@@ -19,7 +19,7 @@ fn forking_bob_plan(bob: &crate::Agent, disposition: Disposition) -> CallPlan {
             feed: CtxFeed::default(),
         
             cseq: None,
-            delayed: None,
+            delayed: vec![],
             claim: None,
         }],
         plan: vec![phase("established", |s| s.leg_at_least("bob", LegPhase::Confirmed))],
@@ -240,7 +240,7 @@ fn forked_pair_plan(
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -254,7 +254,7 @@ fn forked_pair_plan(
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -304,7 +304,7 @@ async fn actor_caller_confirms_forked_winner() {
 /// OWN fork dialog and BYEs that fork (§13.2.2.4), the fork BYE's 200
 /// (recognised by its tag mismatch) closes the `ForkBye` obligation WITHOUT
 /// terminating alice's leg, and the winning dialog tears down normally.
-/// The fork-aware `unackedInvite2xxByed` audit rule gates the wire at
+/// The fork-aware `unacked-2xx-not-cleared` audit rule gates the wire at
 /// `finish()` — an unACKed or unBYEd loser 200 would fail there.
 #[tokio::test(start_paused = true)]
 async fn actor_caller_acks_and_byes_losing_fork_late_200() {
@@ -340,7 +340,7 @@ async fn actor_caller_acks_and_byes_losing_fork_late_200() {
 /// PRACKed on its OWN early dialog — the `(to_tag, rseq)` dedup re-key: an
 /// RSeq-only dedup would swallow the second fork's PRACK (both forks start
 /// at RSeq 1) and the callee (which answers only on the WINNER's PRACK)
-/// would never answer; the `prackOnReliable1xx` audit rule would also flag
+/// would never answer; the `unacked-reliable-provisional` audit rule would also flag
 /// the unPRACKed fork at `finish()`.
 #[tokio::test(start_paused = true)]
 async fn actor_caller_pracks_each_reliable_fork() {

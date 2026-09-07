@@ -1,0 +1,60 @@
+{
+  "abandoned": {
+    "leg": "B",
+    "pending": [
+      "s16"
+    ]
+  },
+  "case": "bc-rc-missing-ack",
+  "completed_steps": [
+    "s1",
+    "s2",
+    "s3",
+    "s4"
+  ],
+  "lane": "upstream-fake",
+  "must_fail": [
+    {
+      "derived_from": "no-ack-to-dialog-creating-2xx",
+      "failure": "unexpected-ack",
+      "observed": {
+        "arrived": {
+          "cseq": 1,
+          "kind": "request",
+          "method": "ACK"
+        },
+        "failure": "unexpected-datagram",
+        "leg": "B"
+      },
+      "step": "s14"
+    },
+    {
+      "derived_from": "no-ack-to-dialog-creating-2xx",
+      "failure": "unexpected-ack",
+      "recorded": "ACK (CSeq 1 ACK)",
+      "step": "s15"
+    }
+  ],
+  "rfc_violations": [
+    {
+      "emitter": "uac1",
+      "gating": false,
+      "rule": "no-ack-to-dialog-creating-2xx",
+      "step": "s4"
+    }
+  ],
+  "status": "ok-negative",
+  "tolerated": [
+    {
+      "arrived": {
+        "cseq": 1,
+        "cseq_method": "INVITE",
+        "kind": "response",
+        "reason": "OK",
+        "status": 200
+      },
+      "failure": "datagram-after-flow",
+      "leg": "A"
+    }
+  ]
+}

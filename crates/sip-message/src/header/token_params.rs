@@ -54,6 +54,22 @@ impl<K: TokenParamsKind> TokenParamsHeader<K> {
     }
 }
 
+/// Parse a `token *(;param)` value with NO named header type — the shape a
+/// number of extension headers share (RFC 7315 §5.4 `P-Access-Network-Info`
+/// among them). Yields the leading token and the parameter list; the grammar's
+/// LWS freedom (`SWS ";" SWS`) is absorbed by the parse, so two spellings of
+/// one value compare equal through the parts.
+pub fn parse_token_params(raw: &SipStr) -> Result<(SipStr, Params), SipParseError> {
+    let value = raw.trimmed();
+    let semi = index_of(value.as_bytes(), b';', 0).unwrap_or(value.len());
+    let token = super::scan::sub_trimmed(&value, 0, semi);
+    if token.is_empty() {
+        return Err(SipParseError::new(format!("no leading token: {:?}", value.as_str())));
+    }
+    let (params, _) = parse_semicolon_params(&value, semi, &HEADER_PARAMS);
+    Ok((token, params))
+}
+
 impl<K: TokenParamsKind> HeaderValue for TokenParamsHeader<K> {
     fn header_name() -> HeaderName {
         K::name()
@@ -108,6 +124,17 @@ mod tests {
         let s = SubscriptionState::parse(&SipStr::owned(raw)).unwrap();
         assert_eq!(s.token(), "terminated");
         assert_eq!(s.to_wire(), raw);
+    }
+
+    /// RFC 3891: the replaced dialog is the leading Call-ID plus the two tags.
+    #[test]
+    fn a_replaces_reads_the_dialog_it_names() {
+        let raw = "425928@bobster.example.org;to-tag=7743;from-tag=6472";
+        let r = crate::header::Replaces::parse(&SipStr::owned(raw)).unwrap();
+        assert_eq!(r.token(), "425928@bobster.example.org");
+        assert_eq!(r.param("to-tag").and_then(ParamValue::as_str), Some("7743"));
+        assert_eq!(r.param("from-tag").and_then(ParamValue::as_str), Some("6472"));
+        assert_eq!(r.to_wire(), raw);
     }
 
     #[test]

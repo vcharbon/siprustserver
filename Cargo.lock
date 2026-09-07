@@ -507,6 +507,7 @@ dependencies = [
  "sip-clock",
  "sip-message",
  "sip-net",
+ "sip-retransmit",
  "sip-txn",
  "thiserror 2.0.18",
  "tokio",
@@ -535,6 +536,7 @@ dependencies = [
  "sip-message",
  "sip-net",
  "sip-proxy",
+ "sip-retransmit",
  "sip-txn",
  "tokio",
 ]
@@ -723,6 +725,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "sip-retransmit",
  "thiserror 2.0.18",
 ]
 
@@ -2972,6 +2975,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "pivot-interpreter"
+version = "0.1.0"
+dependencies = [
+ "b2bua",
+ "b2bua-harness",
+ "call",
+ "call-limiter",
+ "futures",
+ "http-net",
+ "pivot-schema",
+ "regex",
+ "scenario-harness",
+ "serde",
+ "serde_json",
+ "sip-clock",
+ "sip-message",
+ "sip-retransmit",
+ "tokio",
+]
+
+[[package]]
+name = "pivot-schema"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rfc-rules",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sip-message",
+ "sip-retransmit",
+]
+
+[[package]]
 name = "pkcs12"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3446,6 +3483,14 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "rfc-rules"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sip-message",
 ]
 
 [[package]]
@@ -4048,6 +4093,7 @@ dependencies = [
  "async-trait",
  "layer-harness",
  "libc",
+ "rfc-rules",
  "sip-clock",
  "sip-message",
  "socket2 0.6.4",
@@ -4062,6 +4108,9 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "flate2",
+ "rfc-rules",
+ "schemars",
+ "serde",
  "serde_json",
  "sip-message",
 ]
@@ -4114,12 +4163,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sip-retransmit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "sip-txn"
 version = "0.1.0"
 dependencies = [
  "bytes",
  "sip-message",
  "sip-net",
+ "sip-retransmit",
  "tokio",
  "tokio-util",
 ]

@@ -36,7 +36,7 @@ pub trait CallDecisionEngine: Send + Sync {
         req: CallReferRequest,
     ) -> Result<CallReferResponse, CallDecisionError>;
     /// Decide release vs reroute when a **subscribed** internal release event
-    /// fires (max-call-duration first; upstreamneed-009). Consulted only when
+    /// fires (max-call-duration first). Consulted only when
     /// the event kind is in `Call.subscriptions` AND the call carries a
     /// `callback_context` — otherwise the core acts locally and this is never
     /// called.
@@ -69,7 +69,7 @@ pub enum CallDecisionError {
 /// call.
 ///
 /// **Scope — `new_call` + `call_failure` + `call_release`, deliberately NOT
-/// `call_refer`** (ADR-0022 / upstreamneed-009). The first two are the decision
+/// `call_refer`** (ADR-0022). The first two are the decision
 /// calls that can block a caller who is waiting behind the INVITE's auto-100:
 /// `new_call` for the initial route, and `call_failure` for the
 /// limiter-reject / no-answer failover that reroutes *toward a still-pending

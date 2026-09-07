@@ -2,7 +2,7 @@
 //! (auto-100, cached-response replay for duplicates), ACK absorption,
 //! CANCEL→200+487, TU response sending (Timer H/J arming), and Timer G non-2xx
 //! final retransmission. The client (UAC) side does NOT live here — see
-//! `layer::client`.
+//! `layer::client`; a server INVITE rebuilt from a record is `layer::seed`'s.
 
 use std::net::SocketAddr;
 
@@ -10,14 +10,15 @@ use bytes::Bytes;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::header::ParamValue;
 use sip_message::param_codec::decode_param;
-use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
+use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
-use crate::event::{TimeoutKind, TransactionEvent, TxnKind};
-use crate::timers::{ms, T1, T2, TIMER_B, TIMER_H, TIMER_J};
+use crate::event::{TransactionEvent, TxnKind};
+use crate::timers::{ms, TIMER_H, TIMER_J};
+use sip_retransmit::{Class, Ladder, Schedule};
 
 use super::owner::Owner;
-use super::txn::{Timer, Transaction, TxnRole, TxnState};
+use super::txn::{NewTransaction, Timer, Transaction, TxnRole, TxnState};
 
 impl Owner {
     /// RFC 3261 §17.2.1 Timer G: retransmit the cached non-2xx final of an INVITE
@@ -30,16 +31,14 @@ impl Owner {
     /// Non-INVITE (Timer J) and 2xx (TU-owned §13.3.1.4 retransmit) are excluded at
     /// the arming site in `do_send_response`.
     pub(super) async fn fire_server_retransmit(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
-        let (buf, dest, next_interval) = match self.txns.get(branch) {
+        let (buf, dest, status) = match self.txns.get(branch) {
             Some(t)
                 if t.role == TxnRole::Server
                     && t.kind == TxnKind::Invite
                     && t.state == TxnState::Completed =>
             {
-                match (&t.last_response, t.destination) {
-                    (Some(buf), Some(dest)) => {
-                        (buf.clone(), dest, std::cmp::min(t.retransmit_interval_ms * 2, T2))
-                    }
+                match (&t.last_response, t.destination, t.last_response_status) {
+                    (Some(buf), Some(dest), Some(status)) => (buf.clone(), dest, status),
                     _ => return, // no cached final / destination — nothing to resend
                 }
             }
@@ -47,16 +46,19 @@ impl Owner {
         };
 
         self.send_buffer(endpoint, &buf, dest).await;
-        self.metrics
-            .server_final_retransmits
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics.retransmits.record_final(status);
 
-        let key = self
-            .timers
-            .insert(Timer::ServerRetransmit(branch.to_string()), ms(next_interval));
-        if let Some(t) = self.txns.get_mut(branch) {
-            t.retransmit_key = Some(key);
-            t.retransmit_interval_ms = next_interval;
+        let rearm = match self.txns.get_mut(branch).and_then(|t| t.ladder.as_mut()) {
+            Some(ladder) => ladder.advance(),
+            None => return,
+        };
+        if let Some(next_interval) = rearm {
+            let key = self
+                .timers
+                .insert(Timer::ServerRetransmit(branch.to_string()), next_interval);
+            if let Some(t) = self.txns.get_mut(branch) {
+                t.retransmit_key = Some(key);
+            }
         }
     }
 
@@ -66,17 +68,25 @@ impl Owner {
         msg: SipResponse,
         dest: SocketAddr,
     ) {
-        // Every field this layer needs is read before the response goes to the
-        // serializer BY VALUE, so keeping a `&SipMessage` alive costs no
-        // whole-message clone. The response is rendered rather than sent as its
-        // own image: the TU may have edited the header list of a message it
-        // parsed, so only a message this layer itself built carries its wire form.
+        // The response leaves as its own image — the one datagram a typed
+        // message IS (ADR-0025: parsed or frozen, never edited in place) — so a
+        // TU that retains `image()` for a §13.3.1.4 / RFC 3262 §3 repeat holds
+        // the wire bytes themselves (ADR-0029 X3). Nothing here re-renders it.
         let status = msg.status();
         let branch = msg.top_via().branch().map(str::to_string);
         let branch = branch.as_deref();
         let outbound_to_tag =
             if status > 100 { msg.to().tag().map(str::to_string) } else { None };
-        let buf = Bytes::from(serialize(&SipMessage::Response(msg)));
+        let cseq_method = msg.cseq().method().clone();
+        let buf: Bytes = msg.image().clone();
+
+        // A CANCEL response shares its INVITE's branch and this layer holds no
+        // transaction for a CANCEL: it leaves raw, never through — or dropped
+        // by — the INVITE transaction on that branch.
+        if cseq_method == Method::Cancel {
+            self.send_buffer(endpoint, &buf, dest).await;
+            return;
+        }
 
         if let Some(branch) = branch {
             if let Some(txn) = self.txns.get_mut(branch) {
@@ -109,40 +119,54 @@ impl Owner {
                     // for retransmit absorption.
                     if is_final {
                         txn.original_request = None;
-                        // Schedule Timer H/J cleanup (disjoint-field borrow: txns
-                        // and timers are separate Owner fields).
-                        let delay = match txn.kind {
-                            TxnKind::Invite => TIMER_H,
-                            TxnKind::NonInvite => TIMER_J,
-                        };
-                        // RFC 3261 §17.2.1: an INVITE server txn that answered NON-2xx
-                        // MUST actively retransmit the final (Timer G, T1 then ×2 capped
-                        // at T2) until the ACK or Timer H — our auto-100 already silenced
-                        // the UAC's INVITE retransmit, so the passive replay-on-request-
-                        // retransmit path never fires and a single dropped reject would
-                        // otherwise wedge the caller for the full 32 s. 2xx is exempt (the
-                        // TU owns §13.3.1.4 2xx retransmission); non-INVITE (Timer J) only
-                        // absorbs, never retransmits.
-                        let arm_timer_g = matches!(txn.kind, TxnKind::Invite) && status >= 300;
-                        let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(delay));
-                        let g_key = arm_timer_g.then(|| {
-                            self.timers
-                                .insert(Timer::ServerRetransmit(branch.to_string()), ms(T1))
-                        });
-                        if let Some(txn) = self.txns.get_mut(branch) {
-                            txn.cleanup_key = Some(key);
-                            if let Some(g_key) = g_key {
-                                txn.retransmit_key = Some(g_key);
-                                txn.retransmit_interval_ms = T1;
-                                txn.destination = Some(dest);
-                            }
-                        }
+                        let kind = txn.kind;
+                        self.arm_final_hold(branch, kind, status, dest);
                     }
                 }
+            } else if status >= 300 && cseq_method == Method::Invite {
+                // Every status on an unseen branch leaves raw. A non-2xx INVITE
+                // final owes a Timer G ladder, which only the transaction that
+                // admitted the INVITE — or its seed (ADR-0014) — can run:
+                // counted, so a takeover that materialised without one shows.
+                self.metrics
+                    .server_final_unseen_branch
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
         self.send_buffer(endpoint, &buf, dest).await;
+    }
+
+    /// Arm a server txn's post-final timers (RFC 3261 §17.2): the Timer H/J
+    /// cleanup, and for an INVITE answered non-2xx the Timer G ladder that
+    /// re-sends the final to `dest` (T1, then ×2 capped at T2) until the ACK or
+    /// Timer H. The auto-100 already silenced the UAC's INVITE retransmit, so
+    /// the passive replay-on-request-retransmit path never fires and a single
+    /// dropped reject would otherwise wedge the caller for the full 32 s. 2xx is
+    /// exempt (the TU owns §13.3.1.4 2xx retransmission); non-INVITE (Timer J)
+    /// only absorbs, never retransmits.
+    fn arm_final_hold(&mut self, branch: &str, kind: TxnKind, status: u16, dest: SocketAddr) {
+        let delay = match kind {
+            TxnKind::Invite => TIMER_H,
+            TxnKind::NonInvite => TIMER_J,
+        };
+        let arm_timer_g = matches!(kind, TxnKind::Invite) && status >= 300;
+        // Disjoint-field borrow: txns and timers are separate Owner fields.
+        let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(delay));
+        let armed = arm_timer_g
+            .then(|| Ladder::armed(Schedule::rfc(Class::InviteServerFinal)))
+            .flatten()
+            .map(|(ladder, first)| {
+                (ladder, self.timers.insert(Timer::ServerRetransmit(branch.to_string()), first))
+            });
+        if let Some(txn) = self.txns.get_mut(branch) {
+            txn.cleanup_key = Some(key);
+            if let Some((ladder, g_key)) = armed {
+                txn.retransmit_key = Some(g_key);
+                txn.ladder = Some(ladder);
+                txn.destination = Some(dest);
+            }
+        }
     }
 
     pub(super) async fn handle_inbound_request(
@@ -159,6 +183,7 @@ impl Owner {
             self.emit(TransactionEvent::Message {
                 message: Box::new(SipMessage::Request(req)),
                 src,
+                matched_client_txn: false,
             });
             return;
         }
@@ -182,6 +207,7 @@ impl Owner {
                             self.emit(TransactionEvent::Message {
                                 message: Box::new(SipMessage::Request(req)),
                                 src,
+                                matched_client_txn: false,
                             });
                             return;
                         }
@@ -198,22 +224,19 @@ impl Owner {
             self.emit(TransactionEvent::Message {
                 message: Box::new(SipMessage::Request(req)),
                 src,
+                matched_client_txn: false,
             });
             return;
         }
 
         // ── CANCEL ─────────────────────────────────────────────────────────────
         if req.method() == Method::Cancel {
-            self.handle_cancel(endpoint, req, src).await;
+            self.handle_cancel(endpoint, req, src, false).await;
             return;
         }
 
         // ── Duplicate detection for other requests ─────────────────────────────
-        if let Some(existing) = self.txns.get(branch) {
-            if let Some(cached) = existing.last_response.clone() {
-                self.send_buffer(endpoint, &cached, src).await;
-            }
-            // else: duplicate with no response yet — absorb silently.
+        if self.replay_cached(endpoint, &req, src).await {
             return;
         }
 
@@ -238,36 +261,21 @@ impl Owner {
         // `callRef` param yet → `None`.
         let call_ref = extract_ruri_call_ref(&req);
 
-        let txn = Transaction {
+        self.set_txn(Transaction::new(NewTransaction {
             branch: branch.to_string(),
             role: TxnRole::Server,
             kind,
+            method: req.method().clone(),
             call_id: req.call_id().as_str().to_string(),
             from_tag: req.from().tag().unwrap_or_default().to_string(),
             // INVITE server txns keep the request for the CANCEL→487 path; a
             // non-INVITE server txn never reads it, so skip that clone.
             original_request: is_invite.then(|| req.clone()),
-            last_response: None,
-            last_response_status: None,
             call_ref,
             leg_id: None,
             state: TxnState::Trying,
             destination: None,
-            created_at: tokio::time::Instant::now(),
-            uas_to_tag: None,
-            retransmit_key: None,
-            timeout_key: None,
-            cleanup_key: None,
-            held_cancel: None,
-            cancel_grace_key: None,
-            retransmit_buf: None,
-            retransmit_interval_ms: T1,
-            retransmit_elapsed_ms: T1,
-            retransmit_max_ms: TIMER_B,
-            // Server txns arm no client give-up timer; the field is inert here.
-            timeout_kind: TimeoutKind::Response,
-        };
-        self.set_txn(txn);
+        }));
 
         // For INVITE, immediately send 100 Trying and move to proceeding.
         if is_invite {
@@ -295,6 +303,7 @@ impl Owner {
         let event = TransactionEvent::Message {
             message: Box::new(SipMessage::Request(req)),
             src,
+            matched_client_txn: false,
         };
         if is_invite {
             self.emit_critical(event);
@@ -303,7 +312,70 @@ impl Owner {
         }
     }
 
-    async fn handle_cancel(&mut self, endpoint: &dyn UdpEndpoint, req: SipRequest, src: SocketAddr) {
+    /// The retransmission path (RFC 3261 §17.2.1): a request whose branch
+    /// already holds a server transaction draws that transaction's cached
+    /// response — a repeat no timer paced, counted as `trigger` under the
+    /// request's method and the response's status. A `Proceeding` INVITE
+    /// server transaction holding no response yet (a seed rebuilt from a
+    /// record, ADR-0014) owes the retransmission its most recent provisional:
+    /// a 100 Trying is composed from `req`, sent and cached, as the admit path
+    /// does for the first copy. A non-INVITE transaction still awaiting its
+    /// first response sends nothing. `true` when a transaction absorbed the
+    /// request, `false` when the branch is unseen or empty.
+    pub(super) async fn replay_cached(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        req: &SipRequest,
+        src: SocketAddr,
+    ) -> bool {
+        let branch = req.top_via().branch().unwrap_or_default();
+        if branch.is_empty() {
+            return false;
+        }
+        let Some(existing) = self.txns.get(branch) else { return false };
+        let replay = existing
+            .last_response
+            .clone()
+            .zip(existing.last_response_status)
+            .map(|(cached, status)| (cached, status, existing.method.clone()));
+        let owes_trying = existing.role == TxnRole::Server
+            && existing.kind == TxnKind::Invite
+            && existing.state == TxnState::Proceeding;
+        match replay {
+            Some((cached, status, method)) => {
+                self.send_buffer(endpoint, &cached, src).await;
+                self.metrics.retransmits.record_trigger(&method, status);
+            }
+            None if owes_trying => {
+                let trying_buf =
+                    generate_response(req, 100, "Trying", &GenerateResponseOpts::default())
+                        .image()
+                        .clone();
+                self.send_buffer(endpoint, &trying_buf, src).await;
+                if let Some(txn) = self.txns.get_mut(branch) {
+                    txn.last_response = Some(trying_buf);
+                    txn.last_response_status = Some(100);
+                }
+            }
+            None => {}
+        }
+        true
+    }
+
+    /// RFC 3261 §9.2 at this layer: a CANCEL matching an active INVITE server
+    /// transaction is answered 200 and its INVITE 487, and `Cancelled` is
+    /// emitted; `true`. One matching nothing here is the TU's to answer — a
+    /// call it holds for a peer may hold the INVITE the CANCEL names, and only
+    /// the TU can rebuild that transaction and re-offer the CANCEL — so it is
+    /// handed up unanswered as a `Message` (`false`); re-offered and still
+    /// unmatched, it is handed nowhere.
+    pub(super) async fn handle_cancel(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        req: SipRequest,
+        src: SocketAddr,
+        reoffer: bool,
+    ) -> bool {
         let call_id = req.call_id();
         let from = req.from();
         let from_tag = from.tag().unwrap_or_default();
@@ -315,12 +387,15 @@ impl Owner {
         // preserve the branch).
         let cancel_via = req.top_via();
         let cancel_branch = cancel_via.branch().unwrap_or_default();
+        // A CANCEL target holds the INVITE it answers 487 for: a seed rebuilt
+        // without its request absorbs the INVITE's retransmissions only.
         let is_cancel_target = |t: &Transaction| {
             t.role == TxnRole::Server
                 && t.kind == TxnKind::Invite
                 && t.call_id == call_id.as_str()
                 && t.from_tag == from_tag
                 && t.state.is_active()
+                && t.original_request.is_some()
         };
         let matched_branch = self
             .txns
@@ -333,23 +408,21 @@ impl Owner {
                     .find_map(|(b, t)| is_cancel_target(t).then(|| b.clone()))
             });
 
-        // RFC 3261 §9.2: a CANCEL matching no active INVITE server txn gets a 481
-        // and has NO effect. An unconditional 200 + Cancelled event here would let
-        // a late/retransmitted/replayed CANCEL — one arriving after the call was
-        // answered (txn Completed, not active) — tear down an established call
-        // upstream, and give the retransmitted CANCEL a tagless 200 plus a
-        // duplicate Cancelled. Reject it cleanly instead.
+        // No active INVITE server txn — a CANCEL arriving after the answer (txn
+        // Completed) included — has NO effect here: no 200, no 487, no
+        // Cancelled that would tear an established call down upstream. The TU
+        // decides between the §9.2 481 and a re-offer against a rebuilt INVITE.
         let branch = match matched_branch {
             Some(b) => b,
             None => {
-                let reject = generate_response(
-                    &req,
-                    481,
-                    "Call/Transaction Does Not Exist",
-                    &GenerateResponseOpts::default(),
-                );
-                self.send_buffer(endpoint, reject.image(), src).await;
-                return;
+                if !reoffer {
+                    self.emit(TransactionEvent::Message {
+                        message: Box::new(SipMessage::Request(req)),
+                        src,
+                        matched_client_txn: false,
+                    });
+                }
+                return false;
             }
         };
 
@@ -426,6 +499,7 @@ impl Owner {
             in_dialog,
             headers: req.headers().to_vec(),
         });
+        true
     }
 }
 

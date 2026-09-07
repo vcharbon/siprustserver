@@ -12,7 +12,7 @@
 //! (when delivered) received timestamps. A send with no matching receive (lost
 //! packet, unbound destination) becomes an entry with `delivered = false`.
 //!
-//! Arrival vs consumption (upstreamneed-036 ask A): a `RecvItem` is the ARRIVAL
+//! Arrival vs consumption: a `RecvItem` is the ARRIVAL
 //! fact (recorded at delivery into the inbox); a `RecvConsumed` marker is the
 //! CONSUMPTION fact (the endpoint's `recv` returned it). An arrival with no
 //! matching consumption — or one the inbox/loss-model refused — carries a
@@ -198,7 +198,7 @@ fn paired_sip_entries(
     // Pre-index the arrivals so a send can claim the first unpaired match.
     let mut recvs: Vec<RecvHalf<'_>> = Vec::new();
     for s in events {
-        if let SignalingNetworkEvent::RecvItem { bind_key, packet, disposition } = &s.event {
+        if let SignalingNetworkEvent::RecvItem { bind_key, packet, disposition, .. } = &s.event {
             if let Some(receiver) = lane_addr(bind_key) {
                 recvs.push(RecvHalf {
                     seq: s.seq,
@@ -395,6 +395,7 @@ mod tests {
                     src: from.parse().unwrap(),
                     arrival_ms: seq,
                 },
+                wire: crate::contracts::WireStamp::of_bytes(raw.as_bytes()),
             },
             seq,
             at_ms: seq,

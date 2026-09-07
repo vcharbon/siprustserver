@@ -25,6 +25,7 @@
 pub mod config;
 pub mod event;
 pub mod model;
+pub mod relayed_final;
 pub mod service;
 
 /// The framework-type façade the [`define_service!`] / [`sm_rule!`] macros
@@ -33,8 +34,10 @@ pub mod service;
 pub mod rules {
     pub use crate::model::{
         Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleCall,
-        RuleContext, RuleDefinition, RuleHandleResult, StatusMatch, CORE_LAYER, SERVICE_LAYER,
+        RuleContext, RuleDefinition, RuleHandleResult, StatusMatch, TimerDelay, CORE_LAYER,
+        SERVICE_LAYER,
     };
+    pub use crate::relayed_final::RelayedFinal;
     pub use sip_message::draft::Entry;
     pub use sip_message::header::HeaderName;
     pub use sip_message::Method;

@@ -14,6 +14,7 @@ use call::features::{
 };
 use call::model::*;
 use proptest::prelude::*;
+use sip_retransmit::Class;
 
 // ── Representative fixture (port of fixture.ts) ─────────────────────────────
 
@@ -68,20 +69,57 @@ fn dialog(
                     source_timestamp: None,
                     direction: Direction::FromA,
                     cancelled: false,
+                    offered_100rel: false,
                 })
                 .collect(),
             ack_branch: Some(format!("z9hG4bK-ack-{cseq:x}")),
             pending_invite_txn: None,
             cached_sdp: cached_sdp.then(|| SDP_BODY.to_vec()),
             pending_reinvite_2xx: None,
-            answered_advert: Vec::new(),
+            answered_2xx: None,
+            emitted_ack: None,
+            awaited_ack_cseq: None,
         },
     }
 }
 
+/// What a fixture emission on the ladder `class` paces is a copy of: an
+/// INVITE's 200 on the §13.3.1.4 ladder, a 183 to an INVITE on RFC 3262 §3's.
+pub fn repeated_on(class: Class) -> Repeated {
+    match class {
+        Class::ReliableProvisional => Repeated::response("INVITE", 183),
+        _ => Repeated::response("INVITE", 200),
+    }
+}
+
+/// A retained emission standing on `rung` of the ladder `class` paces: the
+/// first rung armed by `paced`, then advanced rung by rung — the way the
+/// stack itself reaches one.
+pub fn paced_emission(datagram: &[u8], dest: (&str, u16), class: Class, rung: u32) -> RetainedEmission {
+    let (mut emission, _) =
+        RetainedEmission::paced(datagram.to_vec(), (dest.0.to_string(), dest.1), class, repeated_on(class));
+    for _ in 1..rung {
+        emission.advance(None).expect("the requested rung sits inside the class's bound");
+    }
+    emission
+}
+
+/// The initial-INVITE 2xx the representative call answered the caller with,
+/// three rungs into its §13.3.1.4 ladder (RFC 3261) — the caller's ACK is
+/// still outstanding.
+pub const ANSWERED_2XX: &[u8] = b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-123;rport=5060\r\n\
+From: <sip:alice@example.com>;tag=alice-from-tag-001\r\nTo: <sip:bob@example.com>;tag=b2bua-to-tag-aleg-9876\r\n\
+Call-ID: call-id-deadbeef@example.com\r\nCSeq: 1 INVITE\r\nP-Charging-Vector: icid-value=icid-9f2c\r\n\
+Content-Length: 0\r\n\r\n";
+
+/// The ACK the representative call emitted toward the callee, retained for
+/// the §13.2.2.4 re-ACK.
+pub const EMITTED_ACK: &[u8] = b"ACK sip:bob@192.0.2.20:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-ack-1f45\r\n\
+CSeq: 8005 ACK\r\nContent-Length: 0\r\n\r\n";
+
 /// A realistic confirmed 2-leg call — mirrors `representativeCall` in fixture.ts.
 pub fn representative_call() -> Call {
-    let a_leg = Leg {
+    let mut a_leg = Leg {
         leg_id: "a".into(),
         call_id: "call-id-deadbeef@example.com".into(),
         from_tag: "alice-from-tag-001".into(),
@@ -112,7 +150,12 @@ pub fn representative_call() -> Call {
         kind: None,
         adopted: None,
     };
-    let b_leg = Leg {
+    a_leg.dialogs[0].ext.answered_2xx = Some(Unacked2xx {
+        dialog_tag: "b2bua-to-tag-aleg-9876".into(),
+        cseq: 1,
+        emission: paced_emission(ANSWERED_2XX, ("192.0.2.10", 5060), Class::Final2xx, 3),
+    });
+    let mut b_leg = Leg {
         leg_id: "b-1".into(),
         call_id: "b-leg-call-id-fedcba@b2bua".into(),
         from_tag: "b2bua-from-tag-bleg-5544".into(),
@@ -143,6 +186,8 @@ pub fn representative_call() -> Call {
         kind: None,
         adopted: None,
     };
+    b_leg.dialogs[0].ext.emitted_ack =
+        Some(RetainedEmission::on_trigger(EMITTED_ACK.to_vec(), ("192.0.2.20".into(), 5060), Repeated::request("ACK")));
 
     let mut ext: ExtMap = BTreeMap::new();
     ext.insert(
@@ -245,6 +290,7 @@ pub fn representative_call() -> Call {
             call_limiters: None,
             advertise_capabilities: None,
             charging_vector: None,
+            withhold_option_tags: None,
         }),
         policy_update_headers: None,
         policy_update_body: None,
@@ -272,6 +318,7 @@ pub fn representative_call() -> Call {
             started_at_ms: 1_779_440_050_000,
         }),
         reliable_provisionals: Vec::new(),
+        pracked_provisionals: Vec::new(),
         sm_cursors: BTreeMap::new(),
     }
 }
@@ -420,6 +467,7 @@ fn arb_pending_request() -> impl Strategy<Value = PendingRequest> {
                     source_timestamp: None,
                     direction,
                     cancelled: false,
+                    offered_100rel: false,
                 }
             },
         )
@@ -456,21 +504,79 @@ fn arb_dialog() -> impl Strategy<Value = Dialog> {
         proptest::option::of(arb_tag()),
         proptest::option::of(arb_invite_handle()),
         proptest::option::of(arb_bytes(80)),
+        proptest::option::of(arb_unacked_2xx()),
+        proptest::option::of(arb_unacked_2xx()),
+        proptest::option::of(arb_retained_emission()),
+        proptest::option::of(any::<i64>()),
     )
         .prop_map(
-            |(remote_cseq, inbound_pending_requests, ack_branch, pending_invite_txn, cached_sdp)| {
+            |(
+                remote_cseq,
+                inbound_pending_requests,
+                ack_branch,
+                pending_invite_txn,
+                cached_sdp,
+                pending_reinvite_2xx,
+                answered_2xx,
+                emitted_ack,
+                awaited_ack_cseq,
+            )| {
                 B2buaDialogExt {
                     remote_cseq,
                     inbound_pending_requests,
                     ack_branch,
                     pending_invite_txn,
                     cached_sdp,
-                    pending_reinvite_2xx: None,
-                    answered_advert: Vec::new(),
+                    pending_reinvite_2xx,
+                    answered_2xx,
+                    emitted_ack,
+                    awaited_ack_cseq,
                 }
             },
         );
     (sip, ext).prop_map(|(sip, ext)| Dialog { sip, ext })
+}
+
+/// Any retained emission: bytes and destination under either repeat shape,
+/// a paced one standing anywhere on the first rungs of any dialog-level class.
+fn arb_retained_emission() -> impl Strategy<Value = RetainedEmission> {
+    let paced = (
+        arb_bytes(120),
+        "[a-z0-9.]{3,20}",
+        any::<u16>(),
+        prop_oneof![Just(Class::Final2xx), Just(Class::ReliableProvisional)],
+        1u32..6,
+    )
+        .prop_map(|(bytes, host, port, class, rung)| paced_emission(&bytes, (&host, port), class, rung));
+    let on_trigger = (arb_bytes(120), "[a-z0-9.]{3,20}", any::<u16>())
+        .prop_map(|(bytes, host, port)| RetainedEmission::on_trigger(bytes, (host, port), Repeated::request("ACK")));
+    prop_oneof![paced, on_trigger]
+}
+
+/// A 2xx still awaiting its ACK: the key the ACK carries plus the retained
+/// emission on the §13.3.1.4 ladder.
+fn arb_unacked_2xx() -> impl Strategy<Value = Unacked2xx> {
+    (arb_tag(), any::<i64>(), arb_retained_emission())
+        .prop_map(|(dialog_tag, cseq, emission)| Unacked2xx { dialog_tag, cseq, emission })
+}
+
+/// A reliable provisional this stack renumbered, PRACKed or with a live §3
+/// ladder (RFC 3262).
+fn arb_reliable_provisional() -> impl Strategy<Value = ReliableProvisional> {
+    (
+        arb_tag(),
+        any::<i64>(),
+        "(a|b-[0-9]{1,2})",
+        arb_tag(),
+        any::<i64>(),
+        any::<i64>(),
+        any::<bool>(),
+        proptest::option::of(arb_retained_emission()),
+        proptest::option::of(any::<i64>()),
+    )
+        .prop_map(|(a_tag, a_rseq, b_leg_id, b_tag, b_cseq, b_rseq, acknowledged, emission, a_cseq)| {
+            ReliableProvisional { a_tag, a_rseq, b_leg_id, b_tag, b_cseq, b_rseq, acknowledged, emission, a_cseq }
+        })
 }
 
 fn arb_leg() -> impl Strategy<Value = Leg> {
@@ -613,6 +719,7 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
             call_limiters: None,
             advertise_capabilities: None,
             charging_vector: None,
+            withhold_option_tags: None,
         })
 }
 
@@ -692,9 +799,10 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         proptest::option::of(proptest::collection::vec(arb_tag(), 0..3)),
         arb_sm_cursors(),
     );
-    // upstreamneed-009: release-event subscriptions + the in-flight reroute slice
+    // Release-event subscriptions + the in-flight reroute slice
     // ride the replicated body like `features`/`transfer` do.
     let release = (
+        proptest::collection::vec(arb_reliable_provisional(), 0..3),
         proptest::collection::vec(Just(ReleaseEventKind::MaxCallDuration), 0..2),
         proptest::option::of((arb_tag(), proptest::option::of(arb_tag()), any::<i64>(), any::<bool>()).prop_map(
             |(new_leg_id, old_leg_id, started_at_ms, realigning)| RerouteState {
@@ -723,7 +831,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
                 terminating_refresh_legs,
                 sm_cursors,
             ),
-            (subscriptions, reroute),
+            (reliable_provisionals, subscriptions, reroute),
         )| Call {
             call_ref,
             a_leg,
@@ -758,7 +866,8 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             transfer: None,
             subscriptions,
             reroute,
-            reliable_provisionals: Vec::new(),
+            reliable_provisionals,
+            pracked_provisionals: Vec::new(),
             sm_cursors,
         },
     )

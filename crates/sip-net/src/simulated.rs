@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use layer_harness::time::now_ms;
+use sip_clock::Clock;
 
 use crate::net::{Counters, SignalingNetwork, UdpEndpoint};
 use crate::queue::PacketQueue;
@@ -39,6 +40,8 @@ struct BoundEndpoint {
     queue: Arc<PacketQueue>,
     counters: Arc<Counters>,
     pre_ingress: Option<PreIngressHook>,
+    /// This bind's arrival-stamp timeline (see [`BindUdpOpts::clock`]).
+    clock: Clock,
 }
 
 struct SimShared {
@@ -110,6 +113,7 @@ impl SignalingNetwork for SimulatedSignalingNetwork {
                     queue: queue.clone(),
                     counters: counters.clone(),
                     pre_ingress: opts.pre_ingress.clone(),
+                    clock: opts.clock.clone(),
                 },
             );
         }
@@ -171,9 +175,9 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
             let routing = shared.routing.lock().unwrap();
             routing
                 .get(&dst)
-                .map(|b| (b.queue.clone(), b.counters.clone(), b.pre_ingress.clone()))
+                .map(|b| (b.queue.clone(), b.counters.clone(), b.pre_ingress.clone(), b.clock.clone()))
         };
-        let (queue, counters, pre) = match target {
+        let (queue, counters, pre, clock) = match target {
             Some(t) => t,
             None => {
                 shared.undeliverable.lock().unwrap().push(UndeliveredPacket {
@@ -210,7 +214,7 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
                 let pkt = UdpPacket {
                     raw,
                     src,
-                    arrival_ms: now_ms(),
+                    arrival_ms: clock.now_ms().max(0) as u64,
                 };
                 if queue.offer(pkt) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);

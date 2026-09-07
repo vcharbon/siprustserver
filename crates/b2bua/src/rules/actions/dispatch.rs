@@ -35,7 +35,7 @@ impl ActionExecutor<'_> {
                 body,
                 content_type,
             } => {
-                self.respond(fx, ctx, *status, reason, body, content_type.as_deref());
+                self.respond(call, fx, ctx, *status, reason, body, content_type.as_deref());
             }
             RuleAction::AckLeg { leg_id, body, content_type } => {
                 // A body-bearing ACK carries a delayed-offer answer (RFC 3261
@@ -119,6 +119,9 @@ impl ActionExecutor<'_> {
             RuleAction::CancelPendingReinvite { leg_id, outbound_cseq } => {
                 self.cancel_pending_reinvite(call, fx, leg_id, *outbound_cseq);
             }
+            RuleAction::RejectPendingReinvite { leg_id, outbound_cseq, status, reason } => {
+                self.reject_pending_reinvite(call, fx, leg_id, *outbound_cseq, *status, reason);
+            }
             RuleAction::ResolveCancelledReinvite { leg_id, outbound_cseq } => {
                 // Drop the cancelled pending-relay snapshot: the final response
                 // to the CANCELled relayed re-INVITE resolves here, never
@@ -129,10 +132,10 @@ impl ActionExecutor<'_> {
             }
             RuleAction::ScheduleTimer {
                 timer_type,
-                delay_sec,
+                delay,
                 leg_id,
             } => {
-                self.schedule(call, fx, timer_type.clone(), delay_sec * 1000, leg_id.clone());
+                self.schedule(call, fx, timer_type.clone(), delay.as_millis(), leg_id.clone());
             }
             RuleAction::CancelTimer { id } => {
                 call.timers.retain(|t| &t.id != id);
@@ -152,7 +155,7 @@ impl ActionExecutor<'_> {
                 leg_id,
                 bye_disposition,
             } => {
-                self.terminate_leg(call, leg_id, *bye_disposition);
+                self.terminate_leg(call, fx, leg_id, *bye_disposition);
             }
             RuleAction::AddCdrEvent {
                 event_type,
@@ -316,7 +319,12 @@ impl ActionExecutor<'_> {
                 *call = call::helpers::set_reroute(call.clone(), state.clone());
             }
             RuleAction::SetFeatures { features } => {
-                call.features = Some(features.clone());
+                // The withhold latch: the standing withheld option tags union
+                // into the incoming declaration — a reroute cannot restore a
+                // tag the call already withholds (`apply_route` parity).
+                let mut features = features.clone();
+                features.latch_withheld_option_tags(call.features.as_ref());
+                call.features = Some(features);
             }
             RuleAction::MergeCallExt { ext } => {
                 for (service_id, value) in ext {
@@ -356,6 +364,7 @@ impl ActionExecutor<'_> {
                 content_type,
                 to_tag,
                 header_updates,
+                relayed,
             } => {
                 self.answer_a_leg_new_dialog(
                     call,
@@ -366,18 +375,8 @@ impl ActionExecutor<'_> {
                     content_type.as_deref(),
                     to_tag.as_deref(),
                     header_updates,
+                    relayed,
                 );
-            }
-            RuleAction::RetransmitALeg2xx => {
-                self.retransmit_a_leg_2xx(call, fx);
-            }
-            RuleAction::RetransmitALegReinvite2xx => {
-                self.retransmit_a_leg_reinvite_2xx(call, fx);
-            }
-            RuleAction::ClearPendingReinvite2xx => {
-                if let Some(d) = call.a_leg.dialogs.first_mut() {
-                    d.ext.pending_reinvite_2xx = None;
-                }
             }
         }
     }

@@ -1,0 +1,393 @@
+{
+  "actors": [
+    {
+      "endpoint": "ep0",
+      "id": "uac1",
+      "identity": "caller",
+      "kind": "uac"
+    },
+    {
+      "claim": {
+        "by": "ruri-pos"
+      },
+      "endpoint": "ep0",
+      "id": "uas1",
+      "kind": "uas"
+    }
+  ],
+  "calls": [
+    {
+      "attempts": [
+        {
+          "branch": 0,
+          "callee": {
+            "identity": "called-0-0"
+          },
+          "final": {
+            "at_ms": 93,
+            "status": 486
+          },
+          "leg": "B",
+          "position": 0
+        }
+      ],
+      "caller_leg": "A",
+      "id": "c1"
+    }
+  ],
+  "case": {
+    "defect": {
+      "description": "observed defect (see the marked step)",
+      "marker": {
+        "step": "s7"
+      }
+    },
+    "family": "transparent",
+    "id": "capture_199850.pcap.gz-case2",
+    "lanes": {
+      "hosted": "ok",
+      "kind": "ok",
+      "upstream-fake": "ok"
+    },
+    "origin": "capture",
+    "source": {
+      "anonymized": true,
+      "call_groups": [
+        3
+      ],
+      "capture": "capture_199850.pcap.gz"
+    },
+    "title": "capture_199850.pcap.gz basic call (groups 3)",
+    "variant": "repro"
+  },
+  "deviations": [
+    {
+      "id": "d1",
+      "kind": "verbatim-emission",
+      "leg": "A",
+      "preserve": [
+        "header-order",
+        "casing"
+      ],
+      "step": "s1"
+    }
+  ],
+  "endpoints": [
+    {
+      "binding": "loopback",
+      "id": "ep0",
+      "observed": "192.0.2.153:5081",
+      "side": "peer"
+    }
+  ],
+  "flow": [
+    {
+      "delay": {
+        "compressible": true,
+        "from": "trigger",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s1",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "ref": "resources/uac1_0_0.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "from": {
+          "form": "e164",
+          "pos": "caller"
+        },
+        "headers": [
+          {
+            "name": "Allow",
+            "value": "INVITE, ACK, PRACK, CANCEL, BYE, OPTIONS, MESSAGE, NOTIFY, UPDATE, REGISTER, INFO, REFER, SUBSCRIBE, PUBLISH"
+          },
+          {
+            "name": "Supported",
+            "value": "uui"
+          },
+          {
+            "name": "P-Asserted-Identity",
+            "value": "<sip:+33000900003;cpc=ordinary@carrier.example.net;user=phone>"
+          },
+          {
+            "name": "Accept",
+            "value": "application/sdp, application/isup, application/xml, application/vnd.example.indata"
+          },
+          {
+            "name": "Diversion",
+            "value": "<sip:+33000900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
+          }
+        ],
+        "method": "INVITE",
+        "ruri": {
+          "form": "trunk-composed",
+          "pos": "called[0][0]"
+        },
+        "to": {
+          "form": "e164",
+          "pos": "called[0][0]"
+        }
+      },
+      "observed": {
+        "at_us": 0,
+        "leg": 5,
+        "msg": 0
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 3,
+        "timer_linked": false
+      },
+      "id": "s2",
+      "leg": "A",
+      "msg": {
+        "cseq": 583516,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "observed": {
+        "at_us": 3129,
+        "leg": 5,
+        "msg": 1
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s3",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "headers": [
+          {
+            "name": "Allow",
+            "value": "INVITE, ACK, PRACK, CANCEL, BYE, OPTIONS, MESSAGE, NOTIFY, UPDATE, REGISTER, INFO, REFER, SUBSCRIBE, PUBLISH"
+          },
+          {
+            "name": "Supported",
+            "value": "uui"
+          },
+          {
+            "name": "P-Asserted-Identity",
+            "value": "<sip:+33000900003;cpc=ordinary@carrier.example.net;user=phone>"
+          },
+          {
+            "name": "Accept",
+            "value": "application/sdp,application/isup,application/xml,application/vnd.example.indata"
+          },
+          {
+            "name": "Diversion",
+            "value": "<sip:+33000900001@carrier.example.net>;limit=10;reason=unknown;counter=1"
+          }
+        ],
+        "method": "INVITE"
+      },
+      "observed": {
+        "at_us": 44362,
+        "leg": 6,
+        "msg": 0
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s3",
+        "ms": 1,
+        "timer_linked": false
+      },
+      "id": "s4",
+      "leg": "B",
+      "msg": {
+        "cseq": 90722,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "observed": {
+        "at_us": 45996,
+        "leg": 6,
+        "msg": 1
+      },
+      "op": "send"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s4",
+        "ms": 47,
+        "timer_linked": false
+      },
+      "id": "s5",
+      "leg": "B",
+      "msg": {
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "P-Identifier",
+            "value": "62"
+          }
+        ],
+        "reason": "Busy Here",
+        "status": 486
+      },
+      "observed": {
+        "at_us": 93947,
+        "leg": 6,
+        "msg": 2
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s5",
+        "ms": 2,
+        "timer_linked": false
+      },
+      "id": "s6",
+      "leg": "B",
+      "msg": {
+        "cseq": 90722,
+        "method": "ACK"
+      },
+      "observed": {
+        "at_us": 96334,
+        "leg": 6,
+        "msg": 3
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s5",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s7",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "mode": "absent"
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "P-Identifier",
+            "value": "62"
+          },
+          {
+            "name": "Reason",
+            "value": "Q.850;cause=17"
+          }
+        ],
+        "reason": "Busy Here",
+        "status": 486
+      },
+      "observed": {
+        "at_us": 110973,
+        "leg": 5,
+        "msg": 2
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s7",
+        "ms": 1,
+        "timer_linked": false
+      },
+      "id": "s8",
+      "leg": "A",
+      "msg": {
+        "cseq": 583516,
+        "method": "ACK"
+      },
+      "observed": {
+        "at_us": 112942,
+        "leg": 5,
+        "msg": 3
+      },
+      "op": "send"
+    }
+  ],
+  "identities": [
+    {
+      "forms": [
+        "e164"
+      ],
+      "kind": "external-caller",
+      "name": "caller",
+      "observed": "+33000900002"
+    },
+    {
+      "catalog": {
+        "class": "site"
+      },
+      "forms": [
+        "e164",
+        "trunk-composed"
+      ],
+      "kind": "site",
+      "name": "called-0-0",
+      "observed": "+33000900004"
+    }
+  ],
+  "legs": [
+    {
+      "actor": "uac1",
+      "dir": "out",
+      "id": "A",
+      "media": {
+        "rtp": "book"
+      }
+    },
+    {
+      "actor": "uas1",
+      "dir": "in",
+      "id": "B",
+      "media": {
+        "rtp": "book"
+      }
+    }
+  ],
+  "pivot_version": 3,
+  "postconditions": {
+    "cdr": {
+      "absent": "capture-carries-no-cdr"
+    }
+  },
+  "timing": {
+    "capture_span_ms": 112,
+    "expect_budget_ms": 32000,
+    "settle_budget_ms": 32000
+  }
+}

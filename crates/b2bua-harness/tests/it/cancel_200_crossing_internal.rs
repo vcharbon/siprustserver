@@ -24,7 +24,7 @@ use b2bua::decision::test_adapter::{route_to, route_to_with_18x};
 use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::features::RelayFirst18xStrategy;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -40,6 +40,16 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
     let h = Harness::with_transit_delay("noanswer-cancel-200-crossing", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let carol = h.agent("carol", "127.0.0.1:5070").await; // rings, no-answer'd, answers late
+    // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
+    // anyway — the crossing this test exists to reap. Scoped to carol, so the
+    // same rule still gates every B2BUA bind.
+    h.waive(
+        WaiverScope::rule(
+            "no-200-after-cancel",
+            "carol deliberately answers 200 after taking the CANCEL (RFC 3261 §9.2) — the crossing under test",
+        )
+        .on_party("carol"),
+    );
     let bob = h.agent("bob", "127.0.0.1:5071").await; // reroute target
 
     let decision = Arc::new(
@@ -129,6 +139,16 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     let h = Harness::with_transit_delay("noanswer-reject-cancel-200-crossing", 1);
     let alice = h.agent("alice", "127.0.0.1:5062").await;
     let carol = h.agent("carol", "127.0.0.1:5072").await; // rings, no-answer'd, answers late
+    // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
+    // anyway — the crossing this test exists to reap. Scoped to carol, so the
+    // same rule still gates every B2BUA bind.
+    h.waive(
+        WaiverScope::rule(
+            "no-200-after-cancel",
+            "carol deliberately answers 200 after taking the CANCEL (RFC 3261 §9.2) — the crossing under test",
+        )
+        .on_party("carol"),
+    );
 
     // Reject path: a short no-answer deadline but NO callback context, so the
     // no-answer teardown rejects the caller WITHOUT consulting /call/failure.
@@ -184,7 +204,7 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     let _ = h.finish().await;
 }
 
-/// **Composition regression (upstreamneed-024):** the same no-answer CANCEL /
+/// **Composition regression:** the same no-answer CANCEL /
 /// crossing-200 flow with the `relayFirst18xTo180` **drop-sdp** machine armed.
 /// Pre-fix, the SERVICE_LAYER 2xx rule (`force-tag-consistency`, active in
 /// `Masking`/`Suppressing`) out-ranked CORE `cancel-200-crossing` and
@@ -198,6 +218,16 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     let h = Harness::with_transit_delay("dropsdp-noanswer-cancel-200-crossing", 1);
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let carol = h.agent("carol", "127.0.0.1:5074").await; // rings, no-answer'd, answers late
+    // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
+    // anyway — the crossing this test exists to reap. Scoped to carol, so the
+    // same rule still gates every B2BUA bind.
+    h.waive(
+        WaiverScope::rule(
+            "no-200-after-cancel",
+            "carol deliberately answers 200 after taking the CANCEL (RFC 3261 §9.2) — the crossing under test",
+        )
+        .on_party("carol"),
+    );
     let bob = h.agent("bob", "127.0.0.1:5075").await; // reroute target
 
     let decision = Arc::new(
@@ -289,6 +319,16 @@ async fn transaction_timeout_cancel_crossed_by_200_reaps_the_abandoned_callee() 
     let h = Harness::with_transit_delay("txn-timeout-cancel-200-crossing", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let carol = h.agent("carol", "127.0.0.1:5070").await; // rings, dead air, then answers late
+    // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
+    // anyway — the crossing this test exists to reap. Scoped to carol, so the
+    // same rule still gates every B2BUA bind.
+    h.waive(
+        WaiverScope::rule(
+            "no-200-after-cancel",
+            "carol deliberately answers 200 after taking the CANCEL (RFC 3261 §9.2) — the crossing under test",
+        )
+        .on_party("carol"),
+    );
     let bob = h.agent("bob", "127.0.0.1:5071").await; // reroute target
 
     let decision = Arc::new(

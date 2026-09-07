@@ -665,6 +665,11 @@ async fn main() {
     // intake-shed hook — a blind tail-drop at the queue cap would otherwise
     // kill emergency and in-dialog traffic first-come-first-served (062).
     let intake_shed = intake_shed_hook(intake_shed_watermark(queue_max));
+    // ONE process clock, built before the first bind: every signaling endpoint
+    // stamps `UdpPacket::arrival_ms` on it and every `ProxyCore` ages dequeued
+    // packets against it, so the self-gate's intake age is a difference of two
+    // readings of a SINGLE monotonic-anchored timeline.
+    let clock = Clock::system();
     let mut endpoints = Vec::with_capacity(recv_shards);
     for _ in 0..recv_shards {
         let ep = bind_with_retry(
@@ -676,7 +681,8 @@ async fn main() {
             || {
                 let opts = BindUdpOpts::new(listen_sa, queue_max)
                     .with_reuse_port(recv_shards > 1)
-                    .with_pre_ingress(intake_shed.clone());
+                    .with_pre_ingress(intake_shed.clone())
+                    .with_clock(clock.clone());
                 async move { net.bind_udp(opts).await }
             },
         )
@@ -701,7 +707,8 @@ async fn main() {
                 || {
                     let opts = BindUdpOpts::new(*ext_sa, queue_max)
                         .with_reuse_port(recv_shards > 1)
-                        .with_pre_ingress(intake_shed.clone());
+                        .with_pre_ingress(intake_shed.clone())
+                        .with_clock(clock.clone());
                     async move { net.bind_udp(opts).await }
                 },
             )
@@ -722,7 +729,8 @@ async fn main() {
         bind_deadline,
         is_udp_in_use,
         || {
-            async move { net.bind_udp(BindUdpOpts::new(probe_sa, 1024)).await }
+            let opts = BindUdpOpts::new(probe_sa, 1024).with_clock(clock.clone());
+            async move { net.bind_udp(opts).await }
         },
     )
     .await
@@ -734,7 +742,6 @@ async fn main() {
     );
     let observer = Arc::new(WorkerLoadObserver::new(observer_cfg));
     let metrics = Arc::new(ProxyMetrics::new());
-    let clock = Clock::system();
     let id_gen = Arc::new(IdGen::from_entropy());
 
     // Proxy-self ELU/CPS admission gate (migration/14). On by default; the ELU
@@ -799,7 +806,7 @@ async fn main() {
     // INVITE that populated the entry.
     let cancel_lru = Arc::new(sip_proxy::cancel_lru::CancelBranchLru::with_clock(clock.clone()));
 
-    // Named-target resolver tuning + startup prewarm (upstreamneed-037). A COLD
+    // Named-target resolver tuning + startup prewarm. A COLD
     // name (fresh deploy, CoreDNS restart, TTL expiry) used to cost the first
     // b-leg forward a full in-path resolve — 3.5–7.5 s under kube ndots:5
     // search expansion, blowing the downstream 2 s connect timer. Prewarm

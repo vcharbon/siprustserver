@@ -1,5 +1,5 @@
 //! `release-reroute` — the subscribed release-event fold + the
-//! **established-call reroute** treatment (upstreamneed-009).
+//! **established-call reroute** treatment.
 //!
 //! When a subscribed internal release event fires (max-call-duration first),
 //! the `max-duration` rule seeds a `ReleaseAsyncHttp`; the router consults
@@ -44,7 +44,7 @@ use call::{
     RerouteState, TimerType,
 };
 
-use super::model::{Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, CORE_LAYER};
+use super::model::{Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, CORE_LAYER};
 
 /// Owner id for the reroute's service-owned guard timer (`Service:release-reroute:guard`).
 pub const RELEASE_REROUTE_MACHINE: MachineId = MachineId::new("release-reroute");
@@ -121,7 +121,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
             },
         ),
         // ── release consult folded: `reroute` → replacement b-leg + slice.
-        // Output parity with the initial/failover route (upstreamneed-005): the
+        // Output parity with the initial/failover route: the
         // shared `route_fold_parity_actions` applies features (incl. the
         // GlobalDuration re-arm — the rerouted call gets the route's fresh
         // cap), service_ext, subscriptions, and the router-admitted limiter
@@ -175,7 +175,7 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 // the call past its cap.
                 actions.push(RuleAction::ScheduleTimer {
                     timer_type: guard_timer(),
-                    delay_sec: ctx.config.release_reroute_guard_sec,
+                    delay: TimerDelay::secs(ctx.config.release_reroute_guard_sec),
                     leg_id: None,
                 });
                 ok(actions)

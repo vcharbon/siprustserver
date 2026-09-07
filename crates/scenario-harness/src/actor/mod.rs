@@ -34,7 +34,7 @@
 //! Module map: the declarative vocabulary is [`endpoint`] + [`goals`] +
 //! [`delta`] + [`observe`]; the live loop is [`runner`] with its arms in
 //! [`react`] / [`response`] / [`answer`] / [`drive`] / [`originate`] /
-//! [`script`] / [`accept_delta`] and its inbound fan-out in
+//! [`script`] / [`select`] / [`accept_delta`] and its inbound fan-out in
 //! [`shared_endpoint`]; the verdict machinery is [`state`] + [`ledger`] +
 //! [`settle`]; scenario surfaces are [`spec`] + [`scenarios`].
 
@@ -52,6 +52,7 @@ mod response;
 mod runner;
 pub mod scenarios;
 mod script;
+mod select;
 mod settle;
 pub mod shared_endpoint;
 mod spec;

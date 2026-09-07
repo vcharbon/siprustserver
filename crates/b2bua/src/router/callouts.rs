@@ -670,6 +670,7 @@ fn parse_call_failure_request(v: &serde_json::Value) -> CallFailureRequest {
                 .and_then(|x| x.as_str())
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
+            timeout_kind: v.get("timeout_kind").and_then(|x| x.as_str()).map(str::to_string),
             // `[[name, value], …]` — wire order and duplicates preserved.
             sip_headers: v
                 .get("sip_headers")

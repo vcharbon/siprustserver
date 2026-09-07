@@ -1,0 +1,1217 @@
+{
+  "actors": [
+    {
+      "endpoint": "ep0",
+      "id": "uac1",
+      "identity": "caller",
+      "kind": "uac"
+    },
+    {
+      "claim": {
+        "by": "ruri-pos"
+      },
+      "endpoint": "ep1",
+      "id": "uas1",
+      "kind": "uas"
+    },
+    {
+      "claim": {
+        "by": "ruri-pos"
+      },
+      "endpoint": "ep0",
+      "id": "uas2",
+      "kind": "uas"
+    }
+  ],
+  "calls": [
+    {
+      "attempts": [
+        {
+          "branch": 0,
+          "callee": {
+            "identity": "called-0-0"
+          },
+          "final": {
+            "at_ms": 12259,
+            "status": 200
+          },
+          "leg": "B",
+          "position": 0
+        },
+        {
+          "branch": 1,
+          "callee": {
+            "identity": "called-1-0"
+          },
+          "final": {
+            "at_ms": 12256,
+            "status": 200
+          },
+          "leg": "C",
+          "position": 0
+        }
+      ],
+      "caller_leg": "A",
+      "id": "c1"
+    }
+  ],
+  "case": {
+    "annotations": {
+      "flags": [
+        {
+          "detail": "R-URI \"19999020000900001\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "kind": "number-bearing-frozen-ref"
+        }
+      ]
+    },
+    "family": "fork",
+    "id": "capture_0104628f-7934-4a96-b385-e0f90d4946cf.pcap.gz-auto",
+    "lanes": {
+      "hosted": "blocked:number-unclassified",
+      "kind": "blocked:number-unclassified",
+      "upstream-fake": "ok"
+    },
+    "origin": "capture",
+    "source": {
+      "anonymized": true,
+      "call_groups": [
+        0
+      ],
+      "capture": "capture_0104628f-7934-4a96-b385-e0f90d4946cf.pcap.gz"
+    },
+    "title": "capture_0104628f-7934-4a96-b385-e0f90d4946cf.pcap.gz basic call (groups 0)",
+    "variant": "repro"
+  },
+  "endpoints": [
+    {
+      "binding": "loopback",
+      "id": "ep0",
+      "observed": "203.0.113.146:5081",
+      "side": "peer"
+    },
+    {
+      "binding": "dedicated",
+      "id": "ep1",
+      "observed": "203.0.113.145:5060",
+      "side": "peer"
+    }
+  ],
+  "flow": [
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "trigger",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s1",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "headers": [
+          {
+            "name": "Supported",
+            "value": "resource-priority,sdp-anat"
+          },
+          {
+            "name": "User-Agent",
+            "value": "VOIP  1.0"
+          },
+          {
+            "name": "Allow",
+            "value": "INVITE, OPTIONS, BYE, CANCEL, ACK, UPDATE, NOTIFY, INFO"
+          },
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Expires",
+            "value": "180"
+          },
+          {
+            "name": "Allow-Events",
+            "value": "telephone-event"
+          },
+          {
+            "name": "Content-Disposition",
+            "value": "session;handling=required"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112237020"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid0200000000000000000000000000000000000000000000;icid-generated-at=203.0.113.147"
+          },
+          {
+            "name": "P-Asserted-Identity",
+            "value": "<tel:0009001>"
+          }
+        ],
+        "method": "INVITE"
+      },
+      "observed": {
+        "at_us": 0,
+        "leg": 0,
+        "msg": 2
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s2",
+      "leg": "B",
+      "msg": {
+        "cseq": 101,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "observed": {
+        "at_us": 739,
+        "leg": 0,
+        "msg": 3
+      },
+      "op": "send"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "trigger",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s3",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "ref": "resources/uac1_0_0.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "from": {
+          "form": "e164",
+          "pos": "caller"
+        },
+        "headers": [
+          {
+            "name": "Supported",
+            "value": "resource-priority,sdp-anat"
+          },
+          {
+            "name": "Allow",
+            "value": "INVITE, OPTIONS, BYE, CANCEL, ACK, UPDATE, NOTIFY, INFO"
+          },
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Expires",
+            "value": "180"
+          },
+          {
+            "name": "Allow-Events",
+            "value": "telephone-event"
+          },
+          {
+            "name": "Content-Disposition",
+            "value": "session;handling=required"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112237020"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid0200000000000000000000000000000000000000000000;icid-generated-at=203.0.113.147"
+          },
+          {
+            "name": "P-Asserted-Identity",
+            "value": "<tel:0009001>"
+          },
+          {
+            "name": "P-Orig",
+            "value": "sbc.site.112"
+          }
+        ],
+        "method": "INVITE",
+        "ruri": {
+          "frozen": "19999020000900001"
+        },
+        "to": {
+          "form": "intl-00",
+          "pos": "called[0][0]"
+        }
+      },
+      "observed": {
+        "at_us": 1265,
+        "leg": 1,
+        "msg": 0
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s2",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s4",
+      "leg": "A",
+      "msg": {
+        "cseq": 101,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "observed": {
+        "at_us": 2526,
+        "leg": 1,
+        "msg": 1
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s3",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s5",
+      "leg": "C",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "headers": [
+          {
+            "name": "Supported",
+            "value": "resource-priority,sdp-anat"
+          },
+          {
+            "name": "Allow",
+            "value": "INVITE, OPTIONS, BYE, CANCEL, ACK, UPDATE, NOTIFY, INFO"
+          },
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Expires",
+            "value": "180"
+          },
+          {
+            "name": "Allow-Events",
+            "value": "telephone-event"
+          },
+          {
+            "name": "Content-Disposition",
+            "value": "session;handling=required"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112237020"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid0200000000000000000000000000000000000000000000;icid-generated-at=203.0.113.147"
+          },
+          {
+            "name": "P-Asserted-Identity",
+            "value": "<sip:+33000900002@carrier.example.net;user=phone>"
+          },
+          {
+            "name": "P-Orig",
+            "value": "sbc.site.112"
+          }
+        ],
+        "method": "INVITE"
+      },
+      "observed": {
+        "at_us": 23951,
+        "leg": 2,
+        "msg": 0
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s5",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s6",
+      "leg": "C",
+      "msg": {
+        "cseq": 524020,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "observed": {
+        "at_us": 24631,
+        "leg": 2,
+        "msg": 1
+      },
+      "op": "send"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s6",
+        "ms": 55,
+        "timer_linked": false
+      },
+      "id": "s7",
+      "leg": "C",
+      "msg": {
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Allow-Events",
+            "value": "hold,talk"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112234801"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid010000000000000000000000000000000000000000000;icid-generated-at=203.0.113.144;orig-ioi=SbcNodeA"
+          }
+        ],
+        "reason": "Session Progress",
+        "status": 183
+      },
+      "observed": {
+        "at_us": 80067,
+        "leg": 2,
+        "msg": 2
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s7",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s8",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "mode": "absent"
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Allow-Events",
+            "value": "hold,talk"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112234801"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid010000000000000000000000000000000000000000000;icid-generated-at=203.0.113.144;orig-ioi=SbcNodeA"
+          }
+        ],
+        "reason": "Session Progress",
+        "status": 183
+      },
+      "observed": {
+        "at_us": 84110,
+        "leg": 1,
+        "msg": 2
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s2",
+        "ms": 83,
+        "timer_linked": false
+      },
+      "id": "s9",
+      "leg": "B",
+      "msg": {
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Allow-Events",
+            "value": "hold,talk"
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid010000000000000000000000000000000000000000000"
+          }
+        ],
+        "reason": "Session Progress",
+        "status": 183
+      },
+      "observed": {
+        "at_us": 84690,
+        "leg": 0,
+        "msg": 4
+      },
+      "op": "send"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s7",
+        "ms": 315,
+        "timer_linked": false
+      },
+      "id": "s10",
+      "leg": "C",
+      "msg": {
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Allow-Events",
+            "value": "hold,talk"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112234801"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid010000000000000000000000000000000000000000000;icid-generated-at=203.0.113.144;orig-ioi=SbcNodeA"
+          }
+        ],
+        "reason": "Ringing",
+        "status": 180
+      },
+      "observed": {
+        "at_us": 395130,
+        "leg": 2,
+        "msg": 3
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s10",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s11",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "mode": "absent"
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Allow-Events",
+            "value": "hold,talk"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112234801"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid010000000000000000000000000000000000000000000;icid-generated-at=203.0.113.144;orig-ioi=SbcNodeA"
+          }
+        ],
+        "reason": "Ringing",
+        "status": 180
+      },
+      "observed": {
+        "at_us": 399562,
+        "leg": 1,
+        "msg": 3
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s9",
+        "ms": 315,
+        "timer_linked": false
+      },
+      "id": "s12",
+      "leg": "B",
+      "msg": {
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Allow-Events",
+            "value": "hold,talk"
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid010000000000000000000000000000000000000000000"
+          }
+        ],
+        "reason": "Ringing",
+        "status": 180
+      },
+      "observed": {
+        "at_us": 400150,
+        "leg": 0,
+        "msg": 6
+      },
+      "op": "send"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s10",
+        "ms": 11861,
+        "timer_linked": false
+      },
+      "id": "s13",
+      "leg": "C",
+      "msg": {
+        "body": {
+          "ref": "resources/uas2_2_0.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Accept",
+            "value": "application/sdp"
+          },
+          {
+            "name": "Allow",
+            "value": "ACK,CANCEL,BYE,NOTIFY,INVITE,OPTIONS,INFO,UPDATE"
+          },
+          {
+            "name": "Privacy",
+            "value": "none"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112234801"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-HKH-RC-HIST",
+            "value": "<sip:+33000900001@203.0.113.1>;device=sbc.site.sbc111;reason=SIP;location=CUSTOMER;realm=2234801;code=200;text=\"OK\""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid010000000000000000000000000000000000000000000;icid-generated-at=203.0.113.144;orig-ioi=SbcNodeA"
+          }
+        ],
+        "reason": "OK",
+        "status": 200
+      },
+      "observed": {
+        "at_us": 12256339,
+        "leg": 2,
+        "msg": 4
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s13",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s14",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Accept",
+            "value": "application/sdp"
+          },
+          {
+            "name": "Allow",
+            "value": "ACK,CANCEL,BYE,NOTIFY,INVITE,OPTIONS,INFO,UPDATE"
+          },
+          {
+            "name": "Privacy",
+            "value": "none"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112234801"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-HKH-RC-HIST",
+            "value": "<sip:+33000900001@203.0.113.1>;device=sbc.site.sbc111;reason=SIP;location=CUSTOMER;realm=2234801;code=200;text=\"OK\""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid010000000000000000000000000000000000000000000;icid-generated-at=203.0.113.144;orig-ioi=SbcNodeA"
+          }
+        ],
+        "reason": "OK",
+        "status": 200
+      },
+      "observed": {
+        "at_us": 12259044,
+        "leg": 1,
+        "msg": 4
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s12",
+        "ms": 11859,
+        "timer_linked": false
+      },
+      "id": "s15",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "ref": "resources/uas1_2_0.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345904"
+          },
+          {
+            "name": "Accept",
+            "value": "application/sdp"
+          },
+          {
+            "name": "Allow",
+            "value": "ACK,CANCEL,BYE,NOTIFY,INVITE,OPTIONS,INFO,UPDATE"
+          },
+          {
+            "name": "P-HKH-RC-HIST",
+            "value": "<sip:+33000900001@203.0.113.1>;device=sbc.site.sbc111;reason=SIP;location=CUSTOMER;realm=2234801;code=200;text=\"OK\""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid010000000000000000000000000000000000000000000"
+          }
+        ],
+        "reason": "OK",
+        "status": 200
+      },
+      "observed": {
+        "at_us": 12259706,
+        "leg": 0,
+        "msg": 8
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s15",
+        "ms": 44,
+        "timer_linked": false
+      },
+      "id": "s16",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "cseq": 101,
+        "method": "ACK"
+      },
+      "observed": {
+        "at_us": 12303988,
+        "leg": 0,
+        "msg": 11
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s14",
+        "ms": 45,
+        "timer_linked": false
+      },
+      "id": "s17",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "cseq": 101,
+        "method": "ACK"
+      },
+      "observed": {
+        "at_us": 12304530,
+        "leg": 1,
+        "msg": 5
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s17",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s18",
+      "in_dialog": true,
+      "leg": "C",
+      "msg": {
+        "cseq": 524020,
+        "method": "ACK"
+      },
+      "observed": {
+        "at_us": 12313923,
+        "leg": 2,
+        "msg": 5
+      },
+      "op": "expect"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s16",
+        "ms": 26907,
+        "timer_linked": false
+      },
+      "id": "s19",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "body": {
+          "mode": "absent"
+        },
+        "headers": [
+          {
+            "name": "User-Agent",
+            "value": "VendorD-Gateway/1.0"
+          },
+          {
+            "name": "Timestamp",
+            "value": "1607345943"
+          },
+          {
+            "name": "Reason",
+            "value": "Q.850;cause=16"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112237020"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid0200000000000000000000000000000000000000000000;icid-generated-at=203.0.113.147;term-ioi=SbcNodeB"
+          },
+          {
+            "name": "P-HKH-RC-HIST",
+            "value": "<sip:203.0.113.147:5060>;device=SBC;reason=XACME;location=CUSTOMER;realm=CORE;code=BYE"
+          }
+        ],
+        "method": "BYE"
+      },
+      "observed": {
+        "at_us": 39211012,
+        "leg": 0,
+        "msg": 13
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s17",
+        "ms": 26907,
+        "timer_linked": false
+      },
+      "id": "s20",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345943"
+          },
+          {
+            "name": "Reason",
+            "value": "Q.850;cause=16"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112237020"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid0200000000000000000000000000000000000000000000;icid-generated-at=203.0.113.147;term-ioi=SbcNodeB"
+          },
+          {
+            "name": "P-HKH-RC-HIST",
+            "value": "<sip:203.0.113.147:5060>;device=sbc.site.112;reason=XACME;location=CUSTOMER;realm=CORE;code=BYE"
+          },
+          {
+            "name": "P-Orig",
+            "value": "sbc.site.112"
+          }
+        ],
+        "method": "BYE"
+      },
+      "observed": {
+        "at_us": 39211667,
+        "leg": 1,
+        "msg": 6
+      },
+      "op": "send"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s20",
+        "ms": 3,
+        "timer_linked": false
+      },
+      "id": "s21",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "body": {
+          "mode": "absent"
+        },
+        "cseq-method": "BYE",
+        "headers": [
+          {
+            "name": "Accept",
+            "value": "application/sdp, application/isup, application/xml"
+          }
+        ],
+        "reason": "OK",
+        "status": 200
+      },
+      "observed": {
+        "at_us": 39214684,
+        "leg": 1,
+        "msg": 7
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s20",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s22",
+      "in_dialog": true,
+      "leg": "C",
+      "msg": {
+        "body": {
+          "mode": "absent"
+        },
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345943"
+          },
+          {
+            "name": "Reason",
+            "value": "Q.850;cause=16"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112237020"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid0200000000000000000000000000000000000000000000;icid-generated-at=203.0.113.147;term-ioi=SbcNodeB"
+          },
+          {
+            "name": "P-HKH-RC-HIST",
+            "value": "<sip:203.0.113.147:5060>;device=sbc.site.112;reason=XACME;location=CUSTOMER;realm=CORE;code=BYE"
+          },
+          {
+            "name": "P-Orig",
+            "value": "sbc.site.112"
+          }
+        ],
+        "method": "BYE"
+      },
+      "observed": {
+        "at_us": 39214721,
+        "leg": 2,
+        "msg": 6
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s19",
+        "ms": 4,
+        "timer_linked": false
+      },
+      "id": "s23",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "cseq-method": "BYE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345943"
+          },
+          {
+            "name": "Accept",
+            "value": "application/sdp, application/isup, application/xml"
+          }
+        ],
+        "reason": "OK",
+        "status": 200
+      },
+      "observed": {
+        "at_us": 39215243,
+        "leg": 0,
+        "msg": 14
+      },
+      "op": "send"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s22",
+        "ms": 204,
+        "timer_linked": false
+      },
+      "id": "s24",
+      "in_dialog": true,
+      "leg": "C",
+      "msg": {
+        "cseq-method": "BYE",
+        "headers": [
+          {
+            "name": "Timestamp",
+            "value": "1607345943"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "112234801"
+          },
+          {
+            "name": "P-Options",
+            "value": ""
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid010000000000000000000000000000000000000000000;icid-generated-at=203.0.113.144;orig-ioi=SbcNodeA"
+          }
+        ],
+        "reason": "OK",
+        "status": 200
+      },
+      "observed": {
+        "at_us": 39419074,
+        "leg": 2,
+        "msg": 7
+      },
+      "op": "send"
+    }
+  ],
+  "identities": [
+    {
+      "forms": [
+        "e164"
+      ],
+      "kind": "external-caller",
+      "name": "caller",
+      "observed": "+33000900002"
+    },
+    {
+      "catalog": {
+        "class": "site"
+      },
+      "forms": [
+        "e164",
+        "intl-00"
+      ],
+      "kind": "site",
+      "name": "called-0-0",
+      "observed": "+33000900001"
+    },
+    {
+      "catalog": {
+        "class": "site"
+      },
+      "forms": [
+        "e164",
+        "intl-00"
+      ],
+      "kind": "site",
+      "name": "called-1-0",
+      "observed": "+33000900001"
+    }
+  ],
+  "legs": [
+    {
+      "actor": "uac1",
+      "dir": "out",
+      "id": "A",
+      "media": {
+        "rtp": "book"
+      }
+    },
+    {
+      "actor": "uas1",
+      "dir": "in",
+      "id": "B",
+      "media": {
+        "rtp": "book"
+      }
+    },
+    {
+      "actor": "uas2",
+      "dir": "in",
+      "id": "C",
+      "media": {
+        "rtp": "book"
+      }
+    }
+  ],
+  "pivot_version": 3,
+  "postconditions": {
+    "cdr": {
+      "absent": "capture-carries-no-cdr"
+    }
+  },
+  "timing": {
+    "capture_span_ms": 39419,
+    "expect_budget_ms": 32000,
+    "settle_budget_ms": 32000
+  }
+}

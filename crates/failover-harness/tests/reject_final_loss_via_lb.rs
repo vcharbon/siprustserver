@@ -15,9 +15,9 @@
 //!
 //! The fix makes reliability END-TO-END: the proxy never ACKs a relayed final;
 //! the worker's Timer G retransmits it through the stateless relay until the
-//! caller's own ACK arrives, and the proxy relays that ACK downstream on the
-//! INVITE's remembered hop (same target, same outbound branch) so the worker's
-//! server transaction matches it and stops retransmitting.
+//! caller's own ACK arrives, and the proxy relays that ACK downstream to the
+//! node the final arrived from, on the INVITE's outbound branch, so the
+//! worker's server transaction matches it and stops retransmitting.
 //!
 //! Here bob rejects with `603 Decline`; a deterministic pre-ingress hook on
 //! alice's bind swallows the FIRST relayed copy of the 603. The test then
@@ -98,7 +98,8 @@ async fn lost_relayed_603_recovers_via_worker_timer_g_and_relayed_ack() {
     bob_uas.respond(603, "Decline").await;
 
     // The worker's §17.1.1.3 auto-ACK for bob's 603 crosses the proxy to bob
-    // (relayed on the b-leg INVITE's remembered hop — NOT proxy-synthesized).
+    // (relayed to bob, whom the 603 came from, on the b-leg INVITE's branch —
+    // NOT proxy-synthesized).
     bob.receive_absorbing("ACK", &["INVITE"]).await;
 
     // Meanwhile the worker relayed the 603 to alice; her first copy was

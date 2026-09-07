@@ -148,7 +148,7 @@ async fn announcement_mrf_rejects() {
     assert_eq!(b2bua.active_calls(), 0, "the call is reaped");
 }
 
-// ── Reject-teardown AFTER the media leg answered (upstreamneed-027 regression).
+// ── Reject-teardown AFTER the media leg answered (regression).
 // The MRF answers (alice gets 183 early media, a parked *unadopted* media leg),
 // then the clip fails (MSCML <response> non-2xx). The service rejects the caller
 // with a 4xx on its early dialog and terminates. The caller never got a 2xx, so
@@ -199,7 +199,7 @@ async fn announcement_clip_fails_after_answer_rejects_caller_without_bye() {
     assert_eq!(b2bua.active_calls(), 0, "the call reaps — no stranded a-leg BYE");
 }
 
-// ── Post-reject crossing BYE (upstreamneed-028 regression). Same reject-teardown
+// ── Post-reject crossing BYE (regression). Same reject-teardown
 // as above, but the MRF's own BYE crosses the b2bua's teardown BYE on the wire.
 // Before the fix, the reject turn left the a-leg unresolved (`RelayFailureToALeg`/
 // `RespondToALeg` are wire-only, and `BeginTermination`'s a-leg arm only set
@@ -217,7 +217,7 @@ async fn announcement_clip_fails_after_answer_rejects_caller_without_bye() {
 //    503 fires, so sip-txn's idempotence backstop absorbs the wire copy — but
 //    in a long early-media flow (RBT max-duration; the txn swept at ~193 s)
 //    `do_send_response` falls through to a RAW send and the 503 reaches the
-//    caller, which is how upstreamsip observed it. State must be right, not
+//    caller, which is how a downstream observed it. State must be right, not
 //    backstop-dependent.
 #[tokio::test]
 async fn crossing_bye_after_reject_gets_200_and_no_second_final_to_caller() {

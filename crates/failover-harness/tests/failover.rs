@@ -158,6 +158,7 @@ async fn canonical_failover() {
     // The proxy re-learns the rebooted pod's NEW address (k8s EndpointSlice path)
     // then marks it alive+ready (deterministic, off is_ready()).
     proxy.set_address(&primary_ord, b1_addr);
+    fh.note_worker_rebound(&primary_ord, b1_addr);
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     fh.mark(&primary_ord, None, "recovered", "alive+ready");
 
@@ -460,7 +461,7 @@ async fn successful_long_call_with_as_generated_options() {
 // proxy reuses the downstream branch for retransmissions. This test pins that:
 // establish a long call, drive ONE AS keepalive OPTIONS cycle on both legs,
 // then a terminating BYE, and assert the recorded trace is RFC-clean — the
-// `CSeqInDialogOrderRule` gate flags ANY non-increasing in-dialog CSeq, so a
+// `cseq-in-dialog-order` gate flags ANY non-increasing in-dialog CSeq, so a
 // clean trace IS the proof that OPTIONS and the later BYE no longer collide.
 // (The same gate also runs automatically on `FailoverHarness::drop`.)
 // ===========================================================================
@@ -619,6 +620,7 @@ async fn reboot_reclaim_exactly_one_owner_after_self_release() {
     // ── reboot the primary → bootstrap-rehydrate + bulk reclaim on go-active ──
     let b1_addr = b1.reboot().await; // NEW pod IP
     proxy.set_address(&primary_ord, b1_addr); // proxy re-learns it (k8s EndpointSlice)
+    fh.note_worker_rebound(&primary_ord, b1_addr); // and the RFC audit stops treating it as a UA
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     for _ in 0..40 {
         fh.advance(Duration::from_millis(500)).await;
@@ -699,6 +701,7 @@ async fn quiescent_long_call_survives_kill_reboot_reclaim() {
     // ── reboot the primary → it reclaims the dormant call ───────────────────────
     let b1_addr = b1.reboot().await; // NEW pod IP
     proxy.set_address(&primary_ord, b1_addr); // proxy re-learns it (k8s EndpointSlice)
+    fh.note_worker_rebound(&primary_ord, b1_addr); // and the RFC audit stops treating it as a UA
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     b2.simulate_peer_added(&primary_ord);
     for _ in 0..40 {
@@ -802,6 +805,7 @@ async fn cseq_stays_in_order_across_failover_and_reclaim() {
     // ── reboot → reclaim; survivor re-publishes the endpoint ────────────────────-
     let b1_addr = b1.reboot().await; // NEW pod IP
     proxy.set_address(&primary_ord, b1_addr); // proxy re-learns it (k8s EndpointSlice)
+    fh.note_worker_rebound(&primary_ord, b1_addr); // and the RFC audit stops treating it as a UA
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     b2.simulate_peer_added(&primary_ord);
     for _ in 0..40 {
@@ -946,6 +950,7 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
     // ── reboot the primary → it re-hydrates from the backup + bulk-reclaims ────
     let b1_addr = b1.reboot().await; // NEW pod IP
     proxy.set_address(&primary_ord, b1_addr); // proxy re-learns it (k8s EndpointSlice)
+    fh.note_worker_rebound(&primary_ord, b1_addr); // and the RFC audit stops treating it as a UA
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     for _ in 0..40 {
         fh.advance(Duration::from_millis(500)).await;
@@ -1023,6 +1028,111 @@ async fn matrix_crash_mid_invite() {
     scenario_harness::callflow::hangup(&mut dlg2, &bob).await;
     fh.advance(Duration::from_millis(300)).await;
     // Reaching here without a panic IS the assertion (liveness preserved).
+    drop((w_b1, w_b2, proxy));
+    let _ = fh.repl_report();
+}
+
+/// Matrix: the backup crashes between two Timer-A copies of one INVITE. The
+/// callee is silent, so both INVITE client transactions keep their Timer A:
+/// the caller's rung reaches the proxy after the backup was killed, and so
+/// does the primary's own b-leg rung. The proxy repeats each forward — same
+/// target, same branch (the §16.6 / §17.2.3 memo) — with its own Record-Route
+/// cookie re-stamped for the membership it now has (`w_bak` empty). The
+/// primary's server transaction absorbs the a-leg copy, the callee absorbs the
+/// b-leg copy, the call completes on the survivor, and the recorded trace is
+/// clean under `rung-byte-identical`: the proxy's own cookie row is the one
+/// row the auditor leaves to the emitter (ADR-0029 X3).
+#[tokio::test(start_paused = true)]
+async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
+    let mut fh = FailoverHarness::new("s10b-backup-crash-between-timer-a-copies", &["b1", "b2"]);
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let proxy = fh
+        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
+        .await;
+    let mut w_b1 = fh
+        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    let mut w_b2 = fh
+        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
+        .await;
+    fh.advance(Duration::from_millis(500)).await;
+
+    // alice INVITEs; bob gets the b-leg. The cookie names both workers.
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let (pri_ord, bak_ord) = worker_ordinals(uas.request());
+    assert!(!bak_ord.is_empty(), "two live workers: the cookie names a backup");
+    let primary: std::net::SocketAddr = if pri_ord == "b1" { B1 } else { B2 }.parse().unwrap();
+
+    // The backup dies before either Timer A fires.
+    fh.mark(&bak_ord, None, "crash", "between two Timer-A copies of the INVITE");
+    if bak_ord == "b1" {
+        w_b1.crash();
+    } else {
+        w_b2.crash();
+    }
+    proxy.set_health(&bak_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_millis(500)).await; // Timer A (T1): the primary's b-leg rung
+
+    // Timer A: the caller re-sends THE INVITE — the bytes that left, again.
+    let invite = fh
+        .sip_entries()
+        .into_iter()
+        .find(|e| e.from == alice.addr() && e.to == proxy.addr() && e.raw.starts_with(b"INVITE "))
+        .map(|e| e.raw)
+        .expect("the caller's INVITE is on the wire");
+    alice.try_send_datagram(&invite, proxy.addr()).await.unwrap();
+    fh.advance(Duration::from_millis(100)).await;
+
+    // The proxy repeated its forward to the SAME primary under the SAME branch,
+    // and its own cookie row is the only thing that changed: the dead backup is
+    // no longer named. (Without this the rest of the test proves nothing.)
+    let forwarded: Vec<Vec<u8>> = fh
+        .sip_entries()
+        .into_iter()
+        .filter(|e| e.from == proxy.addr() && e.to == primary && e.raw.starts_with(b"INVITE "))
+        .map(|e| e.raw)
+        .collect();
+    assert_eq!(forwarded.len(), 2, "two copies of the one INVITE forwarded to {pri_ord}");
+    assert_eq!(
+        sip_message::sniff::via_branch(&forwarded[0]),
+        sip_message::sniff::via_branch(&forwarded[1]),
+        "§16.11: the retransmission rides the branch the first copy got"
+    );
+    let cookie = |raw: &[u8]| {
+        sip_message::sniff::header_values(raw, "Record-Route")
+            .into_iter()
+            .find(|row| row.contains("w_pri="))
+            .expect("the proxy's cookie Record-Route")
+    };
+    assert!(cookie(&forwarded[0]).contains(&format!("w_bak={bak_ord}")), "{}", cookie(&forwarded[0]));
+    assert!(cookie(&forwarded[1]).contains("w_bak=\"\""), "{}", cookie(&forwarded[1]));
+    assert_ne!(forwarded[0], forwarded[1], "the re-stamped cookie is a different datagram");
+    // The b-leg rung took the same re-stamp on its way to bob.
+    let to_bob = fh
+        .sip_entries()
+        .into_iter()
+        .filter(|e| e.from == proxy.addr() && e.to == bob.addr() && e.raw.starts_with(b"INVITE "))
+        .count();
+    assert_eq!(to_bob, 2, "the primary's Timer A re-sent its b-leg INVITE through the proxy");
+
+    // The primary absorbed the a-leg copy; bob absorbs the b-leg copy and
+    // answers the one INVITE it was asked.
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dlg = call.ack().await;
+    bob.receive_absorbing("ACK", &["INVITE"]).await;
+    scenario_harness::callflow::hangup(&mut dlg, &bob).await;
+    fh.advance(Duration::from_millis(300)).await;
+    // Released on the survivor: the primary left no per-call state behind.
+    let survivor = if pri_ord == "b1" { &w_b1 } else { &w_b2 };
+    assert!(
+        survivor.memory_clean(),
+        "{pri_ord} released the call ({} live, {} locks)",
+        survivor.active_calls(),
+        survivor.lock_count()
+    );
     drop((w_b1, w_b2, proxy));
     let _ = fh.repl_report();
 }

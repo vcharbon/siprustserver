@@ -83,7 +83,7 @@ impl SipDestination {
 
 /// The port a decision payload states, or `None` when it states one that is no
 /// port. The one place the two kinds of "missing" are told apart
-/// (upstreamneed-055):
+///:
 ///
 ///   - **absent / `null`** — RFC 3261 §19.1.2 says an unstated port means 5060.
 ///     That default is what the protocol *means*, so it is correct and stays
@@ -140,7 +140,7 @@ pub struct RouteDecision {
     pub service_ext: BTreeMap<String, serde_json::Value>,
     /// Internal release events the backend wants consulted on (`call_release`)
     /// instead of handled locally — the Routing API's `subscribe[]`
-    /// (upstreamneed-009). Recorded on the call at route-apply time (initial
+    ///. Recorded on the call at route-apply time (initial
     /// route: `apply_route`; async failover/reroute route: the
     /// `SetSubscriptions` fold), so it survives replication/takeover like
     /// `features`. Empty = no subscriptions = today's local handling. (This
@@ -223,6 +223,12 @@ pub struct FailureInfo {
     /// The leg whose failure triggered this decision (`None` for pre-leg
     /// origins such as a limiter reject).
     pub failed_leg_id: Option<String>,
+    /// For origin `transaction_timeout` only: which client-transaction timeout
+    /// fired — `"response"` (nothing at all answered the INVITE, not even a
+    /// `100`: the hop is dead) or `"transaction"` (it answered a provisional,
+    /// then went silent past the INVITE bound). Absent for every other origin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_kind: Option<String>,
     /// The failed final response's non-structural headers, verbatim and in
     /// wire order (duplicates preserved) — where `Reason:`/`Warning:`/`X-*`
     /// land. Empty for internal origins (timeouts, limiter).
@@ -327,7 +333,7 @@ impl CallSnapshot {
 }
 
 /// The release-event consult sent when a **subscribed** internal release
-/// event fires (upstreamneed-009; the Routing API's `POST /calls/events/release`).
+/// event fires (the Routing API's `POST /calls/events/release`).
 /// Built by the `max-duration` rule's `ReleaseAsyncHttp` seed; the framework
 /// attaches the snapshot at dispatch, exactly like [`CallFailureRequest`].
 #[derive(Debug, Clone)]
@@ -343,7 +349,7 @@ pub struct CallReleaseRequest {
 /// release into an **established-call reroute** (replace the connected b-leg
 /// with a new destination — announcement / autocutoff treatment). The `Route`
 /// here is the same [`RouteDecision`] shape as every other decision point
-/// (ADR-0017 one-treatment-vocabulary; output parity per upstreamneed-005
+/// (ADR-0017 one-treatment-vocabulary; output parity
 /// applies: `call_limiter` admission, `features`, `service_ext`,
 /// `subscriptions` are all honored on the reroute).
 #[derive(Debug, Clone)]
@@ -409,5 +415,6 @@ pub fn default_platform_features() -> FeatureActivations {
         call_limiters: None,
         advertise_capabilities: None,
         charging_vector: None,
+        withhold_option_tags: None,
     }
 }

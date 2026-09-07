@@ -92,7 +92,10 @@ async fn observe_final_records_divergence_and_acks_observed_2xx() {
                 ("bob", bob.clone()),
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(Barrier::None, GoalStep::ObserveFinal { key: 7, expected: Some(400) }),
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::ObserveFinal { key: 7, expected: Some(400), cseq_method: None },
+                    ),
                     Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
                 ],
             ),
@@ -107,7 +110,7 @@ async fn observe_final_records_divergence_and_acks_observed_2xx() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -155,7 +158,10 @@ async fn truncated_flow_completes_after_class_assert() {
                 ("bob", bob.clone()),
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(Barrier::None, GoalStep::ExpectFinal { assert: FinalAssert::Class(2) }),
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::ExpectFinal { assert: FinalAssert::Class(2), cseq_method: None },
+                    ),
                     Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
                 ],
             ),
@@ -201,7 +207,10 @@ async fn truncated_class_assert_fails_fast_on_wrong_class() {
                 ("bob", bob.clone()),
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(Barrier::None, GoalStep::ExpectFinal { assert: FinalAssert::Class(2) }),
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::ExpectFinal { assert: FinalAssert::Class(2), cseq_method: None },
+                    ),
                 ],
             ),
             scripted_spec(
@@ -251,7 +260,10 @@ async fn reception_goal_suppresses_incidental_shed() {
                 ("bob", bob.clone()),
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(Barrier::None, GoalStep::ObserveFinal { key: 1, expected: Some(486) }),
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::ObserveFinal { key: 1, expected: Some(486), cseq_method: None },
+                    ),
                 ],
             ),
             ActorSpec {
@@ -265,7 +277,7 @@ async fn reception_goal_suppresses_incidental_shed() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -288,6 +300,90 @@ async fn reception_goal_suppresses_incidental_shed() {
             observed: 486,
         })),
         "the observed final is recorded: {:?}",
+        obs.replay_record(),
+    );
+    h.finish().await;
+}
+
+/// Transaction-scoped final observation: bob answers RELIABLY (183 +
+/// Require:100rel) and HOLDS the INVITE, so the stack-automatic PRACK's 200
+/// sits in alice's response queue BEFORE the INVITE's own final. Alice then
+/// CANCELs (gated on that PRACK 200 being observed) and bob 487s the held
+/// INVITE — `ObserveFinal` pinned to INVITE passes the PRACK 200 (and the
+/// CANCEL 200) over and records observed=487, never a foreign transaction's
+/// 2xx.
+#[tokio::test(start_paused = true)]
+async fn observe_final_pinned_to_invite_skips_prack_200() {
+    let h = Harness::new("actor-observe-final-pinned").describe(
+        "reliable 183 → auto-PRACK 200 precedes the INVITE 487; \
+         ObserveFinal{cseq_method: INVITE} records 487, not the PRACK's 200",
+    );
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+
+    let prack_200 = |s: &StateInner| {
+        s.leg("alice")
+            .responses()
+            .iter()
+            .any(|f| f.status == 200 && f.cseq_method.eq_ignore_ascii_case("PRACK"))
+    };
+    let call = CallPlan {
+        actors: vec![
+            caller_spec(
+                "alice",
+                &alice,
+                ("bob", bob.clone()),
+                vec![
+                    Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
+                    Goal::new(
+                        Barrier::pred("prack_200", prack_200),
+                        GoalStep::Cancel { stated: Vec::new() },
+                    ),
+                    Goal::new(
+                        Barrier::None,
+                        GoalStep::ObserveFinal {
+                            key: 9,
+                            expected: Some(487),
+                            cseq_method: Some("INVITE".to_string()),
+                        },
+                    ),
+                ],
+            ),
+            ActorSpec {
+                role: "bob",
+                agent: bob.clone(),
+                // Holds the INVITE 200 for an early UPDATE that never comes:
+                // the PRACK exchange completes while the INVITE final is still
+                // pending, so the CANCEL's 487 is the INVITE's final.
+                disposition: Disposition::ReliableAnswerEarlyUpdate,
+                media: MediaState::answer(ANSWER_SDP),
+                goals: vec![],
+                invite_targets: vec![],
+                via: None,
+                feed: CtxFeed::default(),
+                cseq: None,
+                delayed: vec![],
+                claim: None,
+            },
+        ],
+        plan: vec![],
+        settle: SettleBarrier::default_ceiling(),
+        automatics: Automatics::default(),
+        delta_policy: None,
+        reception_observer: None,
+    };
+
+    let ctx = CallCtx::new();
+    let obs = ObservedState::new();
+    let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+    assert!(verdict.is_ok(), "the cancelled reliable call settles clean, got {verdict:?}");
+    assert!(
+        obs.replay_record().contains(&ReplayEntry::Final(RecordedFinal {
+            key: 9,
+            expected: Some(487),
+            observed: 487,
+        })),
+        "the INVITE-pinned observation records the 487: {:?}",
         obs.replay_record(),
     );
     h.finish().await;

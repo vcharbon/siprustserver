@@ -132,7 +132,7 @@ impl ServerTxn {
     /// until the ACK arrives, the panicking-veneer sibling of
     /// [`try_expect_ack`](Self::try_expect_ack). Purely optional: an unread ACK
     /// is still recorded at delivery and the gating
-    /// `unackedInviteNon2xxFinal` wire rule settles the obligation at
+    /// `unacked-invite-non-2xx-final` wire rule settles the obligation at
     /// `finish()` — reach for this when the test asserts the ACK at a specific
     /// point in the flow.
     pub async fn expect_ack(&self) {
@@ -148,7 +148,7 @@ impl ServerTxn {
             });
         };
         loop {
-            if self.agent.acks.is_fulfilled(self.request.call_id().as_str(), &branch) {
+            if self.agent.txn.hop_ack_is_fulfilled(self.request.call_id().as_str(), &branch) {
                 return Ok(());
             }
             // Pull; the receive core sights (and thereby fulfils) a matching
@@ -285,7 +285,7 @@ impl ServerTxn {
             // alice→bob case (To:bob == bob's uri) but diverge when a UAS is
             // handed an INVITE addressed to a third party (e.g. the MRF media
             // leg carries To:dest): the callee's in-dialog requests must then
-            // carry From:dest, and the recorded-trace midDialogUri audit — which
+            // carry From:dest, and the recorded-trace mid-dialog-uri audit — which
             // merges both tag orientations into one dialog slice — checks it.
             local_uri: req.to().uri().to_string(),
             remote_uri: req.from().uri().to_string(),
@@ -493,10 +493,10 @@ impl<'a> Respond<'a> {
         // re-INVITE) arms the txn-owned ACK wait — the arriving hop ACK is the
         // transaction layer's to claim, in whatever order it lands relative to
         // the body's next receive; `expect_ack` asserts it and the gating
-        // `unackedInviteNon2xxFinal` wire rule settles it at finish.
+        // `unacked-invite-non-2xx-final` wire rule settles it at finish.
         if (300..700).contains(&self.status) && txn.request.method().as_str() == "INVITE" {
             if let Some(branch) = top_via_branch(&txn.request) {
-                txn.agent.acks.arm(txn.request.call_id().to_string(), branch);
+                txn.agent.txn.arm_hop_ack(txn.request.call_id().to_string(), branch);
             }
         }
         Ok(())

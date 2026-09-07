@@ -219,7 +219,7 @@ pub fn rerouting_prack(binder: Arc<dyn RouteBinder>) -> ShapePlan {
 /// per-call dwell on a real clock.
 pub const NOANSWER_RING_SEC: u32 = 2;
 
-/// `rerouting_noanswer` (upstreamneed-047) — bob rings then NEVER answers; the
+/// `rerouting_noanswer` — bob rings then NEVER answers; the
 /// SUT's own no-answer timer (armed per-route by the plan) fires, CANCELs bob
 /// (487) and fails over to bob2, which answers plainly; talk, BYE.
 pub fn rerouting_noanswer(binder: Arc<dyn RouteBinder>) -> ShapePlan {

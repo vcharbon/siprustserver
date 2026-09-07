@@ -44,8 +44,8 @@
 //! - [`step`] — [`StepError`], the fallible-core step vocabulary.
 //! - [`ua`] + [`tolerant_recv`] — [`Agent`]: the send/receive cores and the
 //!   method-filtered receive policies.
-//! - [`txn_view`] — the §17.2 once-and-only-once receive view and §17.1.1.3
-//!   UAS-side ACK obligations.
+//! The §17.2 receive view itself is NOT here: it lives once for the whole tree
+//! in [`crate::absorption`], which every agent mode reads.
 //! - [`invite`] / [`client_invite`] / [`out_of_dialog`] / [`dialog`] —
 //!   client-side builders and transactions (initial INVITE, any out-of-dialog
 //!   method, in-dialog).
@@ -76,7 +76,6 @@ pub(crate) mod waiver;
 #[cfg(test)]
 mod tests;
 mod tolerant_recv;
-mod txn_view;
 mod ua;
 
 pub use client_invite::{CancelHandle, ClientInvite};
@@ -98,4 +97,3 @@ pub(crate) use addressing::top_via_branch;
 pub(crate) use client_invite::InviteResponseFate;
 pub(crate) use harness::Ids;
 pub(crate) use rr_fold::decide_rr_fold;
-pub(crate) use txn_view::{AckObligations, TxnView};

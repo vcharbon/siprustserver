@@ -8,6 +8,15 @@ use std::sync::{Arc, Mutex};
 
 use crate::tier1_brake::Tier1BrakeCounters;
 
+/// The `b2bua_retransmits_total` row key: method uppercased, the code's
+/// digits or nothing for a request.
+fn retransmit_key(ladder: &str, method: &str, code: Option<u16>) -> String {
+    match code {
+        Some(code) => format!("{ladder}|{}|{code}", method.to_ascii_uppercase()),
+        None => format!("{ladder}|{}|", method.to_ascii_uppercase()),
+    }
+}
+
 #[derive(Debug, Default)]
 struct Inner {
     // per-method request + per-(method,code) response counters (data-path
@@ -15,6 +24,14 @@ struct Inner {
     requests: Mutex<BTreeMap<String, u64>>,   // keyed method (INBOUND)
     requests_out: Mutex<BTreeMap<String, u64>>, // keyed method (OUTBOUND — originated/relayed)
     responses: Mutex<BTreeMap<String, u64>>,  // keyed "cseq_method|status_code" (INBOUND)
+    // Every repeat of a retained emission that left this worker — a rung of a
+    // dialog-level ladder or a triggered re-send — keyed "ladder|method|code"
+    // (code empty for a request). An original send is not a repeat: the ratio
+    // an operator wants is this beside `requests_out` / the response path.
+    retransmits: Mutex<BTreeMap<String, u64>>,
+    // Dialog-level ladders that ran to their give-up, keyed by the kind of
+    // obligation left undischarged (`Obligation::kind`): the peer went deaf.
+    repeat_give_ups: Mutex<BTreeMap<String, u64>>,
     // Replication serve-side liveness: per `(flow, peer)` count of catch-up/idle
     // `Noop`s this node SENT as a server (keyed "flow|peer"). A `Noop` means "I am
     // caught up — I have sent you everything in this flow's keyspace" (ADR-0014
@@ -112,6 +129,10 @@ struct Inner {
     repl_applied: Mutex<BTreeMap<String, u64>>,
     repl_takeover_resolved: AtomicU64,
     repl_takeover_hydrated: AtomicU64,
+    // Refusals of a `Terminated` replica; the rule is `router::materialise`.
+    repl_takeover_refused_terminated: AtomicU64,
+    // Reverse flushes a live primary refused to fold; the gate is `router::reclaim`.
+    repl_reverse_flush_refused: AtomicU64,
     // Fail-back (ADR-0011 X11 / ADR-0014): `reclaimed` = calls a rebooted primary
     // re-materialised into its live map (active reclaim); `self_release` = acting-
     // backup takeover copies the backup *self-released* once the transaction(s) it
@@ -309,6 +330,32 @@ impl B2buaMetrics {
         *self.inner.responses.lock().unwrap().entry(key).or_insert(0) += 1;
     }
 
+    /// Count one repeat that left this worker, for
+    /// `b2bua_retransmits_total{ladder,method,code}`: `ladder` is the
+    /// `sip_retransmit::Class` name that paced it or `trigger`, `method` the
+    /// CSeq method of the repeated message, `code` its status for a response.
+    pub fn record_retransmit(&self, ladder: &str, method: &str, code: Option<u16>) {
+        let key = retransmit_key(ladder, method, code);
+        *self.inner.retransmits.lock().unwrap().entry(key).or_insert(0) += 1;
+    }
+
+    /// The count of one `{ladder,method,code}` row.
+    pub fn retransmits_total(&self, ladder: &str, method: &str, code: Option<u16>) -> u64 {
+        let key = retransmit_key(ladder, method, code);
+        self.inner.retransmits.lock().unwrap().get(&key).copied().unwrap_or(0)
+    }
+
+    /// Count one dialog-level ladder that ran to its give-up, for
+    /// `b2bua_repeat_give_ups_total{obligation}`.
+    pub fn record_repeat_give_up(&self, obligation: &str) {
+        *self.inner.repeat_give_ups.lock().unwrap().entry(obligation.to_string()).or_insert(0) += 1;
+    }
+
+    /// The give-ups of one obligation kind.
+    pub fn repeat_give_ups_total(&self, obligation: &str) -> u64 {
+        self.inner.repeat_give_ups.lock().unwrap().get(obligation).copied().unwrap_or(0)
+    }
+
     /// Record one per-peer failure of `kind` against `peer` in `scope`
     /// (`b2bua_peer_failures_total{peer,scope,kind}`; cardinality-bounded, see
     /// [`crate::peer_failures::PeerFailures`]).
@@ -325,6 +372,12 @@ impl B2buaMetrics {
     counter!(bump_repl_flush_propagated, repl_flush_propagated_total, repl_flush_propagated);
     counter!(bump_repl_takeover_resolved, repl_takeover_resolved_total, repl_takeover_resolved);
     counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
+    counter!(bump_repl_reverse_flush_refused, repl_reverse_flush_refused_total, repl_reverse_flush_refused);
+    counter!(
+        bump_repl_takeover_refused_terminated,
+        repl_takeover_refused_terminated_total,
+        repl_takeover_refused_terminated
+    );
     counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
     counter!(bump_repl_self_release, repl_self_release_total, repl_self_release);
     counter!(bump_repl_terminal_lost, repl_terminal_lost_total, repl_terminal_lost);
@@ -546,6 +599,8 @@ impl B2buaMetrics {
         counter("b2bua_repl_flush_propagated_total", "primary flushes that propagated to a backup peer (topology.bak set)", self.repl_flush_propagated_total());
         counter("b2bua_repl_takeover_resolved_total", "in-dialog requests whose callRef was recovered from the replica index (acting-backup)", self.repl_takeover_resolved_total());
         counter("b2bua_repl_takeover_hydrated_total", "calls hydrated from a backup replica to serve a failed-over request", self.repl_takeover_hydrated_total());
+        counter("b2bua_repl_reverse_flush_refused_total", "a backup's reverse flush for a call this primary serves live that neither the (p,b) vector nor lifecycle progress let it fold (ADR-0014): the primary kept its own copy", self.repl_reverse_flush_refused_total());
+        counter("b2bua_repl_takeover_refused_terminated_total", "backup-replica lookups refused because the body is Terminated (a released takeover copy): the message falls to the orphan 481/drop instead of re-serving a call that already ended", self.repl_takeover_refused_terminated_total());
         counter("b2bua_repl_reclaimed_total", "calls a rebooted primary re-materialised into its live map + re-armed (active reclaim, ADR-0011 X11)", self.repl_reclaimed_total());
         counter("b2bua_repl_self_release_total", "acting-backup takeover copies self-released once their served transaction(s) reached a terminal state (ADR-0014, replaces the Deactivate handback)", self.repl_self_release_total());
         counter("b2bua_repl_terminal_lost_total", "backup-held deferred terminals whose primary never reclaimed them (dead past the replica TTL): limiter released + memory freed by the periodic reap, but NO CDR — the accepted lost-CDR double-failure (ADR-0020 X3)", self.repl_terminal_lost_total());
@@ -566,6 +621,22 @@ impl B2buaMetrics {
         s.push_str("# HELP b2bua_requests_out_total outbound SIP requests this worker ORIGINATED/relayed by method (e.g. the in-dialog keepalive OPTIONS); pair with b2bua_responses_total{method=\"OPTIONS\",code=\"200\"} to see the keepalive round-trip\n# TYPE b2bua_requests_out_total counter\n");
         for (method, v) in self.inner.requests_out.lock().unwrap().iter() {
             s.push_str(&format!("b2bua_requests_out_total{{method=\"{method}\"}} {v}\n"));
+        }
+        s.push_str("# HELP b2bua_retransmits_total repeats of a retained emission that left this worker, by what paced them (ladder: the sip_retransmit class of a dialog-level ladder, or trigger for a re-send the peer provoked), the CSeq method, and the status for a response (no code label on a request); a climb names a deaf peer or a lossy path\n# TYPE b2bua_retransmits_total counter\n");
+        for (k, v) in self.inner.retransmits.lock().unwrap().iter() {
+            let mut p = k.splitn(3, '|');
+            let ladder = p.next().unwrap_or("");
+            let method = p.next().unwrap_or("");
+            let code = p.next().unwrap_or("");
+            if code.is_empty() {
+                s.push_str(&format!("b2bua_retransmits_total{{ladder=\"{ladder}\",method=\"{method}\"}} {v}\n"));
+            } else {
+                s.push_str(&format!("b2bua_retransmits_total{{ladder=\"{ladder}\",method=\"{method}\",code=\"{code}\"}} {v}\n"));
+            }
+        }
+        s.push_str("# HELP b2bua_repeat_give_ups_total dialog-level ladders that ran to their give-up with the obligation still undischarged (ack-of-2xx: RFC 3261 §13.3.1.4, prack-of: RFC 3262 §3); the rate a peer goes deaf at\n# TYPE b2bua_repeat_give_ups_total counter\n");
+        for (obligation, v) in self.inner.repeat_give_ups.lock().unwrap().iter() {
+            s.push_str(&format!("b2bua_repeat_give_ups_total{{obligation=\"{obligation}\"}} {v}\n"));
         }
         s.push_str("# HELP b2bua_repl_applied_total inbound replication ops applied per stream+endpoint+op (flow=recovery|backup, peer=endpoint, op=create|update|delete); a reboot's bulk reclaim shows as a recovery/create step\n# TYPE b2bua_repl_applied_total counter\n");
         for (k, v) in self.inner.repl_applied.lock().unwrap().iter() {
@@ -989,6 +1060,26 @@ mod tests {
         assert!(txt.contains("b2bua_requests_total{method=\"BYE\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"INVITE\",code=\"200\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"BYE\",code=\"200\"} 1"));
+    }
+
+    #[test]
+    fn retransmit_and_give_up_families_render() {
+        let m = B2buaMetrics::new();
+        m.record_retransmit("final-2xx", "invite", Some(200));
+        m.record_retransmit("final-2xx", "INVITE", Some(200));
+        m.record_retransmit("reliable-provisional", "INVITE", Some(183));
+        m.record_retransmit("trigger", "ACK", None);
+        m.record_repeat_give_up("ack-of-2xx");
+        assert_eq!(m.retransmits_total("final-2xx", "INVITE", Some(200)), 2);
+        assert_eq!(m.retransmits_total("trigger", "ACK", None), 1);
+        assert_eq!(m.retransmits_total("trigger", "ACK", Some(200)), 0, "a request row carries no code");
+        assert_eq!(m.repeat_give_ups_total("ack-of-2xx"), 1);
+        assert_eq!(m.repeat_give_ups_total("prack-of"), 0);
+        let txt = m.prometheus_text();
+        assert!(txt.contains("b2bua_retransmits_total{ladder=\"final-2xx\",method=\"INVITE\",code=\"200\"} 2"), "{txt}");
+        assert!(txt.contains("b2bua_retransmits_total{ladder=\"reliable-provisional\",method=\"INVITE\",code=\"183\"} 1"));
+        assert!(txt.contains("b2bua_retransmits_total{ladder=\"trigger\",method=\"ACK\"} 1"), "no code label on a request: {txt}");
+        assert!(txt.contains("b2bua_repeat_give_ups_total{obligation=\"ack-of-2xx\"} 1"));
     }
 
     #[test]

@@ -39,24 +39,16 @@
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
-use sip_message::header::{RSeq, Require};
-use sip_message::{build_answer_from_offer, BuildAnswerOptions, Method, SdpBuildResult, SipResponse};
+use sip_message::{build_answer_from_offer, BuildAnswerOptions, Method, SdpBuildResult};
 
 use super::model::{
     Effect, Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
+    TimerDelay,
 };
+use super::relay;
 
 fn ok(actions: Vec<RuleAction>) -> Option<RuleHandleResult> {
     Some(RuleHandleResult::new(actions))
-}
-
-/// RFC 3262: a reliable 1xx carries `Require: 100rel` and a numeric `RSeq`.
-fn reliable_rseq(resp: &SipResponse) -> Option<i64> {
-    let requires = resp.header::<Require>()?.ok()?;
-    if !requires.contains("100rel") {
-        return None;
-    }
-    Some(resp.header::<RSeq>()?.ok()?.value() as i64)
 }
 
 /// True iff an 18x-masking strategy this machine owns is active (`drop-sdp` /
@@ -87,6 +79,14 @@ fn source_leg_not_cancelling(ctx: &RuleContext) -> bool {
     ctx.source_leg()
         .map(|l| l.disposition != LegDisposition::Cancelling)
         .unwrap_or(true)
+}
+
+/// The fake-prack mask is still up: alice holds no committed callee SDP, because
+/// no a-facing 2xx has confirmed her dialog yet. The a-leg is the one that
+/// decides — a b-leg can confirm without facing the caller (an unadopted media
+/// leg answered by the service, a crossing 200 being reaped).
+fn is_fake_prack_masking(ctx: &RuleContext) -> bool {
+    is_fake_prack(ctx) && ctx.call.a_leg().state != LegState::Confirmed
 }
 
 /// fake-prack AND the current UPDATE carries **no body** — the session-refresh
@@ -121,8 +121,10 @@ define_service! {
         // a bare 180 under the SAME stored a-facing tag — the mask stays one
         // early dialog); ONE_PER_VALUE relays the first 18x of each distinct
         // *upstream* status value and suppresses repeats. Reliable 1xx is PRACKed
-        // by the B2BUA itself (alice never saw it); `fake-prack` caches bob's SDP
-        // per `(leg, To-tag)` dialog — strictly, one cache per fork.
+        // by the B2BUA itself (alice never saw it), once per provisional — the
+        // responder's §3 retransmission of one is discarded (RFC 3262 §4);
+        // `fake-prack` caches bob's SDP per `(leg, To-tag)` dialog — strictly,
+        // one cache per fork.
         sm_rule! {
             id: "suppress-18x",
             machine: RELAY_FIRST_18X_MACHINE,
@@ -139,10 +141,17 @@ define_service! {
             handle: |ctx| {
                 let resp = ctx.response()?;
                 let b_tag = resp.to().tag().map(str::to_owned).unwrap_or_default();
-                let rseq = reliable_rseq(resp);
+                let rseq = relay::reliable_rseq(resp);
                 let invite_cseq = resp.cseq().seq() as i64;
                 let leg = ctx.source_leg_id.to_string();
                 let fake_prack = is_fake_prack(ctx);
+
+                // The responder's retransmission of a provisional this stack
+                // already acknowledged: discarded outright (RFC 3262 §4) —
+                // not relayed again, not PRACKed again, not accounted again.
+                if rseq.is_some_and(|rseq| ctx.call.pracked_provisional(&leg, &b_tag, invite_cseq, rseq)) {
+                    return ok(vec![]);
+                }
 
                 // Reliable 1xx → the B2BUA PRACKs the b-leg itself (alice never
                 // sees the reliable provisional, so she won't PRACK).
@@ -237,7 +246,10 @@ define_service! {
         // A 2xx on a leg being CANCELled is NOT matched (`source_leg_not_cancelling`):
         // it defers to CORE `cancel-200-crossing`, which reaps
         // the abandoned callee (ACK+BYE) instead of bridging it to a caller the
-        // teardown is already rejecting.
+        // teardown is already rejecting. `leg_states` matches `confirm-dialog`'s
+        // own gate, so a 2xx RETRANSMITTED on a confirmed leg belongs to CORE
+        // `re-ack-retransmitted-2xx` (RFC 3261 §13.2.2.4) and the answer path
+        // never re-runs.
         sm_rule! {
             id: "force-tag-consistency",
             machine: RELAY_FIRST_18X_MACHINE,
@@ -254,6 +266,7 @@ define_service! {
                 .method("INVITE")
                 .status_class(2)
                 .direction(Direction::FromB)
+                .leg_states(&[LegState::Trying, LegState::Early])
                 .filter(source_leg_not_cancelling),
             handle: |ctx| {
                 let resp = ctx.response()?;
@@ -323,11 +336,17 @@ define_service! {
                 }])
             },
         },
-        // ── fake-prack: locally answer b-leg UPDATE (wins over relay-update) ─
-        // alice has no committed bob-SDP to negotiate against, so the B2BUA
-        // answers bob's early-dialog UPDATE itself: a skeleton-fit answer derived
+        // ── fake-prack: locally answer a b-leg UPDATE under the mask (wins
+        // over `relay-update`) ──────────────────────────────────────────────
+        // Under the mask alice has no committed bob-SDP to negotiate against, so
+        // the B2BUA answers bob's UPDATE itself: a skeleton-fit answer derived
         // from alice's INVITE offer (488 on no codec intersection), advancing the
-        // cached SDP to bob's UPDATE offer.
+        // cached SDP to bob's offer; a bodyless refresh is answered 200 bare.
+        // `is_fake_prack_masking` scopes this to that window — once the a-leg is
+        // confirmed a b-leg UPDATE is an ordinary in-dialog request and falls
+        // through to CORE `relay-update`. The FromA sibling's `leg_states` gate
+        // states the same condition from its own vantage (its source IS the
+        // a-leg).
         sm_rule! {
             id: "fake-prack-handle-update-from-b",
             machine: RELAY_FIRST_18X_MACHINE,
@@ -340,7 +359,7 @@ define_service! {
             matcher: Match::request()
                 .method("UPDATE")
                 .direction(Direction::FromB)
-                .filter(is_fake_prack),
+                .filter(is_fake_prack_masking),
             handle: |ctx| {
                 let req = ctx.request()?;
                 let b_tag = req.from().tag().map(str::to_owned).unwrap_or_default();
@@ -457,7 +476,9 @@ pub fn project_cursor(call: &mut Call) {
 /// Replay `confirm-dialog`'s action sequence (the `force-tag-consistency` rule
 /// composes with it: it wins the 2xx match, so it must emit confirm-dialog's
 /// effects itself). Kept in sync with the CORE `confirm-dialog` rule
-/// (`defaults::core_rules`).
+/// (`defaults::core_rules`). The §13.3.1.4 un-ACKed-2xx ladder is no rule's
+/// to arm — the a-facing answer emit seam (`actions::respond::send_a_leg_answer`)
+/// arms it for every answering path, this replay included.
 fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     let b = ctx.source_leg_id.to_string();
     let a = ctx.call.a_leg().leg_id.clone();
@@ -469,7 +490,10 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     // Operator/worker knob (`B2buaConfig::keepalive_interval_sec`, production
     // default 300 s) — not the per-call feature; see `defaults::keepalive_interval`.
     let keepalive = ctx.config.keepalive_interval_sec;
-    vec![
+    // `ConfirmDialog` FIRST: it stashes the a-facing answer SDP for 2xx
+    // retransmits, reading the one-shot `policy_update_body` that the later
+    // `RelayToPeer` takes.
+    let mut actions = vec![
         RuleAction::ConfirmDialog { leg_id: b.clone() },
         RuleAction::Merge {
             leg_a: a,
@@ -478,6 +502,12 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
         RuleAction::RelayToPeer {
             transform: MessageTransform::default(),
         },
+    ];
+    // RFC 3261 §13.2.2.4: the b-leg UAC core ACKs this 2xx on receipt, after the
+    // caller has its answer — the masking service changes who the caller sees,
+    // never who owes the callee its ACK.
+    actions.extend(relay::ack_on_answer(ctx, &b));
+    actions.extend(vec![
         RuleAction::CancelTimer {
             id: format!("NoAnswer:{b}"),
         },
@@ -486,12 +516,12 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
         },
         RuleAction::ScheduleTimer {
             timer_type: TimerType::GlobalDuration,
-            delay_sec: max_duration,
+            delay: TimerDelay::secs(max_duration),
             leg_id: None,
         },
         RuleAction::ScheduleTimer {
             timer_type: TimerType::Keepalive,
-            delay_sec: keepalive,
+            delay: TimerDelay::secs(keepalive),
             leg_id: None,
         },
         RuleAction::AddCdrEvent {
@@ -500,5 +530,6 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
             status_code: Some(200),
             reason: None,
         },
-    ]
+    ]);
+    actions
 }

@@ -1,0 +1,782 @@
+{
+  "actors": [
+    {
+      "endpoint": "ep0",
+      "id": "uac1",
+      "identity": "caller",
+      "kind": "uac"
+    },
+    {
+      "claim": {
+        "by": "ruri-pos"
+      },
+      "endpoint": "ep0",
+      "id": "uas1",
+      "kind": "uas"
+    }
+  ],
+  "calls": [
+    {
+      "attempts": [
+        {
+          "branch": 0,
+          "callee": {
+            "identity": "called-0-0"
+          },
+          "final": {
+            "at_ms": 4819,
+            "status": 200
+          },
+          "leg": "B",
+          "position": 0
+        }
+      ],
+      "caller_leg": "A",
+      "id": "c1"
+    }
+  ],
+  "case": {
+    "annotations": {
+      "flags": [
+        {
+          "detail": "R-URI \"19999010033000900004\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "kind": "number-bearing-frozen-ref"
+        },
+        {
+          "detail": "From \"19999010033000900002\" embeds a number the plan does not recognize post-anonymization; frozen (not role-mapped) — declare its composed form in the network plan before kind/hosted replay, or the ruri-pos claim will not match",
+          "kind": "number-bearing-frozen-ref"
+        }
+      ]
+    },
+    "family": "transparent",
+    "id": "capture_04887423-d0de-4af0-83e5-7199b2d80ec6.pcap.gz-case3",
+    "lanes": {
+      "hosted": "blocked:number-unclassified",
+      "kind": "blocked:number-unclassified",
+      "upstream-fake": "ok"
+    },
+    "origin": "capture",
+    "source": {
+      "anonymized": true,
+      "call_groups": [
+        2
+      ],
+      "capture": "capture_04887423-d0de-4af0-83e5-7199b2d80ec6.pcap.gz"
+    },
+    "title": "capture_04887423-d0de-4af0-83e5-7199b2d80ec6.pcap.gz basic call (groups 2)",
+    "variant": "repro"
+  },
+  "endpoints": [
+    {
+      "binding": "loopback",
+      "id": "ep0",
+      "observed": "203.0.113.146:5061",
+      "side": "peer"
+    }
+  ],
+  "flow": [
+    {
+      "delay": {
+        "compressible": true,
+        "from": "trigger",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s1",
+      "leg": "A",
+      "msg": {
+        "from": {
+          "frozen": "19999010033000900002"
+        },
+        "headers": [
+          {
+            "name": "Allow",
+            "value": "ACK, BYE, CANCEL, INFO, INVITE, NOTIFY, OPTIONS, PRACK, UPDATE"
+          },
+          {
+            "name": "Supported",
+            "value": "uui"
+          },
+          {
+            "name": "User-Agent",
+            "value": "Genesys SIP Server 8.1.104.06 (SIP_Server_8110406)"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "11"
+          },
+          {
+            "name": "P-Asserted-Identity",
+            "value": "<tel:2260>"
+          },
+          {
+            "name": "P-Orig",
+            "value": "sbc.3p"
+          }
+        ],
+        "method": "INVITE",
+        "ruri": {
+          "frozen": "19999010033000900004"
+        },
+        "to": {
+          "frozen": "8014"
+        }
+      },
+      "observed": {
+        "at_us": 0,
+        "leg": 4,
+        "msg": 0
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s2",
+      "leg": "A",
+      "msg": {
+        "cseq": 1,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "observed": {
+        "at_us": 950,
+        "leg": 4,
+        "msg": 1
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s3",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "mode": "absent"
+        },
+        "headers": [
+          {
+            "name": "Allow",
+            "value": "ACK, BYE, CANCEL, INFO, INVITE, NOTIFY, OPTIONS, PRACK, UPDATE"
+          },
+          {
+            "name": "Supported",
+            "value": "uui"
+          },
+          {
+            "name": "User-Agent",
+            "value": "Genesys SIP Server 8.1.104.06 SIP_Server_8110406"
+          },
+          {
+            "name": "P-Identifier",
+            "value": "11"
+          },
+          {
+            "name": "P-Asserted-Identity",
+            "value": "<sip:+33000900001@carrier.example.net;user=phone>"
+          },
+          {
+            "name": "P-Orig",
+            "value": "sbc.3p"
+          },
+          {
+            "name": "P-Charging-Vector",
+            "value": "icid-value=exampleicid1300000000000000000000000;icid-generated-at=nodea11;orig-ioi=carrier.example.net"
+          }
+        ],
+        "method": "INVITE"
+      },
+      "observed": {
+        "at_us": 75264,
+        "leg": 5,
+        "msg": 0
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s3",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s4",
+      "leg": "B",
+      "msg": {
+        "cseq": 478145,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "observed": {
+        "at_us": 75976,
+        "leg": 5,
+        "msg": 1
+      },
+      "op": "send"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s4",
+        "ms": 102,
+        "timer_linked": false
+      },
+      "id": "s5",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "ref": "resources/uas1_0_0.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Supported",
+            "value": "em,timer,replaces,path,resource-priority"
+          },
+          {
+            "name": "Allow",
+            "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
+          },
+          {
+            "name": "P-OrigHeader",
+            "value": "sip.ort.gwm2k3.rort"
+          },
+          {
+            "name": "P-Term",
+            "value": "cl4.site.nbi.sr.stage"
+          },
+          {
+            "name": "P-RoutingNumber",
+            "value": "+3320914"
+          },
+          {
+            "name": "P-Initial-Invite",
+            "value": "true"
+          }
+        ],
+        "reason": "Session Progress",
+        "status": 183
+      },
+      "observed": {
+        "at_us": 178366,
+        "leg": 5,
+        "msg": 2
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s5",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s6",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Supported",
+            "value": "em,timer,replaces,path,resource-priority"
+          },
+          {
+            "name": "Allow",
+            "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
+          },
+          {
+            "name": "P-OrigHeader",
+            "value": "sip.ort.gwm2k3.rort"
+          },
+          {
+            "name": "P-Term",
+            "value": "cl4.site.nbi.sr.stage"
+          },
+          {
+            "name": "P-RoutingNumber",
+            "value": "+3320914"
+          },
+          {
+            "name": "P-Initial-Invite",
+            "value": "true"
+          }
+        ],
+        "reason": "Session Progress",
+        "status": 183
+      },
+      "observed": {
+        "at_us": 184885,
+        "leg": 4,
+        "msg": 2
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s5",
+        "ms": 1339,
+        "timer_linked": false
+      },
+      "id": "s7",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "ref": "resources/uas1_1_0.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Supported",
+            "value": "em,timer,replaces,path,resource-priority"
+          },
+          {
+            "name": "Allow",
+            "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
+          },
+          {
+            "name": "P-OrigHeader",
+            "value": "sip.ort.gwm2k3.rort"
+          },
+          {
+            "name": "P-Term",
+            "value": "cl4.site.nbi.sr.stage"
+          },
+          {
+            "name": "P-RoutingNumber",
+            "value": "+3320914"
+          },
+          {
+            "name": "P-Initial-Invite",
+            "value": "true"
+          }
+        ],
+        "reason": "Ringing",
+        "status": 180
+      },
+      "observed": {
+        "at_us": 1518343,
+        "leg": 5,
+        "msg": 3
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s7",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s8",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Supported",
+            "value": "em,timer,replaces,path,resource-priority"
+          },
+          {
+            "name": "Allow",
+            "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
+          },
+          {
+            "name": "P-OrigHeader",
+            "value": "sip.ort.gwm2k3.rort"
+          },
+          {
+            "name": "P-Term",
+            "value": "cl4.site.nbi.sr.stage"
+          },
+          {
+            "name": "P-RoutingNumber",
+            "value": "+3320914"
+          },
+          {
+            "name": "P-Initial-Invite",
+            "value": "true"
+          }
+        ],
+        "reason": "Ringing",
+        "status": 180
+      },
+      "observed": {
+        "at_us": 1524821,
+        "leg": 4,
+        "msg": 3
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s7",
+        "ms": 3301,
+        "timer_linked": false
+      },
+      "id": "s9",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "ref": "resources/uas1_2_0.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Supported",
+            "value": "em,timer,replaces,path,resource-priority"
+          },
+          {
+            "name": "Allow",
+            "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
+          },
+          {
+            "name": "P-OrigHeader",
+            "value": "sip.ort.gwm2k3.rort"
+          },
+          {
+            "name": "P-HKH-RC-HIST",
+            "value": "<sip:+33000900004@carrier2.example.net>;device=SR;reason=SIP;location=CORE;realm=cl4.site.nbi.sr.stage;code=200;text=\"OK\""
+          },
+          {
+            "name": "P-Term",
+            "value": "cl4.site.nbi.sr.stage"
+          },
+          {
+            "name": "P-RoutingNumber",
+            "value": "+3320914"
+          },
+          {
+            "name": "P-Initial-Invite",
+            "value": "true"
+          }
+        ],
+        "reason": "OK",
+        "status": 200
+      },
+      "observed": {
+        "at_us": 4819596,
+        "leg": 5,
+        "msg": 4
+      },
+      "op": "send"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s9",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s10",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "cseq-method": "INVITE",
+        "headers": [
+          {
+            "name": "Supported",
+            "value": "em,timer,replaces,path,resource-priority"
+          },
+          {
+            "name": "Allow",
+            "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
+          },
+          {
+            "name": "P-OrigHeader",
+            "value": "sip.ort.gwm2k3.rort"
+          },
+          {
+            "name": "P-HKH-RC-HIST",
+            "value": "<sip:+33000900004@carrier2.example.net>;device=SR;reason=SIP;location=CORE;realm=cl4.site.nbi.sr.stage;code=200;text=\"OK\""
+          },
+          {
+            "name": "P-Term",
+            "value": "cl4.site.nbi.sr.stage"
+          },
+          {
+            "name": "P-RoutingNumber",
+            "value": "+3320914"
+          },
+          {
+            "name": "P-Initial-Invite",
+            "value": "true"
+          }
+        ],
+        "reason": "OK",
+        "status": 200
+      },
+      "observed": {
+        "at_us": 4827571,
+        "leg": 4,
+        "msg": 4
+      },
+      "op": "expect"
+    },
+    {
+      "auto": true,
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s10",
+        "ms": 143,
+        "timer_linked": false
+      },
+      "id": "s11",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "observed": {
+        "at_us": 4970999,
+        "leg": 4,
+        "msg": 5
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "confirms_dialog": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s11",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s12",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "cseq": 478145,
+        "method": "ACK"
+      },
+      "observed": {
+        "at_us": 4981632,
+        "leg": 5,
+        "msg": 5
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s11",
+        "ms": 17930,
+        "timer_linked": false
+      },
+      "id": "s13",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "headers": [
+          {
+            "name": "Reason",
+            "value": "Q.850;cause=16"
+          },
+          {
+            "name": "User-Agent",
+            "value": "Genesys SIP Server 8.1.104.06 (SIP_Server_8110406)"
+          },
+          {
+            "name": "P-Orig",
+            "value": "sbc.3p"
+          },
+          {
+            "name": "P-HKH-RC-HIST",
+            "value": "<sip:203.0.113.146:5061>;device=SR;reason=XACME;location=CORE;realm=XYZ;code=BYE"
+          }
+        ],
+        "method": "BYE"
+      },
+      "observed": {
+        "at_us": 22901176,
+        "leg": 4,
+        "msg": 6
+      },
+      "op": "send"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s13",
+        "ms": 4,
+        "timer_linked": false
+      },
+      "id": "s14",
+      "in_dialog": true,
+      "leg": "A",
+      "msg": {
+        "body": {
+          "mode": "absent"
+        },
+        "cseq-method": "BYE",
+        "reason": "OK",
+        "status": 200
+      },
+      "observed": {
+        "at_us": 22905469,
+        "leg": 4,
+        "msg": 7
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s13",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s15",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "body": {
+          "mode": "absent"
+        },
+        "headers": [
+          {
+            "name": "Reason",
+            "value": "Q.850;cause=16"
+          },
+          {
+            "name": "User-Agent",
+            "value": "Genesys SIP Server 8.1.104.06 (SIP_Server_8110406)"
+          },
+          {
+            "name": "P-Orig",
+            "value": "sbc.3p"
+          },
+          {
+            "name": "P-HKH-RC-HIST",
+            "value": "<sip:203.0.113.146:5061>;device=SR;reason=XACME;location=CORE;realm=XYZ;code=BYE"
+          }
+        ],
+        "method": "BYE"
+      },
+      "observed": {
+        "at_us": 22910506,
+        "leg": 5,
+        "msg": 6
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s15",
+        "ms": 61,
+        "timer_linked": false
+      },
+      "id": "s16",
+      "in_dialog": true,
+      "leg": "B",
+      "msg": {
+        "cseq-method": "BYE",
+        "headers": [
+          {
+            "name": "Supported",
+            "value": "em,timer,replaces,path,resource-priority"
+          },
+          {
+            "name": "Allow",
+            "value": "REGISTER,OPTIONS,INVITE,ACK,CANCEL,BYE,NOTIFY,PRACK,REFER,INFO,SUBSCRIBE,UPDATE"
+          }
+        ],
+        "reason": "OK",
+        "status": 200
+      },
+      "observed": {
+        "at_us": 22971569,
+        "leg": 5,
+        "msg": 7
+      },
+      "op": "send"
+    }
+  ],
+  "identities": [
+    {
+      "kind": "unknown",
+      "name": "caller",
+      "observed": "19999010033000900002"
+    },
+    {
+      "catalog": {
+        "class": "site"
+      },
+      "forms": [
+        "e164"
+      ],
+      "kind": "site",
+      "name": "called-0-0",
+      "observed": "+33000900004"
+    }
+  ],
+  "legs": [
+    {
+      "actor": "uac1",
+      "dir": "out",
+      "id": "A"
+    },
+    {
+      "actor": "uas1",
+      "dir": "in",
+      "id": "B"
+    }
+  ],
+  "pivot_version": 3,
+  "postconditions": {
+    "cdr": {
+      "absent": "capture-carries-no-cdr"
+    }
+  },
+  "timing": {
+    "capture_span_ms": 22971,
+    "expect_budget_ms": 32000,
+    "settle_budget_ms": 32000
+  }
+}

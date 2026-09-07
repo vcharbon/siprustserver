@@ -1,7 +1,8 @@
 //! The §16.6/§17.2.3 retransmission memo: a re-sent request repeats the
 //! original forward (same target, same outbound branch), bypasses the
-//! admission gate, and is not re-counted; CANCEL/ACK follow the INVITE's
-//! remembered hop for the whole ringing window.
+//! admission gate, and is not re-counted; CANCEL follows the INVITE's
+//! remembered hop for the whole ringing window, and a late non-2xx final
+//! still finds the INVITE entry so its ACK is relayed, never re-selected.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -204,8 +205,8 @@ async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
 }
 
 // Same window for the response side: a late non-2xx final must still find
-// the INVITE entry, so the upstream's ACK for it still follows the
-// INVITE's forward (relay, never a fresh selection).
+// the INVITE entry, so the upstream's ACK for it is still relayed to the
+// final's sender on the INVITE's branch (never a fresh selection).
 #[tokio::test(start_paused = true)]
 async fn late_non_2xx_final_ack_still_follows_the_invite() {
     let f = fixture(&[ProxyAddr::new(W1, 5060)]).await;
@@ -227,11 +228,11 @@ Content-Length: 0\r\n\r\n"
     let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
         panic!("expected response")
     };
-    f.core.handle_response(resp).await;
+    f.core.handle_response(resp, format!("{W1}:5060").parse().unwrap()).await;
 
     let out = f.core.route_request(&ack("latefinal-1@test", "tag-a", 9, "z9hG4bKr4"), src()).await;
     assert_eq!(out.decision, RoutingDecisionKind::AckHop);
-    assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)), "the ACK must repeat the INVITE's forward");
+    assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)), "the ACK goes to the node the final came from (relay, not a fresh selection)");
     assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "no fresh selection for the ACK");
 }
 

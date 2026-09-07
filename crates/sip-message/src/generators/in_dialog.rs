@@ -71,7 +71,9 @@ pub(super) fn with_dialog_identity(draft: RequestDraft, dialog: &StackDialog) ->
 pub struct GenerateInDialogRequestOpts {
     /// This hop's own Via. Required.
     pub via: Option<Via>,
-    /// Contact — required for every in-dialog method except BYE (§15.1).
+    /// Contact — required for the target-refresh methods
+    /// [`super::contact_policy::request_states_contact`] names; ignored for
+    /// every other method (no Contact rides).
     pub contact: Option<header::Contact>,
     pub body: Vec<u8>,
     pub content_type: Option<MediaType>,
@@ -88,13 +90,14 @@ pub struct GenerateInDialogRequestOpts {
     /// Remote-target override; defaults to `dialog.remote_target`. The route
     /// set still decides the Request-URI (§12.2.1.1).
     pub request_uri: Option<Uri>,
-    /// Capability set advertised on a re-INVITE (`Allow` / `Supported`, RFC
-    /// 3261 §20.5/§20.37); ignored for every other method. `None` advertises
-    /// [`CapabilitySet::default`]; an empty half advertises a value-less line.
-    /// Precedence, most specific first: an `extra_headers` line naming
-    /// `Allow`/`Supported` wins over this set, which wins over the default —
-    /// so a caller relaying a peer's `Allow`/`Supported` through
-    /// `extra_headers` must drop it first, or the peer's value wins.
+    /// The capability set an in-dialog INVITE advertises (RFC 3261
+    /// §13.2.1 / §20.5 / §20.37 / §20.1); ignored for every other method.
+    /// `None` advertises nothing: a re-INVITE this stack originates states no
+    /// set of its own, and one it relays carries the peer's through
+    /// `extra_headers`. Precedence, most specific first: an `extra_headers`
+    /// line naming a half wins over this set — so a caller relaying a peer's
+    /// advertisement through `extra_headers` must drop it first, or the peer's
+    /// value wins.
     pub capabilities: Option<CapabilitySet>,
 }
 
@@ -121,8 +124,9 @@ pub fn generate_in_dialog_request(
     let mut draft = RequestDraft::new(verb.clone(), uri).push(hop).push(MaxForwards::DEFAULT);
     draft = with_dialog_identity(draft, dialog).push(CSeq::new(next_cseq, verb));
 
-    // Contact for every in-dialog method EXCEPT BYE (RFC 3261 §15.1).
-    if method != InDialogMethod::Bye {
+    // Contact only where it refreshes the dialog target
+    // (`contact_policy::request_states_contact`).
+    if super::contact_policy::request_states_contact(&Method::from(method)) {
         draft = draft.push(opts.contact.clone().expect("contact required"));
     }
 
@@ -142,16 +146,16 @@ pub fn generate_in_dialog_request(
         }
     }
     if method == InDialogMethod::Invite {
-        // Advertise the declared capability set (or the default) — but never
+        // Advertise the stated capability set, half by half — but never
         // duplicate a header the caller already carries through `extra_headers`
         // (duplicated values merge per RFC 3261 §7.3.1), which is how an
         // explicit line stays the most specific statement.
-        let caps = opts.capabilities.clone().unwrap_or_default();
-        if !emit::carries(&opts.extra_headers, &HeaderName::Allow) {
-            draft = draft.push(caps.allow().clone());
-        }
-        if !emit::carries(&opts.extra_headers, &HeaderName::Supported) {
-            draft = draft.push(caps.supported().clone());
+        if let Some(caps) = &opts.capabilities {
+            for entry in caps.entries() {
+                if !emit::carries(&opts.extra_headers, entry.name()) {
+                    draft = draft.push_entry(entry);
+                }
+            }
         }
     }
 

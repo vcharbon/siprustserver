@@ -1,9 +1,15 @@
 //! The in-memory subscriber tests capture logs and trace events with.
 //!
-//! Thread-scoped ([`tracing::subscriber::set_default`]), so a current-thread
-//! runtime's whole test body is covered and two tests running concurrently
-//! never see each other's output. It runs no background task, performs no IO
-//! and reads no wall clock — a paused-clock test installing it stays paused
+//! ONE subscriber for the process, installed on first use; capture is scoped by
+//! the thread-local buffer stack it writes to, so a current-thread runtime's
+//! whole test body is covered and two tests running concurrently never see each
+//! other's output. The subscriber must be process-wide because `tracing` caches
+//! a callsite's `Interest` GLOBALLY, computed once from whatever subscriber the
+//! thread that first reached that callsite happened to hold: under a
+//! thread-scoped subscriber a callsite first reached by a test that captures
+//! nothing is cached as never-enabled, and every concurrently capturing test
+//! silently loses it. It runs no background task, performs no IO and reads no
+//! wall clock — a paused-clock test installing it stays paused
 //! (docs/testing/test-clock.md).
 //!
 //! Scenario tests never assert on captured content — the `Recorder` is the
@@ -16,12 +22,12 @@
 //! out of order withdraws only its own entry.
 
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
-use tracing::subscriber::DefaultGuard;
-use tracing::{Event, Level, Subscriber};
+use tracing::subscriber::Interest;
+use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
@@ -143,10 +149,9 @@ impl TestLogHandle {
     }
 }
 
-/// Holds the thread-scoped subscriber installed. Logging reverts to whatever
-/// was in place when this is dropped.
+/// Holds one buffer installed on this thread. Capture reverts to whatever was
+/// in place when this is dropped.
 pub struct TestLogGuard {
-    _inner: DefaultGuard,
     /// The handle this guard installed — the identity its removal is keyed on.
     mine: TestLogHandle,
 }
@@ -157,7 +162,7 @@ impl Drop for TestLogGuard {
     /// out of order removes an entry from under the live one and leaves the
     /// current buffer where it is.
     fn drop(&mut self) {
-        INSTALLED.with(|stack| {
+        let _ = INSTALLED.try_with(|stack| {
             let mut stack = stack.borrow_mut();
             if let Some(at) = stack.iter().rposition(|h| Arc::ptr_eq(&h.events, &self.mine.events))
             {
@@ -167,19 +172,32 @@ impl Drop for TestLogGuard {
     }
 }
 
-/// Install the in-memory subscriber for the current thread. Hold the guard for
-/// as long as capture should run.
+/// Install the capture subscriber process-wide, once. A thread capturing
+/// nothing is one predicated `enabled` call per event: the filter reads this
+/// thread's buffer stack and refuses when it is empty, so no span is opened and
+/// no event is built.
+///
+/// A subscriber another crate already made global keeps the process — capture
+/// then records nothing, which is the same answer as installing over it and
+/// losing that subscriber's output.
+fn install_capture_subscriber() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(Registry::default().with(CaptureLayer));
+    });
+}
+
+/// Install a capture buffer for the current thread. Hold the guard for as long
+/// as capture should run.
 ///
 /// Captures `info` and above: the lifecycle plane and the per-call trace plane
 /// both emit at `info`, while `debug`/`trace` diagnostics stay off so a long
 /// scenario does not accumulate what nothing reads.
 pub fn test_buffer() -> (TestLogGuard, TestLogHandle) {
+    install_capture_subscriber();
     let handle = TestLogHandle::default();
-    let layer = CaptureLayer { handle: handle.clone() }.with_filter(LevelFilter::INFO);
-    let subscriber = Registry::default().with(layer);
-    let guard = tracing::subscriber::set_default(subscriber);
     INSTALLED.with(|stack| stack.borrow_mut().push(handle.clone()));
-    (TestLogGuard { _inner: guard, mine: handle.clone() }, handle)
+    (TestLogGuard { mine: handle.clone() }, handle)
 }
 
 /// The buffer [`test_buffer`] installed on this thread, if one is active.
@@ -187,17 +205,38 @@ pub fn test_buffer() -> (TestLogGuard, TestLogHandle) {
 /// A component that wants capture but must not shadow an enclosing test's
 /// buffer reuses this handle instead of installing its own.
 pub fn current_test_buffer() -> Option<TestLogHandle> {
-    INSTALLED.with(|stack| stack.borrow().last().cloned())
+    INSTALLED.try_with(|stack| stack.borrow().last().cloned()).ok().flatten()
 }
 
 /// The capture layer: appends one [`CapturedEvent`] per event and one
-/// [`CapturedSpan`] per span creation, nothing else.
-struct CaptureLayer {
-    handle: TestLogHandle,
-}
+/// [`CapturedSpan`] per span creation, to whichever buffer the EMITTING thread
+/// has installed, and nothing else.
+struct CaptureLayer;
 
 impl<S: Subscriber> Layer<S> for CaptureLayer {
+    /// `sometimes` and never `always`: the answer depends on the EMITTING
+    /// thread, and an `always` would let `tracing` cache the first thread's
+    /// answer for the whole process.
+    fn register_callsite(&self, meta: &'static Metadata<'static>) -> Interest {
+        if *meta.level() <= Level::INFO {
+            Interest::sometimes()
+        } else {
+            Interest::never()
+        }
+    }
+
+    /// Captures `info` and above, and only on a thread holding a buffer: a test
+    /// capturing nothing opens no span and builds no event.
+    fn enabled(&self, meta: &Metadata<'_>, _ctx: Context<'_, S>) -> bool {
+        *meta.level() <= Level::INFO && current_test_buffer().is_some()
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::INFO)
+    }
+
     fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
+        let Some(handle) = current_test_buffer() else { return };
         let mut visitor = FieldVisitor::default();
         attrs.record(&mut visitor);
         let meta = attrs.metadata();
@@ -206,10 +245,11 @@ impl<S: Subscriber> Layer<S> for CaptureLayer {
             target: meta.target().to_string(),
             fields: visitor.fields,
         };
-        self.handle.spans.lock().expect("capture buffer mutex").push(captured);
+        handle.spans.lock().expect("capture buffer mutex").push(captured);
     }
 
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let Some(handle) = current_test_buffer() else { return };
         let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
         let meta = event.metadata();
@@ -219,7 +259,7 @@ impl<S: Subscriber> Layer<S> for CaptureLayer {
             message: visitor.message,
             fields: visitor.fields,
         };
-        self.handle.events.lock().expect("capture buffer mutex").push(captured);
+        handle.events.lock().expect("capture buffer mutex").push(captured);
     }
 }
 
@@ -350,6 +390,24 @@ mod tests {
         tracing::info!("lifecycle");
         assert_eq!(log.lines().len(), 1);
         assert!(log.lines()[0].contains("lifecycle"));
+    }
+
+    /// One callsite, reachable from any thread — the identity `tracing` caches
+    /// its `Interest` under.
+    fn cold_probe() {
+        tracing::info!("cold callsite");
+    }
+
+    #[test]
+    fn a_callsite_first_reached_by_a_thread_that_captures_nothing_still_reaches_the_buffer() {
+        let (_guard, log) = test_buffer();
+        // `tracing` computes a callsite's Interest ONCE, from whatever
+        // subscriber the thread that first reaches it holds, and caches it for
+        // the whole process. This thread holds none.
+        std::thread::spawn(cold_probe).join().expect("cold thread");
+
+        cold_probe();
+        assert_eq!(log.lines().len(), 1, "a cold registration must not silence the callsite");
     }
 
     #[test]

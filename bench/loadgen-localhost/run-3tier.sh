@@ -50,7 +50,7 @@ CPS="${2:-100}"
 DURATION="${3:-90}"
 
 TAG="${TAG:-baseline-pre-zerocopy}"
-BIN_DIR="${BIN_DIR:-/home/vince/siprustserver/target/release}"
+BIN_DIR="${BIN_DIR:-$(cd ../.. && pwd)/target/release}"
 RAMP="${RAMP:-20}"      # let the long-tail shapes (options_hold) reach steady state
 WINDOW="${WINDOW:-30}"  # CPU-seconds window
 FLAME="${FLAME:-30}"    # flamegraph window, after the CPU window

@@ -328,11 +328,12 @@ impl<'h> CalleeGroupBuilder<'h> {
                 ids: ids.clone(),
                 rr_fold: decide_rr_fold(name),
                 recv_timeout,
-                // Each logical callee is its own UA: per-leg §17.2 receive
-                // view over the shared socket (upstreamneed-034) and per-leg
-                // §17.1.1.3 ACK obligations (upstreamneed-036 ask B).
-                txn: std::sync::Arc::new(crate::agent::TxnView::functional()),
-                acks: std::sync::Arc::new(crate::agent::AckObligations::default()),
+                // Each logical callee is its own UA: a per-leg receive-side
+                // transaction layer over the shared socket, so §17.2 dedup and
+                // §17.1.1.3 hop-ACK ownership are per callee, not per socket.
+                txn: std::sync::Arc::new(crate::absorption::Absorption::transaction_view()),
+                two_xx_acks: std::sync::Arc::default(),
+                holdback: std::sync::Arc::default(),
             };
             agents.insert(name.clone(), agent);
         }

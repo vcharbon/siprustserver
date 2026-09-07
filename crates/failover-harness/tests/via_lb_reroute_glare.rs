@@ -1,6 +1,6 @@
 //! **Response↔transaction Via correlation across reroute and glare, via-LB**
-//! (upstreamneed/014). Two flows that are clean direct but were flagged by the
-//! downstream `rfc3261.via` audit once a REAL `sip_proxy::ProxyCore` relays
+//!. Two flows that are clean direct but were flagged by the
+//! downstream `response-echoes-request-via` audit once a REAL `sip_proxy::ProxyCore` relays
 //! both directions of the b-leg:
 //!
 //!   alice :5060 ─▶ proxy :5080 ─▶ b1 :5091 ─▶ proxy :5080 ─▶ bob :5070
@@ -60,7 +60,7 @@ fn reroute_decision() -> Arc<dyn CallDecisionEngine> {
 /// with 486; the worker ACKs the failed b-leg and forks the reroute INVITE to
 /// charlie through the same proxy hop; alice is bridged to charlie. The
 /// recorded traces (alice, bob, charlie, proxy, worker) must pass the full RFC
-/// audit — in particular `rfc3261.via` response↔transaction correlation at the
+/// audit — in particular `response-echoes-request-via` response↔transaction correlation at the
 /// relay bind that carried the 486-leg INVITE, its ACK, and the reroute INVITE
 /// back to back.
 #[tokio::test(start_paused = true)]
@@ -111,7 +111,7 @@ async fn reroute_on_486_via_lb_keeps_response_txn_correlation() {
     d_bye.expect(200).await;
 
     // Full per-bind suite — including the relay bind's own client-transaction
-    // correlation (`rfc3261.via`), which the Drop-time endpoint gate skips.
+    // correlation (`response-echoes-request-via`), which the Drop-time endpoint gate skips.
     fh.assert_full_rfc_clean("via-lb-486-reroute");
     drop(proxy);
 }
@@ -183,7 +183,7 @@ async fn bye_bye_glare_via_lb_keeps_response_txn_correlation() {
     b_bye.expect(200).await;
 
     // Full per-bind suite — including the relay bind's own client-transaction
-    // correlation (`rfc3261.via`), which the Drop-time endpoint gate skips.
+    // correlation (`response-echoes-request-via`), which the Drop-time endpoint gate skips.
     fh.assert_full_rfc_clean("via-lb-bye-glare");
     drop(proxy);
 }

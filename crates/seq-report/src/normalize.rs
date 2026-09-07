@@ -16,9 +16,10 @@
 //!   the same ordinal so two lanes' differing absolute sequence numbers agree;
 //! - `Lifecycle` bands (chaos markers — load-lane only, wall-clock placed) are
 //!   dropped;
-//! - only normalization-stable anomalies survive: RFC-audit findings (keyed by
-//!   rule id) are kept with their lane mapped to a role and their timing-bearing
-//!   `detail` cleared; every other anomaly (the structural layer-close kinds —
+//! - only normalization-stable anomalies survive: RFC-audit findings (those the
+//!   projector tagged [`Anomaly::rule_sourced`]) are kept with their lane mapped
+//!   to a role and their timing-bearing `detail` cleared; every other anomaly
+//!   (the structural layer-close kinds —
 //!   queueLeak / inFlightImbalance / undeliverable — and the call-result /
 //!   check-verdict notes, all of which carry timing or transport specifics) is
 //!   dropped.
@@ -113,12 +114,12 @@ pub fn normalize(doc: &SeqDoc, role_map: &HashMap<String, String>) -> SeqDoc {
         })
         .collect();
 
-    // Anomalies: keep only RFC-audit findings (stable rule id), map lane→role,
-    // clear the timing/wire-bearing detail, sort for determinism.
+    // Anomalies: keep only RFC-audit findings (the projector's tag), map
+    // lane→role, clear the timing/wire-bearing detail, sort for determinism.
     let mut anomalies: Vec<Anomaly> = doc
         .anomalies
         .iter()
-        .filter(|a| is_rfc_rule(&a.check))
+        .filter(|a| is_rfc_rule(a))
         .map(|a| Anomaly {
             check: a.check.clone(),
             detail: String::new(),
@@ -128,6 +129,9 @@ pub fn normalize(doc: &SeqDoc, role_map: &HashMap<String, String>) -> SeqDoc {
             // Row links are provenance onto the ORIGINAL seq axis, which the
             // normalized doc re-numbers — dropped like the detail.
             row_seqs: Vec::new(),
+            // Stamped, not carried: survivors are rule-sourced by definition,
+            // and how one passed the filter must not change its bytes.
+            rule_sourced: true,
         })
         .collect();
     anomalies.sort_by(|a, b| a.check.cmp(&b.check).then(a.lane.cmp(&b.lane)));
@@ -180,10 +184,13 @@ fn force_delivered(kind: RowKind) -> RowKind {
     }
 }
 
-/// Whether an anomaly's `check` id names an RFC-audit rule (the only
-/// normalization-stable anomaly class).
-fn is_rfc_rule(check: &str) -> bool {
-    check.starts_with("rfc")
+/// Whether an anomaly is an RFC-audit finding (the only normalization-stable
+/// anomaly class). [`Anomaly::rule_sourced`], set by the projector, is the
+/// answer; the dotted `rfc*.*` prefix is a fallback carrying persisted
+/// pre-tag documents. A rule id is a kebab token (`cseq-in-dialog-order`),
+/// which only the tag recognizes.
+fn is_rfc_rule(a: &Anomaly) -> bool {
+    a.rule_sourced || a.check.starts_with("rfc")
 }
 
 #[cfg(test)]
@@ -225,6 +232,9 @@ mod tests {
                     endpoint: Some("bob".into()),
                     advisory: Some(false),
                     row_seqs: vec![2],
+                    // Untagged on purpose: a persisted pre-tag document,
+                    // carried by the dotted-id fallback.
+                    rule_sourced: false,
                 },
                 Anomaly {
                     check: "queueLeak".into(),
@@ -233,6 +243,7 @@ mod tests {
                     endpoint: None,
                     advisory: Some(true),
                     row_seqs: Vec::new(),
+                    rule_sourced: false,
                 },
             ],
             epoch_base_ms: Some(1_782_802_100_000),
@@ -296,6 +307,49 @@ mod tests {
         assert_eq!(n.anomalies[0].check, "rfc3261.cseqInDialogOrder");
         assert_eq!(n.anomalies[0].lane.as_deref(), Some("bob"));
         assert!(n.anomalies[0].detail.is_empty());
+    }
+
+    /// A rule id is a kebab token (`cseq-in-dialog-order`), which no `rfc`
+    /// prefix recognizes — the projector's `rule_sourced` tag is what carries
+    /// the finding through normalization, and it gets the same treatment a
+    /// dotted id gets: lane→role, detail cleared, row links dropped.
+    #[test]
+    fn kebab_token_finding_survives_on_its_tag() {
+        let mut d = doc();
+        d.anomalies.push(Anomaly {
+            check: "cseq-in-dialog-order".into(),
+            detail: "cseq=2 out of order at :5070".into(),
+            lane: Some("10.0.0.9:5070#bob".into()),
+            endpoint: Some("bob".into()),
+            advisory: Some(false),
+            row_seqs: vec![2],
+            rule_sourced: true,
+        });
+        // Same token, untagged: the fallback recognizes dotted ids only, so
+        // nothing rescues an untagged kebab finding.
+        d.anomalies.push(Anomaly {
+            check: "cancel-after-1xx".into(),
+            detail: "CANCEL before any provisional".into(),
+            lane: Some("10.0.0.1:5060".into()),
+            endpoint: None,
+            advisory: Some(false),
+            row_seqs: Vec::new(),
+            rule_sourced: false,
+        });
+
+        let n = norm(&d);
+        let kept: Vec<&str> = n.anomalies.iter().map(|a| a.check.as_str()).collect();
+        assert_eq!(kept, vec!["cseq-in-dialog-order", "rfc3261.cseqInDialogOrder"]);
+        let kebab = &n.anomalies[0];
+        assert_eq!(kebab.lane.as_deref(), Some("bob"));
+        assert!(kebab.detail.is_empty());
+        assert_eq!(kebab.endpoint, None);
+        assert!(kebab.row_seqs.is_empty());
+        assert_eq!(kebab.advisory, Some(false));
+        // The dotted finding, carried by the fallback, is stamped on the way out
+        // so both serialize identically whatever tagged their projector.
+        assert!(n.anomalies.iter().all(|a| a.rule_sourced));
+        assert_eq!(norm(&n), n, "idempotent with a kebab finding present");
     }
 
     #[test]

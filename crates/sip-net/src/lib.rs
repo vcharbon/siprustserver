@@ -1,15 +1,15 @@
-//! sip-net — the SIP signaling network layer (slice 2 of the migration; port
-//! of `src/sip/{SignalingNetwork,UdpTransport}` core).
+//! sip-net — the SIP signaling network layer.
 //!
 //! The DI seam is the [`SignalingNetwork`] trait ([`net`]). Implementations:
 //!   - [`RealSignalingNetwork`] — `tokio::net::UdpSocket`-backed ([`real`]).
 //!   - [`SimulatedSignalingNetwork`] — in-memory routing fabric ([`simulated`]).
 //!
 //! Recording + auditing is a **decorator** ([`contracts`]) that wraps either
-//! impl with the typed `layer-harness` `Recorder` channel and the per-bind /
-//! cross-message RFC-rule checks (the source's `scopedAudit`), plus the
-//! caller-side `paranoidInputs` precondition decorator. See the
-//! `effect-layer-test` SKILL for the wrapper philosophy.
+//! impl with the typed `layer-harness` `Recorder` channel and the RFC audit
+//! over the recording ([`rfc_audit`], whose rule bodies live once in
+//! `rfc-rules`), plus the caller-side precondition decorator
+//! [`ParanoidSignalingNetwork`]. See the `effect-layer-test` SKILL for the
+//! wrapper philosophy.
 
 pub mod contracts;
 pub mod fragmentation;
@@ -17,6 +17,7 @@ pub mod loss;
 pub mod net;
 pub mod queue;
 pub mod real;
+pub mod repeat;
 pub mod report;
 pub mod rfc_audit;
 pub mod simulated;
@@ -25,11 +26,10 @@ pub mod types;
 pub use contracts::{
     audit_visible_event, with_all_contracts, CrossMessageAuditRule, ParanoidSignalingNetwork, PeerAuditRule,
     RecordingSignalingNetwork, ScopedAuditOptions, SendOutcome, SignalingAuditViolation,
-    SignalingNetworkEvent, WrappedNetwork, SIGNALING_TAG,
+    SignalingNetworkEvent, WireStamp, WrappedNetwork, SIGNALING_TAG,
 };
 pub use rfc_audit::{
-    audit_wire_entries, bind_roles_of, evaluate_rfc_findings, rfc_cross_message_rules,
-    rfc_peer_rules, CSeqInDialogOrderRule, RfcFinding,
+    audit_wire_entries, bind_roles_of, evaluate_rfc_findings, rfc_cross_message_rules, RfcFinding,
 };
 pub use loss::RandomLoss;
 pub use net::{SignalingNetwork, UdpEndpoint};

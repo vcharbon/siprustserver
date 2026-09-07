@@ -1,0 +1,11 @@
+{
+  "name": "@sip/ts-root",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "TypeScript side of the replay toolchain: wire-contract mirrors and typed adapters over the Rust CLIs.",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  }
+}

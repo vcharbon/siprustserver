@@ -16,8 +16,9 @@
 //! with the wrong branch.
 //!
 //! The same cache also drives the non-2xx ACK hop decision (`ackhop|` keys —
-//! relay the upstream's §17.1.1.3 ACK on the INVITE's remembered hop, or
-//! absorb it when the proxy itself generated the final; see `core/request`
+//! relay the upstream's §17.1.1.3 ACK to the node the final arrived from, on
+//! the INVITE's outbound branch, or absorb it when the proxy itself generated
+//! the final; see `core/request`
 //! and `core/response.rs`) and the retransmission branch memo (`rtx|`-prefixed
 //! keys, see `core/request`).
 //!
@@ -34,6 +35,7 @@ use sip_txn::timers::{INVITE_INITIAL_TIMEOUT, TIMER_F, TIMER_H};
 
 use crate::addr::ProxyAddr;
 use crate::observability::ProxyMetrics;
+use crate::strategy::RouteParams;
 
 /// TTL for pending-INVITE entries (CANCEL forwarding + non-2xx ACK synthesis).
 /// Must cover the downstream UA's **whole INVITE transaction window**: the
@@ -73,9 +75,9 @@ pub fn call_id_cseq_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) ->
 /// Namespaced key for the non-2xx ACK hop memo, consulted on the request path
 /// when the upstream's §17.1.1.3 ACK arrives. Written in two flavours:
 ///  • RESPONSE path, on relaying a non-2xx INVITE final upstream — carries
-///    the INVITE's forward (target + outbound branch) so the ACK is RELAYED
-///    on that exact hop (the downstream server transaction matches it and
-///    stops retransmitting the final);
+///    the node the final came from + the INVITE's outbound branch so the ACK
+///    is RELAYED to the transaction that sent the final (it matches the ACK
+///    and stops retransmitting);
 ///  • request path `reply()`, on a final the proxy generated ITSELF — empty
 ///    `branch`, so the ACK is ABSORBED here (the proxy is the UAS; no
 ///    downstream exists).
@@ -95,17 +97,26 @@ pub fn ack_hop_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> Stri
 /// for a 2xx is a new transaction with a fresh branch and takes the normal
 /// routing ladder. Empty when the upstream request carried no branch
 /// (pre-RFC-3261 UA) — never matched against.
+///
+/// `stickiness` is the cookie the INVITE's dialog rides on (the params of the
+/// Record-Route this proxy minted for it, or of the Route it carried), kept only
+/// when `target` is one of our workers: a CANCEL whose remembered worker has
+/// died re-resolves through the same `decode_stickiness` ladder every in-dialog
+/// request takes, so it reaches the node holding the call's replica. `None`
+/// for a downstream target and for the retransmission memos.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelEntry {
     pub target: ProxyAddr,
     pub branch: String,
     pub upstream_branch: String,
+    pub stickiness: Option<RouteParams>,
 }
 
 struct StoredEntry {
     target: ProxyAddr,
     branch: String,
     upstream_branch: String,
+    stickiness: Option<RouteParams>,
     expires_at_ms: u64,
 }
 
@@ -173,6 +184,7 @@ impl CancelBranchLru {
                 target: entry.target,
                 branch: entry.branch,
                 upstream_branch: entry.upstream_branch,
+                stickiness: entry.stickiness,
                 expires_at_ms,
             },
         );
@@ -192,6 +204,7 @@ impl CancelBranchLru {
                 target: e.target.clone(),
                 branch: e.branch.clone(),
                 upstream_branch: e.upstream_branch.clone(),
+                stickiness: e.stickiness.clone(),
             }),
             None => None,
         }
@@ -228,6 +241,7 @@ mod tests {
             target: ProxyAddr::new("10.0.0.2", 5070),
             branch: branch.to_string(),
             upstream_branch: String::new(),
+            stickiness: None,
         }
     }
 

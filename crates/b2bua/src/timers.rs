@@ -122,8 +122,8 @@ impl TimerService {
 
     /// Re-arm a hydrated call's persisted timer intents into this node's driver.
     ///
-    /// Called once, on the fresh failover hydration of a call from the replica
-    /// (`router::run` → `CallState::hydrate_from_replica` with `fresh == true`).
+    /// Called once, on the materialisation of a call from a replica
+    /// (`router::materialise`, on the pass that inserted the copy).
     /// The live `DelayQueue` is per-node and is NOT replicated, so a call
     /// materialized from a backup partition arrives with no live timers here;
     /// without this re-arm its keepalive never probes the peer and its

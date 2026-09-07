@@ -29,7 +29,7 @@
 //! counted): SIP retransmission covers the loss, and carrying waiters would
 //! buy complexity for a window that is typically single-digit milliseconds.
 //!
-//! Cold-cache latency (upstreamneed-037) is attacked from three sides, so the
+//! Cold-cache latency is attacked from three sides, so the
 //! FIRST b-leg forward after a deploy / CoreDNS restart / TTL expiry is
 //! warm-equivalent instead of a 3.5–7.5 s stall that blows the downstream 2 s
 //! connect timer:
@@ -722,7 +722,7 @@ mod tests {
         assert_eq!(*attempts.lock().unwrap(), vec!["mrf".to_string()]);
     }
 
-    // ── proactive refresh + prewarm (upstreamneed-037) ────────────────────────
+    // ── proactive refresh + prewarm ─────────────────────────────────────────
     //
     // Default config: positive TTL 60 s, margin = min(60 s/4, 5 s) = 5 s, so
     // the refresh one-shot fires at exactly 55 s after a positive store. Each

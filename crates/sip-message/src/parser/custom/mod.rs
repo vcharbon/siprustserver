@@ -52,36 +52,19 @@ pub fn hydrate_request(
     let idx = HeaderIndex::build(&headers);
     let eager = extract_request_fields(&idx, &uri, &limits, Some(method), ExtractMode::Hydrate)?;
     let optional = optional_headers::extract_optional_indexed(&idx);
-    Ok(SipRequest::new(
-        RequestLine {
-            method: crate::method::Method::from_wire(method),
-            uri: eager.request_uri,
-            version: SipStr::from_static(SIP_VERSION),
-        },
-        MessageCore::new(headers, eager.common, optional, body.into(), Bytes::new()),
-    ))
-}
-
-/// Build a trusted [`SipResponse`] from already-structured components — the
-/// port of `hydrateResponse`. See [`hydrate_request`].
-pub fn hydrate_response(
-    status: u16,
-    reason: &str,
-    headers: Vec<SipHeader>,
-    body: impl Into<Bytes>,
-) -> Result<SipResponse, SipParseError> {
-    let limits = SipParserLimits::default();
-    let idx = HeaderIndex::build(&headers);
-    let core = extract_response_fields(&idx, status, &limits, ExtractMode::Hydrate)?;
-    let optional = optional_headers::extract_optional_indexed(&idx);
-    Ok(SipResponse::new(
-        StatusLine {
-            version: SipStr::from_static(SIP_VERSION),
-            status,
-            reason: SipStr::owned(reason),
-        },
-        MessageCore::new(headers, core, optional, body.into(), Bytes::new()),
-    ))
+    let body: Bytes = body.into();
+    let start = RequestLine {
+        method: crate::method::Method::from_wire(method),
+        uri: eager.request_uri,
+        version: SipStr::from_static(SIP_VERSION),
+    };
+    // A message always carries its datagram: `image()` is what the transport
+    // sends, so a hydrated request renders it once here.
+    let image = Bytes::from(crate::serializer::render(&headers, &body, |out| {
+        use std::io::Write;
+        let _ = write!(out, "{} {} {}", start.method, start.uri.text(), start.version);
+    }));
+    Ok(SipRequest::new(start, MessageCore::new(headers, eager.common, optional, body, image)))
 }
 
 /// The production parser. Built with `SipParserLimits`.

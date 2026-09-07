@@ -2,7 +2,7 @@
 
 Status: **COMPLETE** (phases A→D all landed, `just test` green). Spec agreed in
 the grill session 2026-07-14; implementation phases A→D below.
-Reference consumer: `/home/vince/upstreamsip` (consumes upstream loadgen as a
+Reference consumer: a downstream platform (consumes upstream loadgen as a
 pinned submodule; routes by dialed-number suffix, NOT X-Api-Call).
 
 ## Goal
@@ -19,9 +19,9 @@ with the in-dialog material reusable over ANY established dialog context
 
 1. **Deliverable / placement.** New crate `crates/callshapes` in siprustserver
    (depends on scenario-harness + e2e-model). Its `README.md` is the
-   downstream-consumption guide, written with upstreamsip as the worked example
+   downstream-consumption guide, written with a dial-plan platform as the worked example
    (dial-plan binder against `routing-mock/config/numbers.json`, ~30-LOC bin
-   via `ShapeRegistry`). Nothing is written into the upstreamsip repo; it picks
+   via `ShapeRegistry`). Nothing is written into the downstream repo; it picks
    the crate up on its next submodule pin bump.
 
 2. **Forking scope — both sides.**
@@ -42,7 +42,7 @@ with the in-dialog material reusable over ANY established dialog context
    `needs_sut: RerouteOnRejectNo18x`, `targets: [bob, bob2]`). A per-platform
    `RouteBinder` turns each slot into concrete INVITE input: R-URI user (dial
    plan), an arbitrary header, or X-Api-Call routes. Upstream ships the
-   X-Api-Call binder (used by our own fake-clock tests); upstreamsip writes a
+   X-Api-Call binder (used by our own fake-clock tests); a downstream writes a
    dial-plan binder mapping slots to numbers.json entries. Case JSON supplies
    per-run values (numbers, header names).
 
@@ -118,7 +118,7 @@ with the in-dialog material reusable over ANY established dialog context
    an `apply_disposition` arm (~695-723), and teach
    `TimedAnswer`/`answer_initial_invite` (~203-208, 497-523) to 200 under the
    winning tag (+ optional losing-tag late 200). `AnswerALegNewDialog`
-   (upstreamneed-019) is SUT-side (b2bua RuleAction), not reusable as the UAS
+   is SUT-side (b2bua RuleAction), not reusable as the UAS
    primitive — but proves the downstream wire shape.
 2. **Caller early-dialog model**: single linear slot —
    `DialogTable.pending_invite: Option<ClientInvite>` (actor.rs ~225-237);
@@ -130,11 +130,11 @@ with the in-dialog material reusable over ANY established dialog context
    `InDialogRequest::with_to_tag`/`with_fork_cseq` agent.rs ~2717-2823, winner
    CSeq promotion in `ack` ~2468).
 3. **rfc_audit**: `project_per_dialog` already splits forks into per-To-tag
-   slices (upstreamneed-029). ONE high-value fix: the pending (pre-tag)
+   slices. ONE high-value fix: the pending (pre-tag)
    INVITE+100 bucket migrates into the FIRST fork's slice only
    (dialog_model.rs ~558-573) — replicate it into EVERY fork's slice so
    rfc3264 offer/answer rules check non-first forks (today they under-check,
-   not false-positive). `cseqInDialogOrder`, `unackedInvite2xxByed` (the
+   not false-positive). `cseq-in-dialog-order`, `unackedInvite2xxByed` (the
    loser-late-200→ACK+BYE case), `prackOnReliable1xx`,
    `noByeOutsideOrEarlyDialog` are already fork-aware. Caller must only ever
    BYE a fork AFTER its own 2xx (a BYE on a never-confirmed early fork
@@ -406,7 +406,7 @@ for the fork seams + the peer-to-peer loser-late-200 finding), then C2/C4/C5.
   (not duplicated).
 - **D3 — README** — commit `632d32b`. `crates/callshapes/README.md`: the
   downstream-consumption + extension guide (pipeline algebra, the
-  RouteBinder/RouteIntent seam with upstreamsip's dial-plan binder as the worked
+  RouteBinder/RouteIntent seam with a dial-plan binder as the worked
   example, the ~30-LOC registry bin, adding a new Establishment/Script/Transfer,
   the fake-net paused-clock pattern, and the SUT-reachability rule).
 

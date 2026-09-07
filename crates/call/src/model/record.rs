@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::cdr::CdrEvent;
+use super::emission::RetainedEmission;
 use super::leg::Leg;
 use super::services::{
     ExtMap, PromotePemState, RelayFirst18xState, ReleaseEventKind, RerouteState, TransferState,
@@ -42,19 +43,68 @@ pub struct TagMapping {
 /// PRACK arrives from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReliableProvisional {
-    /// The a-facing early dialog this rung belongs to — the To-tag the caller
-    /// saw. Each such dialog carries its own sequence (RFC 3262 §4, errata 4603).
+    /// The dialog the provisional was SHOWN in — the To-tag of this stack's
+    /// own on the face it relayed toward: the a-face on an initial INVITE or a
+    /// caller re-INVITE, the b-face on a callee re-INVITE. Each such dialog
+    /// carries its own sequence (RFC 3262 §4, errata 4603).
     pub a_tag: String,
-    /// The `RSeq` shown to the caller — this stack's own sequence.
+    /// The `RSeq` shown there — this stack's own sequence.
     pub a_rseq: i64,
-    /// The b-leg the provisional came from.
+    /// The leg the provisional came from — the responder's.
     pub b_leg_id: String,
-    /// The callee fork that sent it — its own early dialog's To-tag.
+    /// The responder's own tag on that leg's dialog — a callee fork's early
+    /// dialog, or the caller's confirmed one.
     pub b_tag: String,
-    /// The `CSeq` number of the b-leg INVITE transaction it answers.
+    /// The `CSeq` number of the responder-facing INVITE transaction it answers.
     pub b_cseq: i64,
-    /// The `RSeq` that b-leg stated.
+    /// The `RSeq` the responder stated.
     pub b_rseq: i64,
+    /// Whether the matching PRACK has been received on the face the number
+    /// was shown (RFC 3262 §3): a `true` entry is off the unacknowledged list
+    /// — its retransmissions there have ceased, so a responder repeat of it
+    /// is absorbed rather than relayed. The entry itself stays for the life of
+    /// the call: it still translates a re-PRACK's `RAck` and anchors the
+    /// ladder.
+    #[serde(default)]
+    pub acknowledged: bool,
+    /// The provisional as it left on the face the number was shown, on the
+    /// RFC 3262 §3 ladder this stack's retransmissions repeat
+    /// ([`RetainedEmission`], paced). `Some` while the ladder is live; `None`
+    /// before the provisional leaves, once the PRACK retires it, and once the
+    /// ladder ceases — retained bytes are never sent again after any of those.
+    #[serde(default)]
+    pub emission: Option<RetainedEmission>,
+    /// The `CSeq` number of the INVITE the provisional answers on the face it
+    /// was shown — the second `RAck` token a PRACK names beside `a_rseq`
+    /// (RFC 3262 §7.2).
+    /// `None` on an entry hydrated from a peer that recorded none: absent
+    /// books disprove no PRACK, so such an entry admits any CSeq token. The
+    /// replication body is positional, so this stays the LAST field and the
+    /// fields before it are never skipped: `#[serde(default)]` hydrates only a
+    /// missing trailing element.
+    #[serde(default)]
+    pub a_cseq: Option<i64>,
+}
+
+/// A reliable provisional this stack acknowledged ITSELF, on the responder's
+/// face: the originator never offered `100rel`, or a masking policy hid the
+/// provisional from it, so the PRACK the responder is owed is this stack's own
+/// and no shown number exists. Keyed the way the responder identifies the
+/// provisional (RFC 3262 §3, §7.1): its leg, its tag on that leg's dialog, the
+/// `CSeq` of the INVITE it answers and the `RSeq` it stated. One entry per
+/// provisional, for the life of the call: a repeat of it is the responder's §3
+/// retransmission — discarded where it arrives (§4), never PRACKed twice.
+/// Replicated with the call, so a takeover node discards the repeat too.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrackedProvisional {
+    /// The responder's leg.
+    pub leg_id: String,
+    /// The responder's own tag on that leg's dialog.
+    pub remote_tag: String,
+    /// The `CSeq` number of the responder-facing INVITE transaction it answers.
+    pub invite_cseq: i64,
+    /// The `RSeq` the responder stated.
+    pub rseq: i64,
 }
 
 /// Active limiter entry on a call.
@@ -235,6 +285,12 @@ pub struct Call {
     /// takeover still translates onto the b-leg number it acknowledges.
     #[serde(default)]
     pub reliable_provisionals: Vec<ReliableProvisional>,
+    /// The reliable provisionals this stack PRACKed on the responder's behalf
+    /// (no shown number, so no `reliable_provisionals` entry), one per
+    /// provisional for the life of the call — the books that make a
+    /// responder's retransmission of one recognisable as such.
+    #[serde(default)]
+    pub pracked_provisionals: Vec<PrackedProvisional>,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate

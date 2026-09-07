@@ -4,7 +4,7 @@
 //! [`ShapeRegistry`] (and, if needed, the per-run [`ScenarioInputs`]) as a
 //! parameter instead of hardcoding [`ShapeRegistry::with_defaults`].
 //!
-//! This is the upstreamneed-032 seam: ADR-0021 (b) made the shape registry OPEN
+//! This is the open-registry seam: ADR-0021 (b) made the shape registry OPEN
 //! (`ShapeRegistry::empty().register(…)` lets a third-party crate add shapes
 //! without patching the workspace), but the shipped bin constructed the
 //! registry inline, so a downstream load bin's only options were forking the

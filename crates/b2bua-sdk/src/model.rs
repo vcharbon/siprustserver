@@ -6,17 +6,20 @@
 use std::collections::BTreeMap;
 
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
+use call::helpers::RAckTokens;
 use call::{
     ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, CdrEventType, Dialog,
-    Direction, ExtMap, Leg, LegDisposition, LegKind, LegState, MachineId, PromotePemState,
-    StateLabel, TagMapping, TimerType, TransferState,
+    Direction, ExtMap, Leg, LegDisposition, LegKind, LegState, MachineId, Obligation,
+    PromotePemState, StateLabel, TagMapping, TimerType, TransferState,
 };
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
 use sip_message::{Method, SipRequest, SipResponse};
+use sip_txn::TimeoutKind;
 
 use crate::config::B2buaConfig;
 use crate::event::CallEvent;
+use crate::relayed_final::RelayedFinal;
 
 pub const CORE_LAYER: u8 = 0;
 #[allow(dead_code)]
@@ -326,7 +329,7 @@ impl RuleDefinition {
 /// whatever refusal it owns (a reject response, a terminated subscription), and
 /// lets the engine log and count the diagnostic — the alternative a rule surface
 /// without this seam is forced into is choosing between silence and acting as if
-/// the input were fine (upstreamneed-055).
+/// the input were fine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleDiagnostic {
     /// The input that did not read (`refer_to`, `destination.port`, …).
@@ -480,6 +483,31 @@ impl Effect {
     }
 }
 
+/// A timer delay, carrying its own unit. Every arming site states the unit it
+/// means ([`TimerDelay::secs`] / [`TimerDelay::millis`]) and the conversion to
+/// the millisecond deadline the engine schedules on happens once, here — a bare
+/// integer can never reach [`RuleAction::ScheduleTimer`] under the wrong scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TimerDelay(i64);
+
+impl TimerDelay {
+    /// A delay in whole seconds.
+    pub const fn secs(secs: i64) -> Self {
+        Self(secs * 1000)
+    }
+
+    /// A delay in milliseconds — the granularity the timer driver actually runs
+    /// at, for a deadline no whole second can express.
+    pub const fn millis(millis: i64) -> Self {
+        Self(millis)
+    }
+
+    /// The delay in milliseconds (the engine's own unit).
+    pub const fn as_millis(self) -> i64 {
+        self.0
+    }
+}
+
 /// The action vocabulary. The basic-B2BUA subset is exercised now; the trailing
 /// cluster (provisional/prack/notify/reinvite/sdp/policy/refer) is defined for
 /// the deferred 18x/transfer service rules and is unused until they land.
@@ -540,9 +568,17 @@ pub enum RuleAction {
     /// the CANCEL from the dialog's cached `pending_invite_txn` handle (same
     /// branch / Route set / wire destination as the re-INVITE) and marks the
     /// matching pending-relay snapshot (`outbound_cseq`) cancelled so the
-    /// peer's eventual final is resolved locally instead of relayed (the
-    /// originator's own re-INVITE was already 487'd by the txn layer).
+    /// peer's eventual final is resolved locally instead of relayed: the
+    /// originator already holds its final — the txn layer's 487 to its own
+    /// CANCEL here, this stack's reject under [`Self::RejectPendingReinvite`].
     CancelPendingReinvite { leg_id: String, outbound_cseq: i64 },
+    /// End a relayed re-INVITE still pending on `leg_id`'s dialog under
+    /// `outbound_cseq` on BOTH faces, transaction-scoped: answer its
+    /// originator with the locally authored `status` final, and CANCEL the
+    /// relayed request toward its target as [`Self::CancelPendingReinvite`]
+    /// does. Neither dialog moves (RFC 3261 §14.1) — RFC 3262 §3's give-up
+    /// "reject the original request with a 5xx" on an in-dialog INVITE.
+    RejectPendingReinvite { leg_id: String, outbound_cseq: i64, status: u16, reason: String },
     /// Resolve a CANCELled relayed re-INVITE's final response locally: drop the
     /// cancelled pending-relay snapshot (`outbound_cseq`) from `leg_id`'s
     /// dialog. Never relayed — the txn layer answered the originator when the
@@ -553,12 +589,12 @@ pub enum RuleAction {
     /// watchdog with a [`TimerType::Service`] `(service_id, key)`.
     ///
     /// A [`TimerType::Keepalive`] is held to one `keepalive_interval_sec`
-    /// (`call::helpers::cap_keepalive_fire_at`): a larger `delay_sec` trips a
-    /// debug assertion and is clamped in release. Every other timer type keeps
-    /// its full `delay_sec`.
+    /// (`call::helpers::cap_keepalive_fire_at`): a larger `delay` trips a debug
+    /// assertion and is clamped in release. Every other timer type keeps its
+    /// full `delay`.
     ScheduleTimer {
         timer_type: TimerType,
-        delay_sec: i64,
+        delay: TimerDelay,
         leg_id: Option<String>,
     },
     /// Disarm a per-call timer by persisted id. Mint the id with
@@ -604,7 +640,7 @@ pub enum RuleAction {
     /// list). This is the seam a service uses to **reconstruct a deferred relay**:
     /// e.g. INFO_UUI RELAY stashes the inbound INFO's `User-To-User` header across
     /// an async `/infouui` decision, then re-emits it toward the peer here with
-    /// `headers: [("User-To-User", value)]` (upstreamneed/021). The B2BUA rebuilds
+    /// `headers: [("User-To-User", value)]`. The B2BUA rebuilds
     /// every dialog/transport header itself (Via/CSeq/From/To/Call-ID/Contact), so
     /// only application headers belong here. `Content-Type`/`Content-Length` are
     /// owned by `body`/`content_type` and are ignored if listed (never duplicated).
@@ -634,7 +670,9 @@ pub enum RuleAction {
     /// Originate a PRACK toward `leg_id`'s early dialog (selected by `b_tag`),
     /// acknowledging the reliable 1xx with RAck `<rseq> <invite_cseq> INVITE`
     /// (RFC 3262 §7.2). The B2BUA PRACKs the b-leg itself because alice never
-    /// saw the reliable provisional (it was downgraded to a bare 180).
+    /// saw the reliable provisional (it was downgraded to a bare 180). Once per
+    /// provisional: a repeat of one already acknowledged is the responder's
+    /// retransmission and sends nothing (§4).
     SendPrackToLeg {
         leg_id: String,
         rseq: i64,
@@ -730,7 +768,7 @@ pub enum RuleAction {
     /// calls `decision.call_failure` then re-enters via a `call-failure-result`
     /// internal event.
     FailureAsyncHttp { request: serde_json::Value },
-    // ── subscribed release events (call_release) — upstreamneed-009 ───────────
+    // ── subscribed release events (call_release) ────────────────────────────
     /// Kick the async `call_release` consult for a **subscribed** internal
     /// release event (max-call-duration first): push a `ReleaseAsyncHttp`
     /// fire-and-forget effect carrying the event-scoped request JSON
@@ -799,7 +837,9 @@ pub enum RuleAction {
     /// dialog / the ADR-0022 unanswered-a-leg funnel own the failure paths).
     /// `content_type` defaults to `application/sdp` when a `body` is present;
     /// `header_updates` follow the non-structural set/remove discipline of
-    /// [`Self::RespondToALeg`].
+    /// [`Self::RespondToALeg`]; `relayed` is the delivered callee final's lines
+    /// that ride onto this answer (RFC 3261 §16.6), exactly as the plain relay
+    /// would carry them.
     ///
     /// Caveat (unchanged in sip-txn): after this 2xx, a late CANCEL's autonomous
     /// 487 still carries the *pinned* early tag A1 — harmless, as it matches the
@@ -813,27 +853,13 @@ pub enum RuleAction {
         /// distinct from any prior early-media tag).
         to_tag: Option<String>,
         /// Non-structural header sets/removes (structural keys are ignored),
-        /// same discipline as [`Self::RespondToALeg`].
+        /// same discipline as [`Self::RespondToALeg`]. An entry naming a header
+        /// owns it over a relayed line of the same name.
         header_updates: Vec<(String, Option<String>)>,
+        /// The callee final this answer delivers, as the lines of it that ride.
+        /// [`RelayedFinal::none`] when the B2BUA answers on its own behalf.
+        relayed: RelayedFinal,
     },
-    /// RFC 3261 §13.3.1.4 — retransmit the a-leg INVITE **2xx** toward the caller
-    /// while its ACK is missing. Sent **raw** (the a-leg INVITE server txn is
-    /// already `Completed` and would DROP a second final via the txn layer), with
-    /// the dialog's confirmed To-tag + the cached answer SDP, so it is a faithful
-    /// copy of the original 200 the caller can ACK. No-op if the a-leg dialog is
-    /// not yet confirmed.
-    RetransmitALeg2xx,
-    /// RFC 3261 §13.3.1.4 (in-dialog) — retransmit the cached a-leg **re-INVITE**
-    /// 2xx toward the originator while its ACK is missing. Re-sends the exact
-    /// bytes stored in the a-leg dialog's `pending_reinvite_2xx` **raw** (the
-    /// a-leg re-INVITE server txn is already `Completed`), so it is byte-faithful
-    /// to the 2xx the originator must ACK. No-op when nothing awaits an ACK. The
-    /// re-INVITE twin of [`Self::RetransmitALeg2xx`].
-    RetransmitALegReinvite2xx,
-    /// Clear the a-leg dialog's `pending_reinvite_2xx` (the re-INVITE
-    /// un-ACKed-2xx obligation is discharged — the matching a-leg ACK arrived).
-    /// Idempotent; a no-op when nothing is pending.
-    ClearPendingReinvite2xx,
 }
 
 impl RuleAction {
@@ -869,14 +895,13 @@ impl RuleAction {
             | RuleAction::DestroyLeg { .. }
             | RuleAction::CancelLeg { .. }
             | RuleAction::CancelPendingReinvite { .. }
+            | RuleAction::RejectPendingReinvite { .. }
             | RuleAction::TerminateLeg { .. }
             | RuleAction::SendRequestToLeg { .. }
             | RuleAction::SendProvisionalToLeg { .. }
             | RuleAction::SendPrackToLeg { .. }
             | RuleAction::SendReinvite { .. }
-            | RuleAction::SendNotify { .. }
-            | RuleAction::RetransmitALeg2xx
-            | RuleAction::RetransmitALegReinvite2xx => EffectKind::LegMessage,
+            | RuleAction::SendNotify { .. } => EffectKind::LegMessage,
             // Call-lifecycle commands — the one service → global hop (X3).
             RuleAction::BeginTermination { .. }
             | RuleAction::TerminateCall
@@ -907,8 +932,7 @@ impl RuleAction {
             | RuleAction::SetFeatures { .. }
             | RuleAction::MergeCallExt { .. }
             | RuleAction::RecordLimiterHolds { .. }
-            | RuleAction::ResolveCancelledReinvite { .. }
-            | RuleAction::ClearPendingReinvite2xx => EffectKind::Bookkeeping,
+            | RuleAction::ResolveCancelledReinvite { .. } => EffectKind::Bookkeeping,
         }
     }
 }
@@ -946,6 +970,46 @@ impl<'a> RuleCall<'a> {
     }
     pub fn state(&self) -> CallModelState {
         self.0.state
+    }
+    /// Whether `leg_id` is a face whose reliable-provisional numbering is this
+    /// stack's own — every leg of the call — and so the UAS that answers a
+    /// PRACK naming nothing locally (RFC 3262 §4).
+    pub fn owns_rseq_numbering(&self, leg_id: &str) -> bool {
+        call::helpers::owns_rseq_numbering(self.0, leg_id)
+    }
+    /// Whether a PRACK arriving on `source_leg_id` naming `rack` in the `a_tag`
+    /// dialog provably acknowledges no reliable provisional this stack showed
+    /// there (RFC 3262 §4, §7.2 — all three `RAck` tokens must name it).
+    pub fn unacknowledgeable_rack(&self, source_leg_id: &str, a_tag: &str, rack: RAckTokens) -> bool {
+        call::helpers::unacknowledgeable_rack(self.0, source_leg_id, a_tag, rack)
+    }
+    /// Whether this stack already PRACKed the responder's `(leg_id, remote_tag,
+    /// invite_cseq, rseq)` reliable provisional itself, so a copy arriving now
+    /// is its retransmission to discard (RFC 3262 §4).
+    pub fn pracked_provisional(&self, leg_id: &str, remote_tag: &str, invite_cseq: i64, rseq: i64) -> bool {
+        call::helpers::pracked_provisional(self.0, leg_id, remote_tag, invite_cseq, rseq)
+    }
+    /// The relayed INVITE still pending toward its target — `(leg_id,
+    /// outbound_cseq)` there — that the provisional shown as `a_rseq` in the
+    /// `a_tag` dialog answers; `None` for the initial INVITE or a transaction
+    /// already resolved.
+    pub fn pending_invite_answered_by(&self, a_tag: &str, a_rseq: i64) -> Option<(String, i64)> {
+        call::helpers::pending_invite_answered_by(self.0, a_tag, a_rseq)
+    }
+    /// The leg whose dialog carries `shown_tag` as this stack's own — the face
+    /// a reliable provisional so tagged was shown on.
+    pub fn leg_shown(&self, shown_tag: &str) -> Option<&'a str> {
+        call::helpers::leg_shown(self.0, shown_tag)
+    }
+    /// Whether `obligation` is the caller's ACK of the a-leg's INITIAL answer
+    /// rather than of a re-INVITE's 2xx — what tells the `RepeatGiveUp` of the
+    /// call's own setup from an in-dialog one (RFC 3261 §13.3.1.4). A rule
+    /// answering either give-up may re-author the teardown — its cause, its
+    /// CDR, the order the legs go — but not decline it: a call left Active
+    /// after an `AckOf2xx` give-up is torn down by the framework with the CORE
+    /// verdict (ADR-0029 X5). A `PrackOf` give-up carries no such floor.
+    pub fn answers_initial_invite(&self, obligation: &Obligation) -> bool {
+        call::helpers::answers_initial_invite(self.0, obligation)
     }
     /// Every machine's current cursor (ADR-0016 X4) — read-only; `SetState` /
     /// `ClearState` are the only writers.
@@ -1001,6 +1065,11 @@ impl<'a> RuleCall<'a> {
     pub fn transfer_active(&self) -> bool {
         call::helpers::transfer_active(self.0)
     }
+    /// The routing decision directed LOCAL REFER processing (`features.refer`)
+    /// — the gate on the transfer seed rules.
+    pub fn refer_processed_locally(&self) -> bool {
+        call::helpers::refer_processed_locally(self.0)
+    }
     pub fn relay_first_18x_strategy(&self) -> Option<RelayFirst18xStrategy> {
         call::helpers::relay_first_18x_strategy(self.0)
     }
@@ -1033,7 +1102,7 @@ impl<'a> RuleCall<'a> {
         call::helpers::cached_sdp_for_leg_dialog(self.0, leg_id, b_tag)
     }
 
-    // ── subscribed release events + established-call reroute (upstreamneed-009) ─
+    // ── subscribed release events + established-call reroute ──────────────────
     /// The release events the decision backend subscribed to on the last
     /// applied `Route` (written via `SetSubscriptions` / `apply_route`).
     pub fn subscriptions(&self) -> &'a [call::ReleaseEventKind] {
@@ -1072,6 +1141,12 @@ pub struct RuleContext<'a> {
     pub direction: Direction,
     pub now_ms: i64,
     pub config: &'a B2buaConfig,
+    /// The dialog-level ladder this event's ACK or PRACK discharged before the
+    /// rules ran (ADR-0029 X4) — the engine already retired its timers and
+    /// retained emission; a rule reads the fact and owns none of the plumbing.
+    /// `None` for every other event, and for an ACK or PRACK that named no
+    /// live ladder (a retransmitted ACK, a repeat PRACK).
+    pub discharged: Option<&'a Obligation>,
 }
 
 impl<'a> RuleContext<'a> {
@@ -1114,6 +1189,16 @@ impl<'a> RuleContext<'a> {
     pub fn timeout_method(&self) -> Option<&str> {
         match self.event {
             CallEvent::Timeout { method, .. } => method.as_deref(),
+            _ => None,
+        }
+    }
+    /// For a `Timeout` event: which client-transaction timeout fired —
+    /// `Response` (nothing at all answered: the hop is dead) or `Transaction`
+    /// (it answered a provisional, then went silent past the INVITE bound).
+    /// `None` for every other event kind.
+    pub fn timeout_kind(&self) -> Option<TimeoutKind> {
+        match self.event {
+            CallEvent::Timeout { timeout_kind, .. } => Some(*timeout_kind),
             _ => None,
         }
     }
@@ -1160,6 +1245,26 @@ impl<'a> RuleContext<'a> {
         call::helpers::relay_peer_dialog_ready(self.call.0, self.source_leg_id, to_tag)
     }
 
+    /// Does the current response answer a request THIS STACK RELAYED — i.e.
+    /// does the responder's dialog hold a pending-relay snapshot for the
+    /// response CSeq? The dialog is picked fork-correctly (the responder's
+    /// To-tag, else the source dialog), mirroring the relay executor. `false`
+    /// for a request the B2BUA originated itself (keepalive OPTIONS, its own
+    /// PRACK, a REFER-progress NOTIFY), which leaves no snapshot, and for any
+    /// non-response event.
+    pub fn answers_relayed_request(&self) -> bool {
+        let Some(resp) = self.response() else {
+            return false;
+        };
+        let cseq = resp.cseq().seq() as i64;
+        let to_tag = resp.to().tag().unwrap_or_default();
+        self.source_leg()
+            .and_then(|leg| call::helpers::find_dialog_by_to_tag(leg, to_tag))
+            .or_else(|| self.source_dialog())
+            .and_then(|d| call::helpers::find_pending_request(d, cseq))
+            .is_some()
+    }
+
     /// The leg the event arrived on.
     pub fn source_leg(&self) -> Option<&'a Leg> {
         if self.source_leg_id == self.call.a_leg().leg_id {
@@ -1172,5 +1277,13 @@ impl<'a> RuleContext<'a> {
     pub fn source_dialog(&self) -> Option<&Dialog> {
         let leg = self.source_leg()?;
         call::helpers::confirmed_dialog(leg).or_else(|| leg.dialogs.first())
+    }
+    /// The dialog a [`RuleAction::RelayToPeer`] of the current request would be
+    /// regenerated on, resolved with the SAME resolver as the relay executor
+    /// ([`call::helpers::relay_peer_dialog`]) so match and action never
+    /// disagree. `None` when no peer leg or dialog resolves.
+    pub fn peer_dialog(&self) -> Option<&Dialog> {
+        let to_tag = self.request().and_then(|r| r.to().tag());
+        call::helpers::relay_peer_dialog(self.call.0, self.source_leg_id, to_tag).map(|(_, d)| d)
     }
 }

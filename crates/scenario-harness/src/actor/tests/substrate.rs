@@ -36,7 +36,7 @@ async fn two_actor_toy_call_reaches_torn_down() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -52,7 +52,7 @@ async fn two_actor_toy_call_reaches_torn_down() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -107,7 +107,7 @@ async fn two_actor_crossing_bye_both_terminate() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -122,7 +122,7 @@ async fn two_actor_crossing_bye_both_terminate() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],

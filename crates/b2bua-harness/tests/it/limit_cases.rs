@@ -28,7 +28,9 @@ use std::time::Duration;
 use b2bua::cdr::CdrRecord;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
-    CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
+    CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
+    CallLimiterEntry, CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse,
+    ScriptedDecisionEngine,
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
@@ -198,27 +200,25 @@ async fn max_duration_fires_mid_reinvite_and_releases_the_limiter() {
     assert_eq!(store.stats().current_total, 1, "established call holds one limiter slot");
 
     // ── alice re-INVITEs; bob leaves it pending across the cap ───────────────
-    let _reinv = dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut reinv = dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
     let mut bob_reinv = bob.receive("INVITE").await;
 
     // ── the 10 s cap trips while the re-INVITE is pending ────────────────────
     h.advance(Duration::from_secs(11)).await;
 
-    // The max-duration teardown BYEs both legs. The b-leg re-INVITE is abandoned
-    // by the SUT (UAC); that client transaction still blocks call removal — and
-    // hence the limiter release — until it completes. Resolve bob's open re-INVITE
-    // server transaction with a 200 + SDP answer (RFC 3264 §5) so the client
-    // transaction terminates. (Pre-upstreamneed-034 this happened IMPLICITLY: the
-    // Timer-A re-INVITE retransmit was 200-OK'd by `receive_tolerating("BYE",
-    // &["INVITE"])`; now the §17.2 receive view absorbs the retransmit, so the
-    // real answer must be sent explicitly — and a bodyless tolerated-200 to an
-    // offer-carrying re-INVITE was an RFC 3264 §5 violation anyway.)
-    bob_reinv.respond(200, "OK").with_sdp(ANSWER).await;
+    // The max-duration teardown answers the pending round before the BYEs
+    // (RFC 3261 §15.1.2): alice's re-INVITE draws its 487 (hop-ACKed by
+    // `expect`). Bob, whose re-INVITE is still pending when the BYE reaches him,
+    // answers the BYE and ends that INVITE 487 himself (§15.1.2 on his side);
+    // the SUT hop-ACKs it and drops the CANCEL it held for bob's first
+    // provisional (§9.1), so no client transaction blocks call removal or the
+    // limiter release.
+    reinv.expect(487).await;
     let mut b_bye = bob.receive("BYE").await;
     b_bye.respond(200, "OK").await;
-    // alice's queue holds the B2BUA's 100 Trying for her abandoned re-INVITE and
-    // the a-leg BYE; drain it — her a-leg BYE then force-resolves at the 32 s
-    // TerminatingTimeout backstop.
+    bob_reinv.respond(487, "Request Terminated").await;
+    // alice's queue holds the a-leg BYE; drain it — her a-leg BYE then
+    // force-resolves at the 32 s TerminatingTimeout backstop.
     alice.drain().await;
     h.advance(Duration::from_secs(33)).await;
 
@@ -450,6 +450,109 @@ async fn in_dialog_message_storm_trips_the_cap_and_releases_the_limiter() {
     settle_until(|| store.stats().current_total == 0).await;
     assert_eq!(store.stats().current_total, 0, "limiter hold released at the cap teardown");
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+
+    let _report = h.finish().await;
+}
+
+/// **The cap trips on the turn that resolves the last leg → same-turn
+/// discharge.** A failover-capable call (`callback_context` set) whose callee
+/// storms provisionals and then rejects: the `b-leg-failure` rule resolves the
+/// b-leg (`Rejected`) and parks the caller on the `/call/failure` consult, and
+/// the SAME turn crosses the message cap. The router's cap teardown answers the
+/// caller 503 and enters termination with every leg already resolved, so the
+/// terminal invariants must promote the call to `Terminated` in that turn: CDR
+/// written, limiter released, call reaped — with no later wake-up (the consult
+/// here never answers, and no 32 s `TerminatingTimeout` is advanced to).
+#[tokio::test(start_paused = true)]
+async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
+    /// Low cap so the storm is short: the initial INVITE counts one, each
+    /// relayed 180 one more, and the 486 is the event that crosses it.
+    const CAP: u64 = 4;
+    const RINGS: usize = 3;
+
+    /// Failover-capable route + limiter hold, whose failure consult never
+    /// answers — the call must not depend on it to discharge.
+    struct SilentFailoverEngine;
+
+    #[async_trait::async_trait]
+    impl CallDecisionEngine for SilentFailoverEngine {
+        async fn new_call(&self, _req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
+            let mut r = route_to("127.0.0.1", 5073);
+            r.callback_context = Some("cap-failover".into());
+            r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 1 }];
+            r.features.platform.max_duration_sec = 3_600;
+            Ok(NewCallResponse::Route(r))
+        }
+        async fn call_failure(
+            &self,
+            _req: CallFailureRequest,
+        ) -> Result<CallFailureResponse, CallDecisionError> {
+            std::future::pending().await
+        }
+        async fn call_refer(
+            &self,
+            _req: CallReferRequest,
+        ) -> Result<CallReferResponse, CallDecisionError> {
+            std::future::pending().await
+        }
+    }
+
+    let h = Harness::new("b2bua-limit-cap-same-turn");
+    let alice = h.agent("alice", "127.0.0.1:5063").await;
+    let bob = h.agent("bob", "127.0.0.1:5073").await;
+
+    let http = SimulatedHttpNetwork::new();
+    let (store, _limiter_srv) = serve_limiter(&http).await;
+    let b2bua = B2buaSut::builder(Arc::new(SilentFailoverEngine))
+        .limiter(limiter_client(&http))
+        .tune(|c| {
+            c.max_messages_per_call = CAP;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5083")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    assert_eq!(store.stats().current_total, 1, "in-setup call holds one limiter slot");
+
+    // The storm stops one event short of the cap; the reject crosses it.
+    for _ in 0..RINGS {
+        uas.respond(180, "Ringing").await;
+        call.expect(180).await;
+    }
+    assert_eq!(b2bua.metrics().message_cap_terminated_total(), 0, "the cap trips on the 486, not a 180");
+    uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await; // the b2bua completes bob's reject txn (§17.1.1.3)
+    let final_resp = call.expect(503).await;
+    assert_eq!(final_resp.status(), 503, "a-leg INVITE resolves with the 503 cap cause");
+    assert_eq!(b2bua.metrics().message_cap_terminated_total(), 1);
+
+    // Same-turn discharge: no clock advance — `settle_until` only drains the
+    // already-due teardown tasks (≤ 1 s of virtual time, far from the 32 s
+    // safety timer), and the failure consult never answers.
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    let cdrs = b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "the CDR is written on the cap turn itself");
+    assert_eq!(cdrs[0].b_legs.len(), 1, "the CDR records the rejected b-leg");
+    // `enforce` runs on the pre-executor snapshot (a-leg still Early) and must
+    // read the cap's own 503 among the turn's effects: one final, no ADR-0022
+    // synthesis on top (the a-leg server txn drops a second final on the
+    // wire, so only the CDR can show one).
+    assert!(
+        !reasons_of(&cdrs[0]).iter().any(|r| r == "unanswered_at_termination"),
+        "the cap's 503 is the a-leg's final; no second 503 synthesized: {:?}",
+        reasons_of(&cdrs[0]),
+    );
+    settle_until(|| store.stats().current_total == 0).await;
+    assert_eq!(store.stats().current_total, 0, "limiter hold released on the cap turn itself");
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+
+    // The parked consult's deadline fold lands on a call that no longer exists
+    // and resurrects nothing.
+    h.advance(Duration::from_secs(6)).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

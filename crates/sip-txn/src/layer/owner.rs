@@ -19,7 +19,7 @@ use crate::rng::IdGen;
 use crate::timers::{ms, TXN_SWEEP_INTERVAL};
 
 use super::handle::Command;
-use super::txn::{sweep_max_age, Timer, Transaction};
+use super::txn::{sweep_max_age, CancelWire, Timer, Transaction};
 
 pub(super) struct Owner {
     pub(super) txns: HashMap<String, Transaction>,
@@ -61,11 +61,15 @@ pub(super) struct Owner {
     /// event it was about, orphaning it. Drained by `flush_pending_quiesce` at the
     /// end of every owner turn.
     pub(super) pending_quiesce: Vec<String>,
-    /// The configured out-of-dialog INVITE bound
+    /// The configured INVITE bound
     /// ([`TransactionConfig::invite_initial_timeout_ms`](crate::TransactionConfig)):
-    /// the initial-INVITE client timeout and the pre-final INVITE sweep age both
-    /// derive from it.
+    /// the client timeout of an INVITE that has drawn a provisional and the
+    /// pre-final INVITE sweep age both derive from it.
     pub(super) invite_initial_timeout_ms: u64,
+    /// The initial INVITE's first-response bound
+    /// ([`TransactionConfig::invite_first_response_timeout_ms`](crate::TransactionConfig)):
+    /// the client timeout of an out-of-dialog INVITE that has drawn nothing.
+    pub(super) invite_first_response_timeout_ms: u64,
     /// The held-CANCEL policy
     /// ([`TransactionConfig::cancel_hold_grace_ms`](crate::TransactionConfig)):
     /// `Some(ms)` bounds the wait for the branch's first provisional — then
@@ -144,6 +148,7 @@ impl Owner {
         metrics: Arc<MetricsInner>,
         id_gen: Arc<IdGen>,
         invite_initial_timeout_ms: u64,
+        invite_first_response_timeout_ms: u64,
         cancel_hold_grace_ms: Option<u64>,
     ) -> Self {
         Self {
@@ -159,6 +164,7 @@ impl Owner {
             event_retry_armed: false,
             pending_quiesce: Vec::new(),
             invite_initial_timeout_ms,
+            invite_first_response_timeout_ms,
             cancel_hold_grace_ms,
         }
     }
@@ -181,11 +187,12 @@ impl Owner {
             self.cancel_timer(old.timeout_key);
             self.cancel_timer(old.cleanup_key);
             self.cancel_timer(old.cancel_grace_key);
+            self.cancel_timer(old.cancel_retransmit_key);
             self.untrack_call_ref(&old.call_ref, &branch);
             // The displaced txn's held CANCEL dies with it — a never-sent one
             // is counted dropped so the held counters reconcile
             // (held == flushed + flushed_pre1xx + dropped).
-            if old.held_cancel.is_some_and(|h| !h.sent_pre1xx) {
+            if old.held_cancel.is_some_and(|h| h.wire == CancelWire::Held) {
                 self.metrics
                     .held_cancels_dropped
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -228,6 +235,7 @@ impl Owner {
                 self.cancel_timer(t.timeout_key);
                 self.cancel_timer(t.cleanup_key);
                 self.cancel_timer(t.cancel_grace_key);
+                self.cancel_timer(t.cancel_retransmit_key);
                 self.untrack_call_ref(&t.call_ref, branch);
                 self.sync_active();
                 // A txn dying holding a never-sent CANCEL: under the bounded
@@ -236,7 +244,10 @@ impl Owner {
                 // here un-flushed — grace expiry, evict, and timeout all send
                 // it first. Counted dropped only then; a grace-sent copy is
                 // already accounted.
-                if t.held_cancel.as_ref().is_some_and(|h| !h.sent_pre1xx) {
+                if t.held_cancel
+                    .as_ref()
+                    .is_some_and(|h| h.wire == CancelWire::Held)
+                {
                     self.metrics
                         .held_cancels_dropped
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -334,6 +345,12 @@ impl Owner {
                 }
                 self.fire_cancel_grace(endpoint, &branch).await;
             }
+            Timer::CancelRetransmit(branch) => {
+                if let Some(t) = self.txns.get_mut(&branch) {
+                    t.cancel_retransmit_key = None;
+                }
+                self.fire_cancel_retransmit(endpoint, &branch).await;
+            }
             Timer::EventRetry => {
                 self.event_retry_armed = false;
                 self.flush_deferred();
@@ -391,6 +408,14 @@ impl Owner {
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 let _ = reply.send(());
+            }
+            Command::Seed { call_ref, seeds, reply } => {
+                let seeded = self.do_seed(&call_ref, seeds);
+                let _ = reply.send(seeded);
+            }
+            Command::Reoffer { message, src, reply } => {
+                let disposition = self.do_reoffer(endpoint, *message, src).await;
+                let _ = reply.send(disposition);
             }
             Command::CancelTxnsForCall { call_ref, reply } => {
                 self.do_cancel_txns_for_call(endpoint, &call_ref).await;

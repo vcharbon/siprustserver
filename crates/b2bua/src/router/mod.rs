@@ -6,7 +6,9 @@
 //! One concern per submodule: [`resolve`] keys events to calls, [`ingress`] is
 //! the pre-dispatch pipeline, [`process`] the per-call handler body,
 //! [`interpret`] the effect interpreter, [`callouts`] the fire-and-forget
-//! async-HTTP folds, [`reclaim`] the replication reclaim/discharge funnels,
+//! async-HTTP folds, [`materialise`] the one path a stored replica takes to
+//! become the live copy this node serves (takeover or reclaim), [`reclaim`]
+//! the replication reclaim/discharge funnels,
 //! [`restore_hygiene`] the replicated-timer restore seam, [`release`] the one
 //! per-call teardown executor, [`responses`] the locally-authored response
 //! builders, and [`peer_metrics`] per-peer failure attribution.
@@ -14,6 +16,7 @@
 mod callouts;
 mod ingress;
 mod interpret;
+mod materialise;
 mod peer_metrics;
 mod process;
 mod reclaim;
@@ -77,6 +80,9 @@ pub struct RouterCtx {
     /// faults (a no-op atomic read). See `store::faults` for the defined
     /// degraded-mode semantics.
     pub store_faults: StoreFaults,
+    /// Wire-fault seam (`wire_faults`): read by the action executor at the one
+    /// emission site it guards; default = never armed.
+    pub wire_faults: crate::wire_faults::WireFaults,
     pub txn: TransactionLayer,
     pub timers: TimerService,
     pub dispatcher: PerCallDispatcher,
@@ -136,6 +142,11 @@ pub enum ReplCommand {
     /// **Reactive reclaim** of one call a backup just reverse-flushed to us — the
     /// flip-race straggler an acting-backup took over *after* the bulk sweep.
     ReclaimCall(String),
+    /// A backup's reverse flush the store's `(p,b)` gate refused: the body is
+    /// handed up so the call model can fold lifecycle progress the vector
+    /// cannot see (`reclaim::fold_refused_reverse_flush`). `origin_now_ms` is
+    /// the flushing node's wall clock, for timer re-anchoring.
+    ReverseFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
 }
 
 /// Run the router loop over the txn-event + timer-fire channels until both close.
@@ -176,5 +187,8 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
     match cmd {
         ReplCommand::ReclaimAll => reclaim::reclaim_all(ctx).await,
         ReplCommand::ReclaimCall(call_ref) => reclaim::reconcile_reverse_flush(ctx, &call_ref).await,
+        ReplCommand::ReverseFlushRefused { call_ref, body, origin_now_ms } => {
+            reclaim::fold_refused_reverse_flush(ctx, &call_ref, &body, origin_now_ms).await
+        }
     }
 }

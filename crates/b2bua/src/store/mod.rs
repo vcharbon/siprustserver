@@ -30,6 +30,31 @@ use crate::repl::{ReplicatingCallStore, ReplicationPlan};
 /// Stored-call TTL handed to the (HA) store; ignored by the in-memory impl.
 const CALL_TTL_MS: i64 = 3_600_000;
 
+/// Why a narrow partition read ([`CallState::peek_replica`] /
+/// [`CallState::peek_reclaimable`]) returned no call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaMiss {
+    /// This node plays the other role for the ref: a takeover read of a
+    /// primary-role ref, or a reclaim read of a backup-role ref.
+    WrongRole,
+    /// No body in the partition (never replicated, expired, or no replicating
+    /// store wired).
+    Absent,
+    /// A body is present but does not decode as a `Call`.
+    Undecodable,
+}
+
+/// Which entry path is inserting a materialised call
+/// ([`CallState::materialize_if_absent`]): only a reclaim re-establishes the
+/// replica's denormalised backup, since a takeover copy is the backup itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterialiseOrigin {
+    /// An acting-backup takeover copy of a peer's call (`bak:{primary}`).
+    Takeover,
+    /// This node's own call re-served from `pri:{self}`.
+    Reclaim,
+}
+
 #[derive(Default)]
 struct Inner {
     calls: HashMap<String, Call>,
@@ -51,8 +76,8 @@ struct Inner {
     takeover: HashSet<String>,
     /// **Last-touched stamps** (ADR-0020 X4) — the call reaper's only liveness
     /// input: epoch-ms of the last dispatched event that reached the handler
-    /// (`router::process` touches), refreshed at every materialisation
-    /// (create / fresh hydrate / reclaim). Node-local, NEVER a `Call` field
+    /// (`router::process` touches), stamped at every entry
+    /// (create / materialise). Node-local, NEVER a `Call` field
     /// (touching must not dirty the call or trigger a replication flush).
     /// Membership mirrors `calls` exactly: stamped at insertion, cleared in
     /// `remove`/`drop_local`; an orphan never enters either.
@@ -93,15 +118,16 @@ pub struct CallState {
     /// bound, not `max_duration`). A healthy call is re-flushed every keepalive,
     /// well inside the window.
     replicated_ttl_ms: i64,
-    /// Time source for the last-touched stamps written at the materialisation
-    /// sites (create / fresh hydrate / reclaim) — internal so no entry path can
-    /// forget to stamp (ADR-0020 X4). `b2bua_core` wires the runtime clock;
+    /// Time source for the last-touched stamps written at the two entry sites
+    /// (create / materialise) — internal so no entry path can forget to stamp
+    /// (ADR-0020 X4). `b2bua_core` wires the runtime clock;
     /// the default reads the same paused/tokio time the tests advance.
     clock: sip_clock::Clock,
     /// Acting-backup takeover burst aggregation, keyed by the dead peer
     /// (ADR-0026): a 5000-call failover owes ~3 log lines per peer, never one
-    /// per hydrated call. Shared with the router's self-release path so a
-    /// takeover and the shedding that ends it read as ONE episode.
+    /// per hydrated call. The router's `materialise` and self-release paths
+    /// fold into it so a takeover and the shedding that ends it read as ONE
+    /// episode.
     takeover_log: Arc<observe::WaveSet>,
 }
 
@@ -230,68 +256,17 @@ impl CallState {
         self.inner.lock().unwrap().calls.get(call_ref).cloned()
     }
 
-    /// **Acting-backup takeover read-path (S10b).** When an in-dialog request for
-    /// `call_ref` misses the in-memory map (this node never primary-served it),
-    /// try to hydrate it from the replicating store's backup partition: the
-    /// `call_ref` encodes its original primary, so `partition_of` resolves the
-    /// `(Backup, primary)` slot the S5/S6 puller imported the replica into. On a
-    /// hit the decoded call is inserted into the in-memory map + re-indexed, so
-    /// the router proceeds exactly as if it had primary-served the call — the
-    /// failover takeover. Returns the hydrated call (or `None` if no replica /
-    /// no replicating store / decode failure). Idempotent: a present call is
-    /// returned as-is without a store read.
-    ///
-    /// Returns `(call, fresh)` where `fresh == true` iff the call was just
-    /// materialized from the backup partition on THIS call (it was not already
-    /// resident in the in-memory map). The router uses `fresh` to decide whether
-    /// to re-arm the call's per-call timers (keepalive / global-duration) into
-    /// this node's in-memory `TimerService` — those timers are runtime fibers,
-    /// not replicated state, so a freshly-hydrated call arrives with no live
-    /// timers and would otherwise never be probed or reaped (the failover leak).
-    /// The third tuple element is the call's persisted receive-time clock-skew
-    /// offset (`0` when already-resident / none): the reactive-takeover path
-    /// re-anchors the fresh call's absolute timer deadlines by it before re-arming
-    /// (clock-skew hardening). An already-resident call returns `0` — its timers
-    /// are already live on this node's clock and are not re-armed.
-    pub async fn hydrate_from_replica(&self, call_ref: &str) -> Option<(Call, bool, i64)> {
-        if let Some(c) = self.peek(call_ref) {
-            return Some((c, false, 0));
-        }
-        let repl = self.repl_store.as_ref()?;
-        // The call's natural primary (from the encoded ref); on the acting-backup
-        // path this names the crashed peer, and the body lives in `bak:{primary}`.
-        let (role, primary) = partition_of(&self.self_ordinal, call_ref);
-        // Only the backup partition is a takeover source; a primary-role miss is a
-        // genuine orphan (the call is simply gone), not a failover.
-        if role != PartitionRole::Backup {
-            return None;
-        }
-        let body = repl.get_call(role, &primary, call_ref).await.ok().flatten()?;
-        let mut call = self.codec.decode(&body).ok()?;
-        let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
-        let now_ms = self.clock.now_ms();
-        let mut inner = self.inner.lock().unwrap();
-        // Re-check under the lock (a concurrent hydrate may have won the race).
-        if let Some(c) = inner.calls.get(call_ref) {
-            return Some((c.clone(), false, 0));
-        }
-        // A traced call taken over from a crashed primary gets THIS node's own
-        // root span, linked to the nominal's (ADR-0026 §5) — never parented to
-        // it: that span is closed or lost by definition. Under the residency
-        // lock, on the copy that lands: a span is opened only for the call this
-        // node goes on to serve, and its ids never diverge from the stored call.
-        crate::trace::adopt_replicated(&mut call, now_ms);
-        Self::reindex(&mut inner, &call);
-        inner.calls.insert(call_ref.to_string(), call.clone());
-        // The idle clock starts at hydration, never at `created_at` — a freshly
-        // failed-over hours-old call must not look reap-stale (ADR-0020 X4).
-        inner.touched.insert(call_ref.to_string(), now_ms);
-        drop(inner);
-        // A failed-over in-dialog request just loaded its dialog from a backup
-        // replica — the acting-backup takeover actually fired.
-        self.metrics.bump_repl_takeover_hydrated();
-        self.takeover_log.record(&primary, "hydrated", 1);
-        Some((call, true, skew))
+    /// The `bak:{primary}` body of `call_ref` — the acting-backup takeover
+    /// source, read without inserting (the router's `materialise` module owns
+    /// the decision and the insert). The `call_ref` encodes its original
+    /// primary, so `partition_of` resolves the `(Backup, primary)` slot the
+    /// puller imported the replica into; a primary-role ref is a
+    /// [`ReplicaMiss::WrongRole`] (the backup partition is the only takeover
+    /// source). Returns the decoded call with its persisted receive-time
+    /// clock-skew offset (`0` when none). No state check: a `Terminated` body
+    /// is returned as-is for the caller to refuse.
+    pub async fn peek_replica(&self, call_ref: &str) -> Result<(Call, i64), ReplicaMiss> {
+        self.read_partition(PartitionRole::Backup, call_ref).await
     }
 
     /// Replace the in-memory call and refresh its routing index.
@@ -314,9 +289,8 @@ impl CallState {
     /// a no-op for non-proxied calls that carry no `topology`.
     ///
     /// **Replace-only.** `update` never *inserts*: every live call enters the map
-    /// through [`create`](Self::create) / [`hydrate_from_replica`](Self::hydrate_from_replica)
-    /// / [`materialize_if_absent`](Self::materialize_if_absent), all of which
-    /// mark/index/arm as the entry path requires. An update racing a release
+    /// through [`create`](Self::create) / [`materialize_if_absent`](Self::materialize_if_absent),
+    /// both of which mark/index/arm as the entry path requires. An update racing a release
     /// (`remove`/`drop_local` evicted the call after this handler checked it out)
     /// must NOT resurrect an unmarked, unwatched, timer-less zombie copy — the
     /// X11 double-serve class. The dropped mutation is safe: the call is gone on
@@ -456,7 +430,7 @@ impl CallState {
     }
 
     /// Mark `call_ref` as a live acting-backup **takeover copy** (ADR-0011 X11 /
-    /// ADR-0014). Called by the router on a fresh failover hydrate. The router
+    /// ADR-0014). Called by the router's `materialise` on a fresh takeover. The router
     /// later reads it via [`is_takeover`](Self::is_takeover) to drive self-release
     /// once the served transaction(s) finish. Idempotent per call_ref.
     pub fn mark_takeover(&self, call_ref: &str) {
@@ -519,54 +493,72 @@ impl CallState {
 
     /// **Active-reclaim reactive read-path** (ADR-0011 X11): decode a single
     /// reclaimable call from this node's `pri:{self}` partition — the flip-race
-    /// straggler an acting-backup reverse-flushed *after* the bulk sweep. `None`
-    /// if absent, not primary-role for `self`, or no replicating store.
+    /// straggler an acting-backup reverse-flushed *after* the bulk sweep, or the
+    /// call an in-dialog request reaches before the sweep does. A backup-role
+    /// ref is a [`ReplicaMiss::WrongRole`].
     ///
     /// **Evicting** read: an expired body here is a genuinely-dead own call (its
     /// active-replica TTL = `reboot_budget` elapsed without a refresh), so it must
     /// NOT be re-served — let `get_call`'s lazy eviction reap it. The reverse-flush
     /// reconcile path wants the opposite (see [`peek_reclaimable_raw`]).
     /// Returns the decoded call plus its persisted receive-time clock-skew offset
-    /// (`0` when none) so the on-demand reclaim path re-anchors its timers before
-    /// re-arming them (clock-skew hardening).
-    pub async fn peek_reclaimable(&self, call_ref: &str) -> Option<(Call, i64)> {
-        self.peek_reclaimable_inner(call_ref, true).await
+    /// (`0` when none) so the reclaim re-anchors its timers before re-arming them
+    /// (clock-skew hardening).
+    ///
+    /// [`peek_reclaimable_raw`]: Self::peek_reclaimable_raw
+    pub async fn peek_reclaimable(&self, call_ref: &str) -> Result<(Call, i64), ReplicaMiss> {
+        self.read_partition(PartitionRole::Primary, call_ref).await
     }
 
-    /// The persisted receive-time clock-skew offset for a callRef (`0` when the
-    /// ref is absent, has no replicating store, or was written locally). The
-    /// reverse-flush reconcile straggler path reads this to re-anchor a call whose
-    /// body it fetched through the non-offset `peek_reclaimable_raw` read.
-    pub fn skew_offset_ms(&self, call_ref: &str) -> i64 {
-        self.repl_store
-            .as_ref()
-            .and_then(|r| r.skew_offset_ms(call_ref))
-            .unwrap_or(0)
+    /// Decode a replica body this node did not store (a reverse flush the
+    /// `(p,b)` gate refused), so the router can read the call it carries.
+    pub fn decode_body(&self, body: &[u8]) -> Option<Call> {
+        self.codec.decode(body).ok()
     }
 
     /// Like [`peek_reclaimable`](Self::peek_reclaimable) but a **non-evicting**
     /// read (`peek_body_raw`): a reverse-flushed *terminal* the live primary is about
     /// to fold must NOT be destroyed on read — the evicting `get_call` would
     /// physically delete it, stranding the CDR the reconcile is about to write. Used
-    /// by the reverse-flush reconcile.
-    pub async fn peek_reclaimable_raw(&self, call_ref: &str) -> Option<Call> {
-        self.peek_reclaimable_inner(call_ref, false).await.map(|(c, _)| c)
-    }
-
-    async fn peek_reclaimable_inner(&self, call_ref: &str, evict: bool) -> Option<(Call, i64)> {
+    /// by the reverse-flush reconcile to classify the body; a non-terminal one is
+    /// then materialised through the evicting read. Returns the decoded call plus
+    /// its persisted receive-time clock-skew offset (`0` when none).
+    pub async fn peek_reclaimable_raw(&self, call_ref: &str) -> Option<(Call, i64)> {
         let repl = self.repl_store.as_ref()?;
         let (role, primary) = partition_of(&self.self_ordinal, call_ref);
         if role != PartitionRole::Primary {
             return None;
         }
-        let body = if evict {
-            repl.get_call(role, &primary, call_ref).await.ok().flatten()?
-        } else {
-            repl.peek_body_raw(role, &primary, call_ref).await?
-        };
+        let body = repl.peek_body_raw(role, &primary, call_ref).await?;
         let call = self.codec.decode(&body).ok()?;
         let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
         Some((call, skew))
+    }
+
+    /// The one narrow partition read behind [`peek_replica`](Self::peek_replica)
+    /// and [`peek_reclaimable`](Self::peek_reclaimable): the evicting `get_call`
+    /// of `call_ref` in the partition this node holds for it, which must be
+    /// `required`. Every miss is typed so the router can tell a ref this node
+    /// plays the other role for from a body that is gone or unreadable.
+    async fn read_partition(
+        &self,
+        required: PartitionRole,
+        call_ref: &str,
+    ) -> Result<(Call, i64), ReplicaMiss> {
+        let repl = self.repl_store.as_ref().ok_or(ReplicaMiss::Absent)?;
+        let (role, primary) = partition_of(&self.self_ordinal, call_ref);
+        if role != required {
+            return Err(ReplicaMiss::WrongRole);
+        }
+        let body = repl
+            .get_call(role, &primary, call_ref)
+            .await
+            .ok()
+            .flatten()
+            .ok_or(ReplicaMiss::Absent)?;
+        let call = self.codec.decode(&body).map_err(|_| ReplicaMiss::Undecodable)?;
+        let skew = repl.skew_offset_ms(call_ref).unwrap_or(0);
+        Ok((call, skew))
     }
 
     /// **Model-Y orphaned-deferred-terminal read-path.** Decode every **expired**
@@ -613,18 +605,24 @@ impl CallState {
         }
     }
 
-    /// Materialise a reclaimed call into the live map + routing index iff it is
-    /// not already resident (ADR-0011 X11). Returns `true` when just inserted —
-    /// the router then re-arms its timers exactly once. Idempotent: a call
-    /// already live (re-served, or never lost) is left untouched.
+    /// The one residency insert: put a materialised call into the live map +
+    /// routing index iff it is not already resident. Returns `true` when just
+    /// inserted — the router then re-arms its timers exactly once. Idempotent: a
+    /// call already live (re-served, or never lost) is left untouched.
     ///
-    /// On insert it also re-establishes the replica's denormalised backup from the
-    /// call's authoritative `topology.bak` (ADR-0014 #4): the reboot-reclaim
-    /// hydration imports the body via the peerless `PutOpts::default()`, leaving
-    /// `CallMeta.backup == None` and the call invisible to its backup's bootstrap
-    /// scan until the next keepalive re-flush — re-establishing it here closes that
-    /// un-backed-up window the instant the call is re-served.
-    pub fn materialize_if_absent(&self, mut call: Call) -> bool {
+    /// A traced call opens this node's own root span here, after the residency
+    /// check, so a span is opened only for a call this node goes on to serve
+    /// (ADR-0026 §5). The idle clock starts at the insert, never at `created_at`
+    /// (ADR-0020 X4): a hours-old failed-over or reclaimed long-hold call is
+    /// fresh here, not reap-stale.
+    ///
+    /// On a [`MaterialiseOrigin::Reclaim`] insert it also re-establishes the
+    /// replica's denormalised backup from the call's authoritative
+    /// `topology.bak` (ADR-0014 #4): the reboot-reclaim hydration imports the
+    /// body peerless, leaving `CallMeta.backup == None` and the call invisible to
+    /// its backup's bootstrap scan until the next keepalive re-flush. A takeover
+    /// copy holds the `bak:` element itself and re-establishes nothing.
+    pub fn materialize_if_absent(&self, mut call: Call, origin: MaterialiseOrigin) -> bool {
         let backup = call
             .topology
             .as_ref()
@@ -637,19 +635,15 @@ impl CallState {
             if inner.calls.contains_key(&call.call_ref) {
                 return false;
             }
-            // Reclaim is a hydration site too: a traced call re-served here opens
-            // this node's own root span, linked to the one that served it before
-            // (ADR-0026 §5). After the residency check, so the node never opens a
-            // span for a call it does not go on to serve.
             crate::trace::adopt_replicated(&mut call, now_ms);
             Self::reindex(&mut inner, &call);
-            // Reclaim restarts the idle clock (ADR-0020 X4): a 2 h-old reclaimed
-            // long-hold call is fresh here, not reap-stale.
             inner.touched.insert(call.call_ref.clone(), now_ms);
             inner.calls.insert(call.call_ref.clone(), call);
         }
-        if let (Some(repl), Some(backup)) = (self.repl_store.as_ref(), backup) {
-            repl.reestablish_backup(&call_ref, &backup);
+        if origin == MaterialiseOrigin::Reclaim {
+            if let (Some(repl), Some(backup)) = (self.repl_store.as_ref(), backup) {
+                repl.reestablish_backup(&call_ref, &backup);
+            }
         }
         true
     }
@@ -782,9 +776,15 @@ impl CallState {
     /// Fold one takeover event for `call_ref` into its dead primary's episode
     /// (ADR-0026 aggregation): the counter names what happened, the peer the
     /// `call_ref` encodes keys the episode.
-    fn note_takeover(&self, call_ref: &str, counter: &'static str) {
+    pub(crate) fn note_takeover(&self, call_ref: &str, counter: &'static str) {
+        self.note_takeover_count(call_ref, counter, 1);
+    }
+
+    /// [`note_takeover`](Self::note_takeover) for a counter that moves by `n`
+    /// at once — the transactions one materialisation seeded.
+    pub(crate) fn note_takeover_count(&self, call_ref: &str, counter: &'static str, n: u64) {
         let (_, primary) = partition_of(&self.self_ordinal, call_ref);
-        self.takeover_log.record(&primary, counter, 1);
+        self.takeover_log.record(&primary, counter, n);
     }
 
     /// Fold an acting-backup **self-release** into the dead peer's takeover

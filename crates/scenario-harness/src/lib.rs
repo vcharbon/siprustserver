@@ -12,6 +12,7 @@
 //! **TEST-ONLY.** This crate composes the recording/audit decorators, which
 //! never belong in a production network tree.
 
+pub mod absorption;
 pub mod actor;
 pub mod agent;
 pub mod anchors;

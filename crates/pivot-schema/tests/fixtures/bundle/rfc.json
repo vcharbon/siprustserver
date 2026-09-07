@@ -1,0 +1,31 @@
+{
+  "findings": [
+    {
+      "advisory": false,
+      "charged": "127.0.0.1:5080",
+      "detail": "in-dialog CSeq reused (RFC 3261 §12.2.1.1): OPTIONS CSeq 1 reuses a prior request's CSeq",
+      "gating": true,
+      "lane": "127.0.0.1:5071",
+      "offending": 15,
+      "rule": "cseq-in-dialog-order"
+    },
+    {
+      "actor": "ep0",
+      "advisory": false,
+      "charged": "127.0.0.1:5060",
+      "detail": "Took a 2xx confirming the dialog to its own INVITE and never ACKed it: the scripted caller's own withheld ACK",
+      "gating": false,
+      "lane": "127.0.0.1:5060",
+      "offending": 7,
+      "rule": "no-ack-to-dialog-creating-2xx"
+    },
+    {
+      "advisory": true,
+      "detail": "response 200 to OPTIONS keeps an empty rport parameter",
+      "gating": false,
+      "lane": "127.0.0.1:5080",
+      "rule": "rport-echo"
+    }
+  ],
+  "status": "audited"
+}

@@ -58,10 +58,13 @@ pub fn generate_ack_for_2xx(
 /// the INVITE's sequence number; and reproduces the INVITE's Route headers
 /// verbatim ("the Route header fields of the ACK MUST equal" the INVITE's) —
 /// load-bearing when the INVITE carried a preloaded outbound-proxy Route
-/// (RFC3261-MUST-145, flagged by the cross-message audit).
+/// (RFC3261-MUST-145, flagged by the cross-message audit). `extra_headers` are
+/// the caller's own lines, carried verbatim; this ACK carries no body — the
+/// INVITE transaction absorbs it (§17.1.1.3) and no TU reads one.
 pub fn generate_ack_for_non_2xx(
     original_invite: &SipRequest,
     final_response: &SipResponse,
+    extra_headers: &[SipHeader],
 ) -> SipRequest {
     let via = original_invite
         .raw_text(HeaderName::Via)
@@ -80,5 +83,5 @@ pub fn generate_ack_for_non_2xx(
         draft = draft.push_raw(HeaderName::Route, route);
     }
 
-    emit::request(draft.push(ContentLength::new(0)))
+    emit::request(emit::extra_headers(draft, extra_headers).push(ContentLength::new(0)))
 }

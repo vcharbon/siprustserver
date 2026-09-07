@@ -4,7 +4,7 @@
 //! `crate::rules::invariants`.
 
 use call::helpers::{
-    set_bye_disposition, set_leg_disposition, set_leg_state, TERMINATING_TIMEOUT_MS,
+    set_bye_disposition, set_leg_disposition, set_leg_state, Scope, TERMINATING_TIMEOUT_MS,
 };
 use call::{ByeDisposition, Call, LegDisposition, LegState, StackDialog, TimerType};
 use sip_message::generators::{
@@ -36,6 +36,12 @@ impl ActionExecutor<'_> {
     /// invariant stays a pure safety net). Then enter `terminating` and arm the
     /// safety timer.
     ///
+    /// A relayed INVITE still pending on any dialog is answered first (RFC 3261
+    /// §15.1.2: a UAS ending a dialog still responds to its pending requests,
+    /// 487 recommended), its target CANCELled, so no INVITE transaction is
+    /// left open behind the BYEs — a takeover copy is resident exactly while
+    /// one is (ADR-0014).
+    ///
     /// `source_leg_id` is intentionally *not* special-cased here: rules that
     /// consume a BYE/CANCEL pre-mark their source leg's disposition before
     /// emitting begin-termination, so the skip guard below leaves it untouched.
@@ -46,6 +52,20 @@ impl ActionExecutor<'_> {
         ctx: &RuleContext,
         reason: Option<&str>,
     ) {
+        let pending_invites: Vec<(String, i64)> = std::iter::once(&call.a_leg)
+            .chain(call.b_legs.iter())
+            .flat_map(|leg| leg.dialogs.iter().map(move |d| (leg, d)))
+            .flat_map(|(leg, d)| {
+                d.ext
+                    .inbound_pending_requests
+                    .iter()
+                    .filter(|p| p.method.eq_ignore_ascii_case("INVITE") && !p.cancelled)
+                    .map(move |p| (leg.leg_id.clone(), p.outbound_cseq))
+            })
+            .collect();
+        for (leg_id, outbound_cseq) in pending_invites {
+            self.reject_pending_reinvite(call, fx, &leg_id, outbound_cseq, 487, "Request Terminated");
+        }
         // RFC 3261 §16.6: a termination the peer ASKED for restates what it
         // said — the Q.850 cause (RFC 3326 §2), the charging correlation, the
         // end-to-end data — on the BYE/CANCEL minted for the other leg.
@@ -141,11 +161,18 @@ impl ActionExecutor<'_> {
                 fx.critical.push(CriticalStateEffect::CancelTimer { id });
             }
         }
+        // Nothing is repeated into a terminating call either: every ladder
+        // ends with the setup (a caller who CANCELled must not keep receiving
+        // rungs), so a reclaim cannot restore one into it.
+        self.retire(call, fx, Scope::Call);
         call.state = call::CallModelState::Terminating;
         self.schedule(call, fx, TimerType::TerminatingTimeout, TERMINATING_TIMEOUT_MS, None);
     }
 
     pub(super) fn destroy_leg(&self, call: &mut Call, fx: &mut HandlerEffects, leg_id: &str) {
+        // A destroyed leg's ladders die with it (RFC 3262 §3): no rung
+        // re-offers a torn-down leg's answer.
+        self.retire(call, fx, Scope::Leg(leg_id));
         let state = call
             .b_legs
             .iter()
@@ -186,6 +213,9 @@ impl ActionExecutor<'_> {
         ctx: &RuleContext,
         leg_id: &str,
     ) {
+        // The cancelled fork's ladders die with it (RFC 3262 §3): no rung
+        // re-offers a leg being cancelled.
+        self.retire(call, fx, Scope::Leg(leg_id));
         if let Some(e) = self.cancel_to_leg(call, leg_id, &relayed_teardown_headers(ctx)) {
             fx.outbound.push(e);
         }
@@ -197,9 +227,12 @@ impl ActionExecutor<'_> {
     pub(super) fn terminate_leg(
         &self,
         call: &mut Call,
+        fx: &mut HandlerEffects,
         leg_id: &str,
         bye_disposition: Option<ByeDisposition>,
     ) {
+        // The terminal leg's ladders die with it (RFC 3262 §3).
+        self.retire(call, fx, Scope::Leg(leg_id));
         *call = set_leg_state(call.clone(), leg_id, LegState::Terminated);
         if let Some(bd) = bye_disposition {
             *call = set_bye_disposition(call.clone(), leg_id, bd);
@@ -280,10 +313,14 @@ impl ActionExecutor<'_> {
             })
             .unwrap_or_default();
         // The firing rule's own statement is the more specific one and stands;
-        // every other name the releasing peer sent rides beside it.
+        // every other name the releasing peer sent rides beside it, EVERY line
+        // of it: a set-like header the peer split over several lines (`Allow`,
+        // RFC 3261 §7.3.1) is one set, and keeping only its first line would
+        // relay a one-token set the peer never stated.
+        let stated = extra_headers.clone();
         for header in relayed {
             let name = HeaderName::from(header.name.as_str());
-            if !extra_headers.iter().any(|h| name.matches(&h.name)) {
+            if !stated.iter().any(|h| name.matches(&h.name)) {
                 extra_headers.push(header.clone());
             }
         }
@@ -325,35 +362,101 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         outbound_cseq: i64,
     ) {
-        let Some((t_id, dialog)) = find_pending_dialog(call, leg_id, outbound_cseq) else {
+        let Some(cancel) = pending_reinvite_cancel(call, leg_id, outbound_cseq) else {
             return;
         };
-        let Some(handle) = dialog.ext.pending_invite_txn.as_ref() else {
+        self.commit_pending_reinvite_cancel(call, fx, leg_id, outbound_cseq, cancel);
+    }
+
+    /// Put a built re-INVITE CANCEL on the wire and settle its books: the
+    /// snapshot is marked `cancelled`, and the transaction's reliable
+    /// provisionals end with the final the originator now holds — the
+    /// transaction layer's 487 to a relayed CANCEL, or this stack's own
+    /// reject (RFC 3262 §3).
+    fn commit_pending_reinvite_cancel(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        outbound_cseq: i64,
+        cancel: PendingReinviteCancel,
+    ) {
+        fx.outbound.push(cancel.effect);
+        *call = call::helpers::cancel_pending_request(call.clone(), leg_id, &cancel.t_id, outbound_cseq);
+        self.retire(call, fx, Scope::Transaction { leg_id, cseq: outbound_cseq });
+    }
+
+    /// End the relayed re-INVITE still pending on `leg_id`'s dialog under
+    /// `outbound_cseq` on both faces, transaction-scoped (RFC 3261 §14.1 —
+    /// the dialogs stay as they were): its originator is answered the locally
+    /// authored `status` final, rebuilt from the pending snapshot the way a
+    /// relayed final is (§8.2.6.2) and carrying nothing else — a failure
+    /// states no body and no Contact — and the request toward the target is
+    /// CANCELled as [`Self::cancel_pending_reinvite`] does. The two faces
+    /// never disagree: the CANCEL is built before the final leaves, and where
+    /// it cannot be built nothing is emitted, since a final the originator
+    /// holds over a snapshot still live would let the target's own final be
+    /// relayed as a second final on a completed transaction (RFC 3261
+    /// §17.2.1). A snapshot already CANCELled has its originator's final from
+    /// the transaction layer, so nothing is owed twice.
+    pub(super) fn reject_pending_reinvite(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+        outbound_cseq: i64,
+        status: u16,
+        reason: &str,
+    ) {
+        let Some((_, dialog)) = find_pending_dialog(call, leg_id, outbound_cseq) else {
             return;
         };
-        let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.original_invite)
+        let Some(pending) = call::helpers::find_pending_request(&dialog, outbound_cseq).cloned()
         else {
             return;
         };
-        // Defensive: the handle must be the re-INVITE this pending entry tracks
-        // (the glare guard makes a second in-flight INVITE on this dialog
-        // impossible, but never CANCEL a mismatched transaction).
-        if req.cseq().seq() as i64 != outbound_cseq {
+        if pending.cancelled || !pending.method.eq_ignore_ascii_case("INVITE") {
             return;
         }
-        let cancel = generators::generate_cancel(
-            &InviteClientTransactionHandle { original_invite: req },
-            &[],
+        let refused = |what: &str| {
+            tracing::warn!(
+                call_ref = %call.call_ref,
+                leg_id = %leg_id,
+                status,
+                "re-INVITE reject dropped — {what}"
+            );
+        };
+        // §18.2.2: the final goes to the originator's top Via sent-by; one no
+        // reader accepts names no destination (see `relay_response`).
+        let Some(dest) =
+            pending.source_vias.first().and_then(|v| super::relay_response::via_sent_by(v))
+        else {
+            refused("the originator's top Via does not read, so it names no destination");
+            return;
+        };
+        let Some(cancel) = pending_reinvite_cancel(call, leg_id, outbound_cseq) else {
+            refused("the pending re-INVITE toward the target cannot be CANCELled");
+            return;
+        };
+        let opts = super::relay_response::snapshot_response_opts(
+            &pending,
+            "INVITE",
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
         );
+        let originator = call::helpers::get_peer(call, leg_id)
+            .unwrap_or(call.a_leg.leg_id.as_str())
+            .to_string();
         fx.outbound.push(OutboundSipEffect {
-            body: OutboundBody::Request(cancel),
-            mode: OutboundTxnMode::Raw,
-            destination: (handle.destination.host.clone(), handle.destination.port),
-            label: format!("CANCEL re-INVITE → {leg_id}"),
-            leg_id: Some(leg_id.to_string()),
+            body: OutboundBody::Response(generators::generate_relayed_response(status, reason, &opts)),
+            mode: OutboundTxnMode::ServerResponse,
+            destination: dest,
+            label: format!("{status} INVITE → {originator}"),
+            leg_id: Some(originator),
         });
-        *call =
-            call::helpers::cancel_pending_request(call.clone(), leg_id, &t_id, outbound_cseq);
+        self.commit_pending_reinvite_cancel(call, fx, leg_id, outbound_cseq, cancel);
     }
 
     pub(super) fn cancel_to_leg(
@@ -389,6 +492,42 @@ impl ActionExecutor<'_> {
             leg_id: Some(leg_id.to_string()),
         })
     }
+}
+
+/// A re-INVITE CANCEL ready to leave, with the identity of the dialog whose
+/// snapshot it settles.
+struct PendingReinviteCancel {
+    t_id: String,
+    effect: OutboundSipEffect,
+}
+
+/// Build the transaction-scoped CANCEL of the relayed re-INVITE pending on
+/// `leg_id`'s dialog under `outbound_cseq` (RFC 3261 §9.1), from the dialog's
+/// cached `pending_invite_txn` handle: the re-INVITE's own branch, Route set
+/// and wire destination. `None` where no such transaction can be CANCELled —
+/// no pending dialog, no cached handle, an unreadable one, or a handle naming
+/// another CSeq than the snapshot (the glare guard forbids a second in-flight
+/// INVITE on one dialog, and a mismatched transaction is never CANCELled).
+fn pending_reinvite_cancel(call: &Call, leg_id: &str, outbound_cseq: i64) -> Option<PendingReinviteCancel> {
+    let (t_id, dialog) = find_pending_dialog(call, leg_id, outbound_cseq)?;
+    let handle = dialog.ext.pending_invite_txn.as_ref()?;
+    let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.original_invite) else {
+        return None;
+    };
+    if req.cseq().seq() as i64 != outbound_cseq {
+        return None;
+    }
+    let cancel = generators::generate_cancel(&InviteClientTransactionHandle { original_invite: req }, &[]);
+    Some(PendingReinviteCancel {
+        t_id,
+        effect: OutboundSipEffect {
+            body: OutboundBody::Request(cancel),
+            mode: OutboundTxnMode::Raw,
+            destination: (handle.destination.host.clone(), handle.destination.port),
+            label: format!("CANCEL re-INVITE → {leg_id}"),
+            leg_id: Some(leg_id.to_string()),
+        },
+    })
 }
 
 /// What the peer said about the teardown it asked for, for the BYE or CANCEL

@@ -3,8 +3,8 @@
 //! on the absence of a Route header. A b-leg INVITE behind an outbound
 //! proxy carries a preloaded Route, so its non-2xx ACK carries one too; a
 //! `route.is_none()` heuristic misroutes exactly that ACK.
-//! A matched ACK for a RELAYED final is relayed on the INVITE's exact hop
-//! (same target, same outbound branch — the downstream server transaction
+//! A matched ACK for a RELAYED final is relayed to the node the final arrived
+//! from, on the INVITE's outbound branch (the downstream server transaction
 //! must match it to stop retransmitting the final); a matched ACK for a
 //! final the proxy generated ITSELF is absorbed (the proxy is the UAS).
 
@@ -27,6 +27,7 @@ use crate::RoutingStrategy;
 const UAC: &str = "10.244.7.13";
 const PROXY_VIP: &str = "172.20.255.250";
 const W1: &str = "10.0.0.1";
+const W2: &str = "10.0.0.2";
 
 async fn core() -> ProxyCore {
     let net = SimulatedSignalingNetwork::new(1);
@@ -74,6 +75,11 @@ fn src() -> std::net::SocketAddr {
     format!("{UAC}:5060").parse().unwrap()
 }
 
+/// The node a final arrives from — in steady state the INVITE's target.
+fn worker_src() -> std::net::SocketAddr {
+    format!("{W1}:5060").parse().unwrap()
+}
+
 /// The non-2xx final coming back to the proxy: top Via = the proxy (so it
 /// relays it and writes the `ackhop|` relay memo), second Via = the
 /// upstream's INVITE Via (its branch is what the upstream's own §17.1.1.3
@@ -104,7 +110,7 @@ Content-Length: 0\r\n\r\n"
 async fn non_2xx_ack_with_preloaded_proxy_route_follows_the_invite_hop() {
     let core = core().await;
     core.route_request(&invite("z9hG4bKinv"), src()).await;
-    core.handle_response(busy_486("z9hG4bKinv")).await;
+    core.handle_response(busy_486("z9hG4bKinv"), worker_src()).await;
 
     let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
     let outcome = core.route_request(&ack("z9hG4bKinv", &route), src()).await;
@@ -122,11 +128,31 @@ async fn non_2xx_ack_with_preloaded_proxy_route_follows_the_invite_hop() {
 async fn non_2xx_ack_without_route_follows_the_invite_hop() {
     let core = core().await;
     core.route_request(&invite("z9hG4bKinv"), src()).await;
-    core.handle_response(busy_486("z9hG4bKinv")).await;
+    core.handle_response(busy_486("z9hG4bKinv"), worker_src()).await;
 
     let outcome = core.route_request(&ack("z9hG4bKinv", ""), src()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::AckHop);
     assert_eq!(outcome.target, Some(ProxyAddr::new(W1, 5060)));
+}
+
+// The hop memo names the node the final ARRIVED from, not the node the
+// INVITE was forwarded to: after a failover the survivor answers on the
+// INVITE's outbound branch, and only the survivor holds the server
+// transaction the caller's ACK must quench (§17.1.1.3).
+#[tokio::test]
+async fn non_2xx_ack_follows_the_finals_sender_not_the_invite_target() {
+    let core = core().await;
+    core.route_request(&invite("z9hG4bKinv"), src()).await;
+    let survivor: std::net::SocketAddr = format!("{W2}:5060").parse().unwrap();
+    core.handle_response(busy_486("z9hG4bKinv"), survivor).await;
+
+    let outcome = core.route_request(&ack("z9hG4bKinv", ""), src()).await;
+    assert_eq!(outcome.decision, RoutingDecisionKind::AckHop);
+    assert_eq!(
+        outcome.target,
+        Some(ProxyAddr::new(W2, 5060)),
+        "the ACK must reach the node that sent the final, not the INVITE's stale target"
+    );
 }
 
 // A fresh-branch (2xx) ACK arriving AFTER a relayed non-2xx final for the
@@ -136,7 +162,7 @@ async fn non_2xx_ack_without_route_follows_the_invite_hop() {
 async fn fresh_branch_ack_after_a_relayed_final_takes_the_normal_ladder() {
     let core = core().await;
     core.route_request(&invite("z9hG4bKinv"), src()).await;
-    core.handle_response(busy_486("z9hG4bKinv")).await;
+    core.handle_response(busy_486("z9hG4bKinv"), worker_src()).await;
 
     let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
     let outcome = core.route_request(&ack("z9hG4bKack2xx", &route), src()).await;

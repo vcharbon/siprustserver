@@ -143,14 +143,18 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
 }
 
 /// Recover the takeover `callRef` for an in-dialog SIP request from the replica
-/// store's SIP index (the acting-backup production path). Only in-dialog requests
-/// (those carrying a To-tag) are candidates; an initial request, a response, or a
-/// non-SIP event is never a dialog takeover. `None` when not applicable or no
-/// replica matches — the caller then treats the event as unroutable.
+/// store's SIP index (the acting-backup production path). In-dialog requests
+/// (those carrying a To-tag) and a CANCEL — which names its INVITE's Call-ID
+/// and From-tag (RFC 3261 §9.1), the same key, for a ringing call a peer
+/// admitted — are candidates; an initial request, a response, or a non-SIP
+/// event is never a dialog takeover. `None` when not applicable or no replica
+/// matches — the caller then treats the event as unroutable.
 pub(super) async fn replica_takeover_call_ref(ctx: &RouterCtx, event: &CallEvent) -> Option<String> {
     let CallEvent::Sip { message, .. } = event else { return None };
     let SipMessage::Request(req) = message.as_ref() else { return None };
-    req.to().tag()?;
+    if req.to().tag().is_none() && req.method() != Method::Cancel {
+        return None;
+    }
     ctx.state
         .resolve_from_replica_index(req.call_id().as_str(), req.from().tag().unwrap_or(""))
         .await

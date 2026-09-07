@@ -24,6 +24,8 @@
 //!     state, topology, peering, limiters, INVITE snapshot, tag map, policy)
 //!   - [`leg`] — [`Leg`] + state / disposition / role enums
 //!   - [`dialog`] — §12 dialog state + B2BUA-only dialog extensions
+//!   - [`emission`] / [`obligation`] — the retained emission a ladder repeats
+//!     and the key that discharges it (ADR-0029)
 //!   - [`invite_txn`] — in-flight INVITE client-transaction handle
 //!   - [`timer`] — serializable timer intents ([`TimerType`] / [`TimerEntry`])
 //!   - [`cdr`] — CDR event records
@@ -32,8 +34,10 @@
 
 pub mod cdr;
 pub mod dialog;
+pub mod emission;
 pub mod invite_txn;
 pub mod leg;
+pub mod obligation;
 pub mod record;
 pub mod services;
 pub mod sm;
@@ -41,12 +45,13 @@ pub mod timer;
 
 pub use record::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallLimiterState, CallModelState,
-    CallTopology, PolicyUpdateBody, ReliableProvisional, SipHeader, TagMapping,
+    CallTopology, PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader,
+    TagMapping,
 };
 pub use cdr::{CdrEvent, CdrEventType};
-pub use dialog::{
-    B2buaDialogExt, Dialog, Direction, PendingReinvite2xx, PendingRequest, StackDialog,
-};
+pub use dialog::{B2buaDialogExt, Dialog, Direction, PendingRequest, StackDialog, Unacked2xx};
+pub use emission::{Repeat, Repeated, RetainedEmission};
+pub use obligation::Obligation;
 pub use invite_txn::{HostPort, InviteTxnHandle};
 pub use leg::{ByeDisposition, Leg, LegDisposition, LegKind, LegState, RemoteInfo};
 pub use services::{

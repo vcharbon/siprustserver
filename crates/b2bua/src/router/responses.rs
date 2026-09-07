@@ -1,9 +1,10 @@
-//! Locally-authored response builders: the OPTIONS health reply and the
-//! call-layer-stateless store-fault 500. The overload reject lives with the
-//! policy that owns it — [`crate::overload::build_reject_new_call_503`].
+//! Locally-authored response builders: the OPTIONS health reply, the
+//! call-layer-stateless store-fault 500 and the orphan 481. The overload reject
+//! lives with the policy that owns it — [`crate::overload::build_reject_new_call_503`].
 
 use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
 use sip_message::types::SipHeader;
+use sip_message::{SipRequest, SipResponse};
 use sip_txn::IdGen;
 
 use crate::overload::OverloadSignal;
@@ -17,19 +18,26 @@ fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
     }
 }
 
+/// `481 Call/Transaction Does Not Exist` to `req`: an in-dialog request naming
+/// no call this node holds (RFC 3261 §12.2.2), or a CANCEL matching no INVITE
+/// transaction here (§9.2).
+pub(super) fn build_481(req: &SipRequest) -> SipResponse {
+    generate_response(req, 481, "Call/Transaction Does Not Exist", &GenerateResponseOpts::default())
+}
+
 /// Build the self-reported readiness reply to an out-of-dialog OPTIONS
 /// keepalive (S7). Every reply mints a local To-tag: RFC 3261 §8.2.6.2 requires
 /// a To-tag on any response > 100 to an out-of-dialog request (the 2xx path
-/// always did; the 503 path needs it too, and `hydrate_response` rejects a
-/// tagless response otherwise). The status + `Reason` header text is the
+/// always did; the 503 path needs it too). The status + `Reason` header text is the
 /// contract `sip-proxy::health::probe::classify_503` keys on:
 ///   - `Ready`    → `200 OK` + `X-Overload: v=1; elu=…; gc=…; adm=…`.
 ///   - `NotReady` → `503` + `Reason: SIP;cause=503;text="not-ready"`.
 ///   - `Draining` → `503` + `Reason: SIP;cause=503;text="draining"` +
 ///     `Retry-After: 0`.
 ///
-/// `capabilities` is the node's advertised `Allow`/`Supported` set (§11.2) —
-/// node-scoped, since an out-of-dialog OPTIONS names no call; `B2buaConfig`
+/// `capabilities` is the node's advertised `Allow`/`Supported`/`Accept` set
+/// (§11.2) — node-scoped, since an out-of-dialog OPTIONS names no call, and
+/// the one message this stack answers on its own behalf; `B2buaConfig`
 /// declares it, defaulting to the stack set.
 ///
 /// The `X-Overload` worker load signal rides the **200 path only**: it is the
@@ -53,12 +61,12 @@ pub(crate) fn build_options_health_response(
             // RFC 3261 §11.2: an OPTIONS 200 SHOULD advertise capabilities so the
             // querier learns method/extension/body support, not just liveness.
             // Plus the worker load signal the proxy's AIMD band reads.
-            vec![
-                hdr("Allow", capabilities.allow_text()),
-                hdr("Accept", "application/sdp"),
-                hdr("Supported", capabilities.supported_text()),
-                hdr("X-Overload", overload.x_overload_header_value()),
-            ],
+            capabilities
+                .lines()
+                .into_iter()
+                .map(|(name, value)| hdr(name.as_wire_str(), value))
+                .chain([hdr("X-Overload", overload.x_overload_header_value())])
+                .collect(),
         ),
         ReadinessState::NotReady => (
             503,

@@ -115,6 +115,7 @@ fn info_event() -> CallEvent {
     CallEvent::Sip {
         message: Box::new(SipMessage::Request(info)),
         src: "127.0.0.1:5060".parse().unwrap(),
+        matched_client_txn: false,
     }
 }
 
@@ -127,6 +128,7 @@ fn ctx_for<'a>(call: &'a Call, event: &'a CallEvent, config: &'a B2buaConfig) ->
         direction: Direction::FromA,
         now_ms: 0,
         config,
+        discharged: None,
     }
 }
 
@@ -137,7 +139,7 @@ fn stub_service_init_seeds_then_rule_advances_then_declines() {
 
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let event = info_event();
     let services = vec![stub::service_def()];
 
@@ -185,7 +187,7 @@ fn dormant_service_leaves_call_untouched() {
 
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let event = info_event();
 
     fn dormant_init(_: &RuleCall) -> Option<ServiceSeed> {

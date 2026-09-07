@@ -222,5 +222,8 @@ fn emit_udp(
         src: SocketAddr::new(src_ip, sport),
         dst: SocketAddr::new(dst_ip, dport),
         payload: payload[8..ulen].to_vec(),
+        // The container reader stamps the real one: this file does not know
+        // which probe observed the frame, and must not.
+        probe: 0,
     });
 }

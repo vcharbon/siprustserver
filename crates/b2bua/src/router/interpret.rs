@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::CallModelState;
-use sip_message::{serialize, Method, SipMessage};
+use sip_message::Method;
 use sip_txn::TxnKind;
 
 use super::callouts;
@@ -46,6 +46,10 @@ pub(super) async fn process_result(
         // poll; a rebooting primary still has its full reclaim window to fold and
         // discharge it. The primary is the sole discharge authority either way.
         ctx.state.flush(&result.call);
+        // What the turn owes the WIRE is not deferred: the final that ends the
+        // caller's INVITE and the hop-by-hop ACK toward the callee leave from the
+        // node that took the event, or the peers wedge on Timer B / Timer H.
+        emit_outbound(ctx, call_ref, &result, now_ms).await;
         release_call(ctx, call_ref, ReleaseKind::SelfRelease).await;
         return;
     }
@@ -101,65 +105,7 @@ pub(super) async fn process_result(
         }
     }
 
-    // Sent SIP is liveness too (ADR-0020 X4 refinement): a turn that puts a
-    // message on the wire (a keepalive OPTIONS, a relayed response, a teardown
-    // BYE/CANCEL) stamps the ledger alongside received traffic, so the reaper
-    // never preempts a teardown that is legitimately waiting on a slow peer.
-    // Wire-silent turns (LimiterRefresh, absorbed events) stamp nothing. Only
-    // for a still-live call — a terminated result is being released below.
-    if !result.effects.outbound.is_empty() && result.call.state != CallModelState::Terminated {
-        ctx.state.touch(call_ref, now_ms);
-    }
-
-    for eff in &result.effects.outbound {
-        let dest: SocketAddr = match format!("{}:{}", eff.destination.0, eff.destination.1).parse() {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        // Meter outbound requests we originate/relay (the in-dialog keepalive
-        // OPTIONS lands here) — pairs with inbound responses_total{OPTIONS,200} to
-        // isolate the keepalive round-trip (sent vs answered) on the b2bua itself.
-        if let OutboundBody::Request(req) = &eff.body {
-            ctx.metrics.record_request_out(req.method().as_str());
-        }
-        // Traced call: the message as it leaves, raw (ADR-0026). Guarded, so an
-        // unsampled call never serializes a second copy.
-        if crate::trace::sampled(&result.call) {
-            let wire = match &eff.body {
-                OutboundBody::Request(req) => serialize(&SipMessage::Request(req.clone())),
-                OutboundBody::Response(resp) => serialize(&SipMessage::Response(resp.clone())),
-            };
-            crate::trace::emit::sip_out(&result.call, now_ms, dest, &wire);
-        }
-        match (&eff.body, &eff.mode) {
-            // A 2xx retransmit (RFC 3261 §13.3.1.4) must bypass the server txn:
-            // the a-leg INVITE server txn is already `Completed`, so the txn layer
-            // would DROP a second final on `send_response`. Send it raw.
-            (OutboundBody::Response(resp), OutboundTxnMode::Raw) => {
-                let _ = ctx.txn.send_raw(serialize(&SipMessage::Response(resp.clone())), dest).await;
-            }
-            (OutboundBody::Response(resp), _) => { let _ = ctx.txn.send_response(resp.clone(), dest).await; }
-            (OutboundBody::Request(req), OutboundTxnMode::NewClient(kind)) => {
-                let _ = ctx.txn.send_request(req.clone(), dest, *kind).await;
-            }
-            (OutboundBody::Request(req), OutboundTxnMode::Raw) => {
-                // A CANCEL reuses its INVITE's branch, and the INVITE client txn
-                // owns WHEN it may go on the wire (RFC 3261 §9.1: held until the
-                // branch's first provisional, dropped at Timer B) — so it goes
-                // through `send_request`, whose CANCEL path sends raw once the
-                // txn allows it. Other raw requests (ACK) bypass the txn map.
-                if req.method() == Method::Cancel {
-                    let _ = ctx.txn.send_request(req.clone(), dest, TxnKind::Invite).await;
-                } else {
-                    let _ = ctx.txn.send_raw(serialize(&SipMessage::Request(req.clone())), dest).await;
-                }
-            }
-            (OutboundBody::Request(req), OutboundTxnMode::ServerResponse) => {
-                // A request tagged ServerResponse is a misuse; send raw as a fallback.
-                let _ = ctx.txn.send_raw(serialize(&SipMessage::Request(req.clone())), dest).await;
-            }
-        }
-    }
+    emit_outbound(ctx, call_ref, &result, now_ms).await;
 
     for eff in &result.effects.soft {
         match eff {
@@ -233,6 +179,88 @@ pub(super) async fn process_result(
             }
             FireAndForgetEffect::Reenter(ev) => {
                 let _ = ctx.reentry_tx.send(*ev);
+            }
+        }
+    }
+}
+
+/// Put the turn's outbound SIP on the wire, in emission order. Sent SIP is
+/// liveness too (ADR-0020 X4 refinement): a turn that puts a message on the
+/// wire (a keepalive OPTIONS, a relayed response, a teardown BYE/CANCEL) stamps
+/// the ledger alongside received traffic, so the reaper never preempts a
+/// teardown that is legitimately waiting on a slow peer. Wire-silent turns
+/// (LimiterRefresh, absorbed events) stamp nothing; a terminated result is
+/// being released and stamps nothing either.
+async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerResult, now_ms: i64) {
+    if !result.effects.outbound.is_empty() && result.call.state != CallModelState::Terminated {
+        ctx.state.touch(call_ref, now_ms);
+    }
+
+    for eff in &result.effects.outbound {
+        let dest: SocketAddr = match format!("{}:{}", eff.destination.0, eff.destination.1).parse() {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        // Meter outbound requests we originate/relay (the in-dialog keepalive
+        // OPTIONS lands here) — pairs with inbound responses_total{OPTIONS,200} to
+        // isolate the keepalive round-trip (sent vs answered) on the b2bua itself.
+        if let OutboundBody::Request(req) = &eff.body {
+            ctx.metrics.record_request_out(req.method().as_str());
+        }
+        // Traced call: the message as it leaves, raw (ADR-0026). A typed message
+        // is recorded as its image — the datagram the transaction layer sends —
+        // and a retained datagram as the bytes it is, so a recorded rung is
+        // what left the socket, never a re-render of it.
+        if crate::trace::sampled(&result.call) {
+            let wire: &[u8] = match &eff.body {
+                OutboundBody::Request(req) => req.image(),
+                OutboundBody::Response(resp) => resp.image(),
+                OutboundBody::Datagram(emission) => emission.wire().0,
+            };
+            crate::trace::emit::sip_out(&result.call, now_ms, dest, wire);
+        }
+        match (&eff.body, &eff.mode) {
+            // A retained emission's repeat (RFC 3261 §13.3.1.4 / §13.2.2.4,
+            // RFC 3262 §3): the bytes as they are, past every transaction — the
+            // server txn that sent the original is `Completed` and would drop a
+            // second final; the ACK never had one. Counted as it leaves, under
+            // the label captured when it was retained.
+            (OutboundBody::Datagram(emission), _) => {
+                let repeated = emission.repeated();
+                ctx.metrics.record_retransmit(emission.repeat().ladder(), repeated.method(), repeated.code());
+                let _ = ctx.txn.send_raw(emission.wire().0.to_vec(), dest).await;
+            }
+            // A response goes through its server transaction, whatever the mode
+            // says: `Raw` is for requests, and the only raw path for response
+            // bytes is a retained `Datagram` (ADR-0029 X3). The layer sends the
+            // response's image verbatim, so what a rule retained from that
+            // same image is what leaves here.
+            (OutboundBody::Response(resp), mode) => {
+                debug_assert!(
+                    !matches!(mode, OutboundTxnMode::Raw),
+                    "a raw response bypass is a retained datagram, never a re-serialized Response: {}",
+                    eff.label
+                );
+                let _ = ctx.txn.send_response(resp.clone(), dest).await;
+            }
+            (OutboundBody::Request(req), OutboundTxnMode::NewClient(kind)) => {
+                let _ = ctx.txn.send_request(req.clone(), dest, *kind).await;
+            }
+            (OutboundBody::Request(req), OutboundTxnMode::Raw) => {
+                // A CANCEL reuses its INVITE's branch, and the INVITE client txn
+                // owns WHEN it may go on the wire (RFC 3261 §9.1: held until the
+                // branch's first provisional, dropped at Timer B) — so it goes
+                // through `send_request`, whose CANCEL path sends raw once the
+                // txn allows it. Other raw requests (ACK) bypass the txn map.
+                if req.method() == Method::Cancel {
+                    let _ = ctx.txn.send_request(req.clone(), dest, TxnKind::Invite).await;
+                } else {
+                    let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;
+                }
+            }
+            (OutboundBody::Request(req), OutboundTxnMode::ServerResponse) => {
+                // A request tagged ServerResponse is a misuse; send raw as a fallback.
+                let _ = ctx.txn.send_raw(req.image().to_vec(), dest).await;
             }
         }
     }

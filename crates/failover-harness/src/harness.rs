@@ -259,6 +259,15 @@ impl ReplicatedB2buaSut {
             .unwrap_or(&self.metrics)
     }
 
+    /// Non-2xx INVITE finals this worker's transaction layer re-sent on Timer G
+    /// (RFC 3261 §17.2.1) — the a-leg server transaction speaking. 0 while crashed.
+    pub fn server_final_retransmits(&self) -> u64 {
+        self.core
+            .as_ref()
+            .map(|c| c.txn_metrics().server_final_retransmits())
+            .unwrap_or(0)
+    }
+
     /// Readiness gate (every reachable peer bootstrapped AND current). Drives the
     /// proxy registry health deterministically (vs. the OPTIONS probe loop).
     pub fn is_ready(&self) -> bool {
@@ -336,6 +345,12 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().map(|c| c.serves(call_ref)).unwrap_or(false)
     }
 
+    /// The live copy this worker serves for `call_ref`, if any — what its rules
+    /// read at the next event.
+    pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
+        self.core.as_ref().and_then(|c| c.live_call(call_ref))
+    }
+
     /// HARNESS SURGERY (see `B2buaCore::drop_live_copy`): drop the live
     /// in-memory copy of `call_ref` with NO store mutation — the deterministic
     /// recreation of the rebooted-primary "imported into `pri:{self}` but not
@@ -347,7 +362,7 @@ impl ReplicatedB2buaSut {
 
     /// HARNESS SURGERY: implant a stale per-b-leg `NoAnswer` entry into the
     /// replica body this node holds for `call_ref` in `(role, primary)`, firing
-    /// at absolute `fire_at_ms` — the upstreamneed-059 shape: an entry whose
+    /// at absolute `fire_at_ms` — the stale-guard shape: an entry whose
     /// cancel died with the crashed primary, so the body a later bootstrap +
     /// reclaim serves still carries it. The stored `(p,b)` version is kept, so
     /// pull/reclaim replay the mutated body exactly as they would the original.
@@ -383,6 +398,29 @@ impl ReplicatedB2buaSut {
             .await
             .expect("replica store write");
         leg
+    }
+
+    /// HARNESS SURGERY: rewind the replica body this node holds for `call_ref`
+    /// in `(role, primary)` to `body` — an earlier body it genuinely held (read
+    /// back with [`get`](Self::get)) — as if every version after it died with
+    /// the crashed primary before the peer pulled it. The stored `(p,b)` is
+    /// kept, so bootstrap and reclaim replay the rewound body exactly as they
+    /// would the latest one.
+    pub async fn rewind_replica(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+        body: Vec<u8>,
+    ) {
+        let (p, b) = self
+            .store
+            .current_cv(role, primary, call_ref)
+            .expect("replica version vector present");
+        self.store
+            .put_call(role, primary, call_ref, body, &[], 600_000, p, b, &PutOpts::default())
+            .await
+            .expect("replica store write");
     }
 
     /// Is this node **synchronized** as the backup for `call_ref` — does it hold a
@@ -533,6 +571,20 @@ impl ReplicatedB2buaSut {
         new_addr
     }
 
+    /// Id-stream seed for the live incarnation: FNV-1a over `ordinal ‖ gen`. Two
+    /// workers mint distinct Call-ID / Via-branch / To-tag streams (they share one
+    /// masqueraded sent-by at the peer, where equal branches merge transactions),
+    /// a reboot does not replay its prior life's ids, and the seed is a pure
+    /// function of `(ordinal, gen)` so every run stays reproducible.
+    fn id_seed(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in self.ordinal.bytes().chain(self.gen.to_le_bytes()) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
     /// (Re)bind the SIP endpoint and spawn a fresh `B2buaCore` over it with the
     /// given replication setup.
     async fn spawn_core(&self, replication: Option<ReplicationSetup>) -> B2buaCore {
@@ -548,7 +600,7 @@ impl ReplicatedB2buaSut {
             outbound_proxy: self.outbound_proxy.clone(),
             replication,
             clock: self.clock.clone(),
-            id_gen: Arc::new(IdGen::seeded(0xB2B0 + self.gen)),
+            id_gen: Arc::new(IdGen::seeded(self.id_seed())),
             cdr: self.cdr.clone(),
             // DETERMINISTIC overload signal (ELU pinned to 0). The default `None`
             // rides `OverloadSignal::live`, whose `LiveLoadSampler` reads the REAL
@@ -574,6 +626,7 @@ impl ReplicatedB2buaSut {
             // stack's behaviour is identical to the pre-seam wiring.
             store: None,
             store_faults: None,
+            wire_faults: None,
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.
@@ -591,15 +644,6 @@ impl ReplicatedB2buaSut {
             config.keepalive_interval_sec = 300;
             config.keepalive_timeout_sec = 45;
             config.reboot_budget_sec = 600;
-            // Disable the RFC 3261 §13.3.1.4 un-ACKed-2xx watchdog in this harness:
-            // the `confirmed_pre_ack` matrix cells deliberately hold the dialog in
-            // the pre-ACK window for longer than the 1 s 2xx-retransmit cadence, so
-            // the watchdog would emit retransmits that the strict differential
-            // transparency oracle (baseline vs failover, token-for-token) is not
-            // designed to align — they are pure noise for what this harness tests
-            // (SIP-transparent failover), exercised instead by the dedicated
-            // `unacked_2xx_reap` b2bua-harness test.
-            config.ack_timeout_sec = 0;
             // The scenario tune runs LAST so it can override any parity
             // default above — on this spawn and on every reboot re-spawn.
             (self.tune)(config);
@@ -761,10 +805,10 @@ pub struct FailoverHarness {
     worker_tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
 }
 
-/// The in-dialog CSeq-ordering audit rule (`sip_net::rfc_audit`), named here so
+/// The in-dialog CSeq-ordering audit rule (`rfc_rules::rules::cseq`), named here so
 /// the failover tests can waive it by a symbol rather than a bare string. See
 /// [`FailoverHarness::accept_rfc_deviations_from_now`].
-pub const RULE_CSEQ_IN_DIALOG_ORDER: &str = "rfc3261.cseqInDialogOrder";
+pub const RULE_CSEQ_IN_DIALOG_ORDER: &str = "cseq-in-dialog-order";
 
 /// `127.0.0.1:9400+n` — a stable per-ordinal repl listen address.
 fn repl_addr_for(index: usize) -> SocketAddr {
@@ -1272,6 +1316,27 @@ impl FailoverHarness {
         self.mark(a, Some(b), "partition", "");
     }
 
+    /// Delay delivery on every replication stream `from`'s listener serves by
+    /// `ms` — the frames it sends down the connections pullers opened to it
+    /// (both of `to`'s flows). A flush `from` writes lands on `to` only `ms`
+    /// later. Marker.
+    pub fn delay_streams_from(&mut self, from: &str, to: &str, ms: u64) {
+        let listener = self.repl_addrs[from];
+        let listeners: Vec<SocketAddr> = self.repl_addrs.values().copied().collect();
+        let clients: std::collections::BTreeSet<SocketAddr> = self
+            .repl_report()
+            .frames
+            .iter()
+            .filter(|f| f.from == listener && !listeners.contains(&f.to))
+            .map(|f| f.to)
+            .collect();
+        assert!(!clients.is_empty(), "no replication stream from {from}'s listener to a puller");
+        for client in &clients {
+            self.repl_sim.apply_fault(Fault::Delay { src: listener, dst: *client, ms });
+        }
+        self.mark(from, Some(to), "delay", &format!("{ms}ms on {listener} → {clients:?}"));
+    }
+
     /// Heal a repl-fabric partition. Marker.
     pub fn heal(&mut self, a: &str, b: &str) {
         let (aa, ba) = (self.repl_addrs[a], self.repl_addrs[b]);
@@ -1443,9 +1508,9 @@ impl FailoverHarness {
     /// stream across worker binds, so per-bind peer rules would report phantom
     /// findings on the internal nodes). A NON-failover via-LB test — where no
     /// call ever changes workers — can and should opt into the full per-bind
-    /// suite, which is exactly what gates the downstream (upstreamsip) e2e runs:
+    /// suite, which is exactly what gates the downstream e2e runs:
     /// it is the only lane that judges the **relay (proxy) bind's** own client
-    /// transactions (e.g. `rfc3261.via` §8.1.3/§17.1.3 response matching).
+    /// transactions (e.g. `response-echoes-request-via` §8.1.3/§17.1.3 response matching).
     pub fn assert_full_rfc_clean(&self, cell: &str) {
         let events = self.harness.recording().channel().snapshot();
         // `offending` is a 1-based index into the AUDIT-visible wire entries — the
@@ -1546,11 +1611,16 @@ impl FailoverHarness {
 
     /// Record a rebooted worker's NEW SIP address. Updates the report's
     /// latest-addr map (so the unified report's column tracks the live
-    /// incarnation) AND accumulates it into the CSeq-audit exclusion set — the
+    /// incarnation) AND accumulates it into the RFC-audit exclusion set — the
     /// PRE-reboot incarnation's bind must stay excluded too, else the
     /// endpoint-scoped audit would mistake the worker's internal per-leg CSeq
-    /// stream (split across incarnations) for an endpoint skip.
-    pub(crate) fn note_worker_rebound(&mut self, ordinal: &str, new_addr: SocketAddr) {
+    /// stream (split across incarnations) for an endpoint skip, or read its
+    /// reclaimed in-dialog keepalive as a request outside any dialog.
+    ///
+    /// **Every reboot that re-points traffic at the new address calls this** —
+    /// a worker bind the exclusion set does not name is audited as if it were a
+    /// real UA, which [`audited_events`](Self::audited_events) exists to prevent.
+    pub fn note_worker_rebound(&mut self, ordinal: &str, new_addr: SocketAddr) {
         self.worker_sip_addrs.insert(ordinal.to_string(), new_addr);
         self.all_worker_sip_addrs.push(new_addr);
     }
@@ -1629,6 +1699,7 @@ impl FailoverHarness {
                 endpoint: None,
                 advisory: Some(false),
                 row_seqs: Vec::new(),
+                rule_sourced: true,
             });
         }
         for (rule, lane, detail) in accepted {
@@ -1639,6 +1710,7 @@ impl FailoverHarness {
                 endpoint: None,
                 advisory: Some(true),
                 row_seqs: Vec::new(),
+                rule_sourced: true,
             });
         }
         doc

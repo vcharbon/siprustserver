@@ -31,7 +31,7 @@ use sip_net::{audit_wire_entries, RecordedSipEntry, RfcFinding, SignalingNetwork
 /// message); narrow it with [`on_party`](Self::on_party) / [`at_position`](Self::at_position).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaiverScope {
-    /// The audit rule id waived (e.g. `"rfc3261.cseqInDialogOrder"`).
+    /// The audit rule id waived (e.g. `"cseq-in-dialog-order"`).
     pub rule: String,
     /// The EMITTING party (a bind/lane name) whose non-compliance is waived;
     /// `None` = any party. A finding emitted by a different party is never
@@ -170,15 +170,18 @@ fn covers(
 
 /// The non-advisory findings that SURVIVE the waivers (marking each covering
 /// waiver used) — the shared core of both apply variants. Attribution
-/// references each finding's `offending` wire-entry index directly.
+/// references each finding's `offending` wire-entry index directly. Takes the
+/// PRE-EVALUATED suite output so a caller that already ran
+/// `sip_net::evaluate_rfc_findings` (the finish gate) never runs it twice.
 fn survivors(
+    findings: &[RfcFinding],
     events: &[Stamped<SignalingNetworkEvent>],
     waivers: &[WaiverState],
     attr: &Attribution,
 ) -> Vec<RfcFinding> {
     let entries = audit_wire_entries(events);
-    sip_net::evaluate_rfc_findings(events)
-        .into_iter()
+    findings
+        .iter()
         .filter(|f| !f.advisory)
         .filter(|f| {
             let mut waived = false;
@@ -190,18 +193,21 @@ fn survivors(
             }
             !waived
         })
+        .cloned()
         .collect()
 }
 
-/// Apply the waivers to the audit findings: drop every non-advisory finding a
-/// waiver covers (marking that waiver used), returning the remaining gating
-/// `(lane, detail)` pairs — the functional-lane (addr→name) attribution.
+/// Apply the waivers to the PRE-EVALUATED audit findings: drop every
+/// non-advisory finding a waiver covers (marking that waiver used), returning
+/// the remaining gating `(lane, detail)` pairs — the functional-lane
+/// (addr→name) attribution.
 pub(super) fn apply_waivers(
+    findings: &[RfcFinding],
     events: &[Stamped<SignalingNetworkEvent>],
     waivers: &[WaiverState],
     addr_names: &HashMap<SocketAddr, String>,
 ) -> Vec<(String, String)> {
-    survivors(events, waivers, &Attribution::AddrNames(addr_names))
+    survivors(findings, events, waivers, &Attribution::AddrNames(addr_names))
         .into_iter()
         .map(|f| (f.lane, f.detail))
         .collect()
@@ -210,13 +216,15 @@ pub(super) fn apply_waivers(
 /// The finding-preserving apply variant (ADR-0024 §6): the surviving structured
 /// [`RfcFinding`]s, so the load driver can bucket them by rule id (not by "first
 /// error seen"). Marks each covering waiver used (read `WaiverState::used`
-/// after, per campaign). `attr` is the lane's party attribution.
+/// after, per campaign). `attr` is the lane's party attribution. Evaluates the
+/// suite itself — the load lane has no shared report to reuse a set from.
 pub(crate) fn apply_waivers_findings(
     events: &[Stamped<SignalingNetworkEvent>],
     waivers: &[WaiverState],
     attr: &Attribution,
 ) -> Vec<RfcFinding> {
-    survivors(events, waivers, attr)
+    let findings = sip_net::evaluate_rfc_findings(events);
+    survivors(&findings, events, waivers, attr)
 }
 
 /// The declared waivers that filtered NOTHING and are not `conditional` — an
@@ -256,10 +264,11 @@ mod tests {
             detail: "d".into(),
             advisory: false,
             offending: Some(offending),
+            charged: None,
         }
     }
 
-    const RULE: &str = "rfc3261.cseqInDialogOrder";
+    const RULE: &str = "cseq-in-dialog-order";
 
     /// ADR-0024 §6 load-lane specific: sub-lane party attribution. Two logical
     /// legs share ONE mux socket; a party-scoped waiver covers ONLY the leg it

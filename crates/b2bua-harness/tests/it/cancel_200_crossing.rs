@@ -27,7 +27,7 @@ use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -72,6 +72,16 @@ async fn cancel_200_crossing_acks_then_byes_the_b_leg_and_releases_the_limiter()
     let h = Harness::new("b2bua-cancel-200-crossing");
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
+    // The deliberate corner: bob takes the B2BUA's CANCEL and answers 200
+    // anyway — the crossing this test exists to resolve. Scoped to bob, so the
+    // same rule still gates every B2BUA bind.
+    h.waive(
+        WaiverScope::rule(
+            "no-200-after-cancel",
+            "bob deliberately answers 200 after taking the CANCEL (RFC 3261 §9.2) — the crossing under test",
+        )
+        .on_party("bob"),
+    );
 
     let http = SimulatedHttpNetwork::new();
     let (store, _limiter_srv) = serve_limiter(&http).await;

@@ -50,7 +50,7 @@ async fn cancel_consumed_parked_invite_fails_respond_fast() {
         settle: SettleBarrier::default_ceiling(),
         // The §5 automatic: the parked INVITE draws an immediate 100, so
         // the CANCEL follows a provisional (RFC 3261 §9.1).
-        automatics: Automatics { answer_100_trying: true },
+        automatics: Automatics { answer_100_trying: true, ..Default::default() },
         delta_policy: None,
         reception_observer: None,
     };
@@ -131,6 +131,7 @@ async fn scripted_cancel_reception_487_rides_bound_invite() {
                             kind: RequestKind::Initial,
                             body: BodyExpect::SdpPresent,
                             matcher: None,
+                            rank: None,
                         },
                     ),
                     Goal::new(
@@ -147,6 +148,7 @@ async fn scripted_cancel_reception_487_rides_bound_invite() {
                             kind: RequestKind::Cancel,
                             body: BodyExpect::Any,
                             matcher: None,
+                            rank: None,
                         },
                     ),
                     Goal::new(
@@ -216,6 +218,7 @@ async fn cancel_automatic_487s_script_bound_invite() {
                             kind: RequestKind::Initial,
                             body: BodyExpect::SdpPresent,
                             matcher: None,
+                            rank: None,
                         },
                     ),
                     Goal::new(
@@ -301,6 +304,7 @@ async fn parked_cancel_waits_for_dwelling_cancel_expectation() {
                             kind: RequestKind::Initial,
                             body: BodyExpect::SdpPresent,
                             matcher: None,
+                            rank: None,
                         },
                     ),
                     Goal::new(
@@ -320,6 +324,7 @@ async fn parked_cancel_waits_for_dwelling_cancel_expectation() {
                             kind: RequestKind::Cancel,
                             body: BodyExpect::Any,
                             matcher: None,
+                            rank: None,
                         },
                     )
                     .after(Duration::from_millis(300)),

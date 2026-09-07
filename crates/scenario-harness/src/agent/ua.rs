@@ -4,8 +4,8 @@
 //! absorbing receive policies live in [`super::tolerant_recv`].
 
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sip_message::generators::{
@@ -17,7 +17,6 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipHeader, SipMessage, SipParser, SipRequest, SipResponse, SipStr};
 use sip_net::UdpEndpoint;
 
-use super::addressing::top_via_branch;
 use super::client_txn::expect_response;
 use super::dialog::InDialogTxn;
 use super::harness::Ids;
@@ -25,7 +24,7 @@ use super::out_of_dialog::OutOfDialogRequest;
 use super::rr_fold::RecordRouteFold;
 use super::server_txn::ServerTxn;
 use super::step::{unwrap_step, StepError};
-use super::txn_view::{AckObligations, TxnVerdict, TxnView};
+use crate::absorption::{Absorption, Owner, TwoXxAcks, WireEntry};
 use super::Invite;
 
 /// The media type a scenario names as text. A value the reader rejects still
@@ -91,12 +90,17 @@ pub struct Agent {
     pub(crate) rr_fold: RecordRouteFold,
     /// Per-`recv` wait bound, inherited from the `Harness` (Endpoint config).
     pub(crate) recv_timeout: Duration,
-    /// §17.2 once-and-only-once receive view ([`TxnView`]). Shared across
-    /// clones — one transaction table per logical UA.
-    pub(crate) txn: Arc<TxnView>,
-    /// §17.1.1.3 UAS-side ACK obligations ([`AckObligations`]). Shared across
-    /// clones — one table per logical UA.
-    pub(crate) acks: Arc<AckObligations>,
+    /// This UA's receive-side transaction layer ([`Absorption`]) — the §17.2
+    /// classification, the §17.1.1.3 hop-ACK ledger, and the log both views
+    /// project from. Shared across clones: one per logical UA.
+    pub(crate) txn: Arc<Absorption>,
+    /// The ACKs this UA's core sent to 2xx finals, so a retransmitted 2xx is
+    /// answered again (§13.2.2.4). Shared across clones.
+    pub(crate) two_xx_acks: Arc<TwoXxAcks>,
+    /// Datagrams ALREADY sighted by [`sight_queued`](Agent::sight_queued) and
+    /// kept by the TU view, waiting for the body's next pull. Every receive
+    /// path drains it first, so sighting early never reorders the stream.
+    pub(crate) holdback: Arc<Mutex<VecDeque<Result<SipMessage, StepError>>>>,
 }
 
 impl Agent {
@@ -115,15 +119,24 @@ impl Agent {
         Arc::as_ptr(&self.txn) as *const () as usize
     }
 
-    /// Drop this UA to the **raw wire surface**: disable the §17.2
-    /// once-and-only-once receive view ([`TxnView`]) so EVERY duplicate
-    /// datagram surfaces again. Reach for this ONLY when retransmission is
-    /// the *subject* of the test (Timer A/E assertions, ring-again pinning,
-    /// drop-rate recovery) — the same sanction rule as
-    /// [`Harness::allow_violation`](super::Harness::allow_violation). Affects
-    /// every clone of this UA.
-    pub fn wire_view(&self) {
-        self.txn.wire.store(true, Ordering::Relaxed);
+    /// Every datagram this UA received, in arrival order, each tagged with the
+    /// view it belongs to (issue 22's table, in [`crate::absorption`]).
+    pub fn wire_view(&self) -> Vec<WireEntry> {
+        self.txn.wire_view()
+    }
+
+    /// What this UA's transaction user saw: the `SeenBy::Both` subset of
+    /// [`wire_view`](Self::wire_view), in the same order.
+    pub fn tu_view(&self) -> Vec<WireEntry> {
+        self.txn.tu_view()
+    }
+
+    /// Stop absorbing duplicates: every repeat reaches this UA's pulls again.
+    /// Reach for this only when a body must PULL each repeat itself — reading
+    /// [`wire_view`](Self::wire_view) is how a test counts retransmissions now.
+    /// Affects every clone of this UA.
+    pub fn drop_to_raw_wire(&self) {
+        self.txn.disable_dedup();
     }
 
     pub(super) fn branch(&self) -> String {
@@ -169,7 +182,41 @@ impl Agent {
         msg: &SipMessage,
         dst: SocketAddr,
     ) -> Result<(), StepError> {
+        // Every ACK this UA sends is cached (§13.2.2.4): if the final it
+        // answers is retransmitted, the CORE owes the same ACK again. A hop ACK
+        // to a non-2xx is cached too and never read — its final is absorbed as a
+        // transaction-layer duplicate before the cache is ever consulted.
+        if let SipMessage::Request(r) = msg {
+            if r.method().as_str() == "ACK" {
+                if let Some(tag) = r.to().tag() {
+                    self.two_xx_acks.remember(
+                        r.call_id().to_string(),
+                        r.cseq().seq(),
+                        tag.to_string(),
+                        r.clone(),
+                        dst,
+                    );
+                }
+            }
+        }
         self.try_send_wire(&serialize(msg), dst).await
+    }
+
+    /// **The datagram seam**, for a driver that owns its own dialog state and
+    /// composes through `sip_message::generators` rather than through the
+    /// fluent builders: one already-rendered datagram out, recorded exactly as
+    /// [`try_send`](Agent::try_send) records it.
+    ///
+    /// Reach for it only when the caller IS the stack — a scenario interpreter
+    /// sequencing arbitrary steps across legs cannot use the pull-shaped
+    /// transaction handles, because it must dispatch what ARRIVES to whichever
+    /// leg claims it. A test driving one call still uses the builders.
+    pub async fn try_send_datagram(
+        &self,
+        wire: &[u8],
+        dst: SocketAddr,
+    ) -> Result<(), StepError> {
+        self.try_send_wire(wire, dst).await
     }
 
     /// Send an ALREADY-rendered datagram. A message this UA froze carries its
@@ -188,33 +235,103 @@ impl Agent {
     }
 
     /// THE receive core: one SIP datagram surfaced through the §17.2 receive
-    /// view ([`TxnView`]). A timeout / closed queue / parse error is a
+    /// view ([`Absorption`]). A timeout / closed queue / parse error is a
     /// [`StepError`]; the functional lane panics on it via [`recv`](Agent::recv).
     ///
     /// Every surfaced ACK is also SIGHTED against the §17.1.1.3 obligation
-    /// table ([`AckObligations`]) — fulfilment is recorded here so it happens
+    /// ledger ([`Absorption`]) — fulfilment is recorded here so it happens
     /// on ANY pull path, but the absorb decision stays with the caller
     /// ([`ack_obligation_claims`](Agent::ack_obligation_claims) at the
     /// would-be-error sites), so an explicit `receive("ACK")` keeps working.
     pub(super) async fn try_recv(&self) -> Result<SipMessage, StepError> {
         loop {
+            if let Some(held) = self.take_held() {
+                return held;
+            }
             let pkt = match tokio::time::timeout(self.recv_timeout, self.ep.recv()).await {
                 Err(_) => return Err(StepError::Timeout { who: self.name.clone() }),
                 Ok(None) => return Err(StepError::QueueClosed { who: self.name.clone() }),
                 Ok(Some(p)) => p,
             };
-            let msg = CustomParser::new().parse(&pkt.raw).map_err(|e| StepError::Unparseable {
-                who: self.name.clone(),
-                detail: e.to_string(),
-            })?;
-            if let SipMessage::Request(r) = &msg {
-                self.ack_obligation_claims(r);
-            }
-            match self.txn.verdict(&pkt.raw, &msg) {
-                TxnVerdict::Surface => return Ok(msg),
-                TxnVerdict::Absorb => continue,
+            let msg = match self.parse(&pkt.raw) {
+                Ok(msg) => msg,
+                Err(e) => return Err(e),
+            };
+            if let Some(msg) = self.surface(&pkt.raw, msg).await {
+                return Ok(msg);
             }
         }
+    }
+
+    /// Bring the wire view current WITHOUT pulling: sight every datagram
+    /// already queued on this UA's socket, so a retransmission the body will
+    /// never pull is still in [`wire_view`](Agent::wire_view). What the TU view
+    /// keeps is held back, in arrival order, for the body's next receive.
+    pub async fn sight_queued(&self) {
+        while let Some(pkt) = self.ep.try_recv() {
+            let held = match self.parse(&pkt.raw) {
+                Err(e) => Some(Err(e)),
+                Ok(msg) => self.surface(&pkt.raw, msg).await.map(Ok),
+            };
+            if let Some(held) = held {
+                self.holdback.lock().unwrap().push_back(held);
+            }
+        }
+    }
+
+    /// The next already-sighted datagram, if `sight_queued` left one.
+    fn take_held(&self) -> Option<Result<SipMessage, StepError>> {
+        self.holdback.lock().unwrap().pop_front()
+    }
+
+    /// The next TU-visible datagram available WITHOUT waiting: the holdback
+    /// first, then whatever is queued on the socket, each sighted once.
+    /// `None` when nothing is pending — the poll-advance idiom's stop signal.
+    pub(crate) async fn take_held_or_queued(&self) -> Option<Result<SipMessage, StepError>> {
+        loop {
+            if let Some(held) = self.take_held() {
+                return Some(held);
+            }
+            let pkt = self.ep.try_recv()?;
+            match self.parse(&pkt.raw) {
+                Err(e) => return Some(Err(e)),
+                Ok(msg) => {
+                    if let Some(msg) = self.surface(&pkt.raw, msg).await {
+                        return Some(Ok(msg));
+                    }
+                }
+            }
+        }
+    }
+
+    fn parse(&self, raw: &[u8]) -> Result<SipMessage, StepError> {
+        CustomParser::new().parse(raw).map_err(|e| StepError::Unparseable {
+            who: self.name.clone(),
+            detail: e.to_string(),
+        })
+    }
+
+    /// **The absorption seam**: classify one arriving datagram once
+    /// ([`Absorption::sight`]) and decide whether this pull sees it.
+    /// `None` means the transaction layer kept it — a §17.2 duplicate, or a
+    /// retransmitted 2xx this UA's core answered by re-sending the ACK it owes
+    /// (§13.2.2.4), which is the TU acting on a datagram the TU view keeps.
+    /// A txn-owned hop ACK still SURFACES here: the pull sites claim it, so an
+    /// explicit `receive("ACK")` keeps working.
+    pub(crate) async fn surface(&self, raw: &[u8], msg: SipMessage) -> Option<SipMessage> {
+        let sighting = self.txn.sight(raw, &msg);
+        if sighting.owner == Owner::TxnDuplicate {
+            return None;
+        }
+        if sighting.repeat {
+            if let SipMessage::Response(r) = &msg {
+                if let Some((ack, dst)) = self.two_xx_acks.owed_for(r) {
+                    let _ = self.try_send(&SipMessage::Request(ack), dst).await;
+                    return None;
+                }
+            }
+        }
+        Some(msg)
     }
 
     /// Whether `r` is the hop ACK of an armed §17.1.1.3 obligation on this UA.
@@ -223,8 +340,7 @@ impl Agent {
     /// the ACK-races-the-next-INVITE interleave, in either order, never trips
     /// a body.
     pub(crate) fn ack_obligation_claims(&self, r: &SipRequest) -> bool {
-        r.method().as_str() == "ACK"
-            && top_via_branch(r).is_some_and(|b| self.acks.note_ack(r.call_id().as_str(), &b))
+        self.txn.hop_ack_claims(r)
     }
 
     /// THE request-receive core: receive the next request and check its method,
@@ -265,7 +381,7 @@ impl Agent {
     }
 
     /// Receive the next inbound message of EITHER kind through the shared §17.2
-    /// receive view ([`TxnView`]) — the reactive-actor primitive (the
+    /// receive view ([`Absorption`]) — the reactive-actor primitive (the
     /// [`crate::actor`] reactor dispatches on this instead of asserting one
     /// expected message, so a late / reordered / retransmitted datagram is
     /// always consumed). A timeout / closed queue / parse error is a
@@ -303,7 +419,7 @@ impl Agent {
     /// (closing its `reject-final` ledger obligation). Never times out; run it
     /// as a bounded `select!` arm.
     pub(crate) async fn hop_ack_fulfilled(&self, call_id: &str, branch: &str) {
-        self.acks.fulfilled(call_id, branch).await
+        self.txn.hop_ack_fulfilled(call_id, branch).await
     }
 
     /// Begin an out-of-dialog INVITE to `peer`. Returns a builder; call
@@ -352,6 +468,19 @@ impl Agent {
             n += 1;
         }
         n
+    }
+
+    /// The next TU-visible datagram already queued at this UA, WITHOUT waiting
+    /// — `None` when nothing is pending. For a body that observes what a window
+    /// it held open delivered (the rungs of a ladder the peer is still
+    /// climbing) rather than expecting one message. Passes the absorption seam
+    /// like every receive, so a §17.2 duplicate never surfaces here either.
+    /// Panics on an unparseable datagram, as the functional lane does.
+    pub async fn take_queued(&self) -> Option<SipMessage> {
+        match self.take_held_or_queued().await? {
+            Ok(msg) => Some(msg),
+            Err(e) => panic!("{} received an unparseable datagram: {e}", self.name),
+        }
     }
 
     /// Send an out-of-dialog REFER addressed to `dst` whose To carries a bogus

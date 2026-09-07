@@ -1,29 +1,30 @@
-//! **TEST-ONLY.** RFC 3261 / 3262 / 3264 audit rules over the recorded
-//! signaling layer — the Rust port of `tests/harness/rules/rfc/*` from the
-//! TypeScript reference server.
+//! **TEST-ONLY.** The RFC 3261 / 3262 / 3264 audit over the recorded signaling
+//! layer.
 //!
-//! These run at layer close (when wired into [`ScopedAuditOptions`](crate::ScopedAuditOptions))
-//! or directly over a channel snapshot via [`rfc_cross_message_rules`] /
-//! [`rfc_peer_rules`]. They flag on-wire protocol invariants that a real
-//! UAC/UAS enforces but the test UAs (which answer whatever they are handed,
-//! regardless of CSeq / tags / Route) do not — so the recording itself, not the
-//! per-step `expect`, is where those invariants are checked. Wiring the full set
-//! into the default options gives every harness run the same "post-run all
-//! clean" RFC check the live SIPp endpoints apply in endurance.
+//! It runs at layer close (when wired into
+//! [`ScopedAuditOptions`](crate::ScopedAuditOptions)) or directly over a channel
+//! snapshot via [`rfc_cross_message_rules`], and flags on-wire protocol
+//! invariants that a real UAC/UAS enforces but the test UAs (which answer
+//! whatever they are handed, regardless of CSeq / tags / Route) do not — so the
+//! recording itself, not the per-step `expect`, is where those invariants are
+//! checked. Wiring the full set into the default options gives every harness run
+//! the same "post-run all clean" RFC check the live SIPp endpoints apply in
+//! endurance.
 //!
-//! Module layout mirrors the TS source files:
-//!   - [`cseq`]          — the original RFC 3261 §8/§12/§13 CSeq family (cross).
-//!   - [`starter_peer`]  — generic per-message peer validators (TS `starter-peer-rules.ts`).
-//!   - [`rfc3261_peer`] / [`rfc3262_peer`] / [`rfc3264_peer`] — per-RFC peer rules.
-//!   - [`cross_generic`] — generic per-dialog cross-message rules (TS `cross-message-rules.ts`).
-//!   - [`rfc3261_cross`] / [`rfc3262_cross`] / [`rfc3264_cross`] — per-RFC cross rules.
-//!   - [`offer_answer_state`] — the per-dialog offer/answer round state machine.
-//!   - [`server_txn_final`] — §17.2.1 one-final-per-server-transaction.
+//! **Every rule body lives once in `rfc-rules`**; [`wire_adapter`] is the only
+//! thing here that runs one, surfacing it under this layer's vantage and
+//! advisory policy. Cross-message and per-message rules alike: a per-message
+//! rule's occasion is one message at one vantage, so its vantage policy is the
+//! plain reading of the two the adapter already has — charged at the emitter for
+//! what a sender MINTS, at the taker for what the recording checks about a
+//! lane's peer.
 //!
-//! Shared helpers (ports of the TS `_*.ts` helpers):
-//!   - [`dialog_model`]    — `_dialog-model.ts`: per-agent dialog state + per-dialog projector.
-//!   - [`txn_correlation`] — `_transaction-correlation.ts`: top-Via-branch request/response index.
-//!   - [`offer_answer`]    — `_offer-answer.ts`: SDP offer/answer lift (over `sip_message::sdp`).
+//! [`msg_reads`] holds the per-message accessors the adapter builds a
+//! `rfc_rules::Msg` from; [`relay_lanes`] classifies which lanes forward rather
+//! than author, the one policy input the adapter needs beyond the rule bodies.
+//!
+//! SDP grammar is NOT here: a description is read as a document by
+//! [`sip_message::sdp_doc`], the one home for it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -32,7 +33,7 @@ use layer_harness::Stamped;
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParserLimits;
 
-use crate::contracts::{CrossMessageAuditRule, PeerAuditRule, SignalingNetworkEvent};
+use crate::contracts::{CrossMessageAuditRule, SignalingNetworkEvent};
 use crate::types::{all_ua_roles, UaRole};
 
 /// The **lenient** parser the audit layer uses (port of the TS
@@ -47,57 +48,20 @@ pub(crate) fn lenient_parser() -> CustomParser {
     CustomParser::with_limits(SipParserLimits { wire_grammar: false, ..Default::default() })
 }
 
-pub mod cseq;
-
 // Shared helpers.
-pub mod dialog_model;
-pub mod offer_answer;
-pub mod txn_correlation;
+pub mod msg_reads;
+pub mod relay_lanes;
 
-// Per-message peer rules.
-pub mod rfc3261_peer;
-pub mod rfc3262_peer;
-pub mod rfc3264_peer;
-pub mod starter_peer;
-
-// Per-dialog / cross-message rules.
-pub mod cross_generic;
-pub mod rfc3261_cross;
-pub mod offer_answer_state;
-pub mod rfc3262_cross;
-pub mod rfc3264_cross;
-pub mod server_txn_final;
-
-// Keep the original public name exported for back-compat.
-pub use cseq::CSeqInDialogOrderRule;
-
-/// The full default set of **per-message peer** RFC rules every test harness
-/// installs by default (see [`crate::with_all_contracts`] and the
-/// `scenario-harness` `Harness`). Each rule runs against a single bind's events
-/// and only when its `subject()` intersects that bind's declared roles.
-pub fn rfc_peer_rules() -> Vec<Arc<dyn PeerAuditRule>> {
-    let mut v: Vec<Arc<dyn PeerAuditRule>> = Vec::new();
-    v.extend(starter_peer::peer_rules());
-    v.extend(rfc3261_peer::peer_rules());
-    v.extend(rfc3262_peer::peer_rules());
-    v.extend(rfc3264_peer::peer_rules());
-    v
-}
+// The rfc-rules live adapter (issue 29): merged rule bodies surfaced as
+// cross-message findings, replacing their dotted-id predecessors rung by rung.
+pub mod wire_adapter;
 
 /// The full default set of **cross-message** RFC rules every test harness
 /// installs by default. One pass over the whole recorded channel at layer
 /// close; each finding carries its originating bind so subject dispatch and the
 /// hard gate can filter it.
 pub fn rfc_cross_message_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
-    let mut v: Vec<Arc<dyn CrossMessageAuditRule>> = Vec::new();
-    v.extend(cseq::cross_rules());
-    v.extend(cross_generic::cross_rules());
-    v.extend(rfc3261_cross::cross_rules());
-    v.extend(rfc3262_cross::cross_rules());
-    v.extend(rfc3264_cross::cross_rules());
-    v.extend(offer_answer_state::cross_rules());
-    v.extend(server_txn_final::cross_rules());
-    v
+    wire_adapter::cross_rules()
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +74,7 @@ pub fn rfc_cross_message_rules() -> Vec<Arc<dyn CrossMessageAuditRule>> {
 /// finding is surfaced (reports, the e2e findings table) but never gates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RfcFinding {
-    /// The rule id (e.g. `rfc3261.proxy100WithinT100ms`).
+    /// The rule id (e.g. `proxy-100-within-grace`).
     pub rule: String,
     /// The bind (lane) the finding is attributed to.
     pub lane: String,
@@ -124,6 +88,11 @@ pub struct RfcFinding {
     /// position = the index). `None` ⇒ the rule does not (yet) populate it; such
     /// a finding is unattributable to a party/position and stays gated.
     pub offending: Option<usize>,
+    /// The bind the rule holds RESPONSIBLE: the one that emitted the offending
+    /// message, or owed the one never emitted. `lane` is where the finding is
+    /// REPORTED, which for a taker-vantage rule is the other party. `None` ⇒
+    /// the rule names no culprit.
+    pub charged: Option<String>,
 }
 
 /// The recorded wire entries THE AUDIT SEES — `to_sip_entries` over the
@@ -157,8 +126,8 @@ pub fn bind_roles_of(
     roles
 }
 
-/// Run the FULL default RFC suite (peer + cross-message rules) over a recorded
-/// trace, applying **subject dispatch** per finding: a finding is kept only when
+/// Run the FULL default RFC suite over a recorded trace, applying **subject
+/// dispatch** per finding: a finding is kept only when
 /// its rule's `subject()` intersects the originating bind's declared roles
 /// (default = all roles, so this only narrows when roles were declared at
 /// `bind_udp`). This is THE single evaluator — the harness hard gate panics on
@@ -166,7 +135,7 @@ pub fn bind_roles_of(
 /// its `advisory` tags — so the gate and the report can never disagree on
 /// which endpoint a rule applies to.
 pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<RfcFinding> {
-    // Audit view (upstreamneed-036 ask A): consumption markers and modeled-loss /
+    // Audit view: consumption markers and modeled-loss /
     // infra-absorbed arrivals are projection-only — filtered here so EVERY
     // caller (harness hard gate, e2e collector, report projection) hands the
     // rules the same view of the wire.
@@ -189,7 +158,7 @@ pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<R
     // Cross-message rules — one pass over the whole channel each.
     for rule in rfc_cross_message_rules() {
         let subject = rule.subject();
-        for (bind, detail, offending) in rule.check_positioned(events) {
+        for (bind, detail, offending, charged) in rule.check_positioned(events) {
             if subject_hits(&subject, &bind) {
                 findings.push(RfcFinding {
                     rule: rule.name().to_string(),
@@ -197,42 +166,11 @@ pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<R
                     detail,
                     advisory: rule.force_advisory(),
                     offending,
+                    charged,
                 });
             }
         }
     }
 
-    // Peer rules — per-bind slice.
-    let peer_rules = rfc_peer_rules();
-    if !peer_rules.is_empty() {
-        let mut binds: Vec<String> = Vec::new();
-        for s in events {
-            let bk = s.event.bind_key();
-            if !binds.iter().any(|b| b == bk) {
-                binds.push(bk.clone());
-            }
-        }
-        for bind in &binds {
-            let slice: Vec<Stamped<SignalingNetworkEvent>> = events
-                .iter()
-                .filter(|s| s.event.bind_key() == bind)
-                .cloned()
-                .collect();
-            for rule in &peer_rules {
-                if !subject_hits(&rule.subject(), bind) {
-                    continue;
-                }
-                for detail in rule.check(&slice, bind) {
-                    findings.push(RfcFinding {
-                        rule: rule.name().to_string(),
-                        lane: bind.clone(),
-                        detail,
-                        advisory: rule.force_advisory(),
-                        offending: None,
-                    });
-                }
-            }
-        }
-    }
     findings
 }

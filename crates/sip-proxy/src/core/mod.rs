@@ -392,6 +392,9 @@ impl ProxyCore {
             let Some(pkt) = pkt else { break };
             // Intake-saturation signal: the packet's age at dequeue (arrival →
             // now) feeds the self-gate's ELU arm through the shared recorder.
+            // Both readings sit on THIS core's `Clock` — the endpoint stamps
+            // arrivals on it (`BindUdpOpts::clock`) — so the age is a duration
+            // on one timeline and carries no wall-vs-monotonic drift.
             self.intake_age.record(self.now_ms().saturating_sub(pkt.arrival_ms));
             self.metrics.record_face_ingress(face);
             let src = pkt.src;
@@ -403,7 +406,7 @@ impl ProxyCore {
             };
             match msg {
                 SipMessage::Request(_) => self.handle_request(msg, src).await,
-                SipMessage::Response(resp) => self.handle_response(resp).await,
+                SipMessage::Response(resp) => self.handle_response(resp, src).await,
             }
         }
     }
@@ -646,6 +649,7 @@ mod sweeper_tests {
                 target: ProxyAddr::new("10.0.0.2", 5070),
                 branch: "z9hG4bK-x".into(),
                 upstream_branch: String::new(),
+                stickiness: None,
             },
             RTX_ENTRY_TTL_MS,
         );
@@ -744,6 +748,50 @@ mod sweeper_tests {
 
         assert_eq!(recorder.drain_max(), 500, "the window max is the OLDEST packet's dequeue age");
         assert_eq!(recorder.drain_max(), 0, "drained — no new traffic reads 0");
+    }
+
+    /// The arrival stamp and the dequeue reading are ONE timeline. A `Clock`
+    /// anchored far from raw wall time — the wall-vs-monotonic divergence a
+    /// long-lived host accumulates — must not surface as intake age, or an
+    /// idle proxy reads critically overloaded and sheds every new call.
+    #[tokio::test(start_paused = true)]
+    async fn intake_age_is_immune_to_wall_versus_monotonic_divergence() {
+        use sip_net::types::BindUdpOpts;
+        use sip_net::{SignalingNetwork, SimulatedSignalingNetwork};
+
+        use crate::self_gate::AGE_CRITICAL_MS;
+
+        // 20× the age at which the ELU arm reads fully saturated.
+        let clock = Clock::test_at(sip_clock::raw_system_wall_ms() + 20 * AGE_CRITICAL_MS as i64);
+
+        // The arrival stamp comes from a REAL bind told that clock — the seam
+        // the runner wires; the bytes are deliberately unparseable (the age is
+        // recorded before the parse).
+        let net = SimulatedSignalingNetwork::new(1);
+        let uas: SocketAddr = "127.0.0.1:5061".parse().unwrap();
+        let uac = net
+            .bind_udp(BindUdpOpts::new("127.0.0.1:5062".parse().unwrap(), 8).with_clock(clock.clone()))
+            .await
+            .unwrap();
+        let ingress = net.bind_udp(BindUdpOpts::new(uas, 8).with_clock(clock.clone())).await.unwrap();
+        uac.send_to(b"not-sip", uas).await.unwrap();
+        let pkt = ingress.recv().await.expect("the fabric delivers one datagram");
+
+        let recorder = IntakeAgeRecorder::default();
+        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
+        let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
+            .clock(clock)
+            .intake_age(recorder.clone())
+            .build(Box::new(DrainOnceEndpoint(Mutex::new(vec![pkt]))))
+            .run()
+            .await;
+
+        let age = recorder.drain_max();
+        assert!(
+            age < AGE_CRITICAL_MS,
+            "an unqueued packet must age well under {AGE_CRITICAL_MS} ms whatever the wall/monotonic divergence, got {age} ms",
+        );
     }
 
     /// Per-peer metric classification: a destination that resolves to a known

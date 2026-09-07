@@ -50,7 +50,7 @@ async fn request_template_reinvite_completes_renegotiation() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -64,7 +64,7 @@ async fn request_template_reinvite_completes_renegotiation() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -125,7 +125,7 @@ async fn request_template_bye_tears_down() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -201,7 +201,7 @@ async fn request_template_early_update_rides_early_dialog() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -215,7 +215,7 @@ async fn request_template_early_update_rides_early_dialog() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -277,7 +277,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -291,7 +291,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],

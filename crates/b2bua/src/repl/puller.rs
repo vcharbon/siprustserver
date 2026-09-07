@@ -627,6 +627,7 @@ impl Puller {
                     } else {
                         ApplyMode::ForwardOrBootstrap
                     };
+                    let refused_body = body.clone();
                     let applied = self
                         .apply_to_store(
                             op, partition, &call_ref, call_gen, call_bgen, body_ttl_ms,
@@ -646,9 +647,21 @@ impl Puller {
                         // `(p,b)` gate dropped as dominated left the store untouched,
                         // so re-serving from it would be a spurious reclaim of a
                         // stale body (idempotent, but wasted work).
-                        if self.is_reclaim() && op == Op::Put && applied {
+                        if self.is_reclaim() && op == Op::Put {
                             if let Some(tx) = &self.repl_tx {
-                                let _ = tx.send(ReplCommand::ReclaimCall(call_ref.clone()));
+                                let cmd = if applied {
+                                    ReplCommand::ReclaimCall(call_ref.clone())
+                                } else {
+                                    // The vector refused it; the call model gets to
+                                    // read the body for lifecycle progress the
+                                    // counters cannot carry (ADR-0014 amendment).
+                                    ReplCommand::ReverseFlushRefused {
+                                        call_ref: call_ref.clone(),
+                                        body: refused_body.clone().unwrap_or_else(|| Arc::from(Vec::new())),
+                                        origin_now_ms,
+                                    }
+                                };
+                                let _ = tx.send(cmd);
                             }
                         }
                     }
@@ -736,8 +749,9 @@ impl Puller {
     /// bound.)
     /// Returns whether the mutation actually changed the store: a `Put` the
     /// `(p,b)` gate dropped as dominated returns `false`; an applied `Put` and any
-    /// `Delete` (delete-wins) return `true`. The reclaim tail uses this to suppress
-    /// a spurious `ReclaimCall` on a dropped reverse-flush.
+    /// `Delete` (delete-wins) return `true`. The reclaim tail reclaims on an
+    /// applied reverse flush and hands a refused one up with its body, so the
+    /// call model can fold lifecycle progress the vector cannot see.
     #[allow(clippy::too_many_arguments)]
     async fn apply_to_store(
         &self,

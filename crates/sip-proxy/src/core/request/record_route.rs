@@ -11,6 +11,7 @@ use sip_message::{SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
 use crate::headers::{record_route, record_route_flagged};
+use crate::strategy::RouteParams;
 
 use super::super::{is_dialog_creating, ProxyCore};
 
@@ -19,7 +20,9 @@ impl ProxyCore {
     /// (no To-tag); a no-op otherwise. A mid-dialog re-INVITE / target-refresh
     /// (To-tag present) reuses the route set already fixed at dialog creation
     /// (RFC 3261 §12.2), so re-inserting RR is inert bloat and never alters
-    /// the established route set.
+    /// the established route set. Returns the draft and the stickiness cookie
+    /// the inserted RR carries (`None` when nothing was inserted or the
+    /// strategy has no per-dialog stickiness).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn insert_double_record_route(
         &self,
@@ -30,11 +33,11 @@ impl ProxyCore {
         target: &ProxyAddr,
         is_worker_outbound: bool,
         via_worker_addr: &Option<ProxyAddr>,
-    ) -> RequestDraft {
+    ) -> (RequestDraft, Option<RouteParams>) {
         let method = req.method().as_str();
         let is_initial_dialog_req = req.to().tag().map(str::is_empty).unwrap_or(true);
         if !is_dialog_creating(method) || !is_initial_dialog_req {
-            return draft;
+            return (draft, None);
         }
         // Double record-route so in-dialog DIRECTION is intrinsic to the
         // proxy's own Record-Route — no worker-stamped `;outbound`. We insert
@@ -109,6 +112,6 @@ impl ProxyCore {
             draft.push_front(cookie_rr).push_front(outbound_rr)
         };
         self.metrics.record_route_inserted();
-        draft
+        (draft, stickiness)
     }
 }

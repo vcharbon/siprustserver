@@ -13,6 +13,12 @@ pub enum TransactionEvent {
     Message {
         message: Box<SipMessage>,
         src: SocketAddr,
+        /// A response: whether it matched a client transaction at dispatch — one
+        /// this node sent and this layer answers for, ACKing a non-2xx INVITE
+        /// final itself (RFC 3261 §17.1.1.3). A CANCEL response never matches
+        /// (it shares its INVITE's branch and is never handed to that
+        /// transaction); always `false` for a request.
+        matched_client_txn: bool,
     },
     /// A CANCEL matched a server INVITE txn; the 200/487 were sent by this
     /// layer. RFC 3261 §9 scopes a CANCEL to the one INVITE *transaction* it
@@ -48,7 +54,9 @@ pub enum TransactionEvent {
         /// recorded one (legacy/server paths) — consumers then skip per-peer
         /// attribution rather than fabricate an address.
         destination: Option<SocketAddr>,
-        /// Which timeout fired: the short response-detection timer (Timer B/F) vs
+        /// Which timeout fired: the short response-detection timer (Timer B/F,
+        /// or an initial INVITE's tightened
+        /// `TransactionConfig::invite_first_response_timeout_ms`) vs
         /// the configured out-of-dialog INVITE bound
         /// (`TransactionConfig::invite_initial_timeout_ms`, default 158 s). Lets
         /// consumers split `response_timeout` from `transaction_timeout`.
@@ -133,7 +141,9 @@ pub enum TxnKind {
 
 /// Which client-transaction timeout fired, so a consumer can split the metric.
 /// `Response` is the RFC 3261 §17.1 failure-detection timer (Timer B for INVITE,
-/// Timer F for non-INVITE — both 64×T1); `Transaction` is the configured
+/// Timer F for non-INVITE — both 64×T1 — or, for an initial INVITE, the
+/// tightened `TransactionConfig::invite_first_response_timeout_ms`): no
+/// response of any kind arrived, the hop is dead; `Transaction` is the configured
 /// out-of-dialog INVITE bound (`TransactionConfig::invite_initial_timeout_ms`,
 /// default 158 s — the call-setup ring window).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

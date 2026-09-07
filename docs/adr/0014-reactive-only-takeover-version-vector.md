@@ -358,3 +358,80 @@ chrony, host kept awake) — the SUT now bounds the residual, it does not licens
 drift. The failover harness gained a per-node clock-anchor-offset knob
 (`FailoverHarness::with_worker_clock_offset`) that injects deterministic inter-node
 wall skew on the single monotonic timeline, closing the single-clock fidelity gap.
+
+## Amendment — a materialisation re-seeds the INVITE transactions it is in the middle of
+
+Decision 1 says "SIP retransmission cannot bridge an outage". That holds for a
+quiescent dialog and is why takeover stays reactive. It does not hold for an
+INVITE in flight at the kill: the peers keep retransmitting for Timer A/B or
+Timer G/H, well past a failover, and a survivor that holds no transaction for
+that INVITE answers with the wrong thing (a TU-composed ACK sent once, a final
+sent raw with no Timer G, a 481 to the caller's CANCEL).
+
+**A materialisation (reactive takeover, on-demand or bulk reclaim) re-seeds the
+INVITE transactions the replicated record names**, in one router module
+(`b2bua/src/router/materialise`) that every path runs:
+
+- a `Proceeding` client INVITE for each INVITE handle still open (the record
+  says which; a handle kept for a taken 2xx's re-ACK is not in flight), with
+  the INVITE bound armed and no re-send;
+- a `Proceeding` server INVITE for the a-leg's initial INVITE while the a-leg
+  is unanswered (request rebuilt from the replicated snapshot, To-tag pinned),
+  and for each pending relayed INVITE (no request retained: it absorbs the
+  retransmission and replays a 100, and a CANCEL naming it is handed up).
+
+The datagram that caused the materialisation is re-offered to the transaction
+layer after the seed, so the layer owns every hop ACK, Timer D re-ACK and
+Timer G ladder, and the rules see a final like any other. The self-release
+watch is armed after the seed: a takeover copy is resident exactly while a
+transaction it holds is live, the definition in "Self-release mechanism". One
+asymmetry follows: the a-leg seed is attributed to the call while the admit
+path attributes an initial INVITE to no call, so a ringing call's takeover copy
+whose b-leg is rejected releases when the caller ACKs the relayed final (or on
+Timer H), where the primary's own copy released on the turn it went Terminated.
+
+Three contracts change with it. The transaction layer no longer invents a
+transaction for a non-2xx INVITE final on a branch it never saw (the final
+leaves raw and `server_final_unseen_branch` counts it), and no longer answers a
+CANCEL it cannot match: the CANCEL is handed up, and the router answers the
+RFC 3261 §9.2 481 when nothing seeded claims it. Teardown answers every pending
+relayed INVITE 487 before the BYEs (§15.1.2). And the takeover lookup refuses a
+`Terminated` replica (`repl_takeover_refused_terminated`), which the backup
+retains on purpose for the primary to fold or reclaim; `Terminating` is served.
+
+The front proxy's CANCEL memo (Decision 5's ACK/CANCEL exemption) re-resolves a
+dead pinned worker through the stickiness cookie's own health ladder, so the
+caller's give-up reaches the survivor that holds the seeded INVITE.
+
+Pinned by `failover-harness/tests/{prack_takeover,inflight_resend,released_copy}.rs`,
+`sip-txn/tests/seed.rs` and `b2bua/src/router/materialise/tests.rs`.
+
+## Amendment — lifecycle progress folds over a refused reverse flush
+
+The Reverse apply rule (`p_in == p_cur && b_in > b_cur`) reads counters, and a
+counter bump on a reclaimed copy is not progress: a rebooted primary reclaims a
+still-ringing body, the proxy keeps routing to the survivor for the readiness
+lag, the survivor answers the caller, and any in-dialog message that reaches
+the primary first (the caller's ACK) persists a turn on the stale record and
+bumps `p`. The survivor's answer is then refused, both nodes serve the call,
+and the primary's restored ring deadline authors a second final on an INVITE
+transaction the caller already ACKed (RFC 3261 §17.2.1). The accepted
+keepalive-vs-takeover CSeq drop is harmless; a dropped answer or teardown is a
+lost call.
+
+**A reverse flush the vector refuses is handed to the call model with its
+body, not dropped.** The router folds it when it carries lifecycle progress
+the live copy lacks — unanswered < caller answered < terminating < terminated —
+and refuses it otherwise (`repl_reverse_flush_refused_total`). A fold makes the
+live timer service follow the folded ledger: entries the folded body no longer
+carries are cancelled, the ones it carries are armed through the restore
+hygiene seam. The `(p,b)` vector stays the only gate at the store, and the
+only rule for everything that is not lifecycle progress.
+
+Not closed here: an answer version that died with the primary before any copy
+held it. No record can carry that fact; closing it needs the answer durable at
+the backup before the 2xx leaves (an accepted trade-off above rejects it) or a wire check at
+the ring deadline. Pinned ignored in
+`failover-harness/tests/answer_lost_with_primary_no_answer.rs`; the folds are
+pinned live in the same file.
+

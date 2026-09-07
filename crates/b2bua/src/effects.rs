@@ -3,7 +3,7 @@
 //! `process_result` interpreter runs the five categories in a fixed order with
 //! different safety wraps (see ADR-0003 in the source / ADR-0010 here).
 
-use call::{Call, TimerEntry};
+use call::{Call, RetainedEmission, TimerEntry};
 use sip_message::{SipRequest, SipResponse};
 use sip_txn::TxnKind;
 
@@ -21,14 +21,24 @@ pub enum OutboundTxnMode {
     /// the transaction layer outright; a CANCEL is routed through its INVITE
     /// client txn, which owns WHEN it goes on the wire (RFC 3261 §9.1: held
     /// until the branch's first provisional, dropped if the txn dies first).
+    /// Requests only: a response never bypasses its server transaction as a
+    /// `Response` — the one raw path for response bytes is a retained
+    /// [`OutboundBody::Datagram`] (ADR-0029 X3).
     Raw,
 }
 
-/// The outbound payload — a request or a response.
+/// The outbound payload — a request, a response, or a retained datagram.
 #[derive(Debug, Clone)]
 pub enum OutboundBody {
     Request(SipRequest),
     Response(SipResponse),
+    /// A retained emission repeated as the bytes it left as (ADR-0029 X3):
+    /// they reach the socket with no parse and no serialize, so a repeat
+    /// cannot differ from the message it repeats. Always raw, whatever the
+    /// mode says — the transaction that emitted the original is `Completed`
+    /// or never existed. The emission's own label says what is repeated and
+    /// what paced it; the datagram is never read for either.
+    Datagram(RetainedEmission),
 }
 
 /// One SIP message to emit.
@@ -98,7 +108,7 @@ pub enum FireAndForgetEffect {
         request: serde_json::Value,
     },
     /// Kick the async `call_release` consult for a subscribed internal release
-    /// event (upstreamneed-009). Carries the event-scoped request JSON the
+    /// event. Carries the event-scoped request JSON the
     /// `max-duration` rule built; the router attaches the snapshot, calls
     /// `decision.call_release` (deadline-bounded), then re-enters via a
     /// `call-release-result` internal event (`release` | `reroute`).

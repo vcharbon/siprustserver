@@ -26,3 +26,6 @@ sipp-*.csv
 _TODOS.md
 portsource/
 .vscode/
+
+# TypeScript workspace (`ts/`) — installed dependencies only; sources are committed
+**/node_modules/

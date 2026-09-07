@@ -1,0 +1,315 @@
+{
+ "actors": [
+  {
+   "endpoint": "ep-caller",
+   "id": "uac1",
+   "identity": "caller",
+   "kind": "uac"
+  },
+  {
+   "claim": {
+    "by": "ruri-pos"
+   },
+   "endpoint": "ep-callee",
+   "id": "uas1",
+   "kind": "uas"
+  }
+ ],
+ "calls": [
+  {
+   "attempts": [
+    {
+     "branch": 0,
+     "callee": {
+      "identity": "called-0-0"
+     },
+     "leg": "B",
+     "position": 0
+    }
+   ],
+   "caller_leg": "A",
+   "id": "c1"
+  }
+ ],
+ "case": {
+  "annotations": {
+   "notes": [
+    "Two 180s under two answered forks f1/f2 prove the minted reading end to end: two To-tags on the b-leg wire, one INVITE transaction.",
+    "The 486 answers under f1's tag, so the attempt ends where a forking callee's losing forks end: no dialog confirms."
+   ]
+  },
+  "family": "transparent",
+  "id": "forked-ring",
+  "lanes": {
+   "upstream-fake": "ok"
+  },
+  "origin": "authored",
+  "title": "a forking callee rings twice under two early dialogs and rejects under the first",
+  "variant": "repro"
+ },
+ "endpoints": [
+  {
+   "binding": "dedicated",
+   "id": "ep-caller",
+   "observed": "127.0.0.1:5060",
+   "side": "peer"
+  },
+  {
+   "binding": "dedicated",
+   "id": "ep-callee",
+   "observed": "127.0.0.1:5070",
+   "side": "peer"
+  }
+ ],
+ "flow": [
+  {
+   "delay": {
+    "compressible": true,
+    "from": "trigger",
+    "ms": 0,
+    "timer_linked": false
+   },
+   "id": "s1",
+   "leg": "A",
+   "msg": {
+    "body": {
+     "ref": "resources/uac1_offer.sdp",
+     "rewrite": [
+      "c=addr",
+      "m=port"
+     ]
+    },
+    "from": {
+     "form": "private",
+     "pos": "caller"
+    },
+    "headers": [
+     {
+      "name": "X-Api-Call",
+      "value": "{\"destination\":{\"host\":\"127.0.0.1\",\"port\":5070,\"user\":\"bob5070\"}}"
+     }
+    ],
+    "method": "INVITE",
+    "ruri": {
+     "form": "e164",
+     "pos": "called[0][0]"
+    },
+    "to": {
+     "form": "e164",
+     "pos": "called[0][0]"
+    }
+   },
+   "op": "send"
+  },
+  {
+   "auto": true,
+   "check": "record",
+   "delay": {
+    "compressible": true,
+    "from": "step:s1",
+    "ms": 0,
+    "timer_linked": false
+   },
+   "id": "s2",
+   "leg": "A",
+   "msg": {
+    "cseq": 1,
+    "cseq-method": "INVITE",
+    "reason": "Trying",
+    "status": 100
+   },
+   "op": "expect"
+  },
+  {
+   "check": "assert",
+   "delay": {
+    "compressible": true,
+    "from": "step:s1",
+    "ms": 0,
+    "timer_linked": false
+   },
+   "id": "s3",
+   "leg": "B",
+   "msg": {
+    "body": {
+     "mode": "sdp-present"
+    },
+    "method": "INVITE"
+   },
+   "op": "expect"
+  },
+  {
+   "delay": {
+    "compressible": true,
+    "from": "step:s3",
+    "ms": 20,
+    "timer_linked": false
+   },
+   "early": "f1",
+   "id": "s4",
+   "leg": "B",
+   "msg": {
+    "cseq-method": "INVITE",
+    "reason": "Ringing",
+    "status": 180
+   },
+   "op": "send"
+  },
+  {
+   "check": "record",
+   "delay": {
+    "compressible": true,
+    "from": "step:s4",
+    "ms": 0,
+    "timer_linked": false
+   },
+   "id": "s5",
+   "leg": "A",
+   "msg": {
+    "cseq-method": "INVITE",
+    "reason": "Ringing",
+    "status": 180
+   },
+   "op": "expect"
+  },
+  {
+   "delay": {
+    "compressible": true,
+    "from": "step:s4",
+    "ms": 30,
+    "timer_linked": false
+   },
+   "early": "f2",
+   "id": "s6",
+   "leg": "B",
+   "msg": {
+    "cseq-method": "INVITE",
+    "reason": "Ringing",
+    "status": 180
+   },
+   "op": "send"
+  },
+  {
+   "check": "record",
+   "delay": {
+    "compressible": true,
+    "from": "step:s6",
+    "ms": 0,
+    "timer_linked": false
+   },
+   "id": "s7",
+   "leg": "A",
+   "msg": {
+    "cseq-method": "INVITE",
+    "reason": "Ringing",
+    "status": 180
+   },
+   "op": "expect"
+  },
+  {
+   "delay": {
+    "compressible": true,
+    "from": "step:s6",
+    "ms": 30,
+    "timer_linked": false
+   },
+   "early": "f1",
+   "id": "s8",
+   "leg": "B",
+   "msg": {
+    "cseq-method": "INVITE",
+    "reason": "Busy Here",
+    "status": 486
+   },
+   "op": "send"
+  },
+  {
+   "auto": true,
+   "check": "record",
+   "delay": {
+    "compressible": true,
+    "from": "step:s8",
+    "ms": 0,
+    "timer_linked": false
+   },
+   "id": "s9",
+   "leg": "B",
+   "msg": {
+    "cseq": 1,
+    "method": "ACK"
+   },
+   "op": "expect"
+  },
+  {
+   "check": "record",
+   "delay": {
+    "compressible": true,
+    "from": "step:s8",
+    "ms": 0,
+    "timer_linked": false
+   },
+   "id": "s10",
+   "leg": "A",
+   "msg": {
+    "cseq-method": "INVITE",
+    "reason": "Busy Here",
+    "status": 486
+   },
+   "op": "expect"
+  },
+  {
+   "auto": true,
+   "delay": {
+    "compressible": true,
+    "from": "step:s10",
+    "ms": 0,
+    "timer_linked": false
+   },
+   "id": "s11",
+   "leg": "A",
+   "msg": {
+    "cseq": 1,
+    "method": "ACK"
+   },
+   "op": "send"
+  }
+ ],
+ "identities": [
+  {
+   "forms": [
+    "private"
+   ],
+   "kind": "external-caller",
+   "name": "caller"
+  },
+  {
+   "forms": [
+    "e164"
+   ],
+   "kind": "site",
+   "name": "called-0-0"
+  }
+ ],
+ "legs": [
+  {
+   "actor": "uac1",
+   "dir": "out",
+   "id": "A"
+  },
+  {
+   "actor": "uas1",
+   "dir": "in",
+   "id": "B"
+  }
+ ],
+ "pivot_version": 3,
+ "postconditions": {
+  "cdr": {
+   "count": 1
+  }
+ },
+ "timing": {
+  "expect_budget_ms": 5000,
+  "settle_budget_ms": 10000
+ }
+}

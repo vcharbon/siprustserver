@@ -121,11 +121,13 @@ kinds! {
 
     Event => Event, Single;
     SubscriptionState => SubscriptionState, Single;
+    Accept => Accept, Comma;
     ContentType => ContentType, Single;
     ContentDisposition => ContentDisposition, Single;
     SessionExpires => SessionExpires, Single;
     RetryAfter => RetryAfter, Single;
     Reason => Reason, Comma;
+    Replaces => Replaces, Single;
 
     MaxForwards => MaxForwards, Single;
     ContentLength => ContentLength, Single;
@@ -157,7 +159,8 @@ capability! { TaggedKind: From, To }
 capability! { TokenKind: Require, ProxyRequire, Supported, Unsupported, Allow, AllowEvents, Privacy }
 
 capability! { TokenParamsKind:
-    Event, SubscriptionState, ContentType, ContentDisposition, SessionExpires, RetryAfter, Reason,
+    Event, SubscriptionState, Accept, ContentType, ContentDisposition, SessionExpires, RetryAfter, Reason,
+    Replaces,
 }
 
 numeric_kinds! {

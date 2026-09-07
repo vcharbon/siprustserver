@@ -1,0 +1,8 @@
+# Formatting is OFF, deliberately and temporarily.
+#
+# This workspace matches no rustfmt default and declares no config of its own,
+# so an unguarded `cargo fmt` rewrites the whole crate around the file being
+# edited and buries a branch's real diff. The fmt-consistency effort lands the
+# real config and deletes this file; until then `cargo fmt` is a no-op rather
+# than a hazard.
+disable_all_formatting = true

@@ -9,7 +9,7 @@
 //! renegotiation stalls and the call times out (`reinvited@connected`). The
 //! RFC-correct B2BUA must:
 //!   (a) **retransmit** the re-INVITE 2xx to the originator while its ACK is
-//!       missing (the `ReinviteAckRetransmit` cadence, re-sending the cached
+//!       missing (the `AckOf2xx` ladder's rungs, re-sending the cached
 //!       byte-faithful copy raw), and
 //!   (b) at the give-up deadline, **tear the call down** (BYE both legs), driving
 //!       `active_calls` back to 0.
@@ -44,8 +44,8 @@ async fn unacked_reinvite_2xx_is_retransmitted_then_byes_both_legs() {
     let b2bua = b2bua_with_ack_timeout(&h, "b2bua", "127.0.0.1:5089", 5079, ACK_TIMEOUT_SEC).await;
 
     // ── Call setup: INVITE → 180 → 200 → ACK (alice ACKs the INITIAL 2xx, so
-    //    the initial-INVITE watchdog is cancelled and cannot be confused with the
-    //    re-INVITE one). ──
+    //    its `AckOf2xx` obligation is discharged and cannot be confused with
+    //    the re-INVITE's). ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;
@@ -93,12 +93,13 @@ async fn unacked_reinvite_2xx_is_retransmitted_then_byes_both_legs() {
     let _report = h.finish().await;
 }
 
-/// The happy path under the watchdog: the a-leg ACK **does** arrive, so the
-/// re-INVITE watchdog is cancelled (CSeq-matched) and NEVER fires — no spurious
-/// retransmit, no give-up teardown. Guards the cancel seam (`relay-ack`).
+/// The happy path: the a-leg ACK **does** arrive, so the re-INVITE 2xx's
+/// `AckOf2xx` obligation is discharged (matched on the ACK's To-tag and CSeq)
+/// and its ladder NEVER fires — no spurious retransmit, no give-up teardown.
+/// Guards the engine's discharge seam (ADR-0029 X4).
 #[tokio::test(start_paused = true)]
-async fn reinvite_ack_cancels_the_watchdog() {
-    let h = Harness::new("b2bua-reinvite-ack-cancels-watchdog");
+async fn reinvite_ack_discharges_the_2xx_obligation() {
+    let h = Harness::new("b2bua-reinvite-ack-discharges-2xx");
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
     let b2bua = b2bua_with_ack_timeout(&h, "b2bua", "127.0.0.1:5083", 5073, ACK_TIMEOUT_SEC).await;
@@ -121,14 +122,14 @@ async fn reinvite_ack_cancels_the_watchdog() {
     dialog.ack(None).await;
     bob.receive("ACK").await; // the relayed re-INVITE ACK reaches bob.
 
-    // Advance well past both the retransmit cadence and the give-up deadline: the
-    // watchdog was cancelled by the a-leg ACK, so nothing re-sends and the call
+    // Advance well past both the retransmit cadence and the give-up deadline:
+    // the a-leg ACK discharged the obligation, so nothing re-sends and the call
     // is NOT torn down.
     h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64 + 3)).await;
     assert_eq!(
         alice.drain().await,
         0,
-        "a matching a-leg ACK cancels the re-INVITE watchdog — no spurious 2xx retransmit",
+        "a matching a-leg ACK discharges the re-INVITE 2xx obligation — no spurious 2xx retransmit",
     );
     assert_eq!(b2bua.active_calls(), 1, "the call stays up (no give-up teardown)");
 

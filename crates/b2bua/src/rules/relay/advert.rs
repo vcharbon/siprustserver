@@ -1,5 +1,5 @@
-//! The capability advertisement (`Allow`/`Supported`) stamp toward the
-//! originator face. The originated-leg half is stamped at
+//! The capability advertisement (`Allow`/`Supported`/`Accept`) stamp toward
+//! the originator face. The originated-leg half is stamped at
 //! [`super::originate::build_b_leg`]; the set itself is resolved by
 //! [`crate::rules::capabilities`].
 
@@ -8,16 +8,12 @@ use sip_message::generators::CapabilitySet;
 use sip_message::header::HeaderName;
 use sip_message::{SipHeader as MsgHeader, SipStr};
 
-/// Ensure an a-facing INVITE 2xx header set carries exactly ONE `Allow` and ONE
-/// `Supported` — the capability set advertised toward the originator (RFC 3261
-/// §13.2.1/§20.37). `capabilities` is the set for this face, which the caller
-/// resolves from the declaration, the callee's own relayed advertisement and
-/// the stack set (`rules::capabilities::relaying`); `rule_stamped` names the
-/// headers the firing rule already set with its own value — those are more
-/// specific, so they are kept verbatim and only de-duplicated. For the rest the
-/// passed-through lines collapse into the single resolved value. Either way
-/// exactly one of each results (no §7.3.1 duplicate); `Require`/`RSeq`
-/// (reliable-provisional negotiation) are untouched.
+/// Ensure an a-facing INVITE 2xx header set carries at most ONE `Allow`, ONE
+/// `Supported` and ONE `Accept` (RFC 3261 §13.2.1/§20.37/§20.1): a header the
+/// firing rule stamped (`rule_stamped`) is kept verbatim and de-duplicated;
+/// every other passed-through line collapses into `capabilities`' resolved
+/// value, or into no line where the set states none. `Require`/`RSeq` are
+/// untouched.
 pub fn stamp_a_facing_invite_advert(
     headers: &mut Vec<MsgHeader>,
     rule_stamped: &[Entry],
@@ -26,6 +22,7 @@ pub fn stamp_a_facing_invite_advert(
     for (name, value) in [
         (HeaderName::Allow, capabilities.allow_text()),
         (HeaderName::Supported, capabilities.supported_text()),
+        (HeaderName::Accept, capabilities.accept_text()),
     ] {
         if rule_stamped.iter().any(|e| e.is(&name)) {
             // The rule owns this value; just collapse any duplicate to one.
@@ -41,12 +38,15 @@ pub fn stamp_a_facing_invite_advert(
             });
             continue;
         }
-        // Replace any passed-through value with this face's set, exactly once.
+        // Replace any passed-through value with this face's set, exactly once;
+        // a half the set does not state carries no line.
         headers.retain(|h| !name.matches(&h.name));
-        headers.push(MsgHeader {
-            name: SipStr::owned(name.as_wire_str()),
-            value: SipStr::owned(&value),
-        });
+        if let Some(value) = value {
+            headers.push(MsgHeader {
+                name: SipStr::owned(name.as_wire_str()),
+                value: SipStr::owned(&value),
+            });
+        }
     }
 }
 
@@ -120,12 +120,13 @@ CSeq: 314 INVITE\r\n"
             header_updates,
             capabilities,
             None, // no charging vector
+            &[], // no withheld option tags
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
         };
         let allow = invite.raw_text(HeaderName::Allow).next().map(|v| v.as_str().to_string());
         let supported =
@@ -216,14 +217,24 @@ Content-Length: 0\r\n\r\n";
         )
     }
 
-    /// Declaring nothing advertises the stack set on BOTH faces, byte for byte.
+    /// Declaring nothing, with nothing received to relay, advertises NOTHING
+    /// on either face: no line, and a callee line the set does not state is
+    /// not kept either.
     #[test]
-    fn an_undeclared_call_advertises_the_stack_set_on_both_faces() {
+    fn an_undeclared_call_with_nothing_to_relay_advertises_nothing_on_both_faces() {
+        let silent = CapabilitySet::silent();
+        assert_eq!(b_leg_advert(&silent, &[]), (None, None));
+        assert_eq!(a_facing_advert(&silent, &[]), (None, None));
+    }
+
+    /// The node's own set, stated where a message answers on the stack's own
+    /// behalf, reaches the wire byte for byte, `Accept` included.
+    #[test]
+    fn the_stack_set_reaches_the_wire_where_it_is_stated() {
         let default = CapabilitySet::default();
         let (allow, supported) = b_leg_advert(&default, &[]);
         assert_eq!(allow.as_deref(), Some(generators::B2BUA_ALLOW));
         assert_eq!(supported.as_deref(), Some(generators::B2BUA_SUPPORTED));
-
         let (allow, supported) = a_facing_advert(&default, &[]);
         assert_eq!(allow.as_deref(), Some(generators::B2BUA_ALLOW));
         assert_eq!(supported.as_deref(), Some(generators::B2BUA_SUPPORTED));
@@ -295,32 +306,67 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(supported.as_deref(), Some("replaces"));
     }
 
-    /// With no option-tag declaration the transparent relay stands: the peer's
-    /// `Supported` still rides end to end (RFC 3262 negotiation).
+    /// With no declaration the transparent relay stands: the peer's
+    /// `Supported` still rides end to end (RFC 3262 negotiation), and the
+    /// `Allow` the peer never sent is not invented on the relayed re-INVITE.
     #[test]
-    fn an_undeclared_supported_still_relays_the_peers_value_on_a_reinvite() {
-        let (allow, supported) = relayed_reinvite_advert(&CapabilitySet::default(), &[]);
-        assert_eq!(allow.as_deref(), Some(generators::B2BUA_ALLOW));
+    fn an_undeclared_face_relays_the_peers_value_on_a_reinvite_and_invents_none() {
+        let (allow, supported) = relayed_reinvite_advert(&CapabilitySet::silent(), &[]);
+        assert_eq!(allow, None, "the peer stated no Allow, so none is stated onward");
         assert_eq!(supported.as_deref(), Some("100rel, timer, replaces"));
     }
 
     /// The originator's own advertisement travels onto the leg the B2BUA
-    /// originates (RFC 3261 §16.6): every method she accepts is still there,
-    /// with the stack's own added — the face accepts those too.
+    /// originates (RFC 3261 §16.6), token for token: every method she accepts
+    /// is there, and nothing of the stack's own is added.
     #[test]
-    fn the_originators_methods_reach_the_originated_leg_with_the_stacks_added() {
+    fn the_originators_methods_reach_the_originated_leg_and_nothing_is_added() {
         let invite = a_leg_invite_carrying(&[("Allow", "INVITE, ACK, BYE, MESSAGE")]);
         let caps = crate::rules::capabilities::relaying_in(
             None,
             crate::rules::capabilities::Face::Originated,
             invite.headers(),
         );
-        let (allow, _) = b_leg_advert_from(&invite, &caps, &[]);
-        let allow = allow.expect("the originated leg advertises its methods");
-        for method in ["INVITE", "ACK", "BYE", "MESSAGE"] {
-            assert!(allow.contains(method), "{method} the originator accepts must survive");
-        }
-        assert!(allow.contains("PRACK"), "a method the stack services is added");
+        let (allow, supported) = b_leg_advert_from(&invite, &caps, &[]);
+        assert_eq!(allow.as_deref(), Some("INVITE, ACK, BYE, MESSAGE"));
+        assert_eq!(supported, None, "she stated no option tag, so none is claimed for her");
+    }
+
+    /// An `Accept` the originator sent reaches the originated leg as she
+    /// stated it; one she did not send is not minted.
+    #[test]
+    fn the_originators_accept_reaches_the_originated_leg_verbatim() {
+        let invite = a_leg_invite_carrying(&[("Accept", "application/sdp, application/isup, application/xml")]);
+        let caps = crate::rules::capabilities::relaying_in(
+            None,
+            crate::rules::capabilities::Face::Originated,
+            invite.headers(),
+        );
+        let (_leg, effect) = build_b_leg(
+            "w0|call-ref|xyz", "b-1", false, &invite, ("10.244.2.7".to_string(), 5060),
+            None, None, None, None, &B2buaConfig::default(), &IdGen::seeded(0xCAB),
+            None, &[], &caps, None, &[], None,
+        )
+        .expect("nothing to refuse");
+        let OutboundBody::Request(out) = effect.body else { panic!("a request") };
+        let accepts: Vec<String> =
+            out.raw_text(HeaderName::Accept).map(|v| v.as_str().to_string()).collect();
+        assert_eq!(accepts, ["application/sdp, application/isup, application/xml"]);
+
+        let bare = a_leg_invite();
+        let caps = crate::rules::capabilities::relaying_in(
+            None,
+            crate::rules::capabilities::Face::Originated,
+            bare.headers(),
+        );
+        let (_leg, effect) = build_b_leg(
+            "w0|call-ref|xyz", "b-1", false, &bare, ("10.244.2.7".to_string(), 5060),
+            None, None, None, None, &B2buaConfig::default(), &IdGen::seeded(0xCAB),
+            None, &[], &caps, None, &[], None,
+        )
+        .expect("nothing to refuse");
+        let OutboundBody::Request(out) = effect.body else { panic!("a request") };
+        assert_eq!(out.raw_text(HeaderName::Accept).count(), 0, "no Accept is invented");
     }
 
     /// An option tag obliges whoever advertises it: the originated leg claims
@@ -373,6 +419,7 @@ Content-Length: 0\r\n\r\n";
             no_answer_timeout_sec: None,
             call_limiters: None,
             charging_vector: None,
+            withhold_option_tags: None,
             advertise_capabilities: Some(call::features::AdvertiseCapabilitiesFeature {
                 toward_originator: None,
                 toward_originated: Some(call::features::AdvertisedCapabilities {

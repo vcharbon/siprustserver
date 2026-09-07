@@ -1,5 +1,5 @@
 //! Long ringing PAST the default 158 s initial-INVITE bound, under HA
-//! (upstreamneed-073): the raised `invite_txn_timeout_sec` must hold through the
+//!: the raised `invite_txn_timeout_sec` must hold through the
 //! simulated cluster — worker crash, pristine reboot, reclaim — and the
 //! ledger-replicated `SetupTimeout` must fire at its ORIGINAL absolute
 //! deadline on the reclaimed node (neither early nor extended), giving the
@@ -197,6 +197,7 @@ async fn raised_bound_holds_a_ring_across_crash_reboot_reclaim_until_the_origina
         "rebooted primary re-hydrated from the backup"
     );
     proxy.set_address(&primary_ord, new_addr);
+    fh.note_worker_rebound(&primary_ord, new_addr);
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
 
     fh.advance(Duration::from_millis(500)).await;

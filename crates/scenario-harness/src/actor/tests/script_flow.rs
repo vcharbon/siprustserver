@@ -50,6 +50,7 @@ async fn requeue_on_advance_auto_reacts_passed_parked_request() {
                             kind: RequestKind::Initial,
                             body: BodyExpect::SdpPresent,
                             matcher: None,
+                            rank: None,
                         },
                     ),
                     Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),
@@ -61,6 +62,7 @@ async fn requeue_on_advance_auto_reacts_passed_parked_request() {
                             kind: RequestKind::InDialog(InDialogMethod::Info),
                             body: BodyExpect::Present,
                             matcher: None,
+                            rank: None,
                         },
                     )
                     .after(Duration::from_millis(100)),
@@ -135,7 +137,7 @@ async fn expect_response_fails_fast_when_final_precedes_provisional() {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ],
@@ -261,7 +263,7 @@ async fn scripted_originator_attribution_keys_on_first_goal() {
             feed: CtxFeed::default(),
         
             cseq: None,
-            delayed: None,
+            delayed: vec![],
             claim: None,
         },
         scripted_spec("bob", &bob, vec![]),
@@ -315,7 +317,7 @@ async fn run_100_trying_case(name: &'static str, on: bool) -> bool {
         ],
         plan: vec![established_phase()],
         settle: SettleBarrier::default_ceiling(),
-        automatics: Automatics { answer_100_trying: on },
+        automatics: Automatics { answer_100_trying: on, ..Default::default() },
         delta_policy: None,
         reception_observer: None,
     };
@@ -395,6 +397,7 @@ async fn run_initial_matcher_case(name: &'static str, expect_value: &str) -> Cal
                             kind: RequestKind::Initial,
                             body: BodyExpect::SdpPresent,
                             matcher: Some(matcher),
+                            rank: None,
                         },
                     ),
                     Goal::new(Barrier::None, GoalStep::Respond { status: 200 }),

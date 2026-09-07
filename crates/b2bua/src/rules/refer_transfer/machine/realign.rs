@@ -8,7 +8,7 @@ use call::{CdrEventType, Direction, LegState, TransferPhase};
 use sip_message::Method;
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
-use crate::rules::model::{Effect, Match, RuleAction, RuleDefinition};
+use crate::rules::model::{Effect, Match, RuleAction, RuleDefinition, TimerDelay};
 use crate::rules::refer_transfer::ok;
 use crate::rules::Terminal;
 
@@ -55,7 +55,7 @@ pub(super) fn c_realign_200() -> RuleDefinition {
                 },
                 RuleAction::ScheduleTimer {
                     timer_type: call::TimerType::ReferReinviteAnswer,
-                    delay_sec: ctx.config.refer_reinvite_answer_sec,
+                    delay: TimerDelay::secs(ctx.config.refer_reinvite_answer_sec),
                     leg_id: Some("a".to_string()),
                 },
                 RuleAction::SendReinvite {

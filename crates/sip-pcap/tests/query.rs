@@ -16,6 +16,7 @@ fn dg(ts_us: u64, src: &str, dst: &str, payload: &[u8]) -> Datagram {
         src: src.parse().unwrap(),
         dst: dst.parse().unwrap(),
         payload: payload.to_vec(),
+        probe: 0,
     }
 }
 

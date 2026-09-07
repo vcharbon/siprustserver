@@ -1352,8 +1352,8 @@ wireup() {
   # will NOT restart pods onto the freshly-loaded image. Force a rollout so the
   # new binary actually runs, then wait Ready before driving any traffic — else
   # we'd repeat the stale-binary trap above.
-  # NOTE: this proxy restart also happened to MASK upstreamneed-038 (fresh-bringup
-  # dead VIP response path — a restart forces a clean keepalived re-election +
+  # NOTE: this proxy restart also happened to MASK the fresh-bringup
+  # dead VIP response path (a restart forces a clean keepalived re-election +
   # GARP burst onto a now-settled bridge), which is why endurance runs never saw
   # what plain `run.sh deploy` hit. The real fix is upstream (GARP repeat/refresh
   # + chk_proxy track_script in 30-proxy.yaml, vip_smoke gate in run.sh deploy);

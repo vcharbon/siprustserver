@@ -26,6 +26,7 @@ use crate::repl::{ReplServer, ReplicatingCallStore, ReplicationSupervisor, Readi
 use crate::router::{self, RouterCtx};
 use crate::rules::{compose_rules, default_rules_with, ServiceDef};
 use crate::store::{BufferedTerminateWriter, CallState, CallStore, StoreFaults};
+use crate::wire_faults::WireFaults;
 use crate::timers::TimerService;
 
 /// A running B2BUA worker. Holds the shared context; the router loop runs on a
@@ -104,6 +105,9 @@ pub struct B2buaDeps {
     /// Sits ONLY on the live-serving sites — the HA reclaim/reconcile/
     /// terminate-writer paths are deliberately un-probed.
     pub store_faults: StoreFaults,
+    /// Wire-fault seam: one named RFC deviation the core emits on purpose so
+    /// the post-run audit gate can be proven live. Default = never armed.
+    pub wire_faults: WireFaults,
     pub clock: Clock,
     pub id_gen: Arc<IdGen>,
     /// Opt-in replication. `None` → today's non-replicating behaviour verbatim.
@@ -119,7 +123,7 @@ pub struct B2buaDeps {
     /// stranded machine); `Some` maps the logical endpoint onto its base URL.
     pub adaptation_http: Option<crate::router::AdaptationHttpPort>,
     /// Compose-time selection of which built-in CORE machines participate in the
-    /// default rule set (ADR-0016 opt-out seam, upstreamneed-019). `Default` =
+    /// default rule set (ADR-0016 opt-out seam). `Default` =
     /// every built-in included (behaviour-preserving). A downstream that ships
     /// its own subscription-gated transfer machine sets
     /// [`ComposeOptions::without_core_refer_transfer`](crate::rules::ComposeOptions::without_core_refer_transfer)
@@ -175,6 +179,7 @@ impl B2buaCore {
             cdr,
             store,
             store_faults,
+            wire_faults,
             clock,
             id_gen,
             replication,
@@ -200,6 +205,10 @@ impl B2buaCore {
                 // `config.validate()` keeps `setup_timeout_sec` strictly below
                 // it, so the rules path always gives up before the txn layer.
                 invite_initial_timeout_ms: config.invite_txn_timeout_ms(),
+                // The initial INVITE's first-response bound (default Timer B):
+                // an out-of-dialog INVITE that draws nothing at all gives up
+                // here, and the first provisional swaps the bound above in.
+                invite_first_response_timeout_ms: config.invite_first_response_timeout_ms(),
                 // Held-CANCEL policy (ADR-0028): bounded grace by default;
                 // `cancel_strict_rfc3261_wait` selects the literal §9.1 wait.
                 cancel_hold_grace_ms: (!config.cancel_strict_rfc3261_wait)
@@ -350,6 +359,7 @@ impl B2buaCore {
             config,
             state,
             store_faults,
+            wire_faults,
             txn,
             timers,
             dispatcher,
@@ -494,6 +504,13 @@ impl B2buaCore {
         }
     }
 
+    /// The router context, for the in-crate unit tests that drive one router
+    /// seam directly (`router::materialise`) over a fully wired core.
+    #[cfg(test)]
+    pub(crate) fn router_ctx(&self) -> &Arc<RouterCtx> {
+        &self.ctx
+    }
+
     /// The replicating call store, when replication is wired (`None` on the
     /// legacy path). The S10b failover harness reads it to assert a replica
     /// landed on the backup (`get_call`) and to introspect the reclaimed gen.
@@ -618,6 +635,12 @@ impl B2buaCore {
     /// serves a given call". Test/observability.
     pub fn serves(&self, call_ref: &str) -> bool {
         self.ctx.state.peek(call_ref).is_some()
+    }
+
+    /// The live copy of `call_ref` this worker serves, if any (introspection:
+    /// what its rules read at the next event).
+    pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
+        self.ctx.state.peek(call_ref)
     }
 
     /// Live per-call serialization-lock count (test/observability). Should track

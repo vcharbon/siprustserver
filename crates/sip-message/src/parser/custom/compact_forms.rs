@@ -20,6 +20,14 @@ pub fn expanded_name(name: &str) -> &str {
     canonical_of(name).unwrap_or(name)
 }
 
+/// The canonical long form a §7.3.3 compact name expands to, or `None` when
+/// `name` is not a compact form — the public probe over the one table below,
+/// so a consumer that must PUBLISH the mapping enumerates it rather than
+/// keeping a second copy.
+pub fn compact_form_canonical(name: &str) -> Option<&'static str> {
+    canonical_of(name)
+}
+
 /// The canonical long form of a single-character compact name. A non-ASCII
 /// char whose lowercase is a single char folds the same way the wire form did.
 fn canonical_of(name: &str) -> Option<&'static str> {

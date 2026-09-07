@@ -1,24 +1,15 @@
 //! The UAS response the B2BUA mints on the a-leg's inbound INVITE (toward the
 //! originator), on that INVITE's own server transaction.
 
-use sip_message::generators::{self, GenerateResponseOpts};
+use sip_message::generators::{self, response_states_contact, GenerateResponseOpts};
 use sip_message::header::{self, MediaType};
-use sip_message::{SipHeader as MsgHeader, SipRequest};
+use sip_message::{Method, SipHeader as MsgHeader, SipRequest};
 
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode};
 
-/// Whether a response of this status carries the B2BUA's own `Contact`
-/// (RFC 3261 Table 3): a 1xx keeps the early dialog reachable for in-dialog
-/// requests, a 2xx to INVITE MUST carry one, a 3xx and a 485 name where to
-/// retry. Every other final ends the transaction and names no reachable
-/// dialog, so it carries none.
-pub fn stamps_contact(status: u16) -> bool {
-    matches!(status, 100..=399 | 485)
-}
-
 /// Build a UAS response on a leg's inbound INVITE (toward alice). `to_tag` pins
-/// the stable a-facing dialog tag; `contact` is stamped only on the statuses
-/// [`stamps_contact`] names.
+/// the stable a-facing dialog tag; `contact` is stamped only where
+/// [`response_states_contact`] states it for an INVITE response.
 #[allow(clippy::too_many_arguments)]
 pub fn response_to_a_leg(
     a_leg_invite: &SipRequest,
@@ -33,7 +24,7 @@ pub fn response_to_a_leg(
 ) -> OutboundSipEffect {
     let opts = GenerateResponseOpts {
         to_tag,
-        contact: contact.filter(|_| stamps_contact(status)),
+        contact: contact.filter(|_| response_states_contact(&Method::Invite, status)),
         body,
         content_type,
         extra_headers,

@@ -1,7 +1,7 @@
 //! HA: a takeover of a SAMPLED call opens the survivor's OWN root span, linked
 //! to the nominal's (ADR-0026 §5).
 //!
-//! Drives the real hydration seam — the acting-backup's `hydrate_from_replica`
+//! Drives the real materialisation seam — the acting-backup's `router::materialise`
 //! on a failed-over in-dialog BYE — rather than the `adopt_into` unit seam, so a
 //! regression that drops the adoption, or runs it on a copy the store discards,
 //! fails here.
@@ -168,7 +168,7 @@ async fn a_takeover_opens_this_nodes_own_root_span_linked_to_the_nominals() {
     // From here the leg has two potential owners, so ADR-0014's accepted
     // keepalive-vs-backup-transaction overlap may reuse an in-dialog CSeq (one call
     // drops cleanly). Accepted for the takeover window only — establishment above
-    // keeps `cseqInDialogOrder` fully gating.
+    // keeps `cseq-in-dialog-order` fully gating.
     fh.accept_rfc_deviations_from_now(
         failover_harness::RULE_CSEQ_IN_DIALOG_ORDER,
         "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \

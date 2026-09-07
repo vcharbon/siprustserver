@@ -1,0 +1,300 @@
+{
+  "actors": [
+    {
+      "endpoint": "ep-caller",
+      "id": "uac1",
+      "identity": "caller",
+      "kind": "uac"
+    },
+    {
+      "claim": {
+        "by": "ruri-pos"
+      },
+      "endpoint": "ep-callee",
+      "id": "uas1",
+      "kind": "uas"
+    }
+  ],
+  "calls": [
+    {
+      "attempts": [
+        {
+          "branch": 0,
+          "callee": {
+            "identity": "called-0-0"
+          },
+          "leg": "B",
+          "position": 0
+        }
+      ],
+      "caller_leg": "A",
+      "id": "c1"
+    }
+  ],
+  "case": {
+    "annotations": {
+      "notes": [
+        "Leg B scripts NO step for the CANCEL the system relays, nor for the 200 and the 487 RFC 3261 \u00a79.2 makes the endpoint's own: the endpoint answers them while the arrival is still refused, and the flow walks on to the ACK."
+      ]
+    },
+    "family": "transparent",
+    "id": "unscripted-cancel",
+    "lanes": {
+      "upstream-fake": "ok"
+    },
+    "origin": "authored",
+    "title": "a relayed CANCEL no step scripts is refused and answered all the same",
+    "variant": "repro"
+  },
+  "endpoints": [
+    {
+      "binding": "dedicated",
+      "id": "ep-caller",
+      "observed": "127.0.0.1:5060",
+      "side": "peer"
+    },
+    {
+      "binding": "dedicated",
+      "id": "ep-callee",
+      "observed": "127.0.0.1:5070",
+      "side": "peer"
+    }
+  ],
+  "flow": [
+    {
+      "delay": {
+        "compressible": true,
+        "from": "trigger",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s1",
+      "leg": "A",
+      "msg": {
+        "body": {
+          "ref": "resources/uac1_offer.sdp",
+          "rewrite": [
+            "c=addr",
+            "m=port"
+          ]
+        },
+        "from": {
+          "form": "private",
+          "pos": "caller"
+        },
+        "headers": [
+          {
+            "name": "X-Api-Call",
+            "value": "{\"destination\":{\"host\":\"127.0.0.1\",\"port\":5070,\"user\":\"bob5070\"}}"
+          }
+        ],
+        "method": "INVITE",
+        "ruri": {
+          "form": "e164",
+          "pos": "called[0][0]"
+        },
+        "to": {
+          "form": "e164",
+          "pos": "called[0][0]"
+        }
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s2",
+      "leg": "A",
+      "msg": {
+        "cseq": 1,
+        "cseq-method": "INVITE",
+        "reason": "Trying",
+        "status": 100
+      },
+      "op": "expect"
+    },
+    {
+      "check": "assert",
+      "delay": {
+        "compressible": true,
+        "from": "step:s1",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s3",
+      "leg": "B",
+      "msg": {
+        "body": {
+          "mode": "sdp-present"
+        },
+        "method": "INVITE"
+      },
+      "op": "expect"
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s3",
+        "ms": 20,
+        "timer_linked": false
+      },
+      "id": "s4",
+      "leg": "B",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "Ringing",
+        "status": 180
+      },
+      "op": "send"
+    },
+    {
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s4",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s5",
+      "leg": "A",
+      "msg": {
+        "cseq-method": "INVITE",
+        "reason": "Ringing",
+        "status": 180
+      },
+      "op": "expect",
+      "optional": true
+    },
+    {
+      "delay": {
+        "compressible": true,
+        "from": "step:s3",
+        "ms": 60,
+        "timer_linked": false
+      },
+      "id": "s6",
+      "leg": "A",
+      "msg": {
+        "method": "CANCEL"
+      },
+      "op": "send"
+    },
+    {
+      "auto": true,
+      "check": "record",
+      "delay": {
+        "compressible": true,
+        "from": "step:s6",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s10",
+      "leg": "B",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "op": "expect"
+    },
+    {
+      "id": "u1",
+      "op": "unordered",
+      "steps": [
+        {
+          "check": "record",
+          "delay": {
+            "compressible": true,
+            "from": "step:s6",
+            "ms": 0,
+            "timer_linked": false
+          },
+          "id": "s11",
+          "leg": "A",
+          "msg": {
+            "cseq-method": "CANCEL",
+            "reason": "OK",
+            "status": 200
+          },
+          "op": "expect"
+        },
+        {
+          "check": "record",
+          "delay": {
+            "compressible": true,
+            "from": "step:s6",
+            "ms": 0,
+            "timer_linked": false
+          },
+          "id": "s12",
+          "leg": "A",
+          "msg": {
+            "cseq-method": "INVITE",
+            "reason": "Request Terminated",
+            "status": 487
+          },
+          "op": "expect"
+        }
+      ]
+    },
+    {
+      "auto": true,
+      "delay": {
+        "compressible": true,
+        "from": "step:s12",
+        "ms": 0,
+        "timer_linked": false
+      },
+      "id": "s13",
+      "leg": "A",
+      "msg": {
+        "cseq": 1,
+        "method": "ACK"
+      },
+      "op": "send"
+    }
+  ],
+  "identities": [
+    {
+      "forms": [
+        "private"
+      ],
+      "kind": "external-caller",
+      "name": "caller"
+    },
+    {
+      "forms": [
+        "e164"
+      ],
+      "kind": "site",
+      "name": "called-0-0"
+    }
+  ],
+  "legs": [
+    {
+      "actor": "uac1",
+      "dir": "out",
+      "id": "A"
+    },
+    {
+      "actor": "uas1",
+      "dir": "in",
+      "id": "B"
+    }
+  ],
+  "pivot_version": 3,
+  "postconditions": {
+    "cdr": {
+      "count": 1
+    }
+  },
+  "timing": {
+    "expect_budget_ms": 5000,
+    "settle_budget_ms": 10000
+  }
+}

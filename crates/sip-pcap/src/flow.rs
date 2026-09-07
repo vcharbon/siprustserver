@@ -160,10 +160,17 @@ pub struct FlowMsg {
     pub parsed: SipMessage,
     /// Observation vantage, index into the owning leg's [`FlowLeg::hops`].
     pub hop: HopId,
-    /// Same transaction key already seen in this direction on this leg — a
-    /// SIP retransmission (capture-stack duplicates are collapsed earlier and
-    /// never reach the model, see [`FlowStats::capture_dups`]).
+    /// The same DATAGRAM already seen in this direction on this leg, inside the
+    /// transaction envelope — a SIP retransmission (capture-stack duplicates
+    /// are collapsed earlier and never reach the model, see
+    /// [`FlowStats::capture_dups`]). The MODEL's own view: the emitted
+    /// document's `retx` is decided by [`crate::callfacts::mark_repeats`] on
+    /// the same two bounds.
     pub retx: bool,
+    /// Which probe wrote this copy ([`crate::Datagram::probe`]). Carried, not
+    /// derived: two copies of one packet from two probes are identical in every
+    /// other field, so this is the ONLY thing that tells them apart.
+    pub probe: u32,
 }
 
 impl FlowMsg {
@@ -396,7 +403,7 @@ pub fn build_flows(datagrams: &[Datagram], cfg: &FlowConfig) -> Flows {
             });
             legs.len() - 1
         });
-        ingest(&mut legs[idx], d.ts_us, d.src, d.dst, msg, &cfg.strategies);
+        ingest(&mut legs[idx], d.ts_us, d.src, d.dst, msg, d.probe, &cfg.strategies);
     }
 
     let groups = correlate(&legs, cfg);
@@ -428,6 +435,7 @@ fn ingest(
     src: SocketAddr,
     dst: SocketAddr,
     msg: SipMessage,
+    probe: u32,
     strategies: &[CorrelateStrategy],
 ) {
     for (si, strat) in strategies.iter().enumerate() {
@@ -485,24 +493,16 @@ fn ingest(
             }
         }
     }
-    // Retransmission tag: same direction + same transaction key already seen.
-    let retx = leg.msgs.iter().any(|m| {
-        m.src == src
-            && m.dst == dst
-            && match (&m.parsed, &msg) {
-                (SipMessage::Request(a), SipMessage::Request(b)) => {
-                    a.method() == b.method()
-                        && a.cseq().seq() == b.cseq().seq()
-                        && a.top_via().branch() == b.top_via().branch()
-                }
-                (SipMessage::Response(a), SipMessage::Response(b)) => {
-                    a.status() == b.status()
-                        && a.cseq() == b.cseq()
-                        && a.top_via().branch() == b.top_via().branch()
-                }
-                _ => false,
-            }
-    });
+    // Retransmission tag: the SAME DATAGRAM already seen in this direction on
+    // this leg, inside the transaction envelope. The EARLIEST match anchors it,
+    // because 64·T1 runs from the first emission — see [`crate::callfacts`],
+    // which decides the same relation for the emitted document and must not be
+    // able to disagree with this one.
+    let retx = leg
+        .msgs
+        .iter()
+        .find(|m| m.src == src && m.dst == dst && m.parsed.image() == msg.image())
+        .is_some_and(|m| ts_us.saturating_sub(m.ts_us) <= crate::callfacts::REPEAT_ENVELOPE_US);
     let pair = Hop::normalized(src, dst);
     let hop = match leg.hops.iter().position(|h| *h == pair) {
         Some(h) => h,
@@ -511,7 +511,7 @@ fn ingest(
             leg.hops.len() - 1
         }
     };
-    leg.msgs.push(FlowMsg { ts_us, src, dst, parsed: msg, hop, retx });
+    leg.msgs.push(FlowMsg { ts_us, src, dst, parsed: msg, hop, retx, probe });
 }
 
 fn find(parent: &mut [usize], mut x: usize) -> usize {
@@ -797,6 +797,7 @@ fn adjacency_pass(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::callfacts::REPEAT_ENVELOPE_US;
 
     fn dg(ts_us: u64, src: &str, dst: &str, payload: &[u8]) -> Datagram {
         Datagram {
@@ -804,6 +805,7 @@ mod tests {
             src: src.parse().unwrap(),
             dst: dst.parse().unwrap(),
             payload: payload.to_vec(),
+        probe: 0,
         }
     }
 
@@ -889,6 +891,21 @@ mod tests {
         assert_eq!(leg.msgs.len(), 2);
         assert!(!leg.msgs[0].retx);
         assert!(leg.msgs[1].retx);
+    }
+
+    /// Timer B ends the transaction at 64·T1, so the same bytes emitted after
+    /// it are a fresh emission, not a retransmission.
+    #[test]
+    fn a_repeat_past_the_transaction_envelope_is_not_a_retransmission() {
+        let inv = sip_request("INVITE", "late-1", 1, "b1", "");
+        let datagrams = vec![
+            dg(1_000_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv),
+            dg(1_000_000 + REPEAT_ENVELOPE_US, "10.0.0.1:5060", "10.0.0.2:5060", &inv),
+            dg(1_000_000 + REPEAT_ENVELOPE_US + 1_000_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv),
+        ];
+        let leg = &build_flows(&datagrams, &FlowConfig::default()).legs[0];
+        assert_eq!(leg.msgs.len(), 3);
+        assert_eq!(leg.msgs.iter().map(|m| m.retx).collect::<Vec<_>>(), vec![false, true, false]);
     }
 
     #[test]

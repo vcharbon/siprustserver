@@ -12,6 +12,8 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use sip_clock::Clock;
+
 /// Theoretical max single-UDP-datagram payload (65535 − 20 IP − 8 UDP). The
 /// paranoid decorator rejects sends above this; SIP fragments far below it.
 pub const MAX_UDP_PAYLOAD: usize = 65507;
@@ -23,13 +25,16 @@ pub const MAX_UDP_PAYLOAD: usize = 65507;
 pub struct UdpPacket {
     pub raw: Vec<u8>,
     pub src: SocketAddr,
-    /// Capture timestamp (ms) — wall clock on the real impl, virtual on the
-    /// simulated fabric. Report/ordering only.
+    /// Arrival timestamp (ms) on the binding endpoint's [`BindUdpOpts::clock`]
+    /// timeline. Behavioural input — the proxy ages dequeued packets off it to
+    /// drive the self-gate's ELU arm — so an age MUST be taken against that
+    /// same monotonic-anchored `Clock`: differencing it against a raw
+    /// `SystemTime` reading folds unbounded wall-vs-monotonic drift into it.
     pub arrival_ms: u64,
 }
 
 /// How an inbound datagram fared at the receiving endpoint's inbox, recorded on
-/// `SignalingNetworkEvent::RecvItem` at DELIVERY time (upstreamneed-036 ask A) so
+/// `SignalingNetworkEvent::RecvItem` at DELIVERY time so
 /// the trace reflects the true wire even when the scenario body never reads the
 /// packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +53,7 @@ pub enum RecvDisposition {
     AbsorbedRetransmit,
     /// Demuxed to the CALL (token/dialog correlation succeeded) but no live
     /// logical endpoint accepted it — a picker miss or an endpointless slot
-    /// (upstreamneed-036 ask C). Rendered on the `ip:port#noendpoint` sub-lane;
+    ///. Rendered on the `ip:port#noendpoint` sub-lane;
     /// like an orphan it is ladder-only, never judged by the audit.
     Unrouted,
 }
@@ -166,18 +171,22 @@ pub struct BindUdpOpts {
     pub reuse_port: bool,
     /// SIP role(s) this bind serves. `None` → [`all_ua_roles`].
     pub roles: Option<HashSet<UaRole>>,
-    /// Logical sub-lane label for recording (upstreamneed-036 ask C): when
+    /// Logical sub-lane label for recording: when
     /// several LOGICAL endpoints share one socket (loadgen mux legs — callee,
     /// alt), the recording decorator keys this bind's lane
     /// `"ip:port#<label>"` instead of the bare `ip:port`, so each leg is its
     /// own ladder column instead of all legs collapsing onto the socket.
     /// Ignored by the transports; recording-only.
     pub lane_label: Option<String>,
+    /// Timeline this endpoint stamps [`UdpPacket::arrival_ms`] on. Share the
+    /// process `Clock` with whoever ages those packets: two `Clock`s differ by
+    /// a constant, a raw wall reading diverges from one without bound.
+    pub clock: Clock,
 }
 
 impl BindUdpOpts {
     /// Minimal opts: an address and a bounded inbound queue, no pre-ingress
-    /// hook, default roles.
+    /// hook, default roles, own arrival clock.
     pub fn new(addr: SocketAddr, queue_max: usize) -> Self {
         Self {
             addr,
@@ -186,7 +195,15 @@ impl BindUdpOpts {
             reuse_port: false,
             roles: None,
             lane_label: None,
+            clock: Clock::system(),
         }
+    }
+
+    /// Stamp arrivals on `clock` (see the `clock` field) — the bind seam a
+    /// consumer that ages packets uses to sit on one timeline with them.
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Declare the logical sub-lane label (see the `lane_label` field).

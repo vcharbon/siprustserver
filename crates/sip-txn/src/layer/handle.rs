@@ -6,13 +6,14 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use sip_message::{SipParser, SipRequest, SipResponse};
+use sip_message::{SipMessage, SipParser, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::event::{ClientTransactionHandle, TransactionEvent, TxnKind};
 use crate::metrics::{MetricsInner, TransactionMetrics};
 use crate::rng::IdGen;
+use crate::seed::{Reoffer, TxnSeed};
 
 use super::owner::{run, Owner};
 
@@ -23,14 +24,27 @@ pub struct TransactionConfig {
     pub udp_queue_max: usize,
     /// Identifier seam (Via branch / To-tag generation).
     pub id_gen: Arc<IdGen>,
-    /// The INITIAL (out-of-dialog) INVITE transaction bound, ms — the client
-    /// txn's give-up timer AND the server-side sweep age for a pre-final INVITE
-    /// derive from this one value, so both halves of a call admit the same ring
-    /// window. Default [`INVITE_INITIAL_TIMEOUT`](crate::timers::INVITE_INITIAL_TIMEOUT)
+    /// The INVITE transaction bound once a provisional has arrived, ms — the
+    /// client txn's give-up timer for an INVITE in Proceeding (initial or
+    /// in-dialog; before any response it is on Timer B) AND the server-side
+    /// sweep age for a pre-final INVITE derive from this one value, so both
+    /// halves of a call admit the same ring window. Default
+    /// [`INVITE_INITIAL_TIMEOUT`](crate::timers::INVITE_INITIAL_TIMEOUT)
     /// (158 s); the consumer validates its own range and MUST keep every
     /// app-level setup deadline strictly below it, or the txn layer CANCELs
     /// the callee before the app gives up.
     pub invite_initial_timeout_ms: u64,
+    /// The bound on an initial INVITE's wait for a response of ANY kind, ms —
+    /// the client txn's give-up while an out-of-dialog INVITE (no To-tag) sits
+    /// in `Calling`, and the bound its Timer A ladder is armed under, so no
+    /// rung lands past the give-up. Default [`TIMER_B`](crate::timers::TIMER_B)
+    /// (32 s), the RFC 3261 §17.1.1.2 value; a deployment may tighten it
+    /// (telephony policy: a hop drawing nothing is dead, and rerouting must not
+    /// wait 64·T1), never widen it — the effective bound is
+    /// `min(this, invite_initial_timeout_ms)`, and the first provisional still
+    /// swaps in `invite_initial_timeout_ms`. An in-dialog INVITE and a
+    /// non-INVITE never read it: they keep Timer B / Timer F.
+    pub invite_first_response_timeout_ms: u64,
     /// The held-CANCEL policy for a response-less INVITE client txn
     /// (RFC 3261 §9.1 / ADR-0028). `Some(ms)` — the default,
     /// [`CANCEL_HOLD_GRACE`](crate::timers::CANCEL_HOLD_GRACE) (1 s) — holds
@@ -49,6 +63,7 @@ impl Default for TransactionConfig {
             udp_queue_max: 256,
             id_gen: Arc::new(IdGen::from_entropy()),
             invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
+            invite_first_response_timeout_ms: crate::timers::TIMER_B,
             cancel_hold_grace_ms: Some(crate::timers::CANCEL_HOLD_GRACE),
         }
     }
@@ -70,6 +85,20 @@ pub(super) enum Command {
         buf: Vec<u8>,
         dest: SocketAddr,
         reply: oneshot::Sender<()>,
+    },
+    /// Rebuild the in-flight INVITE transactions a materialised call names
+    /// (ADR-0014); replies with how many went in.
+    Seed {
+        call_ref: String,
+        seeds: Vec<TxnSeed>,
+        reply: oneshot::Sender<usize>,
+    },
+    /// Process a datagram the consumer already holds against the map as it now
+    /// stands, after seeding.
+    Reoffer {
+        message: Box<SipMessage>,
+        src: SocketAddr,
+        reply: oneshot::Sender<Reoffer>,
     },
     CancelTxnsForCall {
         call_ref: String,
@@ -134,6 +163,7 @@ impl TransactionLayer {
             metrics_inner,
             config.id_gen,
             config.invite_initial_timeout_ms,
+            config.invite_first_response_timeout_ms,
             config.cancel_hold_grace_ms,
         );
         let owner_abort = tokio::spawn(run(owner, endpoint, cmd_rx)).abort_handle();
@@ -187,7 +217,10 @@ impl TransactionLayer {
         .await
     }
 
-    /// Send an outbound SIP response through its server transaction.
+    /// Send an outbound SIP response through its server transaction. The bytes
+    /// on the wire are `msg.image()`, verbatim: a TU that retains the image is
+    /// retaining what left the socket (ADR-0029 X3), so this layer never
+    /// re-renders a response.
     pub async fn send_response(
         &self,
         msg: SipResponse,
@@ -204,6 +237,45 @@ impl TransactionLayer {
     /// Send a raw buffer directly, bypassing transaction management.
     pub async fn send_raw(&self, buf: Vec<u8>, dest: SocketAddr) -> Result<(), TransactionLayerClosed> {
         self.roundtrip(|reply| Command::SendRaw { buf, dest, reply }).await
+    }
+
+    /// Rebuild the in-flight INVITE transactions a call materialised from a
+    /// replica names (ADR-0014), each as a `Proceeding` transaction attributed
+    /// to `call_ref` — see [`TxnSeed`] for what each seed becomes. Returns how
+    /// many went in; a seed whose branch already holds a transaction is skipped
+    /// and counted (`txn_seed_skipped`), never displaced.
+    pub async fn seed(
+        &self,
+        call_ref: &str,
+        seeds: Vec<TxnSeed>,
+    ) -> Result<usize, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::Seed {
+            call_ref: call_ref.to_string(),
+            seeds,
+            reply,
+        })
+        .await
+    }
+
+    /// Hand back a datagram this layer already emitted, to be processed
+    /// against the transactions now in the map — the ones [`seed`](Self::seed)
+    /// just rebuilt. A response matching a client transaction, a CANCEL
+    /// matching an active INVITE server transaction and a request whose branch
+    /// holds a server transaction run their first-arrival path and are
+    /// [`Reoffer::Matched`] (the consumer drops its copy: whatever that path
+    /// emits arrives as a fresh event); anything else is
+    /// [`Reoffer::Unmatched`], sent nowhere and emitted nowhere.
+    pub async fn reoffer(
+        &self,
+        message: SipMessage,
+        src: SocketAddr,
+    ) -> Result<Reoffer, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::Reoffer {
+            message: Box::new(message),
+            src,
+            reply,
+        })
+        .await
     }
 
     /// Cancel every client transaction whose `call_ref` matches — the

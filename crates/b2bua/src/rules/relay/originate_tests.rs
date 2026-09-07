@@ -73,15 +73,16 @@ Content-Length: 0\r\n\r\n",
             &id_gen,
             None, // no body override
             &[],  // no header updates
-            &CapabilitySet::default(), // undeclared → the stack capability set
+            &CapabilitySet::default(), // the stack's own set, stated in full
             None,
+            &[], // no withheld option tags
             None, // Destination leg
         )
         .expect("no identity rewrites, so nothing to refuse");
 
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
         };
 
         // (a) ID-1 — fresh Call-ID, NOT the a-leg's.
@@ -140,12 +141,13 @@ Content-Length: 0\r\n\r\n",
             &[],
             &CapabilitySet::default(),
             None, // no charging vector
+            &[], // no withheld option tags
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
         };
         (
             invite.top_via().to_string(),
@@ -230,12 +232,13 @@ Content-Length: 0\r\n\r\n",
             &[],
             &CapabilitySet::default(),
             None, // no charging vector
+            &[], // no withheld option tags
             None,
         )
         .expect("the R-URI under test reads");
         match effect.body {
             OutboundBody::Request(r) => r.headers().to_vec(),
-            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
         }
     }
 
@@ -322,11 +325,12 @@ Content-Length: 0\r\n\r\n",
             &updates,
             &CapabilitySet::default(),
             None, // no charging vector
+            &[], // no withheld option tags
             None,
         )
         .map(|(_leg, effect)| match effect.body {
             OutboundBody::Request(r) => r.headers().to_vec(),
-            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
         })
         .expect("no identity rewrites, so nothing to refuse");
         let stated: Vec<&str> = bob
@@ -374,12 +378,13 @@ mod charging_tests {
             &[],
             &CapabilitySet::default(),
             charging,
+            &[], // no withheld option tags
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
         };
         let name = ChargingVector::header_name();
         invite
@@ -439,5 +444,90 @@ mod charging_tests {
         let value = b_leg_vector(&a_leg_invite_carrying(&[]), Some(&arm)).expect("armed");
         let parsed = ChargingVector::parse(&SipStr::owned(&value)).unwrap();
         assert_eq!(parsed.icid_generated_at(), Some("edge.example"));
+    }
+}
+
+mod withhold_tests {
+    //! The call-scoped option-tag withhold on a leg the B2BUA originates
+    //! (`features.withhold_option_tags`): a withheld tag never rides the
+    //! originated INVITE, whichever source stated its line.
+    use super::super::advert::advertisement_tests::a_leg_invite_carrying;
+    use super::*;
+    use sip_message::header::HeaderName;
+
+    /// Build the originated b-leg INVITE under `withheld` and return every
+    /// value line of `name` on it, verbatim.
+    fn b_leg_values(a: &SipRequest, withheld: &[String], name: HeaderName) -> Vec<String> {
+        let (_leg, effect) = build_b_leg(
+            "w0|call-ref|xyz",
+            "b-1",
+            false,
+            a,
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &IdGen::seeded(0x100),
+            None,
+            &[],
+            &crate::rules::capabilities::relaying_in(
+                None,
+                crate::rules::capabilities::Face::Originated,
+                a.headers(),
+            ),
+            None, // no charging vector
+            withheld,
+            None,
+        )
+        .expect("no identity rewrites, so nothing to refuse");
+        let invite = match effect.body {
+            OutboundBody::Request(r) => r,
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+        };
+        invite.raw_text(name).map(|v| v.as_str().to_string()).collect()
+    }
+
+    fn withheld_100rel() -> Vec<String> {
+        vec!["100rel".to_string()]
+    }
+
+    /// A withheld tag is narrowed out of the relayed `Supported` set; the rest
+    /// of the set rides untouched.
+    #[test]
+    fn a_withheld_tag_is_narrowed_out_of_the_relayed_supported() {
+        let a = a_leg_invite_carrying(&[("Supported", "100rel, timer")]);
+        assert_eq!(b_leg_values(&a, &withheld_100rel(), HeaderName::Supported), ["timer"]);
+    }
+
+    /// An emptied `Supported` drops its header: a set narrowed to nothing claims
+    /// nothing, and so does an absent line (RFC 3261 §20.37). The two legs of one
+    /// call reach their callees in the same wire form whichever mint built them.
+    #[test]
+    fn an_emptied_supported_drops_its_header() {
+        let a = a_leg_invite_carrying(&[("Supported", "100rel")]);
+        assert!(b_leg_values(&a, &withheld_100rel(), HeaderName::Supported).is_empty());
+    }
+
+    /// Nothing withheld — the relayed advertisement rides byte-identical.
+    #[test]
+    fn nothing_withheld_leaves_the_advertisement_untouched() {
+        let a = a_leg_invite_carrying(&[("Supported", "100rel, timer")]);
+        assert_eq!(
+            b_leg_values(&a, &[], HeaderName::Supported),
+            ["100rel, timer"],
+        );
+    }
+
+    /// A set not naming a withheld tag is left byte-identical too — the
+    /// withhold narrows, it never rewrites.
+    #[test]
+    fn a_set_without_the_withheld_tag_is_left_byte_identical() {
+        let a = a_leg_invite_carrying(&[("Supported", "timer, replaces")]);
+        assert_eq!(
+            b_leg_values(&a, &withheld_100rel(), HeaderName::Supported),
+            ["timer, replaces"],
+        );
     }
 }

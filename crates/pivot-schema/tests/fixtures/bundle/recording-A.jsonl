@@ -1,0 +1,4 @@
+{"at_us":0,"dir":"out","raw":"INVITE sip:+33000900004@127.0.0.1:5080 SIP/2.0\r\nCSeq: 1 INVITE\r\n\r\n","seq":1,"step":"s1"}
+{"at_us":1900,"dir":"in","raw":"SIP/2.0 100 Trying\r\nCSeq: 1 INVITE\r\n\r\n","seq":2,"step":"s2"}
+{"at_us":500000,"dir":"out","note":"retransmission 1 of 1","raw":"INVITE sip:+33000900004@127.0.0.1:5080 SIP/2.0\r\nCSeq: 1 INVITE\r\n\r\n","repeat_of":1,"seq":3,"step":"s1"}
+{"at_us":2400000,"dir":"in","note":"answered by the actor's background policy","raw":"OPTIONS sip:uac1@127.0.0.1:5060 SIP/2.0\r\nCSeq: 7 OPTIONS\r\n\r\n","seq":4}

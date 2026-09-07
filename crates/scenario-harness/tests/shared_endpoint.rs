@@ -53,7 +53,7 @@ fn loopback_actors(
             via: None,
             feed: CtxFeed::default(),
             cseq: None,
-            delayed: None,
+            delayed: vec![],
             claim: None,
         },
         // The AS's receiving half: owns the leg addressed to the AS user-part.
@@ -67,7 +67,7 @@ fn loopback_actors(
             via: None,
             feed: CtxFeed::default(),
             cseq: None,
-            delayed: None,
+            delayed: vec![],
             claim: Some(ClaimRule::RuriUser("as".into())),
         },
         // The AS's re-originating half: once the inbound leg rings, it places
@@ -90,7 +90,7 @@ fn loopback_actors(
             via: None,
             feed: CtxFeed::default(),
             cseq: None,
-            delayed: None,
+            delayed: vec![],
             claim: None,
         },
         // The peer's receiving half: owns the loopback leg by its R-URI user.
@@ -104,7 +104,7 @@ fn loopback_actors(
             via: None,
             feed: CtxFeed::default(),
             cseq: None,
-            delayed: None,
+            delayed: vec![],
             claim: Some(ClaimRule::RuriUser("peer".into())),
         },
     ]

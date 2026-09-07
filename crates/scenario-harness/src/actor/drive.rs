@@ -58,18 +58,18 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         GoalStep::ExpectResponse { status, cseq_method, body, early, ack_body: _, matcher } => {
             expect_response(st, status, cseq_method.as_deref(), body, early, matcher.as_ref())?;
         }
-        GoalStep::ExpectRequest { kind, body, matcher } => {
-            expect_request(st, &kind, body, matcher.as_ref())?;
+        GoalStep::ExpectRequest { kind, body, matcher, rank } => {
+            expect_request(st, &kind, body, rank, matcher.as_ref())?;
         }
-        GoalStep::ObserveFinal { key, expected } => {
-            let fact = consume_final_fact(st)?;
+        GoalStep::ObserveFinal { key, expected, cseq_method } => {
+            let fact = consume_final_fact(st, cseq_method.as_deref())?;
             st.obs.record(
                 Observation::ReplayFinal { key, expected, observed: fact.status },
                 Instant::now(),
             );
         }
-        GoalStep::ExpectFinal { assert } => {
-            let fact = consume_final_fact(st)?;
+        GoalStep::ExpectFinal { assert, cseq_method } => {
+            let fact = consume_final_fact(st, cseq_method.as_deref())?;
             let (ok, want) = match assert {
                 FinalAssert::Exact(s) => (fact.status == s, s),
                 FinalAssert::Class(c) => (fact.status / 100 == c, c * 100),
@@ -194,10 +194,13 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         }
         GoalStep::Bye => {
             let now = Instant::now();
-            // This leg is hanging up: discharge any in-dialog ack it still awaits
-            // (a re-INVITE/realign it answered, a PRACK/UPDATE 200) BEFORE opening
-            // the BYE's own obligation — the terminating dialog subsumes them
-            // (§15), and the fresh BYE obligation below is still held to the 200.
+            // This leg is hanging up: any HELD ACK goes out first (§15 — the
+            // renegotiation completes before the dialog ends), then discharge
+            // any in-dialog ack it still awaits (a re-INVITE/realign it
+            // answered, a PRACK/UPDATE 200) BEFORE opening the BYE's own
+            // obligation — the terminating dialog subsumes them, and the fresh
+            // BYE obligation below is still held to the 200.
+            super::response::flush_held_acks(st).await;
             discharge_on_teardown(st, now);
             let (key, dialog_clone) = {
                 let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
@@ -224,6 +227,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
                 return Ok(());
             }
             let now = Instant::now();
+            super::response::flush_held_acks(st).await; // see GoalStep::Bye
             discharge_on_teardown(st, now);
             let (key, dialog_clone) = {
                 let dialog = st.dialogs.confirmed.as_mut().expect("checked Some above");
@@ -236,6 +240,7 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         }
         GoalStep::ByeWith { headers } => {
             let now = Instant::now();
+            super::response::flush_held_acks(st).await; // see GoalStep::Bye
             discharge_on_teardown(st, now); // see GoalStep::Bye — subsume pending in-dialog acks
             let (key, dialog_clone) = {
                 let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {

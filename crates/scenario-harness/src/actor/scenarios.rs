@@ -50,7 +50,7 @@ fn guard(who: &'static str, detail: &'static str) -> StepError {
 /// realign sub-flows; and the settle barrier holds the verdict until every
 /// in-dialog request (each REFER-progress NOTIFY, each realign ACK) is
 /// actually acknowledged — a dropped datagram must be RECOVERED by
-/// re-emission, never excused (endurance failure `rfc3261.cseqInDialogOrder`).
+/// re-emission, never excused (endurance failure `cseq-in-dialog-order`).
 ///
 /// Downstream contract (`docs/todos/actor-harness-p1-contract-table.md` §5.3):
 /// phases `referred` → `transferred` ONLY; checkpoints `time_to_200` /
@@ -128,7 +128,7 @@ impl ActorScenario for Refer {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // Bob rings then answers, then — established + a realistic talk
@@ -152,7 +152,7 @@ impl ActorScenario for Refer {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // Charlie answers the transfer INVITE (180 then an immediate 200,
@@ -171,7 +171,7 @@ impl ActorScenario for Refer {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -282,7 +282,7 @@ impl ActorScenario for ReferCharlieReject {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // Bob rings then answers, then REFERs the call to charlie; his
@@ -303,7 +303,7 @@ impl ActorScenario for ReferCharlieReject {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // Charlie DECLINES the transfer INVITE with 603 (the contract's
@@ -319,7 +319,7 @@ impl ActorScenario for ReferCharlieReject {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -412,7 +412,7 @@ impl ActorScenario for ReroutingPrack {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // The primary callee REJECTS its b-leg (486), triggering the SUT's
@@ -428,7 +428,7 @@ impl ActorScenario for ReroutingPrack {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // The rerouted winning leg answers RELIABLY (183/PRACK/200/ACK).
@@ -449,7 +449,7 @@ impl ActorScenario for ReroutingPrack {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -532,7 +532,7 @@ impl ActorScenario for PrackUpdate {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // Bob answers RELIABLY (183/PRACK/200/ACK) and reacts to the UPDATE
@@ -551,7 +551,7 @@ impl ActorScenario for PrackUpdate {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -623,7 +623,7 @@ impl ActorScenario for Reinvite {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // Bob rings then answers, then answers alice's re-INVITE (200 + SDP)
@@ -643,7 +643,7 @@ impl ActorScenario for Reinvite {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -713,7 +713,7 @@ impl ActorScenario for OptionsHold {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -730,7 +730,7 @@ impl ActorScenario for OptionsHold {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -802,7 +802,7 @@ impl ActorScenario for LongCall {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -819,7 +819,7 @@ impl ActorScenario for LongCall {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -878,7 +878,7 @@ impl ActorScenario for InviteReject {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // Bob rejects the initial INVITE with 486; its reject-ACK is absorbed
@@ -894,7 +894,7 @@ impl ActorScenario for InviteReject {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -961,7 +961,7 @@ impl ActorScenario for AbandonRinging {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             // Bob rings (180) then would answer — but the CANCEL arrives first, so
@@ -977,7 +977,7 @@ impl ActorScenario for AbandonRinging {
                 feed: CtxFeed::default(),
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];
@@ -1042,7 +1042,7 @@ impl ActorScenario for BasicCall {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
             ActorSpec {
@@ -1059,7 +1059,7 @@ impl ActorScenario for BasicCall {
                 },
             
                 cseq: None,
-                delayed: None,
+                delayed: vec![],
                 claim: None,
             },
         ];

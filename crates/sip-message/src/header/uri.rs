@@ -193,6 +193,27 @@ impl Uri {
         self.scheme.as_str()
     }
 
+    /// Whether a raw value already opens with a URI scheme (RFC 3261 §25.1:
+    /// `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` then `":"`). A
+    /// colon alone does not say so — `anonymous@10.0.0.1:5060` carries a PORT
+    /// colon, and reading it as a scheme mints a name-addr holding no URI.
+    pub fn value_has_scheme(value: &str) -> bool {
+        let bytes = value.trim().as_bytes();
+        let Some(&first) = bytes.first() else { return false };
+        if !first.is_ascii_alphabetic() {
+            return false;
+        }
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b':' => return i > 0,
+                b if b.is_ascii_alphanumeric() => {}
+                b'+' | b'-' | b'.' => {}
+                _ => return false,
+            }
+        }
+        false
+    }
+
     pub fn is_secure(&self) -> bool {
         self.scheme.eq_ignore_ascii_case("sips")
     }
@@ -295,6 +316,21 @@ impl Uri {
         let digits = stripped.strip_prefix('+').unwrap_or(&stripped);
         let phone_shaped = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
         Some(if phone_shaped { stripped } else { user.to_string() })
+    }
+
+    /// The dialled DIGITS of this URI's user identity: every non-digit dropped,
+    /// then one leading `00` or `0` (international / trunk prefix) removed, so
+    /// `tel:+33-1-23`, `sip:0033123@h` and `sip:33123@h;npdi` all read `33123`.
+    /// `None` when the identity carries no digit at all (`sip:anonymous@…`) —
+    /// a caller comparing subscribers falls back to [`Uri::user_identity`].
+    pub fn user_digits(&self) -> Option<String> {
+        let identity = self.user_identity()?;
+        let digits: String = identity.chars().filter(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        let trimmed = digits.strip_prefix("00").or_else(|| digits.strip_prefix('0'));
+        Some(trimmed.unwrap_or(&digits).to_string())
     }
 
     /// Whether two URIs name the same user identity. The comparison is
@@ -413,7 +449,7 @@ impl Uri {
     /// NEVER on a path that routes, addresses or answers a call. There a value
     /// that does not read is an [`Err`] the caller propagates to a seam that can
     /// act on it — the opaque URI's host is the whole raw text, so routing on
-    /// one dials an address nobody named (ADR/upstreamneed-055).
+    /// one dials an address nobody named.
     pub fn parse_or_verbatim(raw: &SipStr) -> Self {
         Self::parse(raw).unwrap_or_else(|_| Self::opaque(raw.clone()))
     }
@@ -528,6 +564,21 @@ mod tests {
         assert_eq!(Uri::parse_or_verbatim(&SipStr::owned("*")).to_string(), "*");
     }
 
+    /// A port colon is not a scheme colon: a composer that reads one as the
+    /// other emits a name-addr holding no URI at all.
+    #[test]
+    fn a_port_colon_does_not_make_a_value_scheme_bearing() {
+        assert!(Uri::value_has_scheme("sip:anonymous@host"));
+        assert!(Uri::value_has_scheme("SIPS:bob@biloxi.com"));
+        assert!(Uri::value_has_scheme("tel:+33000900002"));
+        assert!(Uri::value_has_scheme("urn:service:sos"));
+        assert!(!Uri::value_has_scheme("anonymous@198.51.100.20:5060"));
+        assert!(!Uri::value_has_scheme("172.31.16.99"));
+        assert!(!Uri::value_has_scheme("680181033000900002"));
+        assert!(!Uri::value_has_scheme(""));
+        assert!(!Uri::value_has_scheme(":5060"));
+    }
+
     #[test]
     fn an_unedited_uri_renders_the_bytes_it_was_read_from() {
         // Including the parts the field renderer would normalize away: the
@@ -585,7 +636,7 @@ mod tests {
         assert!(uri("TEL:+333").same_user_identity(&uri("tel:+333")));
         assert_eq!(uri("tel:(408)555.1212").user_identity().as_deref(), Some("4085551212"));
         assert_eq!(
-            uri("sip:+33000900012;verstat=TN-Validation-Passed@bar.example.com:5060;user=phone")
+            uri("sip:+33000900012;verstat=TN-Validation-Passed@foo.example.com:5060;user=phone")
                 .user_identity()
                 .as_deref(),
             Some("+33000900012"),
@@ -600,6 +651,28 @@ mod tests {
         assert!(!uri("sip:Alice@a.example").same_user_identity(&uri("sip:alice@b.example")));
         assert_eq!(uri("sip:10.0.0.1:5060").user_identity(), None);
         assert!(!uri("sip:host-only.example").same_user_identity(&uri("sip:host-only.example")));
+    }
+
+    // The dial form of one subscriber, however the peer spelled it, reduces to
+    // one digit string; a user-parameter never leaks into it.
+    #[test]
+    fn user_digits_drop_punctuation_and_one_leading_trunk_prefix() {
+        assert_eq!(uri("tel:+33-1-23").user_digits().as_deref(), Some("33123"));
+        assert_eq!(uri("sip:0033123@h").user_digits().as_deref(), Some("33123"));
+        assert_eq!(uri("sip:033123@h").user_digits().as_deref(), Some("33123"));
+        assert_eq!(uri("sip:33123@h;npdi").user_digits().as_deref(), Some("33123"));
+        assert_eq!(
+            uri("sip:+33000900012;verstat=TN-Validation-Passed@foo.example.com").user_digits().as_deref(),
+            Some("33000900012"),
+        );
+        // Exactly ONE prefix goes: a number that really starts 0 keeps the rest.
+        assert_eq!(uri("sip:0009001@h").user_digits().as_deref(), Some("09001"));
+    }
+
+    #[test]
+    fn user_digits_are_absent_where_the_identity_has_no_digit() {
+        assert_eq!(uri("sip:anonymous@anonymous.invalid").user_digits(), None);
+        assert_eq!(uri("sip:10.0.0.1:5060").user_digits(), None);
     }
 
     #[test]

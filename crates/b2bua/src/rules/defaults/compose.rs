@@ -18,12 +18,16 @@ use super::core_rules::core_rules;
 pub struct ComposeOptions {
     /// Include the upstream `refer_transfer` seed (`transfer-intercept-refer` /
     /// `transfer-reject-a-leg-refer` / `transfer-reject-replaces`) **and** its
-    /// machine-gated SERVICE_LAYER rules (default `true`). Set `false` and an
-    /// in-dialog REFER is no longer intercepted — it falls through to the
-    /// transparent `relay-refer` path, forwarded to the peer leg like INFO. A
-    /// downstream transfer machine then owns the *subscribed* REFER; the
-    /// *unsubscribed* one relays transparently (RFC 3515 implicit subscription
-    /// rides the dialog, so its NOTIFYs relay through too).
+    /// machine-gated SERVICE_LAYER rules (default `true`). Set `false` and a
+    /// REFER is never intercepted, whatever the route activated — it falls
+    /// through to the transparent `relay-refer` path, forwarded to the peer leg
+    /// like INFO. A downstream transfer machine then owns the *subscribed*
+    /// REFER; the *unsubscribed* one relays transparently (RFC 3515 implicit
+    /// subscription rides the dialog, so its NOTIFYs relay through too).
+    ///
+    /// Included (the default), the seed still only intercepts a call whose
+    /// route activated `features.refer` — inclusion is the compose-time
+    /// permission, the feature arm is the per-call directive.
     pub core_refer_transfer: bool,
 }
 
@@ -36,9 +40,7 @@ impl Default for ComposeOptions {
 impl ComposeOptions {
     /// Exclude the upstream `refer_transfer` seed + machine-gated rules. The
     /// composed rule set then relays every in-dialog REFER transparently via
-    /// `relay-refer`. Default composition (seed present) is unaffected —
-    /// `transfer-intercept-refer` still out-ranks `relay-refer` by
-    /// registration order.
+    /// `relay-refer`, even on a call whose route activated `features.refer`.
     pub fn without_core_refer_transfer(mut self) -> Self {
         self.core_refer_transfer = false;
         self
@@ -60,9 +62,11 @@ pub fn default_rules() -> Vec<RuleDefinition> {
 pub fn default_rules_with(options: &ComposeOptions) -> Vec<RuleDefinition> {
     // The REFER seed rules are CORE_LAYER and must out-rank the generic
     // `relay-refer`/`relay-non-invite` REFER relay; registration order (earlier
-    // wins within a layer) puts them first. Their match columns + `no_transfer_active`
-    // filter keep them inert for non-REFER traffic. Excluded when a downstream
-    // owns REFER via its own transfer machine.
+    // wins within a layer) puts them first. Their match columns + their
+    // `features.refer` / `no_transfer_active` filters keep them inert for
+    // non-REFER traffic and for a call whose route never activated local REFER
+    // processing. Excluded when a downstream owns REFER via its own transfer
+    // machine.
     let mut rules = Vec::new();
     if options.core_refer_transfer {
         rules.extend(crate::rules::refer_transfer::transfer_seed_rules());

@@ -9,12 +9,17 @@
 //! b-leg failover path: the first 180's To-tag must survive the leg swap (the
 //! `relay_first_18x` slice is not cleared on failover), so bob2's 200 reuses it.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua::decision::test_adapter::route_to_with_18x;
+use b2bua::decision::{CallFailureResponse, NewCallResponse, ScriptedDecisionEngine};
+use b2bua_harness::{settle_until, B2buaSut};
 use call::features::RelayFirst18xStrategy;
+use call::CdrEventType;
 use scenario_harness::Harness;
 use sip_message::error::SipParseError;
+use sip_message::generators::InDialogMethod;
 use sip_message::header::kind::TokenKind;
 use sip_message::header::{RAck, RSeq, Require, Supported, TokenListHeader};
 use sip_message::Method;
@@ -364,6 +369,308 @@ async fn disabled() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+
+    let _ = h.finish().await;
+}
+
+// ── the owned tag on a caller-facing FINAL ──────────────────────────────────
+// Under this mask the B2BUA owns the caller-facing provisional: it shows the
+// caller ONE bare 180 under ONE tag however many b-forks ring and however many
+// b-legs the failover walks. Every response to that INVITE therefore carries
+// that one tag (RFC 3261 §8.2.6.2) — the relayed 18x and the 200 (pinned above),
+// the relayed non-2xx final, and the transaction layer's own 487 on the caller's
+// CANCEL, which resolves the To-tag pinned by the first response above 100
+// (§17.2.1) and so independently names the same value.
+
+/// The owned 180's To-tag, and the b2bua the caller talks to.
+async fn owned_180_tag(call: &mut scenario_harness::agent::ClientInvite) -> String {
+    let p180 = call.expect(180).await;
+    assert!(p180.body().is_empty(), "bare 180 has no body");
+    p180.to().tag().expect("180 has a To-tag").to_string()
+}
+
+/// The recorded-trace audit charges no To-tag flip on this call. `tag-consistency`
+/// (§17.2.1 / §12.1.1) is force-advisory in the live bind — a forking B2BUA
+/// answering 2xx off a LATER early dialog is §13.2.2.4-legitimate and, per server
+/// transaction, indistinguishable from a flip. Under this mask the caller holds
+/// exactly ONE early dialog, so nothing here is that case and these rungs gate on
+/// the rule themselves.
+fn assert_no_tag_flip(report: &scenario_harness::RunReport) {
+    let flips: Vec<&str> = report
+        .rfc_findings()
+        .iter()
+        .filter(|f| f.rule == "tag-consistency")
+        .map(|f| f.detail.as_str())
+        .collect();
+    assert!(flips.is_empty(), "the audit charges a To-tag flip: {flips:?}");
+}
+
+/// The rejected call left one CDR carrying a reject, and the B2BUA holds nothing.
+async fn assert_rejected_and_reaped(b2bua: &B2buaSut) {
+    settle_until(|| !b2bua.cdr_records().is_empty() && b2bua.active_calls() == 0).await;
+    let cdrs = b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "one CDR for the rejected call");
+    let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
+    assert!(kinds.contains(&CdrEventType::Reject), "reject event: {kinds:?}");
+    b2bua.assert_fully_reaped();
+}
+
+/// One callee, one 180, one 486 — no forking, no failover. The caller's early
+/// dialog and the final that ends it carry the same tag.
+#[tokio::test]
+async fn an_unforked_rejection_rides_the_owned_180_s_tag() {
+    let h = Harness::with_transit_delay("suppress-18x-unforked-rejection-tag", 1);
+    let alice = h.agent("alice", "127.0.0.1:5604").await;
+    let bob = h.agent("bob", "127.0.0.1:5619").await;
+    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5619, RelayFirst18xStrategy::DropSdp)
+        .start(&h, "b2bua", "127.0.0.1:5624")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    let owned = owned_180_tag(&mut call).await;
+
+    uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await; // the b2bua completes bob's reject txn (§17.1.1.3)
+
+    let rejected = call.expect(486).await;
+    assert_eq!(
+        rejected.to().tag(),
+        Some(owned.as_str()),
+        "the 486 answers under the tag the owned 180 put the caller in",
+    );
+
+    assert_rejected_and_reaped(&b2bua).await;
+    alice.drain().await;
+    bob.drain().await;
+    assert_no_tag_flip(&h.finish().await);
+}
+
+/// A NON-FIRST b-fork rejects. The mask gives the caller exactly ONE early
+/// dialog however many forks ring, so the 503 rides that one tag — while the
+/// B2BUA's own b-facing ACK stays in fork 2, where the 503 was generated.
+#[tokio::test]
+async fn a_forked_rejection_rides_the_owned_180_s_tag() {
+    let h = Harness::with_transit_delay("suppress-18x-forked-rejection-tag", 1);
+    let alice = h.agent("alice", "127.0.0.1:5606").await;
+    let bob = h.agent("bob", "127.0.0.1:5620").await;
+    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5620, RelayFirst18xStrategy::DropSdp)
+        .start(&h, "b2bua", "127.0.0.1:5626")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    uas.respond(180, "Ringing").with_to_tag("bobfork1").await;
+    let owned = owned_180_tag(&mut call).await;
+    uas.respond(180, "Ringing").with_to_tag("bobfork2").await; // suppressed
+
+    uas.respond(503, "Service Unavailable").with_to_tag("bobfork2").await;
+    let b_ack = bob.receive("ACK").await;
+    assert_eq!(
+        b_ack.request().to().tag(),
+        Some("bobfork2"),
+        "the b-facing ACK acknowledges the response where it was generated",
+    );
+
+    let rejected = call.expect(503).await;
+    assert_eq!(
+        rejected.to().tag(),
+        Some(owned.as_str()),
+        "one masked early dialog → the 503 rides the owned tag, not the rejecting fork's",
+    );
+
+    assert_rejected_and_reaped(&b2bua).await;
+    alice.drain().await;
+    bob.drain().await;
+    assert_no_tag_flip(&h.finish().await);
+}
+
+/// The rejection arrives on the SECOND b-leg, after a `/call/failure` leg swap.
+/// The `relay_first_18x` slice is deliberately not cleared on failover, so the
+/// owned tag survives it on a final exactly as `failover_reject` shows it does
+/// on the 200.
+#[tokio::test]
+async fn a_rejection_after_failover_rides_the_owned_180_s_tag() {
+    let h = Harness::with_transit_delay("suppress-18x-failover-rejection-tag", 1);
+    let alice = h.agent("alice", "127.0.0.1:5609").await;
+    let bob1 = h.agent("bob1", "127.0.0.1:5629").await;
+    let bob2 = h.agent("bob2", "127.0.0.1:5630").await;
+    // One-deep plan: only the FIRST b-leg's failure reroutes, so attempt 2's
+    // rejection is the last word and relays to the caller.
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_req| {
+                let mut r =
+                    route_to_with_18x("127.0.0.1", 5629, RelayFirst18xStrategy::DropSdp);
+                r.callback_context = Some("suppress-18x-failover-rejection".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|req| {
+                if req.failure.failed_leg_id.as_deref() == Some("b-1") {
+                    let mut r =
+                        route_to_with_18x("127.0.0.1", 5630, RelayFirst18xStrategy::DropSdp);
+                    r.new_ruri = Some("sip:+1234@127.0.0.1:5630".into());
+                    r.callback_context = Some("suppress-18x-failover-rejection".into());
+                    CallFailureResponse::Route(r)
+                } else {
+                    CallFailureResponse::Relay
+                }
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5631").await;
+
+    let mut call = alice.invite(&bob1).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas1 = bob1.receive("INVITE").await;
+    uas1.respond(180, "Ringing").await;
+    let owned = owned_180_tag(&mut call).await;
+
+    uas1.respond(503, "Service Unavailable").await;
+    bob1.receive("ACK").await;
+
+    // Attempt 2 rings on two forks (both suppressed), then a non-first fork
+    // rejects — the last attempt, so the failure relays to the caller.
+    let mut uas2 = bob2.receive("INVITE").await;
+    uas2.respond(180, "Ringing").with_to_tag("bob2fork1").await;
+    uas2.respond(180, "Ringing").with_to_tag("bob2fork2").await;
+    uas2.respond(486, "Busy Here").with_to_tag("bob2fork2").await;
+    bob2.receive("ACK").await;
+
+    let rejected = call.expect(486).await;
+    assert_eq!(
+        rejected.to().tag(),
+        Some(owned.as_str()),
+        "the owned tag survives the leg swap on a final, as it does on a 200",
+    );
+
+    assert_rejected_and_reaped(&b2bua).await;
+    alice.drain().await;
+    bob1.drain().await;
+    bob2.drain().await;
+    assert_no_tag_flip(&h.finish().await);
+}
+
+/// The caller CANCELs its own ringing call. The 487 is generated by the
+/// transaction layer off the To-tag it pinned on the first response above 100
+/// (§17.2.1) — the owned 180's. It must agree with the relayed finals above:
+/// one INVITE transaction never ends twice on two tags.
+#[tokio::test]
+async fn the_cancelled_call_s_487_rides_the_owned_180_s_tag() {
+    let h = Harness::with_transit_delay("suppress-18x-cancel-487-tag", 1);
+    let alice = h.agent("alice", "127.0.0.1:5610").await;
+    let bob = h.agent("bob", "127.0.0.1:5632").await;
+    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5632, RelayFirst18xStrategy::DropSdp)
+        .start(&h, "b2bua", "127.0.0.1:5633")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    // Bob pins ONE tag across the INVITE transaction — its 180, its 200 to the
+    // CANCEL (which shares the INVITE's branch, §9.1) and its 487 — so the only
+    // tag identity this rung reads is the SUT's own.
+    uas.respond(180, "Ringing").with_to_tag("bob1").await;
+    let owned = owned_180_tag(&mut call).await;
+
+    let mut cxl = call.cancel().await;
+    cxl.expect(200).await;
+    let terminated = call.expect(487).await;
+    assert_eq!(
+        terminated.to().tag(),
+        Some(owned.as_str()),
+        "the autonomous 487 answers under the tag the owned 180 pinned",
+    );
+
+    // The b-leg is CANCELled and completes its own 487 transaction (§17.1.1.3).
+    bob.receive("CANCEL").await.respond(200, "OK").with_to_tag("bob1").await;
+    uas.respond(487, "Request Terminated").with_to_tag("bob1").await;
+    bob.receive("ACK").await;
+
+    settle_until(|| !b2bua.cdr_records().is_empty() && b2bua.active_calls() == 0).await;
+    let cdrs = b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "one CDR for the cancelled call");
+    b2bua.assert_fully_reaped();
+    alice.drain().await;
+    bob.drain().await;
+    assert_no_tag_flip(&h.finish().await);
+}
+
+/// A stray PRACK is answered HERE, not handed to the callee — `drop-sdp` does
+/// not change who owes the answer.
+///
+/// The `RSeq` space a PRACK names is the one this stack mints toward the caller
+/// (RFC 3262 §4, errata 4603/4604), and under this strategy it mints none: the
+/// first 18x leaves as a bare 180, so alice was shown no reliable provisional
+/// and no `RAck` she can send matches anything. That makes every PRACK on this
+/// face unmatched, and §4 owes each one a `481` from the face that would have
+/// sent the provisional.
+///
+/// Relaying it puts the decision in bob's independent sequence space (§3,
+/// errata 4600), where a coincidental match has him acknowledge a provisional
+/// alice was never shown — and bob was never told to expect PRACK at all here,
+/// `100rel` having been stripped from his `Supported`.
+#[tokio::test]
+async fn a_stray_prack_is_answered_here_and_never_reaches_the_callee() {
+    let h = Harness::with_transit_delay("suppress-18x-stray-prack", 0);
+    let alice = h.agent("alice", "127.0.0.1:5640").await;
+    let bob = h.agent("bob", "127.0.0.1:5641").await;
+    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5641, RelayFirst18xStrategy::DropSdp)
+        .start(&h, "b2bua", "127.0.0.1:5642")
+        .await;
+
+    let mut call = alice
+        .invite(&bob)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+
+    // Bob honours the stripped `Supported` and rings unreliably, so no PRACK
+    // belongs anywhere on this call: the one below is the only one on the wire.
+    let mut uas = bob.receive("INVITE").await;
+    assert!(
+        !has_token(uas.request().header::<Supported>(), "100rel"),
+        "100rel stripped from bob's Supported",
+    );
+    uas.respond(180, "Ringing").await;
+
+    let p180 = call.expect(180).await;
+    assert!(p180.header::<RSeq>().is_none(), "the bare 180 names no sequence");
+
+    // Alice PRACKs regardless — the misbehaving caller this fixture is for.
+    let (mut stray, sent) = call
+        .send_request(InDialogMethod::Prack)
+        .with_rack(&format!("1 {} INVITE", p180.cseq().seq()))
+        .try_send_with_request()
+        .await
+        .expect("the PRACK goes out");
+    assert_eq!(
+        sent.to().tag(),
+        p180.to().tag(),
+        "the PRACK rides the dialog the 180 opened (RFC 3262 §5)",
+    );
+    stray.expect(481).await;
+
+    // The call still completes: a refused PRACK ends nothing.
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    // Nothing PRACK-shaped ever crossed onto the b leg — the whole point, and a
+    // claim about the WHOLE run rather than about what bob happened to read next.
+    let bob_addr: std::net::SocketAddr = "127.0.0.1:5641".parse().unwrap();
+    let leaked = h
+        .wire_entries()
+        .into_iter()
+        .filter(|e| e.to == bob_addr && e.raw.starts_with(b"PRACK "))
+        .count();
+    assert_eq!(leaked, 0, "the callee saw {leaked} PRACK(s) on a leg that negotiated none");
 
     let _ = h.finish().await;
 }

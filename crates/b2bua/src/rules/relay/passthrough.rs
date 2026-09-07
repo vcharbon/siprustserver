@@ -4,18 +4,19 @@
 //! (RFC 3262). The 18x management *policies* that rewrite provisionals live in
 //! `rules::relay_first_18x` / `rules::promote_pem`, not here.
 
-use sip_message::generators::{self, RelayScope};
-use sip_message::header::{self, HeaderName};
+use sip_message::generators::{self, RelayScope, SourceBody};
+use sip_message::header::{self, HeaderName, HeaderValue};
 use sip_message::{SipHeader as MsgHeader, SipRequest, SipStr};
 
 /// What the B2BUA carries transparently from a b-leg response onto the response
 /// it mints toward the a-leg (RFC 3261 §16.6): every header it does not own,
 /// which includes the reliable-provisional negotiation end to end
 /// (`Require`/`Supported`, RFC 3262). `RSeq` rides here too, but as a
-/// placeholder: it is per-transaction sequencing the a-leg owns, so
-/// [`own_the_rseq`] restates it before the response leaves. `keeps_body` states
-/// whether the relayed response carries this response's own body — a policy
-/// that drops or replaces the body leaves the headers describing it behind.
+/// placeholder: it is per-transaction sequencing the face it is shown on
+/// owns, so [`own_the_rseq`] restates it before the response leaves.
+/// `body` states what the relayed response carries where this response had a
+/// body: a policy that drops it leaves every header describing it behind, and
+/// one that replaces it keeps only the header stating the body's role.
 ///
 /// This is plain transparent relay — distinct from the B2BUA-side 18x
 /// management *policies* (`relayFirst18xTo180`/`promote18xPemTo200`), which
@@ -23,11 +24,9 @@ use sip_message::{SipHeader as MsgHeader, SipRequest, SipStr};
 /// [`stamp_a_facing_invite_advert`] owns.
 pub fn relay_response_passthrough_headers(
     resp: &sip_message::SipResponse,
-    keeps_body: bool,
+    body: SourceBody,
 ) -> Vec<MsgHeader> {
-    let scope = RelayScope::response();
-    let scope = if keeps_body { scope } else { scope.without_source_body() };
-    generators::relayable_headers(resp.headers(), scope)
+    generators::relayable_headers(resp.headers(), RelayScope::response_carrying(body))
 }
 
 /// The `RSeq` a reliable provisional states (RFC 3262: `Require: 100rel` plus a
@@ -50,6 +49,32 @@ pub fn own_the_rseq(headers: &mut [MsgHeader], a_rseq: i64) {
     for h in headers.iter_mut().filter(|h| HeaderName::RSeq.matches(&h.name)) {
         h.value = SipStr::owned(&a_rseq.to_string());
     }
+}
+
+/// Relay a reliable provisional UNRELIABLY: drop its `RSeq` and the `100rel`
+/// tag from its `Require`, a `Require` left empty going with it. What remains
+/// is the ordinary provisional RFC 3262 §3 obliges this stack to send where
+/// the originator never offered the extension, or where the request is not an
+/// INVITE (the one method the mechanism serves). The responder's own
+/// reliability is this stack's to acknowledge, not the originator's.
+pub fn strip_reliability(headers: &mut Vec<MsgHeader>) {
+    headers.retain(|h| !HeaderName::RSeq.matches(&h.name));
+    let mut kept = Vec::with_capacity(headers.len());
+    for h in headers.drain(..) {
+        if !HeaderName::Require.matches(&h.name) {
+            kept.push(h);
+            continue;
+        }
+        let Ok(required) = header::Require::parse(&h.value) else {
+            kept.push(h);
+            continue;
+        };
+        let rest = required.without("100rel");
+        if !rest.is_empty() {
+            kept.push(MsgHeader { name: h.name, value: SipStr::owned(&rest.to_wire()) });
+        }
+    }
+    *headers = kept;
 }
 
 /// What the B2BUA carries transparently when relaying an in-dialog *request*
@@ -118,7 +143,7 @@ Content-Length: 4\r\n\r\nv=0\n";
     /// alike — while the callee's route set, Contact and clock stamp do not.
     #[test]
     fn a_relayed_response_carries_the_callee_end_to_end_set() {
-        let carried = names(&relay_response_passthrough_headers(&b_leg_183(), true));
+        let carried = names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Verbatim));
         for name in ["require", "rseq", "supported", "p-early-media", "reason"] {
             assert!(carried.contains(&name.to_string()), "{name} must ride: {carried:?}");
         }
@@ -127,16 +152,55 @@ Content-Length: 4\r\n\r\nv=0\n";
         }
     }
 
-    /// A policy that drops or replaces the body leaves the header describing
-    /// that body behind: `handling=required` must not describe a body the caller
-    /// never receives.
+    /// A policy that DROPS the body leaves the header describing that body
+    /// behind: `handling=required` must not describe a body the caller never
+    /// receives.
     #[test]
     fn body_metadata_does_not_outlive_the_body_it_describes() {
-        let with_body = names(&relay_response_passthrough_headers(&b_leg_183(), true));
+        let with_body = names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Verbatim));
         assert!(with_body.contains(&"content-disposition".to_string()));
 
-        let without = names(&relay_response_passthrough_headers(&b_leg_183(), false));
+        let without = names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Dropped));
         assert!(!without.contains(&"content-disposition".to_string()), "{without:?}");
         assert!(without.contains(&"p-early-media".to_string()), "the rest still rides: {without:?}");
+    }
+
+    /// A policy that REPLACES the body stages one of the same role, so the
+    /// caller still receives a session body and the instruction to reject an
+    /// unprocessable one (RFC 3261 §20.11) still describes it truthfully.
+    #[test]
+    fn a_replaced_body_keeps_the_disposition_that_still_describes_it() {
+        let replaced = names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Replaced));
+        assert!(replaced.contains(&"content-disposition".to_string()), "{replaced:?}");
+        assert!(replaced.contains(&"p-early-media".to_string()), "the rest still rides: {replaced:?}");
+    }
+
+    /// Stripping reliability leaves an ordinary provisional: no `RSeq`, no
+    /// `100rel`, and a `Require` that named nothing else is gone with it —
+    /// while every other end-to-end header still rides.
+    #[test]
+    fn stripping_reliability_leaves_an_ordinary_provisional() {
+        let mut headers = relay_response_passthrough_headers(&b_leg_183(), SourceBody::Verbatim);
+        strip_reliability(&mut headers);
+        let carried = names(&headers);
+        assert!(!carried.contains(&"rseq".to_string()), "{carried:?}");
+        assert!(!carried.contains(&"require".to_string()), "an emptied Require does not ride: {carried:?}");
+        for name in ["supported", "p-early-media", "reason"] {
+            assert!(carried.contains(&name.to_string()), "{name} still rides: {carried:?}");
+        }
+    }
+
+    /// A `Require` that also names another extension keeps naming it: only the
+    /// `100rel` tag is this stack's to withdraw.
+    #[test]
+    fn stripping_reliability_keeps_the_other_required_extensions() {
+        let mut headers = vec![
+            MsgHeader { name: SipStr::from_static("Require"), value: SipStr::from_static("100rel, timer") },
+            MsgHeader { name: SipStr::from_static("RSeq"), value: SipStr::from_static("4711") },
+        ];
+        strip_reliability(&mut headers);
+        assert_eq!(headers.len(), 1, "{headers:?}");
+        assert!(HeaderName::Require.matches(&headers[0].name));
+        assert_eq!(headers[0].value.as_str(), "timer");
     }
 }

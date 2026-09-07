@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use b2bua::wire_faults::WireFaults;
 use b2bua::cdr::{CdrRecord, InMemoryCdrWriter};
 use b2bua::config::B2buaConfig;
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
@@ -80,8 +81,8 @@ pub struct B2buaSpawnParams {
     /// behaviour. A test builds one over `SimulatedHttpNetwork` (mirroring the
     /// limiter injection) to round-trip a binary adaptation body.
     pub adaptation_http: Option<b2bua::AdaptationHttpPort>,
-    /// Compose-time built-in-machine selection (ADR-0016 opt-out seam,
-    /// upstreamneed-019). `Default` = every built-in included. A downstream that
+    /// Compose-time built-in-machine selection (ADR-0016 opt-out seam).
+    /// `Default` = every built-in included. A downstream that
     /// owns REFER via its own transfer machine passes
     /// `ComposeOptions::default().without_core_refer_transfer()`.
     pub compose: b2bua::rules::ComposeOptions,
@@ -94,6 +95,8 @@ pub struct B2buaSpawnParams {
     /// store in a [`FaultInjectingCallStore`] and threads the handle as the
     /// router's live-path probe, so one control drives both halves of the seam.
     pub store_faults: Option<StoreFaults>,
+    /// Wire-fault handle (`b2bua::wire_faults`). `None` → compliant emission.
+    pub wire_faults: Option<WireFaults>,
 }
 
 /// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
@@ -128,6 +131,7 @@ pub fn spawn_b2bua_core(
         compose,
         store,
         store_faults,
+        wire_faults,
     } = params;
     let mut config = B2buaConfig {
         self_ordinal: ordinal,
@@ -157,6 +161,7 @@ pub fn spawn_b2bua_core(
         cdr: Arc::new(cdr),
         store,
         store_faults,
+        wire_faults: wire_faults.unwrap_or_default(),
         clock,
         id_gen,
         replication,
@@ -371,6 +376,7 @@ pub struct B2buaSutBuilder {
     compose: b2bua::rules::ComposeOptions,
     store: Option<Arc<dyn CallStore>>,
     store_faults: Option<StoreFaults>,
+    wire_faults: Option<WireFaults>,
 }
 
 impl B2buaSutBuilder {
@@ -432,7 +438,7 @@ impl B2buaSutBuilder {
     }
 
     /// Exclude the upstream `refer_transfer` seed + machine from the composed
-    /// rule set (ADR-0016 opt-out seam, upstreamneed-019 part 1). An in-dialog
+    /// rule set (ADR-0016 opt-out seam). An in-dialog
     /// REFER is then relayed transparently to the peer leg (`relay-refer`)
     /// instead of being intercepted — the shape a downstream that owns REFER via
     /// its own subscription-gated transfer machine uses. Default composition
@@ -459,6 +465,13 @@ impl B2buaSutBuilder {
         self
     }
 
+    /// Inject a wire fault-control handle: the test keeps its clone and arms a
+    /// named RFC deviation the core then emits on purpose. Default: none.
+    pub fn with_wire_faults(mut self, faults: WireFaults) -> Self {
+        self.wire_faults = Some(faults);
+        self
+    }
+
     /// Bind the B2BUA at `addr` and spawn its core, consuming the builder.
     pub async fn start(self, h: &Harness, name: &str, addr: &str) -> B2buaSut {
         let B2buaSutBuilder {
@@ -472,6 +485,7 @@ impl B2buaSutBuilder {
             compose,
             store,
             store_faults,
+            wire_faults,
         } = self;
         // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
         // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
@@ -502,6 +516,7 @@ impl B2buaSutBuilder {
             compose,
             store,
             store_faults,
+            wire_faults,
         };
         let core = spawn_b2bua_core(endpoint, params, |config| {
             // Production default is 300 s (5 min); the paused-clock keepalive
@@ -555,6 +570,7 @@ impl B2buaSut {
             compose: b2bua::rules::ComposeOptions::default(),
             store: None,
             store_faults: None,
+            wire_faults: None,
         }
     }
 
@@ -573,15 +589,16 @@ impl B2buaSut {
     }
 
     /// Builder for a B2BUA whose engine honors the full inbound `X-Api-Call`
-    /// control surface — the deployed-cluster engine shape: a single
-    /// `destination` pin, an ADR-0017 `routes` failover plan walked on b-leg
-    /// rejection (`/call/failure` pops the next route), and REFER
-    /// authorization; plan-less traffic falls back to routing to `dest`. This
-    /// is the SUT the loadgen rerouting scenarios exercise under the
-    /// `api-call-pin` egress policy.
+    /// control surface — a single `destination` pin, an ADR-0017 `routes`
+    /// failover plan walked on b-leg rejection (`/call/failure` pops the next
+    /// route), per-call `call_limiter` admission and the `features.refer` arm;
+    /// plan-less traffic falls back to routing to `dest`. Every activation is
+    /// the CALLER's to state — nothing is implied — which is what a replayed
+    /// document needs. This is the SUT the loadgen rerouting scenarios exercise
+    /// under the `api-call-pin` egress policy.
     pub fn route_api_call(dest_host: &str, dest_port: u16) -> B2buaSutBuilder {
-        Self::builder(Arc::new(ScriptedDecisionEngine::route_all_to_with_limiter(
-            dest_host, dest_port, None,
+        Self::builder(Arc::new(ScriptedDecisionEngine::route_by_api_call(
+            dest_host, dest_port,
         )))
     }
 

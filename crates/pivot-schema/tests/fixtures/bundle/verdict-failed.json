@@ -1,0 +1,228 @@
+{
+  "abandoned": {
+    "closed": [
+      {
+        "leg": "A",
+        "owed": "ack",
+        "sent": "ACK sip:called@127.0.0.1:5080 SIP/2.0"
+      },
+      {
+        "leg": "A",
+        "owed": "bye",
+        "sent": "BYE sip:called@127.0.0.1:5080 SIP/2.0"
+      },
+      {
+        "leg": "B",
+        "owed": "answer",
+        "sent": "SIP/2.0 480 Temporarily Unavailable"
+      },
+      {
+        "leg": "B",
+        "owed": "cancel",
+        "sent": "CANCEL sip:callee@127.0.0.1:5070 SIP/2.0"
+      }
+    ],
+    "leg": "A",
+    "pending": [
+      "s8",
+      "s9"
+    ],
+    "step": "s7"
+  },
+  "case": "authored-cancel-race",
+  "completed_steps": [
+    "s1",
+    "s2",
+    "s3"
+  ],
+  "failed_step": "s7",
+  "failures": [
+    {
+      "detail": "flow[id:s3]: leg \"C\" is not declared",
+      "failure": "plan-refused"
+    },
+    {
+      "failure": "expect-timed-out",
+      "gated_on": "response 486",
+      "leg": "A",
+      "step": "s7",
+      "within_ms": 32000
+    },
+    {
+      "arrived": {
+        "cseq": 1,
+        "cseq_method": "INVITE",
+        "kind": "response",
+        "reason": "Temporarily Unavailable",
+        "status": 480
+      },
+      "failure": "unmatched-datagram",
+      "gated_on": {
+        "cseq_method": "INVITE",
+        "kind": "response",
+        "status": 486
+      },
+      "leg": "A",
+      "reason": "gated on response 486; 480 arrived",
+      "step": "s7"
+    },
+    {
+      "arrived": {
+        "cseq": 9,
+        "kind": "request",
+        "method": "OPTIONS"
+      },
+      "detail": "no leg of this flow rides call-id opt-1",
+      "failure": "unexpected-datagram",
+      "leg": "B"
+    },
+    {
+      "arrived": {
+        "cseq": 3,
+        "kind": "request",
+        "method": "BYE"
+      },
+      "failure": "datagram-after-flow",
+      "leg": "A"
+    },
+    {
+      "expected": "answered",
+      "failure": "check-failed",
+      "field": "cdr[0].disposition",
+      "observed": "cancelled",
+      "op": "eq",
+      "site": "postconditions"
+    },
+    {
+      "detail": "${step:s8.to-tag} — step s8 has not run",
+      "failure": "accessor-unresolved",
+      "site": "flow[id:s9]"
+    },
+    {
+      "detail": "the composed Request-URI has no host",
+      "failure": "send-failed",
+      "leg": "A",
+      "step": "s2"
+    },
+    {
+      "budget_ms": 32000,
+      "failure": "settle-timed-out",
+      "open": [
+        "A",
+        "B"
+      ]
+    },
+    {
+      "actor": "uas1",
+      "bound": "<= 1",
+      "failure": "background-count",
+      "method": "OPTIONS",
+      "observed": 4
+    },
+    {
+      "expected": "1 record",
+      "failure": "cdr-mismatch",
+      "observed": "0 records"
+    },
+    {
+      "failure": "flow-incomplete",
+      "pending": [
+        "s8",
+        "s9"
+      ]
+    },
+    {
+      "deviation": "d1",
+      "failure": "deviation-unimplemented",
+      "kind": "raw-order",
+      "reason": "this interpreter composes headers in tier order",
+      "step": "s5"
+    },
+    {
+      "action": "kill-b2bua",
+      "failure": "injector-missing",
+      "node": "i1"
+    },
+    {
+      "detail": "the lane bound caller and called-0-0",
+      "failure": "identity-unbound",
+      "identity": "transferee",
+      "site": "flow[id:s1]"
+    },
+    {
+      "actor": "uas1",
+      "detail": "the socket was closed by the peer",
+      "failure": "transport-closed"
+    },
+    {
+      "detail": "recording/A.jsonl: no space left on device",
+      "failure": "recording-failed"
+    },
+    {
+      "failure": "run-stalled",
+      "phase": "flow",
+      "waiting_on": [
+        "s7 on leg A"
+      ]
+    },
+    {
+      "detail": "the run body did not return; the recording is what it had reached",
+      "failure": "run-unwound"
+    },
+    {
+      "emitter": "sut",
+      "failure": "rfc-violation-unverified",
+      "rule": "no-200-after-cancel",
+      "step": "s11"
+    },
+    {
+      "declared": 2,
+      "expected": 2,
+      "failure": "retransmit-count-mismatch",
+      "leg": "A",
+      "observed": 0,
+      "step": "s6"
+    },
+    {
+      "deviation": "d2",
+      "failure": "cseq-override-refused",
+      "leg": "A",
+      "reason": "the stack chooses an ACK's CSeq from the INVITE it confirms",
+      "step": "s6"
+    },
+    {
+      "detail": "the composed message reordered Contact after Allow",
+      "deviation": "d3",
+      "failure": "emission-not-preserved",
+      "leg": "B",
+      "step": "s5"
+    },
+    {
+      "declared_ms": 15000,
+      "failure": "timing-out-of-tolerance",
+      "leg": "A",
+      "observed_ms": 18400,
+      "step": "s7",
+      "tolerance_ms": 700
+    },
+    {
+      "call": "c3",
+      "detail": "no calls[] entry carries this id",
+      "failure": "call-directive-unplaced"
+    },
+    {
+      "detail": "a 200 to an INVITE retransmits on the UAS's own timer",
+      "failure": "retransmit-ladder-refused",
+      "leg": "A",
+      "step": "s3"
+    },
+    {
+      "declared": "unexpected-ack",
+      "detail": "no ACK arrived on leg B after the 200",
+      "failure": "declared-failure-not-produced",
+      "step": "s14"
+    }
+  ],
+  "lane": "upstream-fake",
+  "status": "failed"
+}

@@ -45,11 +45,13 @@ pub mod target_admission;
 pub mod tier1_brake;
 pub mod timers;
 pub mod trace;
+pub mod wire_faults;
 
 pub use b2bua_core::{B2buaCore, B2buaDeps, ReplicationSetup};
 pub use router::AdaptationHttpPort;
 
 pub use config::B2buaConfig;
+pub use wire_faults::{WireFaultPoint, WireFaults};
 pub use effects::{HandlerEffects, HandlerResult};
 pub use event::CallEvent;
 pub use metrics::{B2buaMetrics, BufferedSendCounters, LiveGauge, UdpTransportMetrics};

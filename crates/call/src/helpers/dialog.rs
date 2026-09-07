@@ -2,7 +2,7 @@
 //! pending transparent-relay entries, the per-dialog SDP cache, and the dialog
 //! constructors.
 
-use crate::model::{B2buaDialogExt, Call, Dialog, PendingRequest, StackDialog};
+use crate::model::{B2buaDialogExt, Call, Dialog, PendingRequest, RetainedEmission, StackDialog};
 
 use super::lens::{update_dialog, update_leg};
 
@@ -36,17 +36,69 @@ pub fn relay_cseq_delta(inbound_cseq: i64, source_remote_cseq: Option<i64>) -> i
 /// re-ACK of a **retransmitted** 2xx reuses the SAME branch (RFC 3261 §13.2.2.4).
 /// A fresh branch would mint a new client transaction and never quiesce the
 /// answerer's INVITE server txn, leaking / late-timing-out the confirmed call
-/// when the first ACK is lost. Idempotent: only the first ACK writes it (every
-/// re-ACK re-observes the same value). Reset to `None` wherever a new INVITE
-/// transaction is cached on the dialog, so the stored branch always belongs to
-/// the current INVITE's CSeq. Mirrors the `dialogs.first()` dialog choice in
-/// `rules::relay::ack_b_leg`, its sole writer's twin.
+/// when the first ACK is lost. Idempotent: whoever writes it first wins — the
+/// 2xx that armed it on confirmation, else the first ACK — and every later ACK
+/// re-observes that value. Reset to `None` wherever a new INVITE transaction is
+/// cached on the dialog, so the stored branch always belongs to the current
+/// INVITE's CSeq. Mirrors the `dialogs.first()` dialog choice in
+/// `rules::relay::ack_b_leg`, its twin.
 pub fn retain_ack_branch(call: Call, leg_id: &str, branch: &str) -> Call {
     update_leg(call, leg_id, |leg| {
         if let Some(d) = leg.dialogs.first_mut() {
             if d.ext.ack_branch.is_none() {
                 d.ext.ack_branch = Some(branch.to_string());
             }
+        }
+    })
+}
+
+/// Retain the ACK-for-2xx datagram just emitted on `leg_id`'s dialog, so a
+/// re-ACK of a **retransmitted** 2xx re-passes THE ACK to the transport
+/// (RFC 3261 §13.2.2.4) instead of composing an equivalent — on a delayed offer
+/// the retained bytes carry the answer a fresh composition would drop
+/// (RFC 3264 §4). First write wins, like `retain_ack_branch`: the ACK the 2xx
+/// triggered is the one every later copy re-sends. Reset to `None` alongside
+/// `ack_branch` wherever a new INVITE transaction is cached on the dialog.
+/// Mirrors the `dialogs.first()` dialog choice in `rules::relay::ack_b_leg`.
+pub fn retain_emitted_ack(call: Call, leg_id: &str, ack: RetainedEmission) -> Call {
+    update_leg(call, leg_id, |leg| {
+        if let Some(d) = leg.dialogs.first_mut() {
+            if d.ext.emitted_ack.is_none() {
+                d.ext.emitted_ack = Some(ack.clone());
+            }
+        }
+    })
+}
+
+/// Forget the INVITE client-transaction handle on `leg_id`'s dialog whose
+/// branch a non-2xx final answered (RFC 3261 §17.1.1.3: the transaction ends
+/// with that final, hop-ACKed below the TU), so the record names nothing in
+/// flight for it. Only an open round is closed: a handle kept for a taken 2xx
+/// (`ack_branch` / `awaited_ack_cseq` set) stays for the ACK and its re-ACKs,
+/// whatever a later final on the same branch says; the initial INVITE of a leg
+/// still `Trying` / `Early` keeps it for the CANCEL.
+pub fn close_rejected_invite_round(call: Call, leg_id: &str, branch: &str) -> Call {
+    update_leg(call, leg_id, |leg| {
+        if !matches!(leg.state, crate::model::LegState::Confirmed) {
+            return;
+        }
+        for d in leg.dialogs.iter_mut() {
+            let round_open = d.ext.ack_branch.is_none() && d.ext.awaited_ack_cseq.is_none();
+            if round_open && d.ext.pending_invite_txn.as_ref().is_some_and(|h| h.branch == branch) {
+                d.ext.pending_invite_txn = None;
+            }
+        }
+    })
+}
+
+/// Arm (`Some`) or discharge (`None`) the §13.2.2.4 relay-ACK obligation on
+/// `leg_id`'s dialog. `cseq` is the number the acknowledging peer's ACK will
+/// carry — the peer's own INVITE CSeq, not this dialog's. Mirrors the
+/// `dialogs.first()` dialog choice in `rules::relay::ack_b_leg`.
+pub fn set_awaited_ack_cseq(call: Call, leg_id: &str, cseq: Option<i64>) -> Call {
+    update_leg(call, leg_id, |leg| {
+        if let Some(d) = leg.dialogs.first_mut() {
+            d.ext.awaited_ack_cseq = cseq;
         }
     })
 }
@@ -63,6 +115,20 @@ pub fn add_pending_request(
     update_dialog(call, leg_id, identity_tag, |d| {
         d.ext.inbound_pending_requests.push(entry.clone())
     })
+}
+
+/// Whether an INVITE transaction is still open on this dialog (RFC 3261
+/// §14.1): a transparently relayed INVITE awaiting its final response
+/// (rule 1), or a 2xx this side sent that still awaits its ACK (rule 2 —
+/// RFC 6026 names the interval *Accepted*). While either holds, a new INVITE
+/// on the dialog is glare and gets 491 Request Pending.
+pub fn invite_transaction_open(dialog: &Dialog) -> bool {
+    dialog
+        .ext
+        .inbound_pending_requests
+        .iter()
+        .any(|p| p.method.eq_ignore_ascii_case("INVITE"))
+        || dialog.ext.pending_reinvite_2xx.is_some()
 }
 
 /// Find a pending transparent-relay entry by outbound CSeq.
@@ -170,7 +236,9 @@ pub fn make_empty_dialog(ctx: &MakeDialogLegCtx, initial_cseq: i64) -> Dialog {
             pending_invite_txn: None,
             cached_sdp: None,
             pending_reinvite_2xx: None,
-            answered_advert: Vec::new(),
+            answered_2xx: None,
+            emitted_ack: None,
+            awaited_ack_cseq: None,
         },
     }
 }
@@ -192,7 +260,9 @@ pub fn make_dialog_from_incoming(
             pending_invite_txn: None,
             cached_sdp: None,
             pending_reinvite_2xx: None,
-            answered_advert: Vec::new(),
+            answered_2xx: None,
+            emitted_ack: None,
+            awaited_ack_cseq: None,
         },
     }
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use sip_message::SipMessage;
 
 use super::peer_metrics::classify_b2bua_peer;
-use super::process::process;
+use super::process::{process, reject_stray_cancel};
 use super::release::{release_call, ReleaseKind};
 use super::resolve::{replica_takeover_call_ref, resolve};
 use super::responses::build_options_health_response;
@@ -96,7 +96,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // Out-of-dialog OPTIONS keepalive: self-report readiness (S7, ADR-0011 X6).
     // The front proxy probe keys on the status + Reason header text
     // (`sip-proxy::health::probe::classify_503`).
-    if let CallEvent::Sip { message, src } = &event {
+    if let CallEvent::Sip { message, src, .. } = &event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method() == "OPTIONS" && req.to().tag().is_none() {
                 let resp = build_options_health_response(
@@ -129,6 +129,11 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     let call_ref = match res.call_ref.clone() {
         Some(r) => r,
         None => {
+            // A CANCEL reaches the router only when the transaction layer held
+            // no INVITE for it; naming no call either, it draws the RFC 3261
+            // §9.2 481 here. Every other unroutable request is the peer's to
+            // re-send or give up on.
+            reject_stray_cancel(ctx, &event).await;
             ctx.metrics.bump_unroutable_dropped();
             return;
         }
@@ -166,7 +171,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // `dispatch` cap-drop (an in-dialog request with no live call is an orphan the
     // protocol resends / the peer 481s; only the initial INVITE owes a final).
     if res.initial_invite && ctx.dispatcher.would_drop_new_at_cap(&call_ref) {
-        if let CallEvent::Sip { message, src } = &event {
+        if let CallEvent::Sip { message, src, .. } = &event {
             if let SipMessage::Request(req) = message.as_ref() {
                 let resp = crate::overload::build_reject_new_call_503(
                     ctx.id_gen.new_tag(),

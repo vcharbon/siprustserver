@@ -1,0 +1,25 @@
+{
+  "name": "@sip/contracts",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Effect Schema mirrors of the Rust-owned wire formats: pivot v3, run bundle, correlation rules, flows, lint, e2e records, triage registry.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "effect": "4.0.0-rc.111"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

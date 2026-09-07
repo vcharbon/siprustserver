@@ -32,13 +32,17 @@ pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};
 // The Call→Leg→Dialog tree + call-level satellites.
 pub use model::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallLimiterState, CallModelState,
-    CallTopology, Leg, PolicyUpdateBody, ReliableProvisional, SipHeader, TagMapping,
+    CallTopology, Leg, PolicyUpdateBody, PrackedProvisional, ReliableProvisional, SipHeader,
+    TagMapping,
 };
 // Leg + dialog state.
 pub use model::{
     B2buaDialogExt, ByeDisposition, Dialog, Direction, HostPort, InviteTxnHandle, LegDisposition,
-    LegKind, LegState, PendingReinvite2xx, PendingRequest, RemoteInfo, StackDialog,
+    LegKind, LegState, PendingRequest, RemoteInfo, StackDialog, Unacked2xx,
 };
+// The retained emission every dialog-level retransmission repeats (ADR-0029 X3)
+// and the obligation that discharges its ladder (X4).
+pub use model::{Obligation, Repeat, Repeated, RetainedEmission};
 // Timers + CDR events on the replicated body.
 pub use model::{CdrEvent, CdrEventType, TimerEntry, TimerType};
 // Per-service slices + state-machine identifiers (ADR-0016).

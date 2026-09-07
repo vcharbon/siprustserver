@@ -22,13 +22,18 @@
 //! `sipflow` bin is a presenter over all four.
 
 mod bytes;
+mod callfacts;
 mod classic;
+pub mod doc;
 pub mod emit;
+pub mod enrich;
 pub mod flow;
 mod frame;
 mod pcapng;
 pub mod query;
+mod msgfacts;
 mod reassembly;
+pub mod rfc;
 mod source;
 pub mod txn;
 
@@ -48,6 +53,13 @@ pub struct Datagram {
     pub src: SocketAddr,
     pub dst: SocketAddr,
     pub payload: Vec<u8>,
+    /// WHICH PROBE WROTE THIS COPY, numbered across the whole read: one id per
+    /// classic-pcap file, one per pcapng interface per section. A `mergecap` of
+    /// several probes writes one packet once per probe that saw it, and the two
+    /// copies are then told apart by this and nothing else — their bytes are
+    /// identical and their timestamps differ by the probes' clock offset, which
+    /// no window can distinguish from a retransmission.
+    pub probe: u32,
 }
 
 /// Decode counters — surfaced by `sipflow` so a lossy/odd capture is visible
@@ -120,6 +132,31 @@ impl From<std::io::Error> for PcapError {
     }
 }
 
+/// Hands out the next free probe id. One counter for the whole read: a
+/// container that declares several observation points (pcapng interfaces) takes
+/// several, a classic-pcap file takes one.
+#[derive(Debug, Default)]
+pub struct Probes(u32);
+
+impl Probes {
+    pub fn next(&mut self) -> u32 {
+        let id = self.0;
+        self.0 += 1;
+        id
+    }
+}
+
+/// Stamp `probe` on everything appended to `out` since `from`.
+///
+/// Done by the CONTAINER reader rather than inside the frame decoder, which is
+/// container-agnostic by design and must stay ignorant of where a frame was
+/// observed.
+pub(crate) fn stamp_probe(out: &mut [Datagram], from: usize, probe: u32) {
+    for d in &mut out[from..] {
+        d.probe = probe;
+    }
+}
+
 /// Read one or more capture files (in the given order — pass them oldest-first
 /// so fragment reassembly can straddle ring-file boundaries) and return every
 /// UDP datagram plus decode counters. Each file's container format and
@@ -131,9 +168,12 @@ pub fn read_capture_files<P: AsRef<Path>>(
     let mut out = Vec::new();
     let mut stats = DecodeStats::default();
     let mut reasm = Reassembler::new();
+    // Vantages are numbered across the WHOLE read, so two files' interface 0
+    // are two probes and never one.
+    let mut probes = Probes::default();
     for p in paths {
         let bytes = source::load(p.as_ref())?;
-        read_one(&bytes, &mut out, &mut stats, &mut reasm)
+        read_one(&bytes, &mut out, &mut stats, &mut reasm, &mut probes)
             .map_err(|m| PcapError::Format(format!("{}: {m}", p.as_ref().display())))?;
     }
     stats.frag_dropped += reasm.pending_len() as u64; // still-incomplete at EOF
@@ -147,15 +187,16 @@ fn read_one(
     out: &mut Vec<Datagram>,
     stats: &mut DecodeStats,
     reasm: &mut Reassembler,
+    probes: &mut Probes,
 ) -> Result<(), String> {
     let magic = match bytes.get(..4) {
         Some(m) => u32::from_le_bytes([m[0], m[1], m[2], m[3]]),
         None => return Err("file shorter than a capture header".into()),
     };
     if magic == pcapng::SHB_TYPE {
-        pcapng::walk(bytes, out, stats, reasm)
+        pcapng::walk(bytes, out, stats, reasm, probes)
     } else if classic::MAGICS.contains(&magic) {
-        classic::walk(bytes, out, stats, reasm)
+        classic::walk(bytes, out, stats, reasm, probes)
     } else {
         Err(format!("not a pcap or pcapng capture (magic {magic:#010x})"))
     }
@@ -217,6 +258,37 @@ mod tests {
             epb.extend_from_slice(&(pkt.len() as u32).to_le_bytes()); // original
             epb.extend_from_slice(pkt);
             epb.resize(epb.len().div_ceil(4) * 4, 0); // packet data padding
+            push_block(&mut f, 0x0000_0006, &epb);
+        }
+        f
+    }
+
+    /// A pcapng SECTION with `ifaces` interface descriptions, then one EPB per
+    /// `(iface_id, ticks, frame)` — a `mergecap` output in miniature.
+    fn pcapng_merged(ifaces: usize, records: &[(u32, u64, Vec<u8>)]) -> Vec<u8> {
+        let mut f = Vec::new();
+        let mut shb = Vec::new();
+        shb.extend_from_slice(&0x1a2b_3c4du32.to_le_bytes());
+        shb.extend_from_slice(&1u16.to_le_bytes());
+        shb.extend_from_slice(&0u16.to_le_bytes());
+        shb.extend_from_slice(&(-1i64).to_le_bytes());
+        push_block(&mut f, 0x0a0d_0d0a, &shb);
+        for _ in 0..ifaces {
+            let mut idb = Vec::new();
+            idb.extend_from_slice(&1u16.to_le_bytes()); // LINKTYPE_ETHERNET
+            idb.extend_from_slice(&0u16.to_le_bytes());
+            idb.extend_from_slice(&65535u32.to_le_bytes());
+            push_block(&mut f, 0x0000_0001, &idb);
+        }
+        for (iface, ticks, pkt) in records {
+            let mut epb = Vec::new();
+            epb.extend_from_slice(&iface.to_le_bytes());
+            epb.extend_from_slice(&((ticks >> 32) as u32).to_le_bytes());
+            epb.extend_from_slice(&(*ticks as u32).to_le_bytes());
+            epb.extend_from_slice(&(pkt.len() as u32).to_le_bytes());
+            epb.extend_from_slice(&(pkt.len() as u32).to_le_bytes());
+            epb.extend_from_slice(pkt);
+            epb.resize(epb.len().div_ceil(4) * 4, 0);
             push_block(&mut f, 0x0000_0006, &epb);
         }
         f
@@ -419,6 +491,40 @@ mod tests {
         assert_eq!(stats.records, 2);
         assert_eq!(dgs[0].ts_us, 1_000_000);
         assert_eq!(dgs[1].ts_us, 2_000_000);
+    }
+
+    /// A `mergecap` of two probes: the SAME packet, written once per probe, is
+    /// two datagrams identical in every field but the probe that wrote them.
+    /// Nothing else in the model can tell the two copies apart.
+    #[test]
+    fn each_pcapng_interface_is_its_own_probe() {
+        let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+        let frame = eth_vlan(&ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false));
+        // Probe 1's clock runs 8 s ahead of probe 0's — far outside any
+        // capture-dedup window, and squarely on the INVITE retransmit ladder.
+        let file = write_tmp(
+            "twoprobes",
+            &pcapng_merged(2, &[(0, 1_000_000, frame.clone()), (1, 9_000_000, frame)]),
+        );
+        let (dgs, _) = read_capture_files(&[&file]).unwrap();
+        std::fs::remove_file(&file).ok();
+        assert_eq!(dgs.len(), 2);
+        assert_eq!(dgs[0].payload, dgs[1].payload, "one packet, two records");
+        assert_eq!((dgs[0].probe, dgs[1].probe), (0, 1), "one probe per interface");
+    }
+
+    /// Probes are numbered across the WHOLE read, so two files' interface 0 are
+    /// two observation points and never one.
+    #[test]
+    fn probes_are_numbered_across_every_file_read() {
+        let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+        let ip = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
+        let a = write_tmp("pa", &pcap_raw_ip(&[(1_000_000, ip.clone())]));
+        let b = write_tmp("pb", &pcapng_merged(2, &[(0, 2_000_000, eth_vlan(&ip))]));
+        let (dgs, _) = read_capture_files(&[&a, &b]).unwrap();
+        std::fs::remove_file(&a).ok();
+        std::fs::remove_file(&b).ok();
+        assert_eq!(dgs.iter().map(|d| d.probe).collect::<Vec<_>>(), vec![0, 1]);
     }
 
     /// A truncated tail (the capture was still being written) is counted, not

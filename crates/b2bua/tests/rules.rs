@@ -10,8 +10,8 @@ use b2bua::event::CallEvent;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::rules::{
     default_rules, execute_rules, invariants, pick_ranked, ActionExecutor, Effect, Match,
-    RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, SERVICE_LAYER,
-};
+    RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, SERVICE_LAYER, TimerDelay,
+    };
 use call::{
     B2buaDialogExt, CallModelState, Dialog, Direction, Leg, LegDisposition, LegKind, LegState,
     MachineId, RemoteInfo, StackDialog, StateLabel, TimerType,
@@ -86,6 +86,7 @@ fn timer_global_duration_selects_max_duration() {
         direction: Direction::FromA,
         now_ms: 0,
         config: &B2buaConfig::default(),
+        discharged: None,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -107,6 +108,7 @@ fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
         direction: Direction::FromB,
         now_ms: 0,
         config: &B2buaConfig::default(),
+        discharged: None,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -185,7 +187,7 @@ fn no_answer_fire_on_own_pending_leg_fires_despite_other_leg_confirmed() {
 #[test]
 fn no_answer_fire_on_a_cancelling_leg_absorbs_to_cancel_only() {
     // A caller CANCEL leaves the b-leg at state=Trying, disposition=Cancelling
-    // (upstreamneed-068): state alone reads "still awaiting an answer", but the
+    //: state alone reads "still awaiting an answer", but the
     // leg is already going away — the fire must not consult /calls/failure nor
     // author a second final on the a-leg's completed transaction.
     let mut call = test_call();
@@ -241,6 +243,7 @@ fn handle_timeout_result(call: &call::Call, leg_id: &str) -> Vec<RuleAction> {
         direction: Direction::FromB,
         now_ms: 0,
         config: &B2buaConfig::default(),
+        discharged: None,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -304,6 +307,7 @@ fn setup_timeout_fire_on_a_terminating_call_absorbs_to_cancel_only() {
         direction: Direction::FromA,
         now_ms: 0,
         config: &B2buaConfig::default(),
+        discharged: None,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
@@ -334,6 +338,7 @@ fn max_duration_result(call: &call::Call) -> Vec<RuleAction> {
         direction: Direction::FromA,
         now_ms: 0,
         config: &B2buaConfig::default(),
+        discharged: None,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -403,6 +408,7 @@ fn fold_result(
         direction: Direction::FromA,
         now_ms: 0,
         config: &B2buaConfig::default(),
+        discharged: None,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
@@ -426,7 +432,7 @@ fn route_fold_payload() -> serde_json::Value {
 #[test]
 fn decision_folds_on_a_terminating_call_are_dropped_whole() {
     // A `/calls` decision result landing on a call already going away drives
-    // no forward progress, whatever it decides (upstreamneed-069): no
+    // no forward progress, whatever it decides: no
     // failover/reroute leg toward a caller-less callee, no second final on the
     // a-leg's completed transaction (RFC 3261 §17.2.1), no re-termination.
     let mut call = test_call();
@@ -542,9 +548,10 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         direction: Direction::FromA,
         now_ms: 0,
         config: &config,
+        discharged: None,
     };
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let result = exec.execute(
         &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }],
         &call,
@@ -572,6 +579,7 @@ fn in_dialog_bye_selects_relay_bye() {
     let event = CallEvent::Sip {
         message: Box::new(SipMessage::Request(bye)),
         src: "127.0.0.1:5060".parse().unwrap(),
+        matched_client_txn: false,
     };
     let ctx = RuleContext {
         call: RuleCall::new(&call),
@@ -581,10 +589,49 @@ fn in_dialog_bye_selects_relay_bye() {
         direction: Direction::FromA,
         now_ms: 0,
         config: &B2buaConfig::default(),
+        discharged: None,
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
     assert_eq!(ranked.first().map(|r| r.id), Some("relay-bye"));
+}
+
+/// An in-dialog request on a call whose BYE is in flight selects `post-bye-481`
+/// (the session is terminated, §15.1.2 — never `relay-reinvite`), while ACK
+/// still selects `relay-ack` and an OPTIONS liveness probe keeps
+/// `relay-options` (RFC 3261 §11.2 — the dialog exists until the BYE completes).
+#[test]
+fn in_dialog_request_on_terminating_call_selects_post_bye_481() {
+    let mut call = test_call();
+    call.state = CallModelState::Terminating;
+    let config = B2buaConfig::default();
+    for (method, expected) in [
+        (sip_message::Method::Invite, "post-bye-481"),
+        (sip_message::Method::Update, "post-bye-481"),
+        (sip_message::Method::Info, "post-bye-481"),
+        (sip_message::Method::Options, "relay-options"),
+        (sip_message::Method::Ack, "relay-ack"),
+    ] {
+        let req = in_dialog_request(method.clone());
+        let event = CallEvent::Sip {
+            message: Box::new(SipMessage::Request(req)),
+            src: "127.0.0.1:5060".parse().unwrap(),
+            matched_client_txn: false,
+        };
+        let ctx = RuleContext {
+            call: RuleCall::new(&call),
+            call_ref: &call.call_ref,
+            event: &event,
+            source_leg_id: "a",
+            direction: Direction::FromA,
+            now_ms: 0,
+            config: &config,
+            discharged: None,
+        };
+        let rules = default_rules();
+        let ranked = pick_ranked(&rules, &call, &ctx);
+        assert_eq!(ranked.first().map(|r| r.id), Some(expected), "method {method:?}");
+    }
 }
 
 #[test]
@@ -784,6 +831,7 @@ fn info_event() -> CallEvent {
     CallEvent::Sip {
         message: Box::new(SipMessage::Request(info)),
         src: "127.0.0.1:5060".parse().unwrap(),
+        matched_client_txn: false,
     }
 }
 
@@ -796,6 +844,7 @@ fn ctx_for<'a>(call: &'a call::Call, event: &'a CallEvent, config: &'a B2buaConf
         direction: Direction::FromA,
         now_ms: 0,
         config,
+        discharged: None,
     }
 }
 
@@ -838,7 +887,7 @@ fn set_state_moves_cursor_and_gates_the_next_event() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let rules = vec![sm_rule(handle_to_s1)];
 
     let result = {
@@ -871,7 +920,7 @@ fn undeclared_transition_trips_debug_assert() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let rules = vec![sm_rule(handle_to_s2_undeclared)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -889,7 +938,7 @@ fn undeclared_effect_trips_debug_assert() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     // `sm_rule` declares `effects: &[]`, but the handler emits a `LegMessage`.
     let rules = vec![sm_rule(handle_emits_leg_message)];
 
@@ -906,7 +955,7 @@ fn declared_effect_passes_the_drift_check() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let rules = vec![sm_rule_with_effects(handle_emits_leg_message, &SM_EFFECTS_LEG_MESSAGE)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -923,7 +972,7 @@ fn declared_terminal_clear_state_deactivates_machine() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let rules = vec![sm_rule_with_transitions(handle_clears_state, &SM_TRANSITIONS_TERMINAL)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -943,7 +992,7 @@ fn undeclared_terminal_clear_state_trips_debug_assert() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let rules = vec![sm_rule(handle_clears_state)]; // transitions: S0 => S1 only
 
     let ctx = ctx_for(&call, &event, &config);
@@ -983,7 +1032,9 @@ fn b_leg_pending() -> Leg {
             pending_invite_txn: None,
             cached_sdp: None,
             pending_reinvite_2xx: None,
-            answered_advert: Vec::new(),
+            answered_2xx: None,
+            emitted_ack: None,
+            awaited_ack_cseq: None,
         },
     };
     Leg {
@@ -1030,6 +1081,7 @@ Content-Length: 0\r\n\r\n";
     let event = CallEvent::Sip {
         message: Box::new(SipMessage::Response(resp)),
         src: "10.0.0.2:5070".parse().unwrap(),
+        matched_client_txn: true,
     };
     let config = B2buaConfig::default();
     let ctx = RuleContext {
@@ -1040,9 +1092,10 @@ Content-Length: 0\r\n\r\n";
         direction: Direction::FromB,
         now_ms: 0,
         config: &config,
+        discharged: None,
     };
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
@@ -1092,6 +1145,7 @@ Content-Length: 0\r\n\r\n";
     let event = CallEvent::Sip {
         message: Box::new(SipMessage::Response(resp)),
         src: "10.0.0.2:5070".parse().unwrap(),
+        matched_client_txn: true,
     };
     let config = B2buaConfig::default();
     let ctx = RuleContext {
@@ -1102,9 +1156,10 @@ Content-Length: 0\r\n\r\n";
         direction: Direction::FromB,
         now_ms: 0,
         config: &config,
+        discharged: None,
     };
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
     let rs = &result.call.b_legs[0].dialogs[0].sip.route_set;
@@ -1140,6 +1195,7 @@ Content-Length: 0\r\n\r\n";
     let event = CallEvent::Sip {
         message: Box::new(SipMessage::Response(resp)),
         src: "10.0.0.2:5070".parse().unwrap(),
+        matched_client_txn: true,
     };
     let config = B2buaConfig::default();
     let ctx = RuleContext {
@@ -1150,9 +1206,10 @@ Content-Length: 0\r\n\r\n";
         direction: Direction::FromB,
         now_ms: 0,
         config: &config,
+        discharged: None,
     };
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
@@ -1177,8 +1234,10 @@ Content-Length: 0\r\n\r\n";
 fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
     use b2bua::effects::OutboundBody;
 
-    let mut config = B2buaConfig::default();
-    config.b2b_outbound_proxy = Some(("proxy.example".to_string(), 5060));
+    let config = B2buaConfig {
+        b2b_outbound_proxy: Some(("proxy.example".to_string(), 5060)),
+        ..B2buaConfig::default()
+    };
 
     let call = test_call();
     let a_invite = b2bua::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
@@ -1202,6 +1261,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         &[],
         &CapabilitySet::default(),
         None, // no charging vector
+        &[], // no withheld option tags
         None,
     )
     .expect("no identity rewrites, so nothing to refuse");
@@ -1234,8 +1294,9 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         direction: Direction::FromB,
         now_ms: 0,
         config: &config,
+        discharged: None,
     };
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let result = exec.execute(&[RuleAction::CancelLeg { leg_id: "b-1".into() }], &call, &ctx);
 
     let cancel_effect = result
@@ -1321,7 +1382,9 @@ mod media_primitives {
                 pending_invite_txn: None,
                 cached_sdp: None,
                 pending_reinvite_2xx: None,
-                answered_advert: Vec::new(),
+                answered_2xx: None,
+                emitted_ack: None,
+                awaited_ack_cseq: None,
             },
         }];
     }
@@ -1350,7 +1413,7 @@ mod media_primitives {
         id_gen: &'a IdGen,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let exec = ActionExecutor { config, id_gen, now_ms: 0 };
+        let exec = ActionExecutor { config, id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
         let ctx = RuleContext {
             call: RuleCall::new(call),
             call_ref: &call.call_ref,
@@ -1359,6 +1422,7 @@ mod media_primitives {
             direction: Direction::FromB,
             now_ms: 0,
             config,
+            discharged: None,
         };
         exec.execute(actions, call, &ctx)
     }
@@ -1373,6 +1437,7 @@ mod media_primitives {
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(in_dialog_info())),
             src: "10.0.0.2:5070".parse().unwrap(),
+            matched_client_txn: false,
         };
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(1);
@@ -1400,6 +1465,7 @@ mod media_primitives {
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(in_dialog_info())),
             src: "10.0.0.2:5070".parse().unwrap(),
+            matched_client_txn: false,
         };
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(1);
@@ -1428,6 +1494,7 @@ mod media_primitives {
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(in_dialog_info())),
             src: "10.0.0.2:5070".parse().unwrap(),
+            matched_client_txn: false,
         };
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(1);
@@ -1465,7 +1532,7 @@ mod media_primitives {
     // A service re-originating an in-dialog request forwards arbitrary application
     // headers verbatim onto the request — the seam a deferred INFO_UUI RELAY uses
     // to carry a held `User-To-User` toward the peer at an async decision re-entry
-    // (upstreamneed/021). Body-owned headers (Content-Type/Content-Length) listed
+    //. Body-owned headers (Content-Type/Content-Length) listed
     // here are dropped, never duplicated: `body`/`content_type` own those.
     #[test]
     fn send_request_to_leg_forwards_arbitrary_headers() {
@@ -1474,6 +1541,7 @@ mod media_primitives {
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(in_dialog_info())),
             src: "10.0.0.2:5070".parse().unwrap(),
+            matched_client_txn: false,
         };
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(1);
@@ -1530,6 +1598,7 @@ mod media_primitives {
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(in_dialog_info())),
             src: "10.0.0.2:5070".parse().unwrap(),
+            matched_client_txn: false,
         };
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(1);
@@ -1582,6 +1651,7 @@ mod media_primitives {
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(in_dialog_info())),
             src: "10.0.0.2:5070".parse().unwrap(),
+            matched_client_txn: false,
         };
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(1);
@@ -1610,11 +1680,13 @@ mod media_primitives {
 // The MRF / RBT early-media callflow answers ONE caller INVITE in two stages
 // with two *different* To-tags: 183 (SDP-MRF, tag A1) then 200 (SDP-B, tag A2 ≠
 // A1). `AnswerALegNewDialog` mints/adopts A2, supersedes the early a-dialog A1,
-// relays the callee 200/SDP under A2, and confirms the a-leg (GAP-M-A / upstreamsip
+// relays the callee 200/SDP under A2, and confirms the a-leg (GAP-M-A / a
 // MGIT spine).
 mod answer_a_leg_new_dialog {
     use super::*;
     use b2bua::effects::OutboundBody;
+    use b2bua::rules::RelayedFinal;
+    use sip_message::generators::SourceBody;
     use sip_message::HeaderName;
 
     /// A call whose a-leg already carries the MRF early-media dialog A1 (the tag
@@ -1639,7 +1711,9 @@ mod answer_a_leg_new_dialog {
                 pending_invite_txn: None,
                 cached_sdp: None,
                 pending_reinvite_2xx: None,
-                answered_advert: Vec::new(),
+                answered_2xx: None,
+                emitted_ack: None,
+                awaited_ack_cseq: None,
             },
         }];
         call
@@ -1651,6 +1725,7 @@ mod answer_a_leg_new_dialog {
         CallEvent::Sip {
             message: Box::new(SipMessage::Request(super::invite())),
             src: "127.0.0.1:5060".parse().unwrap(),
+            matched_client_txn: false,
         }
     }
 
@@ -1662,7 +1737,7 @@ mod answer_a_leg_new_dialog {
         id_gen: &'a IdGen,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let exec = ActionExecutor { config, id_gen, now_ms: 0 };
+        let exec = ActionExecutor { config, id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
         let ctx = RuleContext {
             call: RuleCall::new(call),
             call_ref: &call.call_ref,
@@ -1671,6 +1746,7 @@ mod answer_a_leg_new_dialog {
             direction: Direction::FromB,
             now_ms: 0,
             config,
+            discharged: None,
         };
         exec.execute(actions, call, &ctx)
     }
@@ -1698,6 +1774,7 @@ mod answer_a_leg_new_dialog {
                 content_type: None,
                 to_tag: None,
                 header_updates: vec![],
+                relayed: RelayedFinal::none(),
             }],
         );
         assert_eq!(result.effects.outbound.len(), 1);
@@ -1728,6 +1805,110 @@ mod answer_a_leg_new_dialog {
         assert_eq!(result.call.a_leg.state, LegState::Confirmed, "the a-leg is confirmed");
     }
 
+    /// Answering the caller ends the setup's reliable provisionals and nothing
+    /// else: a b-leg's re-INVITE 2xx still awaiting its ACK keeps its ladder,
+    /// its give-up and its retained marker (RFC 3261 §13.3.1.4; the RFC 6026
+    /// *Accepted* marker `reinvite-glare` reads), while the caller-facing §3
+    /// ladder is retired with the final (§17.2.1).
+    #[test]
+    fn answering_the_caller_leaves_a_b_legs_pending_reinvite_2xx_ladder_alone() {
+        let mut call = call_with_early_a_dialog("A1early");
+        let mut b = super::b_leg_pending();
+        b.state = LegState::Confirmed;
+        b.dialogs[0].ext.pending_reinvite_2xx = Some(call::Unacked2xx {
+            dialog_tag: "svc".into(),
+            cseq: 7,
+            emission: call::RetainedEmission::paced(
+                b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
+                ("10.0.0.2".into(), 5070),
+                sip_retransmit::Class::Final2xx,
+                call::Repeated::response("INVITE", 200),
+            )
+            .0,
+        });
+        call = call::helpers::add_b_leg(call, b);
+        let reinvite_2xx = call::Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
+        call.reliable_provisionals.push(call::ReliableProvisional {
+            a_tag: "A1early".into(),
+            a_rseq: 1,
+            a_cseq: Some(1),
+            b_leg_id: "b-1".into(),
+            b_tag: "svc".into(),
+            b_cseq: 1,
+            b_rseq: 9,
+            acknowledged: false,
+            emission: None,
+        });
+        let provisional = call::Obligation::PrackOf { a_tag: "A1early".into(), a_rseq: 1 };
+        for (timer_type, fire_at) in [
+            (TimerType::Rung { obligation: reinvite_2xx.clone() }, 500),
+            (TimerType::RepeatGiveUp { obligation: reinvite_2xx.clone() }, 32_000),
+            (TimerType::Rung { obligation: provisional.clone() }, 500),
+            (TimerType::RepeatGiveUp { obligation: provisional.clone() }, 32_000),
+        ] {
+            call.timers.push(call::TimerEntry { id: timer_type.timer_id(None), timer_type, fire_at, leg_id: None });
+        }
+
+        let event = some_event();
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::AnswerALegNewDialog {
+                status: 200,
+                reason: "OK".into(),
+                body: vec![],
+                content_type: None,
+                to_tag: None,
+                header_updates: vec![],
+                relayed: RelayedFinal::none(),
+            }],
+        );
+
+        let b_dialog = &result.call.b_legs[0].dialogs[0];
+        assert!(
+            b_dialog.ext.pending_reinvite_2xx.is_some(),
+            "the b-leg's re-INVITE 2xx still awaits its ACK: marker kept",
+        );
+        let ladder_timers = |o: &call::Obligation| {
+            result
+                .call
+                .timers
+                .iter()
+                .filter(|t| matches!(&t.timer_type,
+                    TimerType::Rung { obligation } | TimerType::RepeatGiveUp { obligation } if obligation == o))
+                .count()
+        };
+        assert_eq!(ladder_timers(&reinvite_2xx), 2, "the b-leg 2xx's rung and give-up stay in the ledger");
+        assert_eq!(ladder_timers(&provisional), 0, "the caller-facing §3 ladder ends with the final");
+        assert!(
+            result.call.reliable_provisionals.is_empty() || result.call.reliable_provisionals[0].emission.is_none(),
+            "the provisional repeats nothing more",
+        );
+        let cancelled: Vec<&str> = result
+            .effects
+            .critical
+            .iter()
+            .filter_map(|e| match e {
+                CriticalStateEffect::CancelTimer { id } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            cancelled,
+            vec!["Rung:PrackOf:A1early:1", "RepeatGiveUp:PrackOf:A1early:1"],
+            "only the provisional's timers leave the driver",
+        );
+        assert!(
+            result.call.a_leg.dialogs[0].ext.answered_2xx.is_some(),
+            "the caller's answer is retained under its own obligation",
+        );
+    }
+
     // An explicit `to_tag` is used verbatim; `header_updates` add non-structural
     // headers (same discipline as `RespondToALeg`).
     #[test]
@@ -1749,6 +1930,7 @@ mod answer_a_leg_new_dialog {
                 content_type: None,
                 to_tag: Some("A2explicit".into()),
                 header_updates: vec![("X-Served-By".into(), Some("mrf".into()))],
+                relayed: RelayedFinal::none(),
             }],
         );
         let eff = &result.effects.outbound[0];
@@ -1786,6 +1968,7 @@ mod answer_a_leg_new_dialog {
                 content_type: None,
                 to_tag: None,
                 header_updates: vec![],
+                relayed: RelayedFinal::none(),
             }],
         );
         assert!(result.effects.outbound.is_empty(), "a non-2xx final establishes no a-dialog");
@@ -1796,12 +1979,11 @@ mod answer_a_leg_new_dialog {
         );
     }
 
-    // The fork-confirm 2xx is an a-facing final answer like confirm-dialog's:
-    // it carries the B2BUA's own Allow/Supported capability advert by default
-    // (RFC 3261 §13.2.1/§20.37), so a service need not duplicate core policy
-    // via header_updates (upstreamneed-026).
+    // The fork-confirm 2xx is an a-facing final the B2BUA answers on a leg of
+    // its own: with no callee response to relay an advertisement from and no
+    // declaration, it states none (issue 174).
     #[test]
-    fn stamps_the_b2bua_capability_advert_by_default() {
+    fn states_no_capability_advert_unless_declared() {
         let call = call_with_early_a_dialog("A1early");
         let event = some_event();
         let config = B2buaConfig::default();
@@ -1819,24 +2001,16 @@ mod answer_a_leg_new_dialog {
                 content_type: None,
                 to_tag: None,
                 header_updates: vec![],
+                relayed: RelayedFinal::none(),
             }],
         );
         match &result.effects.outbound[0].body {
             OutboundBody::Response(r) => {
-                assert_eq!(
-                    r.raw(HeaderName::Allow).next(),
-                    Some(sip_message::generators::B2BUA_ALLOW),
-                );
-                assert_eq!(
-                    r.raw(HeaderName::Supported).next(),
-                    Some(sip_message::generators::B2BUA_SUPPORTED),
-                );
-                for name in [HeaderName::Allow, HeaderName::Supported] {
-                    let n = r.raw(name.clone()).count();
+                for name in [HeaderName::Allow, HeaderName::Supported, HeaderName::Accept] {
                     assert_eq!(
-                        n,
-                        1,
-                        "exactly one {} header (no §7.3.1 duplicate)",
+                        r.raw(name.clone()).count(),
+                        0,
+                        "no {} on a 2xx nobody declared a set for",
                         name.as_wire_str()
                     );
                 }
@@ -1846,7 +2020,7 @@ mod answer_a_leg_new_dialog {
     }
 
     // A header_updates entry naming Allow/Supported owns it: a set value
-    // replaces the default verbatim (exactly once), a removal keeps the header
+    // replaces the resolved advert verbatim (exactly once), a removal keeps the header
     // absent — the pre-026 downstream workaround stays valid.
     #[test]
     fn header_updates_override_the_capability_advert() {
@@ -1870,6 +2044,7 @@ mod answer_a_leg_new_dialog {
                     ("Supported".into(), Some("timer".into())),
                     ("Allow".into(), None),
                 ],
+                relayed: RelayedFinal::none(),
             }],
         );
         match &result.effects.outbound[0].body {
@@ -1877,7 +2052,7 @@ mod answer_a_leg_new_dialog {
                 assert_eq!(
                     r.raw(HeaderName::Supported).next(),
                     Some("timer"),
-                    "a set value replaces the default verbatim"
+                    "a set value replaces the resolved advert verbatim"
                 );
                 let n = r.raw(HeaderName::Supported).count();
                 assert_eq!(n, 1, "the service value is not duplicated by the default");
@@ -1886,6 +2061,119 @@ mod answer_a_leg_new_dialog {
                     None,
                     "an explicit removal keeps the header absent"
                 );
+            }
+            _ => panic!("expected an outbound response"),
+        }
+    }
+    /// The callee final this answer delivers, stating privacy, an identity line
+    /// of its own, a vendor header, its capability advert, and lines the stack
+    /// owns or withholds.
+    fn callee_final() -> sip_message::SipResponse {
+        let raw = "SIP/2.0 200 OK\r\n\
+Via: SIP/2.0/UDP 10.0.0.70:5060;branch=z9hG4bK-b\r\n\
+From: <sip:alice@host>;tag=alice-tag\r\n\
+To: <sip:callee@host>;tag=callee-tag\r\n\
+Call-ID: b-leg\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:callee@10.0.0.70:5060>\r\n\
+Privacy: none\r\n\
+P-Identifier: 112233368\r\n\
+X-Vendor-Thing: opaque-42\r\n\
+Allow: INVITE, ACK, BYE\r\n\
+Session-Expires: 1800;refresher=uas\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: 4\r\n\r\nv=0\n";
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Response(r) => r,
+            _ => panic!("expected a response"),
+        }
+    }
+
+    /// RFC 3261 §16.6: the answer delivering a callee final carries that final's
+    /// relayable lines — and only those — the way the plain relay would: the
+    /// structural set, the callee's Contact and the per-leg negotiation stay
+    /// behind, and the callee's advert is the caller's to see where the face
+    /// declares none.
+    #[test]
+    fn relays_the_delivered_final_onto_the_answer() {
+        let call = call_with_early_a_dialog("A1early");
+        let event = some_event();
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let delivered = callee_final();
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::AnswerALegNewDialog {
+                status: 200,
+                reason: "OK".into(),
+                body: delivered.body().to_vec(),
+                content_type: None,
+                to_tag: None,
+                header_updates: vec![],
+                relayed: RelayedFinal::of(&delivered, SourceBody::Verbatim),
+            }],
+        );
+        match &result.effects.outbound[0].body {
+            OutboundBody::Response(r) => {
+                assert_eq!(r.raw(HeaderName::from("Privacy")).next(), Some("none"));
+                assert_eq!(r.raw(HeaderName::from("P-Identifier")).next(), Some("112233368"));
+                assert_eq!(r.raw(HeaderName::from("X-Vendor-Thing")).next(), Some("opaque-42"));
+                assert_eq!(
+                    r.raw(HeaderName::Allow).next(),
+                    Some("INVITE, ACK, BYE"),
+                    "an undeclared half states what the delivered final advertised"
+                );
+                assert_eq!(r.raw(HeaderName::Allow).count(), 1);
+                assert_eq!(r.raw(HeaderName::SessionExpires).next(), None, "per-leg negotiation is withheld");
+                assert_eq!(r.raw(HeaderName::Via).count(), 1, "the caller's own Via, not the callee's");
+                assert_eq!(r.raw(HeaderName::Contact).count(), 1, "the B2BUA's Contact, not the callee's");
+                assert_eq!(r.to().tag(), Some(result.call.a_leg.dialogs[0].sip.local_tag.as_str()));
+            }
+            _ => panic!("expected an outbound response"),
+        }
+    }
+
+    /// A `header_updates` entry naming a header owns it over the relayed line of
+    /// the same name — a set value replaces it, a removal keeps it absent.
+    #[test]
+    fn header_updates_own_a_name_over_the_relayed_line() {
+        let call = call_with_early_a_dialog("A1early");
+        let event = some_event();
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let delivered = callee_final();
+        let result = exec_on(
+            &call,
+            &event,
+            "b-1",
+            &config,
+            &id_gen,
+            &[RuleAction::AnswerALegNewDialog {
+                status: 200,
+                reason: "OK".into(),
+                body: delivered.body().to_vec(),
+                content_type: None,
+                to_tag: None,
+                header_updates: vec![
+                    ("X-Vendor-Thing".into(), Some("service-owned".into())),
+                    ("P-Identifier".into(), None),
+                    ("Allow".into(), Some("INVITE".into())),
+                ],
+                relayed: RelayedFinal::of(&delivered, SourceBody::Verbatim),
+            }],
+        );
+        match &result.effects.outbound[0].body {
+            OutboundBody::Response(r) => {
+                assert_eq!(r.raw(HeaderName::from("X-Vendor-Thing")).next(), Some("service-owned"));
+                assert_eq!(r.raw(HeaderName::from("X-Vendor-Thing")).count(), 1);
+                assert_eq!(r.raw(HeaderName::from("P-Identifier")).next(), None, "a removal keeps the relayed line off");
+                assert_eq!(r.raw(HeaderName::Allow).next(), Some("INVITE"));
+                assert_eq!(r.raw(HeaderName::Allow).count(), 1);
+                assert_eq!(r.raw(HeaderName::from("Privacy")).next(), Some("none"), "the rest still rides");
             }
             _ => panic!("expected an outbound response"),
         }
@@ -1899,7 +2187,9 @@ mod answer_a_leg_new_dialog {
 // rides the ACK). A body-bearing ACK defaults its Content-Type to
 // `application/sdp`; an explicit type overrides it; an empty body stays a bare
 // ACK (no body, no Content-Type — the pre-body behaviour, unchanged). The body
-// is a binary-safe `Vec<u8>`.
+// is a binary-safe `Vec<u8>`. Every emitted ACK retains its exact datagram on
+// the dialog (`emitted_ack`), and a bodyless AckLeg re-passes those bytes raw
+// (§13.2.2.4 — the re-ACK is THE ACK the 2xx triggered).
 mod ack_leg_body {
     use super::*;
     use b2bua::effects::OutboundBody;
@@ -1935,9 +2225,10 @@ mod ack_leg_body {
             direction: Direction::FromB,
             now_ms: 0,
             config: &config,
+            discharged: None,
         };
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
         let result = exec.execute(
             &[RuleAction::AckLeg { leg_id: "b-1".into(), body, content_type }],
             &call,
@@ -2001,6 +2292,140 @@ mod ack_leg_body {
             "a bare ACK carries no Content-Type (no regression vs the pre-body AckLeg)"
         );
     }
+
+    // ── The retained ACK datagram (§13.2.2.4 re-ACK: THE ack, re-passed) ─────
+
+    /// Execute one `AckLeg { leg_id: "b-1", body, content_type }` against `call`
+    /// and return the full [`HandlerResult`] (these tests read both the wire
+    /// effect and the updated call).
+    fn ack_exec(call: &call::Call, body: Vec<u8>, content_type: Option<String>) -> HandlerResult {
+        let config = B2buaConfig::default();
+        let event = CallEvent::Timer {
+            timer_type: TimerType::NoAnswer,
+            call_ref: call.call_ref.clone(),
+            leg_id: Some("b-1".to_string()),
+        };
+        let ctx = RuleContext {
+            call: RuleCall::new(call),
+            call_ref: &call.call_ref,
+            event: &event,
+            source_leg_id: "b-1",
+            direction: Direction::FromB,
+            now_ms: 0,
+            config: &config,
+            discharged: None,
+        };
+        let id_gen = IdGen::seeded(1);
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+        exec.execute(
+            &[RuleAction::AckLeg { leg_id: "b-1".into(), body, content_type }],
+            call,
+            &ctx,
+        )
+    }
+
+    /// The one emitted ACK effect in `result`.
+    fn ack_effect(result: &HandlerResult) -> &b2bua::effects::OutboundSipEffect {
+        result
+            .effects
+            .outbound
+            .iter()
+            .find(|e| matches!(&e.body, OutboundBody::Request(r) if r.method() == "ACK"))
+            .expect("AckLeg emits an ACK request")
+    }
+
+    /// The one re-ACK in `result`: a retained datagram repeated as its bytes
+    /// (RFC 3261 §13.2.2.4), never a composed request.
+    fn re_ack_effect(result: &HandlerResult) -> &b2bua::effects::OutboundSipEffect {
+        assert!(
+            !result.effects.outbound.iter().any(|e| matches!(&e.body, OutboundBody::Request(_))),
+            "a re-ACK composes nothing: {:?}",
+            result.effects.outbound
+        );
+        result
+            .effects
+            .outbound
+            .iter()
+            .find(|e| matches!(&e.body, OutboundBody::Datagram(_)))
+            .expect("the re-ACK repeats the retained datagram")
+    }
+
+    // A body-bearing ACK (the relayed delayed-offer answer) retains its exact
+    // wire bytes + destination on the dialog, so a §13.2.2.4 re-ACK can re-pass
+    // THE ACK instead of composing an answerless one.
+    #[test]
+    fn a_body_bearing_ack_retains_its_exact_datagram_and_destination() {
+        let call = call::helpers::add_b_leg(test_call(), b_leg_confirmed());
+        let result = ack_exec(&call, b"answer-sdp".to_vec(), None);
+        let effect = ack_effect(&result);
+        let OutboundBody::Request(sent) = &effect.body else { unreachable!() };
+        let retained = result.call.b_legs[0]
+            .dialogs
+            .first()
+            .and_then(|d| d.ext.emitted_ack.clone())
+            .expect("the emitted ACK datagram is retained on the dialog");
+        let (bytes, dest) = retained.wire();
+        assert_eq!(bytes, sent.image(), "retained bytes are the wire bytes");
+        assert_eq!(
+            dest,
+            (effect.destination.0.as_str(), effect.destination.1),
+            "retained destination is the wire destination"
+        );
+        assert_eq!(retained.repeat(), call::Repeat::OnTrigger, "an ACK is repeated only when a 2xx copy provokes it");
+    }
+
+    // RFC 3261 §13.2.2.4: with a datagram retained, a bodyless AckLeg (the
+    // `re-ack-retransmitted-2xx` action) re-passes THE ACK raw — byte-identical,
+    // answer included, at the retained destination — never a fresh bodyless one.
+    #[test]
+    fn a_bodyless_ack_re_passes_the_retained_datagram_byte_identical() {
+        let call = call::helpers::add_b_leg(test_call(), b_leg_confirmed());
+        let first = ack_exec(&call, b"answer-sdp".to_vec(), None);
+        let first_effect = ack_effect(&first);
+        let OutboundBody::Request(sent) = &first_effect.body else { unreachable!() };
+        let first_bytes = sent.image().to_vec();
+
+        let second = ack_exec(&first.call, Vec::new(), None);
+        let effect = re_ack_effect(&second);
+        let OutboundBody::Datagram(re_sent) = &effect.body else { unreachable!() };
+        assert_eq!(
+            re_sent.wire().0,
+            &first_bytes[..],
+            "the re-ACK is the SAME datagram, answer included"
+        );
+        assert_eq!(
+            (re_sent.repeat().ladder(), re_sent.repeated().method(), re_sent.repeated().code()),
+            ("trigger", "ACK", None),
+            "the re-ACK leaves labelled as a triggered repeat of an ACK",
+        );
+        let re_sent = re_sent.wire().0;
+        assert_eq!(effect.destination, first_effect.destination, "same wire destination");
+        assert!(
+            re_sent.ends_with(b"answer-sdp"),
+            "the delayed-offer answer rides the re-ACK (a fresh composition would drop it)"
+        );
+    }
+
+    // The minted, bodyless first ACK retains its datagram too: the §13.2.2.4
+    // unit is the datagram regardless of body, so a copy of that 2xx draws the
+    // same bare bytes back.
+    #[test]
+    fn a_bare_first_ack_retains_its_datagram_and_a_re_ack_repeats_it() {
+        let call = call::helpers::add_b_leg(test_call(), b_leg_confirmed());
+        let first = ack_exec(&call, Vec::new(), None);
+        let OutboundBody::Request(sent) = &ack_effect(&first).body else { unreachable!() };
+        let retained = first.call.b_legs[0]
+            .dialogs
+            .first()
+            .and_then(|d| d.ext.emitted_ack.clone())
+            .expect("the bare ACK is retained as well");
+        assert_eq!(retained.wire().0, sent.image());
+        assert!(sent.body().is_empty(), "a minted ACK stays bare");
+
+        let second = ack_exec(&first.call, Vec::new(), None);
+        let OutboundBody::Datagram(re_sent) = &re_ack_effect(&second).body else { unreachable!() };
+        assert_eq!(re_sent.wire().0, sent.image(), "the re-ACK repeats the bare datagram");
+    }
 }
 
 // ── TargetAdmission: the rule-driven `create-leg` gate (migration/26) ────────
@@ -2048,9 +2473,10 @@ mod create_leg_admission {
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(reinvite)),
             src: "127.0.0.1:5060".parse().unwrap(),
+            matched_client_txn: false,
         };
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config, id_gen: &id_gen, now_ms: 1_700_000_000_000 };
+        let exec = ActionExecutor { config, id_gen: &id_gen, now_ms: 1_700_000_000_000, wire_faults: &b2bua::wire_faults::WireFaults::none() };
         let ctx = RuleContext {
             call: RuleCall::new(&call),
             call_ref: &call.call_ref,
@@ -2059,6 +2485,7 @@ mod create_leg_admission {
             direction: Direction::FromA,
             now_ms: 1_700_000_000_000,
             config,
+            discharged: None,
         };
         exec.execute(&[create_leg(host, port)], &call, &ctx)
     }
@@ -2169,6 +2596,7 @@ mod default_sdp_create_leg {
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(invite())),
             src: "127.0.0.1:5060".parse().unwrap(),
+            matched_client_txn: false,
         };
         let ctx = RuleContext {
             call: RuleCall::new(&call),
@@ -2178,9 +2606,10 @@ mod default_sdp_create_leg {
             direction: Direction::FromA,
             now_ms: 0,
             config: &config,
+            discharged: None,
         };
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
 
         // The service sources the fake offer from the config parameter — the whole
         // opt-in wiring. (A normal reroute passes `body_override: None` here, which
@@ -2265,6 +2694,7 @@ mod header_update_removal_withholds_a_relayed_name {
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(a_invite)),
             src,
+            matched_client_txn: false,
         };
         let ctx = RuleContext {
             call: RuleCall::new(&call),
@@ -2274,9 +2704,10 @@ mod header_update_removal_withholds_a_relayed_name {
             direction: Direction::FromA,
             now_ms: 0,
             config: &config,
+            discharged: None,
         };
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0 };
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
         let create = RuleAction::CreateLeg {
             destination: ("10.0.1.5".into(), 5070), // IP literal → admission passes
             new_ruri: None,
@@ -2493,7 +2924,7 @@ mod enforce_equivalence {
     }
 }
 
-// ── Service-owned timers (TimerType::Service — upstreamneed 007) ───────────────
+// ── Service-owned timers (TimerType::Service) ────────────────────────────────
 //
 // End-to-end fire/cancel/wildcard behaviour lives in
 // `b2bua-harness/tests/service_timers.rs`; here we pin the *identity* seams at
@@ -2507,14 +2938,14 @@ mod service_timers {
     const SVC: MachineId = MachineId::new("svc-a");
 
     fn schedule(t: TimerType, secs: i64) -> RuleAction {
-        RuleAction::ScheduleTimer { timer_type: t, delay_sec: secs, leg_id: None }
+        RuleAction::ScheduleTimer { timer_type: t, delay: TimerDelay::secs(secs), leg_id: None }
     }
 
     #[test]
     fn distinct_keys_coexist_and_same_key_reschedule_supersedes() {
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 1_000 };
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 1_000, wire_faults: &b2bua::wire_faults::WireFaults::none() };
         let call = test_call();
         let event = info_like_event(&call);
         let ctx = ctx_at(&call, &event, &config);
@@ -2628,6 +3059,7 @@ mod service_timers {
             direction: Direction::FromA,
             now_ms: 1_000,
             config,
+            discharged: None,
         }
     }
 }
@@ -2672,12 +3104,13 @@ fn a_declared_capability_set_reaches_the_originated_leg_wire_header() {
         &[],
         &b2bua::rules::capabilities::for_leg(&call, "b-1"),
         None, // no charging vector
+        &[], // no withheld option tags
         None,
     )
     .expect("no identity rewrites, so nothing to refuse");
     let invite = match effect.body {
         b2bua::effects::OutboundBody::Request(r) => r,
-        b2bua::effects::OutboundBody::Response(_) => panic!("b-leg effect must carry a request"),
+        b2bua::effects::OutboundBody::Response(_) | b2bua::effects::OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
     };
     let allow = invite.raw_text(HeaderName::Allow).next().map(|v| v.as_str().to_string());
     let supported = invite.raw_text(HeaderName::Supported).next().map(|v| v.as_str().to_string());
@@ -2685,24 +3118,24 @@ fn a_declared_capability_set_reaches_the_originated_leg_wire_header() {
     assert_eq!(supported.as_deref(), Some("timer"));
 }
 
-/// The undeclared face keeps the stack set, so one declaration cannot narrow
-/// the other side of the bridge.
+/// The undeclared face states nothing of its own, so one declaration cannot
+/// reach the other side of the bridge.
 #[test]
-fn the_undeclared_face_of_a_declaring_call_keeps_the_stack_set() {
+fn the_undeclared_face_of_a_declaring_call_states_nothing() {
     let call = call_declaring_asymmetric_capabilities();
     use b2bua::rules::capabilities::{self, Face};
     assert_eq!(capabilities::declared(&call, Face::Originator), None, "nothing declared here");
-    assert_eq!(capabilities::for_leg(&call, "a"), CapabilitySet::default());
+    assert_eq!(capabilities::for_leg(&call, "a"), CapabilitySet::silent());
     assert!(capabilities::declared(&call, Face::Originated).is_some());
-    assert_ne!(capabilities::for_leg(&call, "b-1"), CapabilitySet::default());
+    assert_ne!(capabilities::for_leg(&call, "b-1"), CapabilitySet::silent());
 }
 
-/// A call that declares nothing resolves to the stack set on every face.
+/// A call that declares nothing states no set of its own on either face.
 #[test]
-fn an_undeclared_call_resolves_to_the_stack_set_on_every_face() {
+fn an_undeclared_call_states_nothing_on_every_face() {
     let call = test_call();
-    assert_eq!(b2bua::rules::capabilities::for_leg(&call, "a"), CapabilitySet::default());
-    assert_eq!(b2bua::rules::capabilities::for_leg(&call, "b-1"), CapabilitySet::default());
+    assert_eq!(b2bua::rules::capabilities::for_leg(&call, "a"), CapabilitySet::silent());
+    assert_eq!(b2bua::rules::capabilities::for_leg(&call, "b-1"), CapabilitySet::silent());
 }
 
 // ── the keepalive ledger ceiling (arming side) ────────────────────────────────
@@ -2722,6 +3155,7 @@ fn timer_ctx<'a>(
         direction: Direction::FromA,
         now_ms,
         config,
+        discharged: None,
     }
 }
 
@@ -2747,12 +3181,12 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
     let mut actions = (keepalive.handle)(&ctx).expect("keepalive handles its own timer").actions;
     actions.push(RuleAction::ScheduleTimer {
         timer_type: TimerType::GlobalDuration,
-        delay_sec: 3600,
+        delay: TimerDelay::secs(3600),
         leg_id: None,
     });
 
     let id_gen = IdGen::seeded(0x65);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let result = exec.execute(&actions, &call, &ctx);
 
     let armed = result
@@ -2809,11 +3243,11 @@ fn arming_a_keepalive_beyond_one_cadence_trips_the_ledger_invariant() {
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
     let id_gen = IdGen::seeded(0x65);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     exec.execute(
         &[RuleAction::ScheduleTimer {
             timer_type: TimerType::Keepalive,
-            delay_sec: config.keepalive_interval_sec * 2,
+            delay: TimerDelay::secs(config.keepalive_interval_sec * 2),
             leg_id: None,
         }],
         &call,
@@ -2838,11 +3272,11 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
     let id_gen = IdGen::seeded(0x65);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms };
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms, wire_faults: &b2bua::wire_faults::WireFaults::none() };
     let result = exec.execute(
         &[RuleAction::ScheduleTimer {
             timer_type: TimerType::Keepalive,
-            delay_sec: config.keepalive_interval_sec * 2,
+            delay: TimerDelay::secs(config.keepalive_interval_sec * 2),
             leg_id: None,
         }],
         &call,
@@ -2859,4 +3293,391 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
         now_ms + config.keepalive_interval_sec * 1000,
         "the over-cadence deadline is clamped to one interval out",
     );
+}
+
+// ── §13.3.1.4 answered-2xx discharge (the engine's, before the rules) ────────
+
+/// A call whose a-leg dialog retains the initial-INVITE 2xx under the key the
+/// caller's ACK carries (To-tag `btag`, CSeq 1), its ladder armed — the state
+/// the engine must discharge.
+fn call_with_retained_answered_2xx() -> call::Call {
+    let mut call = test_call();
+    call.a_leg.state = LegState::Confirmed;
+    let mut b = b_leg_pending();
+    b.state = LegState::Confirmed;
+    call = call::helpers::add_b_leg(call, b);
+    // The confirmed a-leg UAS dialog the answer seam retained the 2xx on.
+    call.a_leg.dialogs.push(Dialog {
+        sip: StackDialog {
+            call_id: call.a_leg.call_id.clone(),
+            local_tag: "btag".into(),
+            remote_tag: call.a_leg.from_tag.clone(),
+            local_uri: "sip:bob@host".into(),
+            remote_uri: "sip:alice@host".into(),
+            remote_target: "sip:alice@127.0.0.1:5060".into(),
+            local_cseq: 1,
+            route_set: vec![],
+        },
+        ext: B2buaDialogExt {
+            remote_cseq: Some(1),
+            inbound_pending_requests: vec![],
+            ack_branch: None,
+            pending_invite_txn: None,
+            cached_sdp: None,
+            pending_reinvite_2xx: None,
+            awaited_ack_cseq: None,
+            answered_2xx: Some(call::Unacked2xx {
+                dialog_tag: "btag".into(),
+                cseq: 1,
+                emission: call::RetainedEmission::paced(
+                    b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
+                    ("127.0.0.1".into(), 5060),
+                    sip_retransmit::Class::Final2xx,
+                    call::Repeated::response("INVITE", 200),
+                )
+                .0,
+            }),
+            emitted_ack: None,
+        },
+    });
+    let obligation = answered_obligation();
+    for (timer_type, fire_at) in [
+        (TimerType::Rung { obligation: obligation.clone() }, 500),
+        (TimerType::RepeatGiveUp { obligation }, 32_000),
+    ] {
+        call.timers.push(call::TimerEntry { id: timer_type.timer_id(None), timer_type, fire_at, leg_id: None });
+    }
+    call
+}
+
+/// The key the retained answer of [`call_with_retained_answered_2xx`] is owed
+/// under.
+fn answered_obligation() -> call::Obligation {
+    call::Obligation::AckOf2xx { leg: "a".into(), dialog_tag: "btag".into(), cseq: 1 }
+}
+
+/// The engine's discharge step for an in-dialog ACK arriving on
+/// `source_leg_id`: what it retired, the call it leaves, and its effects.
+fn discharge_ack(
+    call: &call::Call,
+    source_leg_id: &str,
+) -> (Option<call::Obligation>, call::Call, b2bua::effects::HandlerEffects) {
+    let ack = in_dialog_request(Method::Ack);
+    let event = CallEvent::Sip {
+        message: Box::new(SipMessage::Request(ack)),
+        src: "127.0.0.1:5060".parse().unwrap(),
+        matched_client_txn: false,
+    };
+    let config = B2buaConfig::default();
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let mut call = call.clone();
+    let mut fx = b2bua::effects::HandlerEffects::new();
+    let discharged = exec.discharge(&mut call, &mut fx, &event, source_leg_id);
+    (discharged, call, fx)
+}
+
+/// The caller's ACK discharges the retained 2xx alongside its §13.3.1.4
+/// ladder — both timers leave the ledger and the driver, and the bytes can
+/// never be sent again, so they stop riding every replication payload for
+/// the rest of the call. The rules then see the discharge as a fact.
+#[test]
+fn caller_ack_discharges_the_retained_answered_2xx() {
+    let call = call_with_retained_answered_2xx();
+    let (discharged, after, fx) = discharge_ack(&call, "a");
+    assert_eq!(discharged, Some(answered_obligation()), "the a-leg ACK names the retained answer");
+    assert!(
+        after.a_leg.dialogs.first().expect("dialog kept").ext.answered_2xx.is_none(),
+        "the retained datagram is discharged from the replicated body",
+    );
+    assert!(
+        after.timers.iter().all(|t| !matches!(t.timer_type, TimerType::Rung { .. } | TimerType::RepeatGiveUp { .. })),
+        "both ladder timers leave the ledger, got {:?}",
+        after.timers,
+    );
+    let cancelled: Vec<&str> = fx
+        .critical
+        .iter()
+        .filter_map(|e| match e {
+            CriticalStateEffect::CancelTimer { id } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        cancelled,
+        vec!["Rung:AckOf2xx:a:btag:1", "RepeatGiveUp:AckOf2xx:a:btag:1"],
+        "both ladder timers leave the driver under the one id recipe",
+    );
+}
+
+/// A b-leg ACK guards nothing on the a-leg: the retained 2xx (still awaiting
+/// the CALLER's ACK) stays, exactly like the ladder timers it rides with.
+#[test]
+fn callee_side_ack_leaves_the_retained_answered_2xx() {
+    let call = call_with_retained_answered_2xx();
+    let (discharged, after, fx) = discharge_ack(&call, "b-1");
+    assert_eq!(discharged, None, "a b-leg ACK must not discharge the caller's obligation");
+    assert!(
+        after.a_leg.dialogs.first().expect("dialog kept").ext.answered_2xx.is_some(),
+        "the retained datagram still awaits the caller's ACK",
+    );
+    assert_eq!(after.timers.len(), call.timers.len(), "the ladder keeps running");
+    assert!(fx.critical.is_empty(), "nothing is cancelled, got {:?}", fx.critical);
+}
+
+/// `relay-ack` owns none of the ladder plumbing any more: an a-leg ACK
+/// produces the relay alone.
+#[test]
+fn relay_ack_pushes_no_ladder_plumbing() {
+    let call = call_with_retained_answered_2xx();
+    let ack = in_dialog_request(Method::Ack);
+    let event = CallEvent::Sip {
+        message: Box::new(SipMessage::Request(ack)),
+        src: "127.0.0.1:5060".parse().unwrap(),
+        matched_client_txn: false,
+    };
+    let config = B2buaConfig::default();
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &config,
+        discharged: None,
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, &call, &ctx);
+    let relay_ack = ranked.iter().find(|r| r.id == "relay-ack").expect("relay-ack is a candidate");
+    let actions = (relay_ack.handle)(&ctx).expect("relay-ack handles an ACK").actions;
+    assert!(
+        actions.iter().all(|a| matches!(a, RuleAction::RelayToPeer { .. })),
+        "relay-ack relays and nothing else, got {actions:?}",
+    );
+}
+
+// ADR-0029 X5 — a ladder give-up's settlement after the rules (`settle_give_up`,
+// the router's step after the rule chain on every `RepeatGiveUp`): an un-ACKed
+// 2xx ends the session whatever a service rule made of the give-up, and a
+// reliable provisional's give-up is left to the rules' own RFC 3262 §3 policy.
+mod ladder_give_up {
+    use super::*;
+    use b2bua::effects::OutboundBody;
+    use call::{CdrEventType, Obligation, RetainedEmission, Unacked2xx};
+    use sip_retransmit::Class;
+
+    const A_TAG: &str = "a-svc";
+
+    /// An answered, bridged call: the a-leg confirmed under `A_TAG` with its
+    /// INITIAL 2xx (CSeq 1) still awaiting the caller's ACK, the b-leg
+    /// confirmed and ACKed.
+    fn answered_call() -> call::Call {
+        let mut call = test_call();
+        call.a_leg.state = LegState::Confirmed;
+        call.a_leg.dialogs = vec![Dialog {
+            sip: StackDialog {
+                call_id: call.a_leg.call_id.clone(),
+                local_tag: A_TAG.into(),
+                remote_tag: call.a_leg.from_tag.clone(),
+                local_uri: "sip:svc@10.0.0.9".into(),
+                remote_uri: "sip:alice@host".into(),
+                remote_target: "sip:alice@127.0.0.1:5060".into(),
+                local_cseq: 1,
+                route_set: vec![],
+            },
+            ext: B2buaDialogExt {
+                remote_cseq: Some(1),
+                inbound_pending_requests: vec![],
+                ack_branch: None,
+                pending_invite_txn: None,
+                cached_sdp: None,
+                pending_reinvite_2xx: None,
+                answered_2xx: Some(retained_2xx(A_TAG, 1, 5060)),
+                emitted_ack: None,
+                awaited_ack_cseq: None,
+            },
+        }];
+        let mut b = super::b_leg_pending();
+        b.state = LegState::Confirmed;
+        b.disposition = LegDisposition::Bridged;
+        b.dialogs[0].sip.remote_tag = "bobtag".into();
+        b.dialogs[0].ext.remote_cseq = Some(1);
+        call::helpers::add_b_leg(call, b)
+    }
+
+    fn retained_2xx(dialog_tag: &str, cseq: i64, port: u16) -> Unacked2xx {
+        Unacked2xx {
+            dialog_tag: dialog_tag.into(),
+            cseq,
+            emission: RetainedEmission::paced(
+                b"SIP/2.0 200 OK\r\n\r\n".to_vec(),
+                ("127.0.0.1".into(), port),
+                Class::Final2xx,
+                call::Repeated::response("INVITE", 200),
+            )
+            .0,
+        }
+    }
+
+    fn give_up_of(call: &call::Call, obligation: &Obligation) -> CallEvent {
+        CallEvent::Timer {
+            timer_type: TimerType::RepeatGiveUp { obligation: obligation.clone() },
+            call_ref: call.call_ref.clone(),
+            leg_id: None,
+        }
+    }
+
+    fn is_2xx_give_up(ctx: &RuleContext) -> bool {
+        matches!(ctx.timer_type(), Some(TimerType::RepeatGiveUp { obligation: Obligation::AckOf2xx { .. } }))
+    }
+
+    fn is_prack_give_up(ctx: &RuleContext) -> bool {
+        matches!(ctx.timer_type(), Some(TimerType::RepeatGiveUp { obligation: Obligation::PrackOf { .. } }))
+    }
+
+    /// A service rule that answers the give-up and deliberately declines to
+    /// end anything — it "parks" the call. Ranked above every CORE rule.
+    fn parking_rule(filter: fn(&RuleContext) -> bool) -> RuleDefinition {
+        RuleDefinition::core(
+            "svc-parks-the-give-up",
+            SERVICE_LAYER,
+            &[],
+            Match::timer().call_state(CallModelState::Active).filter(filter),
+            |_| Some(RuleHandleResult::new(vec![])),
+        )
+    }
+
+    /// The router's give-up turn, step by step: scrub the ladder, run the
+    /// rules, settle the verdict.
+    fn give_up_turn(
+        call: &call::Call,
+        obligation: &Obligation,
+        rules: &[RuleDefinition],
+    ) -> (HandlerResult, HandlerResult) {
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+        let event = give_up_of(call, obligation);
+        let mut call = call.clone();
+        let mut fx = b2bua::effects::HandlerEffects::new();
+        exec.give_up(&mut call, &mut fx, obligation);
+        let ctx = RuleContext {
+            call: RuleCall::new(&call),
+            call_ref: &call.call_ref,
+            event: &event,
+            source_leg_id: "a",
+            direction: Direction::FromA,
+            now_ms: 0,
+            config: &config,
+            discharged: None,
+        };
+        let picked: Vec<&str> = pick_ranked(rules, &call, &ctx).iter().map(|r| r.id).collect();
+        assert_eq!(picked.first().copied(), Some("svc-parks-the-give-up"), "the service rule outranks CORE: {picked:?}");
+        let ruled = execute_rules(rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
+        let settled = exec.settle_give_up(ruled.clone(), obligation, &ctx);
+        (ruled, settled)
+    }
+
+    fn byes_in(result: &HandlerResult) -> Vec<&str> {
+        result
+            .effects
+            .outbound
+            .iter()
+            .filter(|e| matches!(&e.body, OutboundBody::Request(r) if *r.method() == Method::Bye))
+            .filter_map(|e| e.leg_id.as_deref())
+            .collect()
+    }
+
+    #[test]
+    fn a_service_that_parks_the_unacked_2xx_give_up_does_not_keep_the_session() {
+        let call = answered_call();
+        let obligation = Obligation::AckOf2xx { leg: call.a_leg.leg_id.clone(), dialog_tag: A_TAG.into(), cseq: 1 };
+        let mut rules = vec![parking_rule(is_2xx_give_up)];
+        rules.extend(default_rules());
+
+        let (ruled, settled) = give_up_turn(&call, &obligation, &rules);
+
+        // What the rules alone left: the defect's shape.
+        assert_eq!(ruled.call.state, CallModelState::Active, "the service parked the call");
+        assert!(ruled.call.a_leg.dialogs[0].ext.answered_2xx.is_some(), "the rules alone keep the retained 2xx");
+
+        // The settlement: the session ends with the CORE verdict, and nothing
+        // rides the replicated body any more.
+        assert_eq!(settled.call.state, CallModelState::Terminating, "RFC 3261 §13.3.1.4: the session ends");
+        assert!(settled.call.a_leg.dialogs[0].ext.answered_2xx.is_none(), "no retained datagram survives the give-up");
+        let mut byes = byes_in(&settled);
+        byes.sort_unstable();
+        assert_eq!(byes, vec!["a", "b-1"], "the a-leg dialog and the b-leg it bridges are both BYEd");
+        let marker = settled
+            .call
+            .cdr_events
+            .iter()
+            .find(|e| e.event_type == CdrEventType::Bye && e.leg_id == "a")
+            .and_then(|e| e.reason.clone());
+        assert_eq!(marker.as_deref(), Some("ack_timeout"), "the CDR marker is the CORE rule's");
+    }
+
+    #[test]
+    fn a_parked_reinvite_2xx_give_up_ends_the_session_under_its_own_marker() {
+        let mut call = answered_call();
+        // The caller's initial ACK arrived; the b-leg's re-INVITE 2xx (CSeq 7)
+        // is the one still owed.
+        call.a_leg.dialogs[0].ext.answered_2xx = None;
+        call.b_legs[0].dialogs[0].ext.pending_reinvite_2xx = Some(retained_2xx("svc", 7, 5070));
+        let obligation = Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
+        let mut rules = vec![parking_rule(is_2xx_give_up)];
+        rules.extend(default_rules());
+
+        let (_, settled) = give_up_turn(&call, &obligation, &rules);
+
+        assert_eq!(settled.call.state, CallModelState::Terminating);
+        assert!(settled.call.b_legs[0].dialogs[0].ext.pending_reinvite_2xx.is_none(), "the re-INVITE 2xx is not retained either");
+        let marker = settled
+            .call
+            .cdr_events
+            .iter()
+            .find(|e| e.event_type == CdrEventType::Bye && e.leg_id == "b-1")
+            .and_then(|e| e.reason.clone());
+        assert_eq!(marker.as_deref(), Some("reinvite_ack_timeout"), "the CDR names the leg that owed the ACK");
+    }
+
+    #[test]
+    fn a_prack_give_up_keeps_the_rules_own_verdict() {
+        // An answered call whose caller-facing reliable provisional was never
+        // PRACKed: RFC 3262 §3's reject has nothing left to answer, and CORE
+        // absorbs. The settlement forces nothing — the §13.3.1.4 floor is the
+        // 2xx's alone.
+        let mut call = answered_call();
+        call.a_leg.dialogs[0].ext.answered_2xx = None;
+        call.reliable_provisionals.push(call::ReliableProvisional {
+            a_tag: A_TAG.into(),
+            a_rseq: 1,
+            a_cseq: Some(1),
+            b_leg_id: "b-1".into(),
+            b_tag: "bobtag".into(),
+            b_cseq: 1,
+            b_rseq: 9,
+            acknowledged: false,
+            emission: Some(
+                RetainedEmission::paced(
+                    b"SIP/2.0 183 Session Progress\r\n\r\n".to_vec(),
+                    ("127.0.0.1".into(), 5060),
+                    Class::ReliableProvisional,
+                    call::Repeated::response("INVITE", 183),
+                )
+                .0,
+            ),
+        });
+        let obligation = Obligation::PrackOf { a_tag: A_TAG.into(), a_rseq: 1 };
+        let mut rules = vec![parking_rule(is_prack_give_up)];
+        rules.extend(default_rules());
+
+        let (ruled, settled) = give_up_turn(&call, &obligation, &rules);
+
+        assert_eq!(ruled.call.state, CallModelState::Active);
+        assert_eq!(settled.call.state, CallModelState::Active, "a PRACK give-up is the rules' to answer");
+        assert!(byes_in(&settled).is_empty(), "no forced teardown");
+        assert!(settled.call.reliable_provisionals[0].emission.is_none(), "the provisional's emission is spent with its ladder");
+    }
 }

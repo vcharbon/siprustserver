@@ -182,6 +182,9 @@ pub fn combine_doc(
             endpoint: None,
             advisory: Some(!a.severity.fails()),
             row_seqs: Vec::new(),
+            // signalingAudit is the ledger kind sourced from the audit
+            // registry; the structural kinds (queueLeak, …) are not.
+            rule_sourced: a.kind == "signalingAudit",
         })
         .collect();
 

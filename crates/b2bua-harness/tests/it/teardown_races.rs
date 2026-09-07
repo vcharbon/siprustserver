@@ -132,12 +132,15 @@ async fn reinvite_crossing_bye_terminates_and_releases_the_limiter() {
         establish_call_both_sides(&alice, &bob, &b2bua, &store).await;
 
     // ── alice re-INVITEs as bob BYEs (crossing) ───────────────────────────────
-    let _reinv = alice_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    let mut reinv = alice_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
     let _b_bye = bob_dialog.bye().await;
 
-    // Drain the crossing traffic (relayed re-INVITE, BYEs, the abandoned
-    // re-INVITE's response) and force-resolve any unanswered BYE past the 32 s
+    // The BYE ends alice's pending re-INVITE 487 (RFC 3261 §15.1.2) beside the
+    // BYE relayed to her, in either order; she hop-ACKs the final and answers
+    // the BYE. Drain the rest of the crossing traffic (the relayed re-INVITE
+    // toward bob) and force-resolve anything unanswered past the 32 s
     // TerminatingTimeout. The invariant under test is the SUT's clean reap.
+    reinv.expect_tolerating(487, &["BYE"]).await;
     h.advance(Duration::from_secs(1)).await;
     alice.drain().await;
     bob.drain().await;

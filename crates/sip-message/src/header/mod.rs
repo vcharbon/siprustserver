@@ -20,6 +20,7 @@ mod aliases;
 mod charging;
 mod class;
 mod credentials;
+mod equivalence;
 mod identity;
 mod item_separator;
 pub mod kind;
@@ -37,10 +38,10 @@ mod via;
 mod wire;
 
 pub use aliases::{
-    Allow, AllowEvents, Authorization, Contact, ContentDisposition, ContentLength, Diversion,
+    AcceptRange, Allow, AllowEvents, Authorization, Contact, ContentDisposition, ContentLength, Diversion,
     Event, Expires, From, HistoryInfo, MaxForwards, MediaType, MinExpires, MinSe,
     PAssertedIdentity, PPreferredIdentity, PathEntry, Privacy, ProxyAuthenticate, ProxyAuthorization,
-    ProxyRequire, Reason, RSeq, RecordRouteEntry, ReferTo, ReferredBy, RemotePartyId, ReplyTo,
+    ProxyRequire, Reason, Replaces, RSeq, RecordRouteEntry, ReferTo, ReferredBy, RemotePartyId, ReplyTo,
     Require, RetryAfter, RouteEntry, ServiceRouteEntry, SessionExpires, SubscriptionState,
     Supported, To, Unsupported, WwwAuthenticate,
 };
@@ -48,6 +49,7 @@ pub use charging::ChargingVector;
 pub use class::HeaderClass;
 pub use identity::{CSeq, CallId, RAck};
 pub use item_separator::ItemSeparator;
+pub use equivalence::{canonical_header_items, header_forms_equivalent};
 pub use credentials::Credentials;
 pub use name::HeaderName;
 pub use name_addr::NameAddr;
@@ -55,7 +57,7 @@ pub use name_addr_header::NameAddrHeader;
 pub use numeric::NumericHeader;
 pub use params::{ParamValue, Params};
 pub use token_list::TokenListHeader;
-pub use token_params::TokenParamsHeader;
+pub use token_params::{parse_token_params, TokenParamsHeader};
 pub use uri::{HostPort, Uri};
 pub use value::{Folding, HeaderValue};
 pub use via::{Rport, Via, BRANCH_MAGIC_COOKIE};

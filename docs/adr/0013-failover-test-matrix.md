@@ -70,7 +70,7 @@ loss:
    reroutes its in-dialog traffic to it.
 
 2. **A default RFC 3261 audit over the recorded SIP layer, every cell.** New
-   `sip-net::CSeqInDialogOrderRule` (a `CrossMessageAuditRule` installed in the
+   `cseq-in-dialog-order` (a `CrossMessageAuditRule` installed in the
    `scenario-harness` default `ScopedAuditOptions`) replays every received request
    from the recording and flags an in-dialog CSeq regression per
    `(receiving endpoint, Call-ID, From-tag)` — RFC §12.2.2 out-of-order, which a

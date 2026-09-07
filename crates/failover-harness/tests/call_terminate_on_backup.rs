@@ -195,7 +195,7 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
 /// `(p,b)` rejects it), and the accepted outcome is that one call dropping cleanly —
 /// which every cell asserts via `assert_call_fully_over` / `assert_call_lost_no_cdr`.
 /// Call it at the cell's fault injection. Cells that never give one leg two
-/// concurrent owners keep `cseqInDialogOrder` fully gating for their whole run, and
+/// concurrent owners keep `cseq-in-dialog-order` fully gating for their whole run, and
 /// so does every cell's establishment: C1 (no fault at all), C12 (the call is
 /// terminated before the crash, so the reboot reclaims nothing), and C8/C9 — the
 /// primary is genuinely dead, the passive backup never takes over an idle call, and
@@ -225,6 +225,7 @@ async fn reboot_and_reclaim(
     fh.mark(primary_ord, None, "reboot", "restart empty, higher gen, new pod IP");
     let new_addr = primary.reboot().await;
     proxy.set_address(primary_ord, new_addr);
+    fh.note_worker_rebound(primary_ord, new_addr); // keep the worker bind out of the RFC audit
     backup.simulate_peer_added(primary_ord);
     for _ in 0..120 {
         fh.advance(Duration::from_millis(500)).await;

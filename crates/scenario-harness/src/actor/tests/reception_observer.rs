@@ -119,6 +119,7 @@ fn folded_header_plan(
                             kind: RequestKind::Initial,
                             body: BodyExpect::SdpPresent,
                             matcher: None,
+                            rank: None,
                         },
                     ),
                     Goal::new(
@@ -264,6 +265,7 @@ async fn reception_observer_fires_when_the_matcher_fails() {
             vec![TemplateHeader::frozen("X-Absent", "never-sent")],
             Vec::new(),
         )),
+        rank: None,
     };
     let obs = ObservedState::new();
     let ctx = CallCtx::new();

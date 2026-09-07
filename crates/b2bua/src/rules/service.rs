@@ -70,6 +70,7 @@ pub fn seed_services(
                     direction,
                     now_ms: exec.now_ms,
                     config: exec.config,
+                    discharged: None,
                 };
                 exec.execute(&seed.actions, &result.call, &ctx)
             };

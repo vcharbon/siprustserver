@@ -16,8 +16,10 @@ use observe::{WaveReport, WaveSet};
 
 /// Acting-backup takeover, keyed by the dead peer whose partition we are
 /// serving: `hydrated` (calls loaded off the replica), `resolved` (in-dialog
-/// requests re-keyed through the replica index) and `self_released` (takeover
-/// copies shed once their transactions cleared) fold into ONE episode per peer.
+/// requests re-keyed through the replica index), `self_released` (takeover
+/// copies shed once their transactions cleared) and `refused_terminated` (a
+/// released copy's `Terminated` replica refused, the datagram falling to the
+/// orphan path) fold into ONE episode per peer.
 pub fn takeover_waves() -> Arc<WaveSet> {
     WaveSet::new(|peer: &str, r: &WaveReport| {
         tracing::info!(

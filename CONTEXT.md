@@ -92,6 +92,35 @@ The two classes a parser rejection of a grammar-valid input falls into.
 looser than the parser). *Buggy* = matches no known policy → a real parser
 bug. A clean ABNF run has zero buggy rejections and zero silent misparses.
 
+## Retransmission vocabulary
+
+**Ladder**:
+The whole sequence of scheduled re-sends of one message, and the schedule that
+paces it. A ladder belongs either to a **transaction** (Timer A/E/G, the CANCEL
+sub-ladder — the transaction layer drives them and its consumers never see
+them) or to a **dialog-level obligation** (RFC 3261 §13.3.1.4, RFC 3262 §3 —
+replicated with the call, visible to rules only as its give-up). See ADR-0029.
+_Avoid_: "retry", "attempt" (they carry HTTP retry semantics elsewhere in the
+workspace), "cadence" for the schedule as a whole.
+
+**Rung**:
+One step of a ladder. Rung 0 is the original send, rung 1 the first re-send,
+rung *n* the *n*th. Since the schedule is fixed by the class, a rung index is
+the whole of a ladder's state — no epoch anchor, so it survives takeover.
+
+**Retained emission**:
+The exact serialized datagram of a message that owes repeats, kept opaque and
+replicated with the call. A rung re-sends these bytes; it never re-composes an
+equivalent message (ADR-0029 X3).
+
+**Obligation**:
+What discharges a dialog-level ladder, as a key the framework matches on:
+`AckOf2xx` and `PrackOf`. The engine cancels the ladder when the matching ACK
+or PRACK arrives; a rule sees only the give-up. A transaction ladder needs no
+obligation — the transaction layer owns its own.
+_Avoid_: "watchdog" (the old name for the 2xx pair — it named the timer, not
+the thing owed).
+
 ## HA replication glossary
 
 The peer-to-peer call-replication vocabulary (ADR-0011 / `docs/plan/
@@ -166,7 +195,7 @@ watermark from Reclaim; never gates readiness (metrics-only).
 
 **Takeover copy** (acting-backup live copy) — *reactive only* (ADR-0014):
 The live, in-memory call a backup materialises into its own call map **when the
-proxy reroutes an in-dialog request to it** (`hydrate_from_replica`) — distinct
+proxy reroutes an in-dialog request to it** (`router::materialise`) — distinct
 from the serialised backup **Element** (the `bak:{primary}` stored body). There is
 **no** eager/membership-driven takeover: a quiescent failed-over dialog is not
 made live on a survivor; it is recovered by the rebooting primary's **reclaim**.
@@ -182,6 +211,17 @@ ADR-0014 §4), and re-flushing under the new **incarnation-gen** — not merely
 pulling the bodies into `pri:` storage. The storage-only step is **re-hydration**;
 reclaim is re-hydration *plus* re-serving.
 _Avoid_: "reclaim" for the storage-only (re-hydration) step.
+
+**Materialisation**: turning a stored Element into a live copy and re-arming
+what this node needs to serve it: timers, in-flight transactions (seeds), and
+for a takeover the self-release watch. The same step on takeover and on
+reclaim; only the origin differs. _Avoid_: "hydration" for it (that is the
+storage-only step).
+
+**Seed**: a transaction the materialisation rebuilds from the record: a
+Proceeding client INVITE from an INVITE handle, a Proceeding server INVITE
+from the a-leg snapshot or a pending relayed re-INVITE. Never a 2xx, PRACK or
+re-ACK: those are ADR-0029 obligations replicated with the call.
 
 **Self-release** (acting-backup takeover-copy lifecycle) — replaces Activate/Deactivate (ADR-0014):
 A backup holds a **takeover copy** only *while actively serving* the rerouted

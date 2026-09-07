@@ -1,5 +1,5 @@
 //! A `/calls` decision result landing on a call the CALLER already CANCELed
-//! (upstreamneed-069).
+//!.
 //!
 //! The caller gives up while the routing decision is still in flight: the txn
 //! layer finalizes the initial-INVITE transaction at once (200 to the CANCEL,

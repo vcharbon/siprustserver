@@ -45,7 +45,7 @@ SIP_PORT="${SIP_PORT:-5060}"
 # attach (dual-homed), plus the load generators (loadgen / sipp-uas / dnsmasq)
 # as plain docker containers. Callers reach the proxy's EXTERNAL face
 # (SIPEXT_VIP) same-L2 — no SNAT/DNAT/conntrack rewrite anywhere on the SIP
-# path (the fix-class for upstreamneed-041). The WSL host owns the bridge
+# path (the masquerade-drop fix-class). The WSL host owns the bridge
 # gateway (.1) so it dials the VIP directly.
 #
 # Replication contract: interface names are ENV, never hardcoded in manifests.

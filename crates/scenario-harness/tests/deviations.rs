@@ -27,7 +27,7 @@ async fn cseq_jump_visible_on_the_wire() {
     // ALICE's emissions (the peer replaying the anomaly).
     h.waive(
         WaiverScope::rule(
-            "rfc3261.cseqInDialogOrder",
+            "cseq-in-dialog-order",
             "replaying a captured out-of-pattern in-dialog CSeq (declared jump deviation)",
         )
         .on_party("alice"),
@@ -80,7 +80,7 @@ async fn cseq_reuse_emitted_as_declared() {
     );
     h.waive(
         WaiverScope::rule(
-            "rfc3261.cseqInDialogOrder",
+            "cseq-in-dialog-order",
             "replaying a captured in-dialog CSeq reuse (declared reuse deviation)",
         )
         .on_party("alice"),
@@ -177,7 +177,7 @@ async fn shared_cseq_counter_survives_a_scope_refresh_clone() {
          counter for a scope-refresh clone too — no fork, no re-consumed op",
     );
     h.waive(
-        WaiverScope::rule("rfc3261.cseqInDialogOrder", "declared jump; shared-counter clone test")
+        WaiverScope::rule("cseq-in-dialog-order", "declared jump; shared-counter clone test")
             .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5060").await;
@@ -343,7 +343,7 @@ async fn templated_in_dialog_request_honors_the_pattern() {
     );
     h.waive(
         WaiverScope::rule(
-            "rfc3261.cseqInDialogOrder",
+            "cseq-in-dialog-order",
             "replaying a captured out-of-pattern CSeq via a templated in-dialog request",
         )
         .on_party("alice"),

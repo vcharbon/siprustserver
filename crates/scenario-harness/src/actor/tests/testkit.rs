@@ -41,7 +41,7 @@ pub(super) fn caller_spec(role: &'static str, agent: &crate::Agent, callee: (&'s
         feed: CtxFeed::default(),
     
         cseq: None,
-        delayed: None,
+        delayed: vec![],
         claim: None,
     }
 }
@@ -59,7 +59,7 @@ pub(super) fn scripted_spec(role: &'static str, agent: &crate::Agent, goals: Vec
         feed: CtxFeed::default(),
     
         cseq: None,
-        delayed: None,
+        delayed: vec![],
         claim: None,
     }
 }

@@ -234,6 +234,7 @@ pub fn build_initial_call(
         subscriptions: Vec::new(),
         reroute: None,
         reliable_provisionals: Vec::new(),
+        pracked_provisionals: Vec::new(),
         sm_cursors: std::collections::BTreeMap::new(),
     }
 }
@@ -251,6 +252,7 @@ pub async fn handle_initial_invite(
     limiter: &dyn CallLimiter,
     config: &B2buaConfig,
     id_gen: &IdGen,
+    wire_faults: &crate::wire_faults::WireFaults,
     services: &[ServiceDef],
     invite_wire: &[u8],
     clock: &Clock,
@@ -292,7 +294,7 @@ pub async fn handle_initial_invite(
                 now_ms, 0,
             )
             .await;
-            let exec = ActionExecutor { config, id_gen, now_ms };
+            let exec = ActionExecutor { config, id_gen, now_ms, wire_faults };
             let setup_event = setup_event(&result.call, &a_invite);
             seed_services(result, services, &exec, &setup_event, "a", call::Direction::FromA)
         }
@@ -345,6 +347,7 @@ fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
     CallEvent::Sip {
         message: Box::new(SipMessage::Request(a_invite.clone())),
         src,
+        matched_client_txn: false,
     }
 }
 
@@ -430,6 +433,9 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
     }
 }
 
+/// The reason phrase a reject wears when the decision states none. `500` is the
+/// fail-safe every adapter reaches for, so it wears its own RFC 3261 §21.5.1
+/// phrase rather than the `603` fallthrough.
 fn default_reason(status: u16) -> String {
     match status {
         302 => "Moved Temporarily",
@@ -437,6 +443,7 @@ fn default_reason(status: u16) -> String {
         404 => "Not Found",
         480 => "Temporarily Unavailable",
         486 => "Busy Here",
+        500 => "Server Internal Error",
         503 => "Service Unavailable",
         _ => "Declined",
     }

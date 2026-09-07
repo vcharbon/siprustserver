@@ -1,4 +1,4 @@
-//! Arbitrary-MIME in-dialog INFO body survives the B2BUA relay (upstreamneed-020).
+//! Arbitrary-MIME in-dialog INFO body survives the B2BUA relay.
 //!
 //! The `scenario-harness` `InDialogRequest::with_body(content_type, bytes)`
 //! primitive lets a test drive an in-dialog request with a real, arbitrary-MIME
@@ -29,7 +29,7 @@ async fn info_with_arbitrary_body_relays_content_type_and_bytes() {
 
     const CT: &str = "application/example-binary";
     // A genuinely **non-UTF-8** body (0xFF/0xFE/0x80/0xC0 are invalid UTF-8) — the
-    // faithful binary example-binary case upstreamneed-023 unlocked: it must survive
+    // faithful binary example-binary case: it must survive
     // the send path AND the RFC 3261 §20.14 Content-Length hard gate (which counts
     // raw body bytes, not lossy-decoded chars) as well as the verbatim relay.
     let body: Vec<u8> = b"SUP:role=agent;priority=high;\xFF\xFE\x80\xC0payload".to_vec();

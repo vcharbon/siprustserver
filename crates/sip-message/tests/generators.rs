@@ -220,7 +220,7 @@ fn an_imposing_header_rides_a_response_but_never_a_relayed_request() {
 
 /// A header describing the body does not outlive the body it describes: it
 /// rides when the minted message carries the source's body, and is withheld
-/// when a policy dropped or replaced it.
+/// when a policy dropped it.
 #[test]
 fn body_metadata_rides_only_with_the_body_it_describes() {
     for name in ["Content-Disposition", "Content-Encoding", "Content-Language", "MIME-Version"] {
@@ -234,6 +234,19 @@ fn body_metadata_rides_only_with_the_body_it_describes() {
         relayable("P-Asserted-Identity", RelayScope::request().without_source_body()),
         "dropping the body withholds nothing else"
     );
+}
+
+/// A replaced body is not an absent one. The staged body fills the source
+/// body's role, so RFC 3261 §20.11's statement of that role still describes it
+/// truthfully; the octets are the relay's own, so RFC 3261 §20.12 / §20.15 and
+/// RFC 2045 §4's statements about them do not ride.
+#[test]
+fn a_replaced_body_keeps_the_role_it_still_fills_and_loses_the_octets_it_does_not() {
+    let scope = RelayScope::response().with_replaced_body();
+    assert!(relayable("Content-Disposition", scope), "the body's role is unchanged");
+    for name in ["Content-Encoding", "Content-Language", "MIME-Version"] {
+        assert!(!relayable(name, scope), "{name} states octets the relay replaced");
+    }
 }
 
 /// RFC 3325 §7 / RFC 3323 §5.3: a message asking for privacy over its identity
@@ -453,12 +466,10 @@ fn reinvite_advert(
     )
 }
 
-/// An undeclared re-INVITE advertises exactly the constants, byte for byte.
+/// A re-INVITE with no stated capability set advertises nothing: no line.
 #[test]
-fn reinvite_without_a_declared_capability_set_advertises_the_default() {
-    let (allow, supported) = reinvite_advert(None, vec![]);
-    assert_eq!(allow.as_deref(), Some(sip_message::generators::B2BUA_ALLOW));
-    assert_eq!(supported.as_deref(), Some(sip_message::generators::B2BUA_SUPPORTED));
+fn reinvite_without_a_stated_capability_set_advertises_nothing() {
+    assert_eq!(reinvite_advert(None, vec![]), (None, None));
 }
 
 /// A declared set is what reaches the wire — no REFER, no 100rel.
@@ -755,7 +766,7 @@ fn cancel_and_non_2xx_ack_echo_the_invite_request_uri_octet_for_octet() {
         &GenerateResponseOpts { to_tag: Some("uas-tag".to_string()), ..Default::default() },
     );
     assert_eq!(
-        generate_ack_for_non_2xx(&handle.original_invite, &final487).request_uri().text(),
+        generate_ack_for_non_2xx(&handle.original_invite, &final487, &[]).request_uri().text(),
         r_uri
     );
 }
@@ -991,7 +1002,7 @@ fn ack_non_2xx_reuses_invite_via_and_copies_response_from_to() {
         "Request Terminated",
         &GenerateResponseOpts { to_tag: Some("uas-tag".to_string()), ..Default::default() },
     );
-    let ack = generate_ack_for_non_2xx(&handle.original_invite, &final487);
+    let ack = generate_ack_for_non_2xx(&handle.original_invite, &final487, &[]);
     assert_eq!(ack.method(), "ACK");
     assert_eq!(ack.request_uri().text(), "sip:bob@192.0.2.20:5060");
     assert_eq!(first_value(ack.headers(), "Via"), first_value(handle.original_invite.headers(), "Via"));
@@ -1026,7 +1037,7 @@ fn ack_non_2xx_echoes_the_invite_route_set_verbatim() {
         "Busy Here",
         &GenerateResponseOpts { to_tag: Some("uas-tag".to_string()), ..Default::default() },
     );
-    let ack = generate_ack_for_non_2xx(&invite, &final486);
+    let ack = generate_ack_for_non_2xx(&invite, &final486, &[]);
     let ack_routes: Vec<String> = ack
         .headers()
         .iter()

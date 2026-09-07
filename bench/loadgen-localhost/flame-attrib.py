@@ -11,7 +11,7 @@ is compared on numbers.
     ./flame-attrib.py results/baseline-pre-zerocopy/r*_loadgen.svg
 
 Multiple SVGs of the same tier are summed: three short captures make one
-statistically usable profile. Prints the upstreamneed-043 §2 frame table, the
+statistically usable profile. Prints the attribution frame table, the
 parse and allocation bucket totals, and the overall top-20 self-time frames.
 """
 
@@ -20,7 +20,7 @@ import re
 import sys
 from collections import defaultdict
 
-# The frames upstreamneed 043 §2 tabulates, bucketed. Matched as a substring of
+# The frames the attribution table tabulates, bucketed. Matched as a substring of
 # the demangled symbol so a generic/inlined name still lands.
 PARSE_FRAMES = [
     "split_top_level_commas",

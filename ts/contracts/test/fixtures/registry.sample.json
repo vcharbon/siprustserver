@@ -1,0 +1,40 @@
+{
+  "capture_01acaf14-dc05-42d7-8b36-29a6f772fd05.pcap.gz": {
+    "verdict": "expected",
+    "decided_on": "2026-08-25",
+    "evidence": {
+      "bundle": "corpus-work/triage/capture_01acaf14-dc05-42d7-8b36-29a6f772fd05/run1",
+      "step": "12",
+      "note": "SUT sends 180 before the relayed 183; behavior-doc PRACK/18x table row 3 — transparency not promised for non-reliable provisionals"
+    },
+    "hint": "18x-reorder-nonreliable"
+  },
+  "capture_0248583d-190c-46cc-b98f-bbd3c7f4fb6f.pcap.gz": {
+    "verdict": "never-fix",
+    "decided_on": "2026-08-25",
+    "evidence": {
+      "bundle": "corpus-work/triage/capture_0248583d-190c-46cc-b98f-bbd3c7f4fb6f/run1",
+      "note": "capture truncated mid-dialog by the taker; no complete call to replay, not worth a synthetic completion"
+    }
+  },
+  "capture_02ce811e-8bdb-48a4-8ea8-ccdd0549fde6.pcap.gz": {
+    "verdict": "bug",
+    "ticket": ".scratch/replay-refine/issues/90-bye-race-drops-200.md",
+    "decided_on": "2026-08-25",
+    "evidence": {
+      "bundle": "corpus-work/triage/capture_02ce811e-8bdb-48a4-8ea8-ccdd0549fde6/run2",
+      "step": "31",
+      "note": "SUT swallows the 200 OK to BYE when CANCEL crosses it; scenario and interpreter both correct"
+    }
+  },
+  "capture_02eda876-d65f-4f4f-9773-33b55238d131.pcap.gz": {
+    "verdict": "cut",
+    "ticket": ".scratch/replay-refine/issues/91-hairpin-halves-misjoined.md",
+    "cases": ["capture_02eda876-d65f-4f4f-9773-33b55238d131.pcap.gz-cut2"],
+    "decided_on": "2026-08-25",
+    "evidence": {
+      "bundle": "corpus-work/triage/capture_02eda876-d65f-4f4f-9773-33b55238d131/run1",
+      "note": "correlation joined the hairpin's outward half to the wrong ingress leg; scenario misrepresents the pcap"
+    }
+  }
+}

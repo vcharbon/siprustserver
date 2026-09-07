@@ -28,7 +28,7 @@ use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
-use sip_message::types::{SipRequest, SipResponse};
+use sip_message::SipMessage;
 
 use crate::cookie::worker_ordinals;
 use crate::oracle::{NodeEndState, Observation, TeardownSweep, Who};
@@ -74,21 +74,6 @@ fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
         laddr(),
         Duration::from_millis(150),
     ))
-}
-
-fn req_tags(r: &SipRequest) -> (String, String) {
-    (
-        r.from().tag().unwrap_or_default().to_string(),
-        r.to().tag().unwrap_or_default().to_string(),
-    )
-}
-
-fn resp_cseq(r: &SipResponse) -> String {
-    r.cseq().seq().to_string()
-}
-
-fn req_cseq(r: &SipRequest) -> String {
-    r.cseq().seq().to_string()
 }
 
 /// The fixed `target/seq-reports/` artifact root. `CARGO_MANIFEST_DIR` points at
@@ -160,18 +145,14 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     // ── Establish to the cell's safe-point state ─────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
-    {
-        let r = uas.request();
-        let (f, t) = req_tags(r);
-        obs.req(Who::Bob, "INVITE", &req_cseq(r), &f, &t);
-    }
+    obs.req(Who::Bob, uas.request());
     let (pri_ord, bak_ord) = worker_ordinals(uas.request());
 
     // Provisional 180 (gives alice an early dialog).
     uas.respond(180, "Ringing").await;
     {
         let r = call.expect(180).await;
-        obs.resp(Who::Alice, 180, &resp_cseq(&r));
+        obs.resp(Who::Alice, &r);
     }
 
     // v1 transparent states: Established (200+ACK) and ConfirmedPreAck (200
@@ -196,7 +177,7 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     {
         let r = call.expect(200).await;
-        obs.resp(Who::Alice, 200, &resp_cseq(&r));
+        obs.resp(Who::Alice, &r);
     }
     // Bob's dialog view (for callee-initiated in-dialog requests).
     let mut bob_dialog = uas.dialog();
@@ -207,8 +188,7 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
             dialog = call.ack().await;
             {
                 let r = bob.receive("ACK").await;
-                let (f, t) = req_tags(r.request());
-                obs.req(Who::Bob, "ACK", &req_cseq(r.request()), &f, &t);
+                obs.req(Who::Bob, r.request());
             }
             fh.advance(Duration::from_millis(500)).await; // replicate established
             let _ = find_backed_up_ref(backup, &primary_ord).await; // settle
@@ -219,13 +199,24 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
             fh.advance(Duration::from_millis(500)).await; // replicate confirmed-pre-ack
             let _ = find_backed_up_ref(backup, &primary_ord).await; // settle
             inject_failover(&mut fh, primary, backup, &primary_ord, &proxy, cell.fault, inject).await;
+            // The window stayed open past the 200's first rungs (RFC 3261
+            // §13.3.1.4) — past more of them in the variant, whose injection
+            // advances the clock — so alice's socket holds the 200 again. Each
+            // copy is observed: byte-identical (ADR-0029 X3) it folds into the
+            // 200's token; re-composed it is a token of its own and fails the
+            // cell. Nothing else is due to alice before her ACK.
+            while let Some(msg) = alice.take_queued().await {
+                match &msg {
+                    SipMessage::Response(r) => obs.resp(Who::Alice, r),
+                    SipMessage::Request(r) => obs.req(Who::Alice, r),
+                };
+            }
             // The ACK now routes to the backup (primary dead → ACK-exemption
             // does not apply); the backup absorbs it (takeover).
             dialog = call.ack().await;
             {
                 let r = bob.receive("ACK").await;
-                let (f, t) = req_tags(r.request());
-                obs.req(Who::Bob, "ACK", &req_cseq(r.request()), &f, &t);
+                obs.req(Who::Bob, r.request());
             }
             fh.advance(Duration::from_millis(500)).await;
         }
@@ -258,13 +249,10 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
         Event::Bye(Party::Caller) => {
             let mut bye = dialog.bye().await;
             let mut buas = bob.receive("BYE").await;
-            {
-                let (f, t) = req_tags(buas.request());
-                obs.req(Who::Bob, "BYE", &req_cseq(buas.request()), &f, &t);
-            }
+            obs.req(Who::Bob, buas.request());
             buas.respond(200, "OK").await;
             let r = bye.expect(200).await;
-            obs.resp(Who::Alice, 200, &resp_cseq(&r));
+            obs.resp(Who::Alice, &r);
             fh.advance(Duration::from_millis(500)).await;
             if !reboot_before_event && do_reboot {
                 reboot_and_reclaim(&mut fh, primary, backup, &primary_ord, &proxy).await; // reclaim NOTHING
@@ -273,13 +261,10 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
         Event::Bye(Party::Callee) => {
             let mut bye = bob_dialog.bye().await;
             let mut auas = alice.receive("BYE").await;
-            {
-                let (f, t) = req_tags(auas.request());
-                obs.req(Who::Alice, "BYE", &req_cseq(auas.request()), &f, &t);
-            }
+            obs.req(Who::Alice, auas.request());
             auas.respond(200, "OK").await;
             let r = bye.expect(200).await;
-            obs.resp(Who::Bob, 200, &resp_cseq(&r));
+            obs.resp(Who::Bob, &r);
             fh.advance(Duration::from_millis(500)).await;
             if !reboot_before_event && do_reboot {
                 reboot_and_reclaim(&mut fh, primary, backup, &primary_ord, &proxy).await; // reclaim NOTHING
@@ -389,7 +374,7 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
 /// (`simulate_peer_removed`) — the COMPLETE k8s death signal (a real kill removes
 /// the StatefulSet endpoint). Under reactive-only takeover (ADR-0014) the survivor
 /// takes the dialog over when the proxy reroutes its in-dialog traffic
-/// (`hydrate_from_replica`); the membership delta no longer drives an eager
+/// (`router::materialise`); the membership delta no longer drives an eager
 /// takeover (removed with ADR-0014), it just keeps the survivor's view honest. The
 /// reboot re-adds the endpoint ([`reboot_and_reclaim`]).
 async fn inject_failover(
@@ -409,7 +394,7 @@ async fn inject_failover(
     // in-dialog CSeq (the loser's mutation reaches the wire before `(p,b)` rejects
     // it; that one call drops cleanly). Accepted from HERE, never before: the clean
     // baseline (`inject == false`) and this cell's own establishment keep
-    // `cseqInDialogOrder` fully gating, so a new CSeq regression still fails.
+    // `cseq-in-dialog-order` fully gating, so a new CSeq regression still fails.
     fh.accept_rfc_deviations_from_now(
         crate::RULE_CSEQ_IN_DIALOG_ORDER,
         "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap in the \
@@ -503,46 +488,38 @@ async fn drive_generic(
             let sdp = needs_answer.then_some(OFFER);
             let mut tx = dialog.request(method, sdp).await;
             let mut peer = bob.receive(m).await;
-            {
-                let (f, t) = req_tags(peer.request());
-                obs.req(Who::Bob, m, &req_cseq(peer.request()), &f, &t);
-            }
+            obs.req(Who::Bob, peer.request());
             if needs_answer {
                 peer.respond(200, "OK").with_sdp(ANSWER).await;
             } else {
                 peer.respond(200, "OK").await;
             }
             let r = tx.expect(200).await;
-            obs.resp(Who::Alice, 200, &resp_cseq(&r));
+            obs.resp(Who::Alice, &r);
             if method == InDialogMethod::Invite {
                 // The re-INVITE carried the offer, the 200 the answer — bodyless ACK.
                 dialog.ack(None).await;
                 let a = bob.receive("ACK").await;
-                let (f, t) = req_tags(a.request());
-                obs.req(Who::Bob, "ACK", &req_cseq(a.request()), &f, &t);
+                obs.req(Who::Bob, a.request());
             }
         }
         Party::Callee => {
             let sdp = needs_answer.then_some(OFFER);
             let mut tx = bob_dialog.request(method, sdp).await;
             let mut peer = alice.receive(m).await;
-            {
-                let (f, t) = req_tags(peer.request());
-                obs.req(Who::Alice, m, &req_cseq(peer.request()), &f, &t);
-            }
+            obs.req(Who::Alice, peer.request());
             if needs_answer {
                 peer.respond(200, "OK").with_sdp(ANSWER).await;
             } else {
                 peer.respond(200, "OK").await;
             }
             let r = tx.expect(200).await;
-            obs.resp(Who::Bob, 200, &resp_cseq(&r));
+            obs.resp(Who::Bob, &r);
             if method == InDialogMethod::Invite {
                 // The re-INVITE carried the offer, the 200 the answer — bodyless ACK.
                 bob_dialog.ack(None).await;
                 let a = alice.receive("ACK").await;
-                let (f, t) = req_tags(a.request());
-                obs.req(Who::Alice, "ACK", &req_cseq(a.request()), &f, &t);
+                obs.req(Who::Alice, a.request());
             }
         }
     }
@@ -593,15 +570,9 @@ async fn keepalive_tick(
 
     // Answer both legs BEFORE advancing again — each cancels its leg's 5 s reap.
     let mut a = a_txn.expect("alice received the AS keepalive OPTIONS within an interval");
-    {
-        let (f, t) = req_tags(a.request());
-        obs.req(Who::Alice, "OPTIONS", &req_cseq(a.request()), &f, &t);
-    }
+    obs.req(Who::Alice, a.request());
     let mut b = b_txn.expect("bob received the AS keepalive OPTIONS within an interval");
-    {
-        let (f, t) = req_tags(b.request());
-        obs.req(Who::Bob, "OPTIONS", &req_cseq(b.request()), &f, &t);
-    }
+    obs.req(Who::Bob, b.request());
     a.respond(200, "OK").await;
     b.respond(200, "OK").await;
     fh.advance(Duration::from_millis(300)).await;
@@ -620,13 +591,10 @@ async fn terminating_bye(
     // Keepalive category advances a full interval in one step, which fires the
     // OPTIONS *and* its retransmit before the 200 lands).
     let mut buas = bob.receive_tolerating("BYE", &["OPTIONS"]).await;
-    {
-        let (f, t) = req_tags(buas.request());
-        obs.req(Who::Bob, "BYE", &req_cseq(buas.request()), &f, &t);
-    }
+    obs.req(Who::Bob, buas.request());
     buas.respond(200, "OK").await;
     let r = bye.expect_tolerating(200, &["OPTIONS"]).await;
-    obs.resp(Who::Alice, 200, &resp_cseq(&r));
+    obs.resp(Who::Alice, &r);
 }
 
 fn method_name(m: InDialogMethod) -> &'static str {
