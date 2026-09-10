@@ -12,7 +12,7 @@ use sip_message::generators::{
 };
 use sip_message::header::HeaderName;
 use sip_message::parser::custom::CustomParser;
-use sip_message::{Method, SipHeader, SipMessage, SipParser};
+use sip_message::{hops, Method, SipHeader, SipMessage, SipParser};
 use sip_txn::TxnKind;
 
 use crate::effects::{
@@ -70,6 +70,7 @@ impl ActionExecutor<'_> {
         // said — the Q.850 cause (RFC 3326 §2), the charging correlation, the
         // end-to-end data — on the BYE/CANCEL minted for the other leg.
         let relayed = relayed_teardown_headers(ctx);
+        let hops = relayed_teardown_hops(ctx);
         // RFC 3326: stamp the teardown cause on each BYE only when the firing
         // rule supplied a structured `SIP;cause=…` value (the
         // `promote18xPemTo200` diagnostic teardown). The CORE rules pass opaque
@@ -96,9 +97,9 @@ impl ActionExecutor<'_> {
             match state {
                 LegState::Confirmed => {
                     let e = if is_a {
-                        self.bye_to_leg_a(call, reason_header, &relayed)
+                        self.bye_to_leg_a(call, reason_header, &relayed, hops)
                     } else {
-                        self.bye_to_b_leg(call, &id, reason_header, &relayed)
+                        self.bye_to_b_leg(call, &id, reason_header, &relayed, hops)
                     };
                     if let Some(e) = e {
                         fx.outbound.push(e);
@@ -181,7 +182,7 @@ impl ActionExecutor<'_> {
             .or_else(|| (call.a_leg.leg_id == leg_id).then_some(call.a_leg.state));
         match state {
             Some(LegState::Confirmed) => {
-                if let Some(e) = self.bye_to_b_leg(call, leg_id, None, &[]) {
+                if let Some(e) = self.bye_to_b_leg(call, leg_id, None, &[], None) {
                     fx.outbound.push(e);
                 }
                 *call = set_bye_disposition(call.clone(), leg_id, ByeDisposition::ByeSent);
@@ -259,6 +260,7 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         reason: Option<&str>,
         relayed: &[SipHeader],
+        hops: Option<u32>,
     ) -> Option<OutboundSipEffect> {
         let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
         let d = leg.dialogs.first()?;
@@ -269,6 +271,7 @@ impl ActionExecutor<'_> {
             &d.sip,
             reason,
             relayed,
+            hops,
         )
     }
 
@@ -277,6 +280,7 @@ impl ActionExecutor<'_> {
         call: &Call,
         reason: Option<&str>,
         relayed: &[SipHeader],
+        hops: Option<u32>,
     ) -> Option<OutboundSipEffect> {
         let d = call.a_leg.dialogs.first()?;
         self.bye_on_dialog(
@@ -286,6 +290,7 @@ impl ActionExecutor<'_> {
             &d.sip,
             reason,
             relayed,
+            hops,
         )
     }
 
@@ -298,6 +303,7 @@ impl ActionExecutor<'_> {
         sip: &StackDialog,
         reason: Option<&str>,
         relayed: &[SipHeader],
+        hops: Option<u32>,
     ) -> Option<OutboundSipEffect> {
         if sip.remote_tag.is_empty() {
             return None; // not a confirmed dialog
@@ -330,6 +336,7 @@ impl ActionExecutor<'_> {
         let opts = GenerateInDialogRequestOpts {
             via: Some(relay::leg_via(self.config, call_ref, leg_id, is_emergency, branch)),
             extra_headers,
+            max_forwards: hops,
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Bye, &dialog, &opts);
@@ -543,6 +550,20 @@ fn relayed_teardown_headers(ctx: &RuleContext) -> Vec<SipHeader> {
         _ => ctx.cancelled_headers(),
     };
     generators::relayable_headers(received, RelayScope::request().without_source_body())
+}
+
+/// The hop count that teardown states (RFC 3261 §16.6 step 3): the releasing
+/// peer's count less one where the peer ASKED for the teardown, and `None` —
+/// the §8.1.1.6 default — for a release of OURS (a timer, a failure, a CANCEL
+/// the transaction layer already answered), which starts a hop budget rather
+/// than continuing one.
+fn relayed_teardown_hops(ctx: &RuleContext) -> Option<u32> {
+    match ctx.request() {
+        Some(request) if request.method() == Method::Bye => {
+            Some(hops::forwarded_max_forwards(request).value())
+        }
+        _ => None,
+    }
 }
 
 /// Hard-terminate every leg and the call ([`crate::rules::model::RuleAction::TerminateCall`],

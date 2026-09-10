@@ -46,6 +46,24 @@ pub async fn apply_route(
     now_ms: i64,
     depth: u32,
 ) -> HandlerResult {
+    // RFC 3261 §16.3: a request whose hop budget is spent may not be passed on,
+    // and a leg this element originates IS passing it on. The decision was still
+    // consulted — an INVITE at 0 is a liveness probe the backend is meant to
+    // answer — so this only ever fires where the backend routed one anyway, at
+    // depth 0, which is what keeps a routing loop through this element finite.
+    if sip_message::hops::hops_exhausted(a_invite) {
+        return crate::initial_invite::reject_call(
+            call,
+            a_invite,
+            483,
+            Some("Too Many Hops".into()),
+            None,
+            &[],
+            id_gen,
+            now_ms,
+        );
+    }
+
     let mut fx = HandlerEffects::new();
 
     // The engine force-enable (ADR-0026 §3), honored on EVERY route that reaches

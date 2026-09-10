@@ -150,9 +150,9 @@ impl ScriptedDecisionEngine {
                 // when the b-leg is forced through the proxy (b2b_outbound_proxy):
                 // the proxy forwards a worker-outbound request to its R-URI, so a
                 // VIP R-URI bounces straight back to a worker, which re-INVITEs a
-                // fresh b-leg (Max-Forwards reset to 70 each time, so never 483) →
-                // an unbounded call-creation loop that OOMs the worker. The R-URI
-                // MUST name the actual downstream callee.
+                // fresh b-leg — a call-creation storm the §16.6 hop gate ends
+                // only after the inherited budget is spent. The R-URI MUST name
+                // the actual downstream callee.
                 //
                 // The host:port above is non-negotiable (the anti-loop invariant),
                 // but the caller MAY set the R-URI *userpart* via
@@ -599,8 +599,8 @@ fn routed_ruri(req: &NewCallRequest, host: &str, port: u16) -> String {
 /// system's own ingress — is this system's own address: a Request-URI a strict
 /// UAS rejects under RFC 3261 §8.1.2, and behind a front proxy the anti-loop
 /// hazard `route_all_to_with_limiter` documents (a request forwarded to its own
-/// R-URI bounces back to a worker, which re-INVITEs a fresh b-leg with
-/// Max-Forwards reset, so it never 483s). A caller that means something else —
+/// R-URI bounces back to a worker, which re-INVITEs a fresh b-leg — one hop of
+/// the inherited budget per bounce). A caller that means something else —
 /// a userpart for a downstream registrar, a plan route's own rewrite — sets
 /// `new_ruri` after this.
 pub fn route_to(host: &str, port: u16) -> RouteDecision {

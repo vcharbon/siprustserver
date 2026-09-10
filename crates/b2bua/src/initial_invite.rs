@@ -32,6 +32,10 @@ use crate::trace;
 /// `sip_headers`). Shared with the failure path: `route-failure` applies the
 /// same exclusion to the failed final response's headers, so "the
 /// non-structural remainder" means one thing across the decision seam.
+///
+/// `Max-Forwards` is deliberately NOT here: a decision that cannot see the hop
+/// count cannot answer a spent one. It rides `sip_headers` read-only — the stack
+/// owns what a leg it originates states ([`crate::rules::relay::build_b_leg`]).
 pub(crate) const STANDARD_HEADERS: &[HeaderName] = &[
     HeaderName::From,
     HeaderName::To,
@@ -40,7 +44,6 @@ pub(crate) const STANDARD_HEADERS: &[HeaderName] = &[
     HeaderName::ContentType,
     HeaderName::CallId,
     HeaderName::CSeq,
-    HeaderName::MaxForwards,
     HeaderName::ContentLength,
 ];
 

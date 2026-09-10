@@ -23,6 +23,7 @@ pub mod sdp_diff;
 pub mod sdp_doc;
 pub mod generators;
 pub mod emergency;
+pub mod hops;
 pub mod param_codec;
 pub mod preparse;
 pub mod sipfrag;

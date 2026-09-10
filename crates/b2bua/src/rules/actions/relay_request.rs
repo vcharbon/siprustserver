@@ -9,7 +9,7 @@ use call::helpers::{
 use call::{Call, PendingRequest, RetainedEmission};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::{HeaderName, MediaType, RAck};
-use sip_message::Method;
+use sip_message::{hops, Method};
 use sip_txn::TxnKind;
 
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
@@ -216,6 +216,11 @@ impl ActionExecutor<'_> {
             body: req.body().to_vec(),
             content_type: req.raw(HeaderName::ContentType).next().and_then(relay::media_type),
             cseq: Some(outbound_cseq as u32),
+            // §16.6 step 3: the relayed request continues the sender's hop
+            // budget. The stack's OWN in-dialog requests (teardown BYE,
+            // keepalive, a re-offer it authors) state the §8.1.1.6 default —
+            // only what crosses the back-to-back UA inherits a count.
+            max_forwards: Some(hops::forwarded_max_forwards(req).value()),
             extra_headers: relay::relay_request_passthrough_headers(
                 req,
                 &capabilities::declared_advert_headers(call.features.as_ref(), target_face),

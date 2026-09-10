@@ -87,6 +87,10 @@ pub struct GenerateInDialogRequestOpts {
     pub subscription_state: Option<SubscriptionState>,
     /// Explicit CSeq override; defaults to `dialog.local_cseq + 1`.
     pub cseq: Option<u32>,
+    /// The hop count this request states; `None` states the RFC 3261 §8.1.1.6
+    /// default. A request minted BECAUSE one arrived states that request's
+    /// count instead ([`crate::hops::forwarded_max_forwards`]).
+    pub max_forwards: Option<u32>,
     /// Remote-target override; defaults to `dialog.remote_target`. The route
     /// set still decides the Request-URI (§12.2.1.1).
     pub request_uri: Option<Uri>,
@@ -121,7 +125,9 @@ pub fn generate_in_dialog_request(
     let hop = opts.via.clone().expect("via required");
     let verb = Method::from(method);
 
-    let mut draft = RequestDraft::new(verb.clone(), uri).push(hop).push(MaxForwards::DEFAULT);
+    let mut draft = RequestDraft::new(verb.clone(), uri)
+        .push(hop)
+        .push(MaxForwards::new(opts.max_forwards.unwrap_or(emit::DEFAULT_MAX_FORWARDS)));
     draft = with_dialog_identity(draft, dialog).push(CSeq::new(next_cseq, verb));
 
     // Contact only where it refreshes the dialog target

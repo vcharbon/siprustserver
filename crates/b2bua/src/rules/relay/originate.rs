@@ -12,9 +12,10 @@ use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope,
 };
 use sip_message::header::{
-    self, ChargingVector, HeaderName, HeaderValue, MaxForwards, TokenListHeader, Uri,
+    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, MaxForwards, TokenListHeader,
+    Uri,
 };
-use sip_message::{Method, SipHeader as MsgHeader, SipRequest, SipStr};
+use sip_message::{hops, Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
 
 use crate::config::B2buaConfig;
@@ -28,8 +29,8 @@ use super::identity::{leg_contact, leg_via};
 /// Rebuild the a-leg's original INVITE as a `SipRequest` (for `generate_response`).
 /// Every header rides as an unparsed line, so the rebuilt message carries the
 /// caller's bytes exactly as they arrived. A caller that omitted `Max-Forwards`
-/// gets RFC 3261 §8.1.1.6's default — the rebuild is a request the type system
-/// holds, and nothing reads the hop count off it.
+/// gets RFC 3261 §8.1.1.6's default, which is the count [`build_b_leg`] then
+/// carries onto the transfer leg it originates from this rebuild.
 ///
 /// The Request-URI is read verbatim, not refused: this is a round-trip of text
 /// the inbound parser's own strict gates already admitted, so a refusal here
@@ -41,7 +42,7 @@ pub fn rebuild_a_leg_invite(snap: &call::ALegInviteSnapshot) -> SipRequest {
         draft = draft.push_raw(HeaderName::from(h.name.as_str()), SipStr::owned(&h.value));
     }
     if !draft.has(&HeaderName::MaxForwards) {
-        draft = draft.push(MaxForwards::new(70));
+        draft = draft.push(MaxForwards::DEFAULT);
     }
     draft
         .with_body(snap.body.clone().into())
@@ -217,9 +218,13 @@ pub fn build_b_leg(
     };
     // `(name, Some(v))` sets, `(name, None)` removes — either way the name is the
     // caller's and no relayed or configured copy of it rides (see [`removed`]).
-    // Removals never apply to structural headers: the generator owns those.
+    // Neither reaches a STRUCTURAL name (RFC 3261 §16.6): the generator owns
+    // those on the leg it mints, so a decision stating one would ride BESIDE the
+    // stack's line rather than replace it — two `Max-Forwards`, and a budget the
+    // decision could refill.
     let mut extra_headers: Vec<MsgHeader> = header_updates
         .iter()
+        .filter(|(n, _)| HeaderName::class_of(n) != HeaderClass::Structural)
         .filter_map(|(n, v)| {
             v.as_ref().map(|val| MsgHeader { name: n.clone().into(), value: val.clone().into() })
         })
@@ -304,7 +309,12 @@ pub fn build_b_leg(
         cseq: 1,
         via: Some(leg_via(config, call_ref, leg_id, is_emergency, branch.clone())),
         contact: Some(leg_contact(config, call_ref, leg_id, is_emergency)),
-        max_forwards: Some(70),
+        // §16.6 step 3: the originated leg continues the budget of the INVITE
+        // that caused it rather than refilling — a B2BUA that restated 70 would
+        // let a routing loop through it run forever. A REFER transfer leg reads
+        // the rehydrated a-leg INVITE, so each turn of a REFER loop starts one
+        // lower too.
+        max_forwards: Some(hops::forwarded_max_forwards(a_leg_invite).value()),
         body,
         content_type,
         extra_headers,

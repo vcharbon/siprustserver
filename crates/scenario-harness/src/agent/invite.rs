@@ -49,6 +49,9 @@ pub struct Invite<'a> {
     from_uri: Option<String>,
     to_uri: Option<String>,
     request_uri: Option<String>,
+    /// The hop count this INVITE states; `None` states the RFC 3261 §8.1.1.6
+    /// default. A test drives it to reach a receiver's §16.6 hop gate.
+    max_forwards: Option<u32>,
     /// A declared `delayed-automatic` deviation carried onto the
     /// [`ClientInvite`] (honoured by `ack`/`ack_delayed`).
     delayed_automatic: Option<DelayedAutomatic>,
@@ -69,6 +72,7 @@ impl<'a> Invite<'a> {
             from_uri: None,
             to_uri: None,
             request_uri: None,
+            max_forwards: None,
             delayed_automatic: None,
         }
     }
@@ -155,6 +159,13 @@ impl<'a> Invite<'a> {
         self
     }
 
+    /// State a hop count other than the §8.1.1.6 default — `0` reaches the
+    /// receiver's §16.6 hop gate.
+    pub fn max_forwards(mut self, hops: u32) -> Self {
+        self.max_forwards = Some(hops);
+        self
+    }
+
     /// Send the initial INVITE to `proxy` instead of directly to the peer (the
     /// Request-URI still targets the peer). Used to drive an LB/record-routing
     /// proxy; subsequent in-dialog requests then follow the route set learned
@@ -189,7 +200,7 @@ impl<'a> Invite<'a> {
             cseq: 1,
             via: Some(caller.via()),
             contact: Some(caller.contact()),
-            max_forwards: Some(70),
+            max_forwards: Some(self.max_forwards.unwrap_or(70)),
             // A captured template body (raw bytes, any Content-Type) overrides
             // the SDP-string offer; its Content-Type rides as a frozen header.
             body: self

@@ -26,6 +26,9 @@ pub struct GenerateOutOfDialogRequestOpts {
     pub via: Option<Via>,
     /// Contact. Required for a dialog-forming request (§8.1.1.8).
     pub contact: Option<header::Contact>,
+    /// The hop count this request states; `None` states the RFC 3261 §8.1.1.6
+    /// default. A request minted BECAUSE one arrived states that request's
+    /// count instead ([`crate::hops::forwarded_max_forwards`]).
     pub max_forwards: Option<u32>,
     pub body: Vec<u8>,
     pub content_type: Option<MediaType>,

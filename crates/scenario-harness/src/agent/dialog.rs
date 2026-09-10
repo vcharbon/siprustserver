@@ -352,6 +352,9 @@ pub struct InDialogRequest<'a> {
     /// only on the confirmed-dialog path (never the forked early-dialog path);
     /// overrides the natural CSeq for this request per the declared pattern.
     cseq_dev: Option<SharedCseqDev>,
+    /// The hop count this request states; `None` states the RFC 3261 §8.1.1.6
+    /// default. A test drives it to reach a receiver's §16.6 hop gate.
+    max_forwards: Option<u32>,
 }
 
 impl<'a> InDialogRequest<'a> {
@@ -376,7 +379,15 @@ impl<'a> InDialogRequest<'a> {
             to_tag: None,
             fork_cseq: None,
             cseq_dev: None,
+            max_forwards: None,
         }
+    }
+
+    /// State a hop count other than the §8.1.1.6 default — `0` reaches the
+    /// receiver's §16.6 hop gate.
+    pub fn max_forwards(mut self, hops: u32) -> Self {
+        self.max_forwards = Some(hops);
+        self
     }
 
     /// Wire in the originating `ClientInvite`'s per-fork CSeq map so a
@@ -510,6 +521,7 @@ impl<'a> InDialogRequest<'a> {
             content_type: self.content_type.take(),
             rack: self.rack.take(),
             extra_headers: std::mem::take(&mut self.extra_headers),
+            max_forwards: self.max_forwards,
             ..Default::default()
         };
         // Per-fork addressing: generate against a dialog view with the chosen
