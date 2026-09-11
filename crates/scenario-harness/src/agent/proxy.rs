@@ -71,9 +71,8 @@ impl Proxy {
         // Loose router popping itself off the route set (§16.4) — in-dialog
         // requests (ACK/BYE/…) arrive with our Record-Route as the top Route.
         if self.owns_top_route(&req) {
-            draft = draft
-                .pop_top::<RouteEntry>()
-                .expect("the top Route just read as a route entry");
+            draft =
+                draft.pop_top::<RouteEntry>().expect("the top Route just read as a route entry");
         }
         // Record-Route dialog-creating requests so in-dialog traffic returns
         // through us (§16.6.4). A dialog-creating INVITE has no To-tag yet. Ours

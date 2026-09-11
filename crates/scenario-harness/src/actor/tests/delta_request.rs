@@ -1,8 +1,8 @@
 use sip_message::EmitOpts;
 use std::time::Duration;
 
-use crate::actor::*;
 use super::testkit::*;
+use crate::actor::*;
 use crate::Harness;
 
 /// The bye-for-cancel confrontation plan: alice rings bob then abandons with a CANCEL,

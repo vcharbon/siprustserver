@@ -164,8 +164,7 @@ Content-Length: 0\r\n\r\n";
     /// RFC 3261 §8.2.1 — a locally minted 405 names the accepted methods.
     #[test]
     fn a_405_carries_the_stack_allow_set() {
-        let resp =
-            generate_response(&notify(), 405, "Method Not Allowed", &Default::default());
+        let resp = generate_response(&notify(), 405, "Method Not Allowed", &Default::default());
         let allow: Vec<_> = resp.raw_text(HeaderName::Allow).collect();
         assert_eq!(allow.len(), 1);
         assert_eq!(allow[0].as_str(), super::super::B2BUA_ALLOW);

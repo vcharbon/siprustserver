@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use crate::actor::*;
 use super::testkit::*;
+use crate::actor::*;
 use crate::{Harness, ANSWER_SDP};
 
 /// The reject plan for the response-side confrontation: alice's script
@@ -68,10 +68,8 @@ async fn accepted_delta_response_status_drift_recorded() {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
     let drift: AcceptedDeltaPolicy = Arc::new(|ctx: &DeltaContext<'_>| {
-        if matches!(
-            ctx.expected,
-            ExpectedStimulus::Response { status: 486 }
-        ) && matches!(ctx.observed, ObservedStimulus::Response { status: 603, .. })
+        if matches!(ctx.expected, ExpectedStimulus::Response { status: 486 })
+            && matches!(ctx.observed, ObservedStimulus::Response { status: 603, .. })
         {
             DeltaDecision::Accepted(AcceptedDelta {
                 rule: "reject-code-drift",

@@ -182,7 +182,8 @@ mod tests {
     #[test]
     fn jump_shifts_this_and_subsequent_steps() {
         // Jump by +48 at step 0: 2+48 = 50, then continue 51, 52.
-        let pat = CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: 48 } }] };
+        let pat =
+            CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: 48 } }] };
         let mut dev = CseqDeviation::new(pat);
         let c0 = dev.next_cseq(1);
         assert_eq!(c0, 50);
@@ -228,7 +229,8 @@ mod tests {
 
     #[test]
     fn offset_and_jump_interplay() {
-        let pat = CseqPattern { offset: 10, ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: 5 } }] };
+        let pat =
+            CseqPattern { offset: 10, ops: vec![CseqOpAt { at: 0, op: CseqOp::Jump { by: 5 } }] };
         let mut dev = CseqDeviation::new(pat);
         let c0 = dev.next_cseq(1);
         assert_eq!(c0, 17, "1 + offset 10 + 1 + jump 5");

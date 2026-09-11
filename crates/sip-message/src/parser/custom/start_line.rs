@@ -103,7 +103,11 @@ fn parse_request_line(
     Ok(RequestLine { method, uri, version })
 }
 
-fn parse_status_line(s: &mut Scanner, image: &str, version: Span) -> Result<StatusLine, SipParseError> {
+fn parse_status_line(
+    s: &mut Scanner,
+    image: &str,
+    version: Span,
+) -> Result<StatusLine, SipParseError> {
     let version_text = &image[version.start..version.end];
     if version_text != "SIP/2.0" {
         return Err(SipParseError::new(format!("Unsupported SIP version: \"{version_text}\"")));

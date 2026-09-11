@@ -23,13 +23,15 @@ use super::answer::fire_timed_answer;
 use super::delta::AcceptedDeltaPolicy;
 use super::drive::drive_goal;
 use super::endpoint::{ActorSpec, Automatics, CtxFeed, Disposition, MediaState};
-use super::shared_endpoint::{EndpointHandle, Inbox};
 use super::goals::{GoalCursor, GoalStep, RequestKind};
 use super::ledger::ObligationKey;
 use super::observe::ReceptionObserver;
-use super::originate::{originate_reinvite, originate_update, wait_reinvite_retry, wait_update_retry};
+use super::originate::{
+    originate_reinvite, originate_update, wait_reinvite_retry, wait_update_retry,
+};
 use super::react::default_react;
 use super::script::{goal_arm_enabled, requeue_parked};
+use super::shared_endpoint::{EndpointHandle, Inbox};
 use super::state::{Observation, ObservedState};
 use crate::realcall::{CallCtx, CallScope, ChallengeResponder};
 use crate::{Agent, ClientInvite, Dialog, ServerTxn, StepError};
@@ -309,13 +311,9 @@ impl<'c> ActorState<'c> {
         delta_policy: Option<AcceptedDeltaPolicy>,
         reception_observer: Option<ReceptionObserver>,
     ) -> Self {
-        let originates = spec
-            .goals
-            .first()
-            .is_some_and(|g| {
-                matches!(g.step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. })
-            })
-            || matches!(spec.disposition, Disposition::Caller);
+        let originates = spec.goals.first().is_some_and(|g| {
+            matches!(g.step, GoalStep::Invite { .. } | GoalStep::InviteTemplate { .. })
+        }) || matches!(spec.disposition, Disposition::Caller);
         Self {
             role: spec.role,
             agent: spec.agent,
@@ -391,9 +389,7 @@ impl<'c> ActorState<'c> {
     /// originates: a deviation scoped to that ordinal wins over an unscoped one
     /// (which holds every ACK-to-2xx). `None` = the ACK fires promptly.
     pub(super) fn ack_hold_for(&self, ordinal: usize) -> Option<Duration> {
-        let acks = || {
-            self.delayed.iter().filter(|d| d.which == sip_message::Automatic::AckTo2xx)
-        };
+        let acks = || self.delayed.iter().filter(|d| d.which == sip_message::Automatic::AckTo2xx);
         acks()
             .find(|d| d.invite_ordinal == Some(ordinal))
             .or_else(|| acks().find(|d| d.invite_ordinal.is_none()))

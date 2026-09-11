@@ -25,10 +25,10 @@ pub mod model;
 pub mod registry;
 pub mod shape;
 
-pub use bindings::{BindingMode, BindingPool, BindingResolver, ResolvedBinding, validate_bindings};
+pub use bindings::{validate_bindings, BindingMode, BindingPool, BindingResolver, ResolvedBinding};
 pub use checks::{
-    Bindings, CheckVerdict, all_passed, evaluate_blocks, evaluate_blocks_over, evaluate_case,
-    evaluate_case_over,
+    all_passed, evaluate_blocks, evaluate_blocks_over, evaluate_case, evaluate_case_over, Bindings,
+    CheckVerdict,
 };
 pub use egress::{
     ApiCall, ApiCallDestination, ApiCallRoute, CalleeTarget, EgressPolicy, EgressRewrite,
@@ -40,12 +40,11 @@ pub use loadrun::{
     SampleGroup,
 };
 pub use model::{
-    Campaign, Check, CheckBlock, CheckOp, CheckSet, Concurrency, Input, ModelError, TestCase,
     collect_case_blocks, load_campaign, load_check_set, load_check_sets, load_endpoint_config,
-    load_load_profile, load_test_case, schemas, validate_case,
+    load_load_profile, load_test_case, schemas, validate_case, Campaign, Check, CheckBlock,
+    CheckOp, CheckSet, Concurrency, Input, ModelError, TestCase,
 };
 pub use registry::{
-    LegSpec, LoadFactory, ReroutingParams, Scenario, ScenarioInputs, ShapeDescriptor,
-    ShapeRegistry,
+    LegSpec, LoadFactory, ReroutingParams, Scenario, ScenarioInputs, ShapeDescriptor, ShapeRegistry,
 };
 pub use shape::{Anchor, CoreInput, ShapeCatalog, ShapeSpec};

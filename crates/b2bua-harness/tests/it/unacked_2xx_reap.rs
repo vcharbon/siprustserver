@@ -58,8 +58,8 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
-    // bob is ACKed regardless: the ACK for his 2xx is drawn by the response the
-    // UAC core received, not by anything alice does (§13.2.2.4).
+                            // bob is ACKed regardless: the ACK for his 2xx is drawn by the response the
+                            // UAC core received, not by anything alice does (§13.2.2.4).
     bob.receive("ACK").await;
 
     assert_eq!(
@@ -80,7 +80,11 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     // Each rung that left is counted once, under the ladder that paced it and
     // the response it repeated: the two rungs inside 2 s (T1, then 2·T1).
     let counted = || b2bua.metrics().retransmits_total("final-2xx", "INVITE", Some(200));
-    assert_eq!(counted(), 2, "b2bua_retransmits_total{{final-2xx,INVITE,200}} climbs with the rungs");
+    assert_eq!(
+        counted(),
+        2,
+        "b2bua_retransmits_total{{final-2xx,INVITE,200}} climbs with the rungs"
+    );
     assert_eq!(counted(), retransmits as u64, "one increment per copy alice received");
     assert_eq!(b2bua.metrics().repeat_give_ups_total("ack-of-2xx"), 0, "no give-up yet");
 
@@ -104,7 +108,11 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     // did not. The give-up is counted once, under the obligation left
     // undischarged.
     assert_eq!(counted(), 3, "every rung inside the bound, and none past it");
-    assert_eq!(b2bua.metrics().repeat_give_ups_total("ack-of-2xx"), 1, "one give-up: alice's ACK never came");
+    assert_eq!(
+        b2bua.metrics().repeat_give_ups_total("ack-of-2xx"),
+        1,
+        "one give-up: alice's ACK never came"
+    );
     assert_eq!(b2bua.metrics().repeat_give_ups_total("prack-of"), 0);
 
     let _report = h.finish().await;
@@ -116,7 +124,8 @@ const LATE_ACK_TIMEOUT_SEC: i64 = 60;
 /// Every rung a `Final2xx` ladder owes inside Timer L, from the one schedule
 /// the stack itself walks (ADR-0029 X1).
 fn rungs_inside_timer_l() -> usize {
-    let (mut ladder, _) = Ladder::armed(Schedule::rfc(Class::Final2xx)).expect("a 2xx owes its first re-send");
+    let (mut ladder, _) =
+        Ladder::armed(Schedule::rfc(Class::Final2xx)).expect("a 2xx owes its first re-send");
     let mut rungs = 1;
     while ladder.advance().is_some() {
         rungs += 1;
@@ -132,7 +141,9 @@ fn a_leg_invite_2xx_sent_ms(report: &RunReport, sut: SocketAddr, caller: SocketA
         .iter()
         .filter(|e| e.from == sut && e.to == caller)
         .filter(|e| match CustomParser::new().parse(&e.raw) {
-            Ok(SipMessage::Response(r)) => r.status() == 200 && *r.cseq().method() == Method::Invite,
+            Ok(SipMessage::Response(r)) => {
+                r.status() == 200 && *r.cseq().method() == Method::Invite
+            }
             _ => false,
         })
         .map(|e| e.sent_ms)
@@ -152,7 +163,8 @@ async fn a_deadline_past_timer_l_does_not_extend_the_2xx_ladder() {
     );
     let alice = h.agent("alice", "127.0.0.1:5068").await;
     let bob = h.agent("bob", "127.0.0.1:5078").await;
-    let decision = Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", 5078));
+    let decision =
+        Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", 5078));
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
             c.ack_timeout_sec = LATE_ACK_TIMEOUT_SEC;
@@ -227,7 +239,8 @@ async fn a_nonpositive_deadline_still_ends_the_session_at_timer_l() {
     );
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
-    let decision = Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", 5076));
+    let decision =
+        Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", 5076));
     let b2bua = B2buaSut::builder(decision)
         .tune(|c| {
             c.ack_timeout_sec = 0;
@@ -283,7 +296,10 @@ mod parking {
     }
 
     fn is_2xx_give_up(ctx: &RuleContext) -> bool {
-        matches!(ctx.timer_type(), Some(TimerType::RepeatGiveUp { obligation: Obligation::AckOf2xx { .. } }))
+        matches!(
+            ctx.timer_type(),
+            Some(TimerType::RepeatGiveUp { obligation: Obligation::AckOf2xx { .. } })
+        )
     }
 
     fn park_the_give_up() -> RuleDefinition {
@@ -318,7 +334,8 @@ async fn a_service_that_parks_the_give_up_does_not_keep_the_session() {
     );
     let alice = h.agent("alice", "127.0.0.1:5065").await;
     let bob = h.agent("bob", "127.0.0.1:5075").await;
-    let decision = Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", 5075));
+    let decision =
+        Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", 5075));
     let b2bua = B2buaSut::builder(decision)
         .services(vec![parking::service_def()])
         .tune(|c| {
@@ -364,7 +381,8 @@ async fn b2bua_with_ack_timeout(
     dest_port: u16,
     ack_timeout_sec: i64,
 ) -> B2buaSut {
-    let decision = Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", dest_port));
+    let decision =
+        Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", dest_port));
     B2buaSut::builder(decision)
         .tune(move |c| {
             c.ack_timeout_sec = ack_timeout_sec;

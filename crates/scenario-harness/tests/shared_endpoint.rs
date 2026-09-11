@@ -25,19 +25,13 @@ const CEILING: Duration = Duration::from_secs(30);
 
 /// Every leg of the loopback confirmed — the establishment gate.
 fn all_up(s: &scenario_harness::actor::StateInner) -> bool {
-    ["puac", "asuas", "asuac", "puas"]
-        .iter()
-        .all(|r| s.leg_at_least(r, LegPhase::Confirmed))
+    ["puac", "asuas", "asuac", "puas"].iter().all(|r| s.leg_at_least(r, LegPhase::Confirmed))
 }
 
 /// The four actors of the loopback: two per endpoint, opposite roles, distinct
 /// dialogs. `teardown` gates BOTH originators' BYEs, so a test can hold the call
 /// up until whatever it wants to observe has landed.
-fn loopback_actors(
-    peer: &Agent,
-    as_ua: &Agent,
-    teardown: impl Fn() -> Barrier,
-) -> Vec<ActorSpec> {
+fn loopback_actors(peer: &Agent, as_ua: &Agent, teardown: impl Fn() -> Barrier) -> Vec<ActorSpec> {
     vec![
         // The peer's originating half: places the call, hangs it up.
         ActorSpec {

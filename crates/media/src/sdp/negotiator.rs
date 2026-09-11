@@ -61,11 +61,7 @@ pub struct SdpNegotiationError {
 }
 
 fn err(rule: SdpRule, rfc: &'static str, message: impl Into<String>) -> SdpNegotiationError {
-    SdpNegotiationError {
-        rule,
-        rfc,
-        message: message.into(),
-    }
+    SdpNegotiationError { rule, rfc, message: message.into() }
 }
 
 /// Static payload-type → encoding name map for codecs that omit `a=rtpmap`.
@@ -182,11 +178,7 @@ impl OfferAnswerEngine {
             ));
         }
         let m = remote_offer.audio_media().ok_or_else(|| {
-            err(
-                SdpRule::NoMedia,
-                "RFC 3264 §5.1",
-                "offer has no audio media description",
-            )
+            err(SdpRule::NoMedia, "RFC 3264 §5.1", "offer has no audio media description")
         })?;
 
         // Pick the first offered codec we support (honours offerer preference).
@@ -210,8 +202,8 @@ impl OfferAnswerEngine {
         let remote_addr = media_connection_addr(remote_offer, m);
         let answer_dir = m.direction.reverse();
         let reachable = is_reachable(&remote_addr, m.port);
-        let send = matches!(answer_dir, MediaDirection::SendRecv | MediaDirection::SendOnly)
-            && reachable;
+        let send =
+            matches!(answer_dir, MediaDirection::SendRecv | MediaDirection::SendOnly) && reachable;
         let receive = matches!(answer_dir, MediaDirection::SendRecv | MediaDirection::RecvOnly);
 
         self.negotiated = Some(NegotiatedMedia {
@@ -221,11 +213,7 @@ impl OfferAnswerEngine {
             send,
             receive,
         });
-        self.state = if send {
-            NegotiationState::Committed
-        } else {
-            NegotiationState::Held
-        };
+        self.state = if send { NegotiationState::Committed } else { NegotiationState::Held };
         self.session_version += 1;
         Ok(self.build_local_sdp(&[chosen], answer_dir))
     }
@@ -258,19 +246,12 @@ impl OfferAnswerEngine {
             ));
         }
         let m = sdp.audio_media().ok_or_else(|| {
-            err(
-                SdpRule::NoMedia,
-                "RFC 3264 §5.1",
-                "answer has no audio media description",
-            )
+            err(SdpRule::NoMedia, "RFC 3264 §5.1", "answer has no audio media description")
         })?;
 
         // The answer must select exactly from the codecs we offered.
-        let offer_names: Vec<&str> = pending.media[0]
-            .rtpmap
-            .iter()
-            .map(|r| r.encoding_name.as_str())
-            .collect();
+        let offer_names: Vec<&str> =
+            pending.media[0].rtpmap.iter().map(|r| r.encoding_name.as_str()).collect();
         let answer_name = m.formats.first().and_then(|&pt| resolve_codec_name(m, pt));
         let answer_name = match answer_name {
             Some(n) if offer_names.contains(&n.as_str()) => n,
@@ -312,11 +293,7 @@ impl OfferAnswerEngine {
 
         if reliable {
             self.pending_offer = None;
-            self.state = if send {
-                NegotiationState::Committed
-            } else {
-                NegotiationState::Held
-            };
+            self.state = if send { NegotiationState::Committed } else { NegotiationState::Held };
         } else {
             self.state = NegotiationState::Early; // provisional; a later final answer may supersede
         }
@@ -352,8 +329,5 @@ pub struct ProvisionalSignals {
 /// authorized.
 pub fn is_early_media_authorized(has_sdp: bool, p_early_media: Option<MediaDirection>) -> bool {
     has_sdp
-        && matches!(
-            p_early_media,
-            Some(MediaDirection::SendRecv) | Some(MediaDirection::SendOnly)
-        )
+        && matches!(p_early_media, Some(MediaDirection::SendRecv) | Some(MediaDirection::SendOnly))
 }

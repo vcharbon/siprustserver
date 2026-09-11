@@ -47,11 +47,8 @@ fn intersects_codecs_keeps_bobs_pt_numbering() {
         "a=rtpmap:96 opus/48000/2",
         "a=sendrecv",
     ]);
-    let body = ok_body(build_answer_from_offer(
-        bob.as_bytes(),
-        Some(alice_basic().as_bytes()),
-        &opts(),
-    ));
+    let body =
+        ok_body(build_answer_from_offer(bob.as_bytes(), Some(alice_basic().as_bytes()), &opts()));
     assert!(body.contains("m=audio 6000 RTP/AVP 8"));
     assert!(body.contains("a=rtpmap:8 PCMA/8000"));
     assert!(!body.contains("a=rtpmap:0 PCMU/8000"));
@@ -127,11 +124,8 @@ fn preserves_bobs_fmtp_for_matched_pts() {
         "a=fmtp:101 0-15",
         "a=sendrecv",
     ]);
-    let body = ok_body(build_answer_from_offer(
-        bob.as_bytes(),
-        Some(alice_basic().as_bytes()),
-        &opts(),
-    ));
+    let body =
+        ok_body(build_answer_from_offer(bob.as_bytes(), Some(alice_basic().as_bytes()), &opts()));
     assert!(body.contains("a=fmtp:101 0-15"));
 }
 
@@ -147,11 +141,8 @@ fn inherits_bobs_direction() {
         "a=rtpmap:8 PCMA/8000",
         "a=sendonly",
     ]);
-    let body = ok_body(build_answer_from_offer(
-        bob.as_bytes(),
-        Some(alice_basic().as_bytes()),
-        &opts(),
-    ));
+    let body =
+        ok_body(build_answer_from_offer(bob.as_bytes(), Some(alice_basic().as_bytes()), &opts()));
     assert!(body.contains("a=sendonly"));
 }
 
@@ -200,11 +191,8 @@ fn missing_bob_m_section_in_alice_becomes_port0_inactive() {
         "a=rtpmap:96 H264/90000",
         "a=sendrecv",
     ]);
-    let body = ok_body(build_answer_from_offer(
-        bob.as_bytes(),
-        Some(alice_basic().as_bytes()),
-        &opts(),
-    ));
+    let body =
+        ok_body(build_answer_from_offer(bob.as_bytes(), Some(alice_basic().as_bytes()), &opts()));
     assert!(body.contains("m=audio 6000 RTP/AVP 8"));
     assert!(body.contains("m=video 0 RTP/AVP 96"));
     assert!(body.contains("a=rtpmap:96 H264/90000"));
@@ -255,8 +243,7 @@ fn no_common_codec_on_second_m_line_reported_with_index_1() {
         "a=rtpmap:0 PCMU/8000",
         "a=sendrecv",
     ]);
-    let result =
-        build_answer_from_offer(bob.as_bytes(), Some(alice_two_audio.as_bytes()), &opts());
+    let result = build_answer_from_offer(bob.as_bytes(), Some(alice_two_audio.as_bytes()), &opts());
     assert_eq!(result, SdpBuildResult::NoCommonCodec { m_line_index: 1 });
 }
 

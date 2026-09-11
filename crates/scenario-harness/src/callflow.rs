@@ -97,7 +97,8 @@ impl<'a> Call<'a> {
 
     /// Run the handshake and return the caller's confirmed [`Dialog`].
     pub async fn establish(self) -> Dialog {
-        let mut call = self.caller.invite(self.callee).with_sdp(self.offer).through(self.via).send().await;
+        let mut call =
+            self.caller.invite(self.callee).with_sdp(self.offer).through(self.via).send().await;
         let mut uas = self.callee.receive("INVITE").await;
         if self.ring {
             uas.respond(180, "Ringing").await;

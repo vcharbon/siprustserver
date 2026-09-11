@@ -53,8 +53,7 @@ async fn cdr_is_written_while_the_call_is_still_live() {
     let (endpoint, sa) = h.bind_sut("b2bua", "127.0.0.1:5080").await;
     let inner = InMemoryCdrWriter::new();
     let live_at_write = Arc::new(Mutex::new(Vec::new()));
-    let live_calls: Arc<OnceLock<Box<dyn Fn() -> usize + Send + Sync>>> =
-        Arc::new(OnceLock::new());
+    let live_calls: Arc<OnceLock<Box<dyn Fn() -> usize + Send + Sync>>> = Arc::new(OnceLock::new());
     let deps = B2buaDeps {
         config: B2buaConfig {
             self_ordinal: "w0".into(),

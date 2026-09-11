@@ -18,10 +18,7 @@ use crate::rules::model::{RuleAction, RuleContext, TimerDelay};
 /// §17.2.1). The termination in progress owns the teardown; a limiter INCR
 /// the dispatching callout already admitted ages out of its window.
 pub(crate) fn fold_lands_on_going_away_call(ctx: &RuleContext) -> bool {
-    matches!(
-        ctx.call.state(),
-        CallModelState::Terminating | CallModelState::Terminated
-    )
+    matches!(ctx.call.state(), CallModelState::Terminating | CallModelState::Terminated)
 }
 
 /// Parse a `call-failure-result` payload's `update_headers` object into the
@@ -68,9 +65,8 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
     // payload is this stack's own round-trip of a typed `Option<u16>`
     // (`callouts::route_payload`), so the refusal is unreachable by
     // construction — it is the reader's contract, not a live branch.
-    let port = crate::decision::read_stated_port(
-        payload.get("destination").and_then(|d| d.get("port")),
-    )?;
+    let port =
+        crate::decision::read_stated_port(payload.get("destination").and_then(|d| d.get("port")))?;
     Some(RouteFold {
         destination: (host, port),
         new_ruri: payload.get("new_ruri").and_then(|v| v.as_str()).map(str::to_string),
@@ -86,9 +82,7 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
             .and_then(|v| v.as_object())
             .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string))).collect())
             .unwrap_or_default(),
-        features: payload
-            .get("features")
-            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        features: payload.get("features").and_then(|v| serde_json::from_value(v.clone()).ok()),
         // A core-reserved key is not a service slice and no service id may
         // collide with it (ADR-0016) — a decision response cannot write it.
         service_ext: payload
@@ -110,21 +104,18 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
             Some(serde_json::Value::String(s)) => Some(s.clone().into_bytes()),
             Some(_) => None,
         },
-        limiter_holds: payload
-            .get("call_limiter")
-            .and_then(|v| v.as_object())
-            .and_then(|o| {
-                let window = o.get("window")?.as_i64()?;
-                let entries: Vec<(String, i64)> = o
-                    .get("entries")?
-                    .as_array()?
-                    .iter()
-                    .filter_map(|e| {
-                        Some((e.get("id")?.as_str()?.to_string(), e.get("limit")?.as_i64()?))
-                    })
-                    .collect();
-                Some((entries, window))
-            }),
+        limiter_holds: payload.get("call_limiter").and_then(|v| v.as_object()).and_then(|o| {
+            let window = o.get("window")?.as_i64()?;
+            let entries: Vec<(String, i64)> = o
+                .get("entries")?
+                .as_array()?
+                .iter()
+                .filter_map(|e| {
+                    Some((e.get("id")?.as_str()?.to_string(), e.get("limit")?.as_i64()?))
+                })
+                .collect();
+            Some((entries, window))
+        }),
     })
 }
 
@@ -154,10 +145,7 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
         actions.push(RuleAction::SetSubscriptions { events: events.clone() });
     }
     if let Some((entries, window)) = &fold.limiter_holds {
-        actions.push(RuleAction::RecordLimiterHolds {
-            entries: entries.clone(),
-            window: *window,
-        });
+        actions.push(RuleAction::RecordLimiterHolds { entries: entries.clone(), window: *window });
         actions.push(RuleAction::ScheduleTimer {
             timer_type: TimerType::LimiterRefresh,
             delay: TimerDelay::secs(ctx.config.limiter_refresh_sec),

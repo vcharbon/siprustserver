@@ -38,10 +38,8 @@ fn main() {
     // subdirectory there and it shows up under the `Load runs` section.
     let load_runs_root = load_runs_root.unwrap_or_else(|| runs_root.join("load"));
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
+    let rt =
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
     rt.block_on(async move {
         let app = e2e_web::router_with_load_runs(
             e2e_dir.clone(),

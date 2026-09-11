@@ -161,11 +161,7 @@ impl Obligation for SerialRegister {
                 None => {
                     pending.insert(
                         key,
-                        Pending {
-                            key: BranchKey::sent_by(msg, branch),
-                            contact,
-                            msg: mi,
-                        },
+                        Pending { key: BranchKey::sent_by(msg, branch), contact, msg: mi },
                     );
                     out.push(finding(Decision::Compliant));
                 }

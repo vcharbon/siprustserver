@@ -16,11 +16,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use schemars::{JsonSchema, Schema, schema_for};
+use schemars::{schema_for, JsonSchema, Schema};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::bindings::{BindingPool, validate_bindings};
+use crate::bindings::{validate_bindings, BindingPool};
 use crate::endpoint::EndpointConfig;
 use crate::loadprofile::LoadProfile;
 use crate::loadrun::LoadRunIndex;
@@ -294,9 +294,8 @@ pub fn load_check_sets(dir: &Path) -> Result<BTreeMap<String, CheckSet>, ModelEr
         Err(source) => return Err(ModelError::Io { path: dir.to_path_buf(), source }),
     };
     for entry in entries {
-        let path = entry
-            .map_err(|source| ModelError::Io { path: dir.to_path_buf(), source })?
-            .path();
+        let path =
+            entry.map_err(|source| ModelError::Io { path: dir.to_path_buf(), source })?.path();
         if path.extension().is_some_and(|e| e == "json") {
             let set = load_check_set(&path)?;
             if let Some(dup) = sets.insert(set.id.clone(), set) {
@@ -387,7 +386,11 @@ pub fn validate_case<C: ShapeCatalog + ?Sized>(
         }
     }
 
-    if problems.is_empty() { Ok(()) } else { Err(ModelError::Invalid(problems)) }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(ModelError::Invalid(problems))
+    }
 }
 
 /// Resolve a case's referenced Check sets and collect EVERY block it binds

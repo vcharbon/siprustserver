@@ -66,7 +66,10 @@ fn classify_below(top: &(dyn Error + 'static), connect: bool) -> FailureCause {
 /// carry — are a catch-all that applies only when nothing definite matched.
 fn classify_text(text: &str) -> Option<FailureCause> {
     let t = text.to_ascii_lowercase();
-    if t.contains("dns error") || t.contains("failed to lookup address") || t.contains("name or service not known") {
+    if t.contains("dns error")
+        || t.contains("failed to lookup address")
+        || t.contains("name or service not known")
+    {
         return Some(FailureCause::Dns);
     }
     if t.contains("connection refused") {
@@ -97,10 +100,7 @@ mod tests {
 
     impl Link {
         fn new(text: &'static str, source: impl Error + Send + Sync + 'static) -> Self {
-            Self {
-                text,
-                source: Some(Box::new(source)),
-            }
+            Self { text, source: Some(Box::new(source)) }
         }
     }
 
@@ -122,9 +122,15 @@ mod tests {
 
     #[test]
     fn definite_markers_classify_and_anything_else_is_other() {
-        assert_eq!(classify_text("dns error: failed to lookup address information"), Some(FailureCause::Dns));
+        assert_eq!(
+            classify_text("dns error: failed to lookup address information"),
+            Some(FailureCause::Dns)
+        );
         assert_eq!(classify_text("invalid peer certificate"), Some(FailureCause::Tls));
-        assert_eq!(classify_text("tcp connect error: Connection refused (os error 111)"), Some(FailureCause::Refused));
+        assert_eq!(
+            classify_text("tcp connect error: Connection refused (os error 111)"),
+            Some(FailureCause::Refused)
+        );
         assert_eq!(classify_text("connection reset by peer"), Some(FailureCause::ConnReset));
         assert_eq!(classify_text("error sending request"), None);
     }

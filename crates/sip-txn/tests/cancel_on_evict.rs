@@ -26,10 +26,7 @@ async fn t1_cancellation_prevents_timer_b_timeout() {
     let call_ref = "self|call-T1";
     let invite = invite_with_cr_lg(call_ref, "callid-T1", "z9hG4bK-T1", "b-1");
 
-    stack
-        .txn
-        .send_request(invite, addr("192.0.2.20:5060"), TxnKind::Invite)
-        .await.unwrap();
+    stack.txn.send_request(invite, addr("192.0.2.20:5060"), TxnKind::Invite).await.unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 1);
 
     stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
@@ -50,10 +47,7 @@ async fn t2_cancel_is_idempotent() {
     let call_ref = "self|call-T2";
     let invite = invite_with_cr_lg(call_ref, "callid-T2", "z9hG4bK-T2", "b-1");
 
-    stack
-        .txn
-        .send_request(invite, addr("192.0.2.20:5060"), TxnKind::Invite)
-        .await.unwrap();
+    stack.txn.send_request(invite, addr("192.0.2.20:5060"), TxnKind::Invite).await.unwrap();
     stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
     let first = stack.txn.metrics().txn_cancelled_on_call_evict();
     stack.txn.cancel_txns_for_call(call_ref).await.unwrap();
@@ -73,7 +67,8 @@ async fn t3_cancel_targets_only_the_owning_callref() {
             addr("192.0.2.20:5060"),
             TxnKind::Invite,
         )
-        .await.unwrap();
+        .await
+        .unwrap();
     stack
         .txn
         .send_request(
@@ -81,7 +76,8 @@ async fn t3_cancel_targets_only_the_owning_callref() {
             addr("192.0.2.21:5060"),
             TxnKind::Invite,
         )
-        .await.unwrap();
+        .await
+        .unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 2);
 
     stack.txn.cancel_txns_for_call(ref_a).await.unwrap();
@@ -106,10 +102,7 @@ async fn t5_url_encoded_cr_lg_round_trip_matches_decoded_callref() {
     let encoded = "worker-0%7CUUID-1234%405.1.1.1%7Ctag"; // encodeURIComponent
     let invite = invite_with_cr_lg(encoded, "callid-T5", "z9hG4bK-T5", "b-1");
 
-    stack
-        .txn
-        .send_request(invite, addr("192.0.2.20:5060"), TxnKind::Invite)
-        .await.unwrap();
+    stack.txn.send_request(invite, addr("192.0.2.20:5060"), TxnKind::Invite).await.unwrap();
     assert_eq!(stack.txn.metrics().active_transactions(), 1);
 
     // Caller passes the natural (decoded) callRef.

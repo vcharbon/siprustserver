@@ -164,10 +164,7 @@ impl Schedule {
     /// The schedule an RFC prescribes for `class`. The only constructor the SUT
     /// can reach.
     pub fn rfc(class: Class) -> Schedule {
-        Schedule {
-            pacing: Pacing::Rfc(class),
-            give_up: class.give_up(),
-        }
+        Schedule { pacing: Pacing::Rfc(class), give_up: class.give_up() }
     }
 
     /// Replace this schedule's give-up with the owner's own bound, which may
@@ -238,20 +235,14 @@ impl Schedule {
     pub fn exact(intervals: &[Duration], give_up: Option<Duration>) -> Schedule {
         let gaps: Vec<Duration> = intervals.to_vec();
         let bound = give_up.unwrap_or_else(|| gaps.iter().copied().sum());
-        Schedule {
-            pacing: Pacing::Exact(gaps),
-            give_up: bound,
-        }
+        Schedule { pacing: Pacing::Exact(gaps), give_up: bound }
     }
 
     /// Emitted once, no rung ever. Distinct from every RFC class: an ACK and an
     /// unreliable provisional ride no timer of their own, and saying so is not
     /// the same as saying "pace by the RFC".
     pub fn once() -> Schedule {
-        Schedule {
-            pacing: Pacing::Once,
-            give_up: Duration::ZERO,
-        }
+        Schedule { pacing: Pacing::Once, give_up: Duration::ZERO }
     }
 }
 
@@ -272,25 +263,14 @@ impl Ladder {
     /// re-send.
     pub fn armed(schedule: Schedule) -> Option<(Ladder, Duration)> {
         let first = schedule.interval(1)?;
-        Some((
-            Ladder {
-                schedule,
-                rung: 1,
-                elapsed: first,
-            },
-            first,
-        ))
+        Some((Ladder { schedule, rung: 1, elapsed: first }, first))
     }
 
     /// Rebuild a ladder standing on `rung`, deriving the elapsed time from the
     /// schedule. The form a replicated rung index is restored through.
     pub fn at_rung(schedule: Schedule, rung: u32) -> Ladder {
         let elapsed = schedule.elapsed_at(rung);
-        Ladder {
-            schedule,
-            rung,
-            elapsed,
-        }
+        Ladder { schedule, rung, elapsed }
     }
 
     /// Step to the next rung and return the wait before it, or `None` when that

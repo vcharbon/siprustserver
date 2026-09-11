@@ -35,7 +35,8 @@ async fn client_retransmits_on_timer_a_cadence() {
     stack
         .txn
         .send_request(outbound_request("INVITE", "z9hG4bK-rtx"), addr(PEER), TxnKind::Invite)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // By 2 s the peer has seen the initial send + retransmits at 500 ms and
     // 1500 ms (the source's doubling cadence) = 3 INVITEs.
@@ -57,21 +58,16 @@ async fn provisional_response_stops_retransmit() {
     stack
         .txn
         .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     elapse_ms(700).await; // initial + retransmit @500
     assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 2);
 
     // A 100 Trying on the matching branch cancels the retransmit timer.
-    stack
-        .inject(&response_bytes(100, "Trying", "INVITE", branch, "prov-call", false))
-        .await;
+    stack.inject(&response_bytes(100, "Trying", "INVITE", branch, "prov-call", false)).await;
     elapse_ms(3_000).await;
-    assert_eq!(
-        count_requests(&stack.drain_peer(), "INVITE"),
-        0,
-        "no retransmit after 100 Trying"
-    );
+    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 0, "no retransmit after 100 Trying");
 }
 
 // ── Same-branch displacement releases the replaced txn's timers ─────────────
@@ -95,7 +91,8 @@ async fn same_branch_displacement_does_not_fork_retransmits() {
             addr(PEER),
             TxnKind::Invite,
         )
-        .await.unwrap();
+        .await
+        .unwrap();
     // Second INVITE reusing `branch` → displaces the first; its orphan retransmit
     // must be cancelled, not left to fire against this txn.
     stack
@@ -105,7 +102,8 @@ async fn same_branch_displacement_does_not_fork_retransmits() {
             addr(PEER),
             TxnKind::Invite,
         )
-        .await.unwrap();
+        .await
+        .unwrap();
     assert_eq!(active(&stack), 1, "displaced, not doubled");
 
     // Two initial sends + exactly ONE retransmit (the live txn's, @500 ms) by
@@ -144,9 +142,7 @@ async fn non_invite_timer_e_resets_to_t2_on_a_proceeding_fire() {
     assert_eq!(count_requests(&stack.drain_peer(), "BYE"), 1, "one retransmit at T1");
 
     // The provisional arrives with the 2*T1 fire (+1500 ms) already armed.
-    stack
-        .inject(&response_bytes(100, "Trying", "BYE", branch, "bye-rtx-call", false))
-        .await;
+    stack.inject(&response_bytes(100, "Trying", "BYE", branch, "bye-rtx-call", false)).await;
     elapse_ms(20).await; // t=540
 
     // The pending fire runs to completion at +1500 ms: entering Proceeding
@@ -192,10 +188,7 @@ async fn non_invite_timer_e_resets_to_t2_on_a_proceeding_fire() {
     elapse_ms(23_480).await; // t=33000
     assert_eq!(count_requests(&stack.drain_peer(), "BYE"), 5, "T2 plateau to the Timer F bound");
     assert!(
-        stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "Timer F emits Timeout"
     );
     assert_eq!(active(&stack), 0, "the txn is reaped at Timer F");
@@ -240,7 +233,14 @@ async fn send_request_cancel_is_raw_and_does_not_displace_the_invite() {
     // leaves map size 1): only the intact INVITE client txn — holding its
     // `original_request` — can auto-ACK the 487 final (§17.1.1.3).
     stack
-        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            487,
+            "Request Terminated",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(60).await;
     assert_eq!(
@@ -259,7 +259,8 @@ async fn timer_b_emits_timeout_event() {
     stack
         .txn
         .send_request(outbound_reinvite("z9hG4bK-tb"), addr(PEER), TxnKind::Invite)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Timer B fires at 64·T1 = 32 s with no final response.
     elapse_ms(35_000).await;
@@ -275,7 +276,11 @@ async fn timer_b_emits_timeout_event() {
     let (method, destination, kind) = timeout.expect("Timer B emits a Timeout event");
     assert_eq!(method, Some("INVITE".to_string()));
     assert_eq!(destination, Some(addr(PEER)), "Timeout forwards the txn destination");
-    assert_eq!(kind, sip_txn::TimeoutKind::Response, "an in-dialog re-INVITE Timer B is a Response timeout");
+    assert_eq!(
+        kind,
+        sip_txn::TimeoutKind::Response,
+        "an in-dialog re-INVITE Timer B is a Response timeout"
+    );
     assert_eq!(active(&stack), 0, "timed-out txn is removed");
 }
 
@@ -294,11 +299,19 @@ async fn initial_invite_outlives_the_no_answer_window() {
     stack
         .txn
         .send_request(outbound_request("INVITE", "z9hG4bK-init"), addr(PEER), TxnKind::Invite)
-        .await.unwrap();
+        .await
+        .unwrap();
     // The callee rings: the first provisional is what opens the ring window
     // the 158 s bound owns (§17.1.1.2 scopes Timer B to Calling).
     stack
-        .inject(&response_bytes(180, "Ringing", "INVITE", "z9hG4bK-init", "handle-shape-test", true))
+        .inject(&response_bytes(
+            180,
+            "Ringing",
+            "INVITE",
+            "z9hG4bK-init",
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     stack.drain_events();
@@ -306,10 +319,7 @@ async fn initial_invite_outlives_the_no_answer_window() {
     // No Timeout at 35 s — still ringing.
     elapse_ms(35_000).await;
     assert!(
-        !stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "initial INVITE must not expire inside the ring window"
     );
     assert_eq!(active(&stack), 1, "still live, ringing");
@@ -342,7 +352,14 @@ async fn a_reinvite_that_drew_a_provisional_outlives_timer_b() {
         .await
         .unwrap();
     stack
-        .inject(&response_bytes(183, "Session Progress", "INVITE", "z9hG4bK-reinv-1xx", "handle-shape-test", true))
+        .inject(&response_bytes(
+            183,
+            "Session Progress",
+            "INVITE",
+            "z9hG4bK-reinv-1xx",
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     stack.drain_events();
@@ -350,10 +367,7 @@ async fn a_reinvite_that_drew_a_provisional_outlives_timer_b() {
     // No Timeout at 35 s — the renegotiation is still in progress.
     elapse_ms(35_000).await;
     assert!(
-        !stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "a re-INVITE in Proceeding is not on Timer B"
     );
     assert_eq!(active(&stack), 1, "still live, awaiting its final");
@@ -391,10 +405,7 @@ async fn unanswered_initial_invite_times_out_on_timer_b() {
     // Still Calling at 31 s: the Timer-A ladder has run, nothing came back.
     elapse_ms(31_000).await;
     assert!(
-        !stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "Timer B has not reached 64·T1 yet"
     );
     assert_eq!(active(&stack), 1);
@@ -437,7 +448,14 @@ async fn configured_invite_bound_moves_the_initial_invite_expiry() {
         .await
         .unwrap();
     stack
-        .inject(&response_bytes(180, "Ringing", "INVITE", "z9hG4bK-cfg300", "handle-shape-test", true))
+        .inject(&response_bytes(
+            180,
+            "Ringing",
+            "INVITE",
+            "z9hG4bK-cfg300",
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     stack.drain_events();
@@ -445,10 +463,7 @@ async fn configured_invite_bound_moves_the_initial_invite_expiry() {
     // Past the DEFAULT 158 s bound (~165 s): still ringing, no Timeout.
     elapse_ms(165_000).await;
     assert!(
-        !stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "a 300 s-configured initial INVITE must not expire at the default 158 s mark"
     );
     assert_eq!(active(&stack), 1, "still live, ringing");
@@ -521,10 +536,7 @@ async fn tightened_first_response_bound_fails_an_unanswered_initial_invite_early
     // Still Calling at 4 s: the three rungs the bound buys have all fired.
     elapse_ms(4_000).await;
     assert!(
-        !stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "the 5 s bound has not elapsed yet"
     );
     assert_eq!(active(&stack), 1);
@@ -570,10 +582,7 @@ async fn tightened_first_response_bound_leaves_in_dialog_and_non_invite_on_64_t1
     // Well past the 5 s bound: both still live.
     elapse_ms(31_000).await;
     assert!(
-        !stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "neither an in-dialog INVITE nor a non-INVITE reads the first-response bound"
     );
     assert_eq!(active(&stack), 2);
@@ -617,7 +626,14 @@ async fn a_provisional_before_the_first_response_bound_swaps_in_the_long_bound()
         .unwrap();
     elapse_ms(2_000).await;
     stack
-        .inject(&response_bytes(180, "Ringing", "INVITE", "z9hG4bK-fr5-ring", "handle-shape-test", true))
+        .inject(&response_bytes(
+            180,
+            "Ringing",
+            "INVITE",
+            "z9hG4bK-fr5-ring",
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     stack.drain_events();
@@ -626,14 +642,15 @@ async fn a_provisional_before_the_first_response_bound_swaps_in_the_long_bound()
     // Past the 5 s bound (~7 s): still ringing, no Timeout, no more rungs.
     elapse_ms(5_000).await;
     assert!(
-        !stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "a ringing initial INVITE is not on the first-response bound"
     );
     assert_eq!(active(&stack), 1, "still live, ringing");
-    assert_eq!(count_requests(&stack.drain_peer(), "INVITE"), 0, "the provisional stopped the ladder");
+    assert_eq!(
+        count_requests(&stack.drain_peer(), "INVITE"),
+        0,
+        "the provisional stopped the ladder"
+    );
 
     // The long bound fires (measured from the original send: ~158 s).
     elapse_ms(153_000).await;
@@ -652,26 +669,19 @@ async fn cancel_sends_200_and_487_and_emits_cancelled() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
     let branch = "z9hG4bK-cxl";
 
-    stack
-        .inject(&inbound_request("INVITE", branch, "cxl-call", None))
-        .await;
+    stack.inject(&inbound_request("INVITE", branch, "cxl-call", None)).await;
     elapse_ms(60).await;
     assert_eq!(count_responses(&stack.drain_peer(), 100), 1, "100 Trying for INVITE");
     assert!(has_message_request(&stack.drain_events(), "INVITE"));
 
-    stack
-        .inject(&inbound_request("CANCEL", branch, "cxl-call", None))
-        .await;
+    stack.inject(&inbound_request("CANCEL", branch, "cxl-call", None)).await;
     elapse_ms(60).await;
 
     let out = stack.drain_peer();
     assert_eq!(count_responses(&out, 200), 1, "200 OK to the CANCEL");
     assert_eq!(count_responses(&out, 487), 1, "487 Request Terminated on the INVITE");
     assert!(
-        stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Cancelled { .. })),
+        stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Cancelled { .. })),
         "a Cancelled event is emitted"
     );
 }
@@ -683,9 +693,7 @@ async fn cancel_sends_200_and_487_and_emits_cancelled() {
 #[tokio::test(start_paused = true)]
 async fn unmatched_cancel_is_handed_up_unanswered() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
-    stack
-        .inject(&inbound_request("CANCEL", "z9hG4bK-stray", "stray-call", None))
-        .await;
+    stack.inject(&inbound_request("CANCEL", "z9hG4bK-stray", "stray-call", None)).await;
     elapse_ms(60).await;
 
     assert!(stack.drain_peer().is_empty(), "the layer answers an unmatched CANCEL with nothing");
@@ -753,9 +761,7 @@ async fn ack_for_non_2xx_is_absorbed() {
     let branch = "z9hG4bK-ackn";
     invite_then_final(&mut stack, branch, "ackn-call", 480).await;
 
-    stack
-        .inject(&inbound_request("ACK", branch, "ackn-call", Some("peer-tag")))
-        .await;
+    stack.inject(&inbound_request("ACK", branch, "ackn-call", Some("peer-tag"))).await;
     elapse_ms(60).await;
 
     assert_eq!(active(&stack), 0, "ACK for non-2xx terminates the txn");
@@ -771,9 +777,7 @@ async fn ack_for_2xx_passes_through() {
     let branch = "z9hG4bK-ack2";
     invite_then_final(&mut stack, branch, "ack2-call", 200).await;
 
-    stack
-        .inject(&inbound_request("ACK", branch, "ack2-call", Some("peer-tag")))
-        .await;
+    stack.inject(&inbound_request("ACK", branch, "ack2-call", Some("peer-tag"))).await;
     elapse_ms(60).await;
 
     assert_eq!(active(&stack), 0, "ACK for 2xx terminates the server txn");
@@ -798,7 +802,8 @@ async fn duplicate_final_on_completed_server_txn_is_dropped() {
     let _ = stack.drain_peer();
 
     // First final: 487 → Completed, classifier = non-2xx.
-    let first = parse_response(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true));
+    let first =
+        parse_response(&response_bytes(487, "Request Terminated", "INVITE", branch, call_id, true));
     stack.txn.send_response(first, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     assert_eq!(count_responses(&stack.drain_peer(), 487), 1);
@@ -862,15 +867,18 @@ async fn server_invite_non_2xx_final_retransmits_on_timer_g() {
     );
     assert_eq!(
         stack.txn.metrics().retransmit_rows(),
-        vec![RetransmitRow { ladder: "invite-server-final", method: "INVITE", code: Some(603), count: 4 }],
+        vec![RetransmitRow {
+            ladder: "invite-server-final",
+            method: "INVITE",
+            code: Some(603),
+            count: 4
+        }],
         "each Timer G rung is counted under the final's CSeq method and status",
     );
     assert_eq!(active(&stack), 1, "still Completed (unACKed), bounded by Timer H");
 
     // The ACK finally lands → Timer G cancelled, txn terminated, silence after.
-    stack
-        .inject(&inbound_request("ACK", branch, call_id, Some("peer-tag")))
-        .await;
+    stack.inject(&inbound_request("ACK", branch, call_id, Some("peer-tag"))).await;
     elapse_ms(60).await;
     assert_eq!(active(&stack), 0, "ACK terminates the txn (Timer G cancelled)");
     elapse_ms(5_000).await;
@@ -908,13 +916,21 @@ async fn client_auto_acks_non_2xx_final() {
     stack
         .txn
         .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
-        .await.unwrap();
+        .await
+        .unwrap();
     elapse_ms(60).await;
     let _ = stack.drain_peer(); // the initial INVITE
 
     // Peer answers 480 — the transaction layer must ACK it hop-by-hop.
     stack
-        .inject(&response_bytes(480, "Temporarily Unavailable", "INVITE", branch, "autoack-call", true))
+        .inject(&response_bytes(
+            480,
+            "Temporarily Unavailable",
+            "INVITE",
+            branch,
+            "autoack-call",
+            true,
+        ))
         .await;
     elapse_ms(60).await;
 
@@ -940,14 +956,13 @@ async fn non_2xx_invite_final_absorbs_retransmits_for_timer_d() {
     stack
         .txn
         .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
-        .await.unwrap();
+        .await
+        .unwrap();
     elapse_ms(60).await;
     let _ = stack.drain_peer();
 
     // First 486 → auto-ACK, surfaces once, txn held for Timer D.
-    stack
-        .inject(&response_bytes(486, "Busy Here", "INVITE", branch, "timerd-call", true))
-        .await;
+    stack.inject(&response_bytes(486, "Busy Here", "INVITE", branch, "timerd-call", true)).await;
     elapse_ms(60).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "auto-ACK for the 486");
     assert_eq!(
@@ -963,9 +978,7 @@ async fn non_2xx_invite_final_absorbs_retransmits_for_timer_d() {
     assert_eq!(active(&stack), 1, "held in Completed for Timer D");
 
     // Retransmitted 486 (first ACK lost) → RE-ACK, absorbed (no second Message).
-    stack
-        .inject(&response_bytes(486, "Busy Here", "INVITE", branch, "timerd-call", true))
-        .await;
+    stack.inject(&response_bytes(486, "Busy Here", "INVITE", branch, "timerd-call", true)).await;
     elapse_ms(60).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "retransmitted 486 re-ACKed");
     assert!(stack.drain_events().is_empty(), "retransmitted final must not re-surface");
@@ -1000,10 +1013,7 @@ async fn duplicate_request_retransmits_cached_response() {
         1,
         "cached 200 retransmitted for the duplicate"
     );
-    assert!(
-        stack.drain_events().is_empty(),
-        "duplicate request must not surface a second time"
-    );
+    assert!(stack.drain_events().is_empty(), "duplicate request must not surface a second time");
     // A cached FINAL replayed is a `trigger` repeat too, under its own status.
     assert_eq!(
         stack.txn.metrics().retransmit_rows(),
@@ -1063,7 +1073,8 @@ async fn timeout_survives_a_full_event_queue() {
     stack
         .txn
         .send_request(outbound_reinvite("z9hG4bK-tofull"), addr(PEER), TxnKind::Invite)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Saturate the events queue with undrained inbound OPTIONS (lossy Messages).
     for i in 0..70 {
@@ -1081,19 +1092,13 @@ async fn timeout_survives_a_full_event_queue() {
     // Timer B fires (32 s) into the full queue → the Timeout must DEFER, not drop.
     elapse_ms(33_000).await;
     assert!(
-        !stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "the full-queue instant must have deferred the Timeout, not squeezed it in"
     );
     // Capacity returned (we just drained) → the retry tick redelivers it.
     elapse_ms(150).await;
     assert!(
-        stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "deferred Timeout redelivered once queue capacity returned"
     );
 }
@@ -1118,10 +1123,7 @@ async fn retransmitted_invite_replays_the_cached_100() {
         1,
         "cached 100 replayed for the INVITE retransmit"
     );
-    assert!(
-        stack.drain_events().is_empty(),
-        "retransmitted INVITE must not re-surface to the app"
-    );
+    assert!(stack.drain_events().is_empty(), "retransmitted INVITE must not re-surface to the app");
     // The replay is a repeat the peer provoked, not a ladder rung: counted
     // as `trigger`, under the request's method and the cached status.
     assert_eq!(
@@ -1152,9 +1154,10 @@ fn inbound_with_callref(method: &str, branch: &str, call_id: &str, call_ref: &st
 }
 
 fn drained_quiesced(stack: &mut Stack, call_ref: &str) -> bool {
-    stack.drain_events().iter().any(|e| {
-        matches!(e, TransactionEvent::CallQuiesced { call_ref: cr } if cr == call_ref)
-    })
+    stack
+        .drain_events()
+        .iter()
+        .any(|e| matches!(e, TransactionEvent::CallQuiesced { call_ref: cr } if cr == call_ref))
 }
 
 /// The `call_ref → txn-count` index stays in lockstep with the `txns` map, so the

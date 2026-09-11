@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use e2e_core::checks::{self, Bindings};
 use e2e_core::model;
 use e2e_core::{
-    BasicCall, BasicCallMedia, CallflowShape, EndpointConfig, FakeLsbcB2bua, FakeRegisterProxy,
-    InfraShape, RealLoopbackDirect, Rerouting, ReroutingPrack, TransferReferMedia, run,
+    run, BasicCall, BasicCallMedia, CallflowShape, EndpointConfig, FakeLsbcB2bua,
+    FakeRegisterProxy, InfraShape, RealLoopbackDirect, Rerouting, ReroutingPrack,
+    TransferReferMedia,
 };
 
 fn workspace_root() -> PathBuf {
@@ -257,10 +258,9 @@ async fn register_layout_basic_call_media_both_directions() {
 /// Phase K: rerouting + reliable 183/PRACK on the winning leg.
 #[tokio::test(start_paused = true)]
 async fn rerouting_prack_shape_relays_reliable_provisional() {
-    let case = model::load_test_case(
-        &workspace_root().join("e2e/cases/rerouting-prack-identity.json"),
-    )
-    .unwrap();
+    let case =
+        model::load_test_case(&workspace_root().join("e2e/cases/rerouting-prack-identity.json"))
+            .unwrap();
     let check_sets = model::load_check_sets(&workspace_root().join("e2e/checksets")).unwrap();
     model::validate_case(&case, &e2e_core::shapes::registry(), &check_sets).unwrap();
 
@@ -297,12 +297,7 @@ fn committed_full_campaign_runs_green() {
     assert_eq!(result.index.cells.len(), 5);
 
     // The media cell persisted its artifacts + refs + hears-verdicts.
-    let media_cell = result
-        .index
-        .cells
-        .iter()
-        .find(|c| c.cell.case == "basic-call-media")
-        .unwrap();
+    let media_cell = result.index.cells.iter().find(|c| c.cell.case == "basic-call-media").unwrap();
     let cell_dir = result.run_dir.join(&media_cell.dir);
     let media_result = e2e_core::result::read_result(&cell_dir).unwrap();
     assert_eq!(media_result.media.len(), 2);

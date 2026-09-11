@@ -18,12 +18,14 @@
 //! never silently dropped. There is no absorb-set and no window construct.
 
 use pivot_schema::body::{Body, BodyShape};
-use pivot_schema::known_bug::KnownBug;
 use pivot_schema::bundle::{Arrived, Failure};
+use pivot_schema::known_bug::KnownBug;
 use pivot_schema::msg::{Header, MsgSpec};
 use sip_message::generators::states_send_time;
 use sip_message::header::{HeaderValue, MediaType};
-use sip_message::{header_forms_equivalent, HeaderName, HeaderProjection, Method, SipMessage, SipStr};
+use sip_message::{
+    header_forms_equivalent, HeaderName, HeaderProjection, Method, SipMessage, SipStr,
+};
 
 use crate::early::LearnedForks;
 use crate::plan::{CompiledStep, Discriminator};
@@ -154,10 +156,10 @@ pub fn discriminates(step: &CompiledStep, inbound: &Inbound) -> GateVerdict {
                 "gated on request {method}; a {} response arrived",
                 inbound.status.unwrap_or(0)
             )),
-            Some(got) if Method::from_wire(got) == Method::from_wire(method) => GateVerdict::Matches,
-            Some(got) => {
-                GateVerdict::Rejects(format!("gated on request {method}; {got} arrived"))
+            Some(got) if Method::from_wire(got) == Method::from_wire(method) => {
+                GateVerdict::Matches
             }
+            Some(got) => GateVerdict::Rejects(format!("gated on request {method}; {got} arrived")),
         },
         Discriminator::Response { status, cseq_method } => {
             let Some(got) = inbound.status else {
@@ -167,9 +169,7 @@ pub fn discriminates(step: &CompiledStep, inbound: &Inbound) -> GateVerdict {
                 ));
             };
             if got != *status {
-                return GateVerdict::Rejects(format!(
-                    "gated on response {status}; {got} arrived"
-                ));
+                return GateVerdict::Rejects(format!("gated on response {status}; {got} arrived"));
             }
             match cseq_method {
                 None => GateVerdict::Matches,
@@ -547,10 +547,8 @@ fn frozen_value(want: &Header, resolver: &Resolver<'_>) -> Result<String, String
 /// is owed, or the wrong media type, names no known bug and always gates.
 fn body_holds(spec: &MsgSpec, inbound: &Inbound) -> Option<(String, Option<KnownBug>)> {
     let Some(body) = &spec.body else { return None };
-    let media = inbound
-        .content_type
-        .as_deref()
-        .and_then(|t| MediaType::parse(&SipStr::owned(t)).ok());
+    let media =
+        inbound.content_type.as_deref().and_then(|t| MediaType::parse(&SipStr::owned(t)).ok());
     let is_sdp = media.as_ref().is_some_and(MediaType::is_sdp);
     let is_multipart = media.as_ref().is_some_and(MediaType::is_multipart);
     match body {
@@ -592,14 +590,14 @@ fn unstripped_provisional(spec: &MsgSpec) -> Option<KnownBug> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pivot_schema::flow::{Anchor, CheckMode, Delay};
-    use pivot_schema::msg::Header;
-    use pivot_schema::scoping::CheckClass;
     use crate::plan::StepKind;
     use crate::program::StepLoc;
-    use pivot_schema::bundle::{ClockMode, IdentityBindings, RunConfig};
-    use pivot_schema::known_bug::KnownBug;
     use crate::state::RunState;
+    use pivot_schema::bundle::{ClockMode, IdentityBindings, RunConfig};
+    use pivot_schema::flow::{Anchor, CheckMode, Delay};
+    use pivot_schema::known_bug::KnownBug;
+    use pivot_schema::msg::Header;
+    use pivot_schema::scoping::CheckClass;
     use std::sync::OnceLock;
 
     /// A resolver over an empty binding set. These tests freeze literal values,
@@ -688,11 +686,8 @@ mod tests {
 
     #[test]
     fn a_response_gate_pins_the_transaction_it_answers() {
-        let spec = MsgSpec {
-            status: Some(200),
-            cseq_method: Some("INVITE".into()),
-            ..MsgSpec::default()
-        };
+        let spec =
+            MsgSpec { status: Some(200), cseq_method: Some("INVITE".into()), ..MsgSpec::default() };
         let step = step(spec, CheckMode::Record);
         assert!(discriminates(&step, &inbound_response(200, "INVITE")).matches());
         // A PRACK's own 2xx must not satisfy the call's answer.
@@ -709,7 +704,8 @@ mod tests {
     /// minted, so a PRACK for fork 1 must not complete fork 2's step.
     #[test]
     fn an_expect_scoped_to_a_fork_takes_only_that_fork_s_message() {
-        let mut step = step(MsgSpec { method: Some("PRACK".into()), ..MsgSpec::default() }, CheckMode::Record);
+        let mut step =
+            step(MsgSpec { method: Some("PRACK".into()), ..MsgSpec::default() }, CheckMode::Record);
         step.early = Some("f1".into());
         let mut prack = inbound_request("PRACK");
         prack.to_tag = Some("B-early-f1".into());
@@ -734,7 +730,8 @@ mod tests {
     /// what the message carries in To is the discriminator's business, not its.
     #[test]
     fn a_step_naming_no_early_dialog_is_scoped_to_none() {
-        let step = step(MsgSpec { method: Some("PRACK".into()), ..MsgSpec::default() }, CheckMode::Record);
+        let step =
+            step(MsgSpec { method: Some("PRACK".into()), ..MsgSpec::default() }, CheckMode::Record);
         let mut prack = inbound_request("PRACK");
         prack.to_tag = Some("whatever".into());
         assert!(rides_early_dialog(&step, &prack, None).matches());
@@ -744,11 +741,7 @@ mod tests {
     /// A step gated on an observed fork, with the fork it names bound or not.
     fn observed_step(early: &str) -> CompiledStep {
         let mut step = step(
-            MsgSpec {
-                status: Some(180),
-                cseq_method: Some("INVITE".into()),
-                ..MsgSpec::default()
-            },
+            MsgSpec { status: Some(180), cseq_method: Some("INVITE".into()), ..MsgSpec::default() },
             CheckMode::Record,
         );
         step.early = Some(early.into());
@@ -816,11 +809,7 @@ mod tests {
         let mut learned = LearnedForks::default();
         learned.bind("A", "r1", "sut-tag-1");
         let mut answer = step(
-            MsgSpec {
-                status: Some(200),
-                cseq_method: Some("INVITE".into()),
-                ..MsgSpec::default()
-            },
+            MsgSpec { status: Some(200), cseq_method: Some("INVITE".into()), ..MsgSpec::default() },
             CheckMode::Record,
         );
         answer.early = Some("r2".into());
@@ -846,7 +835,10 @@ mod tests {
 
     #[test]
     fn a_request_gate_reads_method_identity_not_spelling() {
-        let step = step(MsgSpec { method: Some("Invite".into()), ..MsgSpec::default() }, CheckMode::Record);
+        let step = step(
+            MsgSpec { method: Some("Invite".into()), ..MsgSpec::default() },
+            CheckMode::Record,
+        );
         assert!(discriminates(&step, &inbound_request("INVITE")).matches());
         assert!(!discriminates(&step, &inbound_request("ACK")).matches());
     }
@@ -858,7 +850,11 @@ mod tests {
         let spec = MsgSpec {
             status: Some(486),
             cseq_method: Some("INVITE".into()),
-            headers: vec![Header { name: "Reason".into(), value: "Q.850;cause=17".into(), class: None }],
+            headers: vec![Header {
+                name: "Reason".into(),
+                value: "Q.850;cause=17".into(),
+                class: None,
+            }],
             ..MsgSpec::default()
         };
         let recorded = step(spec.clone(), CheckMode::Record);
@@ -867,9 +863,15 @@ mod tests {
         assert!(content_holds(&recorded, &arrived, &scope, &plain()).matches());
         assert!(content_holds(&asserted, &arrived, &scope, &plain()).matches());
         arrived.headers = vec![("Reason".into(), "Q.850;cause=16".into())].into();
-        assert!(content_holds(&recorded, &arrived, &scope, &plain()).matches(), "record asserts nothing");
+        assert!(
+            content_holds(&recorded, &arrived, &scope, &plain()).matches(),
+            "record asserts nothing"
+        );
         let rejected = content_holds(&asserted, &arrived, &scope, &plain());
-        assert!(matches!(&rejected, GateVerdict::Rejects(r) if r.contains("cause=16")), "{rejected:?}");
+        assert!(
+            matches!(&rejected, GateVerdict::Rejects(r) if r.contains("cause=16")),
+            "{rejected:?}"
+        );
     }
 
     #[test]
@@ -902,7 +904,10 @@ mod tests {
         );
         let mut invite = inbound_request("INVITE");
         invite.body = b"v=0".to_vec();
-        assert!(!content_holds(&sdp, &invite, &scope, &plain()).matches(), "no content type is not SDP");
+        assert!(
+            !content_holds(&sdp, &invite, &scope, &plain()).matches(),
+            "no content type is not SDP"
+        );
         invite.content_type = Some("application/sdp".into());
         assert!(content_holds(&sdp, &invite, &scope, &plain()).matches());
     }
@@ -967,7 +972,10 @@ mod tests {
         );
         let mut arrived = inbound_response(200, "INVITE");
         arrived.body = b"v=0".to_vec();
-        assert!(!content_holds(&on_a_final, &arrived, &scope, &plain()).matches(), "a final is not a rewrite");
+        assert!(
+            !content_holds(&on_a_final, &arrived, &scope, &plain()).matches(),
+            "a final is not a rewrite"
+        );
 
         // A 100 Trying is not the message a relay18x mode rewrites either.
         on_a_final.msg.status = Some(100);
@@ -1068,11 +1076,8 @@ mod tests {
         };
         let asserted = step(spec, CheckMode::Assert);
         let mut arrived = inbound_response(183, "INVITE");
-        arrived.headers = vec![(
-            "Diversion".into(),
-            "<sip:0033000900001@h>;reason=unconditional".into(),
-        )]
-        .into();
+        arrived.headers =
+            vec![("Diversion".into(), "<sip:0033000900001@h>;reason=unconditional".into())].into();
 
         // The relayed value IS what the accessor names, so the assertion holds
         // and nothing is owed a finding.
@@ -1123,18 +1128,17 @@ mod tests {
             cseq_method: Some("INVITE".into()),
             headers: rows
                 .iter()
-                .map(|value| Header {
-                    name: "Allow".into(),
-                    value: (*value).into(),
-                    class: None,
-                })
+                .map(|value| Header { name: "Allow".into(), value: (*value).into(), class: None })
                 .collect(),
             ..MsgSpec::default()
         };
         let carrying = |rows: &[&str]| {
             let mut arrived = inbound_response(200, "INVITE");
-            arrived.headers =
-                rows.iter().map(|v| ("Allow".to_string(), (*v).to_string())).collect::<Vec<_>>().into();
+            arrived.headers = rows
+                .iter()
+                .map(|v| ("Allow".to_string(), (*v).to_string()))
+                .collect::<Vec<_>>()
+                .into();
             arrived
         };
         let holds = |spec: MsgSpec, arrived: &Inbound| {
@@ -1215,7 +1219,12 @@ mod tests {
                     "session;handling=required".into(),
                     "absent".into()
                 ),
-                ("header(Session-Expires)".into(), "exists".into(), "present".into(), "absent".into()),
+                (
+                    "header(Session-Expires)".into(),
+                    "exists".into(),
+                    "present".into(),
+                    "absent".into()
+                ),
             ],
             "{findings:#?}"
         );
@@ -1311,9 +1320,6 @@ l: 3\r\n\r\nv=0",
         };
         let asserted = step(spec, CheckMode::Assert);
         let rejected = content_holds(&asserted, &inbound_response(200, "INVITE"), &scope, &plain());
-        assert_eq!(
-            rejected,
-            GateVerdict::Rejects("header \"Session-Expires\" is absent".into())
-        );
+        assert_eq!(rejected, GateVerdict::Rejects("header \"Session-Expires\" is absent".into()));
     }
 }

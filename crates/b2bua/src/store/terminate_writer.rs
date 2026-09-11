@@ -80,13 +80,7 @@ impl BufferedTerminateWriter {
         indexes: Vec<String>,
         opts: PutOpts,
     ) {
-        let _ = self.tx.try_send(TerminateOp::Delete {
-            role,
-            primary,
-            call_ref,
-            indexes,
-            opts,
-        });
+        let _ = self.tx.try_send(TerminateOp::Delete { role, primary, call_ref, indexes, opts });
     }
 }
 
@@ -111,16 +105,8 @@ async fn drain(store: Arc<dyn CallStore>, mut rx: mpsc::Receiver<TerminateOp>) {
                     )
                     .await;
             }
-            TerminateOp::Delete {
-                role,
-                primary,
-                call_ref,
-                indexes,
-                opts,
-            } => {
-                let _ = store
-                    .delete_call(role, &primary, &call_ref, &indexes, &opts)
-                    .await;
+            TerminateOp::Delete { role, primary, call_ref, indexes, opts } => {
+                let _ = store.delete_call(role, &primary, &call_ref, &indexes, &opts).await;
             }
         }
     }

@@ -4,11 +4,11 @@
 //! gate + CVE-regression quoted-string / Digest checks (ADR-0007).
 
 use super::compact_forms::expand_compact_form;
-use super::structured_headers::split_top_level_commas;
 use super::scanner::{
     decode, is_token_char, is_wsp, strict_non_negative_decimal, trim_span, HeaderValue, Scanner,
     Span, COLON, CR, HTAB, LF,
 };
+use super::structured_headers::split_top_level_commas;
 use crate::error::SipParseError;
 use crate::header::HeaderName;
 use crate::parser::SipParserLimits;
@@ -177,13 +177,17 @@ pub fn parse_headers(
             // Reject unterminated quoted-strings on quoted-string-bearing headers
             // (CVE-2023-27599).
             if is_quoted_string_header(&known) && has_unbalanced_quotes(&trimmed_value) {
-                return Err(SipParseError::new(format!("Unterminated quoted-string in {name} header")));
+                return Err(SipParseError::new(format!(
+                    "Unterminated quoted-string in {name} header"
+                )));
             }
 
             // Digest credentials must be comma-separated name=value pairs
             // (CVE-2023-28098).
             if is_authorization_header(&known) && !is_valid_digest_credentials(&trimmed_value) {
-                return Err(SipParseError::new(format!("Malformed Digest credentials in {name} header")));
+                return Err(SipParseError::new(format!(
+                    "Malformed Digest credentials in {name} header"
+                )));
             }
         }
 
@@ -323,7 +327,6 @@ fn is_valid_digest_credentials(value: &str) -> bool {
     }
     true
 }
-
 
 /// Byte index of the first `=` outside a quoted-string, or `None`.
 fn find_unquoted_equals(s: &str) -> Option<usize> {

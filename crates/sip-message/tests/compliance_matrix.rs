@@ -48,14 +48,19 @@ fn run_category(category: &str, names: &[&str], expect_reject: &HashSet<&str>, s
         let v = if strict { verdict_strict(&bytes) } else { verdict_eager(&bytes) };
         let should_reject = expect_reject.contains(name);
         match (&v, should_reject) {
-            (Ok(()), true) => mismatches.push(format!("  {category}/{name}: expected REJECT, but ACCEPTED")),
-            (Err(reason), false) => {
-                mismatches.push(format!("  {category}/{name}: expected ACCEPT, but REJECTED ({reason})"))
+            (Ok(()), true) => {
+                mismatches.push(format!("  {category}/{name}: expected REJECT, but ACCEPTED"))
             }
+            (Err(reason), false) => mismatches
+                .push(format!("  {category}/{name}: expected ACCEPT, but REJECTED ({reason})")),
             _ => {}
         }
     }
-    assert!(mismatches.is_empty(), "compliance mismatches in {category}:\n{}", mismatches.join("\n"));
+    assert!(
+        mismatches.is_empty(),
+        "compliance mismatches in {category}:\n{}",
+        mismatches.join("\n")
+    );
 }
 
 fn set(items: &[&'static str]) -> HashSet<&'static str> {
@@ -69,19 +74,19 @@ fn set(items: &[&'static str]) -> HashSet<&'static str> {
 #[test]
 fn rfc4475_valid() {
     let names = [
-        "shortTorturousInvite",   // 3.1.1.1
-        "wideRangeValidChars",    // 3.1.1.2
-        "validPercentEscaping",   // 3.1.1.3
-        "escapedNulls",           // 3.1.1.4
-        "percentNotEscape",       // 3.1.1.5
-        "noLwsBeforeAngleBracket",// 3.1.1.6
-        "longValues",             // 3.1.1.7
-        "extraTrailingOctets",    // 3.1.1.8
-        "semicolonInUserPart",    // 3.1.1.9
-        "variedTransports",       // 3.1.1.10
-        "multipartMime",          // 3.1.1.11
-        "unusualReasonPhrase",    // 3.1.1.12
-        "emptyReasonPhrase",      // 3.1.1.13
+        "shortTorturousInvite",    // 3.1.1.1
+        "wideRangeValidChars",     // 3.1.1.2
+        "validPercentEscaping",    // 3.1.1.3
+        "escapedNulls",            // 3.1.1.4
+        "percentNotEscape",        // 3.1.1.5
+        "noLwsBeforeAngleBracket", // 3.1.1.6
+        "longValues",              // 3.1.1.7
+        "extraTrailingOctets",     // 3.1.1.8
+        "semicolonInUserPart",     // 3.1.1.9
+        "variedTransports",        // 3.1.1.10
+        "multipartMime",           // 3.1.1.11
+        "unusualReasonPhrase",     // 3.1.1.12
+        "emptyReasonPhrase",       // 3.1.1.13
     ];
     // ADR-0007: custom rejects 3.1.1.1 (top-Via no magic cookie), 3.1.1.7
     // (long-values top Via magic-cookie-less), 3.1.1.10 (UNKNOWN transport).
@@ -193,7 +198,8 @@ fn rfc5118_ipv6() {
 
 #[test]
 fn strict_valid_canonical() {
-    let names = ["dateGmt", "fromQuotedDisplay", "fromTokenDisplay", "contactNameAddr", "contactBareUri"];
+    let names =
+        ["dateGmt", "fromQuotedDisplay", "fromTokenDisplay", "contactNameAddr", "contactBareUri"];
     run_category("strict-valid", &names, &HashSet::new(), true);
 }
 
@@ -213,7 +219,9 @@ mod rvoip_parity {
         let mut out = Vec::new();
         for cat in fs::read_dir(&root).unwrap() {
             let cat = cat.unwrap().path();
-            if !cat.is_dir() { continue; }
+            if !cat.is_dir() {
+                continue;
+            }
             let catname = cat.file_name().unwrap().to_string_lossy().to_string();
             for f in fs::read_dir(&cat).unwrap() {
                 let p = f.unwrap().path();

@@ -112,7 +112,12 @@ impl Reassembler {
             self.order.push(key.clone());
             self.pending.insert(
                 key.clone(),
-                FragBuf { first_seen_us: ts_us, pieces: Vec::new(), total_len: None, bytes_buffered: 0 },
+                FragBuf {
+                    first_seen_us: ts_us,
+                    pieces: Vec::new(),
+                    total_len: None,
+                    bytes_buffered: 0,
+                },
             );
         }
         let (over_cap, assembled) = {

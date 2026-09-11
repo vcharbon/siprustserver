@@ -1,8 +1,11 @@
-# Formatting is OFF, deliberately and temporarily.
+# One rustfmt config for this workspace and upstream/siprustserver — the two
+# files are byte-identical, `just fmt-check` says so. Every option here is
+# stable, so `cargo fmt` on the pinned toolchain is the whole story.
 #
-# This workspace matches no rustfmt default and declares no config of its own,
-# so an unguarded `cargo fmt` rewrites the whole crate around the file being
-# edited and buries a branch's real diff. The fmt-consistency effort lands the
-# real config and deletes this file; until then `cargo fmt` is a no-op rather
-# than a hazard.
-disable_all_formatting = true
+# `Max` widths + 100 columns is the style the tree was already written in;
+# `style_edition` is pinned so a future crate edition bump cannot reflow it.
+edition = "2021"
+style_edition = "2021"
+max_width = 100
+use_small_heuristics = "Max"
+newline_style = "Unix"

@@ -51,8 +51,18 @@ mod tests {
 
     #[test]
     fn the_stack_owned_set_is_structural() {
-        for name in ["Via", "From", "To", "Call-ID", "CSeq", "Contact", "Route", "Record-Route",
-                     "Max-Forwards", "Content-Length"] {
+        for name in [
+            "Via",
+            "From",
+            "To",
+            "Call-ID",
+            "CSeq",
+            "Contact",
+            "Route",
+            "Record-Route",
+            "Max-Forwards",
+            "Content-Length",
+        ] {
             assert_eq!(HeaderName::class_of(name), HeaderClass::Structural, "{name}");
         }
     }

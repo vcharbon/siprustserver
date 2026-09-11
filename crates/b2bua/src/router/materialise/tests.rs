@@ -277,7 +277,17 @@ async fn takeover_misses_are_typed() {
     ));
 
     n.store
-        .put_call(BAK, "w0", "w0|garbage|t", vec![0xAB, 0xCD], &[], 60_000, 1, 0, &PutOpts::default())
+        .put_call(
+            BAK,
+            "w0",
+            "w0|garbage|t",
+            vec![0xAB, 0xCD],
+            &[],
+            60_000,
+            1,
+            0,
+            &PutOpts::default(),
+        )
         .await
         .unwrap();
     assert!(matches!(

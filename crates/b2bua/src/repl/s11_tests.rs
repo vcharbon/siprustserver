@@ -41,10 +41,7 @@ const PRI: PartitionRole = PartitionRole::Primary;
 const BAK: PartitionRole = PartitionRole::Backup;
 
 fn config_for(ordinal: &str) -> B2buaConfig {
-    B2buaConfig {
-        self_ordinal: ordinal.into(),
-        ..Default::default()
-    }
+    B2buaConfig { self_ordinal: ordinal.into(), ..Default::default() }
 }
 
 fn src() -> SocketAddr {
@@ -274,7 +271,8 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
     let state = call_state_metered("w1", repl.clone(), metrics.clone());
 
     // The image w1 reverse-flushed when its takeover copy of a w0 call released.
-    let mut ended = build_initial_call(&invite("w0", "w1", "cid-ended"), src(), &config_for("w0"), 0);
+    let mut ended =
+        build_initial_call(&invite("w0", "w1", "cid-ended"), src(), &config_for("w0"), 0);
     ended.state = CallModelState::Terminated;
     let r_ended = ended.call_ref.clone();
     put(&repl, BAK, "w0", &ended).await;
@@ -537,7 +535,12 @@ async fn churn_during_reclaim_keeps_state_consistent() {
     // Seed N reclaim targets into pri:w0 (the partition `reclaim_scan` reads).
     let mut targets = Vec::with_capacity(TARGETS);
     for i in 0..TARGETS {
-        let call = build_initial_call(&invite("w0", "w1", &format!("rec-{i}")), src(), &config_for("w0"), 0);
+        let call = build_initial_call(
+            &invite("w0", "w1", &format!("rec-{i}")),
+            src(),
+            &config_for("w0"),
+            0,
+        );
         put(&repl, PRI, "w0", &call).await;
         targets.push(call.call_ref.clone());
     }

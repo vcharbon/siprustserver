@@ -12,8 +12,8 @@ use std::time::Duration;
 use media::{OpenOptions, PlayScript};
 use media_harness::testkit::advance_media;
 use media_harness::{
-    classify, corrupt_connection_addr, negotiate_call, reference_clip, Classification, ClipName,
-    ClassifyOptions, NegotiateOptions,
+    classify, corrupt_connection_addr, negotiate_call, reference_clip, Classification,
+    ClassifyOptions, ClipName, NegotiateOptions,
 };
 use sip_net::SimulatedSignalingNetwork;
 
@@ -65,16 +65,10 @@ async fn sdp_rewrite_bug_misdirects_media() {
     // Bob never hears Alice: her RTP went to 10.99.99.99, not to Bob.
     let bob_hears = classify(&call.bob_session.recorded().pcm, &ClassifyOptions::default());
     assert_ne!(bob_hears.matched, Some(ClipName::Alice));
-    assert!(matches!(
-        bob_hears.classification,
-        Classification::Silence | Classification::NoAudio
-    ));
+    assert!(matches!(bob_hears.classification, Classification::Silence | Classification::NoAudio));
     assert_eq!(bob.sources().len(), 0, "bob should have no inbound sources");
 
     // The misdirection is targeted: Bob's own media still reached Alice's port
     // (Bob answered with his real address), so Alice has a live inbound source.
-    assert!(
-        !alice.sources().is_empty(),
-        "alice should still receive bob's media"
-    );
+    assert!(!alice.sources().is_empty(), "alice should still receive bob's media");
 }

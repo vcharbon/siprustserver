@@ -55,7 +55,9 @@ async fn refer_reject_http_403() {
     let h = Harness::with_transit_delay("refer-reject-http-403", 1);
     let alice = h.agent("alice", "127.0.0.1:5701").await;
     let bob = h.agent("bob", "127.0.0.1:5711").await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5711).start(&h, "b2bua", "127.0.0.1:5721").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5711)
+        .start(&h, "b2bua", "127.0.0.1:5721")
+        .await;
 
     // A↔B established.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -102,7 +104,9 @@ async fn refer_http_timeout() {
     let h = Harness::new("refer-http-timeout");
     let alice = h.agent("alice", "127.0.0.1:5702").await;
     let bob = h.agent("bob", "127.0.0.1:5712").await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5712).start(&h, "b2bua", "127.0.0.1:5722").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5712)
+        .start(&h, "b2bua", "127.0.0.1:5722")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -156,7 +160,9 @@ async fn refer_replaces_rejected() {
     let h = Harness::with_transit_delay("refer-replaces-rejected", 1);
     let alice = h.agent("alice", "127.0.0.1:5703").await;
     let bob = h.agent("bob", "127.0.0.1:5713").await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5713).start(&h, "b2bua", "127.0.0.1:5723").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5713)
+        .start(&h, "b2bua", "127.0.0.1:5723")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -205,7 +211,9 @@ async fn refer_out_of_dialog() {
     let alice = h.agent("alice", "127.0.0.1:5704").await;
     let bob = h.agent("bob", "127.0.0.1:5714").await;
     let stranger = h.agent("stranger", "127.0.0.1:5734").await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5714).start(&h, "b2bua", "127.0.0.1:5724").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5714)
+        .start(&h, "b2bua", "127.0.0.1:5724")
+        .await;
 
     // Keep a real A↔B call alive so the B2BUA has routing state around.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -240,7 +248,9 @@ async fn refer_second_during_authorizing() {
     let h = Harness::new("refer-second-during-authorizing");
     let alice = h.agent("alice", "127.0.0.1:5705").await;
     let bob = h.agent("bob", "127.0.0.1:5715").await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5715).start(&h, "b2bua", "127.0.0.1:5725").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5715)
+        .start(&h, "b2bua", "127.0.0.1:5725")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -306,7 +316,9 @@ async fn refer_unreadable_refer_to_rejected_400() {
     let h = Harness::with_transit_delay("refer-unreadable-refer-to", 1);
     let alice = h.agent("alice", "127.0.0.1:5707").await;
     let bob = h.agent("bob", "127.0.0.1:5717").await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5717).start(&h, "b2bua", "127.0.0.1:5727").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5717)
+        .start(&h, "b2bua", "127.0.0.1:5727")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;

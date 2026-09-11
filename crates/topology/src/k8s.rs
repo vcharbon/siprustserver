@@ -54,14 +54,18 @@ impl K8sMembership {
     /// runtime — it never tears the process down (liveness over completeness,
     /// ADR-0011 X5), matching the b2bua's "boot and serve even if peers are
     /// unreachable" stance.
-    pub fn spawn(client: Client, namespace: impl Into<String>, service_name: impl Into<String>) -> Self {
+    pub fn spawn(
+        client: Client,
+        namespace: impl Into<String>,
+        service_name: impl Into<String>,
+    ) -> Self {
         let namespace = namespace.into();
         let service_name = service_name.into();
         let state = Arc::new(MembershipState::new(vec![]));
 
         let api: Api<EndpointSlice> = Api::namespaced(client, &namespace);
-        let cfg = watcher::Config::default()
-            .labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
+        let cfg =
+            watcher::Config::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
         let (reader, writer) = reflector::store();
 
         let synced = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -137,11 +141,8 @@ fn peers_from_slices<'a>(slices: impl IntoIterator<Item = &'a EndpointSlice>) ->
             let Some(host) = ep.addresses.first().cloned() else {
                 continue;
             };
-            let ordinal = ep
-                .target_ref
-                .as_ref()
-                .and_then(|r| r.name.clone())
-                .or_else(|| ep.hostname.clone());
+            let ordinal =
+                ep.target_ref.as_ref().and_then(|r| r.name.clone()).or_else(|| ep.hostname.clone());
             if let Some(ordinal) = ordinal {
                 out.push(Peer::new(ordinal, host));
             }
@@ -170,11 +171,7 @@ mod tests {
     }
 
     fn slice(endpoints: Vec<Endpoint>) -> EndpointSlice {
-        EndpointSlice {
-            address_type: "IPv4".to_string(),
-            endpoints,
-            ..Default::default()
-        }
+        EndpointSlice { address_type: "IPv4".to_string(), endpoints, ..Default::default() }
     }
 
     #[test]
@@ -186,10 +183,7 @@ mod tests {
         let peers = peers_from_slices([&s]);
         assert_eq!(
             peers,
-            vec![
-                Peer::new("b2bua-worker-0", "10.0.0.1"),
-                Peer::new("b2bua-worker-1", "10.0.0.2"),
-            ]
+            vec![Peer::new("b2bua-worker-0", "10.0.0.1"), Peer::new("b2bua-worker-1", "10.0.0.2"),]
         );
     }
 
@@ -210,10 +204,7 @@ mod tests {
         let peers = peers_from_slices([&a, &b]);
         assert_eq!(
             peers,
-            vec![
-                Peer::new("b2bua-worker-0", "10.0.0.1"),
-                Peer::new("b2bua-worker-1", "10.0.0.2"),
-            ]
+            vec![Peer::new("b2bua-worker-0", "10.0.0.1"), Peer::new("b2bua-worker-1", "10.0.0.2"),]
         );
     }
 

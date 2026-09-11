@@ -40,9 +40,9 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
     let h = Harness::with_transit_delay("noanswer-cancel-200-crossing", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let carol = h.agent("carol", "127.0.0.1:5070").await; // rings, no-answer'd, answers late
-    // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
-    // anyway — the crossing this test exists to reap. Scoped to carol, so the
-    // same rule still gates every B2BUA bind.
+                                                          // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
+                                                          // anyway — the crossing this test exists to reap. Scoped to carol, so the
+                                                          // same rule still gates every B2BUA bind.
     h.waive(
         WaiverScope::rule(
             "no-200-after-cancel",
@@ -139,9 +139,9 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     let h = Harness::with_transit_delay("noanswer-reject-cancel-200-crossing", 1);
     let alice = h.agent("alice", "127.0.0.1:5062").await;
     let carol = h.agent("carol", "127.0.0.1:5072").await; // rings, no-answer'd, answers late
-    // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
-    // anyway — the crossing this test exists to reap. Scoped to carol, so the
-    // same rule still gates every B2BUA bind.
+                                                          // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
+                                                          // anyway — the crossing this test exists to reap. Scoped to carol, so the
+                                                          // same rule still gates every B2BUA bind.
     h.waive(
         WaiverScope::rule(
             "no-200-after-cancel",
@@ -218,9 +218,9 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     let h = Harness::with_transit_delay("dropsdp-noanswer-cancel-200-crossing", 1);
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let carol = h.agent("carol", "127.0.0.1:5074").await; // rings, no-answer'd, answers late
-    // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
-    // anyway — the crossing this test exists to reap. Scoped to carol, so the
-    // same rule still gates every B2BUA bind.
+                                                          // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
+                                                          // anyway — the crossing this test exists to reap. Scoped to carol, so the
+                                                          // same rule still gates every B2BUA bind.
     h.waive(
         WaiverScope::rule(
             "no-200-after-cancel",
@@ -233,8 +233,7 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     let decision = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
-                let mut r =
-                    route_to_with_18x("127.0.0.1", 5074, RelayFirst18xStrategy::DropSdp);
+                let mut r = route_to_with_18x("127.0.0.1", 5074, RelayFirst18xStrategy::DropSdp);
                 r.no_answer_timeout_sec = Some(30);
                 r.callback_context = Some("noanswer-ctx".into());
                 NewCallResponse::Route(r)
@@ -319,9 +318,9 @@ async fn transaction_timeout_cancel_crossed_by_200_reaps_the_abandoned_callee() 
     let h = Harness::with_transit_delay("txn-timeout-cancel-200-crossing", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let carol = h.agent("carol", "127.0.0.1:5070").await; // rings, dead air, then answers late
-    // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
-    // anyway — the crossing this test exists to reap. Scoped to carol, so the
-    // same rule still gates every B2BUA bind.
+                                                          // The deliberate corner: carol takes the B2BUA's CANCEL and answers 200
+                                                          // anyway — the crossing this test exists to reap. Scoped to carol, so the
+                                                          // same rule still gates every B2BUA bind.
     h.waive(
         WaiverScope::rule(
             "no-200-after-cancel",

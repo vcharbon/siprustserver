@@ -74,9 +74,7 @@ impl ObligationSet {
     /// The two core kinds, in this order: [`LimiterObligations`],
     /// [`CdrObligation`].
     pub fn core() -> Self {
-        Self {
-            kinds: vec![Box::new(LimiterObligations), Box::new(CdrObligation)],
-        }
+        Self { kinds: vec![Box::new(LimiterObligations), Box::new(CdrObligation)] }
     }
 
     /// Extension point: a service / the runner registers an additional kind at
@@ -159,11 +157,7 @@ impl ObligationKind for CdrObligation {
     }
 
     fn settle(&self, _call: &Call, effects: &mut HandlerEffects) {
-        if !effects
-            .buffered
-            .iter()
-            .any(|e| matches!(e, BufferedObservabilityEffect::WriteCdr))
-        {
+        if !effects.buffered.iter().any(|e| matches!(e, BufferedObservabilityEffect::WriteCdr)) {
             effects.buffered.push(BufferedObservabilityEffect::WriteCdr);
         }
     }

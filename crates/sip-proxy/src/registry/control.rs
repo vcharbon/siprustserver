@@ -36,4 +36,3 @@ impl WorkerRegistryControl for WorkerSetControl {
         self.set.set_health(id, health);
     }
 }
-

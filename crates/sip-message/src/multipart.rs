@@ -84,10 +84,7 @@ impl std::error::Error for MultipartError {}
 /// A container type that already names a `boundary` uses it, and is refused
 /// when a payload contains it; otherwise the boundary is derived from the parts
 /// and extended until no payload holds it.
-pub fn compose(
-    container_type: &str,
-    parts: &[MultipartPart],
-) -> Result<Composed, MultipartError> {
+pub fn compose(container_type: &str, parts: &[MultipartPart]) -> Result<Composed, MultipartError> {
     let media = MediaType::parse(&SipStr::owned(container_type)).ok();
     if !media.as_ref().is_some_and(MediaType::is_multipart) {
         return Err(MultipartError::NotMultipart { content_type: container_type.to_string() });
@@ -157,8 +154,7 @@ fn derive_boundary(parts: &[MultipartPart]) -> String {
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.len() <= haystack.len()
-        && haystack.windows(needle.len()).any(|window| window == needle)
+    needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 /// One part LOCATED in a framed body: its entity headers read, its content
@@ -328,8 +324,7 @@ mod tests {
     #[test]
     fn a_part_payload_rides_byte_exact_including_a_trailing_newline() {
         let composed = compose("multipart/mixed", &[sdp(), indata()]).unwrap();
-        let boundary =
-            composed.content_type.split("boundary=").nth(1).unwrap().as_bytes().to_vec();
+        let boundary = composed.content_type.split("boundary=").nth(1).unwrap().as_bytes().to_vec();
         // Split the way an extractor does and read each part's content back.
         let delim = [b"--".as_slice(), &boundary].concat();
         let text = composed.body.clone();

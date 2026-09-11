@@ -583,9 +583,7 @@ impl RuleId {
             RuleId::NoAckToDialogCreating2xx => "no-ack-to-dialog-creating-2xx",
             RuleId::Unacked2xxNotCleared => "unacked-2xx-not-cleared",
             RuleId::RackWithoutKnownInvite => "rack-without-known-invite",
-            RuleId::NoOverlappingReliableProvisionals => {
-                "no-overlapping-reliable-provisionals"
-            }
+            RuleId::NoOverlappingReliableProvisionals => "no-overlapping-reliable-provisionals",
             RuleId::NonContiguousRseq => "non-contiguous-rseq",
             RuleId::NoPrackOfOutOfOrderRseq => "no-prack-of-out-of-order-rseq",
             RuleId::SingleFinalPerServerTxn => "single-final-per-server-txn",
@@ -615,9 +613,7 @@ impl RuleId {
             RuleId::RegisterNoRouteSet => "register-no-route-set",
             RuleId::ConcurrentReInvite500Or491 => "concurrent-re-invite-500-or-491",
             RuleId::NoByeOutsideOrEarlyDialog => "no-bye-outside-or-early-dialog",
-            RuleId::NoReInviteWhileInviteInProgress => {
-                "no-re-invite-while-invite-in-progress"
-            }
+            RuleId::NoReInviteWhileInviteInProgress => "no-re-invite-while-invite-in-progress",
             RuleId::Proxy100WithinGrace => "proxy-100-within-grace",
             RuleId::UnackedInviteNon2xxFinal => "unacked-invite-non-2xx-final",
             RuleId::FailedReinviteTearsDownDialog => "failed-reinvite-tears-down-dialog",
@@ -634,9 +630,7 @@ impl RuleId {
             RuleId::NoNewReliable1xxAfterFinal => "no-new-reliable-1xx-after-final",
             RuleId::NoPrackOf100Trying => "no-prack-of-100-trying",
             RuleId::PrackAnswers1xxOffer => "prack-answers-1xx-offer",
-            RuleId::AckBodyAfterCompleteOfferAnswer => {
-                "ack-body-after-complete-offer-answer"
-            }
+            RuleId::AckBodyAfterCompleteOfferAnswer => "ack-body-after-complete-offer-answer",
             RuleId::Final2xxAnswersTheOffer => "final-2xx-answers-the-offer",
             RuleId::SecondAnswerRepeatsTheFirst => "second-answer-repeats-the-first",
             RuleId::AnswerStreamMatchesOffer => "answer-stream-matches-offer",
@@ -2407,9 +2401,7 @@ impl Evidence {
             Evidence::ExtraTryingForwarded { trying_msg, .. } => *trying_msg,
             Evidence::UnknownDialogRequest { unknown_dialog_msg, .. } => *unknown_dialog_msg,
             Evidence::RejectionNotIssued { rejection_msg, .. } => *rejection_msg,
-            Evidence::ResponseHeadersMissing { response_headers_msg, .. } => {
-                *response_headers_msg
-            }
+            Evidence::ResponseHeadersMissing { response_headers_msg, .. } => *response_headers_msg,
             Evidence::NoTargetFinal { no_target_msg, .. } => *no_target_msg,
             Evidence::AckRequireNotSubset { ack_require_msg, .. } => *ack_require_msg,
             Evidence::AckRouteDiverged { ack_route_msg, .. } => *ack_route_msg,
@@ -2418,18 +2410,12 @@ impl Evidence {
             Evidence::ConcurrentRegister { concurrent_register_msg, .. } => {
                 *concurrent_register_msg
             }
-            Evidence::ConcurrentReInvite { concurrent_invite_msg, .. } => {
-                *concurrent_invite_msg
-            }
+            Evidence::ConcurrentReInvite { concurrent_invite_msg, .. } => *concurrent_invite_msg,
             Evidence::ByeOffDialog { bye_msg, .. } => *bye_msg,
-            Evidence::OverlappingReInvite { overtaking_invite_msg, .. } => {
-                *overtaking_invite_msg
-            }
+            Evidence::OverlappingReInvite { overtaking_invite_msg, .. } => *overtaking_invite_msg,
             Evidence::TryingNotSentInGrace { trying_owed_msg, .. } => *trying_owed_msg,
             Evidence::UnackedReject { reject_msg, .. } => *reject_msg,
-            Evidence::AbandonedReInvite { abandoned_invite_msg, .. } => {
-                *abandoned_invite_msg
-            }
+            Evidence::AbandonedReInvite { abandoned_invite_msg, .. } => *abandoned_invite_msg,
             Evidence::LateProvisional { late_provisional_msg, .. } => *late_provisional_msg,
             Evidence::Unreliable1xx { unreliable_1xx_msg, .. } => *unreliable_1xx_msg,
             Evidence::UnsolicitedReliable1xx { unsolicited_1xx_msg, .. } => *unsolicited_1xx_msg,
@@ -2442,12 +2428,8 @@ impl Evidence {
             Evidence::PrackedTrying { trying_prack_msg, .. } => *trying_prack_msg,
             Evidence::PrackWithoutAnswer { bodiless_prack_msg, .. } => *bodiless_prack_msg,
             Evidence::AckBodyOnClosedRound { ack_body_msg, .. } => *ack_body_msg,
-            Evidence::OfferLeftUnanswered { unanswered_final_msg, .. } => {
-                *unanswered_final_msg
-            }
-            Evidence::SecondAnswerDiverged { second_answer_msg, .. } => {
-                *second_answer_msg
-            }
+            Evidence::OfferLeftUnanswered { unanswered_final_msg, .. } => *unanswered_final_msg,
+            Evidence::SecondAnswerDiverged { second_answer_msg, .. } => *second_answer_msg,
             Evidence::AnswerStreamRetyped { answer_stream_msg, .. } => *answer_stream_msg,
             Evidence::SdpOriginDiverged { origin_msg, .. } => *origin_msg,
             Evidence::OfferWhilePending { new_offer_msg, .. } => *new_offer_msg,

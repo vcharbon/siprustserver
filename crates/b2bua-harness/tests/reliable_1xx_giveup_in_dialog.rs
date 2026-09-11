@@ -20,8 +20,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, WaiverScope};
 use scenario_harness::run::RunReport;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_net::RecordedSipEntry;
 
@@ -66,7 +66,12 @@ async fn advance(ms: u64) {
 }
 
 /// When each request of `method` went from `from` to `to`, in send order.
-fn requests_to(entries: &[RecordedSipEntry], from: SocketAddr, to: SocketAddr, method: &str) -> Vec<u64> {
+fn requests_to(
+    entries: &[RecordedSipEntry],
+    from: SocketAddr,
+    to: SocketAddr,
+    method: &str,
+) -> Vec<u64> {
     let head = format!("{method} ");
     let mut out: Vec<u64> = entries
         .iter()
@@ -174,11 +179,7 @@ async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_on
     let alice_bye = requests_to(&entries, alice_addr, b2bua.addr, "BYE");
     let relayed = requests_to(&entries, b2bua.addr, bob_addr, "BYE");
     assert_eq!(alice_bye.len(), 1, "alice ends the call once: {alice_bye:?}");
-    assert_eq!(
-        relayed.len(),
-        1,
-        "and the callee sees hers, relayed, and no other: {relayed:?}",
-    );
+    assert_eq!(relayed.len(), 1, "and the callee sees hers, relayed, and no other: {relayed:?}",);
     b2bua.assert_fully_reaped();
 }
 
@@ -270,10 +271,6 @@ async fn the_give_up_answers_the_face_that_owed_the_prack() {
     let bob_bye = requests_to(&entries, bob_addr, b2bua.addr, "BYE");
     let relayed = requests_to(&entries, b2bua.addr, alice_addr, "BYE");
     assert_eq!(bob_bye.len(), 1, "bob ends the call once: {bob_bye:?}");
-    assert_eq!(
-        relayed.len(),
-        1,
-        "and the caller sees his, relayed, and no other: {relayed:?}",
-    );
+    assert_eq!(relayed.len(), 1, "and the caller sees his, relayed, and no other: {relayed:?}",);
     b2bua.assert_fully_reaped();
 }

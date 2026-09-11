@@ -76,13 +76,12 @@ impl Correlation {
     ) -> Result<Self, String> {
         let template = template.into();
         let Some((prefix, suffix)) = template.split_once("${token}") else {
-            return Err(format!(
-                "correlation template {template:?} has no ${{token}} placeholder"
-            ));
+            return Err(format!("correlation template {template:?} has no ${{token}} placeholder"));
         };
         let extract = match extract {
             Some(re) => {
-                let re = Regex::new(re).map_err(|e| format!("bad correlation extract regex: {e}"))?;
+                let re =
+                    Regex::new(re).map_err(|e| format!("bad correlation extract regex: {e}"))?;
                 if re.captures_len() < 2 {
                     return Err(format!(
                         "correlation extract regex {:?} needs a capture group (group 1 = the token)",
@@ -200,14 +199,10 @@ mod tests {
     /// appends further params after it.
     #[test]
     fn pcv_shaped_template_renders_and_extracts() {
-        let c =
-            Correlation::header_templated("P-Charging-Vector", "icid-value=${token}", None)
-                .unwrap();
+        let c = Correlation::header_templated("P-Charging-Vector", "icid-value=${token}", None)
+            .unwrap();
         let (name, value) = stamp_header(&c, "lgfeed01");
-        assert_eq!(
-            (name.as_str(), value.as_str()),
-            ("P-Charging-Vector", "icid-value=lgfeed01")
-        );
+        assert_eq!((name.as_str(), value.as_str()), ("P-Charging-Vector", "icid-value=lgfeed01"));
 
         let relayed = invite(
             "<sip:bob@127.0.0.1>",

@@ -519,10 +519,7 @@ impl Obligation for No100relRequireOnNonInvite {
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
-            if msg.repeat
-                || !matches!(msg.kind, Kind::Request { .. })
-                || msg.is_request("INVITE")
-            {
+            if msg.repeat || !matches!(msg.kind, Kind::Request { .. }) || msg.is_request("INVITE") {
                 continue;
             }
             let finding = |d| charge(RuleId::No100relRequireOnNonInvite, msg, mi, d);
@@ -801,7 +798,8 @@ mod tests {
 
     #[test]
     fn max_forwards_at_seventy_is_compliant() {
-        let f = run(&MaxForwards, &[request("INVITE", "Max-Forwards: 70\r\nContent-Length: 0", b"")]);
+        let f =
+            run(&MaxForwards, &[request("INVITE", "Max-Forwards: 70\r\nContent-Length: 0", b"")]);
         assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
     }
 
@@ -956,7 +954,8 @@ mod tests {
 
     #[test]
     fn a_bye_carrying_contact_is_violated() {
-        let f = run(&NoContactOnBye, &[request("BYE", "Contact: <sip:a@h>\r\nContent-Length: 0", b"")]);
+        let f =
+            run(&NoContactOnBye, &[request("BYE", "Contact: <sip:a@h>\r\nContent-Length: 0", b"")]);
         let Decision::Violated(Evidence::ForbiddenHeaderPresent { header, value, .. }) =
             &f[0].decision
         else {
@@ -1039,7 +1038,10 @@ mod tests {
         else {
             panic!("cancel-cseq evidence: {:?}", f[0].decision)
         };
-        assert_eq!((header.as_str(), value.as_str(), expected.as_str()), ("CSeq;method", "INVITE", "CANCEL"));
+        assert_eq!(
+            (header.as_str(), value.as_str(), expected.as_str()),
+            ("CSeq;method", "INVITE", "CANCEL")
+        );
     }
 
     /// Both tokens are wire-model facts, so a byte-less vantage still decides.

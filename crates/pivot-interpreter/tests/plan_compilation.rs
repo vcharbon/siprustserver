@@ -32,8 +32,8 @@ fn documents(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn corpus() -> Vec<PathBuf> {
-    let mut roots = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../pivot-schema/tests/fixtures")];
+    let mut roots =
+        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pivot-schema/tests/fixtures")];
     if let Ok(extra) = std::env::var("PIVOT_DOC_DIRS") {
         roots.extend(extra.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }
@@ -130,8 +130,8 @@ fn refusals_with(flow: &str, postconditions: &str, deviations: &str) -> Vec<Plan
           "timing": {{ "expect_budget_ms": 1000, "settle_budget_ms": 1000 }}
         }}"#
     );
-    let document = PivotV3::from_json(&text)
-        .unwrap_or_else(|e| panic!("the fixture parses: {e}\n{text}"));
+    let document =
+        PivotV3::from_json(&text).unwrap_or_else(|e| panic!("the fixture parses: {e}\n{text}"));
     Plan::compile(document).err().unwrap_or_default()
 }
 
@@ -213,7 +213,8 @@ fn a_forward_anchor_and_an_unknown_one_are_told_apart() {
         }]
     );
     let unknown = r#"[{"id":"s1","leg":"A","op":"send","msg":{"method":"INVITE"},
-             "delay":{"ms":0,"from":"step:sX","compressible":true,"timer_linked":false}}]"#.to_string();
+             "delay":{"ms":0,"from":"step:sX","compressible":true,"timer_linked":false}}]"#
+        .to_string();
     assert_eq!(
         refusals(&unknown),
         [PlanError::UnknownReference {
@@ -292,10 +293,9 @@ fn an_unordered_group_that_holds_a_send_or_one_member_is_refused() {
     );
     let found = refusals(&flow);
     assert!(found.contains(&PlanError::UnorderedTooFewSteps { group: "u1".into(), steps: 1 }));
-    assert!(found.contains(&PlanError::UnorderedHoldsASend {
-        group: "u1".into(),
-        step: "s1".into()
-    }));
+    assert!(
+        found.contains(&PlanError::UnorderedHoldsASend { group: "u1".into(), step: "s1".into() })
+    );
 }
 
 #[test]
@@ -360,24 +360,29 @@ fn a_branch_accessor_on_something_that_is_not_an_alt_is_refused() {
 
 #[test]
 fn a_deviation_missing_its_payload_or_naming_a_scripted_step_is_refused() {
-    let flow = format!(
-        r#"[{{"id":"s1","leg":"A","op":"send","msg":{{"method":"INVITE"}},"delay":{D}}}]"#
-    );
+    let flow =
+        format!(r#"[{{"id":"s1","leg":"A","op":"send","msg":{{"method":"INVITE"}},"delay":{D}}}]"#);
     let found = refusals_with(
         &flow,
         r#""postconditions": { "cdr": { "absent": "unit test" } },"#,
         r#""deviations": [ { "id": "d1", "kind": "cseq-override", "leg": "A" },
                           { "id": "d2", "kind": "suppress-auto", "step": "s1" } ],"#,
     );
-    assert!(found.contains(&PlanError::DeviationMissingPayload {
-        deviation: "d1".into(),
-        kind: "cseq-override".into(),
-        missing: "value".into(),
-    }), "{found:?}");
-    assert!(found.contains(&PlanError::SuppressesScriptedStep {
-        deviation: "d2".into(),
-        step: "s1".into(),
-    }), "{found:?}");
+    assert!(
+        found.contains(&PlanError::DeviationMissingPayload {
+            deviation: "d1".into(),
+            kind: "cseq-override".into(),
+            missing: "value".into(),
+        }),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&PlanError::SuppressesScriptedStep {
+            deviation: "d2".into(),
+            step: "s1".into(),
+        }),
+        "{found:?}"
+    );
 }
 
 /// §11: a `verbatim-emission` on a transaction-derived step COMPILES. The
@@ -402,9 +407,8 @@ fn a_verbatim_emission_naming_an_automatic_compiles() {
 
 #[test]
 fn an_unknown_deviation_kind_compiles_so_the_run_can_name_it() {
-    let flow = format!(
-        r#"[{{"id":"s1","leg":"A","op":"send","msg":{{"method":"INVITE"}},"delay":{D}}}]"#
-    );
+    let flow =
+        format!(r#"[{{"id":"s1","leg":"A","op":"send","msg":{{"method":"INVITE"}},"delay":{D}}}]"#);
     let found = refusals_with(
         &flow,
         r#""postconditions": { "cdr": { "absent": "unit test" } },"#,
@@ -416,7 +420,8 @@ fn an_unknown_deviation_kind_compiles_so_the_run_can_name_it() {
 #[test]
 fn a_timer_linked_dwell_that_claims_to_be_compressible_is_refused() {
     let flow = r#"[{"id":"s1","leg":"A","op":"send","msg":{"method":"BYE"},
-             "delay":{"ms":65000,"from":"trigger","compressible":true,"timer_linked":true}}]"#.to_string();
+             "delay":{"ms":65000,"from":"trigger","compressible":true,"timer_linked":true}}]"#
+        .to_string();
     assert_eq!(refusals(&flow), [PlanError::CompressibleTimerLinkedDwell { step: "s1".into() }]);
 }
 
@@ -434,8 +439,12 @@ fn a_check_whose_op_and_value_disagree_is_refused_at_both_sites() {
         "",
     );
     assert_eq!(found.len(), 2, "{found:?}");
-    assert!(found.iter().any(|e| matches!(e, PlanError::CheckValueMismatch { site, .. } if site.starts_with("step"))));
-    assert!(found.iter().any(|e| matches!(e, PlanError::CheckValueMismatch { site, .. } if site == "postcondition check")));
+    assert!(found.iter().any(
+        |e| matches!(e, PlanError::CheckValueMismatch { site, .. } if site.starts_with("step"))
+    ));
+    assert!(found.iter().any(
+        |e| matches!(e, PlanError::CheckValueMismatch { site, .. } if site == "postcondition check")
+    ));
 }
 
 #[test]
@@ -456,9 +465,8 @@ fn every_refusal_is_collected_rather_than_stopping_at_the_first() {
 /// be attributed to gates nothing and points nowhere.
 #[test]
 fn an_rfc_violation_that_anchors_nowhere_or_names_no_emitter_is_refused() {
-    let flow = format!(
-        r#"[{{"id":"s1","leg":"A","op":"send","msg":{{"method":"INVITE"}},"delay":{D}}}]"#
-    );
+    let flow =
+        format!(r#"[{{"id":"s1","leg":"A","op":"send","msg":{{"method":"INVITE"}},"delay":{D}}}]"#);
     // The block rides the slot before `postconditions`, like `deviations` does.
     let violations = |entry: &str| format!(r#""rfc_violations": [{entry}],"#);
 

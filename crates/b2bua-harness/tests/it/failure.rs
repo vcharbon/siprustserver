@@ -16,7 +16,8 @@ async fn b_leg_busy_is_relayed_and_call_terminates() {
     let h = Harness::with_transit_delay("b2bua-busy", 0);
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5071").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     bob.receive("INVITE").await.respond(486, "Busy Here").await;
@@ -37,11 +38,8 @@ async fn decision_reject_answers_caller_directly() {
     let h = Harness::with_transit_delay("b2bua-reject", 0);
     let alice = h.agent("alice", "127.0.0.1:5062").await;
     let bob = h.agent("bob", "127.0.0.1:5072").await;
-    let decision = Arc::new(
-        ScriptedDecisionEngine::builder()
-            .fallback(|_| reject(403, "Forbidden"))
-            .build(),
-    );
+    let decision =
+        Arc::new(ScriptedDecisionEngine::builder().fallback(|_| reject(403, "Forbidden")).build());
     let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5082").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

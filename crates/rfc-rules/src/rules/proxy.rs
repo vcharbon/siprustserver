@@ -140,15 +140,15 @@ impl Obligation for Proxy100WithinGrace {
             }
             match &msg.kind {
                 Kind::Request { method } if method.eq_ignore_ascii_case("INVITE") => {
-                    taken
-                        .entry((msg.dst.as_str(), msg.call_id.as_str(), branch))
-                        .or_insert(Taken {
+                    taken.entry((msg.dst.as_str(), msg.call_id.as_str(), branch)).or_insert(
+                        Taken {
                             msg: mi,
                             hop: msg.hop,
                             ts_us: msg.at_us,
                             cseq: msg.cseq,
                             sender: msg.src.as_str(),
-                        });
+                        },
+                    );
                 }
                 Kind::Response { status } => {
                     let key = (msg.src.as_str(), msg.call_id.as_str(), branch);
@@ -186,10 +186,11 @@ impl Obligation for Proxy100WithinGrace {
                 }
                 // Nothing at all went out, and the observation may simply have
                 // stopped before it could.
-                None if !wire.obs.absence_decidable(invite.ts_us, PROXY_100_GRACE_US) => out
-                    .push(finding(Decision::Undecidable(
+                None if !wire.obs.absence_decidable(invite.ts_us, PROXY_100_GRACE_US) => {
+                    out.push(finding(Decision::Undecidable(
                         "the observation stopped inside the grace — truncation, not silence",
-                    ))),
+                    )))
+                }
                 _ => out.push(finding(Decision::Violated(Evidence::TryingNotSentInGrace {
                     trying_owed_msg: invite.msg,
                     trying_owed_hop: invite.hop,
@@ -384,23 +385,19 @@ impl Obligation for StrictRouteRewriteHandled {
                 .at(&BranchKey { emitter: proxy, call_id: msg.call_id.as_str(), branch })
                 .and_then(|b| b.first_sent(method));
             let Some(forwarded) = forwarded else {
-                out.push(finding(
-                    Decision::Violated(Evidence::StrictRouteNotRewritten {
-                        strict_route_msg: mi,
-                        strict_route_hop: msg.hop,
-                        strict_route_ts_us: msg.at_us,
-                        method: method.to_string(),
-                        branch: branch.to_string(),
-                        first_route: first_route.uri.clone(),
-                        forwarded_request_uri: String::new(),
-                    }),
-                ));
+                out.push(finding(Decision::Violated(Evidence::StrictRouteNotRewritten {
+                    strict_route_msg: mi,
+                    strict_route_hop: msg.hop,
+                    strict_route_ts_us: msg.at_us,
+                    method: method.to_string(),
+                    branch: branch.to_string(),
+                    first_route: first_route.uri.clone(),
+                    forwarded_request_uri: String::new(),
+                })));
                 continue;
             };
-            let sent_uri = wire.msgs[forwarded.msg]
-                .head
-                .as_deref()
-                .and_then(sniff::request_uri_facts);
+            let sent_uri =
+                wire.msgs[forwarded.msg].head.as_deref().and_then(sniff::request_uri_facts);
             let Some(sent_uri) = sent_uri else {
                 out.push(finding(Decision::Undecidable(
                     "the forward's Request-URI is unreadable at this vantage",
@@ -411,17 +408,15 @@ impl Obligation for StrictRouteRewriteHandled {
                 out.push(finding(Decision::Compliant));
                 continue;
             }
-            out.push(finding(
-                Decision::Violated(Evidence::StrictRouteNotRewritten {
-                    strict_route_msg: mi,
-                    strict_route_hop: msg.hop,
-                    strict_route_ts_us: msg.at_us,
-                    method: method.to_string(),
-                    branch: branch.to_string(),
-                    first_route: first_route.uri.clone(),
-                    forwarded_request_uri: sent_uri.uri,
-                }),
-            ));
+            out.push(finding(Decision::Violated(Evidence::StrictRouteNotRewritten {
+                strict_route_msg: mi,
+                strict_route_hop: msg.hop,
+                strict_route_ts_us: msg.at_us,
+                method: method.to_string(),
+                branch: branch.to_string(),
+                first_route: first_route.uri.clone(),
+                forwarded_request_uri: sent_uri.uri,
+            })));
         }
         out.sort_by_key(|f| f.anchor);
         out
@@ -500,7 +495,11 @@ impl<'a> Reading<'a> {
         }
         let txn = self
             .txns
-            .entry(TxnKey { taker: msg.dst.as_str(), call_id: msg.call_id.as_str(), cseq: msg.cseq })
+            .entry(TxnKey {
+                taker: msg.dst.as_str(),
+                call_id: msg.call_id.as_str(),
+                cseq: msg.cseq,
+            })
             .or_default();
         txn.taken += 1;
         if txn.taken > txn.sent {
@@ -675,9 +674,7 @@ mod tests {
         assert_eq!(f[0].taker, ALICE);
         assert_eq!(f[0].anchor, 2, "the occasion rests on the first excess 100");
         let Decision::Violated(Evidence::ExtraTryingForwarded {
-            trying_taken,
-            invites_sent,
-            ..
+            trying_taken, invites_sent, ..
         }) = &f[0].decision
         else {
             panic!("{:?}", f[0].decision)
@@ -704,9 +701,7 @@ mod tests {
         let f = hits(&extra);
         assert_eq!(f.len(), 1, "{f:?}");
         let Decision::Violated(Evidence::ExtraTryingForwarded {
-            trying_taken,
-            invites_sent,
-            ..
+            trying_taken, invites_sent, ..
         }) = &f[0].decision
         else {
             panic!("{:?}", f[0].decision)
@@ -744,12 +739,8 @@ mod tests {
             m.call_id = "c2".to_string();
             m
         };
-        let msgs = [
-            invite(1_000, 1),
-            trying(2_000, 1),
-            other(invite(3_000, 1)),
-            other(trying(4_000, 1)),
-        ];
+        let msgs =
+            [invite(1_000, 1), trying(2_000, 1), other(invite(3_000, 1)), other(trying(4_000, 1))];
         assert!(hits(&msgs).is_empty(), "{:?}", hits(&msgs));
     }
 
@@ -930,14 +921,8 @@ mod tests {
     /// A LOOSE first route is the §16.12 path this rule says nothing about.
     #[test]
     fn a_loose_first_route_is_no_occasion() {
-        let msgs = [routed(
-            1_000,
-            ALICE,
-            PROXY,
-            "z9hG4bK-in",
-            "sip:bob@h",
-            "Route: <sip:p@h;lr>\r\n",
-        )];
+        let msgs =
+            [routed(1_000, ALICE, PROXY, "z9hG4bK-in", "sip:bob@h", "Route: <sip:p@h;lr>\r\n")];
         assert!(strict(&msgs).is_empty(), "{:?}", strict(&msgs));
     }
 
@@ -999,7 +984,10 @@ mod tests {
         else {
             panic!("strict-route evidence: {:?}", f[0].decision)
         };
-        assert_eq!((first_route.as_str(), forwarded_request_uri.as_str()), ("sip:strict@h", "sip:bob@h"));
+        assert_eq!(
+            (first_route.as_str(), forwarded_request_uri.as_str()),
+            ("sip:strict@h", "sip:bob@h")
+        );
     }
 
     /// The header block is what says a request was strict-routed at all: a
@@ -1083,9 +1071,8 @@ mod tests {
     fn silence_on_a_closed_observation_is_violated() {
         let f = grace(&[invite(1_000, 1)]);
         assert_eq!(f.len(), 1, "{f:?}");
-        let Decision::Violated(Evidence::TryingNotSentInGrace {
-            first_final_after_us, ..
-        }) = &f[0].decision
+        let Decision::Violated(Evidence::TryingNotSentInGrace { first_final_after_us, .. }) =
+            &f[0].decision
         else {
             panic!("{:?}", f[0].decision)
         };

@@ -12,8 +12,7 @@ use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope,
 };
 use sip_message::header::{
-    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, MaxForwards, TokenListHeader,
-    Uri,
+    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, MaxForwards, TokenListHeader, Uri,
 };
 use sip_message::{hops, Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
@@ -37,7 +36,8 @@ use super::identity::{leg_contact, leg_via};
 /// would drop a call the stack accepted. Nothing routes on it — the b-leg's
 /// Request-URI comes from the decision, through [`build_b_leg`]'s reader.
 pub fn rebuild_a_leg_invite(snap: &call::ALegInviteSnapshot) -> SipRequest {
-    let mut draft = RequestDraft::new(Method::Invite, Uri::parse_or_verbatim(&SipStr::owned(&snap.uri)));
+    let mut draft =
+        RequestDraft::new(Method::Invite, Uri::parse_or_verbatim(&SipStr::owned(&snap.uri)));
     for h in &snap.headers {
         draft = draft.push_raw(HeaderName::from(h.name.as_str()), SipStr::owned(&h.value));
     }
@@ -291,8 +291,7 @@ pub fn build_b_leg(
     if let Some(charging) = charging {
         let name = ChargingVector::header_name();
         if !extra_headers.iter().any(|h| name.matches(&h.name)) {
-            let host =
-                charging.generated_at.clone().unwrap_or_else(|| config.sip_local_ip.clone());
+            let host = charging.generated_at.clone().unwrap_or_else(|| config.sip_local_ip.clone());
             let icid = format!("{}-{}", id_gen.new_tag(), leg_id);
             extra_headers.push(MsgHeader {
                 name: SipStr::owned(name.as_wire_str()),
@@ -352,10 +351,7 @@ pub fn build_b_leg(
             pending_invite_txn: Some(InviteTxnHandle {
                 branch: branch.clone(),
                 original_invite: invite.image().to_vec(),
-                destination: call::HostPort {
-                    host: wire_dest.0.clone(),
-                    port: wire_dest.1,
-                },
+                destination: call::HostPort { host: wire_dest.0.clone(), port: wire_dest.1 },
             }),
             cached_sdp: None,
             pending_reinvite_2xx: None,
@@ -371,10 +367,7 @@ pub fn build_b_leg(
         leg_id: leg_id.to_string(),
         call_id: b_call_id,
         from_tag,
-        source: RemoteInfo {
-            address: dest.0.clone(),
-            port: dest.1,
-        },
+        source: RemoteInfo { address: dest.0.clone(), port: dest.1 },
         state: LegState::Trying,
         disposition: LegDisposition::Pending,
         dialogs: vec![dialog],

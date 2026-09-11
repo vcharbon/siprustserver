@@ -102,10 +102,13 @@ fn dual_face_core() -> Fixture {
         addr: format!("{EXT_VIP}:{EXT_PORT}").parse().unwrap(),
         sent: sent.clone(),
     };
-    let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![
-        WorkerEntry::alive("w1", ProxyAddr::new(W1, 5060)),
-    ]));
-    let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+    let reg: Arc<dyn WorkerRegistry> =
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1, 5060),
+        )]));
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
     let metrics = Arc::new(ProxyMetrics::new());
     let core = ProxyCoreBuilder::new(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
         .clock(Clock::test_at(0))
@@ -197,11 +200,31 @@ async fn inbound_invite_egresses_internal_with_internal_via_and_per_face_rr() {
     // caller-facing entry = EXTERNAL face with the cookie.
     let rrs = header_lines(bytes, "Record-Route");
     assert_eq!(rrs.len(), 2, "double record-route, got {rrs:?}");
-    assert!(rrs[0].contains(&format!("{INT_VIP}:{INT_PORT}")), "top RR faces the worker: {}", rrs[0]);
-    assert!(rrs[0].contains(";outbound"), "worker-facing RR keeps the direction marker: {}", rrs[0]);
-    assert!(rrs[0].contains(&format!("target={W1}:5060")), "cookie rides the worker-facing RR too: {}", rrs[0]);
-    assert!(rrs[1].contains(&format!("{EXT_VIP}:{EXT_PORT}")), "lower RR faces the caller: {}", rrs[1]);
-    assert!(rrs[1].contains(&format!("target={W1}:5060")), "cookie on the caller-facing RR: {}", rrs[1]);
+    assert!(
+        rrs[0].contains(&format!("{INT_VIP}:{INT_PORT}")),
+        "top RR faces the worker: {}",
+        rrs[0]
+    );
+    assert!(
+        rrs[0].contains(";outbound"),
+        "worker-facing RR keeps the direction marker: {}",
+        rrs[0]
+    );
+    assert!(
+        rrs[0].contains(&format!("target={W1}:5060")),
+        "cookie rides the worker-facing RR too: {}",
+        rrs[0]
+    );
+    assert!(
+        rrs[1].contains(&format!("{EXT_VIP}:{EXT_PORT}")),
+        "lower RR faces the caller: {}",
+        rrs[1]
+    );
+    assert!(
+        rrs[1].contains(&format!("target={W1}:5060")),
+        "cookie on the caller-facing RR: {}",
+        rrs[1]
+    );
     assert!(!rrs[1].contains(";outbound"), "caller-facing RR is NOT the outbound half: {}", rrs[1]);
 
     // Per-face egress metric.
@@ -236,12 +259,28 @@ async fn worker_outbound_invite_egresses_external_with_external_via_and_mirrored
     // for the ORIGINATING worker's identity).
     let rrs = header_lines(bytes, "Record-Route");
     assert_eq!(rrs.len(), 2, "double record-route, got {rrs:?}");
-    assert!(rrs[0].contains(&format!("{EXT_VIP}:{EXT_PORT}")), "top RR faces the callee: {}", rrs[0]);
+    assert!(
+        rrs[0].contains(&format!("{EXT_VIP}:{EXT_PORT}")),
+        "top RR faces the callee: {}",
+        rrs[0]
+    );
     assert!(!rrs[0].contains(";outbound"), "callee-facing RR is the cookie half: {}", rrs[0]);
-    assert!(rrs[0].contains(&format!("target={W1}:5060")), "cookie pins the originating worker: {}", rrs[0]);
-    assert!(rrs[1].contains(&format!("{INT_VIP}:{INT_PORT}")), "lower RR faces the worker: {}", rrs[1]);
+    assert!(
+        rrs[0].contains(&format!("target={W1}:5060")),
+        "cookie pins the originating worker: {}",
+        rrs[0]
+    );
+    assert!(
+        rrs[1].contains(&format!("{INT_VIP}:{INT_PORT}")),
+        "lower RR faces the worker: {}",
+        rrs[1]
+    );
     assert!(rrs[1].contains(";outbound"), "worker-facing RR keeps the marker: {}", rrs[1]);
-    assert!(rrs[1].contains(&format!("target={W1}:5060")), "cookie rides the worker-facing RR too: {}", rrs[1]);
+    assert!(
+        rrs[1].contains(&format!("target={W1}:5060")),
+        "cookie rides the worker-facing RR too: {}",
+        rrs[1]
+    );
 }
 
 // ── (a) response face picking, both directions ──────────────────────────────
@@ -321,7 +360,12 @@ Content-Length: 0\r\n\r\n"
     // No synthesized hop ACK (ADR-0022 X4: the proxy is transaction-less; the
     // worker's Timer G + the caller's own relayed ACK are the reliability
     // layer) — the 486 relay is the only send, to the caller's external face.
-    assert_eq!(sent.len(), 1, "486 relay must be the only send (no synthesized ACK), got {}", sent.len());
+    assert_eq!(
+        sent.len(),
+        1,
+        "486 relay must be the only send (no synthesized ACK), got {}",
+        sent.len()
+    );
     assert_eq!(sent[0].0, "ext");
     assert_eq!(sent[0].1, caller_src());
 
@@ -344,13 +388,21 @@ Content-Length: 0\r\n\r\n"
     let sent = f.take_sent();
     assert_eq!(sent.len(), 1);
     let (ack_face, ack_dst, ack_bytes) = &sent[0];
-    assert_eq!(*ack_face, "int", "the relayed ACK must egress toward the worker on the internal face");
+    assert_eq!(
+        *ack_face, "int",
+        "the relayed ACK must egress toward the worker on the internal face"
+    );
     assert_eq!(*ack_dst, format!("{W1}:5060").parse::<SocketAddr>().unwrap());
     let text = String::from_utf8_lossy(ack_bytes);
-    assert!(text.starts_with("ACK "), "expected an ACK, got: {}", text.lines().next().unwrap_or(""));
+    assert!(
+        text.starts_with("ACK "),
+        "expected an ACK, got: {}",
+        text.lines().next().unwrap_or("")
+    );
     let vias = header_lines(ack_bytes, "Via");
     assert!(
-        vias[0].contains(&format!("{INT_VIP}:{INT_PORT}")) && vias[0].contains(&format!("branch={proxy_branch}")),
+        vias[0].contains(&format!("{INT_VIP}:{INT_PORT}"))
+            && vias[0].contains(&format!("branch={proxy_branch}")),
         "the relayed ACK's Via must carry the internal-face advertise + the INVITE's branch: {}",
         vias[0],
     );
@@ -375,10 +427,8 @@ Route: <sip:{EXT_VIP}:{EXT_PORT};target={W1}:5060;lr>\r\n\
 Route: <sip:{INT_VIP}:{INT_PORT};target={W1}:5060;outbound;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let outcome = f
-        .core
-        .route_request(&parse_msg(&raw), format!("{CALLEE}:5060").parse().unwrap())
-        .await;
+    let outcome =
+        f.core.route_request(&parse_msg(&raw), format!("{CALLEE}:5060").parse().unwrap()).await;
     assert_eq!(
         outcome.decision,
         RoutingDecisionKind::DecodeForward,
@@ -414,10 +464,8 @@ Route: <sip:{INT_VIP}:{INT_PORT};target={W1}:5060;outbound;lr>\r\n\
 Route: <sip:{EXT_VIP}:{EXT_PORT};target={W1}:5060;lr>\r\n\
 Content-Length: 0\r\n\r\n"
     );
-    let outcome = f
-        .core
-        .route_request(&parse_msg(&raw), format!("{W1}:5060").parse().unwrap())
-        .await;
+    let outcome =
+        f.core.route_request(&parse_msg(&raw), format!("{W1}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::WorkerOutbound);
     assert_eq!(outcome.target, Some(ProxyAddr::new(CALLER, 5060)));
 
@@ -446,10 +494,13 @@ async fn single_face_rr_format_is_unchanged() {
         addr: format!("{INT_VIP}:{INT_PORT}").parse().unwrap(),
         sent: sent.clone(),
     };
-    let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![
-        WorkerEntry::alive("w1", ProxyAddr::new(W1, 5060)),
-    ]));
-    let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+    let reg: Arc<dyn WorkerRegistry> =
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1, 5060),
+        )]));
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
     let core = ProxyCoreBuilder::new(ProxyAddr::new(INT_VIP, INT_PORT), strategy, reg)
         .clock(Clock::test_at(0))
         .build(Box::new(int_ep));

@@ -19,9 +19,7 @@ async fn loopback_send_recv() {
     let a = net.bind_udp(loopback(64)).await.unwrap();
     let b = net.bind_udp(loopback(64)).await.unwrap();
 
-    a.send_to(b"hello over the wire", b.local_addr())
-        .await
-        .unwrap();
+    a.send_to(b"hello over the wire", b.local_addr()).await.unwrap();
 
     let pkt = timeout(Duration::from_secs(2), b.recv())
         .await
@@ -47,10 +45,7 @@ async fn pre_ingress_reply_round_trips() {
 
     a.send_to(b"PING", b.local_addr()).await.unwrap();
 
-    let reply = timeout(Duration::from_secs(2), a.recv())
-        .await
-        .expect("reply timed out")
-        .unwrap();
+    let reply = timeout(Duration::from_secs(2), a.recv()).await.expect("reply timed out").unwrap();
     assert_eq!(reply.raw, b"PONG");
     assert_eq!(b.counters().pre_ingress_replies, 1);
     assert_eq!(b.counters().enqueued, 0);
@@ -73,10 +68,7 @@ async fn real_has_no_transit_or_inflight() {
 async fn reuse_port_shards_one_flow_to_one_socket() {
     let net = RealSignalingNetwork::new();
     // First bind picks the port (reuse_port set so the second can join it).
-    let s1 = net
-        .bind_udp(loopback(64).with_reuse_port(true))
-        .await
-        .expect("first reuse-port bind");
+    let s1 = net.bind_udp(loopback(64).with_reuse_port(true)).await.expect("first reuse-port bind");
     let addr = s1.local_addr();
     let s2 = net
         .bind_udp(BindUdpOpts::new(addr, 64).with_reuse_port(true))
@@ -105,7 +97,9 @@ async fn reuse_port_shards_one_flow_to_one_socket() {
     );
     let receiver = if e1 > 0 { &s1 } else { &s2 };
     let got: Vec<usize> = std::iter::from_fn(|| receiver.try_recv())
-        .map(|pkt| std::str::from_utf8(&pkt.raw).unwrap().strip_prefix("pkt-").unwrap().parse().unwrap())
+        .map(|pkt| {
+            std::str::from_utf8(&pkt.raw).unwrap().strip_prefix("pkt-").unwrap().parse().unwrap()
+        })
         .collect();
     assert_eq!(got, (0..N).collect::<Vec<_>>(), "per-flow order preserved on one shard");
 }
@@ -325,8 +319,8 @@ fn run_in_1500_mtu_netns(child: &str, extra: &str) -> Option<bool> {
         .env(CHILD_ENV, "1")
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).to_string()
-        + &String::from_utf8_lossy(&out.stderr);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     // The namespace itself failed to come up (no unshare privileges, no `ip`,
     // no nft): not a verdict on the stack.
     if !out.status.success() && !text.contains("test result") {
@@ -338,10 +332,7 @@ fn run_in_1500_mtu_netns(child: &str, extra: &str) -> Option<bool> {
     }
     // A child that skipped its own body would still report success, so the
     // probe states that it ran and the parent demands that statement.
-    assert!(
-        text.contains(PROBE_RAN),
-        "the child probe never ran inside the namespace: {text}"
-    );
+    assert!(text.contains(PROBE_RAN), "the child probe never ran inside the namespace: {text}");
     Some(out.status.success())
 }
 
@@ -432,7 +423,9 @@ async fn fragment_loss_probe() {
     let b = net.bind_udp(loopback(64)).await.unwrap();
 
     let big = vec![b'z'; 4_000];
-    a.send_to(&big, b.local_addr()).await.expect("the send still succeeds — the loss is downstream");
+    a.send_to(&big, b.local_addr())
+        .await
+        .expect("the send still succeeds — the loss is downstream");
 
     let nothing = timeout(Duration::from_millis(500), b.recv()).await;
     assert!(nothing.is_err(), "a message missing a fragment is never delivered in part");

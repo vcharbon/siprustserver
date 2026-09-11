@@ -27,10 +27,8 @@ fn each_clip_classifies_as_itself_with_a_margin() {
 fn every_clips_nearest_reference_is_itself() {
     let clips = reference_clips();
     let opts = MfccOptions::default();
-    let sigs: Vec<(ClipName, Vec<f64>)> = clips
-        .iter()
-        .map(|(&n, pcm)| (n, clip_signature(pcm, &opts).expect("signature")))
-        .collect();
+    let sigs: Vec<(ClipName, Vec<f64>)> =
+        clips.iter().map(|(&n, pcm)| (n, clip_signature(pcm, &opts).expect("signature"))).collect();
     for (a, sig_a) in &sigs {
         let self_d = cosine_distance(sig_a, sig_a);
         for (b, sig_b) in &sigs {
@@ -53,9 +51,7 @@ fn empty_pcm_is_no_audio() {
 #[test]
 fn near_silent_pcm_is_silence() {
     // ±1 LSB dither over 1 s — below the RMS floor.
-    let quiet: Vec<i16> = (0..CLIP_SAMPLE_RATE as usize)
-        .map(|i| (i % 3) as i16 - 1)
-        .collect();
+    let quiet: Vec<i16> = (0..CLIP_SAMPLE_RATE as usize).map(|i| (i % 3) as i16 - 1).collect();
     let v = classify(&quiet, &ClassifyOptions::default());
     assert_eq!(v.classification, Classification::Silence);
     assert_eq!(v.matched, None);
@@ -82,10 +78,7 @@ fn ringback_then_voice_classifies_as_ordered_sequence() {
 
     let segments = classify_sequence(
         &joined,
-        &SequenceOptions {
-            sample_rate: CLIP_SAMPLE_RATE,
-            ..Default::default()
-        },
+        &SequenceOptions { sample_rate: CLIP_SAMPLE_RATE, ..Default::default() },
     );
     assert!(matches_sequence(&segments, &[ClipName::Ringback, ClipName::Bob]));
     assert!(!matches_sequence(&segments, &[ClipName::Bob, ClipName::Ringback]));

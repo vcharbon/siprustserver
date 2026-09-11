@@ -6,9 +6,9 @@ use async_trait::async_trait;
 
 #[cfg(feature = "real")]
 mod cause;
-mod recording;
 #[cfg(feature = "real")]
 mod real;
+mod recording;
 mod simulated;
 
 #[cfg(feature = "real")]
@@ -44,22 +44,12 @@ pub struct HttpRequest {
 impl HttpRequest {
     /// A `POST <path>` carrying `body`, no headers.
     pub fn post(path: impl Into<String>, body: Vec<u8>) -> Self {
-        Self {
-            method: "POST".into(),
-            path: path.into(),
-            headers: Vec::new(),
-            body,
-        }
+        Self { method: "POST".into(), path: path.into(), headers: Vec::new(), body }
     }
 
     /// A `GET <path>` with an empty body, no headers.
     pub fn get(path: impl Into<String>) -> Self {
-        Self {
-            method: "GET".into(),
-            path: path.into(),
-            headers: Vec::new(),
-            body: Vec::new(),
-        }
+        Self { method: "GET".into(), path: path.into(), headers: Vec::new(), body: Vec::new() }
     }
 
     /// Append one `(name, value)` header (builder style).
@@ -93,20 +83,12 @@ pub struct HttpResponse {
 impl HttpResponse {
     /// A `200 OK` carrying `body`, no headers.
     pub fn ok(body: Vec<u8>) -> Self {
-        Self {
-            status: 200,
-            headers: Vec::new(),
-            body,
-        }
+        Self { status: 200, headers: Vec::new(), body }
     }
 
     /// A status-only response with an empty body, no headers.
     pub fn status(status: u16) -> Self {
-        Self {
-            status,
-            headers: Vec::new(),
-            body: Vec::new(),
-        }
+        Self { status, headers: Vec::new(), body: Vec::new() }
     }
 
     /// Set the body (builder style).

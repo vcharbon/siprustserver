@@ -52,8 +52,9 @@ mod auth_seam {
         let server = h.agent("server", "127.0.0.1:5070").await;
 
         let responder = FakeResponder {
-            credential: "Digest username=\"alice\", realm=\"sip\", nonce=\"abc\", response=\"deadbeef\""
-                .to_string(),
+            credential:
+                "Digest username=\"alice\", realm=\"sip\", nonce=\"abc\", response=\"deadbeef\""
+                    .to_string(),
             seen: std::sync::Mutex::new(Vec::new()),
         };
 
@@ -183,8 +184,7 @@ mod auth_seam {
         // NOTIFY(s) then the BYE — the nondeterministic-count release pattern
         // (the ct_refer shape). The primitive 200s the NOTIFY, returns on the
         // BYE, and hands the absorbed NOTIFY back for assertion.
-        let mut notify =
-            dialog.send_request(InDialogMethod::Notify).try_send().await.unwrap();
+        let mut notify = dialog.send_request(InDialogMethod::Notify).try_send().await.unwrap();
         let mut bye = dialog.bye().await;
 
         let (mut bye_txn, absorbed) =
@@ -264,11 +264,7 @@ mod auth_seam {
             c.respond(401, "Unauthorized").try_send().await.unwrap();
         });
 
-        match alice
-            .request(OutOfDialogMethod::Options, &server)
-            .try_send_authed(None, 200)
-            .await
-        {
+        match alice.request(OutOfDialogMethod::Options, &server).try_send_authed(None, 200).await {
             Err(StepError::WrongStatus { got: 401, expected: 200, .. }) => {}
             Err(other) => panic!("expected WrongStatus 200/401, got {other:?}"),
             Ok(r) => panic!("expected a 401 deviation, got {}", r.status()),
@@ -507,10 +503,7 @@ mod two_view_ladders {
             "a 2xx retransmission is end-to-end — the TU view keeps it",
         );
         assert!(
-            alice_wire
-                .iter()
-                .filter(|e| e.is_repeat())
-                .all(|e| e.seen_by() == SeenBy::Both),
+            alice_wire.iter().filter(|e| e.is_repeat()).all(|e| e.seen_by() == SeenBy::Both),
             "the ONLY repeat here is the 2xx, and it is in both views",
         );
 

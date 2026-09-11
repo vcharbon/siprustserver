@@ -6,17 +6,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use call_limiter::wire::{AdmitEntry, AdmitRequest, AdmitResponse, Hold, RefreshRequest, RefreshResponse, ReleaseRequest};
+use call_limiter::wire::{
+    AdmitEntry, AdmitRequest, AdmitResponse, Hold, RefreshRequest, RefreshResponse, ReleaseRequest,
+};
 use call_limiter::{AdmitResult, LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpRequest, HttpResponse, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 
 fn cfg() -> LimiterConfig {
-    LimiterConfig {
-        window_sec: 1,
-        active_windows: 3,
-        ttl_sec: 10,
-    }
+    LimiterConfig { window_sec: 1, active_windows: 3, ttl_sec: 10 }
 }
 
 fn addr() -> std::net::SocketAddr {
@@ -50,10 +48,7 @@ async fn http_server_matches_direct_core() {
         vec![AdmitEntry { id: "A".into(), limit: 2 }],
         vec![AdmitEntry { id: "A".into(), limit: 2 }],
         vec![AdmitEntry { id: "A".into(), limit: 2 }], // 3rd -> reject
-        vec![
-            AdmitEntry { id: "A".into(), limit: 2 },
-            AdmitEntry { id: "B".into(), limit: 5 },
-        ], // transactional: A full -> whole batch rejects
+        vec![AdmitEntry { id: "A".into(), limit: 2 }, AdmitEntry { id: "B".into(), limit: 5 }], // transactional: A full -> whole batch rejects
         vec![AdmitEntry { id: "B".into(), limit: 5 }],
     ];
 
@@ -69,13 +64,19 @@ async fn http_server_matches_direct_core() {
         let direct = oracle.admit(entries);
 
         match (&http, &direct) {
-            (AdmitResponse { admitted: true, window: Some(hw), .. }, AdmitResult::Admitted { window: ow }) => {
+            (
+                AdmitResponse { admitted: true, window: Some(hw), .. },
+                AdmitResult::Admitted { window: ow },
+            ) => {
                 assert_eq!(hw, ow, "windows agree");
                 if entries.iter().any(|e| e.id == "B") {
                     last_b_hold = Some(Hold { id: "B".into(), window: *hw });
                 }
             }
-            (AdmitResponse { admitted: false, rejected_id: Some(hid), .. }, AdmitResult::Rejected { limiter_id: oid }) => {
+            (
+                AdmitResponse { admitted: false, rejected_id: Some(hid), .. },
+                AdmitResult::Rejected { limiter_id: oid },
+            ) => {
                 assert_eq!(hid, oid, "rejected ids agree");
             }
             _ => panic!("HTTP {http:?} disagrees with core {direct:?}"),

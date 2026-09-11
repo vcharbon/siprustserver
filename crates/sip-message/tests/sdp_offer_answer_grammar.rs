@@ -6,10 +6,8 @@ use sip_message::sdp::{c_line_is_unspecified, validate_offer_answer_body};
 
 /// A one-audio-stream description with the caller's `o=` line.
 fn body(o_line: &str) -> Vec<u8> {
-    format!(
-        "v=0\r\n{o_line}\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n"
-    )
-    .into_bytes()
+    format!("v=0\r\n{o_line}\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n")
+        .into_bytes()
 }
 
 fn reason(b: &[u8]) -> String {

@@ -40,11 +40,10 @@ async fn reboot_recovery_reclaims_pri_partition() {
     let b = Node::spawn("B", addr(2), 1, &net, &clock).await;
 
     // B pulls A (so it holds A's calls in bak:A).
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
-    b_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let b_sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
+    b_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
     tick(50).await;
 
     let bodies = ["body0", "body1", "body2"];
@@ -69,11 +68,10 @@ async fn reboot_recovery_reclaims_pri_partition() {
     // Simulate A reboot: brand-new EMPTY store under a HIGHER incarnation gen,
     // cold. A now bootstraps from B (pulling B's bak:A partition as pri:A).
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
-    a2_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    )));
+    let a2_sup =
+        supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
+    a2_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
     tick(200).await;
 
     // THE HEADLINE ASSERTION: A's store has all 3 as pri:A with the originals.
@@ -117,19 +115,15 @@ async fn concurrent_mutation_during_scan_keeps_newest() {
     let a = Node::spawn("A", addr(11), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(12), 1, &net, &clock).await;
 
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
-    b_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let b_sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
+    b_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
     tick(50).await;
 
     // A forward-replicates 1 call (call_gen 1) to B.
     let c = cref("A", "0");
-    a.store
-        .put_call(PRI, "A", &c, b"v1".to_vec(), &[], 0, 1, 0, &fwd("B"))
-        .await
-        .unwrap();
+    a.store.put_call(PRI, "A", &c, b"v1".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
     tick(100).await;
 
     // A reboots empty; bootstrap from B begins. BEFORE the tail catches up,
@@ -137,18 +131,14 @@ async fn concurrent_mutation_during_scan_keeps_newest() {
     // (p stays at A's branch point 1): (1,0) → (1,1), which bumps changelog-for-A
     // (partition=Pri).
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
-    a2_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    )));
+    let a2_sup =
+        supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
+    a2_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
     // Let bootstrap exchange begin / complete the pre-seed.
     tick(50).await;
     // Concurrent reverse mutation on B at (1,1).
-    b.store
-        .put_call(BAK, "A", &c, b"v2-newer".to_vec(), &[], 0, 1, 1, &rev("A"))
-        .await
-        .unwrap();
+    b.store.put_call(BAK, "A", &c, b"v2-newer".to_vec(), &[], 0, 1, 1, &rev("A")).await.unwrap();
     tick(300).await;
 
     // A converges on the NEWEST body (v2), not the older bootstrap copy — the
@@ -173,26 +163,21 @@ async fn terminal_handoff_switches_to_replog_same_connection() {
     let b = Node::spawn("B", addr(22), 1, &net, &clock).await;
 
     // B holds one of A's calls in bak:A.
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
-    b_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let b_sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
+    b_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
     tick(50).await;
     let c0 = cref("A", "0");
-    a.store
-        .put_call(PRI, "A", &c0, b"seed".to_vec(), &[], 0, 1, 0, &fwd("B"))
-        .await
-        .unwrap();
+    a.store.put_call(PRI, "A", &c0, b"seed".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
     tick(100).await;
 
     // A reboots empty; bootstrap then tail (single connection).
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
-    a2_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    )));
+    let a2_sup =
+        supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
+    a2_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
     tick(150).await;
     assert!(a2_sup.bootstrap_complete("B"), "terminal Noop seen");
     let w_seed = a2_sup.watermark("B");
@@ -200,10 +185,7 @@ async fn terminal_handoff_switches_to_replog_same_connection() {
     // A POST-SCAN mutation on B (counter advances beyond the seed W). Because the
     // same connection switched to Replog(since=W), the tail must deliver it.
     let c1 = cref("A", "1");
-    b.store
-        .put_call(BAK, "A", &c1, b"post-scan".to_vec(), &[], 0, 1, 0, &rev("A"))
-        .await
-        .unwrap();
+    b.store.put_call(BAK, "A", &c1, b"post-scan".to_vec(), &[], 0, 1, 0, &rev("A")).await.unwrap();
     tick(200).await;
 
     assert_eq!(
@@ -241,25 +223,18 @@ async fn hard_timer_unreachable_peer_boots_anyway() {
     // Cut A→B so connect is blocked.
     net.apply_fault(Fault::Partition { a: a_addr, b: b_addr });
 
-    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
-    a_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    )));
+    let a_sup =
+        supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
+    a_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
 
     // Before the hard timeout: not yet bootstrap-complete (connect keeps failing).
     tick(200).await;
-    assert!(
-        !a_sup.all_bootstrapped(),
-        "still trying to reach B before the hard timeout"
-    );
+    assert!(!a_sup.all_bootstrapped(), "still trying to reach B before the hard timeout");
 
     // Advance past the 2s bootstrap hard timeout → best-effort complete.
     tick(2_500).await;
-    assert!(
-        a_sup.bootstrap_complete("B"),
-        "hard timer marks B bootstrap-complete best-effort"
-    );
+    assert!(a_sup.bootstrap_complete("B"), "hard timer marks B bootstrap-complete best-effort");
     assert!(a_sup.all_bootstrapped(), "A boots and serves despite unreachable B");
 }
 
@@ -291,11 +266,10 @@ async fn hard_timer_stalled_bootstrap_completes_best_effort() {
     });
 
     let a_store = ReplicatingCallStore::new(1, clock.clone());
-    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
-    a_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    )));
+    let a_sup =
+        supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
+    a_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
 
     // Before the timeout: connected but stalled → no terminal Noop yet.
     tick(200).await;
@@ -322,11 +296,10 @@ async fn lazy_batch_scan_interleaved_with_put_converges() {
     let a = Node::spawn("A", addr(51), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(52), 1, &net, &clock).await;
 
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
-    b_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let b_sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
+    b_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
     tick(50).await;
 
     // A forward-replicates 200 calls (> default chunk 128) into B's bak:A.
@@ -342,11 +315,10 @@ async fn lazy_batch_scan_interleaved_with_put_converges() {
 
     // A reboots empty; bootstrap streams 200 keys across multiple batches.
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
-    a2_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    )));
+    let a2_sup =
+        supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
+    a2_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
     // Interleave a concurrent reverse put on B mid-bootstrap (lock discipline).
     tick(50).await;
     let extra = cref("A", "0");
@@ -387,11 +359,10 @@ async fn empty_bak_partition_immediate_terminal_noop() {
 
     // A cold-boots and bootstraps from B, which holds nothing in bak:A.
     let a_store = ReplicatingCallStore::new(1, clock.clone());
-    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
-    a_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    )));
+    let a_sup =
+        supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
+    a_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
     tick(150).await;
 
     assert!(
@@ -402,10 +373,7 @@ async fn empty_bak_partition_immediate_terminal_noop() {
 
     // Tails normally afterward: B reverse-mutates one of A's calls → A picks up.
     let c = cref("A", "7");
-    b.store
-        .put_call(BAK, "A", &c, b"later".to_vec(), &[], 0, 1, 0, &rev("A"))
-        .await
-        .unwrap();
+    b.store.put_call(BAK, "A", &c, b"later".to_vec(), &[], 0, 1, 0, &rev("A")).await.unwrap();
     tick(200).await;
     assert_eq!(
         a_store.get_call(PRI, "A", &c).await.unwrap().as_deref(),
@@ -430,11 +398,10 @@ async fn readiness_not_pinned_by_unreachable_peer() {
     let b_addr = addr(61); // B never listens → every connect is refused.
 
     let a_store = ReplicatingCallStore::new(1, clock.clone());
-    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
-    a_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    )));
+    let a_sup =
+        supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
+    a_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
 
     // Before the hard timeout: not current (still trying to reach B).
     tick(200).await;
@@ -444,10 +411,7 @@ async fn readiness_not_pinned_by_unreachable_peer() {
     // NOT pinned by the unreachable peer (it was never connected).
     tick(2_500).await;
     assert!(a_sup.all_bootstrapped(), "boots best-effort despite unreachable B");
-    assert!(
-        a_sup.all_current(),
-        "an unreachable, never-connected peer must not pin NotReady"
-    );
+    assert!(a_sup.all_current(), "an unreachable, never-connected peer must not pin NotReady");
 }
 
 // ---------------------------------------------------------------------------
@@ -468,11 +432,10 @@ async fn cold_start_bootstraps_after_hard_timeout_reconnect() {
     // A is cold and pulls B; B is NOT listening yet → A's connect is refused and
     // the bootstrap hard timer trips (complete best-effort, W still (0,0)).
     let a_store = ReplicatingCallStore::new(1, clock.clone());
-    let a_sup = supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
-    a_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    )));
+    let a_sup =
+        supervisor_for("A", &a_store, &net, &clock, vec![("B".into(), b_addr)], fast_config());
+    a_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
     tick(2_500).await;
     assert!(a_sup.bootstrap_complete("B"), "hard timer completed bootstrap best-effort");
     assert!(

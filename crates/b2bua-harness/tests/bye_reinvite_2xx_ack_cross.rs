@@ -58,7 +58,8 @@ async fn the_initial_2xx_is_acked_on_receipt_so_no_bye_can_cross_it() {
     let h = Harness::with_transit_delay("b2bua-initial-ack-on-receipt", 0);
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", BOB).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
     let bob_addr: SocketAddr = BOB.parse().unwrap();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -109,11 +110,15 @@ async fn callee_byes_across_the_delayed_offer_initial_2xx_and_the_sut_still_acks
     let h = Harness::with_transit_delay("b2bua-bye-initial-ack", 0);
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
     let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
-    assert!(uas.request().body().is_empty(), "the offerless INVITE reached bob with a substituted body");
+    assert!(
+        uas.request().body().is_empty(),
+        "the offerless INVITE reached bob with a substituted body"
+    );
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(OFFER).await;
@@ -129,7 +134,10 @@ async fn callee_byes_across_the_delayed_offer_initial_2xx_and_the_sut_still_acks
     // ── alice supplies the answer at last; the ACK must still reach bob ──────
     let _alice_dialog = call.ack_with(Some(ANSWER)).await;
     let ack = bob.receive("ACK").await;
-    assert!(!ack.request().body().is_empty(), "the b-leg ACK must carry alice's answer to bob's offer");
+    assert!(
+        !ack.request().body().is_empty(),
+        "the b-leg ACK must carry alice's answer to bob's offer"
+    );
 
     alice_bye.respond(200, "OK").await;
     settle_until(|| b2bua.active_calls() == 0).await;
@@ -151,7 +159,8 @@ async fn callee_byes_across_the_reinvite_2xx_and_the_sut_still_acks() {
     let h = Harness::with_transit_delay("b2bua-bye-reinvite-ack-callee", 0);
     let alice = h.agent("alice", "127.0.0.1:5065").await;
     let bob = h.agent("bob", "127.0.0.1:5075").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
 
     let (mut alice_dialog, mut bob_dialog) = establish(&alice, &bob, &b2bua).await;
 
@@ -159,7 +168,10 @@ async fn callee_byes_across_the_reinvite_2xx_and_the_sut_still_acks() {
     let mut reinv = alice_dialog.reinvite(None).await;
     let reinvite_cseq = alice_dialog.local_cseq();
     let mut bob_reinv = bob.receive("INVITE").await;
-    assert!(bob_reinv.request().body().is_empty(), "the offerless re-INVITE reached bob with a substituted body");
+    assert!(
+        bob_reinv.request().body().is_empty(),
+        "the offerless re-INVITE reached bob with a substituted body"
+    );
     let b_leg_reinvite_branch = bob_reinv.request().top_via().branch().unwrap().to_string();
     let b_leg_call_id = bob_reinv.request().call_id().as_str().to_string();
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
@@ -208,7 +220,8 @@ async fn caller_byes_across_the_reinvite_2xx_and_the_sut_still_acks() {
     let h = Harness::with_transit_delay("b2bua-bye-reinvite-ack-caller", 0);
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let bob = h.agent("bob", "127.0.0.1:5074").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
 
     let (mut alice_dialog, _bob_dialog) = establish(&alice, &bob, &b2bua).await;
 
@@ -253,7 +266,8 @@ async fn a_late_ack_into_a_reaped_dialog_is_absorbed_never_answered() {
     let h = Harness::new("b2bua-bye-reinvite-ack-late");
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
 
     // bob withholds the re-INVITE ACK until after his own BYE — the deliberate
     // non-compliance this test exists for (RFC 5407 §3.1.6 / §3.2.4).
@@ -286,7 +300,11 @@ async fn a_late_ack_into_a_reaped_dialog_is_absorbed_never_answered() {
     // transit hop, and the nearest legitimate emission toward bob — the
     // §13.3.1.4 re-INVITE-2xx rung at T1 — is 500 ms away.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(bob.drain().await, 0, "§17.1.1.3: a late ACK is absorbed, never answered (a 481 here is a defect)");
+    assert_eq!(
+        bob.drain().await,
+        0,
+        "§17.1.1.3: a late ACK is absorbed, never answered (a 481 here is a defect)"
+    );
     assert_eq!(b2bua.active_calls(), 0, "the late ACK created no call state");
     b2bua.assert_fully_reaped();
 
@@ -305,7 +323,8 @@ async fn a_repeated_reinvite_2xx_across_the_bye_draws_one_ack_per_copy() {
     let h = Harness::with_transit_delay("b2bua-bye-reinvite-ack-repeat", 0);
     let alice = h.agent("alice", "127.0.0.1:5062").await;
     let bob = h.agent("bob", BOB).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5072).start(&h, "b2bua", "127.0.0.1:5082").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5072).start(&h, "b2bua", "127.0.0.1:5082").await;
     let bob_addr: SocketAddr = BOB.parse().unwrap();
 
     let (mut alice_dialog, mut bob_dialog) = establish(&alice, &bob, &b2bua).await;

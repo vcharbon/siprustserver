@@ -98,12 +98,7 @@ pub(super) struct HeldCancel {
 
 impl HeldCancel {
     pub(super) fn new(buf: Bytes, dest: SocketAddr, wire: CancelWire) -> Self {
-        Self {
-            buf,
-            dest,
-            wire,
-            ladder: None,
-        }
+        Self { buf, dest, wire, ladder: None }
     }
 }
 

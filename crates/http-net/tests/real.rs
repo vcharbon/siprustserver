@@ -34,10 +34,7 @@ impl HttpService for ReflectService {
 #[tokio::test]
 async fn real_transport_round_trips_query_and_headers() {
     let net = RealHttpNetwork::new();
-    let handle = net
-        .serve("127.0.0.1:0".parse().unwrap(), Arc::new(ReflectService))
-        .await
-        .unwrap();
+    let handle = net.serve("127.0.0.1:0".parse().unwrap(), Arc::new(ReflectService)).await.unwrap();
     let dst = handle.local_addr();
 
     let req = HttpRequest::get("/routes?debug=true&seed=7").header("x-debug", "on");
@@ -48,9 +45,7 @@ async fn real_transport_round_trips_query_and_headers() {
     assert_eq!(resp.body, b"/routes?debug=true&seed=7");
     // Request header crossed the wire; response headers came back.
     assert!(
-        resp.headers
-            .iter()
-            .any(|(k, v)| k.eq_ignore_ascii_case("x-echoed-debug") && v == "on"),
+        resp.headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("x-echoed-debug") && v == "on"),
         "request header not reflected: {:?}",
         resp.headers
     );

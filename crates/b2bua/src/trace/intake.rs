@@ -156,7 +156,13 @@ mod tests {
 
     fn traces(exporter: bool, honors_header: bool) -> CallTraces {
         CallTraces::new(
-            SampleAdmission::new(exporter, 1e-4, 200, RateDraw::seeded(3), TokenBucket::default_at(0)),
+            SampleAdmission::new(
+                exporter,
+                1e-4,
+                200,
+                RateDraw::seeded(3),
+                TokenBucket::default_at(0),
+            ),
             honors_header,
         )
     }

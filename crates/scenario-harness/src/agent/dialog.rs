@@ -12,8 +12,8 @@ use sip_message::generators::{
 };
 use sip_message::header::{HeaderName, HeaderValue, MediaType, RAck};
 use sip_message::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, CseqDeviation, CseqPattern, EmitOpts,
-    MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse, SipStr,
+    apply_name_forms, apply_remote_target_emits, emitted_wire, CseqDeviation, CseqPattern,
+    EmitOpts, MessageTemplate, SipHeader, SipMessage, SipRequest, SipResponse, SipStr,
 };
 
 use super::addressing::next_hop;
@@ -235,11 +235,12 @@ impl Dialog {
     /// captured frozen-header quirks are not replayable yet), and out-of-dialog-
     /// only methods are rejected. See [`EmitOpts`] for the v1 header-order limitation.
     pub async fn send_template(&mut self, tmpl: &MessageTemplate, opts: EmitOpts) -> InDialogTxn {
-        let method = tmpl
-            .method()
-            .and_then(|m| InDialogMethod::try_from(m).ok())
-            .unwrap_or_else(|| {
-                panic!("Dialog::send_template requires an in-dialog request template, got {:?}", tmpl.start())
+        let method =
+            tmpl.method().and_then(|m| InDialogMethod::try_from(m).ok()).unwrap_or_else(|| {
+                panic!(
+                    "Dialog::send_template requires an in-dialog request template, got {:?}",
+                    tmpl.start()
+                )
             });
         self.send_request(method).template(tmpl, opts).send().await
     }
@@ -275,11 +276,7 @@ pub struct ClientReinvite {
 impl ClientReinvite {
     /// The §17.1.1.3 auto-ACK context for this re-INVITE transaction.
     fn ack_ctx(&self) -> AckCtx<'_> {
-        AckCtx {
-            agent: &self.agent,
-            invite: &self.original_invite,
-            wire_dst: self.wire_dst,
-        }
+        AckCtx { agent: &self.agent, invite: &self.original_invite, wire_dst: self.wire_dst }
     }
 
     /// Wait for and assert a response status (the relayed 1xx/2xx/487 for this
@@ -454,8 +451,7 @@ impl<'a> InDialogRequest<'a> {
         // A replay emits the header block it captured: a template that states a
         // media type in ANY spelling keeps that line and the stack adds none, and
         // one that states none must not gain the stack's default.
-        self.suppress_default_ct =
-            !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
+        self.suppress_default_ct = !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
         // Append AFTER any prior `with_header` entries — never drop them.
         self.extra_headers.extend(frozen);
         self.body = tmpl.body().to_vec();
@@ -467,10 +463,8 @@ impl<'a> InDialogRequest<'a> {
 
     /// Attach an arbitrary extra header.
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
-        self.extra_headers.push(SipHeader {
-            name: name.to_string().into(),
-            value: value.to_string().into(),
-        });
+        self.extra_headers
+            .push(SipHeader { name: name.to_string().into(), value: value.to_string().into() });
         self
     }
 
@@ -672,8 +666,7 @@ impl InDialogTxn {
         status: u16,
         tolerate: &[&str],
     ) -> Result<SipResponse, StepError> {
-        try_expect_response_tolerating(&self.agent, status, tolerate, self.ack_ctx().as_ref())
-            .await
+        try_expect_response_tolerating(&self.agent, status, tolerate, self.ack_ctx().as_ref()).await
     }
 
     /// Like [`expect`](InDialogTxn::expect), but first drains (and 200-OKs) any

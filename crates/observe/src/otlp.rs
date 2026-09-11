@@ -80,7 +80,9 @@ fn build(endpoint: &str, service_name: &str) -> ExportSetup {
 }
 
 /// The `tracing` layer feeding `provider`'s tracer.
-pub fn layer<S>(provider: &SdkTracerProvider) -> tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::SdkTracer>
+pub fn layer<S>(
+    provider: &SdkTracerProvider,
+) -> tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::SdkTracer>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {

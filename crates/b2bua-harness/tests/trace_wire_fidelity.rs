@@ -133,11 +133,8 @@ async fn a_traced_call_records_the_datagram_and_the_length_of_its_decision() {
 
     // alice hangs up with the probe on the BYE — an IN-DIALOG message, so it
     // rides the router's guarded `sip.in` rather than the intake backfill.
-    let mut bye = dialog
-        .send_request(InDialogMethod::Bye)
-        .with_header(PROBE, PROBE_BYE)
-        .send()
-        .await;
+    let mut bye =
+        dialog.send_request(InDialogMethod::Bye).with_header(PROBE, PROBE_BYE).send().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 

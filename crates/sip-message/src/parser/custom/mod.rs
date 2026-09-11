@@ -12,24 +12,22 @@
 
 use bytes::Bytes;
 
+use crate::draft::{RequestLine, StatusLine, SIP_VERSION};
 use crate::error::SipParseError;
 use crate::parser::{SipParser, SipParserLimits};
-use crate::draft::{RequestLine, StatusLine, SIP_VERSION};
 use crate::sip_str::{SharedText, SipStr};
 use crate::types::{MessageCore, SipMessage, SipRequest, SipResponse};
 
+pub(crate) mod compact_forms;
+pub mod extract_fields;
+pub mod header_index;
+pub mod headers;
+pub mod optional_headers;
 pub mod scanner;
 pub mod start_line;
-pub mod headers;
-pub mod header_index;
 pub mod structured_headers;
-pub mod extract_fields;
-pub mod optional_headers;
-pub(crate) mod compact_forms;
 
-use extract_fields::{
-    extract_request_fields, extract_response_fields, ExtractMode, RequestEager,
-};
+use extract_fields::{extract_request_fields, extract_response_fields, ExtractMode, RequestEager};
 use header_index::HeaderIndex;
 use scanner::Scanner;
 use start_line::{parse_start_line, StartLine};

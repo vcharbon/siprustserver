@@ -209,7 +209,8 @@ async fn a_non_first_fork_s_answer_rides_its_own_caller_tag() {
     let h = Harness::with_transit_delay("b2bua-forked-answer-own-tag", 1);
     let alice = h.agent("alice", "127.0.0.1:6047").await;
     let bob = h.agent("bob", "127.0.0.1:6048").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 6048).start(&h, "b2bua", "127.0.0.1:6049").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 6048).start(&h, "b2bua", "127.0.0.1:6049").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -233,11 +234,19 @@ async fn a_non_first_fork_s_answer_rides_its_own_caller_tag() {
 
     let mut dialog = call.ack().await;
     let ack_at_bob = bob.receive("ACK").await;
-    assert_eq!(ack_at_bob.request().to().tag(), Some("bobfork2"), "the ACK rides the answering fork");
+    assert_eq!(
+        ack_at_bob.request().to().tag(),
+        Some("bobfork2"),
+        "the ACK rides the answering fork"
+    );
 
     let mut bye = dialog.bye().await;
     let mut bye_at_bob = bob.receive("BYE").await;
-    assert_eq!(bye_at_bob.request().to().tag(), Some("bobfork2"), "the BYE rides the answering fork");
+    assert_eq!(
+        bye_at_bob.request().to().tag(),
+        Some("bobfork2"),
+        "the BYE rides the answering fork"
+    );
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 

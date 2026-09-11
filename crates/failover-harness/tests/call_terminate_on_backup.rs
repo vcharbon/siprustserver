@@ -60,11 +60,7 @@ fn laddr() -> SocketAddr {
 }
 
 fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    Arc::new(HttpCallLimiter::new(
-        Arc::new(http.clone()),
-        laddr(),
-        Duration::from_millis(150),
-    ))
+    Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// Route every call to bob with a hold on trunk-A (cap 8 — comfortably above the
@@ -78,10 +74,7 @@ fn limited_decision_with_max_duration(max_duration_sec: i64) -> Arc<dyn CallDeci
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.call_limiter = vec![CallLimiterEntry {
-                    id: "trunk-A".into(),
-                    limit: 8,
-                }];
+                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 8 }];
                 r.features.platform.max_duration_sec = max_duration_sec;
                 NewCallResponse::Route(r)
             })
@@ -138,19 +131,30 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
     let lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
     // No health probe: `set_health` is authoritative (deterministic misroute).
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
     let mut w_b1 = fh
         .spawn_worker_limited(
-            "b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            decision.clone(), limiter_client(&http),
+            "b1",
+            "b1",
+            B1,
+            &["b2"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            decision.clone(),
+            limiter_client(&http),
         )
         .await;
     let mut w_b2 = fh
         .spawn_worker_limited(
-            "b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            decision.clone(), limiter_client(&http),
+            "b2",
+            "b2",
+            B2,
+            &["b1"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            decision.clone(),
+            limiter_client(&http),
         )
         .await;
 
@@ -185,7 +189,19 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
     assert!(!call_ref.is_empty(), "[{name}] backup holds the replicated call ref");
 
     Established {
-        fh, alice, bob, proxy, store, lh, w_b1, w_b2, primary_ord, bak_ord, call_ref, dialog, bob_dialog,
+        fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh,
+        w_b1,
+        w_b2,
+        primary_ord,
+        bak_ord,
+        call_ref,
+        dialog,
+        bob_dialog,
     }
 }
 
@@ -258,8 +274,19 @@ fn crash_primary(
 #[tokio::test(start_paused = true)]
 async fn c1_bye_on_primary__no_fault() {
     let Established {
-        mut fh, alice, bob, proxy: _proxy, store, lh: _lh, w_b1, w_b2, primary_ord: _p, bak_ord: _b,
-        call_ref, mut dialog, bob_dialog: _bd,
+        mut fh,
+        alice,
+        bob,
+        proxy: _proxy,
+        store,
+        lh: _lh,
+        w_b1,
+        w_b2,
+        primary_ord: _p,
+        bak_ord: _b,
+        call_ref,
+        mut dialog,
+        bob_dialog: _bd,
     } = establish("cterm-c1-bye-on-primary").await;
 
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
@@ -291,8 +318,19 @@ async fn c1_bye_on_primary__no_fault() {
 #[tokio::test(start_paused = true)]
 async fn c2_bye_on_backup__primary_alive__misroute() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, w_b1, w_b2, primary_ord, bak_ord: _b,
-        call_ref, mut dialog, bob_dialog: _bd,
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        w_b1,
+        w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        mut dialog,
+        bob_dialog: _bd,
     } = establish("cterm-c2-bye-backup-primary-alive").await;
 
     accept_takeover_cseq_overlap(&mut fh);
@@ -328,8 +366,19 @@ async fn c2_bye_on_backup__primary_alive__misroute() {
 #[tokio::test(start_paused = true)]
 async fn c3_bye_on_backup__primary_alive__peer_silent() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, w_b1, w_b2, primary_ord, bak_ord: _b,
-        call_ref, mut dialog, bob_dialog: _bd,
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        w_b1,
+        w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        mut dialog,
+        bob_dialog: _bd,
     } = establish("cterm-c3-bye-backup-peer-silent").await;
 
     accept_takeover_cseq_overlap(&mut fh);
@@ -365,8 +414,19 @@ async fn c3_bye_on_backup__primary_alive__peer_silent() {
 #[tokio::test(start_paused = true)]
 async fn c4_bye_on_backup__primary_crashed__stay_dead() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, mut w_b1, mut w_b2, primary_ord, bak_ord: _b,
-        call_ref, mut dialog, bob_dialog: _bd,
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        mut w_b1,
+        mut w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        mut dialog,
+        bob_dialog: _bd,
     } = establish("cterm-c4-bye-backup-crashed-staydead").await;
 
     accept_takeover_cseq_overlap(&mut fh);
@@ -411,8 +471,19 @@ async fn c4_bye_on_backup__primary_crashed__stay_dead() {
 #[tokio::test(start_paused = true)]
 async fn c5_bye_on_backup__primary_crashed__peer_silent__stay_dead() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, mut w_b1, mut w_b2, primary_ord, bak_ord: _b,
-        call_ref, mut dialog, bob_dialog: _bd,
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        mut w_b1,
+        mut w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        mut dialog,
+        bob_dialog: _bd,
     } = establish("cterm-c5-bye-backup-crashed-silent-staydead").await;
 
     accept_takeover_cseq_overlap(&mut fh);
@@ -456,8 +527,19 @@ async fn c5_bye_on_backup__primary_crashed__peer_silent__stay_dead() {
 #[tokio::test(start_paused = true)]
 async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, mut w_b1, mut w_b2, primary_ord, bak_ord: _b,
-        call_ref, mut dialog, bob_dialog: _bd,
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        mut w_b1,
+        mut w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        mut dialog,
+        bob_dialog: _bd,
     } = establish("cterm-c6-bye-backup-crashed-reboot").await;
 
     accept_takeover_cseq_overlap(&mut fh);
@@ -509,8 +591,19 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
 #[tokio::test(start_paused = true)]
 async fn c7_bye_on_backup__primary_crashed__peer_silent__reboot() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, mut w_b1, mut w_b2, primary_ord, bak_ord: _b,
-        call_ref, mut dialog, bob_dialog: _bd,
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        mut w_b1,
+        mut w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        mut dialog,
+        bob_dialog: _bd,
     } = establish("cterm-c7-bye-backup-silent-reboot").await;
 
     accept_takeover_cseq_overlap(&mut fh);
@@ -564,8 +657,19 @@ async fn c7_bye_on_backup__primary_crashed__peer_silent__reboot() {
 #[tokio::test(start_paused = true)]
 async fn c10_bye_split_brain__primary_and_backup() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, w_b1, w_b2, primary_ord, bak_ord: _b,
-        call_ref, mut dialog, mut bob_dialog,
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        w_b1,
+        w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        mut dialog,
+        mut bob_dialog,
     } = establish("cterm-c10-split-brain").await;
 
     accept_takeover_cseq_overlap(&mut fh);
@@ -621,8 +725,19 @@ async fn c10_bye_split_brain__primary_and_backup() {
 #[tokio::test(start_paused = true)]
 async fn c11_reinvite_on_backup__primary_alive__no_terminal() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, w_b1, w_b2, primary_ord, bak_ord: _b,
-        call_ref, mut dialog, bob_dialog: _bd,
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        w_b1,
+        w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        mut dialog,
+        bob_dialog: _bd,
     } = establish("cterm-c11-reinvite-backup-no-terminal").await;
 
     accept_takeover_cseq_overlap(&mut fh);
@@ -685,8 +800,19 @@ async fn c11_reinvite_on_backup__primary_alive__no_terminal() {
 #[tokio::test(start_paused = true)]
 async fn c8_keepalive_timeout_on_backup__reboot() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, mut w_b1, mut w_b2, primary_ord, bak_ord: _b,
-        call_ref, dialog: _d, bob_dialog: _bd,
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        mut w_b1,
+        mut w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        dialog: _d,
+        bob_dialog: _bd,
     } = establish("cterm-c8-keepalive-timeout-reboot").await;
     let _ = (&alice, &bob);
 
@@ -733,13 +859,21 @@ async fn c8_keepalive_timeout_on_backup__reboot() {
 #[tokio::test(start_paused = true)]
 async fn c9_max_duration_on_backup__reboot() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, mut w_b1, mut w_b2, primary_ord, bak_ord: _b,
-        call_ref, dialog: _d, bob_dialog: _bd,
-    } = establish_with(
-        "cterm-c9-max-duration-reboot",
-        limited_decision_with_max_duration(120),
-    )
-    .await;
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        mut w_b1,
+        mut w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        dialog: _d,
+        bob_dialog: _bd,
+    } = establish_with("cterm-c9-max-duration-reboot", limited_decision_with_max_duration(120))
+        .await;
     let _ = (&alice, &bob);
 
     {
@@ -795,8 +929,19 @@ async fn c9_max_duration_on_backup__reboot() {
 #[tokio::test(start_paused = true)]
 async fn c12_bye_on_primary__then_reboot__no_resurrection() {
     let Established {
-        mut fh, alice, bob, proxy, store, lh: _lh, mut w_b1, mut w_b2, primary_ord, bak_ord: _b,
-        call_ref, mut dialog, bob_dialog: _bd,
+        mut fh,
+        alice,
+        bob,
+        proxy,
+        store,
+        lh: _lh,
+        mut w_b1,
+        mut w_b2,
+        primary_ord,
+        bak_ord: _b,
+        call_ref,
+        mut dialog,
+        bob_dialog: _bd,
     } = establish("cterm-c12-bye-primary-then-reboot").await;
 
     // alice BYEs → routed to the (healthy) primary → bob 200 → alice 200. The

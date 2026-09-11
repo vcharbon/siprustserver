@@ -23,13 +23,16 @@ fn cancel_crossing_plan(
                 media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel { stated: Vec::new() })
-                        .after(cancel_after),
+                    Goal::new(
+                        Barrier::pred("ringing", ringing),
+                        GoalStep::Cancel { stated: Vec::new() },
+                    )
+                    .after(cancel_after),
                 ],
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -53,7 +56,7 @@ fn cancel_crossing_plan(
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -81,12 +84,8 @@ async fn cancel_answer_crossing_cancel_wins() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-    let call = cancel_crossing_plan(
-        &alice,
-        &bob,
-        Duration::from_millis(20),
-        Duration::from_millis(2),
-    );
+    let call =
+        cancel_crossing_plan(&alice, &bob, Duration::from_millis(20), Duration::from_millis(2));
     let verdict = run_call(call, Duration::from_secs(5)).await;
     assert!(verdict.is_ok(), "the CANCEL-wins call must reach a clean terminal, got {verdict:?}");
     // The observed 487 → the abandoned branch: pinned in the oracle unit
@@ -109,12 +108,8 @@ async fn cancel_answer_crossing_answer_wins() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-    let call = cancel_crossing_plan(
-        &alice,
-        &bob,
-        Duration::from_millis(5),
-        Duration::from_millis(20),
-    );
+    let call =
+        cancel_crossing_plan(&alice, &bob, Duration::from_millis(5), Duration::from_millis(20));
     let verdict = run_call(call, Duration::from_secs(5)).await;
     assert!(verdict.is_ok(), "the 200-wins call must confirm and tear down OK, got {verdict:?}");
 
@@ -149,13 +144,16 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
                     // The stand-in for the SUT's no-answer timer: CANCEL a
                     // while after the ring (bob would ring forever).
-                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel { stated: Vec::new() })
-                        .after(Duration::from_millis(500)),
+                    Goal::new(
+                        Barrier::pred("ringing", ringing),
+                        GoalStep::Cancel { stated: Vec::new() },
+                    )
+                    .after(Duration::from_millis(500)),
                 ],
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -169,7 +167,7 @@ async fn ring_then_silent_487s_on_cancel_and_settles() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,

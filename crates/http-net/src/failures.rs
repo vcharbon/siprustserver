@@ -138,10 +138,7 @@ pub fn prometheus_text() -> String {
         for cause in FailureCause::ALL {
             let v = row[cause.slot()];
             if v > 0 {
-                s.push_str(&format!(
-                    "{name}{{peer=\"{peer}\",cause=\"{}\"}} {v}\n",
-                    cause.label()
-                ));
+                s.push_str(&format!("{name}{{peer=\"{peer}\",cause=\"{}\"}} {v}\n", cause.label()));
             }
         }
     }
@@ -164,7 +161,9 @@ mod tests {
         let text = prometheus_text();
         assert!(text.contains("# TYPE http_request_failures_total counter"));
         assert!(
-            text.contains("http_request_failures_total{peer=\"10.0.0.1:8080\",cause=\"refused\"} 2"),
+            text.contains(
+                "http_request_failures_total{peer=\"10.0.0.1:8080\",cause=\"refused\"} 2"
+            ),
             "{text}"
         );
     }

@@ -104,10 +104,7 @@ pub enum Barrier {
     /// Fire once a named predicate over the observed state holds — the open
     /// form (the refer `merged` conjunction is `Pred`). The name is the bounded
     /// label a guard-timeout `StepError::who` carries (never free-form).
-    Pred {
-        name: &'static str,
-        pred: Arc<dyn Fn(&StateInner) -> bool + Send + Sync>,
-    },
+    Pred { name: &'static str, pred: Arc<dyn Fn(&StateInner) -> bool + Send + Sync> },
 }
 
 impl Barrier {

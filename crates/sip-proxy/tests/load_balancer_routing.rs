@@ -15,7 +15,9 @@ use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::{LoadBalancerConfig, LoadBalancerStrategy, ProxyAddr, ProxyMetrics, RoutingStrategy};
+use sip_proxy::{
+    LoadBalancerConfig, LoadBalancerStrategy, ProxyAddr, ProxyMetrics, RoutingStrategy,
+};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49180 RTP/AVP 0\r\n";
@@ -35,7 +37,8 @@ async fn new_dialog_routes_to_worker_and_in_dialog_sticks() {
         ],
         Clock::test_at(0),
     ));
-    let hmac = Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
+    let hmac =
+        Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     let strategy: Arc<dyn RoutingStrategy> = Arc::new(LoadBalancerStrategy::new(
         registry.clone(),

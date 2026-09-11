@@ -70,10 +70,7 @@ async fn basic() {
     // Alice sees a bare 180 — no body, no Require:100rel, no RSeq.
     let p180 = call.expect(180).await;
     assert!(p180.body().is_empty(), "bare 180 has no body");
-    assert!(
-        !has_token(p180.header::<Require>(), "100rel"),
-        "no Require:100rel on bare 180",
-    );
+    assert!(!has_token(p180.header::<Require>(), "100rel"), "no Require:100rel on bare 180",);
     assert!(p180.header::<RSeq>().is_none(), "no RSeq on bare 180");
     let first_to_tag = p180.to().tag().expect("180 has a To-tag").to_string();
 
@@ -138,7 +135,11 @@ async fn failover_reject() {
 
     // Failover to bob2 (new R-URI per the on_failure decision).
     let mut uas2 = bob2.receive("INVITE").await;
-    assert_eq!(uas2.request().request_uri().text(), "sip:+1234@127.0.0.1:5614", "bob2 R-URI is the failover new_ruri");
+    assert_eq!(
+        uas2.request().request_uri().text(),
+        "sip:+1234@127.0.0.1:5614",
+        "bob2 R-URI is the failover new_ruri"
+    );
 
     // Bob2's 18x are suppressed (alice already saw the bare 180 from bob1).
     uas2.respond(180, "Ringing").await;
@@ -206,7 +207,11 @@ async fn failover_no_answer() {
 
     // Bob2 receives the failover INVITE with the configured new R-URI.
     let mut uas2 = bob2.receive("INVITE").await;
-    assert_eq!(uas2.request().request_uri().text(), "sip:+1234@127.0.0.1:5616", "bob2 R-URI is the failover new_ruri");
+    assert_eq!(
+        uas2.request().request_uri().text(),
+        "sip:+1234@127.0.0.1:5616",
+        "bob2 R-URI is the failover new_ruri"
+    );
 
     // Bob2's 180 is suppressed; its 200 OK carries the (delayed) SDP offer.
     uas2.respond(180, "Ringing").await;
@@ -348,7 +353,8 @@ async fn disabled() {
     let alice = h.agent("alice", "127.0.0.1:5602").await;
     let bob = h.agent("bob", "127.0.0.1:5612").await;
     // route_all_to → no relay_first_18x feature.
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5612).start(&h, "b2bua", "127.0.0.1:5622").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5612).start(&h, "b2bua", "127.0.0.1:5622").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
 
@@ -502,8 +508,7 @@ async fn a_rejection_after_failover_rides_the_owned_180_s_tag() {
     let decision = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(|_req| {
-                let mut r =
-                    route_to_with_18x("127.0.0.1", 5629, RelayFirst18xStrategy::DropSdp);
+                let mut r = route_to_with_18x("127.0.0.1", 5629, RelayFirst18xStrategy::DropSdp);
                 r.callback_context = Some("suppress-18x-failover-rejection".into());
                 NewCallResponse::Route(r)
             })

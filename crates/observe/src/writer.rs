@@ -61,10 +61,7 @@ fn spawn_into<W: Write + Send + 'static>(
         .name("observe-log-writer".to_string())
         .spawn(move || drain_into(rx, out))
         .expect("spawn log writer thread");
-    (
-        LossyStdout { tx: tx.clone() },
-        LogWriterGuard { tx: Some(tx), handle: Some(handle) },
-    )
+    (LossyStdout { tx: tx.clone() }, LogWriterGuard { tx: Some(tx), handle: Some(handle) })
 }
 
 /// Write every queued line to `out` until the sentinel or a disconnect, flushing

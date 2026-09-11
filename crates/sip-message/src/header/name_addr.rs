@@ -128,10 +128,9 @@ fn angle_uri(value: &SipStr, open: usize) -> Result<(SipStr, usize), SipParseErr
     }
     match index_of(bytes, b'>', open + 1) {
         Some(close) => Ok((sub_trimmed(value, open + 1, close), close + 1)),
-        None => Err(SipParseError::new(format!(
-            "name-addr has no closing `>`: {:?}",
-            value.as_str()
-        ))),
+        None => {
+            Err(SipParseError::new(format!("name-addr has no closing `>`: {:?}", value.as_str())))
+        }
     }
 }
 
@@ -154,8 +153,10 @@ mod tests {
         let n = parse(r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#);
         assert_eq!(n.display(), Some(r#"Alice "A""#));
         assert_eq!(n.params().value("tag"), Some("1928"));
-        assert_eq!(rendered(r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#),
-                   r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#);
+        assert_eq!(
+            rendered(r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#),
+            r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#
+        );
     }
 
     #[test]

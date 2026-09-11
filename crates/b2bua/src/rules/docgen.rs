@@ -144,11 +144,8 @@ fn edge_label(r: &RuleDefinition) -> String {
 /// loops don't count as inbound, so an entry that also handles in-state events is
 /// still detected.
 fn with_start_edges(states: &[String], mut edges: Vec<Edge>) -> Vec<Edge> {
-    let incoming: BTreeSet<&str> = edges
-        .iter()
-        .filter(|e| e.from != e.to)
-        .map(|e| e.to.as_str())
-        .collect();
+    let incoming: BTreeSet<&str> =
+        edges.iter().filter(|e| e.from != e.to).map(|e| e.to.as_str()).collect();
     let terminal = call::StateLabel::terminal();
     let entries: BTreeSet<&str> = states
         .iter()
@@ -180,13 +177,21 @@ pub fn service_graph(def: &ServiceDef) -> MachineGraph {
         let label = edge_label(r);
         if r.transitions.is_empty() {
             for s in r.active_states {
-                edges.push(Edge { from: s.as_str().into(), to: s.as_str().into(), label: label.clone() });
+                edges.push(Edge {
+                    from: s.as_str().into(),
+                    to: s.as_str().into(),
+                    label: label.clone(),
+                });
             }
         } else {
             for (from, to) in r.transitions {
                 states.push(from.as_str().to_string());
                 states.push(to.as_str().to_string());
-                edges.push(Edge { from: from.as_str().into(), to: to.as_str().into(), label: label.clone() });
+                edges.push(Edge {
+                    from: from.as_str().into(),
+                    to: to.as_str().into(),
+                    label: label.clone(),
+                });
             }
         }
     }
@@ -234,10 +239,7 @@ fn registry_graphs(services: &[ServiceDef]) -> Vec<MachineGraph> {
 /// derived entirely from its rules. Returns `(machine_id, markdown)` pairs — the
 /// doc file is `docs/sm/<machine_id>.md`.
 pub fn render_registry(services: &[ServiceDef]) -> Vec<(String, String)> {
-    registry_graphs(services)
-        .into_iter()
-        .map(|g| (g.id.clone(), render_mermaid(&g)))
-        .collect()
+    registry_graphs(services).into_iter().map(|g| (g.id.clone(), render_mermaid(&g))).collect()
 }
 
 /// Render the whole registry as a single **self-contained HTML page** that draws

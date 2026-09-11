@@ -35,9 +35,9 @@ use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::{Changelog, ReplicatingCallStore};
 use b2bua::store::{CallStore, PartitionRole, PutOpts};
-use call::{CallBodyCodec, MsgpackCodec, TimerEntry, TimerType};
 use b2bua::{B2buaCore, ReplicationSetup};
 use b2bua_harness::{spawn_proxy_core, B2buaSpawnParams};
+use call::{CallBodyCodec, MsgpackCodec, TimerEntry, TimerType};
 
 use ha_harness::{Marker, ReplReport};
 use repl_net::transport::{
@@ -59,7 +59,6 @@ use crate::rfc_acceptance::{lane_details, Finding, RfcAcceptance};
 /// survives the whole scenario, short enough that dead-peer auto-clean is
 /// reachable in a test budget.
 const DEFAULT_TTLS: (i64, i64) = (60_000, 600_000);
-
 
 // ===========================================================================
 // ReplicatedB2buaSut — a replicating B2BUA worker on the failover fabric
@@ -91,14 +90,9 @@ impl ReplWiring {
         clock: &Clock,
     ) -> (ReplicationSetup, Arc<ReplicatingCallStore>, Arc<SimulatedMembership>) {
         let changelog = Changelog::new(gen, clock.clone()).with_ttls(self.ttls.0, self.ttls.1);
-        let store = Arc::new(ReplicatingCallStore::with_changelog(
-            changelog,
-            clock.clone(),
-        ));
-        let sim_membership = Arc::new(SimulatedMembership::with_clock(
-            self.peers.clone(),
-            clock.clone(),
-        ));
+        let store = Arc::new(ReplicatingCallStore::with_changelog(changelog, clock.clone()));
+        let sim_membership =
+            Arc::new(SimulatedMembership::with_clock(self.peers.clone(), clock.clone()));
         let membership: Arc<dyn topology::Membership> = sim_membership.clone();
         let addr_map = self.addr_map.clone();
         // The resolver is now async (ADR-0012 D3); wrap the sim's ordinal→addr map
@@ -183,25 +177,22 @@ pub struct HarnessHandle {
 
 impl HarnessHandle {
     fn new(harness: Harness) -> Self {
-        Self {
-            inner: std::sync::Mutex::new(Some(harness)),
-        }
+        Self { inner: std::sync::Mutex::new(Some(harness)) }
     }
 
     /// Bind a SUT endpoint on the shared fabric (under a brief lock). The future
     /// is awaited *after* the lock is released so the guard never crosses the
     /// `.await`.
-    async fn bind_sut(&self, name: &str, addr: &str) -> (Box<dyn sip_net::UdpEndpoint>, SocketAddr) {
+    async fn bind_sut(
+        &self,
+        name: &str,
+        addr: &str,
+    ) -> (Box<dyn sip_net::UdpEndpoint>, SocketAddr) {
         // `bind_udp` is async; the harness is `!Sync`, so we cannot hold the
         // std Mutex guard across the await. `Harness::bind_sut` only registers a
         // lane (sync) + binds — but to keep the guard off the await boundary we
         // take the harness out, bind, then put it back.
-        let h = self
-            .inner
-            .lock()
-            .unwrap()
-            .take()
-            .expect("harness taken (already finished?)");
+        let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
         let res = h.bind_sut(name, addr).await;
         *self.inner.lock().unwrap() = Some(h);
         res
@@ -216,12 +207,7 @@ impl HarnessHandle {
         addr: &str,
         roles: std::collections::HashSet<sip_net::UaRole>,
     ) -> (Box<dyn sip_net::UdpEndpoint>, SocketAddr) {
-        let h = self
-            .inner
-            .lock()
-            .unwrap()
-            .take()
-            .expect("harness taken (already finished?)");
+        let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
         let res = h.bind_sut_with_roles(name, addr, roles).await;
         *self.inner.lock().unwrap() = Some(h);
         res
@@ -253,19 +239,13 @@ impl ReplicatedB2buaSut {
         // is never written by the core — reading it gave a permanent 0 for the
         // X11 reclaim/handback counters under test. Fall back to the (empty) field
         // only while crashed.
-        self.core
-            .as_ref()
-            .map(|c| c.metrics())
-            .unwrap_or(&self.metrics)
+        self.core.as_ref().map(|c| c.metrics()).unwrap_or(&self.metrics)
     }
 
     /// Non-2xx INVITE finals this worker's transaction layer re-sent on Timer G
     /// (RFC 3261 §17.2.1) — the a-leg server transaction speaking. 0 while crashed.
     pub fn server_final_retransmits(&self) -> u64 {
-        self.core
-            .as_ref()
-            .map(|c| c.txn_metrics().server_final_retransmits())
-            .unwrap_or(0)
+        self.core.as_ref().map(|c| c.txn_metrics().server_final_retransmits()).unwrap_or(0)
     }
 
     /// Readiness gate (every reachable peer bootstrapped AND current). Drives the
@@ -293,17 +273,8 @@ impl ReplicatedB2buaSut {
 
     /// Read a replicated body by `(role, primary, call_ref)` from this worker's
     /// repl store (introspection — assert a replica landed / was reclaimed).
-    pub async fn get(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-    ) -> Option<Vec<u8>> {
-        self.store
-            .get_call(role, primary, call_ref)
-            .await
-            .expect("get")
-            .map(|b| b.to_vec())
+    pub async fn get(&self, role: PartitionRole, primary: &str, call_ref: &str) -> Option<Vec<u8>> {
+        self.store.get_call(role, primary, call_ref).await.expect("get").map(|b| b.to_vec())
     }
 
     /// The primary version counter (`p`) currently stored for a ref, or `None`
@@ -389,12 +360,20 @@ impl ReplicatedB2buaSut {
             fire_at: fire_at_ms,
             leg_id: Some(leg.clone()),
         });
-        let (p, b) = self
-            .store
-            .current_cv(role, primary, call_ref)
-            .expect("replica version vector present");
+        let (p, b) =
+            self.store.current_cv(role, primary, call_ref).expect("replica version vector present");
         self.store
-            .put_call(role, primary, call_ref, codec.encode(&call), &[], 600_000, p, b, &PutOpts::default())
+            .put_call(
+                role,
+                primary,
+                call_ref,
+                codec.encode(&call),
+                &[],
+                600_000,
+                p,
+                b,
+                &PutOpts::default(),
+            )
             .await
             .expect("replica store write");
         leg
@@ -413,10 +392,8 @@ impl ReplicatedB2buaSut {
         call_ref: &str,
         body: Vec<u8>,
     ) {
-        let (p, b) = self
-            .store
-            .current_cv(role, primary, call_ref)
-            .expect("replica version vector present");
+        let (p, b) =
+            self.store.current_cv(role, primary, call_ref).expect("replica version vector present");
         self.store
             .put_call(role, primary, call_ref, body, &[], 600_000, p, b, &PutOpts::default())
             .await
@@ -705,8 +682,7 @@ impl ProxySut {
     /// — e.g. the 200 coming back for the rebooted worker's own keepalive OPTIONS —
     /// would target the dead address and be lost.
     pub fn set_address(&self, ordinal: &str, addr: SocketAddr) {
-        self.registry
-            .set_address(ordinal, ProxyAddr::new(addr.ip().to_string(), addr.port()));
+        self.registry.set_address(ordinal, ProxyAddr::new(addr.ip().to_string(), addr.port()));
     }
 
     /// The proxy's CURRENT health view of a worker (as the registry holds it).
@@ -958,14 +934,7 @@ impl FailoverHarness {
     /// capture-order boundary an acceptance window is anchored on. `0` before the
     /// first recorded event.
     fn recorded_seq_high_water(&self) -> u64 {
-        self.harness
-            .recording()
-            .channel()
-            .snapshot()
-            .iter()
-            .map(|s| s.seq)
-            .max()
-            .unwrap_or(0)
+        self.harness.recording().channel().snapshot().iter().map(|s| s.seq).max().unwrap_or(0)
     }
 
     /// Set a worker's **wall-clock anchor offset** (ms) for a clock-skew test —
@@ -1092,14 +1061,7 @@ impl FailoverHarness {
             None
         };
 
-        ProxySut {
-            addr: sock,
-            ext_addr: None,
-            registry,
-            metrics,
-            task,
-            probe_task,
-        }
+        ProxySut { addr: sock, ext_addr: None, registry, metrics, task, probe_task }
     }
 
     /// Stand up a **dual-face** load-balancing proxy SUT: the internal face at
@@ -1129,14 +1091,10 @@ impl FailoverHarness {
         id_seed: u64,
     ) -> ProxySut {
         let roles = std::collections::HashSet::from([sip_net::UaRole::Proxy]);
-        let (int_ep, int_sock) = self
-            .harness
-            .bind_sut_with_roles(&format!("{name}-int"), int_addr, roles.clone())
-            .await;
-        let (ext_ep, ext_sock) = self
-            .harness
-            .bind_sut_with_roles(&format!("{name}-ext"), ext_addr, roles)
-            .await;
+        let (int_ep, int_sock) =
+            self.harness.bind_sut_with_roles(&format!("{name}-int"), int_addr, roles.clone()).await;
+        let (ext_ep, ext_sock) =
+            self.harness.bind_sut_with_roles(&format!("{name}-ext"), ext_addr, roles).await;
         self.relay_sip_addrs.push(int_sock);
         self.relay_sip_addrs.push(ext_sock);
 
@@ -1216,7 +1174,14 @@ impl FailoverHarness {
         limiter: Arc<dyn CallLimiter>,
     ) -> ReplicatedB2buaSut {
         self.spawn_worker_inner(
-            ordinal, sip_name, sip_bind, peers, dest, outbound_proxy, decision, limiter,
+            ordinal,
+            sip_name,
+            sip_bind,
+            peers,
+            dest,
+            outbound_proxy,
+            decision,
+            limiter,
         )
         .await
     }
@@ -1627,16 +1592,9 @@ impl FailoverHarness {
 
     /// Snapshot the replication recording (captured frames + markers + lanes).
     pub fn repl_report(&self) -> ReplReport {
-        let lanes: BTreeMap<SocketAddr, String> = self
-            .repl_addrs
-            .iter()
-            .map(|(ord, addr)| (*addr, ord.clone()))
-            .collect();
-        ReplReport {
-            frames: self.repl_recording.captured(),
-            markers: self.markers.clone(),
-            lanes,
-        }
+        let lanes: BTreeMap<SocketAddr, String> =
+            self.repl_addrs.iter().map(|(ord, addr)| (*addr, ord.clone())).collect();
+        ReplReport { frames: self.repl_recording.captured(), markers: self.markers.clone(), lanes }
     }
 
     /// The worker axes (ordinal ↔ SIP addr ↔ repl addr) for the unified report's
@@ -1816,13 +1774,7 @@ impl FailoverHarness {
     fn write_report_on_drop(&self) {
         // If the harness was consumed (taken out of the inner Mutex), there is
         // nothing to read — skip. `recording()` would panic otherwise.
-        if self
-            .harness
-            .inner
-            .lock()
-            .map(|g| g.is_none())
-            .unwrap_or(true)
-        {
+        if self.harness.inner.lock().map(|g| g.is_none()).unwrap_or(true) {
             return;
         }
         let dir = Self::seq_reports_dir().join(Self::sanitize_name(&self.name));
@@ -1831,10 +1783,7 @@ impl FailoverHarness {
             std::fs::create_dir_all(&dir)?;
             let doc = self.unified_doc(&self.name, true);
             std::fs::write(dir.join("report.html"), seq_report::render_html(&doc))?;
-            std::fs::write(
-                dir.join("report.global.txt"),
-                seq_report::render_global_txt(&doc),
-            )?;
+            std::fs::write(dir.join("report.global.txt"), seq_report::render_global_txt(&doc))?;
             std::fs::write(
                 dir.join("report.replication.mmd"),
                 self.repl_report().render_mermaid(),
@@ -1882,13 +1831,7 @@ impl Drop for FailoverHarness {
 
         // If the harness was consumed there is nothing to audit — skip (mirrors
         // the write-on-Drop guard).
-        if self
-            .harness
-            .inner
-            .lock()
-            .map(|g| g.is_none())
-            .unwrap_or(true)
-        {
+        if self.harness.inner.lock().map(|g| g.is_none()).unwrap_or(true) {
             return;
         }
 
@@ -1917,12 +1860,7 @@ impl Drop for FailoverHarness {
 impl HarnessHandle {
     /// Bind a named UA on the shared fabric (alice/bob), under a brief lock.
     async fn agent(&self, name: &str, addr: &str) -> Agent {
-        let h = self
-            .inner
-            .lock()
-            .unwrap()
-            .take()
-            .expect("harness taken (already finished?)");
+        let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
         let a = h.agent(name, addr).await;
         *self.inner.lock().unwrap() = Some(h);
         a
@@ -1935,12 +1873,7 @@ impl HarnessHandle {
         addr: &str,
         hook: sip_net::PreIngressHook,
     ) -> Agent {
-        let h = self
-            .inner
-            .lock()
-            .unwrap()
-            .take()
-            .expect("harness taken (already finished?)");
+        let h = self.inner.lock().unwrap().take().expect("harness taken (already finished?)");
         let a = h.agent_with_pre_ingress(name, addr, hook).await;
         *self.inner.lock().unwrap() = Some(h);
         a

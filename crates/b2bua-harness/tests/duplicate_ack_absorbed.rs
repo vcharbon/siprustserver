@@ -15,8 +15,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use call::CdrEventType;
 use b2bua_harness::{settle_until, B2buaSut};
+use call::CdrEventType;
 use scenario_harness::Harness;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -44,7 +44,8 @@ fn recorded_ack(h: &Harness, from: SocketAddr, to: SocketAddr, cseq: u32) -> Vec
 fn on_fresh_branch(raw: &[u8], branch: &str) -> Vec<u8> {
     let s = String::from_utf8(raw.to_vec()).expect("an ACK this harness wrote is UTF-8");
     let at = s.find("branch=").expect("a top Via branch") + "branch=".len();
-    let end = at + s[at..].find(|c: char| c == ';' || c == ',' || c.is_whitespace()).unwrap_or(s.len() - at);
+    let end = at
+        + s[at..].find(|c: char| c == ';' || c == ',' || c.is_whitespace()).unwrap_or(s.len() - at);
     format!("{}{branch}{}", &s[..at], &s[end..]).into_bytes()
 }
 
@@ -66,7 +67,8 @@ async fn a_duplicate_ack_on_a_fresh_branch_draws_no_second_b_leg_ack() {
     let h = Harness::new("b2bua-duplicate-ack-fresh-branch");
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", BOB).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
     let bob_addr: SocketAddr = BOB.parse().unwrap();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -123,7 +125,8 @@ async fn a_duplicate_ack_on_the_same_branch_draws_no_second_b_leg_ack() {
     let h = Harness::new("b2bua-duplicate-ack-same-branch");
     let alice = h.agent("alice", "127.0.0.1:5062").await;
     let bob = h.agent("bob", BOB).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5072).start(&h, "b2bua", "127.0.0.1:5082").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5072).start(&h, "b2bua", "127.0.0.1:5082").await;
     let bob_addr: SocketAddr = BOB.parse().unwrap();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -166,7 +169,8 @@ async fn a_duplicate_reinvite_ack_draws_no_third_b_leg_ack() {
     let h = Harness::new("b2bua-duplicate-ack-reinvite");
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", BOB).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
     let bob_addr: SocketAddr = BOB.parse().unwrap();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

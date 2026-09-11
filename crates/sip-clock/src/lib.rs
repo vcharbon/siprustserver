@@ -110,10 +110,7 @@ impl Clock {
             .duration_since(UNIX_EPOCH)
             .expect("system wall clock is before the UNIX epoch (grossly misconfigured host clock) — refusing to anchor Clock to a pre-1970 time")
             .as_millis() as i64;
-        Self {
-            anchor_wall_ms,
-            anchor_instant: Instant::now(),
-        }
+        Self { anchor_wall_ms, anchor_instant: Instant::now() }
     }
 
     /// Test constructor: pin the wall anchor to a fixed epoch-ms value.
@@ -122,10 +119,7 @@ impl Clock {
     /// `tokio::time::pause()`), `now_ms()` then advances in lockstep with
     /// `tokio::time::advance`, giving fully deterministic timestamps.
     pub fn test_at(anchor_wall_ms: i64) -> Self {
-        Self {
-            anchor_wall_ms,
-            anchor_instant: Instant::now(),
-        }
+        Self { anchor_wall_ms, anchor_instant: Instant::now() }
     }
 
     /// Wall-ish timestamp in epoch milliseconds, for logs and call records.
@@ -163,10 +157,7 @@ impl Clock {
 /// (the sampler is observability-only; unlike [`Clock::system`] it must never
 /// panic a running worker).
 pub fn raw_system_wall_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 /// Test helpers mirroring the source's virtual-time advance loop
@@ -323,11 +314,8 @@ mod tests {
     async fn chunked_advance_lands_on_total_and_steps_through() {
         let clock = Clock::test_at(0);
         // 250 ms in 100 ms chunks → observable steps at 100, 200, 250.
-        crate::testkit::advance_in_chunks(
-            Duration::from_millis(250),
-            Duration::from_millis(100),
-        )
-        .await;
+        crate::testkit::advance_in_chunks(Duration::from_millis(250), Duration::from_millis(100))
+            .await;
         assert_eq!(clock.now_ms(), 250);
     }
 

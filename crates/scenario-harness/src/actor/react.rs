@@ -239,14 +239,19 @@ pub(super) async fn react_in_dialog_request(
         // on, so it is 200'd (and its CSeq folded into the dialog stream) but
         // the leg is NOT terminated.
         "BYE" => {
-            let is_fork_teardown = uas
-                .request()
-                .to()
-                .tag()
-                .is_some_and(|t| st.fork_loser_tags.contains(t));
+            let is_fork_teardown =
+                uas.request().to().tag().is_some_and(|t| st.fork_loser_tags.contains(t));
             st.ctx.anchor(&st.agent, "bye", uas.request());
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
+            st.obs.record(
+                Observation::InDialogRequest {
+                    leg: st.role,
+                    call_id: call_id.to_string(),
+                    cseq,
+                    method: method.clone(),
+                },
+                now,
+            );
             if is_fork_teardown {
                 return Ok(());
             }
@@ -273,7 +278,15 @@ pub(super) async fn react_in_dialog_request(
         // gap detector (all methods share the dialog CSeq space, §12.2.1.1).
         "NOTIFY" | "OPTIONS" | "INFO" | "MESSAGE" => {
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
+            st.obs.record(
+                Observation::InDialogRequest {
+                    leg: st.role,
+                    call_id: call_id.to_string(),
+                    cseq,
+                    method: method.clone(),
+                },
+                now,
+            );
         }
         // An in-dialog (re-)INVITE — an offer realign. Answer 200 WITH SDP; a
         // delayed-offer bodyless re-INVITE still gets 200 + our SDP (no
@@ -293,12 +306,28 @@ pub(super) async fn react_in_dialog_request(
             if !st.sent_reinvites.is_empty() || !st.sent_updates.is_empty() {
                 uas.respond(491, "Request Pending").try_send().await?;
                 arm_reject_final(st, &uas, 491);
-                st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
+                st.obs.record(
+                    Observation::InDialogRequest {
+                        leg: st.role,
+                        call_id: call_id.to_string(),
+                        cseq,
+                        method: method.clone(),
+                    },
+                    now,
+                );
                 return Ok(());
             }
             respond_200_sdp(&mut uas, st.answer_body()).await?;
             st.answered_reinvites.insert(cseq);
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
+            st.obs.record(
+                Observation::InDialogRequest {
+                    leg: st.role,
+                    call_id: call_id.to_string(),
+                    cseq,
+                    method: method.clone(),
+                },
+                now,
+            );
             st.obs.record(
                 Observation::RequestSent {
                     key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),
@@ -325,11 +354,27 @@ pub(super) async fn react_in_dialog_request(
         "UPDATE" => {
             if !st.sent_reinvites.is_empty() || !st.sent_updates.is_empty() {
                 uas.respond(491, "Request Pending").try_send().await?;
-                st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
+                st.obs.record(
+                    Observation::InDialogRequest {
+                        leg: st.role,
+                        call_id: call_id.to_string(),
+                        cseq,
+                        method: method.clone(),
+                    },
+                    now,
+                );
                 return Ok(());
             }
             respond_200_sdp(&mut uas, st.answer_body()).await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
+            st.obs.record(
+                Observation::InDialogRequest {
+                    leg: st.role,
+                    call_id: call_id.to_string(),
+                    cseq,
+                    method: method.clone(),
+                },
+                now,
+            );
             // C5 (RFC 3311 §5.1): the EARLY UPDATE's offer/answer completed —
             // release the held INVITE 200, but only once the reliable 183 was
             // also PRACKed (MUST-014); if the UPDATE raced ahead of the PRACK
@@ -348,7 +393,15 @@ pub(super) async fn react_in_dialog_request(
             st.ctx.anchor(&st.agent, "prack", uas.request());
             let prack_tag = uas.request().to().tag().map(str::to_owned);
             uas.respond(200, "OK").try_send().await?;
-            st.obs.record(Observation::InDialogRequest { leg: st.role, call_id: call_id.to_string(), cseq, method: method.clone() }, now);
+            st.obs.record(
+                Observation::InDialogRequest {
+                    leg: st.role,
+                    call_id: call_id.to_string(),
+                    cseq,
+                    method: method.clone(),
+                },
+                now,
+            );
             // C5: this callee holds the INVITE for an early UPDATE — mark the
             // 183 PRACKed and release the held 200 only once the UPDATE is also
             // done (MUST-014 + RFC 3311 §5.1, in either arrival order).

@@ -6,9 +6,7 @@
 //! is no JsSIP in the Rust stack (ADR-0001); the `rvoip` parity oracle takes
 //! that role in the compliance matrix.
 
-use sip_message::header::{
-    Contact, HeaderName, HeaderValue, Params, To, Uri, Via,
-};
+use sip_message::header::{Contact, HeaderName, HeaderValue, Params, To, Uri, Via};
 use sip_message::{ContactSet, CustomParser, SipMessage, SipParser, SipRequest, SipStr};
 
 fn name(header: &str) -> HeaderName {
@@ -319,7 +317,10 @@ fn parsed_fields_with_compact_and_folded() {
     assert_eq!(c.from().tag(), Some("compact-tag"));
     assert_eq!(c.call_id().as_str(), "compact-call-id");
     assert_eq!(c.via().first().branch(), Some("z9hG4bK-compact"));
-    assert_eq!(first_contact(c.contacts()).and_then(|x| x.uri().source()), Some("sip:alice@10.0.0.1:5060"));
+    assert_eq!(
+        first_contact(c.contacts()).and_then(|x| x.uri().source()),
+        Some("sip:alice@10.0.0.1:5060")
+    );
 
     let f = req(FOLDED_HEADERS);
     assert_eq!(f.from().tag(), Some("folded-from-tag"));
@@ -353,7 +354,8 @@ Content-Length: 0\r\n\r\n";
 
 #[test]
 fn refer_to_question_mark_in_userinfo_vs_embedded_headers() {
-    let refer_value = "<sips:+33?param=v@host.example;lr?Replaces=abc%40d%3Bfrom-tag%3D1%3Bto-tag%3D2>";
+    let refer_value =
+        "<sips:+33?param=v@host.example;lr?Replaces=abc%40d%3Bfrom-tag%3D1%3Bto-tag%3D2>";
     let raw = format!(
         "REFER sip:bob@example.com SIP/2.0\r\n\
 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-refer-q\r\n\

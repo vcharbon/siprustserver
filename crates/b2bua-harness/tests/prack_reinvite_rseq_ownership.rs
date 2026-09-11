@@ -50,7 +50,8 @@ async fn a_reliable_provisional_to_a_relayed_reinvite_is_numbered_by_this_stack(
     let h = Harness::with_transit_delay("b2bua-prack-reinvite-rseq", 0);
     let alice = h.agent("alice", "127.0.0.1:5045").await;
     let bob = h.agent("bob", "127.0.0.1:5046").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5046).start(&h, "b2bua", "127.0.0.1:5047").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5046).start(&h, "b2bua", "127.0.0.1:5047").await;
 
     // ── an ordinary call, established without reliability in play ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -160,7 +161,8 @@ async fn a_reliable_provisional_to_a_callee_originated_reinvite_is_numbered_by_t
     let h = Harness::with_transit_delay("b2bua-prack-reinvite-rseq-callee", 0);
     let alice = h.agent("alice", "127.0.0.1:5048").await;
     let bob = h.agent("bob", "127.0.0.1:5053").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5053).start(&h, "b2bua", "127.0.0.1:5054").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5053).start(&h, "b2bua", "127.0.0.1:5054").await;
 
     // ── an ordinary call, established without reliability in play ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

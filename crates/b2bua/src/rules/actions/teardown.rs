@@ -64,7 +64,14 @@ impl ActionExecutor<'_> {
             })
             .collect();
         for (leg_id, outbound_cseq) in pending_invites {
-            self.reject_pending_reinvite(call, fx, &leg_id, outbound_cseq, 487, "Request Terminated");
+            self.reject_pending_reinvite(
+                call,
+                fx,
+                &leg_id,
+                outbound_cseq,
+                487,
+                "Request Terminated",
+            );
         }
         // RFC 3261 §16.6: a termination the peer ASKED for restates what it
         // said — the Q.850 cause (RFC 3326 §2), the charging correlation, the
@@ -81,7 +88,15 @@ impl ActionExecutor<'_> {
         let legs: Vec<(String, LegState, LegDisposition, Option<ByeDisposition>, bool)> =
             std::iter::once(&call.a_leg)
                 .chain(call.b_legs.iter())
-                .map(|l| (l.leg_id.clone(), l.state, l.disposition, l.bye_disposition, l.leg_id == call.a_leg.leg_id))
+                .map(|l| {
+                    (
+                        l.leg_id.clone(),
+                        l.state,
+                        l.disposition,
+                        l.bye_disposition,
+                        l.leg_id == call.a_leg.leg_id,
+                    )
+                })
                 .collect();
         for (id, state, disposition, bye_disposition, is_a) in legs {
             // Skip legs already handled by the firing rule or already resolved.
@@ -312,10 +327,7 @@ impl ActionExecutor<'_> {
         let branch = self.id_gen.new_branch();
         let mut extra_headers: Vec<SipHeader> = reason
             .map(|r| {
-                vec![SipHeader {
-                    name: "Reason".to_string().into(),
-                    value: r.to_string().into(),
-                }]
+                vec![SipHeader { name: "Reason".to_string().into(), value: r.to_string().into() }]
             })
             .unwrap_or_default();
         // The firing rule's own statement is the more specific one and stands;
@@ -389,7 +401,12 @@ impl ActionExecutor<'_> {
         cancel: PendingReinviteCancel,
     ) {
         fx.outbound.push(cancel.effect);
-        *call = call::helpers::cancel_pending_request(call.clone(), leg_id, &cancel.t_id, outbound_cseq);
+        *call = call::helpers::cancel_pending_request(
+            call.clone(),
+            leg_id,
+            &cancel.t_id,
+            outbound_cseq,
+        );
         self.retire(call, fx, Scope::Transaction { leg_id, cseq: outbound_cseq });
     }
 
@@ -453,11 +470,12 @@ impl ActionExecutor<'_> {
             Vec::new(),
             None,
         );
-        let originator = call::helpers::get_peer(call, leg_id)
-            .unwrap_or(call.a_leg.leg_id.as_str())
-            .to_string();
+        let originator =
+            call::helpers::get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string();
         fx.outbound.push(OutboundSipEffect {
-            body: OutboundBody::Response(generators::generate_relayed_response(status, reason, &opts)),
+            body: OutboundBody::Response(generators::generate_relayed_response(
+                status, reason, &opts,
+            )),
             mode: OutboundTxnMode::ServerResponse,
             destination: dest,
             label: format!("{status} INVITE → {originator}"),
@@ -515,7 +533,11 @@ struct PendingReinviteCancel {
 /// no pending dialog, no cached handle, an unreadable one, or a handle naming
 /// another CSeq than the snapshot (the glare guard forbids a second in-flight
 /// INVITE on one dialog, and a mismatched transaction is never CANCELled).
-fn pending_reinvite_cancel(call: &Call, leg_id: &str, outbound_cseq: i64) -> Option<PendingReinviteCancel> {
+fn pending_reinvite_cancel(
+    call: &Call,
+    leg_id: &str,
+    outbound_cseq: i64,
+) -> Option<PendingReinviteCancel> {
     let (t_id, dialog) = find_pending_dialog(call, leg_id, outbound_cseq)?;
     let handle = dialog.ext.pending_invite_txn.as_ref()?;
     let Ok(SipMessage::Request(req)) = CustomParser::new().parse(&handle.original_invite) else {
@@ -524,7 +546,8 @@ fn pending_reinvite_cancel(call: &Call, leg_id: &str, outbound_cseq: i64) -> Opt
     if req.cseq().seq() as i64 != outbound_cseq {
         return None;
     }
-    let cancel = generators::generate_cancel(&InviteClientTransactionHandle { original_invite: req }, &[]);
+    let cancel =
+        generators::generate_cancel(&InviteClientTransactionHandle { original_invite: req }, &[]);
     Some(PendingReinviteCancel {
         t_id,
         effect: OutboundSipEffect {

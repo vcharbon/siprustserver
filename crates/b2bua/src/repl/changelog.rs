@@ -124,24 +124,13 @@ impl SubLog {
             self.entries.remove(&prev.counter);
         }
         self.entries.insert(counter, call_ref.to_string());
-        self.by_ref.insert(
-            call_ref.to_string(),
-            RefState {
-                counter,
-                op,
-                expiry_at_ms,
-            },
-        );
+        self.by_ref.insert(call_ref.to_string(), RefState { counter, op, expiry_at_ms });
     }
 
     /// The due `(counter, callRef, op)` above `since` (or all when `cold`),
     /// ascending, capped at `limit`.
     fn due(&self, since_counter: u64, cold: bool, limit: usize) -> Vec<(u64, String, Op)> {
-        let start = if cold {
-            Bound::Unbounded
-        } else {
-            Bound::Excluded(since_counter)
-        };
+        let start = if cold { Bound::Unbounded } else { Bound::Excluded(since_counter) };
         self.entries
             .range((start, Bound::Unbounded))
             .take(limit)
@@ -164,12 +153,7 @@ struct PeerLog {
 
 impl PeerLog {
     fn new(now_ms: i64) -> Self {
-        Self {
-            pri: SubLog::default(),
-            bak: SubLog::default(),
-            last_active_ms: now_ms,
-            serving: 0,
-        }
+        Self { pri: SubLog::default(), bak: SubLog::default(), last_active_ms: now_ms, serving: 0 }
     }
 
     fn sub(&self, partition: Partition) -> &SubLog {
@@ -227,10 +211,7 @@ impl Changelog {
             clock,
             tombstone_ttl_ms: DEFAULT_TOMBSTONE_TTL_MS,
             dead_peer_ttl_ms: DEFAULT_DEAD_PEER_TTL_MS,
-            inner: Arc::new(Mutex::new(Inner {
-                counter: 0,
-                peers: HashMap::new(),
-            })),
+            inner: Arc::new(Mutex::new(Inner { counter: 0, peers: HashMap::new() })),
         }
     }
 
@@ -260,16 +241,10 @@ impl Changelog {
         {
             let mut inner = self.inner.lock().unwrap();
             let now = self.clock.now_ms();
-            let log = inner
-                .peers
-                .entry(peer.to_string())
-                .or_insert_with(|| PeerLog::new(now));
+            let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now));
             log.serving += 1;
         }
-        ServeGuard {
-            changelog: self.clone(),
-            peer: peer.to_string(),
-        }
+        ServeGuard { changelog: self.clone(), peer: peer.to_string() }
     }
 
     /// Whether a warm puller on `partition` resuming from `since` must
@@ -314,10 +289,7 @@ impl Changelog {
         inner.counter += 1;
         let c = inner.counter;
 
-        let log = inner
-            .peers
-            .entry(peer.to_string())
-            .or_insert_with(|| PeerLog::new(now));
+        let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now));
         log.last_active_ms = now;
 
         let expiry_at_ms = match op {
@@ -398,11 +370,8 @@ impl Changelog {
     /// an outbound leak distinct from the call map. One brief lock; pure read.
     pub fn depth(&self) -> (u64, u64) {
         let inner = self.inner.lock().unwrap();
-        let entries: usize = inner
-            .peers
-            .values()
-            .map(|p| p.pri.entries.len() + p.bak.entries.len())
-            .sum();
+        let entries: usize =
+            inner.peers.values().map(|p| p.pri.entries.len() + p.bak.entries.len()).sum();
         (entries as u64, inner.peers.len() as u64)
     }
 
@@ -412,9 +381,7 @@ impl Changelog {
         let dead_peer_ttl = self.dead_peer_ttl_ms;
         let mut inner = self.inner.lock().unwrap();
         // Drop idle peers wholesale — but NEVER one with an active serve task.
-        inner
-            .peers
-            .retain(|_, log| log.serving > 0 || now_ms - log.last_active_ms < dead_peer_ttl);
+        inner.peers.retain(|_, log| log.serving > 0 || now_ms - log.last_active_ms < dead_peer_ttl);
         // Reap expired tombstones from each surviving sub-log, raising its floor.
         for log in inner.peers.values_mut() {
             reap_sublog(&mut log.pri, now_ms);

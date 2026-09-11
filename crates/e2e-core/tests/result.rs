@@ -76,13 +76,10 @@ async fn result_json_round_trips_and_campaign_indexes() {
     assert_eq!(result.cell.dir_name(), "basic-call-identity__basic-call__fake-lsbc-b2bua");
 
     // Round-trip through the on-disk layout: runs_root/<campaign>/<ts>/<cell>/result.json.
-    let runs_root =
-        std::env::temp_dir().join(format!("e2e-result-test-{}", std::process::id()));
+    let runs_root = std::env::temp_dir().join(format!("e2e-result-test-{}", std::process::id()));
     let run_dir = result::run_dir(&runs_root, "smoke", "t0");
     let path = result::write_result(&run_dir, &result).expect("write result.json");
-    assert!(path.ends_with(
-        "smoke/t0/basic-call-identity__basic-call__fake-lsbc-b2bua/result.json"
-    ));
+    assert!(path.ends_with("smoke/t0/basic-call-identity__basic-call__fake-lsbc-b2bua/result.json"));
     let back = result::read_result(path.parent().unwrap()).expect("read result.json back");
     assert_eq!(
         serde_json::to_value(&back).unwrap(),
@@ -117,8 +114,5 @@ async fn render_svg_matches_the_html_reports_diagram() {
     let svg = seq_report::render_svg(&result.seq_doc);
     assert!(svg.starts_with("<svg"), "standalone SVG markup");
     let html = seq_report::render_html(&result.seq_doc);
-    assert!(
-        html.contains(&svg),
-        "the HTML report must embed the same SVG render_svg returns"
-    );
+    assert!(html.contains(&svg), "the HTML report must embed the same SVG render_svg returns");
 }

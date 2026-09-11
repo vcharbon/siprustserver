@@ -41,7 +41,9 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
+async fn serve_limiter(
+    net: &SimulatedHttpNetwork,
+) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
     let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
@@ -49,11 +51,7 @@ async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn
 }
 
 fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    Arc::new(HttpCallLimiter::new(
-        Arc::new(net.clone()),
-        laddr(),
-        Duration::from_millis(150),
-    ))
+    Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// Shared capture slot for the `/call/failure` requests an engine sees.
@@ -146,8 +144,9 @@ async fn failure_request_carries_snapshot_and_failed_response_headers() {
         snap.cdr_events
     );
     assert!(
-        snap.cdr_events.iter().any(|e| e.event_type == CdrEventType::Reject
-            && e.status_code == Some(486)),
+        snap.cdr_events
+            .iter()
+            .any(|e| e.event_type == CdrEventType::Reject && e.status_code == Some(486)),
         "the triggering reject is already on the trail"
     );
 
@@ -242,11 +241,7 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
 /// INVITE requests the recorded wire delivered to `to` — the original send
 /// plus every Timer A rung.
 fn invites_delivered_to(report: &scenario_harness::RunReport, to: SocketAddr) -> usize {
-    report
-        .entries()
-        .iter()
-        .filter(|e| e.to == to && e.raw.starts_with(b"INVITE "))
-        .count()
+    report.entries().iter().filter(|e| e.to == to && e.raw.starts_with(b"INVITE ")).count()
 }
 
 /// The dead-hop case under a tightened first-response bound
@@ -379,7 +374,10 @@ async fn b_leg_that_rang_under_the_first_response_bound_fails_at_the_long_bound_
 
     // Past the 5 s first-response bound: nothing fires, carol is ringing.
     h.advance(Duration::from_secs(6)).await;
-    assert!(captured.lock().unwrap().is_empty(), "a ringing callee is not on the first-response bound");
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "a ringing callee is not on the first-response bound"
+    );
     assert_eq!(b2bua.active_calls(), 1);
 
     // The long bound is measured from the original send: it fires at 40 s.

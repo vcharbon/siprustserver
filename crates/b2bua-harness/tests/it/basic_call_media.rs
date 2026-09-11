@@ -29,7 +29,8 @@ async fn alice_and_bob_hear_each_other_through_b2bua() {
     let h = Harness::with_transit_delay("b2bua-basic-media", 1);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5070).start(&h, "b2bua", "127.0.0.1:5080").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5070).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     // Media rides a separate simulated fabric (peer-to-peer; the B2BUA never
     // touches RTP). Both transports bind on the same media net so RTP routes.
@@ -39,8 +40,7 @@ async fn alice_and_bob_hear_each_other_through_b2bua() {
     let bob_rtp = me.open("127.0.0.1", Some(BOB_RTP), OpenOptions::default()).await.unwrap();
 
     // Each side's offer/answer engine advertises its own RTP transport address.
-    let mut alice_eng =
-        OfferAnswerEngine::new(NetAddr::new("127.0.0.1", ALICE_RTP), vec![PCMA]);
+    let mut alice_eng = OfferAnswerEngine::new(NetAddr::new("127.0.0.1", ALICE_RTP), vec![PCMA]);
     let mut bob_eng = OfferAnswerEngine::new(NetAddr::new("127.0.0.1", BOB_RTP), vec![PCMA]);
 
     // Alice offers (real SDP), sent through the B2BUA.
@@ -53,9 +53,7 @@ async fn alice_and_bob_hear_each_other_through_b2bua() {
     let offer = parse_sdp(&String::from_utf8_lossy(uas.request().body()));
     let answer_wire = OfferAnswerEngine::to_wire(&bob_eng.answer_to(&offer).expect("bob answers"));
     let bob_session = bob_rtp.session("call");
-    bob_session
-        .configure(bob_eng.negotiated().expect("bob negotiated").clone())
-        .unwrap();
+    bob_session.configure(bob_eng.negotiated().expect("bob negotiated").clone()).unwrap();
 
     uas.respond(180, "Ringing").await;
     call.expect(180).await;

@@ -132,8 +132,7 @@ mod tests {
 
     #[test]
     fn round_trips_through_its_file() {
-        let dir =
-            std::env::temp_dir().join(format!("differential-record-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("differential-record-{}", std::process::id()));
         let path = dir.join("differential.json");
         write_differential(&path, &sample()).unwrap();
         assert_eq!(read_differential(&path).unwrap(), sample());

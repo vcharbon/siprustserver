@@ -22,12 +22,12 @@ use crate::dispatch::PerCallDispatcher;
 use crate::limiter::CallLimiter;
 use crate::metrics::B2buaMetrics;
 use crate::overload::OverloadSignal;
-use crate::repl::{ReplServer, ReplicatingCallStore, ReplicationSupervisor, Readiness};
+use crate::repl::{Readiness, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
 use crate::router::{self, RouterCtx};
 use crate::rules::{compose_rules, default_rules_with, ServiceDef};
 use crate::store::{BufferedTerminateWriter, CallState, CallStore, StoreFaults};
-use crate::wire_faults::WireFaults;
 use crate::timers::TimerService;
+use crate::wire_faults::WireFaults;
 
 /// A running B2BUA worker. Holds the shared context; the router loop runs on a
 /// spawned task that lives until the endpoint closes.
@@ -238,8 +238,7 @@ impl B2buaCore {
         // unconditionally; `repl_tx` is retained on `Self` so the channel never
         // closes on the legacy (no-replication) path — otherwise `repl_rx.recv()`
         // would resolve `None` every poll and busy-loop the router select.
-        let (repl_tx, repl_rx) =
-            tokio::sync::mpsc::unbounded_channel::<router::ReplCommand>();
+        let (repl_tx, repl_rx) = tokio::sync::mpsc::unbounded_channel::<router::ReplCommand>();
 
         // Replication wiring (opt-in). When present: serve our changelog, start
         // the puller supervisor, gate readiness on it, and route flushes through
@@ -383,13 +382,7 @@ impl B2buaCore {
             adaptation_http: adaptation_http.map(Arc::new),
         });
 
-        tasks.push(tokio::spawn(router::run(
-            ctx.clone(),
-            txn_rx,
-            timer_rx,
-            reentry_rx,
-            repl_rx,
-        )));
+        tasks.push(tokio::spawn(router::run(ctx.clone(), txn_rx, timer_rx, reentry_rx, repl_rx)));
         // The single periodic sweep task, driving two concerns off ONE
         // `tokio::time::interval` (was two tasks at the same cadence — racy under
         // the paused clock, redundant timers). Aborted by the harness `crash()`
@@ -414,8 +407,7 @@ impl B2buaCore {
             let ctx2 = ctx.clone();
             let interval_ms = reaper.sweep_interval_ms();
             tasks.push(tokio::spawn(async move {
-                let mut tick =
-                    tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 tick.tick().await; // skip the immediate first tick
                 loop {
@@ -461,15 +453,13 @@ impl B2buaCore {
             let clock = ctx.clock.clone();
             let metrics = metrics.clone();
             tasks.push(tokio::spawn(async move {
-                let mut tick =
-                    tokio::time::interval(std::time::Duration::from_secs(30));
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 tick.tick().await; // skip the immediate first tick
                 let mut warned_recently = false;
                 loop {
                     tick.tick().await;
-                    let divergence =
-                        clock.wall_divergence_ms(sip_clock::raw_system_wall_ms());
+                    let divergence = clock.wall_divergence_ms(sip_clock::raw_system_wall_ms());
                     metrics.set_clock_wall_divergence_ms(divergence);
                     if divergence.abs() > 500 {
                         // Rate-limit: warn on the RISING edge only, so a sustained
@@ -686,8 +676,7 @@ impl B2buaCore {
         if let Some(repl) = &self.repl_store {
             let (meta_total, meta_backup) = repl.meta_counts();
             let (cl_entries, cl_peers) = repl.changelog().depth();
-            self.metrics
-                .set_repl_store_gauges(meta_total, meta_backup, cl_entries, cl_peers);
+            self.metrics.set_repl_store_gauges(meta_total, meta_backup, cl_entries, cl_peers);
         }
     }
 }

@@ -15,7 +15,8 @@ async fn a_relayed_bye_carries_every_line_of_the_peers_advertisement() {
     let h = Harness::with_transit_delay("b2bua-bye-advert-relay", 0);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5070).start(&h, "b2bua", "127.0.0.1:5080").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5070).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -35,10 +36,8 @@ async fn a_relayed_bye_carries_every_line_of_the_peers_advertisement() {
     let mut relayed = bob.receive("BYE").await;
     let allow: Vec<String> =
         relayed.request().raw(HeaderName::Allow).map(|v| v.to_string()).collect();
-    let tokens: Vec<String> = allow
-        .iter()
-        .flat_map(|line| line.split(',').map(|t| t.trim().to_string()))
-        .collect();
+    let tokens: Vec<String> =
+        allow.iter().flat_map(|line| line.split(',').map(|t| t.trim().to_string())).collect();
     for method in ["INVITE", "ACK", "OPTIONS", "CANCEL", "BYE"] {
         assert!(tokens.iter().any(|t| t == method), "{method} rides the relayed BYE: {allow:?}");
     }

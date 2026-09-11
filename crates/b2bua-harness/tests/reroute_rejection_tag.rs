@@ -42,7 +42,11 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 /// `second_port` under `new_ruri`, and RELAYS any further failure to the caller
 /// (the failover plan is one deep). Mirrors the wire
 /// `on_failure: { action: "failover", destination, new_ruri }`.
-fn reroute_once(first_port: u16, second_port: u16, new_ruri: &'static str) -> Arc<ScriptedDecisionEngine> {
+fn reroute_once(
+    first_port: u16,
+    second_port: u16,
+    new_ruri: &'static str,
+) -> Arc<ScriptedDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {

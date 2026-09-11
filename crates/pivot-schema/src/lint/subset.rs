@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 use crate::accessor::Accessor;
 use crate::flow::FlowNode;
 use crate::lint::strings::{deviation_strings, postcondition_strings, step_strings};
-use crate::lint::{Index, Report, at};
+use crate::lint::{at, Index, Report};
 use crate::postcondition::CdrExpectation;
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
@@ -93,7 +93,9 @@ fn authored_constructs(index: &Index<'_>, report: &mut Report) {
         let path = at("flow", node.id());
         match node {
             FlowNode::Alt(_) => refuse(report, "subset/alt", path.clone(), "an `alt`"),
-            FlowNode::Unordered(_) => refuse(report, "subset/unordered", path.clone(), "an `unordered` group"),
+            FlowNode::Unordered(_) => {
+                refuse(report, "subset/unordered", path.clone(), "an `unordered` group")
+            }
             FlowNode::Inject(_) => refuse(report, "subset/inject", path.clone(), "an `inject`"),
             FlowNode::Message(_) => {}
         }

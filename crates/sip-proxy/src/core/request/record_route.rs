@@ -103,7 +103,9 @@ impl ProxyCore {
         // params from, the signed worker pin is present. Intra-face keeps
         // the param-less `;outbound;lr` form.
         let outbound_rr = match (&stickiness, cross_face) {
-            (Some(params), true) => record_route_flagged(worker_party_adv, params.iter(), "outbound"),
+            (Some(params), true) => {
+                record_route_flagged(worker_party_adv, params.iter(), "outbound")
+            }
             _ => record_route_flagged(worker_party_adv, std::iter::empty(), "outbound"),
         };
         let draft = if is_worker_outbound {

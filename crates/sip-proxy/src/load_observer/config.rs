@@ -141,7 +141,12 @@ mod tests {
         // Invariants that keep validate_bands / the runner preflight happy.
         assert!(c.elu_soft < c.elu_hard && c.elu_hard < c.elu_critical);
         let min_gap = (c.elu_hard - c.elu_soft).min(c.elu_critical - c.elu_hard);
-        assert!(c.band_hysteresis < min_gap, "hysteresis {} must be < min gap {}", c.band_hysteresis, min_gap);
+        assert!(
+            c.band_hysteresis < min_gap,
+            "hysteresis {} must be < min gap {}",
+            c.band_hysteresis,
+            min_gap
+        );
     }
 
     #[test]

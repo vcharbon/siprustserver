@@ -86,9 +86,7 @@ impl CallStore for InMemoryCallStore {
     ) -> Result<(), StoreError> {
         let mut inner = self.inner.lock().unwrap();
         // Wrap the owned encoded bytes in an `Arc` once, here.
-        inner
-            .bodies
-            .insert(Self::body_key(role, primary, call_ref), Arc::from(body));
+        inner.bodies.insert(Self::body_key(role, primary, call_ref), Arc::from(body));
         // REPLACE (not just insert) this call's index keys: drop any previously
         // owned key absent from the new set, then upsert the new set and record
         // it for teardown. A put with no index keys (some reclaim/bootstrap puts)
@@ -197,9 +195,19 @@ mod tests {
     async fn delete_with_empty_indexes_still_reclaims_index() {
         let s = InMemoryCallStore::new();
         let ks = keys();
-        s.put_call(PartitionRole::Backup, "w1", "w1|c|t", b"body".to_vec(), &ks, 0, 1, 0, &PutOpts::default())
-            .await
-            .unwrap();
+        s.put_call(
+            PartitionRole::Backup,
+            "w1",
+            "w1|c|t",
+            b"body".to_vec(),
+            &ks,
+            0,
+            1,
+            0,
+            &PutOpts::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(s.lens(), (1, 2), "body + 2 idx after put");
         // Replicated delete: EMPTY indexes (the changelog delete frame).
         s.delete_call(PartitionRole::Backup, "w1", "w1|c|t", &[], &PutOpts::default())
@@ -213,12 +221,32 @@ mod tests {
     #[tokio::test]
     async fn reput_with_changed_keys_drops_the_old() {
         let s = InMemoryCallStore::new();
-        s.put_call(PartitionRole::Primary, "w0", "w0|c|t", b"b1".to_vec(), &["leg:a".into()], 0, 1, 0, &PutOpts::default())
-            .await
-            .unwrap();
-        s.put_call(PartitionRole::Primary, "w0", "w0|c|t", b"b2".to_vec(), &["leg:b".into()], 0, 1, 0, &PutOpts::default())
-            .await
-            .unwrap();
+        s.put_call(
+            PartitionRole::Primary,
+            "w0",
+            "w0|c|t",
+            b"b1".to_vec(),
+            &["leg:a".into()],
+            0,
+            1,
+            0,
+            &PutOpts::default(),
+        )
+        .await
+        .unwrap();
+        s.put_call(
+            PartitionRole::Primary,
+            "w0",
+            "w0|c|t",
+            b"b2".to_vec(),
+            &["leg:b".into()],
+            0,
+            1,
+            0,
+            &PutOpts::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(s.lens(), (1, 1), "only the new key remains");
         assert_eq!(s.get_index("leg:a").await.unwrap(), None, "stale key gone");
         assert_eq!(s.get_index("leg:b").await.unwrap().as_deref(), Some("w0|c|t"));
@@ -232,9 +260,19 @@ mod tests {
         for i in 0..1000 {
             let cr = format!("w0|c{i}|t");
             let ks = vec![format!("leg:cid{i}|tag"), format!("leg:b{i}")];
-            s.put_call(PartitionRole::Primary, "w0", &cr, b"x".to_vec(), &ks, 0, 1, 0, &PutOpts::default())
-                .await
-                .unwrap();
+            s.put_call(
+                PartitionRole::Primary,
+                "w0",
+                &cr,
+                b"x".to_vec(),
+                &ks,
+                0,
+                1,
+                0,
+                &PutOpts::default(),
+            )
+            .await
+            .unwrap();
             // delete as the replicated path does: empty indexes.
             s.delete_call(PartitionRole::Primary, "w0", &cr, &[], &PutOpts::default())
                 .await

@@ -370,16 +370,15 @@ fn background_policies(plan: &Plan) -> Vec<Policy> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pivot_schema::bundle::ClockMode;
     use crate::IdentityBindings;
+    use pivot_schema::bundle::ClockMode;
     use pivot_schema::scoping::CheckClass;
 
     /// A two-leg document whose callee leg claims by the `by` given, stating
     /// the origin lane its content came from where it names one.
     fn plan_of(claim: &str, origin_lane: Option<&str>) -> Plan {
-        let origin_lane = origin_lane
-            .map(|lane| format!(r#", "origin_lane": "{lane}""#))
-            .unwrap_or_default();
+        let origin_lane =
+            origin_lane.map(|lane| format!(r#", "origin_lane": "{lane}""#)).unwrap_or_default();
         let text = format!(
             r#"{{
               "pivot_version": 3,

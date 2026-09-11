@@ -39,7 +39,10 @@ struct QueueStrategy {
 
 impl QueueStrategy {
     fn of(targets: &[ProxyAddr]) -> Arc<Self> {
-        Arc::new(Self { targets: Mutex::new(targets.iter().cloned().collect()), calls: AtomicU32::new(0) })
+        Arc::new(Self {
+            targets: Mutex::new(targets.iter().cloned().collect()),
+            calls: AtomicU32::new(0),
+        })
     }
 }
 
@@ -48,7 +51,11 @@ impl RoutingStrategy for QueueStrategy {
     fn name(&self) -> &str {
         "Queue"
     }
-    async fn select_for_new_dialog(&self, _msg: &SipMessage, _opts: SelectOpts) -> Result<ProxyAddr, SelectError> {
+    async fn select_for_new_dialog(
+        &self,
+        _msg: &SipMessage,
+        _opts: SelectOpts,
+    ) -> Result<ProxyAddr, SelectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.targets.lock().unwrap().pop_front().expect("selection queue exhausted"))
     }
@@ -72,7 +79,11 @@ impl ProxySelfGate for AdmitOnceGate {
     fn try_admit_external(&self) -> AdmitDecision {
         self.tries.fetch_add(1, Ordering::SeqCst);
         if self.used.swap(true, Ordering::SeqCst) {
-            AdmitDecision { admit: false, reason: Some("proxy_overload_cps".into()), retry_after_sec: 3 }
+            AdmitDecision {
+                admit: false,
+                reason: Some("proxy_overload_cps".into()),
+                retry_after_sec: 3,
+            }
         } else {
             AdmitDecision::admit()
         }
@@ -88,7 +99,10 @@ struct Fixture {
 
 async fn fixture(targets: &[ProxyAddr]) -> Fixture {
     let net = SimulatedSignalingNetwork::new(1);
-    let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
+    let ep = net
+        .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
+        .await
+        .unwrap();
     let strategy = QueueStrategy::of(targets);
     let gate = Arc::new(AdmitOnceGate::default());
     let metrics = Arc::new(ProxyMetrics::new());
@@ -164,8 +178,16 @@ async fn retransmitted_invite_repeats_the_original_selection() {
     let retx = f.core.route_request(&req, src()).await;
 
     assert_eq!(first.target, Some(ProxyAddr::new(W1, 5060)));
-    assert_eq!(retx.target, Some(ProxyAddr::new(W1, 5060)), "retransmit must NOT be re-routed to w2");
-    assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "the strategy must not run again for a retransmit");
+    assert_eq!(
+        retx.target,
+        Some(ProxyAddr::new(W1, 5060)),
+        "retransmit must NOT be re-routed to w2"
+    );
+    assert_eq!(
+        f.strategy.calls.load(Ordering::SeqCst),
+        1,
+        "the strategy must not run again for a retransmit"
+    );
 }
 
 // A retransmit of an admitted INVITE must bypass the gate (no 503 to a
@@ -200,7 +222,11 @@ async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
     let cxl = cancel("longring-1@test", "tag-a", 7, "z9hG4bKr3c");
     let outcome = f.core.route_request(&cxl, src()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Cancel);
-    assert_eq!(outcome.target, Some(ProxyAddr::new(W1, 5060)), "CANCEL must follow the INVITE, not re-select");
+    assert_eq!(
+        outcome.target,
+        Some(ProxyAddr::new(W1, 5060)),
+        "CANCEL must follow the INVITE, not re-select"
+    );
     assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "no fallback selection for the CANCEL");
 }
 
@@ -232,7 +258,11 @@ Content-Length: 0\r\n\r\n"
 
     let out = f.core.route_request(&ack("latefinal-1@test", "tag-a", 9, "z9hG4bKr4"), src()).await;
     assert_eq!(out.decision, RoutingDecisionKind::AckHop);
-    assert_eq!(out.target, Some(ProxyAddr::new(W1, 5060)), "the ACK goes to the node the final came from (relay, not a fresh selection)");
+    assert_eq!(
+        out.target,
+        Some(ProxyAddr::new(W1, 5060)),
+        "the ACK goes to the node the final came from (relay, not a fresh selection)"
+    );
     assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "no fresh selection for the ACK");
 }
 
@@ -253,6 +283,14 @@ async fn same_callid_same_cseq_different_from_tags_do_not_collide() {
     let out_a = f.core.route_request(&cxl_a, src()).await;
     let out_b = f.core.route_request(&cxl_b, src()).await;
 
-    assert_eq!(out_a.target, Some(ProxyAddr::new(W1, 5060)), "direction A's CANCEL follows A's INVITE");
-    assert_eq!(out_b.target, Some(ProxyAddr::new(W2, 5060)), "direction B's CANCEL follows B's INVITE");
+    assert_eq!(
+        out_a.target,
+        Some(ProxyAddr::new(W1, 5060)),
+        "direction A's CANCEL follows A's INVITE"
+    );
+    assert_eq!(
+        out_b.target,
+        Some(ProxyAddr::new(W2, 5060)),
+        "direction B's CANCEL follows B's INVITE"
+    );
 }

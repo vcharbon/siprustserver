@@ -40,12 +40,8 @@ impl std::fmt::Display for ClipName {
     }
 }
 
-pub const CLIP_NAMES: [ClipName; 4] = [
-    ClipName::Alice,
-    ClipName::Bob,
-    ClipName::Charlie,
-    ClipName::Ringback,
-];
+pub const CLIP_NAMES: [ClipName; 4] =
+    [ClipName::Alice, ClipName::Bob, ClipName::Charlie, ClipName::Ringback];
 
 struct Formant {
     freq: f64,
@@ -101,10 +97,7 @@ impl Lcg {
         Self { state: seed }
     }
     fn next(&mut self) -> f64 {
-        self.state = self
-            .state
-            .wrapping_mul(1664525)
-            .wrapping_add(1013904223);
+        self.state = self.state.wrapping_mul(1664525).wrapping_add(1013904223);
         self.state as f64 / 0xffff_ffffu32 as f64 - 0.5
     }
 }
@@ -128,9 +121,7 @@ fn syllable_envelope(n: usize, total: usize) -> f64 {
 fn normalize(buf: &[f64], peak: f64) -> Vec<i16> {
     let max = buf.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
     let scale = if max > 0.0 { (peak * 32767.0) / max } else { 0.0 };
-    buf.iter()
-        .map(|&v| (v * scale).round().clamp(-32768.0, 32767.0) as i16)
-        .collect()
+    buf.iter().map(|&v| (v * scale).round().clamp(-32768.0, 32767.0) as i16).collect()
 }
 
 struct Resonator {
@@ -153,13 +144,7 @@ fn synth_voice(spec: &VoiceSpec) -> Vec<i16> {
         .map(|f| {
             let r = (-PI * f.bw / CLIP_SAMPLE_RATE as f64).exp();
             let theta = (2.0 * PI * f.freq) / CLIP_SAMPLE_RATE as f64;
-            Resonator {
-                a1: 2.0 * r * theta.cos(),
-                a2: r * r,
-                gain: f.gain,
-                y1: 0.0,
-                y2: 0.0,
-            }
+            Resonator { a1: 2.0 * r * theta.cos(), a2: r * r, gain: f.gain, y1: 0.0, y2: 0.0 }
         })
         .collect();
 
@@ -212,8 +197,5 @@ pub fn reference_clip(name: ClipName) -> Vec<i16> {
 
 /// All reference clips keyed by name.
 pub fn reference_clips() -> std::collections::BTreeMap<ClipName, Vec<i16>> {
-    CLIP_NAMES
-        .iter()
-        .map(|&n| (n, reference_clip(n)))
-        .collect()
+    CLIP_NAMES.iter().map(|&n| (n, reference_clip(n))).collect()
 }

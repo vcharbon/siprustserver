@@ -20,7 +20,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
-use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -394,11 +394,7 @@ impl FromStr for Anchor {
     }
 }
 
-crate::string_token!(
-    Anchor,
-    "Delay anchor: `trigger` or `step:<id>`.",
-    "^(trigger|step:[^ ]+)$"
-);
+crate::string_token!(Anchor, "Delay anchor: `trigger` or `step:<id>`.", "^(trigger|step:[^ ]+)$");
 
 /// The step's coordinate in the flows document. Informative: the interpreter
 /// never reads it. It exists because the post-run confrontation has to pair a
@@ -471,7 +467,8 @@ mod tests {
 
     #[test]
     fn an_unknown_op_is_refused_by_name() {
-        let error = serde_json::from_str::<FlowNode>(r#"{"id":"x","op":"snd"}"#).unwrap_err().to_string();
+        let error =
+            serde_json::from_str::<FlowNode>(r#"{"id":"x","op":"snd"}"#).unwrap_err().to_string();
         assert!(error.contains("snd"), "{error}");
         assert!(serde_json::from_str::<FlowNode>(r#"{"id":"x"}"#).is_err());
     }

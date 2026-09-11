@@ -21,7 +21,9 @@
 
 use std::time::Duration;
 
-use crate::model::{Call, PendingRequest, PrackedProvisional, ReliableProvisional, RetainedEmission};
+use crate::model::{
+    Call, PendingRequest, PrackedProvisional, ReliableProvisional, RetainedEmission,
+};
 
 /// The shown `RSeq` standing for the responder's `(b_leg_id, b_tag, b_cseq,
 /// b_rseq)` in the `a_tag` dialog — the dialog the provisional is relayed
@@ -86,11 +88,9 @@ pub fn record_reliable_provisional_emission(
     a_rseq: i64,
     emission: RetainedEmission,
 ) -> (Call, bool) {
-    let Some(r) = call
-        .reliable_provisionals
-        .iter_mut()
-        .find(|r| r.a_tag == a_tag && r.a_rseq == a_rseq && !r.acknowledged && r.emission.is_none())
-    else {
+    let Some(r) = call.reliable_provisionals.iter_mut().find(|r| {
+        r.a_tag == a_tag && r.a_rseq == a_rseq && !r.acknowledged && r.emission.is_none()
+    }) else {
         return (call, false);
     };
     r.emission = Some(emission);
@@ -115,7 +115,11 @@ pub fn reliable_provisional_emission<'a>(
 /// doubling, bounded at 64·T1) and return the wait before it, or `None` when
 /// the ladder is over — no live emission, or the next rung would land at or
 /// past the bound. The caller arms the rung's timer, or ceases.
-pub fn advance_reliable_ladder(mut call: Call, a_tag: &str, a_rseq: i64) -> (Call, Option<Duration>) {
+pub fn advance_reliable_ladder(
+    mut call: Call,
+    a_tag: &str,
+    a_rseq: i64,
+) -> (Call, Option<Duration>) {
     let next = call
         .reliable_provisionals
         .iter_mut()
@@ -129,10 +133,8 @@ pub fn advance_reliable_ladder(mut call: Call, a_tag: &str, a_rseq: i64) -> (Cal
 /// PRACKed, ceased at 64·T1, or cancelled with the setup — so the bytes can
 /// never be sent again and stop riding the replicated body.
 pub fn clear_reliable_provisional_emission(mut call: Call, a_tag: &str, a_rseq: i64) -> Call {
-    for r in call
-        .reliable_provisionals
-        .iter_mut()
-        .filter(|r| r.a_tag == a_tag && r.a_rseq == a_rseq)
+    for r in
+        call.reliable_provisionals.iter_mut().filter(|r| r.a_tag == a_tag && r.a_rseq == a_rseq)
     {
         r.emission = None;
     }
@@ -145,10 +147,8 @@ pub fn clear_reliable_provisional_emission(mut call: Call, a_tag: &str, a_rseq: 
 /// cease. Keyed the way the PRACK names it — per a-facing early dialog — so
 /// under forking one fork's PRACK never retires another fork's provisional.
 pub fn retire_a_rseq(mut call: Call, a_tag: &str, a_rseq: i64) -> Call {
-    for r in call
-        .reliable_provisionals
-        .iter_mut()
-        .filter(|r| r.a_tag == a_tag && r.a_rseq == a_rseq)
+    for r in
+        call.reliable_provisionals.iter_mut().filter(|r| r.a_tag == a_tag && r.a_rseq == a_rseq)
     {
         r.acknowledged = true;
         r.emission = None;
@@ -221,7 +221,10 @@ pub fn pracked_provisional(
     rseq: i64,
 ) -> bool {
     call.pracked_provisionals.iter().any(|p| {
-        p.leg_id == leg_id && p.remote_tag == remote_tag && p.invite_cseq == invite_cseq && p.rseq == rseq
+        p.leg_id == leg_id
+            && p.remote_tag == remote_tag
+            && p.invite_cseq == invite_cseq
+            && p.rseq == rseq
     })
 }
 
@@ -234,10 +237,8 @@ pub fn pracked_provisional(
 /// reject — one transaction, the dialog untouched (RFC 3261 §14.1) — from a
 /// setup teardown.
 pub fn pending_invite_answered_by(call: &Call, a_tag: &str, a_rseq: i64) -> Option<(String, i64)> {
-    let shown = call
-        .reliable_provisionals
-        .iter()
-        .find(|r| r.a_tag == a_tag && r.a_rseq == a_rseq)?;
+    let shown =
+        call.reliable_provisionals.iter().find(|r| r.a_tag == a_tag && r.a_rseq == a_rseq)?;
     let leg = crate::helpers::find_leg(call, &shown.b_leg_id)?;
     leg.dialogs
         .iter()
@@ -319,7 +320,12 @@ pub fn leg_shown<'a>(call: &'a Call, shown_tag: &str) -> Option<&'a str> {
 /// rung already acknowledged still matches, and relays. The books are
 /// complete: every reliable provisional shown on either face is recorded
 /// where it leaves, so an absent entry IS the negative.
-pub fn unacknowledgeable_rack(call: &Call, source_leg_id: &str, a_tag: &str, rack: RAckTokens) -> bool {
+pub fn unacknowledgeable_rack(
+    call: &Call,
+    source_leg_id: &str,
+    a_tag: &str,
+    rack: RAckTokens,
+) -> bool {
     owns_rseq_numbering(call, source_leg_id) && !acknowledges_recorded(call, a_tag, rack)
 }
 

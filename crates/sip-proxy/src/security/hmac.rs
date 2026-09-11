@@ -88,7 +88,10 @@ pub struct StaticHmacKeyProvider {
 impl StaticHmacKeyProvider {
     /// Validate and build. Mirrors `staticLayer`'s checks: non-empty kid, min
     /// length, and a previous key whose id differs from current.
-    pub fn new(current: HmacKey, previous: Option<HmacKey>) -> Result<Self, HmacKeyProviderConfigError> {
+    pub fn new(
+        current: HmacKey,
+        previous: Option<HmacKey>,
+    ) -> Result<Self, HmacKeyProviderConfigError> {
         validate_key(&current, "current")?;
         if let Some(prev) = &previous {
             validate_key(prev, "previous")?;

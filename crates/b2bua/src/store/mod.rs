@@ -136,14 +136,8 @@ impl CallState {
     /// recovery read-path). The HA slice extends this to backup partitions +
     /// timer re-arming; here it is bounded by what the in-memory store holds.
     pub async fn load_owned(&self) -> Result<Vec<Call>, StoreError> {
-        let bodies = self
-            .store
-            .scan_calls(PartitionRole::Primary, &self.self_ordinal)
-            .await?;
-        Ok(bodies
-            .iter()
-            .filter_map(|b| self.codec.decode(b).ok())
-            .collect())
+        let bodies = self.store.scan_calls(PartitionRole::Primary, &self.self_ordinal).await?;
+        Ok(bodies.iter().filter_map(|b| self.codec.decode(b).ok()).collect())
     }
 
     pub fn new(
@@ -337,9 +331,8 @@ impl CallState {
     fn store_target(&self, call_ref: &str) -> (PartitionRole, String, PutOpts) {
         match self.backup_of(call_ref) {
             Some(bak) => {
-                let plan = ReplicationPlan::resolve(&self.self_ordinal, call_ref, &|_| {
-                    Some(bak.clone())
-                });
+                let plan =
+                    ReplicationPlan::resolve(&self.self_ordinal, call_ref, &|_| Some(bak.clone()));
                 (plan.role, plan.primary.clone(), plan.put_opts())
             }
             None => {
@@ -368,13 +361,7 @@ impl CallState {
         inner.setup_cancelled.remove(call_ref);
         drop(inner);
 
-        self.terminate_writer.submit_delete(
-            role,
-            primary,
-            call_ref.to_string(),
-            keys,
-            opts,
-        );
+        self.terminate_writer.submit_delete(role, primary, call_ref.to_string(), keys, opts);
     }
 
     /// **Local-only self-release teardown** (ADR-0014): drop a live acting-backup
@@ -477,10 +464,8 @@ impl CallState {
         let Some(repl) = self.repl_store.as_ref() else {
             return Vec::new();
         };
-        let bodies = repl
-            .scan_calls(PartitionRole::Primary, &self.self_ordinal)
-            .await
-            .unwrap_or_default();
+        let bodies =
+            repl.scan_calls(PartitionRole::Primary, &self.self_ordinal).await.unwrap_or_default();
         bodies
             .iter()
             .filter_map(|b| self.codec.decode(b).ok())
@@ -623,11 +608,7 @@ impl CallState {
     /// its backup's bootstrap scan until the next keepalive re-flush. A takeover
     /// copy holds the `bak:` element itself and re-establishes nothing.
     pub fn materialize_if_absent(&self, mut call: Call, origin: MaterialiseOrigin) -> bool {
-        let backup = call
-            .topology
-            .as_ref()
-            .map(|t| t.bak.clone())
-            .filter(|b| !b.is_empty());
+        let backup = call.topology.as_ref().map(|t| t.bak.clone()).filter(|b| !b.is_empty());
         let call_ref = call.call_ref.clone();
         let now_ms = self.clock.now_ms();
         {
@@ -868,8 +849,16 @@ impl CallState {
         // every count is flat is the leak (a held OPTIONS-hold/re-INVITE dialog's
         // per-event tail never pruned till terminal).
         let mut census: BTreeMap<(String, String), u64> = BTreeMap::new();
-        let (mut cdr, mut pend, mut pend_max, mut dialogs, mut rset, mut timers, mut tagmap, mut blegs) =
-            (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+        let (
+            mut cdr,
+            mut pend,
+            mut pend_max,
+            mut dialogs,
+            mut rset,
+            mut timers,
+            mut tagmap,
+            mut blegs,
+        ) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
         for call in inner.calls.values() {
             for (machine, state) in &call.sm_cursors {
                 *census
@@ -892,8 +881,7 @@ impl CallState {
             pend_max = pend_max.max(call_pend);
         }
         self.metrics.set_sm_cursor_census(census);
-        self.metrics
-            .set_call_census(cdr, pend, pend_max, dialogs, rset, timers, tagmap, blegs);
+        self.metrics.set_call_census(cdr, pend, pend_max, dialogs, rset, timers, tagmap, blegs);
     }
 
     /// Recompute and apply a call's routing index, dropping any stale keys.

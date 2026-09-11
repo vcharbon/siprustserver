@@ -15,9 +15,11 @@
 
 use std::time::Duration;
 
-use call::CdrEventType;
-use failover_harness::{worker_ordinals, FailoverHarness, PartitionRole, ReplicatedB2buaSut, WorkerHealth};
 use call::parse_call_ref;
+use call::CdrEventType;
+use failover_harness::{
+    worker_ordinals, FailoverHarness, PartitionRole, ReplicatedB2buaSut, WorkerHealth,
+};
 use scenario_harness::Agent;
 use sip_message::generators::InDialogMethod;
 
@@ -47,17 +49,14 @@ async fn canonical_failover() {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane)); // lanes are registered for reporting only.
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
 
     // Two replicating workers, each backing the other; b-leg through the proxy.
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
 
     // Let the supervisors connect + reach steady-state current/bootstrapped.
     fh.advance(Duration::from_millis(500)).await;
@@ -78,11 +77,8 @@ async fn canonical_failover() {
     // workers consume their own INVITE internally; the cookie is authoritative.)
     let (pri_ord, bak_ord) = worker_ordinals(uas.request());
     // Bind B1 = the primary worker, B2 = the backup, by ordinal.
-    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) = if pri_ord == "b1" {
-        (&mut w_b1, &mut w_b2)
-    } else {
-        (&mut w_b2, &mut w_b1)
-    };
+    let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
     assert_eq!(bak_ord, b2.ordinal(), "cookie w_bak names the backup worker");
     let primary_ord = b1.ordinal().to_string();
 
@@ -226,16 +222,13 @@ async fn hydrated_takeover_copy_self_releases_without_leaking() {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane));
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
 
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
 
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
@@ -349,15 +342,12 @@ async fn successful_long_call_with_as_generated_options() {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane));
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
 
@@ -474,15 +464,12 @@ async fn keepalive_as_options_increments_dialog_cseq() {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane));
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
 
@@ -559,15 +546,12 @@ async fn reboot_reclaim_exactly_one_owner_after_self_release() {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane));
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
 
@@ -586,7 +570,10 @@ async fn reboot_reclaim_exactly_one_owner_after_self_release() {
 
     let call_ref = find_backed_up_ref(b2, &primary_ord).await;
     assert!(b1.serves(&call_ref), "primary serves the established call");
-    assert!(b2.is_synchronized_backup(&call_ref).await, "backup is synchronized (holds the replica)");
+    assert!(
+        b2.is_synchronized_backup(&call_ref).await,
+        "backup is synchronized (holds the replica)"
+    );
     assert!(!b2.serves(&call_ref), "backup is a pure replica (not serving)");
 
     // ── crash primary; fail a NON-terminating re-INVITE over to the backup ────
@@ -611,7 +598,10 @@ async fn reboot_reclaim_exactly_one_owner_after_self_release() {
             break;
         }
     }
-    assert!(b2.memory_clean(), "acting-backup released the takeover copy after serving the re-INVITE");
+    assert!(
+        b2.memory_clean(),
+        "acting-backup released the takeover copy after serving the re-INVITE"
+    );
     assert!(
         b2.is_synchronized_backup(&call_ref).await,
         "the release kept the replica (the call is not lost)",
@@ -659,15 +649,12 @@ async fn quiescent_long_call_survives_kill_reboot_reclaim() {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane));
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
 
@@ -696,7 +683,10 @@ async fn quiescent_long_call_survives_kill_reboot_reclaim() {
     b2.simulate_peer_removed(&primary_ord);
     fh.advance(Duration::from_secs(5)).await;
     assert!(!b2.serves(&call_ref), "a quiescent call is NOT eagerly taken over (dormant)");
-    assert!(b2.is_synchronized_backup(&call_ref).await, "the replica survives the outage (not lost)");
+    assert!(
+        b2.is_synchronized_backup(&call_ref).await,
+        "the replica survives the outage (not lost)"
+    );
 
     // ── reboot the primary → it reclaims the dormant call ───────────────────────
     let b1_addr = b1.reboot().await; // NEW pod IP
@@ -757,15 +747,12 @@ async fn cseq_stays_in_order_across_failover_and_reclaim() {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane));
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
 
@@ -800,7 +787,10 @@ async fn cseq_stays_in_order_across_failover_and_reclaim() {
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     b2.simulate_peer_removed(&primary_ord);
     fh.advance(Duration::from_secs(5)).await;
-    assert!(b2.is_synchronized_backup(&call_ref).await, "replica survives the outage (call not lost)");
+    assert!(
+        b2.is_synchronized_backup(&call_ref).await,
+        "replica survives the outage (call not lost)"
+    );
 
     // ── reboot → reclaim; survivor re-publishes the endpoint ────────────────────-
     let b1_addr = b1.reboot().await; // NEW pod IP
@@ -890,15 +880,12 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane));
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
 
@@ -945,7 +932,10 @@ async fn acting_backup_terminate_leaves_no_expired_context_for_reclaim() {
          discharges on reclaim. b2 wrote {} CDR(s)",
         b2.cdr_records().len(),
     );
-    assert!(b2.memory_clean(), "acting-backup self-released its live copy (no per-call memory leaked)");
+    assert!(
+        b2.memory_clean(),
+        "acting-backup self-released its live copy (no per-call memory leaked)"
+    );
 
     // ── reboot the primary → it re-hydrates from the backup + bulk-reclaims ────
     let b1_addr = b1.reboot().await; // NEW pod IP
@@ -988,15 +978,12 @@ async fn matrix_crash_mid_invite() {
     let mut fh = FailoverHarness::new("s10b-crash-mid-invite", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
 
     // alice INVITEs; bob gets the b-leg. Determine the primary from the cookie.
@@ -1047,15 +1034,12 @@ async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
     let mut fh = FailoverHarness::new("s10b-backup-crash-between-timer-a-copies", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
 
     // alice INVITEs; bob gets the b-leg. The cookie names both workers.
@@ -1106,7 +1090,11 @@ async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
             .find(|row| row.contains("w_pri="))
             .expect("the proxy's cookie Record-Route")
     };
-    assert!(cookie(&forwarded[0]).contains(&format!("w_bak={bak_ord}")), "{}", cookie(&forwarded[0]));
+    assert!(
+        cookie(&forwarded[0]).contains(&format!("w_bak={bak_ord}")),
+        "{}",
+        cookie(&forwarded[0])
+    );
     assert!(cookie(&forwarded[1]).contains("w_bak=\"\""), "{}", cookie(&forwarded[1]));
     assert_ne!(forwarded[0], forwarded[1], "the re-stamped cookie is a different datagram");
     // The b-leg rung took the same re-stamp on its way to bob.
@@ -1145,15 +1133,12 @@ async fn matrix_crash_during_rehydration() {
     let mut fh = FailoverHarness::new("s10b-crash-during-rehydration", &["b1", "b2"]);
     let _alice = fh.agent("alice", ALICE).await;
     let _bob = fh.agent("bob", BOB).await;
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready());
 
@@ -1200,15 +1185,12 @@ async fn matrix_partition_during_failover() {
     let mut fh = FailoverHarness::new("s10b-partition-during-failover", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -1267,15 +1249,12 @@ async fn matrix_double_fault() {
     let mut fh = FailoverHarness::new("s10b-double-fault", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
@@ -1322,15 +1301,12 @@ async fn combined_report_carries_sip_and_replication() {
     let mut fh = FailoverHarness::new("s10b-report", &["b1", "b2"]);
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
 
     // A full establish + teardown so the SIP plane has INVITE/200/ACK/BYE and
@@ -1363,8 +1339,14 @@ async fn combined_report_carries_sip_and_replication() {
     // seq-report global.txt): SIP rows tagged `[SIP ]`, replication rows tagged
     // `[REPL]`, and the lifecycle crash marker as a band. Assert on actual rows
     // (the `->` arrow form), not just the legend.
-    assert!(combined.contains("[SIP ]") && combined.contains("[SIP ]"), "unified report has SIP rows");
-    assert!(combined.contains("[REPL]") && combined.contains("-> b1"), "unified report has replication rows");
+    assert!(
+        combined.contains("[SIP ]") && combined.contains("[SIP ]"),
+        "unified report has SIP rows"
+    );
+    assert!(
+        combined.contains("[REPL]") && combined.contains("-> b1"),
+        "unified report has replication rows"
+    );
     assert!(combined.contains("INVITE"), "SIP exchange shows the INVITE");
     assert!(combined.contains("BYE"), "SIP exchange shows the BYE");
     assert!(
@@ -1412,15 +1394,12 @@ async fn skew_ahead_backup_no_immediate_options_at_takeover() {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane));
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
 
@@ -1500,7 +1479,10 @@ async fn skew_ahead_backup_no_immediate_options_at_takeover() {
             saw_options
         })
         .await;
-    assert!(fired && saw_options, "the re-armed keepalive DOES eventually probe bob (call kept alive)");
+    assert!(
+        fired && saw_options,
+        "the re-armed keepalive DOES eventually probe bob (call kept alive)"
+    );
 
     drop((w_b1, w_b2, proxy));
 }
@@ -1543,15 +1525,12 @@ async fn in_dialog_bye_races_bulk_reclaim_served_on_demand() {
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both ready at steady state");
 

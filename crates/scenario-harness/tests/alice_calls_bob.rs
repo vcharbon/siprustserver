@@ -53,9 +53,9 @@ fn sip(start_line: &str, headers: &[(&str, &str)], body: &str) -> Vec<u8> {
 }
 
 fn parse(raw: &[u8]) -> SipMessage {
-    CustomParser::new()
-        .parse(raw)
-        .unwrap_or_else(|e| panic!("entry did not parse: {e}\n---\n{}", String::from_utf8_lossy(raw)))
+    CustomParser::new().parse(raw).unwrap_or_else(|e| {
+        panic!("entry did not parse: {e}\n---\n{}", String::from_utf8_lossy(raw))
+    })
 }
 
 /// Assert a request entry's method + CSeq.
@@ -272,8 +272,5 @@ async fn alice_calls_bob_full_dialog() {
             && html.contains("querySelector('.detail-body').innerHTML"),
         "html missing .seq-msg → .detail-body click wiring"
     );
-    assert!(
-        html.contains("INVITE sip:bob@127.0.0.1:5070 SIP/2.0"),
-        "html missing wire text"
-    );
+    assert!(html.contains("INVITE sip:bob@127.0.0.1:5070 SIP/2.0"), "html missing wire text");
 }

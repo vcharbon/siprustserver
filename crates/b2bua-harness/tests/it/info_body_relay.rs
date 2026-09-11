@@ -35,11 +35,8 @@ async fn info_with_arbitrary_body_relays_content_type_and_bytes() {
     let body: Vec<u8> = b"SUP:role=agent;priority=high;\xFF\xFE\x80\xC0payload".to_vec();
 
     // ── alice INFO with the arbitrary-MIME body ──
-    let mut info = dialog
-        .send_request(InDialogMethod::Info)
-        .with_body(CT, body.clone())
-        .send()
-        .await;
+    let mut info =
+        dialog.send_request(InDialogMethod::Info).with_body(CT, body.clone()).send().await;
 
     // ── the relayed INFO reaching bob must preserve Content-Type AND the bytes ──
     let mut bob_uas = s.bob.receive("INFO").await;
@@ -50,7 +47,11 @@ async fn info_with_arbitrary_body_relays_content_type_and_bytes() {
             Some(CT),
             "relayed INFO carries the exact Content-Type",
         );
-        assert_eq!(&req.body()[..], &body[..], "relayed INFO carries the exact (binary-safe) body bytes");
+        assert_eq!(
+            &req.body()[..],
+            &body[..],
+            "relayed INFO carries the exact (binary-safe) body bytes"
+        );
         assert_eq!(
             req.raw(HeaderName::ContentLength).next(),
             Some(body.len().to_string().as_str()),
@@ -87,11 +88,8 @@ async fn info_with_multipart_body_relays_verbatim() {
     .as_bytes()
     .to_vec();
 
-    let mut info = dialog
-        .send_request(InDialogMethod::Info)
-        .with_body(CT, body.clone())
-        .send()
-        .await;
+    let mut info =
+        dialog.send_request(InDialogMethod::Info).with_body(CT, body.clone()).send().await;
 
     let mut bob_uas = s.bob.receive("INFO").await;
     {

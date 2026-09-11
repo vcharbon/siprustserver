@@ -32,11 +32,7 @@ fn parses_m_audio_with_payload_types_and_rtpmaps() {
     assert_eq!(profile.payload_types, vec![8, 18, 101]);
     assert_eq!(
         profile.rtpmaps,
-        vec![
-            "a=rtpmap:8 PCMA/8000",
-            "a=rtpmap:18 G729/8000",
-            "a=rtpmap:101 telephone-event/8000",
-        ]
+        vec!["a=rtpmap:8 PCMA/8000", "a=rtpmap:18 G729/8000", "a=rtpmap:101 telephone-event/8000",]
     );
     assert_eq!(profile.fmtp, vec!["a=fmtp:18 annexb=no", "a=fmtp:101 0-15"]);
     assert_eq!(profile.ptime.as_deref(), Some("a=ptime:20"));
@@ -108,8 +104,8 @@ fn drops_lines_for_payload_types_not_in_m_line() {
 
 #[test]
 fn none_when_no_audio_m_line() {
-    let sdp = ["v=0", "o=- 0 0 IN IP4 0.0.0.0", "s=-", "t=0 0", "m=video 30000 RTP/AVP 96"]
-        .join("\r\n");
+    let sdp =
+        ["v=0", "o=- 0 0 IN IP4 0.0.0.0", "s=-", "t=0 0", "m=video 30000 RTP/AVP 96"].join("\r\n");
     assert!(extract_codec_profile(sdp.as_bytes()).is_none());
 }
 

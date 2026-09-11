@@ -188,7 +188,10 @@ impl std::fmt::Display for PlanError {
                 write!(f, "{site} reads `.branch` of {step:?}, which is not an alt")
             }
             PlanError::UndeclaredDialForm { site, name, form } => {
-                write!(f, "{site} asks identity {name:?} for form {form:?}, which it does not declare")
+                write!(
+                    f,
+                    "{site} asks identity {name:?} for form {form:?}, which it does not declare"
+                )
             }
             PlanError::DeviationMissingPayload { deviation, kind, missing } => {
                 write!(f, "deviation {deviation:?} of kind {kind:?} states no {missing}")
@@ -212,7 +215,10 @@ impl std::fmt::Display for PlanError {
                 write!(f, "alt {alt:?} branch {branch:?} opens on optional expect {step:?}")
             }
             PlanError::AltIndiscriminable { alt, left, right, discriminator } => {
-                write!(f, "alt {alt:?} branches {left:?} and {right:?} both open on {discriminator}")
+                write!(
+                    f,
+                    "alt {alt:?} branches {left:?} and {right:?} both open on {discriminator}"
+                )
             }
             PlanError::AltDuplicateBranchName { alt, name } => {
                 write!(f, "alt {alt:?} declares branch {name:?} twice")
@@ -296,7 +302,9 @@ impl std::fmt::Display for Discriminator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Discriminator::Request { method } => write!(f, "{method}"),
-            Discriminator::Response { status, cseq_method: Some(m) } => write!(f, "{status} to {m}"),
+            Discriminator::Response { status, cseq_method: Some(m) } => {
+                write!(f, "{status} to {m}")
+            }
             Discriminator::Response { status, cseq_method: None } => write!(f, "{status}"),
         }
     }
@@ -308,10 +316,12 @@ impl From<&Discriminator> for pivot_schema::bundle::GatedOn {
             Discriminator::Request { method } => {
                 pivot_schema::bundle::GatedOn::Request { method: method.clone() }
             }
-            Discriminator::Response { status, cseq_method } => pivot_schema::bundle::GatedOn::Response {
-                status: *status,
-                cseq_method: cseq_method.clone(),
-            },
+            Discriminator::Response { status, cseq_method } => {
+                pivot_schema::bundle::GatedOn::Response {
+                    status: *status,
+                    cseq_method: cseq_method.clone(),
+                }
+            }
         }
     }
 }
@@ -689,9 +699,7 @@ impl Compiler {
         ordered.sort_by_key(|s| s.order);
         for call in &self.document.calls {
             if let Some(step) = ordered.iter().find(|s| {
-                s.is_send()
-                    && s.leg == call.caller_leg
-                    && s.msg.method.as_deref() == Some("INVITE")
+                s.is_send() && s.leg == call.caller_leg && s.msg.method.as_deref() == Some("INVITE")
             }) {
                 dial_of_call.insert(call.id.clone(), step.id.clone());
             }
@@ -802,10 +810,9 @@ impl Compiler {
                     continue;
                 }
                 (Some(method), None) => Discriminator::Request { method: method.clone() },
-                (None, Some(status)) => Discriminator::Response {
-                    status,
-                    cseq_method: step.msg.cseq_method.clone(),
-                },
+                (None, Some(status)) => {
+                    Discriminator::Response { status, cseq_method: step.msg.cseq_method.clone() }
+                }
                 (None, None) => {
                     self.errors.push(PlanError::NoDiscriminator { step: step.id.clone() });
                     continue;
@@ -832,8 +839,7 @@ impl Compiler {
                 Op::Expect => {}
             }
             if step.delay.timer_linked && step.delay.compressible {
-                self.errors
-                    .push(PlanError::CompressibleTimerLinkedDwell { step: step.id.clone() });
+                self.errors.push(PlanError::CompressibleTimerLinkedDwell { step: step.id.clone() });
             }
             for check in &step.checks {
                 if let Err(e) = check_shape(&format!("step {:?} check", step.id), check) {
@@ -1027,10 +1033,8 @@ impl Compiler {
         let steps: Vec<CompiledStep> = self.steps.values().cloned().collect();
         for step in &steps {
             if !legs.contains_key(&step.leg) {
-                self.errors.push(PlanError::UnknownLeg {
-                    step: step.id.clone(),
-                    leg: step.leg.clone(),
-                });
+                self.errors
+                    .push(PlanError::UnknownLeg { step: step.id.clone(), leg: step.leg.clone() });
             }
             let site = format!("step {:?} delay anchor", step.id);
             if let Anchor::Step(anchor) = &step.delay.from {
@@ -1350,9 +1354,7 @@ impl Compiler {
             for h in &msg.headers_present {
                 out.push((site("headers-present"), owner.clone(), h.clone()));
             }
-            for (what, r) in
-                [("ruri", &msg.ruri), ("from", &msg.from), ("to", &msg.to)]
-            {
+            for (what, r) in [("ruri", &msg.ruri), ("from", &msg.from), ("to", &msg.to)] {
                 let Some(r) = r else { continue };
                 match r {
                     Ref::Positional(p) => {
@@ -1450,22 +1452,20 @@ impl Compiler {
                 }
                 Some(_) => {}
             },
-            Accessor::Number { name, form } => {
-                match forms.get(name) {
-                    None => self.errors.push(PlanError::UnknownIdentity {
+            Accessor::Number { name, form } => match forms.get(name) {
+                None => self.errors.push(PlanError::UnknownIdentity {
+                    site: site.to_string(),
+                    name: name.clone(),
+                }),
+                Some(declared) if !declared.contains(form) => {
+                    self.errors.push(PlanError::UndeclaredDialForm {
                         site: site.to_string(),
                         name: name.clone(),
-                    }),
-                    Some(declared) if !declared.contains(form) => {
-                        self.errors.push(PlanError::UndeclaredDialForm {
-                            site: site.to_string(),
-                            name: name.clone(),
-                            form: form.clone(),
-                        })
-                    }
-                    Some(_) => {}
+                        form: form.clone(),
+                    })
                 }
-            }
+                Some(_) => {}
+            },
             Accessor::Step { step, field } => {
                 if *field == StepField::Branch {
                     let is_alt = self
@@ -1510,7 +1510,9 @@ fn requires_100rel(msg: &MsgSpec) -> bool {
     msg.headers
         .iter()
         .filter(|h| sip_message::HeaderName::Require.matches(&h.name))
-        .filter_map(|h| sip_message::header::Require::parse(&sip_message::SipStr::owned(&h.value)).ok())
+        .filter_map(|h| {
+            sip_message::header::Require::parse(&sip_message::SipStr::owned(&h.value)).ok()
+        })
         .any(|tokens| tokens.contains("100rel"))
 }
 

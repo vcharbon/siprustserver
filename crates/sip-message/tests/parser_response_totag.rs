@@ -50,11 +50,7 @@ const STATUSES: &[(u16, &str)] = &[
 fn non_100_without_to_tag_is_rejected() {
     for &(status, reason) in STATUSES {
         let err = parse(&response_no_tag(status, reason)).unwrap_err();
-        assert!(
-            err.reason.contains("missing mandatory To-tag"),
-            "status={status}: {}",
-            err.reason
-        );
+        assert!(err.reason.contains("missing mandatory To-tag"), "status={status}: {}", err.reason);
         assert!(err.reason.contains(&status.to_string()), "status={status}: {}", err.reason);
     }
 }

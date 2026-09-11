@@ -57,7 +57,8 @@ pub enum MessageResult {
 }
 
 impl MessageResult {
-    const ALL: [MessageResult; 3] = [MessageResult::Forwarded, MessageResult::Responded, MessageResult::Dropped];
+    const ALL: [MessageResult; 3] =
+        [MessageResult::Forwarded, MessageResult::Responded, MessageResult::Dropped];
 
     fn as_str(self) -> &'static str {
         match self {
@@ -133,8 +134,20 @@ impl HmacFailureReason {
 /// + one `/metrics` line per distinct token, ballooning RSS and Prometheus
 /// cardinality without bound.
 const METHOD_SLOTS: [&str; 14] = [
-    "INVITE", "ACK", "BYE", "CANCEL", "OPTIONS", "REGISTER", "SUBSCRIBE", "NOTIFY", "PRACK", "UPDATE", "INFO",
-    "MESSAGE", "REFER", "PUBLISH",
+    "INVITE",
+    "ACK",
+    "BYE",
+    "CANCEL",
+    "OPTIONS",
+    "REGISTER",
+    "SUBSCRIBE",
+    "NOTIFY",
+    "PRACK",
+    "UPDATE",
+    "INFO",
+    "MESSAGE",
+    "REFER",
+    "PUBLISH",
 ];
 
 /// Slot index for an (uppercased) method token; unknown → the `other` slot.
@@ -184,19 +197,19 @@ pub struct ProxyMetrics {
     /// Keyed "method|code" with the method slotted and the code validated to
     /// 100..699 (else `other`) — both wire-controlled inputs bounded.
     responses: LabeledCounter,
-    calls: AtomicU64,                // initial (dialog-creating, no To-tag) INVITEs
+    calls: AtomicU64, // initial (dialog-creating, no To-tag) INVITEs
     routing_decisions: [AtomicU64; RoutingDecisionKind::ALL.len()], // indexed by RoutingDecisionKind
-    hmac_failures: LabeledCounter,   // keyed reason
+    hmac_failures: LabeledCounter,                                  // keyed reason
     /// Locally decided rejections (`RouteOutcome` kind `reject`), keyed by a
     /// bounded static reason — where the reject also answers on the wire, the
     /// same string the SIP `Reason` header states. The per-cause split of the
     /// aggregate `sip_routing_decision_total{kind="reject"}`, so a
     /// proxy-generated 503 is attributable from metrics alone.
     rejects: LabeledCounter,
-    cancel_lookups: LabeledCounter,  // keyed outcome
+    cancel_lookups: LabeledCounter,          // keyed outcome
     decode_forward_promoted: LabeledCounter, // keyed from-reason
-    fresh_pod_forward: LabeledCounter, // keyed age-bucket
-    overload_rejections: LabeledCounter, // keyed reason
+    fresh_pod_forward: LabeledCounter,       // keyed age-bucket
+    overload_rejections: LabeledCounter,     // keyed reason
     /// Coarse (registry-aggregate) count of `WorkerLoadObserver::sweep_stale`
     /// floor events — an Alive worker whose OPTIONS replies stopped carrying a
     /// fresh `X-Overload` payload within `payload_stale_ms`, so AIMD halved its
@@ -296,12 +309,14 @@ impl ProxyMetrics {
 
     /// Count one datagram RECEIVED on `face` (the recv loop's arrival socket).
     pub fn record_face_ingress(&self, face: Face) {
-        self.face_messages[face as usize][Direction::Inbound as usize].fetch_add(1, Ordering::Relaxed);
+        self.face_messages[face as usize][Direction::Inbound as usize]
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Count one datagram EGRESSED on `face` (the destination-picked socket).
     pub fn record_face_egress(&self, face: Face) {
-        self.face_messages[face as usize][Direction::Outbound as usize].fetch_add(1, Ordering::Relaxed);
+        self.face_messages[face as usize][Direction::Outbound as usize]
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Read one per-face counter (test/assertion surface).
@@ -404,8 +419,19 @@ impl ProxyMetrics {
     /// Publish one recv shard's endpoint receive-queue state (gauges) and
     /// lifetime counters (monotonic, endpoint-owned — stored, not accumulated).
     /// Single-socket deployments are just `shard = 0`.
-    pub fn set_udp_endpoint_stats(&self, shard: usize, queue_depth: u64, queue_max: u64, enqueued: u64, tail_dropped: u64, pre_ingress_dropped: u64) {
-        self.udp_shards.lock().unwrap().insert(shard, [queue_depth, queue_max, enqueued, tail_dropped, pre_ingress_dropped]);
+    pub fn set_udp_endpoint_stats(
+        &self,
+        shard: usize,
+        queue_depth: u64,
+        queue_max: u64,
+        enqueued: u64,
+        tail_dropped: u64,
+        pre_ingress_dropped: u64,
+    ) {
+        self.udp_shards
+            .lock()
+            .unwrap()
+            .insert(shard, [queue_depth, queue_max, enqueued, tail_dropped, pre_ingress_dropped]);
     }
 
     /// Cross-shard aggregate
@@ -424,7 +450,14 @@ impl ProxyMetrics {
     /// Set the worker-health gauges from a fleet count. Also derives
     /// `worker_pool_empty` = `1` iff no worker is `Alive` (routable) — the
     /// routing-fatal condition the `/readyz` gate also keys on.
-    pub fn set_worker_health_counts(&self, alive: u64, draining: u64, not_ready: u64, unknown: u64, dead: u64) {
+    pub fn set_worker_health_counts(
+        &self,
+        alive: u64,
+        draining: u64,
+        not_ready: u64,
+        unknown: u64,
+        dead: u64,
+    ) {
         self.health.alive.store(alive, Ordering::Relaxed);
         self.health.draining.store(draining, Ordering::Relaxed);
         self.health.not_ready.store(not_ready, Ordering::Relaxed);
@@ -489,7 +522,12 @@ impl ProxyMetrics {
         let g = |s: &mut String, name: &str, help: &str, ty: &str, val: u64| {
             s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {ty}\n{name} {val}\n"));
         };
-        let labeled = |s: &mut String, name: &str, help: &str, ty: &str, label: &str, m: &BTreeMap<String, u64>| {
+        let labeled = |s: &mut String,
+                       name: &str,
+                       help: &str,
+                       ty: &str,
+                       label: &str,
+                       m: &BTreeMap<String, u64>| {
             s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {ty}\n"));
             if m.is_empty() {
                 s.push_str(&format!("{name}{{{label}=\"none\"}} 0\n"));
@@ -500,7 +538,11 @@ impl ProxyMetrics {
         };
 
         // Two-label render: key is "method|code" -> {method="..",code=".."}.
-        let labeled2 = |s: &mut String, name: &str, help: &str, (l1, l2): (&str, &str), m: &BTreeMap<String, u64>| {
+        let labeled2 = |s: &mut String,
+                        name: &str,
+                        help: &str,
+                        (l1, l2): (&str, &str),
+                        m: &BTreeMap<String, u64>| {
             s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n"));
             if m.is_empty() {
                 s.push_str(&format!("{name}{{{l1}=\"none\",{l2}=\"none\"}} 0\n"));
@@ -547,14 +589,61 @@ impl ProxyMetrics {
             }
         }
 
-        labeled(&mut s, "sip_messages_total", "SIP messages by direction+result.", "counter", "label", &messages_map);
-        labeled(&mut s, "sip_proxy_face_messages_total", "Datagrams by proxy face + direction (dual-face mode; single-face records int only).", "counter", "label", &faces_map);
-        labeled(&mut s, "sip_proxy_requests_total", "Inbound SIP requests by method.", "counter", "method", &requests_map);
-        labeled2(&mut s, "sip_proxy_responses_total", "Inbound SIP responses by CSeq method + status code.", ("method", "code"), &self.responses.snapshot());
-        g(&mut s, "sip_proxy_calls_total", "New calls: initial dialog-creating INVITEs (no To-tag).", "counter", self.calls.load(Ordering::Relaxed));
-        labeled(&mut s, "sip_routing_decision_total", "Routing decisions by kind.", "counter", "kind", &decisions_map);
+        labeled(
+            &mut s,
+            "sip_messages_total",
+            "SIP messages by direction+result.",
+            "counter",
+            "label",
+            &messages_map,
+        );
+        labeled(
+            &mut s,
+            "sip_proxy_face_messages_total",
+            "Datagrams by proxy face + direction (dual-face mode; single-face records int only).",
+            "counter",
+            "label",
+            &faces_map,
+        );
+        labeled(
+            &mut s,
+            "sip_proxy_requests_total",
+            "Inbound SIP requests by method.",
+            "counter",
+            "method",
+            &requests_map,
+        );
+        labeled2(
+            &mut s,
+            "sip_proxy_responses_total",
+            "Inbound SIP responses by CSeq method + status code.",
+            ("method", "code"),
+            &self.responses.snapshot(),
+        );
+        g(
+            &mut s,
+            "sip_proxy_calls_total",
+            "New calls: initial dialog-creating INVITEs (no To-tag).",
+            "counter",
+            self.calls.load(Ordering::Relaxed),
+        );
+        labeled(
+            &mut s,
+            "sip_routing_decision_total",
+            "Routing decisions by kind.",
+            "counter",
+            "kind",
+            &decisions_map,
+        );
         labeled(&mut s, "sip_proxy_rejects_total", "Locally decided rejects by reason (the per-cause split of sip_routing_decision_total kind=reject).", "counter", "reason", &self.rejects.snapshot());
-        labeled(&mut s, "sip_proxy_hmac_failures_total", "HMAC verify failures by reason.", "counter", "reason", &self.hmac_failures.snapshot());
+        labeled(
+            &mut s,
+            "sip_proxy_hmac_failures_total",
+            "HMAC verify failures by reason.",
+            "counter",
+            "reason",
+            &self.hmac_failures.snapshot(),
+        );
 
         // Histogram (count + sum only — the slice does not bucket).
         let cnt = self.routing_duration_count.load(Ordering::Relaxed);
@@ -565,19 +654,87 @@ impl ProxyMetrics {
         s.push_str(&format!("sip_routing_duration_seconds_sum {sum_s}\n"));
         s.push_str(&format!("sip_routing_duration_seconds_count {cnt}\n"));
 
-        g(&mut s, "sip_proxy_record_route_inserted_total", "Record-Route headers inserted.", "counter", self.record_route_inserted.load(Ordering::Relaxed));
-        g(&mut s, "sip_proxy_pending_invite_lru_size", "Pending-INVITE LRU size.", "gauge", self.pending_invite_lru_size.load(Ordering::Relaxed));
-        labeled(&mut s, "sip_proxy_named_sends_total", "Named-target (DNS) sends by outcome.", "counter", "outcome", &self.named_sends.snapshot());
-        labeled(&mut s, "sip_proxy_resolver_refresh_total", "Proactive resolver refresh + startup prewarm events by outcome.", "counter", "outcome", &self.resolver_refresh.snapshot());
-        g(&mut s, "sip_proxy_resolver_cache_size", "Resolver name-cache size.", "gauge", self.resolver_cache_size.load(Ordering::Relaxed));
-        g(&mut s, "sip_proxy_send_failures_total", "Outbound datagrams the endpoint failed to send.", "counter", self.send_failures.load(Ordering::Relaxed));
+        g(
+            &mut s,
+            "sip_proxy_record_route_inserted_total",
+            "Record-Route headers inserted.",
+            "counter",
+            self.record_route_inserted.load(Ordering::Relaxed),
+        );
+        g(
+            &mut s,
+            "sip_proxy_pending_invite_lru_size",
+            "Pending-INVITE LRU size.",
+            "gauge",
+            self.pending_invite_lru_size.load(Ordering::Relaxed),
+        );
+        labeled(
+            &mut s,
+            "sip_proxy_named_sends_total",
+            "Named-target (DNS) sends by outcome.",
+            "counter",
+            "outcome",
+            &self.named_sends.snapshot(),
+        );
+        labeled(
+            &mut s,
+            "sip_proxy_resolver_refresh_total",
+            "Proactive resolver refresh + startup prewarm events by outcome.",
+            "counter",
+            "outcome",
+            &self.resolver_refresh.snapshot(),
+        );
+        g(
+            &mut s,
+            "sip_proxy_resolver_cache_size",
+            "Resolver name-cache size.",
+            "gauge",
+            self.resolver_cache_size.load(Ordering::Relaxed),
+        );
+        g(
+            &mut s,
+            "sip_proxy_send_failures_total",
+            "Outbound datagrams the endpoint failed to send.",
+            "counter",
+            self.send_failures.load(Ordering::Relaxed),
+        );
         let [udp_depth, udp_max, udp_enq, udp_drop, udp_shed] = self.udp_totals();
-        g(&mut s, "sip_proxy_udp_queue_depth", "Inbound UDP queue depth (sampled, summed over recv shards).", "gauge", udp_depth);
-        g(&mut s, "sip_proxy_udp_queue_max", "Inbound UDP queue capacity (summed over recv shards).", "gauge", udp_max);
-        g(&mut s, "sip_proxy_udp_enqueued_total", "Datagrams accepted into the inbound queue(s).", "counter", udp_enq);
-        g(&mut s, "sip_proxy_udp_tail_dropped_total", "Datagrams tail-dropped by the full inbound queue(s).", "counter", udp_drop);
+        g(
+            &mut s,
+            "sip_proxy_udp_queue_depth",
+            "Inbound UDP queue depth (sampled, summed over recv shards).",
+            "gauge",
+            udp_depth,
+        );
+        g(
+            &mut s,
+            "sip_proxy_udp_queue_max",
+            "Inbound UDP queue capacity (summed over recv shards).",
+            "gauge",
+            udp_max,
+        );
+        g(
+            &mut s,
+            "sip_proxy_udp_enqueued_total",
+            "Datagrams accepted into the inbound queue(s).",
+            "counter",
+            udp_enq,
+        );
+        g(
+            &mut s,
+            "sip_proxy_udp_tail_dropped_total",
+            "Datagrams tail-dropped by the full inbound queue(s).",
+            "counter",
+            udp_drop,
+        );
         g(&mut s, "sip_proxy_intake_shed_total", "New non-emergency INVITEs dropped by the depth-watermark pre-ingress shed (the selective last-line guard below the admission layer).", "counter", udp_shed);
-        g(&mut s, "sip_proxy_worker_pool_empty", "1 iff no worker is Alive (routable) — the proxy can serve no new dialog.", "gauge", self.worker_pool_empty.load(Ordering::Relaxed));
+        g(
+            &mut s,
+            "sip_proxy_worker_pool_empty",
+            "1 iff no worker is Alive (routable) — the proxy can serve no new dialog.",
+            "gauge",
+            self.worker_pool_empty.load(Ordering::Relaxed),
+        );
 
         // Overload-shed visibility (port of the TS AIMD counters). Without these a
         // worker that gets silently rate-capped (`bucket_empty`), filtered out
@@ -585,7 +742,14 @@ impl ProxyMetrics {
         // (`stale_decrease`) leaves no Prometheus trail — the 2026-05-25 root cause.
         // `overload_rejections` is keyed by reason; `stale_decrease` is the coarse
         // (registry-aggregate) stand-in for the TS per-`worker_id` push.
-        labeled(&mut s, "sip_proxy_overload_rejections_total", "New-dialog admissions rejected by the AIMD/band overload path, by reason.", "counter", "reason", &self.overload_rejections.snapshot());
+        labeled(
+            &mut s,
+            "sip_proxy_overload_rejections_total",
+            "New-dialog admissions rejected by the AIMD/band overload path, by reason.",
+            "counter",
+            "reason",
+            &self.overload_rejections.snapshot(),
+        );
         g(&mut s, "sip_proxy_worker_stale_decrease_total", "WorkerLoadObserver sweep_stale floor events (AIMD cap halved — no fresh X-Overload within payload_stale_ms).", "counter", self.overload_stale_decrease.load(Ordering::Relaxed));
         g(&mut s, "sip_proxy_lb_emergency_bypassed_total", "Emergency new-dialog INVITEs that bypassed the LB overload gates (above_critical critical-filter + per-worker AIMD bucket). Emergency traffic skipping the load-balancer's overload path under flood.", "counter", self.lb_emergency_bypassed.load(Ordering::Relaxed));
 
@@ -597,7 +761,10 @@ impl ProxyMetrics {
             ("unknown", &self.health.unknown),
             ("dead", &self.health.dead),
         ] {
-            s.push_str(&format!("sip_worker_health{{health=\"{label}\"}} {}\n", val.load(Ordering::Relaxed)));
+            s.push_str(&format!(
+                "sip_worker_health{{health=\"{label}\"}} {}\n",
+                val.load(Ordering::Relaxed)
+            ));
         }
 
         // Per-peer failure/timeout family (cardinality-bounded; see
@@ -665,7 +832,9 @@ mod tests {
         assert_eq!(m.lb_emergency_bypassed_total(), 2);
         let txt = m.prometheus_text();
         assert!(txt.contains("sip_proxy_overload_rejections_total{reason=\"bucket_empty\"} 2"));
-        assert!(txt.contains("sip_proxy_overload_rejections_total{reason=\"no_target_critical_filtered\"} 1"));
+        assert!(txt.contains(
+            "sip_proxy_overload_rejections_total{reason=\"no_target_critical_filtered\"} 1"
+        ));
         assert!(txt.contains("sip_proxy_worker_stale_decrease_total 3"));
         // Emergency-bypass visibility series (the LB critical-filter + AIMD skip).
         assert!(txt.contains("sip_proxy_lb_emergency_bypassed_total 2"));

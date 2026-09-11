@@ -71,14 +71,9 @@ impl Stack {
         config: TransactionConfig,
     ) -> Stack {
         let net = SimulatedSignalingNetwork::new(transit_ms);
-        let b2bua_ep = net
-            .bind_udp(BindUdpOpts::new(addr(B2BUA), b2bua_queue))
-            .await
-            .expect("bind b2bua");
-        let peer = net
-            .bind_udp(BindUdpOpts::new(addr(PEER), 1024))
-            .await
-            .expect("bind peer");
+        let b2bua_ep =
+            net.bind_udp(BindUdpOpts::new(addr(B2BUA), b2bua_queue)).await.expect("bind b2bua");
+        let peer = net.bind_udp(BindUdpOpts::new(addr(PEER), 1024)).await.expect("bind peer");
 
         let parser = Arc::new(CustomParser::new());
         // Deterministic ids (the `build` default seeds 0xC0FFEE) so any
@@ -140,14 +135,10 @@ pub fn parse_response(raw: &[u8]) -> sip_message::SipResponse {
 
 /// Count requests of `method` / responses of `status` in a drained batch.
 pub fn count_requests(msgs: &[SipMessage], method: &str) -> usize {
-    msgs.iter()
-        .filter(|m| matches!(m, SipMessage::Request(r) if r.method() == method))
-        .count()
+    msgs.iter().filter(|m| matches!(m, SipMessage::Request(r) if r.method() == method)).count()
 }
 pub fn count_responses(msgs: &[SipMessage], status: u16) -> usize {
-    msgs.iter()
-        .filter(|m| matches!(m, SipMessage::Response(r) if r.status() == status))
-        .count()
+    msgs.iter().filter(|m| matches!(m, SipMessage::Response(r) if r.status() == status)).count()
 }
 
 /// An inbound request *from the peer toward the b2bua*. Fixed From-tag

@@ -21,7 +21,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use crate::infra::{self, EndpointConfig, InfraKind};
-use crate::model::{Campaign, CheckSet, ModelError, TestCase, validate_case};
+use crate::model::{validate_case, Campaign, CheckSet, ModelError, TestCase};
 use crate::result::{self, CampaignIndex, CellId, CellSummary, RunResult};
 use crate::{checks, shapes};
 
@@ -98,10 +98,8 @@ fn expand(spec: &CampaignSpec) -> Result<Vec<CellSpec>, ModelError> {
 
     for case_id in &spec.campaign.cases {
         let Some(case) = spec.cases.get(case_id) else {
-            problems.push(format!(
-                "campaign {:?}: unknown Test case {case_id:?}",
-                spec.campaign.id
-            ));
+            problems
+                .push(format!("campaign {:?}: unknown Test case {case_id:?}", spec.campaign.id));
             continue;
         };
         if let Err(ModelError::Invalid(p)) = validate_case(case, &shapes, &spec.check_sets) {
@@ -126,7 +124,11 @@ fn expand(spec: &CampaignSpec) -> Result<Vec<CellSpec>, ModelError> {
         }
     }
 
-    if problems.is_empty() { Ok(cells) } else { Err(ModelError::Invalid(problems)) }
+    if problems.is_empty() {
+        Ok(cells)
+    } else {
+        Err(ModelError::Invalid(problems))
+    }
 }
 
 /// Run one cell to a [`CellSummary`], persisting `result.json` (or `error.txt`
@@ -172,12 +174,7 @@ fn run_cell(spec: &CellSpec) -> CellSummary {
     });
 
     result::write_result(&spec.run_dir, &result).expect("persist result.json");
-    CellSummary {
-        cell: spec.cell.clone(),
-        passed: result.passed,
-        dir: dir_name,
-        error: None,
-    }
+    CellSummary { cell: spec.cell.clone(), passed: result.passed, dir: dir_name, error: None }
 }
 
 /// The crash fallback: record the panic as a failed cell with an `error.txt`.
@@ -186,12 +183,7 @@ fn crashed_summary(spec: &CellSpec, panic_msg: String) -> CellSummary {
     let dir = spec.run_dir.join(&dir_name);
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join("error.txt"), format!("{panic_msg}\n"));
-    CellSummary {
-        cell: spec.cell.clone(),
-        passed: false,
-        dir: dir_name,
-        error: Some(panic_msg),
-    }
+    CellSummary { cell: spec.cell.clone(), passed: false, dir: dir_name, error: Some(panic_msg) }
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -304,9 +296,8 @@ fn execute(
             ts: spec.ts.clone(),
             cells: summaries,
         };
-        result::write_campaign_index(&run_dir, &index).map_err(|e| {
-            ModelError::Io { path: run_dir.clone(), source: e }
-        })?;
+        result::write_campaign_index(&run_dir, &index)
+            .map_err(|e| ModelError::Io { path: run_dir.clone(), source: e })?;
         status.lock().unwrap().finished = true;
         Ok(CampaignResult { index, run_dir: run_dir.clone() })
     })

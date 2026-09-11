@@ -11,18 +11,18 @@ use std::time::Duration;
 use b2bua_harness::{settle_until, B2buaSut};
 use layer_harness::TransportKind;
 use loadgen::scenarios::ScenarioId;
+use loadgen::{
+    prefix_leg_picker, CallConfig, CallEnv, CallRouting, CallTuning, Correlation, Driver,
+    DriverCfg, DropDir, EgressPolicy, EndpointSpec, LegInfo, LegSpec, LoadCase, MixEntry, MuxCore,
+    MuxTransport, Reporter, ReporterCfg, ResultClass, Role, ScenarioInputs, ShapeDescriptor,
+    ShapeRegistry, TargetedDrop,
+};
 use scenario_harness::actor::scenarios::BasicCall;
 use scenario_harness::actor::{
     phase, ActorCall, ActorScenario, ActorSpec, Barrier, CtxFeed, Disposition, Expect, Feed, Goal,
     GoalStep, LegPhase, MediaState, SettleBarrier, StateInner, SubflowState, SUBFLOW_REALIGN,
 };
-use scenario_harness::{ANSWER_SDP, ApiCall, OFFER_SDP};
-use loadgen::{
-    prefix_leg_picker, CallConfig, CallEnv, CallRouting, CallTuning,
-    Correlation, Driver, DriverCfg, EgressPolicy, EndpointSpec, LegInfo, LegSpec, LoadCase,
-    MixEntry, MuxCore, MuxTransport, ResultClass, Reporter, ReporterCfg, Role, ScenarioInputs,
-    DropDir, ShapeDescriptor, ShapeRegistry, TargetedDrop,
-};
+use scenario_harness::{ApiCall, ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{Harness, StepError};
 use sip_clock::Clock;
 use sip_net::{RealSignalingNetwork, SignalingNetwork};
@@ -265,7 +265,8 @@ fn cfg(via: SocketAddr, cps: f64, secs: u64, mif: usize, seed: u64) -> DriverCfg
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_mux_smoke_basic_concurrent() {
     let (_h, b2bua, core, transport) = setup(6400, Correlation::header("X-Loadgen-Id"), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
 
     let driver = Driver::new(
         cfg(b2bua.addr, 60.0, 2, 16, 0xB451C),
@@ -275,9 +276,21 @@ async fn loadgen_mux_smoke_basic_concurrent() {
     );
     run_throttled(&driver).await;
 
-    assert!(reporter.count("basic_call", &ResultClass::Ok) > 5, "too few OK basic calls: {}", reporter.render_prometheus());
-    assert_eq!(reporter.count("basic_call", &ResultClass::Timeout), 0, "unexpected timeouts (dialog mixing?)");
-    assert_eq!(core.stats().orphan_no_header.load(std::sync::atomic::Ordering::Relaxed), 0, "unexpected orphans");
+    assert!(
+        reporter.count("basic_call", &ResultClass::Ok) > 5,
+        "too few OK basic calls: {}",
+        reporter.render_prometheus()
+    );
+    assert_eq!(
+        reporter.count("basic_call", &ResultClass::Timeout),
+        0,
+        "unexpected timeouts (dialog mixing?)"
+    );
+    assert_eq!(
+        core.stats().orphan_no_header.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "unexpected orphans"
+    );
     assert!(reporter.sample_count("basic_call", &ResultClass::Ok) > 0, "no OK callflow sample");
 
     // No leak: every call's mux entries reclaimed; SUT fully reaped.
@@ -303,7 +316,8 @@ async fn loadgen_to_user_correlation_rides_the_to_header() {
     use std::sync::atomic::Ordering::Relaxed;
     let (_h, b2bua, core, transport) =
         setup_without_relay_config(6540, Correlation::to_user(), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
 
     let driver = Driver::new(
         cfg(b2bua.addr, 60.0, 2, 16, 0x70C4),
@@ -338,7 +352,8 @@ async fn loadgen_to_user_correlation_rides_the_to_header() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_mux_smoke_all_scenarios() {
     let (_h, b2bua, core, transport) = setup(6410, Correlation::header("X-Loadgen-Id"), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 4 }));
     let driver = Driver::new(
         cfg(b2bua.addr, 60.0, 4, 8, 0xA11),
         MixEntry::default_mix(&ShapeRegistry::with_defaults(), &inputs()),
@@ -368,7 +383,8 @@ async fn loadgen_mux_smoke_all_scenarios() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_mux_smoke_timed_and_long_call() {
     let (_h, b2bua, core, transport) = setup(6470, Correlation::header("X-Loadgen-Id"), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 
     let mut cfg = cfg(b2bua.addr, 40.0, 2, 16, 0x71A1ED);
     cfg.call.ring_delay = Duration::from_millis(30);
@@ -378,11 +394,7 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
 
     let driver = Driver::new(
         cfg,
-        vec![
-            mix("basic_call", 2.0),
-            mix("reinvite", 1.0),
-            mix("long_call", 1.0),
-        ],
+        vec![mix("basic_call", 2.0), mix("reinvite", 1.0), mix("long_call", 1.0)],
         reporter.clone(),
         transport,
     );
@@ -411,14 +423,12 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_mux_smoke_prack_update_mix() {
     let (_h, b2bua, core, transport) = setup(6560, Correlation::header("X-Loadgen-Id"), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 
     let driver = Driver::new(
         cfg(b2bua.addr, 60.0, 2, 16, 0x93AC5),
-        vec![
-            mix("prack_update", 2.0),
-            mix("basic_call", 1.0),
-        ],
+        vec![mix("prack_update", 2.0), mix("basic_call", 1.0)],
         reporter.clone(),
         transport,
     );
@@ -438,12 +448,15 @@ async fn loadgen_mux_smoke_prack_update_mix() {
         reporter.render_prometheus()
     );
     assert_eq!(
-        core.stats().orphan_no_header.load(std::sync::atomic::Ordering::Relaxed) +
-            core.stats().orphan_unknown_token.load(std::sync::atomic::Ordering::Relaxed),
+        core.stats().orphan_no_header.load(std::sync::atomic::Ordering::Relaxed)
+            + core.stats().orphan_unknown_token.load(std::sync::atomic::Ordering::Relaxed),
         0,
         "unexpected orphans (PRACK/UPDATE demux gap?)"
     );
-    assert!(reporter.sample_count("prack_update", &ResultClass::Ok) > 0, "no OK prack_update sample");
+    assert!(
+        reporter.sample_count("prack_update", &ResultClass::Ok) > 0,
+        "no OK prack_update sample"
+    );
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (prack_update)");
@@ -471,7 +484,8 @@ async fn loadgen_mux_smoke_prack_update_mix() {
 async fn loadgen_mux_smoke_rerouting_prack_mix() {
     let (_h, b2bua, core, transport) =
         setup_api_call(6620, Correlation::header("X-Loadgen-Id"), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 
     // The environment axis: the pinned layout (the real cluster's shape) — the
     // egress realizes [bob, bob2] as the routes failover plan.
@@ -566,7 +580,10 @@ async fn loadgen_mux_orphan_observability() {
     assert_eq!(core.registry_size(), 0, "orphans must not be queued/registered");
     let samples = core.stats().samples();
     assert!(samples.iter().any(|s| s.contains("no_header")), "no no_header sample: {samples:?}");
-    assert!(samples.iter().any(|s| s.contains("unknown_token")), "no unknown_token sample: {samples:?}");
+    assert!(
+        samples.iter().any(|s| s.contains("unknown_token")),
+        "no unknown_token sample: {samples:?}"
+    );
 }
 
 /// The chaos-flag endpoint: a `POST /chaos?type=…&target=…` records one marker
@@ -580,7 +597,8 @@ async fn loadgen_chaos_post_records_marker() {
 
     let chaos = Arc::new(ChaosLog::new(Clock::system()));
     let bind = addr(6490);
-    let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(|| "render-body-marker\n".to_string());
+    let render: Arc<dyn Fn() -> String + Send + Sync> =
+        Arc::new(|| "render-body-marker\n".to_string());
     let srv_chaos = chaos.clone();
     tokio::spawn(async move {
         let _ = serve_metrics(bind, render, Some(srv_chaos), None).await;
@@ -594,7 +612,9 @@ async fn loadgen_chaos_post_records_marker() {
         }
     };
     stream
-        .write_all(b"POST /chaos?type=kill_worker&target=b2bua-worker-1 HTTP/1.1\r\nHost: x\r\n\r\n")
+        .write_all(
+            b"POST /chaos?type=kill_worker&target=b2bua-worker-1 HTTP/1.1\r\nHost: x\r\n\r\n",
+        )
         .await
         .unwrap();
     let mut buf = Vec::new();
@@ -609,11 +629,10 @@ async fn loadgen_chaos_post_records_marker() {
     // A POST carrying `ts` (Unix epoch ms of the kill) is back-dated: the ack
     // echoes the ts and a second marker is recorded. The driver supplies this so
     // port-forward latency on the flag path can't shift the marker off the kill.
-    let kill_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-        - 1500;
+    let kill_ms =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            as u64
+            - 1500;
     let mut s_ts = tokio::net::TcpStream::connect(bind).await.unwrap();
     s_ts.write_all(
         format!("POST /chaos?type=kill_worker&target=b2bua-worker-1&ts={kill_ms} HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -914,8 +933,13 @@ async fn loadgen_mux_recorded_inbox_taps_delivery_and_modeled_loss() {
 
     // Call 2: loss model at 100% — the demuxed INVITE never reaches the inbox,
     // but a recorded call still sees the arrival, tagged as modeled loss.
-    let lossy =
-        core.network_tuned(CallRouting::new("lgTAP2".to_string()).leg(uas, "callee"), 1.0, false, 7, None);
+    let lossy = core.network_tuned(
+        CallRouting::new("lgTAP2".to_string()).leg(uas, "callee"),
+        1.0,
+        false,
+        7,
+        None,
+    );
     let ep2 = lossy.bind_udp(BindUdpOpts::new(uas, 256)).await.unwrap();
     let seen2: Arc<StdMutex<Vec<(String, RecvDisposition)>>> = Arc::new(StdMutex::new(Vec::new()));
     let sink2 = seen2.clone();
@@ -1014,26 +1038,19 @@ async fn loadgen_mux_unrouted_correlated_datagram_taps_for_the_ladder() {
 /// `ok` with ZERO loss, and the report keeps first-N samples for BOTH classes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_mux_emergency_split_under_overload() {
-    let (_h, b2bua, core, transport) = setup_with(
-        6450,
-        Correlation::header("X-Loadgen-Id"),
-        5,
-        RECV,
-        |c| {
+    let (_h, b2bua, core, transport) =
+        setup_with(6450, Correlation::header("X-Loadgen-Id"), 5, RECV, |c| {
             c.cps_bucket_size = 0; // exhausted bucket → shed every non-emergency
             c.cps_bucket_rate = 0; // …and never refill (deterministic).
-        },
-    )
-    .await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+        })
+        .await;
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 
     // Mix sheddable non-emergency basic calls with force-admitted emergency ones.
     let driver = Driver::new(
         cfg(b2bua.addr, 60.0, 3, 16, 0xE5E7),
-        vec![
-            mix("basic_call", 1.0),
-            mix("basic_call_em", 1.0),
-        ],
+        vec![mix("basic_call", 1.0), mix("basic_call_em", 1.0)],
         reporter.clone(),
         transport,
     );
@@ -1063,7 +1080,10 @@ async fn loadgen_mux_emergency_split_under_overload() {
     );
 
     // The report keeps samples for BOTH the OK and the 503 class.
-    assert!(reporter.sample_count("basic_call", &ResultClass::WrongStatus(503)) > 0, "no 503 sample kept");
+    assert!(
+        reporter.sample_count("basic_call", &ResultClass::WrongStatus(503)) > 0,
+        "no 503 sample kept"
+    );
     assert!(reporter.sample_count("basic_call_em", &ResultClass::Ok) > 0, "no OK sample kept");
 
     // No RESOURCE leak from the sheds OR the emergency teardowns: no live call,
@@ -1088,11 +1108,13 @@ async fn loadgen_mux_emergency_split_under_overload() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_post_call_cleanup_no_leak() {
     let (_h, b2bua, core, transport) = setup(6460, Correlation::header("X-Loadgen-Id"), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 3 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 3 }));
 
     let mut scenarios = MixEntry::failure_mix(&ShapeRegistry::with_defaults(), &inputs());
     scenarios.push(mix("basic_call", 2.0)); // some happy traffic in the mix
-    let driver = Driver::new(cfg(b2bua.addr, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
+    let driver =
+        Driver::new(cfg(b2bua.addr, 50.0, 3, 12, 0xFA17), scenarios, reporter.clone(), transport);
     run_throttled(&driver).await;
 
     // Each failure mode produced its NOK bucket, and the happy path its OK.
@@ -1101,8 +1123,14 @@ async fn loadgen_post_call_cleanup_no_leak() {
         "no 486 final-reject recorded:\n{}",
         reporter.render_prometheus()
     );
-    assert!(reporter.count("abandon_ringing", &ResultClass::Timeout) > 0, "no abandoned-early call recorded");
-    assert!(reporter.count("refer_charlie_reject", &ResultClass::Unexpected) > 0, "no declined-transfer recorded");
+    assert!(
+        reporter.count("abandon_ringing", &ResultClass::Timeout) > 0,
+        "no abandoned-early call recorded"
+    );
+    assert!(
+        reporter.count("refer_charlie_reject", &ResultClass::Unexpected) > 0,
+        "no declined-transfer recorded"
+    );
     assert!(reporter.count("basic_call", &ResultClass::Ok) > 0, "no happy call completed");
 
     // Post-call cleanup is COMPLETE across every failure-teardown path.
@@ -1130,7 +1158,8 @@ async fn loadgen_post_call_cleanup_no_leak() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
     let (_h, b2bua, core, transport) = setup(6480, Correlation::header("X-Loadgen-Id"), 3).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 4.0, 1, 4, 0xD40F);
     c.default_tuning = CallTuning {
@@ -1182,7 +1211,8 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
     // tail, which idles the full window either way.
     let (_h, b2bua, core, transport) =
         setup_recv(6590, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 12.0, 2, 8, 0x5EED);
     c.default_tuning = CallTuning { drop_rate: 0.10, retransmit: true, ..CallTuning::default() };
@@ -1194,7 +1224,11 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
     let ok = reporter.count("basic_call", &ResultClass::Ok);
     let timeouts = reporter.count("basic_call", &ResultClass::Timeout);
     assert!(drops > 0, "loss model dropped nothing — recovery test is vacuous");
-    assert!(ok >= 6, "too few OK calls despite retransmit: ok={ok}\n{}", reporter.render_prometheus());
+    assert!(
+        ok >= 6,
+        "too few OK calls despite retransmit: ok={ok}\n{}",
+        reporter.render_prometheus()
+    );
     // Retransmit recovers each lost datagram inside the (wide) recv window, so OK
     // dominates overwhelmingly — the SAME loss that broke the majority of the
     // no-retransmit calls above. A comfortable 4:1 margin absorbs the rare tail
@@ -1234,7 +1268,8 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_refer_drop_without_retransmit_breaks_transfers() {
     let (_h, b2bua, core, transport) = setup(6510, Correlation::header("X-Loadgen-Id"), 3).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 8.0, 2, 8, 0xB9B9);
     c.default_tuning = CallTuning { drop_rate: 0.08, retransmit: false, ..CallTuning::default() };
@@ -1297,7 +1332,8 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
     // retransmit ladders (0.5+1+2+4 s) need headroom under CI CPU contention.
     let (_h, b2bua, core, transport) =
         setup_recv(6530, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 6.0, 2, 8, 0xB9A2);
     c.default_tuning = CallTuning { drop_rate: 0.05, retransmit: true, ..CallTuning::default() };
@@ -1316,7 +1352,11 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
     // The recoverable majority succeeds — the SAME loss that broke transfers with
     // no retransmit above (a strict majority, unlike the no-retransmit baseline
     // where the majority failed).
-    assert!(ok >= 6, "too few OK transfers despite retransmit: ok={ok}/{total} drops={drops}\n{}", reporter.render_prometheus());
+    assert!(
+        ok >= 6,
+        "too few OK transfers despite retransmit: ok={ok}/{total} drops={drops}\n{}",
+        reporter.render_prometheus()
+    );
     assert!(
         ok > nok,
         "actor refer did not recover the majority: ok={ok} nok={nok} drops={drops}\n{}",
@@ -1354,7 +1394,10 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
     // `settle_until`: under loss a recovered refer call's teardown rides retransmit
     // ladders and — worst case, a fully-lost BYE — falls back to that 32 s SUT
     // timer, so a 20 s window flaked under full-suite CPU contention.
-    settle_secs(SETTLE_LOSS_SECS, || core.registry_size() == 0 && b2bua.active_calls() as u64 <= nok).await;
+    settle_secs(SETTLE_LOSS_SECS, || {
+        core.registry_size() == 0 && b2bua.active_calls() as u64 <= nok
+    })
+    .await;
     assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
     assert!(
         b2bua.active_calls() as u64 <= nok,
@@ -1377,13 +1420,20 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
 async fn loadgen_settle_gate_recovers_dropped_bye() {
     let (_h, b2bua, core, transport) =
         setup_recv(6580, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 2.0, 1, 4, 0x2D07);
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop { method: "BYE", nth: 1, permanent: false, dir: DropDir::Outbound, leg: None }),
+        drop_nth: Some(TargetedDrop {
+            method: "BYE",
+            nth: 1,
+            permanent: false,
+            dir: DropDir::Outbound,
+            leg: None,
+        }),
     };
     let driver = Driver::new(c, vec![mix("refer", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1396,7 +1446,8 @@ async fn loadgen_settle_gate_recovers_dropped_bye() {
     // EVERY call recovered: the re-sent BYE was acked before the settle ceiling —
     // deterministic, so no dominance ratio, all-or-nothing.
     assert_eq!(
-        ok, total,
+        ok,
+        total,
         "a targeted first-BYE drop was not recovered by retransmit:\n{}",
         reporter.render_prometheus()
     );
@@ -1424,13 +1475,20 @@ async fn loadgen_settle_gate_recovers_dropped_bye() {
 async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
     let (_h, b2bua, core, transport) =
         setup_recv(6640, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC0);
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop { method: "ACK", nth: 1, permanent: false, dir: DropDir::Inbound, leg: None }),
+        drop_nth: Some(TargetedDrop {
+            method: "ACK",
+            nth: 1,
+            permanent: false,
+            dir: DropDir::Inbound,
+            leg: None,
+        }),
     };
     let driver = Driver::new(c, vec![mix("basic_call", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1439,12 +1497,20 @@ async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
     let total = reporter.total_calls();
     let ok = reporter.count("basic_call", &ResultClass::Ok);
     let audit = reporter.count("basic_call", &ResultClass::RfcAuditFail);
-    eprintln!("REPRO drops_in={drops} total={total} ok={ok} audit={audit}\n{}", reporter.render_prometheus());
+    eprintln!(
+        "REPRO drops_in={drops} total={total} ok={ok} audit={audit}\n{}",
+        reporter.render_prometheus()
+    );
     assert!(total >= 1 && drops >= 1, "no call / drop never fired: drops={drops} total={total}");
 
     settle_secs(SETTLE_LOSS_SECS, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
-    assert_eq!(audit, 0, "dropped initial b-leg ACK charged the audit (SUT re-ACK gap):\n{}", reporter.render_prometheus());
+    assert_eq!(
+        audit,
+        0,
+        "dropped initial b-leg ACK charged the audit (SUT re-ACK gap):\n{}",
+        reporter.render_prometheus()
+    );
     assert_eq!(ok, total, "dropped initial b-leg ACK not recovered by SUT re-ACK");
 }
 
@@ -1460,13 +1526,20 @@ async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
 async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
     let (_h, b2bua, core, transport) =
         setup_recv(6610, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC1);
     c.default_tuning = CallTuning {
         drop_rate: 0.0,
         retransmit: true,
-        drop_nth: Some(TargetedDrop { method: "ACK", nth: 1, permanent: false, dir: DropDir::Inbound, leg: None }),
+        drop_nth: Some(TargetedDrop {
+            method: "ACK",
+            nth: 1,
+            permanent: false,
+            dir: DropDir::Inbound,
+            leg: None,
+        }),
     };
     let driver = Driver::new(c, vec![mix("invite_reject", 1.0)], reporter.clone(), transport);
     run_throttled(&driver).await;
@@ -1502,7 +1575,8 @@ async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
 async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
     let (_h, b2bua, core, transport) =
         setup_api_call(6630, Correlation::header("X-Loadgen-Id"), 3).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     let mut c = cfg(b2bua.addr, 1.0, 1, 4, 0x2AC2);
     c.call.egress = EgressPolicy::ApiCallPin; // the [bob, bob2] plan rides X-Api-Call
@@ -1527,13 +1601,19 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
     let total = reporter.total_calls();
     let ok = reporter.count("rerouting_prack", &ResultClass::Ok);
     let audit = reporter.count("rerouting_prack", &ResultClass::RfcAuditFail);
-    eprintln!("REPRO-abandoned-486 drops_in={drops} total={total} ok={ok} audit={audit}\n{}", reporter.render_prometheus());
+    eprintln!(
+        "REPRO-abandoned-486 drops_in={drops} total={total} ok={ok} audit={audit}\n{}",
+        reporter.render_prometheus()
+    );
     // Report FIRST (before the asserts), so a failing run stays inspectable.
     let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/loadgen-abandoned-reject-report");
     reporter.finalize(&out_dir).expect("write repro report");
     eprintln!("repro report: {}/index.html", out_dir.display());
-    assert!(total >= 1 && drops >= 1, "no call / the reject hop-ACK drop never fired: drops={drops} total={total}");
+    assert!(
+        total >= 1 && drops >= 1,
+        "no call / the reject hop-ACK drop never fired: drops={drops} total={total}"
+    );
 
     settle_secs(SETTLE_LOSS_SECS, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
@@ -1543,7 +1623,8 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
         reporter.render_prometheus()
     );
     assert_eq!(
-        ok, total,
+        ok,
+        total,
         "a reroute call with a lost reject hop-ACK did not recover to OK:\n{}",
         reporter.render_prometheus()
     );
@@ -1562,7 +1643,8 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
 async fn loadgen_settle_gate_permanent_notify_loss_names_obligation() {
     let (_h, b2bua, core, transport) =
         setup_recv(6570, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 1 }));
 
     // ONE call is enough — the outcome is deterministic.
     let mut c = cfg(b2bua.addr, 1.0, 1, 2, 0x2D08);
@@ -1586,7 +1668,8 @@ async fn loadgen_settle_gate_permanent_notify_loss_names_obligation() {
     // Graceful, bounded give-up: EVERY call lands in `timeout` (the settle
     // verdict), never an RFC-audit/unexpected/panic class.
     assert_eq!(
-        timeouts, total,
+        timeouts,
+        total,
         "permanent NOTIFY loss did not land in the settle timeout class:\n{}",
         reporter.render_prometheus()
     );
@@ -1666,7 +1749,8 @@ fn list_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_ringing_gate_counts_every_ring() {
     let (_h, b2bua, core, transport) = setup(6500, Correlation::header("X-Loadgen-Id"), 3).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
     // No loss → every 18x is delivered; retransmit on to exercise that path too.
     let mut c = cfg(b2bua.addr, 40.0, 2, 16, 0x9A17);
@@ -1700,19 +1784,29 @@ async fn loadgen_ringing_gate_counts_every_ring() {
 async fn loadgen_inprocess_endurance_lossy() {
     let (_h, b2bua, core, transport) =
         setup_recv(6520, Correlation::header("X-Loadgen-Id"), 5, RECV_LOSSY).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 16 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 16 }));
 
     // The default mix (basic-heavy), production loss + retransmit, 25 s at 25 cps.
     let mut c = cfg(b2bua.addr, 25.0, 25, 64, 0xE0D0E);
     c.default_tuning = CallTuning { drop_rate: 0.001, retransmit: true, ..CallTuning::default() };
-    let driver = Driver::new(c, MixEntry::default_mix(&ShapeRegistry::with_defaults(), &inputs()), reporter.clone(), transport);
+    let driver = Driver::new(
+        c,
+        MixEntry::default_mix(&ShapeRegistry::with_defaults(), &inputs()),
+        reporter.clone(),
+        transport,
+    );
     run_throttled(&driver).await;
 
     let total: u64 = ["basic_call", "reinvite", "options_hold", "refer"]
         .iter()
         .map(|id| reporter.count(id, &ResultClass::Ok))
         .sum();
-    assert!(total > 300, "too few OK calls over the run: {total}\n{}", reporter.render_prometheus());
+    assert!(
+        total > 300,
+        "too few OK calls over the run: {total}\n{}",
+        reporter.render_prometheus()
+    );
     // 18x delivery holds the >99% gate under sustained production loss.
     let (rung, expected) = reporter.ringing_totals();
     assert!(expected > 300, "too few answered calls: {expected}");
@@ -1730,10 +1824,7 @@ async fn loadgen_inprocess_endurance_lossy() {
     // on its own (longer) timers, past this settle. So the un-reaped SUT state must
     // be bounded by the (rare) failure count — a SUCCESSFUL call leaking would be a
     // real bug (leaked > failed).
-    settle_until(|| {
-        b2bua.metrics().creations_total() == b2bua.metrics().removals_total()
-    })
-    .await;
+    settle_until(|| b2bua.metrics().creations_total() == b2bua.metrics().removals_total()).await;
     let failed = reporter.total_calls().saturating_sub(total);
     let leaked = b2bua.metrics().creations_total().saturating_sub(b2bua.metrics().removals_total());
     assert!(
@@ -1789,7 +1880,8 @@ impl ActorScenario for ObservedBasic {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_pooled_case_identities_and_dwell_overrides() {
     let (_h, b2bua, core, transport) = setup(6600, Correlation::header("X-Loadgen-Id"), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 
     let case_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../e2e/cases/load-basic-pooled.json");
@@ -1888,7 +1980,8 @@ async fn loadgen_case_checks_pass_and_render_verdicts() {
     let (_h, b2bua, core, transport) = setup(6700, Correlation::header("X-Loadgen-Id"), 5).await;
     // Record EVERY call (background_record_every = 1): checks are a per-sample
     // oracle, so full recording makes the assertion deterministic.
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
 
     let set: e2e_model::CheckSet = serde_json::from_str(
         r#"{ "id": "load-invite-identity", "blocks": [
@@ -1933,8 +2026,7 @@ async fn loadgen_case_checks_pass_and_render_verdicts() {
     let out = std::env::temp_dir().join(format!("loadgen-checks-ok-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     reporter.finalize(&out).unwrap();
-    let html =
-        std::fs::read_to_string(out.join("callflows/basic_call/ok/clear/0.html")).unwrap();
+    let html = std::fs::read_to_string(out.join("callflows/basic_call/ok/clear/0.html")).unwrap();
     assert!(html.contains("check bob.initialInvite from.uri"), "verdict line missing:\n{html}");
     assert!(html.contains("PASS"), "PASS verdicts must render on the OK page");
     assert!(html.contains("check alice.answer to.tag"), "inline-block verdict missing");
@@ -1952,7 +2044,8 @@ async fn loadgen_case_checks_pass_and_render_verdicts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_failing_check_reclassifies_to_check_fail() {
     let (_h, b2bua, core, transport) = setup(6720, Correlation::header("X-Loadgen-Id"), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
 
     let case = check_case(
         r#"{ "id": "impossible", "compatibleShapes": ["basic_call"],
@@ -1972,7 +2065,11 @@ async fn loadgen_failing_check_reclassifies_to_check_fail() {
     // Every call records (background 1) → every otherwise-OK call reclassifies.
     let failed = reporter.count("basic_call", &ResultClass::CheckFail);
     assert!(failed > 5, "no check_fail calls:\n{}", reporter.render_prometheus());
-    assert_eq!(reporter.count("basic_call", &ResultClass::Ok), 0, "a failing check must never stay OK");
+    assert_eq!(
+        reporter.count("basic_call", &ResultClass::Ok),
+        0,
+        "a failing check must never stay OK"
+    );
     assert!(
         reporter.render_prometheus().contains("class=\"check_fail\""),
         "check_fail must surface as a Prometheus class:\n{}",
@@ -2045,7 +2142,7 @@ impl ActorScenario for ByeWithContact {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -2058,22 +2155,26 @@ impl ActorScenario for ByeWithContact {
                 goals: vec![],
                 invite_targets: vec![],
                 via: None,
-                feed: CtxFeed { on_ack_rx: Feed::new(None, Some("connected")), ..CtxFeed::default() },
-            
+                feed: CtxFeed {
+                    on_ack_rx: Feed::new(None, Some("connected")),
+                    ..CtxFeed::default()
+                },
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
             },
         ];
         let plan = vec![phase("established", |s: &StateInner| {
-            s.leg_at_least("alice", LegPhase::Confirmed) && s.leg_at_least("bob", LegPhase::Confirmed)
+            s.leg_at_least("alice", LegPhase::Confirmed)
+                && s.leg_at_least("bob", LegPhase::Confirmed)
         })];
         Ok(ActorCall {
             actors,
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -2093,7 +2194,8 @@ async fn loadgen_allow_violations_waives_named_rfc_rule() {
     let (_h, b2bua, core, transport) = setup(6740, Correlation::header("X-Loadgen-Id"), 5).await;
 
     // Baseline: no case → the full audit reclassifies to rfc_audit_fail.
-    let baseline = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
+    let baseline =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 1 }));
     let driver = Driver::new(
         cfg(b2bua.addr, 40.0, 2, 16, 0xA0D17),
         vec![(Arc::new(ByeWithContact) as Arc<dyn ActorScenario>, 1.0)],
@@ -2211,7 +2313,7 @@ impl ActorScenario for NumberPlanRefer {
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -2234,7 +2336,7 @@ impl ActorScenario for NumberPlanRefer {
                     on_refer_accepted: Feed::new(Some("time_to_202"), Some("referred")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -2253,7 +2355,7 @@ impl ActorScenario for NumberPlanRefer {
                     on_answer_sent: Feed::new(Some("time_to_charlie_200"), Some("transferred")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -2273,7 +2375,7 @@ impl ActorScenario for NumberPlanRefer {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -2299,13 +2401,16 @@ async fn loadgen_named_leg_specs_demux_number_form_transfer_leg() {
         LegSpec { role: "xfer", ruri_prefixes: &["0650033033"] },
     ];
     let (_h, b2bua, core, transport) = setup(6760, Correlation::header("X-Loadgen-Id"), 5).await;
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 2 }));
 
     // Third-party registration: the open shape carries its own leg specs.
     let mut registry = ShapeRegistry::with_defaults();
-    registry.register(ShapeDescriptor::new("nk_refer_like").legs(NK_LEGS).load_actor_with(
-        |inputs| Arc::new(NumberPlanRefer::new(inputs.refer_key.clone())),
-    ));
+    registry.register(
+        ShapeDescriptor::new("nk_refer_like")
+            .legs(NK_LEGS)
+            .load_actor_with(|inputs| Arc::new(NumberPlanRefer::new(inputs.refer_key.clone()))),
+    );
 
     let driver = Driver::new(
         cfg(b2bua.addr, 30.0, 2, 8, 0x031A),
@@ -2425,7 +2530,8 @@ async fn loadgen_loss_soak_all_bodies_recover() {
     let secs = (PER_BODY as f64 / cps).ceil() as u64; // ≈ 8 s of admission per body
     let tuning = CallTuning { drop_rate: 0.01, retransmit: true, ..CallTuning::default() }; // 1% loss + retransmit
 
-    let reporter = Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 8 }));
+    let reporter =
+        Arc::new(Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 8 }));
     let registry = ShapeRegistry::with_defaults();
     let scenario_inputs = inputs();
     let drops_of = |core: &Arc<MuxCore>| {
@@ -2471,12 +2577,15 @@ async fn loadgen_loss_soak_all_bodies_recover() {
 
     // The loss model actually dropped datagrams over the soak (else it's vacuous).
     let total_drops = drops_of(&core_a) + drops_of(&core_b);
-    assert!(total_drops > 0, "the loss model dropped nothing over the soak — the knob is not wired");
+    assert!(
+        total_drops > 0,
+        "the loss model dropped nothing over the soak — the knob is not wired"
+    );
 
     // Write the self-contained HTML report FIRST — always, even if an assertion
     // below trips — so the run stays inspectable (index.html + sampled callflows).
-    let out_dir =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/loadgen-soak-report");
+    let out_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/loadgen-soak-report");
     reporter.finalize(&out_dir).expect("write loadgen soak report");
     eprintln!(
         "\nloadgen soak report: {}/index.html\n",
@@ -2536,7 +2645,11 @@ async fn loadgen_loss_soak_all_bodies_recover() {
         worst = worst.min(pct);
         eprintln!("  {id:16} ok={ok:>3} timeout={timeout:>2} recovery={pct:>5.1}%");
 
-        assert!(ok > 100, "body {id}: only {ok} OK calls — under-driven:\n{}", reporter.render_prometheus());
+        assert!(
+            ok > 100,
+            "body {id}: only {ok} OK calls — under-driven:\n{}",
+            reporter.render_prometheus()
+        );
         // STRICT audit==0 for EVERY body — including `rerouting_prack`'s abandoned
         // reject leg, the former bounded tolerance: the callee UA now outlives the
         // call (the `reject-final` ledger obligation holds the settle barrier —

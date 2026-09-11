@@ -207,10 +207,7 @@ impl Owner {
     /// not indexed.
     fn track_call_ref(&mut self, call_ref: &Option<String>, branch: &str) {
         if let Some(cr) = call_ref {
-            self.txn_index
-                .entry(cr.clone())
-                .or_default()
-                .insert(branch.to_string());
+            self.txn_index.entry(cr.clone()).or_default().insert(branch.to_string());
         }
     }
 
@@ -244,10 +241,7 @@ impl Owner {
                 // here un-flushed — grace expiry, evict, and timeout all send
                 // it first. Counted dropped only then; a grace-sent copy is
                 // already accounted.
-                if t.held_cancel
-                    .as_ref()
-                    .is_some_and(|h| h.wire == CancelWire::Held)
-                {
+                if t.held_cancel.as_ref().is_some_and(|h| h.wire == CancelWire::Held) {
                     self.metrics
                         .held_cancels_dropped
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -290,11 +284,14 @@ impl Owner {
 
     // ── output ──────────────────────────────────────────────────────────────
 
-    pub(super) async fn send_buffer(&self, endpoint: &dyn UdpEndpoint, buf: &[u8], dest: SocketAddr) {
+    pub(super) async fn send_buffer(
+        &self,
+        endpoint: &dyn UdpEndpoint,
+        buf: &[u8],
+        dest: SocketAddr,
+    ) {
         use std::sync::atomic::Ordering::Relaxed;
-        self.metrics
-            .outbound_message_bytes_total
-            .fetch_add(buf.len() as u64, Relaxed);
+        self.metrics.outbound_message_bytes_total.fetch_add(buf.len() as u64, Relaxed);
         self.metrics.outbound_messages_total.fetch_add(1, Relaxed);
         // A send failure must not abort the owner. No tracing dep here — count it
         // so a failing socket (ENOBUFS/EPERM) is visible rather than a silent
@@ -377,21 +374,14 @@ impl Owner {
             .values()
             .map(|t| t.retransmit_buf.as_ref().map_or(0, |b| b.len()) as u64)
             .sum();
-        self.metrics
-            .retransmit_buf_bytes
-            .store(buf_bytes, std::sync::atomic::Ordering::Relaxed);
+        self.metrics.retransmit_buf_bytes.store(buf_bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ── send API command handling ─────────────────────────────────────────────
 
     async fn handle_command(&mut self, endpoint: &dyn UdpEndpoint, cmd: Command) {
         match cmd {
-            Command::SendRequest {
-                msg,
-                dest,
-                txn_type,
-                reply,
-            } => {
+            Command::SendRequest { msg, dest, txn_type, reply } => {
                 let handle = self.do_send_request(endpoint, *msg, dest, txn_type).await;
                 let _ = reply.send(handle);
             }
@@ -403,9 +393,7 @@ impl Owner {
                 // Bypasses transaction management AND the byte counters; still
                 // count send failures.
                 if endpoint.send_to(&buf, dest).await.is_err() {
-                    self.metrics
-                        .send_errors
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics.send_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 let _ = reply.send(());
             }

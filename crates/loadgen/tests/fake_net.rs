@@ -49,9 +49,7 @@ fn mix(id: &str, weight: f64) -> MixEntry {
 /// in-process b2bua SUT (bound through the recording `Harness`, so `PanicDump`
 /// shows the SUT-side wire on failure) and the mux endpoints (bound raw via
 /// `bind_on`; the loadgen runs its own per-call recording/audit above the mux).
-async fn setup_fake(
-    base: u16,
-) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+async fn setup_fake(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
     setup_fake_shaped(base, B2buaSut::route_all_with_refer).await
 }
 
@@ -60,9 +58,7 @@ async fn setup_fake(
 /// deployed-cluster engine shape the `api-call-pin` egress addresses. The
 /// paused-clock reroute tests run over this (the fake-net mirror of the
 /// smoke lane's `setup_api_call`).
-async fn setup_fake_api_call(
-    base: u16,
-) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
+async fn setup_fake_api_call(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, Arc<MuxTransport>) {
     setup_fake_shaped(base, B2buaSut::route_api_call).await
 }
 
@@ -208,7 +204,8 @@ async fn loadgen_fake_net_recovers_targeted_dropped_bye() {
     assert!(total >= 2, "no calls ran");
     assert!(drops >= total, "the targeted BYE drop never fired: drops={drops} calls={total}");
     assert_eq!(
-        ok, total,
+        ok,
+        total,
         "a targeted first-BYE drop was not recovered by retransmit:\n{}",
         reporter.render_prometheus()
     );
@@ -276,7 +273,8 @@ async fn loadgen_fake_net_cancel_answer_crossing_accepts_either_branch() {
     // A non-zero ring gives the CANCEL a window to race the 200.
     let mut c = cfg(b2bua.addr, 8.0, 2, 8, 0xCA5C);
     c.call.ring_delay = Duration::from_millis(30);
-    let driver = Driver::new(c, vec![mix("cancel_answer_crossing", 1.0)], reporter.clone(), transport);
+    let driver =
+        Driver::new(c, vec![mix("cancel_answer_crossing", 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let total = reporter.total_calls();
@@ -374,7 +372,8 @@ async fn loadgen_fake_net_crossing_bye_recovers_dropped_byes() {
     assert!(total >= 2, "no calls ran");
     assert!(drops >= total, "the targeted BYE drop never fired: drops={drops} calls={total}");
     assert_eq!(
-        ok, total,
+        ok,
+        total,
         "a dropped crossing BYE was not recovered by retransmit:\n{}",
         reporter.render_prometheus()
     );
@@ -413,7 +412,12 @@ async fn loadgen_fake_net_reinvite_x10_serialized() {
     let total = reporter.total_calls();
     let ok = reporter.count("reinvite10", &ResultClass::Ok);
     assert!(total >= 8, "governor under-delivered: {total}");
-    assert_eq!(ok, total, "a serialized ×10 re-INVITE call was NOK:\n{}", reporter.render_prometheus());
+    assert_eq!(
+        ok,
+        total,
+        "a serialized ×10 re-INVITE call was NOK:\n{}",
+        reporter.render_prometheus()
+    );
     assert_eq!(
         core.stats().orphan_no_header.load(Relaxed)
             + core.stats().orphan_unknown_token.load(Relaxed)
@@ -554,8 +558,12 @@ async fn fork_e2e(base: u16, shape: &'static str, seed: u64) {
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
-    let driver =
-        Driver::new(cfg(b2bua.addr, 12.0, 2, 8, seed), vec![mix(shape, 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(
+        cfg(b2bua.addr, 12.0, 2, 8, seed),
+        vec![mix(shape, 1.0)],
+        reporter.clone(),
+        transport,
+    );
     driver.run().await;
 
     let total = reporter.total_calls();
@@ -738,7 +746,8 @@ async fn loadgen_fake_net_recovers_dropped_early_update() {
     assert!(total >= 2, "no calls ran");
     assert!(drops >= total, "the targeted UPDATE drop never fired: drops={drops} calls={total}");
     assert_eq!(
-        ok, total,
+        ok,
+        total,
         "a dropped early UPDATE was not recovered by retransmit:\n{}",
         reporter.render_prometheus()
     );
@@ -772,18 +781,13 @@ async fn loadgen_fake_net_rerouting_noanswer() {
     let mut c = cfg(b2bua.addr, 6.0, 2, 8, 0x0A47);
     c.call.egress = EgressPolicy::ApiCallPin;
 
-    let driver =
-        Driver::new(c, vec![mix("rerouting_noanswer", 1.0)], reporter.clone(), transport);
+    let driver = Driver::new(c, vec![mix("rerouting_noanswer", 1.0)], reporter.clone(), transport);
     driver.run().await;
 
     let total = reporter.total_calls();
     let ok = reporter.count("rerouting_noanswer", &ResultClass::Ok);
     assert!(total >= 5, "governor under-delivered: {total}");
-    assert_eq!(
-        ok, total,
-        "a no-answer reroute call was NOK:\n{}",
-        reporter.render_prometheus()
-    );
+    assert_eq!(ok, total, "a no-answer reroute call was NOK:\n{}", reporter.render_prometheus());
     assert_eq!(
         reporter.count("rerouting_noanswer", &ResultClass::RfcAuditFail),
         0,
@@ -838,7 +842,8 @@ async fn loadgen_fake_net_recovers_dropped_prack() {
     assert!(total >= 2, "no calls ran");
     assert!(drops >= total, "the targeted PRACK drop never fired: drops={drops} calls={total}");
     assert_eq!(
-        ok, total,
+        ok,
+        total,
         "a dropped PRACK was not recovered by retransmit:\n{}",
         reporter.render_prometheus()
     );

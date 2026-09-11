@@ -214,7 +214,8 @@ fn sort_by_ordinal(peers: &mut [Peer]) {
 pub fn reconcile_to_desired(state: &MembershipState, desired: Vec<Peer>) {
     // De-dup desired by ordinal (first wins), preserving a stable target set.
     let mut seen = std::collections::HashSet::new();
-    let desired: Vec<Peer> = desired.into_iter().filter(|p| seen.insert(p.ordinal.clone())).collect();
+    let desired: Vec<Peer> =
+        desired.into_iter().filter(|p| seen.insert(p.ordinal.clone())).collect();
     let desired_ordinals: std::collections::HashSet<&str> =
         desired.iter().map(|p| p.ordinal.as_str()).collect();
 
@@ -440,10 +441,7 @@ mod tests {
         m.remove("w0");
 
         assert_eq!(rx.try_recv().unwrap(), MemberDelta::Added(Peer::new("w0", "h0")));
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            MemberDelta::AddressChanged(Peer::new("w0", "h0-new"))
-        );
+        assert_eq!(rx.try_recv().unwrap(), MemberDelta::AddressChanged(Peer::new("w0", "h0-new")));
         assert_eq!(rx.try_recv().unwrap(), MemberDelta::Removed("w0".to_string()));
         assert!(rx.try_recv().is_err());
     }
@@ -490,10 +488,7 @@ mod tests {
         // Restart is observed as Removed then Added (not AddressChanged) — the
         // ordinal genuinely left and re-joined.
         assert_eq!(rx.try_recv().unwrap(), MemberDelta::Removed("w0".to_string()));
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            MemberDelta::Added(Peer::new("w0", "h0-restarted"))
-        );
+        assert_eq!(rx.try_recv().unwrap(), MemberDelta::Added(Peer::new("w0", "h0-restarted")));
         assert_eq!(m.resolve("w0").unwrap().host, "h0-restarted");
         // Single entry — re-add replaced, not duplicated.
         assert_eq!(m.snapshot().len(), 1);
@@ -511,10 +506,7 @@ mod tests {
         let m = StaticMembership::from_string("w1@host1, w0@host0", "test").unwrap();
         let snap = m.snapshot();
         // Parsed two peers, returned sorted by ordinal regardless of input order.
-        assert_eq!(
-            snap,
-            vec![Peer::new("w0", "host0"), Peer::new("w1", "host1")]
-        );
+        assert_eq!(snap, vec![Peer::new("w0", "host0"), Peer::new("w1", "host1")]);
         // changes() never fires but is a live receiver.
         let mut rx = m.changes();
         assert!(rx.try_recv().is_err());
@@ -544,17 +536,10 @@ mod tests {
             &state,
             vec![Peer::new("w1", "h1-new"), Peer::new("w0", "h0"), Peer::new("w2", "h2")],
         );
-        assert_eq!(
-            ordinals(&state.snapshot()),
-            vec!["w0", "w1", "w2"],
-            "w2 joined, none removed"
-        );
+        assert_eq!(ordinals(&state.snapshot()), vec!["w0", "w1", "w2"], "w2 joined, none removed");
         // w0 unchanged → no delta; w1 moved → AddressChanged; w2 → Added. Order:
         // removals first (none), then adds/changes in desired order (w1, w0(skip), w2).
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            MemberDelta::AddressChanged(Peer::new("w1", "h1-new"))
-        );
+        assert_eq!(rx.try_recv().unwrap(), MemberDelta::AddressChanged(Peer::new("w1", "h1-new")));
         assert_eq!(rx.try_recv().unwrap(), MemberDelta::Added(Peer::new("w2", "h2")));
         assert!(rx.try_recv().is_err(), "w0 unchanged emits nothing");
     }

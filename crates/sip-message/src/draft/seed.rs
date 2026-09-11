@@ -91,11 +91,7 @@ impl ResponseDraft {
     /// A blank response.
     pub fn new(status: u16, reason: impl Into<SipStr>) -> Self {
         Self::from_parts(
-            StatusLine {
-                version: SipStr::from_static(SIP_VERSION),
-                status,
-                reason: reason.into(),
-            },
+            StatusLine { version: SipStr::from_static(SIP_VERSION), status, reason: reason.into() },
             Vec::with_capacity(TYPICAL_HEADERS),
             Bytes::new(),
         )

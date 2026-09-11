@@ -66,8 +66,7 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             }
             SipMessage::Response(resp) => {
                 // Response: read our cr/lg from the top Via we stamped.
-                let ids = via_cr_lg(resp.top_via())
-                    .unwrap_or(ViaIds { cr: None, lg: "a".into() });
+                let ids = via_cr_lg(resp.top_via()).unwrap_or(ViaIds { cr: None, lg: "a".into() });
                 let call_ref = ids.cr.or_else(|| {
                     ctx.state.resolve_from_sip_key_sync(
                         resp.call_id().as_str(),
@@ -100,10 +99,8 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
             // the call (and its index) already exist. A genuinely orphan CANCEL
             // (no INVITE ever) resolves to a callRef with no live call and is
             // reaped cleanly via the orphan path in `process`.
-            let call_ref = ctx
-                .state
-                .resolve_from_sip_key_sync(call_id, from_tag)
-                .unwrap_or_else(|| {
+            let call_ref =
+                ctx.state.resolve_from_sip_key_sync(call_id, from_tag).unwrap_or_else(|| {
                     call::derive_call_ref(&ctx.config.self_ordinal, call_id, from_tag)
                 });
             Resolution {
@@ -149,7 +146,10 @@ pub(super) fn resolve(ctx: &RouterCtx, event: &CallEvent) -> Resolution {
 /// admitted — are candidates; an initial request, a response, or a non-SIP
 /// event is never a dialog takeover. `None` when not applicable or no replica
 /// matches — the caller then treats the event as unroutable.
-pub(super) async fn replica_takeover_call_ref(ctx: &RouterCtx, event: &CallEvent) -> Option<String> {
+pub(super) async fn replica_takeover_call_ref(
+    ctx: &RouterCtx,
+    event: &CallEvent,
+) -> Option<String> {
     let CallEvent::Sip { message, .. } = event else { return None };
     let SipMessage::Request(req) = message.as_ref() else { return None };
     if req.to().tag().is_none() && req.method() != Method::Cancel {

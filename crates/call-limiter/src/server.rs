@@ -13,9 +13,7 @@ use http_net::{HttpRequest, HttpResponse, HttpService};
 
 use crate::metrics::LimiterMetrics;
 use crate::window::{AdmitResult, WindowStore};
-use crate::wire::{
-    AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest,
-};
+use crate::wire::{AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest};
 
 /// The limiter HTTP service: a window store + its metrics.
 pub struct LimiterServer {
@@ -63,11 +61,7 @@ impl HttpService for LimiterServer {
                 let resp = match self.store.admit(&parsed.entries) {
                     AdmitResult::Admitted { window } => {
                         self.metrics.on_admit(true);
-                        AdmitResponse {
-                            admitted: true,
-                            window: Some(window),
-                            rejected_id: None,
-                        }
+                        AdmitResponse { admitted: true, window: Some(window), rejected_id: None }
                     }
                     AdmitResult::Rejected { limiter_id } => {
                         self.metrics.on_admit(false);
@@ -98,11 +92,9 @@ impl HttpService for LimiterServer {
                 self.metrics.on_refresh();
                 json_ok(&RefreshResponse { entries })
             }
-            ("GET", "/metrics") => HttpResponse::ok(
-                self.metrics
-                    .prometheus_text(self.store.stats())
-                    .into_bytes(),
-            ),
+            ("GET", "/metrics") => {
+                HttpResponse::ok(self.metrics.prometheus_text(self.store.stats()).into_bytes())
+            }
             ("GET", "/healthz") => HttpResponse::ok(b"ok\n".to_vec()),
             _ => HttpResponse::status(404).with_body(b"not found\n".to_vec()),
         }

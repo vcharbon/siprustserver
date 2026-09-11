@@ -5,9 +5,9 @@
 //! wrapped simulated network, then asserts the effect on the recorded wire.
 
 use scenario_harness::actor::{
-    phase, run_built_actor_call, run_call_with, ActorCall, ActorSpec, Automatics, Barrier, CallPlan,
-    CtxFeed, Disposition, Expect, Goal, GoalStep, LegPhase, MediaState, ObservedState, ReplayEntry,
-    SettleBarrier,
+    phase, run_built_actor_call, run_call_with, ActorCall, ActorSpec, Automatics, Barrier,
+    CallPlan, CtxFeed, Disposition, Expect, Goal, GoalStep, LegPhase, MediaState, ObservedState,
+    ReplayEntry, SettleBarrier,
 };
 use scenario_harness::realcall::{CallCtx, CallEnv};
 use scenario_harness::{
@@ -18,9 +18,7 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser};
 
 fn parse(raw: &[u8]) -> SipMessage {
-    CustomParser::new()
-        .parse(raw)
-        .unwrap_or_else(|e| panic!("entry did not parse: {e}"))
+    CustomParser::new().parse(raw).unwrap_or_else(|e| panic!("entry did not parse: {e}"))
 }
 
 /// The CSeq number of the first request of `method` on the recorded wire.
@@ -40,7 +38,11 @@ fn req_sent_ms(entries: &[sip_net::RecordedSipEntry], method: &str) -> Option<u6
 }
 
 /// The `sent_ms` of the first response of `status` whose CSeq echoes `cseq_method`.
-fn status_sent_ms(entries: &[sip_net::RecordedSipEntry], status: u16, cseq_method: &str) -> Option<u64> {
+fn status_sent_ms(
+    entries: &[sip_net::RecordedSipEntry],
+    status: u16,
+    cseq_method: &str,
+) -> Option<u64> {
     entries.iter().find_map(|e| match parse(&e.raw) {
         SipMessage::Response(r) if r.status() == status && r.cseq().method() == cseq_method => {
             Some(e.sent_ms)
@@ -54,7 +56,12 @@ fn has_status(entries: &[sip_net::RecordedSipEntry], status: u16) -> bool {
     entries.iter().any(|e| matches!(parse(&e.raw), SipMessage::Response(r) if r.status() == status))
 }
 
-fn caller(role: &'static str, agent: &Agent, callee: (&'static str, Agent), goals: Vec<Goal>) -> ActorSpec {
+fn caller(
+    role: &'static str,
+    agent: &Agent,
+    callee: (&'static str, Agent),
+    goals: Vec<Goal>,
+) -> ActorSpec {
     ActorSpec {
         role,
         agent: agent.clone(),
@@ -70,7 +77,12 @@ fn caller(role: &'static str, agent: &Agent, callee: (&'static str, Agent), goal
     }
 }
 
-fn answering(role: &'static str, agent: &Agent, disposition: Disposition, goals: Vec<Goal>) -> ActorSpec {
+fn answering(
+    role: &'static str,
+    agent: &Agent,
+    disposition: Disposition,
+    goals: Vec<Goal>,
+) -> ActorSpec {
     ActorSpec {
         role,
         agent: agent.clone(),
@@ -128,15 +140,14 @@ async fn cseq_pattern_via_actorspec_emits_declared_number() {
                 ],
             );
             // step 0 (OPTIONS): natural → CSeq 2; step 1 (BYE): reuse → CSeq 2.
-            a.cseq = Some(CseqPattern {
-                offset: 0,
-                ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }],
-            });
+            a.cseq =
+                Some(CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }] });
             a
         },
         answering("bob", &bob, Disposition::Answer, vec![]),
     ];
-    let call = ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::HappyBye);
+    let call =
+        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::HappyBye);
     let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", "tok-cseq");
     let ctx = CallCtx::new();
     let res = run_built_actor_call(call, &env, &ctx).await;
@@ -180,7 +191,8 @@ async fn delayed_automatic_via_actorspec_holds_the_ack() {
         },
         answering("bob", &bob, Disposition::Answer, vec![]),
     ];
-    let call = ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::HappyBye);
+    let call =
+        ActorCall::new(actors, established(), SettleBarrier::default_ceiling(), Expect::HappyBye);
     let env = CallEnv::for_functional(&alice, &bob, None, bob.addr(), "X-Test", "tok-delay");
     let ctx = CallCtx::new();
     let res = run_built_actor_call(call, &env, &ctx).await;
@@ -255,7 +267,7 @@ async fn scoped_delayed_automatic_holds_only_the_named_reinvite_ack() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         reinv.respond(200, "OK").with_sdp(ANSWER_SDP).send().await;
         bob.receive("ACK").await; // the ONE held ACK, after the hold
-        // Re-surfaced AFTER the hold: the prompt idempotent re-ACK path.
+                                  // Re-surfaced AFTER the hold: the prompt idempotent re-ACK path.
         reinv.respond(200, "OK").with_sdp(ANSWER_SDP).send().await;
         bob.receive("ACK").await;
         bob.receive("BYE").await.respond(200, "OK").await;
@@ -369,8 +381,10 @@ async fn mid_hold_retransmissions_are_recorded_and_leave_the_response_log_alone(
         bob.receive("ACK").await;
         bob.receive("BYE").await.respond(200, "OK").await;
     };
-    let (verdict, ()) =
-        tokio::join!(run_call_with(plan, obs.clone(), &ctx, Duration::from_secs(10), None), bob_side);
+    let (verdict, ()) = tokio::join!(
+        run_call_with(plan, obs.clone(), &ctx, Duration::from_secs(10), None),
+        bob_side
+    );
     assert!(verdict.is_ok(), "the held-ACK call settled clean, got {verdict:?}");
 
     let retransmitted: Vec<(u16, String, u32)> = obs

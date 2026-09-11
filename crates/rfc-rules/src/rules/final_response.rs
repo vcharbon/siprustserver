@@ -427,8 +427,7 @@ mod tests {
     /// second occasion.
     #[test]
     fn every_divergent_status_is_reported_exactly_once_on_one_finding() {
-        let retransmitted =
-            eval(&[inv(1_000, 487), inv(2_000, 480), again(inv(3_000, 480))]);
+        let retransmitted = eval(&[inv(1_000, 487), inv(2_000, 480), again(inv(3_000, 480))]);
         assert_eq!(retransmitted.len(), 1, "{retransmitted:?}");
         let Decision::Violated(Evidence::MultipleFinals { divergent, .. }) =
             &retransmitted[0].decision
@@ -438,12 +437,8 @@ mod tests {
         assert_eq!(divergent.as_slice(), [480], "one recording of the offending status");
         assert_eq!(retransmitted[0].anchor, 1, "the FIRST copy of the offending final");
 
-        let three = eval(&[
-            inv(1_000, 487),
-            inv(2_000, 480),
-            again(inv(3_000, 480)),
-            inv(4_000, 486),
-        ]);
+        let three =
+            eval(&[inv(1_000, 487), inv(2_000, 480), again(inv(3_000, 480)), inv(4_000, 486)]);
         assert_eq!(three.len(), 1, "a third status joins the occasion: {three:?}");
         let Decision::Violated(Evidence::MultipleFinals { divergent, second_status, .. }) =
             &three[0].decision
@@ -460,8 +455,7 @@ mod tests {
     #[test]
     fn an_unmarked_duplicate_offence_is_recorded_once() {
         let f = eval(&[inv(1_000, 487), inv(2_000, 480), inv(3_000, 480)]);
-        let Decision::Violated(Evidence::MultipleFinals { divergent, .. }) = &f[0].decision
-        else {
+        let Decision::Violated(Evidence::MultipleFinals { divergent, .. }) = &f[0].decision else {
             panic!("{:?}", f[0].decision)
         };
         assert_eq!(divergent.as_slice(), [480]);
@@ -479,10 +473,8 @@ mod tests {
     /// them on the branch alone would invent a violation.
     #[test]
     fn a_cancel_200_and_its_invite_487_are_two_transactions() {
-        let f = eval(&[
-            rsp(1_000, 200, "z9hG4bK-c", "CANCEL"),
-            rsp(2_000, 487, "z9hG4bK-c", "INVITE"),
-        ]);
+        let f =
+            eval(&[rsp(1_000, 200, "z9hG4bK-c", "CANCEL"), rsp(2_000, 487, "z9hG4bK-c", "INVITE")]);
         assert!(f.is_empty(), "{f:?}");
     }
 
@@ -490,10 +482,7 @@ mod tests {
     /// Call-ID keeps two singly-answered transactions from folding into one.
     #[test]
     fn two_calls_reusing_one_branch_are_distinct_transactions() {
-        let f = eval(&[
-            on_call(inv(1_000, 200), "call-a"),
-            on_call(inv(2_000, 486), "call-b"),
-        ]);
+        let f = eval(&[on_call(inv(1_000, 200), "call-a"), on_call(inv(2_000, 486), "call-b")]);
         assert!(f.is_empty(), "{f:?}");
     }
 
@@ -501,10 +490,7 @@ mod tests {
     /// transaction answered twice with different statuses is a violation.
     #[test]
     fn a_non_invite_server_transaction_is_judged() {
-        let f = eval(&[
-            rsp(1_000, 200, "z9hG4bK-n", "BYE"),
-            rsp(2_000, 481, "z9hG4bK-n", "BYE"),
-        ]);
+        let f = eval(&[rsp(1_000, 200, "z9hG4bK-n", "BYE"), rsp(2_000, 481, "z9hG4bK-n", "BYE")]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].violated(), "{:?}", f[0].decision);
     }

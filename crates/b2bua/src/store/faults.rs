@@ -230,9 +230,7 @@ impl CallStore for FaultInjectingCallStore {
         call_bgen: i64,
     ) -> Result<(), StoreError> {
         self.faults.check(StoreFaultPoint::RefreshCall)?;
-        self.inner
-            .refresh_call(role, primary, call_ref, indexes, ttl_ms, call_gen, call_bgen)
-            .await
+        self.inner.refresh_call(role, primary, call_ref, indexes, ttl_ms, call_gen, call_bgen).await
     }
 
     async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError> {
@@ -266,9 +264,19 @@ mod tests {
     #[tokio::test]
     async fn armed_get_call_fails_and_disarm_restores() {
         let (s, faults) = store_with_one_call();
-        s.put_call(PartitionRole::Primary, "w0", "w0|c|t", b"body".to_vec(), &[], 0, 1, 0, &PutOpts::default())
-            .await
-            .unwrap();
+        s.put_call(
+            PartitionRole::Primary,
+            "w0",
+            "w0|c|t",
+            b"body".to_vec(),
+            &[],
+            0,
+            1,
+            0,
+            &PutOpts::default(),
+        )
+        .await
+        .unwrap();
 
         faults.arm(StoreFaultPoint::GetCall);
         assert!(matches!(
@@ -290,7 +298,17 @@ mod tests {
         let (s, faults) = store_with_one_call();
         faults.arm(StoreFaultPoint::PutCall);
         assert!(s
-            .put_call(PartitionRole::Primary, "w0", "w0|c|t", b"x".to_vec(), &[], 0, 1, 0, &PutOpts::default())
+            .put_call(
+                PartitionRole::Primary,
+                "w0",
+                "w0|c|t",
+                b"x".to_vec(),
+                &[],
+                0,
+                1,
+                0,
+                &PutOpts::default()
+            )
             .await
             .is_err());
         faults.disarm(StoreFaultPoint::PutCall);

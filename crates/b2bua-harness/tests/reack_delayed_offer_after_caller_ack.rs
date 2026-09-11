@@ -34,13 +34,17 @@ async fn a_delayed_offer_2xx_repeated_after_the_relayed_ack_re_sends_that_ack() 
     let h = Harness::new("b2bua-reack-delayed-offer-post-ack");
     let alice = h.agent("alice", ALICE_ADDR).await;
     let bob = h.agent("bob", BOB_ADDR).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5992).start(&h, "b2bua", "127.0.0.1:5993").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5992).start(&h, "b2bua", "127.0.0.1:5993").await;
 
     // ── alice INVITEs bodyless: the offer is bob's to make ────────────────────
     let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
     let invite_cseq = call.invite_cseq();
     let mut uas = bob.receive("INVITE").await;
-    assert!(uas.request().body().is_empty(), "the offerless INVITE reached bob with a substituted body");
+    assert!(
+        uas.request().body().is_empty(),
+        "the offerless INVITE reached bob with a substituted body"
+    );
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(OFFER).await;
@@ -49,7 +53,10 @@ async fn a_delayed_offer_2xx_repeated_after_the_relayed_ack_re_sends_that_ack() 
     // ── alice's ACK carries the answer and is relayed end to end ─────────────
     let mut dialog = call.ack_with(Some(ANSWER)).await;
     let first = bob.receive("ACK").await;
-    assert!(!first.request().body().is_empty(), "the b-leg ACK carries alice's answer to bob's offer");
+    assert!(
+        !first.request().body().is_empty(),
+        "the b-leg ACK carries alice's answer to bob's offer"
+    );
 
     // ── bob never saw it: his §13.3.1.4 ladder repeats the 200 ────────────────
     uas.respond(200, "OK").with_sdp(OFFER).await;
@@ -97,7 +104,8 @@ async fn a_reinvite_2xx_copy_re_sends_its_own_bare_ack_not_the_initial_answer() 
     let h = Harness::new("b2bua-reack-delayed-offer-then-reinvite");
     let alice = h.agent("alice", REINVITE_ALICE_ADDR).await;
     let bob = h.agent("bob", REINVITE_BOB_ADDR).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5995).start(&h, "b2bua", "127.0.0.1:5996").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5995).start(&h, "b2bua", "127.0.0.1:5996").await;
 
     let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -145,7 +153,12 @@ async fn a_reinvite_2xx_copy_re_sends_its_own_bare_ack_not_the_initial_answer() 
 }
 
 /// Every ACK the SUT sent to `peer` on one INVITE's CSeq, in wire order.
-fn acks_to(report: &scenario_harness::RunReport, sut: SocketAddr, peer: &str, cseq: u32) -> Vec<Vec<u8>> {
+fn acks_to(
+    report: &scenario_harness::RunReport,
+    sut: SocketAddr,
+    peer: &str,
+    cseq: u32,
+) -> Vec<Vec<u8>> {
     let peer: SocketAddr = peer.parse().unwrap();
     report
         .entries()

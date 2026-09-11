@@ -77,13 +77,12 @@ async fn announcement_happy_path() {
 
     // The B2BUA opens the MSCML control channel toward the MRF: INFO <play>.
     let mut play = mrf.receive("INFO").await;
-    assert!(
-        play.request()
-            .header::<MediaType>()
-            .expect("INFO carries a Content-Type")
-            .expect("readable Content-Type")
-            .is("application/mediaservercontrol+xml"),
-    );
+    assert!(play
+        .request()
+        .header::<MediaType>()
+        .expect("INFO carries a Content-Type")
+        .expect("readable Content-Type")
+        .is("application/mediaservercontrol+xml"),);
     assert!(
         String::from_utf8_lossy(play.request().body()).contains("href=\"intro-001\""),
         "INFO carries the MSCML <play> for the clip",
@@ -103,14 +102,22 @@ async fn announcement_happy_path() {
     // The B2BUA BYEs the media leg and dials the real destination.
     mrf.receive("BYE").await.respond(200, "OK").await;
     let mut dest_uas = dest.receive("INVITE").await;
-    assert_eq!(String::from_utf8_lossy(dest_uas.request().body()), OFFER, "destination gets alice's offer");
+    assert_eq!(
+        String::from_utf8_lossy(dest_uas.request().body()),
+        OFFER,
+        "destination gets alice's offer"
+    );
     dest_uas.respond(180, "Ringing").await;
     call.expect(180).await;
     dest_uas.respond(200, "OK").with_sdp(DEST_SDP).await;
 
     // Alice is answered with the destination's SDP and bridged.
     let final_200 = call.expect(200).await;
-    assert_eq!(String::from_utf8_lossy(final_200.body()), DEST_SDP, "A answered with the destination SDP");
+    assert_eq!(
+        String::from_utf8_lossy(final_200.body()),
+        DEST_SDP,
+        "A answered with the destination SDP"
+    );
     let mut alice_dialog = call.ack().await;
     dest.receive("ACK").await;
 

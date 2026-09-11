@@ -138,11 +138,7 @@ impl SimulatedHttpNetwork {
                 self.shared.faults.lock().unwrap().insert(dst, DstFault::Cut);
             }
             Fault::ErrorAfter { dst, ms } => {
-                self.shared
-                    .faults
-                    .lock()
-                    .unwrap()
-                    .insert(dst, DstFault::ErrorAfter { ms });
+                self.shared.faults.lock().unwrap().insert(dst, DstFault::ErrorAfter { ms });
             }
             Fault::Resume { dst } => {
                 self.shared.faults.lock().unwrap().remove(&dst);
@@ -195,10 +191,7 @@ impl HttpTransport for SimulatedHttpNetwork {
             }
             routing.insert(addr, service);
         }
-        Ok(Box::new(SimServerHandle {
-            addr,
-            shared: self.shared.clone(),
-        }))
+        Ok(Box::new(SimServerHandle { addr, shared: self.shared.clone() }))
     }
 
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError> {
@@ -209,10 +202,7 @@ impl HttpTransport for SimulatedHttpNetwork {
                 Some(DstFault::Cut) => return Err(HttpError::Connect(dst)),
                 Some(DstFault::ErrorAfter { ms }) => {
                     tokio::time::sleep(Duration::from_millis(ms.max(1))).await;
-                    return Err(HttpError::Io {
-                        addr: dst,
-                        reason: "connection reset".into(),
-                    });
+                    return Err(HttpError::Io { addr: dst, reason: "connection reset".into() });
                 }
                 Some(DstFault::Stall) => {
                     // Park until a Resume wakes us, then re-check the fault map.

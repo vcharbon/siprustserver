@@ -146,8 +146,7 @@ pub fn evaluate_rfc_findings(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<R
         .collect();
     let events = events.as_slice();
     let roles = bind_roles_of(events);
-    let roles_of =
-        |bind: &str| roles.get(bind).cloned().unwrap_or_else(all_ua_roles);
+    let roles_of = |bind: &str| roles.get(bind).cloned().unwrap_or_else(all_ua_roles);
     let subject_hits = |subject: &HashSet<UaRole>, bind: &str| {
         let r = roles_of(bind);
         subject.iter().any(|s| r.contains(s))

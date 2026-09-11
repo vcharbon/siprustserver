@@ -246,10 +246,7 @@ impl<'a> CallEnv<'a> {
     /// Attach a [`ChallengeResponder`] — the deferred-by-design auth adapter (see
     /// [`crate::realcall::auth`]). Builder-style; the default is `None` (no
     /// retry). The load driver plugs one via its own `MixEntry`/`CallEnv` wiring.
-    pub fn with_challenge_responder(
-        mut self,
-        responder: Arc<dyn ChallengeResponder>,
-    ) -> Self {
+    pub fn with_challenge_responder(mut self, responder: Arc<dyn ChallengeResponder>) -> Self {
         self.challenge_responder = Some(responder);
         self
     }
@@ -328,8 +325,7 @@ impl<'a> CallEnv<'a> {
     pub fn refer_authorization(&self, refer_key: &str) -> Option<String> {
         let target = self.refer_target()?;
         Some(
-            ApiCall::refer(refer_key, target.addr.ip().to_string(), target.addr.port())
-                .to_header(),
+            ApiCall::refer(refer_key, target.addr.ip().to_string(), target.addr.port()).to_header(),
         )
     }
 

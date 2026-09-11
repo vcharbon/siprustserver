@@ -104,10 +104,7 @@ fn outbound_proxy_route(config: &B2buaConfig) -> Option<(RouteEntry, (String, u1
 /// in-dialog requests keep traversing the proxy instead of going pod-direct.
 /// Empty when no outbound proxy is configured.
 pub fn outbound_proxy_route_set(config: &B2buaConfig) -> Vec<String> {
-    outbound_proxy_route(config)
-        .map(|(route, _)| route.to_wire())
-        .into_iter()
-        .collect()
+    outbound_proxy_route(config).map(|(route, _)| route.to_wire()).into_iter().collect()
 }
 
 /// The URI of `route` when it names a loose router (RFC 3261 §19.1.1 `;lr`).
@@ -240,9 +237,13 @@ Call-ID: c2@x\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n",
         );
-        let (out, dest) = apply_b_leg_egress(&config, "b-1", &[], invite, ("10.244.2.7".to_string(), 5060));
+        let (out, dest) =
+            apply_b_leg_egress(&config, "b-1", &[], invite, ("10.244.2.7".to_string(), 5060));
         let preloaded = top_route(&out);
-        assert_eq!(preloaded, "<sip:10.0.0.9:5060;lr>", "bootstrap preload must be a plain loose Route");
+        assert_eq!(
+            preloaded, "<sip:10.0.0.9:5060;lr>",
+            "bootstrap preload must be a plain loose Route"
+        );
         let uri = loose_route_uri(&preloaded).expect("a loose route");
         assert!(uri.param("outbound").is_none(), "no ;outbound on the bootstrap preload");
         assert_eq!(dest, ("10.0.0.9".to_string(), 5060), "wire destination is the outbound proxy");

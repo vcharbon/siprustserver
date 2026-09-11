@@ -193,10 +193,7 @@ impl TransactionLayer {
         build: impl FnOnce(oneshot::Sender<R>) -> Command,
     ) -> Result<R, TransactionLayerClosed> {
         let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(build(reply))
-            .await
-            .map_err(|_| TransactionLayerClosed)?;
+        self.cmd_tx.send(build(reply)).await.map_err(|_| TransactionLayerClosed)?;
         rx.await.map_err(|_| TransactionLayerClosed)
     }
 
@@ -208,13 +205,8 @@ impl TransactionLayer {
         dest: SocketAddr,
         txn_type: TxnKind,
     ) -> Result<ClientTransactionHandle, TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::SendRequest {
-            msg: Box::new(msg),
-            dest,
-            txn_type,
-            reply,
-        })
-        .await
+        self.roundtrip(|reply| Command::SendRequest { msg: Box::new(msg), dest, txn_type, reply })
+            .await
     }
 
     /// Send an outbound SIP response through its server transaction. The bytes
@@ -226,16 +218,15 @@ impl TransactionLayer {
         msg: SipResponse,
         dest: SocketAddr,
     ) -> Result<(), TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::SendResponse {
-            msg: Box::new(msg),
-            dest,
-            reply,
-        })
-        .await
+        self.roundtrip(|reply| Command::SendResponse { msg: Box::new(msg), dest, reply }).await
     }
 
     /// Send a raw buffer directly, bypassing transaction management.
-    pub async fn send_raw(&self, buf: Vec<u8>, dest: SocketAddr) -> Result<(), TransactionLayerClosed> {
+    pub async fn send_raw(
+        &self,
+        buf: Vec<u8>,
+        dest: SocketAddr,
+    ) -> Result<(), TransactionLayerClosed> {
         self.roundtrip(|reply| Command::SendRaw { buf, dest, reply }).await
     }
 
@@ -249,12 +240,7 @@ impl TransactionLayer {
         call_ref: &str,
         seeds: Vec<TxnSeed>,
     ) -> Result<usize, TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::Seed {
-            call_ref: call_ref.to_string(),
-            seeds,
-            reply,
-        })
-        .await
+        self.roundtrip(|reply| Command::Seed { call_ref: call_ref.to_string(), seeds, reply }).await
     }
 
     /// Hand back a datagram this layer already emitted, to be processed
@@ -270,23 +256,15 @@ impl TransactionLayer {
         message: SipMessage,
         src: SocketAddr,
     ) -> Result<Reoffer, TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::Reoffer {
-            message: Box::new(message),
-            src,
-            reply,
-        })
-        .await
+        self.roundtrip(|reply| Command::Reoffer { message: Box::new(message), src, reply }).await
     }
 
     /// Cancel every client transaction whose `call_ref` matches — the
     /// call-eviction teardown (so Timer B/F can't fire against a vanished
     /// call). Idempotent.
     pub async fn cancel_txns_for_call(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::CancelTxnsForCall {
-            call_ref: call_ref.to_string(),
-            reply,
-        })
-        .await
+        self.roundtrip(|reply| Command::CancelTxnsForCall { call_ref: call_ref.to_string(), reply })
+            .await
     }
 
     /// How many transactions for `call_ref` are still resident in the map (any
@@ -296,22 +274,16 @@ impl TransactionLayer {
         &self,
         call_ref: &str,
     ) -> Result<usize, TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::ActiveTxnCount {
-            call_ref: call_ref.to_string(),
-            reply,
-        })
-        .await
+        self.roundtrip(|reply| Command::ActiveTxnCount { call_ref: call_ref.to_string(), reply })
+            .await
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last
     /// transaction for `call_ref` clears — the push signal the B2BUA acting-backup
     /// self-release (ADR-0014) arms when it takes a dialog over. Idempotent.
     pub async fn watch_self_release(&self, call_ref: &str) -> Result<(), TransactionLayerClosed> {
-        self.roundtrip(|reply| Command::WatchSelfRelease {
-            call_ref: call_ref.to_string(),
-            reply,
-        })
-        .await
+        self.roundtrip(|reply| Command::WatchSelfRelease { call_ref: call_ref.to_string(), reply })
+            .await
     }
 }
 

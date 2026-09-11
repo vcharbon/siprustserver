@@ -33,15 +33,14 @@ pub mod service;
 /// imports (`use b2bua_sdk::rules::*`).
 pub mod rules {
     pub use crate::model::{
-        Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleCall,
-        RuleContext, RuleDefinition, RuleHandleResult, StatusMatch, TimerDelay, CORE_LAYER,
-        SERVICE_LAYER,
+        Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleCall, RuleContext,
+        RuleDefinition, RuleHandleResult, StatusMatch, TimerDelay, CORE_LAYER, SERVICE_LAYER,
     };
     pub use crate::relayed_final::RelayedFinal;
+    pub use crate::service::{ServiceDef, ServiceSeed, Terminal};
     pub use sip_message::draft::Entry;
     pub use sip_message::header::HeaderName;
     pub use sip_message::Method;
-    pub use crate::service::{ServiceDef, ServiceSeed, Terminal};
     // NOTE: `Call` is deliberately NOT re-exported here (ADR-0020 X8) — rules
     // read through the [`RuleCall`](crate::model::RuleCall) view. The full
     // struct stays nameable only as `b2bua_sdk::service::Call`, for the

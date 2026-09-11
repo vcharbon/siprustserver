@@ -61,7 +61,14 @@ fn last_write_wins_extraction_keeps_payload_intact() {
     // headers, keep the rest. The X-Api-Call value must survive whole.
     let msg = CustomParser::new().parse(&build_invite(API_CALL_REROUTE)).expect("parse");
     let structural = [
-        "from", "to", "via", "contact", "content-type", "call-id", "cseq", "max-forwards",
+        "from",
+        "to",
+        "via",
+        "contact",
+        "content-type",
+        "call-id",
+        "cseq",
+        "max-forwards",
         "content-length",
     ];
     let value = msg

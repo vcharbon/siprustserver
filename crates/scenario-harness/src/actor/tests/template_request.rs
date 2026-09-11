@@ -1,8 +1,8 @@
 use sip_message::{EmitOpts, MessageTemplate, Method, TemplateHeader};
 use std::time::Duration;
 
-use crate::actor::*;
 use super::testkit::*;
+use crate::actor::*;
 use crate::{Harness, ANSWER_SDP, OFFER_SDP};
 
 /// A templated in-dialog re-INVITE (`RequestTemplate`, delayed offer):
@@ -48,7 +48,7 @@ async fn request_template_reinvite_completes_renegotiation() {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -62,7 +62,7 @@ async fn request_template_reinvite_completes_renegotiation() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -123,7 +123,7 @@ async fn request_template_bye_tears_down() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -175,14 +175,9 @@ async fn request_template_early_update_rides_early_dialog() {
                 media: MediaState::full(OFFER_SDP, ANSWER_SDP),
                 disposition: Disposition::Caller,
                 goals: vec![
+                    Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: Some(plan) }),
                     Goal::new(
-                        Barrier::None,
-                        GoalStep::Invite { callee: "bob", plan: Some(plan) },
-                    ),
-                    Goal::new(
-                        Barrier::pred("early", |s| {
-                            s.leg("alice").subflow(SUBFLOW_EARLY).is_some()
-                        }),
+                        Barrier::pred("early", |s| s.leg("alice").subflow(SUBFLOW_EARLY).is_some()),
                         GoalStep::RequestTemplate {
                             template: update_tmpl,
                             opts: EmitOpts::default(),
@@ -199,7 +194,7 @@ async fn request_template_early_update_rides_early_dialog() {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -213,7 +208,7 @@ async fn request_template_early_update_rides_early_dialog() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -275,7 +270,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -289,7 +284,7 @@ async fn request_template_reinvite_glare_491_hop_acks_and_retries() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,

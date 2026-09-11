@@ -17,7 +17,7 @@ fn forking_bob_plan(bob: &crate::Agent, disposition: Disposition) -> CallPlan {
             invite_targets: vec![],
             via: None,
             feed: CtxFeed::default(),
-        
+
             cseq: None,
             delayed: vec![],
             claim: None,
@@ -238,7 +238,7 @@ fn forked_pair_plan(
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -252,7 +252,7 @@ fn forked_pair_plan(
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,

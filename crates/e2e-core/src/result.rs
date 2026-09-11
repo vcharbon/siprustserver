@@ -95,15 +95,10 @@ impl RunResult {
         let entries = report.entries();
         let timings = Timings {
             first_ms: entries.iter().map(|e| e.sent_ms).min().unwrap_or(0),
-            last_ms: entries
-                .iter()
-                .map(|e| e.received_ms.unwrap_or(e.sent_ms))
-                .max()
-                .unwrap_or(0),
+            last_ms: entries.iter().map(|e| e.received_ms.unwrap_or(e.sent_ms)).max().unwrap_or(0),
             messages: entries.len(),
         };
-        let passed =
-            report.passed() && checks::all_passed(&check_verdicts) && rfc_gate.is_empty();
+        let passed = report.passed() && checks::all_passed(&check_verdicts) && rfc_gate.is_empty();
         RunResult {
             cell,
             passed,

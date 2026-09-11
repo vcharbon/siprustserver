@@ -119,19 +119,13 @@ fn roundtrip_data_large_body() {
 
 #[test]
 fn roundtrip_noop() {
-    assert_roundtrip(&Frame::Noop {
-        at: Watermark::new(5, 0),
-    });
+    assert_roundtrip(&Frame::Noop { at: Watermark::new(5, 0) });
 }
 
 #[test]
 fn roundtrip_reset_to_bootstrap() {
-    assert_roundtrip(&Frame::ResetToBootstrap {
-        reason: "since fell off compacted tail".into(),
-    });
-    assert_roundtrip(&Frame::ResetToBootstrap {
-        reason: String::new(),
-    });
+    assert_roundtrip(&Frame::ResetToBootstrap { reason: "since fell off compacted tail".into() });
+    assert_roundtrip(&Frame::ResetToBootstrap { reason: String::new() });
 }
 
 // --- error paths: no panic, typed error ------------------------------------
@@ -161,10 +155,7 @@ fn err_unknown_enum_discriminant_partition() {
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // since_gen
     rmp::encode::write_uint(&mut bytes, 0).unwrap(); // since_counter
     match decode_frame(&bytes) {
-        Err(ReplCodecError::UnknownDiscriminant {
-            field: "Partition",
-            value: 7,
-        }) => {}
+        Err(ReplCodecError::UnknownDiscriminant { field: "Partition", value: 7 }) => {}
         other => panic!("expected UnknownDiscriminant Partition 7, got {other:?}"),
     }
 }
@@ -187,10 +178,7 @@ fn err_unknown_enum_discriminant_op() {
     rmp::encode::write_array_len(&mut bytes, 0).unwrap(); // indexes
     rmp::encode::write_nil(&mut bytes).unwrap(); // body
     match decode_frame(&bytes) {
-        Err(ReplCodecError::UnknownDiscriminant {
-            field: "Op",
-            value: 5,
-        }) => {}
+        Err(ReplCodecError::UnknownDiscriminant { field: "Op", value: 5 }) => {}
         other => panic!("expected UnknownDiscriminant Op 5, got {other:?}"),
     }
 }
@@ -253,9 +241,7 @@ fn err_empty_input() {
 
 #[test]
 fn framing_wrap_then_read_one() {
-    let payload = encode_frame(&Frame::Noop {
-        at: Watermark::new(1, 2),
-    });
+    let payload = encode_frame(&Frame::Noop { at: Watermark::new(1, 2) });
     let wire = frame_with_len_prefix(&payload);
     assert_eq!(&wire[..4], &(payload.len() as u32).to_be_bytes());
 
@@ -269,12 +255,8 @@ fn framing_wrap_then_read_one() {
 
 #[test]
 fn framing_two_concatenated_pop_in_order() {
-    let a = encode_frame(&Frame::Noop {
-        at: Watermark::new(1, 0),
-    });
-    let b = encode_frame(&Frame::ResetToBootstrap {
-        reason: "x".into(),
-    });
+    let a = encode_frame(&Frame::Noop { at: Watermark::new(1, 0) });
+    let b = encode_frame(&Frame::ResetToBootstrap { reason: "x".into() });
     let mut buf = Vec::new();
     buf.extend_from_slice(&frame_with_len_prefix(&a));
     buf.extend_from_slice(&frame_with_len_prefix(&b));
@@ -285,12 +267,7 @@ fn framing_two_concatenated_pop_in_order() {
     assert_eq!(second, b);
     assert!(try_read_framed(&mut buf).unwrap().is_none());
     // Decodes back to the original frames.
-    assert_eq!(
-        decode_frame(&first).unwrap(),
-        Frame::Noop {
-            at: Watermark::new(1, 0)
-        }
-    );
+    assert_eq!(decode_frame(&first).unwrap(), Frame::Noop { at: Watermark::new(1, 0) });
 }
 
 #[test]

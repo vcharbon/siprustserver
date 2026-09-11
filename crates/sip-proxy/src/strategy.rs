@@ -80,7 +80,11 @@ pub trait RoutingStrategy: Send + Sync {
     fn name(&self) -> &str;
 
     /// Pick a downstream target for a request with no usable stickiness cookie.
-    async fn select_for_new_dialog(&self, msg: &SipMessage, opts: SelectOpts) -> Result<ProxyAddr, SelectError>;
+    async fn select_for_new_dialog(
+        &self,
+        msg: &SipMessage,
+        opts: SelectOpts,
+    ) -> Result<ProxyAddr, SelectError>;
 
     /// Recover the target previously encoded into the topmost Route URI's params
     /// (the core already verified the URI points at us and stripped it).

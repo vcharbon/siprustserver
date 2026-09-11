@@ -29,9 +29,8 @@ const FONT: i64 = 12;
 const LABEL_FONT: i64 = 11;
 const ARROW: i64 = 8;
 
-const CALL_ID_COLORS: [&str; 8] = [
-    "#2563eb", "#dc2626", "#059669", "#7c3aed", "#d97706", "#0891b2", "#be185d", "#4f46e5",
-];
+const CALL_ID_COLORS: [&str; 8] =
+    ["#2563eb", "#dc2626", "#059669", "#7c3aed", "#d97706", "#0891b2", "#be185d", "#4f46e5"];
 
 fn transport_canvas(kind: TransportKind) -> &'static str {
     match kind {
@@ -59,7 +58,11 @@ fn call_id_color<'a>(call_id: &str, map: &mut HashMap<String, &'a str>) -> &'a s
 }
 
 /// Render the trace as a standalone SVG document.
-pub fn render(entries: &[RecordedSipEntry], lanes: &[Lane], transport_kind: TransportKind) -> String {
+pub fn render(
+    entries: &[RecordedSipEntry],
+    lanes: &[Lane],
+    transport_kind: TransportKind,
+) -> String {
     if lanes.is_empty() || entries.is_empty() {
         return r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="100"><text x="200" y="50" text-anchor="middle" font-family="monospace" font-size="14" fill="#666">No messages to display</text></svg>"##.to_string();
     }

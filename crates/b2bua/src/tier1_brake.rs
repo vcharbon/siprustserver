@@ -192,11 +192,7 @@ mod tests {
         };
         assert_eq!(cfg.threshold(), 2);
         // Production-ish: queue_max=8192, pct=70 → floor(573440/100)=5734.
-        let prod = Tier1BrakeConfig {
-            queue_max: 8192,
-            tier1_threshold_pct: 70,
-            ..cfg
-        };
+        let prod = Tier1BrakeConfig { queue_max: 8192, tier1_threshold_pct: 70, ..cfg };
         assert_eq!(prod.threshold(), 5734);
         // pct=0 would brake from the first INVITE — only ever set deliberately;
         // the floor is exact.

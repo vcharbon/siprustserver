@@ -61,7 +61,9 @@ fn role_of_lane(lane: &Lane) -> String {
 /// address never leaks into a normalized role.
 fn looks_like_addr(s: &str) -> bool {
     match s.rsplit_once(':') {
-        Some((host, port)) => !host.is_empty() && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()),
+        Some((host, port)) => {
+            !host.is_empty() && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+        }
         None => false,
     }
 }
@@ -72,12 +74,8 @@ fn looks_like_addr(s: &str) -> bool {
 /// derived role. Two lanes AGREE on a plan when their normalized docs serialize
 /// identically. Deterministic and idempotent.
 pub fn normalize(doc: &SeqDoc, role_map: &HashMap<String, String>) -> SeqDoc {
-    let resolve = |id: &str| -> String {
-        role_map
-            .get(id)
-            .cloned()
-            .unwrap_or_else(|| role_of_lane_id(id))
-    };
+    let resolve =
+        |id: &str| -> String { role_map.get(id).cloned().unwrap_or_else(|| role_of_lane_id(id)) };
 
     // Lanes → roles, order-preserving, deduplicated on the resolved role.
     let mut lanes: Vec<Lane> = Vec::new();
@@ -221,7 +219,13 @@ mod tests {
                 Lane::new("10.0.0.9:5070#bob", "bob", LaneKind::Ua).with_group("10.0.0.9:5070"),
             ],
             rows: vec![
-                sip_row(2, 200, "10.0.0.1:5060", "10.0.0.9:5070#bob", "INVITE sip:bob@10.0.0.9:5070"),
+                sip_row(
+                    2,
+                    200,
+                    "10.0.0.1:5060",
+                    "10.0.0.9:5070#bob",
+                    "INVITE sip:bob@10.0.0.9:5070",
+                ),
                 sip_row(1, 100, "10.0.0.9:5070#bob", "10.0.0.1:5060", "200 OK"),
             ],
             anomalies: vec![
@@ -269,10 +273,7 @@ mod tests {
         let n2 = norm(&n1);
         assert_eq!(n1, n2);
         // And serializes identically too.
-        assert_eq!(
-            serde_json::to_string(&n1).unwrap(),
-            serde_json::to_string(&n2).unwrap()
-        );
+        assert_eq!(serde_json::to_string(&n1).unwrap(), serde_json::to_string(&n2).unwrap());
     }
 
     #[test]
@@ -280,7 +281,13 @@ mod tests {
         let mut d = doc();
         // A timer re-emit of the INVITE (the projector's ⟳ marker) after the
         // first occurrence — must not survive.
-        d.rows.push(sip_row(3, 260, "10.0.0.1:5060", "10.0.0.9:5070#bob", "INVITE sip:bob@x \u{21bb} [re-emit: timer]"));
+        d.rows.push(sip_row(
+            3,
+            260,
+            "10.0.0.1:5060",
+            "10.0.0.9:5070#bob",
+            "INVITE sip:bob@x \u{21bb} [re-emit: timer]",
+        ));
         let n = norm(&d);
         let invites = n.rows.iter().filter(|r| r.label == "INVITE").count();
         assert_eq!(invites, 1, "the retransmit collapses onto the first INVITE");

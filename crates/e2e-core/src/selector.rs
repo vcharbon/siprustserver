@@ -16,7 +16,7 @@
 //! without being enumerated. `common_fields_are_evaluable` (tests) cross-checks
 //! every curated entry against the evaluator so the two never drift.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// The curated, ready-to-pick complete selectors offered as completions. Open
 /// forms (`header(Name)`, indices, `param(x)`) are *not* listed — they are

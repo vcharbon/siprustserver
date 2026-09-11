@@ -181,11 +181,7 @@ struct PeerEntry {
 
 impl PeerEntry {
     fn cold() -> Self {
-        Self {
-            reclaim: FlowState::cold(),
-            backup: FlowState::cold(),
-            host: None,
-        }
+        Self { reclaim: FlowState::cold(), backup: FlowState::cold(), host: None }
     }
 
     fn flow(&self, partition: Partition) -> &FlowState {
@@ -275,7 +271,14 @@ impl ReplicationSupervisor {
         resolve: AddrResolver,
         config: PullerConfig,
     ) -> Self {
-        Self::build(self_ordinal, network, store, resolve, config, crate::metrics::B2buaMetrics::new())
+        Self::build(
+            self_ordinal,
+            network,
+            store,
+            resolve,
+            config,
+            crate::metrics::B2buaMetrics::new(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -327,9 +330,10 @@ impl ReplicationSupervisor {
         *self.inner.membership.lock().unwrap() = Some(membership.clone());
         let this = self.clone();
         let period = self.inner.reconcile_period;
-        let handle = topology::spawn_membership_reconcile(membership.clone(), period, move |snapshot| {
-            this.reconcile_from_snapshot(snapshot);
-        });
+        let handle =
+            topology::spawn_membership_reconcile(membership.clone(), period, move |snapshot| {
+                this.reconcile_from_snapshot(snapshot);
+            });
         *self.inner.reconcile.lock().unwrap() = Some(handle);
 
         // Backup-deferral gate: open the Backup streams once the Reclaim flows
@@ -402,18 +406,14 @@ impl ReplicationSupervisor {
     /// loop vs. the backup gate) cannot interleave check-then-spawn and
     /// double-spawn a flow.
     fn reconcile_from_snapshot(&self, snapshot: Vec<Peer>) {
-        let desired: Vec<Peer> = snapshot
-            .into_iter()
-            .filter(|p| p.ordinal != self.inner.self_ordinal)
-            .collect();
+        let desired: Vec<Peer> =
+            snapshot.into_iter().filter(|p| p.ordinal != self.inner.self_ordinal).collect();
         let backup_enabled = self.inner.backup_enabled.load(Ordering::SeqCst);
 
         let mut peers = self.inner.peers.lock().unwrap();
 
         for peer in &desired {
-            let entry = peers
-                .entry(peer.ordinal.clone())
-                .or_insert_with(PeerEntry::cold);
+            let entry = peers.entry(peer.ordinal.clone()).or_insert_with(PeerEntry::cold);
             let drift = entry.host.as_deref() != Some(peer.host.as_str());
             entry.host = Some(peer.host.clone());
 
@@ -539,13 +539,7 @@ impl ReplicationSupervisor {
     /// live status first.
     pub fn is_current(&self, peer: &str) -> bool {
         self.sync();
-        self.inner
-            .peers
-            .lock()
-            .unwrap()
-            .get(peer)
-            .map(|e| e.reclaim.current)
-            .unwrap_or(false)
+        self.inner.peers.lock().unwrap().get(peer).map(|e| e.reclaim.current).unwrap_or(false)
     }
 
     /// The set of peer ordinals this node is currently responsible for (the
@@ -616,12 +610,7 @@ impl ReplicationSupervisor {
     /// rebooting node latch Ready before a single reclaim puller existed —
     /// routing in-dialog traffic at it pre-reclaim (orphan 481s).
     pub fn membership_synced(&self) -> bool {
-        self.inner
-            .membership
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|m| m.synced())
+        self.inner.membership.lock().unwrap().as_ref().is_some_and(|m| m.synced())
     }
 
     /// Are ALL **desired** peers' **Reclaim** flows bootstrap-complete? (S7

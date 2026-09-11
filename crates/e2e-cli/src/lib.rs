@@ -128,14 +128,7 @@ fn cmd_run(args: &[String]) -> i32 {
     };
 
     // Summary table.
-    let width = result
-        .index
-        .cells
-        .iter()
-        .map(|c| c.dir.len())
-        .max()
-        .unwrap_or(4)
-        .max(4);
+    let width = result.index.cells.iter().map(|c| c.dir.len()).max().unwrap_or(4).max(4);
     println!("\n{:<width$}  verdict", "cell");
     for cell in &result.index.cells {
         let verdict = match (&cell.passed, &cell.error) {
@@ -152,7 +145,11 @@ fn cmd_run(args: &[String]) -> i32 {
         result.index.cells.len(),
         result.run_dir.join("campaign.json").display()
     );
-    if failed.is_empty() { 0 } else { 1 }
+    if failed.is_empty() {
+        0
+    } else {
+        1
+    }
 }
 
 /// `--case`/`--infra` subset the campaign; naming something the campaign does
@@ -202,7 +199,11 @@ fn cmd_validate(args: &[String]) -> i32 {
             }
         }
     }
-    if failures == 0 { 0 } else { 1 }
+    if failures == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 /// Detect the doc type by which schema parses it (all four use

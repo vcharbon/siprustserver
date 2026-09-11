@@ -12,8 +12,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, WaiverScope};
 use scenario_harness::run::RunReport;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::RSeq;
 use sip_net::RecordedSipEntry;
@@ -53,7 +53,12 @@ async fn advance(ms: u64) {
 }
 
 /// Every copy of `status` the SUT put on `to`'s wire.
-fn responses_to(entries: &[RecordedSipEntry], from: SocketAddr, to: SocketAddr, status: u16) -> usize {
+fn responses_to(
+    entries: &[RecordedSipEntry],
+    from: SocketAddr,
+    to: SocketAddr,
+    status: u16,
+) -> usize {
     let head = format!("SIP/2.0 {status} ");
     entries
         .iter()

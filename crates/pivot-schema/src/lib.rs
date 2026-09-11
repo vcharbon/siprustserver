@@ -60,6 +60,6 @@ pub mod token;
 pub mod violation;
 
 pub use canonical::{format_json, format_str};
-pub use document::{PIVOT_VERSION, PivotV3, Timing};
-pub use lint::{Diagnostic, Report, Severity, lint};
-pub use rules::{RULE_FILE_VERSION, RuleFile};
+pub use document::{PivotV3, Timing, PIVOT_VERSION};
+pub use lint::{lint, Diagnostic, Report, Severity};
+pub use rules::{RuleFile, RULE_FILE_VERSION};

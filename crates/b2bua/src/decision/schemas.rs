@@ -70,11 +70,7 @@ impl SipDestination {
     pub const DEFAULT_PORT: u16 = 5060;
 
     pub fn new(host: impl Into<String>, port: u16) -> Self {
-        Self {
-            host: host.into(),
-            port: Some(port),
-            transport: None,
-        }
+        Self { host: host.into(), port: Some(port), transport: None }
     }
     pub fn port(&self) -> u16 {
         self.port.unwrap_or(Self::DEFAULT_PORT)
@@ -96,10 +92,7 @@ impl SipDestination {
 pub fn read_stated_port(stated: Option<&serde_json::Value>) -> Option<u16> {
     match stated {
         None | Some(serde_json::Value::Null) => Some(SipDestination::DEFAULT_PORT),
-        Some(v) => v
-            .as_u64()
-            .and_then(|p| u16::try_from(p).ok())
-            .filter(|p| *p != 0),
+        Some(v) => v.as_u64().and_then(|p| u16::try_from(p).ok()).filter(|p| *p != 0),
     }
 }
 
@@ -404,10 +397,7 @@ pub fn default_platform_features() -> FeatureActivations {
     FeatureActivations {
         platform: PlatformActivations {
             max_duration_sec: 3_600,
-            keepalive: KeepaliveActivation {
-                interval_sec: 30,
-                max_missed: 2,
-            },
+            keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
         },
         refer: None,
         relay_first_18x_to_180: None,

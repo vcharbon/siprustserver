@@ -130,10 +130,8 @@ impl ChaosLog {
     /// `wall_ms = clock.now_ms() − delay`. `saturating_sub` keeps a future-dated
     /// kill (clock skew) at delay 0 → marker at ~now, no panic.
     pub fn record_at(&self, kind: impl Into<String>, target: Option<String>, kill_unix_ms: u64) {
-        let wall_now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let wall_now_ms =
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
         let delay_ms = wall_now_ms.saturating_sub(kill_unix_ms);
         let at = Instant::now()
             .checked_sub(Duration::from_millis(delay_ms))
@@ -230,7 +228,9 @@ impl ChaosLog {
         out.push_str("# HELP loadgen_chaos_markers_total Chaos markers recorded by the loadgen.\n");
         out.push_str("# TYPE loadgen_chaos_markers_total counter\n");
         out.push_str(&format!("loadgen_chaos_markers_total {}\n", self.total()));
-        out.push_str("# HELP loadgen_chaos_markers_retained Chaos markers currently retained, by kind.\n");
+        out.push_str(
+            "# HELP loadgen_chaos_markers_retained Chaos markers currently retained, by kind.\n",
+        );
         out.push_str("# TYPE loadgen_chaos_markers_retained gauge\n");
         for (k, n) in &by_kind {
             out.push_str(&format!("loadgen_chaos_markers_retained{{kind=\"{k}\"}} {n}\n"));
@@ -260,16 +260,27 @@ mod tests {
 
         // (1) a call whose `reinvited` transition was 150ms before the kill → Near
         //     (the transition had no time to propagate — acceptable collateral).
-        let phases_txn = [("connected", kill - Duration::from_secs(3)), ("reinvited", kill - Duration::from_millis(150))];
+        let phases_txn = [
+            ("connected", kill - Duration::from_secs(3)),
+            ("reinvited", kill - Duration::from_millis(150)),
+        ];
         assert_eq!(
-            log.classify_call(kill - Duration::from_secs(4), kill + Duration::from_secs(1), &phases_txn),
+            log.classify_call(
+                kill - Duration::from_secs(4),
+                kill + Duration::from_secs(1),
+                &phases_txn
+            ),
             ChaosTag::Near
         );
 
         // (2) a call still in SETUP at the kill (started, never reached connected) → Near.
         let phases_setup: [(&'static str, Instant); 0] = [];
         assert_eq!(
-            log.classify_call(kill - Duration::from_secs(2), kill + Duration::from_secs(1), &phases_setup),
+            log.classify_call(
+                kill - Duration::from_secs(2),
+                kill + Duration::from_secs(1),
+                &phases_setup
+            ),
             ChaosTag::Near
         );
 
@@ -277,15 +288,26 @@ mod tests {
         //     transition near the kill → Clear (a genuine signal, must be triaged).
         let phases_stable = [("connected", kill - Duration::from_secs(10))];
         assert_eq!(
-            log.classify_call(kill - Duration::from_secs(20), kill + Duration::from_secs(20), &phases_stable),
+            log.classify_call(
+                kill - Duration::from_secs(20),
+                kill + Duration::from_secs(20),
+                &phases_stable
+            ),
             ChaosTag::Clear
         );
 
         // (4) a fresh post-kill call: connected 2s AFTER the kill, far from it →
         //     Clear (the post-reboot CSeq-desync calls — must stay visible).
-        let phases_post = [("connected", kill + Duration::from_secs(2)), ("reinvited", kill + Duration::from_secs(3))];
+        let phases_post = [
+            ("connected", kill + Duration::from_secs(2)),
+            ("reinvited", kill + Duration::from_secs(3)),
+        ];
         assert_eq!(
-            log.classify_call(kill + Duration::from_millis(900), kill + Duration::from_secs(5), &phases_post),
+            log.classify_call(
+                kill + Duration::from_millis(900),
+                kill + Duration::from_secs(5),
+                &phases_post
+            ),
             ChaosTag::Clear
         );
     }
@@ -335,7 +357,11 @@ mod tests {
         // brackets now (no `connected` phase) is Near on the interrupted-setup rule.
         let now = Instant::now();
         assert_eq!(
-            log.classify_call(now - Duration::from_millis(100), now + Duration::from_millis(100), &[]),
+            log.classify_call(
+                now - Duration::from_millis(100),
+                now + Duration::from_millis(100),
+                &[]
+            ),
             ChaosTag::Near
         );
     }

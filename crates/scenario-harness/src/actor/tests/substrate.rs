@@ -26,15 +26,12 @@ async fn two_actor_toy_call_reaches_torn_down() {
                 media: MediaState::offer(OFFER_SDP),
                 goals: vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(
-                        Barrier::AllConfirmed(&["alice", "bob"]),
-                        GoalStep::Bye,
-                    ),
+                    Goal::new(Barrier::AllConfirmed(&["alice", "bob"]), GoalStep::Bye),
                 ],
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -42,15 +39,13 @@ async fn two_actor_toy_call_reaches_torn_down() {
             ActorSpec {
                 role: "bob",
                 agent: bob.clone(),
-                disposition: Disposition::RingThenAnswer {
-                    ring: Duration::from_millis(500),
-                },
+                disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(500) },
                 media: MediaState::answer(ANSWER_SDP),
                 goals: vec![],
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -105,7 +100,7 @@ async fn two_actor_crossing_bye_both_terminate() {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -120,7 +115,7 @@ async fn two_actor_crossing_bye_both_terminate() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,

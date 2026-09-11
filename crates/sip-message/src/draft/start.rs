@@ -140,13 +140,8 @@ impl StartKind for kind::Response {
     type Line = StatusLine;
     type Message = SipResponse;
 
-    const REQUIRED: &'static [HeaderName] = &[
-        HeaderName::Via,
-        HeaderName::From,
-        HeaderName::To,
-        HeaderName::CallId,
-        HeaderName::CSeq,
-    ];
+    const REQUIRED: &'static [HeaderName] =
+        &[HeaderName::Via, HeaderName::From, HeaderName::To, HeaderName::CallId, HeaderName::CSeq];
 
     fn render_start(line: &Self::Line, out: &mut Wire) -> StartSpans {
         let version_at = out.len();

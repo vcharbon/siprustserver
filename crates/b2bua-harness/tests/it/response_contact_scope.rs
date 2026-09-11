@@ -25,8 +25,7 @@ fn contacts(resp: &SipResponse) -> Vec<String> {
 async fn the_ring_names_the_b2bua_and_the_refusal_names_nothing() {
     let s = B2buaScene::new("contact-scope-initial-refusal").await;
 
-    let mut call =
-        s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;
     let ringing = call.expect(180).await;
@@ -82,8 +81,7 @@ async fn a_relayed_reinvite_answer_names_the_target_and_its_failure_does_not() {
 async fn the_answer_carries_the_contact_the_caller_addresses() {
     let s = B2buaScene::new("contact-scope-answer").await;
 
-    let mut call =
-        s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;

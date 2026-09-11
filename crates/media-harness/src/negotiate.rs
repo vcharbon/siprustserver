@@ -71,25 +71,16 @@ pub fn negotiate_call(
     let answer_sdp = bob_eng.answer_to(&rewrite_offer(offer))?;
     let bob_negotiated = bob_eng.negotiated().expect("bob negotiated").clone();
     let bob_session = bob.session(&dialog_id);
-    bob_session
-        .configure(bob_negotiated.clone())
-        .expect("bob configure");
+    bob_session.configure(bob_negotiated.clone()).expect("bob configure");
 
     // Alice applies the observed (rewritten) answer → points her at Bob.
     let alice_negotiated = alice_eng.apply_remote(&rewrite_answer(answer_sdp), true)?;
     let alice_session = alice.session(&dialog_id);
-    alice_session
-        .configure(alice_negotiated.clone())
-        .expect("alice configure");
+    alice_session.configure(alice_negotiated.clone()).expect("alice configure");
 
     // 200 OK both ways → both sessions commit (become active peers).
     alice_session.commit(CommitReason::Confirmed);
     bob_session.commit(CommitReason::Confirmed);
 
-    Ok(NegotiatedCall {
-        alice_session,
-        bob_session,
-        alice_negotiated,
-        bob_negotiated,
-    })
+    Ok(NegotiatedCall { alice_session, bob_session, alice_negotiated, bob_negotiated })
 }

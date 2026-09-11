@@ -91,12 +91,7 @@ pub struct Lane {
 impl Lane {
     /// Convenience constructor.
     pub fn new(id: impl Into<String>, label: impl Into<String>, kind: LaneKind) -> Self {
-        Self {
-            id: id.into(),
-            label: label.into(),
-            kind,
-            group: None,
-        }
+        Self { id: id.into(), label: label.into(), kind, group: None }
     }
 
     /// Attach the shared-resource group header (see [`Lane::group`]).
@@ -551,9 +546,7 @@ mod tests {
             "first message is a .seq-msg group with data-idx=\"0\": {svg}"
         );
         // The group with data-idx="0" wraps the INVITE arrow label.
-        let g = svg
-            .find("data-idx=\"0\"")
-            .expect("first message has data-idx=0");
+        let g = svg.find("data-idx=\"0\"").expect("first message has data-idx=0");
         let g_close = svg[g..].find("</g>").expect("group closes");
         let group_span = &svg[g..g + g_close];
         assert!(

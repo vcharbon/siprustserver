@@ -256,10 +256,15 @@ mod tests {
             );
         }
         started.notified().await; // first handler is now parked on the gate
-        // Queue depth is 1 — one of these sits in the queue, the rest are dropped.
+                                  // Queue depth is 1 — one of these sits in the queue, the rest are dropped.
         for _ in 0..5 {
             let ran = ran.clone();
-            d.dispatch("c", Box::pin(async move { ran.fetch_add(1, Ordering::SeqCst); }));
+            d.dispatch(
+                "c",
+                Box::pin(async move {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
         }
         assert!(metrics.queue_drops_total() >= 1, "expected queue drops");
         gate.notify_waiters();

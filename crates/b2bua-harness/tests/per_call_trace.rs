@@ -45,10 +45,7 @@ async fn a_sampled_call_records_its_messages_decision_and_rules_on_one_span() {
         "the INVITE as it arrived, raw: {:?}",
         log.matching("kind=sip.in").len()
     );
-    assert!(
-        !log.matching("kind=sip.out").is_empty(),
-        "the messages the b2bua put on the wire"
-    );
+    assert!(!log.matching("kind=sip.out").is_empty(), "the messages the b2bua put on the wire");
     assert!(
         log.matching("kind=sip.out").iter().any(|e| e.contains("100 Trying")),
         "the transaction layer's auto-100 is part of the story"

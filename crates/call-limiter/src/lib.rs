@@ -18,8 +18,8 @@
 
 mod metrics;
 mod server;
-pub mod wire;
 mod window;
+pub mod wire;
 
 pub use metrics::LimiterMetrics;
 pub use server::LimiterServer;

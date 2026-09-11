@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use pivot_schema::body::Body;
 use pivot_schema::case::{LaneVerdict, Origin};
 use pivot_schema::flow::{CheckMode, FlowNode, Op};
-use pivot_schema::{PIVOT_VERSION, PivotV3};
+use pivot_schema::{PivotV3, PIVOT_VERSION};
 
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -71,7 +71,8 @@ fn every_fixture_round_trips_byte_identically() {
 #[test]
 fn re_parsing_a_re_serialized_fixture_yields_the_same_document() {
     for (name, pivot) in parsed() {
-        let twice = PivotV3::from_json(&pivot.to_canonical_json()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let twice = PivotV3::from_json(&pivot.to_canonical_json())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(pivot, twice, "{name}");
     }
 }
@@ -157,7 +158,11 @@ fn step_ids_are_unique_and_every_delay_anchors_backwards() {
                         n.steps().iter().position(|s| s.id == anchor).map(|i| (p, i))
                     })
                     .unwrap_or_else(|| panic!("{name}: anchor {anchor} resolves"));
-                assert!(anchored_at < (position, inner), "{name} step {}: anchor is not earlier", step.id);
+                assert!(
+                    anchored_at < (position, inner),
+                    "{name} step {}: anchor is not earlier",
+                    step.id
+                );
             }
         }
     }
@@ -176,12 +181,19 @@ fn every_reference_resolves_within_the_document() {
             assert!(legs.contains(call.caller_leg.as_str()), "{name}: call {}", call.id);
             for attempt in &call.attempts {
                 assert!(legs.contains(attempt.leg.as_str()), "{name}: attempt leg {}", attempt.leg);
-                assert!(attempt.no_answer_ms_is_declarable(), "{name}: attempt on leg {}", attempt.leg);
+                assert!(
+                    attempt.no_answer_ms_is_declarable(),
+                    "{name}: attempt on leg {}",
+                    attempt.leg
+                );
             }
         }
         for node in &pivot.flow {
             for target in node.after() {
-                assert!(steps.contains(target.as_str()) || pivot.flow.iter().any(|n| n.id() == target), "{name}: after {target}");
+                assert!(
+                    steps.contains(target.as_str()) || pivot.flow.iter().any(|n| n.id() == target),
+                    "{name}: after {target}"
+                );
                 cross_references += 1;
             }
         }
@@ -296,7 +308,9 @@ fn the_fixture_set_covers_every_feature_the_format_has() {
             accessors += step
                 .checks
                 .iter()
-                .filter(|c| c.value.as_deref().is_some_and(pivot_schema::accessor::Accessor::present_in))
+                .filter(|c| {
+                    c.value.as_deref().is_some_and(pivot_schema::accessor::Accessor::present_in)
+                })
                 .count();
             numbered += step
                 .msg
@@ -463,5 +477,8 @@ fn the_schedule_table_is_the_fixture_byte_for_byte() {
     let text = std::fs::read_to_string(&path).expect("a readable schedules/table.json");
     let printed = pivot_schema::canonical::format(&pivot_schema::schedules::schedule_table())
         .expect("the table serializes");
-    assert_eq!(printed, text, "`pivot-schema schedules` drifted from tests/fixtures/schedules/table.json");
+    assert_eq!(
+        printed, text,
+        "`pivot-schema schedules` drifted from tests/fixtures/schedules/table.json"
+    );
 }

@@ -192,7 +192,13 @@ pub async fn run(scenario: &Scenario) -> RunReport {
                     .unwrap_or_else(|e| panic!("send failed: {e}"));
             }
             Step::Expect { agent, matcher } => {
-                let outcome = run_expect(endpoints[&agent.0].as_ref(), scenario.agent_at(*agent), matcher, &parser).await;
+                let outcome = run_expect(
+                    endpoints[&agent.0].as_ref(),
+                    scenario.agent_at(*agent),
+                    matcher,
+                    &parser,
+                )
+                .await;
                 expects.push(outcome);
             }
             Step::Advance { ms } => {

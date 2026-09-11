@@ -18,9 +18,9 @@ use sip_clock::Clock;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
+use crate::fragmentation::pin_fragmentation;
 use crate::net::{Counters, SignalingNetwork, UdpEndpoint};
 use crate::queue::PacketQueue;
-use crate::fragmentation::pin_fragmentation;
 use crate::types::{
     BindError, BindErrorReason, BindUdpOpts, PreIngressAction, PreIngressHook, SendError,
     UdpEndpointCounters, UdpPacket, UndeliveredPacket,
@@ -34,10 +34,7 @@ use crate::types::{
 /// 4-tuple, so all datagrams from one src:port land on ONE socket and per-flow
 /// ordering (INVITE→CANCEL, retransmits) is preserved. Public so a test reads
 /// the options back off the very socket the bind path produces.
-pub fn build_bound_socket(
-    addr: SocketAddr,
-    reuse_port: bool,
-) -> std::io::Result<socket2::Socket> {
+pub fn build_bound_socket(addr: SocketAddr, reuse_port: bool) -> std::io::Result<socket2::Socket> {
     let domain = socket2::Domain::for_address(addr);
     let raw = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     if reuse_port {
@@ -171,11 +168,7 @@ async fn recv_loop(
                 }
             }
             PreIngressAction::Accept => {
-                let pkt = UdpPacket {
-                    raw,
-                    src,
-                    arrival_ms: clock.now_ms().max(0) as u64,
-                };
+                let pkt = UdpPacket { raw, src, arrival_ms: clock.now_ms().max(0) as u64 };
                 if queue.offer(pkt) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);
                 } else {

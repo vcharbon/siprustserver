@@ -29,11 +29,7 @@ impl WireEntry {
 
     /// The start-line, for a ladder assertion that reads as the wire does.
     pub fn start_line(&self) -> String {
-        String::from_utf8_lossy(&self.raw)
-            .split("\r\n")
-            .next()
-            .unwrap_or_default()
-            .to_string()
+        String::from_utf8_lossy(&self.raw).split("\r\n").next().unwrap_or_default().to_string()
     }
 }
 

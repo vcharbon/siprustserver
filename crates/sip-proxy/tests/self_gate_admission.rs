@@ -13,15 +13,15 @@
 mod common;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use common::ProxySut;
 use scenario_harness::Harness;
 use sip_clock::Clock;
 use sip_message::header::{ParamValue, Reason, RetryAfter};
-use sip_message::HeaderName;
 use sip_message::parser::custom::CustomParser;
+use sip_message::HeaderName;
 use sip_message::{SipMessage, SipParser};
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerRegistry};
@@ -62,11 +62,13 @@ async fn spawn_proxy_with_gate(
 /// classified worker-outbound.
 fn forward_all_with_worker() -> (Arc<dyn RoutingStrategy>, Arc<dyn WorkerRegistry>) {
     let bob: SocketAddr = BOB.parse().unwrap();
-    let strategy: Arc<dyn RoutingStrategy> = Arc::new(sip_proxy::ForwardAllStrategy::new(ProxyAddr::from(bob)));
-    let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
-        "w1",
-        ProxyAddr::from(WORKER.parse::<SocketAddr>().unwrap()),
-    )]));
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(sip_proxy::ForwardAllStrategy::new(ProxyAddr::from(bob)));
+    let registry: Arc<dyn WorkerRegistry> =
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::from(WORKER.parse::<SocketAddr>().unwrap()),
+        )]));
     (strategy, registry)
 }
 
@@ -130,13 +132,22 @@ impl ForceRejectGate {
 impl ProxySelfGate for ForceRejectGate {
     fn try_admit_external(&self) -> AdmitDecision {
         self.tries.fetch_add(1, Ordering::SeqCst);
-        AdmitDecision { admit: false, reason: self.reason.map(String::from), retry_after_sec: self.retry_after_sec }
+        AdmitDecision {
+            admit: false,
+            reason: self.reason.map(String::from),
+            retry_after_sec: self.retry_after_sec,
+        }
     }
 }
 
 /// Drive a single new-dialog external INVITE through a gate that rejects with the
 /// given (reason, retry) and assert the on-wire 503 the source receives.
-async fn assert_wire_503(name: &str, gate_reason: Option<&'static str>, retry: u32, expect_reason_text: &str) {
+async fn assert_wire_503(
+    name: &str,
+    gate_reason: Option<&'static str>,
+    retry: u32,
+    expect_reason_text: &str,
+) {
     let h = Harness::with_transit_delay(name, 0);
     let (bob_ep, _bob_addr) = h.bind_sut("bob", BOB).await;
     let (strategy, registry) = forward_all_with_worker();
@@ -223,7 +234,12 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     // Retry-After fallback (rate 0 + empty bucket).
     let gate = Arc::new(EluCpsGate::new(
         Arc::new(simulated().0),
-        ProxySelfGateConfig { cps_bucket_size: 1, cps_bucket_rate: 0, elu_critical: 0.8, ..Default::default() },
+        ProxySelfGateConfig {
+            cps_bucket_size: 1,
+            cps_bucket_rate: 0,
+            elu_critical: 0.8,
+            ..Default::default()
+        },
     ));
     let proxy = spawn_proxy_with_gate(&h, strategy, registry, gate.clone()).await;
     let (client, _client_addr) = h.bind_sut("alice", ALICE).await;
@@ -250,7 +266,10 @@ async fn real_gate_cps_drain_yields_a_wire_503_cps() {
     client.send_to(&new_invite(ALICE, "z9hG4bK-shed", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
     assert_eq!(resp.status(), 503);
-    assert_eq!(resp.raw(HeaderName::Reason).next(), Some("SIP;cause=503;text=\"proxy_overload_cps\""));
+    assert_eq!(
+        resp.raw(HeaderName::Reason).next(),
+        Some("SIP;cause=503;text=\"proxy_overload_cps\"")
+    );
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("60"));
     assert_eq!(gate.metrics().rejected_cps_total, 1);
 
@@ -270,7 +289,12 @@ async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
     let (sampler, ctl) = simulated();
     let gate = Arc::new(EluCpsGate::new(
         Arc::new(sampler),
-        ProxySelfGateConfig { cps_bucket_size: 50, cps_bucket_rate: 100, elu_critical: 0.8, ..Default::default() },
+        ProxySelfGateConfig {
+            cps_bucket_size: 50,
+            cps_bucket_rate: 100,
+            elu_critical: 0.8,
+            ..Default::default()
+        },
     ));
     // Peg the ELU above critical and seat the EWMA there (two samples from 0:
     // 0.2*0.9 path needs a few; set 1.0 then sample twice to clear 0.8).
@@ -285,7 +309,10 @@ async fn real_gate_elu_over_critical_yields_a_wire_503_elu() {
     client.send_to(&new_invite(ALICE, "z9hG4bK-elu", None), proxy.addr()).await.unwrap();
     let resp = recv_response(&*client).await;
     assert_eq!(resp.status(), 503);
-    assert_eq!(resp.raw(HeaderName::Reason).next(), Some("SIP;cause=503;text=\"proxy_overload_elu\""));
+    assert_eq!(
+        resp.raw(HeaderName::Reason).next(),
+        Some("SIP;cause=503;text=\"proxy_overload_elu\"")
+    );
     // ELU rejection carries Retry-After: 1.
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("1"));
     assert_eq!(gate.metrics().rejected_elu_total, 1);
@@ -315,14 +342,22 @@ struct BypassProbeGate {
 
 impl BypassProbeGate {
     fn new() -> Arc<Self> {
-        Arc::new(Self { admit_tries: AtomicU32::new(0), emergency: AtomicU32::new(0), internal: AtomicU32::new(0) })
+        Arc::new(Self {
+            admit_tries: AtomicU32::new(0),
+            emergency: AtomicU32::new(0),
+            internal: AtomicU32::new(0),
+        })
     }
 }
 
 impl ProxySelfGate for BypassProbeGate {
     fn try_admit_external(&self) -> AdmitDecision {
         self.admit_tries.fetch_add(1, Ordering::SeqCst);
-        AdmitDecision { admit: false, reason: Some("proxy_overload_cps".into()), retry_after_sec: 5 }
+        AdmitDecision {
+            admit: false,
+            reason: Some("proxy_overload_cps".into()),
+            retry_after_sec: 5,
+        }
     }
     fn note_bypass(&self, kind: BypassKind) {
         match kind {
@@ -368,10 +403,17 @@ async fn worker_outbound_new_dialog_invite_bypasses_the_gate() {
     worker_client.send_to(&new_invite(WORKER, "z9hG4bK-int", None), proxy.addr()).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(bob_ep.try_recv().is_some(), "a worker-outbound INVITE must bypass the gate and reach bob");
+    assert!(
+        bob_ep.try_recv().is_some(),
+        "a worker-outbound INVITE must bypass the gate and reach bob"
+    );
     assert!(worker_client.try_recv().is_none(), "a worker-outbound INVITE must NOT be 503'd");
     assert_eq!(gate.admit_tries.load(Ordering::SeqCst), 0, "the gate must not even be consulted");
-    assert_eq!(gate.internal.load(Ordering::SeqCst), 1, "the internal (worker) bypass must be counted");
+    assert_eq!(
+        gate.internal.load(Ordering::SeqCst),
+        1,
+        "the internal (worker) bypass must be counted"
+    );
     assert_eq!(gate.emergency.load(Ordering::SeqCst), 0);
     let _ = h.finish().await;
 }

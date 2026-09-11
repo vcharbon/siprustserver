@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::types::{BindError, BindUdpOpts, SendError, UdpEndpointCounters, UdpPacket, UndeliveredPacket};
+use crate::types::{
+    BindError, BindUdpOpts, SendError, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
+};
 
 /// A bound UDP endpoint. Owns its inbound queue (the `recv` side) and the
 /// means to send (`send_to`). Dropping it releases the underlying socket /

@@ -19,8 +19,8 @@ use std::time::Duration;
 use common::{forward_all, spawn_proxy};
 use scenario_harness::Harness;
 use sip_message::header::{MaxForwards, Unsupported, Via};
-use sip_message::HeaderName;
 use sip_message::parser::custom::CustomParser;
+use sip_message::HeaderName;
 use sip_message::{SipMessage, SipParser};
 
 // ── §16.6 step 3 + step 8 ───────────────────────────────────────────────────
@@ -199,7 +199,8 @@ Content-Length: 0\r\n\r\n";
         panic!("expected a response");
     };
     assert_eq!(resp.status(), 420, "unsupported Proxy-Require → 420 Bad Extension");
-    let unsupported = resp.header::<Unsupported>().expect("420 carries Unsupported").expect("reads");
+    let unsupported =
+        resp.header::<Unsupported>().expect("420 carries Unsupported").expect("reads");
     assert!(
         unsupported.contains("bogus-extension-xyz"),
         "Unsupported header must list the offending option-tag, got {unsupported:?}"

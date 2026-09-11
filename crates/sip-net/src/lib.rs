@@ -24,21 +24,20 @@ pub mod simulated;
 pub mod types;
 
 pub use contracts::{
-    audit_visible_event, with_all_contracts, CrossMessageAuditRule, ParanoidSignalingNetwork, PeerAuditRule,
-    RecordingSignalingNetwork, ScopedAuditOptions, SendOutcome, SignalingAuditViolation,
-    SignalingNetworkEvent, WireStamp, WrappedNetwork, SIGNALING_TAG,
-};
-pub use rfc_audit::{
-    audit_wire_entries, bind_roles_of, evaluate_rfc_findings, rfc_cross_message_rules, RfcFinding,
+    audit_visible_event, with_all_contracts, CrossMessageAuditRule, ParanoidSignalingNetwork,
+    PeerAuditRule, RecordingSignalingNetwork, ScopedAuditOptions, SendOutcome,
+    SignalingAuditViolation, SignalingNetworkEvent, WireStamp, WrappedNetwork, SIGNALING_TAG,
 };
 pub use loss::RandomLoss;
 pub use net::{SignalingNetwork, UdpEndpoint};
-pub use report::{to_sip_entries, wire_positions_by_stamp, RecordedSipEntry, RecvNote};
 pub use real::RealSignalingNetwork;
+pub use report::{to_sip_entries, wire_positions_by_stamp, RecordedSipEntry, RecvNote};
+pub use rfc_audit::{
+    audit_wire_entries, bind_roles_of, evaluate_rfc_findings, rfc_cross_message_rules, RfcFinding,
+};
 pub use simulated::SimulatedSignalingNetwork;
 pub use types::{
     all_ua_roles, BindError, BindErrorReason, BindSummary, BindUdpOpts, PreIngressAction,
     PreIngressHook, ReEmitKind, RecvDisposition, RecvTap, SendError, SendErrorKind, SendTap,
-    UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket,
-    MAX_UDP_PAYLOAD,
+    UaRole, UdpEndpointCounters, UdpPacket, UndeliveredPacket, MAX_UDP_PAYLOAD,
 };

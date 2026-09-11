@@ -13,7 +13,7 @@
 //! These mirror the interpreter's plan refusals, so a generator learns at lint
 //! time rather than at run time.
 
-use crate::lint::{Index, Report, at};
+use crate::lint::{at, Index, Report};
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
     for deviation in &index.pivot.deviations {

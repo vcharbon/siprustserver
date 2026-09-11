@@ -98,7 +98,9 @@ pub fn walk(
                 Some(BYTE_ORDER_MAGIC) => true,
                 _ => match u32at(bytes, off + 8, false) {
                     Some(BYTE_ORDER_MAGIC) => false,
-                    _ if sections == 0 => return Err("pcapng section header has no byte-order magic".into()),
+                    _ if sections == 0 => {
+                        return Err("pcapng section header has no byte-order magic".into())
+                    }
                     _ => {
                         stats.tail_truncated += 1;
                         return Ok(());

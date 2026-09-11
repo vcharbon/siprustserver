@@ -42,14 +42,29 @@ mod tests {
 
     #[test]
     fn target_refresh_requests_state_contact() {
-        for m in [Method::Invite, Method::Update, Method::Subscribe, Method::Notify, Method::Refer, Method::Register] {
+        for m in [
+            Method::Invite,
+            Method::Update,
+            Method::Subscribe,
+            Method::Notify,
+            Method::Refer,
+            Method::Register,
+        ] {
             assert!(request_states_contact(&m), "{m:?}");
         }
     }
 
     #[test]
     fn non_refresh_requests_state_none() {
-        for m in [Method::Ack, Method::Bye, Method::Cancel, Method::Prack, Method::Options, Method::Info, Method::Message] {
+        for m in [
+            Method::Ack,
+            Method::Bye,
+            Method::Cancel,
+            Method::Prack,
+            Method::Options,
+            Method::Info,
+            Method::Message,
+        ] {
             assert!(!request_states_contact(&m), "{m:?}");
         }
     }

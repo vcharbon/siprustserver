@@ -88,7 +88,8 @@ pub fn call_index_keys_from_unknown(state: &serde_json::Value) -> Vec<String> {
         Some(o) => o,
         None => return Vec::new(),
     };
-    let str_field = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let str_field =
+        |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
     let mut keys = Vec::new();
 
     if let Some(a_leg) = obj.get("a_leg") {
@@ -112,10 +113,8 @@ pub fn call_index_keys_from_unknown(state: &serde_json::Value) -> Vec<String> {
                 (&b_call_id, b.get("dialogs").and_then(|v| v.as_array()))
             {
                 for d in dialogs {
-                    if let Some(remote_tag) = d
-                        .get("sip")
-                        .and_then(|s| s.get("remote_tag"))
-                        .and_then(|t| t.as_str())
+                    if let Some(remote_tag) =
+                        d.get("sip").and_then(|s| s.get("remote_tag")).and_then(|t| t.as_str())
                     {
                         if !remote_tag.is_empty() {
                             keys.push(format!("leg:{cid}|{remote_tag}"));

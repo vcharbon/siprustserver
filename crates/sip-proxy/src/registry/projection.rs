@@ -57,7 +57,13 @@ impl Annot {
     /// routable until the OPTIONS probe confirms it), `first_seen` stamped so the
     /// LB fresh-pod guard engages.
     fn fresh(host: String, now_ms: u64) -> Self {
-        Self { health: WorkerHealth::Unknown, draining_since: None, first_seen_at_ms: Some(now_ms), host, port_override: None }
+        Self {
+            health: WorkerHealth::Unknown,
+            draining_since: None,
+            first_seen_at_ms: Some(now_ms),
+            host,
+            port_override: None,
+        }
     }
 }
 
@@ -176,7 +182,11 @@ impl WorkerAnnotations {
 /// A peer with no annotation reads as `Unknown` (not routable) and self-corrects
 /// on the next recompose. Duplicate ordinals are de-duped first-wins (defensive;
 /// topology snapshots are already unique).
-fn project(peers: &[Peer], annots: &HashMap<WorkerId, Annot>, default_port: u16) -> Vec<WorkerEntry> {
+fn project(
+    peers: &[Peer],
+    annots: &HashMap<WorkerId, Annot>,
+    default_port: u16,
+) -> Vec<WorkerEntry> {
     let mut seen = HashSet::new();
     peers
         .iter()
@@ -268,7 +278,13 @@ impl WorkerSet {
         self.annotations.update(|recs| {
             recs.insert(
                 id.to_string(),
-                Annot { health, draining_since, first_seen_at_ms, host: host.clone(), port_override: Some(port) },
+                Annot {
+                    health,
+                    draining_since,
+                    first_seen_at_ms,
+                    host: host.clone(),
+                    port_override: Some(port),
+                },
             );
         });
     }
@@ -350,7 +366,11 @@ mod tests {
         sim.add(Peer::new("w0", "10.0.0.1"));
         set.recompose();
         let w0 = set.resolve("w0").unwrap();
-        assert_eq!(w0.address, ProxyAddr::new("10.0.0.1", 5070), "per-worker port_override honoured");
+        assert_eq!(
+            w0.address,
+            ProxyAddr::new("10.0.0.1", 5070),
+            "per-worker port_override honoured"
+        );
         assert_eq!(w0.health, WorkerHealth::Alive, "preset health honoured");
         assert_eq!(w0.first_seen_at_ms, Some(7));
     }

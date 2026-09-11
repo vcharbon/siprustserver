@@ -23,8 +23,12 @@ const W1: &str = "10.0.0.1";
 
 async fn core_with_metrics() -> (ProxyCore, Arc<ProxyMetrics>) {
     let net = SimulatedSignalingNetwork::new(1);
-    let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
-    let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+    let ep = net
+        .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
+        .await
+        .unwrap();
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
     let metrics = Arc::new(ProxyMetrics::new());
     let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
     let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
@@ -56,8 +60,16 @@ Content-Length: 0\r\n\r\n"
     let before = metrics.messages_total();
     let outcome = core.route_request(&req, format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
-    assert_eq!(metrics.messages_total(), before, "no response (and no forward) may be generated for the ACK");
-    assert_eq!(metrics.reject_count("ack_max_forwards_exhausted"), 1, "the silent discard still attributes its reject");
+    assert_eq!(
+        metrics.messages_total(),
+        before,
+        "no response (and no forward) may be generated for the ACK"
+    );
+    assert_eq!(
+        metrics.reject_count("ack_max_forwards_exhausted"),
+        1,
+        "the silent discard still attributes its reject"
+    );
 }
 
 // §7.3.1: a UA may fold its route set into ONE comma-combined Route header.

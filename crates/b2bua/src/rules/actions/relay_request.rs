@@ -3,9 +3,7 @@
 //! and ACK origination toward a leg. Response relay does NOT live here — see
 //! [`super::relay_response`].
 
-use call::helpers::{
-    add_pending_request, bump_local_cseq, relay_cseq_delta, update_remote_cseq,
-};
+use call::helpers::{add_pending_request, bump_local_cseq, relay_cseq_delta, update_remote_cseq};
 use call::{Call, PendingRequest, RetainedEmission};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::{HeaderName, MediaType, RAck};
@@ -17,7 +15,9 @@ use crate::rules::capabilities;
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
 
-use super::select::{dialog_identity_tag, in_dialog_method, invite_cseq_from_handle, leg_at, leg_index};
+use super::select::{
+    dialog_identity_tag, in_dialog_method, invite_cseq_from_handle, leg_at, leg_index,
+};
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
@@ -43,7 +43,9 @@ impl ActionExecutor<'_> {
         // of composing a fresh, answerless datagram. A body-bearing call is a
         // first emission and composes below.
         if body.is_empty() {
-            if let Some(retained) = leg.and_then(|l| l.dialogs.first()).and_then(|d| d.ext.emitted_ack.as_ref()) {
+            if let Some(retained) =
+                leg.and_then(|l| l.dialogs.first()).and_then(|d| d.ext.emitted_ack.as_ref())
+            {
                 fx.outbound.push(super::ladder::repeat_of(
                     retained,
                     format!("ACK (re-ACK, 2xx retransmit) → {leg_id}"),
@@ -164,8 +166,8 @@ impl ActionExecutor<'_> {
         let source_dialog = ctx.source_dialog().cloned();
         let source_remote_cseq = source_dialog.as_ref().and_then(|d| d.ext.remote_cseq);
         let delta = relay_cseq_delta(inbound_cseq, source_remote_cseq);
-        let target_invite_cseq = invite_cseq_from_handle(&target_dialog)
-            .unwrap_or(target_dialog.sip.local_cseq);
+        let target_invite_cseq =
+            invite_cseq_from_handle(&target_dialog).unwrap_or(target_dialog.sip.local_cseq);
         let outbound_cseq = target_dialog.sip.local_cseq + delta;
 
         // Advance the sequences: source learns the inbound CSeq; target bumps.
@@ -211,8 +213,19 @@ impl ActionExecutor<'_> {
         let gen_dialog = relay::to_gen_dialog(&target_dialog.sip);
         let target_face = capabilities::Face::of_leg(target_leg);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, target_leg, call.emergency == Some(true), branch.clone())),
-            contact: Some(relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true))),
+            via: Some(relay::leg_via(
+                self.config,
+                &call.call_ref,
+                target_leg,
+                call.emergency == Some(true),
+                branch.clone(),
+            )),
+            contact: Some(relay::leg_contact(
+                self.config,
+                &call.call_ref,
+                target_leg,
+                call.emergency == Some(true),
+            )),
             body: req.body().to_vec(),
             content_type: req.raw(HeaderName::ContentType).next().and_then(relay::media_type),
             cseq: Some(outbound_cseq as u32),
@@ -233,13 +246,15 @@ impl ActionExecutor<'_> {
         };
         let res = generators::generate_in_dialog_request(method, &gen_dialog, &opts);
         let dest = relay::target_dest(&gen_dialog.remote_target);
-        let (out_req, dest) =
-            relay::apply_b_leg_egress(self.config, target_leg, &gen_dialog.route_set, res.request, dest);
-        let kind = if method == InDialogMethod::Invite {
-            TxnKind::Invite
-        } else {
-            TxnKind::NonInvite
-        };
+        let (out_req, dest) = relay::apply_b_leg_egress(
+            self.config,
+            target_leg,
+            &gen_dialog.route_set,
+            res.request,
+            dest,
+        );
+        let kind =
+            if method == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
 
         // For a re-INVITE, cache its client-transaction handle on the *target*
         // dialog so the eventual ACK-for-2xx echoes the re-INVITE CSeq

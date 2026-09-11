@@ -21,7 +21,6 @@ use pivot_schema::bundle::Failure;
 use pivot_schema::placement::CountBound;
 use sip_message::Method;
 
-
 /// One policy, bound to the actor that owns it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
@@ -138,10 +137,8 @@ mod tests {
 
     #[test]
     fn a_policy_answers_by_method_identity_and_only_for_its_own_actor() {
-        let table = Background::new(vec![
-            policy("uas1", "options", None),
-            policy("uac1", "OPTIONS", None),
-        ]);
+        let table =
+            Background::new(vec![policy("uas1", "options", None), policy("uac1", "OPTIONS", None)]);
         assert_eq!(table.policy_for("uas1", "OPTIONS").unwrap().0, 0);
         assert_eq!(table.policy_for("uac1", "OPTIONS").unwrap().0, 1);
         assert!(table.policy_for("uas1", "INFO").is_none());

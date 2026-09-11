@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 use crate::body::Body;
 use crate::flow::{CheckMode, FlowNode, Op, Step};
-use crate::lint::{Index, Place, Reach, Report, at, reach};
+use crate::lint::{at, reach, Index, Place, Reach, Report};
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
     for (_, step) in index.all_steps() {
@@ -269,7 +269,8 @@ fn dialog_of<'a, 'd>(
 fn automatic_body_placement(index: &Index<'_>, report: &mut Report) {
     let all: Vec<(Place, &Step)> = index.all_steps().collect();
     for (place, step) in &all {
-        if !step.auto || !matches!(step.msg.body, Some(Body::Resource(_)) | Some(Body::Multipart(_)))
+        if !step.auto
+            || !matches!(step.msg.body, Some(Body::Resource(_)) | Some(Body::Multipart(_)))
         {
             continue;
         }
@@ -353,7 +354,11 @@ fn acks_a_2xx(all: &[(Place, &Step)], step: &Step, place: Place) -> bool {
             other.id != step.id
                 && other.leg == step.leg
                 && other.msg.status.is_some_and(|s| s >= 200)
-                && other.msg.cseq_method.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
+                && other
+                    .msg
+                    .cseq_method
+                    .as_deref()
+                    .is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
                 && reach(*other_place, place) == Reach::Ok
         })
         .next_back()
@@ -442,9 +447,17 @@ fn step_rules(step: &Step, report: &mut Report) {
     }
     if step.check.is_some() != is_expect {
         let (rule, message, hint) = if is_expect {
-            ("check/missing-on-expect", "an `expect` does not say what it does with its content", "state `check`: `assert` matches the stored content, `record` stores what arrived")
+            (
+                "check/missing-on-expect",
+                "an `expect` does not say what it does with its content",
+                "state `check`: `assert` matches the stored content, `record` stores what arrived",
+            )
         } else {
-            ("check/on-send", "a `send` states a `check`", "a send is emitted, not checked; drop the field")
+            (
+                "check/on-send",
+                "a `send` states a `check`",
+                "a send is emitted, not checked; drop the field",
+            )
         };
         report.error(rule, &path, message, hint);
     }
@@ -544,7 +557,10 @@ fn step_rules(step: &Step, report: &mut Report) {
             report.error(
                 "checks/value-mismatch",
                 &path,
-                format!("check on {:?} states a value its operator does not take, or omits one it does", check.field),
+                format!(
+                    "check on {:?} states a value its operator does not take, or omits one it does",
+                    check.field
+                ),
                 "`eq` and `regex` take a value; `exists` and `absent` take none",
             );
         }
@@ -625,11 +641,20 @@ fn alt_rules(alt: &crate::flow::Alt, report: &mut Report) {
 /// that names a method, and the pair is undecidable however different the two
 /// documents look.
 enum Discriminator<'a> {
-    Request { leg: &'a str, method: String },
-    Response { leg: &'a str, status: u16, cseq_method: Option<String> },
+    Request {
+        leg: &'a str,
+        method: String,
+    },
+    Response {
+        leg: &'a str,
+        status: u16,
+        cseq_method: Option<String>,
+    },
     /// No discriminator at all; reported by its own rule, and treated here as
     /// matching anything on its leg.
-    Undecidable { leg: &'a str },
+    Undecidable {
+        leg: &'a str,
+    },
 }
 
 impl<'a> Discriminator<'a> {

@@ -41,9 +41,8 @@ pub fn neighbour_key(flows: &Flows, group_idx: usize, spec: &Neighbours) -> Stri
 /// within the window, the hit itself excluded. Ordered by distance from the
 /// hit, so a `max` cut keeps the nearest.
 pub fn neighbours_of(flows: &Flows, hits: &[usize], spec: &Neighbours) -> Vec<(usize, Vec<usize>)> {
-    let keys: Vec<String> = (0..flows.groups.len())
-        .map(|g| neighbour_key(flows, g, spec))
-        .collect();
+    let keys: Vec<String> =
+        (0..flows.groups.len()).map(|g| neighbour_key(flows, g, spec)).collect();
     let t0s: Vec<u64> = flows.groups.iter().map(|g| group_t0(flows, g)).collect();
 
     hits.iter()
@@ -83,12 +82,12 @@ fn field(flows: &Flows, group_idx: usize, group: &CallGroup, f: KeyField) -> Val
         KeyField::ToUri => json!(invite_field(flows, group, |inv| inv.to_uri.text().into_owned())),
         KeyField::FromUser => json!(invite_field(flows, group, |inv| uri_user(&inv.from_uri))),
         KeyField::ToUser => json!(invite_field(flows, group, |inv| uri_user(&inv.to_uri))),
-        KeyField::Src => json!(legs()
-            .map(|l| l.msgs.first().map(|m| m.src.to_string()))
-            .collect::<Vec<_>>()),
-        KeyField::Dst => json!(legs()
-            .map(|l| l.msgs.first().map(|m| m.dst.to_string()))
-            .collect::<Vec<_>>()),
+        KeyField::Src => {
+            json!(legs().map(|l| l.msgs.first().map(|m| m.src.to_string())).collect::<Vec<_>>())
+        }
+        KeyField::Dst => {
+            json!(legs().map(|l| l.msgs.first().map(|m| m.dst.to_string())).collect::<Vec<_>>())
+        }
         KeyField::FinalStatus => json!(legs().map(|l| l.final_status).collect::<Vec<_>>()),
         KeyField::Saw180 => json!(legs().any(|l| l.saw_180)),
         KeyField::TerminatedBy => {
@@ -98,11 +97,7 @@ fn field(flows: &Flows, group_idx: usize, group: &CallGroup, f: KeyField) -> Val
         KeyField::Hops => json!(legs()
             .flat_map(|l| l.hops.iter().map(|h| format!("{}|{}", h.a, h.b)))
             .collect::<Vec<_>>()),
-        KeyField::Evidence => json!(group
-            .evidence
-            .iter()
-            .map(evidence_kind)
-            .collect::<Vec<_>>()),
+        KeyField::Evidence => json!(group.evidence.iter().map(evidence_kind).collect::<Vec<_>>()),
         KeyField::AsSocket => json!(group
             .evidence
             .iter()

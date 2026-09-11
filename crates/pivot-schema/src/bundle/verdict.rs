@@ -135,12 +135,7 @@ pub enum Failure {
     /// The document names a deviation this interpreter would have to EMIT and
     /// cannot. Parsing it is fine; running it is not, because emitting a
     /// compliant message instead would not reproduce the defect.
-    DeviationUnimplemented {
-        deviation: String,
-        kind: String,
-        step: Option<String>,
-        reason: String,
-    },
+    DeviationUnimplemented { deviation: String, kind: String, step: Option<String>, reason: String },
     /// The document holds an `inject` and the lane supplied no injector.
     InjectorMissing { node: String, action: String },
     /// The lane bound no number for an identity the run needs — a claim whose
@@ -716,9 +711,6 @@ mod tests {
         verdict.note_violation(&violation("sut"));
         assert!(verdict.rfc_violations[0].gating);
         assert!(!verdict.passed());
-        assert!(matches!(
-            verdict.failures.first(),
-            Some(Failure::RfcViolationUnverified { .. })
-        ));
+        assert!(matches!(verdict.failures.first(), Some(Failure::RfcViolationUnverified { .. })));
     }
 }

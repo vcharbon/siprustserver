@@ -203,7 +203,9 @@ impl<'a> Scanner<'a> {
             n = n
                 .checked_mul(10)
                 .and_then(|n| n.checked_add((self.buf[self.pos] - b'0') as u64))
-                .ok_or_else(|| SipParseError::new(format!("Invalid integer at position {start}")))?;
+                .ok_or_else(|| {
+                SipParseError::new(format!("Invalid integer at position {start}"))
+            })?;
             self.pos += 1;
         }
         if self.pos == start {

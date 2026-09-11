@@ -21,7 +21,9 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     if let CallEvent::Sip { message, .. } = &event {
         match message.as_ref() {
             SipMessage::Request(req) => ctx.metrics.record_request(req.method().as_str()),
-            SipMessage::Response(resp) => ctx.metrics.record_response(resp.cseq().method().as_str(), resp.status()),
+            SipMessage::Response(resp) => {
+                ctx.metrics.record_response(resp.cseq().method().as_str(), resp.status())
+            }
         }
     }
 
@@ -34,7 +36,9 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // skipped rather than fabricated.
     if let CallEvent::Timeout { destination: Some(dest), timeout_kind, .. } = &event {
         let kind = match timeout_kind {
-            sip_txn::TimeoutKind::Response => crate::peer_failures::PeerFailureKind::ResponseTimeout,
+            sip_txn::TimeoutKind::Response => {
+                crate::peer_failures::PeerFailureKind::ResponseTimeout
+            }
             sip_txn::TimeoutKind::Transaction => {
                 crate::peer_failures::PeerFailureKind::TransactionTimeout
             }
@@ -68,7 +72,10 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                     // replica TTL loses the CDR/limiter cleanup — the accepted
                     // double-failure.
                     if let Some(call) = ctx.state.peek(&call_ref) {
-                        if matches!(call.state, call::CallModelState::Terminating | call::CallModelState::Terminated) {
+                        if matches!(
+                            call.state,
+                            call::CallModelState::Terminating | call::CallModelState::Terminated
+                        ) {
                             // Belt-and-braces reverse-flush of the terminal state (a
                             // Terminated copy skips the process_result flush gate) so
                             // the primary's reconcile/reclaim has it — held with the

@@ -38,7 +38,10 @@ fn fixpoint<H: HeaderValue + PartialEq>(label: &str, inputs: &[String]) -> usize
         for value in &values {
             let rendered = value.to_wire();
             let reparsed = H::parse(&SipStr::owned(&rendered)).unwrap_or_else(|e| {
-                panic!("{label}: rendered {rendered:?} no longer parses ({})\n  from {input:?}", e.reason)
+                panic!(
+                    "{label}: rendered {rendered:?} no longer parses ({})\n  from {input:?}",
+                    e.reason
+                )
             });
             assert_eq!(
                 &reparsed, value,

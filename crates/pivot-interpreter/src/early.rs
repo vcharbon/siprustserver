@@ -173,7 +173,8 @@ mod tests {
     #[test]
     fn an_observed_fork_mints_no_tag() {
         let mut observed = step("s5", "A", Some("r1"));
-        observed.kind = StepKind::Expect { check: pivot_schema::flow::CheckMode::Record, optional: false };
+        observed.kind =
+            StepKind::Expect { check: pivot_schema::flow::CheckMode::Record, optional: false };
         let dialogs = EarlyDialogs::mint(&[observed], "r1a2b3");
         assert_eq!(dialogs.tag("A", "r1"), None);
     }

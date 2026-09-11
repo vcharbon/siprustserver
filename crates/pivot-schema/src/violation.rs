@@ -45,7 +45,9 @@ impl RfcViolation {
 
 /// The rules this format can state. Closed: each member names a rule a detector
 /// can decide off the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 pub enum RfcRule {
     /// RFC 3261 §9.2: a UAS that has taken a CANCEL for an INVITE answers 487,
     /// never a 2xx.
@@ -85,9 +87,7 @@ impl RfcRule {
             RfcRule::UnackedReliableProvisional => rfc_rules::RuleId::UnackedReliableProvisional,
             RfcRule::NoAckToDialogCreating2xx => rfc_rules::RuleId::NoAckToDialogCreating2xx,
             RfcRule::NoCancelAfterFinal => rfc_rules::RuleId::NoCancelAfterFinal,
-            RfcRule::SecondAnswerRepeatsTheFirst => {
-                rfc_rules::RuleId::SecondAnswerRepeatsTheFirst
-            }
+            RfcRule::SecondAnswerRepeatsTheFirst => rfc_rules::RuleId::SecondAnswerRepeatsTheFirst,
         }
     }
 }
@@ -99,9 +99,7 @@ impl fmt::Display for RfcRule {
             RfcRule::UnackedReliableProvisional => f.write_str("unacked-reliable-provisional"),
             RfcRule::NoAckToDialogCreating2xx => f.write_str("no-ack-to-dialog-creating-2xx"),
             RfcRule::NoCancelAfterFinal => f.write_str("no-cancel-after-final"),
-            RfcRule::SecondAnswerRepeatsTheFirst => {
-                f.write_str("second-answer-repeats-the-first")
-            }
+            RfcRule::SecondAnswerRepeatsTheFirst => f.write_str("second-answer-repeats-the-first"),
         }
     }
 }
@@ -127,10 +125,9 @@ mod tests {
 
     #[test]
     fn a_violation_states_its_rule_its_anchor_and_its_emitter() {
-        let violation: RfcViolation = serde_json::from_str(
-            r#"{"rule":"no-200-after-cancel","step":"s11","emitter":"uas1"}"#,
-        )
-        .unwrap();
+        let violation: RfcViolation =
+            serde_json::from_str(r#"{"rule":"no-200-after-cancel","step":"s11","emitter":"uas1"}"#)
+                .unwrap();
         assert_eq!(violation.rule, RfcRule::No200AfterCancel);
         assert_eq!(violation.step, "s11");
         assert_eq!(violation.emitter, "uas1");
@@ -187,12 +184,10 @@ mod tests {
     fn a_rule_outside_the_closed_vocabulary_is_refused() {
         // An open token here would let a document name a rule no detector can
         // decide, which is a claim nothing can hold the run to.
-        assert!(
-            serde_json::from_str::<RfcViolation>(
-                r#"{"rule":"answer-after-cancel","step":"s11","emitter":"uas1"}"#
-            )
-            .is_err()
-        );
+        assert!(serde_json::from_str::<RfcViolation>(
+            r#"{"rule":"answer-after-cancel","step":"s11","emitter":"uas1"}"#
+        )
+        .is_err());
         assert!("answer-after-cancel".parse::<RfcRule>().is_err());
         // A merged-vocabulary rule (`rfc_rules::RuleId`) that is NOT on the
         // wire contract is refused the same way: membership in rfc-rules
@@ -214,15 +209,13 @@ mod tests {
 
     #[test]
     fn an_entry_missing_a_field_or_carrying_a_spare_one_is_refused() {
-        assert!(
-            serde_json::from_str::<RfcViolation>(r#"{"rule":"no-200-after-cancel","step":"s11"}"#)
-                .is_err()
-        );
-        assert!(
-            serde_json::from_str::<RfcViolation>(
-                r#"{"rule":"no-200-after-cancel","step":"s11","emitter":"uas1","allowed":true}"#
-            )
-            .is_err()
-        );
+        assert!(serde_json::from_str::<RfcViolation>(
+            r#"{"rule":"no-200-after-cancel","step":"s11"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<RfcViolation>(
+            r#"{"rule":"no-200-after-cancel","step":"s11","emitter":"uas1","allowed":true}"#
+        )
+        .is_err());
     }
 }

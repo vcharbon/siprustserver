@@ -44,7 +44,8 @@ async fn prack_reliable_provisional_relayed_end_to_end() {
     let h = Harness::with_transit_delay("b2bua-prack", 0);
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
 
     // Alice INVITEs (offer in the INVITE) advertising 100rel support.
     let mut call = alice
@@ -129,7 +130,8 @@ async fn a_prack_naming_an_rseq_this_face_never_sent_takes_481() {
     let h = Harness::with_transit_delay("b2bua-prack-unmatched-rack", 0);
     let alice = h.agent("alice", "127.0.0.1:5065").await;
     let bob = h.agent("bob", "127.0.0.1:5075").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
 
     let mut call = alice
         .invite(&bob)
@@ -205,7 +207,8 @@ async fn a_pre_prack_callee_repeat_is_absorbed_and_keeps_its_a_facing_number() {
     let h = Harness::with_transit_delay("b2bua-prack-retransmit", 0);
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let bob = h.agent("bob", "127.0.0.1:5074").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
     let alice_addr: SocketAddr = "127.0.0.1:5064".parse().unwrap();
 
     let mut call = alice
@@ -279,7 +282,8 @@ async fn a_prack_retired_reliable_provisional_is_not_relayed_again() {
     let h = Harness::with_transit_delay("b2bua-prack-retired", 0);
     let alice = h.agent("alice", "127.0.0.1:5067").await;
     let bob = h.agent("bob", "127.0.0.1:5077").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
 
     let mut call = alice
         .invite(&bob)
@@ -320,7 +324,8 @@ async fn an_unreliable_provisional_carries_no_rseq() {
     let h = Harness::with_transit_delay("b2bua-prack-unreliable", 0);
     let alice = h.agent("alice", "127.0.0.1:5065").await;
     let bob = h.agent("bob", "127.0.0.1:5075").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
 
     let mut call = alice
         .invite(&bob)
@@ -371,7 +376,8 @@ async fn a_prack_naming_a_shown_rseq_under_a_wrong_cseq_takes_481() {
     );
     let alice = h.agent("alice", "127.0.0.1:5501").await;
     let bob = h.agent("bob", "127.0.0.1:5511").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5511).start(&h, "b2bua", "127.0.0.1:5521").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5511).start(&h, "b2bua", "127.0.0.1:5521").await;
 
     let mut call = alice
         .invite(&bob)
@@ -446,7 +452,8 @@ async fn a_prack_carrying_no_rack_takes_400() {
     let h = Harness::with_transit_delay("b2bua-prack-no-rack", 0);
     let alice = h.agent("alice", "127.0.0.1:5502").await;
     let bob = h.agent("bob", "127.0.0.1:5512").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5512).start(&h, "b2bua", "127.0.0.1:5522").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5512).start(&h, "b2bua", "127.0.0.1:5522").await;
 
     let mut call = alice
         .invite(&bob)
@@ -512,7 +519,8 @@ async fn a_re_prack_of_an_acknowledged_provisional_is_still_relayed() {
     let h = Harness::with_transit_delay("b2bua-prack-re-prack", 0);
     let alice = h.agent("alice", "127.0.0.1:5504").await;
     let bob = h.agent("bob", "127.0.0.1:5514").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5514).start(&h, "b2bua", "127.0.0.1:5524").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5514).start(&h, "b2bua", "127.0.0.1:5524").await;
 
     let mut call = alice
         .invite(&bob)

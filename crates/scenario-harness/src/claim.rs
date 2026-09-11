@@ -52,10 +52,7 @@ pub fn resolve_claim(
     ordinal: usize,
 ) -> Option<usize> {
     if leg.header("Replaces").is_some() {
-        if let Some(i) = claims
-            .iter()
-            .position(|c| matches!(c, Some(ClaimRule::HasReplaces)))
-        {
+        if let Some(i) = claims.iter().position(|c| matches!(c, Some(ClaimRule::HasReplaces))) {
             return Some(i);
         }
     }
@@ -74,9 +71,7 @@ pub fn resolve_claim(
             return Some(i);
         }
     }
-    claims
-        .iter()
-        .position(|c| matches!(c, Some(ClaimRule::ArrivalOrder(k)) if *k == ordinal))
+    claims.iter().position(|c| matches!(c, Some(ClaimRule::ArrivalOrder(k)) if *k == ordinal))
 }
 
 #[cfg(test)]
@@ -120,10 +115,7 @@ mod tests {
     fn has_replaces_takes_precedence_then_falls_through() {
         let by_number = ClaimRule::RuriUser("0650".into());
         let xfer = ClaimRule::HasReplaces;
-        let raw = invite(
-            "sip:065012@10.0.0.1:5070",
-            "Replaces: abc@h;to-tag=1;from-tag=2\r\n",
-        );
+        let raw = invite("sip:065012@10.0.0.1:5070", "Replaces: abc@h;to-tag=1;from-tag=2\r\n");
 
         assert_eq!(resolve(&[Some(&by_number), Some(&xfer)], &raw, 0), Some(1));
         assert_eq!(resolve(&[Some(&by_number), None], &raw, 0), Some(0));

@@ -10,7 +10,10 @@ use sip_message::SipStr;
 /// the reader rejects is carried as the peer wrote it rather than replaced by a
 /// media type this stack invented — the body is still the peer's.
 pub fn media_type(text: &str) -> Option<MediaType> {
-    Some(MediaType::parse(&SipStr::owned(text)).unwrap_or_else(|_| MediaType::new(SipStr::owned(text))))
+    Some(
+        MediaType::parse(&SipStr::owned(text))
+            .unwrap_or_else(|_| MediaType::new(SipStr::owned(text))),
+    )
 }
 
 /// `application/sdp` — the media type the B2BUA's own offers and answers carry.

@@ -42,7 +42,8 @@ async fn retransmitted_2xx_is_re_acked_on_the_same_branch() {
     let h = Harness::new("b2bua-reack-2xx");
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", BOB_ADDR).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
 
     // ── Establish: INVITE → 180 → 200 → ACK, bridged over two dialogs ─────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -80,7 +81,11 @@ async fn retransmitted_2xx_is_re_acked_on_the_same_branch() {
     // The re-ACK is a repeat the peer provoked, not an outbound request of its
     // own: counted once as a `trigger` repeat of an ACK, and nowhere else.
     assert_eq!(b2bua.metrics().retransmits_total("trigger", "ACK", None), 1);
-    assert_eq!(b2bua.metrics().retransmits_total("final-2xx", "INVITE", Some(200)), 0, "no ladder ran");
+    assert_eq!(
+        b2bua.metrics().retransmits_total("final-2xx", "INVITE", Some(200)),
+        0,
+        "no ladder ran"
+    );
 
     // ── Teardown: clean BYE both ways; the confirmed call reaps (no leak) ─────
     let mut bye = dialog.bye().await;
@@ -119,9 +124,7 @@ fn top_via_branch(raw: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(raw).ok()?;
     let start = s.find("branch=")? + "branch=".len();
     let rest = &s[start..];
-    let end = rest
-        .find(|c: char| c == ';' || c == ',' || c.is_whitespace())
-        .unwrap_or(rest.len());
+    let end = rest.find(|c: char| c == ';' || c == ',' || c.is_whitespace()).unwrap_or(rest.len());
     Some(rest[..end].to_string())
 }
 
@@ -197,7 +200,9 @@ async fn retransmitted_2xx_is_re_acked_under_18x_masking() {
     let finals = report
         .entries()
         .iter()
-        .filter(|e| e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 200 "))
+        .filter(|e| {
+            e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 200 ")
+        })
         .filter(|e| String::from_utf8_lossy(&e.raw).contains("CSeq: 1 INVITE"))
         .count();
     assert_eq!(finals, 1, "alice saw exactly one 200 OK for her INVITE (got {finals})");
@@ -212,9 +217,10 @@ async fn retransmitted_2xx_under_fake_prack_does_not_restage_the_answer() {
     let h = Harness::new("b2bua-reack-2xx-fakeprack");
     let alice = h.agent("alice", ALICE_FP_ADDR).await;
     let bob = h.agent("bob", FP_BOB_ADDR).await;
-    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5776, RelayFirst18xStrategy::FakePrack)
-        .start(&h, "b2bua", "127.0.0.1:5786")
-        .await;
+    let b2bua =
+        B2buaSut::route_all_to_with_18x("127.0.0.1", 5776, RelayFirst18xStrategy::FakePrack)
+            .start(&h, "b2bua", "127.0.0.1:5786")
+            .await;
 
     let mut call = alice
         .invite(&bob)
@@ -265,7 +271,9 @@ async fn retransmitted_2xx_under_fake_prack_does_not_restage_the_answer() {
     let finals = report
         .entries()
         .iter()
-        .filter(|e| e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 200 "))
+        .filter(|e| {
+            e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 200 ")
+        })
         .filter(|e| String::from_utf8_lossy(&e.raw).contains("CSeq: 1 INVITE"))
         .count();
     assert_eq!(finals, 1, "alice saw exactly one 200 OK for her INVITE (got {finals})");
@@ -295,7 +303,8 @@ async fn a_foreign_tagged_2xx_is_not_a_retransmission() {
     );
     let alice = h.agent("alice", "127.0.0.1:5062").await;
     let bob = h.agent("bob", FORK_BOB_ADDR).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5072).start(&h, "b2bua", "127.0.0.1:5082").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5072).start(&h, "b2bua", "127.0.0.1:5082").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -322,8 +331,15 @@ async fn a_foreign_tagged_2xx_is_not_a_retransmission() {
         h.advance(Duration::from_millis(100)).await;
         stragglers += bob.drain().await;
     }
-    assert_eq!(stragglers, 0, "a 2xx under an unconfirmed tag draws no ACK (got {stragglers} datagrams)");
-    assert_eq!(b2bua.metrics().retransmits_total("trigger", "ACK", None), 0, "nothing was repeated");
+    assert_eq!(
+        stragglers, 0,
+        "a 2xx under an unconfirmed tag draws no ACK (got {stragglers} datagrams)"
+    );
+    assert_eq!(
+        b2bua.metrics().retransmits_total("trigger", "ACK", None),
+        0,
+        "nothing was repeated"
+    );
 
     alice_bye.respond(200, "OK").await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
@@ -336,5 +352,8 @@ async fn a_foreign_tagged_2xx_is_not_a_retransmission() {
         .iter()
         .filter(|e| e.from == b2bua.addr && e.to == bob_addr && e.raw.starts_with(b"ACK "))
         .count();
-    assert_eq!(acks, 1, "one ACK reached bob — the relayed initial one, and nothing off the straggler");
+    assert_eq!(
+        acks, 1,
+        "one ACK reached bob — the relayed initial one, and nothing off the straggler"
+    );
 }

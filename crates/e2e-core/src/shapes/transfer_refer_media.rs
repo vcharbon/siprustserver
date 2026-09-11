@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use media::{OpenOptions, PlayScript};
-use media_harness::{ClipName, NegotiateOptions, negotiate_call, reference_clip};
+use media_harness::{negotiate_call, reference_clip, ClipName, NegotiateOptions};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::{HeaderValue, ReferTo, Uri};
 use sip_message::SipStr;

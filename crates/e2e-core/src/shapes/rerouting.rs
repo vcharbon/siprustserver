@@ -40,7 +40,8 @@ impl CallflowShape for Rerouting {
         // layout emits an `X-Api-Call` `routes` failover plan [bob1, bob2]; the
         // fake LB's scripted engine owns the same failover and ignores the header.
         // Either way bob1's rejection drives the reroute to bob2.
-        let invite = rt.outgoing_invite(&["bob1", "bob2"], input, alice.invite(bob1).with_sdp(OFFER));
+        let invite =
+            rt.outgoing_invite(&["bob1", "bob2"], input, alice.invite(bob1).with_sdp(OFFER));
         let mut call = invite.send().await;
 
         // bob1 gets the first b-leg (anchor: bob1.initialInvite) and REJECTS with

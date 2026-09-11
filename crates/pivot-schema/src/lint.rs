@@ -84,7 +84,10 @@ impl Report {
                     Severity::Error => "error",
                     Severity::Warning => "warning",
                 };
-                format!("{severity}: {} [{}]\n  {}\n  hint: {}\n", d.path, d.rule, d.message, d.hint)
+                format!(
+                    "{severity}: {} [{}]\n  {}\n  hint: {}\n",
+                    d.path, d.rule, d.message, d.hint
+                )
             })
             .collect()
     }
@@ -230,7 +233,11 @@ pub(crate) fn reach(target: Place, from: Place) -> Reach {
     if target.branch != from.branch {
         return Reach::CrossBranch;
     }
-    if target.inner < from.inner { Reach::Ok } else { Reach::Forward }
+    if target.inner < from.inner {
+        Reach::Ok
+    } else {
+        Reach::Forward
+    }
 }
 
 /// Pre-computed lookups over one document.

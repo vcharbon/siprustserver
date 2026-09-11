@@ -80,8 +80,7 @@ impl Owner {
                             // A pre-1xx copy already on the wire (grace expired)
                             // makes a NEWER CANCEL a plain re-send, not a hold.
                             TxnState::Trying
-                                if t
-                                    .held_cancel
+                                if t.held_cancel
                                     .as_ref()
                                     .map_or(true, |h| h.wire == CancelWire::Held) =>
                             {
@@ -128,9 +127,7 @@ impl Owner {
                             }
                         }
                     }
-                    self.metrics
-                        .cancels_held
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics.cancels_held.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 CancelGate::Suppress => {
                     self.metrics
@@ -217,11 +214,9 @@ impl Owner {
         self.start_client_retransmit(&branch, buf, dest, max_ms, timeout_kind);
 
         match txn_type {
-            TxnKind::Invite => ClientTransactionHandle::Invite {
-                branch,
-                original_invite: msg,
-                destination: dest,
-            },
+            TxnKind::Invite => {
+                ClientTransactionHandle::Invite { branch, original_invite: msg, destination: dest }
+            }
             TxnKind::NonInvite => ClientTransactionHandle::NonInvite {
                 branch,
                 original_request: msg,
@@ -293,7 +288,11 @@ impl Owner {
     /// the ladder's whole life: the host txn's `Proceeding` belongs to the
     /// INVITE, and the CANCEL sub-state never has a Proceeding of its own — any
     /// response with a CANCEL CSeq (1xx included) ends the ladder outright.
-    pub(super) async fn fire_cancel_retransmit(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
+    pub(super) async fn fire_cancel_retransmit(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        branch: &str,
+    ) {
         let send = match self.txns.get_mut(branch) {
             Some(t) if t.state.is_active() => match t.held_cancel.as_mut() {
                 Some(h) if h.wire != CancelWire::Held => {
@@ -308,9 +307,7 @@ impl Owner {
         self.send_buffer(endpoint, &buf, dest).await;
         self.metrics.retransmits.record_request(Class::CancelClient, method_slot(&Method::Cancel));
         if let Some(interval) = rearm {
-            let key = self
-                .timers
-                .insert(Timer::CancelRetransmit(branch.to_string()), interval);
+            let key = self.timers.insert(Timer::CancelRetransmit(branch.to_string()), interval);
             if let Some(txn) = self.txns.get_mut(branch) {
                 txn.cancel_retransmit_key = Some(key);
             }
@@ -386,7 +383,10 @@ impl Owner {
                     buf.clone(),
                     dest,
                     t.kind == TxnKind::NonInvite && t.state == TxnState::Proceeding,
-                    t.ladder.as_ref().and_then(Ladder::class).map(|class| (class, method_slot(&t.method))),
+                    t.ladder
+                        .as_ref()
+                        .and_then(Ladder::class)
+                        .map(|class| (class, method_slot(&t.method))),
                 ),
                 _ => return,
             },
@@ -425,11 +425,10 @@ impl Owner {
     pub(super) async fn fire_timeout(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
         let (call_ref, leg_id, method, destination, timeout_kind) = match self.txns.get(branch) {
             Some(t) if t.state.is_active() => {
-                let method = t
-                    .original_request
-                    .as_ref()
-                    .map(|r| r.method().to_string())
-                    .or_else(|| match t.kind {
+                let method =
+                    t.original_request.as_ref().map(|r| r.method().to_string()).or_else(|| match t
+                        .kind
+                    {
                         TxnKind::Invite => Some("INVITE".to_string()),
                         TxnKind::NonInvite => None,
                     });
@@ -528,10 +527,8 @@ impl Owner {
             None => return,
         };
         for branch in branches {
-            let (is_client, is_completed, is_non_invite) = self
-                .txns
-                .get(branch.as_str())
-                .map_or((false, false, false), |t| {
+            let (is_client, is_completed, is_non_invite) =
+                self.txns.get(branch.as_str()).map_or((false, false, false), |t| {
                     (
                         t.role == TxnRole::Client,
                         t.state == TxnState::Completed,
@@ -551,13 +548,17 @@ impl Owner {
                 // swallow one still inside its grace window). Marked sent so
                 // `delete_txn` does not double-count it as dropped. Strict
                 // §9.1 policy keeps the old drop.
-                let flush = match self.txns.get_mut(branch.as_str()).and_then(|t| t.held_cancel.as_mut()) {
-                    Some(h) if h.wire == CancelWire::Held && self.cancel_hold_grace_ms.is_some() => {
-                        h.wire = CancelWire::SentPre1xx;
-                        Some((h.buf.clone(), h.dest))
-                    }
-                    _ => None,
-                };
+                let flush =
+                    match self.txns.get_mut(branch.as_str()).and_then(|t| t.held_cancel.as_mut()) {
+                        Some(h)
+                            if h.wire == CancelWire::Held
+                                && self.cancel_hold_grace_ms.is_some() =>
+                        {
+                            h.wire = CancelWire::SentPre1xx;
+                            Some((h.buf.clone(), h.dest))
+                        }
+                        _ => None,
+                    };
                 if let Some((buf, dest)) = flush {
                     self.send_buffer(endpoint, &buf, dest).await;
                     self.metrics
@@ -608,8 +609,7 @@ impl Owner {
                 // that already took its final (Completed holds for Timer D).
                 let (key, grace_key, flush) = match self.txns.get_mut(branch) {
                     Some(txn)
-                        if txn.role == TxnRole::Client
-                            && txn.state != TxnState::Completed =>
+                        if txn.role == TxnRole::Client && txn.state != TxnState::Completed =>
                     {
                         txn.state = TxnState::Proceeding;
                         (
@@ -725,11 +725,7 @@ impl Owner {
                             // retransmitting. Cleared; counted as dropped only if
                             // it never made the wire (a grace-sent copy is
                             // already accounted pre-1xx).
-                            if txn
-                                .held_cancel
-                                .take()
-                                .is_some_and(|h| h.wire == CancelWire::Held)
-                            {
+                            if txn.held_cancel.take().is_some_and(|h| h.wire == CancelWire::Held) {
                                 self.metrics
                                     .held_cancels_dropped
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

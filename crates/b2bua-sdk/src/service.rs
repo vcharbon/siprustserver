@@ -53,11 +53,7 @@ pub struct ServiceSeed {
 impl ServiceSeed {
     /// A seed that only sets the initial cursor (no data backing, no actions).
     pub fn new(initial_state: StateLabel) -> Self {
-        Self {
-            initial_state,
-            data_write: Box::new(|_| {}),
-            actions: Vec::new(),
-        }
+        Self { initial_state, data_write: Box::new(|_| {}), actions: Vec::new() }
     }
     /// Install the service's data backing (typed slice or `ext[id]`).
     pub fn with_data(mut self, f: impl FnOnce(&mut Call) + 'static) -> Self {

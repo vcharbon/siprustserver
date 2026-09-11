@@ -93,10 +93,7 @@ impl ReplReport {
     /// Resolve an addr to its node ordinal (lane label), falling back to the
     /// addr string for an unknown endpoint.
     fn lane(&self, addr: SocketAddr) -> String {
-        self.lane_map()
-            .get(&addr)
-            .cloned()
-            .unwrap_or_else(|| addr.to_string())
+        self.lane_map().get(&addr).cloned().unwrap_or_else(|| addr.to_string())
     }
 
     /// The distinct node lanes, sorted by ordinal (deterministic order).
@@ -168,8 +165,7 @@ impl ReplReport {
             let seq = seq as u64 + 1;
             match row {
                 TimelineRow::Frame(f) => {
-                    let from =
-                        lane_map.get(&f.from).cloned().unwrap_or_else(|| f.from.to_string());
+                    let from = lane_map.get(&f.from).cloned().unwrap_or_else(|| f.from.to_string());
                     let to = lane_map.get(&f.to).cloned().unwrap_or_else(|| f.to.to_string());
                     // The ephemeral (puller) endpoint — the one that is NOT a
                     // fixed listen lane — identifies the connection; color by it.
@@ -249,7 +245,12 @@ impl ReplReport {
                 }
                 TimelineRow::Marker(m) => {
                     let lane = &m.node;
-                    out.push_str(&format!("    Note over {}: t{} {}\n", lane, m.at_ms, marker_label(m)));
+                    out.push_str(&format!(
+                        "    Note over {}: t{} {}\n",
+                        lane,
+                        m.at_ms,
+                        marker_label(m)
+                    ));
                 }
             }
         }
@@ -267,10 +268,7 @@ pub fn frame_summary(frame: &Frame) -> String {
                 Partition::Pri => "Reclaim",
                 Partition::Bak => "Backup",
             };
-            format!(
-                "PullRequest[{p}] caller={caller} since=({},{})",
-                since.gen, since.counter
-            )
+            format!("PullRequest[{p}] caller={caller} since=({},{})", since.gen, since.counter)
         }
         Frame::Data { at, op, partition, call_ref, call_gen, call_bgen, body, .. } => {
             let o = match op {

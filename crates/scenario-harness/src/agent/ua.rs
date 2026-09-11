@@ -3,8 +3,8 @@
 //! receive view), and the basic receive/dispatch primitives. The tolerant /
 //! absorbing receive policies live in [`super::tolerant_recv`].
 
-use std::net::SocketAddr;
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,8 +24,8 @@ use super::out_of_dialog::OutOfDialogRequest;
 use super::rr_fold::RecordRouteFold;
 use super::server_txn::ServerTxn;
 use super::step::{unwrap_step, StepError};
-use crate::absorption::{Absorption, Owner, TwoXxAcks, WireEntry};
 use super::Invite;
+use crate::absorption::{Absorption, Owner, TwoXxAcks, WireEntry};
 
 /// The media type a scenario names as text. A value the reader rejects still
 /// reaches the wire as the test wrote it — a scenario states the bytes it means
@@ -211,11 +211,7 @@ impl Agent {
     /// sequencing arbitrary steps across legs cannot use the pull-shaped
     /// transaction handles, because it must dispatch what ARRIVES to whichever
     /// leg claims it. A test driving one call still uses the builders.
-    pub async fn try_send_datagram(
-        &self,
-        wire: &[u8],
-        dst: SocketAddr,
-    ) -> Result<(), StepError> {
+    pub async fn try_send_datagram(&self, wire: &[u8], dst: SocketAddr) -> Result<(), StepError> {
         self.try_send_wire(wire, dst).await
     }
 
@@ -305,10 +301,9 @@ impl Agent {
     }
 
     fn parse(&self, raw: &[u8]) -> Result<SipMessage, StepError> {
-        CustomParser::new().parse(raw).map_err(|e| StepError::Unparseable {
-            who: self.name.clone(),
-            detail: e.to_string(),
-        })
+        CustomParser::new()
+            .parse(raw)
+            .map_err(|e| StepError::Unparseable { who: self.name.clone(), detail: e.to_string() })
     }
 
     /// **The absorption seam**: classify one arriving datagram once
@@ -372,7 +367,8 @@ impl Agent {
                         who: self.name.clone(),
                         detail: format!(
                             "got a {} {} response, expected a {method} request",
-                            r.status(), r.reason()
+                            r.status(),
+                            r.reason()
                         ),
                     })
                 }
@@ -440,7 +436,11 @@ impl Agent {
     /// For a dialog-CREATING INVITE keep using [`invite`](Agent::invite) — this
     /// builder tracks no dialog state (a non-INVITE out-of-dialog transaction
     /// creates none).
-    pub fn request<'a>(&'a self, method: OutOfDialogMethod, peer: &'a Agent) -> OutOfDialogRequest<'a> {
+    pub fn request<'a>(
+        &'a self,
+        method: OutOfDialogMethod,
+        peer: &'a Agent,
+    ) -> OutOfDialogRequest<'a> {
         OutOfDialogRequest::new(self, peer, method)
     }
 
@@ -488,11 +488,7 @@ impl Agent {
     /// the router resolves the (non-existent) call, finds no state, and rejects
     /// it 481 (`maybe_reject_orphan`). Used by the out-of-dialog REFER reject
     /// scenario. Returns a client-transaction handle to `expect` the 481 on.
-    pub async fn send_out_of_dialog_refer(
-        &self,
-        dst: SocketAddr,
-        refer_to: &str,
-    ) -> InDialogTxn {
+    pub async fn send_out_of_dialog_refer(&self, dst: SocketAddr, refer_to: &str) -> InDialogTxn {
         // A synthetic dialog the B2BUA has never seen: fresh Call-ID, a bogus
         // remote (To) tag, and a remote target carrying a bogus stamped callRef
         // (unreserved chars → no escaping needed; the router reads it verbatim),
@@ -514,10 +510,7 @@ impl Agent {
         let opts = GenerateInDialogRequestOpts {
             via: Some(self.via()),
             contact: Some(self.contact()),
-            extra_headers: vec![SipHeader {
-                name: "Refer-To".into(),
-                value: refer_to.into(),
-            }],
+            extra_headers: vec![SipHeader { name: "Refer-To".into(), value: refer_to.into() }],
             ..Default::default()
         };
         let res = generate_in_dialog_request(InDialogMethod::Refer, &view, &opts);

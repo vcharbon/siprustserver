@@ -25,7 +25,10 @@ async fn call_with_alice_reuse(alice: &Agent, bob: &Agent) {
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
-    dialog.set_cseq_pattern(CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }] });
+    dialog.set_cseq_pattern(CseqPattern {
+        offset: 0,
+        ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }],
+    });
     let mut i0 = dialog.send_request(InDialogMethod::Info).send().await;
     bob.receive("INFO").await.respond(200, "OK").await;
     i0.expect(200).await;
@@ -52,7 +55,8 @@ fn info_positions(h: &Harness) -> Vec<usize> {
 /// A party-scoped waiver over exactly the offending party passes the gate.
 #[tokio::test]
 async fn scoped_waiver_passes() {
-    let h = Harness::new("waiver-pass").describe("alice's cseq reuse waived by an alice-scoped waiver");
+    let h =
+        Harness::new("waiver-pass").describe("alice's cseq reuse waived by an alice-scoped waiver");
     h.waive(WaiverScope::rule(CSEQ_RULE, "replayed peer CSeq reuse").on_party("alice"));
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -64,7 +68,8 @@ async fn scoped_waiver_passes() {
 #[tokio::test]
 #[should_panic(expected = "RFC audit violation")]
 async fn unwaived_violation_fails() {
-    let h = Harness::new("waiver-absent").describe("the same cseq reuse with no waiver must fail the gate");
+    let h = Harness::new("waiver-absent")
+        .describe("the same cseq reuse with no waiver must fail the gate");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     call_with_alice_reuse(&alice, &bob).await;
@@ -74,7 +79,8 @@ async fn unwaived_violation_fails() {
 /// The coarse `allow_violation` still waives (any party, any message).
 #[tokio::test]
 async fn coarse_allow_violation_still_waives() {
-    let h = Harness::new("waiver-coarse").describe("allow_violation waives the reuse regardless of party");
+    let h = Harness::new("waiver-coarse")
+        .describe("allow_violation waives the reuse regardless of party");
     h.allow_violation(CSEQ_RULE, "replayed peer CSeq reuse (coarse)");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -88,7 +94,8 @@ async fn coarse_allow_violation_still_waives() {
 #[tokio::test]
 #[should_panic(expected = "RFC audit violation")]
 async fn peer_scoped_waiver_does_not_filter_other_party() {
-    let h = Harness::new("waiver-side").describe("alice-scoped waiver leaves bob's identical violation gated");
+    let h = Harness::new("waiver-side")
+        .describe("alice-scoped waiver leaves bob's identical violation gated");
     h.waive(WaiverScope::rule(CSEQ_RULE, "replayed alice CSeq reuse").on_party("alice"));
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -104,7 +111,10 @@ async fn peer_scoped_waiver_does_not_filter_other_party() {
     let mut bob_dialog = uas.dialog();
 
     // alice's reuse (waived).
-    alice_dialog.set_cseq_pattern(CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }] });
+    alice_dialog.set_cseq_pattern(CseqPattern {
+        offset: 0,
+        ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }],
+    });
     let mut ai0 = alice_dialog.send_request(InDialogMethod::Info).send().await;
     bob.receive("INFO").await.respond(200, "OK").await;
     ai0.expect(200).await;
@@ -113,7 +123,10 @@ async fn peer_scoped_waiver_does_not_filter_other_party() {
     ai1.expect(200).await;
 
     // bob's reuse of the SAME class (NOT waived — different emitting party).
-    bob_dialog.set_cseq_pattern(CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }] });
+    bob_dialog.set_cseq_pattern(CseqPattern {
+        offset: 0,
+        ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }],
+    });
     let mut bi0 = bob_dialog.send_request(InDialogMethod::Info).send().await;
     alice.receive("INFO").await.respond(200, "OK").await;
     bi0.expect(200).await;
@@ -131,7 +144,8 @@ async fn peer_scoped_waiver_does_not_filter_other_party() {
 /// A position-scoped waiver covers its own occurrence — passes.
 #[tokio::test]
 async fn message_position_scoping_covers_its_occurrence() {
-    let h = Harness::new("waiver-pos-ok").describe("a waiver at the reuse's wire position covers it");
+    let h =
+        Harness::new("waiver-pos-ok").describe("a waiver at the reuse's wire position covers it");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     call_with_alice_reuse(&alice, &bob).await;
@@ -148,7 +162,8 @@ async fn message_position_scoping_covers_its_occurrence() {
 #[tokio::test]
 #[should_panic(expected = "RFC audit violation")]
 async fn message_position_scoping_does_not_cover_second() {
-    let h = Harness::new("waiver-pos-scope").describe("a one-position waiver leaves a second occurrence gated");
+    let h = Harness::new("waiver-pos-scope")
+        .describe("a one-position waiver leaves a second occurrence gated");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     call_with_alice_reuse(&alice, &bob).await; // call 1
@@ -220,7 +235,10 @@ async fn relay_call_with_alice_reuse(alice: &Agent, mid: &Proxy, bob: &Agent) {
     mid.forward_request(bob_addr).await;
     bob.receive("ACK").await;
 
-    dialog.set_cseq_pattern(CseqPattern { offset: 0, ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }] });
+    dialog.set_cseq_pattern(CseqPattern {
+        offset: 0,
+        ops: vec![CseqOpAt { at: 1, op: CseqOp::Reuse }],
+    });
     for _ in 0..2 {
         let mut i = dialog.send_request(InDialogMethod::Info).send().await;
         mid.forward_request(bob_addr).await;
@@ -241,13 +259,17 @@ async fn relay_call_with_alice_reuse(alice: &Agent, mid: &Proxy, bob: &Agent) {
 /// never waive the SUT/mid side; here mid is a stand-in relayer.)
 #[tokio::test]
 async fn relay_findings_attributed_to_their_true_emitters() {
-    let h = Harness::new("waiver-relay-both").describe("relay reuse: alice-emitted + mid-relayed, both waived");
+    let h = Harness::new("waiver-relay-both")
+        .describe("relay reuse: alice-emitted + mid-relayed, both waived");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let mid = h.proxy("mid", "127.0.0.1:5080").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     // alice's copy (received at mid) and mid's relayed copy (received at bob).
     h.waive(WaiverScope::rule(CSEQ_RULE, "alice's replayed reuse").on_party("alice"));
-    h.waive(WaiverScope::rule(CSEQ_RULE, "mid relayed it (a real SUT lane never waives the SUT)").on_party("mid"));
+    h.waive(
+        WaiverScope::rule(CSEQ_RULE, "mid relayed it (a real SUT lane never waives the SUT)")
+            .on_party("mid"),
+    );
     relay_call_with_alice_reuse(&alice, &mid, &bob).await;
     h.finish().await;
 }
@@ -258,7 +280,8 @@ async fn relay_findings_attributed_to_their_true_emitters() {
 #[tokio::test]
 #[should_panic(expected = "RFC audit violation")]
 async fn relay_peer_waiver_leaves_relayed_copy_gated() {
-    let h = Harness::new("waiver-relay-alice").describe("alice-scoped waiver leaves the mid-relayed copy gated");
+    let h = Harness::new("waiver-relay-alice")
+        .describe("alice-scoped waiver leaves the mid-relayed copy gated");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let mid = h.proxy("mid", "127.0.0.1:5080").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -272,7 +295,8 @@ async fn relay_peer_waiver_leaves_relayed_copy_gated() {
 #[tokio::test]
 #[should_panic(expected = "RFC audit violation")]
 async fn relay_mid_waiver_leaves_alice_finding_gated() {
-    let h = Harness::new("waiver-relay-mid").describe("mid-scoped waiver leaves the alice-emitted finding gated");
+    let h = Harness::new("waiver-relay-mid")
+        .describe("mid-scoped waiver leaves the alice-emitted finding gated");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let mid = h.proxy("mid", "127.0.0.1:5080").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -286,7 +310,8 @@ async fn relay_mid_waiver_leaves_alice_finding_gated() {
 #[tokio::test]
 #[should_panic(expected = "RFC audit violation")]
 async fn position_waiver_pins_offender_not_a_compliant_neighbour() {
-    let h = Harness::new("waiver-pos-offender").describe("waiving the INVITE's position does not cover the reuse");
+    let h = Harness::new("waiver-pos-offender")
+        .describe("waiving the INVITE's position does not cover the reuse");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     call_with_alice_reuse(&alice, &bob).await;
@@ -305,7 +330,8 @@ async fn position_waiver_pins_offender_not_a_compliant_neighbour() {
 #[tokio::test]
 #[should_panic(expected = "RFC audit violation")]
 async fn two_reuses_one_dialog_position_scopes_exactly_one() {
-    let h = Harness::new("waiver-two-reuse").describe("one position waiver covers one of two reuses in a dialog");
+    let h = Harness::new("waiver-two-reuse")
+        .describe("one position waiver covers one of two reuses in a dialog");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 

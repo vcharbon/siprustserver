@@ -40,11 +40,7 @@ pub struct LimiterConfig {
 
 impl Default for LimiterConfig {
     fn default() -> Self {
-        Self {
-            window_sec: 300,
-            active_windows: 3,
-            ttl_sec: 1200,
-        }
+        Self { window_sec: 300, active_windows: 3, ttl_sec: 1200 }
     }
 }
 
@@ -94,14 +90,7 @@ pub struct WindowStore {
 impl WindowStore {
     /// Build a store over the injected clock.
     pub fn new(cfg: LimiterConfig, clock: Clock) -> Self {
-        Self {
-            inner: Mutex::new(Inner {
-                map: HashMap::new(),
-                auto_cleared: 0,
-            }),
-            clock,
-            cfg,
-        }
+        Self { inner: Mutex::new(Inner { map: HashMap::new(), auto_cleared: 0 }), clock, cfg }
     }
 
     fn now_ms(&self) -> i64 {
@@ -130,9 +119,7 @@ impl WindowStore {
                 }
             }
             if total >= e.limit {
-                return AdmitResult::Rejected {
-                    limiter_id: e.id.clone(),
-                };
+                return AdmitResult::Rejected { limiter_id: e.id.clone() };
             }
         }
 
@@ -142,10 +129,7 @@ impl WindowStore {
             let en = inner
                 .map
                 .entry((e.id.clone(), cur))
-                .or_insert(Entry {
-                    count: 0,
-                    expires_at_ms: expires,
-                });
+                .or_insert(Entry { count: 0, expires_at_ms: expires });
             en.count += 1;
             en.expires_at_ms = expires;
         }
@@ -177,10 +161,10 @@ impl WindowStore {
         for h in holds {
             if h.window != cur {
                 // INCR current first (briefly overcounts, never undercounts).
-                let en = inner.map.entry((h.id.clone(), cur)).or_insert(Entry {
-                    count: 0,
-                    expires_at_ms: expires,
-                });
+                let en = inner
+                    .map
+                    .entry((h.id.clone(), cur))
+                    .or_insert(Entry { count: 0, expires_at_ms: expires });
                 en.count += 1;
                 en.expires_at_ms = expires;
                 // DECR origin (floored).
@@ -188,10 +172,7 @@ impl WindowStore {
                     o.count = (o.count - 1).max(0);
                 }
             }
-            out.push(Hold {
-                id: h.id.clone(),
-                window: cur,
-            });
+            out.push(Hold { id: h.id.clone(), window: cur });
         }
         out
     }

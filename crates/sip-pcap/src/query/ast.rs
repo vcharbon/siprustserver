@@ -229,7 +229,10 @@ pub enum Node {
     /// Group → how many legs.
     CountLeg(NumCmp),
     /// Group or leg → how many transactions satisfy `filter` (all, if absent).
-    CountTxn { filter: Option<Box<Node>>, count: NumCmp },
+    CountTxn {
+        filter: Option<Box<Node>>,
+        count: NumCmp,
+    },
 
     // --- leaves, resolved against whatever the binding offers ---
     /// Correlation evidence kind on the group.
@@ -257,7 +260,10 @@ pub enum Node {
     IsRequest(bool),
     Retx(bool),
     /// A header of the bound message, or of any message of a wider binding.
-    Header { name: String, value: StrMatch },
+    Header {
+        name: String,
+        value: StrMatch,
+    },
     /// The bound message's body — the SDP predicate.
     Body(StrMatch),
     Src(StrMatch),

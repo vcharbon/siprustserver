@@ -26,7 +26,9 @@ pub mod eval;
 pub mod load;
 pub mod project;
 
-pub use ast::{KeyField, Neighbours, Node, NumCmp, Projection, Query, Scope, StatusMatch, StrMatch};
+pub use ast::{
+    KeyField, Neighbours, Node, NumCmp, Projection, Query, Scope, StatusMatch, StrMatch,
+};
 pub use eval::{group_t0, group_t1, select_groups, Ctx};
 pub use load::QueryError;
 pub use project::{neighbours_of, summary_row};

@@ -98,7 +98,9 @@ use b2bua::cdr::CdrWriter;
 use b2bua::decision::{CallLimiterEntry, ScriptedDecisionEngine};
 use b2bua::repl::{PeerResolver, ReplicatingCallStore};
 use b2bua::ReplicationSetup;
-use b2bua_runner_kit::{env_flag, env_or, resolve, split_host_port, validate_default_dest, RunnerEnv};
+use b2bua_runner_kit::{
+    env_flag, env_or, resolve, split_host_port, validate_default_dest, RunnerEnv,
+};
 use repl_net::RealReplicationNetwork;
 use topology::{Membership, Peer, StaticMembership};
 
@@ -134,10 +136,7 @@ fn stress_limiter_from_env() -> Option<CallLimiterEntry> {
 /// future-gen watermark. Falls back to 0 only if the wall clock is before the
 /// epoch (never, in practice).
 fn boot_incarnation() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 /// Where replication peer addresses come from (ADR-0012 D3).
@@ -181,8 +180,7 @@ impl PeerResolver for ReplResolver {
             ReplAddressing::K8sPodDns { service, namespace } => {
                 // Prefer the stable per-pod DNS name (D3): re-resolving it picks up
                 // a restarted peer's new IP without any membership delta.
-                let fqdn =
-                    format!("{}.{}.{}.svc.cluster.local", peer.ordinal, service, namespace);
+                let fqdn = format!("{}.{}.{}.svc.cluster.local", peer.ordinal, service, namespace);
                 let by_dns = tokio::net::lookup_host((fqdn.as_str(), self.repl_port))
                     .await
                     .ok()
@@ -190,10 +188,7 @@ impl PeerResolver for ReplResolver {
                 // CoreDNS miss / NXDOMAIN-while-not-ready → fall back to the
                 // EndpointSlice host (a Pod IP). Backoff+retry covers transients.
                 by_dns.or_else(|| {
-                    peer.host
-                        .parse::<IpAddr>()
-                        .ok()
-                        .map(|ip| SocketAddr::new(ip, self.repl_port))
+                    peer.host.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, self.repl_port))
                 })
             }
         };
@@ -233,8 +228,9 @@ async fn build_membership() -> Option<(Arc<dyn Membership>, ReplAddressing)> {
         }
     }
     let service = env_or("B2BUA_REPL_SERVICE", "b2bua-worker");
-    let namespace =
-        env::var("B2BUA_NAMESPACE").or_else(|_| env::var("POD_NAMESPACE")).unwrap_or_else(|_| "sip-test".to_string());
+    let namespace = env::var("B2BUA_NAMESPACE")
+        .or_else(|_| env::var("POD_NAMESPACE"))
+        .unwrap_or_else(|_| "sip-test".to_string());
     // rustls 0.23 has no default CryptoProvider compiled in; install ring once
     // before the kube client opens its first TLS connection (idempotent — a
     // second call returns Err, which we ignore).
@@ -249,7 +245,10 @@ async fn build_membership() -> Option<(Arc<dyn Membership>, ReplAddressing)> {
             );
             // Reach peers by their stable per-pod DNS name (ADR-0012 D3), built from
             // the ordinal + this Service + namespace.
-            let addressing = ReplAddressing::K8sPodDns { service: service.clone(), namespace: namespace.clone() };
+            let addressing = ReplAddressing::K8sPodDns {
+                service: service.clone(),
+                namespace: namespace.clone(),
+            };
             Some((Arc::new(topology::K8sMembership::spawn(client, namespace, service)), addressing))
         }
         Err(e) => {
@@ -333,10 +332,12 @@ async fn main() {
                 let repl_listen = resolve(&env_or("B2BUA_REPL_LISTEN", "0.0.0.0:9092"));
                 // Cluster-wide repl port peers are reached on; defaults to our
                 // own listen port (homogeneous pool).
-                let repl_port: u16 =
-                    env_or("B2BUA_REPL_PORT", &repl_listen.port().to_string()).parse().expect("B2BUA_REPL_PORT");
+                let repl_port: u16 = env_or("B2BUA_REPL_PORT", &repl_listen.port().to_string())
+                    .parse()
+                    .expect("B2BUA_REPL_PORT");
                 let incarnation_gen = boot_incarnation();
-                let store = Arc::new(ReplicatingCallStore::new(incarnation_gen, base.clock.clone()));
+                let store =
+                    Arc::new(ReplicatingCallStore::new(incarnation_gen, base.clock.clone()));
                 tracing::info!(
                     listen = %repl_listen,
                     peer_port = repl_port,

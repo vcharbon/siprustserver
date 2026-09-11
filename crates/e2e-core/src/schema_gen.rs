@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 
 use schemars::schema_for;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::model::{CheckBlock, CheckSet, TestCase};
 use crate::selector;
@@ -66,8 +66,8 @@ fn op_value_rules() -> Value {
 /// - `Some(shape)` — additionally pin `CheckBlock.on` to `selectors_for(shape)`,
 ///   so only that shape's `<agent>.<anchor>` selectors complete and validate.
 pub fn test_case_schema(shape: Option<&ShapeEntry>) -> Value {
-    let mut root = serde_json::to_value(schema_for!(TestCase))
-        .expect("TestCase schema serialises to JSON");
+    let mut root =
+        serde_json::to_value(schema_for!(TestCase)).expect("TestCase schema serialises to JSON");
 
     let Some(defs) = root.get_mut("$defs").and_then(Value::as_object_mut) else {
         return root;
@@ -154,13 +154,11 @@ pub fn compatible_shapes(
     let mut out = Vec::new();
     for (id, shape) in shapes {
         let spec = &shape.descriptor;
-        let inputs_ok =
-            ShapeSpec::required_input(spec).iter().all(|f| case.input.provides(f));
+        let inputs_ok = ShapeSpec::required_input(spec).iter().all(|f| case.input.provides(f));
         let roster = shape.body.agents();
         let supported = blocks.iter().all(|b| match b.selector() {
             Some((agent, name)) => {
-                let anchor_ok =
-                    Anchor::parse(name).is_some_and(|a| spec.anchors.contains(&a));
+                let anchor_ok = Anchor::parse(name).is_some_and(|a| spec.anchors.contains(&a));
                 let agent_ok = roster.is_empty() || roster.contains(&agent);
                 anchor_ok && agent_ok
             }
@@ -236,7 +234,10 @@ mod tests {
         // basic-call declares none → extras stays an open map.
         let basic = reg.get("basic-call").unwrap();
         let base = test_case_schema(Some(basic));
-        assert_eq!(base["$defs"]["Input"]["properties"]["extras"]["additionalProperties"], json!(true));
+        assert_eq!(
+            base["$defs"]["Input"]["properties"]["extras"]["additionalProperties"],
+            json!(true)
+        );
     }
 
     #[test]

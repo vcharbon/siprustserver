@@ -72,12 +72,8 @@ fn failing_campaign_exits_one() {
     )
     .unwrap();
 
-    let code = e2e_cli::cli(&s(&[
-        "run",
-        e2e.join("campaigns/fail.json").to_str().unwrap(),
-        "--ts",
-        "t0",
-    ]));
+    let code =
+        e2e_cli::cli(&s(&["run", e2e.join("campaigns/fail.json").to_str().unwrap(), "--ts", "t0"]));
     assert_eq!(code, 1, "a failing check must gate CI");
     // Default runs root is <e2e-dir>/runs; the failing cell's result persisted.
     let cell_dir = e2e.join("runs/fail/t0/wrong-number__basic-call__fake-lsbc-b2bua");

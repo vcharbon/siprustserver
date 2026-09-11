@@ -135,7 +135,9 @@ impl PanicDump {
         for e in &entries {
             let sent = format_relative(e.sent_ms as i64 - base);
             let ts = match e.received_ms {
-                Some(r) if r != e.sent_ms => format!("{sent} → {}", format_relative(r as i64 - base)),
+                Some(r) if r != e.sent_ms => {
+                    format!("{sent} → {}", format_relative(r as i64 - base))
+                }
                 _ => sent,
             };
             let undelivered = if e.delivered { "" } else { "  [UNDELIVERED]" };

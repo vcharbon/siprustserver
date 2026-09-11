@@ -164,7 +164,9 @@ mod tests {
             Body::Resource(_)
         ));
         assert!(matches!(
-            parse(r#"{"ref":"resources/s11_uas1_0.xml","mode":"frozen","content-type":"application/mscp+xml"}"#),
+            parse(
+                r#"{"ref":"resources/s11_uas1_0.xml","mode":"frozen","content-type":"application/mscp+xml"}"#
+            ),
             Body::Resource(_)
         ));
         assert!(matches!(parse(r#"{"mode":"absent"}"#), Body::Shape(_)));

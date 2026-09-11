@@ -43,7 +43,8 @@ async fn cancel_reinvite_ends_renegotiation_keeps_call() {
     let h = Harness::with_transit_delay("b2bua-reinvite-cancel", 0);
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5071").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -133,7 +134,8 @@ async fn cancel_reinvite_crossing_200_is_acked_and_absorbed() {
     let h = Harness::with_transit_delay("b2bua-reinvite-cancel-crossing", 0);
     let alice = h.agent("alice", "127.0.0.1:5062").await;
     let bob = h.agent("bob", "127.0.0.1:5072").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5072).start(&h, "b2bua", "127.0.0.1:5082").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5072).start(&h, "b2bua", "127.0.0.1:5082").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -204,7 +206,8 @@ async fn cancel_after_reinvite_answered_is_481_and_keeps_call() {
     );
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

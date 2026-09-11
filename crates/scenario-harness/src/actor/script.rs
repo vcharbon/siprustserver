@@ -40,12 +40,10 @@ pub(super) fn goal_arm_enabled(st: &ActorState<'_>) -> bool {
         Some(GoalStep::ExpectResponse { status, cseq_method, .. }) => {
             let need_final = *status >= 200;
             let pin = cseq_method.as_deref();
-            st.obs
-                .with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, need_final, pin))
+            st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, need_final, pin))
         }
         Some(
-            GoalStep::ObserveFinal { cseq_method, .. }
-            | GoalStep::ExpectFinal { cseq_method, .. },
+            GoalStep::ObserveFinal { cseq_method, .. } | GoalStep::ExpectFinal { cseq_method, .. },
         ) => {
             let pin = cseq_method.as_deref();
             st.obs.with_snapshot(|s| s.leg_response_ready(st.role, st.resp_seen, true, pin))
@@ -255,7 +253,8 @@ pub(super) async fn drive_respond(
                 && (req_method == "INVITE" || req_method == "UPDATE") =>
             {
                 // A policy 2xx to an offer is never bodyless (RFC 3264 §5).
-                txn.respond(status, "OK").with_sdp(st.media.answer_sdp().unwrap_or(crate::ANSWER_SDP))
+                txn.respond(status, "OK")
+                    .with_sdp(st.media.answer_sdp().unwrap_or(crate::ANSWER_SDP))
             }
             None if (200..300).contains(&status) => txn.respond(status, "OK"),
             None => txn.respond(status, reject_reason(status)),
@@ -315,9 +314,8 @@ pub(super) fn consume_final_fact(
 ) -> Result<ResponseFact, StepError> {
     let facts: Vec<ResponseFact> =
         st.obs.with_snapshot(|s| s.leg(st.role).responses()[st.resp_seen..].to_vec());
-    let other_txn = |f: &ResponseFact| {
-        cseq_method.is_some_and(|m| !f.cseq_method.eq_ignore_ascii_case(m))
-    };
+    let other_txn =
+        |f: &ResponseFact| cseq_method.is_some_and(|m| !f.cseq_method.eq_ignore_ascii_case(m));
     for (i, f) in facts.iter().enumerate() {
         if f.status >= 200 && !other_txn(f) {
             st.resp_seen += i + 1;
@@ -346,9 +344,8 @@ pub(super) fn expect_response(
         st.obs.with_snapshot(|s| s.leg(st.role).responses()[st.resp_seen..].to_vec());
     // A pinned expectation is about ONE transaction; another's response is not
     // a wrong status, it is not this expectation's business at all.
-    let other_txn = |f: &ResponseFact| {
-        cseq_method.is_some_and(|m| !f.cseq_method.eq_ignore_ascii_case(m))
-    };
+    let other_txn =
+        |f: &ResponseFact| cseq_method.is_some_and(|m| !f.cseq_method.eq_ignore_ascii_case(m));
     let fact = if status < 200 {
         // The NEXT response (100 Trying is transaction plumbing, skipped) must
         // be a provisional of exactly this status — a final arriving first, or
@@ -439,12 +436,11 @@ pub(super) fn expect_response(
                 detail: "ExpectResponse matcher: the typed response was not retained".to_string(),
             });
         };
-        tmpl.match_inbound(&SipMessage::Response(resp.as_ref().clone()), &MatchOpts::default()).map_err(
-            |m| StepError::UnexpectedKind {
+        tmpl.match_inbound(&SipMessage::Response(resp.as_ref().clone()), &MatchOpts::default())
+            .map_err(|m| StepError::UnexpectedKind {
                 who: st.role.to_string(),
                 detail: format!("response did not match its template: {m}"),
-            },
-        )?;
+            })?;
     }
     Ok(())
 }

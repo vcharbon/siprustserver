@@ -127,11 +127,17 @@ fn last_n_digits(seq: u64, n: usize) -> String {
 /// Walk every string field of `input` (core From/To/R-URI + extras values,
 /// recursively through objects/arrays) and apply `f`. The one traversal shared
 /// by expansion and the load-time token lint.
-fn visit_strings(input: &Input, f: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<(), String> {
+fn visit_strings(
+    input: &Input,
+    f: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
     for s in [&input.core.from, &input.core.to, &input.core.ruri].into_iter().flatten() {
         f(s)?;
     }
-    fn visit_value(v: &serde_json::Value, f: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<(), String> {
+    fn visit_value(
+        v: &serde_json::Value,
+        f: &mut dyn FnMut(&str) -> Result<(), String>,
+    ) -> Result<(), String> {
         match v {
             serde_json::Value::String(s) => f(s),
             serde_json::Value::Array(items) => items.iter().try_for_each(|i| visit_value(i, f)),
@@ -186,13 +192,16 @@ fn expand_input(input: &mut Input, seq: u64, rand_digits: &mut dyn FnMut(usize) 
         *s = expand_str(s, seq, rand_digits)
             .unwrap_or_else(|e| panic!("binding expansion failed: {e}"));
     };
-    for field in [&mut input.core.from, &mut input.core.to, &mut input.core.ruri]
-        .into_iter()
-        .flatten()
+    for field in
+        [&mut input.core.from, &mut input.core.to, &mut input.core.ruri].into_iter().flatten()
     {
         expand(field, rand_digits);
     }
-    fn expand_value(v: &mut serde_json::Value, seq: u64, rand_digits: &mut dyn FnMut(usize) -> String) {
+    fn expand_value(
+        v: &mut serde_json::Value,
+        seq: u64,
+        rand_digits: &mut dyn FnMut(usize) -> String,
+    ) {
         match v {
             serde_json::Value::String(s) => {
                 *s = expand_str(s, seq, rand_digits)
@@ -352,14 +361,10 @@ mod tests {
     fn seq_mode_walks_the_pool_in_order_and_wraps() {
         let pool = BindingPool {
             mode: BindingMode::Seq,
-            entries: vec![
-                input(Some("sip:a@x"), None, None),
-                input(Some("sip:b@x"), None, None),
-            ],
+            entries: vec![input(Some("sip:a@x"), None, None), input(Some("sip:b@x"), None, None)],
         };
         let r = BindingResolver::new(Input::default(), Some(pool), 1);
-        let picks: Vec<_> =
-            (0..5).map(|_| r.resolve().input.core.from.unwrap()).collect();
+        let picks: Vec<_> = (0..5).map(|_| r.resolve().input.core.from.unwrap()).collect();
         // Wrap-allowed by design: identities repeat after the pool wraps.
         assert_eq!(picks, ["sip:a@x", "sip:b@x", "sip:a@x", "sip:b@x", "sip:a@x"]);
     }

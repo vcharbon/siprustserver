@@ -1,8 +1,6 @@
 //! Recorder + severity + sequencer foundations.
 
-use layer_harness::{
-    lane_key, NetworkTag, RecordedAnomaly, Recorder, RunContext, Severity,
-};
+use layer_harness::{lane_key, NetworkTag, RecordedAnomaly, Recorder, RunContext, Severity};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct DemoEvent {
@@ -61,11 +59,7 @@ fn lane_name_conflict_is_recorded_once() {
     recorder.register_lane(addr, "bob", NetworkTag::Ext); // conflict
     recorder.register_lane(addr, "carol", NetworkTag::Ext); // still one anomaly
 
-    let conflicts = recorder
-        .anomalies()
-        .into_iter()
-        .filter(|a| a.kind == "nameConflict")
-        .count();
+    let conflicts = recorder.anomalies().into_iter().filter(|a| a.kind == "nameConflict").count();
     assert_eq!(conflicts, 1);
 
     let snap = recorder.snapshot();
@@ -78,27 +72,15 @@ fn severity_tiers_route_by_context() {
     const TAG: &str = "demo-layer";
 
     // real-run: never fails.
-    assert_eq!(
-        RunContext::RealRun.severity_for(TAG, false),
-        Severity::Advisory
-    );
+    assert_eq!(RunContext::RealRun.severity_for(TAG, false), Severity::Advisory);
     assert!(!RunContext::RealRun.rules_enabled());
 
     // recorder mode: deferred-fail, unless the rule forces advisory.
-    assert_eq!(
-        RunContext::TestWithRecorder.severity_for(TAG, false),
-        Severity::DeferredFail
-    );
-    assert_eq!(
-        RunContext::TestWithRecorder.severity_for(TAG, true),
-        Severity::Advisory
-    );
+    assert_eq!(RunContext::TestWithRecorder.severity_for(TAG, false), Severity::DeferredFail);
+    assert_eq!(RunContext::TestWithRecorder.severity_for(TAG, true), Severity::Advisory);
 
     // unit-test-of-layer: fatal for the targeted tag, advisory for others.
-    assert_eq!(
-        RunContext::UnitTestOfLayer { tag: TAG }.severity_for(TAG, false),
-        Severity::Fatal
-    );
+    assert_eq!(RunContext::UnitTestOfLayer { tag: TAG }.severity_for(TAG, false), Severity::Fatal);
     assert_eq!(
         RunContext::UnitTestOfLayer { tag: "other" }.severity_for(TAG, false),
         Severity::Advisory

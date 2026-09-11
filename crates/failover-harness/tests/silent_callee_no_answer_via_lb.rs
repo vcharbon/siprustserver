@@ -220,7 +220,11 @@ async fn silent_callee_no_answer_via_lb__reject__delayed_crossing_200_still_reap
     bye.respond(200, "OK").await;
 
     let failed = call.expect(503).await;
-    assert_eq!(failed.status(), 503, "caller's INVITE resolves with a final failure after a late reap");
+    assert_eq!(
+        failed.status(),
+        503,
+        "caller's INVITE resolves with a final failure after a late reap"
+    );
     // Flush alice's §17.1.1.3 ACK for the 503 the one hop to the proxy before
     // the Drop-time RFC gate snapshots the trace.
     fh.advance(Duration::from_millis(10)).await;

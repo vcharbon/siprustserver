@@ -7,8 +7,10 @@
 
 use std::net::SocketAddr;
 
-use sip_message::header::{MaxForwards, ProxyRequire, RetryAfter, RouteEntry, Unsupported, Uri, Via};
 use sip_message::emergency::is_emergency_request;
+use sip_message::header::{
+    MaxForwards, ProxyRequire, RetryAfter, RouteEntry, Unsupported, Uri, Via,
+};
 use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
@@ -75,7 +77,11 @@ impl ProxyCore {
         RouteOutcome { decision: RoutingDecisionKind::Reject, target: None }
     }
 
-    pub(in crate::core) async fn route_request(&self, msg: &SipMessage, src: SocketAddr) -> RouteOutcome {
+    pub(in crate::core) async fn route_request(
+        &self,
+        msg: &SipMessage,
+        src: SocketAddr,
+    ) -> RouteOutcome {
         let SipMessage::Request(req) = msg else {
             self.metrics.record_reject("non_request");
             return RouteOutcome { decision: RoutingDecisionKind::Reject, target: None };
@@ -161,8 +167,8 @@ impl ProxyCore {
                 // Branchless legacy fallback (pre-RFC-3261 upstream): no branch
                 // to compare, so keep the old route-less heuristic for it — a
                 // 2xx ACK would carry the dialog's Route set.
-                let legacy_routeless = found.upstream_branch.is_empty()
-                    && !req.has(&sip_message::HeaderName::Route);
+                let legacy_routeless =
+                    found.upstream_branch.is_empty() && !req.has(&sip_message::HeaderName::Route);
                 if same_txn || legacy_routeless {
                     if found.branch.is_empty() {
                         return RouteOutcome { decision: select, target: None };
@@ -273,7 +279,8 @@ impl ProxyCore {
             None
         };
         if !is_worker_outbound
-            && (self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some() || via_worker_addr.is_some())
+            && (self.registry.lookup_by_address(&ProxyAddr::from(src)).is_some()
+                || via_worker_addr.is_some())
         {
             is_worker_outbound = true;
             stripped_route_params = None;
@@ -289,7 +296,8 @@ impl ProxyCore {
             if is_new_dialog_invite && !is_emergency && !is_worker_outbound {
                 let decision = self.self_gate.try_admit_external();
                 if !decision.admit {
-                    let reason = decision.reason.unwrap_or_else(|| "proxy_overload_cps".to_string());
+                    let reason =
+                        decision.reason.unwrap_or_else(|| "proxy_overload_cps".to_string());
                     let extra = [
                         extra_header(RetryAfter::new(decision.retry_after_sec.to_string())),
                         extra_header(proxy_reason(503, &reason)),
@@ -453,8 +461,15 @@ impl ProxyCore {
         };
         draft = draft.set(mf_next);
 
-        let (routed, minted_cookie) =
-            self.insert_double_record_route(draft, msg, req, src, &target, is_worker_outbound, &via_worker_addr);
+        let (routed, minted_cookie) = self.insert_double_record_route(
+            draft,
+            msg,
+            req,
+            src,
+            &target,
+            is_worker_outbound,
+            &via_worker_addr,
+        );
         draft = routed;
 
         // ── §16.6 / §17.2.3 retransmission branch reuse ─────────────────────

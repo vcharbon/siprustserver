@@ -6,13 +6,19 @@
 //! compose around this list — and in what order — is owned by
 //! [`super::compose`].
 
-use call::{ByeDisposition, CdrEventType, Direction, CallModelState, LegDisposition, LegState, Obligation, TimerType};
 use call::helpers::RAckTokens;
+use call::{
+    ByeDisposition, CallModelState, CdrEventType, Direction, LegDisposition, LegState, Obligation,
+    TimerType,
+};
 use sip_message::header::RAck;
 use sip_message::Method;
 use sip_txn::TimeoutKind;
 
-use crate::rules::model::{CORE_LAYER, Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay};
+use crate::rules::model::{
+    Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
+    TimerDelay, CORE_LAYER,
+};
 
 use super::route_fold::{
     fold_lands_on_going_away_call, parse_header_updates, parse_route_fold,
@@ -43,7 +49,10 @@ fn no_transform() -> MessageTransform {
 /// acknowledged: the call's own answer, or a relayed re-INVITE's. The verdict
 /// of both CORE give-up rules, and the framework's when a service rule
 /// re-authored the give-up without ending the session (ADR-0029 X5).
-pub(crate) fn unacked_2xx_give_up_actions(call: &RuleCall, obligation: &Obligation) -> Vec<RuleAction> {
+pub(crate) fn unacked_2xx_give_up_actions(
+    call: &RuleCall,
+    obligation: &Obligation,
+) -> Vec<RuleAction> {
     let Obligation::AckOf2xx { leg, .. } = obligation else {
         return vec![];
     };
@@ -53,7 +62,12 @@ pub(crate) fn unacked_2xx_give_up_actions(call: &RuleCall, obligation: &Obligati
         ("reinvite_ack_timeout", "reinvite-ack-timeout")
     };
     vec![
-        RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: leg.clone(), status_code: None, reason: Some(marker.into()) },
+        RuleAction::AddCdrEvent {
+            event_type: CdrEventType::Bye,
+            leg_id: leg.clone(),
+            status_code: None,
+            reason: Some(marker.into()),
+        },
         RuleAction::BeginTermination { reason: Some(reason.into()) },
     ]
 }
@@ -67,21 +81,19 @@ pub(crate) fn unacked_2xx_give_up_actions(call: &RuleCall, obligation: &Obligati
 /// an already-`cancelled` snapshot is skipped (a retransmitted CANCEL must
 /// not re-CANCEL).
 fn find_pending_relayed_invite(ctx: &RuleContext, inbound_cseq: i64) -> Option<(String, i64)> {
-    std::iter::once(ctx.call.a_leg())
-        .chain(ctx.call.b_legs().iter())
-        .find_map(|leg| {
-            leg.dialogs.iter().find_map(|d| {
-                d.ext
-                    .inbound_pending_requests
-                    .iter()
-                    .find(|p| {
-                        p.method.eq_ignore_ascii_case("INVITE")
-                            && p.inbound_cseq == inbound_cseq
-                            && !p.cancelled
-                    })
-                    .map(|p| (leg.leg_id.clone(), p.outbound_cseq))
-            })
+    std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()).find_map(|leg| {
+        leg.dialogs.iter().find_map(|d| {
+            d.ext
+                .inbound_pending_requests
+                .iter()
+                .find(|p| {
+                    p.method.eq_ignore_ascii_case("INVITE")
+                        && p.inbound_cseq == inbound_cseq
+                        && !p.cancelled
+                })
+                .map(|p| (leg.leg_id.clone(), p.outbound_cseq))
         })
+    })
 }
 
 fn keepalive_interval(ctx: &RuleContext) -> i64 {
@@ -228,7 +240,14 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ctx.source_dialog().is_some_and(call::helpers::invite_transaction_open)
                     || ctx.peer_dialog().is_some_and(call::helpers::invite_transaction_open)
             }),
-            |_ctx| ok(vec![RuleAction::Respond { status: 491, reason: "Request Pending".into(), body: vec![], content_type: None }]),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 491,
+                    reason: "Request Pending".into(),
+                    body: vec![],
+                    content_type: None,
+                }])
+            },
         ),
         // In-dialog UPDATE while the peer side is NOT in a relayable state:
         // no peer leg, the peer leg terminated by a failure whose
@@ -249,7 +268,14 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             "update-peer-unavailable",
             &["relay-update"],
             Match::request().method("UPDATE").filter(|ctx| !ctx.peer_relay_ready()),
-            |_ctx| ok(vec![RuleAction::Respond { status: 491, reason: "Request Pending".into(), body: vec![], content_type: None }]),
+            |_ctx| {
+                ok(vec![RuleAction::Respond {
+                    status: 491,
+                    reason: "Request Pending".into(),
+                    body: vec![],
+                    content_type: None,
+                }])
+            },
         ),
         // Resolve a response to a relayed re-INVITE the originator CANCELled
         // (RFC 3261 §9 — `handle-reinvite-cancel` marked its pending-relay
@@ -296,7 +322,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 let outbound_cseq = resp.cseq().seq() as i64;
                 let mut actions = Vec::new();
                 if (200..300).contains(&resp.status()) {
-                    actions.push(RuleAction::AckLeg { leg_id: leg.clone(), body: Vec::new(), content_type: None });
+                    actions.push(RuleAction::AckLeg {
+                        leg_id: leg.clone(),
+                        body: Vec::new(),
+                        content_type: None,
+                    });
                 }
                 actions.push(RuleAction::ResolveCancelledReinvite { leg_id: leg, outbound_cseq });
                 ok(actions)
@@ -473,7 +503,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             "relay-non-invite-200",
             &[],
             Match::response()
-                .methods(&["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE", "NOTIFY"])
+                .methods(&[
+                    "OPTIONS",
+                    "INFO",
+                    "PRACK",
+                    "UPDATE",
+                    "REFER",
+                    "MESSAGE",
+                    "SUBSCRIBE",
+                    "NOTIFY",
+                ])
                 .status_class(2),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
@@ -497,9 +536,19 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             "relay-non-invite-failure",
             &["handle-481"],
             Match::response()
-                .methods(&["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE", "NOTIFY"])
+                .methods(&[
+                    "OPTIONS",
+                    "INFO",
+                    "PRACK",
+                    "UPDATE",
+                    "REFER",
+                    "MESSAGE",
+                    "SUBSCRIBE",
+                    "NOTIFY",
+                ])
                 .filter(|ctx| {
-                    ctx.response().is_some_and(|r| r.status() >= 300) && ctx.answers_relayed_request()
+                    ctx.response().is_some_and(|r| r.status() >= 300)
+                        && ctx.answers_relayed_request()
                 }),
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
@@ -597,9 +646,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "failover-create-leg",
             &[],
-            Match::internal_event()
-                .topic("call-failure-result")
-                .outcome("failover"),
+            Match::internal_event().topic("call-failure-result").outcome("failover"),
             |ctx| {
                 // Fold landed on a going-away call (069): the caller already
                 // holds its final — drop whole, no leg toward a caller-less
@@ -619,17 +666,18 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 // re-arm), service_ext, subscriptions, update_body, and the
                 // limiter holds the router's fold already admitted.
                 let fold = parse_route_fold(payload)?;
-                let failed_leg_id = payload.get("failed_leg_id").and_then(|v| v.as_str()).unwrap_or("");
+                let failed_leg_id =
+                    payload.get("failed_leg_id").and_then(|v| v.as_str()).unwrap_or("");
 
                 let mut actions = Vec::new();
                 // Cancel the failed leg's no-answer timer (a reject can beat it;
                 // for the no-answer trigger the timer already fired — harmless).
                 if !failed_leg_id.is_empty() {
-                    actions.push(RuleAction::CancelTimer { id: format!("NoAnswer:{failed_leg_id}") });
+                    actions
+                        .push(RuleAction::CancelTimer { id: format!("NoAnswer:{failed_leg_id}") });
                 }
-                let no_answer = fold
-                    .no_answer
-                    .or(fold.features.as_ref().and_then(|f| f.no_answer_timeout_sec));
+                let no_answer =
+                    fold.no_answer.or(fold.features.as_ref().and_then(|f| f.no_answer_timeout_sec));
                 actions.extend(route_fold_parity_actions(&fold, ctx));
                 actions.push(RuleAction::CreateLeg {
                     destination: fold.destination,
@@ -651,9 +699,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "failover-terminate",
             &[],
-            Match::internal_event()
-                .topic("call-failure-result")
-                .outcome("terminate"),
+            Match::internal_event().topic("call-failure-result").outcome("terminate"),
             |ctx| {
                 // Fold landed on a going-away call (069): the caller already
                 // holds its final — no relayed failure, no re-termination.
@@ -673,7 +719,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         .to_string();
                     actions.push(RuleAction::RelayFailureToALeg { status: status as u16, reason });
                 }
-                actions.push(RuleAction::BeginTermination { reason: Some("failover-declined".into()) });
+                actions.push(RuleAction::BeginTermination {
+                    reason: Some("failover-declined".into()),
+                });
                 ok(actions)
             },
         ),
@@ -683,9 +731,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "failover-reject",
             &[],
-            Match::internal_event()
-                .topic("call-failure-result")
-                .outcome("reject"),
+            Match::internal_event().topic("call-failure-result").outcome("reject"),
             |ctx| {
                 // Fold landed on a going-away call (069): no second final on
                 // the a-leg's completed transaction (RFC 3261 §17.2.1).
@@ -714,9 +760,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "failover-redirect",
             &[],
-            Match::internal_event()
-                .topic("call-failure-result")
-                .outcome("redirect"),
+            Match::internal_event().topic("call-failure-result").outcome("redirect"),
             |ctx| {
                 // Fold landed on a going-away call (069): no second final on
                 // the a-leg's completed transaction (RFC 3261 §17.2.1).
@@ -767,19 +811,24 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "handle-481",
             &[],
-            Match::response()
-                .status_code(481)
-                .call_state(CallModelState::Active)
-                .filter(|ctx| {
-                    ctx.response().is_some_and(|r| {
-                        !matches!(r.cseq().method(), Method::Prack | Method::Cancel | Method::Notify)
-                    })
-                }),
+            Match::response().status_code(481).call_state(CallModelState::Active).filter(|ctx| {
+                ctx.response().is_some_and(|r| {
+                    !matches!(r.cseq().method(), Method::Prack | Method::Cancel | Method::Notify)
+                })
+            }),
             |ctx| {
                 let src = ctx.source_leg_id.to_string();
                 ok(vec![
-                    RuleAction::TerminateLeg { leg_id: src.clone(), bye_disposition: Some(ByeDisposition::ByeTimeout) },
-                    RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: src, status_code: Some(481), reason: Some("Call/Transaction Does Not Exist".into()) },
+                    RuleAction::TerminateLeg {
+                        leg_id: src.clone(),
+                        bye_disposition: Some(ByeDisposition::ByeTimeout),
+                    },
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Bye,
+                        leg_id: src,
+                        status_code: Some(481),
+                        reason: Some("Call/Transaction Does Not Exist".into()),
+                    },
                     RuleAction::BeginTermination { reason: Some("481".into()) },
                 ])
             },
@@ -851,14 +900,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule(
             "resolve-bye-response",
             &["absorb-bye-200"],
-            Match::response()
-                .method("BYE")
-                .filter(|ctx| {
-                    ctx.source_leg()
-                        .and_then(|l| l.bye_disposition)
-                        .map(|d| d == ByeDisposition::ByeSent)
-                        .unwrap_or(false)
-                }),
+            Match::response().method("BYE").filter(|ctx| {
+                ctx.source_leg()
+                    .and_then(|l| l.bye_disposition)
+                    .map(|d| d == ByeDisposition::ByeSent)
+                    .unwrap_or(false)
+            }),
             |ctx| {
                 ok(vec![RuleAction::TerminateLeg {
                     leg_id: ctx.source_leg_id.to_string(),
@@ -872,7 +919,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             Match::request().method("BYE").call_state(CallModelState::Terminating),
             |ctx| {
                 ok(vec![
-                    RuleAction::Respond { status: 200, reason: "OK".into(), body: vec![], content_type: None },
+                    RuleAction::Respond {
+                        status: 200,
+                        reason: "OK".into(),
+                        body: vec![],
+                        content_type: None,
+                    },
                     RuleAction::TerminateLeg {
                         leg_id: ctx.source_leg_id.to_string(),
                         bye_disposition: Some(ByeDisposition::ByeReceived),
@@ -912,17 +964,35 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-ack", &[], Match::request().method("ACK"), |_ctx| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
-        rule("relay-bye", &[], Match::request().method("BYE").call_state(CallModelState::Active), |ctx| {
-            // Pre-mark the BYE-sending leg `bye_received` (RFC 3261 §15.1.2) so the
-            // subsequent begin-termination skips it (no duplicate BYE back to the
-            // sender) and only tears down the peer.
-            ok(vec![
-                RuleAction::Respond { status: 200, reason: "OK".into(), body: vec![], content_type: None },
-                RuleAction::TerminateLeg { leg_id: ctx.source_leg_id.to_string(), bye_disposition: Some(ByeDisposition::ByeReceived) },
-                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.source_leg_id.to_string(), status_code: None, reason: None },
-                RuleAction::BeginTermination { reason: Some("BYE".into()) },
-            ])
-        }),
+        rule(
+            "relay-bye",
+            &[],
+            Match::request().method("BYE").call_state(CallModelState::Active),
+            |ctx| {
+                // Pre-mark the BYE-sending leg `bye_received` (RFC 3261 §15.1.2) so the
+                // subsequent begin-termination skips it (no duplicate BYE back to the
+                // sender) and only tears down the peer.
+                ok(vec![
+                    RuleAction::Respond {
+                        status: 200,
+                        reason: "OK".into(),
+                        body: vec![],
+                        content_type: None,
+                    },
+                    RuleAction::TerminateLeg {
+                        leg_id: ctx.source_leg_id.to_string(),
+                        bye_disposition: Some(ByeDisposition::ByeReceived),
+                    },
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Bye,
+                        leg_id: ctx.source_leg_id.to_string(),
+                        status_code: None,
+                        reason: None,
+                    },
+                    RuleAction::BeginTermination { reason: Some("BYE".into()) },
+                ])
+            },
+        ),
         rule("relay-reinvite", &[], Match::request().method("INVITE"), |_| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
@@ -1022,10 +1092,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     return ok(vec![]);
                 };
                 ok(vec![
-                    RuleAction::CancelPendingReinvite {
-                        leg_id: leg_id.clone(),
-                        outbound_cseq,
-                    },
+                    RuleAction::CancelPendingReinvite { leg_id: leg_id.clone(), outbound_cseq },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Cancel,
                         leg_id,
@@ -1039,8 +1106,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             let mut actions = Vec::new();
             for b in ctx.call.b_legs() {
                 match b.state {
-                    LegState::Confirmed => actions.push(RuleAction::DestroyLeg { leg_id: b.leg_id.clone() }),
-                    LegState::Trying | LegState::Early => actions.push(RuleAction::CancelLeg { leg_id: b.leg_id.clone() }),
+                    LegState::Confirmed => {
+                        actions.push(RuleAction::DestroyLeg { leg_id: b.leg_id.clone() })
+                    }
+                    LegState::Trying | LegState::Early => {
+                        actions.push(RuleAction::CancelLeg { leg_id: b.leg_id.clone() })
+                    }
                     LegState::Terminated => {}
                 }
             }
@@ -1064,10 +1135,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // Everything else (a-leg, confirmed-leg re-INVITE, BYE/OPTIONS
             // timeouts, no callback context) keeps the unconditional
             // termination below.
-            let timed_out_invite = ctx
-                .timeout_method()
-                .map(|m| m.eq_ignore_ascii_case("INVITE"))
-                .unwrap_or(false);
+            let timed_out_invite =
+                ctx.timeout_method().map(|m| m.eq_ignore_ascii_case("INVITE")).unwrap_or(false);
             let pending_b_leg = ctx.source_leg().is_some_and(|l| {
                 l.leg_id != ctx.call.a_leg().leg_id
                     && matches!(l.state, LegState::Trying | LegState::Early)
@@ -1117,7 +1186,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         // A blackholed hop drew no final: this consult states an
                         // empty relayable image, so an earlier attempt's headers
                         // cannot answer it.
-                        RuleAction::MergeCallExt { ext: crate::rules::relay::failure_headers_ext(None) },
+                        RuleAction::MergeCallExt {
+                            ext: crate::rules::relay::failure_headers_ext(None),
+                        },
                         RuleAction::FailureAsyncHttp {
                             request: serde_json::json!({
                                 "callback_context": cbctx,
@@ -1149,8 +1220,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             let caller_answered = ctx.call.a_leg().state == LegState::Confirmed;
             let spent = caller_answered
                 || match ctx.source_leg() {
-                    Some(leg) => leg.state == LegState::Confirmed
-                        || call::helpers::leg_is_going_away(ctx.call.state(), leg),
+                    Some(leg) => {
+                        leg.state == LegState::Confirmed
+                            || call::helpers::leg_is_going_away(ctx.call.state(), leg)
+                    }
                     None => true,
                 };
             if spent {
@@ -1161,7 +1234,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             }
             let leg = ctx.source_leg_id.to_string();
             let mut actions = vec![
-                RuleAction::AddCdrEvent { event_type: CdrEventType::Timeout, leg_id: leg.clone(), status_code: None, reason: Some("no_answer_timeout".into()) },
+                RuleAction::AddCdrEvent {
+                    event_type: CdrEventType::Timeout,
+                    leg_id: leg.clone(),
+                    status_code: None,
+                    reason: Some("no_answer_timeout".into()),
+                },
                 RuleAction::DestroyLeg { leg_id: leg.clone() },
             ];
             match ctx.call.callback_context() {
@@ -1171,7 +1249,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 // EMPTY relayable image: the final it authors speaks for a peer
                 // that never answered, not for an earlier attempt that did.
                 Some(cbctx) => actions.extend([
-                    RuleAction::MergeCallExt { ext: crate::rules::relay::failure_headers_ext(None) },
+                    RuleAction::MergeCallExt {
+                        ext: crate::rules::relay::failure_headers_ext(None),
+                    },
                     RuleAction::FailureAsyncHttp {
                         request: serde_json::json!({
                             "callback_context": cbctx,
@@ -1180,7 +1260,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         }),
                     },
                 ]),
-                None => actions.push(RuleAction::BeginTermination { reason: Some("no-answer".into()) }),
+                None => {
+                    actions.push(RuleAction::BeginTermination { reason: Some("no-answer".into()) })
+                }
             }
             ok(actions)
         }),
@@ -1254,10 +1336,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // `reroute` outcome would dial a fresh b-leg on a terminating
             // call) and no BeginTermination re-arm of the safety timer —
             // absorb, and scrub the entry so a later reclaim cannot re-fire it.
-            if matches!(
-                ctx.call.state(),
-                CallModelState::Terminating | CallModelState::Terminated
-            ) {
+            if matches!(ctx.call.state(), CallModelState::Terminating | CallModelState::Terminated)
+            {
                 return ok(vec![RuleAction::CancelTimer {
                     id: format!("{:?}", TimerType::GlobalDuration),
                 }]);
@@ -1277,26 +1357,65 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }
             }
             ok(vec![
-                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.call.a_leg().leg_id.clone(), status_code: None, reason: Some("max_duration".into()) },
+                RuleAction::AddCdrEvent {
+                    event_type: CdrEventType::Bye,
+                    leg_id: ctx.call.a_leg().leg_id.clone(),
+                    status_code: None,
+                    reason: Some("max_duration".into()),
+                },
                 RuleAction::BeginTermination { reason: Some("max-duration".into()) },
             ])
         }),
-        rule("keepalive", &[], Match::timer().timer_type(TimerType::Keepalive).call_state(CallModelState::Active), |ctx| {
-            let mut actions = Vec::new();
-            for leg_id in ctx.call.all_peered_legs() {
-                actions.push(RuleAction::SendRequestToLeg { leg_id: leg_id.clone(), method: "OPTIONS".into(), body: vec![], content_type: None, headers: vec![] });
-                actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::KeepaliveTimeout, delay: TimerDelay::secs(keepalive_timeout(ctx)), leg_id: Some(leg_id) });
-            }
-            actions.push(RuleAction::ScheduleTimer { timer_type: TimerType::Keepalive, delay: TimerDelay::secs(keepalive_interval(ctx)), leg_id: None });
-            ok(actions)
-        }),
-        rule("keepalive-timeout", &[], Match::timer().timer_type(TimerType::KeepaliveTimeout).call_state(CallModelState::Active), |ctx| {
-            ok(vec![
-                RuleAction::TerminateLeg { leg_id: ctx.source_leg_id.to_string(), bye_disposition: Some(ByeDisposition::ByeTimeout) },
-                RuleAction::AddCdrEvent { event_type: CdrEventType::Bye, leg_id: ctx.source_leg_id.to_string(), status_code: None, reason: Some("keepalive timeout".into()) },
-                RuleAction::BeginTermination { reason: Some("keepalive-timeout".into()) },
-            ])
-        }),
+        rule(
+            "keepalive",
+            &[],
+            Match::timer().timer_type(TimerType::Keepalive).call_state(CallModelState::Active),
+            |ctx| {
+                let mut actions = Vec::new();
+                for leg_id in ctx.call.all_peered_legs() {
+                    actions.push(RuleAction::SendRequestToLeg {
+                        leg_id: leg_id.clone(),
+                        method: "OPTIONS".into(),
+                        body: vec![],
+                        content_type: None,
+                        headers: vec![],
+                    });
+                    actions.push(RuleAction::ScheduleTimer {
+                        timer_type: TimerType::KeepaliveTimeout,
+                        delay: TimerDelay::secs(keepalive_timeout(ctx)),
+                        leg_id: Some(leg_id),
+                    });
+                }
+                actions.push(RuleAction::ScheduleTimer {
+                    timer_type: TimerType::Keepalive,
+                    delay: TimerDelay::secs(keepalive_interval(ctx)),
+                    leg_id: None,
+                });
+                ok(actions)
+            },
+        ),
+        rule(
+            "keepalive-timeout",
+            &[],
+            Match::timer()
+                .timer_type(TimerType::KeepaliveTimeout)
+                .call_state(CallModelState::Active),
+            |ctx| {
+                ok(vec![
+                    RuleAction::TerminateLeg {
+                        leg_id: ctx.source_leg_id.to_string(),
+                        bye_disposition: Some(ByeDisposition::ByeTimeout),
+                    },
+                    RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Bye,
+                        leg_id: ctx.source_leg_id.to_string(),
+                        status_code: None,
+                        reason: Some("keepalive timeout".into()),
+                    },
+                    RuleAction::BeginTermination { reason: Some("keepalive-timeout".into()) },
+                ])
+            },
+        ),
         // ── ladder give-ups (ADR-0029 X4/X5) ─────────────────────────────────
         // The one ladder event a rule sees is `RepeatGiveUp { obligation }`,
         // its timers already scrubbed; these CORE rules say what the silence
@@ -1369,14 +1488,17 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 )
             }),
             |ctx| {
-                let Some(TimerType::RepeatGiveUp { obligation: Obligation::PrackOf { a_tag, a_rseq } }) =
-                    ctx.timer_type()
+                let Some(TimerType::RepeatGiveUp {
+                    obligation: Obligation::PrackOf { a_tag, a_rseq },
+                }) = ctx.timer_type()
                 else {
                     return ok(vec![]);
                 };
                 // A re-INVITE's provisional: §3's reject answers that transaction
                 // alone, on both faces.
-                if let Some((leg_id, outbound_cseq)) = ctx.call.pending_invite_answered_by(a_tag, *a_rseq) {
+                if let Some((leg_id, outbound_cseq)) =
+                    ctx.call.pending_invite_answered_by(a_tag, *a_rseq)
+                {
                     let silent = ctx
                         .call
                         .leg_shown(a_tag)
@@ -1447,31 +1569,38 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .outcome(crate::reaper::OUTCOME_FATAL),
             |ctx| reap_force_terminal(ctx, "handler-panic"),
         ),
-        rule("terminating-safety-timeout", &[], Match::timer().timer_type(TimerType::TerminatingTimeout).call_state(CallModelState::Terminating), |ctx| {
-            // A BYE we sent went unanswered within TERMINATING_TIMEOUT_MS (a lost
-            // BYE, a dead UAC/UAS, or proxy churn during teardown). The call is
-            // wedged in Terminating with a non-terminal `ByeSent` leg, so
-            // `is_fully_resolved` never passes, `RemoveCall` is never emitted, and
-            // the call — its `active_calls` slot AND its memory — leaks forever.
-            // Force every still-unresolved leg terminal (mirroring the
-            // `is_fully_resolved` predicate) so the invariant promotes
-            // Terminating→Terminated→RemoveCall and the call is reaped + the
-            // replication delete propagates. If the call already resolved, the
-            // loop yields no actions and this stays the harmless canary it was.
-            let mut actions = Vec::new();
-            for leg in std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()) {
-                // Force every still-unresolved leg terminal. `leg_is_resolved` also
-                // covers a leg wedged in `Cancelling` (an internal CANCEL whose 487
-                // / crossing 200 never arrived): TerminateLeg clears the disposition
-                // so the deferred termination can finally promote → RemoveCall.
-                if !call::helpers::leg_is_resolved(leg) {
-                    actions.push(RuleAction::TerminateLeg {
-                        leg_id: leg.leg_id.clone(),
-                        bye_disposition: Some(ByeDisposition::ByeTimeout),
-                    });
+        rule(
+            "terminating-safety-timeout",
+            &[],
+            Match::timer()
+                .timer_type(TimerType::TerminatingTimeout)
+                .call_state(CallModelState::Terminating),
+            |ctx| {
+                // A BYE we sent went unanswered within TERMINATING_TIMEOUT_MS (a lost
+                // BYE, a dead UAC/UAS, or proxy churn during teardown). The call is
+                // wedged in Terminating with a non-terminal `ByeSent` leg, so
+                // `is_fully_resolved` never passes, `RemoveCall` is never emitted, and
+                // the call — its `active_calls` slot AND its memory — leaks forever.
+                // Force every still-unresolved leg terminal (mirroring the
+                // `is_fully_resolved` predicate) so the invariant promotes
+                // Terminating→Terminated→RemoveCall and the call is reaped + the
+                // replication delete propagates. If the call already resolved, the
+                // loop yields no actions and this stays the harmless canary it was.
+                let mut actions = Vec::new();
+                for leg in std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()) {
+                    // Force every still-unresolved leg terminal. `leg_is_resolved` also
+                    // covers a leg wedged in `Cancelling` (an internal CANCEL whose 487
+                    // / crossing 200 never arrived): TerminateLeg clears the disposition
+                    // so the deferred termination can finally promote → RemoveCall.
+                    if !call::helpers::leg_is_resolved(leg) {
+                        actions.push(RuleAction::TerminateLeg {
+                            leg_id: leg.leg_id.clone(),
+                            bye_disposition: Some(ByeDisposition::ByeTimeout),
+                        });
+                    }
                 }
-            }
-            ok(actions)
-        }),
+                ok(actions)
+            },
+        ),
     ]
 }

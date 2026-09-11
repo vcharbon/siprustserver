@@ -72,11 +72,11 @@ mod rr_fold;
 mod run_guards;
 mod server_txn;
 mod step;
-pub(crate) mod waiver;
 #[cfg(test)]
 mod tests;
 mod tolerant_recv;
 mod ua;
+pub(crate) mod waiver;
 
 pub use client_invite::{CancelHandle, ClientInvite};
 pub use dialog::{ClientReinvite, Dialog, InDialogRequest, InDialogTxn};

@@ -109,7 +109,11 @@ mod tests {
         // The residue §6.4 exists to catch: our stack advertising MORE.
         assert!(!header_forms_equivalent("Allow", &["INVITE, ACK, OPTIONS"], &["INVITE,ACK"]));
         assert!(!header_forms_equivalent("Reason", &["Q.850; cause=127"], &["Q.850;cause=16"]));
-        assert!(!header_forms_equivalent("Reason", &["Q.850;cause=16"], &["Q.850;cause=16;text=\"x\""]));
+        assert!(!header_forms_equivalent(
+            "Reason",
+            &["Q.850;cause=16"],
+            &["Q.850;cause=16;text=\"x\""]
+        ));
         // The national prefix hiding inside an entry the whitespace makes equal.
         assert!(!header_forms_equivalent(
             "History-Info",
@@ -134,7 +138,11 @@ mod tests {
         assert_eq!(canonical_header_items("Reason", &["Q.850;text=\"a, b\""]).len(), 1);
         assert_eq!(canonical_header_items("Contact", &["<sip:a@h;p=1,2>"]).len(), 1);
         // Whitespace inside a quoted string is the caller's data, not layout.
-        assert!(!header_forms_equivalent("Reason", &["Q.850;text=\"a  b\""], &["Q.850;text=\"a b\""]));
+        assert!(!header_forms_equivalent(
+            "Reason",
+            &["Q.850;text=\"a  b\""],
+            &["Q.850;text=\"a b\""]
+        ));
     }
 
     #[test]

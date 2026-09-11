@@ -84,9 +84,10 @@ impl Txn {
 
     /// The first final (>=200) response observation.
     pub fn final_response(&self, leg: &FlowLeg) -> Option<usize> {
-        self.responses.iter().copied().find(|&i| {
-            matches!(&leg.msgs[i].parsed, SipMessage::Response(r) if r.status() >= 200)
-        })
+        self.responses
+            .iter()
+            .copied()
+            .find(|&i| matches!(&leg.msgs[i].parsed, SipMessage::Response(r) if r.status() >= 200))
     }
 }
 
@@ -106,10 +107,7 @@ pub fn transactions(leg: &FlowLeg) -> Vec<Txn> {
                 (branch_of(&msg.parsed), r.cseq().method().clone(), r.cseq().seq(), false)
             }
         };
-        let slot = index
-            .iter()
-            .find(|(b, m, _)| b == &branch && m == method)
-            .map(|(_, _, i)| *i);
+        let slot = index.iter().find(|(b, m, _)| b == &branch && m == method).map(|(_, _, i)| *i);
         let ti = match slot {
             Some(i) => i,
             None => {
@@ -140,9 +138,8 @@ pub fn transactions(leg: &FlowLeg) -> Vec<Txn> {
             if let SipMessage::Response(r) = &msg.parsed {
                 if r.status() >= 200 && txn.final_status.is_none() {
                     txn.final_status = Some(r.status());
-                    txn.latency_us = txn
-                        .request
-                        .map(|ri| msg.ts_us.saturating_sub(leg.msgs[ri].ts_us));
+                    txn.latency_us =
+                        txn.request.map(|ri| msg.ts_us.saturating_sub(leg.msgs[ri].ts_us));
                 }
             }
         }
@@ -200,7 +197,7 @@ mod tests {
             src: src.parse().unwrap(),
             dst: dst.parse().unwrap(),
             payload: payload.to_vec(),
-        probe: 0,
+            probe: 0,
         }
     }
 
@@ -252,7 +249,12 @@ mod tests {
             dg(3_000_000, "10.0.0.1:5060", "10.0.0.9:5060", &req("UPDATE", 2, "b2", ";tag=t1", "")),
             dg(3_500_000, "10.0.0.9:5060", "10.0.0.1:5060", &resp(488, 2, "UPDATE", "b2", "")),
             dg(4_000_000, "10.0.0.1:5060", "10.0.0.9:5060", &req("INVITE", 3, "b3", ";tag=t1", "")),
-            dg(4_200_000, "10.0.0.9:5060", "10.0.0.1:5060", &resp(200, 3, "INVITE", "b3", "a=sendonly")),
+            dg(
+                4_200_000,
+                "10.0.0.9:5060",
+                "10.0.0.1:5060",
+                &resp(200, 3, "INVITE", "b3", "a=sendonly"),
+            ),
         ];
         let (flows, txns) = one_leg(datagrams);
         let leg = &flows.legs[0];

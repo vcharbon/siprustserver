@@ -11,13 +11,16 @@
 use std::time::Duration;
 
 use call::helpers::{RAckTokens, Scope};
-use call::{Call, CallModelState, LegState, Obligation, Repeated, RetainedEmission, TimerType, Unacked2xx};
+use call::{
+    Call, CallModelState, LegState, Obligation, Repeated, RetainedEmission, TimerType, Unacked2xx,
+};
 use sip_message::header::RAck;
 use sip_message::{Method, SipMessage, SipResponse};
 use sip_retransmit::{Class, Schedule};
 
 use crate::effects::{
-    CriticalStateEffect, HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode,
+    CriticalStateEffect, HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect,
+    OutboundTxnMode,
 };
 use crate::event::CallEvent;
 use crate::rules::defaults::unacked_2xx_give_up_actions;
@@ -35,7 +38,12 @@ impl ActionExecutor<'_> {
     /// server transaction goes `Completed` on this final, so the txn layer
     /// neither retransmits the 2xx nor reports the missing ACK: this ladder is
     /// the one that does.
-    pub(super) fn retain_a_leg_answer(&self, call: &mut Call, fx: &mut HandlerEffects, effect: &OutboundSipEffect) {
+    pub(super) fn retain_a_leg_answer(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        effect: &OutboundSipEffect,
+    ) {
         let OutboundBody::Response(resp) = &effect.body else {
             return;
         };
@@ -63,7 +71,10 @@ impl ActionExecutor<'_> {
         let target_dialog = if target_leg == call.a_leg.leg_id {
             call.a_leg.dialogs.first_mut()
         } else {
-            call.b_legs.iter_mut().find(|l| l.leg_id == target_leg).and_then(|l| l.dialogs.first_mut())
+            call.b_legs
+                .iter_mut()
+                .find(|l| l.leg_id == target_leg)
+                .and_then(|l| l.dialogs.first_mut())
         };
         if let Some(d) = target_dialog {
             d.ext.pending_reinvite_2xx = Some(unacked);
@@ -76,7 +87,13 @@ impl ActionExecutor<'_> {
     /// X5): no configuration reaches the rungs or the give-up — a 2xx that
     /// leaves un-ACKed is repeated, and the deadline that ends its session is
     /// in the ledger for as long as the retained marker is.
-    fn arm_ack_ladder(&self, call: &mut Call, fx: &mut HandlerEffects, obligation: Obligation, first: Duration) {
+    fn arm_ack_ladder(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        obligation: Obligation,
+        first: Duration,
+    ) {
         self.schedule(
             call,
             fx,
@@ -118,8 +135,12 @@ impl ActionExecutor<'_> {
             Class::ReliableProvisional,
             Repeated::response(resp.cseq().method().as_str(), resp.status()),
         );
-        let (updated, armed) =
-            call::helpers::record_reliable_provisional_emission(call.clone(), a_tag, a_rseq, emission);
+        let (updated, armed) = call::helpers::record_reliable_provisional_emission(
+            call.clone(),
+            a_tag,
+            a_rseq,
+            emission,
+        );
         *call = updated;
         if !armed {
             return;
@@ -203,7 +224,12 @@ impl ActionExecutor<'_> {
     /// way (its RFC 6026 *Accepted* interval ended with the ladder). A reliable
     /// provisional's give-up keeps the rules' own verdict: RFC 3262 §3 rejects
     /// a transaction, and only the initial INVITE's is the call.
-    pub fn settle_give_up(&self, result: HandlerResult, obligation: &Obligation, turn: &RuleContext) -> HandlerResult {
+    pub fn settle_give_up(
+        &self,
+        result: HandlerResult,
+        obligation: &Obligation,
+        turn: &RuleContext,
+    ) -> HandlerResult {
         let Obligation::AckOf2xx { .. } = obligation else {
             return result;
         };
@@ -371,7 +397,9 @@ fn repeat_toward(call: &Call, obligation: &Obligation) -> Option<OutboundSipEffe
             }
             // The rung goes to the leg the number was shown on; an a-facing
             // fork tag names no dialog of its own and is the a-leg's.
-            let shown = call::helpers::leg_shown(call, a_tag).unwrap_or(call.a_leg.leg_id.as_str()).to_string();
+            let shown = call::helpers::leg_shown(call, a_tag)
+                .unwrap_or(call.a_leg.leg_id.as_str())
+                .to_string();
             (format!("1xx (reliable retransmit, no PRACK) → {shown}"), shown)
         }
     };
@@ -391,7 +419,11 @@ fn ladder_of(timer_type: &TimerType) -> Option<&Obligation> {
 /// first rung. `leg` is the face the 2xx leaves on. The retained bytes are
 /// `resp.image()`: the datagram `send_response` puts on the wire, not a
 /// rendering of the response (ADR-0029 X3).
-fn unacked_2xx_of(resp: &SipResponse, dest: (String, u16), leg: &str) -> (Unacked2xx, Obligation, Duration) {
+fn unacked_2xx_of(
+    resp: &SipResponse,
+    dest: (String, u16),
+    leg: &str,
+) -> (Unacked2xx, Obligation, Duration) {
     let dialog_tag = resp.to().tag().unwrap_or_default().to_string();
     let cseq = resp.cseq().seq() as i64;
     let (emission, first) = RetainedEmission::paced(
@@ -400,14 +432,19 @@ fn unacked_2xx_of(resp: &SipResponse, dest: (String, u16), leg: &str) -> (Unacke
         Class::Final2xx,
         Repeated::response(resp.cseq().method().as_str(), resp.status()),
     );
-    let obligation = Obligation::AckOf2xx { leg: leg.to_string(), dialog_tag: dialog_tag.clone(), cseq };
+    let obligation =
+        Obligation::AckOf2xx { leg: leg.to_string(), dialog_tag: dialog_tag.clone(), cseq };
     (Unacked2xx { dialog_tag, cseq, emission }, obligation, first)
 }
 
 /// The repeat of a retained emission toward `leg_id`: its bytes, to its
 /// destination, past the transaction that sent the original (RFC 3261
 /// §13.3.1.4 — a retransmit is THE response).
-pub(super) fn repeat_of(emission: &RetainedEmission, label: String, leg_id: &str) -> OutboundSipEffect {
+pub(super) fn repeat_of(
+    emission: &RetainedEmission,
+    label: String,
+    leg_id: &str,
+) -> OutboundSipEffect {
     let (_, (host, port)) = emission.wire();
     OutboundSipEffect {
         body: OutboundBody::Datagram(emission.clone()),

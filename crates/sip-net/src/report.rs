@@ -188,7 +188,8 @@ fn paired_sip_entries(
 ) -> Vec<(RecordedSipEntry, Option<u64>)> {
     // Every bind the recording observed (BindAcquire plus any event's bind key
     // as a backstop) — the boundary between in-trace and external peers.
-    let mut recorded_binds: std::collections::HashSet<SocketAddr> = std::collections::HashSet::new();
+    let mut recorded_binds: std::collections::HashSet<SocketAddr> =
+        std::collections::HashSet::new();
     for s in events {
         if let Some(addr) = lane_addr(s.event.bind_key()) {
             recorded_binds.insert(addr);
@@ -247,7 +248,11 @@ fn paired_sip_entries(
         // Earliest unpaired delivery: receiver == `to`, packet.src == `from`,
         // same bytes, and observed at-or-after this send (seq order).
         let matched = recvs.iter_mut().find(|r| {
-            !r.paired && r.receiver == *to && r.src == from && r.raw == msg.as_slice() && r.seq >= s.seq
+            !r.paired
+                && r.receiver == *to
+                && r.src == from
+                && r.raw == msg.as_slice()
+                && r.seq >= s.seq
         });
 
         let (received_ms, recv_note, to_lane, recv_seq) = match matched {
@@ -291,7 +296,11 @@ fn paired_sip_entries(
             continue;
         };
         let matched = recvs.iter_mut().find(|r| {
-            !r.paired && r.receiver == *to && r.src == from && r.raw == msg.as_slice() && r.seq >= s.seq
+            !r.paired
+                && r.receiver == *to
+                && r.src == from
+                && r.raw == msg.as_slice()
+                && r.seq >= s.seq
         });
         let (received_ms, to_lane, recv_seq) = match matched {
             Some(r) => {

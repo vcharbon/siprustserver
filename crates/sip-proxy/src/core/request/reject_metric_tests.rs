@@ -32,7 +32,11 @@ impl RoutingStrategy for FailingSelect {
     fn name(&self) -> &str {
         "FailingSelect"
     }
-    async fn select_for_new_dialog(&self, _msg: &SipMessage, _opts: SelectOpts) -> Result<ProxyAddr, SelectError> {
+    async fn select_for_new_dialog(
+        &self,
+        _msg: &SipMessage,
+        _opts: SelectOpts,
+    ) -> Result<ProxyAddr, SelectError> {
         Err((self.0)())
     }
     async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
@@ -45,7 +49,10 @@ impl RoutingStrategy for FailingSelect {
 
 async fn core_failing_with(err: fn() -> SelectError) -> (ProxyCore, Arc<ProxyMetrics>) {
     let net = SimulatedSignalingNetwork::new(1);
-    let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
+    let ep = net
+        .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
+        .await
+        .unwrap();
     let strategy: Arc<dyn RoutingStrategy> = Arc::new(FailingSelect(err));
     let metrics = Arc::new(ProxyMetrics::new());
     let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
@@ -77,11 +84,14 @@ Content-Length: 0\r\n\r\n"
 async fn no_target_select_failure_attributes_its_reject() {
     let (core, metrics) =
         core_failing_with(|| SelectError::NoTarget { reason: "empty registry".into() }).await;
-    let outcome = core.route_request(&new_dialog_invite(), format!("{UAC}:5060").parse().unwrap()).await;
+    let outcome =
+        core.route_request(&new_dialog_invite(), format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.reject_count("no_target_available"), 1);
     assert_eq!(metrics.reject_count("worker_rate_capped"), 0);
-    assert!(metrics.prometheus_text().contains("sip_proxy_rejects_total{reason=\"no_target_available\"} 1"));
+    assert!(metrics
+        .prometheus_text()
+        .contains("sip_proxy_rejects_total{reason=\"no_target_available\"} 1"));
 }
 
 // SelectError::RateCapExhausted → 503 with Reason text "worker_rate_capped";
@@ -93,11 +103,14 @@ async fn rate_cap_select_failure_attributes_its_reject() {
         retry_after_sec: 1,
     })
     .await;
-    let outcome = core.route_request(&new_dialog_invite(), format!("{UAC}:5060").parse().unwrap()).await;
+    let outcome =
+        core.route_request(&new_dialog_invite(), format!("{UAC}:5060").parse().unwrap()).await;
     assert_eq!(outcome.decision, RoutingDecisionKind::Reject);
     assert_eq!(metrics.reject_count("worker_rate_capped"), 1);
     assert_eq!(metrics.reject_count("no_target_available"), 0);
-    assert!(metrics.prometheus_text().contains("sip_proxy_rejects_total{reason=\"worker_rate_capped\"} 1"));
+    assert!(metrics
+        .prometheus_text()
+        .contains("sip_proxy_rejects_total{reason=\"worker_rate_capped\"} 1"));
 }
 
 // A non-ACK request at Max-Forwards 0 is answered 483 — and attributed.

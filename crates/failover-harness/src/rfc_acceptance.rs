@@ -66,11 +66,7 @@ impl RfcAcceptance {
     /// Open an acceptance window for `rule` covering every message captured
     /// AFTER `from_seq` (the recording's high-water mark at the arm instant).
     pub fn open_window(&mut self, rule: &str, from_seq: u64) {
-        self.windows.push(AcceptanceWindow {
-            rule: rule.to_string(),
-            from_seq,
-            until_seq: None,
-        });
+        self.windows.push(AcceptanceWindow { rule: rule.to_string(), from_seq, until_seq: None });
     }
 
     /// Close EVERY open window for `rule` at `until_seq`, so the rule gates in
@@ -89,11 +85,14 @@ impl RfcAcceptance {
     /// Whether an acceptance window for `rule` covers the finding whose offending
     /// message is the 1-based `offending` index into `entries`. A finding with no
     /// pinned message is never accepted — it cannot be placed in the run.
-    pub fn accepts(&self, rule: &str, offending: Option<usize>, entries: &[RecordedSipEntry]) -> bool {
-        let Some(seq) = offending
-            .and_then(|i| i.checked_sub(1))
-            .and_then(|i| entries.get(i))
-            .map(|e| e.seq)
+    pub fn accepts(
+        &self,
+        rule: &str,
+        offending: Option<usize>,
+        entries: &[RecordedSipEntry],
+    ) -> bool {
+        let Some(seq) =
+            offending.and_then(|i| i.checked_sub(1)).and_then(|i| entries.get(i)).map(|e| e.seq)
         else {
             return false;
         };
@@ -105,7 +104,10 @@ impl RfcAcceptance {
     /// `(gating, accepted)`: a finding is accepted when its OFFENDING message was
     /// captured inside a window for its rule; a lifetime-waived rule is dropped
     /// outright; an unattributable finding gates.
-    pub fn partition(&self, events: &[Stamped<SignalingNetworkEvent>]) -> (Vec<Finding>, Vec<Finding>) {
+    pub fn partition(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> (Vec<Finding>, Vec<Finding>) {
         let entries = sip_net::audit_wire_entries(events);
         let mut gating = Vec::new();
         let mut accepted = Vec::new();

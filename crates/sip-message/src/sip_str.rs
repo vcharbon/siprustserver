@@ -23,7 +23,6 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
-
 /// The decoded text image of one message: the single allocation every
 /// [`SipStr`] of that message points into.
 #[derive(Debug, Clone, PartialEq, Eq)]

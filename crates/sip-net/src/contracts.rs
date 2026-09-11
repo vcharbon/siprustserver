@@ -38,10 +38,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use sip_message::SipParser;
 use layer_harness::recording::{record_call, CallOutcome};
 use layer_harness::time::now_ms;
-use layer_harness::{lane_key, Channel, LaneKey, RecordedAnomaly, Recorder, RunContext, Severity, Stamped};
+use layer_harness::{
+    lane_key, Channel, LaneKey, RecordedAnomaly, Recorder, RunContext, Severity, Stamped,
+};
+use sip_message::SipParser;
 
 use crate::net::{SignalingNetwork, UdpEndpoint};
 use crate::types::{
@@ -71,17 +73,42 @@ pub const SIGNALING_TAG: &str = "sip-net/SignalingNetwork";
 /// recording both, adjacently, at recv time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignalingNetworkEvent {
-    BindAcquire { bind_key: LaneKey, summary: BindSummary },
-    BindRelease { bind_key: LaneKey },
-    SendCalled { bind_key: LaneKey, to: SocketAddr, msg: Vec<u8> },
-    SendResult { bind_key: LaneKey, outcome: SendOutcome },
-    RecvItem { bind_key: LaneKey, packet: UdpPacket, disposition: RecvDisposition, wire: WireStamp },
-    RecvConsumed { bind_key: LaneKey, packet: UdpPacket },
+    BindAcquire {
+        bind_key: LaneKey,
+        summary: BindSummary,
+    },
+    BindRelease {
+        bind_key: LaneKey,
+    },
+    SendCalled {
+        bind_key: LaneKey,
+        to: SocketAddr,
+        msg: Vec<u8>,
+    },
+    SendResult {
+        bind_key: LaneKey,
+        outcome: SendOutcome,
+    },
+    RecvItem {
+        bind_key: LaneKey,
+        packet: UdpPacket,
+        disposition: RecvDisposition,
+        wire: WireStamp,
+    },
+    RecvConsumed {
+        bind_key: LaneKey,
+        packet: UdpPacket,
+    },
     /// An outbound datagram the endpoint's retransmit engine re-emitted below
     /// the recording layer (loadgen `--auto-retransmit`). Projection-only — it
     /// renders on the ladder as a tagged outbound frame but is invisible to the
     /// RFC audit (a re-emit is a byte-identical retransmission the rules dedup).
-    ReEmit { bind_key: LaneKey, to: SocketAddr, msg: Vec<u8>, kind: crate::types::ReEmitKind },
+    ReEmit {
+        bind_key: LaneKey,
+        to: SocketAddr,
+        msg: Vec<u8>,
+        kind: crate::types::ReEmitKind,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,10 +188,7 @@ pub fn audit_visible_event(event: &SignalingNetworkEvent) -> bool {
 /// The audit anomaly kinds this layer owns; the layer-close failure decision
 /// fails on any of these whose severity is non-advisory.
 fn is_audit_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "signalingAudit" | "queueLeak" | "undeliverable" | "inFlightImbalance"
-    )
+    matches!(kind, "signalingAudit" | "queueLeak" | "undeliverable" | "inFlightImbalance")
 }
 
 // ---------------------------------------------------------------------------
@@ -285,9 +309,7 @@ impl RecordingSignalingNetwork {
         opts: ScopedAuditOptions,
     ) -> Self {
         let channel = recorder.for_tag::<SignalingNetworkEvent>(SIGNALING_TAG);
-        let should_audit = opts
-            .should_audit_bind
-            .unwrap_or_else(|| Arc::new(|_: &LaneKey| true));
+        let should_audit = opts.should_audit_bind.unwrap_or_else(|| Arc::new(|_: &LaneKey| true));
         Self(Arc::new(RecordingInner {
             inner,
             recorder,
@@ -385,7 +407,13 @@ impl RecordingSignalingNetwork {
                     } else {
                         self.0.ctx.severity_for(SIGNALING_TAG, false)
                     };
-                    self.push_anomaly("signalingAudit", rule.name(), detail, severity, Some(bind_key));
+                    self.push_anomaly(
+                        "signalingAudit",
+                        rule.name(),
+                        detail,
+                        severity,
+                        Some(bind_key),
+                    );
                 }
             }
         }
@@ -452,16 +480,11 @@ impl SignalingNetwork for RecordingSignalingNetwork {
             None => lane_key(opts.addr),
         };
         let roles = opts.effective_roles();
-        self.0
-            .bind_roles
-            .lock()
-            .unwrap()
-            .insert(bind_key.clone(), roles.clone());
+        self.0.bind_roles.lock().unwrap().insert(bind_key.clone(), roles.clone());
         let summary = opts.summary();
-        self.0.channel.record(SignalingNetworkEvent::BindAcquire {
-            bind_key: bind_key.clone(),
-            summary,
-        });
+        self.0
+            .channel
+            .record(SignalingNetworkEvent::BindAcquire { bind_key: bind_key.clone(), summary });
         let endpoint = self.0.inner.bind_udp(opts).await?;
         // Delivery-time recording: arrivals are recorded
         // the moment the inner inbox accepts (or overflows/refuses) them, so a
@@ -622,9 +645,7 @@ impl UdpEndpoint for RecordedEndpoint {
 impl Drop for RecordedEndpoint {
     fn drop(&mut self) {
         // Per-bind scope close (RAII analogue of the source's bind finalizer).
-        self.channel.record(SignalingNetworkEvent::BindRelease {
-            bind_key: self.bind_key.clone(),
-        });
+        self.channel.record(SignalingNetworkEvent::BindRelease { bind_key: self.bind_key.clone() });
 
         // Queue-leak: capture depth BEFORE the inner endpoint drops and closes
         // its queue. Advisory — many fixtures release a bind with packets
@@ -773,7 +794,10 @@ impl UdpEndpoint for ParanoidEndpoint {
                 "{}",
                 ParanoidViolation::new(
                     "PA5_send_msgSizeBound",
-                    format!("send buf.len()={} exceeds MAX_UDP_PAYLOAD={MAX_UDP_PAYLOAD}", buf.len()),
+                    format!(
+                        "send buf.len()={} exceeds MAX_UDP_PAYLOAD={MAX_UDP_PAYLOAD}",
+                        buf.len()
+                    ),
                 )
             );
         }
@@ -829,8 +853,5 @@ pub fn with_all_contracts(
     } else {
         Arc::new(recording)
     };
-    WrappedNetwork {
-        network,
-        recording: recording_handle,
-    }
+    WrappedNetwork { network, recording: recording_handle }
 }

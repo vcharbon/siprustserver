@@ -123,7 +123,13 @@ mod tests {
 
     fn traces(exporter: bool) -> ProxyTraces {
         ProxyTraces::new(
-            SampleAdmission::new(exporter, 1.0, 10, RateDraw::seeded(5), TokenBucket::default_at(0)),
+            SampleAdmission::new(
+                exporter,
+                1.0,
+                10,
+                RateDraw::seeded(5),
+                TokenBucket::default_at(0),
+            ),
             false,
         )
     }

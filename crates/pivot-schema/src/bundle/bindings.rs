@@ -27,10 +27,9 @@ impl std::fmt::Display for BindingError {
             BindingError::UnboundIdentity { name } => {
                 write!(f, "the lane bound no number for identity {name:?}")
             }
-            BindingError::UnboundForm { name, form, bound } => write!(
-                f,
-                "the lane bound identity {name:?} in {bound:?}, not in form {form:?}"
-            ),
+            BindingError::UnboundForm { name, form, bound } => {
+                write!(f, "the lane bound identity {name:?} in {bound:?}, not in form {form:?}")
+            }
         }
     }
 }
@@ -96,9 +95,11 @@ mod tests {
 
     #[test]
     fn a_form_the_lane_did_not_bind_is_refused_by_name() {
-        let bindings = IdentityBindings::new()
-            .bind("caller", "private", "0009001")
-            .bind("called-0-0", "e164", "+33000900004");
+        let bindings = IdentityBindings::new().bind("caller", "private", "0009001").bind(
+            "called-0-0",
+            "e164",
+            "+33000900004",
+        );
         assert_eq!(bindings.resolve("caller", "private").unwrap(), "0009001");
         assert_eq!(
             bindings.resolve("caller", "e164"),

@@ -26,11 +26,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use b2bua::decision::ScriptedDecisionEngine;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse,
 };
-use b2bua::decision::ScriptedDecisionEngine;
 use b2bua_harness::{establish, settle_until, B2buaSut};
 use scenario_harness::Harness;
 
@@ -140,10 +140,11 @@ async fn initial_invite_at_the_per_call_cap_is_shed_503_not_dropped() {
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5071").await;
     let carol = h.agent("carol", "127.0.0.1:5062").await;
-    let b2bua = B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071)))
-        .tune(|c| c.per_call_queue_cap = 1) // exactly one live per-call queue allowed
-        .start(&h, "b2bua", "127.0.0.1:5081")
-        .await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071)))
+            .tune(|c| c.per_call_queue_cap = 1) // exactly one live per-call queue allowed
+            .start(&h, "b2bua", "127.0.0.1:5081")
+            .await;
 
     // Call 1 establishes and stays up → its per-call queue occupies the cap.
     let _d1 = establish(&alice, &bob, b2bua.addr).await;

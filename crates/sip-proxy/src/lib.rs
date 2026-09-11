@@ -35,8 +35,8 @@ pub mod registry;
 pub mod resolver;
 pub mod security;
 pub mod self_gate;
-pub mod strategy;
 pub mod strategies;
+pub mod strategy;
 pub mod trace;
 
 pub use addr::ProxyAddr;
@@ -44,5 +44,5 @@ pub use core::{ExternalFaceParts, ProxyCore, ProxyCoreBuilder};
 pub use face::{FaceCidrs, Ipv4Cidr};
 pub use observability::ProxyMetrics;
 pub use strategies::{ForwardAllStrategy, LoadBalancerConfig, LoadBalancerStrategy};
-pub use trace::ProxyTraces;
 pub use strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
+pub use trace::ProxyTraces;

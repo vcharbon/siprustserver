@@ -1,8 +1,8 @@
 use sip_message::{EmitOpts, MessageTemplate, Method, TemplateHeader};
 use std::time::Duration;
 
-use crate::actor::*;
 use super::testkit::*;
+use crate::actor::*;
 use crate::{Harness, OFFER_SDP};
 
 /// Requeue-on-advance: two INFOs park while one `ExpectRequest{Info}`
@@ -79,8 +79,7 @@ async fn requeue_on_advance_auto_reacts_passed_parked_request() {
 
     let ctx = CallCtx::new();
     let obs = ObservedState::new();
-    let verdict =
-        run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+    let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
     assert!(verdict.is_ok(), "both INFOs must be answered, got {verdict:?}");
     let replay = obs.replay_record();
     assert!(
@@ -135,7 +134,7 @@ async fn expect_response_fails_fast_when_final_precedes_provisional() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -261,7 +260,7 @@ async fn scripted_originator_attribution_keys_on_first_goal() {
             invite_targets: vec![("bob", bob.clone())],
             via: None,
             feed: CtxFeed::default(),
-        
+
             cseq: None,
             delayed: vec![],
             claim: None,
@@ -324,8 +323,7 @@ async fn run_100_trying_case(name: &'static str, on: bool) -> bool {
 
     let ctx = CallCtx::new();
     let obs = ObservedState::new();
-    let verdict =
-        run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+    let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
     assert!(verdict.is_ok(), "[{name}] must settle clean, got {verdict:?}");
     h.finish().await;
     obs.with_snapshot(|s| s.leg("alice").saw_status(100))

@@ -21,10 +21,7 @@ use super::model::{EffectKind, RuleAction, RuleContext, RuleDefinition, RuleHand
 fn machine_active(r: &RuleDefinition, call: &Call) -> bool {
     match &r.machine {
         None => true,
-        Some(m) => call
-            .sm_cursors
-            .get(m)
-            .is_some_and(|cursor| r.active_states.contains(cursor)),
+        Some(m) => call.sm_cursors.get(m).is_some_and(|cursor| r.active_states.contains(cursor)),
     }
 }
 
@@ -47,10 +44,8 @@ pub fn pick_ranked<'a>(
         })
         .collect();
 
-    let overridden: HashSet<&str> = candidates
-        .iter()
-        .flat_map(|(_, r)| r.overrides.iter().copied())
-        .collect();
+    let overridden: HashSet<&str> =
+        candidates.iter().flat_map(|(_, r)| r.overrides.iter().copied()).collect();
     candidates.retain(|(_, r)| !overridden.contains(r.id));
 
     candidates.sort_by(|a, b| b.1.layer.cmp(&a.1.layer).then(a.0.cmp(&b.0)));
@@ -167,10 +162,7 @@ fn check_declared_transition(
     // transition to the `terminal` sentinel from `f` (ADR-0016 X9).
     let declared = match (from, to) {
         (Some(f), Some(t)) => rule.transitions.iter().any(|(df, dt)| df == f && dt == t),
-        (Some(f), None) => rule
-            .transitions
-            .iter()
-            .any(|(df, dt)| df == f && dt.is_terminal()),
+        (Some(f), None) => rule.transitions.iter().any(|(df, dt)| df == f && dt.is_terminal()),
         _ => false,
     };
     if !declared {

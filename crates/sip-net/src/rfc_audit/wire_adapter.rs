@@ -94,8 +94,7 @@ fn bind_views(events: &[Stamped<SignalingNetworkEvent>]) -> Vec<BindView> {
         // defeat the rules' order-based hop gates (who emitted first, who
         // passed a message on). Event `seq` is the total order (the wire
         // model's tiebreak); a µs bump inside the tied ms preserves it.
-        let at_us =
-            (s.at_ms * 1_000).max(view.msgs.last().map_or(0, |m| m.at_us + 1));
+        let at_us = (s.at_ms * 1_000).max(view.msgs.last().map_or(0, |m| m.at_us + 1));
         view.msgs.push(Msg {
             at_us,
             src,
@@ -386,8 +385,7 @@ impl CrossMessageAuditRule for RackWithoutKnownInviteRule {
                 [only] => format!(", expected \"RAck: {rack_rseq} {only} INVITE\""),
                 _ => String::new(),
             };
-            let seen =
-                known_cseqs.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+            let seen = known_cseqs.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
             format!(
                 "Sent \"RAck: {rack_rseq} {rack_cseq} INVITE\" (callId {cid}) — its CSeq-num \
                  field ({rack_cseq}) names no INVITE this bind opened (opened INVITE CSeq: \
@@ -1222,32 +1220,39 @@ impl CrossMessageAuditRule for AllowSupportedOnInviteRule {
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
         let relays = relay_lanes(events);
-        surfaced_at_taker(events, &rfc_rules::rules::capability::AllowSupportedOnInvite, |f, _cid| {
-            let Decision::Violated(rfc_rules::Evidence::CapabilitiesNotAdvertised {
-                missing,
-                status,
-                ..
-            }) = &f.decision
-            else {
-                return String::new();
-            };
-            let label =
-                if *status == 0 { "re-INVITE".to_string() } else { format!("{status} OK INVITE") };
-            missing
-                .iter()
-                .map(|h| match h.as_str() {
-                    "Allow" => format!(
+        surfaced_at_taker(
+            events,
+            &rfc_rules::rules::capability::AllowSupportedOnInvite,
+            |f, _cid| {
+                let Decision::Violated(rfc_rules::Evidence::CapabilitiesNotAdvertised {
+                    missing,
+                    status,
+                    ..
+                }) = &f.decision
+                else {
+                    return String::new();
+                };
+                let label = if *status == 0 {
+                    "re-INVITE".to_string()
+                } else {
+                    format!("{status} OK INVITE")
+                };
+                missing
+                    .iter()
+                    .map(|h| match h.as_str() {
+                        "Allow" => format!(
                         "{label} missing Allow: header — RFC 3261 §13.2.1 (SHOULD list accepted \
                          methods)"
                     ),
-                    _ => format!(
-                        "{label} missing Supported: header — RFC 3261 §20.37 (SHOULD list \
+                        _ => format!(
+                            "{label} missing Supported: header — RFC 3261 §20.37 (SHOULD list \
                          extensions for Require negotiation)"
-                    ),
-                })
-                .collect::<Vec<_>>()
-                .join("; ")
-        })
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            },
+        )
         .into_iter()
         .filter(|(lane, _, _, _)| !relays.contains(lane))
         .collect()
@@ -1908,30 +1913,26 @@ impl CrossMessageAuditRule for NoReInviteWhileInviteInProgressRule {
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        surfaced(
-            events,
-            &rfc_rules::rules::reinvite::NoReInviteWhileInviteInProgress,
-            |f, cid| {
-                let Decision::Violated(rfc_rules::Evidence::OverlappingReInvite {
-                    branch,
-                    prior_branch,
-                    prior_accepted,
-                    ..
-                }) = &f.decision
-                else {
-                    return String::new();
-                };
-                let phase = if *prior_accepted {
-                    "still Accepted — its 2xx not yet ACKed (RFC 6026)"
-                } else {
-                    "still in progress"
-                };
-                format!(
-                    "Sent re-INVITE (callId {cid}, branch {branch}) while prior INVITE (branch \
+        surfaced(events, &rfc_rules::rules::reinvite::NoReInviteWhileInviteInProgress, |f, cid| {
+            let Decision::Violated(rfc_rules::Evidence::OverlappingReInvite {
+                branch,
+                prior_branch,
+                prior_accepted,
+                ..
+            }) = &f.decision
+            else {
+                return String::new();
+            };
+            let phase = if *prior_accepted {
+                "still Accepted — its 2xx not yet ACKed (RFC 6026)"
+            } else {
+                "still in progress"
+            };
+            format!(
+                "Sent re-INVITE (callId {cid}, branch {branch}) while prior INVITE (branch \
                      {prior_branch}) {phase} — {{Uac}} RFC 3261 §14.1 / RFC3261-MUST-083"
-                )
-            },
-        )
+            )
+        })
     }
 }
 
@@ -2400,26 +2401,21 @@ impl CrossMessageAuditRule for Delay2xxOnUnackedReliable1xxWithSdpRule {
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
         let relays = relay_lanes(events);
-        surfaced(
-            events,
-            &rfc_rules::rules::prack::Delay2xxOnUnackedReliable1xxWithSdp,
-            |f, cid| {
-                let Decision::Violated(rfc_rules::Evidence::AnsweredOverUnackedOffer {
-                    unacked_rseqs,
-                    branch,
-                    ..
-                }) = &f.decision
-                else {
-                    return String::new();
-                };
-                let rseqs =
-                    unacked_rseqs.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
-                format!(
-                    "Sent 2xx INVITE response while reliable 1xx (RSeq={rseqs}) with SDP still \
+        surfaced(events, &rfc_rules::rules::prack::Delay2xxOnUnackedReliable1xxWithSdp, |f, cid| {
+            let Decision::Violated(rfc_rules::Evidence::AnsweredOverUnackedOffer {
+                unacked_rseqs,
+                branch,
+                ..
+            }) = &f.decision
+            else {
+                return String::new();
+            };
+            let rseqs = unacked_rseqs.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
+            format!(
+                "Sent 2xx INVITE response while reliable 1xx (RSeq={rseqs}) with SDP still \
                      unacked (callId {cid}, branch {branch}) — RFC 3262 §3 / RFC3262-MUST-014"
-                )
-            },
-        )
+            )
+        })
         .into_iter()
         .filter(|(lane, _, _, _)| !relays.contains(lane))
         .collect()
@@ -2450,9 +2446,7 @@ impl CrossMessageAuditRule for PrackAcceptedAfterFinalRule {
         let relays = relay_lanes(events);
         surfaced(events, &rfc_rules::rules::prack::PrackAcceptedAfterFinal, |f, cid| {
             let Decision::Violated(rfc_rules::Evidence::LatePrackRejected {
-                status,
-                branch,
-                ..
+                status, branch, ..
             }) = &f.decision
             else {
                 return String::new();
@@ -2629,8 +2623,7 @@ impl CrossMessageAuditRule for AckBodyAfterCompleteOfferAnswerRule {
             &rfc_rules::rules::offer_answer::AckBodyAfterCompleteOfferAnswer,
             |f, cid| {
                 let Decision::Violated(rfc_rules::Evidence::AckBodyOnClosedRound {
-                    streams,
-                    ..
+                    streams, ..
                 }) = &f.decision
                 else {
                     return String::new();
@@ -3251,26 +3244,22 @@ impl CrossMessageAuditRule for ReOfferMLineCountMonotonicRule {
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
         let relays = relay_lanes(events);
-        surfaced(
-            events,
-            &rfc_rules::rules::offer_answer::ReOfferMLineCountMonotonic,
-            |f, cid| {
-                let Decision::Violated(rfc_rules::Evidence::ReOfferStreamsDropped {
-                    m_lines,
-                    prior_m_lines,
-                    ..
-                }) = &f.decision
-                else {
-                    return String::new();
-                };
-                format!(
-                    "Re-offer m= count {m_lines} decreased from prior offer {prior_m_lines} — \
+        surfaced(events, &rfc_rules::rules::offer_answer::ReOfferMLineCountMonotonic, |f, cid| {
+            let Decision::Violated(rfc_rules::Evidence::ReOfferStreamsDropped {
+                m_lines,
+                prior_m_lines,
+                ..
+            }) = &f.decision
+            else {
+                return String::new();
+            };
+            format!(
+                "Re-offer m= count {m_lines} decreased from prior offer {prior_m_lines} — \
                      streams must keep their slot (port=0) (callId {cid}, CSeq {cseq}) — RFC 3264 \
                      §8 / RFC3264-MUST-042",
-                    cseq = f.cseq,
-                )
-            },
-        )
+                cseq = f.cseq,
+            )
+        })
         .into_iter()
         .filter(|(lane, _, _, _)| !relays.contains(lane))
         .collect()
@@ -3376,9 +3365,7 @@ impl CrossMessageAuditRule for PayloadTypeMappingStableRule {
                 let rows = payload_types
                     .iter()
                     .zip(prior_encodings.iter().zip(encodings.iter()))
-                    .map(|(pt, (prev, now))| {
-                        format!("payload-type {pt} was '{prev}' now '{now}'")
-                    })
+                    .map(|(pt, (prev, now))| format!("payload-type {pt} was '{prev}' now '{now}'"))
                     .collect::<Vec<_>>()
                     .join("; ");
                 format!(
@@ -3431,23 +3418,21 @@ impl CrossMessageAuditRule for BranchPrefixRule {
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        surfaced(events, &rfc_rules::rules::wellformed::BranchPrefix, |f, _cid| {
-            match &f.decision {
-                Decision::Violated(rfc_rules::Evidence::HeaderValueRejected {
-                    on, value, ..
-                }) => format!(
+        surfaced(events, &rfc_rules::rules::wellformed::BranchPrefix, |f, _cid| match &f.decision {
+            Decision::Violated(rfc_rules::Evidence::HeaderValueRejected { on, value, .. }) => {
+                format!(
                     "{on} top Via branch \"{value}\" does not begin with the RFC 3261 magic \
                      cookie \"z9hG4bK\" (§8.1.1.7) — a downstream element cannot treat it as an \
                      RFC-3261 transaction id"
-                ),
-                Decision::Violated(rfc_rules::Evidence::RequiredHeaderAbsent { on, .. }) => {
-                    format!(
-                        "{on} has no top Via branch parameter (RFC 3261 §8.1.1.7 requires a \
-                         \"z9hG4bK\"-prefixed branch on every request)"
-                    )
-                }
-                _ => String::new(),
+                )
             }
+            Decision::Violated(rfc_rules::Evidence::RequiredHeaderAbsent { on, .. }) => {
+                format!(
+                    "{on} has no top Via branch parameter (RFC 3261 §8.1.1.7 requires a \
+                         \"z9hG4bK\"-prefixed branch on every request)"
+                )
+            }
+            _ => String::new(),
         })
     }
 }
@@ -3469,31 +3454,29 @@ impl CrossMessageAuditRule for MaxForwardsRule {
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        surfaced(events, &rfc_rules::rules::wellformed::MaxForwards, |f, _cid| {
-            match &f.decision {
-                Decision::Violated(rfc_rules::Evidence::RequiredHeaderAbsent { on, .. }) => {
-                    format!(
-                        "{on} request is missing Max-Forwards — RFC 3261 §8.1.1.6 requires it on \
+        surfaced(events, &rfc_rules::rules::wellformed::MaxForwards, |f, _cid| match &f.decision {
+            Decision::Violated(rfc_rules::Evidence::RequiredHeaderAbsent { on, .. }) => {
+                format!(
+                    "{on} request is missing Max-Forwards — RFC 3261 §8.1.1.6 requires it on \
                          every request (a real downstream element cannot loop-protect this hop)"
-                    )
-                }
-                Decision::Violated(rfc_rules::Evidence::HeaderValueRejected {
-                    on,
-                    value,
-                    expected,
-                    ..
-                }) if expected == "at most 70" => format!(
-                    "{on} Max-Forwards is {value}, exceeds 70 — RFC 3261 §8.1.1.6 (70 is the \
+                )
+            }
+            Decision::Violated(rfc_rules::Evidence::HeaderValueRejected {
+                on,
+                value,
+                expected,
+                ..
+            }) if expected == "at most 70" => format!(
+                "{on} Max-Forwards is {value}, exceeds 70 — RFC 3261 §8.1.1.6 (70 is the \
                      recommended initial value; a higher count was minted, not decremented)"
-                ),
-                Decision::Violated(rfc_rules::Evidence::HeaderValueRejected {
-                    on, value, ..
-                }) => format!(
+            ),
+            Decision::Violated(rfc_rules::Evidence::HeaderValueRejected { on, value, .. }) => {
+                format!(
                     "{on} has an invalid Max-Forwards value \"{value}\" — RFC 3261 §8.1.1.6 \
                      requires an integer in 0..=255"
-                ),
-                _ => String::new(),
+                )
             }
+            _ => String::new(),
         })
     }
 }
@@ -3674,9 +3657,8 @@ impl CrossMessageAuditRule for NoRecordRouteFromUaRule {
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
         surfaced(events, &rfc_rules::rules::wellformed::NoRecordRouteFromUa, |f, _cid| {
-            let Decision::Violated(rfc_rules::Evidence::ForbiddenHeaderPresent {
-                value, ..
-            }) = &f.decision
+            let Decision::Violated(rfc_rules::Evidence::ForbiddenHeaderPresent { value, .. }) =
+                &f.decision
             else {
                 return String::new();
             };
@@ -4277,9 +4259,7 @@ impl CrossMessageAuditRule for CancelCseqMethodRule {
             else {
                 return String::new();
             };
-            format!(
-                "CANCEL request carries CSeq method={value} (expected CANCEL) — RFC 3261 §9.1"
-            )
+            format!("CANCEL request carries CSeq method={value} (expected CANCEL) — RFC 3261 §9.1")
         })
     }
 }
@@ -5120,7 +5100,11 @@ mod tests {
         let out = MidDialogUriRule.check_positioned(&evs);
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].0, SUT, "attributed to the lane that sent the request");
-        assert!(out[0].1.contains("From URI") && out[0].1.contains("sip:eve@127.0.0.1"), "{}", out[0].1);
+        assert!(
+            out[0].1.contains("From URI") && out[0].1.contains("sip:eve@127.0.0.1"),
+            "{}",
+            out[0].1
+        );
         assert_eq!(out[0].2, Some(3), "offending points at the BYE");
 
         let mut clean = established("");
@@ -5168,14 +5152,24 @@ mod tests {
     #[test]
     fn bytes_sent_past_the_derived_destination_are_reported_at_the_emitter() {
         let mut evs = established("");
-        evs.push(sent(SUT, in_dialog("BYE", "sip:bob@127.0.0.1:5070", "z9hG4bK-b", 2, A, B, ""), "127.0.0.1:9999", 2));
+        evs.push(sent(
+            SUT,
+            in_dialog("BYE", "sip:bob@127.0.0.1:5070", "z9hG4bK-b", 2, A, B, ""),
+            "127.0.0.1:9999",
+            2,
+        ));
         let out = MidDialogWireDestinationRule.check_positioned(&evs);
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].0, SUT);
         assert!(out[0].1.contains("wire-sent to 127.0.0.1:9999"), "{}", out[0].1);
 
         let mut clean = established("");
-        clean.push(sent(SUT, in_dialog("BYE", "sip:bob@127.0.0.1:5070", "z9hG4bK-b", 2, A, B, ""), BOB, 2));
+        clean.push(sent(
+            SUT,
+            in_dialog("BYE", "sip:bob@127.0.0.1:5070", "z9hG4bK-b", 2, A, B, ""),
+            BOB,
+            2,
+        ));
         assert!(MidDialogWireDestinationRule.check_positioned(&clean).is_empty());
     }
 
@@ -5185,12 +5179,7 @@ mod tests {
     fn record_route_on_a_100_is_reported_at_the_taker() {
         let evs = vec![
             sent(SUT, in_dialog_less_to_tag("z9hG4bK-i"), BOB, 0),
-            recv(
-                SUT,
-                resp(100, 1, "INVITE", "", "z9hG4bK-i"),
-                BOB,
-                1,
-            ),
+            recv(SUT, resp(100, 1, "INVITE", "", "z9hG4bK-i"), BOB, 1),
         ];
         assert!(RecordRoutePlacementRule.check_positioned(&evs).is_empty(), "a bare 100 is clean");
 
@@ -5271,14 +5260,26 @@ mod tests {
         let out = AllowSupportedOnInviteRule.check_positioned(&evs);
         assert_eq!(out.len(), 1, "one finding, both headers on it: {out:?}");
         assert_eq!(out[0].0, SUT, "reported on the lane that took the re-INVITE");
-        assert!(out[0].1.contains("missing Allow:") && out[0].1.contains("missing Supported:"), "{}", out[0].1);
+        assert!(
+            out[0].1.contains("missing Allow:") && out[0].1.contains("missing Supported:"),
+            "{}",
+            out[0].1
+        );
         assert_eq!(out[0].2, Some(2), "offending points at the re-INVITE");
 
         let advertised = vec![
             recv(SUT, req("INVITE", "z9hG4bK-i", 1, None), ALICE, 0),
             recv(
                 SUT,
-                in_dialog("INVITE", B, "z9hG4bK-r", 2, A, B, "Allow: INVITE, ACK\r\nSupported: 100rel\r\n"),
+                in_dialog(
+                    "INVITE",
+                    B,
+                    "z9hG4bK-r",
+                    2,
+                    A,
+                    B,
+                    "Allow: INVITE, ACK\r\nSupported: 100rel\r\n",
+                ),
                 ALICE,
                 1,
             ),
@@ -5345,7 +5346,12 @@ mod tests {
     fn an_unrecognised_method_is_flagged_on_the_lane_that_took_it() {
         let clean = vec![
             recv(SUT, req_with("FROBNICATE", "z9hG4bK-x", ""), ALICE, 0),
-            sent(SUT, resp_with(405, 1, "FROBNICATE", "z9hG4bK-x", "Allow: INVITE, BYE\r\n"), ALICE, 1),
+            sent(
+                SUT,
+                resp_with(405, 1, "FROBNICATE", "z9hG4bK-x", "Allow: INVITE, BYE\r\n"),
+                ALICE,
+                1,
+            ),
         ];
         assert!(UnsupportedMethod405AllowRule.check_positioned(&clean).is_empty());
 
@@ -5366,7 +5372,12 @@ mod tests {
     fn an_unsupported_require_served_is_flagged() {
         let clean = vec![
             recv(SUT, req_with("INVITE", "z9hG4bK-i", "Require: frobnicate\r\n"), ALICE, 0),
-            sent(SUT, resp_with(420, 1, "INVITE", "z9hG4bK-i", "Unsupported: frobnicate\r\n"), ALICE, 1),
+            sent(
+                SUT,
+                resp_with(420, 1, "INVITE", "z9hG4bK-i", "Unsupported: frobnicate\r\n"),
+                ALICE,
+                1,
+            ),
         ];
         assert!(UnsupportedExtension420Rule.check_positioned(&clean).is_empty());
 
@@ -5598,12 +5609,8 @@ mod tests {
     /// A REGISTER the lane SENT, carrying a Route header — §10.2 owes none.
     #[test]
     fn a_register_carrying_route_is_flagged_on_the_lane_that_sent_it() {
-        let evs = vec![sent(
-            SUT,
-            req_with("REGISTER", "z9hG4bK-r", "Route: <sip:p@h;lr>\r\n"),
-            BOB,
-            0,
-        )];
+        let evs =
+            vec![sent(SUT, req_with("REGISTER", "z9hG4bK-r", "Route: <sip:p@h;lr>\r\n"), BOB, 0)];
         let out = RegisterNoRouteSetRule.check_positioned(&evs);
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].0, SUT);
@@ -5673,8 +5680,7 @@ mod tests {
             assert_eq!(arms, severities.len(), "{token} is surfaced twice at one severity");
         }
         let surfaced: Vec<&str> = by_token.keys().copied().collect();
-        let mut declared: Vec<&str> =
-            rfc_rules::RuleId::ALL.iter().map(|r| r.token()).collect();
+        let mut declared: Vec<&str> = rfc_rules::RuleId::ALL.iter().map(|r| r.token()).collect();
         declared.sort_unstable();
         assert_eq!(surfaced, declared);
     }
@@ -6343,10 +6349,7 @@ mod tests {
     #[test]
     fn a_bodiless_prack_for_a_1xx_offer_is_named_at_either_end() {
         assert!(PrackAnswers1xxOfferRule.force_advisory());
-        assert_eq!(
-            PrackAnswers1xxOfferRule.subject(),
-            HashSet::from([UaRole::Uac, UaRole::Uas])
-        );
+        assert_eq!(PrackAnswers1xxOfferRule.subject(), HashSet::from([UaRole::Uac, UaRole::Uas]));
         // The bind SENT the offending PRACK: charged party and vantage are one.
         let sender = vec![
             recv(SUT, inv_resp_3262(183, "z9hG4bK-i", &reliable_rows(1), true), BOB, 0),
@@ -6446,13 +6449,7 @@ m=audio 20000 RTP/AVP 0\r\n";
     }
 
     /// A response carrying an optional SDP body.
-    fn resp_sdp(
-        status: u16,
-        cseq: u32,
-        method: &str,
-        branch: &str,
-        body: Option<&str>,
-    ) -> Vec<u8> {
+    fn resp_sdp(status: u16, cseq: u32, method: &str, branch: &str, body: Option<&str>) -> Vec<u8> {
         let body = body.unwrap_or("");
         let ctype = if body.is_empty() { "" } else { "Content-Type: application/sdp\r\n" };
         let mut v = format!(
@@ -6492,10 +6489,8 @@ m=audio 20000 RTP/AVP 0\r\n";
     fn an_ack_body_on_a_completed_round_is_flagged_at_its_wire_position() {
         assert!(AckBodyAfterCompleteOfferAnswerRule.check(&t38_call(None, None)).is_empty());
 
-        let out = AckBodyAfterCompleteOfferAnswerRule.check_positioned(&t38_call(
-            None,
-            Some(STRAY_ANSWER),
-        ));
+        let out = AckBodyAfterCompleteOfferAnswerRule
+            .check_positioned(&t38_call(None, Some(STRAY_ANSWER)));
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].0, ALICE, "charged to the lane that sent the ACK");
         assert!(out[0].1.contains("audio/RTP/AVP"), "{}", out[0].1);
@@ -6655,7 +6650,11 @@ m=audio 20000 RTP/AVP 0\r\n";
             recv(SUT, ok.clone(), BOB, 2),
             sent(SUT, ok, ALICE, 3),
         ];
-        assert!(SdpOriginContinuityRule.check(&evs).is_empty(), "{:?}", SdpOriginContinuityRule.check(&evs));
+        assert!(
+            SdpOriginContinuityRule.check(&evs).is_empty(),
+            "{:?}",
+            SdpOriginContinuityRule.check(&evs)
+        );
         assert!(AnswerStreamMatchesOfferRule.check(&evs).is_empty());
         assert!(AckBodyAfterCompleteOfferAnswerRule.check(&evs).is_empty());
     }
@@ -6793,7 +6792,11 @@ a=sendrecv\r\n";
         let out = DirectionPairValidRule.check_positioned(&sdp_round(&held, ANSWER_1AUDIO));
         assert_eq!(out.len(), 1, "{out:?}");
         assert!(out[0].1.contains("MUST-023"), "{}", out[0].1);
-        assert!(out[0].1.contains("answer 'sendrecv' invalid for offer 'inactive'"), "{}", out[0].1);
+        assert!(
+            out[0].1.contains("answer 'sendrecv' invalid for offer 'inactive'"),
+            "{}",
+            out[0].1
+        );
         assert_eq!(out[0].2, Some(2));
 
         let disabled = OFFER_1AUDIO.replace("m=audio 49170 RTP/AVP 0 96", "m=audio 0 RTP/AVP 0 96");
@@ -6838,12 +6841,21 @@ a=sendrecv\r\n";
 
         let reoffer = OFFER_1AUDIO.replace("a=rtpmap:96 opus/48000/2", "a=rtpmap:96 H264/90000");
         let mut evs = sdp_round(OFFER_1AUDIO, ANSWER_1AUDIO);
-        evs.push(sent(ALICE, req_sdp("INVITE", "z9hG4bK-i3", 3, Some("bt"), Some(&reoffer)), BOB, 3));
+        evs.push(sent(
+            ALICE,
+            req_sdp("INVITE", "z9hG4bK-i3", 3, Some("bt"), Some(&reoffer)),
+            BOB,
+            3,
+        ));
         let out = PayloadTypeMappingStableRule.check_positioned(&evs);
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].0, ALICE);
         assert!(out[0].1.contains("MUST-047"), "{}", out[0].1);
-        assert!(out[0].1.contains("payload-type 96 was 'opus/48000/2' now 'H264/90000'"), "{}", out[0].1);
+        assert!(
+            out[0].1.contains("payload-type 96 was 'opus/48000/2' now 'H264/90000'"),
+            "{}",
+            out[0].1
+        );
         assert_eq!(out[0].2, Some(4));
     }
 
@@ -6904,12 +6916,7 @@ a=sendrecv\r\n";
     /// bytes is charged nothing.
     #[test]
     fn a_minted_defect_is_charged_to_its_sender_and_positioned() {
-        let out = BranchPrefixRule.check_positioned(&[sent(
-            ALICE,
-            legacy_branch_invite(),
-            BOB,
-            0,
-        )]);
+        let out = BranchPrefixRule.check_positioned(&[sent(ALICE, legacy_branch_invite(), BOB, 0)]);
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].0, ALICE, "the sender is charged");
         assert!(out[0].1.contains("magic cookie"), "{}", out[0].1);
@@ -6960,8 +6967,7 @@ a=sendrecv\r\n";
         )
         .into_bytes();
         let named = |roles: HashSet<UaRole>| -> Vec<RfcFinding> {
-            let evs =
-                vec![bind_roles(SUT, roles, 0), sent(SUT, rr.clone(), BOB, 1)];
+            let evs = vec![bind_roles(SUT, roles, 0), sent(SUT, rr.clone(), BOB, 1)];
             evaluate_rfc_findings(&evs)
                 .into_iter()
                 .filter(|f| f.rule == NoRecordRouteFromUaRule.name())
@@ -7152,7 +7158,10 @@ a=sendrecv\r\n";
         let detail = &out[0].1;
         assert!(detail.contains("2xx final") && detail.contains("200 (INVITE)"), "{detail}");
         assert!(detail.contains("z9hG4bK-i") && detail.contains("cid-1@127.0.0.1"), "{detail}");
-        assert!(detail.contains("copy 1 of 2") && detail.contains("in the head at byte"), "{detail}");
+        assert!(
+            detail.contains("copy 1 of 2") && detail.contains("in the head at byte"),
+            "{detail}"
+        );
         assert!(detail.contains("first `From: <sip:alice@127.0.0.1>;tag=at`"), "{detail}");
         assert!(detail.contains("this copy `To: <sip:bob@127.0.0.1>;tag=bt`"), "{detail}");
         assert!(detail.contains("§13.3.1.4"), "{detail}");
@@ -7204,7 +7213,10 @@ a=sendrecv\r\n";
         let detail = &out[0].1;
         assert!(detail.contains("INVITE request"), "{detail}");
         assert!(detail.contains("first `Record-Route: <sip:10.0.0.7:5060;lr>`"), "{detail}");
-        assert!(detail.contains("this copy `Record-Route: <sip:10.0.0.7:5060;x=1;lr>`"), "{detail}");
+        assert!(
+            detail.contains("this copy `Record-Route: <sip:10.0.0.7:5060;x=1;lr>`"),
+            "{detail}"
+        );
     }
 
     /// The obliged behaviour: the same bytes again is nothing to report, and
@@ -7239,10 +7251,7 @@ a=sendrecv\r\n";
     #[test]
     fn a_re_composed_rung_the_peer_sent_is_not_charged_to_this_bind() {
         let bye = req("BYE", "z9hG4bK-b", 2, Some("bt"));
-        let evs = vec![
-            recv(SUT, bye.clone(), ALICE, 0),
-            recv(SUT, recomposed(bye), ALICE, 1),
-        ];
+        let evs = vec![recv(SUT, bye.clone(), ALICE, 0), recv(SUT, recomposed(bye), ALICE, 1)];
         assert!(RungByteIdenticalRule.check_positioned(&evs).is_empty());
     }
 

@@ -24,11 +24,7 @@ pub enum CallEvent {
         matched_client_txn: bool,
     },
     /// A B2BUA timer fired (keepalive, no-answer, max-duration, …).
-    Timer {
-        timer_type: TimerType,
-        call_ref: String,
-        leg_id: Option<String>,
-    },
+    Timer { timer_type: TimerType, call_ref: String, leg_id: Option<String> },
     /// A CANCEL matched a server INVITE txn; 200/487 already sent downstream.
     /// RFC 3261 §9 scopes a CANCEL to the one INVITE *transaction* it matched:
     /// `invite_cseq` is that INVITE's CSeq number, `in_dialog` whether it was an
@@ -94,21 +90,16 @@ impl CallEvent {
             TransactionEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers } => {
                 CallEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers }
             }
-            TransactionEvent::Timeout {
-                branch,
-                call_ref,
-                leg_id,
-                method,
-                destination,
-                kind,
-            } => CallEvent::Timeout {
-                branch,
-                call_ref,
-                leg_id,
-                method,
-                destination,
-                timeout_kind: kind,
-            },
+            TransactionEvent::Timeout { branch, call_ref, leg_id, method, destination, kind } => {
+                CallEvent::Timeout {
+                    branch,
+                    call_ref,
+                    leg_id,
+                    method,
+                    destination,
+                    timeout_kind: kind,
+                }
+            }
             TransactionEvent::CallQuiesced { call_ref } => CallEvent::CallQuiesced { call_ref },
         }
     }

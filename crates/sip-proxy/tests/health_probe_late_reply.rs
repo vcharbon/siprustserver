@@ -163,7 +163,8 @@ fn spawn_capture_responder(ep: Box<dyn UdpEndpoint>) -> (tokio::task::JoinHandle
     let hold = Arc::new(AtomicBool::new(false));
     let captured = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let ctl = CaptureCtl { hold: hold.clone(), captured: captured.clone(), release: release.clone() };
+    let ctl =
+        CaptureCtl { hold: hold.clone(), captured: captured.clone(), release: release.clone() };
     let task = tokio::spawn(async move {
         let parser = CustomParser::new();
         let mut held: Vec<(Vec<u8>, std::net::SocketAddr)> = Vec::new();
@@ -238,7 +239,10 @@ async fn wait_for_health(registry: &SimulatedWorkerRegistry, want: WorkerHealth)
 /// would return instantly, before any reply, defeating the test).
 fn unknown_registry(worker_sock: std::net::SocketAddr) -> Arc<SimulatedWorkerRegistry> {
     Arc::new(SimulatedWorkerRegistry::with_clock(
-        vec![WorkerEntry { health: WorkerHealth::Unknown, ..WorkerEntry::alive(WORKER_ID, ProxyAddr::from(worker_sock)) }],
+        vec![WorkerEntry {
+            health: WorkerHealth::Unknown,
+            ..WorkerEntry::alive(WORKER_ID, ProxyAddr::from(worker_sock))
+        }],
         Clock::test_at(0),
     ))
 }
@@ -256,7 +260,11 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
     // Reply delay (150 ms) is THREE tick intervals (50 ms) past the tick that
     // issues each probe — the reply is unambiguously "late" — yet well inside
     // the 600 ms reply window, so its branch still correlates.
-    let responder = spawn_late_responder(worker_ep, Duration::from_millis(150), Arc::new(AtomicBool::new(true)));
+    let responder = spawn_late_responder(
+        worker_ep,
+        Duration::from_millis(150),
+        Arc::new(AtomicBool::new(true)),
+    );
 
     let registry = unknown_registry(worker_sock);
     let writes = Arc::new(Mutex::new(Vec::new()));
@@ -280,7 +288,10 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
     // threshold. Here the branch still correlates, so the worker reaches — and
     // stays — Alive.
     wait_for_health(&registry, WorkerHealth::Alive).await;
-    assert!(observer.band_for(WORKER_ID).is_some(), "the late reply's X-Overload payload must still be applied");
+    assert!(
+        observer.band_for(WORKER_ID).is_some(),
+        "the late reply's X-Overload payload must still be applied"
+    );
 
     // Hold the steady state well past `threshold × interval` so a missed
     // correlation would have flipped the worker Dead.
@@ -304,7 +315,11 @@ async fn late_replies_past_the_reap_window_keep_the_worker_alive() {
 async fn stable_alive_across_sustained_late_replies() {
     let h = Harness::with_transit_delay("probe-late-reply-sustained", 5);
     let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5073").await;
-    let responder = spawn_late_responder(worker_ep, Duration::from_millis(150), Arc::new(AtomicBool::new(true)));
+    let responder = spawn_late_responder(
+        worker_ep,
+        Duration::from_millis(150),
+        Arc::new(AtomicBool::new(true)),
+    );
 
     let registry = unknown_registry(worker_sock);
     let writes = Arc::new(Mutex::new(Vec::new()));
@@ -357,7 +372,10 @@ async fn uncorrelated_reply_cannot_revive_dead_worker_correlated_one_does() {
     // Step 1 injects a synthetic 200 from the worker bind that never matched an
     // inbound request on that lane → the locally-minted-tag audit fires on the
     // fixture. The probe (not a real UA) is the SUT; waive that UA-side rule.
-    h.allow_violation("mid-dialog-tags", "raw-injected spoof response; probe is the SUT, not a real UA");
+    h.allow_violation(
+        "mid-dialog-tags",
+        "raw-injected spoof response; probe is the SUT, not a real UA",
+    );
 
     let (worker_ep, worker_sock) = h.bind_sut(WORKER_ID, "127.0.0.1:5075").await;
     let probe_sock: std::net::SocketAddr = "127.0.0.1:5097".parse().unwrap();
@@ -501,7 +519,11 @@ async fn branch_correlated_reply_from_moved_worker_cannot_revive() {
 /// analogue of the TS `synthetic200(callId)`. Mirrors the probe's own OPTIONS
 /// shape so the response is well-formed, but the branch is one the probe never
 /// issued, so it correlates to nothing.
-fn synthetic_200(branch: &str, worker_sock: &std::net::SocketAddr, probe_sock: &std::net::SocketAddr) -> Vec<u8> {
+fn synthetic_200(
+    branch: &str,
+    worker_sock: &std::net::SocketAddr,
+    probe_sock: &std::net::SocketAddr,
+) -> Vec<u8> {
     let probe_host = probe_sock.ip().to_string();
     let probe_port = probe_sock.port();
     let worker_host = worker_sock.ip().to_string();
@@ -524,8 +546,7 @@ fn synthetic_200(branch: &str, worker_sock: &std::net::SocketAddr, probe_sock: &
             )),
             cseq: 1,
             via: Some(
-                Via::udp(SipStr::owned(&probe_host), probe_port)
-                    .with_branch(SipStr::owned(branch)),
+                Via::udp(SipStr::owned(&probe_host), probe_port).with_branch(SipStr::owned(branch)),
             ),
             contact: Some(header::Contact::from_uri(
                 Uri::sip_user(SipStr::from_static("probe"), SipStr::owned(&probe_host))
@@ -535,6 +556,11 @@ fn synthetic_200(branch: &str, worker_sock: &std::net::SocketAddr, probe_sock: &
             ..Default::default()
         },
     );
-    let resp = generate_response(&fake_options, 200, "OK", &GenerateResponseOpts { to_tag: Some("spoof-uas".into()), ..Default::default() });
+    let resp = generate_response(
+        &fake_options,
+        200,
+        "OK",
+        &GenerateResponseOpts { to_tag: Some("spoof-uas".into()), ..Default::default() },
+    );
     serialize(&SipMessage::Response(resp))
 }

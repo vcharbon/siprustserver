@@ -325,16 +325,24 @@ pub fn extract_common_fields(
 
     // From/To/Call-ID/CSeq appear exactly once; only Via may repeat.
     if idx.from.count > 1 {
-        return Err(SipParseError::new("Multiple From headers (RFC 3261 §8.1.1 — exactly one required)"));
+        return Err(SipParseError::new(
+            "Multiple From headers (RFC 3261 §8.1.1 — exactly one required)",
+        ));
     }
     if idx.to.count > 1 {
-        return Err(SipParseError::new("Multiple To headers (RFC 3261 §8.1.1 — exactly one required)"));
+        return Err(SipParseError::new(
+            "Multiple To headers (RFC 3261 §8.1.1 — exactly one required)",
+        ));
     }
     if idx.call_id.count > 1 {
-        return Err(SipParseError::new("Multiple Call-ID headers (RFC 3261 §8.1.1 — exactly one required)"));
+        return Err(SipParseError::new(
+            "Multiple Call-ID headers (RFC 3261 §8.1.1 — exactly one required)",
+        ));
     }
     if idx.cseq.count > 1 {
-        return Err(SipParseError::new("Multiple CSeq headers (RFC 3261 §8.1.1 — exactly one required)"));
+        return Err(SipParseError::new(
+            "Multiple CSeq headers (RFC 3261 §8.1.1 — exactly one required)",
+        ));
     }
 
     let from_val =
@@ -348,7 +356,10 @@ pub fn extract_common_fields(
     }
     if wire {
         if let Some(reason) = validate_strict_sip_uri(&from_parsed.uri) {
-            return Err(SipParseError::new(format!("Strict From URI: {reason} (\"{}\")", from_parsed.uri)));
+            return Err(SipParseError::new(format!(
+                "Strict From URI: {reason} (\"{}\")",
+                from_parsed.uri
+            )));
         }
     }
 
@@ -362,7 +373,10 @@ pub fn extract_common_fields(
     }
     if wire {
         if let Some(reason) = validate_strict_sip_uri(&to_parsed.uri) {
-            return Err(SipParseError::new(format!("Strict To URI: {reason} (\"{}\")", to_parsed.uri)));
+            return Err(SipParseError::new(format!(
+                "Strict To URI: {reason} (\"{}\")",
+                to_parsed.uri
+            )));
         }
     }
 
@@ -380,7 +394,9 @@ pub fn extract_common_fields(
         let space_idx = cseq_raw.bytes().position(|c| c == b' ' || c == b'\t');
         match space_idx {
             None => {
-                return Err(SipParseError::new(format!("CSeq missing method token: \"{cseq_val}\"")));
+                return Err(SipParseError::new(format!(
+                    "CSeq missing method token: \"{cseq_val}\""
+                )));
             }
             Some(idx) => {
                 let cseq_digits = &cseq_raw[..idx];
@@ -390,7 +406,9 @@ pub fn extract_common_fields(
                     )));
                 }
                 if cseq_raw[idx + 1..].trim().is_empty() {
-                    return Err(SipParseError::new(format!("CSeq missing method token: \"{cseq_val}\"")));
+                    return Err(SipParseError::new(format!(
+                        "CSeq missing method token: \"{cseq_val}\""
+                    )));
                 }
             }
         }
@@ -405,7 +423,9 @@ pub fn extract_common_fields(
     let via_segments = || idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()));
     for segment in via_segments() {
         if has_via_port_trailing_garbage(segment) {
-            return Err(SipParseError::new(format!("Trailing non-digit after Via port: \"{segment}\"")));
+            return Err(SipParseError::new(format!(
+                "Trailing non-digit after Via port: \"{segment}\""
+            )));
         }
         if wire {
             if let Some(reason) = check_sent_protocol(segment) {
@@ -414,7 +434,9 @@ pub fn extract_common_fields(
         }
     }
     let mut vias: Vec<header::Via> = Vec::with_capacity(idx.via.len());
-    for (value, raw) in idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s))) {
+    for (value, raw) in
+        idx.via.iter().flat_map(|v| top_level_comma_entries(v.as_str()).map(move |s| (*v, s)))
+    {
         let v = parse_via(&value.reslice(raw));
         if let Some(p) = v.port {
             if !is_valid_port(p) {
@@ -441,7 +463,10 @@ pub fn extract_common_fields(
                 }
             }
             if let Some(reason) = validate_strict_host(&v.host) {
-                return Err(SipParseError::new(format!("Strict Via sent-by host: {reason} (\"{}\")", v.host)));
+                return Err(SipParseError::new(format!(
+                    "Strict Via sent-by host: {reason} (\"{}\")",
+                    v.host
+                )));
             }
             if let Some(colon_count) = sent_by_extra_colons(raw) {
                 return Err(SipParseError::new(format!(
@@ -451,7 +476,10 @@ pub fn extract_common_fields(
             // The allowlist is documented case-insensitive; probe without minting
             // an uppercased String per Via (set is ≤6 entries — linear is fine).
             if !limits.allowed_transports.iter().any(|t| t.eq_ignore_ascii_case(&v.transport)) {
-                return Err(SipParseError::new(format!("Via transport \"{}\" not in allowed set", v.transport)));
+                return Err(SipParseError::new(format!(
+                    "Via transport \"{}\" not in allowed set",
+                    v.transport
+                )));
             }
         }
         vias.push(header::Via::from_parts(
@@ -473,14 +501,19 @@ pub fn extract_common_fields(
     };
     let contact_wildcard = contact_segments().any(|(_, seg)| seg == "*");
     if contact_wildcard && contact_segments().any(|(_, seg)| seg != "*") {
-        return Err(SipParseError::new("Contact: * wildcard must be the only value (RFC 3261 §10.2.2)"));
+        return Err(SipParseError::new(
+            "Contact: * wildcard must be the only value (RFC 3261 §10.2.2)",
+        ));
     }
     let mut contact_list: Vec<header::Contact> = Vec::new();
     for (value, seg) in contact_segments().filter(|(_, seg)| *seg != "*") {
         let parsed = parse_contact(&value.reslice(seg));
         if wire {
             if let Some(reason) = validate_strict_sip_uri(&parsed.uri) {
-                return Err(SipParseError::new(format!("Strict Contact URI: {reason} (\"{}\")", parsed.uri)));
+                return Err(SipParseError::new(format!(
+                    "Strict Contact URI: {reason} (\"{}\")",
+                    parsed.uri
+                )));
             }
         }
         contact_list.push(to_contact(parsed));
@@ -590,20 +623,28 @@ pub fn extract_request_fields(
     // Strict Request-URI gates.
     if wire {
         if let Some(reason) = validate_strict_sip_uri(request_uri) {
-            return Err(SipParseError::new(format!("Strict Request-URI: {reason} (\"{request_uri}\")")));
+            return Err(SipParseError::new(format!(
+                "Strict Request-URI: {reason} (\"{request_uri}\")"
+            )));
         }
     }
     if has_unescaped_ctl_bytes(request_uri) {
         return Err(SipParseError::new(format!("Control byte in Request-URI: \"{request_uri}\"")));
     }
     if has_unbalanced_square_brackets(request_uri) {
-        return Err(SipParseError::new(format!("Unbalanced IPv6 brackets in Request-URI: \"{request_uri}\"")));
+        return Err(SipParseError::new(format!(
+            "Unbalanced IPv6 brackets in Request-URI: \"{request_uri}\""
+        )));
     }
     if has_uri_port_trailing_garbage(request_uri) {
-        return Err(SipParseError::new(format!("Trailing non-digit after Request-URI port: \"{request_uri}\"")));
+        return Err(SipParseError::new(format!(
+            "Trailing non-digit after Request-URI port: \"{request_uri}\""
+        )));
     }
     if has_unbracketed_ipv6(request_uri) {
-        return Err(SipParseError::new(format!("Unbracketed IPv6 in Request-URI: \"{request_uri}\"")));
+        return Err(SipParseError::new(format!(
+            "Unbracketed IPv6 in Request-URI: \"{request_uri}\""
+        )));
     }
     let request_uri_parsed = parse_sip_uri_string(request_uri)
         .ok_or_else(|| SipParseError::new(format!("Malformed Request-URI: \"{request_uri}\"")))?;
@@ -637,7 +678,9 @@ pub fn extract_response_fields(
     if mode == ExtractMode::Wire {
         let cseq_method = common.cseq().method().as_str().to_string();
         let is_redirect = status == 485 || (300..400).contains(&status);
-        if !is_redirect && (cseq_method == "INVITE" || cseq_method == "SUBSCRIBE" || cseq_method == "REFER") {
+        if !is_redirect
+            && (cseq_method == "INVITE" || cseq_method == "SUBSCRIBE" || cseq_method == "REFER")
+        {
             match common.contacts() {
                 ContactSet::Wildcard => {
                     return Err(SipParseError::new(format!(

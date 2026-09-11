@@ -143,14 +143,12 @@ pub fn validate_outbound_proxy_requirement(
     outbound_proxy_set: bool,
 ) -> Result<(), String> {
     if require_outbound_proxy && !outbound_proxy_set {
-        return Err(
-            "B2BUA_REQUIRE_OUTBOUND_PROXY is set but B2BUA_OUTBOUND_PROXY is unset: this \
+        return Err("B2BUA_REQUIRE_OUTBOUND_PROXY is set but B2BUA_OUTBOUND_PROXY is unset: this \
              profile REQUIRES every b-leg to traverse the front proxy (workers must never \
              dial callees pod-direct — only the proxy bridges to the external plane). Set \
              B2BUA_OUTBOUND_PROXY=host:port or unset B2BUA_REQUIRE_OUTBOUND_PROXY for \
              local/dev"
-                .to_string(),
-        );
+            .to_string());
     }
     Ok(())
 }
@@ -348,9 +346,12 @@ impl RunnerEnv {
             invite_txn_timeout_sec: env_or("B2BUA_INVITE_TXN_TIMEOUT_SEC", "158")
                 .parse()
                 .expect("B2BUA_INVITE_TXN_TIMEOUT_SEC"),
-            invite_first_response_timeout_sec: env_or("B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC", "32")
-                .parse()
-                .expect("B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC"),
+            invite_first_response_timeout_sec: env_or(
+                "B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC",
+                "32",
+            )
+            .parse()
+            .expect("B2BUA_INVITE_FIRST_RESPONSE_TIMEOUT_SEC"),
             cancel_strict_rfc_wait: env_flag("B2BUA_CANCEL_STRICT_RFC_WAIT"),
             call_control_timeout_ms: env_or("B2BUA_CALL_CONTROL_TIMEOUT_MS", "5000")
                 .parse()
@@ -406,8 +407,11 @@ impl RunnerEnv {
         ));
         validate_tier1_pct(self.udp_tier1_pct)
             .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
-        validate_outbound_proxy_requirement(self.require_outbound_proxy, self.outbound_proxy.is_some())
-            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
+        validate_outbound_proxy_requirement(
+            self.require_outbound_proxy,
+            self.outbound_proxy.is_some(),
+        )
+        .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
 
         let listen_sa = resolve(&self.listen);
         let metrics_sa = resolve(&self.metrics_addr);

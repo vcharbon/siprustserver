@@ -35,10 +35,7 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
     if result.call.state == CallModelState::Terminating && is_fully_resolved(&result.call) {
         result.call.state = CallModelState::Terminated;
     }
-    result
-        .call
-        .sm_cursors
-        .insert(GLOBAL_CALL_MACHINE, global_call_label(result.call.state));
+    result.call.sm_cursors.insert(GLOBAL_CALL_MACHINE, global_call_label(result.call.state));
     // Project the authoritative `Call.transfer.phase` into the `transfer` machine
     // cursor (ADR-0016 slice 7) the same way — a read-only view the transfer
     // service rules gate on; clearing the slice removes the cursor.
@@ -70,8 +67,8 @@ pub fn enforce(
     now_ms: i64,
     answer_unanswered_a_leg: bool,
 ) -> HandlerResult {
-    let became_terminated =
-        before.state != CallModelState::Terminated && result.call.state == CallModelState::Terminated;
+    let became_terminated = before.state != CallModelState::Terminated
+        && result.call.state == CallModelState::Terminated;
     if !became_terminated {
         return result;
     }
@@ -87,10 +84,7 @@ pub fn enforce(
     obligations.settle(&result.call, &mut result.effects);
 
     // remove-call must run last.
-    result
-        .effects
-        .critical
-        .retain(|e| !matches!(e, CriticalStateEffect::RemoveCall));
+    result.effects.critical.retain(|e| !matches!(e, CriticalStateEffect::RemoveCall));
     result.effects.critical.push(CriticalStateEffect::RemoveCall);
     result
 }
@@ -123,8 +117,7 @@ pub fn enforce(
 /// the synthesis can only ever double-answer a caller that a *swept* (≥ 193 s
 /// old) transaction once served — a harmless late raw datagram.
 fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms: i64) {
-    let unanswered_entering =
-        matches!(before.a_leg.state, LegState::Trying | LegState::Early);
+    let unanswered_entering = matches!(before.a_leg.state, LegState::Trying | LegState::Early);
     if !unanswered_entering || result.call.a_leg_invite.headers.is_empty() {
         return;
     }

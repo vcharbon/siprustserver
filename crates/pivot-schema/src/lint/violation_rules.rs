@@ -5,7 +5,7 @@
 //! lands on the datagram, and a driver knows whether the entry gates. An entry
 //! naming neither is a note, and notes live in `case.annotations`.
 
-use crate::lint::{Index, Report, at};
+use crate::lint::{at, Index, Report};
 use crate::violation::SUT_EMITTER;
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
@@ -19,9 +19,7 @@ pub(super) fn check(index: &Index<'_>, report: &mut Report) {
                 "anchor the violation on the flow step whose message breaks the rule",
             );
         }
-        if violation.emitter != SUT_EMITTER
-            && !index.actors.contains(violation.emitter.as_str())
-        {
+        if violation.emitter != SUT_EMITTER && !index.actors.contains(violation.emitter.as_str()) {
             report.error(
                 "ref/violation-emitter-unknown",
                 &path,

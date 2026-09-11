@@ -19,7 +19,8 @@ async fn reinvite_during_bye_gets_481_locally() {
     let h = Harness::with_transit_delay("b2bua-reinvite-after-bye", 0);
     let alice = h.agent("alice", "127.0.0.1:5069").await;
     let bob = h.agent("bob", "127.0.0.1:5079").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5079).start(&h, "b2bua", "127.0.0.1:5089").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5079).start(&h, "b2bua", "127.0.0.1:5089").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

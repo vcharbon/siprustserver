@@ -29,7 +29,12 @@ pub(super) fn response_template(status: u16, reason: &str, sdp: bool) -> Message
 }
 
 /// A plain caller spec with the given goals (offer media, no plan/via).
-pub(super) fn caller_spec(role: &'static str, agent: &crate::Agent, callee: (&'static str, crate::Agent), goals: Vec<Goal>) -> ActorSpec {
+pub(super) fn caller_spec(
+    role: &'static str,
+    agent: &crate::Agent,
+    callee: (&'static str, crate::Agent),
+    goals: Vec<Goal>,
+) -> ActorSpec {
     ActorSpec {
         role,
         agent: agent.clone(),
@@ -39,7 +44,7 @@ pub(super) fn caller_spec(role: &'static str, agent: &crate::Agent, callee: (&'s
         invite_targets: vec![callee],
         via: None,
         feed: CtxFeed::default(),
-    
+
         cseq: None,
         delayed: vec![],
         claim: None,
@@ -47,7 +52,11 @@ pub(super) fn caller_spec(role: &'static str, agent: &crate::Agent, callee: (&'s
 }
 
 /// A Scripted callee spec with the given goals (answer media).
-pub(super) fn scripted_spec(role: &'static str, agent: &crate::Agent, goals: Vec<Goal>) -> ActorSpec {
+pub(super) fn scripted_spec(
+    role: &'static str,
+    agent: &crate::Agent,
+    goals: Vec<Goal>,
+) -> ActorSpec {
     ActorSpec {
         role,
         agent: agent.clone(),
@@ -57,7 +66,7 @@ pub(super) fn scripted_spec(role: &'static str, agent: &crate::Agent, goals: Vec
         invite_targets: vec![],
         via: None,
         feed: CtxFeed::default(),
-    
+
         cseq: None,
         delayed: vec![],
         claim: None,
@@ -66,7 +75,6 @@ pub(super) fn scripted_spec(role: &'static str, agent: &crate::Agent, goals: Vec
 
 pub(super) fn established_phase() -> BarrierPhase {
     phase("established", |s| {
-        s.leg_at_least("alice", LegPhase::Confirmed)
-            && s.leg_at_least("bob", LegPhase::Confirmed)
+        s.leg_at_least("alice", LegPhase::Confirmed) && s.leg_at_least("bob", LegPhase::Confirmed)
     })
 }

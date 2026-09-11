@@ -95,10 +95,7 @@ fn drop_path_writes_fail_artifacts_only_when_the_env_gate_is_set() {
     let case = root.join("artifact-panic-path");
     assert!(case.join("artifact-panic-path.svg").exists(), "svg written");
     assert!(case.join("ext/alice.txt").exists(), "per-endpoint ladder written");
-    assert!(
-        !root.join("artifact-env-unset").exists(),
-        "the env-unset run left nothing behind"
-    );
+    assert!(!root.join("artifact-env-unset").exists(), "the env-unset run left nothing behind");
 
     let global = fs::read_to_string(case.join("artifact-panic-path.global.txt")).unwrap();
     assert!(global.contains("Status: FAIL"), "banner reads FAIL, not vacuous PASS:\n{global}");

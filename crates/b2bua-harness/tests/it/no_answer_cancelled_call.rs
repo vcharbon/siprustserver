@@ -45,10 +45,7 @@ const NO_ANSWER_SEC: i64 = 5;
 /// `handle-timeout` consult path is REACHABLE); every `/calls/failure`
 /// consult increments `consults` and rejects 480 — loud on the wire if a
 /// regression ever consults for an abandoned call.
-fn failover_capable_decision(
-    port: u16,
-    consults: Arc<AtomicUsize>,
-) -> Arc<dyn CallDecisionEngine> {
+fn failover_capable_decision(port: u16, consults: Arc<AtomicUsize>) -> Arc<dyn CallDecisionEngine> {
     Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
@@ -187,7 +184,11 @@ async fn no_answer_deadline_on_a_caller_cancelled_call_is_inert() {
             - Duration::from_millis(sip_txn::timers::CANCEL_HOLD_GRACE + 500),
     )
     .await;
-    assert_eq!(consults.load(Ordering::SeqCst), 0, "no /calls/failure consult for an abandoned call");
+    assert_eq!(
+        consults.load(Ordering::SeqCst),
+        0,
+        "no /calls/failure consult for an abandoned call"
+    );
     // No second final reaches alice: her queue is empty (a regression's 480
     // would surface here as an unexpected response).
     assert!(
@@ -285,8 +286,10 @@ async fn stale_no_answer_fire_during_the_terminating_window_is_absorbed() {
     // The terminating backstop still reaps the call on schedule.
     h.advance(Duration::from_millis(
         call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000
-            - Duration::from_secs((stalerestore::INJECT_AT_SEC + stalerestore::STALE_FIRE_SEC + 1) as u64)
-                .as_millis() as u64,
+            - Duration::from_secs(
+                (stalerestore::INJECT_AT_SEC + stalerestore::STALE_FIRE_SEC + 1) as u64,
+            )
+            .as_millis() as u64,
     ))
     .await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;

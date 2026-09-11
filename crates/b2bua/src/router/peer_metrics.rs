@@ -128,8 +128,8 @@ mod tests {
         let call = test_call(vec![a_dialog], vec![("b-1", vec![b_dialog])]);
 
         // The KeepaliveTimeout fired for the b-leg.
-        let hop = keepalive_timeout_peer(&config, &call, Some("b-1"))
-            .expect("b-leg dialog resolves");
+        let hop =
+            keepalive_timeout_peer(&config, &call, Some("b-1")).expect("b-leg dialog resolves");
         assert_eq!(
             hop,
             ("10.0.0.9".to_string(), 5060),
@@ -201,10 +201,7 @@ mod tests {
         }
     }
 
-    fn test_call(
-        a_dialogs: Vec<call::Dialog>,
-        b_legs: Vec<(&str, Vec<call::Dialog>)>,
-    ) -> Call {
+    fn test_call(a_dialogs: Vec<call::Dialog>, b_legs: Vec<(&str, Vec<call::Dialog>)>) -> Call {
         let mut call = build_initial_call(
             &crate::rules::relay::rebuild_a_leg_invite(&minimal_invite_snapshot()),
             "203.0.113.7:5060".parse().unwrap(),
@@ -220,8 +217,14 @@ mod tests {
         call::ALegInviteSnapshot {
             uri: "sip:bob@10.244.2.7:5060".into(),
             headers: vec![
-                call::SipHeader { name: "Via".into(), value: "SIP/2.0/UDP 203.0.113.7:5060;branch=z9hG4bKa".into() },
-                call::SipHeader { name: "From".into(), value: "<sip:alice@203.0.113.7:5060>;tag=alice".into() },
+                call::SipHeader {
+                    name: "Via".into(),
+                    value: "SIP/2.0/UDP 203.0.113.7:5060;branch=z9hG4bKa".into(),
+                },
+                call::SipHeader {
+                    name: "From".into(),
+                    value: "<sip:alice@203.0.113.7:5060>;tag=alice".into(),
+                },
                 call::SipHeader { name: "To".into(), value: "<sip:bob@10.244.2.7:5060>".into() },
                 call::SipHeader { name: "Call-ID".into(), value: "cid@x".into() },
                 call::SipHeader { name: "CSeq".into(), value: "1 INVITE".into() },

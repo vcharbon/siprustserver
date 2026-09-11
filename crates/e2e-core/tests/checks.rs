@@ -66,14 +66,23 @@ fn wrong_regex_block() -> Vec<CheckBlock> {
     .unwrap()
 }
 
-fn evaluate(blocks: &[CheckBlock], report: &RunReport, input: &Input, lb_vip: SocketAddr) -> Vec<CheckVerdict> {
+fn evaluate(
+    blocks: &[CheckBlock],
+    report: &RunReport,
+    input: &Input,
+    lb_vip: SocketAddr,
+) -> Vec<CheckVerdict> {
     let refs: Vec<&CheckBlock> = blocks.iter().collect();
     checks::evaluate_blocks(&refs, report, &Bindings { input, lb_vip })
 }
 
 fn assert_all_passed(verdicts: &[CheckVerdict]) {
     for v in verdicts {
-        assert!(v.passed, "{}.{} [{:?}] failed: {} (actual {:?})", v.on, v.field, v.op, v.detail, v.actual);
+        assert!(
+            v.passed,
+            "{}.{} [{:?}] failed: {} (actual {:?})",
+            v.on, v.field, v.op, v.detail, v.actual
+        );
     }
 }
 
@@ -109,13 +118,11 @@ async fn run_fake() -> (RunReport, Input, SocketAddr) {
 /// binary (they run concurrently) AND from portability.rs's 35060/35070. The
 /// recorder keys lanes on the requested addr, so port 0 is not an option.
 async fn run_real(base: u16) -> (RunReport, Input, SocketAddr) {
-    let roles: BTreeMap<String, SocketAddr> = [
-        ("alice", format!("127.0.0.1:{base}")),
-        ("bob1", format!("127.0.0.1:{}", base + 10)),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v.parse().unwrap()))
-    .collect();
+    let roles: BTreeMap<String, SocketAddr> =
+        [("alice", format!("127.0.0.1:{base}")), ("bob1", format!("127.0.0.1:{}", base + 10))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.parse().unwrap()))
+            .collect();
     let cfg = EndpointConfig {
         schema: None,
         infra_shape: "real-loopback-direct".into(),

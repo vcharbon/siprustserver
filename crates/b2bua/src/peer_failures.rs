@@ -191,11 +191,8 @@ impl PeerFailures {
                 // New external peer. Evict the LRU victim first if at cap, so the
                 // map never exceeds `cap` live external rows.
                 if inner.external.len() >= self.cap {
-                    if let Some(victim) = inner
-                        .external
-                        .iter()
-                        .min_by_key(|(_, e)| e.last_seen)
-                        .map(|(k, _)| *k)
+                    if let Some(victim) =
+                        inner.external.iter().min_by_key(|(_, e)| e.last_seen).map(|(k, _)| *k)
                     {
                         if let Some(ev) = inner.external.remove(&victim) {
                             inner.overflow.fold_in(&ev.counts);

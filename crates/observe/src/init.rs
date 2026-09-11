@@ -90,7 +90,8 @@ pub fn init_production(service_name: &str) -> ObserveGuard {
         return ObserveGuard::inert();
     }
     let (make_writer, writer_guard) = writer::spawn();
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
     let fmt_layer = tracing_subscriber::fmt::layer()
         .compact()
         .with_ansi(false)
@@ -197,13 +198,12 @@ mod tests {
 
         tracing::info!(node = "w-0", peer = "w-1", "takeover complete");
 
-        let lease = SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), TokenBucket::default_at(0))
-            .admit(None, 0)
-            .expect("the gate is wide open in this fixture");
-        let span = CallSpan::open(
-            lease,
-            CallIdentity { call_id: "c1@host", from_tag: "ft", to_tag: "" },
-        );
+        let lease =
+            SampleAdmission::new(true, 1.0, 10, RateDraw::seeded(1), TokenBucket::default_at(0))
+                .admit(None, 0)
+                .expect("the gate is wide open in this fixture");
+        let span =
+            CallSpan::open(lease, CallIdentity { call_id: "c1@host", from_tag: "ft", to_tag: "" });
         span.record(TraceEvent::new("sip.in", 0, "alice").with_body(b"INVITE sip:bob SIP/2.0"));
         span.child("/call/new").record(TraceEvent::new("http.request", 1, "POST"));
 

@@ -76,9 +76,7 @@ fn is_fake_prack(ctx: &RuleContext) -> bool {
 /// crossing 200 into the being-rejected a-leg, orphaning the callee in a
 /// one-sided established dialog.
 fn source_leg_not_cancelling(ctx: &RuleContext) -> bool {
-    ctx.source_leg()
-        .map(|l| l.disposition != LegDisposition::Cancelling)
-        .unwrap_or(true)
+    ctx.source_leg().map(|l| l.disposition != LegDisposition::Cancelling).unwrap_or(true)
 }
 
 /// The fake-prack mask is still up: alice holds no committed callee SDP, because
@@ -482,11 +480,7 @@ pub fn project_cursor(call: &mut Call) {
 fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     let b = ctx.source_leg_id.to_string();
     let a = ctx.call.a_leg().leg_id.clone();
-    let max_duration = ctx
-        .call
-        .features()
-        .map(|f| f.platform.max_duration_sec)
-        .unwrap_or(3600);
+    let max_duration = ctx.call.features().map(|f| f.platform.max_duration_sec).unwrap_or(3600);
     // Operator/worker knob (`B2buaConfig::keepalive_interval_sec`, production
     // default 300 s) — not the per-call feature; see `defaults::keepalive_interval`.
     let keepalive = ctx.config.keepalive_interval_sec;
@@ -495,25 +489,16 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     // `RelayToPeer` takes.
     let mut actions = vec![
         RuleAction::ConfirmDialog { leg_id: b.clone() },
-        RuleAction::Merge {
-            leg_a: a,
-            leg_b: b.clone(),
-        },
-        RuleAction::RelayToPeer {
-            transform: MessageTransform::default(),
-        },
+        RuleAction::Merge { leg_a: a, leg_b: b.clone() },
+        RuleAction::RelayToPeer { transform: MessageTransform::default() },
     ];
     // RFC 3261 §13.2.2.4: the b-leg UAC core ACKs this 2xx on receipt, after the
     // caller has its answer — the masking service changes who the caller sees,
     // never who owes the callee its ACK.
     actions.extend(relay::ack_on_answer(ctx, &b));
     actions.extend(vec![
-        RuleAction::CancelTimer {
-            id: format!("NoAnswer:{b}"),
-        },
-        RuleAction::CancelTimer {
-            id: format!("{:?}", TimerType::SetupTimeout),
-        },
+        RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
+        RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },
         RuleAction::ScheduleTimer {
             timer_type: TimerType::GlobalDuration,
             delay: TimerDelay::secs(max_duration),

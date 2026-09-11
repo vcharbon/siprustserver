@@ -49,11 +49,7 @@ fn laddr() -> SocketAddr {
 }
 
 fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    Arc::new(HttpCallLimiter::new(
-        Arc::new(http.clone()),
-        laddr(),
-        Duration::from_millis(150),
-    ))
+    Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// Route to bob through the outbound proxy with a `limit:1` hold — the
@@ -63,10 +59,7 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.call_limiter = vec![CallLimiterEntry {
-                    id: "trunk-A".into(),
-                    limit: 1,
-                }];
+                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 1 }];
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -90,19 +83,12 @@ async fn raised_bound_holds_a_ring_across_crash_reboot_reclaim_until_the_origina
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(
-        LimiterConfig::default(),
-        Clock::test_at(0),
-    ));
+    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
-    let proxy = fh
-        .spawn_proxy(
-            PROXY,
-            &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())],
-        )
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
     let mut w_b1 = fh
         .spawn_worker_limited(
             "b1",
@@ -132,12 +118,7 @@ async fn raised_bound_holds_a_ring_across_crash_reboot_reclaim_until_the_origina
     assert!(w_b1.is_ready() && w_b2.is_ready(), "workers ready");
 
     // ── Ringing setup: bob rings and never answers ────────────────────────────
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .through(proxy.addr())
-        .send()
-        .await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
     let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
     uas.respond(180, "Ringing").await;
@@ -146,18 +127,10 @@ async fn raised_bound_holds_a_ring_across_crash_reboot_reclaim_until_the_origina
     // Replicate the in-setup call (hold + the route-time SetupTimeout ledger
     // entry) primary → backup before anything else happens.
     fh.advance(Duration::from_millis(500)).await;
-    assert_eq!(
-        store.stats().current_total,
-        1,
-        "in-setup call holds its limiter slot"
-    );
+    assert_eq!(store.stats().current_total, 1, "in-setup call holds its limiter slot");
 
     let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
-        if primary_ord == "b1" {
-            (&mut w_b1, &mut w_b2)
-        } else {
-            (&mut w_b2, &mut w_b1)
-        };
+        if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
     let call_ref = backup
         .scan_one_backed_up(&primary_ord)
         .await
@@ -169,16 +142,8 @@ async fn raised_bound_holds_a_ring_across_crash_reboot_reclaim_until_the_origina
         bob.try_receive_tolerating("CANCEL", &[]).await.is_none(),
         "no transaction-layer CANCEL while ringing inside the raised bound",
     );
-    assert_eq!(
-        primary.active_calls(),
-        1,
-        "the long-ringing call is still up"
-    );
-    assert_eq!(
-        store.stats().current_total,
-        1,
-        "the hold is still pinned by the ring"
-    );
+    assert_eq!(primary.active_calls(), 1, "the long-ringing call is still up");
+    assert_eq!(store.stats().current_total, 1, "the hold is still pinned by the ring");
 
     // ── Crash + reboot-pristine + reclaim (the endurance kill_worker shape) ───
     primary.crash();
@@ -192,10 +157,7 @@ async fn raised_bound_holds_a_ring_across_crash_reboot_reclaim_until_the_origina
             break;
         }
     }
-    assert!(
-        primary.is_ready(),
-        "rebooted primary re-hydrated from the backup"
-    );
+    assert!(primary.is_ready(), "rebooted primary re-hydrated from the backup");
     proxy.set_address(&primary_ord, new_addr);
     fh.note_worker_rebound(&primary_ord, new_addr);
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
@@ -212,21 +174,14 @@ async fn raised_bound_holds_a_ring_across_crash_reboot_reclaim_until_the_origina
     // (6 s before the ORIGINAL deadline) the raised bound still holds the ring —
     // no transaction-layer CANCEL, no early fire of the restored SetupTimeout. ─
     let to_174 = 174_000_i64 - fh.now_ms();
-    assert!(
-        to_174 > 0,
-        "reboot+reclaim completed inside the ring window"
-    );
+    assert!(to_174 > 0, "reboot+reclaim completed inside the ring window");
     fh.advance(Duration::from_millis(to_174 as u64)).await;
     assert!(
         bob.try_receive_tolerating("CANCEL", &[]).await.is_none(),
         "the raised bound holds past 158 s and the re-anchored SetupTimeout \
          must not fire early",
     );
-    assert_eq!(
-        store.stats().current_total,
-        1,
-        "hold intact just before the deadline"
-    );
+    assert_eq!(store.stats().current_total, 1, "hold intact just before the deadline");
 
     // ── Nor extended: crossing the ORIGINAL 180 s mark trips the restored
     // deadline. The b-leg CANCEL lands inside the LB's cancel-LRU TTL, so it
@@ -237,11 +192,7 @@ async fn raised_bound_holds_a_ring_across_crash_reboot_reclaim_until_the_origina
     fh.advance(Duration::from_secs(7)).await;
     bob.receive("CANCEL").await;
     let final_resp = call.expect(408).await;
-    assert_eq!(
-        final_resp.status(),
-        408,
-        "caller's INVITE resolves at the restored setup deadline",
-    );
+    assert_eq!(final_resp.status(), 408, "caller's INVITE resolves at the restored setup deadline",);
     // Flush alice's §17.1.1.3 ACK for the 408 the one hop to the proxy.
     // (`uas` — bob's ringing server txn — stays in scope untouched: the
     // dead-peer callee never answers the CANCEL.)

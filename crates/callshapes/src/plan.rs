@@ -593,8 +593,7 @@ impl ShapePlan {
                     delayed: vec![],
                     claim: None,
                 });
-                b.phases
-                    .push(phase("rejected", |s| s.leg_at_least("bob", LegPhase::Terminated)));
+                b.phases.push(phase("rejected", |s| s.leg_at_least("bob", LegPhase::Terminated)));
                 b.expect = Expect::Reject(code);
             }
             Establishment::AbandonAfterRinging => {
@@ -604,7 +603,10 @@ impl ShapePlan {
                     Barrier::None,
                     GoalStep::Invite { callee: "bob", plan: Some(plan) },
                 ));
-                b.caller_goals.push(Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel { stated: Vec::new() }));
+                b.caller_goals.push(Goal::new(
+                    Barrier::pred("ringing", ringing),
+                    GoalStep::Cancel { stated: Vec::new() },
+                ));
                 b.caller_feed.on_provisional = Feed::new(Some("time_to_180"), None);
                 b.callees.push(ActorSpec {
                     role: "bob",
@@ -640,8 +642,11 @@ impl ShapePlan {
                     GoalStep::Invite { callee: "bob", plan: Some(plan) },
                 ));
                 b.caller_goals.push(
-                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel { stated: Vec::new() })
-                        .after(env.ring_delay),
+                    Goal::new(
+                        Barrier::pred("ringing", ringing),
+                        GoalStep::Cancel { stated: Vec::new() },
+                    )
+                    .after(env.ring_delay),
                 );
                 b.caller_feed.on_provisional = Feed::new(Some("time_to_180"), None);
                 b.callees.push(ActorSpec {
@@ -702,8 +707,7 @@ impl ShapePlan {
             Script::UpdatePostConnect => {
                 b.caller_goals
                     .push(Goal::new(b.gate.clone(), GoalStep::Update).after(env.reinvite_gap));
-                b.caller_feed.on_update_ok =
-                    Feed::new(Some("time_to_update_200"), Some("updated"));
+                b.caller_feed.on_update_ok = Feed::new(Some("time_to_update_200"), Some("updated"));
                 b.gate = Barrier::pred("updated", reneg_done);
             }
             // C5 (RFC 3311 §5.1): the caller UPDATEs the reliable EARLY dialog
@@ -715,8 +719,7 @@ impl ShapePlan {
                 let early = |s: &StateInner| s.leg("alice").subflow(SUBFLOW_EARLY).is_some();
                 b.caller_goals
                     .push(Goal::new(Barrier::pred("early", early), GoalStep::UpdateEarly));
-                b.caller_feed.on_update_ok =
-                    Feed::new(Some("time_to_update_200"), Some("updated"));
+                b.caller_feed.on_update_ok = Feed::new(Some("time_to_update_200"), Some("updated"));
                 b.callee_mut("bob").disposition = Disposition::ReliableAnswerEarlyUpdate;
             }
             Script::KeepaliveOnce => {
@@ -805,8 +808,7 @@ impl ShapePlan {
             b.phases.push(phase("referred", |s| {
                 s.leg("bob").subflow(SUBFLOW_REFER).is_some_and(|f| f >= SubflowState::Answered)
             }));
-            b.phases
-                .push(phase("transferred", |s| s.leg_at_least("charlie", LegPhase::Confirmed)));
+            b.phases.push(phase("transferred", |s| s.leg_at_least("charlie", LegPhase::Confirmed)));
             b.phases.push(phase("merged", merged));
             b.gate = Barrier::pred("merged", merged);
         } else {
@@ -907,9 +909,17 @@ mod tests {
         let mk = |tags, winner, loser| ShapePlan {
             id: "fk",
             binder: shapes::default_binder(),
-            establish: Establishment::Forked { tags, winner, reliable: false, loser_late_200: loser },
+            establish: Establishment::Forked {
+                tags,
+                winner,
+                reliable: false,
+                loser_late_200: loser,
+            },
             stages: vec![],
-            teardown: Teardown::CallerBye { after: DwellKnob::None, feed: ByeFeed::CheckpointAndPhase },
+            teardown: Teardown::CallerBye {
+                after: DwellKnob::None,
+                feed: ByeFeed::CheckpointAndPhase,
+            },
             ringing_gate: true,
             stamp_connected: true,
         };
@@ -934,7 +944,10 @@ mod tests {
     fn validate_rejects_miscomposed_chains() {
         let mut term = shapes::invite_reject(shapes::default_binder());
         term.stages = vec![Stage::Script(Script::Reinvite { n: 1 })];
-        assert_eq!(detail(term.validate().unwrap_err()), "stage chained after a terminal establishment");
+        assert_eq!(
+            detail(term.validate().unwrap_err()),
+            "stage chained after a terminal establishment"
+        );
 
         let mut term = shapes::abandon_ringing(shapes::default_binder());
         term.teardown =

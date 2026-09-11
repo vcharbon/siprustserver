@@ -94,7 +94,10 @@ pub trait ReplicationNetwork: Send + Sync {
     /// Open a connection to a peer's listener. The returned connection is the
     /// **client** end; the peer obtains the matching **server** end from its
     /// listener's [`accept`](ReplicationListener::accept).
-    async fn connect(&self, dst: SocketAddr) -> Result<Box<dyn ReplicationConnection>, ConnectError>;
+    async fn connect(
+        &self,
+        dst: SocketAddr,
+    ) -> Result<Box<dyn ReplicationConnection>, ConnectError>;
 
     /// Bind a listener at `local`. Dropping it stops accepting new connections.
     async fn listen(&self, local: SocketAddr) -> Result<Box<dyn ReplicationListener>, ListenError>;

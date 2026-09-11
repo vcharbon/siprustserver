@@ -181,7 +181,8 @@ async fn multi_callee_group_demuxes_via_proxy() {
 
     // Two distinct-R-URI legs, each arriving at the ONE shared socket FROM the
     // proxy — still routed to the right logical agent by its R-URI digits.
-    let mut alice_bob = establish_via_proxy(&alice, &proxy, &bob, BOB_DIGITS, alice_addr, proxy_addr).await;
+    let mut alice_bob =
+        establish_via_proxy(&alice, &proxy, &bob, BOB_DIGITS, alice_addr, proxy_addr).await;
     let mut alice_charlie =
         establish_via_proxy(&alice, &proxy, &charlie, CHARLIE_DIGITS, alice_addr, proxy_addr).await;
 

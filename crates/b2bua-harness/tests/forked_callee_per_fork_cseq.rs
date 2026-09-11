@@ -48,7 +48,8 @@ async fn each_callee_fork_numbers_its_requests_from_its_own_invite() {
     let h = Harness::with_transit_delay("b2bua-forked-callee-per-fork-cseq", 1);
     let alice = h.agent("alice", "127.0.0.1:6031").await;
     let bob = h.agent("bob", "127.0.0.1:6032").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 6032).start(&h, "b2bua", "127.0.0.1:6033").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 6032).start(&h, "b2bua", "127.0.0.1:6033").await;
 
     let mut call = alice
         .invite(&bob)
@@ -62,7 +63,11 @@ async fn each_callee_fork_numbers_its_requests_from_its_own_invite() {
     assert_eq!(invite_cseq, 1, "the b-leg INVITE seeds every fork at CSeq 1");
 
     // ── fork 1 rings, and alice PRACKs it: fork 1's own INVITE + 1 ───────────
-    uas.respond(183, "Session Progress").with_to_tag("bobfork1").reliable(1).with_sdp(ANSWER_F1).await;
+    uas.respond(183, "Session Progress")
+        .with_to_tag("bobfork1")
+        .reliable(1)
+        .with_sdp(ANSWER_F1)
+        .await;
     let p1 = call.expect(183).await;
     let fork1_atag = p1.to().tag().expect("fork1 a-facing tag").to_string();
 
@@ -100,7 +105,11 @@ async fn each_callee_fork_numbers_its_requests_from_its_own_invite() {
     update.expect(200).await;
 
     // ── fork 2 rings: its sequence is untouched by everything fork 1 spent ───
-    uas.respond(183, "Session Progress").with_to_tag("bobfork2").reliable(1).with_sdp(ANSWER_F2).await;
+    uas.respond(183, "Session Progress")
+        .with_to_tag("bobfork2")
+        .reliable(1)
+        .with_sdp(ANSWER_F2)
+        .await;
     let p2 = call.expect(183).await;
     let fork2_atag = p2.to().tag().expect("fork2 a-facing tag").to_string();
     assert_ne!(fork1_atag, fork2_atag, "each callee fork maps to a distinct a-facing tag");
@@ -184,11 +193,16 @@ async fn an_answer_under_an_unrung_tag_starts_its_own_sequence() {
     let h = Harness::with_transit_delay("b2bua-answer-under-unrung-tag", 1);
     let alice = h.agent("alice", "127.0.0.1:6034").await;
     let bob = h.agent("bob", "127.0.0.1:6035").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 6035).start(&h, "b2bua", "127.0.0.1:6036").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 6035).start(&h, "b2bua", "127.0.0.1:6036").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
-    assert_eq!(uas.request().cseq().seq(), 1, "the b-leg INVITE seeds every dialog it creates at 1");
+    assert_eq!(
+        uas.request().cseq().seq(),
+        1,
+        "the b-leg INVITE seeds every dialog it creates at 1"
+    );
 
     // ── fork 1 rings, and alice refreshes the early dialog on it ────────────
     // The UPDATE carries no offer: alice's INVITE offer is still unanswered
@@ -222,12 +236,20 @@ async fn an_answer_under_an_unrung_tag_starts_its_own_sequence() {
     );
     let mut dialog = call.ack().await;
     let ack_at_bob = bob.receive("ACK").await;
-    assert_eq!(ack_at_bob.request().to().tag(), Some("bobfork2"), "the ACK rides the answering dialog");
+    assert_eq!(
+        ack_at_bob.request().to().tag(),
+        Some("bobfork2"),
+        "the ACK rides the answering dialog"
+    );
     assert_eq!(ack_at_bob.request().cseq().seq(), 1, "the 2xx ACK reuses the INVITE's CSeq");
 
     let mut reinvite = dialog.request(InDialogMethod::Invite, Some(REINVITE_RESUME)).await;
     let mut reinvite_at_bob = bob.receive("INVITE").await;
-    assert_eq!(reinvite_at_bob.request().to().tag(), Some("bobfork2"), "re-INVITE rides the answering dialog");
+    assert_eq!(
+        reinvite_at_bob.request().to().tag(),
+        Some("bobfork2"),
+        "re-INVITE rides the answering dialog"
+    );
     assert_eq!(
         reinvite_at_bob.request().cseq().seq(),
         2,
@@ -241,7 +263,11 @@ async fn an_answer_under_an_unrung_tag_starts_its_own_sequence() {
 
     let mut bye = dialog.bye().await;
     let mut bye_at_bob = bob.receive("BYE").await;
-    assert_eq!(bye_at_bob.request().cseq().seq(), 3, "the answering dialog stays contiguous: 1, 2, then 3");
+    assert_eq!(
+        bye_at_bob.request().cseq().seq(),
+        3,
+        "the answering dialog stays contiguous: 1, 2, then 3"
+    );
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 

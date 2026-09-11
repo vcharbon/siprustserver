@@ -8,8 +8,8 @@
 
 use std::collections::BTreeMap;
 
-use e2e_model::{ShapeDescriptor, ShapeRegistry};
 use e2e_model::shape::{AsShapeSpec, ShapeSpec};
+use e2e_model::{ShapeDescriptor, ShapeRegistry};
 
 use crate::shape::CallflowShape;
 
@@ -172,9 +172,9 @@ mod tests {
         impl crate::shape::CallflowShape for Orphan {
             async fn run(&self, _rt: &mut InfraRuntime, _input: &Input) {}
         }
-        let _ = attach(&ShapeRegistry::with_defaults(), vec![(
-            "orphan-shape",
-            Box::new(Orphan) as Box<dyn CallflowShape>,
-        )]);
+        let _ = attach(
+            &ShapeRegistry::with_defaults(),
+            vec![("orphan-shape", Box::new(Orphan) as Box<dyn CallflowShape>)],
+        );
     }
 }

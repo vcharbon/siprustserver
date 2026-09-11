@@ -33,7 +33,10 @@ pub struct StaticRegistryParseError {
 /// string yields an empty set. Rejects empty entries, missing/edge `@`, empty
 /// ids, duplicate ids, malformed `host:port`, and DNS-named hosts (the pool
 /// must be IP literals — see the in-loop comment).
-pub fn parse_worker_list(source: &str, raw: &str) -> Result<Vec<WorkerEntry>, StaticRegistryParseError> {
+pub fn parse_worker_list(
+    source: &str,
+    raw: &str,
+) -> Result<Vec<WorkerEntry>, StaticRegistryParseError> {
     let err = |reason: String| StaticRegistryParseError { origin: source.to_string(), reason };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -49,7 +52,9 @@ pub fn parse_worker_list(source: &str, raw: &str) -> Result<Vec<WorkerEntry>, St
         let at = part.find('@');
         match at {
             // `at <= 0` (no `@`, or leading `@`) or trailing `@` are invalid.
-            Some(0) | None => return Err(err(format!("entry \"{part}\" must be of the form id@host:port"))),
+            Some(0) | None => {
+                return Err(err(format!("entry \"{part}\" must be of the form id@host:port")))
+            }
             Some(at) if at == part.len() - 1 => {
                 return Err(err(format!("entry \"{part}\" must be of the form id@host:port")))
             }
@@ -61,9 +66,12 @@ pub fn parse_worker_list(source: &str, raw: &str) -> Result<Vec<WorkerEntry>, St
                 if !seen.insert(id.to_string()) {
                     return Err(err(format!("duplicate worker id \"{id}\"")));
                 }
-                let addr = ProxyAddr::parse(&part[at + 1..])
-                    .filter(|a| a.port >= 1)
-                    .ok_or_else(|| err(format!("entry \"{part}\" has malformed host:port (port must be 1..65535)")))?;
+                let addr =
+                    ProxyAddr::parse(&part[at + 1..]).filter(|a| a.port >= 1).ok_or_else(|| {
+                        err(format!(
+                            "entry \"{part}\" has malformed host:port (port must be 1..65535)"
+                        ))
+                    })?;
                 // IP literals only: `lookup_by_address` (worker-outbound
                 // classification) compares raw host strings against datagram
                 // source IPs, so a DNS-named pool silently never matches —
@@ -95,7 +103,11 @@ impl StaticWorkerRegistry {
     }
 
     /// [`from_string`](Self::from_string) with an injected clock.
-    pub fn from_string_with_clock(raw: &str, source: &str, clock: Clock) -> Result<Self, StaticRegistryParseError> {
+    pub fn from_string_with_clock(
+        raw: &str,
+        source: &str,
+        clock: Clock,
+    ) -> Result<Self, StaticRegistryParseError> {
         Ok(Self::from_entries_with_clock(parse_worker_list(source, raw)?, clock))
     }
 
@@ -117,7 +129,14 @@ impl StaticWorkerRegistry {
         );
         let set = Arc::new(WorkerSet::new(Arc::new(membership), DEFAULT_PORT, clock));
         for e in &entries {
-            set.preset(&e.id, e.address.host.clone(), e.address.port, e.health, e.draining_since, e.first_seen_at_ms);
+            set.preset(
+                &e.id,
+                e.address.host.clone(),
+                e.address.port,
+                e.health,
+                e.draining_since,
+                e.first_seen_at_ms,
+            );
         }
         set.recompose();
         Self { set }
@@ -158,7 +177,9 @@ mod tests {
 
     #[test]
     fn parses_valid_list_all_alive() {
-        let r = StaticWorkerRegistry::from_string("b2b-1@10.0.0.2:5070, b2b-2@10.0.0.3:5070", "test").unwrap();
+        let r =
+            StaticWorkerRegistry::from_string("b2b-1@10.0.0.2:5070, b2b-2@10.0.0.3:5070", "test")
+                .unwrap();
         let snap = r.snapshot();
         assert_eq!(snap.len(), 2);
         assert!(snap.iter().all(|w| w.health == WorkerHealth::Alive));
@@ -190,7 +211,9 @@ mod tests {
 
     #[test]
     fn membership_identity_matches_worker_set() {
-        let r = StaticWorkerRegistry::from_string("b2b-1@10.0.0.2:5070, b2b-2@10.0.0.3:5070", "test").unwrap();
+        let r =
+            StaticWorkerRegistry::from_string("b2b-1@10.0.0.2:5070, b2b-2@10.0.0.3:5070", "test")
+                .unwrap();
         let peers = r.membership().snapshot();
         assert_eq!(peers, vec![Peer::new("b2b-1", "10.0.0.2"), Peer::new("b2b-2", "10.0.0.3")]);
     }

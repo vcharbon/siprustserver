@@ -112,12 +112,7 @@ pub fn facets(raw: &[u8]) -> Facets {
         parts.push(format!("T:{}", &to_tag[..to_tag.len().min(8)]));
     }
 
-    Facets {
-        label,
-        call_id: call_id.to_string(),
-        tag_label: parts.join(" "),
-        is_response,
-    }
+    Facets { label, call_id: call_id.to_string(), tag_label: parts.join(" "), is_response }
 }
 
 /// Format a virtual-clock offset (ms, relative to the first entry) as

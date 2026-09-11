@@ -103,13 +103,9 @@ pub fn invert(verdict: &mut RunVerdict, plan: &Plan, recording: &Recording) {
         // list in `failures`, which is where a red run's evidence belongs.
         verdict.failures.extend(absent);
     }
-    verdict.failed_step =
-        verdict.failures.iter().find_map(Failure::step).map(str::to_string);
-    verdict.status = if verdict.failures.is_empty() {
-        VerdictStatus::OkNegative
-    } else {
-        VerdictStatus::Failed
-    };
+    verdict.failed_step = verdict.failures.iter().find_map(Failure::step).map(str::to_string);
+    verdict.status =
+        if verdict.failures.is_empty() { VerdictStatus::OkNegative } else { VerdictStatus::Failed };
 }
 
 /// What a failure is EVIDENCE of, which is what decides whether a negative case
@@ -278,11 +274,7 @@ fn anchor_dialog(
 }
 
 /// The datagram `declared` predicts, where the recording holds one.
-fn predicted(
-    plan: &Plan,
-    recording: &Recording,
-    declared: &MustFail,
-) -> Result<Predicted, String> {
+fn predicted(plan: &Plan, recording: &Recording, declared: &MustFail) -> Result<Predicted, String> {
     match declared.failure {
         DeclaredFailure::UnexpectedAck => {
             let anchor = anchor_dialog(plan, recording, declared)?;
@@ -296,10 +288,7 @@ fn predicted(
                 .filter_map(|m| parse(&m.raw))
                 .map(|message| Inbound::of(&message))
                 .find(|inbound| is_predicted_ack(&anchor, &anchor.leg, inbound))
-                .map(|inbound| Predicted {
-                    leg: anchor.leg.clone(),
-                    arrived: inbound.arrived(),
-                })
+                .map(|inbound| Predicted { leg: anchor.leg.clone(), arrived: inbound.arrived() })
                 .ok_or_else(|| {
                     format!(
                         "leg {:?} holds no unclaimed ACK to the 2xx step {:?} emitted \
@@ -345,10 +334,7 @@ fn predicted(
                 .filter_map(|m| parse(&m.raw))
                 .map(|message| Inbound::of(&message))
                 .find(|inbound| is_predicted_cancel(&anchor, inbound))
-                .map(|inbound| Predicted {
-                    leg: anchor.leg.clone(),
-                    arrived: inbound.arrived(),
-                })
+                .map(|inbound| Predicted { leg: anchor.leg.clone(), arrived: inbound.arrived() })
                 .ok_or_else(|| {
                     format!(
                         "leg {:?} holds no unclaimed CANCEL for the transaction step {:?} \
@@ -893,12 +879,10 @@ mod tests {
         // the stray wire failure and the absent declaration, both stated.
         assert_eq!(verdict.failures.len(), 2, "{:#?}", verdict.failures);
         assert!(verdict.failures.iter().any(|f| matches!(f, Failure::UnexpectedDatagram { .. })));
-        assert!(
-            verdict
-                .failures
-                .iter()
-                .any(|f| matches!(f, Failure::DeclaredFailureNotProduced { .. }))
-        );
+        assert!(verdict
+            .failures
+            .iter()
+            .any(|f| matches!(f, Failure::DeclaredFailureNotProduced { .. })));
     }
 
     /// A document that declares nothing is not touched: no note, no status
@@ -974,7 +958,10 @@ mod tests {
 
         assert_eq!(verdict.status, VerdictStatus::Failed);
         assert!(verdict.must_fail[0].recorded.is_none());
-        assert!(verdict.tolerated.is_empty(), "a run carrying an absent declaration carries nothing");
+        assert!(
+            verdict.tolerated.is_empty(),
+            "a run carrying an absent declaration carries nothing"
+        );
     }
 
     /// A verdict carrying a declaration survives the bundle: the note is what a

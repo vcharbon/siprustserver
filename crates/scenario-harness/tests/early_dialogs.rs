@@ -24,7 +24,8 @@ async fn two_early_dialogs_winner_answers() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-    let mut call = alice.invite(&bob).with_sdp(OFFER).with_header("Supported", "100rel").send().await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).with_header("Supported", "100rel").send().await;
     let mut uas = bob.receive("INVITE").await;
 
     // Two early dialogs on the ONE server transaction.
@@ -113,7 +114,8 @@ async fn early_dialog_update_before_final() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-    let mut call = alice.invite(&bob).with_sdp(OFFER).with_header("Supported", "100rel").send().await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).with_header("Supported", "100rel").send().await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond_early("e1", 180, "Ringing").send().await;
     uas.respond_early("e2", 183, "Session Progress").reliable(1).with_sdp(ANSWER).send().await;
@@ -132,12 +134,8 @@ async fn early_dialog_update_before_final() {
     prack.expect(200).await;
 
     // In-early-dialog UPDATE (RFC 3311 §5.1) in e2, before the final.
-    let mut upd = call
-        .send_request(InDialogMethod::Update)
-        .with_to_tag(&t2)
-        .with_sdp(OFFER)
-        .send()
-        .await;
+    let mut upd =
+        call.send_request(InDialogMethod::Update).with_to_tag(&t2).with_sdp(OFFER).send().await;
     let mut ubob = bob.receive("UPDATE").await;
     assert_eq!(
         ubob.request().to().tag(),
@@ -272,11 +270,7 @@ async fn template_provisional_targets_early_dialog() {
     let t2 = p2.to().tag().map(str::to_owned).expect("e2");
     assert_ne!(t1, t2, "distinct early dialogs");
     // e2's template provisional: frozen headers byte-preserved, own To-tag.
-    assert_eq!(
-        p2.raw(HeaderName::Subject).next(),
-        Some("fork-e2"),
-        "frozen Subject preserved"
-    );
+    assert_eq!(p2.raw(HeaderName::Subject).next(), Some("fork-e2"), "frozen Subject preserved");
     assert_eq!(
         p2.raw(HeaderName::from("X-Trace")).next(),
         Some("kept"),

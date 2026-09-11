@@ -5,9 +5,7 @@
 
 use call::helpers::{add_b_leg, add_cdr_event, bump_local_cseq};
 use call::{Call, CdrEvent, LegKind, TimerType};
-use sip_message::generators::{
-    self, GenerateInDialogRequestOpts, InDialogMethod,
-};
+use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::{Event, HeaderValue, RAck, SubscriptionState};
 use sip_message::{Method, SipStr};
 use sip_txn::TxnKind;
@@ -57,10 +55,7 @@ impl ActionExecutor<'_> {
                     timestamp: self.now_ms,
                     leg_id: ctx.source_leg_id.to_string(),
                     status_code: Some(503),
-                    reason: Some(format!(
-                        "admission_reject host={}",
-                        destination.0
-                    )),
+                    reason: Some(format!("admission_reject host={}", destination.0)),
                 },
             );
             terminate_all(call);
@@ -151,11 +146,7 @@ impl ActionExecutor<'_> {
             Some(i) => i,
             None => return,
         };
-        let dialog = match leg_at(call, idx)
-            .dialogs
-            .iter()
-            .find(|d| !d.sip.remote_tag.is_empty())
-        {
+        let dialog = match leg_at(call, idx).dialogs.iter().find(|d| !d.sip.remote_tag.is_empty()) {
             Some(d) => d.clone(),
             None => return,
         };
@@ -166,8 +157,19 @@ impl ActionExecutor<'_> {
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch)),
-            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
+            via: Some(relay::leg_via(
+                self.config,
+                &call.call_ref,
+                leg_id,
+                call.emergency == Some(true),
+                branch,
+            )),
+            contact: Some(relay::leg_contact(
+                self.config,
+                &call.call_ref,
+                leg_id,
+                call.emergency == Some(true),
+            )),
             body: body.to_vec(),
             content_type: content_type.and_then(relay::media_type),
             cseq: Some(outbound_cseq as u32),
@@ -183,10 +185,16 @@ impl ActionExecutor<'_> {
             ),
             ..Default::default()
         };
-        let res = generators::generate_in_dialog_request(InDialogMethod::Notify, &gen_dialog, &opts);
+        let res =
+            generators::generate_in_dialog_request(InDialogMethod::Notify, &gen_dialog, &opts);
         let dest = relay::target_dest(&gen_dialog.remote_target);
-        let (out_req, dest) =
-            relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
+        let (out_req, dest) = relay::apply_b_leg_egress(
+            self.config,
+            leg_id,
+            &gen_dialog.route_set,
+            res.request,
+            dest,
+        );
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),
@@ -214,11 +222,7 @@ impl ActionExecutor<'_> {
             Some(i) => i,
             None => return,
         };
-        let dialog = match leg_at(call, idx)
-            .dialogs
-            .iter()
-            .find(|d| !d.sip.remote_tag.is_empty())
-        {
+        let dialog = match leg_at(call, idx).dialogs.iter().find(|d| !d.sip.remote_tag.is_empty()) {
             Some(d) => d.clone(),
             None => return,
         };
@@ -236,8 +240,19 @@ impl ActionExecutor<'_> {
             })
             .collect();
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch.clone())),
-            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
+            via: Some(relay::leg_via(
+                self.config,
+                &call.call_ref,
+                leg_id,
+                call.emergency == Some(true),
+                branch.clone(),
+            )),
+            contact: Some(relay::leg_contact(
+                self.config,
+                &call.call_ref,
+                leg_id,
+                call.emergency == Some(true),
+            )),
             body: body.to_vec(),
             content_type: (!body.is_empty()).then(relay::sdp),
             cseq: Some(outbound_cseq as u32),
@@ -247,10 +262,16 @@ impl ActionExecutor<'_> {
             capabilities: Some(capabilities::for_leg(call, leg_id)),
             ..Default::default()
         };
-        let res = generators::generate_in_dialog_request(InDialogMethod::Invite, &gen_dialog, &opts);
+        let res =
+            generators::generate_in_dialog_request(InDialogMethod::Invite, &gen_dialog, &opts);
         let dest = relay::target_dest(&gen_dialog.remote_target);
-        let (out_req, dest) =
-            relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
+        let (out_req, dest) = relay::apply_b_leg_egress(
+            self.config,
+            leg_id,
+            &gen_dialog.route_set,
+            res.request,
+            dest,
+        );
 
         // Cache the re-INVITE's client-transaction handle so the ACK-for-2xx
         // echoes its CSeq (§13.2.2.4). Reset the retained ACK branch, its
@@ -304,11 +325,7 @@ impl ActionExecutor<'_> {
         // dialog captured mid-confirm; building an in-dialog `To` from an empty
         // remote tag yields a tag-less header that panics in `make_request` and
         // leaks the dialog. Skip when no dialog is confirmed (nothing to probe).
-        let dialog = match leg_at(call, idx)
-            .dialogs
-            .iter()
-            .find(|d| !d.sip.remote_tag.is_empty())
-        {
+        let dialog = match leg_at(call, idx).dialogs.iter().find(|d| !d.sip.remote_tag.is_empty()) {
             Some(d) => d.clone(),
             None => {
                 // An early/mid-confirm leg legitimately has no confirmed dialog
@@ -349,8 +366,9 @@ impl ActionExecutor<'_> {
 
         // Opaque body carrier (MSCML INFO rides here): default the content type
         // to `application/sdp` when a body is present and none was given.
-        let content_type =
-            content_type.and_then(relay::media_type).or_else(|| (!body.is_empty()).then(relay::sdp));
+        let content_type = content_type
+            .and_then(relay::media_type)
+            .or_else(|| (!body.is_empty()).then(relay::sdp));
         // Forward the service-nominated application headers verbatim (e.g. a held
         // `User-To-User` re-emitted toward the peer on a deferred INFO_UUI relay).
         // Body-owned headers are dropped: `body`/`content_type` own
@@ -363,13 +381,27 @@ impl ActionExecutor<'_> {
                 named != sip_message::HeaderName::ContentType
                     && named != sip_message::HeaderName::ContentLength
             })
-            .map(|(name, value)| sip_message::SipHeader { name: name.clone().into(), value: value.clone().into() })
+            .map(|(name, value)| sip_message::SipHeader {
+                name: name.clone().into(),
+                value: value.clone().into(),
+            })
             .collect();
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch)),
-            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
+            via: Some(relay::leg_via(
+                self.config,
+                &call.call_ref,
+                leg_id,
+                call.emergency == Some(true),
+                branch,
+            )),
+            contact: Some(relay::leg_contact(
+                self.config,
+                &call.call_ref,
+                leg_id,
+                call.emergency == Some(true),
+            )),
             cseq: Some(outbound_cseq as u32),
             body: body.to_vec(),
             content_type,
@@ -378,8 +410,13 @@ impl ActionExecutor<'_> {
         };
         let res = generators::generate_in_dialog_request(m, &gen_dialog, &opts);
         let dest = relay::target_dest(&gen_dialog.remote_target);
-        let (out_req, dest) =
-            relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
+        let (out_req, dest) = relay::apply_b_leg_egress(
+            self.config,
+            leg_id,
+            &gen_dialog.route_set,
+            res.request,
+            dest,
+        );
         let kind = if m == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(out_req),
@@ -429,8 +466,13 @@ impl ActionExecutor<'_> {
         if dialog.sip.remote_tag.is_empty() {
             return;
         }
-        let (updated, first) =
-            call::helpers::record_pracked_provisional(call.clone(), leg_id, b_tag, invite_cseq, rseq);
+        let (updated, first) = call::helpers::record_pracked_provisional(
+            call.clone(),
+            leg_id,
+            b_tag,
+            invite_cseq,
+            rseq,
+        );
         *call = updated;
         if !first {
             return;
@@ -446,20 +488,32 @@ impl ActionExecutor<'_> {
         let branch = self.id_gen.new_branch();
         let gen_dialog = relay::to_gen_dialog(&dialog.sip);
         let opts = GenerateInDialogRequestOpts {
-            via: Some(relay::leg_via(self.config, &call.call_ref, leg_id, call.emergency == Some(true), branch)),
-            contact: Some(relay::leg_contact(self.config, &call.call_ref, leg_id, call.emergency == Some(true))),
-            rack: Some(RAck::new(
-                rseq.max(0) as u32,
-                invite_cseq.max(0) as u32,
-                Method::Invite,
+            via: Some(relay::leg_via(
+                self.config,
+                &call.call_ref,
+                leg_id,
+                call.emergency == Some(true),
+                branch,
             )),
+            contact: Some(relay::leg_contact(
+                self.config,
+                &call.call_ref,
+                leg_id,
+                call.emergency == Some(true),
+            )),
+            rack: Some(RAck::new(rseq.max(0) as u32, invite_cseq.max(0) as u32, Method::Invite)),
             cseq: Some(outbound_cseq as u32),
             ..Default::default()
         };
         let res = generators::generate_in_dialog_request(InDialogMethod::Prack, &gen_dialog, &opts);
         let dest = relay::target_dest(&gen_dialog.remote_target);
-        let (out_req, dest) =
-            relay::apply_b_leg_egress(self.config, leg_id, &gen_dialog.route_set, res.request, dest);
+        let (out_req, dest) = relay::apply_b_leg_egress(
+            self.config,
+            leg_id,
+            &gen_dialog.route_set,
+            res.request,
+            dest,
+        );
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(TxnKind::NonInvite),

@@ -109,6 +109,7 @@ mod tests {
 
     #[test]
     fn an_unknown_deviation_field_is_refused_rather_than_ignored() {
-        assert!(serde_json::from_str::<Deviation>(r#"{"id":"d1","kind":"raw-order","at-step":3}"#).is_err());
+        assert!(serde_json::from_str::<Deviation>(r#"{"id":"d1","kind":"raw-order","at-step":3}"#)
+            .is_err());
     }
 }

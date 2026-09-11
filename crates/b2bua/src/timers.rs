@@ -366,7 +366,12 @@ mod tests {
         let (timers, mut fire_rx) = TimerService::spawn(clock);
         timers
             .schedule(
-                TimerEntry { id: "t1".into(), timer_type: TimerType::Keepalive, fire_at: 1_000, leg_id: None },
+                TimerEntry {
+                    id: "t1".into(),
+                    timer_type: TimerType::Keepalive,
+                    fire_at: 1_000,
+                    leg_id: None,
+                },
                 "c".into(),
             )
             .await;
@@ -392,27 +397,45 @@ mod tests {
         // 1. Arm "keepalive" for t=30s and let it fire (slot freed).
         timers
             .schedule(
-                TimerEntry { id: "keepalive".into(), timer_type: TimerType::Keepalive, fire_at: 30_000, leg_id: None },
+                TimerEntry {
+                    id: "keepalive".into(),
+                    timer_type: TimerType::Keepalive,
+                    fire_at: 30_000,
+                    leg_id: None,
+                },
                 cref.clone(),
             )
             .await;
         tokio::time::advance(Duration::from_millis(30_000)).await;
         assert!(
-            matches!(fire_rx.recv().await, Some(CallEvent::Timer { timer_type: TimerType::Keepalive, .. })),
+            matches!(
+                fire_rx.recv().await,
+                Some(CallEvent::Timer { timer_type: TimerType::Keepalive, .. })
+            ),
             "first keepalive fires at 30s",
         );
 
         // 2. Arm a per-leg timeout (reuses the freed slot) ...
         timers
             .schedule(
-                TimerEntry { id: "KeepaliveTimeout:a".into(), timer_type: TimerType::KeepaliveTimeout, fire_at: 35_000, leg_id: Some("a".into()) },
+                TimerEntry {
+                    id: "KeepaliveTimeout:a".into(),
+                    timer_type: TimerType::KeepaliveTimeout,
+                    fire_at: 35_000,
+                    leg_id: Some("a".into()),
+                },
                 cref.clone(),
             )
             .await;
         // 3. ... reschedule keepalive for t=60s ...
         timers
             .schedule(
-                TimerEntry { id: "keepalive".into(), timer_type: TimerType::Keepalive, fire_at: 60_000, leg_id: None },
+                TimerEntry {
+                    id: "keepalive".into(),
+                    timer_type: TimerType::Keepalive,
+                    fire_at: 60_000,
+                    leg_id: None,
+                },
                 cref.clone(),
             )
             .await;
@@ -454,7 +477,12 @@ mod tests {
 
         timers
             .schedule(
-                TimerEntry { id: "GlobalDuration".into(), timer_type: TimerType::GlobalDuration, fire_at: 3_600_000, leg_id: None },
+                TimerEntry {
+                    id: "GlobalDuration".into(),
+                    timer_type: TimerType::GlobalDuration,
+                    fire_at: 3_600_000,
+                    leg_id: None,
+                },
                 "c".into(),
             )
             .await;
@@ -465,7 +493,11 @@ mod tests {
         // Call teardown — the slot must be freed immediately, not at +1 h.
         timers.cancel_all("c".into()).await;
         settle().await;
-        assert_eq!(metrics.timer_queue_len(), 0, "CancelAll reclaims the slot — no lingering tombstone");
+        assert_eq!(
+            metrics.timer_queue_len(),
+            0,
+            "CancelAll reclaims the slot — no lingering tombstone"
+        );
         assert_eq!(metrics.timer_live(), 0, "no schedulable timers remain");
     }
 
@@ -481,13 +513,22 @@ mod tests {
         for round in 0..50 {
             timers
                 .schedule(
-                    TimerEntry { id: "keepalive".into(), timer_type: TimerType::Keepalive, fire_at: 300_000 + round, leg_id: None },
+                    TimerEntry {
+                        id: "keepalive".into(),
+                        timer_type: TimerType::Keepalive,
+                        fire_at: 300_000 + round,
+                        leg_id: None,
+                    },
                     "c".into(),
                 )
                 .await;
         }
         settle().await;
-        assert_eq!(metrics.timer_queue_len(), 1, "50 re-arms collapse to one live entry, not 50 tombstones");
+        assert_eq!(
+            metrics.timer_queue_len(),
+            1,
+            "50 re-arms collapse to one live entry, not 50 tombstones"
+        );
         assert_eq!(metrics.timer_live(), 1);
     }
 

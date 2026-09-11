@@ -24,8 +24,8 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallFailureResponse, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Harness, ServerTxn, WaiverScope};
-use sip_net::RecordedSipEntry;
 use sip_message::generators::InDialogMethod;
+use sip_net::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -109,11 +109,10 @@ fn reliable_180_bob2(uas: &mut ServerTxn) -> scenario_harness::Respond<'_> {
 /// belongs to, which is the scope RFC 3262 §3's ban is written in.
 fn to_tag_in(raw: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(raw).ok()?;
-    let to = s
-        .split("\r\n")
-        .find(|l| l.len() > 3 && (l[..3].eq_ignore_ascii_case("To:") || l[..2].eq_ignore_ascii_case("t:")))?;
-    to.split(';')
-        .find_map(|p| p.trim().strip_prefix("tag=").map(|t| t.trim().to_string()))
+    let to = s.split("\r\n").find(|l| {
+        l.len() > 3 && (l[..3].eq_ignore_ascii_case("To:") || l[..2].eq_ignore_ascii_case("t:"))
+    })?;
+    to.split(';').find_map(|p| p.trim().strip_prefix("tag=").map(|t| t.trim().to_string()))
 }
 
 /// Every copy of the `status` response the SUT put on `to`'s wire, in send
@@ -182,7 +181,8 @@ async fn the_caller_facing_ladder_runs_on_our_own_clock() {
     let h = Harness::with_transit_delay("b2bua-prack-ladder", 0);
     let alice = h.agent("alice", "127.0.0.1:5401").await;
     let bob = h.agent("bob", "127.0.0.1:5411").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5411).start(&h, "b2bua", "127.0.0.1:5421").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5411).start(&h, "b2bua", "127.0.0.1:5421").await;
     let alice_addr: SocketAddr = "127.0.0.1:5401".parse().unwrap();
     let bob_addr: SocketAddr = "127.0.0.1:5411".parse().unwrap();
 
@@ -205,7 +205,11 @@ async fn the_caller_facing_ladder_runs_on_our_own_clock() {
     // Each rung is counted as it leaves, under the §3 ladder and the
     // provisional it repeats — the 183 to her INVITE.
     let counted = || b2bua.metrics().retransmits_total("reliable-provisional", "INVITE", Some(183));
-    assert_eq!(counted(), 3, "b2bua_retransmits_total{{reliable-provisional,INVITE,183}} climbs with the rungs");
+    assert_eq!(
+        counted(),
+        3,
+        "b2bua_retransmits_total{{reliable-provisional,INVITE,183}} climbs with the rungs"
+    );
 
     // ── her PRACK retires the number and the ladder stops ────────────────────
     let mut prack = call.try_prack(&p183).await.expect("alice PRACKs the reliable 183");
@@ -240,7 +244,11 @@ async fn the_caller_facing_ladder_runs_on_our_own_clock() {
     assert_ladder(&seen, &LADDER_GAPS_MS);
     assert_one_number(&seen);
     assert_eq!(counted(), 3, "the PRACK stopped the ladder: nothing more was counted");
-    assert_eq!(b2bua.metrics().repeat_give_ups_total("prack-of"), 0, "a PRACKed ladder never gives up");
+    assert_eq!(
+        b2bua.metrics().repeat_give_ups_total("prack-of"),
+        0,
+        "a PRACKed ladder never gives up"
+    );
 }
 
 /// **The two halves compose.** The callee repeats its reliable provisional on
@@ -254,7 +262,8 @@ async fn the_callees_own_pacing_never_reaches_the_caller() {
     let h = Harness::with_transit_delay("b2bua-prack-ladder-offbeat", 0);
     let alice = h.agent("alice", "127.0.0.1:5402").await;
     let bob = h.agent("bob", "127.0.0.1:5412").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5412).start(&h, "b2bua", "127.0.0.1:5422").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5412).start(&h, "b2bua", "127.0.0.1:5422").await;
     let alice_addr: SocketAddr = "127.0.0.1:5402".parse().unwrap();
 
     let mut call = alice
@@ -324,7 +333,8 @@ async fn the_ladder_gives_up_at_64_t1() {
     );
     let alice = h.agent("alice", "127.0.0.1:5403").await;
     let bob = h.agent("bob", "127.0.0.1:5413").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5413).start(&h, "b2bua", "127.0.0.1:5423").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5413).start(&h, "b2bua", "127.0.0.1:5423").await;
     let alice_addr: SocketAddr = "127.0.0.1:5403".parse().unwrap();
 
     let mut call = alice
@@ -357,17 +367,18 @@ async fn the_ladder_gives_up_at_64_t1() {
     b2bua.assert_fully_reaped();
     // The give-up is counted once, under the obligation alice left
     // undischarged; every rung before it was counted as it left.
-    assert_eq!(b2bua.metrics().repeat_give_ups_total("prack-of"), 1, "one give-up: her PRACK never came");
+    assert_eq!(
+        b2bua.metrics().repeat_give_ups_total("prack-of"),
+        1,
+        "one give-up: her PRACK never came"
+    );
     assert_eq!(b2bua.metrics().repeat_give_ups_total("ack-of-2xx"), 0);
     let report = h.finish().await;
     let entries = report.entries();
 
     let seen = copies_to(&entries, b2bua.addr, alice_addr, 183);
     let first = seen[0].0;
-    assert!(
-        seen.len() >= 5,
-        "a 64·T1 ladder is a real ladder, not one rung: {seen:?}",
-    );
+    assert!(seen.len() >= 5, "a 64·T1 ladder is a real ladder, not one rung: {seen:?}",);
     assert_eq!(
         b2bua.metrics().retransmits_total("reliable-provisional", "INVITE", Some(183)) as usize,
         seen.len() - 1,
@@ -404,7 +415,8 @@ async fn a_prack_inside_the_bound_is_not_rejected() {
     let h = Harness::with_transit_delay("b2bua-prack-ladder-late-prack", 0);
     let alice = h.agent("alice", "127.0.0.1:5407").await;
     let bob = h.agent("bob", "127.0.0.1:5417").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5417).start(&h, "b2bua", "127.0.0.1:5427").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5417).start(&h, "b2bua", "127.0.0.1:5427").await;
     let alice_addr: SocketAddr = "127.0.0.1:5407".parse().unwrap();
 
     let mut call = alice
@@ -471,7 +483,8 @@ async fn the_ladder_ceases_at_the_final_response() {
     );
     let alice = h.agent("alice", "127.0.0.1:5404").await;
     let bob = h.agent("bob", "127.0.0.1:5414").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5414).start(&h, "b2bua", "127.0.0.1:5424").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5414).start(&h, "b2bua", "127.0.0.1:5424").await;
     let alice_addr: SocketAddr = "127.0.0.1:5404".parse().unwrap();
 
     let mut call = alice
@@ -508,10 +521,8 @@ async fn the_ladder_ceases_at_the_final_response() {
 
     let rings = copies_to(&entries, b2bua.addr, alice_addr, 180);
     assert_ladder(&rings, &[T1_MS]);
-    let answered_at = copies_to(&entries, b2bua.addr, alice_addr, 200)
-        .first()
-        .expect("alice was answered")
-        .0;
+    let answered_at =
+        copies_to(&entries, b2bua.addr, alice_addr, 200).first().expect("alice was answered").0;
     assert!(
         rings.iter().all(|(ms, _)| *ms < answered_at),
         "the ladder is cancelled by the final response — no 180 after the 200 at {answered_at} ms: {rings:?}",
@@ -533,7 +544,8 @@ async fn the_ladder_ceases_on_the_callers_cancel() {
     );
     let alice = h.agent("alice", "127.0.0.1:5405").await;
     let bob = h.agent("bob", "127.0.0.1:5415").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5415).start(&h, "b2bua", "127.0.0.1:5425").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5415).start(&h, "b2bua", "127.0.0.1:5425").await;
     let alice_addr: SocketAddr = "127.0.0.1:5405".parse().unwrap();
 
     let mut call = alice
@@ -566,10 +578,8 @@ async fn the_ladder_ceases_on_the_callers_cancel() {
     let entries = report.entries();
 
     let rings = copies_to(&entries, b2bua.addr, alice_addr, 180);
-    let released_at = copies_to(&entries, b2bua.addr, alice_addr, 487)
-        .first()
-        .expect("alice was released 487")
-        .0;
+    let released_at =
+        copies_to(&entries, b2bua.addr, alice_addr, 487).first().expect("alice was released 487").0;
     assert_ladder(&rings, &[T1_MS]);
     assert!(
         rings.iter().all(|(ms, _)| *ms < released_at),
@@ -764,22 +774,18 @@ async fn a_rerouted_ring_opens_its_own_caller_early_dialog() {
         .filter(|e| {
             e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 180 ")
         })
-        .filter_map(|e| {
-            Some((e.sent_ms, to_tag_in(&e.raw)?, rseq_in(&e.raw)?))
-        })
+        .filter_map(|e| Some((e.sent_ms, to_tag_in(&e.raw)?, rseq_in(&e.raw)?)))
         .collect();
     let attempt1 = rings.first().expect("attempt 1 rang the caller");
-    let attempt2 = rings
-        .iter()
-        .find(|(_, tag, _)| *tag != attempt1.1)
-        .unwrap_or_else(|| {
-            panic!(
-                "the rerouted ring opens its own caller-facing early dialog — every 180 rode \
+    let attempt2 = rings.iter().find(|(_, tag, _)| *tag != attempt1.1).unwrap_or_else(|| {
+        panic!(
+            "the rerouted ring opens its own caller-facing early dialog — every 180 rode \
                  one To-tag: {rings:?}"
-            )
-        });
+        )
+    });
     assert_ne!(
-        attempt2.2, attempt1.2 + 1,
+        attempt2.2,
+        attempt1.2 + 1,
         "each early dialog carries its OWN randomly-seeded RSeq space (RFC 3262 §4, errata \
          4603) — the second dialog must not continue the first's numbering: {rings:?}",
     );
@@ -825,7 +831,8 @@ async fn the_ladder_of_a_relayed_reinvite_ceases_at_its_own_final() {
     );
     let alice = h.agent("alice", "127.0.0.1:5109").await;
     let bob = h.agent("bob", "127.0.0.1:5110").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5110).start(&h, "b2bua", "127.0.0.1:5111").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5110).start(&h, "b2bua", "127.0.0.1:5111").await;
     let alice_addr: SocketAddr = "127.0.0.1:5109".parse().unwrap();
 
     // ── an ordinary call, established without reliability in play ──
@@ -873,11 +880,17 @@ async fn the_ladder_of_a_relayed_reinvite_ceases_at_its_own_final() {
     let rings = copies_to(&entries, b2bua.addr, alice_addr, 180);
     let reinvite_rings: Vec<(u64, u32)> = entries
         .iter()
-        .filter(|e| e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 180 "))
+        .filter(|e| {
+            e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 180 ")
+        })
         .filter(|e| cseq_in(&e.raw).as_deref() == Some(&format!("{reinvite_cseq} INVITE")))
         .map(|e| (e.sent_ms, rseq_in(&e.raw).unwrap_or(0)))
         .collect();
-    assert_eq!(reinvite_rings.len() + 1, rings.len(), "the setup's own 180 is unreliable: {rings:?}");
+    assert_eq!(
+        reinvite_rings.len() + 1,
+        rings.len(),
+        "the setup's own 180 is unreliable: {rings:?}"
+    );
     assert_ladder(&reinvite_rings, &[T1_MS]);
     assert!(
         reinvite_rings.iter().all(|(_, rseq)| *rseq != BOB_RSEQ && *rseq != 0),
@@ -885,7 +898,9 @@ async fn the_ladder_of_a_relayed_reinvite_ceases_at_its_own_final() {
     );
     let answered_at = entries
         .iter()
-        .filter(|e| e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 200 "))
+        .filter(|e| {
+            e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"SIP/2.0 200 ")
+        })
         .filter(|e| cseq_in(&e.raw).as_deref() == Some(&format!("{reinvite_cseq} INVITE")))
         .map(|e| e.sent_ms)
         .min()

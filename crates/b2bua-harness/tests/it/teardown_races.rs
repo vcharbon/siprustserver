@@ -30,7 +30,9 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
+async fn serve_limiter(
+    net: &SimulatedHttpNetwork,
+) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
     let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
@@ -38,11 +40,7 @@ async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn
 }
 
 fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    Arc::new(HttpCallLimiter::new(
-        Arc::new(net.clone()),
-        laddr(),
-        Duration::from_millis(150),
-    ))
+    Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_millis(150)))
 }
 
 fn route_limited(host: &str, port: u16, id: &str, limit: i64) -> Arc<dyn CallDecisionEngine> {

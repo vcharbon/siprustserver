@@ -79,12 +79,7 @@ impl ReplServer {
         changelog: Changelog,
         source: Arc<dyn BodySource>,
     ) -> Self {
-        Self {
-            self_ordinal: self_ordinal.into(),
-            changelog,
-            source,
-            metrics: None,
-        }
+        Self { self_ordinal: self_ordinal.into(), changelog, source, metrics: None }
     }
 
     /// Attach the metrics handle so the serve loop records `repl_noops_sent`
@@ -124,12 +119,7 @@ impl ReplServer {
     /// its single flow to completion (until the socket closes).
     async fn serve_connection(self, conn: Box<dyn ReplicationConnection>) {
         let (caller, partition, since) = match conn.recv().await {
-            Some(Frame::PullRequest {
-                caller,
-                partition,
-                since,
-                ..
-            }) => (caller, partition, since),
+            Some(Frame::PullRequest { caller, partition, since, .. }) => (caller, partition, since),
             // Anything other than an opening PullRequest, or a close → done.
             _ => return,
         };
@@ -176,10 +166,7 @@ impl ReplServer {
         // then resumes from W (warm), so the scan and the tail never double-deliver.
         let mut w = since;
         if since == Watermark::new(0, 0) {
-            match self
-                .serve_bootstrap(conn, caller, partition, role, &primary)
-                .await
-            {
+            match self.serve_bootstrap(conn, caller, partition, role, &primary).await {
                 Ok(scan_head) => w = scan_head,
                 Err(()) => return, // socket dropped mid-scan.
             }

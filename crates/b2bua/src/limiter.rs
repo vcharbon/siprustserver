@@ -59,10 +59,7 @@ pub(crate) fn live_holds(call: &call::Call) -> Vec<LimiterHold> {
     call.limiter_entries
         .iter()
         .filter(|e| e.increment_succeeded != Some(false))
-        .map(|e| LimiterHold {
-            limiter_id: e.limiter_id.clone(),
-            window: e.origin_window,
-        })
+        .map(|e| LimiterHold { limiter_id: e.limiter_id.clone(), window: e.origin_window })
         .collect()
 }
 

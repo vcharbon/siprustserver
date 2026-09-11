@@ -29,7 +29,6 @@ use b2bua_harness::{B2buaScene, B2buaSut, BOB_PORT};
 use call::model::cdr::CdrEventType;
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpTransport, SimulatedHttpNetwork};
-use sip_clock::Clock;
 use pivot_interpreter::plan::Plan;
 use pivot_interpreter::{
     Booking, ClockMode, CloseOwed, Failure, IdentityBindings, Lane, Outcome, RunConfig, Sut,
@@ -43,6 +42,7 @@ use pivot_schema::placement::{BackgroundMatch, BackgroundPolicy, BackgroundRespo
 use pivot_schema::scoping::CheckClass;
 use pivot_schema::violation::RfcRule;
 use pivot_schema::PivotV3;
+use sip_clock::Clock;
 use sip_message::header::Uri;
 
 /// The demo lane's URI composition: a Request-URI is addressed at the system
@@ -100,7 +100,9 @@ impl UriComposer for DemoComposer {
 /// would silently stop matching.
 fn ruri_user(r: &pivot_schema::msg::Ref, composer: &DemoComposer) -> Option<String> {
     let uri = match r {
-        pivot_schema::msg::Ref::Positional(p) => composer.compose(&p.pos, p.form.as_deref(), true)?,
+        pivot_schema::msg::Ref::Positional(p) => {
+            composer.compose(&p.pos, p.form.as_deref(), true)?
+        }
         pivot_schema::msg::Ref::Frozen(f) => composer.frozen(&f.frozen, f.kind.as_deref(), true),
     };
     let after_scheme = uri.split_once(':').map(|(_, rest)| rest).unwrap_or(&uri);
@@ -153,8 +155,7 @@ fn lane_numbers(plan: &Plan) -> (BTreeMap<String, String>, IdentityBindings) {
             .and_then(|l| document.actors.iter().find(|a| a.id == l.actor))
             .and_then(|a| a.identity.clone())
         {
-            let (position, number) =
-                allocate(&name, format!("{prefix}caller"), &mut bindings);
+            let (position, number) = allocate(&name, format!("{prefix}caller"), &mut bindings);
             numbers.insert(position, number);
         }
         for attempt in &call.attempts {
@@ -248,11 +249,8 @@ fn lane_egress(
             // system can reach it at. `endpoints[].observed` is the socket the
             // capture saw and answers only when this lane happens to bind the
             // same one; a directive naming it otherwise dials an empty port.
-            let actor = document
-                .legs
-                .iter()
-                .find(|leg| leg.id == attempt.leg)
-                .map(|leg| leg.actor.clone());
+            let actor =
+                document.legs.iter().find(|leg| leg.id == attempt.leg).map(|leg| leg.actor.clone());
             let dest = actor
                 .as_ref()
                 .and_then(|actor| agents.get(actor))
@@ -272,9 +270,7 @@ fn lane_egress(
                 identity: name.clone(),
                 user,
                 dest,
-                no_answer_sec: attempt
-                    .no_answer_ms
-                    .map(|ms| no_answer_sec(name, ms, tolerance_ms)),
+                no_answer_sec: attempt.no_answer_ms.map(|ms| no_answer_sec(name, ms, tolerance_ms)),
             });
         }
     }
@@ -317,7 +313,8 @@ fn hunt_plan(egress: &[Egress], call: &pivot_schema::call::Call) -> Option<serde
             Some(route)
         })
         .collect();
-    (routes.len() == chain.len()).then(|| serde_json::json!({ "action": "route", "routes": routes }))
+    (routes.len() == chain.len())
+        .then(|| serde_json::json!({ "action": "route", "routes": routes }))
 }
 
 /// The admission cap this lane arms for one run: a limiter id and how many
@@ -412,8 +409,7 @@ fn walk(prefix: String, value: &serde_json::Value, out: &mut BTreeMap<String, St
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map {
-                let path =
-                    if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+                let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
                 walk(path, child, out);
             }
         }
@@ -493,8 +489,8 @@ fn corpus_case(case_id: &str) -> Option<Case> {
 fn read_case(path: &std::path::Path, base_dir: PathBuf) -> Case {
     let text =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let document = PivotV3::from_json(&text)
-        .unwrap_or_else(|e| panic!("{} parses: {e}", path.display()));
+    let document =
+        PivotV3::from_json(&text).unwrap_or_else(|e| panic!("{} parses: {e}", path.display()));
     Case { document, base_dir }
 }
 
@@ -577,12 +573,12 @@ async fn replay_directed(
     let (lane_positions, lane_bindings) = lane_numbers(&plan);
     let mut numbers = lane_positions.clone();
     numbers.extend(BTreeMap::from([
-            ("caller".to_string(), "0009001".to_string()),
-            ("called[0][0]".to_string(), format!("bob{BOB_PORT}")),
-            ("c1.caller".to_string(), "0009001".to_string()),
-            ("c1.called[0][0]".to_string(), format!("bob{BOB_PORT}")),
-            ("c2.caller".to_string(), "0009002".to_string()),
-            ("c2.called[0][0]".to_string(), format!("idle{IDLE_PORT}")),
+        ("caller".to_string(), "0009001".to_string()),
+        ("called[0][0]".to_string(), format!("bob{BOB_PORT}")),
+        ("c1.caller".to_string(), "0009001".to_string()),
+        ("c1.called[0][0]".to_string(), format!("bob{BOB_PORT}")),
+        ("c2.caller".to_string(), "0009002".to_string()),
+        ("c2.called[0][0]".to_string(), format!("idle{IDLE_PORT}")),
     ]));
     let composer =
         DemoComposer { ingress, domain: "pivot.invalid".into(), numbers, trunk: "1999999".into() };
@@ -621,9 +617,8 @@ async fn replay_directed(
     let mut per_call: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     for call in &plan.document().calls {
         let directive = if directives.armed() {
-            hunt_plan(&egress, call)
-                .or_else(|| single_destination(&egress, &call.id))
-                .map(|mut value| {
+            hunt_plan(&egress, call).or_else(|| single_destination(&egress, &call.id)).map(
+                |mut value| {
                     if let Some(admission) = &directives.admission {
                         value["call_limiter"] =
                             serde_json::json!([{ "id": admission.id, "limit": admission.limit }]);
@@ -632,7 +627,8 @@ async fn replay_directed(
                         value["features"] = serde_json::json!({ "refer": {} });
                     }
                     value
-                })
+                },
+            )
         } else {
             hunt_plan(&egress, call)
         };
@@ -689,7 +685,8 @@ fn assert_bundle_is_complete(outcome: &Outcome, dir: &std::path::Path) {
     let legs = outcome.recording.legs();
     assert!(legs.contains_key("A") && legs.contains_key("B"), "both legs recorded: {legs:#?}");
     assert!(
-        legs.values().all(|messages| messages.iter().all(|m| !m.raw.is_empty() || m.note.is_some())),
+        legs.values()
+            .all(|messages| messages.iter().all(|m| !m.raw.is_empty() || m.note.is_some())),
         "every recorded datagram carries its bytes"
     );
     for file in ["pivot.json", "run-config.json", "verdict.json", "timing.json"] {
@@ -730,9 +727,9 @@ async fn the_final_owed_to_a_sent_bye_is_absorbed_where_no_expect_scripts_it() {
     let scene = api_scene("pivot-owed-bye-final").await;
     let mut case = fixture("linear-attempt.v3.json");
     case.document.case.id = "linear-attempt-owed-bye-final".to_string();
-    case.document.flow.retain(|node| {
-        !matches!(node, pivot_schema::flow::FlowNode::Message(step) if step.id == "s13")
-    });
+    case.document.flow.retain(
+        |node| !matches!(node, pivot_schema::flow::FlowNode::Message(step) if step.id == "s13"),
+    );
     let (outcome, dir) = replay_case(&scene, case, BTreeMap::new()).await;
     assert_bundle_is_complete(&outcome, &dir);
     assert_eq!(outcome.verdict.completed_steps.len(), 12, "every remaining step ran");
@@ -741,10 +738,7 @@ async fn the_final_owed_to_a_sent_bye_is_absorbed_where_no_expect_scripts_it() {
         .find(|m| m.raw.starts_with("SIP/2.0 200") && m.raw.contains("\r\nCSeq: 2 BYE\r\n"))
         .unwrap_or_else(|| panic!("the owed final was recorded: {:#?}", outcome.recording.legs()))
         .clone();
-    assert!(
-        absorbed.note.as_deref().is_some_and(|note| note.contains("15.1.2")),
-        "{absorbed:#?}"
-    );
+    assert!(absorbed.note.as_deref().is_some_and(|note| note.contains("15.1.2")), "{absorbed:#?}");
     scene.finish().await;
 }
 
@@ -913,10 +907,8 @@ async fn a_second_ack_for_one_2xx_still_finds_the_final_the_first_discharged() {
     // Both ACKs left leg A under the one 2xx's CSeq, on DISTINCT branches: a
     // second transaction on the dialog, not a retransmission of the first.
     let legs = outcome.recording.legs();
-    let acks: Vec<_> = legs["A"]
-        .iter()
-        .filter(|m| m.dir == Dir::Out && m.raw.starts_with("ACK "))
-        .collect();
+    let acks: Vec<_> =
+        legs["A"].iter().filter(|m| m.dir == Dir::Out && m.raw.starts_with("ACK ")).collect();
     assert_eq!(acks.len(), 2, "both ACK steps reached the wire: {:#?}", legs["A"]);
     let branch = |raw: &str| {
         raw.lines()
@@ -938,7 +930,8 @@ async fn a_second_ack_for_one_2xx_still_finds_the_final_the_first_discharged() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn rung_two_a_cancelled_attempt_tolerates_the_ring_and_takes_the_teardown_pair_in_any_order() {
+async fn rung_two_a_cancelled_attempt_tolerates_the_ring_and_takes_the_teardown_pair_in_any_order()
+{
     let scene = api_scene("pivot-cancel-race").await;
     let (outcome, dir) = replay(&scene, "cancel-race.v3.json").await;
     assert_bundle_is_complete(&outcome, &dir);
@@ -1157,7 +1150,9 @@ async fn a_run_whose_document_asserts_the_wrong_final_fails_by_name_and_keeps_it
         .failures
         .iter()
         .find(|f| matches!(f, Failure::UnmatchedDatagram { .. }))
-        .unwrap_or_else(|| panic!("no unmatched-datagram failure: {:#?}", outcome.verdict.failures));
+        .unwrap_or_else(|| {
+            panic!("no unmatched-datagram failure: {:#?}", outcome.verdict.failures)
+        });
     let Failure::UnmatchedDatagram { step, leg, gated_on, arrived, .. } = unmatched else {
         unreachable!("matched above")
     };
@@ -1231,17 +1226,19 @@ async fn an_absorbed_retransmission_is_recorded_and_never_reaches_an_expect() {
     // stream — the retransmission is in the wire view and not in the TU view.
     let wire = &outcome.wire_view;
     let tu = outcome.tu_view();
-    assert!(wire.len() > tu.len(), "the wire view is the wider one: {} vs {}", wire.len(), tu.len());
+    assert!(
+        wire.len() > tu.len(),
+        "the wire view is the wider one: {} vs {}",
+        wire.len(),
+        tu.len()
+    );
     let repeats: Vec<_> = wire.iter().filter(|e| e.is_repeat()).collect();
     assert_eq!(repeats.len(), absorbed.len(), "one wire-view repeat per recorded absorption");
     assert!(
         repeats.iter().all(|e| e.start_line().starts_with("INVITE")),
         "the held ring's Timer-A retransmission is the repeat: {repeats:#?}",
     );
-    assert!(
-        !tu.iter().any(|e| e.is_repeat()),
-        "no absorbed repeat reached the transaction user",
-    );
+    assert!(!tu.iter().any(|e| e.is_repeat()), "no absorbed repeat reached the transaction user",);
 
     scene.finish().await;
 }
@@ -1323,7 +1320,9 @@ async fn a_declared_retransmit_ladder_is_emitted_paced_and_counted_in_both_views
     let wire = &outcome.wire_view;
     let tu = outcome.tu_view();
     let count = |view: &[scenario_harness::absorption::WireEntry], prefix: &str, repeat: bool| {
-        view.iter().filter(|e| e.start_line().starts_with(prefix) && e.is_repeat() == repeat).count()
+        view.iter()
+            .filter(|e| e.start_line().starts_with(prefix) && e.is_repeat() == repeat)
+            .count()
     };
     assert_eq!(count(wire, "INVITE", true), 2, "the absorbed ladder");
     assert_eq!(count(&tu, "INVITE", true), 0, "and none of it reached the transaction user");
@@ -1585,12 +1584,8 @@ async fn an_alt_its_released_absence_completes_still_settles_for_what_waits_on_i
     absent.within_ms = Some(250);
     absent.delay.from = "step:s11".parse().expect("s11 is a step id");
     absent.delay.ms = 0;
-    let pivot_schema::flow::FlowNode::Alt(alt) = case
-        .document
-        .flow
-        .iter_mut()
-        .find(|node| node.id() == "a1")
-        .expect("the fixture's alt")
+    let pivot_schema::flow::FlowNode::Alt(alt) =
+        case.document.flow.iter_mut().find(|node| node.id() == "a1").expect("the fixture's alt")
     else {
         panic!("a1 is the alt")
     };
@@ -1715,12 +1710,8 @@ async fn rung_three_a_draft_runs_green_with_its_origin_lane_s_vocabulary_recorde
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
     assert_eq!(outcome.verdict.informative.len(), 2, "{:#?}", outcome.verdict.informative);
     assert!(
-        outcome
-            .verdict
-            .informative
-            .iter()
-            .all(|note| note.class == CheckClass::CdrVocabulary
-                && matches!(&note.finding, Failure::CdrMismatch { .. })),
+        outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
+            && matches!(&note.finding, Failure::CdrMismatch { .. })),
         "{:#?}",
         outcome.verdict.informative
     );
@@ -1841,12 +1832,8 @@ async fn rung_three_a_forked_reliable_provisional_draft_prack_s_each_early_dialo
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
     assert_eq!(outcome.verdict.informative.len(), 4, "{:#?}", outcome.verdict.informative);
     assert!(
-        outcome
-            .verdict
-            .informative
-            .iter()
-            .all(|note| note.class == CheckClass::CdrVocabulary
-                && matches!(&note.finding, Failure::CdrMismatch { .. })),
+        outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
+            && matches!(&note.finding, Failure::CdrMismatch { .. })),
         "{:#?}",
         outcome.verdict.informative
     );
@@ -1970,7 +1957,9 @@ async fn a_caller_side_collapse_of_two_observed_forks_fails_by_name() {
         .failures
         .iter()
         .find(|f| matches!(f, Failure::UnmatchedDatagram { .. }))
-        .unwrap_or_else(|| panic!("no unmatched-datagram failure: {:#?}", outcome.verdict.failures));
+        .unwrap_or_else(|| {
+            panic!("no unmatched-datagram failure: {:#?}", outcome.verdict.failures)
+        });
     let Failure::UnmatchedDatagram { step, leg, reason, arrived, .. } = unmatched else {
         unreachable!("matched above")
     };
@@ -1979,7 +1968,9 @@ async fn a_caller_side_collapse_of_two_observed_forks_fails_by_name() {
     // The refusal names the fork, the tag, and the id that already rides it —
     // the exact account the triage taxonomy quotes.
     assert!(
-        reason.starts_with("gated on early dialog \"r2\", which must be a dialog of its own; To-tag \""),
+        reason.starts_with(
+            "gated on early dialog \"r2\", which must be a dialog of its own; To-tag \""
+        ),
         "{reason}"
     );
     assert!(reason.contains("\" already rides \"r1\""), "{reason}");
@@ -2051,12 +2042,8 @@ async fn rung_three_a_re_invite_draft_crosses_a_bye_and_takes_the_481_order_free
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
     assert_eq!(outcome.verdict.informative.len(), 2, "{:#?}", outcome.verdict.informative);
     assert!(
-        outcome
-            .verdict
-            .informative
-            .iter()
-            .all(|note| note.class == CheckClass::CdrVocabulary
-                && matches!(&note.finding, Failure::CdrMismatch { .. })),
+        outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
+            && matches!(&note.finding, Failure::CdrMismatch { .. })),
         "{:#?}",
         outcome.verdict.informative
     );
@@ -2272,7 +2259,8 @@ async fn rung_three_a_reroute_draft_hunts_past_a_busy_destination() {
     };
     let scene = hunting_scene("pivot-bc-02-486").await;
     let bob = scene.bob.clone();
-    let (outcome, dir) = replay_case(&scene, case, BTreeMap::from([("uas2".to_string(), bob)])).await;
+    let (outcome, dir) =
+        replay_case(&scene, case, BTreeMap::from([("uas2".to_string(), bob)])).await;
     assert_bundle_is_complete(&outcome, &dir);
     for step in (1..=18).map(|n| format!("s{n}")) {
         let step = &step;
@@ -2304,12 +2292,8 @@ async fn rung_three_a_reroute_draft_hunts_past_a_busy_destination() {
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
     assert_eq!(outcome.verdict.informative.len(), 3, "{:#?}", outcome.verdict.informative);
     assert!(
-        outcome
-            .verdict
-            .informative
-            .iter()
-            .all(|note| note.class == CheckClass::CdrVocabulary
-                && matches!(&note.finding, Failure::CdrMismatch { .. })),
+        outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
+            && matches!(&note.finding, Failure::CdrMismatch { .. })),
         "{:#?}",
         outcome.verdict.informative
     );
@@ -2334,7 +2318,8 @@ async fn rung_three_a_no_answer_draft_rings_out_and_hunts_on() {
     };
     let scene = hunting_scene("pivot-bc-02-na").await;
     let bob = scene.bob.clone();
-    let (outcome, dir) = replay_case(&scene, case, BTreeMap::from([("uas2".to_string(), bob)])).await;
+    let (outcome, dir) =
+        replay_case(&scene, case, BTreeMap::from([("uas2".to_string(), bob)])).await;
     assert_bundle_is_complete(&outcome, &dir);
     for step in (1..=20).map(|n| format!("s{n}")) {
         let step = &step;
@@ -2363,10 +2348,8 @@ async fn rung_three_a_no_answer_draft_rings_out_and_hunts_on() {
 
     // And the abandoned leg was closed the way RFC 3261 §17.1.1.3 owes it: the
     // 487 the CANCEL drew, ACKed on the INVITE's own branch.
-    let ack = b_leg
-        .iter()
-        .find(|m| m.raw.starts_with("ACK sip:"))
-        .expect("the 487 draws its hop ACK");
+    let ack =
+        b_leg.iter().find(|m| m.raw.starts_with("ACK sip:")).expect("the 487 draws its hop ACK");
     let branch = |raw: &str| {
         raw.split("branch=").nth(1).and_then(|r| r.split(['\r', ';']).next()).map(str::to_string)
     };
@@ -2383,12 +2366,8 @@ async fn rung_three_a_no_answer_draft_rings_out_and_hunts_on() {
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
     assert_eq!(outcome.verdict.informative.len(), 3, "{:#?}", outcome.verdict.informative);
     assert!(
-        outcome
-            .verdict
-            .informative
-            .iter()
-            .all(|note| note.class == CheckClass::CdrVocabulary
-                && matches!(&note.finding, Failure::CdrMismatch { .. })),
+        outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
+            && matches!(&note.finding, Failure::CdrMismatch { .. })),
         "{:#?}",
         outcome.verdict.informative
     );
@@ -2452,12 +2431,7 @@ async fn a_ring_this_lane_cannot_arm_exactly_rides_the_run_s_stated_tolerance() 
 
     // The reading, in the verdict: what the document declares, what the system's
     // timer actually measured, and the window that covered the difference.
-    assert_eq!(
-        outcome.verdict.timings.len(),
-        1,
-        "{:#?}",
-        outcome.verdict.timings
-    );
+    assert_eq!(outcome.verdict.timings.len(), 1, "{:#?}", outcome.verdict.timings);
     let note = &outcome.verdict.timings[0];
     assert_eq!(note.step, "s6");
     assert_eq!(note.leg, "B");
@@ -2864,7 +2838,8 @@ async fn serve_limiter(
 ) -> (Arc<WindowStore>, Box<dyn http_net::HttpServerHandle>) {
     let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-    let handle = net.serve(LIMITER_ADDR.parse().expect("the limiter address parses"), server)
+    let handle = net
+        .serve(LIMITER_ADDR.parse().expect("the limiter address parses"), server)
         .await
         .expect("the limiter binds");
     (store, handle)
@@ -2965,11 +2940,7 @@ async fn rung_six_a_limited_second_call_is_refused_before_any_b_leg() {
     // counter bounded `exactly: 0`, and a green run is that counter holding.
     assert!(legs.get("D").is_none_or(|messages| messages.is_empty()), "{legs:#?}");
     assert!(
-        !outcome
-            .verdict
-            .failures
-            .iter()
-            .any(|f| matches!(f, Failure::BackgroundCount { .. })),
+        !outcome.verdict.failures.iter().any(|f| matches!(f, Failure::BackgroundCount { .. })),
         "{:#?}",
         outcome.verdict.failures
     );
@@ -3008,12 +2979,8 @@ async fn rung_six_a_limited_second_call_is_refused_before_any_b_leg() {
     assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
     assert_eq!(outcome.verdict.informative.len(), 2, "{:#?}", outcome.verdict.informative);
     assert!(
-        outcome
-            .verdict
-            .informative
-            .iter()
-            .all(|note| note.class == CheckClass::CdrVocabulary
-                && matches!(&note.finding, Failure::CdrMismatch { .. })),
+        outcome.verdict.informative.iter().all(|note| note.class == CheckClass::CdrVocabulary
+            && matches!(&note.finding, Failure::CdrMismatch { .. })),
         "{:#?}",
         outcome.verdict.informative
     );
@@ -3541,9 +3508,10 @@ async fn a_background_policy_does_not_absorb_the_arrival_an_open_expect_waits_fo
     // The two readings of one method really did both happen on leg B: the
     // relayed poll attributed to its step, the audits answered by the policy.
     let b_leg = &outcome.recording.legs()["B"];
-    let options = |predicate: &dyn Fn(&pivot_schema::bundle::recording::RecordedMessage) -> bool| {
-        b_leg.iter().filter(|m| m.raw.starts_with("OPTIONS ") && predicate(m)).count()
-    };
+    let options =
+        |predicate: &dyn Fn(&pivot_schema::bundle::recording::RecordedMessage) -> bool| {
+            b_leg.iter().filter(|m| m.raw.starts_with("OPTIONS ") && predicate(m)).count()
+        };
     assert_eq!(options(&|m| m.step.as_deref() == Some("s102")), 1, "the relay is the step's");
     assert!(
         options(&|m| m.note.as_deref().is_some_and(|n| n.starts_with("background"))) >= 1,
@@ -3574,8 +3542,7 @@ async fn an_open_expect_holds_out_for_the_relay_when_an_audit_lands_in_the_same_
     let scene = api_scene("pivot-options-collision").await;
     let mut case = fixture("linear-attempt.v3.json");
     case.document.case.id = "options-collision".into();
-    let mark =
-        Header { name: POLL_MARK.into(), value: "icid-value=\"poll\"".into(), class: None };
+    let mark = Header { name: POLL_MARK.into(), value: "icid-value=\"poll\"".into(), class: None };
     let mut send_options = step_of(&mut case, "s10").clone();
     send_options.id = "s101".into();
     send_options.msg.method = Some("OPTIONS".into());
@@ -3622,10 +3589,8 @@ async fn an_open_expect_holds_out_for_the_relay_when_an_audit_lands_in_the_same_
     assert_eq!(outcome.verdict.status, VerdictStatus::Ok, "{:#?}", outcome.verdict.failures);
     assert_eq!(outcome.verdict.completed_steps.len(), 17, "every step ran");
     let b_leg = &outcome.recording.legs()["B"];
-    let relay = b_leg
-        .iter()
-        .find(|m| m.step.as_deref() == Some("s102"))
-        .expect("the relay is the step's");
+    let relay =
+        b_leg.iter().find(|m| m.step.as_deref() == Some("s102")).expect("the relay is the step's");
     assert!(relay.raw.contains(POLL_MARK), "the step took the poll, not an audit: {relay:#?}");
     // The collision is the test, not a bonus: an audit has to have landed on
     // this leg INSIDE the step's open window — after the poll that opened it,
@@ -3800,12 +3765,7 @@ async fn a_failed_inline_check_fails_the_verdict_and_the_flow_walks_to_its_own_t
         outcome.verdict.failures
     );
     // Every step ran, s7 and the whole teardown behind it included.
-    assert_eq!(
-        outcome.verdict.completed_steps.len(),
-        13,
-        "{:#?}",
-        outcome.verdict.completed_steps
-    );
+    assert_eq!(outcome.verdict.completed_steps.len(), 13, "{:#?}", outcome.verdict.completed_steps);
     assert!(
         outcome.verdict.abandoned.is_none(),
         "nothing was abandoned: {:#?}",
@@ -3860,12 +3820,7 @@ async fn a_header_the_answer_omits_names_itself_and_the_call_reaches_its_teardow
 
     // The call went on: the step took the answer, so the ACK behind it and the
     // whole scripted teardown ran, and nothing was abandoned.
-    assert_eq!(
-        outcome.verdict.completed_steps.len(),
-        13,
-        "{:#?}",
-        outcome.verdict.completed_steps
-    );
+    assert_eq!(outcome.verdict.completed_steps.len(), 13, "{:#?}", outcome.verdict.completed_steps);
     assert!(outcome.verdict.abandoned.is_none(), "{:#?}", outcome.verdict.abandoned);
     assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
     assert_eq!(scene.b2bua.cdr_records().len(), 1, "the call was billed");

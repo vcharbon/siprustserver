@@ -213,13 +213,8 @@ impl<S: StartKind> Draft<S> {
         f: impl FnOnce(HeaderList<H>) -> HeaderList<H>,
     ) -> Result<Self, SipParseError> {
         let name = H::header_name();
-        let positions: Vec<usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.is(&name))
-            .map(|(i, _)| i)
-            .collect();
+        let positions: Vec<usize> =
+            self.entries.iter().enumerate().filter(|(_, e)| e.is(&name)).map(|(i, _)| i).collect();
 
         let mut values = Vec::new();
         for &at in &positions {
@@ -248,10 +243,7 @@ impl<S: StartKind> Draft<S> {
     /// Rewrite the first value of one header, reading only the LINE that
     /// carries it — a router stamps its own hop without parsing hops it has no
     /// business parsing. Lines below the first are left byte-untouched.
-    pub fn update_top<H: HeaderValue>(
-        self,
-        f: impl FnOnce(H) -> H,
-    ) -> Result<Self, SipParseError> {
+    pub fn update_top<H: HeaderValue>(self, f: impl FnOnce(H) -> H) -> Result<Self, SipParseError> {
         self.edit_top_line::<H>(|list| list.map_first(f))
     }
 

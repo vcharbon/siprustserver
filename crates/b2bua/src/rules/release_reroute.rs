@@ -44,7 +44,9 @@ use call::{
     RerouteState, TimerType,
 };
 
-use super::model::{Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, CORE_LAYER};
+use super::model::{
+    Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, CORE_LAYER,
+};
 
 /// Owner id for the reroute's service-owned guard timer (`Service:release-reroute:guard`).
 pub const RELEASE_REROUTE_MACHINE: MachineId = MachineId::new("release-reroute");
@@ -146,9 +148,8 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 // `new_leg_id` names the leg CreateLeg is about to mint.
                 let new_leg_id = format!("b-{}", ctx.call.b_legs().len() + 1);
                 let old_leg_id = ctx.call.active_peer().map(|p| p.leg_b.clone());
-                let no_answer = fold
-                    .no_answer
-                    .or(fold.features.as_ref().and_then(|f| f.no_answer_timeout_sec));
+                let no_answer =
+                    fold.no_answer.or(fold.features.as_ref().and_then(|f| f.no_answer_timeout_sec));
 
                 let mut actions = super::defaults::route_fold_parity_actions(&fold, ctx);
                 actions.push(RuleAction::CreateLeg {
@@ -226,7 +227,11 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         disposition: Some(LegDisposition::Bridged),
                     },
                     RuleAction::ConfirmDialog { leg_id: new_leg.clone() },
-                    RuleAction::AckLeg { leg_id: new_leg.clone(), body: Vec::new(), content_type: None },
+                    RuleAction::AckLeg {
+                        leg_id: new_leg.clone(),
+                        body: Vec::new(),
+                        content_type: None,
+                    },
                     RuleAction::cancel_timer(&TimerType::NoAnswer, Some(&new_leg)),
                     RuleAction::SendReinvite {
                         leg_id: "a".to_string(),
@@ -247,12 +252,9 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
         rule(
             "reroute-b-fail",
             &["route-failure"],
-            Match::response()
-                .method("INVITE")
-                .direction(Direction::FromB)
-                .filter(|ctx| {
-                    ctx.response().map(|r| r.status() >= 300).unwrap_or(false) && is_new_leg(ctx)
-                }),
+            Match::response().method("INVITE").direction(Direction::FromB).filter(|ctx| {
+                ctx.response().map(|r| r.status() >= 300).unwrap_or(false) && is_new_leg(ctx)
+            }),
             |ctx| {
                 let resp = ctx.response()?;
                 let new_leg = ctx.source_leg_id.to_string();
@@ -309,19 +311,21 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
         rule(
             "reroute-a-realign-200",
             &[],
-            Match::response()
-                .method("INVITE")
-                .status_class(2)
-                .direction(Direction::FromA)
-                .filter(|ctx| {
+            Match::response().method("INVITE").status_class(2).direction(Direction::FromA).filter(
+                |ctx| {
                     ctx.source_leg_id == "a"
                         && ctx.call.reroute_state().map(|r| r.phase)
                             == Some(ReroutePhase::ARealigning)
-                }),
+                },
+            ),
             |ctx| {
                 let st = ctx.call.reroute_state()?.clone();
                 let mut actions = vec![
-                    RuleAction::AckLeg { leg_id: "a".to_string(), body: Vec::new(), content_type: None },
+                    RuleAction::AckLeg {
+                        leg_id: "a".to_string(),
+                        body: Vec::new(),
+                        content_type: None,
+                    },
                     RuleAction::cancel_timer(&guard_timer(), None),
                     RuleAction::Merge { leg_a: "a".to_string(), leg_b: st.new_leg_id.clone() },
                 ];
@@ -345,15 +349,11 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
         rule(
             "reroute-a-realign-fail",
             &[],
-            Match::response()
-                .method("INVITE")
-                .direction(Direction::FromA)
-                .filter(|ctx| {
-                    ctx.response().map(|r| r.status() >= 300).unwrap_or(false)
-                        && ctx.source_leg_id == "a"
-                        && ctx.call.reroute_state().map(|r| r.phase)
-                            == Some(ReroutePhase::ARealigning)
-                }),
+            Match::response().method("INVITE").direction(Direction::FromA).filter(|ctx| {
+                ctx.response().map(|r| r.status() >= 300).unwrap_or(false)
+                    && ctx.source_leg_id == "a"
+                    && ctx.call.reroute_state().map(|r| r.phase) == Some(ReroutePhase::ARealigning)
+            }),
             |ctx| {
                 let resp = ctx.response()?;
                 let mut actions = vec![RuleAction::AddCdrEvent {

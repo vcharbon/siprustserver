@@ -10,8 +10,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use crate::egress::{CalleeTarget, EgressPolicy};
+use async_trait::async_trait;
 use b2bua::decision::test_adapter::{default_call_refer, route_to_processing_refer};
 use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::B2buaSut;
@@ -78,9 +78,7 @@ pub struct InfraRuntime {
 
 impl InfraRuntime {
     pub fn agent(&self, role: &str) -> &Agent {
-        self.agents
-            .get(role)
-            .unwrap_or_else(|| panic!("infra has no agent for role {role:?}"))
+        self.agents.get(role).unwrap_or_else(|| panic!("infra has no agent for role {role:?}"))
     }
 
     /// Label a message `role` just received with a canonical [`Anchor`]
@@ -169,14 +167,7 @@ impl InfraRuntime {
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let InfraRuntime {
-            harness,
-            agents,
-            _proxy,
-            _b2bua,
-            _register_proxy,
-            ..
-        } = self;
+        let InfraRuntime { harness, agents, _proxy, _b2bua, _register_proxy, .. } = self;
         let (report, gate) = harness.finish_collecting().await;
         drop(agents);
         drop(_proxy);
@@ -209,12 +200,7 @@ pub fn by_id(id: &str) -> Option<Box<dyn InfraShape>> {
 
 /// Every registered Infra-shape id (for precise unknown-id errors).
 pub fn known_ids() -> Vec<&'static str> {
-    vec![
-        "fake-lsbc-b2bua",
-        "fake-register-proxy",
-        "real-loopback-direct",
-        "real",
-    ]
+    vec!["fake-lsbc-b2bua", "fake-register-proxy", "real-loopback-direct", "real"]
 }
 
 /// The **fake** infra: alice / bob1 / bob2 on the simulated fabric under a paused
@@ -238,9 +224,8 @@ impl InfraShape for FakeLsbcB2bua {
         // Same seam as the real infra (`with_network_and_clock`), simulated
         // fabric + paused test clock — so the config's `recv_timeout_ms` is
         // honoured here too (0-transit coercion to ≥1ms per the sim hazard).
-        let net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(
-            sip_net::SimulatedSignalingNetwork::new(cfg.transit_delay_ms.max(1)),
-        );
+        let net: Arc<dyn sip_net::SignalingNetwork> =
+            Arc::new(sip_net::SimulatedSignalingNetwork::new(cfg.transit_delay_ms.max(1)));
         let h = Harness::with_network_and_clock(
             scenario_name.to_string(),
             net.clone(),
@@ -357,9 +342,8 @@ impl InfraShape for FakeRegisterProxy {
 
     async fn build(&self, scenario_name: &str, cfg: &EndpointConfig) -> InfraRuntime {
         cfg.assert_binds(self.id());
-        let net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(
-            sip_net::SimulatedSignalingNetwork::new(cfg.transit_delay_ms.max(1)),
-        );
+        let net: Arc<dyn sip_net::SignalingNetwork> =
+            Arc::new(sip_net::SimulatedSignalingNetwork::new(cfg.transit_delay_ms.max(1)));
         let clock = Clock::test_at(0);
         let h = Harness::with_network_and_clock(
             scenario_name.to_string(),
@@ -442,7 +426,8 @@ impl InfraShape for RealLoopbackDirect {
 
     async fn build(&self, scenario_name: &str, cfg: &EndpointConfig) -> InfraRuntime {
         cfg.assert_binds(self.id());
-        let net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(sip_net::RealSignalingNetwork::new());
+        let net: Arc<dyn sip_net::SignalingNetwork> =
+            Arc::new(sip_net::RealSignalingNetwork::new());
         let h = Harness::with_network_and_clock(
             scenario_name.to_string(),
             net.clone(),
@@ -506,7 +491,8 @@ impl InfraShape for RealKindLb {
 
     async fn build(&self, scenario_name: &str, cfg: &EndpointConfig) -> InfraRuntime {
         cfg.assert_binds(self.id());
-        let net: Arc<dyn sip_net::SignalingNetwork> = Arc::new(sip_net::RealSignalingNetwork::new());
+        let net: Arc<dyn sip_net::SignalingNetwork> =
+            Arc::new(sip_net::RealSignalingNetwork::new());
         let h = Harness::with_network_and_clock(
             scenario_name.to_string(),
             net.clone(),

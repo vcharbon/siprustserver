@@ -250,11 +250,7 @@ impl SimShared {
         let mut g = self.dir_state.lock().unwrap();
         g.entry((src, dst))
             .or_insert_with(|| {
-                let drop_on = self
-                    .drop_on_overflow_pairs
-                    .lock()
-                    .unwrap()
-                    .contains(&(src, dst));
+                let drop_on = self.drop_on_overflow_pairs.lock().unwrap().contains(&(src, dst));
                 Arc::new(DirState::new(self.default_delay_ms, drop_on, self.buffer_cap))
             })
             .clone()
@@ -301,10 +297,7 @@ impl SimulatedReplicationNetwork {
     pub fn apply_fault(&self, fault: Fault) {
         match fault {
             Fault::Delay { src, dst, ms } => {
-                self.shared
-                    .dir(src, dst)
-                    .delay_ms
-                    .store(ms.max(1), Ordering::SeqCst);
+                self.shared.dir(src, dst).delay_ms.store(ms.max(1), Ordering::SeqCst);
             }
             Fault::Stall { src, dst } => {
                 self.shared.dir(src, dst).stalled.store(true, Ordering::SeqCst);
@@ -346,15 +339,8 @@ impl SimulatedReplicationNetwork {
                 ds.remove(&(b, a));
             }
             Fault::DropOnOverflow { src, dst } => {
-                self.shared
-                    .drop_on_overflow_pairs
-                    .lock()
-                    .unwrap()
-                    .insert((src, dst));
-                self.shared
-                    .dir(src, dst)
-                    .drop_on_overflow
-                    .store(true, Ordering::SeqCst);
+                self.shared.drop_on_overflow_pairs.lock().unwrap().insert((src, dst));
+                self.shared.dir(src, dst).drop_on_overflow.store(true, Ordering::SeqCst);
             }
             Fault::Block { src, dst } => {
                 // Arm the flow-control black-hole. No wake needed: arming only
@@ -406,10 +392,7 @@ impl ReplicationNetwork for SimulatedReplicationNetwork {
         self.connect_from(local, dst).await
     }
 
-    async fn listen(
-        &self,
-        local: SocketAddr,
-    ) -> Result<Box<dyn ReplicationListener>, ListenError> {
+    async fn listen(&self, local: SocketAddr) -> Result<Box<dyn ReplicationListener>, ListenError> {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         {
             let mut routing = self.shared.routing.lock().unwrap();
@@ -436,10 +419,7 @@ impl SimulatedReplicationNetwork {
     ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
         // Partitioned? refuse.
         if self.shared.partitions.lock().unwrap().contains(&(local, dst)) {
-            return Err(ConnectError::Blocked {
-                addr: dst,
-                reason: "partitioned".into(),
-            });
+            return Err(ConnectError::Blocked { addr: dst, reason: "partitioned".into() });
         }
 
         // Network error armed on this pair? Reject the connect — immediately if it
@@ -558,7 +538,8 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                 match staging_rx.try_recv() {
                     Ok(bytes) => {
                         let now = tokio::time::Instant::now();
-                        let delay = Duration::from_millis(dir_actor.delay_ms.load(Ordering::SeqCst).max(1));
+                        let delay =
+                            Duration::from_millis(dir_actor.delay_ms.load(Ordering::SeqCst).max(1));
                         let base = last_deadline.max(now);
                         let deadline = base + delay;
                         last_deadline = deadline;
@@ -638,13 +619,17 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                             dir_actor.cut.store(true, Ordering::SeqCst);
                             shared_actor.in_flight.fetch_sub(1, Ordering::Relaxed);
                             // Remaining pending no longer in flight.
-                            shared_actor.in_flight.fetch_sub(pending.len() as i64, Ordering::Relaxed);
+                            shared_actor
+                                .in_flight
+                                .fetch_sub(pending.len() as i64, Ordering::Relaxed);
                             drop(inbound_tx);
                             return;
                         }
                         Err(mpsc::error::TrySendError::Closed(_)) => {
                             shared_actor.in_flight.fetch_sub(1, Ordering::Relaxed);
-                            shared_actor.in_flight.fetch_sub(pending.len() as i64, Ordering::Relaxed);
+                            shared_actor
+                                .in_flight
+                                .fetch_sub(pending.len() as i64, Ordering::Relaxed);
                             return;
                         }
                     }
@@ -667,11 +652,7 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
         }
     });
 
-    Wire {
-        staging_tx,
-        inbound_rx,
-        dir,
-    }
+    Wire { staging_tx, inbound_rx, dir }
 }
 
 struct SimListener {
@@ -803,9 +784,7 @@ mod tests {
     }
 
     fn noop(counter: u64) -> Frame {
-        Frame::Noop {
-            at: crate::Watermark::new(1, counter),
-        }
+        Frame::Noop { at: crate::Watermark::new(1, counter) }
     }
 
     /// Open a connected (client, server) pair from A to B's listener.

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Refuses a commit whose STAGED Rust content is not what `cargo fmt` would
+# write. Checks the index blobs, not the worktree, so a formatted worktree
+# cannot vouch for an unformatted stage. Installed by `just hooks`.
+set -euo pipefail
+top="$(git rev-parse --show-toplevel)"
+bad=()
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  # On stdin rustfmt --check exits 0 either way; a diff shows only as output.
+  out="$(git show ":$f" | rustfmt --check --color never --config-path "$top/rustfmt.toml" 2>&1)" \
+    || true
+  [ -z "$out" ] || bad+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
+[ "${#bad[@]}" -eq 0 ] && exit 0
+echo "pre-commit: staged Rust is not rustfmt-clean:" >&2
+printf '  %s\n' "${bad[@]}" >&2
+echo "run \`cargo fmt --all\` and stage again (or commit --no-verify)." >&2
+exit 1

@@ -103,22 +103,52 @@ mod imp {
 
         // --- footprint: the RSS-bounding evidence -------------------------------
         if let Ok(v) = stats::allocated::read() {
-            push_gauge(&mut s, "jemalloc_allocated_bytes", "Bytes in live application allocations (app demand).", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_allocated_bytes",
+                "Bytes in live application allocations (app demand).",
+                v,
+            );
         }
         if let Ok(v) = stats::active::read() {
-            push_gauge(&mut s, "jemalloc_active_bytes", "Bytes in active pages backing allocations.", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_active_bytes",
+                "Bytes in active pages backing allocations.",
+                v,
+            );
         }
         if let Ok(v) = stats::resident::read() {
-            push_gauge(&mut s, "jemalloc_resident_bytes", "Physical resident bytes (RSS-equivalent). Watch resident-allocated for retention.", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_resident_bytes",
+                "Physical resident bytes (RSS-equivalent). Watch resident-allocated for retention.",
+                v,
+            );
         }
         if let Ok(v) = stats::mapped::read() {
-            push_gauge(&mut s, "jemalloc_mapped_bytes", "Bytes mapped into the process address space.", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_mapped_bytes",
+                "Bytes mapped into the process address space.",
+                v,
+            );
         }
         if let Ok(v) = stats::retained::read() {
-            push_gauge(&mut s, "jemalloc_retained_bytes", "Virtual bytes retained (unmapped, kept for fast reuse) — not resident.", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_retained_bytes",
+                "Virtual bytes retained (unmapped, kept for fast reuse) — not resident.",
+                v,
+            );
         }
         if let Ok(v) = stats::metadata::read() {
-            push_gauge(&mut s, "jemalloc_metadata_bytes", "Bytes of jemalloc internal metadata.", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_metadata_bytes",
+                "Bytes of jemalloc internal metadata.",
+                v,
+            );
         }
 
         // --- size-class split: SIP fragments across many sizes -----------------
@@ -128,15 +158,30 @@ mod imp {
         // localises internal (slab) fragmentation — `active - allocated` is the
         // padding wasted inside half-full slabs, the classic variable-size cost.
         if let Some(v) = raw::<usize>(b"stats.arenas.4096.small.allocated\0") {
-            push_gauge(&mut s, "jemalloc_small_allocated_bytes", "Live bytes in small size classes (most SIP allocations).", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_small_allocated_bytes",
+                "Live bytes in small size classes (most SIP allocations).",
+                v,
+            );
         }
         if let Some(v) = raw::<usize>(b"stats.arenas.4096.large.allocated\0") {
-            push_gauge(&mut s, "jemalloc_large_allocated_bytes", "Live bytes in the large size class (big bodies/buffers).", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_large_allocated_bytes",
+                "Live bytes in the large size class (big bodies/buffers).",
+                v,
+            );
         }
         // Net live small objects = nmalloc - ndalloc. A monotonic climb while
         // active_calls is flat is a per-size-class retention/leak fingerprint.
         if let Some(v) = raw::<u64>(b"stats.arenas.4096.small.nmalloc\0") {
-            push_counter(&mut s, "jemalloc_small_nmalloc_total", "Cumulative small allocations (churn rate; vs ndalloc = net live).", v);
+            push_counter(
+                &mut s,
+                "jemalloc_small_nmalloc_total",
+                "Cumulative small allocations (churn rate; vs ndalloc = net live).",
+                v,
+            );
         }
         if let Some(v) = raw::<u64>(b"stats.arenas.4096.small.ndalloc\0") {
             push_counter(&mut s, "jemalloc_small_ndalloc_total", "Cumulative small frees.", v);
@@ -183,7 +228,12 @@ mod imp {
         // --- decay backlog + activity: the CPU-cost evidence --------------------
         let page: usize = raw(b"arenas.page\0").unwrap_or(4096);
         if let Some(p) = raw::<usize>(b"stats.arenas.4096.pdirty\0") {
-            push_gauge(&mut s, "jemalloc_dirty_bytes", "Resident bytes freed but not yet purged (awaiting dirty decay).", p * page);
+            push_gauge(
+                &mut s,
+                "jemalloc_dirty_bytes",
+                "Resident bytes freed but not yet purged (awaiting dirty decay).",
+                p * page,
+            );
         }
         if let Some(p) = raw::<usize>(b"stats.arenas.4096.pmuzzy\0") {
             push_gauge(&mut s, "jemalloc_muzzy_bytes", "Bytes madvise(FREE)'d, reclaimable by the OS under pressure (awaiting muzzy decay).", p * page);
@@ -194,10 +244,20 @@ mod imp {
         // the cost signal). A steady climb here while RSS is flat is the
         // CPU-traded-for-RSS outcome to watch for.
         if let Some(v) = raw::<u64>(b"stats.arenas.4096.dirty_nmadvise\0") {
-            push_counter(&mut s, "jemalloc_dirty_nmadvise_total", "madvise() calls issued purging dirty pages.", v);
+            push_counter(
+                &mut s,
+                "jemalloc_dirty_nmadvise_total",
+                "madvise() calls issued purging dirty pages.",
+                v,
+            );
         }
         if let Some(v) = raw::<u64>(b"stats.arenas.4096.muzzy_nmadvise\0") {
-            push_counter(&mut s, "jemalloc_muzzy_nmadvise_total", "madvise() calls issued purging muzzy pages.", v);
+            push_counter(
+                &mut s,
+                "jemalloc_muzzy_nmadvise_total",
+                "madvise() calls issued purging muzzy pages.",
+                v,
+            );
         }
         let _ = ALL; // documents the magic 4096 above; keeps it greppable.
 
@@ -206,16 +266,36 @@ mod imp {
         // typo'd _RJEM_MALLOC_CONF is silently ignored, so these are the only
         // trustworthy confirmation the 1000ms tuning took.
         if let Some(v) = raw::<isize>(b"opt.dirty_decay_ms\0") {
-            push_gauge(&mut s, "jemalloc_opt_dirty_decay_ms", "Resolved dirty_decay_ms (confirm _RJEM_MALLOC_CONF parsed; expect 1000).", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_opt_dirty_decay_ms",
+                "Resolved dirty_decay_ms (confirm _RJEM_MALLOC_CONF parsed; expect 1000).",
+                v,
+            );
         }
         if let Some(v) = raw::<isize>(b"opt.muzzy_decay_ms\0") {
-            push_gauge(&mut s, "jemalloc_opt_muzzy_decay_ms", "Resolved muzzy_decay_ms (confirm _RJEM_MALLOC_CONF parsed; expect 1000).", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_opt_muzzy_decay_ms",
+                "Resolved muzzy_decay_ms (confirm _RJEM_MALLOC_CONF parsed; expect 1000).",
+                v,
+            );
         }
         if let Some(v) = raw::<u32>(b"arenas.narenas\0") {
-            push_gauge(&mut s, "jemalloc_arenas", "Number of arenas (parallelism vs per-arena retention trade-off).", v);
+            push_gauge(
+                &mut s,
+                "jemalloc_arenas",
+                "Number of arenas (parallelism vs per-arena retention trade-off).",
+                v,
+            );
         }
         if let Some(v) = raw::<bool>(b"background_thread\0") {
-            push_gauge(&mut s, "jemalloc_background_thread", "1 if purging runs on background threads (off the alloc hot path).", v as u8);
+            push_gauge(
+                &mut s,
+                "jemalloc_background_thread",
+                "1 if purging runs on background threads (off the alloc hot path).",
+                v as u8,
+            );
         }
 
         // --- OS ground truth: localise the leak ON or OFF the heap --------------
@@ -240,10 +320,20 @@ mod imp {
             let page = 4096usize; // Linux base page; statm is always base-page units.
             if let (Some(vsz), Some(rss)) = (it.next(), it.next()) {
                 if let Ok(p) = vsz.parse::<usize>() {
-                    push_gauge(s, "process_virtual_memory_bytes", "Virtual address space (RSS-independent; jemalloc retained shows here).", p * page);
+                    push_gauge(
+                        s,
+                        "process_virtual_memory_bytes",
+                        "Virtual address space (RSS-independent; jemalloc retained shows here).",
+                        p * page,
+                    );
                 }
                 if let Ok(p) = rss.parse::<usize>() {
-                    push_gauge(s, "process_resident_memory_bytes", "OS RSS the cgroup OOMs on — compare to jemalloc_resident_bytes.", p * page);
+                    push_gauge(
+                        s,
+                        "process_resident_memory_bytes",
+                        "OS RSS the cgroup OOMs on — compare to jemalloc_resident_bytes.",
+                        p * page,
+                    );
                 }
             }
         }
@@ -253,7 +343,12 @@ mod imp {
             for line in status.lines() {
                 if let Some(rest) = line.strip_prefix("Threads:") {
                     if let Ok(n) = rest.trim().parse::<u64>() {
-                        push_gauge(s, "process_threads", "OS thread count (each ~stack of RSS; off-heap growth source).", n);
+                        push_gauge(
+                            s,
+                            "process_threads",
+                            "OS thread count (each ~stack of RSS; off-heap growth source).",
+                            n,
+                        );
                     }
                 }
             }

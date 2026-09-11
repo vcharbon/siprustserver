@@ -34,13 +34,7 @@ async fn ring_past_158s_gives_up_cleanly_at_the_app_deadline() {
     })
     .await;
 
-    let mut call = s
-        .alice
-        .invite(&s.bob)
-        .with_sdp(OFFER)
-        .through(s.b2bua.addr)
-        .send()
-        .await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
@@ -63,11 +57,7 @@ async fn ring_past_158s_gives_up_cleanly_at_the_app_deadline() {
     let mut cancel = s.bob.receive("CANCEL").await;
     cancel.respond(200, "OK").await;
     let final_resp = call.expect(408).await;
-    assert_eq!(
-        final_resp.status(),
-        408,
-        "caller's INVITE resolves at the setup deadline"
-    );
+    assert_eq!(final_resp.status(), 408, "caller's INVITE resolves at the setup deadline");
     uas.respond(487, "Request Terminated").await;
     s.bob.receive("ACK").await;
 
@@ -96,13 +86,7 @@ async fn answer_after_158s_establishes_end_to_end() {
     })
     .await;
 
-    let mut call = s
-        .alice
-        .invite(&s.bob)
-        .with_sdp(OFFER)
-        .through(s.b2bua.addr)
-        .send()
-        .await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
@@ -154,13 +138,7 @@ async fn no_answer_at_or_above_the_bound_is_clamped_to_the_margin() {
     })
     .await;
 
-    let mut call = s
-        .alice
-        .invite(&s.bob)
-        .with_sdp(OFFER)
-        .through(s.b2bua.addr)
-        .send()
-        .await;
+    let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     let mut uas = s.bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;
     call.expect(180).await;

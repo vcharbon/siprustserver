@@ -37,7 +37,9 @@ pub struct MustFail {
 
 /// The failures this format can declare. Closed: each member names a failure
 /// the generator can predict from a detector's hit plus this lane's behaviour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 pub enum DeclaredFailure {
     /// This platform ACKs a dialog-creating 2xx locally (RFC 3261 §13.2.2.4)
     /// where the source platform relayed an ACK that never came. The capture
@@ -79,9 +81,7 @@ impl FromStr for DeclaredFailure {
             "unexpected-ack" => Ok(DeclaredFailure::UnexpectedAck),
             "unexpected-prack" => Ok(DeclaredFailure::UnexpectedPrack),
             "unexpected-cancel" => Ok(DeclaredFailure::UnexpectedCancel),
-            other => {
-                Err(format!("declared failure {other:?} is not in the closed vocabulary"))
-            }
+            other => Err(format!("declared failure {other:?} is not in the closed vocabulary")),
         }
     }
 }
@@ -137,10 +137,8 @@ mod tests {
 
     #[test]
     fn a_declaration_missing_a_field_or_carrying_a_spare_one_is_refused() {
-        assert!(
-            serde_json::from_str::<MustFail>(r#"{"failure":"unexpected-ack","step":"s14"}"#)
-                .is_err()
-        );
+        assert!(serde_json::from_str::<MustFail>(r#"{"failure":"unexpected-ack","step":"s14"}"#)
+            .is_err());
         assert!(
             serde_json::from_str::<MustFail>(
                 r#"{"failure":"unexpected-ack","step":"s14","derived_from":"no-ack-to-dialog-creating-2xx","leg":"B"}"#
@@ -199,11 +197,9 @@ mod tests {
     fn the_rule_a_declaration_cites_is_the_violation_vocabulary_and_nothing_else() {
         // `derived_from` reuses §11.1's closed enum on purpose: the evidence a
         // prediction rests on is a rule some detector decided off the wire.
-        assert!(
-            serde_json::from_str::<MustFail>(
-                r#"{"failure":"unexpected-ack","step":"s14","derived_from":"peer-was-rude"}"#
-            )
-            .is_err()
-        );
+        assert!(serde_json::from_str::<MustFail>(
+            r#"{"failure":"unexpected-ack","step":"s14","derived_from":"peer-was-rude"}"#
+        )
+        .is_err());
     }
 }

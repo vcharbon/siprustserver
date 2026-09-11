@@ -62,11 +62,7 @@ impl Match {
 #[derive(Clone, Debug)]
 pub enum Step {
     /// `from` sends `raw` bytes addressed to `to`.
-    Send {
-        from: AgentId,
-        to: AgentId,
-        raw: Vec<u8>,
-    },
+    Send { from: AgentId, to: AgentId, raw: Vec<u8> },
     /// `agent` must receive a datagram matching `matcher` within the driver's
     /// per-expect timeout.
     Expect { agent: AgentId, matcher: Match },
@@ -87,12 +83,7 @@ pub struct Scenario {
 
 impl Scenario {
     pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            description: None,
-            agents: Vec::new(),
-            steps: Vec::new(),
-        }
+        Self { name: name.into(), description: None, agents: Vec::new(), steps: Vec::new() }
     }
 
     /// Human-readable commentary, surfaced in the report header (port of
@@ -116,11 +107,7 @@ impl Scenario {
 
     /// `from` sends `raw` to `to`.
     pub fn send(&mut self, from: AgentId, to: AgentId, raw: impl Into<Vec<u8>>) -> &mut Self {
-        self.steps.push(Step::Send {
-            from,
-            to,
-            raw: raw.into(),
-        });
+        self.steps.push(Step::Send { from, to, raw: raw.into() });
         self
     }
 

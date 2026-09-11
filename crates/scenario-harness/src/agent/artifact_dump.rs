@@ -53,14 +53,7 @@ impl ArtifactDump {
         // A previous guard on this thread whose gate was off never took its
         // note — drop it so this run's artifacts can only carry its OWN panic.
         super::panic_note::clear();
-        Self {
-            name,
-            description,
-            channel,
-            recorder,
-            anchors,
-            armed: Cell::new(true),
-        }
+        Self { name, description, channel, recorder, anchors, armed: Cell::new(true) }
     }
 
     /// Stop the guard from firing — the run reports through its normal path.

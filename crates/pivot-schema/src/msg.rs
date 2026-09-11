@@ -156,6 +156,7 @@ mod tests {
 
     #[test]
     fn an_unknown_msg_field_is_refused_rather_than_ignored() {
-        assert!(serde_json::from_str::<MsgSpec>(r#"{"method":"INVITE","observed-headers":[]}"#).is_err());
+        assert!(serde_json::from_str::<MsgSpec>(r#"{"method":"INVITE","observed-headers":[]}"#)
+            .is_err());
     }
 }

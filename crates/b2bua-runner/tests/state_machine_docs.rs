@@ -53,10 +53,8 @@ fn committed_diagrams_are_fresh() {
 #[test]
 fn no_orphan_diagrams() {
     let dir = sm_dir();
-    let generated: std::collections::BTreeSet<String> = b2bua_runner::state_machine_docs()
-        .into_iter()
-        .map(|(m, _)| format!("{m}.md"))
-        .collect();
+    let generated: std::collections::BTreeSet<String> =
+        b2bua_runner::state_machine_docs().into_iter().map(|(m, _)| format!("{m}.md")).collect();
     for entry in fs::read_dir(&dir).expect("docs/sm exists") {
         let name = entry.unwrap().file_name().to_string_lossy().into_owned();
         if name.ends_with(".md") {

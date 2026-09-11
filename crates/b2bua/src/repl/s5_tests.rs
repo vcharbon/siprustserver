@@ -13,7 +13,10 @@ use sip_clock::Clock;
 use topology::{Membership, Peer, SimulatedMembership};
 
 use super::test_support::{cref, fwd, supervisor_for, tick, Node};
-use super::{Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
+use super::{
+    Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore,
+    ReplicationSupervisor,
+};
 use crate::store::{CallStore, PartitionRole};
 
 const PRI: PartitionRole = PartitionRole::Primary;
@@ -21,11 +24,7 @@ const BAK: PartitionRole = PartitionRole::Backup;
 
 /// Short backoff so a couple of advances trip a reconnect deterministically.
 fn fast_backoff() -> PullerConfig {
-    PullerConfig {
-        backoff_init_ms: 100,
-        backoff_max_ms: 1_000,
-        ..PullerConfig::default()
-    }
+    PullerConfig { backoff_init_ms: 100, backoff_max_ms: 1_000, ..PullerConfig::default() }
 }
 
 fn addr(n: u16) -> SocketAddr {
@@ -45,7 +44,8 @@ async fn vertical_skeleton_put_on_a_appears_on_b() {
     let b = Node::spawn("B", addr(2), 1, &net, &clock).await;
 
     // B pulls A.
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
+    let sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
     let membership: Arc<dyn Membership> =
         Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone()));
     sup.start(membership);
@@ -65,11 +65,7 @@ async fn vertical_skeleton_put_on_a_appears_on_b() {
 
     // THE GATE: B's store has (Backup, "A", callRefA) with the same body.
     let got = b.store.get_call(BAK, "A", &call_ref).await.unwrap();
-    assert_eq!(
-        got.as_deref(),
-        Some(&b"body-A1"[..]),
-        "B must hold the backup body A pushed"
-    );
+    assert_eq!(got.as_deref(), Some(&b"body-A1"[..]), "B must hold the backup body A pushed");
 }
 
 // ---------------------------------------------------------------------------
@@ -82,35 +78,21 @@ async fn convergence_update_and_delete() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(11), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(12), 1, &net, &clock).await;
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
-    sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
+    sup.start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
     tick(50).await;
 
     let c1 = cref("A", "1");
     let c2 = cref("A", "2");
-    a.store
-        .put_call(PRI, "A", &c1, b"v1".to_vec(), &[], 0, 1, 0, &fwd("B"))
-        .await
-        .unwrap();
-    a.store
-        .put_call(PRI, "A", &c2, b"w1".to_vec(), &[], 0, 1, 0, &fwd("B"))
-        .await
-        .unwrap();
+    a.store.put_call(PRI, "A", &c1, b"v1".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
+    a.store.put_call(PRI, "A", &c2, b"w1".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
     tick(50).await;
     assert!(sup.is_current("A"), "current after first Noop");
 
     // Update c1 (higher call_gen) + delete c2.
-    a.store
-        .put_call(PRI, "A", &c1, b"v2".to_vec(), &[], 0, 2, 0, &fwd("B"))
-        .await
-        .unwrap();
-    a.store
-        .delete_call(PRI, "A", &c2, &[], &fwd("B"))
-        .await
-        .unwrap();
+    a.store.put_call(PRI, "A", &c1, b"v2".to_vec(), &[], 0, 2, 0, &fwd("B")).await.unwrap();
+    a.store.delete_call(PRI, "A", &c2, &[], &fwd("B")).await.unwrap();
     tick(50).await;
 
     assert_eq!(
@@ -118,10 +100,7 @@ async fn convergence_update_and_delete() {
         Some(&b"v2"[..]),
         "update shows latest body on B"
     );
-    assert!(
-        b.store.get_call(BAK, "A", &c2).await.unwrap().is_none(),
-        "delete removes c2 on B"
-    );
+    assert!(b.store.get_call(BAK, "A", &c2).await.unwrap().is_none(), "delete removes c2 on B");
 }
 
 // ---------------------------------------------------------------------------
@@ -134,11 +113,9 @@ async fn current_flag_sticky_across_reconnect() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(21), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(22), 1, &net, &clock).await;
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
-    sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
+    sup.start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
     // Bootstrap pre-seed → cold-Replog re-pull → first tail Noop sets `current`;
     // the two-phase re-hydration (S6) needs a slightly larger advance budget than
     // a bare Replog open.
@@ -147,18 +124,12 @@ async fn current_flag_sticky_across_reconnect() {
 
     // Cut the A→B direction (server pushes won't arrive; recv yields None).
     let local_pairs = (b.addr, a.addr);
-    net.apply_fault(Fault::Partition {
-        a: local_pairs.0,
-        b: local_pairs.1,
-    });
+    net.apply_fault(Fault::Partition { a: local_pairs.0, b: local_pairs.1 });
     // Drive past the cut detection + a backoff so the puller cycles.
     tick(50).await;
     assert!(sup.is_current("A"), "current stays sticky after a cut");
 
-    net.apply_fault(Fault::Heal {
-        a: local_pairs.0,
-        b: local_pairs.1,
-    });
+    net.apply_fault(Fault::Heal { a: local_pairs.0, b: local_pairs.1 });
     tick(300).await;
     assert!(sup.is_current("A"), "still current after reconnect");
 }
@@ -173,11 +144,9 @@ async fn watermark_retention_pulls_only_deltas() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(31), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(32), 1, &net, &clock).await;
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
-    sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
+    sup.start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
     tick(50).await;
 
     for i in 0..3 {
@@ -218,7 +187,11 @@ async fn watermark_retention_pulls_only_deltas() {
             "call {i} converged on B"
         );
     }
-    assert_eq!(sup.flow_watermark("A", Partition::Bak), Watermark::new(1, 5), "W at head after deltas");
+    assert_eq!(
+        sup.flow_watermark("A", Partition::Bak),
+        Watermark::new(1, 5),
+        "W at head after deltas"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -236,13 +209,14 @@ async fn backoff_then_reconnect_converges() {
     let b_changelog = Changelog::new(1, clock.clone());
     let b_store = ReplicatingCallStore::with_changelog(b_changelog, clock.clone());
     let b_listener = net.listen(b_addr).await.unwrap();
-    tokio::spawn(ReplServer::new("B", Changelog::new(1, clock.clone()), Arc::new(b_store.clone())).run(b_listener));
+    tokio::spawn(
+        ReplServer::new("B", Changelog::new(1, clock.clone()), Arc::new(b_store.clone()))
+            .run(b_listener),
+    );
 
-    let sup = supervisor_for("B", &b_store, &net, &clock, vec![("A".into(), a_addr)], fast_backoff());
-    sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let sup =
+        supervisor_for("B", &b_store, &net, &clock, vec![("A".into(), a_addr)], fast_backoff());
+    sup.start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
 
     // First connect fails immediately (no listener at A). Backoff = 100ms.
     tick(50).await;
@@ -253,10 +227,7 @@ async fn backoff_then_reconnect_converges() {
     // Now bring A up (heal by spawning its listener + server) and a call.
     let a = Node::spawn("A", a_addr, 1, &net, &clock).await;
     let c = cref("A", "1");
-    a.store
-        .put_call(PRI, "A", &c, b"late".to_vec(), &[], 0, 1, 0, &fwd("B"))
-        .await
-        .unwrap();
+    a.store.put_call(PRI, "A", &c, b"late".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
 
     // Advance past the (now larger) backoff so the puller retries + converges.
     tick(2_000).await;
@@ -280,7 +251,8 @@ async fn topology_add_remove_readd() {
 
     // Start with A absent in membership; B has no puller.
     let membership = SimulatedMembership::with_clock(vec![], clock.clone());
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
+    let sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
     sup.start(Arc::new(membership.clone()));
     tick(50).await;
     assert!(!sup.is_running("A"), "no puller before A is added");
@@ -289,16 +261,10 @@ async fn topology_add_remove_readd() {
     membership.add(Peer::new("A", "A"));
     tick(50).await;
     let c1 = cref("A", "1");
-    a.store
-        .put_call(PRI, "A", &c1, b"x1".to_vec(), &[], 0, 1, 0, &fwd("B"))
-        .await
-        .unwrap();
+    a.store.put_call(PRI, "A", &c1, b"x1".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
     tick(50).await;
     assert!(sup.is_running("A"));
-    assert_eq!(
-        b.store.get_call(BAK, "A", &c1).await.unwrap().as_deref(),
-        Some(&b"x1"[..])
-    );
+    assert_eq!(b.store.get_call(BAK, "A", &c1).await.unwrap().as_deref(), Some(&b"x1"[..]));
     // The backup data B holds for A rides the Backup flow; its watermark tracks
     // these deltas (Reclaim is over A's empty `bak:{B}`).
     let w_before_remove = sup.flow_watermark("A", Partition::Bak);
@@ -312,10 +278,7 @@ async fn topology_add_remove_readd() {
 
     // While parked, A adds another call.
     let c2 = cref("A", "2");
-    a.store
-        .put_call(PRI, "A", &c2, b"x2".to_vec(), &[], 0, 1, 0, &fwd("B"))
-        .await
-        .unwrap();
+    a.store.put_call(PRI, "A", &c2, b"x2".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
 
     // Re-add A → reconnect from retained W=(1,1), pull only the new delta.
     membership.add(Peer::new("A", "A"));
@@ -338,24 +301,16 @@ async fn lww_idempotence_and_no_regression() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(61), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(62), 1, &net, &clock).await;
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
-    sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
+    sup.start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
     tick(50).await;
 
     let c = cref("A", "1");
     // gen 5 body.
-    a.store
-        .put_call(PRI, "A", &c, b"high".to_vec(), &[], 0, 5, 0, &fwd("B"))
-        .await
-        .unwrap();
+    a.store.put_call(PRI, "A", &c, b"high".to_vec(), &[], 0, 5, 0, &fwd("B")).await.unwrap();
     tick(50).await;
-    assert_eq!(
-        b.store.get_call(BAK, "A", &c).await.unwrap().as_deref(),
-        Some(&b"high"[..])
-    );
+    assert_eq!(b.store.get_call(BAK, "A", &c).await.unwrap().as_deref(), Some(&b"high"[..]));
 
     // Cut + reconnect from (0,0) replays the SAME entry (idempotent). The body
     // is unchanged; no regression. (call_gen equal → body write skipped, W still
@@ -374,10 +329,7 @@ async fn lww_idempotence_and_no_regression() {
     // body. We exercise the puller's LWW by writing a stale frame through B's
     // store directly with a lower gen is not the path; instead push from A with
     // a LOWER gen — the changelog bumps but B's LWW skips the body write.
-    a.store
-        .put_call(PRI, "A", &c, b"stale".to_vec(), &[], 0, 3, 0, &fwd("B"))
-        .await
-        .unwrap();
+    a.store.put_call(PRI, "A", &c, b"stale".to_vec(), &[], 0, 3, 0, &fwd("B")).await.unwrap();
     tick(100).await;
     assert_eq!(
         b.store.get_call(BAK, "A", &c).await.unwrap().as_deref(),
@@ -396,11 +348,9 @@ async fn cold_reboot_reacquires_full_set() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(71), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(72), 1, &net, &clock).await;
-    let sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
-    sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
+    sup.start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
     tick(50).await;
 
     for i in 0..3 {
@@ -414,11 +364,9 @@ async fn cold_reboot_reacquires_full_set() {
 
     // Simulate B reboot: brand-new empty store + supervisor pulling from (0,0).
     let b2_store = ReplicatingCallStore::new(1, clock.clone());
-    let sup2 = supervisor_for("B", &b2_store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
-    sup2.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("A", "A")],
-        clock.clone(),
-    )));
+    let sup2 =
+        supervisor_for("B", &b2_store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
+    sup2.start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone())));
     tick(500).await;
 
     // The compacted changelog delivers the full live set to the cold puller.
@@ -459,9 +407,7 @@ async fn lagged_membership_channel_still_redirects_puller_to_new_addr() {
     // address-change actually MOVES where the puller connects (the fixed
     // ordinal→addr map of `supervisor_for` cannot express a move; the real
     // host→addr resolver can, and that is what D3 exercises).
-    let resolve = Arc::new(FnPeerResolver(|peer: &Peer| {
-        peer.host.parse::<SocketAddr>().unwrap()
-    }));
+    let resolve = Arc::new(FnPeerResolver(|peer: &Peer| peer.host.parse::<SocketAddr>().unwrap()));
     let membership =
         SimulatedMembership::with_clock(vec![Peer::new("A", a1_addr.to_string())], clock.clone());
     let sup = ReplicationSupervisor::with_config(
@@ -474,10 +420,7 @@ async fn lagged_membership_channel_still_redirects_puller_to_new_addr() {
     sup.start(Arc::new(membership.clone()));
 
     let c1 = cref("A", "1");
-    a1.store
-        .put_call(PRI, "A", &c1, b"one".to_vec(), &[], 0, 1, 0, &fwd("B"))
-        .await
-        .unwrap();
+    a1.store.put_call(PRI, "A", &c1, b"one".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
     tick(300).await;
     assert_eq!(
         b.store.get_call(BAK, "A", &c1).await.unwrap().as_deref(),
@@ -488,10 +431,7 @@ async fn lagged_membership_channel_still_redirects_puller_to_new_addr() {
     // A "restarts" at a2 (a higher incarnation gen) holding a fresh call c2.
     let a2 = Node::spawn("A", a2_addr, 2, &net, &clock).await;
     let c2 = cref("A", "2");
-    a2.store
-        .put_call(PRI, "A", &c2, b"two".to_vec(), &[], 0, 1, 0, &fwd("B"))
-        .await
-        .unwrap();
+    a2.store.put_call(PRI, "A", &c2, b"two".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
 
     // Emit the CRITICAL delta (A: a1 → a2) FIRST, then bury it under >256 throwaway
     // deltas — all synchronously, so the supervisor task stays parked and the
@@ -534,14 +474,8 @@ async fn catchup_noop_carries_flow_cursor_not_global_head() {
     // the global head is (1,2); B's Bak sub-log tops out at (1,1).
     let c1 = cref("A", "1");
     let c2 = cref("A", "2");
-    a.store
-        .put_call(PRI, "A", &c1, b"v1".to_vec(), &[], 0, 1, 0, &fwd("B"))
-        .await
-        .unwrap();
-    a.store
-        .put_call(PRI, "A", &c2, b"v1".to_vec(), &[], 0, 1, 0, &fwd("C"))
-        .await
-        .unwrap();
+    a.store.put_call(PRI, "A", &c1, b"v1".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
+    a.store.put_call(PRI, "A", &c2, b"v1".to_vec(), &[], 0, 1, 0, &fwd("C")).await.unwrap();
 
     // Hand-rolled WARM Backup-flow pull as B (warm ⇒ no bootstrap scan).
     let conn = net.connect(a.addr).await.unwrap();
@@ -606,9 +540,7 @@ async fn reset_to_bootstrap_rearms_the_hard_deadline() {
             if *round == 1 {
                 let _ = conn.send(Frame::Noop { at: Watermark::new(1, 5) }).await;
             } else {
-                let _ = conn
-                    .send(Frame::ResetToBootstrap { reason: "compacted".into() })
-                    .await;
+                let _ = conn.send(Frame::ResetToBootstrap { reason: "compacted".into() }).await;
             }
             // Let the frame land before dropping (closing) the connection.
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -619,17 +551,21 @@ async fn reset_to_bootstrap_rearms_the_hard_deadline() {
     });
 
     let store = ReplicatingCallStore::new(1, clock.clone());
-    let sup = supervisor_for("B", &store, &net, &clock, vec![("A".into(), a_addr)], super::test_support::fast_config());
+    let sup = supervisor_for(
+        "B",
+        &store,
+        &net,
+        &clock,
+        vec![("A".into(), a_addr)],
+        super::test_support::fast_config(),
+    );
     sup.start(super::test_support::one_peer("A", &clock));
 
     // By t=500ms: round 1 (Noop → bootstrap-complete), reconnect, round 2
     // (ResetToBootstrap re-opens the gate), and the peer has gone dark. The
     // re-armed deadline (2 s from the reset) has NOT fired yet.
     tick(500).await;
-    assert!(
-        !sup.all_bootstrapped(),
-        "ResetToBootstrap re-opened the bootstrap gate"
-    );
+    assert!(!sup.all_bootstrapped(), "ResetToBootstrap re-opened the bootstrap gate");
     assert!(sup.is_current("A"), "current stays sticky across the reset");
 
     // The RE-ARMED hard deadline (2 s, fast_config) fires through the

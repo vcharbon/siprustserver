@@ -49,11 +49,20 @@ impl SimulatedWorkerRegistry {
     }
 
     fn build(initial: Vec<WorkerEntry>, clock: Clock, auto_first_seen: bool) -> Self {
-        let peers = initial.iter().map(|e| Peer::new(e.id.clone(), e.address.host.clone())).collect();
+        let peers =
+            initial.iter().map(|e| Peer::new(e.id.clone(), e.address.host.clone())).collect();
         let membership = SimulatedMembership::with_clock(peers, clock.clone());
-        let set = Arc::new(WorkerSet::new(Arc::new(membership.clone()), DEFAULT_PORT, clock.clone()));
+        let set =
+            Arc::new(WorkerSet::new(Arc::new(membership.clone()), DEFAULT_PORT, clock.clone()));
         for e in &initial {
-            set.preset(&e.id, e.address.host.clone(), e.address.port, e.health, e.draining_since, e.first_seen_at_ms);
+            set.preset(
+                &e.id,
+                e.address.host.clone(),
+                e.address.port,
+                e.health,
+                e.draining_since,
+                e.first_seen_at_ms,
+            );
         }
         set.recompose();
         Self { set, membership, clock, auto_first_seen }
@@ -119,7 +128,14 @@ impl SimulatedWorkerRegistry {
             // Host change is membership identity. Re-seed the annotation at the new
             // host (carrying the current health/timing + new port) so the recompose
             // preserves it rather than resetting to a fresh endpoint.
-            self.set.preset(id, address.host.clone(), address.port, cur.health, cur.draining_since, cur.first_seen_at_ms);
+            self.set.preset(
+                id,
+                address.host.clone(),
+                address.port,
+                cur.health,
+                cur.draining_since,
+                cur.first_seen_at_ms,
+            );
             self.membership.change_address(Peer::new(id.to_string(), address.host.clone()));
             self.set.recompose();
         } else {
@@ -183,7 +199,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn auto_first_seen_stamps_on_add() {
-        let reg = SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(42)).auto_stamp_first_seen();
+        let reg =
+            SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(42)).auto_stamp_first_seen();
         reg.add(WorkerEntry::alive("w", ProxyAddr::new("127.0.0.1", 5070)));
         assert_eq!(reg.resolve("w").unwrap().first_seen_at_ms, Some(42));
     }

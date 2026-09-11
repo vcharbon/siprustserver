@@ -122,28 +122,13 @@ async fn consume(
     let mut args = FieldTable::default();
     if max_len > 0 {
         args.insert("x-max-length".into(), AMQPValue::LongLongInt(max_len));
-        args.insert(
-            "x-overflow".into(),
-            AMQPValue::LongString(LongString::from("drop-head")),
-        );
+        args.insert("x-overflow".into(), AMQPValue::LongString(LongString::from("drop-head")));
     }
-    chan.queue_declare(
-        queue,
-        QueueDeclareOptions {
-            durable: true,
-            ..Default::default()
-        },
-        args,
-    )
-    .await?;
+    chan.queue_declare(queue, QueueDeclareOptions { durable: true, ..Default::default() }, args)
+        .await?;
 
     let mut consumer = chan
-        .basic_consume(
-            queue,
-            "cdr-consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
+        .basic_consume(queue, "cdr-consumer", BasicConsumeOptions::default(), FieldTable::default())
         .await?;
     tracing::info!(
         node = observe::node(),
@@ -186,9 +171,7 @@ async fn main() {
 
     let url = env_or("CDR_AMQP_URL", "amqp://guest:guest@rabbitmq:5672/%2f");
     let queue = env_or("CDR_QUEUE", "cdr");
-    let max_len: i64 = env_or("CDR_QUEUE_MAX_LEN", "100000")
-        .parse()
-        .expect("CDR_QUEUE_MAX_LEN");
+    let max_len: i64 = env_or("CDR_QUEUE_MAX_LEN", "100000").parse().expect("CDR_QUEUE_MAX_LEN");
     let metrics_listen = env_or("CDR_METRICS_LISTEN", "0.0.0.0:9093");
     let addr: std::net::SocketAddr = metrics_listen
         .parse()

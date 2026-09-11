@@ -55,7 +55,8 @@ async fn takeover_then_reclaim_keeps_backup_mutation() {
     // A is primary; B backs A up (B pulls A → holds bak:A).
     let a = Node::spawn("A", addr(1), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(2), 1, &net, &clock).await;
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
+    let b_sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
     b_sup.start(one_peer("A", &clock));
     tick(50).await;
 
@@ -125,7 +126,8 @@ async fn takeover_then_reclaim_keeps_backup_mutation() {
     // A REBOOTS: brand-new EMPTY store under a HIGHER incarnation gen (2), cold.
     // A tails from B → bootstrap pre-seed + cold Replog deliver the Pri frame.
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
+    let a2_sup =
+        supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
     a2_sup.start(one_peer("B", &clock));
     tick(300).await;
 
@@ -160,7 +162,8 @@ async fn reverse_pb_high_b_wins_low_and_equal_noop() {
     let a = Node::spawn("A", addr(11), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(12), 1, &net, &clock).await;
     // A pulls B so A APPLIES B's reverse-flushes (partition=Pri for A's own ref).
-    let a_sup = supervisor_for("A", &a.store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
+    let a_sup =
+        supervisor_for("A", &a.store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
     a_sup.start(one_peer("B", &clock));
     tick(50).await;
 
@@ -174,10 +177,7 @@ async fn reverse_pb_high_b_wins_low_and_equal_noop() {
 
     // B (acting-backup) reverse-flushes a genuine advance (1,2) — b jumped past
     // A's stored b=0 with p unchanged → A applies it.
-    b.store
-        .put_call(BAK, "A", &c, b"b2".to_vec(), &[], 0, 1, 2, &rev("A"))
-        .await
-        .unwrap();
+    b.store.put_call(BAK, "A", &c, b"b2".to_vec(), &[], 0, 1, 2, &rev("A")).await.unwrap();
     tick(100).await;
     assert_eq!(
         a.store.get_call(PRI, "A", &c).await.unwrap().as_deref(),
@@ -187,10 +187,7 @@ async fn reverse_pb_high_b_wins_low_and_equal_noop() {
 
     // B reverse-flushes a STALE lower b (1,1): `b_in=1 > b_cur=2` is false → A
     // keeps its own (1,2). (Changelog still bumps; the (p,b) rule rejects it.)
-    b.store
-        .put_call(BAK, "A", &c, b"b1-stale".to_vec(), &[], 0, 1, 1, &rev("A"))
-        .await
-        .unwrap();
+    b.store.put_call(BAK, "A", &c, b"b1-stale".to_vec(), &[], 0, 1, 1, &rev("A")).await.unwrap();
     tick(100).await;
     assert_eq!(
         a.store.get_call(PRI, "A", &c).await.unwrap().as_deref(),
@@ -199,10 +196,7 @@ async fn reverse_pb_high_b_wins_low_and_equal_noop() {
     );
 
     // Equal (1,2) re-delivery is a no-op: `b_in > b_cur` is false.
-    b.store
-        .put_call(BAK, "A", &c, b"b2-again".to_vec(), &[], 0, 1, 2, &rev("A"))
-        .await
-        .unwrap();
+    b.store.put_call(BAK, "A", &c, b"b2-again".to_vec(), &[], 0, 1, 2, &rev("A")).await.unwrap();
     tick(100).await;
     assert_eq!(
         a.store.get_call(PRI, "A", &c).await.unwrap().as_deref(),
@@ -226,7 +220,8 @@ async fn reverse_while_primary_unreachable_reclaimed_on_reconnect() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(21), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(22), 1, &net, &clock).await;
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
+    let b_sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
     b_sup.start(one_peer("A", &clock));
     tick(50).await;
 
@@ -240,15 +235,26 @@ async fn reverse_while_primary_unreachable_reclaimed_on_reconnect() {
     // A is DOWN (its reclaiming incarnation has not started pulling yet). While A
     // is unreachable, B (acting-backup) takes over: mutate to (p=1, b=1) via the
     // policy → Reverse → changelog-for-A partition=Pri.
-    flush_replicated(&b.store, "B", &c, b"v2-while-A-down".to_vec(), &[], 0, 1, 1, &resolver_to("A"))
-        .await
-        .unwrap();
+    flush_replicated(
+        &b.store,
+        "B",
+        &c,
+        b"v2-while-A-down".to_vec(),
+        &[],
+        0,
+        1,
+        1,
+        &resolver_to("A"),
+    )
+    .await
+    .unwrap();
     tick(100).await;
 
     // A reboots empty under a higher incarnation gen and only NOW reconnects.
     // The cold re-pull from B delivers the takeover mutation it never saw live.
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
+    let a2_sup =
+        supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
     a2_sup.start(one_peer("B", &clock));
     tick(300).await;
     assert_eq!(
@@ -289,9 +295,11 @@ async fn bidirectional_coexistence_converges_independently() {
     let b = Node::spawn("B", addr(32), 1, &net, &clock).await;
 
     // B pulls A (so B holds bak:A); A pulls B (so A holds bak:B). Both streams.
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
+    let b_sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
     b_sup.start(one_peer("A", &clock));
-    let a_sup = supervisor_for("A", &a.store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
+    let a_sup =
+        supervisor_for("A", &a.store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
     a_sup.start(one_peer("B", &clock));
     tick(100).await;
 
@@ -320,9 +328,19 @@ async fn bidirectional_coexistence_converges_independently() {
 
     // Now B "crashes" for callY: A takes over callY via the acting-backup policy
     // (A does NOT own "B|.." → Reverse → propagate to B). A bumps only b: (1,0)→(1,1).
-    let plan = flush_replicated(&a.store, "A", &call_y, b"y2-takeover".to_vec(), &[], 0, 1, 1, &resolver_to("B"))
-        .await
-        .unwrap();
+    let plan = flush_replicated(
+        &a.store,
+        "A",
+        &call_y,
+        b"y2-takeover".to_vec(),
+        &[],
+        0,
+        1,
+        1,
+        &resolver_to("B"),
+    )
+    .await
+    .unwrap();
     assert_eq!(plan.role, PartitionRole::Backup);
     assert_eq!(plan.primary, "B");
     assert_eq!(plan.target, Some(("B".into(), PropagateDirection::Reverse)));
@@ -354,7 +372,8 @@ async fn convergence_after_takeover_and_reboot_highest_gen() {
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
     let a = Node::spawn("A", addr(41), 1, &net, &clock).await;
     let b = Node::spawn("B", addr(42), 1, &net, &clock).await;
-    let b_sup = supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
+    let b_sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
     b_sup.start(one_peer("A", &clock));
     tick(50).await;
 
@@ -376,7 +395,8 @@ async fn convergence_after_takeover_and_reboot_highest_gen() {
 
     // A reboots empty, reclaims, then quiesces.
     let a2_store = ReplicatingCallStore::new(2, clock.clone());
-    let a2_sup = supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
+    let a2_sup =
+        supervisor_for("A", &a2_store, &net, &clock, vec![("B".into(), b.addr)], fast_config());
     a2_sup.start(one_peer("B", &clock));
     tick(400).await;
 

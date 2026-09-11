@@ -120,13 +120,15 @@ CSeq: 314 INVITE\r\n"
             header_updates,
             capabilities,
             None, // no charging vector
-            &[], // no withheld option tags
+            &[],  // no withheld option tags
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
         };
         let allow = invite.raw_text(HeaderName::Allow).next().map(|v| v.as_str().to_string());
         let supported =
@@ -204,8 +206,7 @@ Content-Length: 0\r\n\r\n";
             &opts,
         )
         .request;
-        let value =
-            |name: HeaderName| out.raw_text(name).next().map(|v| v.as_str().to_string());
+        let value = |name: HeaderName| out.raw_text(name).next().map(|v| v.as_str().to_string());
         (value(HeaderName::Allow), value(HeaderName::Supported))
     }
 
@@ -275,8 +276,7 @@ Content-Length: 0\r\n\r\n";
     /// the update does not name.
     #[test]
     fn an_explicit_header_update_beats_the_declared_set_on_the_originated_leg() {
-        let updates =
-            vec![("Allow".to_string(), Some("INVITE, ACK, BYE, MESSAGE".to_string()))];
+        let updates = vec![("Allow".to_string(), Some("INVITE, ACK, BYE, MESSAGE".to_string()))];
         let (allow, supported) = b_leg_advert(&narrow(), &updates);
         assert_eq!(allow.as_deref(), Some("INVITE, ACK, BYE, MESSAGE"));
         assert_eq!(supported.as_deref(), Some("replaces"));
@@ -336,16 +336,33 @@ Content-Length: 0\r\n\r\n";
     /// stated it; one she did not send is not minted.
     #[test]
     fn the_originators_accept_reaches_the_originated_leg_verbatim() {
-        let invite = a_leg_invite_carrying(&[("Accept", "application/sdp, application/isup, application/xml")]);
+        let invite = a_leg_invite_carrying(&[(
+            "Accept",
+            "application/sdp, application/isup, application/xml",
+        )]);
         let caps = crate::rules::capabilities::relaying_in(
             None,
             crate::rules::capabilities::Face::Originated,
             invite.headers(),
         );
         let (_leg, effect) = build_b_leg(
-            "w0|call-ref|xyz", "b-1", false, &invite, ("10.244.2.7".to_string(), 5060),
-            None, None, None, None, &B2buaConfig::default(), &IdGen::seeded(0xCAB),
-            None, &[], &caps, None, &[], None,
+            "w0|call-ref|xyz",
+            "b-1",
+            false,
+            &invite,
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &IdGen::seeded(0xCAB),
+            None,
+            &[],
+            &caps,
+            None,
+            &[],
+            None,
         )
         .expect("nothing to refuse");
         let OutboundBody::Request(out) = effect.body else { panic!("a request") };
@@ -360,9 +377,23 @@ Content-Length: 0\r\n\r\n";
             bare.headers(),
         );
         let (_leg, effect) = build_b_leg(
-            "w0|call-ref|xyz", "b-1", false, &bare, ("10.244.2.7".to_string(), 5060),
-            None, None, None, None, &B2buaConfig::default(), &IdGen::seeded(0xCAB),
-            None, &[], &caps, None, &[], None,
+            "w0|call-ref|xyz",
+            "b-1",
+            false,
+            &bare,
+            ("10.244.2.7".to_string(), 5060),
+            None,
+            None,
+            None,
+            None,
+            &B2buaConfig::default(),
+            &IdGen::seeded(0xCAB),
+            None,
+            &[],
+            &caps,
+            None,
+            &[],
+            None,
         )
         .expect("nothing to refuse");
         let OutboundBody::Request(out) = effect.body else { panic!("a request") };
@@ -388,8 +419,7 @@ Content-Length: 0\r\n\r\n";
     /// relayed set, half for half.
     #[test]
     fn a_declaration_outranks_the_originators_relayed_set() {
-        let invite =
-            a_leg_invite_carrying(&[("Allow", "INVITE, MESSAGE"), ("Supported", "path")]);
+        let invite = a_leg_invite_carrying(&[("Allow", "INVITE, MESSAGE"), ("Supported", "path")]);
         let features = declaring_originated(Some(vec!["INVITE".into(), "ACK".into()]), None);
         let caps = crate::rules::capabilities::relaying_in(
             Some(&features),
@@ -409,10 +439,7 @@ Content-Length: 0\r\n\r\n";
         call::features::FeatureActivations {
             platform: call::features::PlatformActivations {
                 max_duration_sec: 3_600,
-                keepalive: call::features::KeepaliveActivation {
-                    interval_sec: 30,
-                    max_missed: 2,
-                },
+                keepalive: call::features::KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
             refer: None,
             relay_first_18x_to_180: None,

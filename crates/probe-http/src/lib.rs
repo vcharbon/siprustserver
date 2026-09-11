@@ -221,7 +221,9 @@ async fn handle_conn(
             Some(h) => tokio::task::spawn_blocking(move || h())
                 .await
                 .unwrap_or_else(|e| Err(format!("join error: {e}"))),
-            None => Err("heap profiling unavailable (non-jemalloc build or prof:false)".to_string()),
+            None => {
+                Err("heap profiling unavailable (non-jemalloc build or prof:false)".to_string())
+            }
         };
         match result {
             Ok(bytes) => {
@@ -252,8 +254,12 @@ async fn handle_conn(
         // `/ready` (worker) and `/readyz` (proxy) are the same probe.
         "/readyz" | "/ready" => match (routes.ready)() {
             ProbeState::Ready => ("200 OK", "text/plain", "ready\n".to_string()),
-            ProbeState::NotReady => ("503 Service Unavailable", "text/plain", "not-ready\n".to_string()),
-            ProbeState::Draining => ("503 Service Unavailable", "text/plain", "draining\n".to_string()),
+            ProbeState::NotReady => {
+                ("503 Service Unavailable", "text/plain", "not-ready\n".to_string())
+            }
+            ProbeState::Draining => {
+                ("503 Service Unavailable", "text/plain", "draining\n".to_string())
+            }
         },
         _ => ("404 Not Found", "text/plain", "not found\n".to_string()),
     };
@@ -272,11 +278,7 @@ mod tests {
     use std::sync::atomic::{AtomicU8, Ordering};
 
     fn routes(body: &'static str, ready: ReadyFn) -> ProbeRoutes {
-        ProbeRoutes {
-            metrics: Arc::new(move || body.to_string()),
-            ready,
-            heap: None,
-        }
+        ProbeRoutes { metrics: Arc::new(move || body.to_string()), ready, heap: None }
     }
     fn always(state: ProbeState) -> ReadyFn {
         Arc::new(move || state)
@@ -284,9 +286,7 @@ mod tests {
 
     async fn get(addr: std::net::SocketAddr, path: &str) -> String {
         let mut s = TcpStream::connect(addr).await.unwrap();
-        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
+        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await.unwrap();
         let mut resp = Vec::new();
         s.read_to_end(&mut resp).await.unwrap();
         String::from_utf8_lossy(&resp).into_owned()
@@ -327,9 +327,8 @@ mod tests {
             2 => ProbeState::Draining,
             _ => ProbeState::NotReady,
         });
-        let server = ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes("", ready))
-            .await
-            .unwrap();
+        let server =
+            ProbeServer::start("127.0.0.1:0".parse().unwrap(), routes("", ready)).await.unwrap();
 
         for path in ["/readyz", "/ready"] {
             st.store(1, Ordering::SeqCst);
@@ -351,11 +350,9 @@ mod tests {
         // The caller binds (and may retry-wait on) the listener itself; the
         // server only accepts on it — same routes, same behaviour.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let server = ProbeServer::serve_on(
-            listener,
-            routes("pre-bound\n", always(ProbeState::Ready)),
-        )
-        .unwrap();
+        let server =
+            ProbeServer::serve_on(listener, routes("pre-bound\n", always(ProbeState::Ready)))
+                .unwrap();
         assert!(get(server.addr(), "/metrics").await.contains("pre-bound"));
         assert!(get(server.addr(), "/healthz").await.contains("200 OK"));
     }

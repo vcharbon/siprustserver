@@ -1,8 +1,8 @@
 use sip_message::{EmitOpts, MessageTemplate, TemplateHeader};
 use std::time::Duration;
 
-use crate::actor::*;
 use super::testkit::*;
+use crate::actor::*;
 use crate::Harness;
 
 /// Parked-CANCEL fail-fast: the CANCEL automatic consumes the parked
@@ -26,7 +26,8 @@ async fn cancel_consumed_parked_invite_fails_respond_fast() {
                 ("bob", bob.clone()),
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(Barrier::None, GoalStep::Cancel { stated: Vec::new() }).after(Duration::from_millis(200)),
+                    Goal::new(Barrier::None, GoalStep::Cancel { stated: Vec::new() })
+                        .after(Duration::from_millis(200)),
                 ],
             ),
             scripted_spec(
@@ -35,9 +36,7 @@ async fn cancel_consumed_parked_invite_fails_respond_fast() {
                 // Gated PAST the cancellation, so the automatic has already
                 // consumed the parked INVITE when the script reaches it.
                 vec![Goal::new(
-                    Barrier::pred("caller_gone", |s| {
-                        s.leg_at_least("alice", LegPhase::Terminated)
-                    }),
+                    Barrier::pred("caller_gone", |s| s.leg_at_least("alice", LegPhase::Terminated)),
                     GoalStep::RespondTemplate {
                         template: response_template(200, "OK", true),
                         opts: EmitOpts::default(),
@@ -202,8 +201,11 @@ async fn cancel_automatic_487s_script_bound_invite() {
                 ("bob", bob.clone()),
                 vec![
                     Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: None }),
-                    Goal::new(Barrier::pred("ringing", ringing), GoalStep::Cancel { stated: Vec::new() })
-                        .after(Duration::from_millis(200)),
+                    Goal::new(
+                        Barrier::pred("ringing", ringing),
+                        GoalStep::Cancel { stated: Vec::new() },
+                    )
+                    .after(Duration::from_millis(200)),
                 ],
             ),
             // The script claims the INVITE and rings, then ends — no
@@ -242,10 +244,7 @@ async fn cancel_automatic_487s_script_bound_invite() {
     let ctx = CallCtx::new();
     let obs = ObservedState::new();
     let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
-    assert!(
-        verdict.is_ok(),
-        "the automatic must 487 the bound INVITE and settle, got {verdict:?}"
-    );
+    assert!(verdict.is_ok(), "the automatic must 487 the bound INVITE and settle, got {verdict:?}");
     assert!(
         obs.replay_record().contains(&ReplayEntry::ServicedStray {
             leg: "bob",

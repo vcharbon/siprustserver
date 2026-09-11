@@ -34,7 +34,9 @@ fn laddr() -> SocketAddr {
 /// Serve a real `LimiterServer` (default 300 s window, so the window never rolls
 /// mid-test) on `net` at [`LIMITER_ADDR`]; return the store (for count probes)
 /// and the server handle (keep alive for the test).
-async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
+async fn serve_limiter(
+    net: &SimulatedHttpNetwork,
+) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
     let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
@@ -42,11 +44,7 @@ async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn
 }
 
 fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    Arc::new(HttpCallLimiter::new(
-        Arc::new(net.clone()),
-        laddr(),
-        Duration::from_millis(150),
-    ))
+    Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// A decision that routes every call to `host:port` and attaches one limiter
@@ -58,10 +56,7 @@ fn route_with_limiter(host: &str, port: u16, id: &str, limit: i64) -> Arc<dyn Ca
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to(&host, port);
-                r.call_limiter = vec![CallLimiterEntry {
-                    id: id.clone(),
-                    limit,
-                }];
+                r.call_limiter = vec![CallLimiterEntry { id: id.clone(), limit }];
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -77,9 +72,10 @@ async fn rejected_call_gets_486_and_no_second_increment() {
     let http = SimulatedHttpNetwork::new();
     let (store, _lh) = serve_limiter(&http).await;
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
-    let b2bua =
-        B2buaSut::builder(decision).limiter(limiter_client(&http)).start(&h, "b2bua", "127.0.0.1:5080")
-            .await;
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     // First call admitted + answered.
     let _dialog1 = establish(&alice, &bob, b2bua.addr).await;
@@ -105,9 +101,10 @@ async fn release_on_bye_frees_the_slot() {
     let http = SimulatedHttpNetwork::new();
     let (store, _lh) = serve_limiter(&http).await;
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
-    let b2bua =
-        B2buaSut::builder(decision).limiter(limiter_client(&http)).start(&h, "b2bua", "127.0.0.1:5080")
-            .await;
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     // Establish then hang up call 1.
     let mut dialog1 = establish(&alice, &bob, b2bua.addr).await;
@@ -118,11 +115,7 @@ async fn release_on_bye_frees_the_slot() {
 
     // The release must drain the counter back to 0.
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(
-        store.stats().current_total,
-        0,
-        "BYE must release the limiter hold"
-    );
+    assert_eq!(store.stats().current_total, 0, "BYE must release the limiter hold");
 
     // The freed slot admits a fresh call (bob sees its INVITE, not a 486).
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -146,9 +139,10 @@ async fn fail_open_admits_when_limiter_is_cut() {
     http.apply_fault(Fault::Cut { dst: laddr() });
 
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
-    let b2bua =
-        B2buaSut::builder(decision).limiter(limiter_client(&http)).start(&h, "b2bua", "127.0.0.1:5080")
-            .await;
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     // The call is admitted despite the limiter being down: bob sees the INVITE.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -208,19 +202,17 @@ async fn failover_on_reject_routes_to_backup() {
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.call_limiter = vec![CallLimiterEntry {
-                    id: "trunk-A".into(),
-                    limit: 1,
-                }];
+                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 1 }];
                 r.callback_context = Some("limiter-failover".into());
                 NewCallResponse::Route(r)
             })
             .on_failure(move |_req| CallFailureResponse::Route(route_to("127.0.0.1", 5071)))
             .build(),
     );
-    let b2bua =
-        B2buaSut::builder(decision).limiter(limiter_client(&http)).start(&h, "b2bua", "127.0.0.1:5080")
-            .await;
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     // Call 1 fills the cap on the primary.
     let _d = establish(&alice, &bob, b2bua.addr).await;

@@ -138,14 +138,10 @@ impl CallTraces {
     }
 
     fn existing(&self, call_ref: &str) -> Option<TraceIds> {
-        self.spans
-            .lock()
-            .expect("trace registry mutex")
-            .get(call_ref)
-            .map(|s| TraceIds {
-                trace_id: s.trace_id().to_string(),
-                root_span_id: s.span_id().to_string(),
-            })
+        self.spans.lock().expect("trace registry mutex").get(call_ref).map(|s| TraceIds {
+            trace_id: s.trace_id().to_string(),
+            root_span_id: s.span_id().to_string(),
+        })
     }
 
     fn insert(&self, call_ref: &str, span: CallSpan) -> TraceIds {

@@ -76,10 +76,7 @@ pub fn combine_doc(
     // Column resolver for a SIP address: a worker column if it is a worker SIP
     // addr, else the lane's own address string (alice/proxy/bob).
     let sip_col = |addr: SocketAddr| -> String {
-        sip_addr_col
-            .get(&addr)
-            .cloned()
-            .unwrap_or_else(|| addr.to_string())
+        sip_addr_col.get(&addr).cloned().unwrap_or_else(|| addr.to_string())
     };
 
     // --- 2. the rows, one plane at a time, on ONE shared global seq ----------
@@ -113,9 +110,7 @@ pub fn combine_doc(
             label: facets(&e.raw).label,
             detail: Some(detail),
             conn: None,
-            kind: RowKind::Sip {
-                delivered: e.delivered,
-            },
+            kind: RowKind::Sip { delivered: e.delivered },
         });
     }
 
@@ -130,14 +125,8 @@ pub fn combine_doc(
         if f.dir != Direction::Sent {
             continue;
         }
-        let from = repl_lane_map
-            .get(&f.from)
-            .cloned()
-            .unwrap_or_else(|| f.from.to_string());
-        let to = repl_lane_map
-            .get(&f.to)
-            .cloned()
-            .unwrap_or_else(|| f.to.to_string());
+        let from = repl_lane_map.get(&f.from).cloned().unwrap_or_else(|| f.from.to_string());
+        let to = repl_lane_map.get(&f.to).cloned().unwrap_or_else(|| f.to.to_string());
         rows.push(SeqRow {
             at_ms: f.at_ms,
             seq: f.seq,
@@ -146,9 +135,7 @@ pub fn combine_doc(
             label: frame_summary(&f.frame),
             detail: None,
             conn: Some(conn_label(f, &repl_addr_col)),
-            kind: RowKind::Repl {
-                delivered: delivered_sent.contains(&i),
-            },
+            kind: RowKind::Repl { delivered: delivered_sent.contains(&i) },
         });
     }
 
@@ -218,12 +205,11 @@ pub fn combine_doc(
 /// (e.g. dropped pre-reboot, then re-sent and delivered). We walk `Received` in
 /// time order and claim, for each, the most-recent unconsumed matching `Sent` at
 /// or before it — so a later delivery can never "rescue" an earlier dropped send.
-fn delivered_sent(frames: &[repl_net::transport::CapturedFrame]) -> std::collections::HashSet<usize> {
-    let sent: Vec<(usize, &repl_net::transport::CapturedFrame)> = frames
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| f.dir == Direction::Sent)
-        .collect();
+fn delivered_sent(
+    frames: &[repl_net::transport::CapturedFrame],
+) -> std::collections::HashSet<usize> {
+    let sent: Vec<(usize, &repl_net::transport::CapturedFrame)> =
+        frames.iter().enumerate().filter(|(_, f)| f.dir == Direction::Sent).collect();
     let mut received: Vec<&repl_net::transport::CapturedFrame> =
         frames.iter().filter(|f| f.dir == Direction::Received).collect();
     received.sort_by_key(|f| f.at_ms);
@@ -279,11 +265,7 @@ fn build_lanes(
 ) -> Vec<Lane> {
     // Friendly names from the recording.
     let name_of = |addr: SocketAddr| -> Option<String> {
-        scenario
-            .lanes
-            .iter()
-            .find(|l| l.addr == addr)
-            .and_then(|l| l.names.first().cloned())
+        scenario.lanes.iter().find(|l| l.addr == addr).and_then(|l| l.names.first().cloned())
     };
 
     // Partition the non-worker SIP lanes into UAs and the proxy/core SUT.
@@ -334,11 +316,7 @@ fn build_lanes(
     }
     // Callee-side UA last (bob).
     if let Some((addr, name)) = uas.last() {
-        lanes.push(Lane::new(
-            addr.to_string(),
-            label(name, &addr.to_string()),
-            LaneKind::Ua,
-        ));
+        lanes.push(Lane::new(addr.to_string(), label(name, &addr.to_string()), LaneKind::Ua));
     }
 
     let _ = name_of; // reserved for richer worker captions; SIP addr suffices now
@@ -374,7 +352,9 @@ fn sip_col_str(key: &str, sip_addr_col: &BTreeMap<SocketAddr, String>) -> String
 /// repl-only and unified views read identically).
 fn marker_label(m: &ha_harness::Marker) -> String {
     match &m.peer {
-        Some(peer) if !m.detail.is_empty() => format!("{} {}<->{} {}", m.kind, m.node, peer, m.detail),
+        Some(peer) if !m.detail.is_empty() => {
+            format!("{} {}<->{} {}", m.kind, m.node, peer, m.detail)
+        }
         Some(peer) => format!("{} {}<->{}", m.kind, m.node, peer),
         None if !m.detail.is_empty() => format!("{} {} {}", m.kind, m.node, m.detail),
         None => format!("{} {}", m.kind, m.node),
@@ -430,8 +410,8 @@ mod tests {
         // single receipt at t=231 must pair with the t=230 send — NOT retroactively
         // mark the t=170 drop as delivered.
         let frames = vec![
-            cap(170, 9401, 9402, Direction::Sent, noop()),     // dropped (peer dead)
-            cap(230, 9401, 9402, Direction::Sent, noop()),     // re-sent post-reboot
+            cap(170, 9401, 9402, Direction::Sent, noop()), // dropped (peer dead)
+            cap(230, 9401, 9402, Direction::Sent, noop()), // re-sent post-reboot
             cap(231, 9401, 9402, Direction::Received, noop()), // pairs with t=230
         ];
         let delivered = delivered_sent(&frames);

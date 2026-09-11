@@ -43,10 +43,7 @@ pub async fn run_actor_collecting(
 /// `panic!` if it did not reach its declared happy outcome — the assert-on-
 /// deviation analogue of [`run_actor_collecting`]. The caller then asserts on the
 /// SUT (`active_calls() == 0`, `assert_fully_reaped()`).
-pub async fn run_actor_asserting(
-    scenario: &dyn crate::actor::ActorScenario,
-    env: &CallEnv<'_>,
-) {
+pub async fn run_actor_asserting(scenario: &dyn crate::actor::ActorScenario, env: &CallEnv<'_>) {
     if let Err(e) = run_actor_collecting(scenario, env).await {
         panic!("actor scenario `{}` failed: {e:?}", scenario.id());
     }

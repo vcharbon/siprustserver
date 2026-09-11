@@ -10,10 +10,10 @@
 //! the wire bytes it forwards — every untouched line is memcpy'd, never
 //! re-parsed (ADR-0025).
 
-mod request;
-mod response;
 #[cfg(test)]
 mod dual_face_tests;
+mod request;
+mod response;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -38,7 +38,9 @@ use crate::trace::ProxyTraces;
 
 /// The per-peer bucket a failed send belongs in: an oversize datagram accuses
 /// the message, everything else the peer or the socket.
-fn peer_failure_kind(err: &sip_net::SendError) -> crate::observability::peer_failures::PeerFailureKind {
+fn peer_failure_kind(
+    err: &sip_net::SendError,
+) -> crate::observability::peer_failures::PeerFailureKind {
     use crate::observability::peer_failures::PeerFailureKind;
     match err.kind {
         sip_net::SendErrorKind::MessageTooLong => PeerFailureKind::MessageTooLong,
@@ -324,7 +326,11 @@ impl ProxyCore {
             // upstream UAC/UAS — external); still classify via the registry in
             // case it is a worker.
             let target = ProxyAddr::from(src);
-            self.metrics.record_peer_failure(&src, self.classify_peer(&target), peer_failure_kind(&e));
+            self.metrics.record_peer_failure(
+                &src,
+                self.classify_peer(&target),
+                peer_failure_kind(&e),
+            );
         }
     }
 
@@ -351,8 +357,9 @@ impl ProxyCore {
             let ext_endpoint = self.external.as_ref().map(|e| e.endpoint.clone());
             let shard = self.shard;
             tokio::spawn(async move {
-                let mut tick =
-                    tokio::time::interval(Duration::from_millis(crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS));
+                let mut tick = tokio::time::interval(Duration::from_millis(
+                    crate::cancel_lru::DEFAULT_SWEEP_INTERVAL_MS,
+                ));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tick.tick().await;
@@ -360,9 +367,8 @@ impl ProxyCore {
                     // Intake-shed drops are counted on BOTH faces — in
                     // dual-face mode callers arrive on the external socket, so
                     // its pre-ingress drops must not be invisible.
-                    let ext_shed = ext_endpoint
-                        .as_ref()
-                        .map_or(0, |e| e.counters().pre_ingress_dropped);
+                    let ext_shed =
+                        ext_endpoint.as_ref().map_or(0, |e| e.counters().pre_ingress_dropped);
                     metrics.set_udp_endpoint_stats(
                         shard,
                         endpoint.queue_depth() as u64,
@@ -481,7 +487,11 @@ pub struct ProxyCoreBuilder {
 }
 
 impl ProxyCoreBuilder {
-    pub fn new(advertised: ProxyAddr, strategy: Arc<dyn RoutingStrategy>, registry: Arc<dyn WorkerRegistry>) -> Self {
+    pub fn new(
+        advertised: ProxyAddr,
+        strategy: Arc<dyn RoutingStrategy>,
+        registry: Arc<dyn WorkerRegistry>,
+    ) -> Self {
         Self {
             advertised,
             external: None,
@@ -564,16 +574,16 @@ impl ProxyCoreBuilder {
     /// Finish into a [`ProxyCore`] bound on `endpoint`.
     pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
         let clock = self.clock.unwrap_or_else(Clock::system);
-        let traces = self
-            .traces
-            .unwrap_or_else(|| Arc::new(ProxyTraces::from_env(clock.now_ms())));
+        let traces = self.traces.unwrap_or_else(|| Arc::new(ProxyTraces::from_env(clock.now_ms())));
         ProxyCore::new(ProxyCoreParts {
             endpoint,
             advertised: self.advertised,
             external: self.external,
             strategy: self.strategy,
             registry: self.registry,
-            cancel_lru: self.cancel_lru.unwrap_or_else(|| Arc::new(CancelBranchLru::with_clock(clock.clone()))),
+            cancel_lru: self
+                .cancel_lru
+                .unwrap_or_else(|| Arc::new(CancelBranchLru::with_clock(clock.clone()))),
             id_gen: self.id_gen.unwrap_or_else(|| Arc::new(IdGen::from_entropy())),
             clock,
             metrics: self.metrics.unwrap_or_else(|| Arc::new(ProxyMetrics::new())),
@@ -656,8 +666,10 @@ mod sweeper_tests {
         metrics.set_pending_invite_lru_size(lru.size() as u64);
         assert_eq!(metrics.pending_invite_lru_size(), 1);
 
-        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
-        let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        let strategy: Arc<dyn RoutingStrategy> =
+            Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
+        let registry: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![]));
         let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
             .clock(clock)
             .cancel_lru(lru.clone())
@@ -676,7 +688,11 @@ mod sweeper_tests {
         }
 
         assert_eq!(lru.size(), 0, "sweeper must physically reclaim the expired entry");
-        assert_eq!(metrics.pending_invite_lru_size(), 0, "gauge must follow the reclaimed map down");
+        assert_eq!(
+            metrics.pending_invite_lru_size(),
+            0,
+            "gauge must follow the reclaimed map down"
+        );
 
         task.abort();
     }
@@ -731,13 +747,23 @@ mod sweeper_tests {
         // Two packets queued in the past: ages at dequeue 500 ms and 200 ms.
         // Raw bytes are deliberately unparseable — no SIP flow is involved.
         let ep = DrainOnceEndpoint(Mutex::new(vec![
-            UdpPacket { raw: b"not-sip".to_vec(), src: "127.0.0.1:9999".parse().unwrap(), arrival_ms: 200 },
-            UdpPacket { raw: b"not-sip".to_vec(), src: "127.0.0.1:9999".parse().unwrap(), arrival_ms: 500 },
+            UdpPacket {
+                raw: b"not-sip".to_vec(),
+                src: "127.0.0.1:9999".parse().unwrap(),
+                arrival_ms: 200,
+            },
+            UdpPacket {
+                raw: b"not-sip".to_vec(),
+                src: "127.0.0.1:9999".parse().unwrap(),
+                arrival_ms: 500,
+            },
         ]));
         let recorder = IntakeAgeRecorder::default();
 
-        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
-        let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        let strategy: Arc<dyn RoutingStrategy> =
+            Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
+        let registry: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![]));
         let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
             .clock(clock)
             .intake_age(recorder.clone())
@@ -770,16 +796,21 @@ mod sweeper_tests {
         let net = SimulatedSignalingNetwork::new(1);
         let uas: SocketAddr = "127.0.0.1:5061".parse().unwrap();
         let uac = net
-            .bind_udp(BindUdpOpts::new("127.0.0.1:5062".parse().unwrap(), 8).with_clock(clock.clone()))
+            .bind_udp(
+                BindUdpOpts::new("127.0.0.1:5062".parse().unwrap(), 8).with_clock(clock.clone()),
+            )
             .await
             .unwrap();
-        let ingress = net.bind_udp(BindUdpOpts::new(uas, 8).with_clock(clock.clone())).await.unwrap();
+        let ingress =
+            net.bind_udp(BindUdpOpts::new(uas, 8).with_clock(clock.clone())).await.unwrap();
         uac.send_to(b"not-sip", uas).await.unwrap();
         let pkt = ingress.recv().await.expect("the fabric delivers one datagram");
 
         let recorder = IntakeAgeRecorder::default();
-        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
-        let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
+        let strategy: Arc<dyn RoutingStrategy> =
+            Arc::new(ForwardAllStrategy::new(ProxyAddr::new("10.0.0.2", 5070)));
+        let registry: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![]));
         ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
             .clock(clock)
             .intake_age(recorder.clone())
@@ -803,9 +834,11 @@ mod sweeper_tests {
         use crate::registry::WorkerEntry;
 
         let worker = ProxyAddr::new("10.0.0.2", 5070);
-        let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![
-            WorkerEntry::alive("w0", worker.clone()),
-        ]));
+        let registry: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+                "w0",
+                worker.clone(),
+            )]));
         let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(worker.clone()));
         let core = ProxyCoreBuilder::new(ProxyAddr::new("127.0.0.1", 5060), strategy, registry)
             .build(Box::new(PendingEndpoint));

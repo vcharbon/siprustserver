@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use sip_clock::Clock;
-use sip_message::parser::custom::CustomParser;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
+use sip_message::parser::custom::CustomParser;
 use sip_message::{serialize, SipMessage, SipParser};
 use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
@@ -34,7 +34,11 @@ struct CountingEndpoint {
 
 #[async_trait]
 impl UdpEndpoint for CountingEndpoint {
-    async fn send_to(&self, buf: &[u8], dst: std::net::SocketAddr) -> Result<(), sip_net::SendError> {
+    async fn send_to(
+        &self,
+        buf: &[u8],
+        dst: std::net::SocketAddr,
+    ) -> Result<(), sip_net::SendError> {
         self.inner.send_to(buf, dst).await
     }
     async fn recv(&self) -> Option<sip_net::UdpPacket> {
@@ -118,13 +122,14 @@ async fn two_shards_serve_many_flows_and_cross_shard_responses() {
     let lru = Arc::new(CancelBranchLru::with_clock(clock.clone()));
     let mut tasks = Vec::new();
     for (shard, ep) in [ep0, ep1].into_iter().enumerate() {
-        let core = ProxyCoreBuilder::new(ProxyAddr::from(proxy_addr), strategy.clone(), registry.clone())
-            .clock(clock.clone())
-            .id_gen(Arc::new(IdGen::seeded(0xBEEF + shard as u64)))
-            .metrics(metrics.clone())
-            .cancel_lru(lru.clone())
-            .shard(shard)
-            .build(ep);
+        let core =
+            ProxyCoreBuilder::new(ProxyAddr::from(proxy_addr), strategy.clone(), registry.clone())
+                .clock(clock.clone())
+                .id_gen(Arc::new(IdGen::seeded(0xBEEF + shard as u64)))
+                .metrics(metrics.clone())
+                .cancel_lru(lru.clone())
+                .shard(shard)
+                .build(ep);
         tasks.push(tokio::spawn(core.run()));
     }
 

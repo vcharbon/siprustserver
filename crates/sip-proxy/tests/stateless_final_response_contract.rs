@@ -30,8 +30,8 @@ use std::time::Duration;
 
 use common::{forward_all, spawn_proxy};
 use scenario_harness::Harness;
-use sip_message::HeaderName;
 use sip_message::parser::custom::CustomParser;
+use sip_message::HeaderName;
 use sip_message::{SipMessage, SipParser, SipRequest};
 
 const ALICE_INVITE: &str = "INVITE sip:bob@127.0.0.1:5070 SIP/2.0\r\n\
@@ -55,8 +55,7 @@ fn parse_request(raw: &[u8]) -> SipRequest {
 /// (proxy's Via on top, alice's below) so the proxy's §16.7 response path
 /// routes it back upstream.
 fn bob_response(fwd: &SipRequest, status: u16, reason: &str, to_tag: Option<&str>) -> String {
-    let vias: Vec<String> =
-        fwd.raw(HeaderName::Via).map(|v| format!("Via: {v}\r\n")).collect();
+    let vias: Vec<String> = fwd.raw(HeaderName::Via).map(|v| format!("Via: {v}\r\n")).collect();
     let to = match to_tag {
         Some(t) => format!("<sip:bob@127.0.0.1>;tag={t}"),
         None => "<sip:bob@127.0.0.1>".to_string(),
@@ -84,8 +83,14 @@ async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
     // rules: locally-minted tag, the 200-terminus that is never ACKed/BYE'd,
     // and Allow/Supported absence on the bare INVITE.
     h.allow_violation("mid-dialog-tags", "raw-injected responses; proxy is the SUT, not a real UA");
-    h.allow_violation("unacked-2xx-not-cleared", "bob's 200 is a fixture terminus; testing relay, not the dialog");
-    h.allow_violation("no-ack-to-dialog-creating-2xx", "alice never ACKs the fixture terminus; testing relay, not the dialog");
+    h.allow_violation(
+        "unacked-2xx-not-cleared",
+        "bob's 200 is a fixture terminus; testing relay, not the dialog",
+    );
+    h.allow_violation(
+        "no-ack-to-dialog-creating-2xx",
+        "alice never ACKs the fixture terminus; testing relay, not the dialog",
+    );
     h.allow_violation("allow-supported-on-invite", "bare INVITE fixture; proxy relay is the SUT");
     let (bob_ep, bob_addr) = h.bind_sut("bob", "127.0.0.1:5070").await;
     let (strategy, registry) = forward_all(bob_addr);
@@ -115,7 +120,10 @@ async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
     );
 
     // A real 18x IS relayed — the first thing alice ever hears — then the 200.
-    bob_ep.send_to(bob_response(&fwd, 180, "Ringing", Some("b1")).as_bytes(), proxy.addr()).await.unwrap();
+    bob_ep
+        .send_to(bob_response(&fwd, 180, "Ringing", Some("b1")).as_bytes(), proxy.addr())
+        .await
+        .unwrap();
     let relayed = tokio::time::timeout(Duration::from_secs(2), alice.recv())
         .await
         .expect("the 180 relays upstream")
@@ -125,7 +133,10 @@ async fn proxy_emits_no_100_absorbs_workers_and_relays_18x_final() {
     };
     assert_eq!(resp.status(), 180, "first upstream message is the worker's 180, never a 100");
 
-    bob_ep.send_to(bob_response(&fwd, 200, "OK", Some("b1")).as_bytes(), proxy.addr()).await.unwrap();
+    bob_ep
+        .send_to(bob_response(&fwd, 200, "OK", Some("b1")).as_bytes(), proxy.addr())
+        .await
+        .unwrap();
     let relayed = tokio::time::timeout(Duration::from_secs(2), alice.recv())
         .await
         .expect("the 200 relays upstream")

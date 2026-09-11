@@ -12,8 +12,8 @@ use call::{
     LegDisposition, LegKind, LegState, RemoteInfo,
 };
 use sip_clock::Clock;
-use sip_message::header::{HeaderClass, HeaderName, ParamValue, RecordRouteEntry};
 use sip_message::emergency::is_emergency_request;
+use sip_message::header::{HeaderClass, HeaderName, ParamValue, RecordRouteEntry};
 use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 use sip_txn::IdGen;
 
@@ -158,10 +158,7 @@ pub fn build_initial_call(
         leg_id: "a".to_string(),
         call_id: invite.call_id().to_string(),
         from_tag: invite.from().tag().map(str::to_owned).unwrap_or_default().to_string(),
-        source: RemoteInfo {
-            address: src.ip().to_string(),
-            port: src.port(),
-        },
+        source: RemoteInfo { address: src.ip().to_string(), port: src.port() },
         state: LegState::Trying,
         disposition: LegDisposition::Pending,
         dialogs: vec![],
@@ -182,10 +179,7 @@ pub fn build_initial_call(
         headers: invite
             .headers()
             .iter()
-            .map(|h| call::SipHeader {
-                name: h.name.to_string(),
-                value: h.value.to_string(),
-            })
+            .map(|h| call::SipHeader { name: h.name.to_string(), value: h.value.to_string() })
             .collect(),
         body: invite.body().to_vec(),
     };
@@ -293,8 +287,17 @@ pub async fn handle_initial_invite(
             // A dormant service (`init` → `None`) and the empty-service list
             // (production today) both leave the result untouched.
             let result = apply_route(
-                call, route, &a_invite, invite_wire, decision, limiter, config, id_gen, clock,
-                now_ms, 0,
+                call,
+                route,
+                &a_invite,
+                invite_wire,
+                decision,
+                limiter,
+                config,
+                id_gen,
+                clock,
+                now_ms,
+                0,
             )
             .await;
             let exec = ActionExecutor { config, id_gen, now_ms, wire_faults };
@@ -333,9 +336,16 @@ pub async fn handle_initial_invite(
             id_gen,
             now_ms,
         ),
-        Err(_unavailable) => {
-            reject_call(call, &a_invite, 503, Some("Service Unavailable".into()), None, &[], id_gen, now_ms)
-        }
+        Err(_unavailable) => reject_call(
+            call,
+            &a_invite,
+            503,
+            Some("Service Unavailable".into()),
+            None,
+            &[],
+            id_gen,
+            now_ms,
+        ),
     }
 }
 
@@ -384,7 +394,14 @@ pub(crate) fn reject_call(
                 "redirect refused"
             );
             return reject_call(
-                call, a_invite, 500, Some(err.to_string()), update_headers, &[], id_gen, now_ms,
+                call,
+                a_invite,
+                500,
+                Some(err.to_string()),
+                update_headers,
+                &[],
+                id_gen,
+                now_ms,
             );
         }
     };
@@ -432,7 +449,8 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
         contact: invite.raw(HeaderName::Contact).map(str::to_string).collect(),
         content_type: invite.raw(HeaderName::ContentType).next().map(str::to_string),
         sip_headers,
-        sip_body: (!invite.body().is_empty()).then(|| String::from_utf8_lossy(invite.body()).into_owned()),
+        sip_body: (!invite.body().is_empty())
+            .then(|| String::from_utf8_lossy(invite.body()).into_owned()),
     }
 }
 
@@ -552,7 +570,8 @@ mod emergency_on_invite_tests {
         assert_eq!(call.emergency, None, "no RPH → emergency stays None");
 
         // A well-formed but non-emergency RPH namespace.value also stays None.
-        let call = build_initial_call(&invite_with_rph(Some("dsn.flash")), src(), &config_for("w0"), 0);
+        let call =
+            build_initial_call(&invite_with_rph(Some("dsn.flash")), src(), &config_for("w0"), 0);
         assert_eq!(call.emergency, None, "non-emergency RPH → emergency stays None");
     }
 
@@ -560,16 +579,22 @@ mod emergency_on_invite_tests {
     fn emergency_is_derived_through_the_real_helper() {
         // Proves the field is wired to `is_emergency_request` and not a naive
         // header-presence check: r-values compare case-insensitively (RFC 4412)…
-        let call = build_initial_call(&invite_with_rph(Some("ESNET.0")), src(), &config_for("w0"), 0);
+        let call =
+            build_initial_call(&invite_with_rph(Some("ESNET.0")), src(), &config_for("w0"), 0);
         assert_eq!(call.emergency, Some(true), "r-value casing must not gate emergency");
 
         // …an emergency r-value among multiple namespaces flags…
-        let call =
-            build_initial_call(&invite_with_rph(Some("dsn.flash, q735.0")), src(), &config_for("w0"), 0);
+        let call = build_initial_call(
+            &invite_with_rph(Some("dsn.flash, q735.0")),
+            src(),
+            &config_for("w0"),
+            0,
+        );
         assert_eq!(call.emergency, Some(true), "emergency r-value in a list flags emergency");
 
         // …and an r-value merely embedding a token does not.
-        let call = build_initial_call(&invite_with_rph(Some("esnet.01")), src(), &config_for("w0"), 0);
+        let call =
+            build_initial_call(&invite_with_rph(Some("esnet.01")), src(), &config_for("w0"), 0);
         assert_eq!(call.emergency, None, "embedded token is not an emergency r-value");
     }
 }
@@ -596,7 +621,8 @@ mod stickiness_cookie_tests {
 
     /// The proxy's double-record-route as it arrives on an inbound INVITE: the
     /// direction-only `;outbound` half topmost, the cookie half below it.
-    const COOKIE_RR: &str = "<sip:10.0.0.9:5060;outbound;lr>,<sip:10.0.0.9:5060;v=3;w_pri=w7;w_bak=w9;lr>";
+    const COOKIE_RR: &str =
+        "<sip:10.0.0.9:5060;outbound;lr>,<sip:10.0.0.9:5060;v=3;w_pri=w7;w_bak=w9;lr>";
 
     fn invite_with_record_route(rr: Option<&str>) -> SipRequest {
         let rr_line = match rr {
@@ -671,8 +697,9 @@ mod stickiness_cookie_tests {
         // The read is all-or-nothing (`list::<RecordRouteEntry>`), so a bad
         // `;outbound` half takes the cookie half down with it. Pinned because it
         // is the reason the warning names the *route*, not the cookie.
-        let invite =
-            invite_with_record_route(Some(&format!("<sip:10.0.0.9:70596;outbound;lr>,{COOKIE_RR}")));
+        let invite = invite_with_record_route(Some(&format!(
+            "<sip:10.0.0.9:70596;outbound;lr>,{COOKIE_RR}"
+        )));
         assert!(matches!(read_topology_cookie(&invite, "w0"), CookieRead::Unreadable(_)));
     }
 

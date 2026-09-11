@@ -163,8 +163,7 @@ pub fn labelled_prefix_leg_picker_defaulting(
         };
         let mut best: Option<&(String, String)> = None;
         for entry in &entries {
-            if user.starts_with(entry.0.as_str())
-                && best.is_none_or(|b| entry.0.len() > b.0.len())
+            if user.starts_with(entry.0.as_str()) && best.is_none_or(|b| entry.0.len() > b.0.len())
             {
                 best = Some(entry);
             }

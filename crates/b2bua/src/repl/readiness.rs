@@ -185,10 +185,7 @@ mod tests {
     }
     impl FlagSource {
         fn new(b: bool, c: bool) -> Arc<Self> {
-            Arc::new(Self {
-                bootstrapped: AtomicBool::new(b),
-                current: AtomicBool::new(c),
-            })
+            Arc::new(Self { bootstrapped: AtomicBool::new(b), current: AtomicBool::new(c) })
         }
         fn set(&self, b: bool, c: bool) {
             self.bootstrapped.store(b, Ordering::SeqCst);

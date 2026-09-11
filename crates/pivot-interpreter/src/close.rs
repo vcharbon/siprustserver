@@ -80,10 +80,10 @@ impl std::fmt::Display for Owed {
         match self {
             Owed::Nothing => f.write_str("holds nothing open"),
             Owed::AwaitFinal => f.write_str("sent an INVITE no final has answered yet"),
-            Owed::AwaitTeardown => {
-                f.write_str("answered the dialog, and the teardown its far side owes has not \
-                             arrived")
-            }
+            Owed::AwaitTeardown => f.write_str(
+                "answered the dialog, and the teardown its far side owes has not \
+                             arrived",
+            ),
             Owed::Answer { cseq_method, status } => {
                 write!(f, "owes a {status} to the {cseq_method} it took")
             }

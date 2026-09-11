@@ -95,7 +95,11 @@ fn transaction_scope_is_what_makes_the_join() {
     }));
 
     let decoy = build_flows(&update_ok_reinvite_rejected(), &FlowConfig::default());
-    assert_eq!(select_groups(&decoy, &flat).len(), 1, "the flat reading is fooled — that is the point");
+    assert_eq!(
+        select_groups(&decoy, &flat).len(),
+        1,
+        "the flat reading is fooled — that is the point"
+    );
     assert_eq!(
         select_groups(&decoy, &scoped).len(),
         0,
@@ -115,10 +119,20 @@ fn reinvite_answer_body_binds_to_its_own_transaction() {
     let datagrams = vec![
         dg(1_000_000, "10.0.0.1:5060", "10.0.0.9:5060", &req("INVITE", cid, 1, "d1", "")),
         // The INITIAL INVITE's 200 carries the marker …
-        dg(1_500_000, "10.0.0.9:5060", "10.0.0.1:5060", &resp(200, cid, 1, "INVITE", "d1", "a=sendonly")),
+        dg(
+            1_500_000,
+            "10.0.0.9:5060",
+            "10.0.0.1:5060",
+            &resp(200, cid, 1, "INVITE", "d1", "a=sendonly"),
+        ),
         // … the re-INVITE's does not.
         dg(3_000_000, "10.0.0.1:5060", "10.0.0.9:5060", &req("INVITE", cid, 3, "d3", ";tag=t1")),
-        dg(3_200_000, "10.0.0.9:5060", "10.0.0.1:5060", &resp(200, cid, 3, "INVITE", "d3", "a=sendrecv")),
+        dg(
+            3_200_000,
+            "10.0.0.9:5060",
+            "10.0.0.1:5060",
+            &resp(200, cid, 3, "INVITE", "d3", "a=sendrecv"),
+        ),
     ];
     let flows = build_flows(&datagrams, &FlowConfig::default());
     let q = query(json!({
@@ -135,8 +149,18 @@ fn reinvite_answer_body_binds_to_its_own_transaction() {
 
     // Move the marker onto the re-INVITE's answer and it matches.
     let mut moved = datagrams.clone();
-    moved[1] = dg(1_500_000, "10.0.0.9:5060", "10.0.0.1:5060", &resp(200, cid, 1, "INVITE", "d1", "a=sendrecv"));
-    moved[3] = dg(3_200_000, "10.0.0.9:5060", "10.0.0.1:5060", &resp(200, cid, 3, "INVITE", "d3", "a=sendonly"));
+    moved[1] = dg(
+        1_500_000,
+        "10.0.0.9:5060",
+        "10.0.0.1:5060",
+        &resp(200, cid, 1, "INVITE", "d1", "a=sendrecv"),
+    );
+    moved[3] = dg(
+        3_200_000,
+        "10.0.0.9:5060",
+        "10.0.0.1:5060",
+        &resp(200, cid, 3, "INVITE", "d3", "a=sendonly"),
+    );
     let flows = build_flows(&moved, &FlowConfig::default());
     assert_eq!(select_groups(&flows, &q).len(), 1);
 }
@@ -194,7 +218,8 @@ fn no_final_response_is_distinguishable_from_no_invite() {
 #[test]
 fn projection_yields_the_named_fields() {
     let flows = build_flows(&update_rejected(), &FlowConfig::default());
-    let row = summary_row(&flows, 0, &[KeyField::CallId, KeyField::RuriUser, KeyField::FinalStatus]);
+    let row =
+        summary_row(&flows, 0, &[KeyField::CallId, KeyField::RuriUser, KeyField::FinalStatus]);
     assert_eq!(row["call_id"], json!(["scope-2"]));
     assert_eq!(row["ruri_user"], json!(["+33123456789"]), "host and params stripped");
     assert_eq!(row["final"], json!([200]));
@@ -206,8 +231,18 @@ fn neighbours_expand_a_hit_by_the_named_key() {
     let mut datagrams = update_rejected();
     // Two more calls to the same callee: one nearby, one far outside the window.
     for (cid, t0, branch) in [("near-1", 10_000_000u64, "h1"), ("far-1", 900_000_000, "h2")] {
-        datagrams.push(dg(t0, "10.0.0.1:5060", "10.0.0.9:5060", &req("INVITE", cid, 1, branch, "")));
-        datagrams.push(dg(t0 + 100_000, "10.0.0.9:5060", "10.0.0.1:5060", &resp(200, cid, 1, "INVITE", branch, "")));
+        datagrams.push(dg(
+            t0,
+            "10.0.0.1:5060",
+            "10.0.0.9:5060",
+            &req("INVITE", cid, 1, branch, ""),
+        ));
+        datagrams.push(dg(
+            t0 + 100_000,
+            "10.0.0.9:5060",
+            "10.0.0.1:5060",
+            &resp(200, cid, 1, "INVITE", branch, ""),
+        ));
     }
     let flows = build_flows(&datagrams, &FlowConfig::default());
     let q = query(json!({

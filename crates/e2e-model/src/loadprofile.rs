@@ -258,7 +258,10 @@ mod tests {
         assert_eq!(p.mix.len(), 4);
         assert_eq!(p.mix[1].drop_rate, Some(0.002));
         assert_eq!(p.mix[2].retransmit, Some(false));
-        assert_eq!(p.mix[3].case.as_deref(), Some(std::path::Path::new("e2e/cases/load-basic-pooled.json")));
+        assert_eq!(
+            p.mix[3].case.as_deref(),
+            Some(std::path::Path::new("e2e/cases/load-basic-pooled.json"))
+        );
 
         // Round-trip (defaults are re-applied on the omitted `weight` in mix[0]).
         let back: LoadProfile = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();

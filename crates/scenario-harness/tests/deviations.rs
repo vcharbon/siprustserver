@@ -233,12 +233,8 @@ async fn delayed_automatic_ack_provokes_retx_and_settles() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .delayed_ack(Duration::from_millis(2800))
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).delayed_ack(Duration::from_millis(2800)).send().await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
@@ -268,7 +264,10 @@ async fn delayed_automatic_ack_provokes_retx_and_settles() {
         }
     };
     let (mut dialog, retx) = tokio::join!(alice_side, bob_side);
-    assert!(retx >= 1, "the peer retransmitted the 200 at least once while the ACK was held (got {retx})");
+    assert!(
+        retx >= 1,
+        "the peer retransmitted the 200 at least once while the ACK was held (got {retx})"
+    );
 
     // Drain any 200 retransmits still queued at alice's socket (recorded received).
     alice.drain().await;
@@ -293,12 +292,8 @@ async fn declared_delay_binds_plain_ack() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .delayed_ack(Duration::from_millis(1500))
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).delayed_ack(Duration::from_millis(1500)).send().await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
@@ -338,9 +333,8 @@ async fn declared_delay_binds_plain_ack() {
 /// peer anomaly.)
 #[tokio::test]
 async fn templated_in_dialog_request_honors_the_pattern() {
-    let h = Harness::new("template-plus-jump").describe(
-        "a templated INFO honors the declared CSeq jump (base+jump), BYE continues",
-    );
+    let h = Harness::new("template-plus-jump")
+        .describe("a templated INFO honors the declared CSeq jump (base+jump), BYE continues");
     h.waive(
         WaiverScope::rule(
             "cseq-in-dialog-order",

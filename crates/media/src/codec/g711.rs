@@ -42,11 +42,7 @@ pub fn alaw_encode_sample(pcm: i16) -> u8 {
         return ((0x7f ^ mask) & 0xff) as u8;
     }
     let mut aval = seg << SEG_SHIFT;
-    aval |= if seg < 2 {
-        (value >> 1) & QUANT_MASK
-    } else {
-        (value >> seg) & QUANT_MASK
-    };
+    aval |= if seg < 2 { (value >> 1) & QUANT_MASK } else { (value >> seg) & QUANT_MASK };
     ((aval ^ mask) & 0xff) as u8
 }
 
@@ -215,15 +211,12 @@ mod tests {
     #[test]
     fn bulk_helpers_match_per_sample() {
         let pcm: Vec<i16> = sweep();
-        assert_eq!(alaw_encode(&pcm), pcm.iter().map(|&s| alaw_encode_sample(s)).collect::<Vec<_>>());
         assert_eq!(
-            g711_round_trip(&pcm, G711Codec::Pcma),
-            alaw_decode(&alaw_encode(&pcm))
+            alaw_encode(&pcm),
+            pcm.iter().map(|&s| alaw_encode_sample(s)).collect::<Vec<_>>()
         );
-        assert_eq!(
-            g711_round_trip(&pcm, G711Codec::Pcmu),
-            mulaw_decode(&mulaw_encode(&pcm))
-        );
+        assert_eq!(g711_round_trip(&pcm, G711Codec::Pcma), alaw_decode(&alaw_encode(&pcm)));
+        assert_eq!(g711_round_trip(&pcm, G711Codec::Pcmu), mulaw_decode(&mulaw_encode(&pcm)));
     }
 
     #[test]

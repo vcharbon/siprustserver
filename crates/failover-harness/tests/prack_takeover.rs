@@ -71,10 +71,7 @@ async fn replicated_provisionals(
         .get(PartitionRole::Backup, primary, call_ref)
         .await
         .expect("the backup holds a replica body for the early call");
-    MsgpackCodec::new()
-        .decode(&body)
-        .expect("replica body decodes")
-        .reliable_provisionals
+    MsgpackCodec::new().decode(&body).expect("replica body decodes").reliable_provisionals
 }
 
 /// Reboot the crashed primary EMPTY at a higher gen + new pod IP, re-learn its
@@ -113,25 +110,18 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
 
     // ── STEP 1: delayed-offer INVITE, answered RELIABLY with the offer ───────
-    let mut call = alice
-        .invite(&bob)
-        .with_header("Supported", "100rel")
-        .through(proxy.addr())
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
     assert!(uas.request().body().is_empty(), "delayed offer: no SDP on the INVITE");
 
@@ -182,7 +172,6 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
     survivor.simulate_peer_removed(&pri_ord);
     fh.advance(Duration::from_millis(300)).await;
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
-
 
     // The §3 ladder repeats the still-un-PRACKed provisional at T1 (500 ms), so
     // the replication window above let exactly one rung fire. Absorb it here —
@@ -275,24 +264,17 @@ async fn prack_naming_an_unshown_rseq_after_takeover_draws_481() {
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
 
-    let mut call = alice
-        .invite(&bob)
-        .with_header("Supported", "100rel")
-        .through(proxy.addr())
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, _bak_ord) = worker_ordinals(uas.request());
     let (primary, survivor): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
@@ -409,24 +391,17 @@ async fn non_2xx_b_leg_final_after_a_takeover_reaches_the_caller_and_acks_the_ca
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
 
-    let mut call = alice
-        .invite(&bob)
-        .with_header("Supported", "100rel")
-        .through(proxy.addr())
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, _bak_ord) = worker_ordinals(uas.request());
     // The b-leg INVITE as the CALLEE sees it — the transaction his ACK must name.
@@ -532,7 +507,6 @@ async fn non_2xx_b_leg_final_after_a_takeover_reaches_the_caller_and_acks_the_ca
     drop(proxy);
 }
 
-
 /// The SURVIVOR's non-2xx final is answered by an a-leg server transaction it
 /// never received the INVITE of: its Timer G re-sends the final when the first
 /// copy is lost, and the caller's RFC 3261 §17.1.1.3 ACK is relayed onward to
@@ -553,8 +527,7 @@ async fn the_callers_ack_for_a_post_takeover_reject_reaches_the_survivor_that_se
             "alice",
             ALICE,
             Arc::new(move |bytes: &[u8], _src, _depth| {
-                if bytes.starts_with(b"SIP/2.0 486")
-                    && counter.fetch_add(1, Ordering::SeqCst) == 0
+                if bytes.starts_with(b"SIP/2.0 486") && counter.fetch_add(1, Ordering::SeqCst) == 0
                 {
                     return PreIngressAction::Drop;
                 }
@@ -564,24 +537,17 @@ async fn the_callers_ack_for_a_post_takeover_reject_reaches_the_survivor_that_se
         .await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
 
-    let mut call = alice
-        .invite(&bob)
-        .with_header("Supported", "100rel")
-        .through(proxy.addr())
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, _bak_ord) = worker_ordinals(uas.request());
     // The b-leg INVITE as the CALLEE sees it — the transaction his ACK must name.
@@ -762,24 +728,17 @@ async fn a_lost_takeover_ack_is_resent_when_the_callee_retransmits_its_final() {
         )
         .await;
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let mut w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let mut w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let mut w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let mut w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
 
-    let mut call = alice
-        .invite(&bob)
-        .with_header("Supported", "100rel")
-        .through(proxy.addr())
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, _bak_ord) = worker_ordinals(uas.request());
     // The b-leg INVITE as the CALLEE sees it — the transaction his ACK must name.

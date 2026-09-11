@@ -162,11 +162,7 @@ impl ReplicatingCallStore {
         if self.is_expired(call_ref) {
             return None;
         }
-        self.meta
-            .lock()
-            .unwrap()
-            .get(call_ref)
-            .map(|m| (m.meta.call_gen, m.meta.call_bgen))
+        self.meta.lock().unwrap().get(call_ref).map(|m| (m.meta.call_gen, m.meta.call_bgen))
     }
 
     /// The persisted receive-time clock-skew offset for a callRef
@@ -251,8 +247,7 @@ impl ReplicatingCallStore {
     pub fn meta_counts(&self) -> (u64, u64) {
         let meta = self.meta.lock().unwrap();
         let total = meta.len() as u64;
-        let backup =
-            meta.values().filter(|m| m.role == PartitionRole::Backup).count() as u64;
+        let backup = meta.values().filter(|m| m.role == PartitionRole::Backup).count() as u64;
         (total, backup)
     }
 
@@ -280,26 +275,14 @@ impl ReplicatingCallStore {
     /// meta is removed in the same step, so this is the LAST moment the index
     /// keys are recoverable. Leaving them stranded both leaked the index map and
     /// let `resolve_from_replica_index` resolve a takeover to a dead callRef.
-    async fn evict_if_expired(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-    ) -> bool {
+    async fn evict_if_expired(&self, role: PartitionRole, primary: &str, call_ref: &str) -> bool {
         if !self.is_expired(call_ref) {
             return false;
         }
-        let indexes = self
-            .meta
-            .lock()
-            .unwrap()
-            .remove(call_ref)
-            .map(|m| m.meta.indexes)
-            .unwrap_or_default();
-        let _ = self
-            .inner
-            .delete_call(role, primary, call_ref, &indexes, &PutOpts::default())
-            .await;
+        let indexes =
+            self.meta.lock().unwrap().remove(call_ref).map(|m| m.meta.indexes).unwrap_or_default();
+        let _ =
+            self.inner.delete_call(role, primary, call_ref, &indexes, &PutOpts::default()).await;
         true
     }
 
@@ -440,16 +423,11 @@ impl CallStore for ReplicatingCallStore {
         indexes: &[String],
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
-        self.inner
-            .delete_call(role, primary, call_ref, indexes, opts)
-            .await?;
+        self.inner.delete_call(role, primary, call_ref, indexes, opts).await?;
         self.meta.lock().unwrap().remove(call_ref);
         // Tombstone the ref so a late reverse-flush cannot resurrect it (see
         // `put_call`); pruned in `reap`.
-        self.tombstones
-            .lock()
-            .unwrap()
-            .insert(call_ref.to_string(), self.clock.now_ms());
+        self.tombstones.lock().unwrap().insert(call_ref.to_string(), self.clock.now_ms());
 
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);

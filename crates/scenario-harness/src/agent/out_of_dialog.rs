@@ -9,15 +9,15 @@ use sip_message::generators::{
 };
 use sip_message::header::{HeaderName, MediaType};
 use sip_message::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate, SipHeader, SipMessage,
-    SipResponse,
+    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MessageTemplate,
+    SipHeader, SipMessage, SipResponse,
 };
 
 use super::client_txn::recv_response_raw;
 use super::dialog::InDialogTxn;
 use super::step::{unwrap_step, StepError};
-use super::Agent;
 use super::ua::{from_of, media_type, to_of, uri_of};
+use super::Agent;
 use crate::realcall::auth::{parse_challenge, ChallengeResponder};
 
 /// Builder for a generic out-of-dialog request (any [`OutOfDialogMethod`]) —
@@ -83,7 +83,8 @@ impl<'a> OutOfDialogRequest<'a> {
 
     /// Attach an arbitrary extra header. Repeatable; order preserved.
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
-        self.extra_headers.push(SipHeader { name: name.to_string().into(), value: value.to_string().into() });
+        self.extra_headers
+            .push(SipHeader { name: name.to_string().into(), value: value.to_string().into() });
         self
     }
 
@@ -109,8 +110,7 @@ impl<'a> OutOfDialogRequest<'a> {
         // A replay emits the header block it captured: a template that states a
         // media type in ANY spelling keeps that line and the stack adds none, and
         // one that states none must not gain the stack's default.
-        self.suppress_default_ct =
-            !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
+        self.suppress_default_ct = !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
         // Append AFTER any prior `with_header` entries — never drop them.
         self.extra_headers.extend(frozen);
         self.body = Some(tmpl.body().to_vec());
@@ -154,9 +154,9 @@ impl<'a> OutOfDialogRequest<'a> {
         let caller = self.caller;
         let peer = self.peer;
         let wire_dst = self.wire_dst.unwrap_or(peer.addr);
-        let request_uri = self
-            .request_uri
-            .unwrap_or_else(|| format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port()));
+        let request_uri = self.request_uri.unwrap_or_else(|| {
+            format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port())
+        });
         let opts = GenerateOutOfDialogRequestOpts {
             request_uri: Some(uri_of(&request_uri)),
             call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
@@ -220,10 +220,9 @@ impl<'a> OutOfDialogRequest<'a> {
         let caller = self.caller.clone();
         let peer = self.peer;
         let wire_dst = self.wire_dst.unwrap_or(peer.addr);
-        let request_uri = self
-            .request_uri
-            .clone()
-            .unwrap_or_else(|| format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port()));
+        let request_uri = self.request_uri.clone().unwrap_or_else(|| {
+            format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port())
+        });
         let mut opts = GenerateOutOfDialogRequestOpts {
             request_uri: Some(uri_of(&request_uri)),
             call_id: format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()),
@@ -283,8 +282,7 @@ impl<'a> OutOfDialogRequest<'a> {
                 header_value: String::new(),
             });
             // Responder declines → surface the challenge as a plain deviation.
-            let Some(credential) =
-                responder.respond(&challenge, method.as_str(), &request_uri)
+            let Some(credential) = responder.respond(&challenge, method.as_str(), &request_uri)
             else {
                 return Err(StepError::WrongStatus {
                     who: caller.name.clone(),

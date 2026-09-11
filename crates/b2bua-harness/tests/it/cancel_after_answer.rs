@@ -36,7 +36,8 @@ async fn cancel_after_answer_does_not_tear_down() {
     );
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
     // ── establish the call (INVITE → 180 → 200 → ACK) ────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -69,7 +70,10 @@ async fn cancel_after_answer_does_not_tear_down() {
     let kinds: Vec<call::CdrEventType> = cdr.events.iter().map(|e| e.event_type).collect();
     assert!(kinds.contains(&call::CdrEventType::Answer), "answered: {kinds:?}");
     assert!(kinds.contains(&call::CdrEventType::Bye), "byed: {kinds:?}");
-    assert!(!kinds.contains(&call::CdrEventType::Cancel), "no cancel event — late CANCEL was absorbed: {kinds:?}");
+    assert!(
+        !kinds.contains(&call::CdrEventType::Cancel),
+        "no cancel event — late CANCEL was absorbed: {kinds:?}"
+    );
 
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();

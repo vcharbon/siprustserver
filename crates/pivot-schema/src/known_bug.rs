@@ -20,7 +20,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// One named SUT defect a lane declares.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum KnownBug {
     /// The SUT relays a provisional response without applying the 18x rewrite
@@ -34,7 +36,9 @@ pub enum KnownBug {
 impl fmt::Display for KnownBug {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            KnownBug::ProvisionalRewriteNotApplied => f.write_str("provisional-rewrite-not-applied"),
+            KnownBug::ProvisionalRewriteNotApplied => {
+                f.write_str("provisional-rewrite-not-applied")
+            }
         }
     }
 }

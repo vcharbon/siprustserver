@@ -10,10 +10,8 @@ use super::leg::{find_b_leg, find_dialog_by_to_tag, is_adopted};
 /// Add a tag mapping keyed by `(bLegId, bTag)`. A duplicate key leaves the call
 /// unchanged (the tagMap is a dialog-identity index).
 pub fn add_tag_mapping(mut call: Call, mapping: TagMapping) -> Call {
-    let exists = call
-        .tag_map
-        .iter()
-        .any(|m| m.b_leg_id == mapping.b_leg_id && m.b_tag == mapping.b_tag);
+    let exists =
+        call.tag_map.iter().any(|m| m.b_leg_id == mapping.b_leg_id && m.b_tag == mapping.b_tag);
     if !exists {
         call.tag_map.push(mapping);
     }
@@ -27,9 +25,7 @@ pub fn find_by_a_tag<'a>(call: &'a Call, a_tag: &str) -> Option<&'a TagMapping> 
 
 /// Look up a mapping by the B-leg's real tag.
 pub fn find_by_b_tag<'a>(call: &'a Call, b_leg_id: &str, b_tag: &str) -> Option<&'a TagMapping> {
-    call.tag_map
-        .iter()
-        .find(|m| m.b_leg_id == b_leg_id && m.b_tag == b_tag)
+    call.tag_map.iter().find(|m| m.b_leg_id == b_leg_id && m.b_tag == b_tag)
 }
 
 // ── Active peer (INAP-style split/merge) ────────────────────────────────────
@@ -48,10 +44,7 @@ pub fn get_peer<'a>(call: &'a Call, leg_id: &str) -> Option<&'a str> {
 
 /// Connect two legs (INAP MergeCallSegments) — replaces any existing pairing.
 pub fn merge_leg(mut call: Call, leg_a: impl Into<String>, leg_b: impl Into<String>) -> Call {
-    call.active_peer = Some(ActivePeer {
-        leg_a: leg_a.into(),
-        leg_b: leg_b.into(),
-    });
+    call.active_peer = Some(ActivePeer { leg_a: leg_a.into(), leg_b: leg_b.into() });
     call
 }
 
@@ -156,11 +149,7 @@ pub fn relay_peer_dialog<'a>(
 ) -> Option<(&'a Leg, &'a Dialog)> {
     let (peer, fork_tag) = resolve_relay_peer(call, source_leg_id, request_to_tag);
     let peer_id = peer?;
-    let leg = if peer_id == call.a_leg.leg_id {
-        &call.a_leg
-    } else {
-        find_b_leg(call, &peer_id)?
-    };
+    let leg = if peer_id == call.a_leg.leg_id { &call.a_leg } else { find_b_leg(call, &peer_id)? };
     let dialog = fork_tag
         .as_deref()
         .and_then(|tt| find_dialog_by_to_tag(leg, tt))

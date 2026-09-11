@@ -170,7 +170,9 @@ impl FromStr for LaneVerdict {
             other => match other.strip_prefix("blocked:") {
                 Some("") => Err("lane verdict 'blocked:' states no reason".into()),
                 Some(reason) => Ok(LaneVerdict::Blocked(reason.to_string())),
-                None => Err(format!("lane verdict {other:?} is neither 'ok' nor 'blocked:<reason>'")),
+                None => {
+                    Err(format!("lane verdict {other:?} is neither 'ok' nor 'blocked:<reason>'"))
+                }
             },
         }
     }

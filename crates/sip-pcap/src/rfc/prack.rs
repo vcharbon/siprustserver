@@ -206,8 +206,7 @@ mod tests {
     /// undecidable: the unreadable one may be exactly the missing answer.
     #[test]
     fn an_unreadable_rack_leaves_the_emitters_obligations_undecided() {
-        let scanned =
-            scan(&doc_of(ladder("b1", Some("RAck: not-a-number\r\n"), answered("b1"))));
+        let scanned = scan(&doc_of(ladder("b1", Some("RAck: not-a-number\r\n"), answered("b1"))));
         assert!(scanned.hits.is_empty(), "the PRACK might be the one: {:?}", scanned.hits);
         let p = scanned.population["unacked-reliable-provisional"];
         assert_eq!((p.occasions, p.decided), (1, 0));
@@ -225,7 +224,12 @@ mod tests {
                 A,
                 response_hdr(180, "Ringing", 1, "INVITE", "m1", "fa", Some("tb"), REL_180),
             ),
-            dg(1_300_000, A, B, request_hdr("PRACK", 2, "m1", "fa", Some("tb"), "RAck: 1 1 INVITE\r\n")),
+            dg(
+                1_300_000,
+                A,
+                B,
+                request_hdr("PRACK", 2, "m1", "fa", Some("tb"), "RAck: 1 1 INVITE\r\n"),
+            ),
             dg(1_350_000, B, A, response(200, "OK", 2, "PRACK", "m1", "fa", Some("tb"))),
             dg(
                 2_000_000,
@@ -295,7 +299,12 @@ mod tests {
             dg(1_000, P, A, response(100, "Trying", 1, "INVITE", call, "fa", None)),
             dg(53_000, P, B, request_hdr("INVITE", 1, call, "fa", None, OFFER)),
             dg(56_000, B, P, response(100, "Trying", 1, "INVITE", call, "fa", None)),
-            dg(280_000, B, P, response_hdr(180, "Ringing", 1, "INVITE", call, "fa", Some("tb"), rel)),
+            dg(
+                280_000,
+                B,
+                P,
+                response_hdr(180, "Ringing", 1, "INVITE", call, "fa", Some("tb"), rel),
+            ),
         ];
         if prack {
             out.push(dg(
@@ -305,7 +314,12 @@ mod tests {
                 request_hdr("PRACK", 2, call, "fa", Some("tb"), "RAck: 887672120 1 INVITE\r\n"),
             ));
         }
-        out.push(dg(297_000, P, A, response_hdr(180, "Ringing", 1, "INVITE", call, "fa", Some("tb"), rel)));
+        out.push(dg(
+            297_000,
+            P,
+            A,
+            response_hdr(180, "Ringing", 1, "INVITE", call, "fa", Some("tb"), rel),
+        ));
         if prack {
             out.push(dg(343_000, B, A, response(200, "OK", 2, "PRACK", call, "fa", Some("tb"))));
         }
@@ -360,7 +374,12 @@ mod tests {
         let mut out = vec![
             dg(0, P, B, request_hdr("INVITE", 1, call, "fa", None, OFFER)),
             dg(1_000, B, P, response(100, "Trying", 1, "INVITE", call, "fa", None)),
-            dg(330_000, B, P, response_hdr(180, "Ringing", 1, "INVITE", call, "fa", Some("tb"), rel)),
+            dg(
+                330_000,
+                B,
+                P,
+                response_hdr(180, "Ringing", 1, "INVITE", call, "fa", Some("tb"), rel),
+            ),
         ];
         if prack {
             out.push(dg(
@@ -411,10 +430,25 @@ mod tests {
         let rel = "Require: 100rel\r\nRSeq: 1\r\n";
         let hits = detect(&doc_of(vec![
             dg(1_000_000, A, B, request_hdr("INVITE", 1, "f1", "fa", None, OFFER)),
-            dg(1_200_000, B, A, response_hdr(183, "Progress", 1, "INVITE", "f1", "fa", Some("t1"), rel)),
-            dg(1_300_000, A, B, request_hdr("PRACK", 2, "f1", "fa", Some("t1"), "RAck: 1 1 INVITE\r\n")),
+            dg(
+                1_200_000,
+                B,
+                A,
+                response_hdr(183, "Progress", 1, "INVITE", "f1", "fa", Some("t1"), rel),
+            ),
+            dg(
+                1_300_000,
+                A,
+                B,
+                request_hdr("PRACK", 2, "f1", "fa", Some("t1"), "RAck: 1 1 INVITE\r\n"),
+            ),
             dg(1_350_000, B, A, response(200, "OK", 2, "PRACK", "f1", "fa", Some("t1"))),
-            dg(1_400_000, FORK, A, response_hdr(183, "Progress", 1, "INVITE", "f1", "fa", Some("t2"), rel)),
+            dg(
+                1_400_000,
+                FORK,
+                A,
+                response_hdr(183, "Progress", 1, "INVITE", "f1", "fa", Some("t2"), rel),
+            ),
             dg(10_000_000, B, A, response(200, "OK", 1, "INVITE", "f1", "fa", Some("t1"))),
             dg(10_100_000, A, B, request("ACK", 1, "f1", "fa", Some("t1"))),
         ]));

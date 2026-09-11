@@ -157,8 +157,7 @@ pub enum PreIngressAction {
 /// Arrival-time filter installed at `bind_udp`. Receives the raw bytes, the
 /// source address, and the current queue depth. `Arc<dyn Fn>` so it clones
 /// into the simulated routing table and recorded summaries.
-pub type PreIngressHook =
-    Arc<dyn Fn(&[u8], SocketAddr, usize) -> PreIngressAction + Send + Sync>;
+pub type PreIngressHook = Arc<dyn Fn(&[u8], SocketAddr, usize) -> PreIngressAction + Send + Sync>;
 
 /// Options for `bind_udp` (port of `BindUdpOpts`).
 #[derive(Clone)]

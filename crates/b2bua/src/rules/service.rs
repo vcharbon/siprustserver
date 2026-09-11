@@ -20,8 +20,8 @@ use super::model::{RuleCall, RuleContext};
 // Re-export the authoring registry types so `crate::rules::{ServiceDef,
 // ServiceSeed}` and the macros' `$crate::rules::…` references resolve identically
 // whether the rule was authored in-tree or out-of-crate.
-pub use b2bua_sdk::service::{ServiceDef, ServiceSeed, Terminal};
 use b2bua_sdk::model::RuleDefinition;
+pub use b2bua_sdk::service::{ServiceDef, ServiceSeed, Terminal};
 
 /// The engine's rule list: every service's state-gated rules (SERVICE_LAYER,
 /// ranked above core) followed by the `core` defaults. With an empty service
@@ -53,10 +53,7 @@ pub fn seed_services(
             continue;
         };
         // 1) seed the cursor (the service id is its machine id),
-        result
-            .call
-            .sm_cursors
-            .insert(MachineId::new(def.id), seed.initial_state);
+        result.call.sm_cursors.insert(MachineId::new(def.id), seed.initial_state);
         // 2) install the data backing,
         (seed.data_write)(&mut result.call);
         // 3) fold the initial actions through the executor (no back-door write).

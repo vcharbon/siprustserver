@@ -58,7 +58,8 @@ async fn established_update_no_sdp_b_to_a() {
     let h = Harness::new("upd-established-nosdp-b2a");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5070).start(&h, "b2bua", "127.0.0.1:5080").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5070).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -85,11 +86,18 @@ async fn established_update_no_sdp_b_to_a() {
 /// Plain 180 (unreliable) → early dialog. Alice sends an early-dialog UPDATE
 /// (RFC 3311 §5.1) that must relay to bob even though no PRACK ever happened.
 /// Runs with and without SDP.
-async fn early_not_pracked_a_to_b(name: &str, alice_port: &str, bob_port_n: u16, b2bua_port: &str, with_sdp: bool) {
+async fn early_not_pracked_a_to_b(
+    name: &str,
+    alice_port: &str,
+    bob_port_n: u16,
+    b2bua_port: &str,
+    with_sdp: bool,
+) {
     let h = Harness::new(name);
     let alice = h.agent("alice", alice_port).await;
     let bob = h.agent("bob", &format!("127.0.0.1:{bob_port_n}")).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", bob_port_n).start(&h, "b2bua", b2bua_port).await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", bob_port_n).start(&h, "b2bua", b2bua_port).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -128,12 +136,26 @@ async fn early_not_pracked_a_to_b(name: &str, alice_port: &str, bob_port_n: u16,
 
 #[tokio::test]
 async fn early_not_pracked_update_a_to_b_with_sdp() {
-    early_not_pracked_a_to_b("upd-early-nopr-a2b-sdp", "127.0.0.1:5061", 5071, "127.0.0.1:5081", true).await;
+    early_not_pracked_a_to_b(
+        "upd-early-nopr-a2b-sdp",
+        "127.0.0.1:5061",
+        5071,
+        "127.0.0.1:5081",
+        true,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn early_not_pracked_update_a_to_b_no_sdp() {
-    early_not_pracked_a_to_b("upd-early-nopr-a2b-nosdp", "127.0.0.1:5062", 5072, "127.0.0.1:5082", false).await;
+    early_not_pracked_a_to_b(
+        "upd-early-nopr-a2b-nosdp",
+        "127.0.0.1:5062",
+        5072,
+        "127.0.0.1:5082",
+        false,
+    )
+    .await;
 }
 
 // ── Early dialog, NOT PRACKed: UPDATE B→A (callee early-media adjust) ─────────
@@ -146,7 +168,8 @@ async fn early_not_pracked_update_b_to_a() {
     let h = Harness::new("upd-early-nopr-b2a");
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -184,7 +207,8 @@ async fn early_pracked_update_no_sdp_a_to_b() {
     let h = Harness::new("upd-early-pracked-nosdp-a2b");
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let bob = h.agent("bob", "127.0.0.1:5074").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5074).start(&h, "b2bua", "127.0.0.1:5084").await;
 
     let mut call = alice
         .invite(&bob)
@@ -235,7 +259,8 @@ async fn early_update_forking_no_sdp_second_fork() {
     let h = Harness::with_transit_delay("upd-fork-nosdp-f2", 1);
     let alice = h.agent("alice", "127.0.0.1:5065").await;
     let bob = h.agent("bob", "127.0.0.1:5075").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5075).start(&h, "b2bua", "127.0.0.1:5085").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -281,7 +306,8 @@ async fn early_update_forking_b_to_a_second_fork() {
     let h = Harness::with_transit_delay("upd-fork-b2a-f2", 1);
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -330,7 +356,8 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     let h = Harness::with_transit_delay("upd-worst-prack-fork-mixed", 1);
     let alice = h.agent("alice", "127.0.0.1:5767").await;
     let bob = h.agent("bob", "127.0.0.1:5777").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5777).start(&h, "b2bua", "127.0.0.1:5787").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5777).start(&h, "b2bua", "127.0.0.1:5787").await;
 
     let mut call = alice
         .invite(&bob)
@@ -345,7 +372,12 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     uas.respond(183, "Session Progress").with_to_tag("bf1").reliable(1).with_sdp(ANSWER).await;
     let p1 = call.expect(183).await;
     let f1 = p1.to().tag().expect("fork1 a-tag").to_string();
-    let mut prack1 = call.send_request(InDialogMethod::Prack).with_to_tag(&f1).with_rack(&format!("{} 1 INVITE", rseq_of(&p1))).send().await;
+    let mut prack1 = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&f1)
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p1)))
+        .send()
+        .await;
     bob.receive("PRACK").await.respond(200, "OK").await;
     prack1.expect(200).await;
 
@@ -354,20 +386,36 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     let p2 = call.expect(183).await;
     let f2 = p2.to().tag().expect("fork2 a-tag").to_string();
     assert_ne!(f1, f2);
-    let mut prack2 = call.send_request(InDialogMethod::Prack).with_to_tag(&f2).with_rack(&format!("{} 1 INVITE", rseq_of(&p2))).send().await;
+    let mut prack2 = call
+        .send_request(InDialogMethod::Prack)
+        .with_to_tag(&f2)
+        .with_rack(&format!("{} 1 INVITE", rseq_of(&p2)))
+        .send()
+        .await;
     let mut prack2_at_bob = bob.receive("PRACK").await;
     assert_eq!(prack2_at_bob.request().to().tag(), Some("bf2"), "fork2 PRACK targets fork2");
     prack2_at_bob.respond(200, "OK").await;
     prack2.expect(200).await;
 
     // ── SDP re-offer UPDATE on fork 2 (hold) ──
-    let mut u2 = call.send_request(InDialogMethod::Update).with_to_tag(&f2).with_sdp(REOFFER_HOLD).send().await;
+    let mut u2 = call
+        .send_request(InDialogMethod::Update)
+        .with_to_tag(&f2)
+        .with_sdp(REOFFER_HOLD)
+        .send()
+        .await;
     let mut u2_at_bob = bob.receive("UPDATE").await;
     assert_eq!(u2_at_bob.request().to().tag(), Some("bf2"), "SDP UPDATE rode fork 2");
-    assert!(String::from_utf8_lossy(u2_at_bob.request().body()).contains("a=sendonly"), "hold re-offer relayed to bob");
+    assert!(
+        String::from_utf8_lossy(u2_at_bob.request().body()).contains("a=sendonly"),
+        "hold re-offer relayed to bob"
+    );
     u2_at_bob.respond(200, "OK").with_sdp(REANSWER_HELD).await;
     let u2_ok = u2.expect(200).await;
-    assert!(String::from_utf8_lossy(u2_ok.body()).contains("a=recvonly"), "held answer relayed back to alice");
+    assert!(
+        String::from_utf8_lossy(u2_ok.body()).contains("a=recvonly"),
+        "held answer relayed back to alice"
+    );
 
     // ── Bodyless refresh UPDATE on fork 1 (distinct fork, distinct CSeq) ──
     let mut u1 = call.send_request(InDialogMethod::Update).with_to_tag(&f1).send().await;
@@ -408,9 +456,10 @@ async fn fake_prack_early_update_with_offer_relays_to_bob() {
     let h = Harness::with_transit_delay("upd-fakeprack-a-offer", 1);
     let alice = h.agent("alice", "127.0.0.1:5761").await;
     let bob = h.agent("bob", "127.0.0.1:5771").await;
-    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5771, RelayFirst18xStrategy::FakePrack)
-        .start(&h, "b2bua", "127.0.0.1:5781")
-        .await;
+    let b2bua =
+        B2buaSut::route_all_to_with_18x("127.0.0.1", 5771, RelayFirst18xStrategy::FakePrack)
+            .start(&h, "b2bua", "127.0.0.1:5781")
+            .await;
 
     let mut call = alice
         .invite(&bob)
@@ -468,9 +517,10 @@ async fn fake_prack_early_bodyless_update_answered_locally() {
     let h = Harness::with_transit_delay("upd-fakeprack-a-bodyless", 1);
     let alice = h.agent("alice", "127.0.0.1:5762").await;
     let bob = h.agent("bob", "127.0.0.1:5772").await;
-    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5772, RelayFirst18xStrategy::FakePrack)
-        .start(&h, "b2bua", "127.0.0.1:5782")
-        .await;
+    let b2bua =
+        B2buaSut::route_all_to_with_18x("127.0.0.1", 5772, RelayFirst18xStrategy::FakePrack)
+            .start(&h, "b2bua", "127.0.0.1:5782")
+            .await;
 
     let mut call = alice
         .invite(&bob)
@@ -513,9 +563,10 @@ async fn fake_prack_confirmed_bodyless_update_from_b_relays_to_alice() {
     let h = Harness::with_transit_delay("upd-fakeprack-b-confirmed-nosdp", 1);
     let alice = h.agent("alice", "127.0.0.1:5763").await;
     let bob = h.agent("bob", "127.0.0.1:5773").await;
-    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5773, RelayFirst18xStrategy::FakePrack)
-        .start(&h, "b2bua", "127.0.0.1:5783")
-        .await;
+    let b2bua =
+        B2buaSut::route_all_to_with_18x("127.0.0.1", 5773, RelayFirst18xStrategy::FakePrack)
+            .start(&h, "b2bua", "127.0.0.1:5783")
+            .await;
 
     let mut call = alice
         .invite(&bob)
@@ -558,9 +609,10 @@ async fn fake_prack_confirmed_update_with_offer_from_b_relays_to_alice() {
     let h = Harness::with_transit_delay("upd-fakeprack-b-confirmed-sdp", 1);
     let alice = h.agent("alice", "127.0.0.1:5764").await;
     let bob = h.agent("bob", "127.0.0.1:5774").await;
-    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5774, RelayFirst18xStrategy::FakePrack)
-        .start(&h, "b2bua", "127.0.0.1:5784")
-        .await;
+    let b2bua =
+        B2buaSut::route_all_to_with_18x("127.0.0.1", 5774, RelayFirst18xStrategy::FakePrack)
+            .start(&h, "b2bua", "127.0.0.1:5784")
+            .await;
 
     let mut call = alice
         .invite(&bob)

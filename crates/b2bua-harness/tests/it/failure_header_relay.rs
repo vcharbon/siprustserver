@@ -72,14 +72,23 @@ async fn a_failing_finals_headers_ride_the_decision_authored_final() {
         "update_headers": {"Reason": "Q.850;cause=34"}
     }));
 
-    let mut call =
-        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
     s.bob
         .receive("INVITE")
         .await
         .respond(486, "Busy Here")
         .with_header("Warning", "399 gw.example \"Refused by ISUP\"")
-        .with_header("P-Charging-Vector", "icid-value=\"cv-bleg-1\";orig-ioi=op.example;term-ioi=term.example")
+        .with_header(
+            "P-Charging-Vector",
+            "icid-value=\"cv-bleg-1\";orig-ioi=op.example;term-ioi=term.example",
+        )
         .with_header("P-Vendor-Thing", "annotation")
         .with_header("Allow", "INVITE, ACK, CANCEL, BYE")
         .await;
@@ -89,14 +98,22 @@ async fn a_failing_finals_headers_ride_the_decision_authored_final() {
     let raw = |name: &str| -> Vec<String> {
         resp.raw(HeaderName::from(name)).map(str::to_string).collect()
     };
-    assert_eq!(raw("Warning"), ["399 gw.example \"Refused by ISUP\""], "the callee's Warning reaches the caller");
+    assert_eq!(
+        raw("Warning"),
+        ["399 gw.example \"Refused by ISUP\""],
+        "the callee's Warning reaches the caller"
+    );
     assert_eq!(
         raw("P-Charging-Vector"),
         ["icid-value=\"cv-bleg-1\";orig-ioi=op.example;term-ioi=term.example"],
         "the charging correlation survives the refusal"
     );
     assert_eq!(raw("P-Vendor-Thing"), ["annotation"], "the vendor annotation reaches the caller");
-    assert_eq!(raw("Allow"), ["INVITE, ACK, CANCEL, BYE"], "the refusing party's advertisement reaches the caller");
+    assert_eq!(
+        raw("Allow"),
+        ["INVITE, ACK, CANCEL, BYE"],
+        "the refusing party's advertisement reaches the caller"
+    );
     assert_eq!(raw("Reason"), ["Q.850;cause=34"], "the decision's own statement rides too");
 
     settle_until(|| s.b2bua.active_calls() == 0).await;
@@ -118,8 +135,14 @@ async fn a_decision_header_update_owns_the_name_it_states() {
         }
     }));
 
-    let mut call =
-        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
     s.bob
         .receive("INVITE")
         .await
@@ -139,8 +162,16 @@ async fn a_decision_header_update_owns_the_name_it_states() {
         ["399 plan.example \"authored by the plan\""],
         "the decision's set value stands alone — the relayed one folds under it"
     );
-    assert_eq!(raw("P-Charging-Vector"), Vec::<String>::new(), "the decision's removal wins over the relayed value");
-    assert_eq!(raw("P-Vendor-Thing"), ["annotation"], "a name the decision does not state still travels");
+    assert_eq!(
+        raw("P-Charging-Vector"),
+        Vec::<String>::new(),
+        "the decision's removal wins over the relayed value"
+    );
+    assert_eq!(
+        raw("P-Vendor-Thing"),
+        ["annotation"],
+        "a name the decision does not state still travels"
+    );
 
     settle_until(|| s.b2bua.active_calls() == 0).await;
     s.b2bua.assert_fully_reaped();
@@ -155,8 +186,14 @@ async fn the_resynthesized_relay_final_restates_the_callees_headers() {
     let s = plan_scene("failure-hdr-relay-final").await;
     let plan = plan(serde_json::json!({"action": "relay"}));
 
-    let mut call =
-        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
     s.bob
         .receive("INVITE")
         .await
@@ -188,8 +225,14 @@ async fn privacy_id_withholds_the_identity_the_failing_final_conceals() {
     let s = plan_scene("failure-hdr-privacy").await;
     let plan = plan(serde_json::json!({"action": "relay"}));
 
-    let mut call =
-        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
     s.bob
         .receive("INVITE")
         .await
@@ -230,8 +273,14 @@ async fn a_superseded_attempts_headers_do_not_answer_a_later_no_answer() {
         serde_json::json!({"action": "reject", "code": 480, "reason": "Temporarily Unavailable"}),
     );
 
-    let mut call =
-        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
     s.bob
         .receive("INVITE")
         .await
@@ -256,8 +305,16 @@ async fn a_superseded_attempts_headers_do_not_answer_a_later_no_answer() {
     let raw = |name: &str| -> Vec<String> {
         resp.raw(HeaderName::from(name)).map(str::to_string).collect()
     };
-    assert_eq!(raw("Warning"), Vec::<String>::new(), "the superseded attempt's Warning does not diagnose this failure");
-    assert_eq!(raw("Retry-After"), Vec::<String>::new(), "a stale Retry-After names a peer that was never contacted");
+    assert_eq!(
+        raw("Warning"),
+        Vec::<String>::new(),
+        "the superseded attempt's Warning does not diagnose this failure"
+    );
+    assert_eq!(
+        raw("Retry-After"),
+        Vec::<String>::new(),
+        "a stale Retry-After names a peer that was never contacted"
+    );
     assert_eq!(
         raw("P-Charging-Vector"),
         Vec::<String>::new(),
@@ -281,8 +338,14 @@ async fn a_plan_authored_redirect_carries_none_of_the_refusals_headers() {
         "contacts": [{"uri": "sip:backup@10.9.9.9:5062"}]
     }));
 
-    let mut call =
-        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
     s.bob
         .receive("INVITE")
         .await
@@ -332,11 +395,8 @@ async fn a_capacity_refusal_carries_none_of_the_failed_peers_headers() {
     let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr, server).await.unwrap();
-    let limiter: Arc<dyn CallLimiter> = Arc::new(HttpCallLimiter::new(
-        Arc::new(http.clone()),
-        laddr,
-        Duration::from_millis(150),
-    ));
+    let limiter: Arc<dyn CallLimiter> =
+        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_millis(150)));
     let s = B2buaScene::with_b2bua("failure-hdr-limiter-refusal", move |_bob_port| {
         B2buaSut::builder(Arc::new(ScriptedDecisionEngine::numbering_plan())).limiter(limiter)
     })
@@ -355,8 +415,14 @@ async fn a_capacity_refusal_carries_none_of_the_failed_peers_headers() {
     })
     .to_string();
 
-    let mut call =
-        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
     s.bob
         .receive("INVITE")
         .await
@@ -407,8 +473,14 @@ async fn the_setup_deadline_final_speaks_only_for_itself() {
     // plan — is what answers alice.
     let plan = reroute_plan(60, serde_json::json!({"action": "relay"}));
 
-    let mut call =
-        s.alice.invite(&s.bob).with_sdp(OFFER).with_header("X-Api-Call", &plan).through(s.b2bua.addr).send().await;
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .through(s.b2bua.addr)
+        .send()
+        .await;
     s.bob
         .receive("INVITE")
         .await
@@ -431,7 +503,11 @@ async fn the_setup_deadline_final_speaks_only_for_itself() {
     let raw = |name: &str| -> Vec<String> {
         resp.raw(HeaderName::from(name)).map(str::to_string).collect()
     };
-    assert_eq!(raw("Warning"), Vec::<String>::new(), "the refusing peer's Warning does not explain a setup deadline");
+    assert_eq!(
+        raw("Warning"),
+        Vec::<String>::new(),
+        "the refusing peer's Warning does not explain a setup deadline"
+    );
     assert_eq!(
         raw("P-Charging-Vector"),
         Vec::<String>::new(),

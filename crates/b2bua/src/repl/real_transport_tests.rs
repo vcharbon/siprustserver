@@ -26,7 +26,8 @@ use sip_clock::Clock;
 use tokio::sync::watch;
 
 use super::{
-    Changelog, FnPeerResolver, Puller, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor,
+    Changelog, FnPeerResolver, Puller, PullerConfig, ReplServer, ReplicatingCallStore,
+    ReplicationSupervisor,
 };
 use crate::metrics::B2buaMetrics;
 use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
@@ -61,11 +62,7 @@ fn loopback() -> SocketAddr {
 }
 
 fn fast_config() -> PullerConfig {
-    PullerConfig {
-        backoff_init_ms: 20,
-        backoff_max_ms: 200,
-        bootstrap_hard_timeout_ms: 2_000,
-    }
+    PullerConfig { backoff_init_ms: 20, backoff_max_ms: 200, bootstrap_hard_timeout_ms: 2_000 }
 }
 
 /// `Forward` flush opts: this node is the primary, `peer` backs it up.
@@ -88,10 +85,7 @@ fn src() -> SocketAddr {
 }
 
 fn config_for(ordinal: &str) -> B2buaConfig {
-    B2buaConfig {
-        self_ordinal: ordinal.into(),
-        ..Default::default()
-    }
+    B2buaConfig { self_ordinal: ordinal.into(), ..Default::default() }
 }
 
 /// A proxied INVITE carrying the `w_pri`/`w_bak` cookie, keyed by Call-ID so each
@@ -121,7 +115,8 @@ fn invite(pri: &str, bak: &str, cid: &str) -> SipRequest {
 /// timer-restore work per call without the timer firing (and tearing the call
 /// down) mid-measurement. Returns `(call_ref, encoded body)`.
 fn reclaim_body(primary: &str, backup: &str, cid: &str, clock: &Clock) -> (String, Vec<u8>) {
-    let mut call = build_initial_call(&invite(primary, backup, cid), src(), &config_for(primary), 0);
+    let mut call =
+        build_initial_call(&invite(primary, backup, cid), src(), &config_for(primary), 0);
     call.timers.push(TimerEntry {
         id: format!("keepalive-{cid}"),
         timer_type: TimerType::Keepalive,
@@ -147,10 +142,7 @@ async fn spawn_reclaimer_core(
     clock: &Clock,
 ) -> (B2buaCore, Arc<ReplicatingCallStore>) {
     let sip_net = RealSignalingNetwork::new();
-    let endpoint = sip_net
-        .bind_udp(BindUdpOpts::new(loopback(), 256))
-        .await
-        .expect("bind sip udp");
+    let endpoint = sip_net.bind_udp(BindUdpOpts::new(loopback(), 256)).await.expect("bind sip udp");
     let sip_port = endpoint.local_addr().port();
 
     // Fresh empty store at a higher incarnation gen (the rebooted node).
@@ -304,19 +296,11 @@ async fn tail_delivers_post_connect_mutation_over_real_tcp() {
     eventually("backup receives the post-connect call", || {
         let w1 = w1.clone();
         let call_ref = call_ref.clone();
-        async move {
-            w1.get_call(BAK, "w0", &call_ref)
-                .await
-                .unwrap()
-                .is_some()
-        }
+        async move { w1.get_call(BAK, "w0", &call_ref).await.unwrap().is_some() }
     })
     .await;
 
-    assert!(
-        metrics.repl_applied_sum() >= 1,
-        "puller applied the replicated entry"
-    );
+    assert!(metrics.repl_applied_sum() >= 1, "puller applied the replicated entry");
     assert_eq!(metrics.repl_backup_replicas(), 1, "one backup replica held");
     assert_eq!(
         w1.current_cv(BAK, "w0", &call_ref),
@@ -372,10 +356,7 @@ async fn tail_streams_successive_updates_over_real_tcp() {
 
     let body = w1.get_call(BAK, "w0", &call_ref).await.unwrap().unwrap();
     assert_eq!(&body[..], b"body-v4", "latest update body served");
-    assert!(
-        metrics.repl_applied_sum() >= 1,
-        "at least one apply recorded"
-    );
+    assert!(metrics.repl_applied_sum() >= 1, "at least one apply recorded");
     // Compaction: only one live replica for the ref despite four mutations.
     assert_eq!(metrics.repl_backup_replicas(), 1, "compacted to one live replica");
 }
@@ -427,10 +408,7 @@ async fn bootstrap_preseed_delivers_over_real_tcp() {
 
     let body = w1.get_call(PRI, "w1", &call_ref).await.unwrap().unwrap();
     assert_eq!(&body[..], b"reclaim-body", "pre-seed body round-trips");
-    assert!(
-        metrics.repl_applied_sum() >= 1,
-        "bootstrap pre-seed counted as applied"
-    );
+    assert!(metrics.repl_applied_sum() >= 1, "bootstrap pre-seed counted as applied");
 }
 
 // ---------------------------------------------------------------------------
@@ -453,9 +431,7 @@ async fn bidirectional_supervisor_replication_over_real_tcp() {
     // Address resolution: ordinal → the node's bound repl addr (the runner's
     // AddrResolver equivalent).
     let addrs: std::collections::HashMap<String, SocketAddr> =
-        [("w0".to_string(), w0_addr), ("w1".to_string(), w1_addr)]
-            .into_iter()
-            .collect();
+        [("w0".to_string(), w0_addr), ("w1".to_string(), w1_addr)].into_iter().collect();
     let resolve = {
         let addrs = addrs.clone();
         Arc::new(FnPeerResolver(move |peer: &Peer| *addrs.get(&peer.ordinal).unwrap()))
@@ -498,19 +474,35 @@ async fn bidirectional_supervisor_replication_over_real_tcp() {
     // changelog entry stays `Create`; an in-dialog UPDATE then bumps it to gen 2
     // and compacts the entry to `Update` before the peer necessarily drains.
     for i in 0..6 {
-        let (src, primary, peer) = if i % 2 == 0 {
-            (&w0, "w0", "w1")
-        } else {
-            (&w1, "w1", "w0")
-        };
+        let (src, primary, peer) = if i % 2 == 0 { (&w0, "w0", "w1") } else { (&w1, "w1", "w0") };
         let call_ref = format!("{primary}|burst-{i}|tag");
-        src.put_call(PRI, primary, &call_ref, format!("body-{i}-v1").into_bytes(), &[], 30_000, 1, 0, &forward_to(peer))
-            .await
-            .unwrap();
+        src.put_call(
+            PRI,
+            primary,
+            &call_ref,
+            format!("body-{i}-v1").into_bytes(),
+            &[],
+            30_000,
+            1,
+            0,
+            &forward_to(peer),
+        )
+        .await
+        .unwrap();
         // In-dialog re-INVITE/UPDATE — second authoritative mutation (gen 2).
-        src.put_call(PRI, primary, &call_ref, format!("body-{i}-v2").into_bytes(), &[], 30_000, 2, 0, &forward_to(peer))
-            .await
-            .unwrap();
+        src.put_call(
+            PRI,
+            primary,
+            &call_ref,
+            format!("body-{i}-v2").into_bytes(),
+            &[],
+            30_000,
+            2,
+            0,
+            &forward_to(peer),
+        )
+        .await
+        .unwrap();
     }
 
     // Every backed-up call must reach the peer at gen 2 (latest), on the right
@@ -611,11 +603,7 @@ async fn bootstrap_synchronises_above_5k_contexts_per_second_over_real_tcp() {
 
     // (a) Completeness: every context present, none lost to a watermark
     //     collision or a truncated stream.
-    assert_eq!(
-        w1.scan_call_refs(PRI, "w1").len(),
-        N,
-        "all {N} contexts re-hydrated into pri:w1"
-    );
+    assert_eq!(w1.scan_call_refs(PRI, "w1").len(), N, "all {N} contexts re-hydrated into pri:w1");
     assert!(
         metrics.repl_applied_sum() >= N as u64,
         "every context counted as applied ({} < {N})",
@@ -667,9 +655,19 @@ async fn reclaim_materialises_into_live_map_under_serving_load() {
     let mut refs = Vec::with_capacity(N);
     for i in 0..N {
         let (call_ref, body) = reclaim_body("w1", "w0", &format!("cid-{i}"), &clock);
-        w0.put_call(BAK, "w1", &call_ref, body, &[format!("idx-{i}")], 300_000, 1, 0, &PutOpts::default())
-            .await
-            .unwrap();
+        w0.put_call(
+            BAK,
+            "w1",
+            &call_ref,
+            body,
+            &[format!("idx-{i}")],
+            300_000,
+            1,
+            0,
+            &PutOpts::default(),
+        )
+        .await
+        .unwrap();
         refs.push(call_ref);
     }
 
@@ -1018,10 +1016,7 @@ async fn measure_bootstrap_latent(
     n: usize,
     send_cost: Duration,
 ) -> Duration {
-    let net = LatentNet {
-        inner: Arc::new(base.clone()),
-        send_cost,
-    };
+    let net = LatentNet { inner: Arc::new(base.clone()), send_cost };
     let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);
     let w0 = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone());
     let listener = net.listen(loopback()).await.unwrap();
@@ -1167,10 +1162,8 @@ async fn bootstrap_coalesces_into_few_network_rounds() {
     const N: usize = 2_000;
     let clock = Clock::test_at(0);
     let rounds = Arc::new(AtomicU64::new(0));
-    let net = CountingNet {
-        inner: Arc::new(RealReplicationNetwork::new()),
-        rounds: rounds.clone(),
-    };
+    let net =
+        CountingNet { inner: Arc::new(RealReplicationNetwork::new()), rounds: rounds.clone() };
 
     // Primary w0 holds N static bak:w1 bodies; serve over the counting net.
     let changelog = Changelog::new(1, clock.clone()).with_ttls(30_000, 300_000);

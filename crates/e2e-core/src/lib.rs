@@ -23,13 +23,15 @@ pub use checks::{Bindings, CheckVerdict};
 pub use egress::{
     ApiCall, ApiCallDestination, ApiCallRoute, CalleeTarget, EgressPolicy, EgressRewrite,
 };
-pub use result::{CampaignIndex, CellId, CellSummary, MediaRef, RunResult};
-pub use run::{CampaignResult, CampaignSpec, JobHandle, JobStatus, load_spec, run_blocking, spawn_job};
 pub use infra::{
     EndpointConfig, FakeLsbcB2bua, FakeRegisterProxy, InfraKind, InfraRuntime, InfraShape,
     RealLoopbackDirect,
 };
 pub use model::{Campaign, Check, CheckBlock, CheckOp, CheckSet, ModelError, TestCase};
+pub use result::{CampaignIndex, CellId, CellSummary, MediaRef, RunResult};
+pub use run::{
+    load_spec, run_blocking, spawn_job, CampaignResult, CampaignSpec, JobHandle, JobStatus,
+};
 pub use shape::{Anchor, CallflowShape, Input, MediaMode};
 pub use shapes::{
     BasicCall, BasicCallMedia, Rerouting, ReroutingPrack, ShapeEntry, TransferReferMedia,

@@ -513,8 +513,13 @@ impl TimerDelay {
 /// the deferred 18x/transfer service rules and is unused until they land.
 #[derive(Debug, Clone)]
 pub enum RuleAction {
-    RelayToPeer { transform: MessageTransform },
-    RelayToLeg { leg_id: String, transform: MessageTransform },
+    RelayToPeer {
+        transform: MessageTransform,
+    },
+    RelayToLeg {
+        leg_id: String,
+        transform: MessageTransform,
+    },
     Respond {
         status: u16,
         reason: String,
@@ -525,8 +530,14 @@ pub enum RuleAction {
     /// RFC 3261 §13.2.2.4 / RFC 3264 §4) — empty for the ordinary bare ACK.
     /// `content_type` defaults to `application/sdp` when a body is present and
     /// none is given; an empty ACK carries no body and no Content-Type.
-    AckLeg { leg_id: String, body: Vec<u8>, content_type: Option<String> },
-    ConfirmDialog { leg_id: String },
+    AckLeg {
+        leg_id: String,
+        body: Vec<u8>,
+        content_type: Option<String>,
+    },
+    ConfirmDialog {
+        leg_id: String,
+    },
     UpdateLegState {
         leg_id: String,
         state: LegState,
@@ -537,8 +548,13 @@ pub enum RuleAction {
         b_leg_id: String,
         b_tag: String,
     },
-    Merge { leg_a: String, leg_b: String },
-    Split { leg_id: String },
+    Merge {
+        leg_a: String,
+        leg_b: String,
+    },
+    Split {
+        leg_id: String,
+    },
     CreateLeg {
         destination: (String, u16),
         new_ruri: Option<String>,
@@ -560,8 +576,12 @@ pub enum RuleAction {
         /// leg is gated out of the generic relay-to-peer fallback.
         kind: Option<LegKind>,
     },
-    DestroyLeg { leg_id: String },
-    CancelLeg { leg_id: String },
+    DestroyLeg {
+        leg_id: String,
+    },
+    CancelLeg {
+        leg_id: String,
+    },
     /// CANCEL a relayed, still-unanswered **re-INVITE** client transaction on
     /// `leg_id`'s dialog (RFC 3261 §9.1) — transaction-scoped: no leg state or
     /// disposition change, the established dialog and the call stay up. Builds
@@ -571,19 +591,30 @@ pub enum RuleAction {
     /// peer's eventual final is resolved locally instead of relayed: the
     /// originator already holds its final — the txn layer's 487 to its own
     /// CANCEL here, this stack's reject under [`Self::RejectPendingReinvite`].
-    CancelPendingReinvite { leg_id: String, outbound_cseq: i64 },
+    CancelPendingReinvite {
+        leg_id: String,
+        outbound_cseq: i64,
+    },
     /// End a relayed re-INVITE still pending on `leg_id`'s dialog under
     /// `outbound_cseq` on BOTH faces, transaction-scoped: answer its
     /// originator with the locally authored `status` final, and CANCEL the
     /// relayed request toward its target as [`Self::CancelPendingReinvite`]
     /// does. Neither dialog moves (RFC 3261 §14.1) — RFC 3262 §3's give-up
     /// "reject the original request with a 5xx" on an in-dialog INVITE.
-    RejectPendingReinvite { leg_id: String, outbound_cseq: i64, status: u16, reason: String },
+    RejectPendingReinvite {
+        leg_id: String,
+        outbound_cseq: i64,
+        status: u16,
+        reason: String,
+    },
     /// Resolve a CANCELled relayed re-INVITE's final response locally: drop the
     /// cancelled pending-relay snapshot (`outbound_cseq`) from `leg_id`'s
     /// dialog. Never relayed — the txn layer answered the originator when the
     /// CANCEL matched.
-    ResolveCancelledReinvite { leg_id: String, outbound_cseq: i64 },
+    ResolveCancelledReinvite {
+        leg_id: String,
+        outbound_cseq: i64,
+    },
     /// Arm (or re-arm — same derived id supersedes) a per-call timer. The
     /// persisted id is `timer_type.timer_id(leg_id)`; a service arms its own
     /// watchdog with a [`TimerType::Service`] `(service_id, key)`.
@@ -600,10 +631,14 @@ pub enum RuleAction {
     /// Disarm a per-call timer by persisted id. Mint the id with
     /// [`TimerType::timer_id`] (or use [`RuleAction::cancel_timer`]) so it can
     /// never drift from the schedule recipe.
-    CancelTimer { id: String },
+    CancelTimer {
+        id: String,
+    },
     CancelAllTimers,
     TerminateCall,
-    BeginTermination { reason: Option<String> },
+    BeginTermination {
+        reason: Option<String>,
+    },
     TerminateLeg {
         leg_id: String,
         bye_disposition: Option<call::ByeDisposition>,
@@ -614,12 +649,17 @@ pub enum RuleAction {
         status_code: Option<i64>,
         reason: Option<String>,
     },
-    DeactivateRule { rule_id: String },
+    DeactivateRule {
+        rule_id: String,
+    },
     /// Move a machine's cursor (ADR-0016 X4): write `call.sm_cursors[machine] =
     /// to`. The sole writer of the cursor map. The legality of the resulting
     /// `(from, to)` edge against the emitting rule's declared `transitions` is
     /// checked in the executor (debug panic / release log-and-proceed).
-    SetState { machine: MachineId, to: StateLabel },
+    SetState {
+        machine: MachineId,
+        to: StateLabel,
+    },
     /// Deactivate a machine: remove its cursor from `call.sm_cursors` (ADR-0016
     /// X9). The declarative inverse of [`Self::SetState`] and the only other
     /// writer of the cursor map; a rule emits it to reach its machine's terminal
@@ -627,7 +667,9 @@ pub enum RuleAction {
     /// `SetState`, it is a cursor move ([`EffectKind::CursorMove`]), not a tracked
     /// side effect: the deactivation is drawn as the transition to `[*]`, declared
     /// via the rule's `transitions`, not its `effects`.
-    ClearState { machine: MachineId },
+    ClearState {
+        machine: MachineId,
+    },
     /// Originate an in-dialog request toward a leg's confirmed dialog. Method is
     /// restricted to the body-bearing/keepalive subset (OPTIONS / INFO / UPDATE /
     /// MESSAGE — plus BYE/INVITE/PRACK/NOTIFY for internal callers). `body` is an
@@ -688,7 +730,9 @@ pub enum RuleAction {
     },
     /// Stage `body` into `call.policy_update_body` so the response relay path
     /// substitutes it into the next relayed body (`fake-prack` 200-OK SDP).
-    SetPolicyUpdateBody { body: Vec<u8> },
+    SetPolicyUpdateBody {
+        body: Vec<u8>,
+    },
     /// Bare-180 downgrade relay (`relayFirst18xTo180`): mint an a-facing To-tag
     /// on the FIRST 18x (the executor owns the IdGen) — or reuse the stored one
     /// on a later 18x the `relay18x.messages` policy relays again (the caller
@@ -697,7 +741,10 @@ pub enum RuleAction {
     /// status value for `ONE_PER_VALUE` dedupe), and relay the current 1xx to
     /// the caller as a bare 180 (no body / Require / RSeq). The tag is the
     /// single source the relay path resolves via the tag map.
-    RelayFirstBare180 { leg_id: String, b_tag: String },
+    RelayFirstBare180 {
+        leg_id: String,
+        b_tag: String,
+    },
     // ── promote18xPemTo200 (SERVICE_LAYER) ──────────────────────────────────
     /// Originate a re-INVITE on `leg_id` (here always the a-leg) carrying `body`
     /// as the new offer plus `add_headers` (Allow/Supported), CSeq =
@@ -709,7 +756,9 @@ pub enum RuleAction {
         add_headers: Vec<Entry>,
     },
     /// Overwrite the per-call PEM runtime slice (`None` → pre-promotion state).
-    SetPromotePem { state: Option<call::PromotePemState> },
+    SetPromotePem {
+        state: Option<call::PromotePemState>,
+    },
     // ── referTransfer (SERVICE_LAYER) ───────────────────────────────────────
     /// Send a NOTIFY toward `leg_id`'s confirmed dialog carrying the REFER
     /// subscription state (`Event` + `Subscription-State` + sipfrag body). The
@@ -726,7 +775,9 @@ pub enum RuleAction {
     /// fire-and-forget effect carrying the request JSON. The router interpreter
     /// calls `decision.call_refer` then re-enters via a `refer-http-result`
     /// internal event.
-    ReferAsyncHttp { request: serde_json::Value },
+    ReferAsyncHttp {
+        request: serde_json::Value,
+    },
     /// The **generic, service-authorable** async-HTTP callback (the seam that
     /// generalizes [`ReferAsyncHttp`]/[`FailureAsyncHttp`]). A custom service
     /// emits this mid-dialog to POST/GET a logical adaptation endpoint with a
@@ -761,13 +812,17 @@ pub enum RuleAction {
     },
     /// Overwrite the per-call REFER transfer runtime slice (`None` clears it —
     /// the terminal path; mirrors `SetPromotePem`).
-    SetTransfer { state: Option<call::TransferState> },
+    SetTransfer {
+        state: Option<call::TransferState>,
+    },
     // ── b-leg failover (/call/failure) ───────────────────────────────────────
     /// Kick the async `/call/failure` decision: push a `FailureAsyncHttp`
     /// fire-and-forget effect carrying the request JSON. The router interpreter
     /// calls `decision.call_failure` then re-enters via a `call-failure-result`
     /// internal event.
-    FailureAsyncHttp { request: serde_json::Value },
+    FailureAsyncHttp {
+        request: serde_json::Value,
+    },
     // ── subscribed release events (call_release) ────────────────────────────
     /// Kick the async `call_release` consult for a **subscribed** internal
     /// release event (max-call-duration first): push a `ReleaseAsyncHttp`
@@ -779,34 +834,50 @@ pub enum RuleAction {
     /// (`release` → local teardown; `reroute` → the established-call reroute
     /// treatment). Engine error / timeout folds `release`, so local teardown
     /// stays the fail-safe.
-    ReleaseAsyncHttp { request: serde_json::Value },
+    ReleaseAsyncHttp {
+        request: serde_json::Value,
+    },
     /// Record the decision-declared release-event **subscriptions** on the
     /// call (replaces the previous set — the latest applied `Route` owns it).
     /// The async (re)route folds back through the rule layer, so this is how
     /// a failover/reroute route's `subscriptions` reach the replicated call
     /// (`apply_route` records the initial route's directly).
-    SetSubscriptions { events: Vec<call::ReleaseEventKind> },
+    SetSubscriptions {
+        events: Vec<call::ReleaseEventKind>,
+    },
     /// Overwrite the per-call established-call **reroute** runtime slice
     /// (`None` clears it — completion / rollback; mirrors [`Self::SetTransfer`]).
-    SetReroute { state: Option<call::RerouteState> },
+    SetReroute {
+        state: Option<call::RerouteState>,
+    },
     /// Overwrite the call's feature activations from a (re)route decision. The
     /// initial route applies features inside `apply_route`; the async failover
     /// route folds back through the rule layer, so this is how the reroute's
     /// features reach the call (failover/initial-route parity).
-    SetFeatures { features: FeatureActivations },
+    SetFeatures {
+        features: FeatureActivations,
+    },
     /// Merge per-service ext slices into `call.ext` (the failover-route
     /// counterpart of `apply_route`'s `service_ext` seeding). `null` values
     /// clear the slice, mirroring `set_call_ext`.
-    MergeCallExt { ext: ExtMap },
+    MergeCallExt {
+        ext: ExtMap,
+    },
     /// Record **already-admitted** limiter holds on the call. The async
     /// failover route's admit runs in the router's fire-and-forget task (the
     /// rule layer is sync); this folds the holds into the replicated call so
     /// termination decrements them. `entries` are `(limiter_id, limit)`.
-    RecordLimiterHolds { entries: Vec<(String, i64)>, window: i64 },
+    RecordLimiterHolds {
+        entries: Vec<(String, i64)>,
+        window: i64,
+    },
     /// Synthesize a final failure response on the a-leg INVITE server txn
     /// (the terminate-after-`/call/failure` path — relay the b-leg failure to A
     /// once the backend declines to fail over). Reuses the a-dialog tag.
-    RelayFailureToALeg { status: u16, reason: String },
+    RelayFailureToALeg {
+        status: u16,
+        reason: String,
+    },
     /// Author a decision-layer **Reject** or **Redirect** treatment on the a-leg
     /// INVITE server txn (ADR-0017 failover path). `header_updates` add
     /// non-structural headers (e.g. `Reason:`, RFC 3326); `contacts` (`uri`, `q`)
@@ -980,13 +1051,24 @@ impl<'a> RuleCall<'a> {
     /// Whether a PRACK arriving on `source_leg_id` naming `rack` in the `a_tag`
     /// dialog provably acknowledges no reliable provisional this stack showed
     /// there (RFC 3262 §4, §7.2 — all three `RAck` tokens must name it).
-    pub fn unacknowledgeable_rack(&self, source_leg_id: &str, a_tag: &str, rack: RAckTokens) -> bool {
+    pub fn unacknowledgeable_rack(
+        &self,
+        source_leg_id: &str,
+        a_tag: &str,
+        rack: RAckTokens,
+    ) -> bool {
         call::helpers::unacknowledgeable_rack(self.0, source_leg_id, a_tag, rack)
     }
     /// Whether this stack already PRACKed the responder's `(leg_id, remote_tag,
     /// invite_cseq, rseq)` reliable provisional itself, so a copy arriving now
     /// is its retransmission to discard (RFC 3262 §4).
-    pub fn pracked_provisional(&self, leg_id: &str, remote_tag: &str, invite_cseq: i64, rseq: i64) -> bool {
+    pub fn pracked_provisional(
+        &self,
+        leg_id: &str,
+        remote_tag: &str,
+        invite_cseq: i64,
+        rseq: i64,
+    ) -> bool {
         call::helpers::pracked_provisional(self.0, leg_id, remote_tag, invite_cseq, rseq)
     }
     /// The relayed INVITE still pending toward its target — `(leg_id,

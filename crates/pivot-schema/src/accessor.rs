@@ -137,7 +137,9 @@ impl Accessor {
                 .split_once(':')
                 .ok_or_else(|| format!("accessor {body:?} names an identity but no dial form"))?;
             if name.is_empty() || form.is_empty() {
-                return Err(format!("accessor {body:?} states an empty identity name or dial form"));
+                return Err(format!(
+                    "accessor {body:?} states an empty identity name or dial form"
+                ));
             }
             return Ok(Accessor::Number { name: name.to_string(), form: form.to_string() });
         }
@@ -206,7 +208,10 @@ impl Accessor {
                     rest = &after[end + 1..];
                 }
                 None => {
-                    out.push(Err(format!("accessor {:?} is not terminated by `}}`", &rest[start..])));
+                    out.push(Err(format!(
+                        "accessor {:?} is not terminated by `}}`",
+                        &rest[start..]
+                    )));
                     break;
                 }
             }
@@ -370,6 +375,8 @@ mod tests {
             serde_json::from_str(r#"{"from":"${step:s7.cseq}","delta":1}"#).unwrap();
         assert_eq!(computed.delta, 1);
         assert_eq!(computed.from.target(), "s7");
-        assert!(serde_json::from_str::<Computed>(r#"{"from":"${step:s7.cseq}","times":2}"#).is_err());
+        assert!(
+            serde_json::from_str::<Computed>(r#"{"from":"${step:s7.cseq}","times":2}"#).is_err()
+        );
     }
 }

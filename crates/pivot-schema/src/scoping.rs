@@ -23,7 +23,9 @@ use serde::{Deserialize, Serialize};
 /// What vocabulary an assertion reads. Closed: a class is a promise that one
 /// named downgrade rule applies to it, and a rule nothing implements is not a
 /// promise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum CheckClass {
     /// A header only the origin platform emits (`P-Charging-Vector`,

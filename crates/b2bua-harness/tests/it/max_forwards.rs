@@ -63,13 +63,8 @@ async fn a_spent_hop_count_reaches_the_decision_engine() {
     );
     let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5087").await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .max_forwards(0)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).max_forwards(0).through(b2bua.addr).send().await;
 
     let resp = call.expect(483).await;
     assert!(resp.to().tag().is_some(), "non-100 final carries a To-tag (RFC 3261 §8.2.6.2)");
@@ -113,13 +108,8 @@ async fn a_decision_cannot_restate_the_hop_count() {
     );
     let b2bua = B2buaSut::builder(decision).start(&h, "b2bua", "127.0.0.1:5082").await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .max_forwards(20)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).max_forwards(20).through(b2bua.addr).send().await;
 
     let mut uas = bob.receive("INVITE").await;
     assert_eq!(
@@ -160,15 +150,11 @@ async fn a_route_for_a_spent_hop_count_is_refused_483() {
     let bob = h.agent("bob", "127.0.0.1:5073").await;
     // `route_all_to` routes EVERY call, hop count included — the misconfigured
     // backend the brake exists for.
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .max_forwards(0)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).max_forwards(0).through(b2bua.addr).send().await;
 
     let resp = call.expect(483).await;
     assert!(resp.to().tag().is_some(), "non-100 final carries a To-tag (RFC 3261 §8.2.6.2)");
@@ -193,15 +179,11 @@ async fn a_b_leg_may_leave_with_its_last_hop_spent() {
         .describe("a caller with one hop left still reaches the callee, at Max-Forwards 0");
     let alice = h.agent("alice", "127.0.0.1:5069").await;
     let bob = h.agent("bob", "127.0.0.1:5079").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5079).start(&h, "b2bua", "127.0.0.1:5089").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5079).start(&h, "b2bua", "127.0.0.1:5089").await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .max_forwards(1)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).max_forwards(1).through(b2bua.addr).send().await;
 
     let mut uas = bob.receive("INVITE").await;
     assert_eq!(
@@ -236,7 +218,8 @@ async fn a_bye_at_zero_hops_still_tears_the_call_down() {
         .describe("a BYE with Max-Forwards: 0 is answered and relayed, never refused");
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5071").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5081").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -267,17 +250,13 @@ async fn every_relayed_request_states_one_hop_less() {
         .describe("the b-leg INVITE, a relayed re-INVITE and the relayed BYE each spend one hop");
     let alice = h.agent("alice", "127.0.0.1:5068").await;
     let bob = h.agent("bob", "127.0.0.1:5078").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5078).start(&h, "b2bua", "127.0.0.1:5088").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5078).start(&h, "b2bua", "127.0.0.1:5088").await;
 
     // Alice dials with a count of her own, so the assertions below cannot pass
     // by coincidence with the default.
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .max_forwards(20)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).max_forwards(20).through(b2bua.addr).send().await;
 
     let mut uas = bob.receive("INVITE").await;
     assert_eq!(hops(uas.request(), "the b-leg INVITE"), 19, "the originated leg spends one hop");

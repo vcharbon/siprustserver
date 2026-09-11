@@ -38,7 +38,7 @@ const ALICE: &str = "192.168.60.10:5060";
 const BOB: &str = "192.168.60.20:5060";
 const CHARLIE: &str = "192.168.60.21:5060"; // reroute target
 const PROXY_EXT: &str = "192.168.60.250:5060"; // external VIP
-// Internal (worker) plane.
+                                               // Internal (worker) plane.
 const PROXY_INT: &str = "10.244.255.250:5080"; // internal VIP
 const B1: &str = "10.244.0.11:5091";
 const INT_CIDRS: &str = "10.244.0.0/16";
@@ -173,7 +173,14 @@ async fn stand_up(
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
     let proxy = fh
-        .spawn_proxy_dual("proxy", PROXY_INT, PROXY_EXT, INT_CIDRS, &[("b1", B1.parse().unwrap())], 0xC0FFEE)
+        .spawn_proxy_dual(
+            "proxy",
+            PROXY_INT,
+            PROXY_EXT,
+            INT_CIDRS,
+            &[("b1", B1.parse().unwrap())],
+            0xC0FFEE,
+        )
         .await;
     let b1 = fh
         .spawn_worker_limited(
@@ -448,7 +455,14 @@ async fn dual_face_takeover_moves_both_faces_together() {
     // before the peer claims the same two VIP addresses.
     fh.advance(Duration::from_millis(100)).await;
     let proxy_b = fh
-        .spawn_proxy_dual("proxy2", PROXY_INT, PROXY_EXT, INT_CIDRS, &[("b1", B1.parse().unwrap())], 0xFACE2)
+        .spawn_proxy_dual(
+            "proxy2",
+            PROXY_INT,
+            PROXY_EXT,
+            INT_CIDRS,
+            &[("b1", B1.parse().unwrap())],
+            0xFACE2,
+        )
         .await;
     fh.mark("proxy", None, "reboot", "peer proxy holds both VIPs");
 

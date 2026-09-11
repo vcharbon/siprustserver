@@ -143,7 +143,8 @@ Content-Length: 4\r\n\r\nv=0\n";
     /// alike — while the callee's route set, Contact and clock stamp do not.
     #[test]
     fn a_relayed_response_carries_the_callee_end_to_end_set() {
-        let carried = names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Verbatim));
+        let carried =
+            names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Verbatim));
         for name in ["require", "rseq", "supported", "p-early-media", "reason"] {
             assert!(carried.contains(&name.to_string()), "{name} must ride: {carried:?}");
         }
@@ -157,12 +158,16 @@ Content-Length: 4\r\n\r\nv=0\n";
     /// receives.
     #[test]
     fn body_metadata_does_not_outlive_the_body_it_describes() {
-        let with_body = names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Verbatim));
+        let with_body =
+            names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Verbatim));
         assert!(with_body.contains(&"content-disposition".to_string()));
 
         let without = names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Dropped));
         assert!(!without.contains(&"content-disposition".to_string()), "{without:?}");
-        assert!(without.contains(&"p-early-media".to_string()), "the rest still rides: {without:?}");
+        assert!(
+            without.contains(&"p-early-media".to_string()),
+            "the rest still rides: {without:?}"
+        );
     }
 
     /// A policy that REPLACES the body stages one of the same role, so the
@@ -170,9 +175,13 @@ Content-Length: 4\r\n\r\nv=0\n";
     /// unprocessable one (RFC 3261 §20.11) still describes it truthfully.
     #[test]
     fn a_replaced_body_keeps_the_disposition_that_still_describes_it() {
-        let replaced = names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Replaced));
+        let replaced =
+            names(&relay_response_passthrough_headers(&b_leg_183(), SourceBody::Replaced));
         assert!(replaced.contains(&"content-disposition".to_string()), "{replaced:?}");
-        assert!(replaced.contains(&"p-early-media".to_string()), "the rest still rides: {replaced:?}");
+        assert!(
+            replaced.contains(&"p-early-media".to_string()),
+            "the rest still rides: {replaced:?}"
+        );
     }
 
     /// Stripping reliability leaves an ordinary provisional: no `RSeq`, no
@@ -184,7 +193,10 @@ Content-Length: 4\r\n\r\nv=0\n";
         strip_reliability(&mut headers);
         let carried = names(&headers);
         assert!(!carried.contains(&"rseq".to_string()), "{carried:?}");
-        assert!(!carried.contains(&"require".to_string()), "an emptied Require does not ride: {carried:?}");
+        assert!(
+            !carried.contains(&"require".to_string()),
+            "an emptied Require does not ride: {carried:?}"
+        );
         for name in ["supported", "p-early-media", "reason"] {
             assert!(carried.contains(&name.to_string()), "{name} still rides: {carried:?}");
         }
@@ -195,7 +207,10 @@ Content-Length: 4\r\n\r\nv=0\n";
     #[test]
     fn stripping_reliability_keeps_the_other_required_extensions() {
         let mut headers = vec![
-            MsgHeader { name: SipStr::from_static("Require"), value: SipStr::from_static("100rel, timer") },
+            MsgHeader {
+                name: SipStr::from_static("Require"),
+                value: SipStr::from_static("100rel, timer"),
+            },
             MsgHeader { name: SipStr::from_static("RSeq"), value: SipStr::from_static("4711") },
         ];
         strip_reliability(&mut headers);

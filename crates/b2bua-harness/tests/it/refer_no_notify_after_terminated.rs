@@ -60,7 +60,9 @@ async fn no_notify_after_terminated() {
     let alice = h.agent("alice", "127.0.0.1:5966").await;
     let bob = h.agent("bob", "127.0.0.1:5976").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5976).start(&h, "b2bua", "127.0.0.1:5986").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 5976)
+        .start(&h, "b2bua", "127.0.0.1:5986")
+        .await;
 
     // ── A↔B established ──────────────────────────────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -132,7 +134,10 @@ async fn no_notify_after_terminated() {
     // live it would have emitted a NOTIFY synchronously on that event; poll bob's
     // socket and require it empty of NOTIFY.
     let stray = bob.try_receive_tolerating("NOTIFY", &["OPTIONS", "INVITE", "BYE"]).await;
-    assert!(stray.is_none(), "no NOTIFY toward the referrer after the terminal NOTIFY + slice clear");
+    assert!(
+        stray.is_none(),
+        "no NOTIFY toward the referrer after the terminal NOTIFY + slice clear"
+    );
 
     let _ = &mut alice_dialog;
     let _ = h.finish().await;

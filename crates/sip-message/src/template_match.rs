@@ -34,8 +34,7 @@ use crate::template::{HeaderClass, MessageTemplate, TemplateHeader, TemplateStar
 use crate::types::SipMessage;
 
 /// Tier-1 headers the live dialog owns — never value-compared.
-const TIER1: &[&str] =
-    &["via", "from", "to", "call-id", "cseq", "max-forwards", "content-length"];
+const TIER1: &[&str] = &["via", "from", "to", "call-id", "cseq", "max-forwards", "content-length"];
 
 /// The subset of tier-1 whose presence is RFC-mandatory (and parser-guaranteed)
 /// for both requests and responses — the only headers whose absence is a
@@ -547,8 +546,12 @@ CSeq: 2 UPDATE\r\nContent-Length: 0\r\n\r\n",
         );
 
         // Reason-phrase mismatch — the distinctive defect signature.
-        let tmpl2 =
-            MessageTemplate::response(400, "Bad Request - Invalid Dialog State", vec![], Vec::new());
+        let tmpl2 = MessageTemplate::response(
+            400,
+            "Bad Request - Invalid Dialog State",
+            vec![],
+            Vec::new(),
+        );
         let got_plain_400 = parse(
             b"SIP/2.0 400 Bad Request\r\nVia: SIP/2.0/UDP 1.1.1.1:5060;branch=z9hG4bK-1\r\n\
 From: <sip:a@ex>;tag=at\r\nTo: <sip:b@ex>;tag=bt\r\nCall-ID: c@1\r\n\

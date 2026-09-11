@@ -176,15 +176,10 @@ pub fn render(msg: &MsgSpec, site: &str, cx: &Context<'_>) -> Result<Rendered, R
     }
 
     let template = match (&msg.method, msg.status) {
-        (Some(method), None) => {
-            MessageTemplate::request(Method::from_wire(method), headers, body)
+        (Some(method), None) => MessageTemplate::request(Method::from_wire(method), headers, body),
+        (None, Some(status)) => {
+            MessageTemplate::response(status, msg.reason.clone().unwrap_or_default(), headers, body)
         }
-        (None, Some(status)) => MessageTemplate::response(
-            status,
-            msg.reason.clone().unwrap_or_default(),
-            headers,
-            body,
-        ),
         _ => return Err(RenderError::NoStartLine),
     };
 
@@ -348,24 +343,20 @@ fn rewrite_sdp(
     leg: &str,
     stream: &mut usize,
 ) -> String {
-    sip_message::rewrite_connection_and_ports(
-        sdp,
-        rewrite.addr.then(|| media.addr()),
-        |pairs| {
-            rewrite.port.then(|| {
-                let port = media.port(leg, *stream, pairs);
-                *stream += 1;
-                port
-            })
-        },
-    )
+    sip_message::rewrite_connection_and_ports(sdp, rewrite.addr.then(|| media.addr()), |pairs| {
+        rewrite.port.then(|| {
+            let port = media.port(leg, *stream, pairs);
+            *stream += 1;
+            port
+        })
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pivot_schema::bundle::{ClockMode, IdentityBindings};
     use crate::state::RunState;
+    use pivot_schema::bundle::{ClockMode, IdentityBindings};
     use pivot_schema::msg::{Header, PositionalRef};
     use sip_message::header::Uri;
 
@@ -395,7 +386,8 @@ mod tests {
     }
 
     fn config() -> RunConfig {
-        RunConfig::new("upstream-fake", ClockMode::Virtual, "10.0.0.9:5080").with_header("X-Lane", "upstream-fake")
+        RunConfig::new("upstream-fake", ClockMode::Virtual, "10.0.0.9:5080")
+            .with_header("X-Lane", "upstream-fake")
     }
 
     #[test]
@@ -433,7 +425,8 @@ mod tests {
         .expect("the message composes");
         assert_eq!(rendered.ruri.as_deref(), Some("sip:+1999999900004@10.0.0.9:5080"));
         assert_eq!(rendered.from.as_deref(), Some("sip:0009001@lane.invalid"));
-        let names: Vec<&str> = rendered.template.headers().iter().map(|h| h.name.as_str()).collect();
+        let names: Vec<&str> =
+            rendered.template.headers().iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names, ["P-Orig", "X-Lane"], "the lane's own header rides last");
         assert_eq!(rendered.template.method(), Some(&Method::Invite));
     }
@@ -475,10 +468,7 @@ mod tests {
         assert_eq!(value("X-Api-Call"), "{\"destination\":\"idle\"}");
         assert_eq!(value("X-Lane"), "this-call", "the more specific statement wins");
         // And exactly once: a run-wide header the call restated is not stamped twice.
-        assert_eq!(
-            rendered.template.headers().iter().filter(|h| h.name == "X-Lane").count(),
-            1
-        );
+        assert_eq!(rendered.template.headers().iter().filter(|h| h.name == "X-Lane").count(), 1);
     }
 
     #[test]
@@ -587,7 +577,11 @@ mod tests {
     fn a_multipart_body_frames_each_part_under_its_own_type() {
         let dir = std::env::temp_dir().join(format!("pivot-render-mp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("uac1_0_0.sdp"), "v=0\r\nc=IN IP4 1.2.3.4\r\nm=audio 16804 RTP/AVP 8\r\n").unwrap();
+        std::fs::write(
+            dir.join("uac1_0_0.sdp"),
+            "v=0\r\nc=IN IP4 1.2.3.4\r\nm=audio 16804 RTP/AVP 8\r\n",
+        )
+        .unwrap();
         let indata: &[u8] = &[0x77, 0x15, 0x47, 0x00, 0x83, 0x0a];
         std::fs::write(dir.join("uac1_0_1.bin"), indata).unwrap();
         let body = Body::Multipart(pivot_schema::body::MultipartBody {
@@ -639,12 +633,15 @@ mod tests {
         );
         assert!(text.contains("Content-Type: application/vnd.example.indata\r\n"));
         // The stored entity block rides verbatim, `Content-ID` first.
-        assert!(text.contains(
-            "Content-Type: application/vnd.example.indata\r\n\
+        assert!(
+            text.contains(
+                "Content-Type: application/vnd.example.indata\r\n\
              Content-ID: <indata@example.invalid>\r\n\
              Content-Transfer-Encoding: binary\r\n\
              Content-Disposition: signal;handling=optional\r\n\r\n"
-        ), "{text}");
+            ),
+            "{text}"
+        );
         assert!(
             bytes.windows(indata.len()).any(|w| w == indata),
             "the binary part rides byte-exact"
@@ -672,7 +669,8 @@ mod tests {
                 }],
             },
         });
-        let error = load_body(&body, Path::new("."), &Booking::new("127.0.0.1", 40000), "A").unwrap_err();
+        let error =
+            load_body(&body, Path::new("."), &Booking::new("127.0.0.1", 40000), "A").unwrap_err();
         assert!(
             matches!(&error, RenderError::MultipartCidUnstated { headers, .. } if headers == &["call-info"]),
             "{error}"

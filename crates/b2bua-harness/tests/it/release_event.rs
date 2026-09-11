@@ -50,7 +50,9 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
+async fn serve_limiter(
+    net: &SimulatedHttpNetwork,
+) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
     let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
@@ -63,11 +65,7 @@ fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     // timer INSIDE a big `h.advance` — the harness advances in 100 ms chunks,
     // so a 150 ms budget can expire between chunks before the simulated HTTP
     // round-trip is delivered (a paused-clock pumping artifact, not SUT).
-    Arc::new(HttpCallLimiter::new(
-        Arc::new(net.clone()),
-        laddr(),
-        Duration::from_secs(1),
-    ))
+    Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_secs(1)))
 }
 
 /// Re-answer a Timer-A retransmit of the replacement-leg INVITE as a real UAS
@@ -146,13 +144,14 @@ async fn unsubscribed_max_duration_keeps_local_teardown_without_consult() {
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 
-    assert_eq!(consults.load(Ordering::SeqCst), 0, "unsubscribed expiry must NOT consult call_release");
+    assert_eq!(
+        consults.load(Ordering::SeqCst),
+        0,
+        "unsubscribed expiry must NOT consult call_release"
+    );
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert!(
-        b2bua.cdr_records()[0]
-            .events
-            .iter()
-            .any(|e| e.reason.as_deref() == Some("max_duration")),
+        b2bua.cdr_records()[0].events.iter().any(|e| e.reason.as_deref() == Some("max_duration")),
         "CDR carries the max_duration reason",
     );
 
@@ -211,20 +210,14 @@ async fn subscribed_release_consults_engine_then_tears_down() {
     assert_eq!(req.snapshot.legs.len(), 2, "a-leg + b-leg in the snapshot");
     assert_eq!(req.snapshot.legs[0].leg_id, "a");
     assert!(
-        req.snapshot
-            .cdr_events
-            .iter()
-            .any(|e| matches!(e.event_type, call::CdrEventType::Answer)),
+        req.snapshot.cdr_events.iter().any(|e| matches!(e.event_type, call::CdrEventType::Answer)),
         "snapshot CDR trail carries the answer",
     );
     drop(reqs);
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert!(
-        b2bua.cdr_records()[0]
-            .events
-            .iter()
-            .any(|e| e.reason.as_deref() == Some("max_duration")),
+        b2bua.cdr_records()[0].events.iter().any(|e| e.reason.as_deref() == Some("max_duration")),
         "CDR carries the max_duration reason",
     );
 
@@ -254,8 +247,7 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
                 // Reroute the released call to the announcement target, with
                 // its own limiter hold (output parity: admitted + released).
                 let mut r = route_to("127.0.0.1", 5092);
-                r.call_limiter =
-                    vec![CallLimiterEntry { id: "announce-cap".into(), limit: 10 }];
+                r.call_limiter = vec![CallLimiterEntry { id: "announce-cap".into(), limit: 10 }];
                 ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
             })
             .build(),
@@ -325,10 +317,7 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let cdrs = b2bua.cdr_records();
     assert!(
-        cdrs[0]
-            .events
-            .iter()
-            .any(|e| e.reason.as_deref() == Some("release-reroute-completed")),
+        cdrs[0].events.iter().any(|e| e.reason.as_deref() == Some("release-reroute-completed")),
         "CDR records the completed reroute: {:?}",
         cdrs[0].events,
     );
@@ -446,10 +435,7 @@ async fn hung_release_consult_falls_back_to_local_teardown_within_deadline() {
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert!(
-        b2bua.cdr_records()[0]
-            .events
-            .iter()
-            .any(|e| e.reason.as_deref() == Some("max_duration")),
+        b2bua.cdr_records()[0].events.iter().any(|e| e.reason.as_deref() == Some("max_duration")),
         "fallback teardown still writes the max_duration CDR",
     );
 

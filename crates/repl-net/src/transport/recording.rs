@@ -87,12 +87,7 @@ impl RecordingReplicationNetwork {
     /// Wrap `inner`, stamping captures with `clock`. No shared sequence source:
     /// captured frames carry `seq = 0` and order purely by append.
     pub fn new(inner: Arc<dyn ReplicationNetwork>, clock: Clock) -> Self {
-        Self {
-            inner,
-            clock,
-            sink: Arc::new(Mutex::new(Vec::new())),
-            seq: None,
-        }
+        Self { inner, clock, sink: Arc::new(Mutex::new(Vec::new())), seq: None }
     }
 
     /// Wrap `inner`, stamping each captured frame with `clock` AND a global
@@ -100,12 +95,7 @@ impl RecordingReplicationNetwork {
     /// to interleave repl frames with another plane's events (SIP / lifecycle)
     /// in true append order off ONE shared counter.
     pub fn with_seq(inner: Arc<dyn ReplicationNetwork>, clock: Clock, seq: CaptureSeq) -> Self {
-        Self {
-            inner,
-            clock,
-            sink: Arc::new(Mutex::new(Vec::new())),
-            seq: Some(seq),
-        }
+        Self { inner, clock, sink: Arc::new(Mutex::new(Vec::new())), seq: Some(seq) }
     }
 
     /// Snapshot of every captured frame so far (in append order).
@@ -137,10 +127,7 @@ impl ReplicationNetwork for RecordingReplicationNetwork {
         }))
     }
 
-    async fn listen(
-        &self,
-        local: SocketAddr,
-    ) -> Result<Box<dyn ReplicationListener>, ListenError> {
+    async fn listen(&self, local: SocketAddr) -> Result<Box<dyn ReplicationListener>, ListenError> {
         let listener = self.inner.listen(local).await?;
         Ok(Box::new(RecordingListener {
             inner: listener,

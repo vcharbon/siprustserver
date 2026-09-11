@@ -17,7 +17,9 @@ use std::sync::Arc;
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua_harness::B2buaSut;
 use scenario_harness::{Harness, RunReport};
-use sip_message::header::{Contact, HeaderName, HeaderValue, PAssertedIdentity, ParamValue, Reason};
+use sip_message::header::{
+    Contact, HeaderName, HeaderValue, PAssertedIdentity, ParamValue, Reason,
+};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -87,11 +89,7 @@ async fn route_rewrites_from_to_ruri_pai_and_pani() {
     );
     assert_eq!(req.to().uri().host(), "carrier.example", "To host rewritten");
     assert_eq!(
-        req.header::<PAssertedIdentity>()
-            .expect("PAI added")
-            .expect("readable PAI")
-            .uri()
-            .text(),
+        req.header::<PAssertedIdentity>().expect("PAI added").expect("readable PAI").uri().text(),
         "sip:+15551000@trunk.example",
         "PAI added"
     );

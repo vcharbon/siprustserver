@@ -42,6 +42,10 @@ fmt:
 fmt-check:
     cargo fmt --all --check
 
+# Point git at the versioned hooks (pre-commit: staged Rust must be fmt-clean).
+hooks:
+    git config core.hooksPath .githooks
+
 # ── deploy ─────────────────────────────────────────────────────────────
 
 # Build the k8s image: every runner binary, `--release`, fully optimized.

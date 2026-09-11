@@ -41,7 +41,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -56,7 +56,7 @@ async fn reinvite_glare_491_both_ways_then_retry_resolves() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -120,7 +120,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -135,7 +135,7 @@ async fn update_vs_reinvite_collision_491_then_retry_resolves() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -197,18 +197,13 @@ async fn early_update_on_the_reliable_early_dialog() {
                 media: MediaState::full(OFFER_SDP, ANSWER_SDP),
                 disposition: Disposition::Caller,
                 goals: vec![
-                    Goal::new(
-                        Barrier::None,
-                        GoalStep::Invite { callee: "bob", plan: Some(plan) },
-                    ),
+                    Goal::new(Barrier::None, GoalStep::Invite { callee: "bob", plan: Some(plan) }),
                     // The early UPDATE fires once alice has PRACKed the
                     // reliable 183 (SUBFLOW_EARLY — a real post-183 signal,
                     // NOT LegPhase::Early which holds the instant she
                     // originates), before the final 200 (RFC 3311 §5.1).
                     Goal::new(
-                        Barrier::pred("early", |s| {
-                            s.leg("alice").subflow(SUBFLOW_EARLY).is_some()
-                        }),
+                        Barrier::pred("early", |s| s.leg("alice").subflow(SUBFLOW_EARLY).is_some()),
                         GoalStep::UpdateEarly,
                     ),
                     Goal::new(alice_confirmed.clone(), GoalStep::Bye),
@@ -216,7 +211,7 @@ async fn early_update_on_the_reliable_early_dialog() {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -230,7 +225,7 @@ async fn early_update_on_the_reliable_early_dialog() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -295,7 +290,7 @@ async fn actor_originates_in_dialog_info() {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -303,15 +298,13 @@ async fn actor_originates_in_dialog_info() {
             ActorSpec {
                 role: "bob",
                 agent: bob.clone(),
-                disposition: Disposition::RingThenAnswer {
-                    ring: Duration::from_millis(200),
-                },
+                disposition: Disposition::RingThenAnswer { ring: Duration::from_millis(200) },
                 media: MediaState::answer(ANSWER_SDP),
                 goals: vec![],
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,

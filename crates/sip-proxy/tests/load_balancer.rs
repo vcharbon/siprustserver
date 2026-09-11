@@ -15,8 +15,8 @@ use sip_proxy::observability::ProxyMetrics;
 use sip_proxy::registry::simulated::SimulatedWorkerRegistry;
 use sip_proxy::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::strategy::{DecodeResult, RoutingStrategy, SelectError, SelectOpts};
 use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
+use sip_proxy::strategy::{DecodeResult, RoutingStrategy, SelectError, SelectOpts};
 
 const W1: &str = "b2b-1";
 const W2: &str = "b2b-2";
@@ -35,7 +35,12 @@ fn request(method: &str, call_id: &str, to_tag: Option<&str>) -> SipMessage {
 /// As [`request`], optionally stamping a `Resource-Priority` header (the on-wire
 /// emergency signal `is_emergency_invite` detects, mirroring the TS
 /// `buildInvite(callId, true)` which adds `Resource-Priority: esnet.0`).
-fn request_with_rph(method: &str, call_id: &str, to_tag: Option<&str>, rph: Option<&str>) -> SipMessage {
+fn request_with_rph(
+    method: &str,
+    call_id: &str,
+    to_tag: Option<&str>,
+    rph: Option<&str>,
+) -> SipMessage {
     let to = match to_tag {
         Some(t) => format!("<sip:bob@b>;tag={t}"),
         None => "<sip:bob@b>".to_string(),
@@ -64,10 +69,18 @@ fn emergency_invite(call_id: &str) -> SipMessage {
 }
 
 fn strategy(reg: SimulatedWorkerRegistry, clock: Clock) -> LoadBalancerStrategy {
-    let hmac = Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
+    let hmac =
+        Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     let metrics = Arc::new(ProxyMetrics::new());
-    LoadBalancerStrategy::new(Arc::new(reg), hmac, observer, metrics, clock, LoadBalancerConfig::default())
+    LoadBalancerStrategy::new(
+        Arc::new(reg),
+        hmac,
+        observer,
+        metrics,
+        clock,
+        LoadBalancerConfig::default(),
+    )
 }
 
 fn strategy_with_observer(
@@ -75,9 +88,17 @@ fn strategy_with_observer(
     clock: Clock,
     observer: Arc<WorkerLoadObserver>,
 ) -> LoadBalancerStrategy {
-    let hmac = Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
+    let hmac =
+        Arc::new(StaticHmacKeyProvider::new(HmacKey::new("k1", vec![7u8; 32]), None).unwrap());
     let metrics = Arc::new(ProxyMetrics::new());
-    LoadBalancerStrategy::new(Arc::new(reg), hmac, observer, metrics, clock, LoadBalancerConfig::default())
+    LoadBalancerStrategy::new(
+        Arc::new(reg),
+        hmac,
+        observer,
+        metrics,
+        clock,
+        LoadBalancerConfig::default(),
+    )
 }
 
 fn two_worker_registry(clock: Clock) -> SimulatedWorkerRegistry {
@@ -258,7 +279,10 @@ async fn draining_post_grace_falls_back_to_backup() {
     // Past the 5 s grace window: in-dialog request promotes to the backup.
     tokio::time::advance(std::time::Duration::from_millis(5_001)).await;
     let reinvite = request("INVITE", "call-dg@h", Some("bobtag"));
-    assert!(matches!(s.decode_stickiness(&params, &reinvite).await, DecodeResult::ForwardBackup { .. }));
+    assert!(matches!(
+        s.decode_stickiness(&params, &reinvite).await,
+        DecodeResult::ForwardBackup { .. }
+    ));
 }
 
 #[tokio::test(start_paused = true)]
@@ -313,7 +337,8 @@ async fn above_critical_band_filtered_for_non_emergency_only() {
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     // Single worker, pinned above_critical.
-    let reg = SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
+    let reg =
+        SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
     observer.apply_payload(W1, &OverloadPayload { elu: 0.95, gc: 0.0, adm: 0.0 }, clock.now_ms());
     let s = strategy_with_observer(reg, clock, observer);
 
@@ -356,7 +381,8 @@ async fn rate_cap_exhausted_when_winners_bucket_is_empty() {
     // Single worker so the rendezvous winner is deterministic; seed a cool
     // payload (below_soft) so the bucket exists and is NOT band-filtered, then
     // drain every token at the same instant.
-    let reg = SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
+    let reg =
+        SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
     observer.apply_payload(W1, &OverloadPayload { elu: 0.1, gc: 0.0, adm: 0.0 }, clock.now_ms());
     while observer.try_consume_for(W1, clock.now_ms()) {}
     let s = strategy_with_observer(reg, clock, observer);
@@ -415,7 +441,8 @@ async fn in_dialog_sticks_to_owner_in_above_critical_and_bypasses_empty_bucket()
     let clock = Clock::test_at(0);
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
     // Single worker so the rendezvous winner is deterministic.
-    let reg = SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
+    let reg =
+        SimulatedWorkerRegistry::with_clock(vec![WorkerEntry::alive(W1, addr(A1))], clock.clone());
     // Pin AboveCritical (elu 0.95 > the new 0.65 critical threshold) so the
     // worker WOULD be filtered out of NON-emergency new-dialog candidates…
     observer.apply_payload(W1, &OverloadPayload { elu: 0.95, gc: 0.0, adm: 0.0 }, clock.now_ms());
@@ -442,10 +469,7 @@ async fn in_dialog_sticks_to_owner_in_above_critical_and_bypasses_empty_bucket()
     // A second in-dialog request still admits — proves the bucket is bypassed,
     // not merely that one stray token existed.
     let bye = request("BYE", "call-est@h", Some("bobtag"));
-    assert_eq!(
-        s.select_for_new_dialog(&bye, SelectOpts::default()).await.unwrap(),
-        addr(A1)
-    );
+    assert_eq!(s.select_for_new_dialog(&bye, SelectOpts::default()).await.unwrap(), addr(A1));
 }
 
 #[tokio::test]

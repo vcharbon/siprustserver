@@ -87,12 +87,11 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
         GoalStep::Refer { refer_to, authorization } => {
             let now = Instant::now();
             let (key, dialog_clone, request) = {
-                let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
-                    StepError::UnexpectedKind {
+                let dialog =
+                    st.dialogs.confirmed.as_mut().ok_or_else(|| StepError::UnexpectedKind {
                         who: st.role.to_string(),
                         detail: "Refer goal with no confirmed dialog".to_string(),
-                    }
-                })?;
+                    })?;
                 let mut refer =
                     dialog.send_request(InDialogMethod::Refer).with_header("Refer-To", &refer_to);
                 if let Some(api) = &authorization {
@@ -203,12 +202,11 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
             super::response::flush_held_acks(st).await;
             discharge_on_teardown(st, now);
             let (key, dialog_clone) = {
-                let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
-                    StepError::UnexpectedKind {
+                let dialog =
+                    st.dialogs.confirmed.as_mut().ok_or_else(|| StepError::UnexpectedKind {
                         who: st.role.to_string(),
                         detail: "Bye goal with no confirmed dialog".to_string(),
-                    }
-                })?;
+                    })?;
                 // Send the BYE; the reactor observes its 200 and closes the
                 // obligation (we do not block on the final here).
                 let _bye = dialog.bye().await;
@@ -243,12 +241,11 @@ pub(super) async fn drive_goal(st: &mut ActorState<'_>, step: GoalStep) -> Resul
             super::response::flush_held_acks(st).await; // see GoalStep::Bye
             discharge_on_teardown(st, now); // see GoalStep::Bye — subsume pending in-dialog acks
             let (key, dialog_clone) = {
-                let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
-                    StepError::UnexpectedKind {
+                let dialog =
+                    st.dialogs.confirmed.as_mut().ok_or_else(|| StepError::UnexpectedKind {
                         who: st.role.to_string(),
                         detail: "ByeWith goal with no confirmed dialog".to_string(),
-                    }
-                })?;
+                    })?;
                 // Send the BYE carrying the extra headers (the deliberate
                 // deviation); the reactor observes its 200 and closes the
                 // obligation (we do not block on the final here).

@@ -129,26 +129,25 @@ pub fn render(
     let mut files = BTreeMap::new();
 
     // Global view — the SHARED unified renderer over a single-plane SeqDoc.
-    let doc = super::project::sip_doc(scenario_name, description, entries, scenario, passed, extra_anomalies);
-    files.insert(
-        format!("{scenario_name}.global.txt"),
-        seq_report::render_global_txt(&doc),
+    let doc = super::project::sip_doc(
+        scenario_name,
+        description,
+        entries,
+        scenario,
+        passed,
+        extra_anomalies,
     );
+    files.insert(format!("{scenario_name}.global.txt"), seq_report::render_global_txt(&doc));
 
     // Per-endpoint views — one per lane that sent or received a message.
     for lane in &scenario.lanes {
-        let filtered: Vec<&RecordedSipEntry> = entries
-            .iter()
-            .filter(|e| e.from == lane.addr || e.to == lane.addr)
-            .collect();
+        let filtered: Vec<&RecordedSipEntry> =
+            entries.iter().filter(|e| e.from == lane.addr || e.to == lane.addr).collect();
         if filtered.is_empty() {
             continue;
         }
-        let slug = lane
-            .names
-            .first()
-            .cloned()
-            .unwrap_or_else(|| lane.addr.to_string().replace(':', "-"));
+        let slug =
+            lane.names.first().cloned().unwrap_or_else(|| lane.addr.to_string().replace(':', "-"));
         let net = match lane.network {
             layer_harness::NetworkTag::Ext => "ext",
             layer_harness::NetworkTag::Core => "core",
@@ -157,7 +156,8 @@ pub fn render(
             Some(n) => format!("{n} (endpoint, network={net})"),
             None => format!("{} (endpoint, network={net})", lane.addr),
         };
-        let header = render_header(scenario_name, &view_label, scenario.transport_kind, passed, description);
+        let header =
+            render_header(scenario_name, &view_label, scenario.transport_kind, passed, description);
         let body = render_entries(&filtered, base_ts, &names);
         files.insert(format!("{net}/{slug}.txt"), format!("{header}{body}"));
     }

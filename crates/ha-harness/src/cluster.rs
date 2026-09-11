@@ -97,14 +97,12 @@ impl HaCluster {
         Self::build_cluster(node_ordinals, clock, replica_backstop_ms).await
     }
 
-    async fn build_cluster(
-        node_ordinals: &[&str],
-        clock: Clock,
-        replica_backstop_ms: i64,
-    ) -> Self {
+    async fn build_cluster(node_ordinals: &[&str], clock: Clock, replica_backstop_ms: i64) -> Self {
         let sim = Arc::new(SimulatedReplicationNetwork::with_delay(1));
-        let recording =
-            RecordingReplicationNetwork::new(sim.clone() as Arc<dyn ReplicationNetwork>, clock.clone());
+        let recording = RecordingReplicationNetwork::new(
+            sim.clone() as Arc<dyn ReplicationNetwork>,
+            clock.clone(),
+        );
 
         let mut addrs = HashMap::new();
         for (i, ord) in node_ordinals.iter().enumerate() {
@@ -125,11 +123,8 @@ impl HaCluster {
 
         // Spawn each node with a full-mesh peer list (every other ordinal).
         for ord in node_ordinals {
-            let peers: Vec<Peer> = node_ordinals
-                .iter()
-                .filter(|o| *o != ord)
-                .map(|o| Peer::new(*o, *o))
-                .collect();
+            let peers: Vec<Peer> =
+                node_ordinals.iter().filter(|o| *o != ord).map(|o| Peer::new(*o, *o)).collect();
             let wiring = cluster.wiring_for(peers);
             let addr = cluster.addrs[*ord];
             let node = HaNode::spawn(ord, addr, 1, cluster.clock.clone(), &wiring).await;
@@ -163,16 +158,12 @@ impl HaCluster {
 
     /// Immutable node accessor (introspection).
     pub fn node(&self, ordinal: &str) -> &HaNode {
-        self.nodes
-            .get(ordinal)
-            .unwrap_or_else(|| panic!("no node {ordinal}"))
+        self.nodes.get(ordinal).unwrap_or_else(|| panic!("no node {ordinal}"))
     }
 
     /// Mutable node accessor (crash/reboot).
     pub fn node_mut(&mut self, ordinal: &str) -> &mut HaNode {
-        self.nodes
-            .get_mut(ordinal)
-            .unwrap_or_else(|| panic!("no node {ordinal}"))
+        self.nodes.get_mut(ordinal).unwrap_or_else(|| panic!("no node {ordinal}"))
     }
 
     /// Every node ordinal, sorted (deterministic order).
@@ -195,9 +186,7 @@ impl HaCluster {
         backup_resolver: &dyn Fn(&str) -> Option<String>,
     ) {
         self.mark(ordinal, None, "put", &format!("{call_ref} cv=({call_gen},{call_bgen})"));
-        self.node(ordinal)
-            .put(call_ref, body, call_gen, call_bgen, backup_resolver)
-            .await;
+        self.node(ordinal).put(call_ref, body, call_gen, call_bgen, backup_resolver).await;
     }
 
     /// Delete on `ordinal` via the write-side policy, recording a `delete` marker.
@@ -298,8 +287,7 @@ impl HaCluster {
     /// Arm buffer-overflow → drop-subscriber on `from → to`.
     pub fn drop_on_overflow(&mut self, from: &str, to: &str) {
         let (fa, ta) = (self.addrs[from], self.addrs[to]);
-        self.sim
-            .apply_fault(Fault::DropOnOverflow { src: fa, dst: ta });
+        self.sim.apply_fault(Fault::DropOnOverflow { src: fa, dst: ta });
         self.mark(from, Some(to), "drop_on_overflow", "");
     }
 
@@ -324,16 +312,9 @@ impl HaCluster {
 
     /// Snapshot the recording: captured frames + injected markers + lane map.
     pub fn report(&self) -> ReplReport {
-        let lanes: BTreeMap<SocketAddr, String> = self
-            .addrs
-            .iter()
-            .map(|(ord, addr)| (*addr, ord.clone()))
-            .collect();
-        ReplReport {
-            frames: self.recording.captured(),
-            markers: self.markers.clone(),
-            lanes,
-        }
+        let lanes: BTreeMap<SocketAddr, String> =
+            self.addrs.iter().map(|(ord, addr)| (*addr, ord.clone())).collect();
+        ReplReport { frames: self.recording.captured(), markers: self.markers.clone(), lanes }
     }
 
     /// Render the text + mermaid reports and write them under `dir` as
@@ -364,4 +345,3 @@ impl HaCluster {
         });
     }
 }
-

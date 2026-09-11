@@ -27,7 +27,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use e2e_model::checks::Bindings;
-use e2e_model::model::{CheckSet, Input, TestCase, load_test_case};
+use e2e_model::model::{load_test_case, CheckSet, Input, TestCase};
 use e2e_model::{BindingResolver, CheckVerdict, ResolvedBinding};
 use scenario_harness::realcall::CoreIdentity;
 use scenario_harness::{AnchorTag, WaiverScope};
@@ -146,9 +146,7 @@ impl LoadCase {
             waivers: case
                 .allow_violations
                 .iter()
-                .map(|rule| {
-                    WaiverScope::rule(rule.clone(), "case allowViolations").conditional()
-                })
+                .map(|rule| WaiverScope::rule(rule.clone(), "case allowViolations").conditional())
                 .collect(),
             // Keep only the sets the case references (bounded per-case store).
             check_sets: case
@@ -217,8 +215,8 @@ impl LoadCase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use e2e_model::{BindingMode, BindingPool};
     use e2e_model::shape::CoreInput;
+    use e2e_model::{BindingMode, BindingPool};
 
     fn case_with(input: Input, bindings: Option<BindingPool>) -> TestCase {
         TestCase {

@@ -1,8 +1,8 @@
 use sip_message::EmitOpts;
 use std::time::Duration;
 
-use crate::actor::*;
 use super::testkit::*;
+use crate::actor::*;
 use crate::{Harness, ANSWER_SDP};
 
 /// Scripted end-to-end template replay: a templated INVITE, a scripted 180
@@ -108,7 +108,7 @@ async fn observe_final_records_divergence_and_acks_observed_2xx() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -123,8 +123,7 @@ async fn observe_final_records_divergence_and_acks_observed_2xx() {
 
     let ctx = CallCtx::new();
     let obs = ObservedState::new();
-    let verdict =
-        run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+    let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
     assert!(verdict.is_ok(), "divergence is data, never a failure — got {verdict:?}");
     let replay = obs.replay_record();
     assert!(
@@ -275,7 +274,7 @@ async fn reception_goal_suppresses_incidental_shed() {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -290,8 +289,7 @@ async fn reception_goal_suppresses_incidental_shed() {
 
     let ctx = CallCtx::new();
     let obs = ObservedState::new();
-    let verdict =
-        run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+    let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
     assert!(verdict.is_ok(), "the reception goal owns the 486, got {verdict:?}");
     assert!(
         obs.replay_record().contains(&ReplayEntry::Final(RecordedFinal {

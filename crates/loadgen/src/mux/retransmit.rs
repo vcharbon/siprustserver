@@ -155,7 +155,11 @@ struct TxnInner {
 }
 
 impl CallTxns {
-    pub(super) fn new(endpoint: Arc<dyn UdpEndpoint>, drop: Arc<DropModel>, stats: Arc<MuxStats>) -> Self {
+    pub(super) fn new(
+        endpoint: Arc<dyn UdpEndpoint>,
+        drop: Arc<DropModel>,
+        stats: Arc<MuxStats>,
+    ) -> Self {
         Self {
             endpoint,
             drop,

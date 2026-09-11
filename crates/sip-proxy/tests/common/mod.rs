@@ -85,7 +85,8 @@ pub async fn spawn_proxy_with_traces(
 /// A `ForwardAll` strategy pointed at a single backend, with an empty registry
 /// (alice/bob are never classified as workers).
 pub fn forward_all(target: SocketAddr) -> (Arc<dyn RoutingStrategy>, Arc<dyn WorkerRegistry>) {
-    let strategy: Arc<dyn RoutingStrategy> = Arc::new(sip_proxy::ForwardAllStrategy::new(ProxyAddr::from(target)));
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(sip_proxy::ForwardAllStrategy::new(ProxyAddr::from(target)));
     let registry: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
     (strategy, registry)
 }

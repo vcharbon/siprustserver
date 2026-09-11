@@ -89,11 +89,8 @@ pub fn sip_doc_with_overlay(
     // `(seq, at_ms)` sort drops the band exactly between the surrounding frames).
     if !overlay.markers.is_empty() && !entries.is_empty() {
         const MARGIN_MS: i64 = 2_000;
-        let last = entries
-            .iter()
-            .map(|e| e.received_ms.unwrap_or(e.sent_ms) as i64)
-            .max()
-            .unwrap_or(base);
+        let last =
+            entries.iter().map(|e| e.received_ms.unwrap_or(e.sent_ms) as i64).max().unwrap_or(base);
         let (lo, hi) = (base - MARGIN_MS, last + MARGIN_MS);
         for (wall_ms, label) in &overlay.markers {
             let at = *wall_ms;
@@ -158,10 +155,8 @@ pub fn sip_doc_with_overlay(
     // Resolve each finding's lane to its registered display name (`lb`,
     // `bob1`, …) so report tables can tag rows with the endpoint, not just an
     // ip:port the reader has to cross-reference.
-    let name_of: std::collections::HashMap<&str, &str> = lanes
-        .iter()
-        .map(|l| (l.id.as_str(), l.label.as_str()))
-        .collect();
+    let name_of: std::collections::HashMap<&str, &str> =
+        lanes.iter().map(|l| (l.id.as_str(), l.label.as_str())).collect();
     for a in &mut anomalies {
         if a.endpoint.is_none() {
             if let Some(lane) = &a.lane {
@@ -277,10 +272,7 @@ fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lan
                     .group
                     .as_deref()
                     .and_then(|g| {
-                        lanes
-                            .iter()
-                            .rposition(|l| l.group.as_deref() == Some(g))
-                            .map(|i| i + 1)
+                        lanes.iter().rposition(|l| l.group.as_deref() == Some(g)).map(|i| i + 1)
                     })
                     .unwrap_or(lanes.len());
                 lanes.insert(insert_at, lane);
@@ -350,9 +342,7 @@ fn project_entry(e: &RecordedSipEntry, base: i64) -> SeqRow {
         // hue, so a b2bua's a-leg vs b-leg — or a reroute's primary vs alt
         // dialog — read as distinct flows at a glance.
         conn: (!f.call_id.is_empty()).then(|| f.call_id.clone()),
-        kind: RowKind::Sip {
-            delivered: e.delivered,
-        },
+        kind: RowKind::Sip { delivered: e.delivered },
     }
 }
 
@@ -378,11 +368,7 @@ mod tests {
     }
 
     fn scenario() -> RecordedScenario {
-        RecordedScenario {
-            transport_kind: TransportKind::Live,
-            lanes: vec![],
-            anomalies: vec![],
-        }
+        RecordedScenario { transport_kind: TransportKind::Live, lanes: vec![], anomalies: vec![] }
     }
 
     /// 036 ask C: registered sub-lanes keep their composite key as the lane id
@@ -432,10 +418,7 @@ mod tests {
         assert_eq!(noep.group.as_deref(), Some("10.0.0.2:5070"));
         // Adjacent to its sibling sub-lane so the group header brackets both.
         let idx_of = |id: &str| doc.lanes.iter().position(|l| l.id == id).unwrap();
-        assert_eq!(
-            idx_of("10.0.0.2:5070#noendpoint"),
-            idx_of("10.0.0.2:5070#callee") + 1
-        );
+        assert_eq!(idx_of("10.0.0.2:5070#noendpoint"), idx_of("10.0.0.2:5070#callee") + 1);
 
         // Rows resolve to the sub-lane ids, and colour-band by Call-ID.
         assert_eq!(doc.rows[0].to.as_deref(), Some("10.0.0.2:5070#callee"));
@@ -450,7 +433,13 @@ mod tests {
         let t0 = 1_782_802_100_000i64;
         let entries = vec![
             entry("10.0.0.1:5060", "10.0.0.2:5060", "INVITE sip:bob@x SIP/2.0\r\n", t0 as u64, 1),
-            entry("10.0.0.1:5060", "10.0.0.2:5060", "BYE sip:bob@x SIP/2.0\r\n", (t0 + 10_000) as u64, 9),
+            entry(
+                "10.0.0.1:5060",
+                "10.0.0.2:5060",
+                "BYE sip:bob@x SIP/2.0\r\n",
+                (t0 + 10_000) as u64,
+                9,
+            ),
         ];
         // One kill inside the call window (t0 + 4s), one far outside (t0 + 60s).
         let overlay = TimelineOverlay {
@@ -460,7 +449,8 @@ mod tests {
                 (t0 + 60_000, "chaos kill_worker(other-window)".to_string()),
             ],
         };
-        let doc = sip_doc_with_overlay("reinvite", None, &entries, &scenario(), false, &[], &overlay);
+        let doc =
+            sip_doc_with_overlay("reinvite", None, &entries, &scenario(), false, &[], &overlay);
 
         // Wall-clock anchor set → renders absolute UTC.
         assert_eq!(doc.epoch_base_ms, Some(t0));

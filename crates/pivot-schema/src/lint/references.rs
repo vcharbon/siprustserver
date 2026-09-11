@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use crate::call::Position;
 use crate::flow::{Anchor, FlowNode, Op, Step};
-use crate::lint::{Index, Place, Reach, Report, at, reach};
+use crate::lint::{at, reach, Index, Place, Reach, Report};
 use crate::msg::Ref;
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
@@ -303,8 +303,11 @@ struct Rules {
 
 const AFTER: Rules =
     Rules { unknown: "ref/after-unknown", forward: "order/after-forward", what: "orders after" };
-const ANCHOR: Rules =
-    Rules { unknown: "ref/anchor-unknown", forward: "order/anchor-forward", what: "is measured from" };
+const ANCHOR: Rules = Rules {
+    unknown: "ref/anchor-unknown",
+    forward: "order/anchor-forward",
+    what: "is measured from",
+};
 
 /// One reference must name something declared, that already ran, on every run
 /// that reaches it.
@@ -367,7 +370,10 @@ fn positions(index: &Index<'_>, report: &mut Report) {
                 report.error(
                     "ref/pos-unqualified",
                     &path,
-                    format!("position {:?} is bare in a document with several calls", positional.pos),
+                    format!(
+                        "position {:?} is bare in a document with several calls",
+                        positional.pos
+                    ),
                     "qualify it with the call id: `<call-id>.called[b][s]`",
                 );
                 continue;
@@ -390,7 +396,10 @@ fn positions(index: &Index<'_>, report: &mut Report) {
                     report.error(
                         "ref/pos-unknown",
                         &path,
-                        format!("position {:?} names no attempt of call {:?}", positional.pos, call.id),
+                        format!(
+                            "position {:?} names no attempt of call {:?}",
+                            positional.pos, call.id
+                        ),
                         "point at an attempt the call declares",
                     );
                 }

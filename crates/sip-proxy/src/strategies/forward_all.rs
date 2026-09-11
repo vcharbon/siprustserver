@@ -30,11 +30,19 @@ impl RoutingStrategy for ForwardAllStrategy {
         "ForwardAll"
     }
 
-    async fn select_for_new_dialog(&self, _msg: &SipMessage, _opts: SelectOpts) -> Result<ProxyAddr, SelectError> {
+    async fn select_for_new_dialog(
+        &self,
+        _msg: &SipMessage,
+        _opts: SelectOpts,
+    ) -> Result<ProxyAddr, SelectError> {
         Ok(self.target.clone())
     }
 
-    async fn decode_stickiness(&self, route_param: &RouteParams, _msg: &SipMessage) -> DecodeResult {
+    async fn decode_stickiness(
+        &self,
+        route_param: &RouteParams,
+        _msg: &SipMessage,
+    ) -> DecodeResult {
         match route_param.get(TARGET_PARAM).and_then(|raw| ProxyAddr::parse(raw)) {
             Some(target) => DecodeResult::Forward { target, is_emergency: false },
             None => DecodeResult::Unknown { is_emergency: false },
@@ -70,12 +78,17 @@ Content-Length: 0\r\n\r\n";
     async fn selects_static_target_and_round_trips_cookie() {
         let s = ForwardAllStrategy::new(ProxyAddr::new("10.0.0.3", 5070));
         let msg = invite();
-        assert_eq!(s.select_for_new_dialog(&msg, SelectOpts::default()).await.unwrap(), ProxyAddr::new("10.0.0.3", 5070));
+        assert_eq!(
+            s.select_for_new_dialog(&msg, SelectOpts::default()).await.unwrap(),
+            ProxyAddr::new("10.0.0.3", 5070)
+        );
 
         let params = s.encode_stickiness(&ProxyAddr::new("10.0.0.3", 5070), &msg).unwrap();
         assert_eq!(params.get("target").unwrap(), "10.0.0.3:5070");
         match s.decode_stickiness(&params, &msg).await {
-            DecodeResult::Forward { target, .. } => assert_eq!(target, ProxyAddr::new("10.0.0.3", 5070)),
+            DecodeResult::Forward { target, .. } => {
+                assert_eq!(target, ProxyAddr::new("10.0.0.3", 5070))
+            }
             other => panic!("expected Forward, got {other:?}"),
         }
     }
@@ -84,7 +97,10 @@ Content-Length: 0\r\n\r\n";
     async fn missing_or_bad_cookie_is_unknown() {
         let s = ForwardAllStrategy::new(ProxyAddr::new("10.0.0.3", 5070));
         let msg = invite();
-        assert!(matches!(s.decode_stickiness(&RouteParams::new(), &msg).await, DecodeResult::Unknown { .. }));
+        assert!(matches!(
+            s.decode_stickiness(&RouteParams::new(), &msg).await,
+            DecodeResult::Unknown { .. }
+        ));
         let mut bad = RouteParams::new();
         bad.insert("target".into(), "garbage".into());
         assert!(matches!(s.decode_stickiness(&bad, &msg).await, DecodeResult::Unknown { .. }));

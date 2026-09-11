@@ -47,7 +47,8 @@ pub struct CheckNote {
 use layer_harness::{NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
 use sip_net::{
-    with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork, SimulatedSignalingNetwork,
+    with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork,
+    SimulatedSignalingNetwork,
 };
 
 use crate::agent::{decide_rr_fold, Agent, Ids};

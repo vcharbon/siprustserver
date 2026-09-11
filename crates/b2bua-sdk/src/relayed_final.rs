@@ -79,7 +79,17 @@ Content-Length: 4\r\n\r\nv=0\n";
         for name in ["privacy", "p-identifier", "x-vendor-thing", "allow"] {
             assert!(carried.contains(&name.to_string()), "{name} must ride: {carried:?}");
         }
-        let stays = ["via", "record-route", "from", "to", "call-id", "cseq", "contact", "content-type", "session-expires"];
+        let stays = [
+            "via",
+            "record-route",
+            "from",
+            "to",
+            "call-id",
+            "cseq",
+            "contact",
+            "content-type",
+            "session-expires",
+        ];
         for name in stays {
             assert!(!carried.contains(&name.to_string()), "{name} must not ride: {carried:?}");
         }

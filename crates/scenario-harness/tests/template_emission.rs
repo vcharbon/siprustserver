@@ -33,11 +33,7 @@ fn casing_of<'a>(headers: &'a [SipHeader], name: &str) -> &'a str {
 /// Every value carried under `name` (case-insensitive), in wire order — proves a
 /// duplicated frozen header kept both rows.
 fn values_of<'a>(headers: &'a [SipHeader], name: &str) -> Vec<&'a str> {
-    headers
-        .iter()
-        .filter(|h| h.name.eq_ignore_ascii_case(name))
-        .map(|h| h.value.as_str())
-        .collect()
+    headers.iter().filter(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.as_str()).collect()
 }
 
 /// Build a well-formed raw SIP datagram (Content-Length computed from the body).
@@ -107,7 +103,11 @@ async fn template_invite_regenerates_dialog_fields_and_freezes_headers() {
     assert!(req.to().tag().is_none(), "an initial INVITE carries no To-tag");
     assert_eq!(req.cseq().seq(), 1, "CSeq regenerated to the fresh dialog's 1");
     assert_eq!(req.cseq().method(), "INVITE");
-    assert_eq!(values_of(req.headers(), "Max-Forwards"), vec!["70"], "Max-Forwards regenerated (not the captured 55)");
+    assert_eq!(
+        values_of(req.headers(), "Max-Forwards"),
+        vec!["70"],
+        "Max-Forwards regenerated (not the captured 55)"
+    );
     // The Request-URI is the stack's (peer-addressed), not the captured R-URI.
     let ruri = req.request_uri().text();
     assert!(ruri.contains("127.0.0.1:5070"), "R-URI regenerated to the peer, got {ruri}");
@@ -115,9 +115,20 @@ async fn template_invite_regenerates_dialog_fields_and_freezes_headers() {
 
     // --- frozen headers byte-equal, casing + duplicate layout preserved -------
     assert_eq!(values_of(req.headers(), "Subject"), vec!["Q3 planning"]);
-    assert_eq!(casing_of(req.headers(), "p-asserted-identity"), "p-AsSeRtEd-IdEnTiTy", "captured casing preserved");
-    assert_eq!(values_of(req.headers(), "p-asserted-identity"), vec!["<sip:+15551234@capture.example>"]);
-    assert_eq!(values_of(req.headers(), "X-Trace"), vec!["hop-a", "hop-b"], "both duplicated rows preserved in order");
+    assert_eq!(
+        casing_of(req.headers(), "p-asserted-identity"),
+        "p-AsSeRtEd-IdEnTiTy",
+        "captured casing preserved"
+    );
+    assert_eq!(
+        values_of(req.headers(), "p-asserted-identity"),
+        vec!["<sip:+15551234@capture.example>"]
+    );
+    assert_eq!(
+        values_of(req.headers(), "X-Trace"),
+        vec!["hop-a", "hop-b"],
+        "both duplicated rows preserved in order"
+    );
     assert_eq!(req.body(), OFFER.as_bytes(), "frozen SDP body byte-preserved");
 
     // --- carry the call to a clean, RFC-compliant teardown --------------------
@@ -383,9 +394,8 @@ async fn template_body_without_content_type_emits_no_content_type() {
 /// template method against the builder's method.
 #[tokio::test]
 async fn template_preserves_prior_with_header() {
-    let h = Harness::new("template-extend-headers").describe(
-        "A with_header set before .template() survives (extended, not replaced)",
-    );
+    let h = Harness::new("template-extend-headers")
+        .describe("A with_header set before .template() survives (extended, not replaced)");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
@@ -406,8 +416,16 @@ async fn template_preserves_prior_with_header() {
 
     let mut uas = bob.receive("INVITE").await;
     let req = uas.request().clone();
-    assert_eq!(values_of(req.headers(), "X-Pre"), vec!["kept"], "prior with_header survived .template()");
-    assert_eq!(values_of(req.headers(), "X-Frozen"), vec!["from-template"], "frozen header present");
+    assert_eq!(
+        values_of(req.headers(), "X-Pre"),
+        vec!["kept"],
+        "prior with_header survived .template()"
+    );
+    assert_eq!(
+        values_of(req.headers(), "X-Frozen"),
+        vec!["from-template"],
+        "frozen header present"
+    );
 
     uas.respond(200, "OK").with_sdp(ANSWER).send().await;
     call.expect(200).await;
@@ -432,9 +450,8 @@ async fn out_of_dialog_template_method_mismatch_panics() {
 
     // An INVITE template handed to an OPTIONS builder must panic.
     let invite_tmpl = MessageTemplate::request(Method::Invite, Vec::new(), Vec::new());
-    let _ = alice
-        .request(OutOfDialogMethod::Options, &bob)
-        .template(&invite_tmpl, EmitOpts::default());
+    let _ =
+        alice.request(OutOfDialogMethod::Options, &bob).template(&invite_tmpl, EmitOpts::default());
 }
 
 /// Compact-name fidelity: an INVITE captured with all-compact names (v/f/t/i/m/c/l) replays with
@@ -477,7 +494,9 @@ l: {}\r\n\r\n{}",
         assert!(text.contains(line), "expected compact line {line:?} in:\n{text}");
     }
     // No duplicate FULL-name lines for those headers.
-    for full in ["\r\nVia:", "\r\nFrom:", "\r\nTo:", "\r\nCall-ID:", "\r\nContact:", "\r\nContent-Type:"] {
+    for full in
+        ["\r\nVia:", "\r\nFrom:", "\r\nTo:", "\r\nCall-ID:", "\r\nContact:", "\r\nContent-Type:"]
+    {
         assert!(!text.contains(full), "unexpected full-name line {full:?} in:\n{text}");
     }
     // Content-Length is serializer-owned: emitted FULL, never compact `l:`.
@@ -535,7 +554,14 @@ async fn template_full_name_capture_replays_full_names() {
     let mut uas = bob.receive("INVITE").await;
     let text = String::from_utf8_lossy(uas.request().image()).into_owned();
 
-    for line in ["\r\nVia: ", "\r\nFrom: ", "\r\nTo: ", "\r\nCall-ID: ", "\r\nContact: ", "\r\nContent-Type: "] {
+    for line in [
+        "\r\nVia: ",
+        "\r\nFrom: ",
+        "\r\nTo: ",
+        "\r\nCall-ID: ",
+        "\r\nContact: ",
+        "\r\nContent-Type: ",
+    ] {
         assert!(text.contains(line), "expected full-name line {line:?} in:\n{text}");
     }
     for compact in ["\r\nv: ", "\r\nf: ", "\r\nt: ", "\r\ni: ", "\r\nm: ", "\r\nc: "] {

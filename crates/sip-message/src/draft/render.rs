@@ -36,12 +36,7 @@ pub(crate) fn render_bytes<S: StartKind>(
     write::<S>(line, entries, body, false).bytes
 }
 
-fn write<S: StartKind>(
-    line: &S::Line,
-    entries: &[Entry],
-    body: &[u8],
-    record: bool,
-) -> Rendered {
+fn write<S: StartKind>(line: &S::Line, entries: &[Entry], body: &[u8], record: bool) -> Rendered {
     const FIRST_LINE_HINT: usize = 96;
     const ENTRY_HINT: usize = 72;
     let capacity = FIRST_LINE_HINT + entries.len() * ENTRY_HINT + body.len() + 4;

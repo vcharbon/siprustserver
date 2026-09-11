@@ -54,7 +54,9 @@ fn refer_to_has_replaces(ctx: &RuleContext) -> bool {
 /// Non-structural REFER headers forwarded verbatim to `/call/refer`. The
 /// transfer's own payload headers ride as typed request fields, so they are
 /// excluded alongside the stack-owned set.
-fn extract_sip_headers(req: &sip_message::SipRequest) -> serde_json::Map<String, serde_json::Value> {
+fn extract_sip_headers(
+    req: &sip_message::SipRequest,
+) -> serde_json::Map<String, serde_json::Value> {
     const SKIP: &[HeaderName] = &[
         HeaderName::From,
         HeaderName::To,
@@ -81,13 +83,9 @@ fn extract_sip_headers(req: &sip_message::SipRequest) -> serde_json::Map<String,
 /// `Call-ID;to-tag=…;from-tag=…` from the referrer (B) leg's perspective.
 fn state_dialog_id(ctx: &RuleContext, leg_id: &str) -> String {
     let leg = ctx.source_leg();
-    let (call_id, from_tag) = leg
-        .map(|l| (l.call_id.clone(), l.from_tag.clone()))
-        .unwrap_or_default();
-    let to_tag = ctx
-        .source_dialog()
-        .map(|d| d.sip.remote_tag.clone())
-        .unwrap_or_default();
+    let (call_id, from_tag) =
+        leg.map(|l| (l.call_id.clone(), l.from_tag.clone())).unwrap_or_default();
+    let to_tag = ctx.source_dialog().map(|d| d.sip.remote_tag.clone()).unwrap_or_default();
     let _ = leg_id;
     format!("{call_id};to-tag={to_tag};from-tag={from_tag}")
 }
@@ -171,8 +169,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
             |ctx| {
                 let req = ctx.request()?;
                 let leg_id = ctx.source_leg_id.to_string();
-                let refer_to =
-                    req.raw(HeaderName::ReferTo).next().unwrap_or_default().to_string();
+                let refer_to = req.raw(HeaderName::ReferTo).next().unwrap_or_default().to_string();
                 let referred_by = req.raw(HeaderName::ReferredBy).next().map(str::to_string);
 
                 // Seed the transfer slice (phase refer-authorizing).
@@ -199,7 +196,10 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                 if let Some(rb) = &referred_by {
                     request.insert("referred_by".into(), serde_json::json!(rb));
                 }
-                request.insert("sip_headers".into(), serde_json::Value::Object(extract_sip_headers(req)));
+                request.insert(
+                    "sip_headers".into(),
+                    serde_json::Value::Object(extract_sip_headers(req)),
+                );
 
                 let first_notify = notify(&seed, SUB_STATE_ACTIVE_60, 100, "Trying");
                 let mut actions = vec![

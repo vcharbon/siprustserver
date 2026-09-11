@@ -24,8 +24,8 @@ pub mod model;
 
 // callRef derivation + parsing (a-leg identity → replicated key).
 pub use callref::{
-    call_index_keys, call_index_keys_from_unknown, call_ref_primary, derive_call_ref, parse_call_ref,
-    ParsedCallRef,
+    call_index_keys, call_index_keys_from_unknown, call_ref_primary, derive_call_ref,
+    parse_call_ref, ParsedCallRef,
 };
 // Pluggable body codec (msgpack default).
 pub use codec::{CallBodyCodec, CallDecodeError, MsgpackCodec};

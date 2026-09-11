@@ -57,7 +57,8 @@ pub async fn assert_cell_transparent(cell: Cell) {
 /// reclaim + self-release path must hold. Reads the cluster's vocabulary
 /// ([`ReplicatedB2buaSut::serves`]), not partition bodies or repl counters.
 pub fn assert_single_owner(nodes: &[&ReplicatedB2buaSut], call_ref: &str) {
-    let owners: Vec<&str> = nodes.iter().filter(|n| n.serves(call_ref)).map(|n| n.ordinal()).collect();
+    let owners: Vec<&str> =
+        nodes.iter().filter(|n| n.serves(call_ref)).map(|n| n.ordinal()).collect();
     assert_eq!(
         owners.len(),
         1,
@@ -73,12 +74,7 @@ pub fn assert_single_owner(nodes: &[&ReplicatedB2buaSut], call_ref: &str) {
 pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
     nodes
         .iter()
-        .map(|n| {
-            n.cdr_records()
-                .into_iter()
-                .filter(|r| r.call_ref == call_ref)
-                .count()
-        })
+        .map(|n| n.cdr_records().into_iter().filter(|r| r.call_ref == call_ref).count())
         .sum()
 }
 
@@ -115,7 +111,8 @@ pub async fn assert_call_fully_over(
     // #3 — limiter released exactly once (drained to zero, never negative).
     let total = limiter.stats().current_total;
     assert_eq!(
-        total, 0,
+        total,
+        0,
         "limiter hold for {call_ref} not released exactly once: current_total = {total} \
          ({} = leaked / pinned, {} = double release)",
         if total > 0 { "positive" } else { "" },
@@ -154,7 +151,8 @@ pub async fn assert_call_lost_no_cdr(
     );
     let total = limiter.stats().current_total;
     assert_eq!(
-        total, 0,
+        total,
+        0,
         "limiter hold for {call_ref} not released by the backup auto-cleanup: \
          current_total = {total} ({} = leaked / pinned, {} = double release)",
         if total > 0 { "positive" } else { "" },

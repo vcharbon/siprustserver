@@ -66,7 +66,6 @@ mod stub {
     }
 }
 
-
 /// The URI a fixture names as text.
 fn uri_of(text: &str) -> Uri {
     Uri::parse(&SipStr::owned(text)).expect("readable URI")
@@ -76,7 +75,9 @@ fn invite() -> SipRequest {
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(uri_of("sip:bob@127.0.0.1:5070")),
         call_id: "c1@alice".into(),
-        from: Some(header::From::from_uri(uri_of("sip:alice@host")).with_tag(SipStr::from_static("atag"))),
+        from: Some(
+            header::From::from_uri(uri_of("sip:alice@host")).with_tag(SipStr::from_static("atag")),
+        ),
         to: Some(header::To::from_uri(uri_of("sip:bob@host"))),
         cseq: 1,
         via: Some(Via::udp("127.0.0.1", 5060).with_branch(SipStr::from_static("z9hG4bKalice"))),
@@ -139,7 +140,12 @@ fn stub_service_init_seeds_then_rule_advances_then_declines() {
 
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let event = info_event();
     let services = vec![stub::service_def()];
 
@@ -187,7 +193,12 @@ fn dormant_service_leaves_call_untouched() {
 
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let event = info_event();
 
     fn dormant_init(_: &RuleCall) -> Option<ServiceSeed> {

@@ -19,18 +19,18 @@ use sip_message::{SipHeader, TemplateHeader};
 pub fn verify(stated: &[TemplateHeader], emitted: &[SipHeader]) -> Result<(), String> {
     let mut at = 0usize;
     for header in stated {
-        let found = emitted[at..].iter().position(|h| {
-            h.name.as_str() == header.name && h.value.as_str() == header.value
-        });
+        let found = emitted[at..]
+            .iter()
+            .position(|h| h.name.as_str() == header.name && h.value.as_str() == header.value);
         match found {
             Some(offset) => at += offset + 1,
             None => {
                 let mispositioned = emitted[..at.min(emitted.len())]
                     .iter()
                     .any(|h| h.name.as_str() == header.name && h.value.as_str() == header.value);
-                let miscased = emitted
-                    .iter()
-                    .any(|h| h.name.eq_ignore_ascii_case(&header.name) && h.value.as_str() == header.value);
+                let miscased = emitted.iter().any(|h| {
+                    h.name.eq_ignore_ascii_case(&header.name) && h.value.as_str() == header.value
+                });
                 let why = if mispositioned {
                     "emitted out of the stated order"
                 } else if miscased {
@@ -41,11 +41,7 @@ pub fn verify(stated: &[TemplateHeader], emitted: &[SipHeader]) -> Result<(), St
                 return Err(format!(
                     "{:?}: {why} (emitted block: {})",
                     header.name,
-                    emitted
-                        .iter()
-                        .map(|h| h.name.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    emitted.iter().map(|h| h.name.to_string()).collect::<Vec<_>>().join(", ")
                 ));
             }
         }
@@ -126,10 +122,8 @@ mod tests {
             TemplateHeader::frozen("Accept", "application/sdp"),
             TemplateHeader::frozen("Accept", "application/vnd.example.indata"),
         ];
-        let both = emitted(&[
-            ("Accept", "application/sdp"),
-            ("Accept", "application/vnd.example.indata"),
-        ]);
+        let both =
+            emitted(&[("Accept", "application/sdp"), ("Accept", "application/vnd.example.indata")]);
         assert_eq!(verify(&stated, &both), Ok(()));
         let merged = emitted(&[("Accept", "application/sdp, application/vnd.example.indata")]);
         assert!(verify(&stated, &merged).is_err(), "a merged row is not two rows");

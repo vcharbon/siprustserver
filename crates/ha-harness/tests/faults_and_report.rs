@@ -86,10 +86,7 @@ async fn buffer_full_drop_then_reconnect_converges() {
     let c0 = cref("A", "0");
     cl.put("A", &c0, b"seed".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(300)).await;
-    assert_eq!(
-        cl.node("B").get(BAK, "A", &c0).await.as_deref(),
-        Some(&b"seed"[..])
-    );
+    assert_eq!(cl.node("B").get(BAK, "A", &c0).await.as_deref(), Some(&b"seed"[..]));
 
     // Cut the established A→B server→client direction (drop the subscriber), add
     // calls while it is down, then reconnect (heal) so a fresh subscription
@@ -98,19 +95,14 @@ async fn buffer_full_drop_then_reconnect_converges() {
     cl.advance(ms(200)).await;
     for i in 1..4 {
         let c = cref("A", &i.to_string());
-        cl.put("A", &c, format!("b{i}").into_bytes(), 1, 0, &backup_is("B"))
-            .await;
+        cl.put("A", &c, format!("b{i}").into_bytes(), 1, 0, &backup_is("B")).await;
     }
     cl.reconnect("A", "B");
     cl.advance(secs(2)).await;
 
     for i in 0..4 {
         let c = cref("A", &i.to_string());
-        let want = if i == 0 {
-            b"seed".to_vec()
-        } else {
-            format!("b{i}").into_bytes()
-        };
+        let want = if i == 0 { b"seed".to_vec() } else { format!("b{i}").into_bytes() };
         assert_eq!(
             cl.node("B").get(BAK, "A", &c).await.as_deref(),
             Some(&want[..]),
@@ -145,14 +137,8 @@ async fn report_projects_readable_replication_exchange() {
         report.any_frame(|f| matches!(f, Frame::PullRequest { .. })),
         "report has a PullRequest"
     );
-    assert!(
-        report.any_frame(|f| matches!(f, Frame::Data { .. })),
-        "report has a Data frame"
-    );
-    assert!(
-        report.any_frame(|f| matches!(f, Frame::Noop { .. })),
-        "report has a Noop"
-    );
+    assert!(report.any_frame(|f| matches!(f, Frame::Data { .. })), "report has a Data frame");
+    assert!(report.any_frame(|f| matches!(f, Frame::Noop { .. })), "report has a Noop");
 
     // Lanes are node ordinals.
     let lanes = report.node_lanes();

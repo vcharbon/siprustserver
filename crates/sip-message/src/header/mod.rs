@@ -38,19 +38,19 @@ mod via;
 mod wire;
 
 pub use aliases::{
-    AcceptRange, Allow, AllowEvents, Authorization, Contact, ContentDisposition, ContentLength, Diversion,
-    Event, Expires, From, HistoryInfo, MaxForwards, MediaType, MinExpires, MinSe,
-    PAssertedIdentity, PPreferredIdentity, PathEntry, Privacy, ProxyAuthenticate, ProxyAuthorization,
-    ProxyRequire, Reason, Replaces, RSeq, RecordRouteEntry, ReferTo, ReferredBy, RemotePartyId, ReplyTo,
-    Require, RetryAfter, RouteEntry, ServiceRouteEntry, SessionExpires, SubscriptionState,
-    Supported, To, Unsupported, WwwAuthenticate,
+    AcceptRange, Allow, AllowEvents, Authorization, Contact, ContentDisposition, ContentLength,
+    Diversion, Event, Expires, From, HistoryInfo, MaxForwards, MediaType, MinExpires, MinSe,
+    PAssertedIdentity, PPreferredIdentity, PathEntry, Privacy, ProxyAuthenticate,
+    ProxyAuthorization, ProxyRequire, RSeq, Reason, RecordRouteEntry, ReferTo, ReferredBy,
+    RemotePartyId, Replaces, ReplyTo, Require, RetryAfter, RouteEntry, ServiceRouteEntry,
+    SessionExpires, SubscriptionState, Supported, To, Unsupported, WwwAuthenticate,
 };
 pub use charging::ChargingVector;
 pub use class::HeaderClass;
+pub use credentials::Credentials;
+pub use equivalence::{canonical_header_items, header_forms_equivalent};
 pub use identity::{CSeq, CallId, RAck};
 pub use item_separator::ItemSeparator;
-pub use equivalence::{canonical_header_items, header_forms_equivalent};
-pub use credentials::Credentials;
 pub use name::HeaderName;
 pub use name_addr::NameAddr;
 pub use name_addr_header::NameAddrHeader;

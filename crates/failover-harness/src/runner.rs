@@ -58,10 +58,7 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
         ScriptedDecisionEngine::builder()
             .fallback(|_req| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.call_limiter = vec![CallLimiterEntry {
-                    id: "trunk-A".into(),
-                    limit: 8,
-                }];
+                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 8 }];
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -69,11 +66,7 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
 }
 
 fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    Arc::new(HttpCallLimiter::new(
-        Arc::new(http.clone()),
-        laddr(),
-        Duration::from_millis(150),
-    ))
+    Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// The fixed `target/seq-reports/` artifact root. `CARGO_MANIFEST_DIR` points at
@@ -83,8 +76,7 @@ fn seq_reports_dir() -> std::path::PathBuf {
     if let Ok(t) = std::env::var("CARGO_TARGET_DIR") {
         return std::path::PathBuf::from(t).join("seq-reports");
     }
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/seq-reports")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/seq-reports")
 }
 
 /// The concrete method for a `Generic` event chosen from a seed (the seeded
@@ -128,14 +120,26 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
         .await;
     let mut w_b1 = fh
         .spawn_worker_limited(
-            "b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            limited_decision(), limiter_client(&http),
+            "b1",
+            "b1",
+            B1,
+            &["b2"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            limited_decision(),
+            limiter_client(&http),
         )
         .await;
     let mut w_b2 = fh
         .spawn_worker_limited(
-            "b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            limited_decision(), limiter_client(&http),
+            "b2",
+            "b2",
+            B2,
+            &["b1"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            limited_decision(),
+            limiter_client(&http),
         )
         .await;
 
@@ -192,13 +196,15 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
             }
             fh.advance(Duration::from_millis(500)).await; // replicate established
             let _ = find_backed_up_ref(backup, &primary_ord).await; // settle
-            inject_failover(&mut fh, primary, backup, &primary_ord, &proxy, cell.fault, inject).await;
+            inject_failover(&mut fh, primary, backup, &primary_ord, &proxy, cell.fault, inject)
+                .await;
         }
         DialogState::ConfirmedPreAck => {
             // Safe-point BEFORE the ACK: 200 is sent + replicated, ACK pending.
             fh.advance(Duration::from_millis(500)).await; // replicate confirmed-pre-ack
             let _ = find_backed_up_ref(backup, &primary_ord).await; // settle
-            inject_failover(&mut fh, primary, backup, &primary_ord, &proxy, cell.fault, inject).await;
+            inject_failover(&mut fh, primary, backup, &primary_ord, &proxy, cell.fault, inject)
+                .await;
             // The window stayed open past the 200's first rungs (RFC 3261
             // §13.3.1.4) — past more of them in the variant, whose injection
             // advances the clock — so alice's socket holds the 200 again. Each
@@ -234,12 +240,8 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     //  - Bye (terminating): the event ends the call on the backup, THEN the
     //    primary reboots — it must reclaim NOTHING (no resurrection).
     let do_reboot = inject
-        && matches!(
-            cell.recovery,
-            Recovery::RebootAfterTakeover | Recovery::RebootNoTraffic
-        );
-    let reboot_before_event =
-        inject && matches!(cell.event, Event::Nothing | Event::Keepalive);
+        && matches!(cell.recovery, Recovery::RebootAfterTakeover | Recovery::RebootNoTraffic);
+    let reboot_before_event = inject && matches!(cell.event, Event::Nothing | Event::Keepalive);
     if reboot_before_event && do_reboot {
         reboot_and_reclaim(&mut fh, primary, backup, &primary_ord, &proxy).await;
     }
@@ -255,7 +257,8 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
             obs.resp(Who::Alice, &r);
             fh.advance(Duration::from_millis(500)).await;
             if !reboot_before_event && do_reboot {
-                reboot_and_reclaim(&mut fh, primary, backup, &primary_ord, &proxy).await; // reclaim NOTHING
+                reboot_and_reclaim(&mut fh, primary, backup, &primary_ord, &proxy).await;
+                // reclaim NOTHING
             }
         }
         Event::Bye(Party::Callee) => {
@@ -267,7 +270,8 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
             obs.resp(Who::Bob, &r);
             fh.advance(Duration::from_millis(500)).await;
             if !reboot_before_event && do_reboot {
-                reboot_and_reclaim(&mut fh, primary, backup, &primary_ord, &proxy).await; // reclaim NOTHING
+                reboot_and_reclaim(&mut fh, primary, backup, &primary_ord, &proxy).await;
+                // reclaim NOTHING
             }
         }
         Event::Generic { from, method } => {

@@ -68,12 +68,14 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::types::SipResponse;
 use sip_message::{SipMessage, SipRequest, SipStr};
 use sip_net::UdpEndpoint;
-use sip_txn::{IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed, TxnKind};
+use sip_txn::{
+    IdGen, TransactionConfig, TransactionEvent, TransactionLayer, TransactionLayerClosed, TxnKind,
+};
 use tokio::sync::mpsc;
 
 use crate::addr::ProxyAddr;
-use crate::observability::ProxyMetrics;
 use crate::load_observer::{parse_x_overload_header, WorkerLoadObserver, X_OVERLOAD};
+use crate::observability::ProxyMetrics;
 use crate::registry::control::WorkerRegistryControl;
 use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
 
@@ -233,8 +235,12 @@ impl HealthProbe {
         // ── Reap probes past their reply window ──────────────────────────
         // Each reap = one miss; the transaction is cancelled so Timer E stops
         // retransmitting into the void for the remainder of Timer F.
-        let expired: Vec<String> =
-            state.pending.iter().filter(|(_, p)| p.deadline_ms <= now).map(|(b, _)| b.clone()).collect();
+        let expired: Vec<String> = state
+            .pending
+            .iter()
+            .filter(|(_, p)| p.deadline_ms <= now)
+            .map(|(b, _)| b.clone())
+            .collect();
         for branch in expired {
             let p = state.pending.remove(&branch[..]).expect("collected above");
             self.txn.cancel_txns_for_call(&probe_call_ref(&branch)).await?;
@@ -375,7 +381,10 @@ impl HealthProbe {
                 via: Some(
                     Via::udp(SipStr::owned(&self.probe_host), self.probe_port)
                         .with_branch(SipStr::owned(branch))
-                        .with_param("cr", ParamValue::Token(SipStr::owned(&probe_call_ref(branch)))),
+                        .with_param(
+                            "cr",
+                            ParamValue::Token(SipStr::owned(&probe_call_ref(branch))),
+                        ),
                 ),
                 contact: Some(header::Contact::from_uri(
                     Uri::sip_user(SipStr::from_static("probe"), SipStr::owned(&self.probe_host))
@@ -401,7 +410,10 @@ mod tests {
 
     #[test]
     fn classify_503_distinguishes_not_ready() {
-        assert_eq!(classify_503(Some("SIP;cause=503;text=\"not-ready (boot drain)\"")), WorkerHealth::NotReady);
+        assert_eq!(
+            classify_503(Some("SIP;cause=503;text=\"not-ready (boot drain)\"")),
+            WorkerHealth::NotReady
+        );
         assert_eq!(classify_503(Some("SIP;cause=503;text=\"draining\"")), WorkerHealth::Draining);
         assert_eq!(classify_503(None), WorkerHealth::Draining);
     }

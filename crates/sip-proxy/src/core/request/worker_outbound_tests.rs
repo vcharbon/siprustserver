@@ -25,8 +25,12 @@ const PROXY_VIP: &str = "172.20.255.250";
 
 async fn core(reg: Arc<dyn WorkerRegistry>) -> crate::core::ProxyCore {
     let net = SimulatedSignalingNetwork::new(1);
-    let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
-    let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
+    let ep = net
+        .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
+        .await
+        .unwrap();
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
     ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
         .clock(Clock::test_at(0))
         .metrics(Arc::new(ProxyMetrics::new()))
@@ -62,7 +66,10 @@ Content-Length: 0\r\n\r\n"
 #[tokio::test]
 async fn snat_masqueraded_worker_keepalive_routes_to_downstream_not_back_to_worker() {
     let reg: Arc<dyn WorkerRegistry> =
-        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1_POD, 5060),
+        )]));
     let core = core(reg).await;
 
     // SNAT'd source: the kind NODE ip + an ephemeral port — NOT in the registry.
@@ -100,10 +107,17 @@ async fn named_target_resolution_never_blocks_routing() {
     }
 
     let reg: Arc<dyn WorkerRegistry> =
-        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1_POD, 5060),
+        )]));
     let net = SimulatedSignalingNetwork::new(1);
-    let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
-    let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
+    let ep = net
+        .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
+        .await
+        .unwrap();
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1_POD, 5060)));
     let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
         .clock(Clock::test_at(0))
         .resolver(Arc::new(PendingResolver))
@@ -136,7 +150,10 @@ Content-Length: 0\r\n\r\n"
 #[tokio::test]
 async fn pod_direct_worker_source_is_still_worker_outbound() {
     let reg: Arc<dyn WorkerRegistry> =
-        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1_POD, 5060),
+        )]));
     let core = core(reg).await;
 
     let pod_src = format!("{W1_POD}:5060").parse().unwrap();
@@ -153,7 +170,10 @@ async fn pod_direct_worker_source_is_still_worker_outbound() {
 #[tokio::test]
 async fn external_in_dialog_request_is_not_worker_outbound() {
     let reg: Arc<dyn WorkerRegistry> =
-        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1_POD, 5060),
+        )]));
     let core = core(reg).await;
 
     // Same cookie Route, but the top Via sent-by is the UAC (not a worker).
@@ -181,7 +201,10 @@ Content-Length: 0\r\n\r\n"
 #[tokio::test]
 async fn worker_stamped_outbound_marker_still_accepted() {
     let reg: Arc<dyn WorkerRegistry> =
-        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1_POD, 5060),
+        )]));
     let core = core(reg).await;
 
     let new_pod_ip = "10.244.9.99"; // rebooted worker's new IP — NOT in registry
@@ -217,7 +240,10 @@ Content-Length: 0\r\n\r\n"
 #[tokio::test]
 async fn rebooted_worker_keepalive_direction_from_proxy_issued_outbound_rr() {
     let reg: Arc<dyn WorkerRegistry> =
-        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1_POD, 5060),
+        )]));
     let core = core(reg).await;
 
     let new_pod_ip = "10.244.9.99"; // rebooted worker's new IP — NOT in registry
@@ -258,7 +284,10 @@ Content-Length: 0\r\n\r\n"
 #[tokio::test]
 async fn external_in_dialog_with_double_rr_decodes_to_worker() {
     let reg: Arc<dyn WorkerRegistry> =
-        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1_POD, 5060),
+        )]));
     let core = core(reg).await;
 
     let raw = format!(

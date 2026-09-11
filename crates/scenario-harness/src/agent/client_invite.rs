@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use sip_message::generators::{
-    generate_ack_for_2xx, GenerateAckFor2xxOpts, InDialogMethod,
-    InviteClientTransactionHandle, StackDialog,
+    generate_ack_for_2xx, GenerateAckFor2xxOpts, InDialogMethod, InviteClientTransactionHandle,
+    StackDialog,
 };
 use sip_message::header::{self, CSeq, HeaderName, HeaderValue};
 use sip_message::sip_str::SipStr;
@@ -124,11 +124,7 @@ impl ClientInvite {
     /// auth-retried INVITE — `ack_and_resend_with_auth` re-points
     /// `original_invite`, so a final to the retried transaction matches).
     fn ack_ctx(&self) -> AckCtx<'_> {
-        AckCtx {
-            agent: &self.agent,
-            invite: &self.original_invite,
-            wire_dst: self.wire_dst,
-        }
+        AckCtx { agent: &self.agent, invite: &self.original_invite, wire_dst: self.wire_dst }
     }
 
     /// SIPp-`optional` semantics for the load lane: wait for the FINAL
@@ -464,7 +460,8 @@ impl ClientInvite {
             who: self.agent.name.clone(),
             detail: format!(
                 "cannot PRACK the {} {}: no parseable RSeq header (not a reliable provisional)",
-                reliable_1xx.status(), reliable_1xx.reason()
+                reliable_1xx.status(),
+                reliable_1xx.reason()
             ),
         })?;
         self.send_request(InDialogMethod::Prack).with_rack(&rack).try_send().await
@@ -490,7 +487,8 @@ impl ClientInvite {
             who: self.agent.name.clone(),
             detail: format!(
                 "cannot PRACK the {} {}: no parseable RSeq header (not a reliable provisional)",
-                reliable_1xx.status(), reliable_1xx.reason()
+                reliable_1xx.status(),
+                reliable_1xx.reason()
             ),
         })?;
         let fork_tag = reliable_1xx.to().tag().map(str::to_owned);
@@ -542,9 +540,8 @@ impl ClientInvite {
     /// after a declaration still delays.
     pub async fn ack_with(&mut self, sdp: Option<&str>) -> Dialog {
         self.honour_delayed_automatic().await;
-        let handle = InviteClientTransactionHandle {
-            original_invite: self.original_invite.clone(),
-        };
+        let handle =
+            InviteClientTransactionHandle { original_invite: self.original_invite.clone() };
         let opts = GenerateAckFor2xxOpts {
             via: Some(self.agent.via()),
             body: sdp.map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),

@@ -60,10 +60,7 @@ async fn full_dialog_auto_generated() {
 
     let mut uas = bob.receive("INVITE").await;
     // The UAS can inspect what it got — e.g. that the offer arrived.
-    assert!(
-        uas.request().body().starts_with(b"v=0"),
-        "INVITE should carry the SDP offer body"
-    );
+    assert!(uas.request().body().starts_with(b"v=0"), "INVITE should carry the SDP offer body");
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
 

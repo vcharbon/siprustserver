@@ -30,12 +30,7 @@ impl BufferedCdrWriter {
     /// exports; overflow drops are recorded into `cdr_dropped_total`.
     pub fn spawn(inner: Arc<dyn CdrWriter>, queue_max: usize, metrics: B2buaMetrics) -> Self {
         if queue_max == 0 {
-            return Self {
-                inner,
-                tx: None,
-                dropped: Arc::new(AtomicU64::new(0)),
-                metrics,
-            };
+            return Self { inner, tx: None, dropped: Arc::new(AtomicU64::new(0)), metrics };
         }
         let (tx, mut rx) = mpsc::channel::<(Call, i64)>(queue_max);
         let drain_inner = inner.clone();
@@ -44,12 +39,7 @@ impl BufferedCdrWriter {
                 drain_inner.write(&call, ts).await;
             }
         });
-        Self {
-            inner,
-            tx: Some(tx),
-            dropped: Arc::new(AtomicU64::new(0)),
-            metrics,
-        }
+        Self { inner, tx: Some(tx), dropped: Arc::new(AtomicU64::new(0)), metrics }
     }
 
     pub fn dropped_total(&self) -> u64 {

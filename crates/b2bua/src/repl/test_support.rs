@@ -17,7 +17,10 @@ use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 
-use super::{Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
+use super::{
+    Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore,
+    ReplicationSupervisor,
+};
 use crate::store::{PropagateDirection, PutOpts};
 
 /// Puller config with short backoff + a finite bootstrap hard-timeout so a
@@ -59,10 +62,7 @@ pub fn cref(primary: &str, id: &str) -> String {
 
 /// Membership of a single peer.
 pub fn one_peer(ordinal: &str, clock: &Clock) -> Arc<SimulatedMembership> {
-    Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new(ordinal, ordinal)],
-        clock.clone(),
-    ))
+    Arc::new(SimulatedMembership::with_clock(vec![Peer::new(ordinal, ordinal)], clock.clone()))
 }
 
 /// A node = its store + changelog + listen address; the [`ReplServer`] runs in
@@ -111,11 +111,5 @@ pub fn supervisor_for(
     let map: HashMap<String, SocketAddr> = addrs.into_iter().collect();
     let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| *map.get(&peer.ordinal).unwrap()));
     let _ = clock; // signature kept stable for the many s5–s10 call sites
-    ReplicationSupervisor::with_config(
-        self_ordinal,
-        net.clone(),
-        store.clone(),
-        resolve,
-        config,
-    )
+    ReplicationSupervisor::with_config(self_ordinal, net.clone(), store.clone(), resolve, config)
 }

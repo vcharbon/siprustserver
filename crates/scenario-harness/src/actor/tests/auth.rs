@@ -23,10 +23,7 @@ impl crate::realcall::ChallengeResponder for FakeResponder {
         method: &str,
         ruri: &str,
     ) -> Option<String> {
-        self.seen
-            .lock()
-            .unwrap()
-            .push((challenge.status, method.to_string(), ruri.to_string()));
+        self.seen.lock().unwrap().push((challenge.status, method.to_string(), ruri.to_string()));
         Some(self.credential.clone())
     }
 }
@@ -108,7 +105,7 @@ async fn actor_caller_retries_through_a_401_challenge() {
             invite_targets: vec![("bob", bob.clone())],
             via: None,
             feed: CtxFeed::default(),
-        
+
             cseq: None,
             delayed: vec![],
             claim: None,
@@ -121,14 +118,9 @@ async fn actor_caller_retries_through_a_401_challenge() {
     };
 
     let ctx = CallCtx::new();
-    let verdict = run_call_with(
-        call,
-        ObservedState::new(),
-        &ctx,
-        Duration::from_secs(5),
-        Some(responder),
-    )
-    .await;
+    let verdict =
+        run_call_with(call, ObservedState::new(), &ctx, Duration::from_secs(5), Some(responder))
+            .await;
     assert!(
         verdict.is_ok(),
         "the challenged call must retry, admit, and settle OK, got {verdict:?}",
@@ -198,7 +190,7 @@ async fn actor_caller_without_responder_classifies_401_unchanged() {
             invite_targets: vec![("bob", bob.clone())],
             via: None,
             feed: CtxFeed::default(),
-        
+
             cseq: None,
             delayed: vec![],
             claim: None,
@@ -211,14 +203,8 @@ async fn actor_caller_without_responder_classifies_401_unchanged() {
     };
 
     let ctx = CallCtx::new();
-    let verdict = run_call_with(
-        call,
-        ObservedState::new(),
-        &ctx,
-        Duration::from_secs(5),
-        None,
-    )
-    .await;
+    let verdict =
+        run_call_with(call, ObservedState::new(), &ctx, Duration::from_secs(5), None).await;
     match verdict {
         CallVerdict::Failed(StepError::WrongStatus { who, expected, got, .. }) => {
             assert_eq!((who.as_str(), expected, got), ("alice", 180, 401));
@@ -234,5 +220,3 @@ async fn actor_caller_without_responder_classifies_401_unchanged() {
 // Capture-replay verbs: template emission, Scripted park-or-react,
 // reception goals, lane automatics.
 // -----------------------------------------------------------------------
-
-

@@ -14,19 +14,28 @@ use crate::event::{EventQueueDropReason, TransactionEvent};
 
 /// The transaction ladders this layer drives, in the order the family
 /// enumerates them. A dialog-level class is the TU's and never reaches here.
-const REQUEST_LADDERS: [Class; 4] = [
-    Class::InviteClient,
-    Class::NonInviteClient,
-    Class::NonInviteProceeding,
-    Class::CancelClient,
-];
+const REQUEST_LADDERS: [Class; 4] =
+    [Class::InviteClient, Class::NonInviteClient, Class::NonInviteProceeding, Class::CancelClient];
 
 /// The `method` label slots of a request ladder's rows: every method
 /// `sip_message` models natively, plus one bucket for an extension method, so
 /// the family stays a fixed set of atomics whatever the wire carries.
 const METHOD_LABELS: [&str; 15] = [
-    "INVITE", "ACK", "BYE", "CANCEL", "OPTIONS", "REGISTER", "INFO", "UPDATE", "PRACK", "SUBSCRIBE",
-    "NOTIFY", "PUBLISH", "MESSAGE", "REFER", "OTHER",
+    "INVITE",
+    "ACK",
+    "BYE",
+    "CANCEL",
+    "OPTIONS",
+    "REGISTER",
+    "INFO",
+    "UPDATE",
+    "PRACK",
+    "SUBSCRIBE",
+    "NOTIFY",
+    "PUBLISH",
+    "MESSAGE",
+    "REFER",
+    "OTHER",
 ];
 
 /// The `method` label slot of `method` — the index a rung is counted at, so
@@ -109,7 +118,9 @@ impl RetransmitFamily {
 
     /// Count one Timer G rung re-sending an INVITE's non-2xx final of `code`.
     pub(crate) fn record_final(&self, code: u16) {
-        if let Some(slot) = code.checked_sub(FIRST_FINAL_CODE).map(usize::from).filter(|s| *s < FINAL_CODES) {
+        if let Some(slot) =
+            code.checked_sub(FIRST_FINAL_CODE).map(usize::from).filter(|s| *s < FINAL_CODES)
+        {
             self.finals[slot].fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -117,7 +128,9 @@ impl RetransmitFamily {
     /// Count one replay of the cached response of status `code` to a
     /// retransmitted request of `method`.
     pub(crate) fn record_trigger(&self, method: &Method, code: u16) {
-        if let Some(slot) = code.checked_sub(FIRST_TRIGGER_CODE).map(usize::from).filter(|s| *s < TRIGGER_CODES) {
+        if let Some(slot) =
+            code.checked_sub(FIRST_TRIGGER_CODE).map(usize::from).filter(|s| *s < TRIGGER_CODES)
+        {
             self.triggers[method_slot(method)][slot].fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -333,10 +346,7 @@ impl TransactionMetrics {
 
     /// Sum of all per-reason drop counters.
     pub fn event_queue_drops_total(&self) -> u64 {
-        EventQueueDropReason::ALL
-            .iter()
-            .map(|r| self.event_queue_drops(*r))
-            .sum()
+        EventQueueDropReason::ALL.iter().map(|r| self.event_queue_drops(*r)).sum()
     }
 
     /// Client transactions torn down because their owning call was evicted.

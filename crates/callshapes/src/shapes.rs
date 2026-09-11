@@ -264,10 +264,7 @@ pub fn long_call(binder: Arc<dyn RouteBinder>) -> ShapePlan {
         binder,
         establish: Establishment::Transparent,
         stages: vec![Stage::Script(Script::KeepaliveOnce)],
-        teardown: Teardown::CallerBye {
-            after: DwellKnob::LongHold,
-            feed: ByeFeed::CheckpointOnly,
-        },
+        teardown: Teardown::CallerBye { after: DwellKnob::LongHold, feed: ByeFeed::CheckpointOnly },
         ringing_gate: true,
         stamp_connected: true,
     }

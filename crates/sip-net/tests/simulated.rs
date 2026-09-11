@@ -37,11 +37,7 @@ async fn double_bind_same_addr_is_already_bound() {
     let net = SimulatedSignalingNetwork::new(0);
     let _a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
     // `Box<dyn UdpEndpoint>` isn't Debug, so take the error out via `.err()`.
-    let err = net
-        .bind_udp(opts("10.0.0.1:5060", 64))
-        .await
-        .err()
-        .expect("expected AlreadyBound");
+    let err = net.bind_udp(opts("10.0.0.1:5060", 64)).await.err().expect("expected AlreadyBound");
     assert_eq!(err.reason, BindErrorReason::AlreadyBound);
 }
 
@@ -50,9 +46,7 @@ async fn send_to_unbound_addr_is_undeliverable() {
     let net = SimulatedSignalingNetwork::new(0);
     let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
 
-    a.send_to(b"lost", "10.9.9.9:5060".parse().unwrap())
-        .await
-        .unwrap();
+    a.send_to(b"lost", "10.9.9.9:5060".parse().unwrap()).await.unwrap();
     net.await_in_flight(Duration::from_secs(1)).await;
 
     let undelivered = net.drain_undeliverable().await;
@@ -68,10 +62,7 @@ async fn send_fault_fails_the_send_synchronously() {
         .with_send_fault(Arc::new(|_src, _dst| Some("simulated EHOSTUNREACH".to_string())));
     let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
 
-    let err = a
-        .send_to(b"x", "10.0.0.2:5060".parse().unwrap())
-        .await
-        .unwrap_err();
+    let err = a.send_to(b"x", "10.0.0.2:5060".parse().unwrap()).await.unwrap_err();
     assert!(err.message.contains("EHOSTUNREACH"));
 }
 
@@ -110,10 +101,7 @@ async fn pre_ingress_drop_and_reply() {
         _ => PreIngressAction::Accept,
     });
     let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
-    let b = net
-        .bind_udp(opts("10.0.0.2:5060", 64).with_pre_ingress(hook))
-        .await
-        .unwrap();
+    let b = net.bind_udp(opts("10.0.0.2:5060", 64).with_pre_ingress(hook)).await.unwrap();
     let dst = b.local_addr();
 
     a.send_to(b"DROP_ME", dst).await.unwrap();
@@ -122,10 +110,7 @@ async fn pre_ingress_drop_and_reply() {
     net.await_in_flight(Duration::from_secs(1)).await;
 
     // a should have received the PONG reply.
-    let reply = timeout(Duration::from_secs(1), a.recv())
-        .await
-        .expect("reply timed out")
-        .unwrap();
+    let reply = timeout(Duration::from_secs(1), a.recv()).await.expect("reply timed out").unwrap();
     assert_eq!(reply.raw, b"PONG");
 
     // b enqueued only ACCEPT; dropped DROP_ME; replied to PING.

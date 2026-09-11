@@ -193,8 +193,8 @@ pub(super) fn sanitize_restored_timers(
                 continue;
             }
             if now_ms - t.fire_at >= keepalive_interval_ms {
-                let jitter = (stable_jitter(call_ref) ^ stable_jitter(&t.id))
-                    % keepalive_interval_ms as u64;
+                let jitter =
+                    (stable_jitter(call_ref) ^ stable_jitter(&t.id)) % keepalive_interval_ms as u64;
                 t.fire_at = now_ms + jitter as i64;
             }
         }
@@ -230,7 +230,12 @@ mod tests {
     use std::time::Duration;
 
     fn keepalive(fire_at: i64) -> TimerEntry {
-        TimerEntry { id: "Keepalive".into(), timer_type: TimerType::Keepalive, fire_at, leg_id: None }
+        TimerEntry {
+            id: "Keepalive".into(),
+            timer_type: TimerType::Keepalive,
+            fire_at,
+            leg_id: None,
+        }
     }
     fn keepalive_timeout(leg: &str, fire_at: i64) -> TimerEntry {
         TimerEntry {
@@ -253,7 +258,12 @@ mod tests {
             keepalive(300_000),
             keepalive_timeout("a", 35_000),
             keepalive_timeout("b-1", 35_000),
-            TimerEntry { id: "GlobalDuration".into(), timer_type: TimerType::GlobalDuration, fire_at: 3_600_000, leg_id: None },
+            TimerEntry {
+                id: "GlobalDuration".into(),
+                timer_type: TimerType::GlobalDuration,
+                fire_at: 3_600_000,
+                leg_id: None,
+            },
         ];
         drop_stale_keepalive_timeout(&mut timers);
         assert!(
@@ -431,8 +441,7 @@ mod tests {
         let interval = 300_000;
         // One entry overdue by 40 intervals poisons the batch-wide l_max; this call
         // is overdue by 1 s, so it lands at the far end of the catch-up band.
-        let smoothing =
-            Smoothing { now_ms: now, l_max: 40 * interval, speedup: 10, cap_ms: None };
+        let smoothing = Smoothing { now_ms: now, l_max: 40 * interval, speedup: 10, cap_ms: None };
         let mut timers = vec![keepalive(now - 1_000)];
         sanitize_restored_timers(&mut timers, "w1|od|od", now, Some(0), interval, Some(smoothing));
         assert!(
@@ -522,9 +531,9 @@ mod tests {
         // subtract the offset back out. Model the raw (pre-correction) fire_at:
         let skew = 45_000; // receiver_now − origin_now
         let raw_fire_at = now - skew + 300_000; // origin-frame deadline as stored
-        // Before correction this is `now + 255_000` → looks 45 s "closer" but still
-        // future; a LARGER skew would flip it past-due. Use a skew big enough to
-        // flip it: origin minted it only 30 s out.
+                                                // Before correction this is `now + 255_000` → looks 45 s "closer" but still
+                                                // future; a LARGER skew would flip it past-due. Use a skew big enough to
+                                                // flip it: origin minted it only 30 s out.
         let raw_fire_at_flip = now - skew + 30_000; // = now - 15_000 → PAST-DUE raw!
         let mut timers = vec![keepalive(raw_fire_at_flip)];
         // l_max computed over the CORRECTED deadline (as reclaim_all now does):

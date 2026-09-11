@@ -116,10 +116,9 @@ fn party_of(from_lane: &Option<String>, attr: &Attribution) -> Option<String> {
             let addr: SocketAddr = key.split('#').next()?.parse().ok()?;
             map.get(&addr).filter(|n| !n.is_empty()).cloned()
         }
-        Attribution::SubLane => key
-            .split_once('#')
-            .map(|(_, name)| name.to_string())
-            .filter(|n| !n.is_empty()),
+        Attribution::SubLane => {
+            key.split_once('#').map(|(_, name)| name.to_string()).filter(|n| !n.is_empty())
+        }
     }
 }
 
@@ -230,11 +229,7 @@ pub(crate) fn apply_waivers_findings(
 /// The declared waivers that filtered NOTHING and are not `conditional` — an
 /// error at `finish()`.
 pub(super) fn unused_waivers(waivers: &[WaiverState]) -> Vec<&WaiverScope> {
-    waivers
-        .iter()
-        .filter(|w| !w.used.get() && !w.scope.conditional)
-        .map(|w| &w.scope)
-        .collect()
+    waivers.iter().filter(|w| !w.used.get() && !w.scope.conditional).map(|w| &w.scope).collect()
 }
 
 #[cfg(test)]
@@ -325,12 +320,7 @@ mod tests {
     fn rule_only_covers_by_rule_regardless_of_party() {
         let entries = vec![entry("10.0.0.9:5070#bob")];
         let attr = Attribution::SubLane;
-        assert!(covers(
-            &WaiverScope::rule(RULE, "coarse"),
-            &finding(RULE, 1),
-            &entries,
-            &attr,
-        ));
+        assert!(covers(&WaiverScope::rule(RULE, "coarse"), &finding(RULE, 1), &entries, &attr,));
         // A different rule is never covered.
         assert!(!covers(
             &WaiverScope::rule("rfc3261.other", "coarse"),

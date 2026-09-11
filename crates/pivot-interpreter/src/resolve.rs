@@ -113,9 +113,8 @@ impl<'a> Resolver<'a> {
                     detail: "accessor is not terminated by `}`".into(),
                 });
             };
-            let accessor = Accessor::parse_body(&after[..end]).map_err(|detail| {
-                ResolveError::Malformed { text: text.to_string(), detail }
-            })?;
+            let accessor = Accessor::parse_body(&after[..end])
+                .map_err(|detail| ResolveError::Malformed { text: text.to_string(), detail })?;
             out.push_str(&self.accessor(&accessor)?);
             rest = &after[end + 1..];
         }
@@ -138,19 +137,11 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    fn leg_field(
-        &self,
-        name: &str,
-        leg: &str,
-        field: LegField,
-    ) -> Result<String, ResolveError> {
-        let state = self
-            .state
-            .leg(leg)
-            .ok_or_else(|| ResolveError::LegUnknown {
-                accessor: name.to_string(),
-                leg: leg.to_string(),
-            })?;
+    fn leg_field(&self, name: &str, leg: &str, field: LegField) -> Result<String, ResolveError> {
+        let state = self.state.leg(leg).ok_or_else(|| ResolveError::LegUnknown {
+            accessor: name.to_string(),
+            leg: leg.to_string(),
+        })?;
         let unset = |what: &'static str| ResolveError::LegFieldUnset {
             accessor: name.to_string(),
             leg: leg.to_string(),
@@ -214,14 +205,12 @@ impl<'a> Resolver<'a> {
         field: &StepField,
     ) -> Result<String, ResolveError> {
         if let StepField::Branch = field {
-            return self
-                .state
-                .branch(step)
-                .map(str::to_string)
-                .ok_or_else(|| ResolveError::BranchNotCommitted {
+            return self.state.branch(step).map(str::to_string).ok_or_else(|| {
+                ResolveError::BranchNotCommitted {
                     accessor: name.to_string(),
                     alt: step.to_string(),
-                });
+                }
+            });
         }
         let outcome = self.state.step(step).ok_or_else(|| ResolveError::StepNotRun {
             accessor: name.to_string(),
@@ -249,10 +238,9 @@ impl<'a> Resolver<'a> {
     pub fn computed(&self, computed: &Computed) -> Result<u32, ResolveError> {
         let name = computed.from.to_string();
         let raw = self.accessor(&computed.from)?;
-        let base: i64 = raw.parse().map_err(|_| ResolveError::NotNumeric {
-            accessor: name.clone(),
-            value: raw.clone(),
-        })?;
+        let base: i64 = raw
+            .parse()
+            .map_err(|_| ResolveError::NotNumeric { accessor: name.clone(), value: raw.clone() })?;
         let sum = base + computed.delta;
         u32::try_from(sum).map_err(|_| ResolveError::OutOfRange { accessor: name, value: sum })
     }
@@ -298,9 +286,11 @@ mod tests {
     }
 
     fn bindings() -> IdentityBindings {
-        IdentityBindings::new()
-            .bind("caller", "private", "0009001")
-            .bind("transferee", "e164", "+33000900006")
+        IdentityBindings::new().bind("caller", "private", "0009001").bind(
+            "transferee",
+            "e164",
+            "+33000900006",
+        )
     }
 
     #[test]
@@ -461,10 +451,7 @@ mod tests {
         let state = state();
         let bindings = bindings();
         let r = Resolver::new(&state, &bindings);
-        assert!(matches!(
-            r.text("${leg:C.call-id}").unwrap_err(),
-            ResolveError::LegUnknown { .. }
-        ));
+        assert!(matches!(r.text("${leg:C.call-id}").unwrap_err(), ResolveError::LegUnknown { .. }));
         assert!(matches!(
             r.text("${step:s99.status}").unwrap_err(),
             ResolveError::StepNotRun { .. }
@@ -512,15 +499,9 @@ mod tests {
         assert_eq!(r.computed(&computed).unwrap(), 14);
         let negative: Computed =
             serde_json::from_str(r#"{"from":"${step:s7.cseq}","delta":-20}"#).unwrap();
-        assert!(matches!(
-            r.computed(&negative).unwrap_err(),
-            ResolveError::OutOfRange { .. }
-        ));
+        assert!(matches!(r.computed(&negative).unwrap_err(), ResolveError::OutOfRange { .. }));
         let textual: Computed =
             serde_json::from_str(r#"{"from":"${step:s7.header.To}","delta":1}"#).unwrap();
-        assert!(matches!(
-            r.computed(&textual).unwrap_err(),
-            ResolveError::NotNumeric { .. }
-        ));
+        assert!(matches!(r.computed(&textual).unwrap_err(), ResolveError::NotNumeric { .. }));
     }
 }

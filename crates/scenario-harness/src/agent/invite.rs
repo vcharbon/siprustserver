@@ -6,18 +6,17 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use sip_message::generators::{
-    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
-    StackDialog,
+    generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, StackDialog,
 };
 use sip_message::header::HeaderName;
 use sip_message::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, DelayedAutomatic, EmitOpts, MessageTemplate,
-    SipHeader, SipMessage,
+    apply_name_forms, apply_remote_target_emits, emitted_wire, DelayedAutomatic, EmitOpts,
+    MessageTemplate, SipHeader, SipMessage,
 };
 
 use super::client_invite::ClientInvite;
-use super::Agent;
 use super::ua::{from_of, to_of, uri_of};
+use super::Agent;
 
 /// Builder for an outgoing INVITE (lets the SDP offer be attached fluently).
 pub struct Invite<'a> {
@@ -116,8 +115,7 @@ impl<'a> Invite<'a> {
         // A replay emits the header block it captured: a template that states a
         // media type in ANY spelling keeps that line and the stack adds none, and
         // one that states none must not gain the stack's default.
-        self.suppress_default_ct =
-            !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
+        self.suppress_default_ct = !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
         // Append AFTER any prior `with_header` entries — never drop them.
         self.extra_headers.extend(frozen);
         self.template_body = Some(tmpl.body().to_vec());
@@ -131,10 +129,8 @@ impl<'a> Invite<'a> {
     /// Attach an arbitrary extra header on the initial INVITE (e.g. `Supported:
     /// 100rel, timer` to drive the 18x-management strategies).
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
-        self.extra_headers.push(SipHeader {
-            name: name.to_string().into(),
-            value: value.to_string().into(),
-        });
+        self.extra_headers
+            .push(SipHeader { name: name.to_string().into(), value: value.to_string().into() });
         self
     }
 
@@ -185,10 +181,9 @@ impl<'a> Invite<'a> {
         let from_tag = caller.tag();
         // Default identities are the agent URIs / a peer-addressed R-URI; a Test
         // case may override any of From/To/R-URI from its input data.
-        let request_uri = self
-            .request_uri
-            .clone()
-            .unwrap_or_else(|| format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port()));
+        let request_uri = self.request_uri.clone().unwrap_or_else(|| {
+            format!("sip:{}@{}:{}", peer.name, peer.addr.ip(), peer.addr.port())
+        });
         let from_uri = self.from_uri.clone().unwrap_or_else(|| caller.uri.clone());
         let to_uri = self.to_uri.clone().unwrap_or_else(|| peer.uri.clone());
 

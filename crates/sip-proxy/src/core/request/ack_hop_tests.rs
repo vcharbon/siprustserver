@@ -31,8 +31,12 @@ const W2: &str = "10.0.0.2";
 
 async fn core() -> ProxyCore {
     let net = SimulatedSignalingNetwork::new(1);
-    let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
-    let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+    let ep = net
+        .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
+        .await
+        .unwrap();
+    let strategy: Arc<dyn RoutingStrategy> =
+        Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
     let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
     ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
         .clock(Clock::test_at(0))
@@ -167,7 +171,11 @@ async fn fresh_branch_ack_after_a_relayed_final_takes_the_normal_ladder() {
     let route = format!("Route: <sip:{PROXY_VIP}:5060;lr>\r\n");
     let outcome = core.route_request(&ack("z9hG4bKack2xx", &route), src()).await;
     assert!(outcome.target.is_some(), "a fresh-branch ACK must still be forwarded");
-    assert_ne!(outcome.decision, RoutingDecisionKind::AckHop, "a fresh-branch ACK is not the hop ACK");
+    assert_ne!(
+        outcome.decision,
+        RoutingDecisionKind::AckHop,
+        "a fresh-branch ACK is not the hop ACK"
+    );
 }
 
 // An ACK for a 2xx is its OWN transaction (§13.2.2.4) and must be forwarded

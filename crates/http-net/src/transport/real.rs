@@ -115,14 +115,8 @@ impl HttpTransport for RealHttpNetwork {
                                 .await
                                 .map(|c| c.to_bytes().to_vec())
                                 .unwrap_or_default();
-                            let resp = svc
-                                .handle(HttpRequest {
-                                    method,
-                                    path,
-                                    headers,
-                                    body,
-                                })
-                                .await;
+                            let resp =
+                                svc.handle(HttpRequest { method, path, headers, body }).await;
                             let mut builder = Response::builder().status(resp.status);
                             for (name, value) in &resp.headers {
                                 builder = builder.header(name.as_str(), value.as_str());
@@ -146,10 +140,8 @@ impl HttpTransport for RealHttpNetwork {
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         // `req.path` is a path-and-query target, so the query string rides along.
         let url = format!("http://{dst}{}", req.path);
-        let method = reqwest::Method::from_bytes(req.method.as_bytes()).map_err(|e| HttpError::Io {
-            addr: dst,
-            reason: format!("bad method: {e}"),
-        })?;
+        let method = reqwest::Method::from_bytes(req.method.as_bytes())
+            .map_err(|e| HttpError::Io { addr: dst, reason: format!("bad method: {e}") })?;
         let mut builder = self.client.request(method, &url);
         for (name, value) in &req.headers {
             builder = builder.header(name.as_str(), value.as_str());
@@ -161,10 +153,7 @@ impl HttpTransport for RealHttpNetwork {
             if e.is_connect() {
                 HttpError::Connect(dst)
             } else {
-                HttpError::Io {
-                    addr: dst,
-                    reason: e.to_string(),
-                }
+                HttpError::Io { addr: dst, reason: e.to_string() }
             }
         })?;
         let status = resp.status().as_u16();
@@ -178,16 +167,9 @@ impl HttpTransport for RealHttpNetwork {
             .await
             .map_err(|e| {
                 crate::failures::record(&dst.to_string(), super::cause::classify(&e));
-                HttpError::Io {
-                    addr: dst,
-                    reason: e.to_string(),
-                }
+                HttpError::Io { addr: dst, reason: e.to_string() }
             })?
             .to_vec();
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-        })
+        Ok(HttpResponse { status, headers, body })
     }
 }

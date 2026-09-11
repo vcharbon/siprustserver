@@ -19,7 +19,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{Call, MsgpackCodec, CallBodyCodec};
+use call::{Call, CallBodyCodec, MsgpackCodec};
 use repl_net::transport::{ReplicationNetwork, SimulatedReplicationNetwork};
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
@@ -38,10 +38,7 @@ const BAK: PartitionRole = PartitionRole::Backup;
 
 /// Build a `B2buaConfig` for a worker `ordinal` (only `self_ordinal` matters here).
 fn config_for(ordinal: &str) -> B2buaConfig {
-    B2buaConfig {
-        self_ordinal: ordinal.into(),
-        ..Default::default()
-    }
+    B2buaConfig { self_ordinal: ordinal.into(), ..Default::default() }
 }
 
 /// Craft + parse a raw INVITE carrying the proxy's stickiness cookie as URI
@@ -88,7 +85,8 @@ async fn replicating_callstate_flush_lands_on_peer() {
     let w1 = Node::spawn("w1", SocketAddr::from(([127, 0, 0, 1], 9902)), 1, &net, &clock).await;
 
     // w1 backs up w0: w1's supervisor pulls w0.
-    let w1_sup = supervisor_for("w1", &w1.store, &net, &clock, vec![("w0".into(), w0.addr)], fast_config());
+    let w1_sup =
+        supervisor_for("w1", &w1.store, &net, &clock, vec![("w0".into(), w0.addr)], fast_config());
     w1_sup.start(one_peer("w0", &clock));
     tick(50).await;
 
@@ -98,8 +96,9 @@ async fn replicating_callstate_flush_lands_on_peer() {
     // CallState, and the replication handle share one Arc over that same state.
     let store: Arc<ReplicatingCallStore> = Arc::new(w0.store.clone());
     let writer = BufferedTerminateWriter::spawn(store.clone() as Arc<dyn CallStore>, 1024);
-    let state = CallState::new(store.clone() as Arc<dyn CallStore>, writer, "w0", B2buaMetrics::new())
-        .with_replication(store.clone());
+    let state =
+        CallState::new(store.clone() as Arc<dyn CallStore>, writer, "w0", B2buaMetrics::new())
+            .with_replication(store.clone());
 
     // Build a call from an INVITE carrying the w_pri=w0;w_bak=w1 cookie. The
     // callRef encodes primary w0, so the write-side policy routes it Forward → w1.

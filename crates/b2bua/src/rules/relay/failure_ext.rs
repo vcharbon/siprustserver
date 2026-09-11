@@ -36,10 +36,11 @@ pub fn is_core_reserved_ext(key: &str) -> bool {
 pub fn failure_headers_ext(resp: Option<&sip_message::SipResponse>) -> call::ExtMap {
     let value = match resp {
         Some(resp) => {
-            let pairs: Vec<serde_json::Value> = relay_response_passthrough_headers(resp, SourceBody::Dropped)
-                .iter()
-                .map(|h| serde_json::json!([h.name.as_str(), h.value.as_str()]))
-                .collect();
+            let pairs: Vec<serde_json::Value> =
+                relay_response_passthrough_headers(resp, SourceBody::Dropped)
+                    .iter()
+                    .map(|h| serde_json::json!([h.name.as_str(), h.value.as_str()]))
+                    .collect();
             serde_json::Value::Array(pairs)
         }
         None => serde_json::Value::Null,

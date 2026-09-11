@@ -22,11 +22,7 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 
 /// Every ACK this UA has taken off the wire, whatever absorbed it.
 fn acks_seen(agent: &scenario_harness::Agent) -> usize {
-    agent
-        .wire_view()
-        .iter()
-        .filter(|e| e.start_line().starts_with("ACK "))
-        .count()
+    agent.wire_view().iter().filter(|e| e.start_line().starts_with("ACK ")).count()
 }
 
 #[tokio::test(start_paused = true)]
@@ -49,9 +45,10 @@ async fn a_leg_stray_ack_is_absorbed_and_never_acks_the_unanswered_b_leg() {
         .conditional(),
     );
 
-    let b2bua = B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071)))
-        .start(&h, "b2bua", "127.0.0.1:5081")
-        .await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071)))
+            .start(&h, "b2bua", "127.0.0.1:5081")
+            .await;
 
     // ── a ringing call ───────────────────────────────────────────────────────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

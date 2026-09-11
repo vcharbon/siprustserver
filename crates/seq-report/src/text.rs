@@ -40,7 +40,9 @@ pub fn render_global_txt(doc: &SeqDoc) -> String {
     out.push('\n');
 
     // Legend so the plane tags are self-describing.
-    out.push_str("  legend: [SIP] request/response · [REPL] replication frame · === lifecycle ===\n");
+    out.push_str(
+        "  legend: [SIP] request/response · [REPL] replication frame · === lifecycle ===\n",
+    );
     out.push_str(&"-".repeat(SEP_WIDTH));
     out.push('\n');
 
@@ -88,11 +90,7 @@ fn render_row(out: &mut String, row: &SeqRow, base: i64, doc: &SeqDoc) {
                 RowKind::Lifecycle => unreachable!(),
             };
             let from = lane_label(doc, &row.from);
-            let to = row
-                .to
-                .as_deref()
-                .map(|t| lane_label(doc, t))
-                .unwrap_or_else(|| "?".into());
+            let to = row.to.as_deref().map(|t| lane_label(doc, t)).unwrap_or_else(|| "?".into());
             // The socket tag disambiguates which connection a repl frame rode —
             // so a frame "lost to b2" is legible as a different (defunct) socket
             // than the live one collapsed on the same lane.
@@ -116,20 +114,12 @@ fn count(doc: &SeqDoc, pred: impl Fn(RowKind) -> bool) -> usize {
 }
 
 fn lane_line(doc: &SeqDoc) -> String {
-    doc.lanes
-        .iter()
-        .map(|l| l.id.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+    doc.lanes.iter().map(|l| l.id.as_str()).collect::<Vec<_>>().join(", ")
 }
 
 /// Resolve a lane id to its caption, falling back to the id for an unknown lane
 /// (a projector may reference a lane it did not declare — render it raw rather
 /// than panic).
 fn lane_label(doc: &SeqDoc, id: &str) -> String {
-    doc.lanes
-        .iter()
-        .find(|l| l.id == id)
-        .map(|l| l.label.clone())
-        .unwrap_or_else(|| id.to_string())
+    doc.lanes.iter().find(|l| l.id == id).map(|l| l.label.clone()).unwrap_or_else(|| id.to_string())
 }

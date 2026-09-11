@@ -5,9 +5,9 @@
 
 use std::path::PathBuf;
 
-use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{header, Request, StatusCode};
+use axum::Router;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -64,11 +64,7 @@ async fn post(app: &Router, uri: &str, body: &str, json: bool) -> (StatusCode, S
     if json {
         req = req.header(header::ACCEPT, "application/json");
     }
-    let resp = app
-        .clone()
-        .oneshot(req.body(Body::from(body.to_string())).unwrap())
-        .await
-        .unwrap();
+    let resp = app.clone().oneshot(req.body(Body::from(body.to_string())).unwrap()).await.unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())

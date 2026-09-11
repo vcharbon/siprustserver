@@ -17,8 +17,5 @@ pub fn cookie_field(req: &SipRequest, name: &str) -> Option<String> {
 /// The `(w_pri, w_bak)` worker ordinals the proxy stamped on the route it
 /// recorded. An absent field reads as the empty string, which names no worker.
 pub fn worker_ordinals(req: &SipRequest) -> (String, String) {
-    (
-        cookie_field(req, "w_pri").unwrap_or_default(),
-        cookie_field(req, "w_bak").unwrap_or_default(),
-    )
+    (cookie_field(req, "w_pri").unwrap_or_default(), cookie_field(req, "w_bak").unwrap_or_default())
 }

@@ -35,7 +35,9 @@ const DTMF: &str = "Signal=5\r\nDuration=160\r\n";
 const CHARLIE_PORT: u16 = 5667;
 
 fn x_api_allow_c() -> String {
-    format!(r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}}}}"#)
+    format!(
+        r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}}}}"#
+    )
 }
 
 fn x_api_http_timeout() -> String {
@@ -65,8 +67,7 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
 fn assert_reinvite(req: &sip_message::SipRequest, body: &str, leg: &str) {
     assert_eq!(req.method(), "INVITE", "expected re-INVITE");
     assert!(req.cseq().seq() > 1, "re-INVITE CSeq.seq {} should be > 1", req.cseq().seq());
-    let contact =
-        req.header::<Contact>().expect("a Contact").expect("readable Contact");
+    let contact = req.header::<Contact>().expect("a Contact").expect("readable Contact");
     assert_eq!(
         contact.uri().param("leg").and_then(ParamValue::as_str),
         Some(leg),
@@ -83,7 +84,9 @@ async fn refer_gating_a_reinvite_refer_authorizing() {
     let h = Harness::new("refer-gating-a-reinvite-refer-authorizing");
     let alice = h.agent("alice", "127.0.0.1:6001").await;
     let bob = h.agent("bob", "127.0.0.1:6011").await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6011).start(&h, "b2bua", "127.0.0.1:6021").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6011)
+        .start(&h, "b2bua", "127.0.0.1:6021")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -109,11 +112,8 @@ async fn refer_gating_a_reinvite_refer_authorizing() {
     n100.respond(200, "OK").await;
 
     // A re-INVITEs mid-authorising — must relay transparently to B.
-    let mut a_reinvite = alice_dialog
-        .send_request(InDialogMethod::Invite)
-        .with_sdp(AREINVITE)
-        .send()
-        .await;
+    let mut a_reinvite =
+        alice_dialog.send_request(InDialogMethod::Invite).with_sdp(AREINVITE).send().await;
     let mut bob_reinvite = bob.receive("INVITE").await;
     assert_eq!(
         String::from_utf8_lossy(bob_reinvite.request().body()),
@@ -157,7 +157,9 @@ async fn refer_gating_a_reinvite_c_ringing() {
     let alice = h.agent("alice", "127.0.0.1:6002").await;
     let bob = h.agent("bob", "127.0.0.1:6012").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6012).start(&h, "b2bua", "127.0.0.1:6022").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6012)
+        .start(&h, "b2bua", "127.0.0.1:6022")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -189,11 +191,8 @@ async fn refer_gating_a_reinvite_c_ringing() {
     n180.respond(200, "OK").await;
 
     // A re-INVITEs mid c-ringing — must still relay transparently to B.
-    let mut a_reinvite = alice_dialog
-        .send_request(InDialogMethod::Invite)
-        .with_sdp(AREINVITE)
-        .send()
-        .await;
+    let mut a_reinvite =
+        alice_dialog.send_request(InDialogMethod::Invite).with_sdp(AREINVITE).send().await;
     let mut bob_reinvite = bob.receive("INVITE").await;
     assert_eq!(
         String::from_utf8_lossy(bob_reinvite.request().body()),
@@ -228,7 +227,9 @@ async fn refer_gating_a_reinvite_c_realigning() {
     let alice = h.agent("alice", "127.0.0.1:6003").await;
     let bob = h.agent("bob", "127.0.0.1:6013").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6013).start(&h, "b2bua", "127.0.0.1:6023").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6013)
+        .start(&h, "b2bua", "127.0.0.1:6023")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -267,11 +268,8 @@ async fn refer_gating_a_reinvite_c_realigning() {
     assert_reinvite(c_realign.request(), OFFER, "b-2");
 
     // A glares during c-realigning — transfer-a-glare-reinvite returns 491.
-    let mut a_glare = alice_dialog
-        .send_request(InDialogMethod::Invite)
-        .with_sdp(AREINVITE)
-        .send()
-        .await;
+    let mut a_glare =
+        alice_dialog.send_request(InDialogMethod::Invite).with_sdp(AREINVITE).send().await;
     a_glare.expect(491).await;
 
     // Resume the c-realign exchange → a-realign re-INVITE toward A.
@@ -299,7 +297,9 @@ async fn refer_gating_a_info_refer_authorizing() {
     let h = Harness::new("refer-gating-a-info-refer-authorizing");
     let alice = h.agent("alice", "127.0.0.1:6004").await;
     let bob = h.agent("bob", "127.0.0.1:6014").await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6014).start(&h, "b2bua", "127.0.0.1:6024").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6014)
+        .start(&h, "b2bua", "127.0.0.1:6024")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -370,7 +370,9 @@ async fn refer_gating_a_info_c_ringing() {
     let alice = h.agent("alice", "127.0.0.1:6005").await;
     let bob = h.agent("bob", "127.0.0.1:6015").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6015).start(&h, "b2bua", "127.0.0.1:6025").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6015)
+        .start(&h, "b2bua", "127.0.0.1:6025")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -437,7 +439,9 @@ async fn refer_gating_b_info_refer_authorizing() {
     let h = Harness::new("refer-gating-b-info-refer-authorizing");
     let alice = h.agent("alice", "127.0.0.1:6006").await;
     let bob = h.agent("bob", "127.0.0.1:6016").await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6016).start(&h, "b2bua", "127.0.0.1:6026").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6016)
+        .start(&h, "b2bua", "127.0.0.1:6026")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -501,7 +505,9 @@ async fn refer_gating_second_refer_c_ringing() {
     let alice = h.agent("alice", "127.0.0.1:6007").await;
     let bob = h.agent("bob", "127.0.0.1:6017").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6017).start(&h, "b2bua", "127.0.0.1:6027").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6017)
+        .start(&h, "b2bua", "127.0.0.1:6027")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;
@@ -561,7 +567,9 @@ async fn refer_gating_second_refer_c_realigning() {
     let alice = h.agent("alice", "127.0.0.1:6008").await;
     let bob = h.agent("bob", "127.0.0.1:6018").await;
     let charlie = h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
-    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6018).start(&h, "b2bua", "127.0.0.1:6028").await;
+    let b2bua = B2buaSut::route_all_with_refer("127.0.0.1", 6018)
+        .start(&h, "b2bua", "127.0.0.1:6028")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;

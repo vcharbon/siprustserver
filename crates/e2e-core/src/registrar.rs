@@ -79,10 +79,7 @@ pub struct Registrar {
 
 impl Registrar {
     pub fn new(clock: Clock) -> Self {
-        Self {
-            clock,
-            bindings: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { clock, bindings: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     /// Store / refresh `aor → contact_uri` for `ttl_sec` seconds. Existing
@@ -173,9 +170,7 @@ impl RegisterProxy {
     }
 
     fn next_branch(&self) -> String {
-        let n = self
-            .branch
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let n = self.branch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         format!("z9hG4bK-regproxy-{n}")
     }
 
@@ -185,9 +180,7 @@ impl RegisterProxy {
 
     /// The loose-route entry this proxy records on a dialog (§16.6.4).
     fn record_route(&self) -> RecordRouteEntry {
-        let uri = Uri::sip(self.addr.ip().to_string())
-            .with_port(self.addr.port())
-            .with_flag("lr");
+        let uri = Uri::sip(self.addr.ip().to_string()).with_port(self.addr.port()).with_flag("lr");
         RecordRouteEntry::from_uri(uri)
     }
 
@@ -311,9 +304,9 @@ impl RegisterProxy {
         // The lifetime rides as a HEADER parameter of the Contact, which is
         // where §10.2.4 puts it and what a name-addr echo keeps it as.
         let contact_echo = match granted {
-            Some(contact) => {
-                extra_header(contact.with_param("expires", ParamValue::text(expires_sec.to_string())))
-            }
+            Some(contact) => extra_header(
+                contact.with_param("expires", ParamValue::text(expires_sec.to_string())),
+            ),
             None => SipHeader {
                 name: HeaderName::Contact.as_wire_str().into(),
                 value: contact_raw.clone(),

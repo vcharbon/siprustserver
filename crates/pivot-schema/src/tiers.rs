@@ -324,7 +324,10 @@ mod tests {
             handling("application/mscp+xml"),
             BodyHandling::Freeze { mode: crate::body::BodyMode::Frozen }
         );
-        assert_eq!(handling("text/plain"), BodyHandling::Freeze { mode: crate::body::BodyMode::Frozen });
+        assert_eq!(
+            handling("text/plain"),
+            BodyHandling::Freeze { mode: crate::body::BodyMode::Frozen }
+        );
         // Unrecognized: frozen, and flagged — a missing handler is a decision owed.
         assert_eq!(handling("application/octet-stream"), registry.unmatched.handling);
     }
@@ -337,7 +340,10 @@ mod tests {
             .iter()
             .find(|r| r.match_on.matches("application/emergencycalldata.ecall.msd"))
             .unwrap();
-        assert_eq!(first.handling, BodyHandling::Freeze { mode: crate::body::BodyMode::FrozenBinary });
+        assert_eq!(
+            first.handling,
+            BodyHandling::Freeze { mode: crate::body::BodyMode::FrozenBinary }
+        );
     }
 
     #[test]

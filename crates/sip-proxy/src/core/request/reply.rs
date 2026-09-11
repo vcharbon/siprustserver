@@ -34,7 +34,14 @@ pub(super) fn proxy_reason(status: u16, text: &str) -> Reason {
 
 impl ProxyCore {
     /// Synthesize a UAS response to the source.
-    pub(super) async fn reply(&self, req: &SipRequest, src: SocketAddr, status: u16, reason: &str, extra: &[SipHeader]) {
+    pub(super) async fn reply(
+        &self,
+        req: &SipRequest,
+        src: SocketAddr,
+        status: u16,
+        reason: &str,
+        extra: &[SipHeader],
+    ) {
         let opts = GenerateResponseOpts {
             to_tag: Some(self.id_gen.new_tag()),
             extra_headers: extra.to_vec(),
@@ -48,7 +55,13 @@ impl ProxyCore {
         // place a traced call's own 503 / 483 / 420 / 400 becomes a `sip.out`.
         // A shed call never reaches a downstream hop, so without this its span
         // would show the INVITE arriving and nothing leaving.
-        emit::responded(&self.traces, req.call_id().as_str(), self.now_ms() as i64, src, resp.image());
+        emit::responded(
+            &self.traces,
+            req.call_id().as_str(),
+            self.now_ms() as i64,
+            src,
+            resp.image(),
+        );
 
         // ── §16.7 / §17.1.1.3: absorb the ACK to our OWN non-2xx INVITE final ─
         // Generating a final response makes this proxy the UAS of that INVITE
@@ -82,7 +95,12 @@ impl ProxyCore {
     /// Map a `select_for_new_dialog` failure to its 503. Each variant carries a
     /// distinct `Retry-After` + `Reason` text so the UAC (and dashboards) can
     /// tell "no worker at all" from "this worker is being rate-capped".
-    pub(super) async fn reply_select_failure(&self, req: &SipRequest, src: SocketAddr, err: SelectError) -> RouteOutcome {
+    pub(super) async fn reply_select_failure(
+        &self,
+        req: &SipRequest,
+        src: SocketAddr,
+        err: SelectError,
+    ) -> RouteOutcome {
         let (retry_after, reason_text) = match &err {
             SelectError::NoTarget { .. } => (5u32, "no_target_available"),
             SelectError::RateCapExhausted { retry_after_sec, .. } => {

@@ -15,8 +15,8 @@ use sip_message::{SipHeader, SipStr};
 use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
 use crate::rules::capabilities::{self, Face};
 use crate::rules::model::RuleContext;
-use crate::rules::RelayedFinal;
 use crate::rules::relay;
+use crate::rules::RelayedFinal;
 
 use super::select::dialog_identity_tag;
 use super::ActionExecutor;
@@ -96,7 +96,12 @@ impl ActionExecutor<'_> {
         self.retire(call, fx, Scope::Provisionals);
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
+        let contact = relay::leg_contact(
+            self.config,
+            &call.call_ref,
+            &call.a_leg.leg_id,
+            call.emergency == Some(true),
+        );
         let extra = failure_headers_answering(ctx, call);
         fx.outbound.push(relay::response_to_a_leg(
             &a_invite,
@@ -237,10 +242,16 @@ impl ActionExecutor<'_> {
             None => self.ensure_a_dialog(call),
         };
         // SDP early-media body defaults to application/sdp (mirrors the request path).
-        let content_type =
-            content_type.and_then(relay::media_type).or_else(|| (!body.is_empty()).then(relay::sdp));
+        let content_type = content_type
+            .and_then(relay::media_type)
+            .or_else(|| (!body.is_empty()).then(relay::sdp));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
+        let contact = relay::leg_contact(
+            self.config,
+            &call.call_ref,
+            &call.a_leg.leg_id,
+            call.emergency == Some(true),
+        );
         let mut extra_headers = Vec::new();
         if let Some(pem) = p_early_media {
             extra_headers.push(SipHeader {
@@ -325,17 +336,25 @@ impl ActionExecutor<'_> {
             }
         }
         // SDP answer defaults to application/sdp (mirrors the provisional path).
-        let content_type =
-            content_type.and_then(relay::media_type).or_else(|| (!body.is_empty()).then(relay::sdp));
+        let content_type = content_type
+            .and_then(relay::media_type)
+            .or_else(|| (!body.is_empty()).then(relay::sdp));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
+        let contact = relay::leg_contact(
+            self.config,
+            &call.call_ref,
+            &call.a_leg.leg_id,
+            call.emergency == Some(true),
+        );
         // §16.6: the delivered final's lines ride as received, except the names
         // the service's `header_updates` state — those are the service's, set
         // or removed, and a relayed line of the same name never competes.
         let mut extra_headers: Vec<SipHeader> = relayed
             .headers()
             .iter()
-            .filter(|h| !header_updates.iter().any(|(n, _)| HeaderName::from(n.as_str()).matches(&h.name)))
+            .filter(|h| {
+                !header_updates.iter().any(|(n, _)| HeaderName::from(n.as_str()).matches(&h.name))
+            })
             .cloned()
             .collect();
         // The advert (RFC 3261 §13.2.1): a DECLARED half stands, an undeclared
@@ -345,17 +364,16 @@ impl ActionExecutor<'_> {
         // it absent (`header_update_lines` already dropped it).
         let advert = capabilities::relaying(call, Face::Originator, &extra_headers);
         extra_headers.extend(header_update_lines(header_updates));
-        let service_owned: Vec<Entry> = [HeaderName::Allow, HeaderName::Supported, HeaderName::Accept]
-            .into_iter()
-            .filter_map(|name| {
-                header_updates
-                    .iter()
-                    .find(|(n, _)| name.matches(n))
-                    .map(|(_, v)| {
-                        Entry::raw(name, SipStr::owned(v.as_deref().unwrap_or("")))
-                    })
-            })
-            .collect();
+        let service_owned: Vec<Entry> =
+            [HeaderName::Allow, HeaderName::Supported, HeaderName::Accept]
+                .into_iter()
+                .filter_map(|name| {
+                    header_updates
+                        .iter()
+                        .find(|(n, _)| name.matches(n))
+                        .map(|(_, v)| Entry::raw(name, SipStr::owned(v.as_deref().unwrap_or(""))))
+                })
+                .collect();
         relay::stamp_a_facing_invite_advert(&mut extra_headers, &service_owned, &advert);
         let effect = relay::response_to_a_leg(
             &a_invite,

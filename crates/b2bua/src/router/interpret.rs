@@ -70,14 +70,8 @@ pub(super) async fn process_result(
     // termination, and re-sends the BYE at the *reused* CSeq a real UAS drops
     // (matrix cells C7/RFC). Only `Terminated` is excluded — it takes the
     // `RemoveCall` delete path below instead.
-    if matches!(
-        result.call.state,
-        CallModelState::Active | CallModelState::Terminating
-    ) && result
-        .call
-        .topology
-        .as_ref()
-        .is_some_and(|t| !t.bak.is_empty())
+    if matches!(result.call.state, CallModelState::Active | CallModelState::Terminating)
+        && result.call.topology.as_ref().is_some_and(|t| !t.bak.is_empty())
     {
         ctx.state.flush(&result.call);
     }
@@ -197,7 +191,8 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
     }
 
     for eff in &result.effects.outbound {
-        let dest: SocketAddr = match format!("{}:{}", eff.destination.0, eff.destination.1).parse() {
+        let dest: SocketAddr = match format!("{}:{}", eff.destination.0, eff.destination.1).parse()
+        {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -227,7 +222,11 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
             // the label captured when it was retained.
             (OutboundBody::Datagram(emission), _) => {
                 let repeated = emission.repeated();
-                ctx.metrics.record_retransmit(emission.repeat().ladder(), repeated.method(), repeated.code());
+                ctx.metrics.record_retransmit(
+                    emission.repeat().ladder(),
+                    repeated.method(),
+                    repeated.code(),
+                );
                 let _ = ctx.txn.send_raw(emission.wire().0.to_vec(), dest).await;
             }
             // A response goes through its server transaction, whatever the mode

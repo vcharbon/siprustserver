@@ -47,6 +47,6 @@ mod transport;
 pub use transport::RealHttpNetwork;
 pub use transport::{
     BindError, CapturedExchange, Direction, ExchangeOutcome, Fault, HttpError, HttpRequest,
-    HttpResponse, HttpService, HttpServerHandle, HttpTransport, RecordingHttpNetwork,
+    HttpResponse, HttpServerHandle, HttpService, HttpTransport, RecordingHttpNetwork,
     SimulatedHttpNetwork,
 };

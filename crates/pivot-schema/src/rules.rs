@@ -120,7 +120,9 @@ impl Rule {
     /// The rule's key-bearing regex fields, as `(field, regex)`.
     pub fn key_regexes(&self) -> Vec<(&'static str, &str)> {
         match self {
-            Rule::CallId { left, right, .. } => vec![("left", left.as_str()), ("right", right.as_str())],
+            Rule::CallId { left, right, .. } => {
+                vec![("left", left.as_str()), ("right", right.as_str())]
+            }
             Rule::HeaderKey { pattern, .. } => vec![("pattern", pattern.as_str())],
             _ => Vec::new(),
         }
@@ -179,12 +181,14 @@ mod tests {
 
     #[test]
     fn an_unknown_kind_and_a_cross_kind_field_are_both_refused() {
-        assert!(RuleFile::from_json(r#"{"version":0,"rules":[{"name":"r","kind":"icid"}]}"#).is_err());
-        // `finals` belongs to `retry` alone.
         assert!(
-            RuleFile::from_json(r#"{"version":0,"rules":[{"name":"r","kind":"refer","window_ms":1,"finals":[]}]}"#)
-                .is_err()
+            RuleFile::from_json(r#"{"version":0,"rules":[{"name":"r","kind":"icid"}]}"#).is_err()
         );
+        // `finals` belongs to `retry` alone.
+        assert!(RuleFile::from_json(
+            r#"{"version":0,"rules":[{"name":"r","kind":"refer","window_ms":1,"finals":[]}]}"#
+        )
+        .is_err());
     }
 
     #[test]

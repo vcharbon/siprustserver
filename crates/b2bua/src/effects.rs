@@ -56,7 +56,9 @@ pub struct OutboundSipEffect {
 #[derive(Debug, Clone)]
 pub enum CriticalStateEffect {
     ScheduleTimer(TimerEntry),
-    CancelTimer { id: String },
+    CancelTimer {
+        id: String,
+    },
     CancelAllTimers,
     /// Flush the call to the store (replication path).
     Flush,
@@ -155,9 +157,6 @@ pub struct HandlerResult {
 
 impl HandlerResult {
     pub fn new(call: Call) -> Self {
-        Self {
-            call,
-            effects: HandlerEffects::new(),
-        }
+        Self { call, effects: HandlerEffects::new() }
     }
 }

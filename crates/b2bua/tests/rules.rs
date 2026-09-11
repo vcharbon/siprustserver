@@ -10,22 +10,21 @@ use b2bua::event::CallEvent;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::rules::{
     default_rules, execute_rules, invariants, pick_ranked, ActionExecutor, Effect, Match,
-    RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, SERVICE_LAYER, TimerDelay,
-    };
+    RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay, SERVICE_LAYER,
+};
 use call::{
     B2buaDialogExt, CallModelState, Dialog, Direction, Leg, LegDisposition, LegKind, LegState,
     MachineId, RemoteInfo, StackDialog, StateLabel, TimerType,
 };
-use sip_txn::IdGen;
 use sip_message::generators::{
     generate_out_of_dialog_request, CapabilitySet, GenerateOutOfDialogRequestOpts,
     OutOfDialogMethod,
 };
-use sip_message::parser::custom::CustomParser;
 use sip_message::header::{self, Uri, Via};
+use sip_message::parser::custom::CustomParser;
 use sip_message::SipStr;
 use sip_message::{HeaderName, Method, SipMessage, SipParser, SipRequest};
-
+use sip_txn::IdGen;
 
 /// The URI a fixture names as text.
 fn uri_of(text: &str) -> Uri {
@@ -36,7 +35,9 @@ fn invite() -> SipRequest {
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(uri_of("sip:bob@127.0.0.1:5070")),
         call_id: "c1@alice".into(),
-        from: Some(header::From::from_uri(uri_of("sip:alice@host")).with_tag(SipStr::from_static("atag"))),
+        from: Some(
+            header::From::from_uri(uri_of("sip:alice@host")).with_tag(SipStr::from_static("atag")),
+        ),
         to: Some(header::To::from_uri(uri_of("sip:bob@host"))),
         cseq: 1,
         via: Some(Via::udp("127.0.0.1", 5060).with_branch(SipStr::from_static("z9hG4bKalice"))),
@@ -112,8 +113,7 @@ fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
     };
     let rules = default_rules();
     let ranked = pick_ranked(&rules, call, &ctx);
-    let no_answer =
-        ranked.iter().find(|r| r.id == "no-answer").expect("no-answer is a candidate");
+    let no_answer = ranked.iter().find(|r| r.id == "no-answer").expect("no-answer is a candidate");
     (no_answer.handle)(&ctx).expect("no-answer handles its own timer").actions
 }
 
@@ -416,9 +416,7 @@ fn fold_result(
         .iter()
         .find(|r| r.id == rule_id)
         .unwrap_or_else(|| panic!("{rule_id} is a candidate"));
-    (rule.handle)(&ctx)
-        .unwrap_or_else(|| panic!("{rule_id} handles its fold"))
-        .actions
+    (rule.handle)(&ctx).unwrap_or_else(|| panic!("{rule_id} handles its fold")).actions
 }
 
 /// A route-shaped fold payload (what `callouts::route_result_payload` emits).
@@ -481,8 +479,13 @@ fn decision_folds_on_a_live_call_still_apply() {
     call.callback_context = Some("cb".into());
     call = call::helpers::add_b_leg(call, b_leg_pending());
 
-    let actions =
-        fold_result(&call, "failover-create-leg", "call-failure-result", "failover", route_fold_payload());
+    let actions = fold_result(
+        &call,
+        "failover-create-leg",
+        "call-failure-result",
+        "failover",
+        route_fold_payload(),
+    );
     assert!(
         actions.iter().any(|a| matches!(a, RuleAction::CreateLeg { .. })),
         "live failover fold creates the leg, got {actions:?}",
@@ -551,7 +554,12 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         discharged: None,
     };
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let result = exec.execute(
         &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }],
         &call,
@@ -563,9 +571,11 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         result.call.timers,
     );
     assert!(
-        result.effects.critical.iter().any(
-            |e| matches!(e, CriticalStateEffect::CancelTimer { id } if *id == no_answer_id)
-        ),
+        result
+            .effects
+            .critical
+            .iter()
+            .any(|e| matches!(e, CriticalStateEffect::CancelTimer { id } if *id == no_answer_id)),
         "the live NoAnswer fiber is cancelled, got {:?}",
         result.effects.critical,
     );
@@ -690,15 +700,18 @@ fn no_synthesized_final_when_the_turn_already_answered() {
     let a_invite = b2bua::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     let mut result = HandlerResult::new(call);
     result.effects.outbound.push(b2bua::rules::relay::response_to_a_leg(
-        &a_invite, 486, "Busy Here", Some("totag-x".into()), None, vec![], None, None, vec![],
+        &a_invite,
+        486,
+        "Busy Here",
+        Some("totag-x".into()),
+        None,
+        vec![],
+        None,
+        None,
+        vec![],
     ));
-    let result = invariants::enforce(
-        &b2bua::obligations::ObligationSet::core(),
-        &before,
-        result,
-        0,
-        true,
-    );
+    let result =
+        invariants::enforce(&b2bua::obligations::ObligationSet::core(), &before, result, 0, true);
     let finals_to_a = result
         .effects
         .outbound
@@ -795,10 +808,7 @@ fn sm_rule_with_effects(
     handle: fn(&RuleContext) -> Option<RuleHandleResult>,
     effects: &'static [Effect],
 ) -> RuleDefinition {
-    RuleDefinition {
-        effects,
-        ..sm_rule(handle)
-    }
+    RuleDefinition { effects, ..sm_rule(handle) }
 }
 
 /// Like [`sm_rule`] but with a custom declared `transitions` list.
@@ -806,10 +816,7 @@ fn sm_rule_with_transitions(
     handle: fn(&RuleContext) -> Option<RuleHandleResult>,
     transitions: &'static [(StateLabel, StateLabel)],
 ) -> RuleDefinition {
-    RuleDefinition {
-        transitions,
-        ..sm_rule(handle)
-    }
+    RuleDefinition { transitions, ..sm_rule(handle) }
 }
 
 fn sm_rule(handle: fn(&RuleContext) -> Option<RuleHandleResult>) -> RuleDefinition {
@@ -835,7 +842,11 @@ fn info_event() -> CallEvent {
     }
 }
 
-fn ctx_for<'a>(call: &'a call::Call, event: &'a CallEvent, config: &'a B2buaConfig) -> RuleContext<'a> {
+fn ctx_for<'a>(
+    call: &'a call::Call,
+    event: &'a CallEvent,
+    config: &'a B2buaConfig,
+) -> RuleContext<'a> {
     RuleContext {
         call: RuleCall::new(call),
         call_ref: &call.call_ref,
@@ -887,7 +898,12 @@ fn set_state_moves_cursor_and_gates_the_next_event() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let rules = vec![sm_rule(handle_to_s1)];
 
     let result = {
@@ -920,7 +936,12 @@ fn undeclared_transition_trips_debug_assert() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let rules = vec![sm_rule(handle_to_s2_undeclared)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -938,7 +959,12 @@ fn undeclared_effect_trips_debug_assert() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     // `sm_rule` declares `effects: &[]`, but the handler emits a `LegMessage`.
     let rules = vec![sm_rule(handle_emits_leg_message)];
 
@@ -955,7 +981,12 @@ fn declared_effect_passes_the_drift_check() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let rules = vec![sm_rule_with_effects(handle_emits_leg_message, &SM_EFFECTS_LEG_MESSAGE)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -972,7 +1003,12 @@ fn declared_terminal_clear_state_deactivates_machine() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let rules = vec![sm_rule_with_transitions(handle_clears_state, &SM_TRANSITIONS_TERMINAL)];
 
     let ctx = ctx_for(&call, &event, &config);
@@ -992,7 +1028,12 @@ fn undeclared_terminal_clear_state_trips_debug_assert() {
     let event = info_event();
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let rules = vec![sm_rule(handle_clears_state)]; // transitions: S0 => S1 only
 
     let ctx = ctx_for(&call, &event, &config);
@@ -1095,7 +1136,12 @@ Content-Length: 0\r\n\r\n";
         discharged: None,
     };
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
@@ -1159,7 +1205,12 @@ Content-Length: 0\r\n\r\n";
         discharged: None,
     };
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
     let rs = &result.call.b_legs[0].dialogs[0].sip.route_set;
@@ -1209,7 +1260,12 @@ Content-Length: 0\r\n\r\n";
         discharged: None,
     };
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
 
     let result = exec.execute(&[RuleAction::ConfirmDialog { leg_id: "b-1".into() }], &call, &ctx);
 
@@ -1261,7 +1317,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         &[],
         &CapabilitySet::default(),
         None, // no charging vector
-        &[], // no withheld option tags
+        &[],  // no withheld option tags
         None,
     )
     .expect("no identity rewrites, so nothing to refuse");
@@ -1296,7 +1352,12 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         config: &config,
         discharged: None,
     };
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let result = exec.execute(&[RuleAction::CancelLeg { leg_id: "b-1".into() }], &call, &ctx);
 
     let cancel_effect = result
@@ -1326,11 +1387,7 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         "CANCEL must echo the INVITE's preloaded outbound-proxy Route (RFC 3261 §9.1)"
     );
     // ... and the transaction-correlation Via branch is the INVITE's verbatim.
-    let cancel_via = cancel
-        .raw(HeaderName::Via)
-        .next()
-        .expect("CANCEL has a Via")
-        .to_string();
+    let cancel_via = cancel.raw(HeaderName::Via).next().expect("CANCEL has a Via").to_string();
     assert_eq!(cancel_via, invite_via, "CANCEL top Via (incl. branch) must equal the INVITE's");
 }
 
@@ -1413,7 +1470,12 @@ mod media_primitives {
         id_gen: &'a IdGen,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let exec = ActionExecutor { config, id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+        let exec = ActionExecutor {
+            config,
+            id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
         let ctx = RuleContext {
             call: RuleCall::new(call),
             call_ref: &call.call_ref,
@@ -1737,7 +1799,12 @@ mod answer_a_leg_new_dialog {
         id_gen: &'a IdGen,
         actions: &[RuleAction],
     ) -> HandlerResult {
-        let exec = ActionExecutor { config, id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+        let exec = ActionExecutor {
+            config,
+            id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
         let ctx = RuleContext {
             call: RuleCall::new(call),
             call_ref: &call.call_ref,
@@ -1789,7 +1856,8 @@ mod answer_a_leg_new_dialog {
                     Some("application/sdp"),
                     "an SDP body defaults to application/sdp"
                 );
-                let tag = r.to().tag().map(str::to_owned).expect("the 200 carries an a-facing To-tag");
+                let tag =
+                    r.to().tag().map(str::to_owned).expect("the 200 carries an a-facing To-tag");
                 assert_ne!(tag, "A1early", "A2 ≠ the early-media tag A1 (RFC 3264 §5.1)");
                 tag
             }
@@ -1827,7 +1895,8 @@ mod answer_a_leg_new_dialog {
             .0,
         });
         call = call::helpers::add_b_leg(call, b);
-        let reinvite_2xx = call::Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
+        let reinvite_2xx =
+            call::Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
         call.reliable_provisionals.push(call::ReliableProvisional {
             a_tag: "A1early".into(),
             a_rseq: 1,
@@ -1846,7 +1915,12 @@ mod answer_a_leg_new_dialog {
             (TimerType::Rung { obligation: provisional.clone() }, 500),
             (TimerType::RepeatGiveUp { obligation: provisional.clone() }, 32_000),
         ] {
-            call.timers.push(call::TimerEntry { id: timer_type.timer_id(None), timer_type, fire_at, leg_id: None });
+            call.timers.push(call::TimerEntry {
+                id: timer_type.timer_id(None),
+                timer_type,
+                fire_at,
+                leg_id: None,
+            });
         }
 
         let event = some_event();
@@ -1883,10 +1957,19 @@ mod answer_a_leg_new_dialog {
                     TimerType::Rung { obligation } | TimerType::RepeatGiveUp { obligation } if obligation == o))
                 .count()
         };
-        assert_eq!(ladder_timers(&reinvite_2xx), 2, "the b-leg 2xx's rung and give-up stay in the ledger");
-        assert_eq!(ladder_timers(&provisional), 0, "the caller-facing §3 ladder ends with the final");
+        assert_eq!(
+            ladder_timers(&reinvite_2xx),
+            2,
+            "the b-leg 2xx's rung and give-up stay in the ledger"
+        );
+        assert_eq!(
+            ladder_timers(&provisional),
+            0,
+            "the caller-facing §3 ladder ends with the final"
+        );
         assert!(
-            result.call.reliable_provisionals.is_empty() || result.call.reliable_provisionals[0].emission.is_none(),
+            result.call.reliable_provisionals.is_empty()
+                || result.call.reliable_provisionals[0].emission.is_none(),
             "the provisional repeats nothing more",
         );
         let cancelled: Vec<&str> = result
@@ -2128,9 +2211,21 @@ Content-Length: 4\r\n\r\nv=0\n";
                     "an undeclared half states what the delivered final advertised"
                 );
                 assert_eq!(r.raw(HeaderName::Allow).count(), 1);
-                assert_eq!(r.raw(HeaderName::SessionExpires).next(), None, "per-leg negotiation is withheld");
-                assert_eq!(r.raw(HeaderName::Via).count(), 1, "the caller's own Via, not the callee's");
-                assert_eq!(r.raw(HeaderName::Contact).count(), 1, "the B2BUA's Contact, not the callee's");
+                assert_eq!(
+                    r.raw(HeaderName::SessionExpires).next(),
+                    None,
+                    "per-leg negotiation is withheld"
+                );
+                assert_eq!(
+                    r.raw(HeaderName::Via).count(),
+                    1,
+                    "the caller's own Via, not the callee's"
+                );
+                assert_eq!(
+                    r.raw(HeaderName::Contact).count(),
+                    1,
+                    "the B2BUA's Contact, not the callee's"
+                );
                 assert_eq!(r.to().tag(), Some(result.call.a_leg.dialogs[0].sip.local_tag.as_str()));
             }
             _ => panic!("expected an outbound response"),
@@ -2170,10 +2265,18 @@ Content-Length: 4\r\n\r\nv=0\n";
             OutboundBody::Response(r) => {
                 assert_eq!(r.raw(HeaderName::from("X-Vendor-Thing")).next(), Some("service-owned"));
                 assert_eq!(r.raw(HeaderName::from("X-Vendor-Thing")).count(), 1);
-                assert_eq!(r.raw(HeaderName::from("P-Identifier")).next(), None, "a removal keeps the relayed line off");
+                assert_eq!(
+                    r.raw(HeaderName::from("P-Identifier")).next(),
+                    None,
+                    "a removal keeps the relayed line off"
+                );
                 assert_eq!(r.raw(HeaderName::Allow).next(), Some("INVITE"));
                 assert_eq!(r.raw(HeaderName::Allow).count(), 1);
-                assert_eq!(r.raw(HeaderName::from("Privacy")).next(), Some("none"), "the rest still rides");
+                assert_eq!(
+                    r.raw(HeaderName::from("Privacy")).next(),
+                    Some("none"),
+                    "the rest still rides"
+                );
             }
             _ => panic!("expected an outbound response"),
         }
@@ -2228,7 +2331,12 @@ mod ack_leg_body {
             discharged: None,
         };
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
         let result = exec.execute(
             &[RuleAction::AckLeg { leg_id: "b-1".into(), body, content_type }],
             &call,
@@ -2250,14 +2358,15 @@ mod ack_leg_body {
     // explicit type, the ACK advertises `Content-Type: application/sdp`.
     #[test]
     fn ack_leg_carries_body_verbatim_and_defaults_content_type_to_sdp() {
-        let mut body =
-            b"v=0\r\no=- 0 0 IN IP4 10.0.0.9\r\ns=-\r\nc=IN IP4 10.0.0.9\r\nt=0 0\r\n\
+        let mut body = b"v=0\r\no=- 0 0 IN IP4 10.0.0.9\r\ns=-\r\nc=IN IP4 10.0.0.9\r\nt=0 0\r\n\
               m=audio 40000 RTP/AVP 0\r\n"
-                .to_vec();
+            .to_vec();
         body.push(0xFF); // a non-UTF-8 byte must survive the Vec<u8> round-trip.
 
         let ack = ack_request(body.clone(), None);
-        assert_eq!(&ack.body()[..], &body[..],
+        assert_eq!(
+            &ack.body()[..],
+            &body[..],
             "the delayed-offer answer rides the ACK byte-for-byte (binary-safe)"
         );
         assert_eq!(
@@ -2316,12 +2425,13 @@ mod ack_leg_body {
             discharged: None,
         };
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
-        exec.execute(
-            &[RuleAction::AckLeg { leg_id: "b-1".into(), body, content_type }],
-            call,
-            &ctx,
-        )
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
+        exec.execute(&[RuleAction::AckLeg { leg_id: "b-1".into(), body, content_type }], call, &ctx)
     }
 
     /// The one emitted ACK effect in `result`.
@@ -2371,7 +2481,11 @@ mod ack_leg_body {
             (effect.destination.0.as_str(), effect.destination.1),
             "retained destination is the wire destination"
         );
-        assert_eq!(retained.repeat(), call::Repeat::OnTrigger, "an ACK is repeated only when a 2xx copy provokes it");
+        assert_eq!(
+            retained.repeat(),
+            call::Repeat::OnTrigger,
+            "an ACK is repeated only when a 2xx copy provokes it"
+        );
     }
 
     // RFC 3261 §13.2.2.4: with a datagram retained, a bodyless AckLeg (the
@@ -2476,7 +2590,12 @@ mod create_leg_admission {
             matched_client_txn: false,
         };
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config, id_gen: &id_gen, now_ms: 1_700_000_000_000, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+        let exec = ActionExecutor {
+            config,
+            id_gen: &id_gen,
+            now_ms: 1_700_000_000_000,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
         let ctx = RuleContext {
             call: RuleCall::new(&call),
             call_ref: &call.call_ref,
@@ -2501,10 +2620,7 @@ mod create_leg_admission {
             result.effects.outbound.is_empty(),
             "a rejected create-leg must emit no b-leg outbound (host never reaches the send path)"
         );
-        assert!(
-            result.call.b_legs.is_empty(),
-            "no b-leg state is allocated on admission reject"
-        );
+        assert!(result.call.b_legs.is_empty(), "no b-leg state is allocated on admission reject");
         assert_eq!(
             result.call.state,
             CallModelState::Terminated,
@@ -2551,10 +2667,8 @@ mod create_leg_admission {
     // non-IP `kindlab` is now admitted.
     #[test]
     fn create_leg_to_any_host_is_admitted_under_wildcard_allow_list() {
-        let config = B2buaConfig {
-            worker_allowed_target_suffixes: vec!["*".into()],
-            ..Default::default()
-        };
+        let config =
+            B2buaConfig { worker_allowed_target_suffixes: vec!["*".into()], ..Default::default() };
         let result = run_create_leg(&config, "kindlab", 5060);
 
         assert!(
@@ -2609,7 +2723,12 @@ mod default_sdp_create_leg {
             discharged: None,
         };
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
 
         // The service sources the fake offer from the config parameter — the whole
         // opt-in wiring. (A normal reroute passes `body_override: None` here, which
@@ -2637,7 +2756,9 @@ mod default_sdp_create_leg {
             OutboundBody::Request(r) => r,
             _ => unreachable!(),
         };
-        assert_eq!(&inv.body()[..], &sdp[..],
+        assert_eq!(
+            &inv.body()[..],
+            &sdp[..],
             "the b-leg INVITE carries the config default_sdp sourced via body_override"
         );
         assert_eq!(
@@ -2707,7 +2828,12 @@ mod header_update_removal_withholds_a_relayed_name {
             discharged: None,
         };
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
         let create = RuleAction::CreateLeg {
             destination: ("10.0.1.5".into(), 5070), // IP literal → admission passes
             new_ruri: None,
@@ -2827,10 +2953,7 @@ mod enforce_equivalence {
             });
         }
 
-        result
-            .effects
-            .critical
-            .retain(|e| !matches!(e, CriticalStateEffect::RemoveCall));
+        result.effects.critical.retain(|e| !matches!(e, CriticalStateEffect::RemoveCall));
         result.effects.critical.push(CriticalStateEffect::RemoveCall);
         result
     }
@@ -2945,18 +3068,20 @@ mod service_timers {
     fn distinct_keys_coexist_and_same_key_reschedule_supersedes() {
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 1_000, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 1_000,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
         let call = test_call();
         let event = info_like_event(&call);
         let ctx = ctx_at(&call, &event, &config);
 
         let fast = TimerType::service(SVC, "fast");
         let slow = TimerType::service(SVC, "slow");
-        let result = exec.execute(
-            &[schedule(fast.clone(), 3), schedule(slow.clone(), 6)],
-            &call,
-            &ctx,
-        );
+        let result =
+            exec.execute(&[schedule(fast.clone(), 3), schedule(slow.clone(), 6)], &call, &ctx);
         let ids: Vec<&str> = result.call.timers.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -3104,13 +3229,15 @@ fn a_declared_capability_set_reaches_the_originated_leg_wire_header() {
         &[],
         &b2bua::rules::capabilities::for_leg(&call, "b-1"),
         None, // no charging vector
-        &[], // no withheld option tags
+        &[],  // no withheld option tags
         None,
     )
     .expect("no identity rewrites, so nothing to refuse");
     let invite = match effect.body {
         b2bua::effects::OutboundBody::Request(r) => r,
-        b2bua::effects::OutboundBody::Response(_) | b2bua::effects::OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+        b2bua::effects::OutboundBody::Response(_) | b2bua::effects::OutboundBody::Datagram(_) => {
+            panic!("b-leg effect must carry a request")
+        }
     };
     let allow = invite.raw_text(HeaderName::Allow).next().map(|v| v.as_str().to_string());
     let supported = invite.raw_text(HeaderName::Supported).next().map(|v| v.as_str().to_string());
@@ -3186,7 +3313,12 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
     });
 
     let id_gen = IdGen::seeded(0x65);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let result = exec.execute(&actions, &call, &ctx);
 
     let armed = result
@@ -3216,7 +3348,9 @@ fn the_keepalive_rule_arms_its_ledger_deadline_at_exactly_one_cadence() {
         .critical
         .iter()
         .find_map(|e| match e {
-            CriticalStateEffect::ScheduleTimer(t) if t.timer_type == TimerType::Keepalive => Some(t),
+            CriticalStateEffect::ScheduleTimer(t) if t.timer_type == TimerType::Keepalive => {
+                Some(t)
+            }
             _ => None,
         })
         .expect("the probe's ledger write is replicated");
@@ -3243,7 +3377,12 @@ fn arming_a_keepalive_beyond_one_cadence_trips_the_ledger_invariant() {
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
     let id_gen = IdGen::seeded(0x65);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     exec.execute(
         &[RuleAction::ScheduleTimer {
             timer_type: TimerType::Keepalive,
@@ -3272,7 +3411,12 @@ fn arming_a_keepalive_beyond_one_cadence_is_clamped() {
     };
     let ctx = timer_ctx(&call, &event, &config, now_ms);
     let id_gen = IdGen::seeded(0x65);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let result = exec.execute(
         &[RuleAction::ScheduleTimer {
             timer_type: TimerType::Keepalive,
@@ -3345,7 +3489,12 @@ fn call_with_retained_answered_2xx() -> call::Call {
         (TimerType::Rung { obligation: obligation.clone() }, 500),
         (TimerType::RepeatGiveUp { obligation }, 32_000),
     ] {
-        call.timers.push(call::TimerEntry { id: timer_type.timer_id(None), timer_type, fire_at, leg_id: None });
+        call.timers.push(call::TimerEntry {
+            id: timer_type.timer_id(None),
+            timer_type,
+            fire_at,
+            leg_id: None,
+        });
     }
     call
 }
@@ -3370,7 +3519,12 @@ fn discharge_ack(
     };
     let config = B2buaConfig::default();
     let id_gen = IdGen::seeded(1);
-    let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
     let mut call = call.clone();
     let mut fx = b2bua::effects::HandlerEffects::new();
     let discharged = exec.discharge(&mut call, &mut fx, &event, source_leg_id);
@@ -3391,7 +3545,10 @@ fn caller_ack_discharges_the_retained_answered_2xx() {
         "the retained datagram is discharged from the replicated body",
     );
     assert!(
-        after.timers.iter().all(|t| !matches!(t.timer_type, TimerType::Rung { .. } | TimerType::RepeatGiveUp { .. })),
+        after.timers.iter().all(|t| !matches!(
+            t.timer_type,
+            TimerType::Rung { .. } | TimerType::RepeatGiveUp { .. }
+        )),
         "both ladder timers leave the ledger, got {:?}",
         after.timers,
     );
@@ -3529,11 +3686,17 @@ mod ladder_give_up {
     }
 
     fn is_2xx_give_up(ctx: &RuleContext) -> bool {
-        matches!(ctx.timer_type(), Some(TimerType::RepeatGiveUp { obligation: Obligation::AckOf2xx { .. } }))
+        matches!(
+            ctx.timer_type(),
+            Some(TimerType::RepeatGiveUp { obligation: Obligation::AckOf2xx { .. } })
+        )
     }
 
     fn is_prack_give_up(ctx: &RuleContext) -> bool {
-        matches!(ctx.timer_type(), Some(TimerType::RepeatGiveUp { obligation: Obligation::PrackOf { .. } }))
+        matches!(
+            ctx.timer_type(),
+            Some(TimerType::RepeatGiveUp { obligation: Obligation::PrackOf { .. } })
+        )
     }
 
     /// A service rule that answers the give-up and deliberately declines to
@@ -3557,7 +3720,12 @@ mod ladder_give_up {
     ) -> (HandlerResult, HandlerResult) {
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(1);
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &b2bua::wire_faults::WireFaults::none() };
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
         let event = give_up_of(call, obligation);
         let mut call = call.clone();
         let mut fx = b2bua::effects::HandlerEffects::new();
@@ -3573,8 +3741,13 @@ mod ladder_give_up {
             discharged: None,
         };
         let picked: Vec<&str> = pick_ranked(rules, &call, &ctx).iter().map(|r| r.id).collect();
-        assert_eq!(picked.first().copied(), Some("svc-parks-the-give-up"), "the service rule outranks CORE: {picked:?}");
-        let ruled = execute_rules(rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
+        assert_eq!(
+            picked.first().copied(),
+            Some("svc-parks-the-give-up"),
+            "the service rule outranks CORE: {picked:?}"
+        );
+        let ruled =
+            execute_rules(rules, &call, &ctx, &exec, &b2bua::obligations::ObligationSet::core());
         let settled = exec.settle_give_up(ruled.clone(), obligation, &ctx);
         (ruled, settled)
     }
@@ -3592,7 +3765,11 @@ mod ladder_give_up {
     #[test]
     fn a_service_that_parks_the_unacked_2xx_give_up_does_not_keep_the_session() {
         let call = answered_call();
-        let obligation = Obligation::AckOf2xx { leg: call.a_leg.leg_id.clone(), dialog_tag: A_TAG.into(), cseq: 1 };
+        let obligation = Obligation::AckOf2xx {
+            leg: call.a_leg.leg_id.clone(),
+            dialog_tag: A_TAG.into(),
+            cseq: 1,
+        };
         let mut rules = vec![parking_rule(is_2xx_give_up)];
         rules.extend(default_rules());
 
@@ -3600,15 +3777,29 @@ mod ladder_give_up {
 
         // What the rules alone left: the defect's shape.
         assert_eq!(ruled.call.state, CallModelState::Active, "the service parked the call");
-        assert!(ruled.call.a_leg.dialogs[0].ext.answered_2xx.is_some(), "the rules alone keep the retained 2xx");
+        assert!(
+            ruled.call.a_leg.dialogs[0].ext.answered_2xx.is_some(),
+            "the rules alone keep the retained 2xx"
+        );
 
         // The settlement: the session ends with the CORE verdict, and nothing
         // rides the replicated body any more.
-        assert_eq!(settled.call.state, CallModelState::Terminating, "RFC 3261 §13.3.1.4: the session ends");
-        assert!(settled.call.a_leg.dialogs[0].ext.answered_2xx.is_none(), "no retained datagram survives the give-up");
+        assert_eq!(
+            settled.call.state,
+            CallModelState::Terminating,
+            "RFC 3261 §13.3.1.4: the session ends"
+        );
+        assert!(
+            settled.call.a_leg.dialogs[0].ext.answered_2xx.is_none(),
+            "no retained datagram survives the give-up"
+        );
         let mut byes = byes_in(&settled);
         byes.sort_unstable();
-        assert_eq!(byes, vec!["a", "b-1"], "the a-leg dialog and the b-leg it bridges are both BYEd");
+        assert_eq!(
+            byes,
+            vec!["a", "b-1"],
+            "the a-leg dialog and the b-leg it bridges are both BYEd"
+        );
         let marker = settled
             .call
             .cdr_events
@@ -3625,21 +3816,29 @@ mod ladder_give_up {
         // is the one still owed.
         call.a_leg.dialogs[0].ext.answered_2xx = None;
         call.b_legs[0].dialogs[0].ext.pending_reinvite_2xx = Some(retained_2xx("svc", 7, 5070));
-        let obligation = Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
+        let obligation =
+            Obligation::AckOf2xx { leg: "b-1".into(), dialog_tag: "svc".into(), cseq: 7 };
         let mut rules = vec![parking_rule(is_2xx_give_up)];
         rules.extend(default_rules());
 
         let (_, settled) = give_up_turn(&call, &obligation, &rules);
 
         assert_eq!(settled.call.state, CallModelState::Terminating);
-        assert!(settled.call.b_legs[0].dialogs[0].ext.pending_reinvite_2xx.is_none(), "the re-INVITE 2xx is not retained either");
+        assert!(
+            settled.call.b_legs[0].dialogs[0].ext.pending_reinvite_2xx.is_none(),
+            "the re-INVITE 2xx is not retained either"
+        );
         let marker = settled
             .call
             .cdr_events
             .iter()
             .find(|e| e.event_type == CdrEventType::Bye && e.leg_id == "b-1")
             .and_then(|e| e.reason.clone());
-        assert_eq!(marker.as_deref(), Some("reinvite_ack_timeout"), "the CDR names the leg that owed the ACK");
+        assert_eq!(
+            marker.as_deref(),
+            Some("reinvite_ack_timeout"),
+            "the CDR names the leg that owed the ACK"
+        );
     }
 
     #[test]
@@ -3676,8 +3875,15 @@ mod ladder_give_up {
         let (ruled, settled) = give_up_turn(&call, &obligation, &rules);
 
         assert_eq!(ruled.call.state, CallModelState::Active);
-        assert_eq!(settled.call.state, CallModelState::Active, "a PRACK give-up is the rules' to answer");
+        assert_eq!(
+            settled.call.state,
+            CallModelState::Active,
+            "a PRACK give-up is the rules' to answer"
+        );
         assert!(byes_in(&settled).is_empty(), "no forced teardown");
-        assert!(settled.call.reliable_provisionals[0].emission.is_none(), "the provisional's emission is spent with its ladder");
+        assert!(
+            settled.call.reliable_provisionals[0].emission.is_none(),
+            "the provisional's emission is spent with its ladder"
+        );
     }
 }

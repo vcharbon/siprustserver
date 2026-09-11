@@ -443,7 +443,9 @@ impl Repeats {
                         && sip_message::sniff::rack_cseq(raw) == ladder.cseq
                 }
                 Closer::AnyResponse => is_response && same_transaction,
-                Closer::Final => is_response && status.is_some_and(|s| s >= 200) && same_transaction,
+                Closer::Final => {
+                    is_response && status.is_some_and(|s| s >= 200) && same_transaction
+                }
                 Closer::Nothing => false,
             };
             if closes {
@@ -495,9 +497,9 @@ impl Repeats {
             },
             LadderSide::Send => Some(ladder.declared),
             LadderSide::Expect if !ladder.paced() => Some(ladder.declared),
-            LadderSide::Expect => ladder
-                .window(run_end_us)
-                .map(|w| rungs_within(&ladder.pacing, w)),
+            LadderSide::Expect => {
+                ladder.window(run_end_us).map(|w| rungs_within(&ladder.pacing, w))
+            }
         }
     }
 
@@ -852,7 +854,8 @@ mod tests {
     #[test]
     fn an_auto_ack_ladder_is_held_to_the_finals_own_repeats() {
         let ok = b"SIP/2.0 200 OK\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c9\r\nCSeq: 4 INVITE\r\n\r\n";
-        let ack = b"ACK sip:b@h SIP/2.0\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c9\r\nCSeq: 4 ACK\r\n\r\n";
+        let ack =
+            b"ACK sip:b@h SIP/2.0\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c9\r\nCSeq: 4 ACK\r\n\r\n";
         let drawn = |copies: u32| {
             let mut repeats = Repeats::new();
             repeats.claim("s1", "A", LadderSide::Expect, None, &[], ok, 0);
@@ -1078,7 +1081,11 @@ mod tests {
         let mut repeats = Repeats::new();
         repeats.claim("s6", "A", LadderSide::Expect, Some(1), &[], p183, 0);
         repeats.answered("A", elsewhere, 1_000_000);
-        assert_eq!(repeats.notes(RUN_END)[0].dwell_us, None, "a coincidental RSeq is not an answer");
+        assert_eq!(
+            repeats.notes(RUN_END)[0].dwell_us,
+            None,
+            "a coincidental RSeq is not an answer"
+        );
     }
 
     /// RFC 3261 §17.1.2.1 — a provisional moves a non-INVITE transaction to

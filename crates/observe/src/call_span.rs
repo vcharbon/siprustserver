@@ -301,12 +301,8 @@ mod tests {
     #[test]
     fn a_takeover_span_reuses_the_trace_and_links_the_nominal_root() {
         let nominal = CallSpan::open(lease(), identity());
-        let backup = CallSpan::linked(
-            lease(),
-            identity(),
-            nominal.trace_id(),
-            Some(nominal.span_id()),
-        );
+        let backup =
+            CallSpan::linked(lease(), identity(), nominal.trace_id(), Some(nominal.span_id()));
         assert_eq!(backup.trace_id(), nominal.trace_id(), "one trace spans both processes");
         assert_ne!(backup.span_id(), nominal.span_id(), "the backup opens its OWN root");
     }
@@ -412,7 +408,8 @@ mod tests {
         let (_guard, log) = test_buffer();
         let span = CallSpan::open(lease(), identity());
         let child = span.child("/call/new");
-        child.record(TraceEvent::new("http.request", 10, "POST").with_body(b"{\"call_id\":\"c1\"}"));
+        child
+            .record(TraceEvent::new("http.request", 10, "POST").with_body(b"{\"call_id\":\"c1\"}"));
         child.record(TraceEvent::new("http.response", 20, "200").with_body(b"{\"route\":{}}"));
 
         assert_eq!(log.matching("kind=http.request").len(), 1);

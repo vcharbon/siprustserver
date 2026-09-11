@@ -187,4 +187,3 @@ async fn bye_bye_glare_via_lb_keeps_response_txn_correlation() {
     fh.assert_full_rfc_clean("via-lb-bye-glare");
     drop(proxy);
 }
-

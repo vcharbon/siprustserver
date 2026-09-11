@@ -149,9 +149,15 @@ fn body_strings(body: Option<&Body>) -> Vec<Text<'_>> {
             }
         }
         Some(Body::Multipart(multipart)) => {
-            out.push(one("msg.body.multipart.content-type", multipart.multipart.content_type.as_str()));
+            out.push(one(
+                "msg.body.multipart.content-type",
+                multipart.multipart.content_type.as_str(),
+            ));
             for part in &multipart.multipart.parts {
-                out.push(one("msg.body.multipart.parts[].content-type", part.content_type.as_str()));
+                out.push(one(
+                    "msg.body.multipart.parts[].content-type",
+                    part.content_type.as_str(),
+                ));
                 out.push(one("msg.body.multipart.parts[].ref", part.reference.as_str()));
                 out.extend(
                     part.rewrite
@@ -162,7 +168,10 @@ fn body_strings(body: Option<&Body>) -> Vec<Text<'_>> {
                     out.push(one("msg.body.multipart.parts[].content-id", content_id.as_str()));
                 }
                 for header in &part.headers {
-                    out.push(one("msg.body.multipart.parts[].headers[].name", header.name.as_str()));
+                    out.push(one(
+                        "msg.body.multipart.parts[].headers[].name",
+                        header.name.as_str(),
+                    ));
                     out.push(one(
                         "msg.body.multipart.parts[].headers[].value",
                         header.value.as_str(),
@@ -263,7 +272,8 @@ mod tests {
                 "value":{"from":"${step:s7.cseq}","delta":1}}"#,
         )
         .expect("a deviation");
-        let found: Vec<String> = deviation_strings(&deviation).into_iter().map(|t| t.field).collect();
+        let found: Vec<String> =
+            deviation_strings(&deviation).into_iter().map(|t| t.field).collect();
         for field in ["id", "kind", "leg", "step", "header", "races", "preserve[]"] {
             assert!(found.iter().any(|f| f == field), "{field} is not in the inventory: {found:?}");
         }
@@ -278,12 +288,14 @@ mod tests {
         .expect("postconditions");
         let found: Vec<String> =
             postcondition_strings(&postconditions).into_iter().map(|t| t.field).collect();
-        for field in ["checks[].field", "checks[].value", "cdr.checks[].field", "cdr.checks[].value"]
+        for field in
+            ["checks[].field", "checks[].value", "cdr.checks[].field", "cdr.checks[].value"]
         {
             assert!(found.iter().any(|f| f == field), "{field} is not in the inventory: {found:?}");
         }
         let absent: Postconditions =
-            serde_json::from_str(r#"{"cdr":{"absent":"capture-carries-no-cdr"}}"#).expect("absence");
+            serde_json::from_str(r#"{"cdr":{"absent":"capture-carries-no-cdr"}}"#)
+                .expect("absence");
         assert_eq!(
             postcondition_strings(&absent).into_iter().map(|t| t.text).collect::<Vec<_>>(),
             ["capture-carries-no-cdr"]
@@ -292,10 +304,9 @@ mod tests {
 
     #[test]
     fn an_injection_contributes_its_action_and_target() {
-        let node: FlowNode = serde_json::from_str(
-            r#"{"id":"i1","op":"inject","action":"node-kill","target":"b"}"#,
-        )
-        .expect("a node");
+        let node: FlowNode =
+            serde_json::from_str(r#"{"id":"i1","op":"inject","action":"node-kill","target":"b"}"#)
+                .expect("a node");
         let found: Vec<&str> = node_strings(&node).iter().map(|t| t.text).collect();
         assert_eq!(found, ["node-kill", "b"]);
     }

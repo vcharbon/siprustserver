@@ -23,10 +23,7 @@ s=B2BUA call\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\n\
 m=audio 16384 RTP/AVP 0 8 96\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\na=ptime:20\r\n";
 
 fn header(name: &str, value: &str) -> SipHeader {
-    SipHeader {
-        name: name.to_string(),
-        value: value.to_string(),
-    }
+    SipHeader { name: name.to_string(), value: value.to_string() }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -95,9 +92,18 @@ pub fn repeated_on(class: Class) -> Repeated {
 /// A retained emission standing on `rung` of the ladder `class` paces: the
 /// first rung armed by `paced`, then advanced rung by rung — the way the
 /// stack itself reaches one.
-pub fn paced_emission(datagram: &[u8], dest: (&str, u16), class: Class, rung: u32) -> RetainedEmission {
-    let (mut emission, _) =
-        RetainedEmission::paced(datagram.to_vec(), (dest.0.to_string(), dest.1), class, repeated_on(class));
+pub fn paced_emission(
+    datagram: &[u8],
+    dest: (&str, u16),
+    class: Class,
+    rung: u32,
+) -> RetainedEmission {
+    let (mut emission, _) = RetainedEmission::paced(
+        datagram.to_vec(),
+        (dest.0.to_string(), dest.1),
+        class,
+        repeated_on(class),
+    );
     for _ in 1..rung {
         emission.advance(None).expect("the requested rung sits inside the class's bound");
     }
@@ -123,10 +129,7 @@ pub fn representative_call() -> Call {
         leg_id: "a".into(),
         call_id: "call-id-deadbeef@example.com".into(),
         from_tag: "alice-from-tag-001".into(),
-        source: RemoteInfo {
-            address: "10.0.0.5".into(),
-            port: 5060,
-        },
+        source: RemoteInfo { address: "10.0.0.5".into(), port: 5060 },
         state: LegState::Confirmed,
         disposition: LegDisposition::Bridged,
         dialogs: vec![dialog(
@@ -159,10 +162,7 @@ pub fn representative_call() -> Call {
         leg_id: "b-1".into(),
         call_id: "b-leg-call-id-fedcba@b2bua".into(),
         from_tag: "b2bua-from-tag-bleg-5544".into(),
-        source: RemoteInfo {
-            address: "203.0.113.42".into(),
-            port: 5060,
-        },
+        source: RemoteInfo { address: "203.0.113.42".into(), port: 5060 },
         state: LegState::Confirmed,
         disposition: LegDisposition::Bridged,
         dialogs: vec![dialog(
@@ -186,8 +186,11 @@ pub fn representative_call() -> Call {
         kind: None,
         adopted: None,
     };
-    b_leg.dialogs[0].ext.emitted_ack =
-        Some(RetainedEmission::on_trigger(EMITTED_ACK.to_vec(), ("192.0.2.20".into(), 5060), Repeated::request("ACK")));
+    b_leg.dialogs[0].ext.emitted_ack = Some(RetainedEmission::on_trigger(
+        EMITTED_ACK.to_vec(),
+        ("192.0.2.20".into(), 5060),
+        Repeated::request("ACK"),
+    ));
 
     let mut ext: ExtMap = BTreeMap::new();
     ext.insert(
@@ -199,10 +202,7 @@ pub fn representative_call() -> Call {
         call_ref: "worker-0|call-id-deadbeef@example.com|alice-from-tag-001".into(),
         a_leg,
         b_legs: vec![b_leg],
-        active_peer: Some(ActivePeer {
-            leg_a: "a".into(),
-            leg_b: "b-1".into(),
-        }),
+        active_peer: Some(ActivePeer { leg_a: "a".into(), leg_b: "b-1".into() }),
         callback_context: Some("ctx-abc-123".into()),
         billing_context: Some("subscriber=alice@example.com;plan=premium".into()),
         a_leg_invite: ALegInviteSnapshot {
@@ -276,10 +276,7 @@ pub fn representative_call() -> Call {
         features: Some(FeatureActivations {
             platform: PlatformActivations {
                 max_duration_sec: 3600,
-                keepalive: KeepaliveActivation {
-                    interval_sec: 30,
-                    max_missed: 2,
-                },
+                keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
             refer: None,
             relay_first_18x_to_180: Some(RelayFirst18xTo180Feature {
@@ -295,14 +292,8 @@ pub fn representative_call() -> Call {
         policy_update_headers: None,
         policy_update_body: None,
         active_rules: Some(vec![
-            ActiveRule {
-                id: "limit-by-subscriber".into(),
-                active: true,
-            },
-            ActiveRule {
-                id: "promote-pem-to-200".into(),
-                active: false,
-            },
+            ActiveRule { id: "limit-by-subscriber".into(), active: true },
+            ActiveRule { id: "promote-pem-to-200".into(), active: false },
         ]),
         ext: Some(ext),
         message_count: Some(7),
@@ -364,13 +355,13 @@ fn arb_host_port() -> impl Strategy<Value = HostPort> {
     ("[a-z0-9.]{1,15}", any::<u16>()).prop_map(|(host, port)| HostPort { host, port })
 }
 fn arb_invite_handle() -> impl Strategy<Value = InviteTxnHandle> {
-    (arb_tag(), arb_bytes(48), arb_host_port()).prop_map(|(branch, original_invite, destination)| {
-        InviteTxnHandle {
+    (arb_tag(), arb_bytes(48), arb_host_port()).prop_map(
+        |(branch, original_invite, destination)| InviteTxnHandle {
             branch,
             original_invite,
             destination,
-        }
-    })
+        },
+    )
 }
 
 fn arb_leg_state() -> impl Strategy<Value = LegState> {
@@ -455,7 +446,16 @@ fn arb_pending_request() -> impl Strategy<Value = PendingRequest> {
         arb_direction(),
     )
         .prop_map(
-            |(method, outbound_cseq, inbound_cseq, source_vias, source_call_id, source_from, source_to, direction)| {
+            |(
+                method,
+                outbound_cseq,
+                inbound_cseq,
+                source_vias,
+                source_call_id,
+                source_from,
+                source_to,
+                direction,
+            )| {
                 PendingRequest {
                     method,
                     outbound_cseq,
@@ -485,7 +485,16 @@ fn arb_dialog() -> impl Strategy<Value = Dialog> {
         proptest::collection::vec("[a-z0-9 /.:;=<>-]{1,40}", 0..3),
     )
         .prop_map(
-            |(call_id, local_tag, remote_tag, local_uri, remote_uri, remote_target, local_cseq, route_set)| {
+            |(
+                call_id,
+                local_tag,
+                remote_tag,
+                local_uri,
+                remote_uri,
+                remote_target,
+                local_cseq,
+                route_set,
+            )| {
                 StackDialog {
                     call_id,
                     local_tag,
@@ -547,9 +556,13 @@ fn arb_retained_emission() -> impl Strategy<Value = RetainedEmission> {
         prop_oneof![Just(Class::Final2xx), Just(Class::ReliableProvisional)],
         1u32..6,
     )
-        .prop_map(|(bytes, host, port, class, rung)| paced_emission(&bytes, (&host, port), class, rung));
-    let on_trigger = (arb_bytes(120), "[a-z0-9.]{3,20}", any::<u16>())
-        .prop_map(|(bytes, host, port)| RetainedEmission::on_trigger(bytes, (host, port), Repeated::request("ACK")));
+        .prop_map(|(bytes, host, port, class, rung)| {
+            paced_emission(&bytes, (&host, port), class, rung)
+        });
+    let on_trigger =
+        (arb_bytes(120), "[a-z0-9.]{3,20}", any::<u16>()).prop_map(|(bytes, host, port)| {
+            RetainedEmission::on_trigger(bytes, (host, port), Repeated::request("ACK"))
+        });
     prop_oneof![paced, on_trigger]
 }
 
@@ -574,9 +587,21 @@ fn arb_reliable_provisional() -> impl Strategy<Value = ReliableProvisional> {
         proptest::option::of(arb_retained_emission()),
         proptest::option::of(any::<i64>()),
     )
-        .prop_map(|(a_tag, a_rseq, b_leg_id, b_tag, b_cseq, b_rseq, acknowledged, emission, a_cseq)| {
-            ReliableProvisional { a_tag, a_rseq, b_leg_id, b_tag, b_cseq, b_rseq, acknowledged, emission, a_cseq }
-        })
+        .prop_map(
+            |(a_tag, a_rseq, b_leg_id, b_tag, b_cseq, b_rseq, acknowledged, emission, a_cseq)| {
+                ReliableProvisional {
+                    a_tag,
+                    a_rseq,
+                    b_leg_id,
+                    b_tag,
+                    b_cseq,
+                    b_rseq,
+                    acknowledged,
+                    emission,
+                    a_cseq,
+                }
+            },
+        )
 }
 
 fn arb_leg() -> impl Strategy<Value = Leg> {
@@ -588,10 +613,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
         arb_leg_state(),
         arb_leg_disposition(),
         proptest::collection::vec(arb_dialog(), 0..3),
-        (
-            proptest::option::of(0i64..600),
-            proptest::option::of(arb_bye()),
-        ),
+        (proptest::option::of(0i64..600), proptest::option::of(arb_bye())),
         (
             proptest::option::of(arb_uri()),
             proptest::option::of(arb_uri()),
@@ -639,12 +661,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
 
 fn arb_timer() -> impl Strategy<Value = TimerEntry> {
     (arb_tag(), arb_timer_type(), any::<i64>(), proptest::option::of(arb_tag())).prop_map(
-        |(id, timer_type, fire_at, leg_id)| TimerEntry {
-            id,
-            timer_type,
-            fire_at,
-            leg_id,
-        },
+        |(id, timer_type, fire_at, leg_id)| TimerEntry { id, timer_type, fire_at, leg_id },
     )
 }
 fn arb_cdr() -> impl Strategy<Value = CdrEvent> {
@@ -687,10 +704,7 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
     let platform = (any::<i64>(), any::<i64>(), any::<i64>()).prop_map(
         |(max_duration_sec, interval_sec, max_missed)| PlatformActivations {
             max_duration_sec,
-            keepalive: KeepaliveActivation {
-                interval_sec,
-                max_missed,
-            },
+            keepalive: KeepaliveActivation { interval_sec, max_missed },
         },
     );
     let strat = prop_oneof![
@@ -712,7 +726,8 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
     )
         .prop_map(|(platform, refer_depth, strategy, no_answer)| FeatureActivations {
             platform,
-            refer: refer_depth.map(|max_chain_depth| call::features::ReferFeature { max_chain_depth }),
+            refer: refer_depth
+                .map(|max_chain_depth| call::features::ReferFeature { max_chain_depth }),
             relay_first_18x_to_180: strategy
                 .map(|(strategy, messages)| RelayFirst18xTo180Feature { strategy, messages }),
             no_answer_timeout_sec: no_answer,
@@ -757,7 +772,9 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         "[a-z0-9|@.-]{1,32}",
         arb_leg(),
         proptest::collection::vec(arb_leg(), 0..3),
-        proptest::option::of((arb_tag(), arb_tag()).prop_map(|(leg_a, leg_b)| ActivePeer { leg_a, leg_b })),
+        proptest::option::of(
+            (arb_tag(), arb_tag()).prop_map(|(leg_a, leg_b)| ActivePeer { leg_a, leg_b }),
+        ),
         proptest::option::of("[a-z0-9-]{0,20}"),
         proptest::option::of("[a-z0-9=@.;-]{0,30}"),
         arb_aleg_invite(),
@@ -804,14 +821,20 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
     let release = (
         proptest::collection::vec(arb_reliable_provisional(), 0..3),
         proptest::collection::vec(Just(ReleaseEventKind::MaxCallDuration), 0..2),
-        proptest::option::of((arb_tag(), proptest::option::of(arb_tag()), any::<i64>(), any::<bool>()).prop_map(
-            |(new_leg_id, old_leg_id, started_at_ms, realigning)| RerouteState {
-                phase: if realigning { ReroutePhase::ARealigning } else { ReroutePhase::BLegDialing },
-                new_leg_id,
-                old_leg_id,
-                started_at_ms,
-            },
-        )),
+        proptest::option::of(
+            (arb_tag(), proptest::option::of(arb_tag()), any::<i64>(), any::<bool>()).prop_map(
+                |(new_leg_id, old_leg_id, started_at_ms, realigning)| RerouteState {
+                    phase: if realigning {
+                        ReroutePhase::ARealigning
+                    } else {
+                        ReroutePhase::BLegDialing
+                    },
+                    new_leg_id,
+                    old_leg_id,
+                    started_at_ms,
+                },
+            ),
+        ),
     );
 
     (head, collections, state, trace, tail, release).prop_map(

@@ -146,7 +146,10 @@ mod tests {
     fn endpoint_addr_reads_the_socket_address_under_a_label() {
         assert_eq!(endpoint_addr("10.0.0.9:5080").map(|a| a.port()), Some(5080));
         assert_eq!(endpoint_addr("10.0.0.9:5080#proxy"), endpoint_addr("10.0.0.9:5080"));
-        assert_eq!(endpoint_addr("[::1]:5080").map(|a| a.ip().to_string()), Some("::1".to_string()));
+        assert_eq!(
+            endpoint_addr("[::1]:5080").map(|a| a.ip().to_string()),
+            Some("::1".to_string())
+        );
         assert_eq!(endpoint_addr("proxy.example:5080"), None, "a name is not an address");
     }
 }

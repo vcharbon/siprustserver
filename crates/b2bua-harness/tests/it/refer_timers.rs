@@ -30,7 +30,9 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const CHARLIE_PORT: u16 = 5667;
 
 fn x_api_allow_c() -> String {
-    format!(r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}}}}"#)
+    format!(
+        r#"{{"refer_key":"refer-allow-c","destination":{{"host":"127.0.0.1","port":{CHARLIE_PORT}}}}}"#
+    )
 }
 
 fn refer_to_charlie() -> String {
@@ -119,10 +121,7 @@ async fn refer_overall_safety_fires() {
         .await
         .respond(200, "OK")
         .await;
-    bob.receive_tolerating("BYE", &["INVITE", "CANCEL", "OPTIONS"])
-        .await
-        .respond(200, "OK")
-        .await;
+    bob.receive_tolerating("BYE", &["INVITE", "CANCEL", "OPTIONS"]).await.respond(200, "OK").await;
     charlie
         .receive_tolerating("BYE", &["INVITE", "CANCEL", "OPTIONS"])
         .await

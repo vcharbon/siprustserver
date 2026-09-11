@@ -92,10 +92,7 @@ async fn play_record_webrtc_witness() {
 async fn rtcp_reports_flow_on_the_interval() {
     let net = Arc::new(SimulatedSignalingNetwork::new(1));
     let me = media::ts_endpoint(net);
-    let opts = OpenOptions {
-        rtcp_interval_ms: Some(1000),
-        ..Default::default()
-    };
+    let opts = OpenOptions { rtcp_interval_ms: Some(1000), ..Default::default() };
     let alice = me.open("10.10.0.1", Some(41000), opts.clone()).await.unwrap();
     let bob = me.open("10.20.0.1", Some(41002), opts).await.unwrap();
 
@@ -120,8 +117,5 @@ async fn rtcp_reports_flow_on_the_interval() {
         .into_iter()
         .find(|s| s.direction == StreamDirection::Inbound)
         .expect("bob inbound");
-    assert!(
-        bob_in.rtcp_packets_received > 0,
-        "bob should have received RTCP"
-    );
+    assert!(bob_in.rtcp_packets_received > 0, "bob should have received RTCP");
 }

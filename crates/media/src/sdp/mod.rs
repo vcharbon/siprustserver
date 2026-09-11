@@ -152,11 +152,7 @@ pub fn parse_sdp(input: &str) -> Sdp {
                     kind: p.first().copied().unwrap_or("audio").to_string(),
                     port: p.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
                     protocol: p.get(2).copied().unwrap_or("RTP/AVP").to_string(),
-                    formats: p
-                        .iter()
-                        .skip(3)
-                        .filter_map(|f| f.parse::<u8>().ok())
-                        .collect(),
+                    formats: p.iter().skip(3).filter_map(|f| f.parse::<u8>().ok()).collect(),
                     rtpmap: Vec::new(),
                     direction: MediaDirection::SendRecv, // RFC 3264 default
                     connection_addr: None,
@@ -192,11 +188,7 @@ pub fn parse_sdp(input: &str) -> Sdp {
         media.push(done);
     }
 
-    Sdp {
-        origin,
-        connection_addr: session_conn,
-        media,
-    }
+    Sdp { origin, connection_addr: session_conn, media }
 }
 
 /// Serialise an [`Sdp`] to wire text (CRLF line endings).
@@ -214,21 +206,12 @@ pub fn build_sdp(sdp: &Sdp) -> String {
     lines.push("t=0 0".into());
     for m in &sdp.media {
         let formats: Vec<String> = m.formats.iter().map(|f| f.to_string()).collect();
-        lines.push(format!(
-            "m={} {} {} {}",
-            m.kind,
-            m.port,
-            m.protocol,
-            formats.join(" ")
-        ));
+        lines.push(format!("m={} {} {} {}", m.kind, m.port, m.protocol, formats.join(" ")));
         if let Some(c) = &m.connection_addr {
             lines.push(format!("c=IN IP4 {c}"));
         }
         for r in &m.rtpmap {
-            lines.push(format!(
-                "a=rtpmap:{} {}/{}",
-                r.payload_type, r.encoding_name, r.clock_rate
-            ));
+            lines.push(format!("a=rtpmap:{} {}/{}", r.payload_type, r.encoding_name, r.clock_rate));
         }
         lines.push(format!("a={}", m.direction.as_str()));
     }

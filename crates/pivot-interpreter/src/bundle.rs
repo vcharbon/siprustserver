@@ -183,7 +183,11 @@ mod tests {
             config: RunConfig::new("upstream-fake", ClockMode::Virtual, "127.0.0.1:5080"),
             recording,
             verdict: RunVerdict::ok("case", "upstream-fake"),
-            timing: RunTiming { started_at_ms: 0, settled_at_ms: Some(1420), settle_budget_ms: 32000 },
+            timing: RunTiming {
+                started_at_ms: 0,
+                settled_at_ms: Some(1420),
+                settle_budget_ms: 32000,
+            },
         };
         let dir = std::env::temp_dir().join(format!("pivot-bundle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

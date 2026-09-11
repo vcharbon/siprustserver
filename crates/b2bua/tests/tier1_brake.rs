@@ -115,10 +115,7 @@ async fn setup() -> (
         .bind_udp(BindUdpOpts::new(b2bua_addr(), QUEUE_MAX).with_pre_ingress(hook))
         .await
         .expect("bind b2bua");
-    let flooder = net
-        .bind_udp(BindUdpOpts::new(flooder_addr(), 64))
-        .await
-        .expect("bind flooder");
+    let flooder = net.bind_udp(BindUdpOpts::new(flooder_addr(), 64)).await.expect("bind flooder");
 
     (net, b2bua, flooder, counters)
 }
@@ -238,10 +235,7 @@ async fn in_dialog_reinvites_are_never_braked() {
     for i in 0..3u32 {
         flooder.send_to(&new_invite(i), b2bua_addr()).await.unwrap();
     }
-    flooder
-        .send_to(&invite_buf(7, false, Some("bob-tag-7")), b2bua_addr())
-        .await
-        .unwrap();
+    flooder.send_to(&invite_buf(7, false, Some("bob-tag-7")), b2bua_addr()).await.unwrap();
     settle(&net).await;
 
     // Only the new INVITEs above the threshold were refused (indexes 2..).

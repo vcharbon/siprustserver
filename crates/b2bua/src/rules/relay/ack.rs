@@ -5,8 +5,8 @@
 //! (a taken-over call seeds that transaction, `router::materialise`).
 
 use call::{Dialog, Leg, LegState};
-use sip_message::generators::GenerateAckFor2xxOpts;
 use sip_message::generators;
+use sip_message::generators::GenerateAckFor2xxOpts;
 use sip_message::header::MediaType;
 use sip_txn::IdGen;
 
@@ -54,11 +54,7 @@ pub fn ack_b_leg(
     // armed (`confirm_dialog`), else mint one here. `ack_branch` is reset wherever
     // a new INVITE transaction is cached on the dialog, so a `Some(_)` here always
     // belongs to the CSeq echoed just below.
-    let branch = dialog
-        .ext
-        .ack_branch
-        .clone()
-        .unwrap_or_else(|| id_gen.new_branch());
+    let branch = dialog.ext.ack_branch.clone().unwrap_or_else(|| id_gen.new_branch());
     // The ACK reuses the CSeq of the INVITE it acknowledges — not the dialog's
     // running `local_cseq`, which an intervening early PRACK/UPDATE (or a later
     // in-dialog request) has advanced past the INVITE. Recover it from the cached

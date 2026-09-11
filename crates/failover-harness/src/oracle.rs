@@ -280,7 +280,10 @@ mod tests {
     fn a_differing_repeat_is_its_own_token_and_fails_the_oracle() {
         let mut variant = sample();
         let recomposed = OK_200.replace("branch=z9hG4bK1", "branch=z9hG4bK1;rport");
-        assert!(variant.resp(Who::Alice, &response(&recomposed)), "a differing datagram is a token");
+        assert!(
+            variant.resp(Who::Alice, &response(&recomposed)),
+            "a differing datagram is a token"
+        );
         assert_eq!(variant.alice, vec!["RESP 200 cseq=1", "RESP 200 cseq=1"]);
         assert_transparent("self", &sample(), &variant, true);
     }
@@ -324,7 +327,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "did not drain")]
     fn an_outstanding_limiter_hold_fails_the_sweep() {
-        let sweep = TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 1, expect_cdr: true };
+        let sweep =
+            TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 1, expect_cdr: true };
         sweep.assert_clean("self");
     }
 
@@ -350,14 +354,16 @@ mod tests {
     #[test]
     #[should_panic(expected = "no CDR")]
     fn a_missing_cdr_fails_the_sweep() {
-        let sweep = TeardownSweep { nodes: vec![], cdr_count: 0, limiter_total: 0, expect_cdr: true };
+        let sweep =
+            TeardownSweep { nodes: vec![], cdr_count: 0, limiter_total: 0, expect_cdr: true };
         sweep.assert_clean("self");
     }
 
     #[test]
     fn staydead_zero_cdr_passes_the_sweep() {
         // StayDead variant: zero CDRs is correct (the accepted loss); limiter drained.
-        let sweep = TeardownSweep { nodes: vec![], cdr_count: 0, limiter_total: 0, expect_cdr: false };
+        let sweep =
+            TeardownSweep { nodes: vec![], cdr_count: 0, limiter_total: 0, expect_cdr: false };
         sweep.assert_clean("self"); // does not panic
     }
 
@@ -365,7 +371,8 @@ mod tests {
     #[should_panic(expected = "illegally discharged")]
     fn staydead_with_a_cdr_fails_the_sweep() {
         // A backup that illegally discharged a StayDead deferral → a CDR appears.
-        let sweep = TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 0, expect_cdr: false };
+        let sweep =
+            TeardownSweep { nodes: vec![], cdr_count: 1, limiter_total: 0, expect_cdr: false };
         sweep.assert_clean("self");
     }
 }

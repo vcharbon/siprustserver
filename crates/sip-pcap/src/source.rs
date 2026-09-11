@@ -107,11 +107,9 @@ fn tar_largest_regular_member(bytes: &[u8]) -> Option<&[u8]> {
 /// A tar header's NUL/space-terminated octal number field.
 fn tar_octal(field: &[u8]) -> Option<usize> {
     let digits = field.split(|b| *b == 0 || *b == b' ').find(|s| !s.is_empty())?;
-    digits
-        .iter()
-        .try_fold(0usize, |acc, b| {
-            b.is_ascii_digit().then(|| acc.checked_mul(8)?.checked_add((b - b'0') as usize))?
-        })
+    digits.iter().try_fold(0usize, |acc, b| {
+        b.is_ascii_digit().then(|| acc.checked_mul(8)?.checked_add((b - b'0') as usize))?
+    })
 }
 
 #[cfg(test)]

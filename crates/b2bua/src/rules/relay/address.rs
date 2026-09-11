@@ -120,7 +120,7 @@ Content-Length: 0\r\n\r\n";
             &[],
             &CapabilitySet::default(),
             None, // no charging vector
-            &[], // no withheld option tags
+            &[],  // no withheld option tags
             None,
         )
     }
@@ -128,10 +128,10 @@ Content-Length: 0\r\n\r\n";
     /// Addresses RFC 3261 §19.1.1 refuses, each of which `Uri::opaque` would
     /// have turned into a "host" equal to the whole string.
     const UNREADABLE: &[&str] = &[
-        "sip:2001:db8::1",            // unbracketed IPv6 — would resolve "2001"
-        "sip:host:88161",             // port out of range
-        "not a uri at all",           // no scheme
-        "sip:[2001:db8::1",           // unclosed IPv6 reference
+        "sip:2001:db8::1",  // unbracketed IPv6 — would resolve "2001"
+        "sip:host:88161",   // port out of range
+        "not a uri at all", // no scheme
+        "sip:[2001:db8::1", // unclosed IPv6 reference
     ];
 
     // Every identity rewrite is refused, and the error names WHICH field —
@@ -144,9 +144,9 @@ Content-Length: 0\r\n\r\n";
                 ("new_from", build(None, Some(text), None)),
                 ("new_to", build(None, None, Some(text))),
             ] {
-                let err = built.err().unwrap_or_else(|| {
-                    panic!("{field}={text:?} must be refused, not routed")
-                });
+                let err = built
+                    .err()
+                    .unwrap_or_else(|| panic!("{field}={text:?} must be refused, not routed"));
                 assert_eq!(err.field, field);
                 assert_eq!(err.value, *text, "the refusal carries the stated text");
                 // The wire form names the field only — a peer's bytes never
@@ -170,7 +170,9 @@ Content-Length: 0\r\n\r\n";
         assert_eq!(leg.invite_request_uri.as_deref(), Some("sip:charlie@10.244.2.9:5060"));
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
         };
         assert_eq!(invite.from().uri().host(), "carrier.example");
         assert_eq!(invite.to().uri().user(), Some("+15559876"));
@@ -183,7 +185,9 @@ Content-Length: 0\r\n\r\n";
         let (_leg, effect) = build(None, None, None).expect("relayed a-leg values must route");
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
         };
         assert_eq!(invite.request_uri().host_port(), ("10.244.2.7", 5060));
     }

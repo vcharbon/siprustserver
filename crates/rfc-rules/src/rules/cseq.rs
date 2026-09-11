@@ -714,11 +714,8 @@ mod tests {
     /// violation; arriving "after" CSeq 3 is not judged on its own.
     #[test]
     fn a_stale_takeover_reusing_a_spent_cseq_is_violated() {
-        let msgs = [
-            options(1_000, 2),
-            options(2_000, 3),
-            in_dialog(3_000, "OPTIONS", 2, "z9hG4bK-stale"),
-        ];
+        let msgs =
+            [options(1_000, 2), options(2_000, 3), in_dialog(3_000, "OPTIONS", 2, "z9hG4bK-stale")];
         let f = order(&msgs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(matches!(f[0].decision, Decision::Violated(Evidence::CseqReused { .. })));
@@ -777,11 +774,8 @@ mod tests {
     /// From tag), each own an independent CSeq space — no cross-stream alias.
     #[test]
     fn separate_streams_do_not_alias() {
-        let msgs = [
-            options(1_000, 5),
-            on_call(options(2_000, 1), "c2"),
-            from(options(3_000, 1), "fb"),
-        ];
+        let msgs =
+            [options(1_000, 5), on_call(options(2_000, 1), "c2"), from(options(3_000, 1), "fb")];
         assert!(order(&msgs).is_empty(), "{:?}", order(&msgs));
     }
 
@@ -1003,10 +997,8 @@ mod tests {
     /// INVITE server transaction.
     #[test]
     fn an_ack_on_a_number_no_invite_used_is_violated() {
-        let msgs = [
-            req(1_000, "INVITE", 1, "z9hG4bK-i", None),
-            in_dialog(2_000, "ACK", 3, "z9hG4bK-a"),
-        ];
+        let msgs =
+            [req(1_000, "INVITE", 1, "z9hG4bK-i", None), in_dialog(2_000, "ACK", 3, "z9hG4bK-a")];
         let f = hits(&AckCseqMatchesInvite, &msgs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].emitter, ALICE, "the endpoint that sent the ACK is charged");
@@ -1029,7 +1021,10 @@ mod tests {
         let f = eval(&AckCseqMatchesInvite, &[in_dialog(1_000, "ACK", 9, "z9hG4bK-a")]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(
-            matches!(f[0].decision, Decision::Undecidable("no INVITE on this stream at this vantage")),
+            matches!(
+                f[0].decision,
+                Decision::Undecidable("no INVITE on this stream at this vantage")
+            ),
             "{:?}",
             f[0].decision
         );

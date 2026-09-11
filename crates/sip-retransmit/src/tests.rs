@@ -13,61 +13,27 @@ const fn m(v: u64) -> Duration {
 fn every_class_paces_and_bounds_as_its_rfc_states() {
     let rows: &[(Class, [u64; 4], u64, u64)] = &[
         // §17.1.1.2 Timer A: doubling, no ceiling, Timer B.
-        (
-            Class::InviteClient,
-            [500, 1000, 2000, 4000],
-            500 * 2048,
-            32_000,
-        ),
+        (Class::InviteClient, [500, 1000, 2000, 4000], 500 * 2048, 32_000),
         // §17.1.2.2 Timer E in Trying: doubling, T2 ceiling, Timer F.
-        (
-            Class::NonInviteClient,
-            [500, 1000, 2000, 4000],
-            4000,
-            32_000,
-        ),
+        (Class::NonInviteClient, [500, 1000, 2000, 4000], 4000, 32_000),
         // §17.1.2.2 in Proceeding: flat T2 from the first fire after it.
-        (
-            Class::NonInviteProceeding,
-            [4000, 4000, 4000, 4000],
-            4000,
-            32_000,
-        ),
+        (Class::NonInviteProceeding, [4000, 4000, 4000, 4000], 4000, 32_000),
         // ADR-0028 X4: a non-INVITE's pacing, its own 64·T1 ceiling.
         (Class::CancelClient, [500, 1000, 2000, 4000], 4000, 32_000),
         // §17.2.1 Timer G: doubling, T2 ceiling, until the ACK or Timer H.
-        (
-            Class::InviteServerFinal,
-            [500, 1000, 2000, 4000],
-            4000,
-            32_000,
-        ),
+        (Class::InviteServerFinal, [500, 1000, 2000, 4000], 4000, 32_000),
         // §13.3.1.4: doubling, T2 ceiling, until the ACK or Timer L.
         (Class::Final2xx, [500, 1000, 2000, 4000], 4000, 32_000),
         // RFC 3262 §3: doubling, NO ceiling — a PRACK is a request of its own.
-        (
-            Class::ReliableProvisional,
-            [500, 1000, 2000, 4000],
-            500 * 2048,
-            32_000,
-        ),
+        (Class::ReliableProvisional, [500, 1000, 2000, 4000], 500 * 2048, 32_000),
     ];
 
     for (class, first_four, settled, give_up) in rows {
         let s = Schedule::rfc(*class);
         for (i, want) in first_four.iter().enumerate() {
-            assert_eq!(
-                s.interval(i as u32 + 1),
-                Some(m(*want)),
-                "{class:?} rung {}",
-                i + 1
-            );
+            assert_eq!(s.interval(i as u32 + 1), Some(m(*want)), "{class:?} rung {}", i + 1);
         }
-        assert_eq!(
-            s.interval(12),
-            Some(m(*settled)),
-            "{class:?} settled interval"
-        );
+        assert_eq!(s.interval(12), Some(m(*settled)), "{class:?} settled interval");
         assert_eq!(s.give_up_after(), m(*give_up), "{class:?} give-up");
     }
 }
@@ -143,11 +109,7 @@ fn retargeting_changes_the_pace_and_keeps_the_elapsed() {
 
     l.retarget(Class::NonInviteProceeding);
     assert_eq!(l.give_up_after(), m(9_000), "re-pacing moved the deadline");
-    assert_eq!(
-        l.advance(),
-        Some(m(4000)),
-        "Proceeding re-arms at exactly T2"
-    );
+    assert_eq!(l.advance(), Some(m(4000)), "Proceeding re-arms at exactly T2");
     assert_eq!(l.elapsed(), m(5500), "the switch did not reset the clock");
 }
 
@@ -182,10 +144,7 @@ fn a_tightened_bound_never_passes_the_classs() {
 
 #[test]
 fn a_class_is_readable_back_off_its_schedule() {
-    assert_eq!(
-        Schedule::rfc(Class::Final2xx).class(),
-        Some(Class::Final2xx)
-    );
+    assert_eq!(Schedule::rfc(Class::Final2xx).class(), Some(Class::Final2xx));
 }
 
 /// One stable label per class, distinct across the family, in the kebab-case

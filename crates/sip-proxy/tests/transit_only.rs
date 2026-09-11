@@ -8,8 +8,8 @@ mod common;
 
 use common::{forward_all, spawn_proxy};
 use scenario_harness::Harness;
-use sip_message::HeaderName;
 use sip_message::parser::custom::CustomParser;
+use sip_message::HeaderName;
 use sip_message::{SipMessage, SipParser};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n";
@@ -29,7 +29,10 @@ async fn happy_call_invite_200_ack_bye_through_real_proxy() {
     let mut uas = bob.receive("INVITE").await;
     let recvd = uas.request();
     assert!(
-        recvd.raw(HeaderName::RecordRoute).next().is_some_and(|rr| rr.contains("127.0.0.1:5080") && rr.contains(";lr")),
+        recvd
+            .raw(HeaderName::RecordRoute)
+            .next()
+            .is_some_and(|rr| rr.contains("127.0.0.1:5080") && rr.contains(";lr")),
         "proxy must insert a ;lr Record-Route"
     );
     assert_eq!(recvd.via().len(), 2, "bob sees alice's Via + the proxy's");

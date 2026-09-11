@@ -11,7 +11,6 @@
 
 use std::collections::BTreeMap;
 
-
 use crate::parser::custom::compact_forms::expanded_name;
 use crate::parser::custom::structured_headers::{
     parse_name_addr, parse_sip_uri_string, split_top_level_commas,
@@ -54,10 +53,7 @@ fn parse_element(elem: &str) -> RtElement {
     let (user, uri_params) = match parse_sip_uri_string(&na.uri) {
         Some(u) => (
             u.user.map(String::from),
-            u.params
-                .into_iter()
-                .map(|(k, v)| (k.to_ascii_lowercase(), String::from(v)))
-                .collect(),
+            u.params.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), String::from(v))).collect(),
         ),
         None => (None, BTreeMap::new()),
     };
@@ -138,7 +134,10 @@ mod tests {
 
     #[test]
     fn rewrites_bare_and_userless_uris() {
-        assert_eq!(rewrite_hostport("<sip:proxy.example;lr>", "10.0.0.1", 5060), "<sip:10.0.0.1:5060;lr>");
+        assert_eq!(
+            rewrite_hostport("<sip:proxy.example;lr>", "10.0.0.1", 5060),
+            "<sip:10.0.0.1:5060;lr>"
+        );
         assert_eq!(rewrite_hostport("sip:a@h:5060", "1.2.3.4", 9), "sip:a@1.2.3.4:9");
     }
 

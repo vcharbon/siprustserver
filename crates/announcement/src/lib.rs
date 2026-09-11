@@ -71,7 +71,9 @@ fn ann_data(call: &RuleCall) -> Option<AnnData> {
 fn media_leg_id(call: &RuleCall) -> Option<String> {
     call.b_legs()
         .iter()
-        .find(|l| call::helpers::leg_kind(l) == call::LegKind::Media && l.state != LegState::Terminated)
+        .find(|l| {
+            call::helpers::leg_kind(l) == call::LegKind::Media && l.state != LegState::Terminated
+        })
         .map(|l| l.leg_id.clone())
 }
 
@@ -111,10 +113,7 @@ fn on_media_answer(ctx: &RuleContext) -> Option<RuleHandleResult> {
             content_type: Some(mscml::CONTENT_TYPE.to_string()),
             headers: vec![],
         },
-        RuleAction::SetState {
-            machine: MACHINE,
-            to: State::Announcing.label(),
-        },
+        RuleAction::SetState { machine: MACHINE, to: State::Announcing.label() },
     ])
 }
 
@@ -200,9 +199,7 @@ fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
         RuleAction::RelayFailureToALeg { status, reason: reason.to_string() },
         // Terminate: the confirmed media leg is BYE'd, the Early a-leg is resolved
         // by its just-sent 4xx (no BYE). No a-leg un-confirm workaround here.
-        RuleAction::BeginTermination {
-            reason: Some("announcement-clip-failed".to_string()),
-        },
+        RuleAction::BeginTermination { reason: Some("announcement-clip-failed".to_string()) },
     ])
 }
 
@@ -235,9 +232,7 @@ fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
         // with the MRF's failure before tearing the call down (begin-termination
         // assumes the firing rule already replied to a Trying/Early a-leg).
         RuleAction::RelayFailureToALeg { status, reason: reason.to_string() },
-        RuleAction::BeginTermination {
-            reason: Some("announcement-mrf-failure".to_string()),
-        },
+        RuleAction::BeginTermination { reason: Some("announcement-mrf-failure".to_string()) },
     ])
 }
 

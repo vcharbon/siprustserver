@@ -37,28 +37,15 @@ async fn recording_captures_every_call() {
     a.send_to(b"INVITE", b.local_addr()).await.unwrap();
     let _ = timeout(Duration::from_secs(1), b.recv()).await.unwrap();
 
-    let events: Vec<_> = wrapped
-        .recording
-        .channel()
-        .snapshot()
-        .into_iter()
-        .map(|s| s.event)
-        .collect();
+    let events: Vec<_> =
+        wrapped.recording.channel().snapshot().into_iter().map(|s| s.event).collect();
 
-    let binds = events
-        .iter()
-        .filter(|e| matches!(e, SignalingNetworkEvent::BindAcquire { .. }))
-        .count();
+    let binds =
+        events.iter().filter(|e| matches!(e, SignalingNetworkEvent::BindAcquire { .. })).count();
     assert_eq!(binds, 2);
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, SignalingNetworkEvent::SendCalled { .. })));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, SignalingNetworkEvent::SendResult { .. })));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, SignalingNetworkEvent::RecvItem { .. })));
+    assert!(events.iter().any(|e| matches!(e, SignalingNetworkEvent::SendCalled { .. })));
+    assert!(events.iter().any(|e| matches!(e, SignalingNetworkEvent::SendResult { .. })));
+    assert!(events.iter().any(|e| matches!(e, SignalingNetworkEvent::RecvItem { .. })));
 }
 
 #[tokio::test]
@@ -72,11 +59,7 @@ async fn paranoid_rejects_empty_send() {
         ScopedAuditOptions::default(),
         true,
     );
-    let a = wrapped
-        .network
-        .bind_udp(opts("10.0.0.1:5060", 64))
-        .await
-        .unwrap();
+    let a = wrapped.network.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
     // Empty buffer is a programmer error → defect (panic).
     let _ = a.send_to(b"", "10.0.0.2:5060".parse().unwrap()).await;
 }
@@ -144,9 +127,7 @@ async fn undeliverable_is_deferred_fail() {
 
     {
         let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
-        a.send_to(b"nowhere", "10.9.9.9:5060".parse().unwrap())
-            .await
-            .unwrap();
+        a.send_to(b"nowhere", "10.9.9.9:5060".parse().unwrap()).await.unwrap();
         net.await_in_flight(Duration::from_secs(1)).await;
     }
 
@@ -174,51 +155,32 @@ impl PeerAuditRule for NoSendRule {
 #[tokio::test]
 async fn peer_rule_fails_close_in_recorder_mode() {
     let recorder = Recorder::fake();
-    let opts_audit = ScopedAuditOptions {
-        rules: vec![Arc::new(NoSendRule)],
-        ..Default::default()
-    };
-    let wrapped = with_all_contracts(
-        sim(),
-        recorder,
-        RunContext::TestWithRecorder,
-        opts_audit,
-        false,
-    );
+    let opts_audit = ScopedAuditOptions { rules: vec![Arc::new(NoSendRule)], ..Default::default() };
+    let wrapped =
+        with_all_contracts(sim(), recorder, RunContext::TestWithRecorder, opts_audit, false);
     let net = wrapped.network.clone();
 
     {
         let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
-        a.send_to(b"x", "10.0.0.2:5060".parse().unwrap())
-            .await
-            .unwrap();
+        a.send_to(b"x", "10.0.0.2:5060".parse().unwrap()).await.unwrap();
         // a drops → per-bind NoSendRule fires (deferred-fail).
     }
 
-    let err = wrapped
-        .recording
-        .close()
-        .await
-        .expect_err("peer rule violation must fail close");
+    let err = wrapped.recording.close().await.expect_err("peer rule violation must fail close");
     assert_eq!(err.check, "test.noSend");
 }
 
 #[tokio::test]
 async fn real_run_silences_rules() {
     let recorder = Recorder::fake();
-    let opts_audit = ScopedAuditOptions {
-        rules: vec![Arc::new(NoSendRule)],
-        ..Default::default()
-    };
+    let opts_audit = ScopedAuditOptions { rules: vec![Arc::new(NoSendRule)], ..Default::default() };
     // Same rule + same traffic, but RealRun → rules don't fire.
     let wrapped = with_all_contracts(sim(), recorder, RunContext::RealRun, opts_audit, false);
     let net = wrapped.network.clone();
 
     {
         let a = net.bind_udp(opts("10.0.0.1:5060", 64)).await.unwrap();
-        a.send_to(b"x", "10.0.0.2:5060".parse().unwrap())
-            .await
-            .unwrap();
+        a.send_to(b"x", "10.0.0.2:5060".parse().unwrap()).await.unwrap();
         net.await_in_flight(Duration::from_secs(1)).await;
     }
 
@@ -261,9 +223,7 @@ async fn unconsumed_arrival_is_recorded_at_delivery_and_noted() {
         "arrival must be recorded at delivery, without any recv()"
     );
     assert!(
-        !snapshot
-            .iter()
-            .any(|s| matches!(&s.event, SignalingNetworkEvent::RecvConsumed { .. })),
+        !snapshot.iter().any(|s| matches!(&s.event, SignalingNetworkEvent::RecvConsumed { .. })),
         "no consumption marker without a recv()"
     );
 
@@ -346,10 +306,7 @@ async fn overflow_arrival_is_recorded_with_its_disposition() {
         .collect();
     assert_eq!(
         dispositions,
-        vec![
-            sip_net::RecvDisposition::Delivered,
-            sip_net::RecvDisposition::InboxOverflow
-        ],
+        vec![sip_net::RecvDisposition::Delivered, sip_net::RecvDisposition::InboxOverflow],
         "the overflowed datagram is still a recorded arrival"
     );
 
@@ -407,9 +364,7 @@ const STAMPED_INVITE: &str = "INVITE sip:bob@10.0.0.2 SIP/2.0\r\n\
     Content-Length: 0\r\n\r\n";
 
 /// Every `RecvItem` on a bind's lane, in capture order.
-fn recv_items(
-    wrapped: &sip_net::WrappedNetwork,
-) -> Vec<Stamped<SignalingNetworkEvent>> {
+fn recv_items(wrapped: &sip_net::WrappedNetwork) -> Vec<Stamped<SignalingNetworkEvent>> {
     wrapped
         .recording
         .channel()

@@ -51,10 +51,7 @@ impl ReplicationNetwork for RealReplicationNetwork {
         RealConnection::from_stream(stream).map_err(ConnectError::Io)
     }
 
-    async fn listen(
-        &self,
-        local: SocketAddr,
-    ) -> Result<Box<dyn ReplicationListener>, ListenError> {
+    async fn listen(&self, local: SocketAddr) -> Result<Box<dyn ReplicationListener>, ListenError> {
         let listener = TcpListener::bind(local).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse {
                 ListenError::AlreadyInUse(local)
@@ -62,13 +59,8 @@ impl ReplicationNetwork for RealReplicationNetwork {
                 ListenError::Io(e.to_string())
             }
         })?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|e| ListenError::Io(e.to_string()))?;
-        Ok(Box::new(RealListener {
-            inner: listener,
-            local_addr,
-        }))
+        let local_addr = listener.local_addr().map_err(|e| ListenError::Io(e.to_string()))?;
+        Ok(Box::new(RealListener { inner: listener, local_addr }))
     }
 }
 
@@ -117,11 +109,7 @@ impl RealConnection {
             peer,
             local,
             write: Mutex::new(write_half),
-            read: Mutex::new(ReadState {
-                half: read_half,
-                buf: Vec::new(),
-                done: false,
-            }),
+            read: Mutex::new(ReadState { half: read_half, buf: Vec::new(), done: false }),
         }))
     }
 }
@@ -132,9 +120,7 @@ impl ReplicationConnection for RealConnection {
         // Codec + length prefix, then one write.
         let wire = frame_with_len_prefix(&encode_frame(&frame));
         let mut w = self.write.lock().await;
-        w.write_all(&wire)
-            .await
-            .map_err(|e| classify_write(&e))?;
+        w.write_all(&wire).await.map_err(|e| classify_write(&e))?;
         w.flush().await.map_err(|e| classify_write(&e))?;
         Ok(())
     }
@@ -240,9 +226,7 @@ mod tests {
         let server = accept_task.await.unwrap().expect("accepted");
 
         // A small frame and a Data frame with a body, both round-trip identically.
-        let noop = Frame::Noop {
-            at: crate::Watermark::new(3, 9),
-        };
+        let noop = Frame::Noop { at: crate::Watermark::new(3, 9) };
         let data = Frame::Data {
             at: crate::Watermark::new(3, 10),
             op: crate::Op::Put,
@@ -263,9 +247,7 @@ mod tests {
         assert_eq!(server.recv().await, Some(data));
 
         // Bidirectional.
-        let reset = Frame::ResetToBootstrap {
-            reason: "tail fell off".into(),
-        };
+        let reset = Frame::ResetToBootstrap { reason: "tail fell off".into() };
         server.send(reset.clone()).await.unwrap();
         assert_eq!(client.recv().await, Some(reset));
 

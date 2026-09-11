@@ -48,11 +48,7 @@ pub struct Channel<E> {
 
 impl<E> Clone for Channel<E> {
     fn clone(&self) -> Self {
-        Self {
-            buf: self.buf.clone(),
-            seq: self.seq.clone(),
-            clock: self.clock.clone(),
-        }
+        Self { buf: self.buf.clone(), seq: self.seq.clone(), clock: self.clock.clone() }
     }
 }
 
@@ -74,10 +70,7 @@ impl<E> Channel<E> {
         let seq = self.seq.next();
         let at_ms = self.clock.now_ms().max(0) as u64;
         let event = build(seq);
-        self.buf
-            .lock()
-            .unwrap()
-            .push(Stamped { event, seq, at_ms });
+        self.buf.lock().unwrap().push(Stamped { event, seq, at_ms });
     }
 }
 
@@ -190,20 +183,11 @@ impl Recorder {
                 .clone()
                 .downcast::<Mutex<Vec<Stamped<E>>>>()
                 .expect("Recorder::for_tag called with a different event type for the same tag");
-            return Channel {
-                buf,
-                seq: self.seq.clone(),
-                clock: self.clock.clone(),
-            };
+            return Channel { buf, seq: self.seq.clone(), clock: self.clock.clone() };
         }
         let buf: Arc<Mutex<Vec<Stamped<E>>>> = Arc::new(Mutex::new(Vec::new()));
-        st.channels
-            .insert(tag, buf.clone() as Arc<dyn Any + Send + Sync>);
-        Channel {
-            buf,
-            seq: self.seq.clone(),
-            clock: self.clock.clone(),
-        }
+        st.channels.insert(tag, buf.clone() as Arc<dyn Any + Send + Sync>);
+        Channel { buf, seq: self.seq.clone(), clock: self.clock.clone() }
     }
 
     // ---- anomaly ledger -------------------------------------------------
@@ -257,12 +241,7 @@ impl Recorder {
                 let initial_kills = st.pending_kills.remove(&key).unwrap_or_default();
                 st.lanes.insert(
                     key,
-                    MutableLane {
-                        addr,
-                        names: vec![name],
-                        network,
-                        killed_at: initial_kills,
-                    },
+                    MutableLane { addr, names: vec![name], network, killed_at: initial_kills },
                 );
             }
             Some(lane) => {
@@ -326,11 +305,7 @@ impl Recorder {
         for projector in st.projectors.values() {
             anomalies.extend(projector());
         }
-        RecordedScenario {
-            transport_kind: self.kind,
-            lanes,
-            anomalies,
-        }
+        RecordedScenario { transport_kind: self.kind, lanes, anomalies }
     }
 
     /// All findings currently on the ledger (eager ++ projected). Convenience

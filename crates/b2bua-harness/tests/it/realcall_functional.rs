@@ -129,10 +129,7 @@ async fn refer_scene(name: &str) -> (B2buaScene, Agent) {
         B2buaSut::route_all_with_refer("127.0.0.1", bob_port)
     })
     .await;
-    let charlie = scene
-        .h
-        .agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}"))
-        .await;
+    let charlie = scene.h.agent("charlie", &format!("127.0.0.1:{CHARLIE_PORT}")).await;
     (scene, charlie)
 }
 

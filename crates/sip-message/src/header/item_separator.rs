@@ -69,7 +69,8 @@ mod tests {
     fn privacy_separates_its_priv_values_with_semicolons() {
         assert_eq!(HeaderName::Privacy.item_separator(), ItemSeparator::Semicolon);
         assert_eq!(HeaderName::item_separator_of("privacy"), ItemSeparator::Semicolon);
-        let items: Vec<&str> = HeaderName::Privacy.item_separator().split("id;user; header").collect();
+        let items: Vec<&str> =
+            HeaderName::Privacy.item_separator().split("id;user; header").collect();
         assert_eq!(items, ["id", "user", "header"]);
     }
 
@@ -78,7 +79,8 @@ mod tests {
         for name in ["Supported", "Allow", "Contact", "Via", "Reason", "X-Extension"] {
             assert_eq!(HeaderName::item_separator_of(name), ItemSeparator::Comma, "{name}");
         }
-        let items: Vec<&str> = HeaderName::Supported.item_separator().split("100rel, timer").collect();
+        let items: Vec<&str> =
+            HeaderName::Supported.item_separator().split("100rel, timer").collect();
         assert_eq!(items, ["100rel", "timer"]);
     }
 

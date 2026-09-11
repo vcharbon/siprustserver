@@ -31,8 +31,8 @@ mod parsed_tests {
     //! every Resource-Priority header checked, `false` when absent.
 
     use super::is_emergency_request;
-    use crate::parser::SipParser;
     use crate::parser::custom::CustomParser;
+    use crate::parser::SipParser;
     use crate::types::SipMessage;
 
     /// Parse a minimal INVITE carrying the given `Resource-Priority` header;
@@ -122,13 +122,11 @@ CSeq: 1 INVITE\r\n\
 Resource-Priority: dsn.flash\r\n\
 Resource-Priority: wps.0\r\n\
 Content-Length: 0\r\n\r\n";
-        let req = match CustomParser::new()
-            .parse(raw.as_bytes())
-            .expect("fixture INVITE should parse")
-        {
-            SipMessage::Request(r) => r,
-            SipMessage::Response(_) => panic!("expected request"),
-        };
+        let req =
+            match CustomParser::new().parse(raw.as_bytes()).expect("fixture INVITE should parse") {
+                SipMessage::Request(r) => r,
+                SipMessage::Response(_) => panic!("expected request"),
+            };
         assert!(is_emergency_request(&req));
     }
 }

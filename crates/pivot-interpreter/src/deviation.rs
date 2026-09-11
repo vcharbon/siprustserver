@@ -60,14 +60,14 @@ impl Effect {
             | Effect::Verbatim { .. }
             | Effect::RawOrder { .. }
             | Effect::CseqOverride { .. } => None,
-            Effect::NotEmittable { .. } => {
-                Some("this interpreter has no emission path for it, and emitting a compliant \
-                      message instead would not reproduce the defect")
-            }
-            Effect::PreserveUnsupported { .. } => {
-                Some("this interpreter does not guarantee that property through emission, and \
-                      emitting without it would not reproduce the defect")
-            }
+            Effect::NotEmittable { .. } => Some(
+                "this interpreter has no emission path for it, and emitting a compliant \
+                      message instead would not reproduce the defect",
+            ),
+            Effect::PreserveUnsupported { .. } => Some(
+                "this interpreter does not guarantee that property through emission, and \
+                      emitting without it would not reproduce the defect",
+            ),
             Effect::Unknown { .. } => Some("this interpreter does not model this kind"),
         }
     }
@@ -80,14 +80,9 @@ impl Effect {
 /// token it cannot guarantee, become refusals the run states by name.
 pub fn effect(deviation: &Deviation) -> Effect {
     let unsupported = |kind: &str| {
-        deviation
-            .preserve
-            .iter()
-            .find(|token| !PRESERVABLE.contains(&token.as_str()))
-            .map(|token| Effect::PreserveUnsupported {
-                kind: kind.to_string(),
-                token: token.clone(),
-            })
+        deviation.preserve.iter().find(|token| !PRESERVABLE.contains(&token.as_str())).map(
+            |token| Effect::PreserveUnsupported { kind: kind.to_string(), token: token.clone() },
+        )
     };
     match deviation.kind.as_str() {
         "suppress-auto" => Effect::SuppressAuto,
@@ -125,12 +120,12 @@ pub fn effect(deviation: &Deviation) -> Effect {
 /// request's, and an override reaches it.
 pub fn cseq_override_refusal(status: Option<u16>, method: Option<&str>) -> Option<&'static str> {
     match (status, method) {
-        (Some(_), _) => Some(
-            "a response repeats the CSeq of the request it answers (RFC 3261 §8.2.6.2)",
-        ),
-        (None, Some(m)) if m.eq_ignore_ascii_case("CANCEL") => Some(
-            "a CANCEL carries the CSeq number of the request it cancels (RFC 3261 §9.1)",
-        ),
+        (Some(_), _) => {
+            Some("a response repeats the CSeq of the request it answers (RFC 3261 §8.2.6.2)")
+        }
+        (None, Some(m)) if m.eq_ignore_ascii_case("CANCEL") => {
+            Some("a CANCEL carries the CSeq number of the request it cancels (RFC 3261 §9.1)")
+        }
         _ => None,
     }
 }
@@ -292,10 +287,8 @@ mod tests {
         assert_eq!(effect(&unknown), Effect::Unknown { kind: "drop-every-third-packet".into() });
         let refusals = StepEffects::of([&unknown]).refusals();
         assert_eq!(refusals.len(), 1);
-        assert!(
-            matches!(&refusals[0], Failure::DeviationUnimplemented { kind, reason, .. }
-                if kind == "drop-every-third-packet" && reason.contains("does not model"))
-        );
+        assert!(matches!(&refusals[0], Failure::DeviationUnimplemented { kind, reason, .. }
+                if kind == "drop-every-third-packet" && reason.contains("does not model")));
     }
 
     #[test]

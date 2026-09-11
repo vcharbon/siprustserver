@@ -13,8 +13,8 @@
 //! - `Expect::AbandonedEarly` → `Timeout { who: "alice-abandoned-after-ringing" }`;
 //! - `Expect::TransferDeclined` → `UnexpectedKind { who: "refer_charlie_reject" }`.
 
-use super::endpoint::{Automatics, Disposition};
 use super::delta::AcceptedDeltaPolicy;
+use super::endpoint::{Automatics, Disposition};
 use super::goals::GoalStep;
 use super::observe::ReceptionObserver;
 use super::state::{ObservedState, ReplayEntry};
@@ -178,10 +178,7 @@ pub fn originating_role(actors: &[ActorSpec]) -> &'static str {
         })
         .map(|a| a.role)
         .or_else(|| {
-            actors
-                .iter()
-                .find(|a| matches!(a.disposition, Disposition::Caller))
-                .map(|a| a.role)
+            actors.iter().find(|a| matches!(a.disposition, Disposition::Caller)).map(|a| a.role)
         })
         .unwrap_or("alice")
 }
@@ -225,9 +222,9 @@ pub fn into_result(
                 }
             }
             // The `abandon_ringing` synthetic terminal (`failures.rs:104`).
-            Expect::AbandonedEarly => Err(StepError::Timeout {
-                who: "alice-abandoned-after-ringing".to_string(),
-            }),
+            Expect::AbandonedEarly => {
+                Err(StepError::Timeout { who: "alice-abandoned-after-ringing".to_string() })
+            }
             // The `refer_charlie_reject` synthetic terminal (`failures.rs:178`).
             Expect::TransferDeclined => Err(StepError::UnexpectedKind {
                 who: "refer_charlie_reject".to_string(),
@@ -240,9 +237,9 @@ pub fn into_result(
             // §9.2 — the call confirmed and tore down normally).
             Expect::EitherOf(branches) => {
                 let cancelled = branches.iter().find_map(|b| match b {
-                    ExpectBranch::Cancelled { code } => obs
-                        .with_snapshot(|s| s.leg(caller).saw_final(*code))
-                        .then_some(*code),
+                    ExpectBranch::Cancelled { code } => {
+                        obs.with_snapshot(|s| s.leg(caller).saw_final(*code)).then_some(*code)
+                    }
                     ExpectBranch::Answered => None,
                 });
                 if cancelled.is_some() {

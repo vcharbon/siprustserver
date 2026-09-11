@@ -35,13 +35,12 @@ pub fn new_span_id() -> String {
 /// A replicated id that fails this is not linked against — a malformed link
 /// target is worse than none.
 pub fn is_valid_id(id: &str, width: usize) -> bool {
-    id.len() == width
-        && id.bytes().all(|b| b.is_ascii_hexdigit())
-        && id.bytes().any(|b| b != b'0')
+    id.len() == width && id.bytes().all(|b| b.is_ascii_hexdigit()) && id.bytes().any(|b| b != b'0')
 }
 
 fn next_nonzero() -> u64 {
-    let mut x = seed() ^ COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut x =
+        seed() ^ COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x << 13;
     x ^= x >> 7;
     x ^= x << 17;

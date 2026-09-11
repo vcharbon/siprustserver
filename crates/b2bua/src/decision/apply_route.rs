@@ -112,7 +112,14 @@ pub async fn apply_route(
         == AdmissionVerdict::Reject
     {
         return crate::initial_invite::reject_call(
-            call, a_invite, 503, Some("Service Unavailable".into()), None, &[], id_gen, now_ms,
+            call,
+            a_invite,
+            503,
+            Some("Service Unavailable".into()),
+            None,
+            &[],
+            id_gen,
+            now_ms,
         );
     }
 
@@ -122,10 +129,7 @@ pub async fn apply_route(
         let entries: Vec<LimiterEntry> = route
             .call_limiter
             .iter()
-            .map(|e| LimiterEntry {
-                id: e.id.clone(),
-                limit: e.limit,
-            })
+            .map(|e| LimiterEntry { id: e.id.clone(), limit: e.limit })
             .collect();
         let outcome = limiter.admit(&entries).await;
         if crate::trace::sampled(&call) {
@@ -161,8 +165,17 @@ pub async fn apply_route(
             AdmitOutcome::Unavailable => {}
             AdmitOutcome::Rejected { limiter_id } => {
                 return Box::pin(limiter_reject_failover(
-                    call, limiter_id, a_invite, invite_wire, decision, limiter, config, id_gen,
-                    clock, now_ms, depth,
+                    call,
+                    limiter_id,
+                    a_invite,
+                    invite_wire,
+                    decision,
+                    limiter,
+                    config,
+                    id_gen,
+                    clock,
+                    now_ms,
+                    depth,
                 ))
                 .await;
             }
@@ -236,7 +249,14 @@ pub async fn apply_route(
                 "routing decision refused"
             );
             return crate::initial_invite::reject_call(
-                call, a_invite, 500, Some(err.to_string()), None, &[], id_gen, now_ms,
+                call,
+                a_invite,
+                500,
+                Some(err.to_string()),
+                None,
+                &[],
+                id_gen,
+                now_ms,
             );
         }
     };
@@ -335,7 +355,14 @@ async fn limiter_reject_failover(
 ) -> HandlerResult {
     if call.callback_context.is_none() || depth >= MAX_LIMITER_FAILOVER {
         return crate::initial_invite::reject_call(
-            call, a_invite, 486, Some("Busy Here".into()), None, &[], id_gen, now_ms,
+            call,
+            a_invite,
+            486,
+            Some("Busy Here".into()),
+            None,
+            &[],
+            id_gen,
+            now_ms,
         );
     }
     let req = limiter_failure_request(&call, &limiter_id);
@@ -349,10 +376,8 @@ async fn limiter_reject_failover(
     // so it IS the body that went out.
     if let Ok(CallTreatment::Route(route2)) = &response {
         if route2.trace && !crate::trace::sampled(&call) {
-            let rebuilt = crate::trace::intake::json_body(&limiter_failure_request(
-                &call,
-                &limiter_id,
-            ));
+            let rebuilt =
+                crate::trace::intake::json_body(&limiter_failure_request(&call, &limiter_id));
             if crate::trace::intake::force_enable(&mut call, invite_wire, now_ms) {
                 request_json = Some(rebuilt);
             }
@@ -362,26 +387,61 @@ async fn limiter_reject_failover(
     match response {
         Ok(CallTreatment::Route(route2)) => {
             Box::pin(apply_route(
-                call, route2, a_invite, invite_wire, decision, limiter, config, id_gen, clock,
-                now_ms, depth + 1,
+                call,
+                route2,
+                a_invite,
+                invite_wire,
+                decision,
+                limiter,
+                config,
+                id_gen,
+                clock,
+                now_ms,
+                depth + 1,
             ))
             .await
         }
         Ok(CallTreatment::Reject(rj)) => crate::initial_invite::reject_call(
-            call, a_invite, rj.reject_code, rj.reject_reason, rj.update_headers.as_ref(), &[],
-            id_gen, now_ms,
+            call,
+            a_invite,
+            rj.reject_code,
+            rj.reject_reason,
+            rj.update_headers.as_ref(),
+            &[],
+            id_gen,
+            now_ms,
         ),
         Ok(CallTreatment::Redirect(rd)) => crate::initial_invite::reject_call(
-            call, a_invite, rd.code, rd.reason, rd.update_headers.as_ref(), &rd.contacts, id_gen,
+            call,
+            a_invite,
+            rd.code,
+            rd.reason,
+            rd.update_headers.as_ref(),
+            &rd.contacts,
+            id_gen,
             now_ms,
         ),
         // Relay with no captured failure (a limiter reject is pre-leg) → 480
         // fallback (ADR-0017 X5); a backend error → 486 Busy Here.
         Ok(CallTreatment::Relay) => crate::initial_invite::reject_call(
-            call, a_invite, 480, Some("Temporarily Unavailable".into()), None, &[], id_gen, now_ms,
+            call,
+            a_invite,
+            480,
+            Some("Temporarily Unavailable".into()),
+            None,
+            &[],
+            id_gen,
+            now_ms,
         ),
         Err(_) => crate::initial_invite::reject_call(
-            call, a_invite, 486, Some("Busy Here".into()), None, &[], id_gen, now_ms,
+            call,
+            a_invite,
+            486,
+            Some("Busy Here".into()),
+            None,
+            &[],
+            id_gen,
+            now_ms,
         ),
     }
 }
@@ -443,14 +503,20 @@ fn record_failure_round_trip(
 
 /// Arm the GlobalDuration absolute-cap backstop on the call (idempotent by id).
 /// Factored out so the deferred-routing path arms it too.
-fn arm_global_duration(call: &mut Call, fx: &mut HandlerEffects, max_duration_sec: i64, now_ms: i64) {
+fn arm_global_duration(
+    call: &mut Call,
+    fx: &mut HandlerEffects,
+    max_duration_sec: i64,
+    now_ms: i64,
+) {
     let global = TimerEntry {
         id: format!("{:?}", TimerType::GlobalDuration),
         timer_type: TimerType::GlobalDuration,
         fire_at: now_ms + max_duration_sec * 1000,
         leg_id: None,
     };
-    call.timers = call::helpers::replace_timer_by_id(std::mem::take(&mut call.timers), global.clone());
+    call.timers =
+        call::helpers::replace_timer_by_id(std::mem::take(&mut call.timers), global.clone());
     fx.critical.push(CriticalStateEffect::ScheduleTimer(global));
 }
 
@@ -463,7 +529,12 @@ fn arm_global_duration(call: &mut Call, fx: &mut HandlerEffects, max_duration_se
 /// the configured sip-txn initial-INVITE bound dies with a crashed node and
 /// left such calls holding their limiter slots for the full GlobalDuration
 /// (endurance 2026-06-12). `setup_timeout_sec <= 0` disables.
-fn arm_setup_timeout(call: &mut Call, fx: &mut HandlerEffects, setup_timeout_sec: i64, now_ms: i64) {
+fn arm_setup_timeout(
+    call: &mut Call,
+    fx: &mut HandlerEffects,
+    setup_timeout_sec: i64,
+    now_ms: i64,
+) {
     if setup_timeout_sec <= 0 {
         return;
     }
@@ -486,8 +557,7 @@ fn arm_setup_timeout(call: &mut Call, fx: &mut HandlerEffects, setup_timeout_sec
 /// creates the legs instead (ADR-0016 slice 8). Generic — no service is named here.
 fn defers_routing(call: &Call) -> bool {
     call.ext.as_ref().is_some_and(|ext| {
-        ext.values()
-            .any(|v| v.get("defer_routing").and_then(|d| d.as_bool()) == Some(true))
+        ext.values().any(|v| v.get("defer_routing").and_then(|d| d.as_bool()) == Some(true))
     })
 }
 
@@ -524,11 +594,8 @@ fn apply_supported_for_18x(
             .is_some_and(|ct| ct.is("application/sdp"));
 
     let keep_100rel = strategy == RelayFirst18xStrategy::FakePrack && alice_has_sdp;
-    let withheld = call
-        .features
-        .as_ref()
-        .and_then(|f| f.withhold_option_tags.clone())
-        .unwrap_or_default();
+    let withheld =
+        call.features.as_ref().and_then(|f| f.withhold_option_tags.clone()).unwrap_or_default();
 
     // Self-disable on the fake-prack delayed-offer fallback.
     if strategy == RelayFirst18xStrategy::FakePrack && !alice_has_sdp {

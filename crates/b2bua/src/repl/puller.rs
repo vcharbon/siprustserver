@@ -141,11 +141,7 @@ impl PullerConfig {
     /// (tests advance exactly to a deadline), and the previous per-harness
     /// copies (ha-harness, b2bua test_support, s5) had already drifted.
     pub fn fast_test() -> Self {
-        Self {
-            backoff_init_ms: 100,
-            backoff_max_ms: 1_000,
-            bootstrap_hard_timeout_ms: 2_000,
-        }
+        Self { backoff_init_ms: 100, backoff_max_ms: 1_000, bootstrap_hard_timeout_ms: 2_000 }
     }
 }
 
@@ -308,8 +304,7 @@ impl Puller {
         metrics: crate::metrics::B2buaMetrics,
     ) -> (Self, watch::Receiver<PullerStatus>) {
         let ordinal = peer_ordinal.into();
-        let resolve: AddrResolver =
-            Arc::new(super::FnPeerResolver(move |_: &Peer| peer_addr));
+        let resolve: AddrResolver = Arc::new(super::FnPeerResolver(move |_: &Peer| peer_addr));
         Self::new(
             Peer::new(ordinal, peer_addr.to_string()),
             self_ordinal,
@@ -338,7 +333,11 @@ impl Puller {
     /// Pri/Reclaim flow (our own calls pulled back from a peer's backup), `backup`
     /// = the Bak flow (a peer's calls we hold as backup).
     fn flow_label(&self) -> &'static str {
-        if self.is_reclaim() { "recovery" } else { "backup" }
+        if self.is_reclaim() {
+            "recovery"
+        } else {
+            "backup"
+        }
     }
 
     /// One puller FSM transition, one line (ADR-0026): per `(peer, flow)` these
@@ -484,10 +483,7 @@ impl Puller {
     /// `min(init · 2^(attempt-1), max)` — attempt 1 = init, growing per failure.
     fn backoff_ms(&self, attempt: u32) -> u64 {
         let shift = attempt.saturating_sub(1).min(31);
-        let scaled = self
-            .config
-            .backoff_init_ms
-            .saturating_mul(1u64 << shift);
+        let scaled = self.config.backoff_init_ms.saturating_mul(1u64 << shift);
         scaled.min(self.config.backoff_max_ms)
     }
 
@@ -630,8 +626,16 @@ impl Puller {
                     let refused_body = body.clone();
                     let applied = self
                         .apply_to_store(
-                            op, partition, &call_ref, call_gen, call_bgen, body_ttl_ms,
-                            origin_now_ms, &indexes, body, mode,
+                            op,
+                            partition,
+                            &call_ref,
+                            call_gen,
+                            call_bgen,
+                            body_ttl_ms,
+                            origin_now_ms,
+                            &indexes,
+                            body,
+                            mode,
                         )
                         .await;
                     if !bootstrapped {
@@ -657,7 +661,9 @@ impl Puller {
                                     // counters cannot carry (ADR-0014 amendment).
                                     ReplCommand::ReverseFlushRefused {
                                         call_ref: call_ref.clone(),
-                                        body: refused_body.clone().unwrap_or_else(|| Arc::from(Vec::new())),
+                                        body: refused_body
+                                            .clone()
+                                            .unwrap_or_else(|| Arc::from(Vec::new())),
                                         origin_now_ms,
                                     }
                                 };
@@ -678,10 +684,7 @@ impl Puller {
                         // First catch-up Noop ends the bootstrap: from here the
                         // tail advances W and (Reclaim) applies the Reverse rule.
                         bootstrapped = true;
-                        self.mark_bootstrap_complete(
-                            applied_in_bootstrap,
-                            "first catch-up Noop",
-                        );
+                        self.mark_bootstrap_complete(applied_in_bootstrap, "first catch-up Noop");
                         *deadline = None;
                         // Reclaim flow: bulk-materialise everything the bootstrap
                         // scan imported into the live serving map (smoothed).
@@ -779,8 +782,7 @@ impl Puller {
                 // reordered re-delivery). The dominance gate is now the ONLY
                 // idempotency (no watermark apply-gate): it is what makes every
                 // bootstrap frame — all sharing `at = W` — safe to apply.
-                let dominated =
-                    |sp: i64, sb: i64| sp >= call_gen && sb >= call_bgen;
+                let dominated = |sp: i64, sb: i64| sp >= call_gen && sb >= call_bgen;
                 let apply = match mode {
                     // Bootstrap recovery / Forward primary→backup: authority's
                     // body, monotone by `(p,b)`.
@@ -814,10 +816,7 @@ impl Puller {
                             // Carry the origin wall clock so the store can persist
                             // the receive-time skew offset for later timer
                             // re-anchoring on failover/reclaim (clock-skew hardening).
-                            &PutOpts {
-                                origin_now_ms: Some(origin_now_ms),
-                                ..PutOpts::default()
-                            },
+                            &PutOpts { origin_now_ms: Some(origin_now_ms), ..PutOpts::default() },
                         )
                         .await;
                     // Inbound replica admitted — record the op per stream+endpoint:
@@ -922,10 +921,7 @@ mod tests {
                 });
             }
             q.push_back(Frame::Noop { at: self.w_scan });
-            Ok(Box::new(PacedConn {
-                frames: Mutex::new(q),
-                gap_ms: self.gap_ms,
-            }))
+            Ok(Box::new(PacedConn { frames: Mutex::new(q), gap_ms: self.gap_ms }))
         }
         async fn listen(
             &self,
@@ -946,11 +942,8 @@ mod tests {
         let clock = Clock::test_at(0);
         let n = 10usize;
         let store = ReplicatingCallStore::new(1, clock.clone());
-        let net: Arc<dyn ReplicationNetwork> = Arc::new(PacedNet {
-            n,
-            gap_ms: 100,
-            w_scan: Watermark::new(1, 100),
-        });
+        let net: Arc<dyn ReplicationNetwork> =
+            Arc::new(PacedNet { n, gap_ms: 100, w_scan: Watermark::new(1, 100) });
         let config = PullerConfig {
             backoff_init_ms: 50,
             backoff_max_ms: 1_000,

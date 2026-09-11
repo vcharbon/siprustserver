@@ -193,11 +193,7 @@ impl LoadRunIndex {
     /// Genuine (chaos=clear) non-ok calls — the triage total that excludes
     /// accepted kill collateral.
     pub fn clear_failures(&self) -> u64 {
-        self.counts
-            .iter()
-            .filter(|c| !c.ok && c.chaos == "clear")
-            .map(|c| c.count)
-            .sum()
+        self.counts.iter().filter(|c| !c.ok && c.chaos == "clear").map(|c| c.count).sum()
     }
 }
 
@@ -261,11 +257,7 @@ mod tests {
                 p90_ms: 8.0,
                 p99_ms: 15.0,
             }],
-            checks: vec![CheckSummaryRow {
-                scenario: "reinvite".into(),
-                passed: 7,
-                failed: 3,
-            }],
+            checks: vec![CheckSummaryRow { scenario: "reinvite".into(), passed: 7, failed: 3 }],
             canaries: Canaries {
                 orphans: 0,
                 shed: 4,

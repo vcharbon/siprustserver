@@ -43,7 +43,14 @@ mod tests {
         assert_eq!(hit.cseq, 1);
         assert!(!hit.relayed);
         let Evidence::NoAck {
-            to_tag, status, window_us, emitter_window_us, retransmits, bye_after_us, bye_by, ..
+            to_tag,
+            status,
+            window_us,
+            emitter_window_us,
+            retransmits,
+            bye_after_us,
+            bye_by,
+            ..
         } = &hit.evidence
         else {
             panic!("the ack rule carries its own evidence: {hit:?}")

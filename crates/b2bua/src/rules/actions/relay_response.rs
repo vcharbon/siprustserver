@@ -4,7 +4,9 @@
 //! bare-180 downgrade (`relayFirst18xTo180`). Request relay does NOT live
 //! here — see [`super::relay_request`].
 
-use call::helpers::{add_tag_mapping, find_by_b_tag, remove_pending_request, find_pending_request, Scope};
+use call::helpers::{
+    add_tag_mapping, find_by_b_tag, find_pending_request, remove_pending_request, Scope,
+};
 use call::{Call, LegState, PendingRequest, TagMapping};
 use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateRelayedResponseOpts, SourceBody};
@@ -155,9 +157,19 @@ impl ActionExecutor<'_> {
         // responder's DISTINCT next provisional matches no entry and relays.
         if cseq_method == "INVITE" && (101..200).contains(&resp.status()) {
             if let Some(b_rseq) = relay::reliable_rseq(resp) {
-                if call::helpers::reliable_provisional_relayed(call, &source_leg_id, &to_tag, cseq_num, b_rseq)
-                    || call::helpers::pracked_provisional(call, &source_leg_id, &to_tag, cseq_num, b_rseq)
-                {
+                if call::helpers::reliable_provisional_relayed(
+                    call,
+                    &source_leg_id,
+                    &to_tag,
+                    cseq_num,
+                    b_rseq,
+                ) || call::helpers::pracked_provisional(
+                    call,
+                    &source_leg_id,
+                    &to_tag,
+                    cseq_num,
+                    b_rseq,
+                ) {
                     return;
                 }
             }
@@ -198,15 +210,19 @@ impl ActionExecutor<'_> {
                 // The B2BUA's Contact rides only where it establishes a dialog
                 // or answers a target refresh (`response_states_contact`) — a
                 // relayed 200 to PRACK/OPTIONS/INFO/MESSAGE states none.
-                let contact = generators::response_states_contact(
-                    &Method::from_wire(&cseq_method),
-                    status,
-                )
-                .then(|| {
-                    relay::leg_contact(self.config, &call.call_ref, target_leg, call.emergency == Some(true))
-                });
-                let mut transparent_headers =
-                    filter_passthrough(relay::relay_response_passthrough_headers(resp, relay_source_body));
+                let contact =
+                    generators::response_states_contact(&Method::from_wire(&cseq_method), status)
+                        .then(|| {
+                            relay::leg_contact(
+                                self.config,
+                                &call.call_ref,
+                                target_leg,
+                                call.emergency == Some(true),
+                            )
+                        });
+                let mut transparent_headers = filter_passthrough(
+                    relay::relay_response_passthrough_headers(resp, relay_source_body),
+                );
                 // A 2xx answer to a B2BUA-relayed re-INVITE advertises this
                 // face's capability set (RFC 3261 §13.2.1/§20.37) — the source
                 // response's own, carried through, unless the call declares one.
@@ -215,7 +231,11 @@ impl ActionExecutor<'_> {
                 if cseq_method == "INVITE" && (200..300).contains(&status) {
                     let caps =
                         capabilities::relaying_for_leg(call, target_leg, &transparent_headers);
-                    relay::stamp_a_facing_invite_advert(&mut transparent_headers, &transform.add_headers, &caps);
+                    relay::stamp_a_facing_invite_advert(
+                        &mut transparent_headers,
+                        &transform.add_headers,
+                        &caps,
+                    );
                 }
                 // A reliable provisional leaves toward the originator under
                 // THIS stack's number — it is the UAS of that face, and RFC
@@ -229,7 +249,9 @@ impl ActionExecutor<'_> {
                 // non-INVITE provisional here (RFC 4320 §4.1 discards it);
                 // the method guard on the PRACK states that, nothing more.
                 let mut ladder: Option<(String, i64)> = None;
-                if let Some(b_rseq) = relay::reliable_rseq(resp).filter(|_| (101..200).contains(&status)) {
+                if let Some(b_rseq) =
+                    relay::reliable_rseq(resp).filter(|_| (101..200).contains(&status))
+                {
                     let shown_tag = call::helpers::admits_reliable_provisional(&pending)
                         .then(|| shown_tag_of(call, target_leg, &pending))
                         .flatten();
@@ -249,7 +271,14 @@ impl ActionExecutor<'_> {
                         None => {
                             relay::strip_reliability(&mut transparent_headers);
                             if cseq_method == "INVITE" {
-                                self.send_prack_to_leg(call, fx, &source_leg_id, b_rseq, cseq_num, &to_tag);
+                                self.send_prack_to_leg(
+                                    call,
+                                    fx,
+                                    &source_leg_id,
+                                    b_rseq,
+                                    cseq_num,
+                                    &to_tag,
+                                );
                             }
                         }
                     }
@@ -278,7 +307,11 @@ impl ActionExecutor<'_> {
                     // 3262 §3, RFC 3261 §17.2.1). This transaction's alone —
                     // a re-INVITE's final is not the setup's.
                     if cseq_method == "INVITE" {
-                        self.retire(call, fx, Scope::Transaction { leg_id: &source_leg_id, cseq: cseq_num });
+                        self.retire(
+                            call,
+                            fx,
+                            Scope::Transaction { leg_id: &source_leg_id, cseq: cseq_num },
+                        );
                     }
                 }
                 // RFC 3261 §13.3.1.4 (in-dialog): a **2xx to a re-INVITE the
@@ -318,7 +351,8 @@ impl ActionExecutor<'_> {
                     );
                     if relay::acked_invite_carries_offer(&src_dialog) {
                         let branch = self.id_gen.new_branch();
-                        *call = call::helpers::retain_ack_branch(call.clone(), &source_leg_id, &branch);
+                        *call =
+                            call::helpers::retain_ack_branch(call.clone(), &source_leg_id, &branch);
                         let answering_leg = source_leg_id.clone();
                         self.ack_leg(call, fx, &answering_leg, Vec::new(), None);
                     }
@@ -399,11 +433,7 @@ impl ActionExecutor<'_> {
                     } else {
                         call.tag_map.iter().any(|m| m.b_leg_id == source_leg_id)
                     };
-                    let a_face = if already_published {
-                        self.id_gen.new_tag()
-                    } else {
-                        primary
-                    };
+                    let a_face = if already_published { self.id_gen.new_tag() } else { primary };
                     *call = add_tag_mapping(
                         call.clone(),
                         TagMapping {
@@ -416,9 +446,16 @@ impl ActionExecutor<'_> {
                 }
             };
             let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-            let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
-            let mut passthrough =
-                filter_passthrough(relay::relay_response_passthrough_headers(resp, relay_source_body));
+            let contact = relay::leg_contact(
+                self.config,
+                &call.call_ref,
+                &call.a_leg.leg_id,
+                call.emergency == Some(true),
+            );
+            let mut passthrough = filter_passthrough(relay::relay_response_passthrough_headers(
+                resp,
+                relay_source_body,
+            ));
             // A 2xx INVITE answer the B2BUA mints toward the caller advertises the
             // capability set of the originator face (RFC 3261 §13.2.1/§20.37):
             // the callee's own, carried through, unless the call declares one.
@@ -426,7 +463,11 @@ impl ActionExecutor<'_> {
             // (Supported:100rel) negotiation survives.
             if (200..300).contains(&status) {
                 let caps = capabilities::relaying(call, Face::Originator, &passthrough);
-                relay::stamp_a_facing_invite_advert(&mut passthrough, &transform.add_headers, &caps);
+                relay::stamp_a_facing_invite_advert(
+                    &mut passthrough,
+                    &transform.add_headers,
+                    &caps,
+                );
             }
             let a_rseq = self.own_relayed_rseq(
                 call,
@@ -478,7 +519,12 @@ impl ActionExecutor<'_> {
         // owned bare 180's under `relayFirst18xTo180`.
         let a_tag = self.ensure_a_dialog(call);
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
-        let contact = relay::leg_contact(self.config, &call.call_ref, &call.a_leg.leg_id, call.emergency == Some(true));
+        let contact = relay::leg_contact(
+            self.config,
+            &call.call_ref,
+            &call.a_leg.leg_id,
+            call.emergency == Some(true),
+        );
         // Reliable-provisional negotiation (Require/Supported) passes through
         // transparently so end-to-end PRACK keeps working (RFC 3262); the RSeq
         // it rides on is this transaction's own (`own_relayed_rseq`).
@@ -573,11 +619,7 @@ impl ActionExecutor<'_> {
             status: Some(180),
             reason: Some("Ringing".to_string()),
             drop_body: true,
-            remove_headers: vec![
-                HeaderName::Require,
-                HeaderName::RSeq,
-                HeaderName::PEarlyMedia,
-            ],
+            remove_headers: vec![HeaderName::Require, HeaderName::RSeq, HeaderName::PEarlyMedia],
             add_headers: vec![],
         };
         let (peer, target_to_tag) = resolve_peer(call, ctx);
@@ -586,7 +628,6 @@ impl ActionExecutor<'_> {
         }
     }
 }
-
 
 /// The tag this stack showed the originator of `pending` — its own on the
 /// dialog the response is relayed into, read off the originator's `To` (RFC

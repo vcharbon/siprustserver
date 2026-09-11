@@ -9,14 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::decision::{
+    CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
+};
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use failover_harness::{
-    assert_call_fully_over, cookie_field, FailoverHarness, ReplicatedB2buaSut,
-    RULE_CSEQ_IN_DIALOG_ORDER, WorkerHealth,
-};
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use failover_harness::{
+    assert_call_fully_over, cookie_field, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
+    RULE_CSEQ_IN_DIALOG_ORDER,
+};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
@@ -61,11 +63,7 @@ fn accept_takeover_cseq_overlap(fh: &mut FailoverHarness) {
 }
 
 fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    Arc::new(HttpCallLimiter::new(
-        Arc::new(http.clone()),
-        laddr(),
-        Duration::from_millis(150),
-    ))
+    Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// The limiter-carrying decision shared by every worker in this file: route the
@@ -86,10 +84,7 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", 5070);
                 r.new_ruri = None;
-                r.call_limiter = vec![CallLimiterEntry {
-                    id: "trunk-A".into(),
-                    limit: 1,
-                }];
+                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 1 }];
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -105,11 +100,7 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
 /// `LimiterConfig::default()` (300 s / 3 windows / 1200 s TTL) would force a
 /// >20-minute virtual advance for the same coverage.
 fn ttl_leak_config() -> LimiterConfig {
-    LimiterConfig {
-        window_sec: 120,
-        active_windows: 1,
-        ttl_sec: 120,
-    }
+    LimiterConfig { window_sec: 120, active_windows: 1, ttl_sec: 120 }
 }
 
 #[tokio::test(start_paused = true)]
@@ -124,21 +115,32 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
 
     // Both workers share the limiter server + the limiter-carrying decision.
     let mut w_b1 = fh
         .spawn_worker_limited(
-            "b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            limited_decision(), limiter_client(&http),
+            "b1",
+            "b1",
+            B1,
+            &["b2"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            limited_decision(),
+            limiter_client(&http),
         )
         .await;
     let mut w_b2 = fh
         .spawn_worker_limited(
-            "b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            limited_decision(), limiter_client(&http),
+            "b2",
+            "b2",
+            B2,
+            &["b1"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            limited_decision(),
+            limiter_client(&http),
         )
         .await;
 
@@ -160,11 +162,7 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
 
     // Bind primary/backup by the cookie's w_pri.
     let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
-        if primary_ord == "b1" {
-            (&mut w_b1, &mut w_b2)
-        } else {
-            (&mut w_b2, &mut w_b1)
-        };
+        if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
     // Crash the primary; mark it dead so the proxy fails the in-dialog request
     // over to the backup.
@@ -184,9 +182,7 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     // once the deferral's replica TTL (`reboot_budget`) expires, the periodic reap
     // releases the hold (no CDR) and frees the body. Pump past that TTL, then assert
     // the limiter drained to 0 with zero CDRs and exactly one lost-CDR cleanup.
-    let released = fh
-        .settle_lossy_cleanup(async || store.stats().current_total == 0)
-        .await;
+    let released = fh.settle_lossy_cleanup(async || store.stats().current_total == 0).await;
     assert!(
         backup.metrics().creations_total() > creations_before,
         "backup processed the failed-over BYE",
@@ -241,19 +237,30 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
     let mut w_b1 = fh
         .spawn_worker_limited(
-            "b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            limited_decision(), limiter_client(&http),
+            "b1",
+            "b1",
+            B1,
+            &["b2"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            limited_decision(),
+            limiter_client(&http),
         )
         .await;
     let mut w_b2 = fh
         .spawn_worker_limited(
-            "b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            limited_decision(), limiter_client(&http),
+            "b2",
+            "b2",
+            B2,
+            &["b1"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            limited_decision(),
+            limiter_client(&http),
         )
         .await;
 
@@ -273,11 +280,7 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
     assert_eq!(store.stats().current_total, 1, "in-setup call holds its limiter slot");
 
     let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
-        if primary_ord == "b1" {
-            (&mut w_b1, &mut w_b2)
-        } else {
-            (&mut w_b2, &mut w_b1)
-        };
+        if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
     // ── Crash + reboot-pristine + reclaim (the endurance kill_worker shape) ───
     primary.crash();
@@ -297,11 +300,7 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
 
     fh.advance(Duration::from_millis(500)).await;
-    assert_eq!(
-        primary.active_calls(),
-        1,
-        "the reboot reclaim re-materialised the in-setup call",
-    );
+    assert_eq!(primary.active_calls(), 1, "the reboot reclaim re-materialised the in-setup call",);
     assert_eq!(store.stats().current_total, 1, "the hold rides the reclaim");
 
     // ── The restored SetupTimeout fires at the (absolute) 150 s deadline ──────
@@ -396,19 +395,30 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
     let mut w_b1 = fh
         .spawn_worker_limited(
-            "b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            limited_decision(), limiter_client(&http),
+            "b1",
+            "b1",
+            B1,
+            &["b2"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            limited_decision(),
+            limiter_client(&http),
         )
         .await;
     let mut w_b2 = fh
         .spawn_worker_limited(
-            "b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            limited_decision(), limiter_client(&http),
+            "b2",
+            "b2",
+            B2,
+            &["b1"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            limited_decision(),
+            limiter_client(&http),
         )
         .await;
 
@@ -449,8 +459,7 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
 
     // Bind the primary by the cookie's w_pri (the backup is reached only via
     // `w_b1`/`w_b2` later, so it needs no separate live binding here).
-    let primary: &mut ReplicatedB2buaSut =
-        if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
+    let primary: &mut ReplicatedB2buaSut = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
 
     // ── Permanently kill the primary: no BYE, no respawn, no reclaim ──────────
     // The hold is leaked. With no in-dialog request ever routed to the backup,
@@ -478,7 +487,8 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
     assert_eq!(store.stats().current_total, 1, "hold still leaked right after the crash");
     fh.advance(Duration::from_secs(125)).await;
     assert_eq!(
-        store.stats().current_total, 1,
+        store.stats().current_total,
+        1,
         "the leaked hold is STILL a 1 at +125 s — expired but unswept (no access has run \
          a sweep); only Call B's admit recovers it",
     );
@@ -503,7 +513,8 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
     // `expectCdrCount == 1` shape documents.
     let mut call_b = scenario_harness::callflow::establish(&alice, &bob2, proxy.addr()).await;
     assert_eq!(
-        store.stats().current_total, 1,
+        store.stats().current_total,
+        1,
         "post-recovery total back to 1 — Call B's admit swept the expired Call A W0 key, \
          then took its own slot. With the admit-time sweep removed Call A's leaked W0 key \
          survives (it is in a different window, so never re-counted but also never reaped) \
@@ -541,10 +552,7 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
                 && w_b1.cdr_records().len() + w_b2.cdr_records().len() == 1
         })
         .await;
-    assert!(
-        drained,
-        "Call B's clean BYE released its limiter hold AND wrote exactly one CDR",
-    );
+    assert!(drained, "Call B's clean BYE released its limiter hold AND wrote exactly one CDR",);
 
     // Call A's CDR is the accepted loss (its primary crashed for good and never
     // reclaimed); only Call B terminated cleanly, so exactly one CDR exists.
@@ -601,19 +609,30 @@ async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
     let mut w_b1 = fh
         .spawn_worker_limited(
-            "b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            limited_decision(), limiter_client(&http),
+            "b1",
+            "b1",
+            B1,
+            &["b2"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            limited_decision(),
+            limiter_client(&http),
         )
         .await;
     let mut w_b2 = fh
         .spawn_worker_limited(
-            "b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            limited_decision(), limiter_client(&http),
+            "b2",
+            "b2",
+            B2,
+            &["b1"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            limited_decision(),
+            limiter_client(&http),
         )
         .await;
 
@@ -679,7 +698,8 @@ async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
         "the re-INVITE was taken over / is held by the backup after the crash",
     );
     assert_eq!(
-        store.stats().current_total, 1,
+        store.stats().current_total,
+        1,
         "the re-INVITE must NOT touch the shared limiter (still one hold)",
     );
 
@@ -733,7 +753,8 @@ async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
     );
     failover_harness::assert_single_owner(&[&w_b1, &w_b2], &call_ref);
     assert_eq!(
-        store.stats().current_total, 1,
+        store.stats().current_total,
+        1,
         "the hold rode the switchback reclaim (still one) — the BYE has not run yet",
     );
 
@@ -766,7 +787,8 @@ async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
     // THE regression guard (TS `expectLimiterCount(0)`): the decrement landed on the
     // origin window, so the cluster-shared counter is back to 0.
     assert_eq!(
-        store.stats().current_total, 0,
+        store.stats().current_total,
+        0,
         "switchback BYE decremented the shared limiter via the preserved origin_window",
     );
     // The discharge happened on the RETURNED PRIMARY (it created/reclaimed the call

@@ -101,9 +101,7 @@ fn binds(status: u16, msg: &Msg) -> bool {
     if status >= 200 {
         return true;
     }
-    msg.head
-        .as_deref()
-        .is_some_and(|h| sniff::require_has_100rel(h) && sniff::rseq_of(h).is_some())
+    msg.head.as_deref().is_some_and(|h| sniff::require_has_100rel(h) && sniff::rseq_of(h).is_some())
 }
 
 /// Whether a method's description is an OFFER whose answer rides the 2xx to
@@ -738,9 +736,9 @@ impl Obligation for Final2xxAnswersTheOffer {
                 Decision::Compliant
             } else {
                 match wire.msgs[due.msg].body.as_deref() {
-                    None => Decision::Undecidable(
-                        "the vantage carried no body bytes for this final",
-                    ),
+                    None => {
+                        Decision::Undecidable("the vantage carried no body bytes for this final")
+                    }
                     Some([]) => Decision::Violated(Evidence::OfferLeftUnanswered {
                         unanswered_final_msg: due.msg,
                         unanswered_final_hop: wire.msgs[due.msg].hop,
@@ -1047,8 +1045,7 @@ impl Obligation for AnswerMLineCountMatchesOffer {
         let mut out = Vec::new();
         for a in &seen.answers {
             let Some((offer, answer)) = seen.round_docs(a) else { continue };
-            let (offer_m_lines, answer_m_lines) =
-                (offer.doc.media.len(), answer.doc.media.len());
+            let (offer_m_lines, answer_m_lines) = (offer.doc.media.len(), answer.doc.media.len());
             let decision = if offer_m_lines == answer_m_lines {
                 Decision::Compliant
             } else {
@@ -2093,8 +2090,7 @@ m=audio 20000 RTP/AVP 0\r\n";
         answered.to_tag = Some("fork-a".to_string());
         let mut silent = resp(3, BOB, ALICE, 200, 1, "INVITE", None);
         silent.to_tag = Some("fork-b".to_string());
-        let msgs =
-            vec![req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)), answered, silent];
+        let msgs = vec![req(1, ALICE, BOB, "INVITE", 1, None, Some(AUDIO_OFFER)), answered, silent];
         let f = violations(&Final2xxAnswersTheOffer, &msgs);
         assert_eq!(f.len(), 1, "one fork answered, the other did not: {f:?}");
         assert_eq!(f[0].anchor, 2);
@@ -2577,13 +2573,7 @@ a=sendrecv\r\n";
 
     /// A response presenting a chosen early dialog — the To tag that tells two
     /// forks of one INVITE apart.
-    fn resp_fork(
-        at_us: u64,
-        status: u16,
-        cseq: u32,
-        to_tag: &str,
-        body: Option<&str>,
-    ) -> Msg {
+    fn resp_fork(at_us: u64, status: u16, cseq: u32, to_tag: &str, body: Option<&str>) -> Msg {
         Msg {
             to_tag: Some(to_tag.to_string()),
             ..resp(at_us, BOB, ALICE, status, cseq, "INVITE", body)
@@ -2716,9 +2706,7 @@ a=sendrecv\r\n";
         let f = violations(&AnswerTLineEqualsOffer, &one_round(OFFER_1AUDIO, &answer));
         assert_eq!(f.len(), 1, "{f:?}");
         let Decision::Violated(Evidence::AnswerTLineDiffers {
-            offer_t_line,
-            answer_t_line,
-            ..
+            offer_t_line, answer_t_line, ..
         }) = &f[0].decision
         else {
             panic!("{:?}", f[0].decision);
@@ -2886,7 +2874,10 @@ a=sendrecv\r\n";
         else {
             panic!("{:?}", f[0].decision);
         };
-        assert_eq!((stream_indexes.as_slice(), answered_ports.as_slice()), ([0].as_slice(), [50000].as_slice()));
+        assert_eq!(
+            (stream_indexes.as_slice(), answered_ports.as_slice()),
+            ([0].as_slice(), [50000].as_slice())
+        );
     }
 
     #[test]
@@ -3190,7 +3181,9 @@ a=ptime:20\r\n";
         let f = run(&C0PortNonZero, &[declared(body, "application/sdp")]);
         assert_eq!(f.len(), 1, "one description, one finding: {f:?}");
         let Decision::Violated(Evidence::HeldAndRejectedStreams {
-            held_stream_indexes, held_streams, ..
+            held_stream_indexes,
+            held_streams,
+            ..
         }) = &f[0].decision
         else {
             panic!("held/rejected evidence: {:?}", f[0].decision)

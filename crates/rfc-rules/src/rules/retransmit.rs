@@ -114,8 +114,10 @@ impl Obligation for RungByteIdentical {
                 }
             }
         }
-        let mut out: Vec<Finding> =
-            ladders.into_iter().filter_map(|(identity, ladder)| ladder.finding(&identity)).collect();
+        let mut out: Vec<Finding> = ladders
+            .into_iter()
+            .filter_map(|(identity, ladder)| ladder.finding(&identity))
+            .collect();
         // Observation order, so a ladder and the report read the same way.
         out.sort_by_key(|f| f.anchor);
         out
@@ -417,9 +419,13 @@ impl Divergence {
         if let Some((fi, ci)) = first_difference(first_head, &first_mask, copy_head, &copy_mask) {
             let body_start = |raw: &[u8]| sniff::body(raw).map(|b| raw.len() - b.len());
             return Some(match (body_start(first_head), body_start(copy_head)) {
-                (Some(fs), Some(cs)) if fi >= fs && ci >= cs => {
-                    Divergence::in_region("body", fi - fs, ci - cs, &first_head[fs..], &copy_head[cs..])
-                }
+                (Some(fs), Some(cs)) if fi >= fs && ci >= cs => Divergence::in_region(
+                    "body",
+                    fi - fs,
+                    ci - cs,
+                    &first_head[fs..],
+                    &copy_head[cs..],
+                ),
                 _ => Divergence::in_region("head", fi, ci, first_head, copy_head),
             });
         }
@@ -454,11 +460,14 @@ impl Divergence {
 fn own_record_route_spans(raw: &[u8], emitter: &str) -> Vec<Range<usize>> {
     let Some(addr) = endpoint_addr(emitter) else { return Vec::new() };
     let names_emitter = |hop: &sniff::UriFacts| {
-        hop.port == addr.port() && hop.host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip == addr.ip())
+        hop.port == addr.port()
+            && hop.host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip == addr.ip())
     };
     sniff::route_rows(raw, "Record-Route")
         .into_iter()
-        .filter(|row| row.hops.as_ref().is_some_and(|hops| !hops.is_empty() && hops.iter().all(names_emitter)))
+        .filter(|row| {
+            row.hops.as_ref().is_some_and(|hops| !hops.is_empty() && hops.iter().all(names_emitter))
+        })
         .map(|row| row.span)
         .collect()
 }
@@ -603,7 +612,10 @@ mod tests {
         let mut swapped = ROWS;
         swapped.swap(4, 5);
         let rung = ok_200(&swapped);
-        let f = eval(&[rsp(1_000, 200, "INVITE", "tb", &first), rsp(501_000, 200, "INVITE", "tb", &rung)]);
+        let f = eval(&[
+            rsp(1_000, 200, "INVITE", "tb", &first),
+            rsp(501_000, 200, "INVITE", "tb", &rung),
+        ]);
         assert_eq!(f.len(), 1, "one occasion, the message: {f:?}");
         assert_eq!(f[0].rule, RuleId::RungByteIdentical);
         assert_eq!(f[0].emitter, UAS, "the endpoint that re-composed its rung is charged");
@@ -633,7 +645,11 @@ mod tests {
         assert_eq!((method.as_str(), *status, *rseq), ("INVITE", Some(200), None));
         assert_eq!(branch, "z9hG4bK-1");
         assert_eq!(region, "head");
-        assert_eq!(*offset, first.find("CSeq: 1").unwrap() + 1, "the first byte the two disagree on");
+        assert_eq!(
+            *offset,
+            first.find("CSeq: 1").unwrap() + 1,
+            "the first byte the two disagree on"
+        );
         assert_eq!(first_line.as_deref(), Some("CSeq: 1 INVITE"));
         assert_eq!(rung_line.as_deref(), Some("Content-Length: 0"));
         assert_eq!(*gap_us, 500_000);
@@ -645,7 +661,10 @@ mod tests {
     fn a_normalised_value_on_a_rung_is_violated() {
         let first = ok_200(&ROWS);
         let rung = first.replace("Content-Length: 0", "Content-Length:0");
-        let f = eval(&[rsp(1_000, 200, "INVITE", "tb", &first), rsp(501_000, 200, "INVITE", "tb", &rung)]);
+        let f = eval(&[
+            rsp(1_000, 200, "INVITE", "tb", &first),
+            rsp(501_000, 200, "INVITE", "tb", &rung),
+        ]);
         assert_eq!(f.len(), 1);
         assert!(f[0].violated(), "{f:?}");
     }
@@ -680,7 +699,10 @@ mod tests {
         let mut rows = ROWS;
         rows[2] = "To: <sip:b@h>;tag=tc";
         let loser = ok_200(&rows);
-        let f = eval(&[rsp(1_000, 200, "INVITE", "tb", &winner), rsp(2_000, 200, "INVITE", "tc", &loser)]);
+        let f = eval(&[
+            rsp(1_000, 200, "INVITE", "tb", &winner),
+            rsp(2_000, 200, "INVITE", "tc", &loser),
+        ]);
         assert!(f.is_empty(), "{f:?}");
     }
 
@@ -690,7 +712,10 @@ mod tests {
     fn a_second_final_of_another_status_is_not_a_rung() {
         let first = ok_200(&ROWS).replace("200 OK", "487 Terminated");
         let second = ok_200(&ROWS).replace("200 OK", "480 Gone");
-        let f = eval(&[rsp(1_000, 487, "INVITE", "tb", &first), rsp(2_000, 480, "INVITE", "tb", &second)]);
+        let f = eval(&[
+            rsp(1_000, 487, "INVITE", "tb", &first),
+            rsp(2_000, 480, "INVITE", "tb", &second),
+        ]);
         assert!(f.is_empty(), "{f:?}");
     }
 
@@ -781,7 +806,8 @@ mod tests {
         ]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].emitter, UAC);
-        let Evidence::RungDiverged { class, method, status, first_line, rung_line, .. } = violated(&f[0])
+        let Evidence::RungDiverged { class, method, status, first_line, rung_line, .. } =
+            violated(&f[0])
         else {
             panic!()
         };
@@ -860,7 +886,10 @@ mod tests {
     fn past_the_envelope_a_matching_identity_is_a_fresh_message() {
         let first = ok_200(&ROWS);
         let later = first.replace("Content-Length: 0", "Content-Length:0");
-        let f = eval(&[rsp(1_000, 200, "INVITE", "tb", &first), rsp(33_001_000, 200, "INVITE", "tb", &later)]);
+        let f = eval(&[
+            rsp(1_000, 200, "INVITE", "tb", &first),
+            rsp(33_001_000, 200, "INVITE", "tb", &later),
+        ]);
         assert!(f.is_empty(), "{f:?}");
     }
 
@@ -876,7 +905,10 @@ mod tests {
         b.via_branch = None;
         let f = eval(&[a.clone(), b]);
         assert_eq!(f.len(), 1);
-        assert!(matches!(f[0].decision, Decision::Undecidable("no via branch at this vantage")), "{f:?}");
+        assert!(
+            matches!(f[0].decision, Decision::Undecidable("no via branch at this vantage")),
+            "{f:?}"
+        );
         let mut same = a.clone();
         same.at_us = 501_000;
         let f = eval(&[a, same]);
@@ -892,7 +924,10 @@ mod tests {
         opaque.body = None;
         let f = eval(&[rsp(1_000, 200, "INVITE", "tb", &first), opaque]);
         assert_eq!(f.len(), 1);
-        assert!(matches!(f[0].decision, Decision::Undecidable("no bytes at this vantage")), "{f:?}");
+        assert!(
+            matches!(f[0].decision, Decision::Undecidable("no bytes at this vantage")),
+            "{f:?}"
+        );
     }
 
     fn ok_200_sdp(port: u16) -> String {
@@ -912,9 +947,14 @@ mod tests {
     fn a_body_divergence_is_located_in_the_body_at_either_vantage() {
         let first = ok_200_sdp(4000);
         let rung = ok_200_sdp(4002);
-        let whole = eval(&[rsp(1_000, 200, "INVITE", "tb", &first), rsp(501_000, 200, "INVITE", "tb", &rung)]);
+        let whole = eval(&[
+            rsp(1_000, 200, "INVITE", "tb", &first),
+            rsp(501_000, 200, "INVITE", "tb", &rung),
+        ]);
         assert_eq!(whole.len(), 1);
-        let Evidence::RungDiverged { region, offset, first_line, rung_line, .. } = violated(&whole[0]) else {
+        let Evidence::RungDiverged { region, offset, first_line, rung_line, .. } =
+            violated(&whole[0])
+        else {
             panic!()
         };
         let (whole_region, whole_offset) = (region.clone(), *offset);
@@ -933,7 +973,11 @@ mod tests {
             split(rsp(501_000, 200, "INVITE", "tb", &rung)),
         ]);
         let Evidence::RungDiverged { region, offset, .. } = violated(&f[0]) else { panic!() };
-        assert_eq!((region.as_str(), *offset), (whole_region.as_str(), whole_offset), "one region, one offset, either way");
+        assert_eq!(
+            (region.as_str(), *offset),
+            (whole_region.as_str(), whole_offset),
+            "one region, one offset, either way"
+        );
     }
 
     /// One occasion per message: the finding rests on the FIRST divergent copy
@@ -950,7 +994,9 @@ mod tests {
         ]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].anchor, 2);
-        let Evidence::RungDiverged { rung, copies, divergent, .. } = violated(&f[0]) else { panic!() };
+        let Evidence::RungDiverged { rung, copies, divergent, .. } = violated(&f[0]) else {
+            panic!()
+        };
         assert_eq!((*rung, *copies, *divergent), (2, 4, 2));
     }
 
@@ -1030,7 +1076,8 @@ mod tests {
         let f = eval(&[forwarded(1_000, &first), forwarded(501_000, &rung)]);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].emitter, PROXY);
-        let Evidence::RungDiverged { region, offset, first_line, rung_line, .. } = violated(&f[0]) else {
+        let Evidence::RungDiverged { region, offset, first_line, rung_line, .. } = violated(&f[0])
+        else {
             panic!()
         };
         assert_eq!(region, "head");
@@ -1057,10 +1104,13 @@ mod tests {
     #[test]
     fn a_re_rendered_row_beside_the_masked_one_is_still_violated() {
         let first = forwarded_invite(&[OWN_COOKIE_B2]);
-        let rung = forwarded_invite(&[OWN_COOKIE_NONE]).replace("CSeq: 1 INVITE", "CSeq:  1 INVITE");
+        let rung =
+            forwarded_invite(&[OWN_COOKIE_NONE]).replace("CSeq: 1 INVITE", "CSeq:  1 INVITE");
         let f = eval(&[forwarded(1_000, &first), forwarded(501_000, &rung)]);
         assert_eq!(f.len(), 1, "{f:?}");
-        let Evidence::RungDiverged { offset, first_line, rung_line, .. } = violated(&f[0]) else { panic!() };
+        let Evidence::RungDiverged { offset, first_line, rung_line, .. } = violated(&f[0]) else {
+            panic!()
+        };
         assert_eq!(*offset, first.find("CSeq: 1").unwrap() + "CSeq: ".len());
         assert_eq!(first_line.as_deref(), Some("CSeq: 1 INVITE"));
         assert_eq!(rung_line.as_deref(), Some("CSeq:  1 INVITE"));
@@ -1076,15 +1126,27 @@ mod tests {
 
         let f = eval(&[forwarded(1_000, &with), forwarded(501_000, &without)]);
         assert_eq!(f.len(), 1, "{f:?}");
-        let Evidence::RungDiverged { offset, first_line, rung_line, .. } = violated(&f[0]) else { panic!() };
-        assert_eq!(*offset, with.find(OWN_COOKIE_B2).unwrap(), "the dropped row, in the first copy");
+        let Evidence::RungDiverged { offset, first_line, rung_line, .. } = violated(&f[0]) else {
+            panic!()
+        };
+        assert_eq!(
+            *offset,
+            with.find(OWN_COOKIE_B2).unwrap(),
+            "the dropped row, in the first copy"
+        );
         assert_eq!(first_line.as_deref(), Some(OWN_COOKIE_B2));
         assert_eq!(rung_line.as_deref(), Some(FOREIGN));
 
         let f = eval(&[forwarded(1_000, &without), forwarded(501_000, &with)]);
         assert_eq!(f.len(), 1, "{f:?}");
-        let Evidence::RungDiverged { offset, first_line, rung_line, .. } = violated(&f[0]) else { panic!() };
-        assert_eq!(*offset, without.find(FOREIGN).unwrap(), "the added row, where the first copy has none");
+        let Evidence::RungDiverged { offset, first_line, rung_line, .. } = violated(&f[0]) else {
+            panic!()
+        };
+        assert_eq!(
+            *offset,
+            without.find(FOREIGN).unwrap(),
+            "the added row, where the first copy has none"
+        );
         assert_eq!(first_line.as_deref(), Some(FOREIGN));
         assert_eq!(rung_line.as_deref(), Some(OWN_COOKIE_B2));
     }

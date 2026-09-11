@@ -73,14 +73,7 @@ async fn mutation_creates_entry_and_drains_live_body() {
         .drain_since("A", BAK_P, Watermark::new(7, 0), NO_LIMIT, &store, PRI, SELF)
         .await;
     match one_data(frames) {
-        Frame::Data {
-            op,
-            partition,
-            call_ref,
-            call_gen,
-            body,
-            ..
-        } => {
+        Frame::Data { op, partition, call_ref, call_gen, body, .. } => {
             assert_eq!(op, Op::Put);
             assert_eq!(partition, Partition::Bak); // Forward → Bak
             assert_eq!(call_ref, "c1");
@@ -104,10 +97,8 @@ async fn update_compacts_and_moves_counter_forward() {
 
     // Drain from the OLD watermark yields the latest body only, op=Put
     // (Create/Update merged — ADR-0014).
-    let frames = store
-        .changelog()
-        .drain_since("A", BAK_P, after_first, NO_LIMIT, &store, PRI, SELF)
-        .await;
+    let frames =
+        store.changelog().drain_since("A", BAK_P, after_first, NO_LIMIT, &store, PRI, SELF).await;
     match one_data(frames) {
         Frame::Data { op, body, call_gen, .. } => {
             assert_eq!(op, Op::Put);
@@ -153,10 +144,7 @@ async fn delete_emits_tombstone_then_reaped() {
     let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 60_000);
     let store = ReplicatingCallStore::with_changelog(cl, clock.clone());
     put(&store, "c1", b"v1", 0, 1, &fwd("A")).await;
-    store
-        .delete_call(PRI, SELF, "c1", &[], &fwd("A"))
-        .await
-        .unwrap();
+    store.delete_call(PRI, SELF, "c1", &[], &fwd("A")).await.unwrap();
 
     // Tombstone present + drained as Delete with no body.
     assert_eq!(store.changelog().peer_len("A", BAK_P), 1);
@@ -395,7 +383,10 @@ async fn needs_reset_after_tombstone_reap_raises_floor() {
 
     assert!(cl.needs_reset("A", BAK_P, Watermark::new(1, 1)), "since below reaped tail → reset");
     assert!(!cl.needs_reset("A", BAK_P, Watermark::new(1, 2)), "since AT the floor → no reset");
-    assert!(!cl.needs_reset("A", BAK_P, Watermark::new(0, 1)), "lower gen is a cold pull → no reset");
+    assert!(
+        !cl.needs_reset("A", BAK_P, Watermark::new(0, 1)),
+        "lower gen is a cold pull → no reset"
+    );
     assert!(!cl.needs_reset("Z", BAK_P, Watermark::new(1, 1)), "unknown peer → no reset");
 }
 
@@ -421,10 +412,7 @@ async fn gen_collision_or_backward_clock_forces_reset() {
         "same-gen counter above head = collision → reset"
     );
     // Future-gen watermark: our boot clock stepped backward across the restart.
-    assert!(
-        cl.needs_reset("A", BAK_P, Watermark::new(2, 3)),
-        "future-gen watermark → reset"
-    );
+    assert!(cl.needs_reset("A", BAK_P, Watermark::new(2, 3)), "future-gen watermark → reset");
     // A legitimate same-gen watermark at/below head stays warm.
     assert!(
         !cl.needs_reset("A", BAK_P, Watermark::new(1, 1)),
@@ -476,10 +464,7 @@ async fn nonpositive_ttl_replica_self_evicts_via_backstop() {
         .await
         .unwrap();
     assert!(store.get_call(BAK, "A", "c1").await.unwrap().is_some());
-    assert_eq!(
-        store.get_index("leg:cid-1|tag-a").await.unwrap().as_deref(),
-        Some("c1")
-    );
+    assert_eq!(store.get_index("leg:cid-1|tag-a").await.unwrap().as_deref(), Some("c1"));
 
     // Past the backstop → lazily evicted on access (no permanent ghost), AND the
     // ghost's idx:* entries are freed with it — a stranded index would both leak
@@ -509,10 +494,7 @@ async fn reap_frees_expired_replica_index_entries() {
         .put_call(BAK, "A", "c2", b"v1".to_vec(), &idx, 0, 1, 0, &PutOpts::default())
         .await
         .unwrap();
-    assert_eq!(
-        store.get_index("leg:cid-2|tag-b").await.unwrap().as_deref(),
-        Some("c2")
-    );
+    assert_eq!(store.get_index("leg:cid-2|tag-b").await.unwrap().as_deref(), Some("c2"));
 
     tokio::time::advance(Duration::from_millis(1_001)).await;
     store.reap(clock.now_ms()).await;

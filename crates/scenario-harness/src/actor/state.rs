@@ -63,7 +63,11 @@ pub struct RecordedFinal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayEntry {
     Final(RecordedFinal),
-    ServicedStray { leg: &'static str, method: String, action: &'static str },
+    ServicedStray {
+        leg: &'static str,
+        method: String,
+        action: &'static str,
+    },
     /// An accepted-delta policy blessed a non-matching inbound as satisfying
     /// the due scripted expectation: `step` is the goal-cursor index of that
     /// expectation on `leg`; `expected`/`observed` are the confrontation's
@@ -81,12 +85,20 @@ pub enum ReplayEntry {
     /// message for an actor that has already finished. `endpoint` names the UA
     /// it arrived on, `detail` the message. Counted and recorded, never
     /// silently dropped.
-    UnclaimedInbound { endpoint: String, detail: String },
+    UnclaimedInbound {
+        endpoint: String,
+        detail: String,
+    },
     /// A final RETRANSMITTED on `leg` while this endpoint holds its ACK (a
     /// declared delayed automatic): the peer's own RFC 3261 §13.3.1.4
     /// re-passing, absorbed by the scheduled ACK. ONE entry per retransmission,
     /// so a run states how many the hold provoked instead of hiding them.
-    HeldFinalRetransmitted { leg: &'static str, status: u16, cseq_method: String, cseq: u32 },
+    HeldFinalRetransmitted {
+        leg: &'static str,
+        status: u16,
+        cseq_method: String,
+        cseq: u32,
+    },
     /// A reception goal's [`super::goals::BodyExpect`] was not met by the
     /// message that otherwise satisfied the goal: divergence DATA, never a step
     /// failure — the run continues and the report side classifies the record.
@@ -263,8 +275,7 @@ impl StateInner {
     /// predicate. Vacuously false before any leg appears (a call that never
     /// started has not "torn down").
     pub fn all_terminated(&self) -> bool {
-        !self.legs.is_empty()
-            && self.legs.values().all(|l| l.phase() == LegPhase::Terminated)
+        !self.legs.is_empty() && self.legs.values().all(|l| l.phase() == LegPhase::Terminated)
     }
 
     /// Whether a leg has an unconsumed response fact at or beyond `from` —

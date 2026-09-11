@@ -24,7 +24,13 @@ impl ActionExecutor<'_> {
     /// dialog (Contact / Record-Route / CSeq come from it); other `(leg, tag)`
     /// targets must already be tracked. Idempotent (`track_b_early_dialog`
     /// skips a known tag).
-    pub(super) fn ensure_b_early_dialog(&self, call: &mut Call, ctx: &RuleContext, leg_id: &str, b_tag: &str) {
+    pub(super) fn ensure_b_early_dialog(
+        &self,
+        call: &mut Call,
+        ctx: &RuleContext,
+        leg_id: &str,
+        b_tag: &str,
+    ) {
         if b_tag.is_empty() || leg_id == "a" {
             return;
         }
@@ -62,9 +68,8 @@ impl ActionExecutor<'_> {
         if already {
             return;
         }
-        let contact =
-            contact_uri(resp.header::<header::Contact>(), &call.call_ref, source_leg_id)
-                .unwrap_or_default();
+        let contact = contact_uri(resp.header::<header::Contact>(), &call.call_ref, source_leg_id)
+            .unwrap_or_default();
         // §12.1.2: an EARLY dialog's route set is established from the reliable
         // 1xx's Record-Route, exactly like the 2xx path below — one entry per
         // recorded route (a comma-combined double-record-route is two), reversed
@@ -95,10 +100,7 @@ impl ActionExecutor<'_> {
                 // otherwise its 2xx ACK (and RAck CSeq) would fall back to the
                 // running `local_cseq`, which any early PRACK/UPDATE has already
                 // advanced past the INVITE (§13.2.2.4 wants the INVITE's CSeq).
-                let leg_handle = leg
-                    .dialogs
-                    .iter()
-                    .find_map(|d| d.ext.pending_invite_txn.clone());
+                let leg_handle = leg.dialogs.iter().find_map(|d| d.ext.pending_invite_txn.clone());
                 let ctx = call::helpers::MakeDialogLegCtx {
                     call_id: &leg.call_id,
                     local_uri: leg.local_uri.as_deref().unwrap_or(""),
@@ -129,9 +131,8 @@ impl ActionExecutor<'_> {
         };
         let remote_tag = resp.to().tag().unwrap_or_default().to_string();
         let remote_tag_clone = remote_tag.clone();
-        let remote_target =
-            contact_uri(resp.header::<header::Contact>(), &call.call_ref, leg_id)
-                .unwrap_or_default();
+        let remote_target = contact_uri(resp.header::<header::Contact>(), &call.call_ref, leg_id)
+            .unwrap_or_default();
         // §12.1.2: the b-leg is a UAC dialog, so its route set is the
         // dialog-creating 2xx's Record-Route values in *reverse* order (the
         // a-leg/UAS path keeps the INVITE's Record-Route forward). We must reverse
@@ -148,8 +149,7 @@ impl ActionExecutor<'_> {
         // Via/registry rescue.
         let route_set = self.dialog_route_set(uac_route_set(resp), &call.call_ref, leg_id);
         // The CSeq the caller's §13.2.2.4 ACK will carry — its own INVITE's.
-        let awaited_ack_cseq =
-            relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
+        let awaited_ack_cseq = relay::rebuild_a_leg_invite(&call.a_leg_invite).cseq().seq() as i64;
         // §12.1.2: a 2xx whose To-tag no provisional ever carried answers on a
         // dialog of its OWN — an accepting branch that never rang. Track it
         // before promotion (idempotent for a known tag) so it exists with the
@@ -263,11 +263,8 @@ impl ActionExecutor<'_> {
         //    by an a-facing final 2xx — core relay, `RespondToALeg`, or
         //    `AnswerALegNewDialog`. Adopted destination legs (incl. the REFER
         //    transfer target and the failover crossing-200 callee) are unaffected.
-        let confirmed_leg_adopted = call
-            .b_legs
-            .iter()
-            .find(|l| l.leg_id == leg_id)
-            .is_none_or(call::helpers::is_adopted);
+        let confirmed_leg_adopted =
+            call.b_legs.iter().find(|l| l.leg_id == leg_id).is_none_or(call::helpers::is_adopted);
         if call.state == call::CallModelState::Active && confirmed_leg_adopted {
             *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
         }
@@ -282,7 +279,11 @@ impl ActionExecutor<'_> {
     /// Like [`Self::ensure_a_dialog`] but, when the a-dialog is being created,
     /// uses `preferred` as its local tag instead of minting a fresh one (tag
     /// continuity across forking/failover, `relayFirst18xTo180`).
-    pub(super) fn ensure_a_dialog_with(&self, call: &mut Call, preferred: Option<String>) -> String {
+    pub(super) fn ensure_a_dialog_with(
+        &self,
+        call: &mut Call,
+        preferred: Option<String>,
+    ) -> String {
         if let Some(d) = call.a_leg.dialogs.first() {
             if !d.sip.local_tag.is_empty() {
                 return d.sip.local_tag.clone();
@@ -299,8 +300,7 @@ impl ActionExecutor<'_> {
         // Record-Route entries in forward order, one entry per recorded route (a
         // comma-combined header — the proxy's double-record-route halves — is
         // two), same as the b-leg path above.
-        let route_set =
-            self.dialog_route_set(uas_route_set(&a_invite), &call.call_ref, &a_leg_id);
+        let route_set = self.dialog_route_set(uas_route_set(&a_invite), &call.call_ref, &a_leg_id);
         let cseq = a_invite.cseq().seq() as i64;
         let dialog = Dialog {
             sip: StackDialog {
@@ -478,7 +478,12 @@ Content-Length: 0\r\n\r\n"
         let config = proxied_config();
         let id_gen = IdGen::seeded(0xD1);
         let wire_faults = crate::wire_faults::WireFaults::none();
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &wire_faults };
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &wire_faults,
+        };
 
         let resp = ok_200(UNREADABLE_RR);
         assert!(uac_route_set(&resp).is_err(), "the fixture's recorded route must not read");
@@ -505,7 +510,12 @@ Content-Length: 0\r\n\r\n"
         let config = B2buaConfig::default();
         let id_gen = IdGen::seeded(0xD2);
         let wire_faults = crate::wire_faults::WireFaults::none();
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &wire_faults };
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &wire_faults,
+        };
         let resp = ok_200(UNREADABLE_RR);
         assert!(uac_route_set(&resp).is_err());
         assert!(exec.dialog_route_set(uac_route_set(&resp), "call-1", "b-1").is_empty());
@@ -519,7 +529,12 @@ Content-Length: 0\r\n\r\n"
         let config = proxied_config();
         let id_gen = IdGen::seeded(0xD3);
         let wire_faults = crate::wire_faults::WireFaults::none();
-        let exec = ActionExecutor { config: &config, id_gen: &id_gen, now_ms: 0, wire_faults: &wire_faults };
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &wire_faults,
+        };
         let combined = "<sip:10.0.0.9:5060;outbound;lr>,<sip:10.0.0.9:5060;target=1;lr>";
 
         let resp = ok_200(combined);

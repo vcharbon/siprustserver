@@ -25,7 +25,12 @@ async fn a_running_harness_captures_what_the_sut_logs() {
     tracing::info!(node = "w-0", "takeover complete");
 
     let captured = log.matching("takeover complete");
-    assert_eq!(captured.len(), 1, "the run's lifecycle line lands in the buffer: {:?}", log.lines());
+    assert_eq!(
+        captured.len(),
+        1,
+        "the run's lifecycle line lands in the buffer: {:?}",
+        log.lines()
+    );
     assert!(captured[0].contains("node=w-0"), "with its fields: {}", captured[0].line());
 
     h.finish().await;

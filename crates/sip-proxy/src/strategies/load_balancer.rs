@@ -75,8 +75,14 @@ impl RendezvousCandidate for WorkerKey {
     }
 }
 
-fn build_stickiness_input(primary_id: &str, backup_id: &str, emergency: &str, call_id: &str) -> Vec<u8> {
-    format!("v={COOKIE_VERSION}|w_pri={primary_id}|w_bak={backup_id}|e={emergency}|c={call_id}").into_bytes()
+fn build_stickiness_input(
+    primary_id: &str,
+    backup_id: &str,
+    emergency: &str,
+    call_id: &str,
+) -> Vec<u8> {
+    format!("v={COOKIE_VERSION}|w_pri={primary_id}|w_bak={backup_id}|e={emergency}|c={call_id}")
+        .into_bytes()
 }
 
 /// Config for the LB (source defaults).
@@ -88,7 +94,10 @@ pub struct LoadBalancerConfig {
 
 impl Default for LoadBalancerConfig {
     fn default() -> Self {
-        Self { drain_grace_ms: DEFAULT_DRAIN_GRACE_MS, fresh_pod_guard_ms: DEFAULT_FRESH_POD_GUARD_MS }
+        Self {
+            drain_grace_ms: DEFAULT_DRAIN_GRACE_MS,
+            fresh_pod_guard_ms: DEFAULT_FRESH_POD_GUARD_MS,
+        }
     }
 }
 
@@ -139,7 +148,11 @@ impl RoutingStrategy for LoadBalancerStrategy {
         "LoadBalancer"
     }
 
-    async fn select_for_new_dialog(&self, msg: &SipMessage, opts: SelectOpts) -> Result<ProxyAddr, SelectError> {
+    async fn select_for_new_dialog(
+        &self,
+        msg: &SipMessage,
+        opts: SelectOpts,
+    ) -> Result<ProxyAddr, SelectError> {
         let call_id = call_id_of(msg).unwrap_or("");
         let is_emergency = opts.emergency_override || is_emergency_invite(msg);
         let in_dialog = is_in_dialog(msg);
@@ -149,7 +162,11 @@ impl RoutingStrategy for LoadBalancerStrategy {
         let candidates: Vec<_> = if is_emergency || in_dialog {
             alive.clone()
         } else {
-            alive.iter().copied().filter(|w| self.observer.band_for(&w.id) != Some(EluBand::AboveCritical)).collect()
+            alive
+                .iter()
+                .copied()
+                .filter(|w| self.observer.band_for(&w.id) != Some(EluBand::AboveCritical))
+                .collect()
         };
 
         if candidates.is_empty() {
@@ -161,7 +178,11 @@ impl RoutingStrategy for LoadBalancerStrategy {
             } else if is_emergency {
                 format!("no alive workers among {} entries", snapshot.len())
             } else {
-                format!("all alive workers in above_critical band (snapshot={}, alive={})", snapshot.len(), alive.len())
+                format!(
+                    "all alive workers in above_critical band (snapshot={}, alive={})",
+                    snapshot.len(),
+                    alive.len()
+                )
             };
             return Err(SelectError::NoTarget { reason });
         }
@@ -196,7 +217,10 @@ impl RoutingStrategy for LoadBalancerStrategy {
             // until ≥1 token refills) derived from the bucket's own cap/fill
             // rate, not a constant. See `crate::load_observer`.
             let retry_after_sec = self.observer.retry_after_sec_for(&winner.id, now_ms).max(1);
-            return Err(SelectError::RateCapExhausted { worker_id: winner.id.clone(), retry_after_sec });
+            return Err(SelectError::RateCapExhausted {
+                worker_id: winner.id.clone(),
+                retry_after_sec,
+            });
         } else {
             self.observer.record_own_admitted(&winner.id);
         }
@@ -213,7 +237,8 @@ impl RoutingStrategy for LoadBalancerStrategy {
 
         // `w_bak` may legitimately be present-but-empty; `w_pri`/`kid`/`sig` must
         // be non-empty; `e` must be "0" or "1".
-        let (Some(w_pri), Some(w_bak), Some(e), Some(v), Some(kid), Some(sig)) = (w_pri, w_bak, e, v, kid, sig)
+        let (Some(w_pri), Some(w_bak), Some(e), Some(v), Some(kid), Some(sig)) =
+            (w_pri, w_bak, e, v, kid, sig)
         else {
             self.metrics.record_hmac_failure(HmacFailureReason::Missing);
             return DecodeResult::Unknown { is_emergency: false };
@@ -224,15 +249,24 @@ impl RoutingStrategy for LoadBalancerStrategy {
         }
         if v != COOKIE_VERSION {
             self.metrics.record_hmac_failure(HmacFailureReason::Decode);
-            return DecodeResult::Reject { status: 403, reason: format!("unsupported stickiness cookie version \"{v}\"") };
+            return DecodeResult::Reject {
+                status: 403,
+                reason: format!("unsupported stickiness cookie version \"{v}\""),
+            };
         }
         let Some(call_id) = call_id_of(msg) else {
             self.metrics.record_hmac_failure(HmacFailureReason::Decode);
-            return DecodeResult::Reject { status: 403, reason: "missing Call-ID for stickiness verify".to_string() };
+            return DecodeResult::Reject {
+                status: 403,
+                reason: "missing Call-ID for stickiness verify".to_string(),
+            };
         };
         let Ok(decoded) = URL_SAFE_NO_PAD.decode(sig) else {
             self.metrics.record_hmac_failure(HmacFailureReason::Decode);
-            return DecodeResult::Reject { status: 403, reason: "malformed stickiness signature".to_string() };
+            return DecodeResult::Reject {
+                status: 403,
+                reason: "malformed stickiness signature".to_string(),
+            };
         };
         if decoded.len() != TRUNCATED_MAC_BYTES {
             self.metrics.record_hmac_failure(HmacFailureReason::Decode);
@@ -246,7 +280,10 @@ impl RoutingStrategy for LoadBalancerStrategy {
         let input = build_stickiness_input(w_pri, w_bak, e, call_id);
         if !self.hmac.verify_truncated(&input, kid, &decoded) {
             self.metrics.record_hmac_failure(HmacFailureReason::Mismatch);
-            return DecodeResult::Reject { status: 403, reason: "stickiness signature mismatch".to_string() };
+            return DecodeResult::Reject {
+                status: 403,
+                reason: "stickiness signature mismatch".to_string(),
+            };
         }
 
         // MAC verified — resolve the primary.
@@ -286,7 +323,9 @@ impl RoutingStrategy for LoadBalancerStrategy {
         }
         // dead / unknown / not-ready → backup.
         let promoted = self.try_backup(w_bak, is_emergency);
-        if primary.health == WorkerHealth::NotReady && matches!(promoted, DecodeResult::ForwardBackup { .. }) {
+        if primary.health == WorkerHealth::NotReady
+            && matches!(promoted, DecodeResult::ForwardBackup { .. })
+        {
             self.metrics.record_decode_forward_promoted("not-ready");
         }
         promoted
@@ -301,7 +340,8 @@ impl RoutingStrategy for LoadBalancerStrategy {
             .filter(|w| w.health == WorkerHealth::Alive && w.id != primary.id)
             .map(|w| WorkerKey(w.id.clone()))
             .collect();
-        let backup_id = rendezvous_select(call_id, &backup_keys).map(|k| k.0.clone()).unwrap_or_default();
+        let backup_id =
+            rendezvous_select(call_id, &backup_keys).map(|k| k.0.clone()).unwrap_or_default();
         let emergency_flag = if is_emergency_invite(msg) { "1" } else { "0" };
         let input = build_stickiness_input(&primary.id, &backup_id, emergency_flag, call_id);
         let signed = self.hmac.sign(&input);

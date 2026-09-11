@@ -184,10 +184,7 @@ impl Payload {
         let head_len = raw.len().saturating_sub(body.len());
         if !body.is_empty() && raw[head_len..] == *body {
             if let Ok(head) = std::str::from_utf8(&raw[..head_len]) {
-                return Payload::HeadBody {
-                    head: head.to_string(),
-                    body_b64: base64(body),
-                };
+                return Payload::HeadBody { head: head.to_string(), body_b64: base64(body) };
             }
         }
         Payload::Opaque { raw_b64: base64(raw) }
@@ -213,9 +210,7 @@ impl Payload {
     /// EMPTY body — a fact, not an absence.
     pub fn body(&self) -> Option<Vec<u8>> {
         match self {
-            Payload::Text { raw } => {
-                sip_message::sniff::body(raw.as_bytes()).map(<[u8]>::to_vec)
-            }
+            Payload::Text { raw } => sip_message::sniff::body(raw.as_bytes()).map(<[u8]>::to_vec),
             Payload::HeadBody { body_b64, .. } => unbase64(body_b64).ok(),
             Payload::Opaque { .. } => None,
         }
@@ -274,20 +269,8 @@ impl MsgJson {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Summary {
-    Request {
-        method: String,
-        uri: String,
-        cseq: CSeqJson,
-        from: Party,
-        to: Party,
-    },
-    Response {
-        status: u16,
-        reason: String,
-        cseq: CSeqJson,
-        from: Party,
-        to: Party,
-    },
+    Request { method: String, uri: String, cseq: CSeqJson, from: Party, to: Party },
+    Response { status: u16, reason: String, cseq: CSeqJson, from: Party, to: Party },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

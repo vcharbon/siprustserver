@@ -77,11 +77,7 @@ fn identities(msg: &SipMessage) -> Identities {
 }
 
 fn identity(uri: &Uri) -> Identity {
-    Identity {
-        uri: uri.text().into_owned(),
-        user: uri.user_identity(),
-        digits: uri.user_digits(),
-    }
+    Identity { uri: uri.text().into_owned(), user: uri.user_identity(), digits: uri.user_digits() }
 }
 
 fn replaces_of(msg: &SipMessage) -> Option<DialogRef> {
@@ -230,11 +226,7 @@ l: 0\r\n\r\n";
             vec![
                 ("X-Api-Call", None, "call-9"),
                 ("X-Api-Call", Some("x-api-call"), "call-10"),
-                (
-                    "Refer-To",
-                    None,
-                    "<sip:+33456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>"
-                ),
+                ("Refer-To", None, "<sip:+33456@h?Replaces=abc%40h%3Bto-tag%3Dtt%3Bfrom-tag%3Dff>"),
                 // `l` resolved to Content-Length before the projection saw it.
                 ("Content-Length", None, "0"),
             ]
@@ -330,7 +322,11 @@ Content-Length: {}\r\n\r\n{body}",
         // The entity headers beyond the two with their own field, in wire
         // order: what a byte-exact replay has to put back.
         assert_eq!(
-            b.parts[1].headers.iter().map(|h| (h.name.as_str(), h.value.as_str())).collect::<Vec<_>>(),
+            b.parts[1]
+                .headers
+                .iter()
+                .map(|h| (h.name.as_str(), h.value.as_str()))
+                .collect::<Vec<_>>(),
             [
                 ("Content-Transfer-Encoding", "binary"),
                 ("Content-Disposition", "signal;handling=optional")

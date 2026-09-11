@@ -117,9 +117,8 @@ async fn refer_relays_transparently_when_the_route_activates_nothing() {
     // Default composition — the `refer_transfer` seed IS present. What is absent
     // is the route's `features.refer` arm, so this platform processes no
     // transfer and the REFER is an ordinary in-dialog request.
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5796)
-        .start(&h, "b2bua", "127.0.0.1:5797")
-        .await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5796).start(&h, "b2bua", "127.0.0.1:5797").await;
 
     // A↔B established.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -187,9 +186,8 @@ async fn a_malformed_refer_to_relays_untouched_on_the_transparent_path() {
     let h = Harness::new("refer-transparent-malformed-referto");
     let alice = h.agent("alice", "127.0.0.1:5798").await;
     let bob = h.agent("bob", "127.0.0.1:5799").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5799)
-        .start(&h, "b2bua", "127.0.0.1:5800")
-        .await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5799).start(&h, "b2bua", "127.0.0.1:5800").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut bob_uas = bob.receive("INVITE").await;

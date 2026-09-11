@@ -41,7 +41,10 @@ fn score64(key: &str, id: &str) -> u64 {
 /// ties via candidate-slice order (strict `>` keeps the first winner), so the
 /// result is deterministic across snapshots that order workers identically.
 /// Returns `None` only when `candidates` is empty.
-pub fn rendezvous_select<'a, T: RendezvousCandidate>(key: &str, candidates: &'a [T]) -> Option<&'a T> {
+pub fn rendezvous_select<'a, T: RendezvousCandidate>(
+    key: &str,
+    candidates: &'a [T],
+) -> Option<&'a T> {
     let mut best: Option<&T> = None;
     let mut best_score: u128 = 0;
     for c in candidates {

@@ -83,7 +83,11 @@ pub fn is_settled(flow_done: bool, sut: &dyn Sut, postconditions: Option<&Postco
 }
 
 /// What was still open when the settle budget ran out.
-pub fn open_reasons(flow_done: bool, sut: &dyn Sut, postconditions: Option<&Postconditions>) -> Vec<String> {
+pub fn open_reasons(
+    flow_done: bool,
+    sut: &dyn Sut,
+    postconditions: Option<&Postconditions>,
+) -> Vec<String> {
     let mut open = Vec::new();
     if !flow_done {
         open.push("the flow has not completed".into());
@@ -295,8 +299,9 @@ mod tests {
 
     #[test]
     fn a_metric_the_system_does_not_publish_fails_rather_than_reading_as_zero() {
-        let expectation =
-            post(r#"{"cdr":{"absent":"n/a"},"checks":[{"field":"widgets_total","op":"eq","value":"0"}]}"#);
+        let expectation = post(
+            r#"{"cdr":{"absent":"n/a"},"checks":[{"field":"widgets_total","op":"eq","value":"0"}]}"#,
+        );
         let sut = FakeSut { active: 0, cdrs: vec![], metrics: BTreeMap::new() };
         let state = RunState::new();
         let bindings = IdentityBindings::new();

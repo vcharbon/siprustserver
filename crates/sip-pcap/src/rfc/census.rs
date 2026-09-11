@@ -298,8 +298,12 @@ fn bucket_of(evidence: &Evidence) -> &'static str {
         Evidence::AckBodyOnClosedRound { .. } => "ack body on a completed round",
         Evidence::OfferLeftUnanswered { .. } => "offer left unanswered",
         Evidence::AnswerStreamRetyped { .. } => "answer re-typed an offered stream",
-        Evidence::SdpOriginDiverged { same_session: false, .. } => "sdp origin names another session",
-        Evidence::SdpOriginDiverged { same_session: true, .. } => "sdp sess-version off its changes",
+        Evidence::SdpOriginDiverged { same_session: false, .. } => {
+            "sdp origin names another session"
+        }
+        Evidence::SdpOriginDiverged { same_session: true, .. } => {
+            "sdp sess-version off its changes"
+        }
         Evidence::OfferWhilePending { .. } => "offer over an unanswered one",
         Evidence::AnswerMLineCountDiffers { .. } => "answer stream count off the offer's",
         Evidence::AnswerTLineDiffers { .. } => "answer t= line off the offer's",
@@ -384,7 +388,12 @@ mod tests {
         let both = doc_of(vec![
             // The PRACK rule's shape: 100rel offered, a reliable 180 taken,
             // never PRACKed, and the dialog lives on for seconds.
-            dg(1_000_000, A, B, request_hdr("INVITE", 1, "x1", "fa", None, "Supported: 100rel\r\n")),
+            dg(
+                1_000_000,
+                A,
+                B,
+                request_hdr("INVITE", 1, "x1", "fa", None, "Supported: 100rel\r\n"),
+            ),
             dg(
                 1_200_000,
                 B,
@@ -436,7 +445,8 @@ mod tests {
     #[test]
     fn a_named_candidate_is_tallied_and_an_unnamed_one_is_not() {
         let ok = response(200, "OK", 1, "INVITE", "r1", "fa", Some("tb"));
-        let recomposed = response_hdr(200, "OK", 1, "INVITE", "r1", "fa", Some("tb"), "Server: x\r\n");
+        let recomposed =
+            response_hdr(200, "OK", 1, "INVITE", "r1", "fa", Some("tb"), "Server: x\r\n");
         let doc = doc_of(vec![
             dg(1_000_000, A, B, request("INVITE", 1, "r1", "fa", None)),
             dg(1_100_000, B, A, ok),
@@ -459,11 +469,15 @@ mod tests {
         assert!(!plain.rules.contains_key("rung-byte-identical"), "{:?}", plain.rules.keys());
         assert!(plain.hits.is_empty());
         let mut zero = Census::with_candidates(&[RfcRule::RungByteIdentical]);
-        zero.absorb("clean.json", "cap-c", &doc_of(vec![
-            dg(1_000_000, A, B, request("INVITE", 1, "r2", "fa", None)),
-            dg(1_100_000, B, A, response(200, "OK", 1, "INVITE", "r2", "fa", Some("tb"))),
-            dg(1_200_000, A, B, request("ACK", 1, "r2", "fa", Some("tb"))),
-        ]));
+        zero.absorb(
+            "clean.json",
+            "cap-c",
+            &doc_of(vec![
+                dg(1_000_000, A, B, request("INVITE", 1, "r2", "fa", None)),
+                dg(1_100_000, B, A, response(200, "OK", 1, "INVITE", "r2", "fa", Some("tb"))),
+                dg(1_200_000, A, B, request("ACK", 1, "r2", "fa", Some("tb"))),
+            ]),
+        );
         assert_eq!(zero.rules["rung-byte-identical"].hits, 0, "reported, not omitted");
     }
 }

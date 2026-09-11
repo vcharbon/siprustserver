@@ -43,7 +43,9 @@ fn parse_name_addr_list(
             }
             let parsed = parse_name_addr(&v.reslice(entry));
             if parsed.uri.is_empty() {
-                return Err(SipParseError::new(format!("Malformed {header_name} entry: \"{entry}\"")));
+                return Err(SipParseError::new(format!(
+                    "Malformed {header_name} entry: \"{entry}\""
+                )));
             }
             if let Some(reason) = validate_strict_sip_uri(&parsed.uri) {
                 return Err(SipParseError::new(format!(
@@ -176,9 +178,15 @@ fn parse_date_value_strict(value: &str) -> Result<(), SipParseError> {
     if v[16] != ' ' {
         return bad("missing SP before time");
     }
-    if !v[17].is_ascii_digit() || !v[18].is_ascii_digit() || v[19] != ':'
-        || !v[20].is_ascii_digit() || !v[21].is_ascii_digit() || v[22] != ':'
-        || !v[23].is_ascii_digit() || !v[24].is_ascii_digit() || v[25] != ' '
+    if !v[17].is_ascii_digit()
+        || !v[18].is_ascii_digit()
+        || v[19] != ':'
+        || !v[20].is_ascii_digit()
+        || !v[21].is_ascii_digit()
+        || v[22] != ':'
+        || !v[23].is_ascii_digit()
+        || !v[24].is_ascii_digit()
+        || v[25] != ' '
     {
         return bad("bad HH:MM:SS");
     }
@@ -236,15 +244,21 @@ fn validate_angle_section(s: &[char], lt: usize, header_name: &str) -> Result<()
     }
     let gt = match index_of(s, '>', lt + 1) {
         Some(g) => g,
-        None => return Err(SipParseError::new(format!("Strict {header_name}: unterminated \"<...>\""))),
+        None => {
+            return Err(SipParseError::new(format!("Strict {header_name}: unterminated \"<...>\"")))
+        }
     };
     let first = s[lt + 1];
     if first == ' ' || first == '\t' {
-        return Err(SipParseError::new(format!("Strict {header_name}: LWS inside \"<...>\" addr-spec")));
+        return Err(SipParseError::new(format!(
+            "Strict {header_name}: LWS inside \"<...>\" addr-spec"
+        )));
     }
     let last = s[gt - 1];
     if last == ' ' || last == '\t' {
-        return Err(SipParseError::new(format!("Strict {header_name}: LWS inside \"<...>\" addr-spec")));
+        return Err(SipParseError::new(format!(
+            "Strict {header_name}: LWS inside \"<...>\" addr-spec"
+        )));
     }
     Ok(())
 }
@@ -279,7 +293,9 @@ fn validate_name_addr_strict(value: &str, header_name: &str) -> Result<(), SipPa
             i += 1;
         }
         if !closed {
-            return Err(SipParseError::new(format!("Strict {header_name}: unterminated quoted display name")));
+            return Err(SipParseError::new(format!(
+                "Strict {header_name}: unterminated quoted display name"
+            )));
         }
         return match index_of(&s, '<', i) {
             None => Ok(()),
@@ -312,7 +328,9 @@ fn validate_name_addr_strict(value: &str, header_name: &str) -> Result<(), SipPa
     if !has_colon {
         let trimmed: String = s[i..].iter().collect::<String>().trim().to_string();
         if !trimmed.is_empty() {
-            return Err(SipParseError::new(format!("Strict {header_name}: addr-spec required, got \"{trimmed}\"")));
+            return Err(SipParseError::new(format!(
+                "Strict {header_name}: addr-spec required, got \"{trimmed}\""
+            )));
         }
     }
     Ok(())

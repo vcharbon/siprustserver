@@ -428,8 +428,7 @@ fn uri_header(name: &str, index: usize, msg: &SipMessage) -> Result<Option<AddrF
         // A wildcard Contact is not an address: it names every binding at once
         // (RFC 3261 §10.2.2), so it reads back as the star the UA sent.
         "contact" if msg.raw(HeaderName::Contact).any(|v| v.trim() == "*") => {
-            Ok((index == 0)
-                .then(|| AddrField { addr: NameAddr::new(Uri::opaque("*")), tag: None }))
+            Ok((index == 0).then(|| AddrField { addr: NameAddr::new(Uri::opaque("*")), tag: None }))
         }
         "contact" => nth(msg.list::<header::Contact>(), name, index),
         other => Err(format!(

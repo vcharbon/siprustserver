@@ -38,10 +38,7 @@ pub struct PacketQueue {
 impl PacketQueue {
     pub fn new(cap: usize) -> Self {
         Self {
-            inner: Mutex::new(Inner {
-                buf: VecDeque::new(),
-                closed: false,
-            }),
+            inner: Mutex::new(Inner { buf: VecDeque::new(), closed: false }),
             notify: Notify::new(),
             cap,
             tap: OnceLock::new(),

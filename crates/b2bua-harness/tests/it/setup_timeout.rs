@@ -20,13 +20,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use b2bua::cdr::CdrRecord;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use b2bua::cdr::CdrRecord;
 use b2bua_harness::{settle_until, B2buaSut};
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
@@ -51,7 +51,9 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
+async fn serve_limiter(
+    net: &SimulatedHttpNetwork,
+) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
     let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
@@ -59,11 +61,7 @@ async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn
 }
 
 fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    Arc::new(HttpCallLimiter::new(
-        Arc::new(net.clone()),
-        laddr(),
-        Duration::from_millis(150),
-    ))
+    Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_millis(150)))
 }
 
 fn route_with_limiter(host: &str, port: u16, id: &str, limit: i64) -> Arc<dyn CallDecisionEngine> {

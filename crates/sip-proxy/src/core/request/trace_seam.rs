@@ -104,7 +104,13 @@ mod tests {
 
     fn gate(exporter: bool, honors_header: bool) -> ProxyTraces {
         ProxyTraces::new(
-            SampleAdmission::new(exporter, 1.0, 10, RateDraw::seeded(2), TokenBucket::default_at(0)),
+            SampleAdmission::new(
+                exporter,
+                1.0,
+                10,
+                RateDraw::seeded(2),
+                TokenBucket::default_at(0),
+            ),
             honors_header,
         )
     }

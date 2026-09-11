@@ -17,7 +17,7 @@
 use crate::accessor::{Accessor, StepField};
 use crate::deviation::CseqValue;
 use crate::lint::strings::{deviation_strings, node_strings, postcondition_strings, step_strings};
-use crate::lint::{Index, Place, Reach, Report, at, reach};
+use crate::lint::{at, reach, Index, Place, Reach, Report};
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
     for (place, node) in index.pivot.flow.iter().enumerate().map(|(n, e)| (Place::node(n), e)) {

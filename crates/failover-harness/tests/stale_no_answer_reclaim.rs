@@ -114,9 +114,8 @@ async fn stale_no_answer_restored_by_reclaim_is_absorbed_and_scrubbed() {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane)); // lanes registered for reporting only
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
     let mut w_b1 = fh
         .spawn_worker_limited(
             "b1",

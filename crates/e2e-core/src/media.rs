@@ -9,7 +9,7 @@
 use std::io;
 use std::path::Path;
 
-use media_harness::{Classification, ClassifyOptions, ClipName, classify};
+use media_harness::{classify, Classification, ClassifyOptions, ClipName};
 
 use crate::checks::CheckVerdict;
 use crate::model::CheckOp;

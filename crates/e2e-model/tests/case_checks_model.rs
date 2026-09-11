@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-use e2e_model::checks::{Bindings, evaluate_blocks_over, evaluate_case_over};
-use e2e_model::model::{CheckSet, TestCase, collect_case_blocks, schemas};
+use e2e_model::checks::{evaluate_blocks_over, evaluate_case_over, Bindings};
+use e2e_model::model::{collect_case_blocks, schemas, CheckSet, TestCase};
 use scenario_harness::{AnchorKeys, AnchorTag};
 use sip_message::parser::custom::CustomParser;
 use sip_message::SipParser;

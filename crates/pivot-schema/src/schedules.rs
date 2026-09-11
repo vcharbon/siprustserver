@@ -37,9 +37,7 @@ pub struct ClassSchedule {
 
 /// The table, one row per class.
 pub fn schedule_table() -> ScheduleTable {
-    ScheduleTable {
-        classes: Class::ALL.iter().map(|class| row(*class)).collect(),
-    }
+    ScheduleTable { classes: Class::ALL.iter().map(|class| row(*class)).collect() }
 }
 
 fn row(class: Class) -> ClassSchedule {
@@ -52,11 +50,7 @@ fn row(class: Class) -> ClassSchedule {
             rung_intervals_ms.push(millis(wait));
         }
     }
-    ClassSchedule {
-        class: class.as_str().to_string(),
-        rung_intervals_ms,
-        give_up_ms,
-    }
+    ClassSchedule { class: class.as_str().to_string(), rung_intervals_ms, give_up_ms }
 }
 
 fn millis(d: std::time::Duration) -> u64 {
@@ -76,18 +70,29 @@ mod tests {
         for (row, class) in table.classes.iter().zip(Class::ALL) {
             assert_eq!(row.class, class.as_str());
             let elapsed: u64 = row.rung_intervals_ms.iter().sum();
-            assert!(elapsed < row.give_up_ms, "{}: the last rung lands inside the bound", row.class);
+            assert!(
+                elapsed < row.give_up_ms,
+                "{}: the last rung lands inside the bound",
+                row.class
+            );
             let schedule = Schedule::rfc(class);
             let next = u32::try_from(row.rung_intervals_ms.len() + 1).expect("a short ladder");
-            let past = elapsed + millis(schedule.interval(next).expect("an RFC class always paces"));
-            assert!(past >= row.give_up_ms, "{}: one more rung would land at or past the bound", row.class);
+            let past =
+                elapsed + millis(schedule.interval(next).expect("an RFC class always paces"));
+            assert!(
+                past >= row.give_up_ms,
+                "{}: one more rung would land at or past the bound",
+                row.class
+            );
         }
     }
 
     #[test]
     fn the_capped_classes_flatten_at_t2_and_the_uncapped_keep_doubling() {
         let table = schedule_table();
-        let by = |name: &str| &table.classes.iter().find(|r| r.class == name).expect(name).rung_intervals_ms;
+        let by = |name: &str| {
+            &table.classes.iter().find(|r| r.class == name).expect(name).rung_intervals_ms
+        };
         assert_eq!(by("invite-client"), &[500, 1000, 2000, 4000, 8000, 16000]);
         assert_eq!(by("reliable-provisional"), &[500, 1000, 2000, 4000, 8000, 16000]);
         assert_eq!(by("final-2xx"), &[500, 1000, 2000, 4000, 4000, 4000, 4000, 4000, 4000, 4000]);

@@ -41,8 +41,7 @@ fn invite(call_id: &str) -> SipRequest {
         to: Some(header::To::from_uri(uri_of("sip:bob@host"))),
         cseq: 1,
         via: Some(
-            Via::udp("127.0.0.1", 5060)
-                .with_branch(SipStr::owned(&format!("z9hG4bK{call_id}"))),
+            Via::udp("127.0.0.1", 5060).with_branch(SipStr::owned(&format!("z9hG4bK{call_id}"))),
         ),
         contact: Some(header::Contact::from_uri(
             Uri::sip_user("alice", "127.0.0.1").with_port(5060),
@@ -110,7 +109,10 @@ async fn materialising_adopts_the_call_it_serves_and_only_that_call() {
     //    over here; the registry never outruns the stored state ────────────────
     let resident = replicated("resident@x", None);
     let resident_ref = resident.call_ref.clone();
-    assert!(s.materialize_if_absent(resident, MaterialiseOrigin::Reclaim), "first materialise inserts");
+    assert!(
+        s.materialize_if_absent(resident, MaterialiseOrigin::Reclaim),
+        "first materialise inserts"
+    );
     assert_eq!(traces().active(), 1, "an unsampled call opens no span");
 
     let again = replicated("resident@x", Some(true));

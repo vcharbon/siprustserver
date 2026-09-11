@@ -342,7 +342,9 @@ impl LegStack {
         let opts = GenerateOutOfDialogRequestOpts {
             request_uri: Some(uri_of(ruri)),
             call_id: self.dialog.call_id.clone(),
-            from: Some(header::From::new(addr_of(from)).with_tag(SipStr::owned(&self.dialog.local_tag))),
+            from: Some(
+                header::From::new(addr_of(from)).with_tag(SipStr::owned(&self.dialog.local_tag)),
+            ),
             to: Some(header::To::new(addr_of(to))),
             cseq: self.dialog.local_cseq,
             via: Some(via),
@@ -371,10 +373,7 @@ impl LegStack {
         cseq: Option<u32>,
     ) -> Result<SipRequest, StackError> {
         if !self.has_dialog {
-            return Err(StackError::NoDialog {
-                leg: self.leg.clone(),
-                method: method.to_string(),
-            });
+            return Err(StackError::NoDialog { leg: self.leg.clone(), method: method.to_string() });
         }
         let verb = in_dialog_method(&method).ok_or_else(|| StackError::UnsupportedMethod {
             leg: self.leg.clone(),
@@ -471,7 +470,8 @@ impl LegStack {
         // (RFC 3261 §12.1.1): the fork answers under that tag, on the dialog
         // the INVITE established, in its own CSeq space.
         if (101..200).contains(&status) && *request.cseq().method() == Method::Invite {
-            let fork = StackDialog { local_tag: to_tag.clone(), local_cseq: 0, ..self.dialog.clone() };
+            let fork =
+                StackDialog { local_tag: to_tag.clone(), local_cseq: 0, ..self.dialog.clone() };
             self.ring_early(&to_tag, fork, rseq);
         }
         if status >= 200 {
@@ -583,13 +583,13 @@ impl LegStack {
                 }
             },
         };
-        let dialog = self
-            .early_dialog(&tag)
-            .map(|early| early.dialog.clone())
-            .ok_or_else(|| StackError::EarlyDialogUnknown {
-                leg: self.leg.clone(),
-                method: Method::Update.to_string(),
-                early: tag.clone(),
+        let dialog =
+            self.early_dialog(&tag).map(|early| early.dialog.clone()).ok_or_else(|| {
+                StackError::EarlyDialogUnknown {
+                    leg: self.leg.clone(),
+                    method: Method::Update.to_string(),
+                    early: tag.clone(),
+                }
             })?;
         let via = self.via();
         let opts = GenerateInDialogRequestOpts {
@@ -739,10 +739,7 @@ impl LegStack {
             .find(|invite| invite.cseq().seq() == response.cseq().seq())
             .or_else(|| self.sent_invites.last())
             .cloned()
-            .ok_or_else(|| StackError::NoInvite {
-                leg: self.leg.clone(),
-                method: "ACK".into(),
-            })?;
+            .ok_or_else(|| StackError::NoInvite { leg: self.leg.clone(), method: "ACK".into() })?;
         self.acked_invites.insert(invite.cseq().seq());
         if response.status() < 300 {
             let txn = InviteClientTransactionHandle { original_invite: invite };
@@ -783,8 +780,10 @@ impl LegStack {
         if let Some(contact) = response.contacts().as_slice().first() {
             self.dialog.remote_target = contact.uri().to_string();
         }
-        let routes: Vec<String> =
-            response.raw_text(sip_message::HeaderName::RecordRoute).map(|s| s.to_string()).collect();
+        let routes: Vec<String> = response
+            .raw_text(sip_message::HeaderName::RecordRoute)
+            .map(|s| s.to_string())
+            .collect();
         if !routes.is_empty() {
             self.dialog.route_set = routes.into_iter().rev().collect();
         }
@@ -807,8 +806,8 @@ impl LegStack {
         // is seeded by the INVITE that created it (RFC 3261 §12.2.1.1) — never
         // the leg's running counter, which another fork's traffic may have
         // advanced by the time this fork rings.
-        let provisional_fork = (101..200).contains(&response.status())
-            && *response.cseq().method() == Method::Invite;
+        let provisional_fork =
+            (101..200).contains(&response.status()) && *response.cseq().method() == Method::Invite;
         if let (true, Some(tag)) = (provisional_fork, response.to().tag().map(str::to_string)) {
             let seeded = self.sent_invite().map(|invite| invite.cseq().seq());
             let fork = StackDialog {
@@ -923,10 +922,7 @@ fn rseq_of(response: &SipResponse) -> Option<u32> {
 
 /// The document's frozen headers, as generator input.
 fn frozen(headers: &[TemplateHeader]) -> Vec<SipHeader> {
-    headers
-        .iter()
-        .map(|h| SipHeader::new(h.name.clone(), h.value.clone()))
-        .collect()
+    headers.iter().map(|h| SipHeader::new(h.name.clone(), h.value.clone())).collect()
 }
 
 fn out_of_dialog_method(method: &Method) -> Option<OutOfDialogMethod> {
@@ -981,10 +977,7 @@ mod tests {
     }
 
     fn reliable(rseq: &str) -> Vec<TemplateHeader> {
-        vec![
-            TemplateHeader::frozen("Require", "100rel"),
-            TemplateHeader::frozen("RSeq", rseq),
-        ]
+        vec![TemplateHeader::frozen("Require", "100rel"), TemplateHeader::frozen("RSeq", rseq)]
     }
 
     /// A caller stack that has put its INVITE on the wire.
@@ -1014,10 +1007,30 @@ mod tests {
     fn two_forks_of_one_leg_answer_under_the_tags_the_run_minted() {
         let (mut uas, _) = ringing("B");
         let first = uas
-            .respond(&Answer { status: 183, reason: "Session Progress", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("1"), Vec::new(), None)
+            .respond(
+                &Answer {
+                    status: 183,
+                    reason: "Session Progress",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &reliable("1"),
+                Vec::new(),
+                None,
+            )
             .expect("fork 1 rings");
         let second = uas
-            .respond(&Answer { status: 180, reason: "Ringing", cseq_method: Some("INVITE"), early_tag: Some("B-early-f2") }, &reliable("7001"), Vec::new(), None)
+            .respond(
+                &Answer {
+                    status: 180,
+                    reason: "Ringing",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f2"),
+                },
+                &reliable("7001"),
+                Vec::new(),
+                None,
+            )
             .expect("fork 2 rings");
         assert_eq!(to_tag(&first), "B-early-f1");
         assert_eq!(to_tag(&second), "B-early-f2");
@@ -1030,14 +1043,34 @@ mod tests {
         let mut uac = calling();
         let (mut uas, _) = ringing("B");
         let rings = uas
-            .respond(&Answer { status: 183, reason: "Session Progress", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("1"), Vec::new(), None)
+            .respond(
+                &Answer {
+                    status: 183,
+                    reason: "Session Progress",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &reliable("1"),
+                Vec::new(),
+                None,
+            )
             .expect("fork 1 rings");
         uac.learn_response(&rings);
         let prack = uac.prack(None, &[], Vec::new(), None, None).expect("the caller PRACKs fork 1");
         assert_eq!(prack.to().tag(), Some("B-early-f1"), "a PRACK rides its own early dialog");
         uas.learn_request(&prack);
         let ok = uas
-            .respond(&Answer { status: 200, reason: "OK", cseq_method: Some("PRACK"), early_tag: Some("B-early-f2") }, &[], Vec::new(), None)
+            .respond(
+                &Answer {
+                    status: 200,
+                    reason: "OK",
+                    cseq_method: Some("PRACK"),
+                    early_tag: Some("B-early-f2"),
+                },
+                &[],
+                Vec::new(),
+                None,
+            )
             .expect("the PRACK is answered");
         assert_eq!(to_tag(&ok), "B-early-f1", "the answered request names its own dialog");
     }
@@ -1047,11 +1080,31 @@ mod tests {
     #[test]
     fn the_fork_that_answers_becomes_the_leg_s_dialog() {
         let (mut uas, _) = ringing("B");
-        uas.respond(&Answer { status: 183, reason: "Session Progress", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("1"), Vec::new(), None)
-            .expect("fork 1 rings");
+        uas.respond(
+            &Answer {
+                status: 183,
+                reason: "Session Progress",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
+            &reliable("1"),
+            Vec::new(),
+            None,
+        )
+        .expect("fork 1 rings");
         assert_ne!(uas.local_tag(), "B-early-f1", "ringing confirms nothing");
-        uas.respond(&Answer { status: 200, reason: "OK", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &[], Vec::new(), None)
-            .expect("fork 1 answers");
+        uas.respond(
+            &Answer {
+                status: 200,
+                reason: "OK",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
+            &[],
+            Vec::new(),
+            None,
+        )
+        .expect("fork 1 answers");
         assert_eq!(uas.local_tag(), "B-early-f1");
     }
 
@@ -1081,7 +1134,17 @@ mod tests {
         let mut uac = calling();
         let (mut uas, _) = ringing("B");
         let ringing_at_uas = uas
-            .respond(&Answer { status: 183, reason: "Session Progress", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("7001"), Vec::new(), None)
+            .respond(
+                &Answer {
+                    status: 183,
+                    reason: "Session Progress",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &reliable("7001"),
+                Vec::new(),
+                None,
+            )
             .expect("the callee rings reliably");
         uac.learn_response(&ringing_at_uas);
         assert_eq!(uac.unacknowledged().len(), 1);
@@ -1091,7 +1154,10 @@ mod tests {
             prack.raw_text(sip_message::HeaderName::RAck).next().map(|s| s.to_string()),
             Some("7001 1 INVITE".to_string())
         );
-        assert!(uac.unacknowledged().is_empty(), "an acknowledged provisional is not PRACKed twice");
+        assert!(
+            uac.unacknowledged().is_empty(),
+            "an acknowledged provisional is not PRACKed twice"
+        );
     }
 
     /// A document that froze its own RAck replays it: a frozen header always
@@ -1101,7 +1167,17 @@ mod tests {
         let mut uac = calling();
         let (mut uas, _) = ringing("B");
         let rings = uas
-            .respond(&Answer { status: 183, reason: "Session Progress", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("7001"), Vec::new(), None)
+            .respond(
+                &Answer {
+                    status: 183,
+                    reason: "Session Progress",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &reliable("7001"),
+                Vec::new(),
+                None,
+            )
             .expect("the callee rings reliably");
         uac.learn_response(&rings);
         let prack = uac
@@ -1126,10 +1202,9 @@ mod tests {
     fn called_by_two_forks() -> LegStack {
         let mut uac = calling();
         let (mut uas, _) = ringing("B");
-        for (status, reason, tag, rseq) in [
-            (183, "Session Progress", "B-early-f1", "1"),
-            (180, "Ringing", "B-early-f2", "7001"),
-        ] {
+        for (status, reason, tag, rseq) in
+            [(183, "Session Progress", "B-early-f1", "1"), (180, "Ringing", "B-early-f2", "7001")]
+        {
             let rings = uas
                 .respond(
                     &Answer { status, reason, cseq_method: Some("INVITE"), early_tag: Some(tag) },
@@ -1149,12 +1224,10 @@ mod tests {
     #[test]
     fn two_forks_of_one_leg_number_their_own_pracks_from_the_invite_s_cseq() {
         let mut uac = called_by_two_forks();
-        let first = uac
-            .prack(Some("B-early-f1"), &[], Vec::new(), None, None)
-            .expect("fork 1's PRACK");
-        let second = uac
-            .prack(Some("B-early-f2"), &[], Vec::new(), None, None)
-            .expect("fork 2's PRACK");
+        let first =
+            uac.prack(Some("B-early-f1"), &[], Vec::new(), None, None).expect("fork 1's PRACK");
+        let second =
+            uac.prack(Some("B-early-f2"), &[], Vec::new(), None, None).expect("fork 2's PRACK");
         assert_eq!(first.to().tag(), Some("B-early-f1"));
         assert_eq!(second.to().tag(), Some("B-early-f2"));
         assert_eq!(first.cseq().seq(), 2, "fork 1's INVITE was CSeq 1");
@@ -1286,11 +1359,31 @@ mod tests {
     fn the_leg_publishes_the_rseq_it_last_sighted() {
         let (mut uas, _) = ringing("B");
         assert_eq!(uas.rseq(), None);
-        uas.respond(&Answer { status: 183, reason: "Session Progress", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("1"), Vec::new(), None)
-            .expect("fork 1 rings");
+        uas.respond(
+            &Answer {
+                status: 183,
+                reason: "Session Progress",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
+            &reliable("1"),
+            Vec::new(),
+            None,
+        )
+        .expect("fork 1 rings");
         assert_eq!(uas.rseq(), Some(1));
-        uas.respond(&Answer { status: 180, reason: "Ringing", cseq_method: Some("INVITE"), early_tag: Some("B-early-f2") }, &reliable("7001"), Vec::new(), None)
-            .expect("fork 2 rings");
+        uas.respond(
+            &Answer {
+                status: 180,
+                reason: "Ringing",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f2"),
+            },
+            &reliable("7001"),
+            Vec::new(),
+            None,
+        )
+        .expect("fork 2 rings");
         assert_eq!(uas.rseq(), Some(7001));
     }
 
@@ -1300,10 +1393,30 @@ mod tests {
     #[test]
     fn each_fork_publishes_the_rseq_of_its_own_reliable_provisional() {
         let (mut uas, _) = ringing("B");
-        uas.respond(&Answer { status: 183, reason: "Session Progress", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("1"), Vec::new(), None)
-            .expect("fork 1 rings");
-        uas.respond(&Answer { status: 180, reason: "Ringing", cseq_method: Some("INVITE"), early_tag: Some("B-early-f2") }, &reliable("7001"), Vec::new(), None)
-            .expect("fork 2 rings");
+        uas.respond(
+            &Answer {
+                status: 183,
+                reason: "Session Progress",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
+            &reliable("1"),
+            Vec::new(),
+            None,
+        )
+        .expect("fork 1 rings");
+        uas.respond(
+            &Answer {
+                status: 180,
+                reason: "Ringing",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f2"),
+            },
+            &reliable("7001"),
+            Vec::new(),
+            None,
+        )
+        .expect("fork 2 rings");
         assert_eq!(uas.early_rseq("B-early-f1"), Some(1));
         assert_eq!(uas.early_rseq("B-early-f2"), Some(7001));
         assert_eq!(uas.early_rseq("B-early-f9"), None);
@@ -1317,10 +1430,30 @@ mod tests {
     fn a_second_reliable_provisional_on_one_fork_rises_by_exactly_one() {
         let (mut uas, _) = ringing("B");
         let first = uas
-            .respond(&Answer { status: 183, reason: "Session Progress", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("1318758475"), Vec::new(), None)
+            .respond(
+                &Answer {
+                    status: 183,
+                    reason: "Session Progress",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &reliable("1318758475"),
+                Vec::new(),
+                None,
+            )
             .expect("the fork rings");
         let second = uas
-            .respond(&Answer { status: 180, reason: "Ringing", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("705007309"), Vec::new(), None)
+            .respond(
+                &Answer {
+                    status: 180,
+                    reason: "Ringing",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &reliable("705007309"),
+                Vec::new(),
+                None,
+            )
             .expect("the fork rings again");
         assert_eq!(rseq_of(&first), Some(1318758475), "the document seeds the space");
         assert_eq!(rseq_of(&second), Some(1318758476));
@@ -1335,7 +1468,17 @@ mod tests {
         let (mut uas, _) = ringing("B");
         for _ in 0..2 {
             let rings = uas
-                .respond(&Answer { status: 180, reason: "Ringing", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("7001"), Vec::new(), None)
+                .respond(
+                    &Answer {
+                        status: 180,
+                        reason: "Ringing",
+                        cseq_method: Some("INVITE"),
+                        early_tag: Some("B-early-f1"),
+                    },
+                    &reliable("7001"),
+                    Vec::new(),
+                    None,
+                )
                 .expect("the fork rings");
             assert_eq!(rseq_of(&rings), Some(7001));
         }
@@ -1348,10 +1491,9 @@ mod tests {
     fn a_caller_opens_one_early_dialog_per_fork_that_rings_it() {
         let mut uac = calling();
         let (mut uas, _) = ringing("B");
-        for (status, reason, tag, rseq) in [
-            (183, "Session Progress", "B-early-f1", "1"),
-            (180, "Ringing", "B-early-f2", "7001"),
-        ] {
+        for (status, reason, tag, rseq) in
+            [(183, "Session Progress", "B-early-f1", "1"), (180, "Ringing", "B-early-f2", "7001")]
+        {
             let rings = uas
                 .respond(
                     &Answer { status, reason, cseq_method: Some("INVITE"), early_tag: Some(tag) },
@@ -1414,7 +1556,8 @@ mod tests {
         assert_eq!(uas.remote_cseq(), Some(1), "the peer's INVITE was its CSeq 1");
         let first = uas.in_dialog(Method::Info, &[], Vec::new(), None, None).expect("an INFO");
         assert_eq!(first.cseq().seq(), 1, "this side's first request is its own CSeq 1");
-        let second = uas.in_dialog(Method::Invite, &[], Vec::new(), None, None).expect("a re-INVITE");
+        let second =
+            uas.in_dialog(Method::Invite, &[], Vec::new(), None, None).expect("a re-INVITE");
         assert_eq!(second.cseq().seq(), 2);
         assert_eq!(uas.local_cseq(), Some(2));
         // And a request the PEER sends next does not move this side's counter.
@@ -1488,7 +1631,8 @@ mod tests {
         let first_ack = uac.ack_for(&ok, &[], Vec::new(), None, None).expect("the caller ACKs");
         assert_eq!(first_ack.cseq().seq(), 1);
 
-        let re_invite = uac.in_dialog(Method::Invite, &[], Vec::new(), None, None).expect("a re-INVITE");
+        let re_invite =
+            uac.in_dialog(Method::Invite, &[], Vec::new(), None, None).expect("a re-INVITE");
         assert_eq!(re_invite.cseq().seq(), 2);
         uas.learn_request(&re_invite);
         let re_ok = uas
@@ -1639,7 +1783,8 @@ mod tests {
         uac.learn_response(&ok);
         uac.ack_for(&ok, &[], Vec::new(), None, None).expect("the caller ACKs");
 
-        let re_invite = uac.in_dialog(Method::Invite, &[], Vec::new(), None, None).expect("a re-INVITE");
+        let re_invite =
+            uac.in_dialog(Method::Invite, &[], Vec::new(), None, None).expect("a re-INVITE");
         let branch = re_invite.top_via().branch().unwrap_or_default().to_string();
         uas.learn_request(&re_invite);
         let refused = uas
@@ -1661,7 +1806,8 @@ mod tests {
         assert_eq!(ack.cseq().seq(), re_invite.cseq().seq());
         // A negative in-dialog final closes nothing: the dialog stands and the
         // next request keeps numbering where the re-INVITE left off (K15).
-        let bye = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("the dialog is alive");
+        let bye =
+            uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("the dialog is alive");
         assert_eq!(bye.cseq().seq(), 3);
     }
 
@@ -1682,10 +1828,30 @@ mod tests {
     /// A UAS ringing two forks, each under its own tag and RSeq.
     fn forking(leg: &str) -> (LegStack, SipRequest) {
         let (mut uas, invite) = ringing(leg);
-        uas.respond(&Answer { status: 183, reason: "Session Progress", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("1"), Vec::new(), None)
-            .expect("fork 1 rings");
-        uas.respond(&Answer { status: 180, reason: "Ringing", cseq_method: Some("INVITE"), early_tag: Some("B-early-f2") }, &reliable("7001"), Vec::new(), None)
-            .expect("fork 2 rings");
+        uas.respond(
+            &Answer {
+                status: 183,
+                reason: "Session Progress",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
+            &reliable("1"),
+            Vec::new(),
+            None,
+        )
+        .expect("fork 1 rings");
+        uas.respond(
+            &Answer {
+                status: 180,
+                reason: "Ringing",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f2"),
+            },
+            &reliable("7001"),
+            Vec::new(),
+            None,
+        )
+        .expect("fork 2 rings");
         (uas, invite)
     }
 
@@ -1730,7 +1896,17 @@ mod tests {
         let mut uac = calling();
         let (mut uas, _) = ringing("B");
         let rings = uas
-            .respond(&Answer { status: 183, reason: "Session Progress", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") }, &reliable("1"), Vec::new(), None)
+            .respond(
+                &Answer {
+                    status: 183,
+                    reason: "Session Progress",
+                    cseq_method: Some("INVITE"),
+                    early_tag: Some("B-early-f1"),
+                },
+                &reliable("1"),
+                Vec::new(),
+                None,
+            )
             .expect("the callee rings");
         uac.learn_response(&rings);
         let update = uac
@@ -1784,16 +1960,29 @@ mod tests {
             .expect("fork 1 updates before answering");
         assert_eq!(early.cseq().seq(), 1);
         uas.respond(
-            &Answer { status: 200, reason: "OK", cseq_method: Some("INVITE"), early_tag: Some("B-early-f1") },
+            &Answer {
+                status: 200,
+                reason: "OK",
+                cseq_method: Some("INVITE"),
+                early_tag: Some("B-early-f1"),
+            },
             &[],
             Vec::new(),
             None,
         )
         .expect("fork 1 answers");
         let confirmed = uas.update(None, &[], Vec::new(), None, None).expect("the dialog is up");
-        assert_eq!(confirmed.from().tag(), Some("B-early-f1"), "the fork that answered IS the dialog");
+        assert_eq!(
+            confirmed.from().tag(),
+            Some("B-early-f1"),
+            "the fork that answered IS the dialog"
+        );
         assert_eq!(confirmed.to().tag(), invite.from().tag());
-        assert_eq!(confirmed.cseq().seq(), 2, "the confirmed dialog continues the fork's numbering");
+        assert_eq!(
+            confirmed.cseq().seq(),
+            2,
+            "the confirmed dialog continues the fork's numbering"
+        );
         // And the plain in-dialog path composes the same request.
         let plain = uas.in_dialog(Method::Update, &[], Vec::new(), None, None).expect("in-dialog");
         assert_eq!(plain.cseq().seq(), 3);
@@ -1806,10 +1995,9 @@ mod tests {
     fn confirmation_adopts_the_answering_fork_s_own_sequence() {
         let mut uac = calling();
         let (mut uas, _) = ringing("B");
-        for (status, reason, tag, rseq) in [
-            (183, "Session Progress", "B-early-f1", "1"),
-            (180, "Ringing", "B-early-f2", "7001"),
-        ] {
+        for (status, reason, tag, rseq) in
+            [(183, "Session Progress", "B-early-f1", "1"), (180, "Ringing", "B-early-f2", "7001")]
+        {
             let rings = uas
                 .respond(
                     &Answer { status, reason, cseq_method: Some("INVITE"), early_tag: Some(tag) },
@@ -1841,7 +2029,11 @@ mod tests {
         uac.learn_response(&ok);
         let re_invite =
             uac.in_dialog(Method::Invite, &[], Vec::new(), None, None).expect("a re-INVITE");
-        assert_eq!(re_invite.cseq().seq(), 2, "fork 2's only prior request was the INVITE's CSeq 1");
+        assert_eq!(
+            re_invite.cseq().seq(),
+            2,
+            "fork 2's only prior request was the INVITE's CSeq 1"
+        );
     }
 
     /// A confirming To-tag that rang no provisional confirms a dialog whose
@@ -1928,7 +2120,10 @@ mod tests {
             )
             .expect("an INFO with a frozen body");
         assert_eq!(info.body().as_ref(), b"dwdHAIQDjwGh");
-        assert_eq!(header(&info, sip_message::HeaderName::ContentType), "application/example-binary");
+        assert_eq!(
+            header(&info, sip_message::HeaderName::ContentType),
+            "application/example-binary"
+        );
         assert_eq!(header(&info, sip_message::HeaderName::ContentLength), "12");
     }
 

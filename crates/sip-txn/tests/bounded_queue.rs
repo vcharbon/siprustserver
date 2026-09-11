@@ -59,10 +59,7 @@ async fn overflow_stops_at_capacity_and_counts_drops_then_recovers() {
 
     let m = stack.txn.metrics();
     assert_eq!(m.event_queue_depth(), cap, "queue saturated at capacity");
-    assert_eq!(
-        m.event_queue_drops(EventQueueDropReason::Response),
-        (overflow - cap) as u64
-    );
+    assert_eq!(m.event_queue_drops(EventQueueDropReason::Response), (overflow - cap) as u64);
     // Unrelated reasons untouched.
     assert_eq!(m.event_queue_drops(EventQueueDropReason::RequestInvite), 0);
     assert_eq!(m.event_queue_drops(EventQueueDropReason::Cancelled), 0);

@@ -51,13 +51,7 @@ impl RabbitMqCdrWriter {
     /// `url` is an AMQP URI (`amqp://user:pass@host:5672/vhost`); `queue` is the
     /// destination queue name; `max_len` bounds the broker queue (0 = unbounded).
     pub fn new(url: String, queue: String, max_len: i64, metrics: B2buaMetrics) -> Self {
-        Self {
-            url,
-            queue,
-            max_len,
-            chan: Mutex::new(None),
-            metrics,
-        }
+        Self { url, queue, max_len, chan: Mutex::new(None), metrics }
     }
 
     /// Connect over the same tokio runtime everything else uses, then declare the
@@ -74,17 +68,11 @@ impl RabbitMqCdrWriter {
             // Bound the broker queue; drop the OLDEST record on overflow so a
             // stalled consumer never grows the broker without limit.
             args.insert("x-max-length".into(), AMQPValue::LongLongInt(self.max_len));
-            args.insert(
-                "x-overflow".into(),
-                AMQPValue::LongString(LongString::from("drop-head")),
-            );
+            args.insert("x-overflow".into(), AMQPValue::LongString(LongString::from("drop-head")));
         }
         chan.queue_declare(
             &self.queue,
-            QueueDeclareOptions {
-                durable: true,
-                ..Default::default()
-            },
+            QueueDeclareOptions { durable: true, ..Default::default() },
             args,
         )
         .await?;

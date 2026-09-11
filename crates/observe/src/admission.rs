@@ -154,26 +154,16 @@ mod tests {
 
     #[test]
     fn without_an_exporter_nothing_is_admitted() {
-        let gate = SampleAdmission::new(
-            false,
-            1.0,
-            1000,
-            RateDraw::seeded(1),
-            TokenBucket::default_at(0),
-        );
+        let gate =
+            SampleAdmission::new(false, 1.0, 1000, RateDraw::seeded(1), TokenBucket::default_at(0));
         assert_eq!(gate.admit(None, 0).err(), Some(Denied::NoExporter));
         assert_eq!(gate.active(), 0);
     }
 
     #[test]
     fn a_negative_draw_stops_before_the_bucket() {
-        let gate = SampleAdmission::new(
-            true,
-            0.0,
-            1000,
-            RateDraw::seeded(1),
-            TokenBucket::default_at(0),
-        );
+        let gate =
+            SampleAdmission::new(true, 0.0, 1000, RateDraw::seeded(1), TokenBucket::default_at(0));
         for _ in 0..100 {
             assert_eq!(gate.admit(None, 0).err(), Some(Denied::Draw));
         }
@@ -209,13 +199,8 @@ mod tests {
 
     #[test]
     fn a_force_enable_still_passes_the_bucket_and_the_cap() {
-        let gate = SampleAdmission::new(
-            true,
-            0.0,
-            2,
-            RateDraw::seeded(9),
-            TokenBucket::new(2.0, 1.0, 0),
-        );
+        let gate =
+            SampleAdmission::new(true, 0.0, 2, RateDraw::seeded(9), TokenBucket::new(2.0, 1.0, 0));
         let _a = gate.admit(Some(1.0), 0).unwrap();
         let _b = gate.admit(Some(1.0), 0).unwrap();
         assert_eq!(gate.admit(Some(1.0), 0).err(), Some(Denied::Rate));

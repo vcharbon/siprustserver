@@ -20,13 +20,14 @@ fn partition_strat() -> impl Strategy<Value = Partition> {
 }
 
 fn frame_strat() -> impl Strategy<Value = Frame> {
-    let pull = (any::<u16>(), ".*", partition_strat(), watermark_strat())
-        .prop_map(|(proto_ver, caller, partition, since)| Frame::PullRequest {
+    let pull = (any::<u16>(), ".*", partition_strat(), watermark_strat()).prop_map(
+        |(proto_ver, caller, partition, since)| Frame::PullRequest {
             proto_ver,
             caller,
             partition,
             since,
-        });
+        },
+    );
 
     let data = (
         watermark_strat(),

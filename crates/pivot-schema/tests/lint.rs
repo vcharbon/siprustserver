@@ -7,7 +7,7 @@
 //! everywhere; the shipped fixtures cover breadth.
 
 use pivot_schema::lint::lint_str;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// A document that lints clean: one authored call, one send, one expect.
 fn base() -> Value {
@@ -134,7 +134,8 @@ fn detector_roster_unchecked_on_an_authored_document() {
 /// on every step it already carries.
 fn captured_base(document: &mut Value) {
     document["case"]["origin"] = json!("capture");
-    document["case"]["source"] = json!({ "capture": "c.pcap", "call_groups": [0], "anonymized": true });
+    document["case"]["source"] =
+        json!({ "capture": "c.pcap", "call_groups": [0], "anonymized": true });
     document["timing"]["capture_span_ms"] = json!(120);
     // One coordinate per step: two steps naming one captured message is its own
     // rule, and a fixture that shared one would fire it on every test.
@@ -298,8 +299,12 @@ fn a_bare_position_name_is_refused_once_the_document_declares_several_calls() {
 
 #[test]
 fn a_position_that_names_no_attempt_is_refused() {
-    assert_fires("ref/pos-malformed", |d| flow(d)[0]["msg"]["ruri"] = json!({ "pos": "called[0]" }));
-    assert_fires("ref/pos-unknown", |d| flow(d)[0]["msg"]["ruri"] = json!({ "pos": "called[0][7]" }));
+    assert_fires("ref/pos-malformed", |d| {
+        flow(d)[0]["msg"]["ruri"] = json!({ "pos": "called[0]" })
+    });
+    assert_fires("ref/pos-unknown", |d| {
+        flow(d)[0]["msg"]["ruri"] = json!({ "pos": "called[0][7]" })
+    });
 }
 
 /// A bare `called[b][s]` names one chain, so a second call makes it ambiguous.
@@ -521,7 +526,10 @@ fn two_claims_that_dial_the_same_number_block_every_lane() {
         d["actors"].as_array_mut().expect("actors").push(json!(
             { "id": "uas2", "kind": "uas", "endpoint": "ep0", "claim": { "by": "ruri-pos" } }
         ));
-        d["legs"].as_array_mut().expect("legs").push(json!({ "id": "C", "actor": "uas2", "dir": "in" }));
+        d["legs"]
+            .as_array_mut()
+            .expect("legs")
+            .push(json!({ "id": "C", "actor": "uas2", "dir": "in" }));
         let mut fork = d["calls"][0]["attempts"][0].clone();
         fork["branch"] = json!(1);
         fork["leg"] = json!("C");
@@ -544,7 +552,10 @@ fn a_joined_leg_points_at_a_join_of_its_own_call() {
     });
     assert_fires("attempt/joined-step-other-call", |d| {
         // A second call on its own legs; the join then names a step of neither.
-        d["legs"].as_array_mut().expect("legs").push(json!({ "id": "C", "actor": "uac1", "dir": "out" }));
+        d["legs"]
+            .as_array_mut()
+            .expect("legs")
+            .push(json!({ "id": "C", "actor": "uac1", "dir": "out" }));
         let mut other = d["calls"][0].clone();
         other["id"] = json!("c2");
         other["caller_leg"] = json!("C");
@@ -585,7 +596,10 @@ fn a_joined_leg_may_also_state_why_the_platform_left_it() {
         joined["cause"] = json!("busy");
         d["calls"][0]["attempts"].as_array_mut().expect("attempts").push(joined);
         transferee_actor(d);
-        d["legs"].as_array_mut().expect("legs").push(json!({ "id": "C", "actor": "uas2", "dir": "in" }));
+        d["legs"]
+            .as_array_mut()
+            .expect("legs")
+            .push(json!({ "id": "C", "actor": "uas2", "dir": "in" }));
         flow(d).push(json!({
             "id": "s3", "leg": "C", "op": "expect", "check": "assert",
             "msg": { "method": "INVITE" },
@@ -639,7 +653,10 @@ fn a_join_names_a_step_that_runs_unconditionally_and_before_the_leg_it_joined() 
         second["leg"] = json!("C");
         second["joined_by"] = json!({ "kind": "refer", "step": step });
         d["calls"][0]["attempts"].as_array_mut().expect("attempts").push(second);
-        d["legs"].as_array_mut().expect("legs").push(json!({ "id": "C", "actor": "uas1", "dir": "in" }));
+        d["legs"]
+            .as_array_mut()
+            .expect("legs")
+            .push(json!({ "id": "C", "actor": "uas1", "dir": "in" }));
     };
     // A step inside an `alt` branch happens only on the run that chose it.
     assert_fires("attempt/joined-step-conditional", |d| {
@@ -827,21 +844,13 @@ fn an_unreliable_provisional_is_not_sent_on_a_ladder() {
         });
         flow(d)[0]["retransmits"] = json!(1);
     });
-    assert!(
-        !reliable.rules().contains("retransmits/unpaced-provisional"),
-        "{}",
-        reliable.render()
-    );
+    assert!(!reliable.rules().contains("retransmits/unpaced-provisional"), "{}", reliable.render());
     // The count on an `expect` counts arrivals; it asks nobody to emit.
     let counted = broken(|d| {
         flow(d)[1]["msg"] = json!({ "status": 180, "reason": "Ringing", "cseq-method": "INVITE" });
         flow(d)[1]["retransmits"] = json!(1);
     });
-    assert!(
-        !counted.rules().contains("retransmits/unpaced-provisional"),
-        "{}",
-        counted.render()
-    );
+    assert!(!counted.rules().contains("retransmits/unpaced-provisional"), "{}", counted.render());
 }
 
 #[test]
@@ -852,7 +861,9 @@ fn a_message_without_a_discriminator_is_refused() {
 /// Compressing a dwell a system timer measures changes what the test proves.
 #[test]
 fn a_timer_linked_dwell_may_not_be_compressible() {
-    assert_fires("delay/timer-linked-compressed", |d| flow(d)[1]["delay"]["timer_linked"] = json!(true));
+    assert_fires("delay/timer-linked-compressed", |d| {
+        flow(d)[1]["delay"]["timer_linked"] = json!(true)
+    });
 }
 
 #[test]
@@ -883,7 +894,10 @@ fn branch_step(id: &str, status: u16) -> Value {
 
 #[test]
 fn an_alt_offers_at_least_two_non_empty_branches() {
-    assert_fires("alt/too-few-branches", with_alt(json!([{ "name": "only", "steps": [branch_step("s3", 200)] }])));
+    assert_fires(
+        "alt/too-few-branches",
+        with_alt(json!([{ "name": "only", "steps": [branch_step("s3", 200)] }])),
+    );
     assert_fires(
         "alt/empty-branch",
         with_alt(json!([
@@ -982,7 +996,8 @@ fn an_accessor_is_resolved_wherever_a_document_carries_a_string() {
             json!([{ "id": "d1", "kind": "malformed-header", "header": "${num:ghost:e164}" }]);
     });
     assert_fires("accessor/leg-unknown", |d| {
-        d["deviations"] = json!([{ "id": "d1", "kind": "raw-order", "preserve": ["${leg:Z.call-id}"] }]);
+        d["deviations"] =
+            json!([{ "id": "d1", "kind": "raw-order", "preserve": ["${leg:Z.call-id}"] }]);
     });
     assert_fires("accessor/step-unknown", |d| {
         flow(d)[1]["checks"] = json!([{ "field": "header(${step:s9.status})", "op": "exists" }]);
@@ -1006,14 +1021,16 @@ fn an_early_accessor_must_name_one_leg_s_declared_fork() {
     // The fork the flow declares passes: `s2` rides `f1` and reads its tag.
     let declared = |d: &mut Value| {
         flow(d)[1]["early"] = json!("f1");
-        flow(d)[1]["checks"] = json!([{ "field": "to.tag", "op": "eq", "value": "${early:f1.tag}" }]);
+        flow(d)[1]["checks"] =
+            json!([{ "field": "to.tag", "op": "eq", "value": "${early:f1.tag}" }]);
     };
     let report = broken(declared);
     assert!(!report.has_errors(), "{}", report.render());
 
     assert_fires("accessor/early-unknown", |d| {
         flow(d)[1]["early"] = json!("f1");
-        flow(d)[1]["checks"] = json!([{ "field": "to.tag", "op": "eq", "value": "${early:f2.tag}" }]);
+        flow(d)[1]["checks"] =
+            json!([{ "field": "to.tag", "op": "eq", "value": "${early:f2.tag}" }]);
     });
     assert_fires("accessor/early-ambiguous", |d| {
         flow(d)[0]["early"] = json!("f1");
@@ -1048,8 +1065,13 @@ fn a_missing_cdr_expectation_needs_a_reason() {
         d["postconditions"] = json!({ "checks": [{ "field": "m", "op": "exists" }] });
     });
     // Stated as an absence with a reason: accepted.
-    let report = broken(|d| d["postconditions"] = json!({ "cdr": { "absent": "capture-carries-no-cdr" } }));
-    assert!(!report.rules().contains("postconditions/cdr-absent-needs-reason"), "{}", report.render());
+    let report =
+        broken(|d| d["postconditions"] = json!({ "cdr": { "absent": "capture-carries-no-cdr" } }));
+    assert!(
+        !report.rules().contains("postconditions/cdr-absent-needs-reason"),
+        "{}",
+        report.render()
+    );
 }
 
 /// The ONE tolerated absence a capture justifies: a caller-facing PROVISIONAL
@@ -1146,17 +1168,18 @@ fn a_captured_document_may_not_carry_an_authored_construct() {
     // keepalive; anything beyond it stays authored-only.
     let report = broken(|d| {
         captured(d);
-        d["actors"][1]["background"] = json!([{ "match": { "method": "OPTIONS" }, "respond": { "status": 200 } }]);
+        d["actors"][1]["background"] =
+            json!([{ "match": { "method": "OPTIONS" }, "respond": { "status": 200 } }]);
     });
     assert!(!report.rules().contains("subset/background"), "{}", report.render());
     assert_fires("subset/background", |d| {
         captured(d);
-        d["actors"][1]["background"] =
-            json!([{ "match": { "method": "OPTIONS" }, "respond": { "status": 200 }, "count": { "at_least": 1 } }]);
+        d["actors"][1]["background"] = json!([{ "match": { "method": "OPTIONS" }, "respond": { "status": 200 }, "count": { "at_least": 1 } }]);
     });
     assert_fires("subset/background", |d| {
         captured(d);
-        d["actors"][1]["background"] = json!([{ "match": { "method": "INFO" }, "respond": { "status": 200 } }]);
+        d["actors"][1]["background"] =
+            json!([{ "match": { "method": "INFO" }, "respond": { "status": 200 } }]);
     });
     assert_fires("subset/alt", |d| {
         captured(d);
@@ -1282,7 +1305,9 @@ fn an_accessor_is_found_in_every_string_a_message_carries() {
     /// Where an accessor hides, and the edit that hides it there.
     type Position = (&'static str, fn(&mut Value));
     let positions: [Position; 5] = [
-        ("msg.ruri.frozen", |d| flow(d)[0]["msg"]["ruri"] = json!({ "frozen": "${leg:B.call-id}" })),
+        ("msg.ruri.frozen", |d| {
+            flow(d)[0]["msg"]["ruri"] = json!({ "frozen": "${leg:B.call-id}" })
+        }),
         ("msg.headers[].name", |d| {
             flow(d)[0]["msg"]["headers"] = json!([{ "name": "${leg:B.call-id}", "value": "x" }]);
         }),
@@ -1300,7 +1325,8 @@ fn an_accessor_is_found_in_every_string_a_message_carries() {
         // On a capture: refused outright, wherever it hides.
         let report = broken(|d| {
             d["case"]["origin"] = json!("capture");
-            d["case"]["source"] = json!({ "capture": "c.pcap", "call_groups": [0], "anonymized": true });
+            d["case"]["source"] =
+                json!({ "capture": "c.pcap", "call_groups": [0], "anonymized": true });
             d["timing"]["capture_span_ms"] = json!(120);
             for step in flow(d) {
                 step["observed"] = json!({ "leg": 0, "msg": 0, "at_us": 0 });
@@ -1461,14 +1487,16 @@ fn a_duplicate_key_in_a_flow_node_is_refused_like_anywhere_else() {
 #[test]
 fn a_defined_deviation_kind_must_carry_its_payload() {
     assert_fires("deviation/cseq-override-no-value", |d| {
-        d["deviations"] = json!([{ "id": "d1", "kind": "cseq-override", "leg": "A", "step": "s1" }]);
+        d["deviations"] =
+            json!([{ "id": "d1", "kind": "cseq-override", "leg": "A", "step": "s1" }]);
     });
     assert_fires("deviation/suppress-auto-no-step", |d| {
         d["deviations"] = json!([{ "id": "d1", "kind": "suppress-auto", "leg": "A" }]);
     });
     // s2 is a scripted expect: the stack never composed it, so nothing is withheld.
     assert_fires("deviation/suppress-auto-not-auto", |d| {
-        d["deviations"] = json!([{ "id": "d1", "kind": "suppress-auto", "leg": "B", "step": "s2" }]);
+        d["deviations"] =
+            json!([{ "id": "d1", "kind": "suppress-auto", "leg": "B", "step": "s2" }]);
     });
     // Pointed at a real automatic, it is the documented way to withhold one.
     let report = broken(|d| {
@@ -1478,7 +1506,8 @@ fn a_defined_deviation_kind_must_carry_its_payload() {
             "msg": { "method": "ACK", "cseq": 1 },
             "delay": { "ms": 0, "from": "step:s3", "compressible": true, "timer_linked": false }
         }));
-        d["deviations"] = json!([{ "id": "d1", "kind": "suppress-auto", "leg": "A", "step": "s4" }]);
+        d["deviations"] =
+            json!([{ "id": "d1", "kind": "suppress-auto", "leg": "A", "step": "s4" }]);
     });
     assert!(!report.has_errors(), "{}", report.render());
     // An open kind this crate does not define is not second-guessed.
@@ -1530,7 +1559,9 @@ fn a_background_counter_must_state_a_bound_that_can_fail() {
     assert_fires("background/count-empty", policy(json!({})));
     assert_fires("background/count-unsatisfiable", policy(json!({ "exactly": 1, "at_least": 1 })));
     assert_fires("background/count-unsatisfiable", policy(json!({ "at_least": 3, "at_most": 1 })));
-    for good in [json!({ "at_least": 1 }), json!({ "exactly": 0 }), json!({ "at_least": 1, "at_most": 3 })] {
+    for good in
+        [json!({ "at_least": 1 }), json!({ "exactly": 0 }), json!({ "at_least": 1, "at_most": 3 })]
+    {
         let report = broken(policy(good.clone()));
         assert!(!report.has_errors(), "{good}:\n{}", report.render());
     }
@@ -1873,15 +1904,13 @@ fn an_rfc_violation_rule_outside_the_vocabulary_is_refused() {
 #[test]
 fn a_classified_check_without_an_origin_lane_is_flagged() {
     assert_fires("lane/class-without-origin", |d| {
-        d["postconditions"]["cdr"]["checks"] =
-            json!([{ "field": "events", "op": "regex", "value": "InviteReceived",
+        d["postconditions"]["cdr"]["checks"] = json!([{ "field": "events", "op": "regex", "value": "InviteReceived",
                      "class": "cdr-vocabulary" }]);
     });
 
     let report = broken(|d| {
         d["case"]["origin_lane"] = json!("origin-platform");
-        d["postconditions"]["cdr"]["checks"] =
-            json!([{ "field": "events", "op": "regex", "value": "InviteReceived",
+        d["postconditions"]["cdr"]["checks"] = json!([{ "field": "events", "op": "regex", "value": "InviteReceived",
                      "class": "cdr-vocabulary" }]);
         flow(d)[1]["msg"]["headers"] = json!([
             { "name": "P-Charging-Vector", "value": "icid-value=x",
@@ -1943,7 +1972,8 @@ fn unexpected_ack_is_declared_on_the_2xx_the_peer_sends() {
     });
     assert_fires("must-fail/anchor-not-a-2xx-send", |d| {
         unacked(d);
-        flow(d)[2]["msg"] = json!({ "status": 486, "reason": "Busy Here", "cseq-method": "INVITE" });
+        flow(d)[2]["msg"] =
+            json!({ "status": 486, "reason": "Busy Here", "cseq-method": "INVITE" });
         d["must_fail"] = declares("s3");
     });
 }
@@ -2163,7 +2193,8 @@ fn a_captured_document_may_declare_the_failure_its_replay_will_produce() {
     let report = broken(|d| {
         unacked(d);
         d["case"]["origin"] = json!("capture");
-        d["case"]["source"] = json!({ "capture": "c.pcap", "call_groups": [0], "anonymized": true });
+        d["case"]["source"] =
+            json!({ "capture": "c.pcap", "call_groups": [0], "anonymized": true });
         d["timing"]["capture_span_ms"] = json!(120);
         for (i, step) in flow(d).iter_mut().enumerate() {
             step["observed"] = json!({ "leg": 0, "msg": i, "at_us": i * 10 });

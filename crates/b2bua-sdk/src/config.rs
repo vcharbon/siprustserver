@@ -410,14 +410,16 @@ impl B2buaConfig {
             return Err(format!(
                 "keepalive_interval_sec={} < min {} s (2 min): a shorter in-dialog \
                  OPTIONS cadence breaks long-hold traffic",
-                self.keepalive_interval_sec, Self::MIN_KEEPALIVE_SEC
+                self.keepalive_interval_sec,
+                Self::MIN_KEEPALIVE_SEC
             ));
         }
         if self.reboot_budget_sec < Self::MIN_REBOOT_BUDGET_SEC {
             return Err(format!(
                 "reboot_budget_sec={} < min {} s (1 min): a replicated backup must \
                  survive a primary reboot",
-                self.reboot_budget_sec, Self::MIN_REBOOT_BUDGET_SEC
+                self.reboot_budget_sec,
+                Self::MIN_REBOOT_BUDGET_SEC
             ));
         }
         // The backup `Element` TTL is refreshed only on a primary flush, and a
@@ -454,7 +456,8 @@ impl B2buaConfig {
         // call the instant load is non-zero — the worker could never admit an
         // INVITE. (>= 1.0 is the documented "disable" and is allowed: the clamped
         // ELU never exceeds 1.)
-        if !(self.overload_panic_elu_threshold.is_finite() && self.overload_panic_elu_threshold > 0.0)
+        if !(self.overload_panic_elu_threshold.is_finite()
+            && self.overload_panic_elu_threshold > 0.0)
         {
             return Err(format!(
                 "overload_panic_elu_threshold={} is not a positive fraction: ELU is \
@@ -480,7 +483,8 @@ impl B2buaConfig {
         // The first-response bound is a deadline between the two-rung floor
         // and Timer B: below the floor the INVITE is effectively sent once,
         // above Timer B the RFC value already owns the give-up.
-        if !(Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC..=Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC)
+        if !(Self::MIN_INVITE_FIRST_RESPONSE_TIMEOUT_SEC
+            ..=Self::MAX_INVITE_FIRST_RESPONSE_TIMEOUT_SEC)
             .contains(&self.invite_first_response_timeout_sec)
         {
             return Err(format!(
@@ -574,7 +578,11 @@ impl B2buaConfig {
     /// falls back to the 32 s default rather than leaving a 2xx's silence
     /// unanswered (RFC 3261 §13.3.1.4).
     pub fn ack_timeout_ms(&self) -> u64 {
-        let sec = if self.ack_timeout_sec > 0 { self.ack_timeout_sec } else { Self::DEFAULT_ACK_TIMEOUT_SEC };
+        let sec = if self.ack_timeout_sec > 0 {
+            self.ack_timeout_sec
+        } else {
+            Self::DEFAULT_ACK_TIMEOUT_SEC
+        };
         u64::try_from(sec).unwrap_or(Self::DEFAULT_ACK_TIMEOUT_SEC as u64).saturating_mul(1000)
     }
 
@@ -618,13 +626,8 @@ mod tests {
     #[test]
     fn rejects_nonpositive_or_nan_panic_elu() {
         for bad in [0.0, -0.5, f64::NAN, f64::INFINITY] {
-            let c = B2buaConfig {
-                overload_panic_elu_threshold: bad,
-                ..Default::default()
-            };
-            let e = c
-                .validate()
-                .expect_err("non-positive/NaN panic-ELU must be rejected");
+            let c = B2buaConfig { overload_panic_elu_threshold: bad, ..Default::default() };
+            let e = c.validate().expect_err("non-positive/NaN panic-ELU must be rejected");
             assert!(e.contains("overload_panic_elu_threshold"), "msg was: {e}");
         }
     }
@@ -634,21 +637,14 @@ mod tests {
         // `>= 1.0` is the documented way to disable the backstop (clamped ELU
         // never exceeds 1) — must NOT be rejected.
         for ok in [1.0, 1.5] {
-            let c = B2buaConfig {
-                overload_panic_elu_threshold: ok,
-                ..Default::default()
-            };
+            let c = B2buaConfig { overload_panic_elu_threshold: ok, ..Default::default() };
             assert!(c.validate().is_ok(), "{ok} should validate");
         }
     }
 
     #[test]
     fn rejects_zero_cps_rate_when_gate_enabled() {
-        let c = B2buaConfig {
-            cps_bucket_size: 1000,
-            cps_bucket_rate: 0,
-            ..Default::default()
-        };
+        let c = B2buaConfig { cps_bucket_size: 1000, cps_bucket_rate: 0, ..Default::default() };
         let e = c.validate().expect_err("zero refill with gate on must be rejected");
         assert!(e.contains("cps_bucket_rate"), "msg was: {e}");
     }
@@ -656,11 +652,7 @@ mod tests {
     #[test]
     fn allows_zero_cps_rate_when_gate_disabled() {
         // size == 0 disables the hard CPS gate, so a 0 refill rate is moot.
-        let c = B2buaConfig {
-            cps_bucket_size: 0,
-            cps_bucket_rate: 0,
-            ..Default::default()
-        };
+        let c = B2buaConfig { cps_bucket_size: 0, cps_bucket_rate: 0, ..Default::default() };
         assert!(c.validate().is_ok());
     }
 
@@ -685,9 +677,7 @@ mod tests {
                 setup_timeout_sec: 0,
                 ..Default::default()
             };
-            let e = c
-                .validate()
-                .expect_err("out-of-range invite_txn_timeout_sec must be rejected");
+            let e = c.validate().expect_err("out-of-range invite_txn_timeout_sec must be rejected");
             assert!(e.contains("invite_txn_timeout_sec"), "msg was: {e}");
         }
     }
@@ -701,10 +691,7 @@ mod tests {
         // 1 s would send the INVITE effectively once; 33 s is above the RFC
         // value the class already gives up at.
         for bad in [1, 33, 0, -5] {
-            let c = B2buaConfig {
-                invite_first_response_timeout_sec: bad,
-                ..Default::default()
-            };
+            let c = B2buaConfig { invite_first_response_timeout_sec: bad, ..Default::default() };
             let e = c
                 .validate()
                 .expect_err("out-of-range invite_first_response_timeout_sec must be rejected");
@@ -712,19 +699,13 @@ mod tests {
         }
         // The floor (two re-sends) and the ceiling (Timer B) are both allowed.
         for ok in [2, 5, 32] {
-            let c = B2buaConfig {
-                invite_first_response_timeout_sec: ok,
-                ..Default::default()
-            };
+            let c = B2buaConfig { invite_first_response_timeout_sec: ok, ..Default::default() };
             assert!(c.validate().is_ok(), "{ok} s must be accepted");
             assert_eq!(c.invite_first_response_timeout_ms(), ok as u64 * 1000);
         }
         // A harness config that writes a non-positive value anyway arms the
         // Timer B default, never a degenerate bound.
-        let c = B2buaConfig {
-            invite_first_response_timeout_sec: 0,
-            ..Default::default()
-        };
+        let c = B2buaConfig { invite_first_response_timeout_sec: 0, ..Default::default() };
         assert_eq!(c.invite_first_response_timeout_ms(), 32_000);
     }
 
@@ -741,20 +722,14 @@ mod tests {
     #[test]
     fn disabled_setup_deadline_skips_the_ordering_check() {
         // <= 0 disables the app deadline; only the range check applies.
-        let c = B2buaConfig {
-            setup_timeout_sec: 0,
-            invite_txn_timeout_sec: 158,
-            ..Default::default()
-        };
+        let c =
+            B2buaConfig { setup_timeout_sec: 0, invite_txn_timeout_sec: 158, ..Default::default() };
         assert!(c.validate().is_ok());
     }
 
     #[test]
     fn clamps_no_answer_above_the_margin_ceiling() {
-        let c = B2buaConfig {
-            invite_txn_timeout_sec: 200,
-            ..Default::default()
-        };
+        let c = B2buaConfig { invite_txn_timeout_sec: 200, ..Default::default() };
         // Above `bound − margin` → held to the ceiling; at/under it → untouched.
         assert_eq!(c.clamp_no_answer_sec(250), 192);
         assert_eq!(c.clamp_no_answer_sec(200), 192);
@@ -794,14 +769,10 @@ mod tests {
             reaper_idle_max_sec: 400,
             ..Default::default()
         };
-        let e = c
-            .validate()
-            .expect_err("an idle window a ringing call can outlive must be rejected");
+        let e =
+            c.validate().expect_err("an idle window a ringing call can outlive must be rejected");
         assert!(e.contains("invite_txn_timeout_sec"), "msg was: {e}");
-        let ok = B2buaConfig {
-            reaper_idle_max_sec: 401,
-            ..c
-        };
+        let ok = B2buaConfig { reaper_idle_max_sec: 401, ..c };
         assert!(ok.validate().is_ok());
     }
 
@@ -810,10 +781,7 @@ mod tests {
         // RFC 3261 §13.3.1.4: the give-up is a deadline, not a switch — no
         // value may configure an un-ACKed 2xx that never ends the session.
         for bad in [0, -5] {
-            let c = B2buaConfig {
-                ack_timeout_sec: bad,
-                ..Default::default()
-            };
+            let c = B2buaConfig { ack_timeout_sec: bad, ..Default::default() };
             let e = c.validate().expect_err("a non-positive ACK deadline must be rejected");
             assert!(e.contains("ack_timeout_sec"), "msg was: {e}");
         }
@@ -825,13 +793,13 @@ mod tests {
         // A harness config that writes 0 anyway arms the 32 s default, never a
         // ladder whose give-up tears nothing down.
         for bad in [0, -5] {
-            let c = B2buaConfig {
-                ack_timeout_sec: bad,
-                ..Default::default()
-            };
+            let c = B2buaConfig { ack_timeout_sec: bad, ..Default::default() };
             assert_eq!(c.ack_timeout_ms(), 32_000);
         }
-        assert_eq!(B2buaConfig { ack_timeout_sec: 6, ..Default::default() }.ack_timeout_ms(), 6_000);
+        assert_eq!(
+            B2buaConfig { ack_timeout_sec: 6, ..Default::default() }.ack_timeout_ms(),
+            6_000
+        );
     }
 
     #[test]
@@ -839,10 +807,7 @@ mod tests {
         // 0 is NOT "disabled" for the transaction bound (validate refuses it at
         // boot); a harness config that writes it anyway gets the 158 s default,
         // never a degenerate near-zero bound.
-        let c = B2buaConfig {
-            invite_txn_timeout_sec: 0,
-            ..Default::default()
-        };
+        let c = B2buaConfig { invite_txn_timeout_sec: 0, ..Default::default() };
         assert_eq!(c.invite_txn_timeout_ms(), 158_000);
     }
 }

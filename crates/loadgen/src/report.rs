@@ -71,7 +71,13 @@ impl Hist {
         for (i, &c) in self.counts.iter().enumerate() {
             cum += c;
             if cum >= target {
-                return self.bounds.get(i).copied().unwrap_or(self.max).min(self.max.max(0.0)).max(0.0);
+                return self
+                    .bounds
+                    .get(i)
+                    .copied()
+                    .unwrap_or(self.max)
+                    .min(self.max.max(0.0))
+                    .max(0.0);
             }
         }
         self.max
@@ -217,7 +223,12 @@ impl Reporter {
     /// tally (ADR-0024 §6). `waivers` is the call's stable merged waiver list
     /// (case + plan); `used` is aligned to it. Idempotent to call on an
     /// unsampled call (its mask is all-false → a no-op).
-    pub fn record_waiver_use(&self, scenario: ScenarioId, waivers: &[scenario_harness::WaiverScope], used: &[bool]) {
+    pub fn record_waiver_use(
+        &self,
+        scenario: ScenarioId,
+        waivers: &[scenario_harness::WaiverScope],
+        used: &[bool],
+    ) {
         if waivers.is_empty() {
             return;
         }
@@ -235,9 +246,7 @@ impl Reporter {
         g.waivers
             .iter()
             .flat_map(|(id, cw)| {
-                cw.unused()
-                    .into_iter()
-                    .map(move |w| (*id, w.rule.clone(), w.justification.clone()))
+                cw.unused().into_iter().map(move |w| (*id, w.rule.clone(), w.justification.clone()))
             })
             .collect()
     }
@@ -269,7 +278,9 @@ impl Reporter {
     /// eventually captured. Converges to (background-only) once full.
     pub fn should_record(&self, scenario: ScenarioId) -> bool {
         let n = self.record_counter.fetch_add(1, Ordering::Relaxed);
-        if self.cfg.background_record_every != 0 && n.is_multiple_of(self.cfg.background_record_every) {
+        if self.cfg.background_record_every != 0
+            && n.is_multiple_of(self.cfg.background_record_every)
+        {
             return true;
         }
         let g = self.inner.lock().unwrap();
@@ -442,20 +453,19 @@ impl Reporter {
                     );
                     std::fs::write(&page, stub)?;
                 }
-                links
-                    .entry((scenario, class.clone(), case.clone(), *chaos))
-                    .or_default()
-                    .push(rel);
+                links.entry((scenario, class.clone(), case.clone(), *chaos)).or_default().push(rel);
             }
         }
 
         // index.html
         let mut idx = String::new();
-        idx.push_str("<html><head><meta charset=\"utf-8\"><title>loadgen report</title>\
+        idx.push_str(
+            "<html><head><meta charset=\"utf-8\"><title>loadgen report</title>\
             <style>body{font-family:sans-serif}table{border-collapse:collapse}\
             td,th{border:1px solid #ccc;padding:4px 8px}.ok{color:#070}.nok{color:#a00}\
             .near{color:#a60;font-weight:bold}</style>\
-            </head><body><h1>loadgen report</h1>");
+            </head><body><h1>loadgen report</h1>",
+        );
         idx.push_str("<h2>Results by scenario × class × case × chaos</h2>\
             <p>chaos=<b>clear</b> are the genuine results to triage; chaos=<b>near</b> are \
             within the chaos tolerance of an injected fault (likely acceptable kill collateral). \
@@ -522,7 +532,12 @@ impl Reporter {
             writeln!(
                 md,
                 "| {scenario} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} |",
-                h.total, h.mean_ms(), h.quantile_ms(0.5), h.quantile_ms(0.9), h.quantile_ms(0.99), h.max
+                h.total,
+                h.mean_ms(),
+                h.quantile_ms(0.5),
+                h.quantile_ms(0.9),
+                h.quantile_ms(0.99),
+                h.max
             )?;
         }
         Ok(())
@@ -754,9 +769,8 @@ mod tests {
     #[test]
     fn chaos_splits_counts_samples_and_dirs() {
         let r = Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 0 });
-        let mk = |d: &str| {
-            Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 1.0 })
-        };
+        let mk =
+            |d: &str| Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 1.0 });
         let outcome = rfc_fail("rfc3261.cseq", "CSeq went backwards");
         let case = outcome.case(None);
         r.record(
@@ -807,16 +821,23 @@ mod tests {
     #[test]
     fn case_splits_sample_buckets_within_a_class() {
         let r = Reporter::new(ReporterCfg { sample_cap: 1, background_record_every: 0 });
-        let mk = |d: &str| {
-            Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 1.0 })
-        };
+        let mk =
+            |d: &str| Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 1.0 });
         let unacked = rfc_fail("unacked-invite-non-2xx-final", "reject never ACKed");
         let cseq = rfc_fail("rfc3261.cseq", "CSeq went backwards");
         let (case_a, case_b) = (unacked.case(None), cseq.case(None));
         assert_ne!(case_a, case_b, "different rules → different cases");
 
         // Fill rule A's bucket (cap 1), then rule B must STILL want a sample.
-        r.record("reinvite", &unacked, &case_a, Duration::from_millis(1), &[], mk("a"), ChaosTag::Clear);
+        r.record(
+            "reinvite",
+            &unacked,
+            &case_a,
+            Duration::from_millis(1),
+            &[],
+            mk("a"),
+            ChaosTag::Clear,
+        );
         assert!(
             !r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_a, ChaosTag::Clear),
             "rule A bucket full at cap"
@@ -825,7 +846,15 @@ mod tests {
             r.wants_sample("reinvite", &ResultClass::RfcAuditFail, &case_b, ChaosTag::Clear),
             "rule B keeps its own bucket"
         );
-        r.record("reinvite", &cseq, &case_b, Duration::from_millis(1), &[], mk("b"), ChaosTag::Clear);
+        r.record(
+            "reinvite",
+            &cseq,
+            &case_b,
+            Duration::from_millis(1),
+            &[],
+            mk("b"),
+            ChaosTag::Clear,
+        );
         assert_eq!(r.sample_count("reinvite", &ResultClass::RfcAuditFail), 2);
 
         // The machine-readable index carries the case on counts AND samples,
@@ -865,11 +894,20 @@ mod tests {
     #[test]
     fn writes_and_parses_the_machine_readable_index() {
         let r = Reporter::new(ReporterCfg { sample_cap: 5, background_record_every: 0 });
-        let mk = |d: &str| Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 2.0 });
+        let mk =
+            |d: &str| Some(RenderedSample { html: None, detail: Some(d.to_string()), e2e_ms: 2.0 });
 
         // One OK basic call, one genuine check-fail reinvite (sampled), plus the
         // cross-call ringing gate + a sampled check tally.
-        r.record("basic_call", &CallOutcome::Ok, "", Duration::from_millis(3), &[("ringing", Duration::from_millis(1))], mk("ok"), ChaosTag::Clear);
+        r.record(
+            "basic_call",
+            &CallOutcome::Ok,
+            "",
+            Duration::from_millis(3),
+            &[("ringing", Duration::from_millis(1))],
+            mk("ok"),
+            ChaosTag::Clear,
+        );
         let check_fail = CallOutcome::CheckFail(vec![e2e_model::CheckVerdict {
             on: "alice.invite".to_string(),
             field: "from.userInfo".to_string(),
@@ -880,7 +918,15 @@ mod tests {
             detail: "from.userInfo mismatch".to_string(),
         }]);
         let check_case = check_fail.case(None);
-        r.record("reinvite", &check_fail, &check_case, Duration::from_millis(5), &[], mk("check fail"), ChaosTag::Clear);
+        r.record(
+            "reinvite",
+            &check_fail,
+            &check_case,
+            Duration::from_millis(5),
+            &[],
+            mk("check fail"),
+            ChaosTag::Clear,
+        );
         r.record_ringing(Some(true));
         r.record_ringing(Some(false));
         r.record_checks("reinvite", true);
@@ -913,7 +959,10 @@ mod tests {
         assert_eq!(idx.total_calls(), 2);
         assert_eq!(idx.failed_calls(), 1, "the check_fail reinvite");
         assert!(idx.counts.iter().any(|c| c.scenario == "basic_call" && c.class == "ok" && c.ok));
-        assert!(idx.counts.iter().any(|c| c.scenario == "reinvite" && c.class == "check_fail" && !c.ok));
+        assert!(idx
+            .counts
+            .iter()
+            .any(|c| c.scenario == "reinvite" && c.class == "check_fail" && !c.ok));
 
         // Canaries: reporter-owned shed/ringing filled in; caller-owned drops kept.
         assert_eq!(idx.canaries.shed, 1);
@@ -993,8 +1042,7 @@ mod tests {
         // The shutdown sequence under test: stop the task, THEN write the final.
         snap.abort();
         let _ = snap.await;
-        r.finalize_run(&out, LoadRunMeta { finished: true, ..base }, Canaries::default())
-            .unwrap();
+        r.finalize_run(&out, LoadRunMeta { finished: true, ..base }, Canaries::default()).unwrap();
         assert!(read_finished(&out), "final write says finished:true");
 
         // The regression: advance past several more would-be ticks — a leaked

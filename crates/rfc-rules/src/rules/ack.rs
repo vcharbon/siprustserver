@@ -116,8 +116,7 @@ impl Obligation for NoAckToDialogCreating2xx {
             }
             // The two hop tests, each the other's blind spot: an INVITE this
             // endpoint did not open, and a 2xx it passed on.
-            let opened_it =
-                seen.invite.get(&(uac, cseq)).is_some_and(|at_us| *at_us == opened_us);
+            let opened_it = seen.invite.get(&(uac, cseq)).is_some_and(|at_us| *at_us == opened_us);
             let forwarded_it =
                 seen.propagated.get(&(cseq, dialog)).is_some_and(|last| f.ts_us < *last);
             let window_us = wire.obs.last_us.saturating_sub(f.ts_us);
@@ -179,10 +178,8 @@ impl Obligation for Unacked2xxNotCleared {
                 anchor: f.msg,
                 decision,
             };
-            let relayed = seen
-                .two_xx_first_us
-                .get(&(cseq, dialog))
-                .is_some_and(|first| *first < f.ts_us);
+            let relayed =
+                seen.two_xx_first_us.get(&(cseq, dialog)).is_some_and(|first| *first < f.ts_us);
             let discharged = seen.acked.contains(&(cseq, dialog))
                 || seen.byes.iter().any(|b| b.on_dialog(dialog));
             if discharged {
@@ -256,9 +253,7 @@ impl Obligation for UnackedInviteNon2xxFinal {
             };
             match &msg.kind {
                 Kind::Request { method } if method.eq_ignore_ascii_case("INVITE") => {
-                    invite
-                        .entry((msg.dst.as_str(), msg.call_id.as_str(), branch))
-                        .or_insert(mi);
+                    invite.entry((msg.dst.as_str(), msg.call_id.as_str(), branch)).or_insert(mi);
                 }
                 // §17.1.1.3: the ACK of a non-2xx final rides its INVITE's own
                 // branch, so it discharges that transaction and no other.
@@ -559,9 +554,7 @@ impl Obligation for AckRequireSubsetOfInvite {
                 let (Some(ack_head), Some(invite_head)) =
                     (wire.msgs[ack.msg].head.as_deref(), wire.msgs[invite.msg].head.as_deref())
                 else {
-                    out.push(finding(Decision::Undecidable(
-                        "no header block at this vantage",
-                    )));
+                    out.push(finding(Decision::Undecidable("no header block at this vantage")));
                     continue;
                 };
                 let ack_tags = sniff::option_tags(ack_head, "require");
@@ -634,9 +627,7 @@ impl Obligation for AckPreservesInviteRoute {
                 let (Some(ack_head), Some(invite_head)) =
                     (wire.msgs[ack.msg].head.as_deref(), wire.msgs[invite.msg].head.as_deref())
                 else {
-                    out.push(finding(Decision::Undecidable(
-                        "no header block at this vantage",
-                    )));
+                    out.push(finding(Decision::Undecidable("no header block at this vantage")));
                     continue;
                 };
                 let ack_routes = sniff::header_values(ack_head, "route");
@@ -736,8 +727,7 @@ mod tests {
     /// immediately, because the harness drained before stopping.
     #[test]
     fn a_closed_observation_collapses_the_ack_window() {
-        let msgs =
-            vec![req(1_000_000, UAC, UAS, "INVITE", 1, None), ok200(1_200_000, 1)];
+        let msgs = vec![req(1_000_000, UAC, UAS, "INVITE", 1, None), ok200(1_200_000, 1)];
         let open = obs(&msgs, false);
         let f = NoAckToDialogCreating2xx.eval(&WireView { msgs: &msgs, obs: &open });
         assert_eq!(f.len(), 1);
@@ -803,8 +793,7 @@ mod tests {
     /// with the observation closed — the silent answered-call leak.
     #[test]
     fn a_2xx_neither_acked_nor_byed_charges_the_uas_too() {
-        let msgs =
-            vec![req(1_000_000, UAC, UAS, "INVITE", 1, None), ok200(1_200_000, 1)];
+        let msgs = vec![req(1_000_000, UAC, UAS, "INVITE", 1, None), ok200(1_200_000, 1)];
         let closed = obs(&msgs, true);
         let f = Unacked2xxNotCleared.eval(&WireView { msgs: &msgs, obs: &closed });
         assert_eq!(f.len(), 1);
@@ -1078,8 +1067,7 @@ mod tests {
     /// The defect: the reject went out and its mandatory ACK never came back.
     #[test]
     fn a_reject_that_is_never_acked_is_violated() {
-        let f =
-            unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), reject(2_000, 486, "z9hG4bK-i")]);
+        let f = unacked(&[took(1_000, "INVITE", "z9hG4bK-i"), reject(2_000, 486, "z9hG4bK-i")]);
         assert_eq!(f.len(), 1, "{f:?}");
         let Decision::Violated(Evidence::UnackedReject { status, branch, invite_msg, .. }) =
             &f[0].decision
@@ -1121,10 +1109,9 @@ mod tests {
     /// truncation; a CLOSED one decides at once.
     #[test]
     fn a_closed_observation_collapses_the_reject_window() {
-        let msgs =
-            [took(1_000, "INVITE", "z9hG4bK-i"), reject(2_000, 486, "z9hG4bK-i")];
-        let open = UnackedInviteNon2xxFinal
-            .eval(&WireView { msgs: &msgs, obs: &obs(&msgs, false) });
+        let msgs = [took(1_000, "INVITE", "z9hG4bK-i"), reject(2_000, 486, "z9hG4bK-i")];
+        let open =
+            UnackedInviteNon2xxFinal.eval(&WireView { msgs: &msgs, obs: &obs(&msgs, false) });
         assert_eq!(open.len(), 1, "{open:?}");
         assert!(!open[0].decided(), "{:?}", open[0].decision);
         assert!(unacked(&msgs)[0].violated());

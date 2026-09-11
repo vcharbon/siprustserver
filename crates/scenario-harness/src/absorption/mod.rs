@@ -141,10 +141,7 @@ impl Absorption {
     /// the socket.
     pub fn sight(&self, raw: &[u8], msg: &SipMessage) -> Sighting {
         let repeat = self.dedup.load(Ordering::Relaxed)
-            && self
-                .tables
-                .note(raw, msg, self.sighted.fetch_add(1, Ordering::Relaxed))
-                .is_some();
+            && self.tables.note(raw, msg, self.sighted.fetch_add(1, Ordering::Relaxed)).is_some();
         let owner = if self.hop_ack_claims_msg(msg) {
             Owner::TxnHopAck
         } else if repeat && !repeat_belongs_to_tu(msg) {

@@ -55,10 +55,7 @@ pub enum ReplCodecError {
 
 impl From<UnknownDiscriminant> for ReplCodecError {
     fn from(u: UnknownDiscriminant) -> Self {
-        ReplCodecError::UnknownDiscriminant {
-            field: u.field,
-            value: u.value,
-        }
+        ReplCodecError::UnknownDiscriminant { field: u.field, value: u.value }
     }
 }
 
@@ -76,12 +73,7 @@ pub fn encode_frame(frame: &Frame) -> Vec<u8> {
 
 fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
     match frame {
-        Frame::PullRequest {
-            proto_ver,
-            caller,
-            partition,
-            since,
-        } => {
+        Frame::PullRequest { proto_ver, caller, partition, since } => {
             encode::write_array_len(buf, 6).unwrap();
             encode::write_uint(buf, tag::PULL_REQUEST).unwrap();
             encode::write_uint(buf, *proto_ver as u64).unwrap();
@@ -152,9 +144,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, ReplCodecError> {
     let mut rd: &[u8] = bytes;
     let len = read_array_len(&mut rd, "frame")?;
     if len == 0 {
-        return Err(ReplCodecError::MalformedArray(
-            "empty array, no tag element".into(),
-        ));
+        return Err(ReplCodecError::MalformedArray("empty array, no tag element".into()));
     }
     let tag = read_u64(&mut rd, "tag")?;
     match tag {
@@ -229,9 +219,7 @@ fn decode_noop(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
     expect_len(len, 3, "Noop")?;
     let gen = read_u64(rd, "gen")?;
     let counter = read_u64(rd, "counter")?;
-    Ok(Frame::Noop {
-        at: Watermark::new(gen, counter),
-    })
+    Ok(Frame::Noop { at: Watermark::new(gen, counter) })
 }
 
 fn decode_reset(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
@@ -251,10 +239,9 @@ fn map_vre(e: ValueReadError, at: &'static str) -> ReplCodecError {
         ValueReadError::InvalidMarkerRead(_) | ValueReadError::InvalidDataRead(_) => {
             ReplCodecError::Truncated(format!("at {at}"))
         }
-        ValueReadError::TypeMismatch(m) => ReplCodecError::Type {
-            at,
-            detail: format!("unexpected marker {m:?}"),
-        },
+        ValueReadError::TypeMismatch(m) => {
+            ReplCodecError::Type { at, detail: format!("unexpected marker {m:?}") }
+        }
     }
 }
 
@@ -263,14 +250,12 @@ fn map_nvre(e: NumValueReadError, at: &'static str) -> ReplCodecError {
         NumValueReadError::InvalidMarkerRead(_) | NumValueReadError::InvalidDataRead(_) => {
             ReplCodecError::Truncated(format!("at {at}"))
         }
-        NumValueReadError::TypeMismatch(m) => ReplCodecError::Type {
-            at,
-            detail: format!("unexpected marker {m:?}"),
-        },
-        NumValueReadError::OutOfRange => ReplCodecError::Type {
-            at,
-            detail: "integer out of range".into(),
-        },
+        NumValueReadError::TypeMismatch(m) => {
+            ReplCodecError::Type { at, detail: format!("unexpected marker {m:?}") }
+        }
+        NumValueReadError::OutOfRange => {
+            ReplCodecError::Type { at, detail: "integer out of range".into() }
+        }
     }
 }
 

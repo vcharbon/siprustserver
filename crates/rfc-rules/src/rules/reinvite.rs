@@ -132,8 +132,11 @@ impl Obligation for ConcurrentReInvite500Or491 {
                     dialog_of.insert(txn, dialog);
                 }
                 Kind::Response { status } if msg.cseq_method.eq_ignore_ascii_case("INVITE") => {
-                    let txn =
-                        TxnKey { endpoint: msg.src.as_str(), call_id: msg.call_id.as_str(), branch };
+                    let txn = TxnKey {
+                        endpoint: msg.src.as_str(),
+                        call_id: msg.call_id.as_str(),
+                        branch,
+                    };
                     if *status < 200 || *status >= 700 {
                         continue;
                     }
@@ -141,7 +144,10 @@ impl Obligation for ConcurrentReInvite500Or491 {
                         status: *status,
                         // §14.2 makes `Retry-After` part of the 500 answer; a
                         // vantage carrying no header block cannot read it.
-                        retry_after: msg.head.as_deref().map(|h| sniff::has_header(h, "retry-after")),
+                        retry_after: msg
+                            .head
+                            .as_deref()
+                            .map(|h| sniff::has_header(h, "retry-after")),
                     });
                     if let Some(dialog) = dialog_of.get(&txn) {
                         if let Some(in_flight) = in_progress.get_mut(dialog) {
@@ -197,9 +203,7 @@ impl Obligation for ConcurrentReInvite500Or491 {
                 // Only a 500 turns on the header; anything else is already
                 // decided by its status alone.
                 None if answer.status == 500 => {
-                    out.push(finding(Decision::Undecidable(
-                        "no header block at this vantage",
-                    )));
+                    out.push(finding(Decision::Undecidable("no header block at this vantage")));
                     continue;
                 }
                 None => false,
@@ -278,7 +282,12 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                     // until its 2xx re-keys it, and an unmatched trace may hold
                     // it either way.
                     for dialog in [
-                        OrderedKey { endpoint: sender, call_id: msg.call_id.as_str(), from_tag, to_tag },
+                        OrderedKey {
+                            endpoint: sender,
+                            call_id: msg.call_id.as_str(),
+                            from_tag,
+                            to_tag,
+                        },
                         OrderedKey {
                             endpoint: sender,
                             call_id: msg.call_id.as_str(),
@@ -288,8 +297,11 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                     ] {
                         let Some(in_flight) = in_progress.get_mut(&dialog) else { continue };
                         in_flight.retain(|b| {
-                            let txn =
-                                TxnKey { endpoint: sender, call_id: msg.call_id.as_str(), branch: b };
+                            let txn = TxnKey {
+                                endpoint: sender,
+                                call_id: msg.call_id.as_str(),
+                                branch: b,
+                            };
                             let confirms = branch_cseq.get(&txn) == Some(&msg.cseq);
                             if confirms {
                                 accepted.remove(&txn);
@@ -299,8 +311,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                     }
                 }
                 Kind::Request { method } if method.eq_ignore_ascii_case("INVITE") => {
-                    let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty())
-                    else {
+                    let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) else {
                         continue;
                     };
                     let sender = msg.src.as_str();
@@ -363,8 +374,7 @@ impl Obligation for NoReInviteWhileInviteInProgress {
                 Kind::Response { status }
                     if *status >= 200 && msg.cseq_method.eq_ignore_ascii_case("INVITE") =>
                 {
-                    let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty())
-                    else {
+                    let Some(branch) = msg.via_branch.as_deref().filter(|b| !b.is_empty()) else {
                         continue;
                     };
                     // The transaction belongs to the endpoint that TOOK the
@@ -602,8 +612,8 @@ mod tests {
 
     use super::super::Obligation;
     use super::{
-        ConcurrentReInvite500Or491, FailedReinviteTearsDownDialog,
-        NoReInviteWhileInviteInProgress, REINVITE_FINAL_WINDOW_US,
+        ConcurrentReInvite500Or491, FailedReinviteTearsDownDialog, NoReInviteWhileInviteInProgress,
+        REINVITE_FINAL_WINDOW_US,
     };
 
     const ALICE: &str = "10.0.0.1:5060";
@@ -905,7 +915,9 @@ mod tests {
             );
             assert_eq!(f.len(), 1, "{label}: {f:?}");
             let Decision::Violated(Evidence::OverlappingReInvite {
-                prior_accepted, prior_branch, ..
+                prior_accepted,
+                prior_branch,
+                ..
             }) = &f[0].decision
             else {
                 panic!("{label}: {:?}", f[0].decision)
@@ -1037,9 +1049,8 @@ mod tests {
         );
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].emitter, ALICE, "the re-INVITE's sender is charged");
-        let Decision::Violated(Evidence::AbandonedReInvite {
-            branch, provisional_status, ..
-        }) = &f[0].decision
+        let Decision::Violated(Evidence::AbandonedReInvite { branch, provisional_status, .. }) =
+            &f[0].decision
         else {
             panic!("{:?}", f[0].decision)
         };

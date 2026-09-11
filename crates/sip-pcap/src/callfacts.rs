@@ -78,9 +78,9 @@ fn retransmits_on_a_timer(m: &MsgJson) -> bool {
 pub fn mark_repeats(leg: &mut LegJson) {
     for i in 0..leg.msgs.len() {
         let anchor = if retransmits_on_a_timer(&leg.msgs[i]) {
-            (0..i)
-                .find(|&j| repeats(&leg.msgs[i], &leg.msgs[j]))
-                .filter(|&j| leg.msgs[i].ts_us.saturating_sub(leg.msgs[j].ts_us) <= REPEAT_ENVELOPE_US)
+            (0..i).find(|&j| repeats(&leg.msgs[i], &leg.msgs[j])).filter(|&j| {
+                leg.msgs[i].ts_us.saturating_sub(leg.msgs[j].ts_us) <= REPEAT_ENVELOPE_US
+            })
         } else {
             None
         };
@@ -183,7 +183,11 @@ fn capture_order(legs: &[LegJson], group: &GroupJson) -> Vec<Coord> {
         .iter()
         .filter(|&&l| l < legs.len())
         .flat_map(|&l| {
-            legs[l].msgs.iter().enumerate().map(move |(i, m)| Coord { leg: l, msg: i, ts_us: m.ts_us })
+            legs[l].msgs.iter().enumerate().map(move |(i, m)| Coord {
+                leg: l,
+                msg: i,
+                ts_us: m.ts_us,
+            })
         })
         .collect();
     out.sort_by_key(|c| c.ts_us);
@@ -230,9 +234,7 @@ mod tests {
     /// payload, exactly as it would be on the wire.
     fn wire(summary: &Summary, branch: &str) -> String {
         let (start, cseq) = match summary {
-            Summary::Request { method, uri, cseq, .. } => {
-                (format!("{method} {uri} SIP/2.0"), cseq)
-            }
+            Summary::Request { method, uri, cseq, .. } => (format!("{method} {uri} SIP/2.0"), cseq),
             Summary::Response { status, reason, cseq, .. } => {
                 (format!("SIP/2.0 {status} {reason}"), cseq)
             }
@@ -293,7 +295,8 @@ mod tests {
     /// The same message stating its RSeq, in the projection AND on the wire.
     fn with_rseq(mut m: MsgJson, v: &str) -> MsgJson {
         let Payload::Text { raw } = &m.payload else { unreachable!("the helper renders text") };
-        m.payload = Payload::Text { raw: raw.replace("\r\n\r\n", &format!("\r\nRSeq: {v}\r\n\r\n")) };
+        m.payload =
+            Payload::Text { raw: raw.replace("\r\n\r\n", &format!("\r\nRSeq: {v}\r\n\r\n")) };
         m.rseq = Some(v.into());
         m
     }

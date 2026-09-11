@@ -135,11 +135,7 @@ async fn route_decision_landing_after_the_callers_cancel_is_dropped() {
         alice.try_receive_tolerating("CANCEL", &[]).await.is_none(),
         "nothing may reach the caller after the 487",
     );
-    assert_eq!(
-        b2bua.metrics().decision_dropped_cancelled_total(),
-        1,
-        "the drop is metered once",
-    );
+    assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 1, "the drop is metered once",);
 
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
@@ -252,11 +248,8 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     // simulated transits quantize to the 100 ms advance chunks the admit rides
     // through (it lands mid-`h.advance`, unlike the agent-pumped callflow
     // steps), so a production-sized 150 ms budget would fail open here.
-    let limiter: Arc<dyn CallLimiter> = Arc::new(HttpCallLimiter::new(
-        Arc::new(http.clone()),
-        laddr,
-        Duration::from_secs(2),
-    ));
+    let limiter: Arc<dyn CallLimiter> =
+        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_secs(2)));
 
     let decision = Arc::new(DelayedDecisionEngine {
         new_call_delay: DECISION_DELAY,
@@ -271,10 +264,8 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
                 .build(),
         ),
     });
-    let b2bua = B2buaSut::builder(decision)
-        .limiter(limiter)
-        .start(&h, "b2bua", "127.0.0.1:5080")
-        .await;
+    let b2bua =
+        B2buaSut::builder(decision).limiter(limiter).start(&h, "b2bua", "127.0.0.1:5080").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     h.advance(Duration::from_millis(200)).await;

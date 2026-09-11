@@ -83,11 +83,7 @@ pub fn flows_to_doc_selected(
 fn leg_json(leg: &FlowLeg) -> LegJson {
     LegJson {
         call_id: leg.call_id.clone(),
-        hops: leg
-            .hops
-            .iter()
-            .map(|h| HopJson { a: h.a.to_string(), b: h.b.to_string() })
-            .collect(),
+        hops: leg.hops.iter().map(|h| HopJson { a: h.a.to_string(), b: h.b.to_string() }).collect(),
         invite: leg.invite.as_ref().map(|inv| InviteJson {
             ruri: inv.ruri.text().into_owned(),
             from_uri: inv.from_uri.text().into_owned(),
@@ -132,13 +128,9 @@ fn summary_json(msg: &SipMessage) -> Summary {
             from,
             to,
         },
-        SipMessage::Response(r) => Summary::Response {
-            status: r.status(),
-            reason: r.reason().to_string(),
-            cseq,
-            from,
-            to,
-        },
+        SipMessage::Response(r) => {
+            Summary::Response { status: r.status(), reason: r.reason().to_string(), cseq, from, to }
+        }
     }
 }
 
@@ -157,11 +149,9 @@ fn group_json(group: &CallGroup, remap: &impl Fn(usize) -> usize) -> GroupJson {
 fn evidence_json(ev: &MatchEvidence, remap: &impl Fn(usize) -> usize) -> Evidence {
     let legs_of = |ls: &[usize]| ls.iter().map(|&l| remap(l)).collect::<Vec<_>>();
     match ev {
-        MatchEvidence::SharedToken { strategy, token, legs } => Evidence::SharedToken {
-            strategy: *strategy,
-            token: token.clone(),
-            legs: legs_of(legs),
-        },
+        MatchEvidence::SharedToken { strategy, token, legs } => {
+            Evidence::SharedToken { strategy: *strategy, token: token.clone(), legs: legs_of(legs) }
+        }
         MatchEvidence::SharedHeaderParam { strategy, header, param, token, legs } => {
             Evidence::SharedHeaderParam {
                 strategy: *strategy,
@@ -212,7 +202,7 @@ mod tests {
             src: src.parse().unwrap(),
             dst: dst.parse().unwrap(),
             payload: payload.to_vec(),
-        probe: 0,
+            probe: 0,
         }
     }
 
@@ -356,8 +346,20 @@ mod tests {
     fn match_evidence_variants_are_emitted() {
         let tok_a = sip_request("INVITE", "ev-a", 1, "ba", "X-Api-Call: call-9\r\n");
         let tok_b = sip_request("INVITE", "ev-b", 1, "bb", "X-Api-Call: call-9\r\n");
-        let icid_a = sip_request("INVITE", "ev-e", 1, "be", "P-Charging-Vector: icid-value=icid-7;orig-ioi=a\r\n");
-        let icid_b = sip_request("INVITE", "ev-f", 1, "bf", "P-Charging-Vector: orig-ioi=b;icid-value=icid-7\r\n");
+        let icid_a = sip_request(
+            "INVITE",
+            "ev-e",
+            1,
+            "be",
+            "P-Charging-Vector: icid-value=icid-7;orig-ioi=a\r\n",
+        );
+        let icid_b = sip_request(
+            "INVITE",
+            "ev-f",
+            1,
+            "bf",
+            "P-Charging-Vector: orig-ioi=b;icid-value=icid-7\r\n",
+        );
         let der_a = sip_request("INVITE", "ev-derived-base", 1, "bg", "");
         let der_b = sip_request("INVITE", "1-ev-derived-base", 1, "bh", "");
         let adj_a = sip_request("INVITE", "ev-c", 1, "bc", "");

@@ -43,7 +43,9 @@ impl ParamValue {
     /// A token value, quoting it only if the text could not survive bare.
     pub fn text(value: impl Into<SipStr>) -> Self {
         let v: SipStr = value.into();
-        if v.is_empty() || v.bytes().any(|b| matches!(b, b';' | b',' | b'"' | b'>' | b' ' | b'\t' | b'=' | b'?'))
+        if v.is_empty()
+            || v.bytes()
+                .any(|b| matches!(b, b';' | b',' | b'"' | b'>' | b' ' | b'\t' | b'=' | b'?'))
         {
             ParamValue::Quoted(v)
         } else {
@@ -94,7 +96,8 @@ impl Params {
     pub fn parse_list(raw: &SipStr) -> Self {
         let value = raw.trimmed();
         let mut params = Self::new();
-        let after_first = read_one(&value, skip_ws(value.as_bytes(), 0), &HEADER_PARAMS, &mut params);
+        let after_first =
+            read_one(&value, skip_ws(value.as_bytes(), 0), &HEADER_PARAMS, &mut params);
         collect_semicolon_params(&value, after_first, &HEADER_PARAMS, &mut params);
         params
     }

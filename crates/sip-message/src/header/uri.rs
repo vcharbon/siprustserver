@@ -397,8 +397,9 @@ impl Uri {
         let value = raw.trimmed();
         let bytes = value.as_bytes();
         let len = bytes.len();
-        let colon = index_of(bytes, b':', 0)
-            .ok_or_else(|| SipParseError::new(format!("URI has no scheme: {:?}", value.as_str())))?;
+        let colon = index_of(bytes, b':', 0).ok_or_else(|| {
+            SipParseError::new(format!("URI has no scheme: {:?}", value.as_str()))
+        })?;
         let scheme = sub_lower(&value, 0, colon);
         let mut i = colon + 1;
 
@@ -662,7 +663,9 @@ mod tests {
         assert_eq!(uri("sip:033123@h").user_digits().as_deref(), Some("33123"));
         assert_eq!(uri("sip:33123@h;npdi").user_digits().as_deref(), Some("33123"));
         assert_eq!(
-            uri("sip:+33000900012;verstat=TN-Validation-Passed@foo.example.com").user_digits().as_deref(),
+            uri("sip:+33000900012;verstat=TN-Validation-Passed@foo.example.com")
+                .user_digits()
+                .as_deref(),
             Some("33000900012"),
         );
         // Exactly ONE prefix goes: a number that really starts 0 keeps the rest.

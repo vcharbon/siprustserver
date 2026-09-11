@@ -154,7 +154,10 @@ pub(super) fn record_response_fact(st: &mut ActorState<'_>, resp: &SipResponse, 
     );
 }
 
-pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -> Result<(), StepError> {
+pub(super) async fn react_response(
+    st: &mut ActorState<'_>,
+    resp: SipResponse,
+) -> Result<(), StepError> {
     let now = Instant::now();
     // A 2xx RETRANSMITTED while this leg holds its ACK (RFC 3261 §13.3.1.4: the
     // answerer re-passes its 2xx to the transport until the ACK arrives).
@@ -184,44 +187,44 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
     // INVITE being answered); it falls through to the obligation-closing path.
     if resp.cseq().method() == "INVITE" {
         if let Some(mut inv) = st.dialogs.pending_invite.take() {
-        match inv.absorb_response(&resp).await? {
-            InviteResponseFate::Provisional { status } => {
-                absorb_establishing_provisional(st, &mut inv, &resp, status, now).await?;
-                st.dialogs.pending_invite = Some(inv);
-            }
-            InviteResponseFate::Answered => {
-                st.ctx.anchor(&st.agent, "answer", &resp);
-                if st.feed.ringing_gate && !st.saw_provisional {
-                    // Answered without ever ringing: a lost non-PRACK 18x is
-                    // best-effort — counted into the cross-call gate, never a
-                    // per-call failure (contract table §3).
-                    st.ctx.mark_ringing(false);
-                }
-                st.feed.on_answer_rx.stamp(st.ctx);
-                // ACK the 2xx then register the confirmed dialog with NO await in
-                // between, so a mid-window cancellation can never leave a
-                // confirmed-but-unregistered dialog (the drop-safety rule).
-                let mut dialog = inv.ack().await;
-                // Dialog-formation point: attach this leg's shared CSeq counter
-                // BEFORE the scope-refresh clone, so both share ONE step counter
-                // (ADR-0024 §6 — the teardown BYE never re-consumes an op).
-                dialog.set_shared_cseq_dev(st.cseq_dev.clone());
-                st.dialogs.confirmed = Some(dialog.clone());
-                st.scope.set_confirmed(dialog);
-                st.obs.record(Observation::LegConfirmed { leg: st.role }, now);
-                // RETAIN the establishing INVITE (C1/E3): a LOSING fork's late
-                // 2xx (§13.2.2.4) is ACK+BYE'd on a fork dialog derived from it.
-                st.dialogs.won_invite = Some(inv);
-            }
-            InviteResponseFate::Failed { status } => {
-                if absorb_establishing_failure(st, &mut inv, &resp, status, now).await? {
-                    // §22.2 authenticated resend — the retried INVITE is a
-                    // fresh pending transaction, parked back.
+            match inv.absorb_response(&resp).await? {
+                InviteResponseFate::Provisional { status } => {
+                    absorb_establishing_provisional(st, &mut inv, &resp, status, now).await?;
                     st.dialogs.pending_invite = Some(inv);
                 }
+                InviteResponseFate::Answered => {
+                    st.ctx.anchor(&st.agent, "answer", &resp);
+                    if st.feed.ringing_gate && !st.saw_provisional {
+                        // Answered without ever ringing: a lost non-PRACK 18x is
+                        // best-effort — counted into the cross-call gate, never a
+                        // per-call failure (contract table §3).
+                        st.ctx.mark_ringing(false);
+                    }
+                    st.feed.on_answer_rx.stamp(st.ctx);
+                    // ACK the 2xx then register the confirmed dialog with NO await in
+                    // between, so a mid-window cancellation can never leave a
+                    // confirmed-but-unregistered dialog (the drop-safety rule).
+                    let mut dialog = inv.ack().await;
+                    // Dialog-formation point: attach this leg's shared CSeq counter
+                    // BEFORE the scope-refresh clone, so both share ONE step counter
+                    // (ADR-0024 §6 — the teardown BYE never re-consumes an op).
+                    dialog.set_shared_cseq_dev(st.cseq_dev.clone());
+                    st.dialogs.confirmed = Some(dialog.clone());
+                    st.scope.set_confirmed(dialog);
+                    st.obs.record(Observation::LegConfirmed { leg: st.role }, now);
+                    // RETAIN the establishing INVITE (C1/E3): a LOSING fork's late
+                    // 2xx (§13.2.2.4) is ACK+BYE'd on a fork dialog derived from it.
+                    st.dialogs.won_invite = Some(inv);
+                }
+                InviteResponseFate::Failed { status } => {
+                    if absorb_establishing_failure(st, &mut inv, &resp, status, now).await? {
+                        // §22.2 authenticated resend — the retried INVITE is a
+                        // fresh pending transaction, parked back.
+                        st.dialogs.pending_invite = Some(inv);
+                    }
+                }
             }
-        }
-        return Ok(());
+            return Ok(());
         }
         // A NON-2xx final to a re-INVITE WE originated (C4/S5 glare): a `491
         // Request Pending` (§14.1) the peer sent because it had its OWN re-INVITE
@@ -288,8 +291,7 @@ pub(super) async fn react_response(st: &mut ActorState<'_>, resp: SipResponse) -
                     // Our INVITE carried the offer, so the fork's 200 carried
                     // its answer — the ACK is bodyless (§13.2.2.4).
                     fork.ack_for(resp.cseq().seq(), None).await;
-                    let _bye =
-                        fork.send_request(InDialogMethod::Bye).try_send().await?;
+                    let _bye = fork.send_request(InDialogMethod::Bye).try_send().await?;
                     st.obs.record(
                         Observation::RequestSent {
                             key: ObligationKey::new(
@@ -465,12 +467,7 @@ pub(super) async fn wait_held_ack(held: &[HeldAck]) {
 /// Fire the earliest held ACK: send it on the confirmed dialog (idempotent,
 /// re-derivable — §13.2.2.4) and complete the bookkeeping the hold deferred.
 pub(super) async fn fire_due_held_ack(st: &mut ActorState<'_>) {
-    let Some(pos) = st
-        .held_acks
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, h)| h.at)
-        .map(|(i, _)| i)
+    let Some(pos) = st.held_acks.iter().enumerate().min_by_key(|(_, h)| h.at).map(|(i, _)| i)
     else {
         return;
     };

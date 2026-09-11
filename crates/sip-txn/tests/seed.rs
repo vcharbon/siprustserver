@@ -27,10 +27,12 @@ fn messages(events: &[TransactionEvent]) -> Vec<(bool, u16, bool)> {
     events
         .iter()
         .filter_map(|e| match e {
-            TransactionEvent::Message { message, matched_client_txn, .. } => Some(match message.as_ref() {
-                SipMessage::Response(r) => (true, r.status(), *matched_client_txn),
-                SipMessage::Request(_) => (false, 0, *matched_client_txn),
-            }),
+            TransactionEvent::Message { message, matched_client_txn, .. } => {
+                Some(match message.as_ref() {
+                    SipMessage::Response(r) => (true, r.status(), *matched_client_txn),
+                    SipMessage::Request(_) => (false, 0, *matched_client_txn),
+                })
+            }
             _ => None,
         })
         .collect()
@@ -74,7 +76,8 @@ fn server_seed(branch: &str, call_id: &str, with_request: bool) -> TxnSeed {
         from_tag: "caller-tag".to_string(),
         to_tag: Some(SEED_TO_TAG.to_string()),
         leg_id: Some("a".to_string()),
-        original_request: with_request.then(|| request_bytes(&inbound_request("INVITE", branch, call_id, None))),
+        original_request: with_request
+            .then(|| request_bytes(&inbound_request("INVITE", branch, call_id, None))),
     }
 }
 
@@ -101,13 +104,25 @@ async fn a_seeded_client_invite_acks_a_486_and_holds_timer_d() {
 
     stack.inject(&response_bytes(486, "Busy Here", "INVITE", branch, "seed-c", true)).await;
     elapse_ms(60).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "the layer ACKs the final (§17.1.1.3)");
-    assert_eq!(messages(&stack.drain_events()), vec![(true, 486, true)], "the final reaches the consumer once, matched");
+    assert_eq!(
+        count_requests(&stack.drain_peer(), "ACK"),
+        1,
+        "the layer ACKs the final (§17.1.1.3)"
+    );
+    assert_eq!(
+        messages(&stack.drain_events()),
+        vec![(true, 486, true)],
+        "the final reaches the consumer once, matched"
+    );
     assert_eq!(active(&stack), 1, "Completed, holding Timer D");
 
     stack.inject(&response_bytes(486, "Busy Here", "INVITE", branch, "seed-c", true)).await;
     elapse_ms(60).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "a retransmitted final is re-ACKed (§17.1.1.2)");
+    assert_eq!(
+        count_requests(&stack.drain_peer(), "ACK"),
+        1,
+        "a retransmitted final is re-ACKed (§17.1.1.2)"
+    );
     assert!(stack.drain_events().is_empty(), "and absorbed");
 
     elapse_ms(33_000).await;
@@ -123,7 +138,10 @@ async fn a_seeded_client_invite_gives_up_on_the_invite_bound() {
     stack.txn.seed(CALL_REF, vec![client_seed("z9hG4bK-seed-bound", "seed-bound")]).await.unwrap();
 
     elapse_ms(33_000).await;
-    assert!(stack.drain_events().is_empty(), "past Timer B the seed still waits (it is Proceeding)");
+    assert!(
+        stack.drain_events().is_empty(),
+        "past Timer B the seed still waits (it is Proceeding)"
+    );
 
     elapse_ms(sip_txn::timers::INVITE_INITIAL_TIMEOUT).await;
     let events = stack.drain_events();
@@ -135,7 +153,12 @@ async fn a_seeded_client_invite_gives_up_on_the_invite_bound() {
     });
     assert_eq!(
         timeout,
-        Some((Some(CALL_REF.to_string()), Some("b-1".to_string()), Some("INVITE".to_string()), TimeoutKind::Transaction)),
+        Some((
+            Some(CALL_REF.to_string()),
+            Some("b-1".to_string()),
+            Some("INVITE".to_string()),
+            TimeoutKind::Transaction
+        )),
         "the bound fires as the configured INVITE bound, for the seed's call and leg"
     );
     assert_eq!(active(&stack), 0);
@@ -150,7 +173,10 @@ async fn a_seeded_server_invite_ladders_a_final_on_timer_g_until_the_ack() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
     let branch = "z9hG4bK-seed-s";
     let call_id = "seed-s";
-    assert_eq!(stack.txn.seed(CALL_REF, vec![server_seed(branch, call_id, false)]).await.unwrap(), 1);
+    assert_eq!(
+        stack.txn.seed(CALL_REF, vec![server_seed(branch, call_id, false)]).await.unwrap(),
+        1
+    );
     assert_eq!(stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(), 1);
 
     let resp = parse_response(&response_bytes(486, "Busy Here", "INVITE", branch, call_id, true));
@@ -162,7 +188,11 @@ async fn a_seeded_server_invite_ladders_a_final_on_timer_g_until_the_ack() {
     elapse_ms(600).await;
     assert_eq!(count_responses(&stack.drain_peer(), 486), 1, "Timer G re-sends at T1");
     assert_eq!(stack.txn.metrics().retransmits(Class::InviteServerFinal), 1);
-    assert_eq!(stack.txn.metrics().server_final_unseen_branch(), 0, "the branch was seen: it was seeded");
+    assert_eq!(
+        stack.txn.metrics().server_final_unseen_branch(),
+        0,
+        "the branch was seen: it was seeded"
+    );
 
     stack.inject(&inbound_request("ACK", branch, call_id, Some("peer-tag"))).await;
     elapse_ms(60).await;
@@ -188,7 +218,11 @@ async fn a_seeded_server_invite_with_its_request_answers_a_cancel() {
     let out = stack.drain_peer();
     assert_eq!(count_responses(&out, 200), 1, "200 to the CANCEL");
     assert_eq!(count_responses(&out, 487), 1, "487 to the seeded INVITE");
-    assert_eq!(to_tag_of(&out, 487).as_deref(), Some(SEED_TO_TAG), "the 487 rides the seed's To-tag (§17.2.1)");
+    assert_eq!(
+        to_tag_of(&out, 487).as_deref(),
+        Some(SEED_TO_TAG),
+        "the 487 rides the seed's To-tag (§17.2.1)"
+    );
     assert_eq!(to_tag_of(&out, 200).as_deref(), Some(SEED_TO_TAG), "so does the CANCEL's 200");
     let events = stack.drain_events();
     assert!(cancelled(&events), "Cancelled reaches the consumer");
@@ -226,7 +260,10 @@ async fn a_seed_on_an_occupied_branch_is_skipped_and_counted() {
 
     let seeded = stack
         .txn
-        .seed(CALL_REF, vec![server_seed(branch, "occupied", true), client_seed("z9hG4bK-free", "occupied")])
+        .seed(
+            CALL_REF,
+            vec![server_seed(branch, "occupied", true), client_seed("z9hG4bK-free", "occupied")],
+        )
         .await
         .unwrap();
     assert_eq!(seeded, 1, "only the free branch is seeded");
@@ -246,7 +283,14 @@ async fn a_seed_on_an_occupied_branch_is_skipped_and_counted() {
 #[tokio::test(start_paused = true)]
 async fn a_final_on_an_unseen_branch_leaves_raw_once_and_is_counted() {
     let stack = Stack::build(TRANSIT, 64, 64).await;
-    let resp = parse_response(&response_bytes(486, "Busy Here", "INVITE", "z9hG4bK-unseen", "unseen", true));
+    let resp = parse_response(&response_bytes(
+        486,
+        "Busy Here",
+        "INVITE",
+        "z9hG4bK-unseen",
+        "unseen",
+        true,
+    ));
     stack.txn.send_response(resp, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     assert_eq!(count_responses(&stack.drain_peer(), 486), 1, "the 486 leaves once");
@@ -254,10 +298,15 @@ async fn a_final_on_an_unseen_branch_leaves_raw_once_and_is_counted() {
     assert_eq!(stack.txn.metrics().server_final_unseen_branch(), 1);
 
     elapse_ms(8_000).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 486), 0, "no Timer G ladder without a transaction");
+    assert_eq!(
+        count_responses(&stack.drain_peer(), 486),
+        0,
+        "no Timer G ladder without a transaction"
+    );
     assert_eq!(stack.txn.metrics().retransmits(Class::InviteServerFinal), 0);
 
-    let ok = parse_response(&response_bytes(200, "OK", "INVITE", "z9hG4bK-unseen2xx", "unseen", true));
+    let ok =
+        parse_response(&response_bytes(200, "OK", "INVITE", "z9hG4bK-unseen2xx", "unseen", true));
     stack.txn.send_response(ok, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
     assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the 2xx leaves raw");
@@ -277,7 +326,11 @@ async fn a_reoffered_final_is_taken_by_the_seed_it_arrived_before() {
     let raw = response_bytes(486, "Busy Here", "INVITE", branch, "reoffer", true);
     stack.inject(&raw).await;
     elapse_ms(60).await;
-    assert_eq!(messages(&stack.drain_events()), vec![(true, 486, false)], "the first arrival matched nothing");
+    assert_eq!(
+        messages(&stack.drain_events()),
+        vec![(true, 486, false)],
+        "the first arrival matched nothing"
+    );
     assert!(stack.drain_peer().is_empty(), "and drew no ACK");
     let final_486 = CustomParser::new().parse(&raw).expect("parse");
 
@@ -310,7 +363,11 @@ async fn a_reoffered_cancel_is_answered_by_the_seed_it_arrived_before() {
     let raw = inbound_request("CANCEL", branch, call_id, None);
     stack.inject(&raw).await;
     elapse_ms(60).await;
-    assert_eq!(messages(&stack.drain_events()), vec![(false, 0, false)], "the CANCEL was handed up");
+    assert_eq!(
+        messages(&stack.drain_events()),
+        vec![(false, 0, false)],
+        "the CANCEL was handed up"
+    );
     let cancel = CustomParser::new().parse(&raw).expect("parse");
 
     assert_eq!(stack.txn.reoffer(cancel.clone(), addr(PEER)).await.unwrap(), Reoffer::Unmatched);
@@ -344,7 +401,11 @@ async fn a_reoffered_request_is_absorbed_by_the_transaction_on_its_branch() {
 
     assert_eq!(stack.txn.reoffer(invite, addr(PEER)).await.unwrap(), Reoffer::Matched);
     elapse_ms(60).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 100), 1, "the cached 100 is replayed (§17.2.1)");
+    assert_eq!(
+        count_responses(&stack.drain_peer(), 100),
+        1,
+        "the cached 100 is replayed (§17.2.1)"
+    );
     assert!(stack.drain_events().is_empty(), "a retransmission surfaces nothing");
     assert_eq!(active(&stack), 1);
 
@@ -357,15 +418,25 @@ async fn a_reoffered_request_is_absorbed_by_the_transaction_on_its_branch() {
     let retransmission = CustomParser::new().parse(&bare_raw).expect("parse");
     assert_eq!(stack.txn.reoffer(retransmission, addr(PEER)).await.unwrap(), Reoffer::Matched);
     elapse_ms(60).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 100), 1, "a Proceeding seed owes the retransmission a provisional (§17.2.1)");
+    assert_eq!(
+        count_responses(&stack.drain_peer(), 100),
+        1,
+        "a Proceeding seed owes the retransmission a provisional (§17.2.1)"
+    );
     assert!(stack.drain_events().is_empty());
     stack.inject(&bare_raw).await;
     elapse_ms(60).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 100), 1, "every later retransmission draws the cached 100");
+    assert_eq!(
+        count_responses(&stack.drain_peer(), 100),
+        1,
+        "every later retransmission draws the cached 100"
+    );
     assert!(stack.drain_events().is_empty());
     assert_eq!(active(&stack), 2);
 
-    let other = CustomParser::new().parse(&inbound_request("INVITE", "z9hG4bK-nobody", "nobody", None)).expect("parse");
+    let other = CustomParser::new()
+        .parse(&inbound_request("INVITE", "z9hG4bK-nobody", "nobody", None))
+        .expect("parse");
     assert_eq!(stack.txn.reoffer(other, addr(PEER)).await.unwrap(), Reoffer::Unmatched);
     elapse_ms(60).await;
     assert!(stack.drain_peer().is_empty(), "no 100 for a request no transaction holds");

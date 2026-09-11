@@ -105,11 +105,7 @@ fn ewma_smooths_across_repeated_samples() {
 /// Build a signal whose admission gate uses the given bucket/threshold knobs,
 /// over a simulated sampler whose ELU the returned control sets. The EWMA is
 /// seated by one `sample()` so `should_admit`'s panic-ELU read sees a real value.
-fn admission_sig(
-    size: u32,
-    rate: u32,
-    panic_elu: f64,
-) -> (OverloadSignal, SimulatedLoadControl) {
+fn admission_sig(size: u32, rate: u32, panic_elu: f64) -> (OverloadSignal, SimulatedLoadControl) {
     let (sampler, ctl) = simulated();
     let sig = OverloadSignal::new(Arc::new(sampler));
     sig.configure_admission(&crate::config::B2buaConfig {
@@ -150,7 +146,7 @@ async fn the_bucket_refills_over_time() {
     let (sig, _ctl) = admission_sig(1, 1, 1.0);
     assert!(sig.should_admit(false).admit); // drains the lone token
     assert!(!sig.should_admit(false).admit); // empty immediately after
-    // One second of refill at 1 token/s restores exactly one token.
+                                             // One second of refill at 1 token/s restores exactly one token.
     tokio::time::advance(Duration::from_secs(1)).await;
     assert!(sig.should_admit(false).admit, "a refilled token should admit");
 }
@@ -240,8 +236,8 @@ async fn prometheus_text_renders_inputs_and_decisions() {
     ctl.set_elu(0.42);
     ctl.set_gc_fraction(0.0);
     sig.sample(); // seat the ELU EWMA at 0.42
-    // One non-emergency admit (drains the lone token), one emergency admit
-    // (consume_forced → overdraft), then a non-emergency reject (bucket empty).
+                  // One non-emergency admit (drains the lone token), one emergency admit
+                  // (consume_forced → overdraft), then a non-emergency reject (bucket empty).
     assert!(sig.should_admit(false).admit);
     sig.increment_non_emergency_admitted();
     assert!(sig.should_admit(true).admit);

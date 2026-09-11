@@ -58,8 +58,7 @@ pub(super) fn name_addr_text(uri_or_name_addr: &str, tag: Option<&str>) -> SipSt
 /// one of them.
 pub(super) fn extra_headers<S: StartKind>(mut draft: Draft<S>, extra: &[SipHeader]) -> Draft<S> {
     for header in extra {
-        draft =
-            draft.push_raw(HeaderName::Other(header.name.clone()), header.value.clone());
+        draft = draft.push_raw(HeaderName::Other(header.name.clone()), header.value.clone());
     }
     draft
 }

@@ -25,7 +25,8 @@ async fn callee_offerless_reinvite_relays_offerless() {
     let h = Harness::with_transit_delay("b2bua-offerless-reinvite-callee", 0);
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", "127.0.0.1:5073").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

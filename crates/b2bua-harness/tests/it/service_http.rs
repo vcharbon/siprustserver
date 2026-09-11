@@ -76,9 +76,7 @@ impl HttpService for EchoServer {
         self.received.lock().unwrap().push((corr.clone(), req.body.clone()));
         match corr.as_str() {
             CORR_A => HttpResponse::ok(resp_a()),
-            CORR_B => HttpResponse::status(201)
-                .with_body(resp_b())
-                .header("X-Echo", CORR_B),
+            CORR_B => HttpResponse::status(201).with_body(resp_b()).header("X-Echo", CORR_B),
             _ => HttpResponse::status(200),
         }
     }
@@ -88,7 +86,8 @@ impl HttpService for EchoServer {
 //    records each raw response body keyed by correlation. ───────────────────────
 mod binprobe {
     use b2bua::rules::{
-        Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, RuleCall, ServiceSeed, TimerDelay,
+        Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceSeed,
+        TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
     use call::TimerType;
@@ -205,7 +204,8 @@ mod binprobe {
 //    `outcome:"error"` re-entry (the machine is never stranded). ────────────────
 mod errprobe {
     use b2bua::rules::{
-        Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, RuleCall, ServiceSeed, TimerDelay,
+        Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult, ServiceSeed,
+        TimerDelay,
     };
     use b2bua::{define_service, sm_rule, CallEvent};
     use call::TimerType;

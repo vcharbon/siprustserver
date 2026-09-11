@@ -383,13 +383,8 @@ const CALL_ANCHORS: &[Anchor] = &[Anchor::InitialInvite, Anchor::Answer, Anchor:
 /// actor caller's INVITE + BYE feeds): the plain set plus the 180 (tagged only
 /// when it arrived — a non-PRACK provisional is best-effort, so key it from an
 /// `optional` block).
-const LOAD_CALL_ANCHORS: &[Anchor] = &[
-    Anchor::InitialInvite,
-    Anchor::FirstProvisional,
-    Anchor::Answer,
-    Anchor::Ack,
-    Anchor::Bye,
-];
+const LOAD_CALL_ANCHORS: &[Anchor] =
+    &[Anchor::InitialInvite, Anchor::FirstProvisional, Anchor::Answer, Anchor::Ack, Anchor::Bye];
 /// The load `reinvite` shape: the shared establishment plus the re-INVITE.
 const LOAD_REINVITE_ANCHORS: &[Anchor] = &[
     Anchor::InitialInvite,
@@ -402,13 +397,8 @@ const LOAD_REINVITE_ANCHORS: &[Anchor] = &[
 /// The load `refer` shape: hand-rolled establishment + the REFER (a SENT
 /// anchor on bob — its only receiver is the SUT) + charlie's transfer INVITE
 /// (`charlie.initialInvite`). Its teardown is scenario-owned (no bye anchor).
-const LOAD_REFER_ANCHORS: &[Anchor] = &[
-    Anchor::InitialInvite,
-    Anchor::FirstProvisional,
-    Anchor::Answer,
-    Anchor::Ack,
-    Anchor::Refer,
-];
+const LOAD_REFER_ANCHORS: &[Anchor] =
+    &[Anchor::InitialInvite, Anchor::FirstProvisional, Anchor::Answer, Anchor::Ack, Anchor::Refer];
 /// The load `long_call` shape: the shared establishment only — its tolerant
 /// teardown absorbs bob's BYE in a quiesce (no bye anchor).
 const LOAD_ESTABLISH_ANCHORS: &[Anchor] =
@@ -501,9 +491,7 @@ fn default_shapes() -> Vec<ShapeDescriptor> {
             .anchors(LOAD_REFER_ANCHORS)
             .default_weight(1.0)
             .needs_charlie()
-            .load_actor_with(|inputs| {
-                Arc::new(cs::refer(cs::default_binder(), &inputs.refer_key))
-            }),
+            .load_actor_with(|inputs| Arc::new(cs::refer(cs::default_binder(), &inputs.refer_key))),
         // ACTOR-executed (plan §6 P3 order #3): same downstream contract
         // (table §5.4).
         ShapeDescriptor::new("options_hold")
@@ -647,7 +635,10 @@ mod tests {
         }
         // The generated cross-product cells are id-addressable ONLY (no weight),
         // so the default mix stays a representative sample (no bob2 in the mix).
-        assert!(!mix.contains_key("reroute+reinvite"), "generated cells are not in the default mix");
+        assert!(
+            !mix.contains_key("reroute+reinvite"),
+            "generated cells are not in the default mix"
+        );
         assert!(reg.get("reroute+reinvite").is_some(), "but they ARE registered by id");
 
         let failures: Vec<&str> = reg.failure_mix().iter().map(|d| d.id).collect();

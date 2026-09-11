@@ -21,10 +21,10 @@ use sip_message::generators::{
     generate_out_of_dialog_request, CapabilitySet, GenerateOutOfDialogRequestOpts,
     OutOfDialogMethod,
 };
-use sip_message::HeaderName;
 use sip_message::header::{self, Uri, Via};
-use sip_message::SipStr;
+use sip_message::HeaderName;
 use sip_message::SipRequest;
+use sip_message::SipStr;
 use sip_txn::IdGen;
 
 use super::{Readiness, ReadinessSource};
@@ -38,10 +38,7 @@ struct FlagSource {
 }
 impl FlagSource {
     fn new(b: bool, c: bool) -> Arc<Self> {
-        Arc::new(Self {
-            bootstrapped: AtomicBool::new(b),
-            current: AtomicBool::new(c),
-        })
+        Arc::new(Self { bootstrapped: AtomicBool::new(b), current: AtomicBool::new(c) })
     }
     fn set(&self, b: bool, c: bool) {
         self.bootstrapped.store(b, Ordering::SeqCst);
@@ -68,7 +65,10 @@ fn options_probe() -> SipRequest {
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(uri_of("sip:b2bua@127.0.0.1:5070")),
         call_id: "probe-w0-1234-ab@10.0.0.1".into(),
-        from: Some(header::From::from_uri(uri_of("sip:probe@10.0.0.1")).with_tag(SipStr::from_static("probe"))),
+        from: Some(
+            header::From::from_uri(uri_of("sip:probe@10.0.0.1"))
+                .with_tag(SipStr::from_static("probe")),
+        ),
         to: Some(header::To::from_uri(uri_of("sip:b2bua@127.0.0.1:5070"))),
         cseq: 1,
         via: Some(Via::udp("10.0.0.1", 5060).with_branch(SipStr::from_static("z9hG4bKprobe"))),
@@ -151,7 +151,10 @@ fn options_latches_ready_across_blip_then_drains() {
     let id_gen = IdGen::seeded(7);
     let req = options_probe();
 
-    assert_eq!(build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default()).status(), 200);
+    assert_eq!(
+        build_options_health_response(&r, &ov(), &id_gen, &req, &CapabilitySet::default()).status(),
+        200
+    );
 
     // Peer blip: no longer current/bootstrapped — must NOT revert to 503.
     src.set(false, false);
@@ -189,13 +192,15 @@ fn emitted_reason_aligns_with_proxy_classify_503() {
     let req = options_probe();
 
     let not_ready = Readiness::new(FlagSource::new(false, false));
-    let resp = build_options_health_response(&not_ready, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp =
+        build_options_health_response(&not_ready, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert_eq!(classify_503(reason_of(&resp).as_deref()), Health::NotReady);
 
     let draining = Readiness::always_ready();
     draining.set_draining();
-    let resp = build_options_health_response(&draining, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp =
+        build_options_health_response(&draining, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert_eq!(classify_503(reason_of(&resp).as_deref()), Health::Draining);
 }
@@ -215,16 +220,17 @@ fn options_200_stamps_x_overload_503_does_not() {
     // Ready → 200 with an X-Overload header in the exact zero-state v=1 schema.
     let overload = OverloadSignal::live();
     let ready = Readiness::always_ready();
-    let resp = build_options_health_response(&ready, &overload, &id_gen, &req, &CapabilitySet::default());
+    let resp =
+        build_options_health_response(&ready, &overload, &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
-    let xo = x_overload(&resp)
-        .expect("OPTIONS 200 must advertise the worker load signal");
+    let xo = x_overload(&resp).expect("OPTIONS 200 must advertise the worker load signal");
     assert_eq!(xo, "v=1; elu=0.000; gc=0.000; adm=0");
 
     // Advance the admit counter; the next 200's header reflects it as adm=2.
     overload.increment_non_emergency_admitted();
     overload.increment_non_emergency_admitted();
-    let resp = build_options_health_response(&ready, &overload, &id_gen, &req, &CapabilitySet::default());
+    let resp =
+        build_options_health_response(&ready, &overload, &id_gen, &req, &CapabilitySet::default());
     let xo = x_overload(&resp).unwrap();
     assert_eq!(
         xo, "v=1; elu=0.000; gc=0.000; adm=2",
@@ -233,7 +239,13 @@ fn options_200_stamps_x_overload_503_does_not() {
 
     // NotReady (503) and Draining (503) carry NO X-Overload.
     let not_ready = Readiness::new(FlagSource::new(false, false));
-    let resp = build_options_health_response(&not_ready, &overload, &id_gen, &req, &CapabilitySet::default());
+    let resp = build_options_health_response(
+        &not_ready,
+        &overload,
+        &id_gen,
+        &req,
+        &CapabilitySet::default(),
+    );
     assert_eq!(resp.status(), 503);
     assert!(
         x_overload(&resp).is_none(),
@@ -242,7 +254,13 @@ fn options_200_stamps_x_overload_503_does_not() {
 
     let draining = Readiness::always_ready();
     draining.set_draining();
-    let resp = build_options_health_response(&draining, &overload, &id_gen, &req, &CapabilitySet::default());
+    let resp = build_options_health_response(
+        &draining,
+        &overload,
+        &id_gen,
+        &req,
+        &CapabilitySet::default(),
+    );
     assert_eq!(resp.status(), 503);
     assert!(
         x_overload(&resp).is_none(),
@@ -312,11 +330,10 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
 
     // Before start/catch-up: no peers known yet OR not current → NotReady. We
     // start the supervisor first so a peer exists and is genuinely not-current.
-    a_sup.start(Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    )));
-    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
+    a_sup
+        .start(Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone())));
+    let resp =
+        build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503, "before catch-up: NotReady");
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("not-ready"));
 
@@ -325,19 +342,18 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     assert!(a_sup.all_bootstrapped(), "A bootstraps from B");
     assert!(a_sup.all_current(), "A's tail catches up");
     // Sanity: A reclaimed the call as pri:A.
-    assert_eq!(
-        a_store.get_call(PRI, "A", &c).await.unwrap().as_deref(),
-        Some(b"body0".as_ref()),
-    );
+    assert_eq!(a_store.get_call(PRI, "A", &c).await.unwrap().as_deref(), Some(b"body0".as_ref()),);
 
     // Gate now open → 200 OK; readiness latches.
-    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp =
+        build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 200);
     assert!(reason_of(&resp).is_none());
 
     // SIGTERM → 503 draining + Retry-After: 0.
     readiness.set_draining();
-    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
+    let resp =
+        build_options_health_response(&readiness, &ov(), &id_gen, &req, &CapabilitySet::default());
     assert_eq!(resp.status(), 503);
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("0"));
@@ -376,10 +392,8 @@ async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
     );
 
     // Boot seeing the peer once (its pre-restart, now-stale identity).
-    let membership = Arc::new(SimulatedMembership::with_clock(
-        vec![Peer::new("B", "B")],
-        clock.clone(),
-    ));
+    let membership =
+        Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone()));
     a_sup.start(membership.clone());
 
     // Let the Reclaim puller spawn + fail its first connect. Stay well under the
@@ -398,10 +412,7 @@ async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
     // Still BEFORE the 2 s hard timer (≈200 ms elapsed): B never went
     // bootstrap-complete. The node must nonetheless be Ready — B is no longer
     // desired, so its parked entry must not pin readiness.
-    assert!(
-        a_sup.all_bootstrapped(),
-        "departed parked peer must not block all_bootstrapped"
-    );
+    assert!(a_sup.all_bootstrapped(), "departed parked peer must not block all_bootstrapped");
     assert!(
         a_sup.all_current(),
         "departed parked peer must not block all_current (cold-start deadlock)"
@@ -410,7 +421,13 @@ async fn departed_unreachable_peer_does_not_wedge_readiness_not_ready() {
     // End to end through the readiness latch + OPTIONS responder: 200 OK.
     let readiness = Readiness::new(Arc::new(a_sup.clone()));
     let id_gen = IdGen::seeded(0xC0FFEE);
-    let resp = build_options_health_response(&readiness, &ov(), &id_gen, &options_probe(), &CapabilitySet::default());
+    let resp = build_options_health_response(
+        &readiness,
+        &ov(),
+        &id_gen,
+        &options_probe(),
+        &CapabilitySet::default(),
+    );
     assert_eq!(resp.status(), 200, "peerless-after-departure node serves Ready");
     assert!(reason_of(&resp).is_none());
 }

@@ -23,8 +23,8 @@
 
 use crate::common;
 
-use call::CdrEventType;
 use b2bua_harness::{settle_until, B2buaSut};
+use call::CdrEventType;
 use scenario_harness::Harness;
 use sip_message::header::RecordRouteEntry;
 use sip_message::parser::custom::CustomParser;

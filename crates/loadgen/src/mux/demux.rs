@@ -70,11 +70,8 @@ fn route(mux: &MuxSocket, raw: &[u8], src: SocketAddr) {
         // reads nothing but the call token — leg routing is the scenario's to
         // own.
         let idx = if slot.claim_mode {
-            let claims: Vec<_> = slot
-                .receivers
-                .iter()
-                .map(|r| r.claim.as_ref().filter(|_| !r.claimed))
-                .collect();
+            let claims: Vec<_> =
+                slot.receivers.iter().map(|r| r.claim.as_ref().filter(|_| !r.claimed)).collect();
             match resolve_claim(&claims, &LegInfo::new(raw), slot.order_fired) {
                 Some(i) => {
                     slot.receivers[i].claimed = true;
@@ -174,7 +171,13 @@ fn handle_inbound(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr) {
 
 /// Report a demuxed-but-discarded datagram to a recorded inbox's delivery tap
 /// (no-op — not even an allocation — on the unsampled path).
-fn tap_discard(mux: &MuxSocket, d: &Delivery, raw: &[u8], src: SocketAddr, disp: sip_net::RecvDisposition) {
+fn tap_discard(
+    mux: &MuxSocket,
+    d: &Delivery,
+    raw: &[u8],
+    src: SocketAddr,
+    disp: sip_net::RecvDisposition,
+) {
     if let Some(tap) = d.queue.recv_tap() {
         let arrival_ms = mux.clock.now_ms().max(0) as u64;
         tap(&UdpPacket { raw: raw.to_vec(), src, arrival_ms }, disp);
@@ -192,10 +195,7 @@ fn tap_unrouted(mux: &MuxSocket, slot: &CallSlot, raw: &[u8], src: SocketAddr) {
         return;
     };
     let arrival_ms = mux.clock.now_ms().max(0) as u64;
-    tap(
-        &UdpPacket { raw: raw.to_vec(), src, arrival_ms },
-        sip_net::RecvDisposition::Unrouted,
-    );
+    tap(&UdpPacket { raw: raw.to_vec(), src, arrival_ms }, sip_net::RecvDisposition::Unrouted);
 }
 
 fn deliver(stats: &MuxStats, q: &PacketQueue, pkt: UdpPacket) {

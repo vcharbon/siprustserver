@@ -37,7 +37,9 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
     let mut branches = HashSet::new();
     let mut push = |seed: TxnSeed| {
         let branch = match &seed {
-            TxnSeed::ClientInvite { invite, .. } => invite.top_via().branch().unwrap_or_default().to_string(),
+            TxnSeed::ClientInvite { invite, .. } => {
+                invite.top_via().branch().unwrap_or_default().to_string()
+            }
             TxnSeed::ServerInvite { branch, .. } => branch.clone(),
         };
         if !branch.is_empty() && branches.insert(branch) {
@@ -53,7 +55,12 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
             from_tag: invite.from().tag().unwrap_or_default().to_string(),
             // The tag every provisional to the caller carried (`ensure_a_dialog`);
             // none while nothing above a 100 went out.
-            to_tag: call.a_leg.dialogs.first().map(|d| d.sip.local_tag.clone()).filter(|t| !t.is_empty()),
+            to_tag: call
+                .a_leg
+                .dialogs
+                .first()
+                .map(|d| d.sip.local_tag.clone())
+                .filter(|t| !t.is_empty()),
             leg_id: Some(call.a_leg.leg_id.clone()),
             original_request: Some(invite),
         });
@@ -74,7 +81,8 @@ pub(super) fn seeds_for(call: &Call) -> Vec<TxnSeed> {
                     }
                 }
             }
-            for pending in dialog.ext.inbound_pending_requests.iter().filter(|p| pending_invite(p)) {
+            for pending in dialog.ext.inbound_pending_requests.iter().filter(|p| pending_invite(p))
+            {
                 if let Some(seed) = relayed_server_seed(call, leg, pending) {
                     push(seed);
                 }
@@ -134,7 +142,8 @@ fn pending_invite(p: &PendingRequest) -> bool {
 /// do not read — nothing can be rebuilt from it.
 fn client_seed(handle: &InviteTxnHandle) -> Option<TxnSeed> {
     let invite = parse_request(&handle.original_invite)?;
-    let dest: SocketAddr = format!("{}:{}", handle.destination.host, handle.destination.port).parse().ok()?;
+    let dest: SocketAddr =
+        format!("{}:{}", handle.destination.host, handle.destination.port).parse().ok()?;
     Some(TxnSeed::ClientInvite { invite, dest })
 }
 
@@ -177,8 +186,13 @@ fn parse_request(bytes: &[u8]) -> Option<SipRequest> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call::{B2buaDialogExt, Dialog, Direction, HostPort, LegDisposition, LegKind, RemoteInfo, StackDialog};
-    use sip_message::generators::{generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod};
+    use call::{
+        B2buaDialogExt, Dialog, Direction, HostPort, LegDisposition, LegKind, RemoteInfo,
+        StackDialog,
+    };
+    use sip_message::generators::{
+        generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
+    };
     use sip_message::header::Uri;
 
     use crate::config::B2buaConfig;
@@ -200,7 +214,10 @@ mod tests {
             &GenerateOutOfDialogRequestOpts {
                 request_uri: Some(uri("sip:bob@10.0.0.9:5080")),
                 call_id: "acid@alice".into(),
-                from: Some(header::From::from_uri(uri("sip:alice@10.0.0.1")).with_tag(SipStr::from_static("atag"))),
+                from: Some(
+                    header::From::from_uri(uri("sip:alice@10.0.0.1"))
+                        .with_tag(SipStr::from_static("atag")),
+                ),
                 to: Some(header::To::from_uri(uri("sip:bob@10.0.0.9"))),
                 cseq: 1,
                 via: Some(Via::udp("10.0.0.1", 5060).with_branch(SipStr::from_static(A_BRANCH))),
@@ -221,14 +238,25 @@ mod tests {
             &GenerateOutOfDialogRequestOpts {
                 request_uri: Some(uri("sip:bob@10.0.0.2:5070")),
                 call_id: "bcid@x".into(),
-                from: Some(header::From::from_uri(uri("sip:svc@10.0.0.9")).with_tag(SipStr::from_static("svc"))),
+                from: Some(
+                    header::From::from_uri(uri("sip:svc@10.0.0.9"))
+                        .with_tag(SipStr::from_static("svc")),
+                ),
                 to: Some(header::To::from_uri(uri("sip:bob@10.0.0.2"))),
                 cseq,
                 via: Some(
                     Via::udp("10.0.0.9", 5080)
                         .with_branch(SipStr::owned(branch))
-                        .with_param(SipStr::from_static("cr"), header::ParamValue::Token(SipStr::from_static("w0%7Cacid%40alice%7Catag")))
-                        .with_param(SipStr::from_static("lg"), header::ParamValue::Token(SipStr::from_static("b-1"))),
+                        .with_param(
+                            SipStr::from_static("cr"),
+                            header::ParamValue::Token(SipStr::from_static(
+                                "w0%7Cacid%40alice%7Catag",
+                            )),
+                        )
+                        .with_param(
+                            SipStr::from_static("lg"),
+                            header::ParamValue::Token(SipStr::from_static("b-1")),
+                        ),
                 ),
                 contact: Some(header::Contact::from_uri(uri("sip:svc@10.0.0.9:5080"))),
                 max_forwards: Some(70),
@@ -249,7 +277,11 @@ mod tests {
             sip: StackDialog {
                 call_id: "bcid@x".into(),
                 local_tag: "svc".into(),
-                remote_tag: if state == LegState::Confirmed { "btag".into() } else { String::new() },
+                remote_tag: if state == LegState::Confirmed {
+                    "btag".into()
+                } else {
+                    String::new()
+                },
                 local_uri: "sip:svc@10.0.0.9".into(),
                 remote_uri: "sip:bob@10.0.0.2".into(),
                 remote_target: "sip:bob@10.0.0.2:5070".into(),
@@ -311,7 +343,8 @@ mod tests {
 
     fn call_with(a_state: LegState, b: Leg) -> Call {
         let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        let mut call = build_initial_call(&a_invite(), "10.0.0.1:5060".parse().unwrap(), &config, 0);
+        let mut call =
+            build_initial_call(&a_invite(), "10.0.0.1:5060".parse().unwrap(), &config, 0);
         call.a_leg.state = a_state;
         call = call::helpers::add_b_leg(call, b);
         call.active_peer = Some(call::ActivePeer { leg_a: "a".into(), leg_b: "b-1".into() });
@@ -349,7 +382,9 @@ mod tests {
         seeds
             .iter()
             .filter_map(|s| match s {
-                TxnSeed::ServerInvite { branch, original_request, .. } => Some((branch.clone(), original_request.is_some())),
+                TxnSeed::ServerInvite { branch, original_request, .. } => {
+                    Some((branch.clone(), original_request.is_some()))
+                }
                 TxnSeed::ClientInvite { .. } => None,
             })
             .collect()
@@ -370,7 +405,9 @@ mod tests {
         seeds
             .iter()
             .filter_map(|s| match s {
-                TxnSeed::ClientInvite { invite, .. } => Some(invite.top_via().branch().unwrap_or_default().to_string()),
+                TxnSeed::ClientInvite { invite, .. } => {
+                    Some(invite.top_via().branch().unwrap_or_default().to_string())
+                }
                 TxnSeed::ServerInvite { .. } => None,
             })
             .collect()
@@ -382,24 +419,37 @@ mod tests {
     /// a-leg branch for an in-dialog re-offer.
     #[test]
     fn a_ringing_call_seeds_the_a_leg_server_invite_and_the_b_leg_client_invite_once() {
-        let mut call = call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
+        let mut call =
+            call_with(LegState::Early, b_leg(LegState::Early, Some(b_handle(B_BRANCH, 1))));
         ring_a_leg(&mut call, "svca");
-        assert!(!names_server_branch(&call, A_BRANCH), "the caller's INVITE is no in-dialog re-offer target");
+        assert!(
+            !names_server_branch(&call, A_BRANCH),
+            "the caller's INVITE is no in-dialog re-offer target"
+        );
         assert!(!names_server_branch(&call, B_BRANCH));
         let seeds = seeds_for(&call);
         assert_eq!(seeds.len(), 2, "{seeds:?}");
         assert_eq!(server_branches(&seeds), vec![(A_BRANCH.to_string(), true)]);
         assert_eq!(client_branches(&seeds), vec![B_BRANCH.to_string()]);
-        assert_eq!(server_identity(&seeds[0]), Some(("acid@alice", "atag", Some("svca"), Some("a"))), "the a-leg seed first");
+        assert_eq!(
+            server_identity(&seeds[0]),
+            Some(("acid@alice", "atag", Some("svca"), Some("a"))),
+            "the a-leg seed first"
+        );
         let TxnSeed::ClientInvite { dest, .. } = &seeds[1] else { panic!("the b-leg seed second") };
-        assert_eq!(*dest, "10.0.0.2:5070".parse::<SocketAddr>().unwrap(), "the handle's wire destination");
+        assert_eq!(
+            *dest,
+            "10.0.0.2:5070".parse::<SocketAddr>().unwrap(),
+            "the handle's wire destination"
+        );
     }
 
     /// A call still `Trying` — nothing above a 100 went to the caller — seeds the
     /// a-leg INVITE with no To-tag: the layer mints one on its first response.
     #[test]
     fn an_unrung_a_leg_seeds_no_to_tag() {
-        let call = call_with(LegState::Trying, b_leg(LegState::Trying, Some(b_handle(B_BRANCH, 1))));
+        let call =
+            call_with(LegState::Trying, b_leg(LegState::Trying, Some(b_handle(B_BRANCH, 1))));
         let seeds = seeds_for(&call);
         assert_eq!(server_identity(&seeds[0]), Some(("acid@alice", "atag", None, Some("a"))));
     }
@@ -408,7 +458,8 @@ mod tests {
     /// on the record for the ACK, and seed nothing.
     #[test]
     fn an_established_call_seeds_nothing() {
-        let call = call_with(LegState::Confirmed, b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1))));
+        let call =
+            call_with(LegState::Confirmed, b_leg(LegState::Confirmed, Some(b_handle(B_BRANCH, 1))));
         assert!(seeds_for(&call).is_empty());
     }
 
@@ -426,8 +477,15 @@ mod tests {
         assert_eq!(server_branches(&seeds), vec![(RELAYED_BRANCH.to_string(), false)]);
         assert_eq!(client_branches(&seeds), vec![REINVITE_BRANCH.to_string()]);
         let server = seeds.iter().find_map(server_identity);
-        assert_eq!(server, Some(("acid@alice", "atag", Some("svca"), Some("a"))), "the originator's identity, its To-tag and leg");
-        assert!(names_server_branch(&call, RELAYED_BRANCH), "the relayed INVITE's branch is a server seed");
+        assert_eq!(
+            server,
+            Some(("acid@alice", "atag", Some("svca"), Some("a"))),
+            "the originator's identity, its To-tag and leg"
+        );
+        assert!(
+            names_server_branch(&call, RELAYED_BRANCH),
+            "the relayed INVITE's branch is a server seed"
+        );
         assert!(!names_server_branch(&call, REINVITE_BRANCH), "the client half is no server seed");
         assert!(!names_server_branch(&call, A_BRANCH), "an answered a-leg names no server INVITE");
     }
@@ -448,7 +506,10 @@ mod tests {
 
         let mut answered = leg.clone();
         answered.dialogs[0].ext.awaited_ack_cseq = Some(2);
-        assert!(seeds_for(&call_with(LegState::Confirmed, answered)).is_empty(), "a 2xx taken closes the round");
+        assert!(
+            seeds_for(&call_with(LegState::Confirmed, answered)).is_empty(),
+            "a 2xx taken closes the round"
+        );
 
         let rejected = call::helpers::close_rejected_invite_round(open, "b-1", REINVITE_BRANCH);
         assert!(seeds_for(&rejected).is_empty(), "a non-2xx final closed the round on the record");

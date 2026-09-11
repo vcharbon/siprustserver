@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use super::endpoint::{
-    CtxFeed, Disposition, Feed, MediaState, SUBFLOW_REALIGN, SUBFLOW_RENEG, SUBFLOW_REFER,
+    CtxFeed, Disposition, Feed, MediaState, SUBFLOW_REALIGN, SUBFLOW_REFER, SUBFLOW_RENEG,
 };
 use super::goals::{Barrier, Goal, GoalStep};
 use super::spec::{ActorCall, ActorScenario, Expect};
@@ -111,10 +111,7 @@ impl ActorScenario for Refer {
                 goals: vec![
                     Goal::new(
                         Barrier::None,
-                        GoalStep::Invite {
-                            callee: "bob",
-                            plan: Some(env.invite_plan(&["bob"])),
-                        },
+                        GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
                     ),
                     Goal::new(Barrier::pred("merged", merged), GoalStep::Bye),
                 ],
@@ -126,7 +123,7 @@ impl ActorScenario for Refer {
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -150,7 +147,7 @@ impl ActorScenario for Refer {
                     on_refer_accepted: Feed::new(Some("time_to_202"), Some("referred")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -169,7 +166,7 @@ impl ActorScenario for Refer {
                     on_answer_sent: Feed::new(Some("time_to_charlie_200"), Some("transferred")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -182,9 +179,7 @@ impl ActorScenario for Refer {
                     && s.leg_at_least("bob", LegPhase::Confirmed)
             }),
             phase("referred", |s| {
-                s.leg("bob")
-                    .subflow(SUBFLOW_REFER)
-                    .is_some_and(|f| f >= SubflowState::Answered)
+                s.leg("bob").subflow(SUBFLOW_REFER).is_some_and(|f| f >= SubflowState::Answered)
             }),
             phase("transferred", |s| s.leg_at_least("charlie", LegPhase::Confirmed)),
             phase("merged", merged),
@@ -195,7 +190,7 @@ impl ActorScenario for Refer {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -265,10 +260,7 @@ impl ActorScenario for ReferCharlieReject {
                 goals: vec![
                     Goal::new(
                         Barrier::None,
-                        GoalStep::Invite {
-                            callee: "bob",
-                            plan: Some(env.invite_plan(&["bob"])),
-                        },
+                        GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
                     ),
                     Goal::new(Barrier::pred("declined", declined), GoalStep::Bye),
                 ],
@@ -280,7 +272,7 @@ impl ActorScenario for ReferCharlieReject {
                     on_answer_rx: Feed::new(Some("time_to_200"), None),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -301,7 +293,7 @@ impl ActorScenario for ReferCharlieReject {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -317,7 +309,7 @@ impl ActorScenario for ReferCharlieReject {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -340,7 +332,7 @@ impl ActorScenario for ReferCharlieReject {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::TransferDeclined,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -410,7 +402,7 @@ impl ActorScenario for ReroutingPrack {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -426,7 +418,7 @@ impl ActorScenario for ReroutingPrack {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -447,7 +439,7 @@ impl ActorScenario for ReroutingPrack {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -466,7 +458,7 @@ impl ActorScenario for ReroutingPrack {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -530,7 +522,7 @@ impl ActorScenario for PrackUpdate {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -549,7 +541,7 @@ impl ActorScenario for PrackUpdate {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -565,7 +557,7 @@ impl ActorScenario for PrackUpdate {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -621,7 +613,7 @@ impl ActorScenario for Reinvite {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -641,7 +633,7 @@ impl ActorScenario for Reinvite {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -655,7 +647,7 @@ impl ActorScenario for Reinvite {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -711,7 +703,7 @@ impl ActorScenario for OptionsHold {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -728,7 +720,7 @@ impl ActorScenario for OptionsHold {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -742,7 +734,7 @@ impl ActorScenario for OptionsHold {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -800,7 +792,7 @@ impl ActorScenario for LongCall {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), None),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -817,7 +809,7 @@ impl ActorScenario for LongCall {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -831,7 +823,7 @@ impl ActorScenario for LongCall {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -876,7 +868,7 @@ impl ActorScenario for InviteReject {
                 via: None,
                 // NO phases / checkpoints / ringing gate (contract table §5.8).
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -892,7 +884,7 @@ impl ActorScenario for InviteReject {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -907,7 +899,7 @@ impl ActorScenario for InviteReject {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::Reject(486),
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -949,7 +941,10 @@ impl ActorScenario for AbandonRinging {
                         Barrier::None,
                         GoalStep::Invite { callee: "bob", plan: Some(env.invite_plan(&["bob"])) },
                     ),
-                    Goal::new(Barrier::pred("ringing", alice_early), GoalStep::Cancel { stated: Vec::new() }),
+                    Goal::new(
+                        Barrier::pred("ringing", alice_early),
+                        GoalStep::Cancel { stated: Vec::new() },
+                    ),
                 ],
                 invite_targets: vec![("bob", env.bob.clone())],
                 via: None,
@@ -959,7 +954,7 @@ impl ActorScenario for AbandonRinging {
                     on_provisional: Feed::new(Some("time_to_180"), None),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -975,7 +970,7 @@ impl ActorScenario for AbandonRinging {
                 invite_targets: vec![],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -990,7 +985,7 @@ impl ActorScenario for AbandonRinging {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::AbandonedEarly,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,
@@ -1040,7 +1035,7 @@ impl ActorScenario for BasicCall {
                     on_bye_ok: Feed::new(Some("time_to_bye_200"), Some("bye_200")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -1057,7 +1052,7 @@ impl ActorScenario for BasicCall {
                     on_ack_rx: Feed::new(None, Some("connected")),
                     ..CtxFeed::default()
                 },
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -1071,7 +1066,7 @@ impl ActorScenario for BasicCall {
             plan,
             settle: SettleBarrier::default_ceiling(),
             expect: Expect::HappyBye,
-        
+
             waivers: Vec::new(),
             automatics: Default::default(),
             ceiling: None,

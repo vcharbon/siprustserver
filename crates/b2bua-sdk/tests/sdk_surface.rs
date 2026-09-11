@@ -7,7 +7,7 @@
 //! out-of-tree boundary check (the `announcement` crate).
 
 use b2bua_sdk::rules::{
-    Effect, EffectKind, Match, MachineId, Method, RuleContext, RuleDefinition, RuleHandleResult,
+    Effect, EffectKind, MachineId, Match, Method, RuleContext, RuleDefinition, RuleHandleResult,
     StateLabel, SERVICE_LAYER,
 };
 use b2bua_sdk::{define_service, sm_rule};

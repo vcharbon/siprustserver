@@ -30,9 +30,9 @@ use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to_with_18x;
 use b2bua::decision::{CallDecisionEngine, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::NoopLimiter;
 use call::features::RelayFirst18xStrategy;
 use call::{CallBodyCodec, MsgpackCodec, PrackedProvisional};
-use b2bua::limiter::NoopLimiter;
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -118,20 +118,31 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
     let decision = decision_masking_the_first_18x();
     let mut w_b1 = fh
         .spawn_worker_limited(
-            "b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            decision.clone(), Arc::new(NoopLimiter),
+            "b1",
+            "b1",
+            B1,
+            &["b2"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            decision.clone(),
+            Arc::new(NoopLimiter),
         )
         .await;
     let mut w_b2 = fh
         .spawn_worker_limited(
-            "b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            decision.clone(), Arc::new(NoopLimiter),
+            "b2",
+            "b2",
+            B2,
+            &["b1"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            decision.clone(),
+            Arc::new(NoopLimiter),
         )
         .await;
     fh.advance(Duration::from_millis(500)).await;
@@ -151,10 +162,7 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
         if pri_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
 
     // Bob answers reliably, in good faith; alice is shown the ordinary copy.
-    uas.respond(183, "Session Progress")
-        .reliable(BOB_RSEQ)
-        .with_sdp(ANSWER)
-        .await;
+    uas.respond(183, "Session Progress").reliable(BOB_RSEQ).with_sdp(ANSWER).await;
     let p180 = call.expect(180).await;
     assert!(!requires_100rel(&p180), "the mask shows the caller nothing reliable");
     assert!(p180.header::<RSeq>().is_none(), "and no RSeq");
@@ -192,10 +200,7 @@ async fn a_repeat_after_takeover_draws_no_second_prack_from_the_survivor() {
     let hydrated_before = survivor.metrics().repl_takeover_hydrated_total();
 
     // ── STEP 4: bob's §3 ladder repeats the SAME provisional, at the survivor ─
-    uas.respond(183, "Session Progress")
-        .reliable(BOB_RSEQ)
-        .with_sdp(ANSWER)
-        .await;
+    uas.respond(183, "Session Progress").reliable(BOB_RSEQ).with_sdp(ANSWER).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(
         bob.try_receive_tolerating("PRACK", &[]).await.is_none(),

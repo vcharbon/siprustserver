@@ -44,21 +44,19 @@ const B2: &str = "127.0.0.1:5092";
 /// Why `cseq-in-dialog-order` is accepted from the kill onward: with two
 /// potential owners of one leg in the takeover window, the b-leg CSeq the dead
 /// primary minted may be minted again by the survivor (ADR-0014).
-const CSEQ_OVERLAP: &str = "ADR-0014 accepted trade-off: with two potential owners of one leg in the \
+const CSEQ_OVERLAP: &str =
+    "ADR-0014 accepted trade-off: with two potential owners of one leg in the \
                             takeover window, the b-leg CSeq the dead primary minted may be minted \
                             again by the survivor";
 
 /// The proxy plus both workers, ready at steady state.
 async fn bring_up(fh: &mut FailoverHarness) -> (ProxySut, ReplicatedB2buaSut, ReplicatedB2buaSut) {
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
     (proxy, w_b1, w_b2)
@@ -123,10 +121,8 @@ async fn synchronized_call_ref(
 ) -> String {
     let primary = if pri_ord == "b1" { w_b1 } else { w_b2 };
     let survivor = survivor_of(pri_ord, w_b1, w_b2);
-    let call_ref = survivor
-        .scan_one_backed_up(pri_ord)
-        .await
-        .expect("the call replicated to the backup");
+    let call_ref =
+        survivor.scan_one_backed_up(pri_ord).await.expect("the call replicated to the backup");
     assert!(primary.serves(&call_ref), "the primary serves the call");
     assert!(
         survivor.is_synchronized_backup(&call_ref).await,

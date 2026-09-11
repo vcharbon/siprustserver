@@ -65,11 +65,13 @@ impl Inbox {
     pub async fn recv(&mut self) -> Result<Inbound, StepError> {
         match self {
             Inbox::Own(agent) => agent.recv_any().await,
-            Inbox::Shared { role, rx, idle } => match tokio::time::timeout(*idle, rx.recv()).await {
-                Ok(Some(m)) => Ok(m),
-                Ok(None) => Err(StepError::QueueClosed { who: role.to_string() }),
-                Err(_) => Err(StepError::Timeout { who: role.to_string() }),
-            },
+            Inbox::Shared { role, rx, idle } => {
+                match tokio::time::timeout(*idle, rx.recv()).await {
+                    Ok(Some(m)) => Ok(m),
+                    Ok(None) => Err(StepError::QueueClosed { who: role.to_string() }),
+                    Err(_) => Err(StepError::Timeout { who: role.to_string() }),
+                }
+            }
         }
     }
 }
@@ -144,11 +146,8 @@ impl Demux {
 
     /// Resolve the pending claim owning this initial INVITE, consuming it.
     fn claim_leg(&mut self, leg: &LegInfo<'_>) -> Option<usize> {
-        let pending: Vec<Option<&ClaimRule>> = self
-            .members
-            .iter()
-            .map(|m| if m.fired { None } else { m.claim.as_ref() })
-            .collect();
+        let pending: Vec<Option<&ClaimRule>> =
+            self.members.iter().map(|m| if m.fired { None } else { m.claim.as_ref() }).collect();
         let i = resolve_claim(&pending, leg, self.ordinal)?;
         if matches!(self.members[i].claim, Some(ClaimRule::ArrivalOrder(_))) {
             self.ordinal += 1;
@@ -237,12 +236,7 @@ pub fn wire_shared_endpoints(
         for &i in &indices {
             let (tx, rx) = mpsc::unbounded_channel();
             let spec = &specs[i];
-            members.push(Member {
-                role: spec.role,
-                claim: spec.claim.clone(),
-                fired: false,
-                tx,
-            });
+            members.push(Member { role: spec.role, claim: spec.claim.clone(), fired: false, tx });
             inboxes.push((spec.role, Inbox::Shared { role: spec.role, rx, idle }));
         }
         let demux = Arc::new(Mutex::new(Demux {

@@ -103,7 +103,9 @@ mod tests {
 
     #[test]
     fn a_count_and_a_reason_cannot_be_stated_at_once() {
-        assert!(serde_json::from_str::<Postconditions>(r#"{"cdr":{"count":1,"absent":"x"}}"#).is_err());
+        assert!(
+            serde_json::from_str::<Postconditions>(r#"{"cdr":{"count":1,"absent":"x"}}"#).is_err()
+        );
         assert!(serde_json::from_str::<Postconditions>(r#"{"cdr":{}}"#).is_err());
     }
 

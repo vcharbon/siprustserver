@@ -37,12 +37,7 @@ impl HttpService for EchoService {
 
 fn echo() -> (Arc<EchoService>, Arc<AtomicU32>) {
     let calls = Arc::new(AtomicU32::new(0));
-    (
-        Arc::new(EchoService {
-            calls: calls.clone(),
-        }),
-        calls,
-    )
+    (Arc::new(EchoService { calls: calls.clone() }), calls)
 }
 
 #[tokio::test(start_paused = true)]
@@ -82,10 +77,7 @@ async fn non_2xx_response_is_still_ok() {
 #[tokio::test(start_paused = true)]
 async fn no_server_is_connect_error() {
     let net = SimulatedHttpNetwork::new();
-    let err = net
-        .request(addr("10.0.0.9:8080"), HttpRequest::get("/x"))
-        .await
-        .unwrap_err();
+    let err = net.request(addr("10.0.0.9:8080"), HttpRequest::get("/x")).await.unwrap_err();
     assert!(matches!(err, HttpError::Connect(_)));
 }
 
@@ -95,10 +87,7 @@ async fn dropping_the_handle_deregisters() {
     let (svc, _calls) = echo();
     let server = net.serve(addr("10.0.0.1:8080"), svc).await.unwrap();
     drop(server);
-    let err = net
-        .request(addr("10.0.0.1:8080"), HttpRequest::get("/x"))
-        .await
-        .unwrap_err();
+    let err = net.request(addr("10.0.0.1:8080"), HttpRequest::get("/x")).await.unwrap_err();
     assert!(matches!(err, HttpError::Connect(_)));
 }
 
@@ -248,14 +237,8 @@ async fn headers_and_query_travel_through_the_fabric() {
     // Query string survived on the path.
     assert_eq!(resp.body, b"/routes?debug=true&seed=7");
     // Request header reached the handler, response headers came back.
-    assert!(resp
-        .headers
-        .iter()
-        .any(|(k, v)| k == "x-echoed-debug" && v == "on"));
-    assert!(resp
-        .headers
-        .iter()
-        .any(|(k, v)| k == "x-example-trace-id" && v == "trace-1"));
+    assert!(resp.headers.iter().any(|(k, v)| k == "x-echoed-debug" && v == "on"));
+    assert!(resp.headers.iter().any(|(k, v)| k == "x-example-trace-id" && v == "trace-1"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -276,10 +259,7 @@ async fn recorder_captures_request_headers_and_response_headers() {
     let cap = rec.captured();
     assert_eq!(cap.len(), 1);
     assert_eq!(cap[0].path, "/routes?seed=1");
-    assert!(cap[0]
-        .req_headers
-        .iter()
-        .any(|(k, v)| k == "x-debug" && v == "yes"));
+    assert!(cap[0].req_headers.iter().any(|(k, v)| k == "x-debug" && v == "yes"));
     match &cap[0].outcome {
         ExchangeOutcome::Response { status, headers, .. } => {
             assert_eq!(*status, 200);
@@ -313,9 +293,6 @@ async fn recorder_captures_response_and_error() {
     assert_eq!(cap[0].method, "POST");
     assert_eq!(cap[0].path, "/hi");
     assert_eq!(cap[0].req_body, b"body");
-    assert!(matches!(
-        cap[0].outcome,
-        ExchangeOutcome::Response { status: 200, .. }
-    ));
+    assert!(matches!(cap[0].outcome, ExchangeOutcome::Response { status: 200, .. }));
     assert!(matches!(cap[1].outcome, ExchangeOutcome::Error(_)));
 }

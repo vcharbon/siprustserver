@@ -15,14 +15,11 @@ async fn send_request_invite_returns_invite_handle() {
     let handle = stack
         .txn
         .send_request(invite.clone(), addr("192.0.2.20:5060"), TxnKind::Invite)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     match handle {
-        ClientTransactionHandle::Invite {
-            branch: b,
-            original_invite,
-            destination,
-        } => {
+        ClientTransactionHandle::Invite { branch: b, original_invite, destination } => {
             assert_eq!(b, branch);
             assert_eq!(destination, addr("192.0.2.20:5060"));
             assert_eq!(original_invite, invite);
@@ -41,14 +38,11 @@ async fn send_request_non_invite_returns_non_invite_handle() {
     let handle = stack
         .txn
         .send_request(bye.clone(), addr("192.0.2.20:5060"), TxnKind::NonInvite)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     match handle {
-        ClientTransactionHandle::NonInvite {
-            branch: b,
-            original_request,
-            destination,
-        } => {
+        ClientTransactionHandle::NonInvite { branch: b, original_request, destination } => {
             assert_eq!(b, branch);
             assert_eq!(destination, addr("192.0.2.20:5060"));
             assert_eq!(original_request, bye);

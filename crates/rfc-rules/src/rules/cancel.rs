@@ -284,9 +284,7 @@ impl Obligation for CancelRouteEchoesInvite {
                 let (Some(cancel_head), Some(invite_head)) =
                     (wire.msgs[cancel.msg].head.as_deref(), wire.msgs[invite.msg].head.as_deref())
                 else {
-                    out.push(finding(Decision::Undecidable(
-                        "no header block at this vantage",
-                    )));
+                    out.push(finding(Decision::Undecidable("no header block at this vantage")));
                     continue;
                 };
                 let cancel_routes = sniff::header_values(cancel_head, "route");
@@ -638,8 +636,7 @@ mod tests {
     }
 
     fn rsp(at_us: u64, status: u16) -> Msg {
-        let mut m =
-            msg(at_us, UAS, UAC, Kind::Response { status }, "INVITE");
+        let mut m = msg(at_us, UAS, UAC, Kind::Response { status }, "INVITE");
         m.to_tag = Some("tb".to_string());
         m
     }
@@ -662,12 +659,8 @@ mod tests {
     /// PRESENT on the wire, so closing the observation changes nothing.
     #[test]
     fn a_2xx_after_the_cancel_is_violated_under_a_closed_observation() {
-        let msgs = vec![
-            req(1_000, "INVITE"),
-            rsp(3_000, 180),
-            req(4_000, "CANCEL"),
-            rsp(6_000, 200),
-        ];
+        let msgs =
+            vec![req(1_000, "INVITE"), rsp(3_000, 180), req(4_000, "CANCEL"), rsp(6_000, 200)];
         let f = No200AfterCancel.eval(&WireView { msgs: &msgs, obs: &obs(&msgs) });
         assert_eq!(f.len(), 1, "one occasion, the cancelled transaction: {f:?}");
         assert_eq!(f[0].rule, RuleId::No200AfterCancel);
@@ -686,12 +679,8 @@ mod tests {
     /// rate against.
     #[test]
     fn a_2xx_that_crossed_the_cancel_stays_compliant_live() {
-        let msgs = vec![
-            req(1_000, "INVITE"),
-            rsp(3_000, 180),
-            rsp(4_000, 200),
-            req(4_500, "CANCEL"),
-        ];
+        let msgs =
+            vec![req(1_000, "INVITE"), rsp(3_000, 180), rsp(4_000, 200), req(4_500, "CANCEL")];
         let f = No200AfterCancel.eval(&WireView { msgs: &msgs, obs: &obs(&msgs) });
         assert_eq!(f.len(), 1, "the crossing costs an occasion: {f:?}");
         assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
@@ -714,8 +703,9 @@ mod tests {
         assert_eq!(f.len(), 1, "one occasion, the CANCEL: {f:?}");
         assert_eq!(f[0].emitter, UAC, "the UAC that cancelled is charged");
         assert_eq!(f[0].taker, UAS);
-        let Decision::Violated(Evidence::LateCancel { since_final_us, final_status, ack_msg, .. }) =
-            &f[0].decision
+        let Decision::Violated(Evidence::LateCancel {
+            since_final_us, final_status, ack_msg, ..
+        }) = &f[0].decision
         else {
             panic!("late-cancel evidence: {:?}", f[0].decision)
         };
@@ -938,10 +928,8 @@ mod tests {
 
         // The branch is what §9.1 pairs on: an INVITE on another branch of the
         // same call pairs with nothing either.
-        let other = [
-            sent(1_000, "INVITE", "z9hG4bK-other", P1),
-            sent(4_000, "CANCEL", "z9hG4bK-1", P2),
-        ];
+        let other =
+            [sent(1_000, "INVITE", "z9hG4bK-other", P1), sent(4_000, "CANCEL", "z9hG4bK-1", P2)];
         assert!(routes(&other).is_empty(), "{:?}", routes(&other));
     }
 

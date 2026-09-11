@@ -118,11 +118,7 @@ mod tests {
                 bind_key: bind.to_string(),
                 disposition: crate::types::RecvDisposition::Delivered,
                 wire: crate::contracts::WireStamp::of_bytes(&raw),
-                packet: UdpPacket {
-                    raw,
-                    src: "127.0.0.1:5070".parse().unwrap(),
-                    arrival_ms: seq,
-                },
+                packet: UdpPacket { raw, src: "127.0.0.1:5070".parse().unwrap(), arrival_ms: seq },
             },
             seq,
             at_ms: seq,

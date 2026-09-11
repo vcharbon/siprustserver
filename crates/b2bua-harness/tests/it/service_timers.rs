@@ -28,7 +28,7 @@ fn reasons_of(cdr: &b2bua::cdr::CdrRecord) -> Vec<String> {
 /// The 18x watchdog service — the exact downstream `timer18x` shape.
 mod ringwatch {
     use b2bua::rules::{
-        Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, RuleCall,
+        Effect, Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
@@ -135,7 +135,7 @@ mod ringwatch {
 /// Key-identity probe: two keys, one wildcard rule, a same-key re-arm.
 mod dualkeys {
     use b2bua::rules::{
-        Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, RuleCall,
+        Effect, Match, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
         ServiceSeed, Terminal, TimerDelay,
     };
     use b2bua::{define_service, sm_rule};
@@ -246,10 +246,7 @@ async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
     // terminating backstop (armed at BeginTermination) reaps the silent leg —
     // advance exactly past it, so a regression that falls back to the 150 s
     // SetupTimeout fails here instead of passing under a longer pump.
-    h.advance(Duration::from_millis(
-        call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000,
-    ))
-    .await;
+    h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
     assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_some(),
         "the grace expiry puts the b-leg CANCEL on the wire (ADR-0028)"

@@ -84,17 +84,19 @@ use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork};
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::observability::ProxyMetrics;
-use sip_proxy::registry::control::WorkerRegistryControl;
 use sip_proxy::registry::composed::ComposedWorkerRegistry;
+use sip_proxy::registry::control::WorkerRegistryControl;
 use sip_proxy::registry::static_reg::StaticWorkerRegistry;
 use sip_proxy::registry::{WorkerHealth, WorkerRegistry};
-use topology::{K8sMembership, Membership};
 use sip_proxy::resolver::ResolverConfig;
 use sip_proxy::security::hmac::{HmacKey, StaticHmacKeyProvider};
-use sip_proxy::self_gate::{AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate, ProxySelfGateConfig};
+use sip_proxy::self_gate::{
+    AlwaysAdmitGate, EluCpsGate, IntakeAgeRecorder, ProxySelfGate, ProxySelfGateConfig,
+};
 use sip_proxy::strategies::{LoadBalancerConfig, LoadBalancerStrategy};
 use sip_proxy::{ExternalFaceParts, FaceCidrs, ProxyAddr, ProxyCoreBuilder, RoutingStrategy};
 use sip_txn::IdGen;
+use topology::{K8sMembership, Membership};
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
@@ -163,12 +165,12 @@ fn parse_ext_face_cidrs(
         return Ok(None);
     }
     match cidrs.map(str::trim).filter(|s| !s.is_empty()) {
-        None => Err(
-            "PROXY_FACE_INT_CIDRS is REQUIRED when PROXY_LISTEN_EXT is set: the dual-face \
+        None => {
+            Err("PROXY_FACE_INT_CIDRS is REQUIRED when PROXY_LISTEN_EXT is set: the dual-face \
              egress picker needs the internal-plane CIDR list (e.g. \
              PROXY_FACE_INT_CIDRS=10.244.0.0/16,172.20.0.0/16). Refusing to start."
-                .to_string(),
-        ),
+                .to_string())
+        }
         Some(s) => FaceCidrs::parse(s)
             .map(Some)
             .map_err(|e| format!("bad PROXY_FACE_INT_CIDRS: {e}. Refusing to start.")),
@@ -269,10 +271,7 @@ fn validate_config(
 
     // Cap-band sanity. Cheap typo guards.
     if observer.cap_floor_cps <= 0.0 {
-        violations.push(format!(
-            "cap_floor_cps must be > 0 (got {}).",
-            observer.cap_floor_cps,
-        ));
+        violations.push(format!("cap_floor_cps must be > 0 (got {}).", observer.cap_floor_cps,));
     }
     if observer.cap_floor_cps > observer.cap_initial_cps {
         violations.push(format!(
@@ -300,10 +299,7 @@ fn validate_config(
         violations.push(format!(
             "aimd cooldown ({} × {} = {} ms) must be >= one HealthProbe cycle ({} ms) \
              so a single decrease isn't immediately followed by an increase tick.",
-            observer.aimd_cooldown_ticks,
-            observer.options_interval_ms,
-            cooldown_ms,
-            probe_cycle_ms,
+            observer.aimd_cooldown_ticks, observer.options_interval_ms, cooldown_ms, probe_cycle_ms,
         ));
     }
 
@@ -322,8 +318,7 @@ fn validate_config(
 fn assert_valid_config(probe: ProbeTimingConfig, observer: &LoadObserverConfig) {
     if let Err(violations) = validate_config(probe, observer) {
         let header = "sip-front-proxy: refusing to start — invalid configuration:";
-        let bullets =
-            violations.iter().map(|v| format!("  - {v}")).collect::<Vec<_>>().join("\n");
+        let bullets = violations.iter().map(|v| format!("  - {v}")).collect::<Vec<_>>().join("\n");
         panic!("{header}\n{bullets}");
     }
 }
@@ -398,18 +393,59 @@ fn self_gate_prometheus_text(gate: &Option<EluCpsGate>) -> String {
     let counter = |s: &mut String, name: &str, help: &str, val: u64| {
         s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {val}\n"));
     };
-    gauge(&mut s, "sip_proxy_self_elu_ewma", "Proxy-self ELU EWMA (0..1). Crosses elu_critical -> 503.", m.elu_ewma);
-    gauge(&mut s, "sip_proxy_self_gc_fraction", "Proxy-self GC fraction (0..1). Informational only.", m.gc_fraction);
-    gauge(&mut s, "sip_proxy_self_cps_bucket_level", "Proxy-self CPS bucket level (tokens remaining).", m.cps_bucket_level);
-    gauge(&mut s, "sip_proxy_self_cps_bucket_max", "Proxy-self CPS bucket capacity (constant per config).", m.cps_bucket_max);
-    counter(&mut s, "sip_proxy_self_external_invites_admitted_total", "External new-dialog non-emergency INVITEs admitted by the proxy-self gate.", m.external_admitted_total);
+    gauge(
+        &mut s,
+        "sip_proxy_self_elu_ewma",
+        "Proxy-self ELU EWMA (0..1). Crosses elu_critical -> 503.",
+        m.elu_ewma,
+    );
+    gauge(
+        &mut s,
+        "sip_proxy_self_gc_fraction",
+        "Proxy-self GC fraction (0..1). Informational only.",
+        m.gc_fraction,
+    );
+    gauge(
+        &mut s,
+        "sip_proxy_self_cps_bucket_level",
+        "Proxy-self CPS bucket level (tokens remaining).",
+        m.cps_bucket_level,
+    );
+    gauge(
+        &mut s,
+        "sip_proxy_self_cps_bucket_max",
+        "Proxy-self CPS bucket capacity (constant per config).",
+        m.cps_bucket_max,
+    );
+    counter(
+        &mut s,
+        "sip_proxy_self_external_invites_admitted_total",
+        "External new-dialog non-emergency INVITEs admitted by the proxy-self gate.",
+        m.external_admitted_total,
+    );
     // Per-reason rejection split (reason=proxy_overload_elu | proxy_overload_cps).
     s.push_str("# HELP sip_proxy_self_external_invites_rejected_total External new-dialog non-emergency INVITEs rejected by the proxy-self gate.\n");
     s.push_str("# TYPE sip_proxy_self_external_invites_rejected_total counter\n");
-    s.push_str(&format!("sip_proxy_self_external_invites_rejected_total{{reason=\"proxy_overload_elu\"}} {}\n", m.rejected_elu_total));
-    s.push_str(&format!("sip_proxy_self_external_invites_rejected_total{{reason=\"proxy_overload_cps\"}} {}\n", m.rejected_cps_total));
-    counter(&mut s, "sip_proxy_self_emergency_bypassed_total", "Emergency INVITEs that bypassed the proxy-self gate.", m.emergency_bypassed_total);
-    counter(&mut s, "sip_proxy_self_internal_bypassed_total", "Worker-originated INVITEs that bypassed the proxy-self gate.", m.internal_bypassed_total);
+    s.push_str(&format!(
+        "sip_proxy_self_external_invites_rejected_total{{reason=\"proxy_overload_elu\"}} {}\n",
+        m.rejected_elu_total
+    ));
+    s.push_str(&format!(
+        "sip_proxy_self_external_invites_rejected_total{{reason=\"proxy_overload_cps\"}} {}\n",
+        m.rejected_cps_total
+    ));
+    counter(
+        &mut s,
+        "sip_proxy_self_emergency_bypassed_total",
+        "Emergency INVITEs that bypassed the proxy-self gate.",
+        m.emergency_bypassed_total,
+    );
+    counter(
+        &mut s,
+        "sip_proxy_self_internal_bypassed_total",
+        "Worker-originated INVITEs that bypassed the proxy-self gate.",
+        m.internal_bypassed_total,
+    );
     s
 }
 
@@ -568,10 +604,8 @@ async fn main() {
     // is REQUIRED with it (fail-fast); PROXY_ADVERTISE_EXT defaults to the
     // external listen addr under the same unspecified→loopback rule as the
     // internal pair. Unset → single-face, behaviour identical to before.
-    let listen_ext: Option<String> = env::var("PROXY_LISTEN_EXT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let listen_ext: Option<String> =
+        env::var("PROXY_LISTEN_EXT").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let ext_cidrs = parse_ext_face_cidrs(
         listen_ext.is_some(),
         env::var("PROXY_FACE_INT_CIDRS").ok().as_deref(),
@@ -645,16 +679,12 @@ async fn main() {
     // shard config, whereas the data sockets may carry SO_REUSEPORT
     // (recv_shards > 1) and would silently overlap a predecessor. The accept
     // loop starts later (ProbeServer::serve_on) — the bind is the lock.
-    let metrics_listener = bind_with_retry(
-        "metrics",
-        metrics_sa,
-        bind_interval,
-        bind_deadline,
-        is_tcp_in_use,
-        || tokio::net::TcpListener::bind(metrics_sa),
-    )
-    .await
-    .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
+    let metrics_listener =
+        bind_with_retry("metrics", metrics_sa, bind_interval, bind_deadline, is_tcp_in_use, || {
+            tokio::net::TcpListener::bind(metrics_sa)
+        })
+        .await
+        .unwrap_or_else(|e| panic!("sip-proxy-runner FATAL: {e}"));
 
     // Main signaling endpoint(s) — one per recv shard. With N > 1 every bind
     // (including the first) sets SO_REUSEPORT; the kernel flow-hashes on the
@@ -754,12 +784,15 @@ async fn main() {
     // it; hand each core an `Arc<dyn ProxySelfGate>` view of the same gate.
     let intake_age = IntakeAgeRecorder::default();
     let self_gate: Option<EluCpsGate> = if parse_bool("PROXY_SELF_GATE", true) {
-        Some(EluCpsGate::intake(intake_age.clone(), ProxySelfGateConfig {
-            elu_critical: parse_f64("PROXY_SELF_GATE_ELU_CRITICAL", 0.8),
-            cps_bucket_size: parse_u64("PROXY_SELF_GATE_CPS_SIZE", 50) as u32,
-            cps_bucket_rate: parse_u64("PROXY_SELF_GATE_CPS_RATE", 100) as u32,
-            ..ProxySelfGateConfig::default()
-        }))
+        Some(EluCpsGate::intake(
+            intake_age.clone(),
+            ProxySelfGateConfig {
+                elu_critical: parse_f64("PROXY_SELF_GATE_ELU_CRITICAL", 0.8),
+                cps_bucket_size: parse_u64("PROXY_SELF_GATE_CPS_SIZE", 50) as u32,
+                cps_bucket_rate: parse_u64("PROXY_SELF_GATE_CPS_RATE", 100) as u32,
+                ..ProxySelfGateConfig::default()
+            },
+        ))
     } else {
         None
     };
@@ -815,8 +848,14 @@ async fn main() {
     // sip_proxy_resolver_refresh_total{outcome=prewarmed|prewarm_failed}) and
     // pinned so the proactive refresh keeps them permanently warm.
     let resolver_cfg = ResolverConfig {
-        positive_ttl_ms: parse_u64("PROXY_RESOLVER_POSITIVE_TTL_MS", ResolverConfig::default().positive_ttl_ms),
-        negative_ttl_ms: parse_u64("PROXY_RESOLVER_NEGATIVE_TTL_MS", ResolverConfig::default().negative_ttl_ms),
+        positive_ttl_ms: parse_u64(
+            "PROXY_RESOLVER_POSITIVE_TTL_MS",
+            ResolverConfig::default().positive_ttl_ms,
+        ),
+        negative_ttl_ms: parse_u64(
+            "PROXY_RESOLVER_NEGATIVE_TTL_MS",
+            ResolverConfig::default().negative_ttl_ms,
+        ),
         ..ResolverConfig::default()
     };
     let prewarm_raw = env_or("PROXY_RESOLVER_PREWARM", "");
@@ -825,8 +864,9 @@ async fn main() {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| {
-            ProxyAddr::parse(s)
-                .unwrap_or_else(|| panic!("bad PROXY_RESOLVER_PREWARM entry {s:?} (want host:port)"))
+            ProxyAddr::parse(s).unwrap_or_else(|| {
+                panic!("bad PROXY_RESOLVER_PREWARM entry {s:?} (want host:port)")
+            })
         })
         .collect();
 
@@ -837,16 +877,17 @@ async fn main() {
     let mut cores = Vec::with_capacity(recv_shards);
     let mut ext_endpoints = ext_endpoints.into_iter();
     for (shard, endpoint) in endpoints.into_iter().enumerate() {
-        let mut builder = ProxyCoreBuilder::new(advertised.clone(), strategy.clone(), registry.clone())
-            .clock(clock.clone())
-            .id_gen(id_gen.clone())
-            .metrics(metrics.clone())
-            .cancel_lru(cancel_lru.clone())
-            .self_gate(gate_dyn.clone())
-            .intake_age(intake_age.clone())
-            .resolver_config(resolver_cfg)
-            .traces(traces.clone())
-            .shard(shard);
+        let mut builder =
+            ProxyCoreBuilder::new(advertised.clone(), strategy.clone(), registry.clone())
+                .clock(clock.clone())
+                .id_gen(id_gen.clone())
+                .metrics(metrics.clone())
+                .cancel_lru(cancel_lru.clone())
+                .self_gate(gate_dyn.clone())
+                .intake_age(intake_age.clone())
+                .resolver_config(resolver_cfg)
+                .traces(traces.clone())
+                .shard(shard);
         if let Some((_, ext_adv, cidrs)) = &ext_face {
             builder = builder.external_face(ExternalFaceParts {
                 endpoint: ext_endpoints.next().expect("one external endpoint per shard"),
@@ -926,7 +967,8 @@ async fn main() {
             let mut ticker = tokio::time::interval(Duration::from_secs(2));
             loop {
                 ticker.tick().await;
-                let (mut alive, mut draining, mut not_ready, mut unknown, mut dead) = (0, 0, 0, 0, 0);
+                let (mut alive, mut draining, mut not_ready, mut unknown, mut dead) =
+                    (0, 0, 0, 0, 0);
                 for w in reg.snapshot() {
                     match w.health {
                         WorkerHealth::Alive => alive += 1,
@@ -1477,9 +1519,7 @@ mod tests {
             TEST_INTERVAL,
             TEST_DEADLINE,
             |e: &BindError| e.is_addr_in_use(),
-            || {
-                async move { net.bind_udp(BindUdpOpts::new(addr, 8)).await }
-            },
+            || async move { net.bind_udp(BindUdpOpts::new(addr, 8)).await },
         )
         .await;
         // Manual unwrap of the Err arm — `Box<dyn UdpEndpoint>` is not Debug.

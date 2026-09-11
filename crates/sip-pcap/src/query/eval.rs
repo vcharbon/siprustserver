@@ -83,12 +83,10 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
         Node::AnyMsg(n) => msgs_of(ctx, bind).iter().any(|&(l, m)| eval(ctx, Bind::Msg(l, m), n)),
         Node::Request(n) => match bind {
             Bind::Txn(l, t) => t.request.is_some_and(|m| eval(ctx, Bind::Msg(l, m), n)),
-            Bind::Msg(l, m) => {
-                is_request(ctx, l, m) && eval(ctx, Bind::Msg(l, m), n)
-            }
-            _ => txn_binds(ctx, bind).iter().any(|&(l, t)| {
-                t.request.is_some_and(|m| eval(ctx, Bind::Msg(l, m), n))
-            }),
+            Bind::Msg(l, m) => is_request(ctx, l, m) && eval(ctx, Bind::Msg(l, m), n),
+            _ => txn_binds(ctx, bind)
+                .iter()
+                .any(|&(l, t)| t.request.is_some_and(|m| eval(ctx, Bind::Msg(l, m), n))),
         },
         Node::AnyResponse(n) => match bind {
             Bind::Txn(l, t) => t.responses.iter().any(|&m| eval(ctx, Bind::Msg(l, m), n)),
@@ -102,9 +100,7 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
         Node::CountTxn { filter, count } => {
             let n = txn_binds(ctx, bind)
                 .iter()
-                .filter(|&&(l, t)| {
-                    filter.as_ref().is_none_or(|f| eval(ctx, Bind::Txn(l, t), f))
-                })
+                .filter(|&&(l, t)| filter.as_ref().is_none_or(|f| eval(ctx, Bind::Txn(l, t), f)))
                 .count();
             count.test(n as u64)
         }
@@ -125,11 +121,13 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
         // --- leg-level leaves ---
         Node::CallId(m) => legs_of(bind).iter().any(|&l| m.test(&ctx.flows.legs[l].call_id)),
         Node::Saw180(want) => legs_of(bind).iter().any(|&l| ctx.flows.legs[l].saw_180 == *want),
-        Node::TerminatedBy(m) => legs_of(bind).iter().any(|&l| {
-            m.test_opt(ctx.flows.legs[l].terminated_by.map(|t| t.as_str()))
-        }),
+        Node::TerminatedBy(m) => legs_of(bind)
+            .iter()
+            .any(|&l| m.test_opt(ctx.flows.legs[l].terminated_by.map(|t| t.as_str()))),
         Node::DurationUs(cmp) => match bind {
-            Bind::Group(g) => cmp.test(group_t1(ctx.flows, g).saturating_sub(group_t0(ctx.flows, g))),
+            Bind::Group(g) => {
+                cmp.test(group_t1(ctx.flows, g).saturating_sub(group_t0(ctx.flows, g)))
+            }
             _ => legs_of(bind).iter().any(|&l| {
                 let leg = &ctx.flows.legs[l];
                 cmp.test(leg.t_last().saturating_sub(leg.t_first()))
@@ -138,16 +136,16 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
 
         // --- resolved per binding: the same question at several levels ---
         Node::Ruri(m) => match bind {
-            Bind::Msg(l, i) => request_of(ctx, l, i).is_some_and(|r| m.test(&r.request_uri().text())),
+            Bind::Msg(l, i) => {
+                request_of(ctx, l, i).is_some_and(|r| m.test(&r.request_uri().text()))
+            }
             Bind::Txn(l, t) => t
                 .request
                 .and_then(|i| request_of(ctx, l, i))
                 .is_some_and(|r| m.test(&r.request_uri().text())),
-            _ => legs_of(bind)
-                .iter()
-                .any(|&l| {
-                    ctx.flows.legs[l].invite.as_ref().is_some_and(|inv| m.test(&inv.ruri.text()))
-                }),
+            _ => legs_of(bind).iter().any(|&l| {
+                ctx.flows.legs[l].invite.as_ref().is_some_and(|inv| m.test(&inv.ruri.text()))
+            }),
         },
         Node::FromUri(m) => uri_leaf(ctx, bind, m, true),
         Node::ToUri(m) => uri_leaf(ctx, bind, m, false),
@@ -160,9 +158,9 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
                 ctx.flows.legs[l].invite.is_some() && sm.test(ctx.flows.legs[l].final_status)
             }),
         },
-        Node::LatencyUs(cmp) => txn_binds(ctx, bind)
-            .iter()
-            .any(|(_, t)| t.latency_us.is_some_and(|us| cmp.test(us))),
+        Node::LatencyUs(cmp) => {
+            txn_binds(ctx, bind).iter().any(|(_, t)| t.latency_us.is_some_and(|us| cmp.test(us)))
+        }
         Node::TxnKindIs(kind) => txn_binds(ctx, bind).iter().any(|(_, t)| t.kind == *kind),
         Node::MethodIs(name) => match bind {
             Bind::Txn(_, t) => t.method.as_str().eq_ignore_ascii_case(name),
@@ -172,12 +170,12 @@ fn eval(ctx: &Ctx, bind: Bind, node: &Node) -> bool {
         },
 
         // --- message-level leaves ---
-        Node::Status(sm) => msgs_of(ctx, bind).iter().any(|&(l, i)| {
-            match &ctx.flows.legs[l].msgs[i].parsed {
+        Node::Status(sm) => {
+            msgs_of(ctx, bind).iter().any(|&(l, i)| match &ctx.flows.legs[l].msgs[i].parsed {
                 SipMessage::Response(r) => sm.test(Some(r.status())),
                 SipMessage::Request(_) => false,
-            }
-        }),
+            })
+        }
         Node::IsRequest(want) => {
             msgs_of(ctx, bind).iter().any(|&(l, i)| is_request(ctx, l, i) == *want)
         }
@@ -263,11 +261,7 @@ fn msg_method<'a>(ctx: &'a Ctx, leg: LegId, msg: usize) -> &'a Method {
     }
 }
 
-fn request_of<'a>(
-    ctx: &'a Ctx,
-    leg: LegId,
-    msg: usize,
-) -> Option<&'a sip_message::SipRequest> {
+fn request_of<'a>(ctx: &'a Ctx, leg: LegId, msg: usize) -> Option<&'a sip_message::SipRequest> {
     match &ctx.flows.legs[leg].msgs[msg].parsed {
         SipMessage::Request(r) => Some(r),
         SipMessage::Response(_) => None,

@@ -102,21 +102,19 @@ fn invite_bound() -> Duration {
 }
 
 /// Why `cseq-in-dialog-order` is accepted from the kill onward in every cell.
-const CSEQ_OVERLAP: &str = "ADR-0014 accepted trade-off: with two potential owners of one leg in the \
+const CSEQ_OVERLAP: &str =
+    "ADR-0014 accepted trade-off: with two potential owners of one leg in the \
                             takeover window, the b-leg CSeq the dead primary minted may be minted \
                             again by the survivor";
 
 /// The proxy plus both workers, ready at steady state.
 async fn bring_up(fh: &mut FailoverHarness) -> (ProxySut, ReplicatedB2buaSut, ReplicatedB2buaSut) {
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
-    let w_b1 = fh
-        .spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
-    let w_b2 = fh
-        .spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080))
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
     (proxy, w_b1, w_b2)
@@ -124,7 +122,12 @@ async fn bring_up(fh: &mut FailoverHarness) -> (ProxySut, ReplicatedB2buaSut, Re
 
 /// Establish alice ⇄ bob through the proxy; returns the confirmed dialog and the
 /// ordinal of the worker the proxy's stickiness cookie placed the call on.
-async fn establish(fh: &FailoverHarness, alice: &Agent, bob: &Agent, proxy: &ProxySut) -> (Dialog, String) {
+async fn establish(
+    fh: &FailoverHarness,
+    alice: &Agent,
+    bob: &Agent,
+    proxy: &ProxySut,
+) -> (Dialog, String) {
     let mut call = alice.invite(bob).with_sdp(OFFER).through(proxy.addr()).send().await;
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, _bak) = worker_ordinals(uas.request());
@@ -140,12 +143,18 @@ async fn establish(fh: &FailoverHarness, alice: &Agent, bob: &Agent, proxy: &Pro
 /// The exact datagram `from` last put on the wire for `method`, with the
 /// destination it addressed — the peer's own copy, which it re-sends verbatim
 /// when nothing answers.
-fn last_request_sent(fh: &FailoverHarness, from: SocketAddr, method: &Method) -> (Vec<u8>, SocketAddr) {
+fn last_request_sent(
+    fh: &FailoverHarness,
+    from: SocketAddr,
+    method: &Method,
+) -> (Vec<u8>, SocketAddr) {
     let parser = CustomParser::new();
     fh.sip_entries()
         .into_iter()
         .filter(|e| e.from == from)
-        .rfind(|e| matches!(parser.parse(&e.raw), Ok(SipMessage::Request(r)) if r.method() == method))
+        .rfind(
+            |e| matches!(parser.parse(&e.raw), Ok(SipMessage::Request(r)) if r.method() == method),
+        )
         .map(|e| (e.raw, e.to))
         .unwrap_or_else(|| panic!("{from} put a {method} on the wire this run"))
 }
@@ -240,10 +249,8 @@ async fn synchronized_call_ref(
 ) -> String {
     let primary = if pri_ord == "b1" { w_b1 } else { w_b2 };
     let survivor = survivor_of(pri_ord, w_b1, w_b2);
-    let call_ref = survivor
-        .scan_one_backed_up(pri_ord)
-        .await
-        .expect("the call replicated to the backup");
+    let call_ref =
+        survivor.scan_one_backed_up(pri_ord).await.expect("the call replicated to the backup");
     assert!(primary.serves(&call_ref), "the primary serves the call");
     assert!(
         survivor.is_synchronized_backup(&call_ref).await,
@@ -300,7 +307,9 @@ fn round_invites_sent_to(fh: &FailoverHarness, to: SocketAddr, offer: &str) -> u
         .into_iter()
         .filter(|e| e.to == to)
         .filter_map(|e| match parser.parse(&e.raw) {
-            Ok(SipMessage::Request(r)) if *r.method() == Method::Invite && r.body() == offer.as_bytes() => {
+            Ok(SipMessage::Request(r))
+                if *r.method() == Method::Invite && r.body() == offer.as_bytes() =>
+            {
                 r.top_via().branch().map(str::to_string)
             }
             _ => None,
@@ -375,11 +384,7 @@ async fn an_update_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
 
     // ── The UPDATE goes IN FLIGHT: the primary relayed it, nobody answered ───
-    let mut update = dialog
-        .send_request(InDialogMethod::Update)
-        .with_sdp(REOFFER)
-        .send()
-        .await;
+    let mut update = dialog.send_request(InDialogMethod::Update).with_sdp(REOFFER).send().await;
     let mut first_at_bob = bob.receive("UPDATE").await;
 
     // ── The kill lands inside that window ───────────────────────────────────
@@ -535,11 +540,7 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
     let call_ref = synchronized_call_ref(&pri_ord, &w_b1, &w_b2).await;
 
     // ── The re-INVITE goes IN FLIGHT: relayed, replicated, nobody answered ──
-    let reinvite = dialog
-        .send_request(InDialogMethod::Invite)
-        .with_sdp(REOFFER)
-        .send()
-        .await;
+    let reinvite = dialog.send_request(InDialogMethod::Invite).with_sdp(REOFFER).send().await;
     let mut first_at_bob = bob.receive("INVITE").await;
     fh.advance(REPLICATE).await;
 
@@ -582,7 +583,11 @@ async fn a_reinvite_in_flight_at_the_kill_is_served_on_the_peers_resend() {
             ),
         }
     };
-    assert_eq!(round_final.status(), 487, "the pending re-INVITE ends with the dialog (RFC 3261 §15.1.2)");
+    assert_eq!(
+        round_final.status(),
+        487,
+        "the pending re-INVITE ends with the dialog (RFC 3261 §15.1.2)"
+    );
     reinvite.ack_non_2xx(&round_final).await.expect("the caller hop-ACKs the 487");
     alice.receive("BYE").await.respond(200, "OK").await;
     // The callee's side of the round is CANCELled (§9.2: a CANCEL of an INVITE

@@ -80,11 +80,9 @@ impl FaceCidrs {
             .map(Ipv4Cidr::parse)
             .collect::<Result<_, _>>()?;
         if cidrs.is_empty() {
-            return Err(
-                "internal-face CIDR list is empty — dual-face mode needs at least one \
+            return Err("internal-face CIDR list is empty — dual-face mode needs at least one \
                  internal CIDR (e.g. PROXY_FACE_INT_CIDRS=10.244.0.0/16,172.20.0.0/16)"
-                    .to_string(),
-            );
+                .to_string());
         }
         Ok(Self { cidrs })
     }

@@ -83,10 +83,7 @@ fn conn_color(conn: &str) -> &'static str {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 fn lane_x(idx: usize) -> i64 {
@@ -160,12 +157,8 @@ fn severity_class(a: &Anomaly) -> &'static str {
 pub fn render_html(doc: &SeqDoc) -> String {
     let rows = doc.sorted_rows();
     let base = doc.base_ms();
-    let lane_idx: std::collections::HashMap<&str, usize> = doc
-        .lanes
-        .iter()
-        .enumerate()
-        .map(|(i, l)| (l.id.as_str(), i))
-        .collect();
+    let lane_idx: std::collections::HashMap<&str, usize> =
+        doc.lanes.iter().enumerate().map(|(i, l)| (l.id.as_str(), i)).collect();
 
     let views = anomaly_views(doc, &rows);
     let anoms_of_row = row_anomaly_map(&views);
@@ -368,12 +361,8 @@ pub fn render_html(doc: &SeqDoc) -> String {
 pub fn render_svg(doc: &SeqDoc) -> String {
     let rows = doc.sorted_rows();
     let base = doc.base_ms();
-    let lane_idx: std::collections::HashMap<&str, usize> = doc
-        .lanes
-        .iter()
-        .enumerate()
-        .map(|(i, l)| (l.id.as_str(), i))
-        .collect();
+    let lane_idx: std::collections::HashMap<&str, usize> =
+        doc.lanes.iter().enumerate().map(|(i, l)| (l.id.as_str(), i)).collect();
     let views = anomaly_views(doc, &rows);
     svg_markup(doc, &rows, base, &lane_idx, &row_anomaly_map(&views), &views)
 }
@@ -390,12 +379,8 @@ pub fn render_svg(doc: &SeqDoc) -> String {
 pub fn render_embed(doc: &SeqDoc) -> String {
     let rows = doc.sorted_rows();
     let base = doc.base_ms();
-    let lane_idx: std::collections::HashMap<&str, usize> = doc
-        .lanes
-        .iter()
-        .enumerate()
-        .map(|(i, l)| (l.id.as_str(), i))
-        .collect();
+    let lane_idx: std::collections::HashMap<&str, usize> =
+        doc.lanes.iter().enumerate().map(|(i, l)| (l.id.as_str(), i)).collect();
     let views = anomaly_views(doc, &rows);
     let anoms_of_row = row_anomaly_map(&views);
     let svg = svg_markup(doc, &rows, base, &lane_idx, &anoms_of_row, &views);
@@ -607,11 +592,7 @@ fn svg_markup(
                 };
 
                 let fi = lane_idx.get(row.from.as_str()).copied().unwrap_or(0);
-                let ti = row
-                    .to
-                    .as_deref()
-                    .and_then(|t| lane_idx.get(t).copied())
-                    .unwrap_or(fi);
+                let ti = row.to.as_deref().and_then(|t| lane_idx.get(t).copied()).unwrap_or(fi);
                 let (x1, x2) = (lane_x(fi), lane_x(ti));
                 let opacity = if delivered { "1" } else { "0.5" };
                 // Each message is a clickable `<g class="seq-msg" data-idx="{ord}">`
@@ -720,11 +701,8 @@ fn render_payloads(
                     RowKind::Lifecycle => unreachable!(),
                 };
                 let from = lane_caption(doc, &row.from);
-                let to = row
-                    .to
-                    .as_deref()
-                    .map(|t| lane_caption(doc, t))
-                    .unwrap_or_else(|| "?".into());
+                let to =
+                    row.to.as_deref().map(|t| lane_caption(doc, t)).unwrap_or_else(|| "?".into());
                 // A colored socket chip so the connection is identifiable in the
                 // detail panel too (same hue as its arrow).
                 let conn_chip = row
@@ -781,7 +759,12 @@ fn render_payloads(
 /// `row_seqs` resolved to diagram rows renders as a clickable `.linked` item
 /// carrying `data-rows` (the ordinals) and a `→ <first linked message>` jump
 /// affordance; the click handler highlights the rows and opens the first one.
-fn render_anomalies(doc: &SeqDoc, rows: &[&SeqRow], base: i64, views: &[AnomalyView<'_>]) -> String {
+fn render_anomalies(
+    doc: &SeqDoc,
+    rows: &[&SeqRow],
+    base: i64,
+    views: &[AnomalyView<'_>],
+) -> String {
     if views.is_empty() {
         return String::new();
     }

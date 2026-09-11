@@ -8,7 +8,7 @@
 //! green for the wrong reason.
 
 use crate::flow::{Op, Step};
-use crate::lint::{Index, Place, Reach, Report, at, reach};
+use crate::lint::{at, reach, Index, Place, Reach, Report};
 use crate::must_fail::DeclaredFailure;
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
@@ -197,7 +197,9 @@ fn answering<'a>(
 ) -> Option<&'a str> {
     all.iter()
         .find(|(other_place, other)| {
-            other.leg == step.leg && is_method(other, method) && reach(place, *other_place) == Reach::Ok
+            other.leg == step.leg
+                && is_method(other, method)
+                && reach(place, *other_place) == Reach::Ok
         })
         .map(|(_, other)| other.id.as_str())
 }
@@ -212,7 +214,9 @@ fn preceding<'a>(
 ) -> Option<&'a str> {
     all.iter()
         .find(|(other_place, other)| {
-            other.leg == step.leg && is_method(other, method) && reach(*other_place, place) == Reach::Ok
+            other.leg == step.leg
+                && is_method(other, method)
+                && reach(*other_place, place) == Reach::Ok
         })
         .map(|(_, other)| other.id.as_str())
 }

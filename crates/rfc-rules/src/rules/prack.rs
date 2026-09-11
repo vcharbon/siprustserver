@@ -488,16 +488,14 @@ impl Obligation for ReliableNeedsClientOptIn {
                             "the INVITE this response answers never crossed this vantage",
                         ),
                         Some(invite) if invite.offers_100rel => Decision::Compliant,
-                        Some(invite) => {
-                            Decision::Violated(Evidence::UnsolicitedReliable1xx {
-                                unsolicited_1xx_msg: a.msg,
-                                unsolicited_1xx_hop: a.hop,
-                                unsolicited_1xx_ts_us: a.ts_us,
-                                status: a.status,
-                                invite_msg: invite.msg,
-                                branch: key.branch.to_string(),
-                            })
-                        }
+                        Some(invite) => Decision::Violated(Evidence::UnsolicitedReliable1xx {
+                            unsolicited_1xx_msg: a.msg,
+                            unsolicited_1xx_hop: a.hop,
+                            unsolicited_1xx_ts_us: a.ts_us,
+                            status: a.status,
+                            invite_msg: invite.msg,
+                            branch: key.branch.to_string(),
+                        }),
                     },
                 });
             }
@@ -653,7 +651,8 @@ impl Obligation for Prack2xxOr481 {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for (key, list) in &seen.answers {
-            let Some(prack) = seen.served.get(key).filter(|s| s.method.eq_ignore_ascii_case("PRACK"))
+            let Some(prack) =
+                seen.served.get(key).filter(|s| s.method.eq_ignore_ascii_case("PRACK"))
             else {
                 continue;
             };
@@ -677,8 +676,7 @@ impl Obligation for Prack2xxOr481 {
                 && seen
                     .reliably_sent_before(key.uas, key.call_id, prack.dialog, prack.ts_us)
                     .contains(&(rack.rseq, rack.cseq));
-            let honoured =
-                if matched { (200..300).contains(&a.status) } else { a.status == 481 };
+            let honoured = if matched { (200..300).contains(&a.status) } else { a.status == 481 };
             out.push(head(if honoured {
                 Decision::Compliant
             } else {
@@ -724,8 +722,7 @@ impl Obligation for Delay2xxOnUnackedReliable1xxWithSdp {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for (key, list) in &seen.answers {
-            for a in list.iter().filter(|a| a.answers("INVITE") && (200..300).contains(&a.status))
-            {
+            for a in list.iter().filter(|a| a.answers("INVITE") && (200..300).contains(&a.status)) {
                 let mut offer_1xx_msg = None;
                 let mut unacked: Vec<u64> = Vec::new();
                 let mut judged: BTreeSet<u64> = BTreeSet::new();
@@ -801,7 +798,8 @@ impl Obligation for PrackAcceptedAfterFinal {
         let seen = Reading::of(wire.msgs);
         let mut out = Vec::new();
         for (key, list) in &seen.answers {
-            let Some(prack) = seen.served.get(key).filter(|s| s.method.eq_ignore_ascii_case("PRACK"))
+            let Some(prack) =
+                seen.served.get(key).filter(|s| s.method.eq_ignore_ascii_case("PRACK"))
             else {
                 continue;
             };
@@ -1311,8 +1309,10 @@ impl<'a> Reading<'a> {
         if method.eq_ignore_ascii_case("PRACK") {
             if let Some(rseq) = head.and_then(sniff::rack_rseq) {
                 let dialog = msg.to_tag.as_deref().unwrap_or_default();
-                let at =
-                    self.pracked_at.entry((msg.dst.as_str(), call, dialog, rseq)).or_insert(msg.at_us);
+                let at = self
+                    .pracked_at
+                    .entry((msg.dst.as_str(), call, dialog, rseq))
+                    .or_insert(msg.at_us);
                 *at = (*at).min(msg.at_us);
             }
         }
@@ -1522,9 +1522,7 @@ impl<'a> Reading<'a> {
     /// `RAck` reached it earlier on this view.
     fn relayed_prack(&self, p: &Prack<'a>) -> bool {
         p.rack.is_some_and(|rack| {
-            self.pracks
-                .iter()
-                .any(|q| q.dst == p.src && q.rack == Some(rack) && q.ts_us < p.ts_us)
+            self.pracks.iter().any(|q| q.dst == p.src && q.rack == Some(rack) && q.ts_us < p.ts_us)
         })
     }
 }
@@ -1593,7 +1591,15 @@ mod tests {
     const UAC: &str = "10.0.0.1:5060";
     const UAS: &str = "10.0.0.2:5060";
 
-    fn msg(at_us: u64, src: &str, dst: &str, kind: Kind, cseq: u32, to_tag: Option<&str>, head: String) -> Msg {
+    fn msg(
+        at_us: u64,
+        src: &str,
+        dst: &str,
+        kind: Kind,
+        cseq: u32,
+        to_tag: Option<&str>,
+        head: String,
+    ) -> Msg {
         Msg {
             at_us,
             src: src.to_string(),
@@ -1652,8 +1658,15 @@ mod tests {
             "PRACK sip:bob@h SIP/2.0\r\nFrom: <sip:a@h>;tag=fa\r\nTo: <sip:b@h>;tag={to_tag}\r\n\
              CSeq: {cseq} PRACK\r\nRAck: {rseq} {rack_cseq} INVITE\r\nContent-Length: 0\r\n\r\n"
         );
-        let mut m =
-            msg(at_us, src, dst, Kind::Request { method: "PRACK".to_string() }, cseq, Some(to_tag), head);
+        let mut m = msg(
+            at_us,
+            src,
+            dst,
+            Kind::Request { method: "PRACK".to_string() },
+            cseq,
+            Some(to_tag),
+            head,
+        );
         m.cseq_method = "PRACK".to_string();
         m
     }
@@ -1909,15 +1922,8 @@ mod tests {
              From: <sip:a@h>;tag=fa\r\nTo: {to}\r\nCSeq: 1 INVITE\r\n{extra}{}\r\n",
             body_rows(body)
         );
-        let mut m = msg(
-            at_us,
-            UAC,
-            UAS,
-            Kind::Request { method: "INVITE".to_string() },
-            1,
-            to_tag,
-            head,
-        );
+        let mut m =
+            msg(at_us, UAC, UAS, Kind::Request { method: "INVITE".to_string() }, 1, to_tag, head);
         m.via_branch = Some(INV_BRANCH.to_string());
         m
     }
@@ -2038,9 +2044,10 @@ mod tests {
             invite_on(1_000_000, "Require: 100rel\r\n", None, false),
             inv_resp(1_100_000, 180, &reliable_rows(1), false),
         ];
-        assert!(
-            matches!(decide(&RequireReliable1xxOnRequire, &reliable)[0].decision, Decision::Compliant)
-        );
+        assert!(matches!(
+            decide(&RequireReliable1xxOnRequire, &reliable)[0].decision,
+            Decision::Compliant
+        ));
 
         let rejected = vec![
             invite_on(1_000_000, "Require: 100rel\r\n", None, false),
@@ -2071,7 +2078,10 @@ mod tests {
             invite_on(1_000_000, "Supported: 100rel\r\n", None, false),
             inv_resp(1_100_000, 180, &reliable_rows(1), false),
         ];
-        assert!(matches!(decide(&ReliableNeedsClientOptIn, &opted)[0].decision, Decision::Compliant));
+        assert!(matches!(
+            decide(&ReliableNeedsClientOptIn, &opted)[0].decision,
+            Decision::Compliant
+        ));
 
         let orphan = vec![inv_resp(1_100_000, 180, &reliable_rows(1), false)];
         assert!(matches!(
@@ -2102,7 +2112,10 @@ mod tests {
             invite_on(1_000_000, "Supported: 100rel\r\n", None, false),
             inv_resp(1_100_000, 180, &reliable_rows(1), false),
         ];
-        assert!(matches!(decide(&NoReliable1xxOnInDialog, &initial)[0].decision, Decision::Compliant));
+        assert!(matches!(
+            decide(&NoReliable1xxOnInDialog, &initial)[0].decision,
+            Decision::Compliant
+        ));
     }
 
     /// A re-INVITE is an INVITE: RFC 3262 §3's To-tag prohibition is written
@@ -2142,7 +2155,10 @@ mod tests {
             inbound(inv_resp(1_100_000, 180, &reliable_rows(1), false)),
             prack_on(1_200_000, "1 1 INVITE", false),
         ];
-        assert!(matches!(decide(&UnmatchedPrackProxied, &matched)[0].decision, Decision::Compliant));
+        assert!(matches!(
+            decide(&UnmatchedPrackProxied, &matched)[0].decision,
+            Decision::Compliant
+        ));
 
         let forwarded = vec![
             inbound(inv_resp(1_100_000, 180, &reliable_rows(1), false)),
@@ -2210,10 +2226,17 @@ mod tests {
                 prack_answer(1_250_000, status),
             ]
         };
-        assert!(matches!(decide(&Prack2xxOr481, &wrong_cseq(481))[0].decision, Decision::Compliant));
+        assert!(matches!(
+            decide(&Prack2xxOr481, &wrong_cseq(481))[0].decision,
+            Decision::Compliant
+        ));
         let f = decide(&Prack2xxOr481, &wrong_cseq(200));
-        let Decision::Violated(Evidence::PrackAnsweredWrongly { status, rack_matched, rack_rseq, .. }) =
-            &f[0].decision
+        let Decision::Violated(Evidence::PrackAnsweredWrongly {
+            status,
+            rack_matched,
+            rack_rseq,
+            ..
+        }) = &f[0].decision
         else {
             panic!("prack-answer evidence: {:?}", f[0].decision)
         };
@@ -2241,7 +2264,10 @@ mod tests {
                 prack_answer(1_250_000, status),
             ]
         };
-        assert!(matches!(decide(&Prack2xxOr481, &cross_fork(481))[0].decision, Decision::Compliant));
+        assert!(matches!(
+            decide(&Prack2xxOr481, &cross_fork(481))[0].decision,
+            Decision::Compliant
+        ));
         let f = decide(&Prack2xxOr481, &cross_fork(200));
         let Decision::Violated(Evidence::PrackAnsweredWrongly { rack_matched, rack_rseq, .. }) =
             &f[0].decision
@@ -2456,7 +2482,10 @@ mod tests {
             prack_on(1_200_000, "1 1 INVITE", false),
             prack_answer(1_250_000, 200),
         ];
-        assert!(matches!(decide(&PrackAcceptedAfterFinal, &accepted)[0].decision, Decision::Compliant));
+        assert!(matches!(
+            decide(&PrackAcceptedAfterFinal, &accepted)[0].decision,
+            Decision::Compliant
+        ));
 
         let early = vec![
             prack_on(1_100_000, "1 1 INVITE", false),
@@ -2478,8 +2507,9 @@ mod tests {
         let f = decide(&NoNewReliable1xxAfterFinal, &msgs);
         assert_eq!(f.len(), 2, "both provisionals are occasions: {f:?}");
         assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
-        let Decision::Violated(Evidence::Reliable1xxAfterFinal { rseq, prior_final_status, .. }) =
-            &f[1].decision
+        let Decision::Violated(Evidence::Reliable1xxAfterFinal {
+            rseq, prior_final_status, ..
+        }) = &f[1].decision
         else {
             panic!("stray-1xx evidence: {:?}", f[1].decision)
         };
@@ -2542,7 +2572,10 @@ mod tests {
             inv_resp(1_100_000, 183, &reliable_rows(1), true),
             prack_on(1_200_000, "1 1 INVITE", true),
         ];
-        assert!(matches!(decide(&PrackAnswers1xxOffer, &answered)[0].decision, Decision::Compliant));
+        assert!(matches!(
+            decide(&PrackAnswers1xxOffer, &answered)[0].decision,
+            Decision::Compliant
+        ));
 
         let standard = vec![
             invite_on(1_000_000, "Supported: 100rel\r\n", None, true),

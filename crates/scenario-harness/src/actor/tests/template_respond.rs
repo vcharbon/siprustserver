@@ -1,8 +1,8 @@
 use sip_message::{MessageTemplate, Method, TemplateHeader};
 use std::time::Duration;
 
-use crate::actor::*;
 use super::testkit::*;
+use crate::actor::*;
 use crate::{Harness, ANSWER_SDP, OFFER_SDP};
 
 /// A scripted 2xx answer to a RECEIVED re-INVITE (`ExpectRequest{InDialog
@@ -52,7 +52,7 @@ async fn scripted_reinvite_answer_holds_settle_until_ack() {
                 invite_targets: vec![("bob", bob.clone())],
                 via: None,
                 feed: CtxFeed::default(),
-            
+
                 cseq: None,
                 delayed: vec![],
                 claim: None,
@@ -163,8 +163,7 @@ async fn scripted_bye_answer_tears_down_cleanly() {
 
     let ctx = CallCtx::new();
     let obs = ObservedState::new();
-    let verdict =
-        run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
+    let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
     assert!(verdict.is_ok(), "the scripted BYE answer must settle OK, got {verdict:?}");
     assert!(
         !obs.replay_record().iter().any(|e| matches!(
@@ -235,10 +234,7 @@ async fn ack_body_override_rides_the_reinvite_ack() {
                 Goal::new(Barrier::None, expect(180, None)),
                 Goal::new(Barrier::None, expect(200, None)),
                 Goal::new(alice_confirmed, GoalStep::Reinvite),
-                Goal::new(
-                    Barrier::None,
-                    expect(200, Some(CUSTOM_ACK_SDP.as_bytes().to_vec())),
-                ),
+                Goal::new(Barrier::None, expect(200, Some(CUSTOM_ACK_SDP.as_bytes().to_vec()))),
                 Goal::new(Barrier::None, GoalStep::Bye).after(Duration::from_millis(100)),
             ],
         )],
@@ -343,7 +339,7 @@ async fn per_goal_deadline_bounds_the_guard_wait() {
             invite_targets: vec![],
             via: None,
             feed: CtxFeed::default(),
-        
+
             cseq: None,
             delayed: vec![],
             claim: None,

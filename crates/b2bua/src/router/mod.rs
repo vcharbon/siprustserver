@@ -186,7 +186,9 @@ pub async fn run(
 async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
     match cmd {
         ReplCommand::ReclaimAll => reclaim::reclaim_all(ctx).await,
-        ReplCommand::ReclaimCall(call_ref) => reclaim::reconcile_reverse_flush(ctx, &call_ref).await,
+        ReplCommand::ReclaimCall(call_ref) => {
+            reclaim::reconcile_reverse_flush(ctx, &call_ref).await
+        }
         ReplCommand::ReverseFlushRefused { call_ref, body, origin_now_ms } => {
             reclaim::fold_refused_reverse_flush(ctx, &call_ref, &body, origin_now_ms).await
         }

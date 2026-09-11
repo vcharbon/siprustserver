@@ -27,11 +27,9 @@ pub(super) async fn originate_in_dialog(
 ) -> Result<(), StepError> {
     let now = Instant::now();
     let (key, dialog_clone) = {
-        let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
-            StepError::UnexpectedKind {
-                who: st.role.to_string(),
-                detail: format!("{} goal with no confirmed dialog", method.as_str()),
-            }
+        let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: format!("{} goal with no confirmed dialog", method.as_str()),
         })?;
         let mut req = dialog.send_request(method);
         match (body, content_type) {
@@ -74,12 +72,11 @@ pub(super) async fn originate_initial_invite(
     plan: Option<crate::realcall::InvitePlan>,
     template: Option<(MessageTemplate, EmitOpts)>,
 ) -> Result<(), StepError> {
-    let target = st.invite_targets.get(callee).cloned().ok_or_else(|| {
-        StepError::UnexpectedKind {
+    let target =
+        st.invite_targets.get(callee).cloned().ok_or_else(|| StepError::UnexpectedKind {
             who: st.role.to_string(),
             detail: format!("Invite goal has no bound target {callee:?}"),
-        }
-    })?;
+        })?;
     let mut builder = st.agent.invite(&target);
     if let Some(offer) = st.media.offer_sdp() {
         builder = builder.with_sdp(offer);
@@ -153,12 +150,12 @@ pub(super) async fn send_request_template(
     early: bool,
 ) -> Result<(), StepError> {
     let now = Instant::now();
-    let method = template
-        .method()
-        .and_then(|m| InDialogMethod::try_from(m).ok())
-        .ok_or_else(|| StepError::UnexpectedKind {
-            who: st.role.to_string(),
-            detail: "RequestTemplate requires an in-dialog request template".to_string(),
+    let method =
+        template.method().and_then(|m| InDialogMethod::try_from(m).ok()).ok_or_else(|| {
+            StepError::UnexpectedKind {
+                who: st.role.to_string(),
+                detail: "RequestTemplate requires an in-dialog request template".to_string(),
+            }
         })?;
     if method == InDialogMethod::Bye && !early {
         // A held ACK is sent BEFORE our own BYE (§15 — the renegotiation
@@ -168,11 +165,9 @@ pub(super) async fn send_request_template(
         discharge_on_teardown(st, now);
     }
     let (txn, req, dialog_clone) = if early {
-        let inv = st.dialogs.pending_invite.as_mut().ok_or_else(|| {
-            StepError::UnexpectedKind {
-                who: st.role.to_string(),
-                detail: "RequestTemplate{early} with no pending early dialog".to_string(),
-            }
+        let inv = st.dialogs.pending_invite.as_mut().ok_or_else(|| StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: "RequestTemplate{early} with no pending early dialog".to_string(),
         })?;
         let tag = inv.early_remote_tag().to_string();
         let mut b = inv.send_request(method).template(template, opts);
@@ -182,18 +177,17 @@ pub(super) async fn send_request_template(
         let (txn, req) = b.try_send_with_request().await?;
         (txn, req, None)
     } else {
-        let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| {
-            StepError::UnexpectedKind {
-                who: st.role.to_string(),
-                detail: "RequestTemplate with no confirmed dialog".to_string(),
-            }
+        let dialog = st.dialogs.confirmed.as_mut().ok_or_else(|| StepError::UnexpectedKind {
+            who: st.role.to_string(),
+            detail: "RequestTemplate with no confirmed dialog".to_string(),
         })?;
         let (txn, req) =
             dialog.send_request(method).template(template, opts).try_send_with_request().await?;
         (txn, req, Some(dialog.clone()))
     };
     let cseq = req.cseq().seq();
-    let kind = ObligationKind::from_cseq_method(method.as_str()).unwrap_or(ObligationKind::InDialog);
+    let kind =
+        ObligationKind::from_cseq_method(method.as_str()).unwrap_or(ObligationKind::InDialog);
     match method {
         InDialogMethod::Invite => {
             st.sent_reinvites.insert(cseq);
@@ -272,15 +266,13 @@ pub(super) async fn originate_update(st: &mut ActorState<'_>) -> Result<(), Step
             who: st.role.to_string(),
             detail: "Update with no confirmed dialog".to_string(),
         })?;
-        let _upd =
-            dialog.send_request(InDialogMethod::Update).with_sdp(offer).try_send().await?;
+        let _upd = dialog.send_request(InDialogMethod::Update).with_sdp(offer).try_send().await?;
         let cseq = dialog.local_cseq();
         (ObligationKey::new(st.role, ObligationKind::Update, cseq), dialog.clone())
     };
     st.sent_updates.insert(key.cseq);
     st.scope.set_confirmed(dialog_clone); // refresh so a teardown BYE stays valid
-    st.obs
-        .record(Observation::RequestSent { key, detail: "update awaiting 200".to_string() }, now);
+    st.obs.record(Observation::RequestSent { key, detail: "update awaiting 200".to_string() }, now);
     Ok(())
 }
 

@@ -295,7 +295,13 @@ pub enum MatchEvidence {
     SharedToken { strategy: usize, token: String, legs: Vec<LegId> },
     /// The [`CorrelateStrategy::HeaderParam`] `header`'s `param` carried the
     /// same value on all `legs`.
-    SharedHeaderParam { strategy: usize, header: String, param: String, token: String, legs: Vec<LegId> },
+    SharedHeaderParam {
+        strategy: usize,
+        header: String,
+        param: String,
+        token: String,
+        legs: Vec<LegId>,
+    },
     /// [`CorrelateStrategy::DerivedCallId`]: `legs[1]`'s Call-ID is `prefix`
     /// ++ `legs[0]`'s. `as_socket` emitted the derived INVITE, `peer_socket`
     /// received it — the application server and the peer it looped back to.
@@ -348,8 +354,6 @@ pub struct Flows {
     pub groups: Vec<CallGroup>,
     pub stats: FlowStats,
 }
-
-
 
 /// Build the flow model: dedup + SIP filter + parse + leg ingest + correlate.
 /// Datagrams are processed in capture-time order regardless of input order.
@@ -458,7 +462,8 @@ fn ingest(
                     }
                 }
             }
-            CorrelateStrategy::DerivedCallId { .. } | CorrelateStrategy::IdentityAdjacency { .. } => {}
+            CorrelateStrategy::DerivedCallId { .. }
+            | CorrelateStrategy::IdentityAdjacency { .. } => {}
         }
     }
     match &msg {
@@ -731,8 +736,7 @@ fn adjacency_pass(
     for i in 0..legs.len() {
         *group_size.entry(find(parent, i)).or_insert(0) += 1;
     }
-    let eligible: Vec<bool> =
-        (0..legs.len()).map(|i| group_size[&find(parent, i)] == 1).collect();
+    let eligible: Vec<bool> = (0..legs.len()).map(|i| group_size[&find(parent, i)] == 1).collect();
 
     let mut pairs: Vec<(u64, usize, usize, IpAddr)> = Vec::new();
     for i in 0..legs.len() {
@@ -805,7 +809,7 @@ mod tests {
             src: src.parse().unwrap(),
             dst: dst.parse().unwrap(),
             payload: payload.to_vec(),
-        probe: 0,
+            probe: 0,
         }
     }
 
@@ -987,7 +991,14 @@ mod tests {
 
     /// INVITE with fully custom R-URI / From / To (the cross-leg correlation
     /// tests need every URI byte-different across the AS).
-    fn invite_custom(call_id: &str, branch: &str, ruri: &str, from: &str, to: &str, extra: &str) -> Vec<u8> {
+    fn invite_custom(
+        call_id: &str,
+        branch: &str,
+        ruri: &str,
+        from: &str,
+        to: &str,
+        extra: &str,
+    ) -> Vec<u8> {
         format!(
             "INVITE {ruri} SIP/2.0\r\n\
              Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK{branch}\r\n\
@@ -1041,7 +1052,10 @@ mod tests {
         else {
             panic!("expected header-param evidence, got {:?}", g.evidence)
         };
-        assert_eq!(*strategy, 1, "P-Charging-Vector icid is the default pipeline's second strategy");
+        assert_eq!(
+            *strategy, 1,
+            "P-Charging-Vector icid is the default pipeline's second strategy"
+        );
         assert_eq!(header, "P-Charging-Vector");
         assert_eq!(param, "icid-value");
         assert_eq!(token, ICID);
@@ -1141,7 +1155,8 @@ mod tests {
         let g = &flows.groups[0];
         assert_eq!(g.evidence.len(), 2, "icid AND derivation must both record: {:?}", g.evidence);
         assert!(matches!(&g.evidence[0], MatchEvidence::SharedHeaderParam { strategy: 1, .. }));
-        let MatchEvidence::DerivedCallId { strategy: 2, as_socket, peer_socket, .. } = &g.evidence[1]
+        let MatchEvidence::DerivedCallId { strategy: 2, as_socket, peer_socket, .. } =
+            &g.evidence[1]
         else {
             panic!("the derivation must be attested even though the icid merged first")
         };
@@ -1363,7 +1378,8 @@ mod tests {
         };
         let flows = build_flows(&datagrams, &relaxed);
         assert_eq!(flows.groups.len(), 1);
-        let MatchEvidence::DerivedCallId { shared_hop, as_socket, .. } = &flows.groups[0].evidence[0]
+        let MatchEvidence::DerivedCallId { shared_hop, as_socket, .. } =
+            &flows.groups[0].evidence[0]
         else {
             panic!("expected derivation evidence")
         };

@@ -43,7 +43,9 @@ pub enum TimerType {
     /// itself — no rule sees a rung. Retired with the obligation: by the
     /// discharging ACK or PRACK, by the give-up, or with the leg, transaction
     /// or call the emission belonged to.
-    Rung { obligation: Obligation },
+    Rung {
+        obligation: Obligation,
+    },
     /// The give-up deadline of `obligation`'s ladder — the one ladder event a
     /// rule sees: 64·T1 for a reliable provisional, the deployment's ACK
     /// deadline for a 2xx (Timer L where it states none). Armed once with the
@@ -55,7 +57,9 @@ pub enum TimerType {
     /// teardown's shape, never whether it happens; a reliable provisional's is
     /// the rule's alone — a teardown, an in-dialog reject, or nothing (RFC
     /// 3262 §3).
-    RepeatGiveUp { obligation: Obligation },
+    RepeatGiveUp {
+        obligation: Obligation,
+    },
     /// Safety-net timer scheduled when entering "terminating" state.
     TerminatingTimeout,
     /// REFER subscription expiry (RFC 3515).

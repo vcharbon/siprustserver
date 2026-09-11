@@ -37,7 +37,8 @@ async fn prack_forking_two_early_dialogs() {
     let h = Harness::with_transit_delay("b2bua-prack-forking", 0);
     let alice = h.agent("alice", "127.0.0.1:5066").await;
     let bob = h.agent("bob", "127.0.0.1:5076").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5076).start(&h, "b2bua", "127.0.0.1:5086").await;
 
     // Alice INVITEs with NO SDP (delayed-offer model), advertising 100rel.
     let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
@@ -181,7 +182,8 @@ async fn a_prack_naming_another_forks_rseq_takes_481() {
     let h = Harness::with_transit_delay("b2bua-prack-forking-cross-fork", 0);
     let alice = h.agent("alice", "127.0.0.1:5503").await;
     let bob = h.agent("bob", "127.0.0.1:5513").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5513).start(&h, "b2bua", "127.0.0.1:5523").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5513).start(&h, "b2bua", "127.0.0.1:5523").await;
 
     let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;

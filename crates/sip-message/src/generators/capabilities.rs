@@ -16,14 +16,15 @@
 //! cannot render a second value or inject a header line.
 
 use crate::draft::Entry;
-use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::header::{AcceptRange, Allow, HeaderName, HeaderValue, Supported};
+use crate::parser::custom::structured_headers::top_level_comma_entries;
 use crate::sip_str::SipStr;
 use crate::types::SipHeader;
 
 /// RFC 3261 §13.2.1 / §20.5 — the methods the stack accepts, on a message it
 /// answers on its own behalf.
-pub const B2BUA_ALLOW: &str = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, NOTIFY, PRACK";
+pub const B2BUA_ALLOW: &str =
+    "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, NOTIFY, PRACK";
 /// RFC 3261 §20.37 — the option tags the stack understands, on a message it
 /// answers on its own behalf. An option tag obliges whoever advertises it, so
 /// a tag no part of this stack exercises is not a member: RFC 4028's `timer`
@@ -154,9 +155,9 @@ impl CapabilitySet {
     /// The `Accept` header value as it reaches the wire, where stated: the
     /// media ranges comma-separated on one line (RFC 3261 §7.3.1).
     pub fn accept_text(&self) -> Option<String> {
-        self.accept.as_ref().map(|ranges| {
-            ranges.iter().map(HeaderValue::to_wire).collect::<Vec<_>>().join(", ")
-        })
+        self.accept
+            .as_ref()
+            .map(|ranges| ranges.iter().map(HeaderValue::to_wire).collect::<Vec<_>>().join(", "))
     }
 }
 

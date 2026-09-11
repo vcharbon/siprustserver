@@ -10,11 +10,7 @@ use super::lens::update_leg;
 
 /// Resolve a leg's role, defaulting from `legId` when `kind` is absent.
 pub fn leg_kind(leg: &Leg) -> LegKind {
-    leg.kind.unwrap_or(if leg.leg_id == "a" {
-        LegKind::A
-    } else {
-        LegKind::Destination
-    })
+    leg.kind.unwrap_or(if leg.leg_id == "a" { LegKind::A } else { LegKind::Destination })
 }
 
 /// Whether the generic relay / keepalive / failover rules own this leg.
@@ -90,19 +86,15 @@ pub fn leg_is_resolved(leg: &Leg) -> bool {
 /// already going away — resolution and progress-eligibility are different
 /// questions.
 pub fn leg_is_going_away(call_state: CallModelState, leg: &Leg) -> bool {
-    matches!(
-        call_state,
-        CallModelState::Terminating | CallModelState::Terminated
-    ) || leg.disposition == LegDisposition::Cancelling
+    matches!(call_state, CallModelState::Terminating | CallModelState::Terminated)
+        || leg.disposition == LegDisposition::Cancelling
         || leg.state == LegState::Terminated
 }
 
 /// Whether all legs of a terminating call have reached a terminal resolution
 /// (see [`leg_is_resolved`]).
 pub fn is_fully_resolved(call: &Call) -> bool {
-    std::iter::once(&call.a_leg)
-        .chain(call.b_legs.iter())
-        .all(leg_is_resolved)
+    std::iter::once(&call.a_leg).chain(call.b_legs.iter()).all(leg_is_resolved)
 }
 
 /// Add a new b-leg.
@@ -136,12 +128,7 @@ pub fn b2bua_tag(call: &Call, leg_id: &str) -> Option<String> {
         return call.a_leg.dialogs.first().map(|d| d.sip.local_tag.clone());
     }
     let b = find_b_leg(call, leg_id)?;
-    Some(
-        b.dialogs
-            .first()
-            .map(|d| d.sip.local_tag.clone())
-            .unwrap_or_else(|| b.from_tag.clone()),
-    )
+    Some(b.dialogs.first().map(|d| d.sip.local_tag.clone()).unwrap_or_else(|| b.from_tag.clone()))
 }
 
 /// The remote party's tag for a leg (`sip.remoteTag` of `dialogs[0]`).

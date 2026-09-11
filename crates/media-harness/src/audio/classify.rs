@@ -72,7 +72,9 @@ fn rms_full_scale(pcm: &[i16]) -> f64 {
     (acc / pcm.len() as f64).sqrt()
 }
 
-fn reference_signatures(refs: &Option<BTreeMap<ClipName, Vec<i16>>>) -> BTreeMap<ClipName, Vec<f64>> {
+fn reference_signatures(
+    refs: &Option<BTreeMap<ClipName, Vec<i16>>>,
+) -> BTreeMap<ClipName, Vec<f64>> {
     let opts = MfccOptions::default();
     let owned;
     let clips: &BTreeMap<ClipName, Vec<i16>> = match refs {
@@ -82,10 +84,7 @@ fn reference_signatures(refs: &Option<BTreeMap<ClipName, Vec<i16>>>) -> BTreeMap
             &owned
         }
     };
-    clips
-        .iter()
-        .filter_map(|(&name, pcm)| clip_signature(pcm, &opts).map(|s| (name, s)))
-        .collect()
+    clips.iter().filter_map(|(&name, pcm)| clip_signature(pcm, &opts).map(|s| (name, s))).collect()
 }
 
 /// Classify a single recorded clip against the reference set.
@@ -145,11 +144,7 @@ pub fn classify(pcm: &[i16], opts: &ClassifyOptions) -> MediaVerdict {
         }
     }
 
-    let gap = if second_d.is_infinite() {
-        f64::INFINITY
-    } else {
-        second_d - best_d
-    };
+    let gap = if second_d.is_infinite() { f64::INFINITY } else { second_d - best_d };
     match best {
         None => MediaVerdict {
             classification: Classification::NoAudio,

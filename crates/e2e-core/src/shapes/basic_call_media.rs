@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use media::{OpenOptions, PlayScript};
-use media_harness::{reference_clip, ClipName, NegotiateOptions, negotiate_call};
+use media_harness::{negotiate_call, reference_clip, ClipName, NegotiateOptions};
 
 use crate::infra::InfraRuntime;
 use crate::media::MediaCapture;
@@ -77,9 +77,7 @@ impl CallflowShape for BasicCallMedia {
         uas.respond(180, "Ringing").await;
         call.expect(180).await;
 
-        uas.respond(200, "OK")
-            .with_sdp(&sdp("bob", &b_rtp.ip().to_string(), b_rtp.port()))
-            .await;
+        uas.respond(200, "OK").with_sdp(&sdp("bob", &b_rtp.ip().to_string(), b_rtp.port())).await;
         let answer = call.expect(200).await;
         rt.anchor("alice", Anchor::Answer, &answer);
 

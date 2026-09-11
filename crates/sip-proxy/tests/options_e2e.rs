@@ -34,7 +34,10 @@ enum Mode {
 }
 
 /// Spawn a simulated B2BUA that answers OPTIONS per the shared `mode`.
-fn spawn_responder(ep: Box<dyn UdpEndpoint>, mode: Arc<Mutex<Mode>>) -> tokio::task::JoinHandle<()> {
+fn spawn_responder(
+    ep: Box<dyn UdpEndpoint>,
+    mode: Arc<Mutex<Mode>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let parser = CustomParser::new();
         while let Some(pkt) = ep.recv().await {
@@ -45,11 +48,36 @@ fn spawn_responder(ep: Box<dyn UdpEndpoint>, mode: Arc<Mutex<Mode>>) -> tokio::t
             let m = *mode.lock().unwrap();
             let (status, reason, extra): (u16, &str, Vec<SipHeader>) = match m {
                 Mode::Silent => continue,
-                Mode::Ok200 => (200, "OK", vec![SipHeader { name: "X-Overload".into(), value: "v=1; elu=0.2; gc=0.0; adm=3".into() }]),
-                Mode::Draining503 => (503, "Service Unavailable", vec![SipHeader { name: "Reason".into(), value: "SIP;cause=503;text=\"draining\"".into() }]),
-                Mode::NotReady503 => (503, "Service Unavailable", vec![SipHeader { name: "Reason".into(), value: "SIP;cause=503;text=\"not-ready (boot drain)\"".into() }]),
+                Mode::Ok200 => (
+                    200,
+                    "OK",
+                    vec![SipHeader {
+                        name: "X-Overload".into(),
+                        value: "v=1; elu=0.2; gc=0.0; adm=3".into(),
+                    }],
+                ),
+                Mode::Draining503 => (
+                    503,
+                    "Service Unavailable",
+                    vec![SipHeader {
+                        name: "Reason".into(),
+                        value: "SIP;cause=503;text=\"draining\"".into(),
+                    }],
+                ),
+                Mode::NotReady503 => (
+                    503,
+                    "Service Unavailable",
+                    vec![SipHeader {
+                        name: "Reason".into(),
+                        value: "SIP;cause=503;text=\"not-ready (boot drain)\"".into(),
+                    }],
+                ),
             };
-            let opts = GenerateResponseOpts { to_tag: Some("uas".into()), extra_headers: extra, ..Default::default() };
+            let opts = GenerateResponseOpts {
+                to_tag: Some("uas".into()),
+                extra_headers: extra,
+                ..Default::default()
+            };
             let resp = generate_response(&req, status, reason, &opts);
             let _ = ep.send_to(&serialize(&SipMessage::Response(resp)), pkt.src).await;
         }
@@ -66,7 +94,10 @@ async fn probe_drives_worker_health_through_options() {
 
     // Worker starts Unknown; the probe must observe it before it is routable.
     let registry = SimulatedWorkerRegistry::with_clock(
-        vec![WorkerEntry { health: WorkerHealth::Unknown, ..WorkerEntry::alive("b2b-1", ProxyAddr::from(worker_sock)) }],
+        vec![WorkerEntry {
+            health: WorkerHealth::Unknown,
+            ..WorkerEntry::alive("b2b-1", ProxyAddr::from(worker_sock))
+        }],
         Clock::test_at(0),
     );
     let registry = Arc::new(registry);
@@ -162,15 +193,15 @@ async fn single_packet_loss_is_absorbed_by_timer_e_retransmit() {
     });
 
     let registry = SimulatedWorkerRegistry::with_clock(
-        vec![WorkerEntry { health: WorkerHealth::Unknown, ..WorkerEntry::alive("b2b-rtx", ProxyAddr::from(worker_sock)) }],
+        vec![WorkerEntry {
+            health: WorkerHealth::Unknown,
+            ..WorkerEntry::alive("b2b-rtx", ProxyAddr::from(worker_sock))
+        }],
         Clock::test_at(0),
     );
     let registry = Arc::new(registry);
     let writes = Arc::new(Mutex::new(Vec::new()));
-    let control = Arc::new(RecordingControl {
-        inner: registry.control(),
-        writes: writes.clone(),
-    });
+    let control = Arc::new(RecordingControl { inner: registry.control(), writes: writes.clone() });
     let observer = Arc::new(WorkerLoadObserver::new(LoadObserverConfig::default()));
 
     let (probe_ep, _probe_sock) = h.bind_sut("probe-rtx", "127.0.0.1:5098").await;

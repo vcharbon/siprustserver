@@ -6,13 +6,13 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use b2bua::wire_faults::WireFaults;
 use b2bua::cdr::{CdrRecord, InMemoryCdrWriter};
 use b2bua::config::B2buaConfig;
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::{CallStore, FaultInjectingCallStore, InMemoryCallStore, StoreFaults};
+use b2bua::wire_faults::WireFaults;
 use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use scenario_harness::{Agent, Dialog, Harness, RunReport};
 
@@ -148,10 +148,9 @@ pub fn spawn_b2bua_core(
     let base_store: Arc<dyn CallStore> =
         store.unwrap_or_else(|| Arc::new(InMemoryCallStore::new()));
     let (store, store_faults) = match store_faults {
-        Some(f) => (
-            Arc::new(FaultInjectingCallStore::new(base_store, f.clone())) as Arc<dyn CallStore>,
-            f,
-        ),
+        Some(f) => {
+            (Arc::new(FaultInjectingCallStore::new(base_store, f.clone())) as Arc<dyn CallStore>, f)
+        }
         None => (base_store, StoreFaults::default()),
     };
     let deps = B2buaDeps {
@@ -541,17 +540,12 @@ impl B2buaSutBuilder {
             // semantics-preserving for the harness. A `tune` can re-enable it (and
             // inject a `simulated()` sampler) to exercise it end-to-end.
             config.overload_panic_elu_threshold = 1.1; // > clamped ELU max (1.0)
-            // The caller's tune runs LAST so it can still override the keepalive
-            // defaults above (preserving the prior ordering).
+                                                       // The caller's tune runs LAST so it can still override the keepalive
+                                                       // defaults above (preserving the prior ordering).
             tune(config);
         });
         let metrics = core.metrics().clone();
-        B2buaSut {
-            addr: sa,
-            cdr,
-            metrics,
-            _core: core,
-        }
+        B2buaSut { addr: sa, cdr, metrics, _core: core }
     }
 }
 
@@ -583,9 +577,7 @@ impl B2buaSut {
     /// transfers via the default `X-Api-Call`-keyed `/call/refer` behavior (the
     /// REFER-scenario constructor).
     pub fn route_all_with_refer(dest_host: &str, dest_port: u16) -> B2buaSutBuilder {
-        Self::builder(Arc::new(ScriptedDecisionEngine::route_all_with_refer(
-            dest_host, dest_port,
-        )))
+        Self::builder(Arc::new(ScriptedDecisionEngine::route_all_with_refer(dest_host, dest_port)))
     }
 
     /// Builder for a B2BUA whose engine honors the full inbound `X-Api-Call`
@@ -597,9 +589,7 @@ impl B2buaSut {
     /// document needs. This is the SUT the loadgen rerouting scenarios exercise
     /// under the `api-call-pin` egress policy.
     pub fn route_api_call(dest_host: &str, dest_port: u16) -> B2buaSutBuilder {
-        Self::builder(Arc::new(ScriptedDecisionEngine::route_by_api_call(
-            dest_host, dest_port,
-        )))
+        Self::builder(Arc::new(ScriptedDecisionEngine::route_by_api_call(dest_host, dest_port)))
     }
 
     /// Builder for a B2BUA that routes every call to `dest` with the
@@ -614,9 +604,7 @@ impl B2buaSut {
             b2bua::decision::ScriptedDecisionEngine::builder()
                 .fallback(move |_req| {
                     b2bua::decision::NewCallResponse::Route(
-                        b2bua::decision::test_adapter::route_to_with_18x(
-                            &dest.0, dest.1, strategy,
-                        ),
+                        b2bua::decision::test_adapter::route_to_with_18x(&dest.0, dest.1, strategy),
                     )
                 })
                 .build(),
@@ -730,10 +718,7 @@ impl B2buaSut {
     /// Call it *after* the teardown has drained (see [`settle_until`]).
     #[track_caller]
     pub fn assert_fully_reaped(&self) {
-        let (creations, removals) = (
-            self.metrics.creations_total(),
-            self.metrics.removals_total(),
-        );
+        let (creations, removals) = (self.metrics.creations_total(), self.metrics.removals_total());
         assert_eq!(
             creations, removals,
             "call leak: creations ({creations}) != removals ({removals}) — a call \
@@ -828,18 +813,13 @@ impl B2buaScene {
     /// (`outbound_proxy`, `limiter`, `services`, `tune`), so a test needing a
     /// non-default decision still gets the canonical alice/bob/ports wiring for
     /// free. Default decision = `route_all_to(bob)` (see [`new`](Self::new)).
-    pub async fn with_b2bua(
-        name: &str,
-        build: impl FnOnce(u16) -> B2buaSutBuilder,
-    ) -> Self {
+    pub async fn with_b2bua(name: &str, build: impl FnOnce(u16) -> B2buaSutBuilder) -> Self {
         // Match the common b2bua-test convention: the harness's default
         // SIMULATED_TRANSIT_DELAY_MS (1 ms floor enforced by the fabric).
         let h = Harness::new(name);
         let alice = h.agent("alice", &format!("127.0.0.1:{ALICE_PORT}")).await;
         let bob = h.agent("bob", &format!("127.0.0.1:{BOB_PORT}")).await;
-        let b2bua = build(BOB_PORT)
-            .start(&h, "b2bua", &format!("127.0.0.1:{B2BUA_PORT}"))
-            .await;
+        let b2bua = build(BOB_PORT).start(&h, "b2bua", &format!("127.0.0.1:{B2BUA_PORT}")).await;
         Self { h, alice, bob, b2bua }
     }
 

@@ -134,19 +134,13 @@ const DESCRIBES_BODY_ROLE: &[HeaderName] = &[HeaderName::ContentDisposition];
 
 /// States a property of the body's OCTETS (RFC 3261 §20.12 / §20.15, RFC 2045
 /// §4), so it rides only where those octets themselves ride.
-const DESCRIBES_BODY_OCTETS: &[HeaderName] = &[
-    HeaderName::ContentEncoding,
-    HeaderName::ContentLanguage,
-    HeaderName::MimeVersion,
-];
+const DESCRIBES_BODY_OCTETS: &[HeaderName] =
+    &[HeaderName::ContentEncoding, HeaderName::ContentLanguage, HeaderName::MimeVersion];
 
 /// The network's own assertion about who the sender is — the thing RFC 3323
 /// privacy suppresses, as opposed to the `From` claim the sender makes.
-const ASSERTED_IDENTITY: &[HeaderName] = &[
-    HeaderName::PAssertedIdentity,
-    HeaderName::PPreferredIdentity,
-    HeaderName::RemotePartyId,
-];
+const ASSERTED_IDENTITY: &[HeaderName] =
+    &[HeaderName::PAssertedIdentity, HeaderName::PPreferredIdentity, HeaderName::RemotePartyId];
 
 /// The RFC 3323 §4.2 priv-values that ask an intermediary to suppress the
 /// network's assertion before passing the message on: `id` is RFC 3325 §7's
@@ -188,8 +182,7 @@ pub fn relayable(name: &str, scope: RelayScope) -> bool {
         SourceBody::Replaced if DESCRIBES_BODY_OCTETS.contains(&known) => return false,
         SourceBody::Replaced => {}
         SourceBody::Dropped
-            if DESCRIBES_BODY_ROLE.contains(&known)
-                || DESCRIBES_BODY_OCTETS.contains(&known) =>
+            if DESCRIBES_BODY_ROLE.contains(&known) || DESCRIBES_BODY_OCTETS.contains(&known) =>
         {
             return false
         }

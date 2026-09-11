@@ -161,10 +161,7 @@ impl SignalingNetwork for MuxNetwork {
                 return Err(BindError {
                     reason: BindErrorReason::OsError,
                     addr: opts.addr,
-                    message: format!(
-                        "callee endpoint {} bound without a declared leg",
-                        opts.addr
-                    ),
+                    message: format!("callee endpoint {} bound without a declared leg", opts.addr),
                 })
             }
             None => None,
@@ -182,9 +179,9 @@ impl SignalingNetwork for MuxNetwork {
             Some(leg) => uas.as_ref().map(|(l, _)| l.as_str()) == Some(leg),
         });
         let drop = Arc::new(DropModel::new(self.drop_rate, self.next_drop_seed(), drop_nth));
-        let txns = self
-            .retransmit
-            .then(|| Arc::new(CallTxns::new(mux.endpoint.clone(), drop.clone(), mux.stats.clone())));
+        let txns = self.retransmit.then(|| {
+            Arc::new(CallTxns::new(mux.endpoint.clone(), drop.clone(), mux.stats.clone()))
+        });
 
         if let Some((label, claim)) = uas {
             let claim_mode = claim.is_some();

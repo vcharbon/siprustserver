@@ -79,7 +79,12 @@ mod tests {
         let obeyed = scan(&doc_of(vec![
             dg(1_000, A, B, request("INVITE", 1, "d2", "fa", None)),
             dg(4_000, A, B, request("CANCEL", 1, "d2", "fa", None)),
-            dg(4_500, B, A, response(487, "Request Terminated", 1, "INVITE", "d2", "fa", Some("tb"))),
+            dg(
+                4_500,
+                B,
+                A,
+                response(487, "Request Terminated", 1, "INVITE", "d2", "fa", Some("tb")),
+            ),
             dg(5_000, A, B, request("ACK", 1, "d2", "fa", Some("tb"))),
         ]));
         let p = obeyed.population["no-200-after-cancel"];
@@ -98,7 +103,12 @@ mod tests {
             dg(3_000, B, A, response(180, "Ringing", 1, "INVITE", "c1", "fa", Some("tb"))),
             dg(4_000, A, B, request("CANCEL", 1, "c1", "fa", None)),
             dg(5_000, B, A, response(200, "OK", 1, "CANCEL", "c1", "fa", Some("tb"))),
-            dg(5_500, B, A, response(487, "Request Terminated", 1, "INVITE", "c1", "fa", Some("tb"))),
+            dg(
+                5_500,
+                B,
+                A,
+                response(487, "Request Terminated", 1, "INVITE", "c1", "fa", Some("tb")),
+            ),
             dg(6_000, A, B, request("ACK", 1, "c1", "fa", Some("tb"))),
         ]));
         assert!(hits.is_empty(), "487 is what §9.2 asks for: {hits:?}");
@@ -128,8 +138,7 @@ mod tests {
         // The stray CANCEL leaves after this emitter ACKed the 200, so
         // `no-cancel-after-final` charges it on its own account; what this test
         // pins is the two-key reading of the rule this module is about.
-        let crossed: Vec<_> =
-            hits.iter().filter(|h| h.rule == RfcRule::No200AfterCancel).collect();
+        let crossed: Vec<_> = hits.iter().filter(|h| h.rule == RfcRule::No200AfterCancel).collect();
         assert!(
             crossed.is_empty(),
             "the CSeq number collides but the direction does not: {hits:?}"
@@ -196,7 +205,12 @@ mod tests {
             dg(3_300, B, P, response(200, "OK", 1, "CANCEL", "leg-b", "fp", Some("tb"))),
             dg(4_000, B, P, response(200, "OK", 1, "INVITE", "leg-b", "fp", Some("tb"))),
             dg(4_500, P, B, request("ACK", 1, "leg-b", "fp", Some("tb"))),
-            dg(5_000, P, A, response(487, "Request Terminated", 1, "INVITE", "leg-a", "fa", Some("tp"))),
+            dg(
+                5_000,
+                P,
+                A,
+                response(487, "Request Terminated", 1, "INVITE", "leg-a", "fa", Some("tp")),
+            ),
             dg(5_100, A, P, request("ACK", 1, "leg-a", "fa", Some("tp"))),
         ]));
         assert_eq!(hits.len(), 1, "only the callee broke the rule: {hits:?}");
@@ -219,7 +233,12 @@ mod tests {
         let hits = detect(&doc_of(vec![
             dg(1_000, A, PROXY_NEAR, request("INVITE", 7, "chain", "fa", None)),
             dg(1_200, PROXY_FAR, FAR, request("INVITE", 7, "chain", "fa", None)),
-            dg(2_000, FAR, PROXY_FAR, response(180, "Ringing", 7, "INVITE", "chain", "fa", Some("tz"))),
+            dg(
+                2_000,
+                FAR,
+                PROXY_FAR,
+                response(180, "Ringing", 7, "INVITE", "chain", "fa", Some("tz")),
+            ),
             dg(3_000, A, PROXY_NEAR, request("CANCEL", 7, "chain", "fa", None)),
             dg(3_200, PROXY_FAR, FAR, request("CANCEL", 7, "chain", "fa", None)),
             // The far UAS answers 200 anyway: the violation, originated.

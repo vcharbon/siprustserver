@@ -64,12 +64,7 @@ pub fn blocks(inbound: &Inbound, armed: &[CompiledStep], leg: &[RecordedMessage]
 /// draws a 2xx per answered fork (§13.2.2.4) and a final is retransmitted — so
 /// what refused it was content or an early dialog, and another copy can still
 /// satisfy the step.
-fn contradicts(
-    step: &CompiledStep,
-    status: u16,
-    inbound: &Inbound,
-    sent: Option<u32>,
-) -> bool {
+fn contradicts(step: &CompiledStep, status: u16, inbound: &Inbound, sent: Option<u32>) -> bool {
     // An expect gated on a status alone names no transaction, so nothing about
     // one transaction ending makes it unsatisfiable.
     let Discriminator::Response { status: want, cseq_method: Some(method) } = &step.discriminator
@@ -284,10 +279,8 @@ mod tests {
         let mixed = [expects("s7", 200, Some("INVITE"), false), expects_request("s8", "BYE")];
         assert!(!blocks(&busy, &mixed, &leg));
 
-        let both = [
-            expects("s7", 200, Some("INVITE"), false),
-            expects("s8", 486, Some("INVITE"), false),
-        ];
+        let both =
+            [expects("s7", 200, Some("INVITE"), false), expects("s8", 486, Some("INVITE"), false)];
         assert!(!blocks(&busy, &both, &leg), "one branch is the very status that arrived");
         let declined = arrival(&response(603, "1 INVITE"));
         assert!(blocks(&declined, &both, &leg), "neither branch can be satisfied now");
@@ -302,10 +295,8 @@ mod tests {
         assert!(!blocks(&busy, &[expects("s5", 180, Some("INVITE"), true)], &leg));
         // Beside a REQUIRED expect the same final contradicts, the required one
         // decides.
-        let pair = [
-            expects("s5", 180, Some("INVITE"), true),
-            expects("s7", 200, Some("INVITE"), false),
-        ];
+        let pair =
+            [expects("s5", 180, Some("INVITE"), true), expects("s7", 200, Some("INVITE"), false)];
         assert!(blocks(&busy, &pair, &leg));
     }
 

@@ -94,14 +94,9 @@ async fn admit_route_limiters(
         .map(|e| LimiterEntry { id: e.id.clone(), limit: e.limit })
         .collect();
     match limiter.admit(&entries).await {
-        AdmitOutcome::Admitted { window } => Ok(Some((
-            route
-                .call_limiter
-                .iter()
-                .map(|e| (e.id.clone(), e.limit))
-                .collect(),
-            window,
-        ))),
+        AdmitOutcome::Admitted { window } => {
+            Ok(Some((route.call_limiter.iter().map(|e| (e.id.clone(), e.limit)).collect(), window)))
+        }
         AdmitOutcome::Unavailable => Ok(None),
         AdmitOutcome::Rejected { limiter_id } => Err(limiter_id),
     }
@@ -171,10 +166,9 @@ pub(super) fn spawn_refer_callout(
                     callback_context,
                 }),
             ),
-            Ok(CallReferResponse::Reject { code, reason }) => (
-                "reject",
-                json!({ "reject_code": code, "reject_reason": reason }),
-            ),
+            Ok(CallReferResponse::Reject { code, reason }) => {
+                ("reject", json!({ "reject_code": code, "reject_reason": reason }))
+            }
             Err(_) => ("error", json!({})),
         };
         record_round_trip(&trace, &ctx2, "/call/refer", sent_at_ms, &request, outcome, &payload);
@@ -260,11 +254,8 @@ async fn failure_outcome(
 ) -> (&'static str, serde_json::Value) {
     let mut req = parse_call_failure_request(request);
     req.snapshot = snapshot.clone();
-    let failed_leg_id = request
-        .get("failed_leg_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let failed_leg_id =
+        request.get("failed_leg_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut depth: u32 = 0;
     loop {
         match ctx.decision.call_failure(req).await {
@@ -446,10 +437,8 @@ pub(super) fn spawn_service_http_callout(ctx: &Arc<RouterCtx>, c: ServiceHttpCal
         // Per-request budget is INDEPENDENT of `call_control_timeout_ms` (the
         // `DeadlineDecisionEngine` wraps only new_call/call_failure). Fail-safe
         // on teardown: a re-entry landing on a dead `call_ref` is dropped.
-        let budget = c
-            .timeout_ms
-            .map(std::time::Duration::from_millis)
-            .unwrap_or(port.default_timeout);
+        let budget =
+            c.timeout_ms.map(std::time::Duration::from_millis).unwrap_or(port.default_timeout);
         let mut req = http_net::HttpRequest {
             method: c.method,
             path: c.endpoint,
@@ -562,9 +551,8 @@ fn route_result_payload(
     admitted: Option<(Vec<(String, i64)>, i64)>,
     failed_leg_id: Option<String>,
 ) -> serde_json::Value {
-    let no_answer_timeout_sec = route
-        .no_answer_timeout_sec
-        .or(route.features.no_answer_timeout_sec);
+    let no_answer_timeout_sec =
+        route.no_answer_timeout_sec.or(route.features.no_answer_timeout_sec);
     to_payload(RoutePayload {
         destination: RouteDestinationPayload {
             host: route.destination.host,
@@ -636,10 +624,7 @@ fn parse_call_release_request(
         .and_then(|x| serde_json::from_value::<call::ReleaseEventKind>(x.clone()).ok())
         .unwrap_or(call::ReleaseEventKind::MaxCallDuration);
     crate::decision::CallReleaseRequest {
-        callback_context: v
-            .get("callback_context")
-            .and_then(|x| x.as_str())
-            .map(str::to_string),
+        callback_context: v.get("callback_context").and_then(|x| x.as_str()).map(str::to_string),
         event,
         snapshot,
     }
@@ -650,20 +635,10 @@ fn parse_call_release_request(
 /// attaches it from the authoritative call.
 fn parse_call_failure_request(v: &serde_json::Value) -> CallFailureRequest {
     CallFailureRequest {
-        callback_context: v
-            .get("callback_context")
-            .and_then(|x| x.as_str())
-            .map(str::to_string),
+        callback_context: v.get("callback_context").and_then(|x| x.as_str()).map(str::to_string),
         failure: FailureInfo {
-            origin: v
-                .get("origin")
-                .and_then(|x| x.as_str())
-                .unwrap_or("external")
-                .to_string(),
-            status_code: v
-                .get("sip_code")
-                .and_then(|x| x.as_u64())
-                .map(|c| c as u16),
+            origin: v.get("origin").and_then(|x| x.as_str()).unwrap_or("external").to_string(),
+            status_code: v.get("sip_code").and_then(|x| x.as_u64()).map(|c| c as u16),
             limiter_id: v.get("limiter_id").and_then(|x| x.as_str()).map(str::to_string),
             failed_leg_id: v
                 .get("failed_leg_id")
@@ -679,7 +654,10 @@ fn parse_call_failure_request(v: &serde_json::Value) -> CallFailureRequest {
                     arr.iter()
                         .filter_map(|pair| {
                             let p = pair.as_array()?;
-                            Some((p.first()?.as_str()?.to_string(), p.get(1)?.as_str()?.to_string()))
+                            Some((
+                                p.first()?.as_str()?.to_string(),
+                                p.get(1)?.as_str()?.to_string(),
+                            ))
                         })
                         .collect()
                 })

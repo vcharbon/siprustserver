@@ -54,7 +54,9 @@ fn laddr() -> SocketAddr {
 /// Stand up a real `LimiterServer` on its own simulated HTTP fabric. The
 /// returned `WindowStore` is the ground-truth counter every test asserts drains
 /// back to 0; the handle keeps the server task alive for the scenario.
-async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
+async fn serve_limiter(
+    net: &SimulatedHttpNetwork,
+) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
     let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
@@ -62,11 +64,7 @@ async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<WindowStore>, Box<dyn
 }
 
 fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
-    Arc::new(HttpCallLimiter::new(
-        Arc::new(net.clone()),
-        laddr(),
-        Duration::from_millis(150),
-    ))
+    Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_millis(150)))
 }
 
 /// A decision that routes every call to `host:port`, takes a limiter hold under
@@ -146,7 +144,11 @@ async fn max_duration_byes_both_legs_and_releases_the_limiter() {
     b_bye.respond(200, "OK").await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter hold released at the max-duration teardown");
+    assert_eq!(
+        store.stats().current_total,
+        0,
+        "limiter hold released at the max-duration teardown"
+    );
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 
@@ -229,7 +231,10 @@ async fn max_duration_fires_mid_reinvite_and_releases_the_limiter() {
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert!(
-        b2bua.cdr_records().iter().any(|c| reasons_of(c).iter().any(|r| r.contains("max_duration"))),
+        b2bua
+            .cdr_records()
+            .iter()
+            .any(|c| reasons_of(c).iter().any(|r| r.contains("max_duration"))),
         "CDR carries the max-duration reason",
     );
 
@@ -357,7 +362,10 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
             break; // the relayed 200(PRACK) tripped the cap
         }
     }
-    assert!(rseq >= 40, "the cap must defend only against a genuine storm (tripped at round {rseq})");
+    assert!(
+        rseq >= 40,
+        "the cap must defend only against a genuine storm (tripped at round {rseq})"
+    );
 
     // Teardown: a-leg gets the 503 cap cause (same router cap path as the plain
     // provisional storm), the still-ringing b-leg gets a CANCEL, and the
@@ -372,7 +380,11 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
     h.advance(Duration::from_secs(33)).await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter released after the PRACK-loop cap teardown");
+    assert_eq!(
+        store.stats().current_total,
+        0,
+        "limiter released after the PRACK-loop cap teardown"
+    );
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 
@@ -438,7 +450,10 @@ async fn in_dialog_message_storm_trips_the_cap_and_releases_the_limiter() {
             break; // tripped on the relayed 200
         }
     }
-    assert!(rounds >= 95, "the cap must defend only against a genuine storm (tripped at round {rounds})");
+    assert!(
+        rounds >= 95,
+        "the cap must defend only against a genuine storm (tripped at round {rounds})"
+    );
 
     // Teardown BYEs both legs; tolerate a trailing relayed OPTIONS request in
     // flight from the round that tripped the cap.
@@ -477,7 +492,10 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
 
     #[async_trait::async_trait]
     impl CallDecisionEngine for SilentFailoverEngine {
-        async fn new_call(&self, _req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
+        async fn new_call(
+            &self,
+            _req: NewCallRequest,
+        ) -> Result<NewCallResponse, CallDecisionError> {
             let mut r = route_to("127.0.0.1", 5073);
             r.callback_context = Some("cap-failover".into());
             r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 1 }];
@@ -522,7 +540,11 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
         uas.respond(180, "Ringing").await;
         call.expect(180).await;
     }
-    assert_eq!(b2bua.metrics().message_cap_terminated_total(), 0, "the cap trips on the 486, not a 180");
+    assert_eq!(
+        b2bua.metrics().message_cap_terminated_total(),
+        0,
+        "the cap trips on the 486, not a 180"
+    );
     uas.respond(486, "Busy Here").await;
     bob.receive("ACK").await; // the b2bua completes bob's reject txn (§17.1.1.3)
     let final_resp = call.expect(503).await;

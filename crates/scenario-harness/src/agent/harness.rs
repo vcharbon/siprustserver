@@ -14,17 +14,15 @@ use std::time::Duration;
 
 use layer_harness::{NetworkTag, Recorder, RunContext, TransportKind};
 use sip_clock::Clock;
-use sip_net::{
-    with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork, UdpEndpoint,
-};
+use sip_net::{with_all_contracts, BindUdpOpts, ScopedAuditOptions, SignalingNetwork, UdpEndpoint};
 
 use super::artifact_dump::ArtifactDump;
 use super::log_dump::LogDump;
-use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate, PanicDump};
 use super::rr_fold::decide_rr_fold;
+use super::run_guards::{render_rfc_panic, rfc_hard_gate_findings, CseqGate, PanicDump};
 use super::waiver::{unused_waivers, WaiverScope, WaiverState};
-use crate::absorption::Absorption;
 use super::{Agent, Proxy};
+use crate::absorption::Absorption;
 use crate::run::RunReport;
 
 /// Fake-fabric per-`recv` silent-wait bound (virtual time — a paused clock
@@ -113,13 +111,7 @@ impl Harness {
         let transit_delay_ms = transit_delay_ms.max(1);
         let sim: Arc<dyn SignalingNetwork> =
             Arc::new(sip_net::SimulatedSignalingNetwork::new(transit_delay_ms));
-        Self::build(
-            scenario_name.into(),
-            sim,
-            Clock::test_at(0),
-            TransportKind::Fake,
-            RECV_TIMEOUT,
-        )
+        Self::build(scenario_name.into(), sim, Clock::test_at(0), TransportKind::Fake, RECV_TIMEOUT)
     }
 
     /// Start a session over a **caller-supplied** network + clock — the seam an
@@ -137,13 +129,7 @@ impl Harness {
         transport_kind: TransportKind,
         recv_timeout: Duration,
     ) -> Self {
-        Self::build(
-            scenario_name.into(),
-            network,
-            clock,
-            transport_kind,
-            recv_timeout,
-        )
+        Self::build(scenario_name.into(), network, clock, transport_kind, recv_timeout)
     }
 
     /// Shared constructor body: wrap the raw network in the recorder + the full
@@ -174,7 +160,8 @@ impl Harness {
         let dump = PanicDump::new(name.clone(), wrapped.recording.channel(), recorder.clone());
         let log_dump = LogDump::install(name.clone());
         super::panic_note::install();
-        let anchors: Rc<RefCell<Vec<crate::anchors::AnchorTag>>> = Rc::new(RefCell::new(Vec::new()));
+        let anchors: Rc<RefCell<Vec<crate::anchors::AnchorTag>>> =
+            Rc::new(RefCell::new(Vec::new()));
         let description: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let artifact_dump = ArtifactDump::new(
             name.clone(),
@@ -314,8 +301,12 @@ impl Harness {
     /// 100-within-200ms, strict-route rewrite, PRACK forwarding) do not judge
     /// its lane. Use [`agent_with_roles`](Self::agent_with_roles) to override.
     pub async fn agent(&self, name: impl Into<String>, addr: &str) -> Agent {
-        self.agent_with_roles(name, addr, HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]))
-            .await
+        self.agent_with_roles(
+            name,
+            addr,
+            HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
+        )
+        .await
     }
 
     /// [`agent`](Self::agent) with explicit bind roles for RFC-rule subject
@@ -365,11 +356,8 @@ impl Harness {
         if let Some(hook) = pre_ingress {
             opts = opts.with_pre_ingress(hook);
         }
-        let ep = self
-            .network
-            .bind_udp(opts)
-            .await
-            .unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
+        let ep =
+            self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         let rr_fold = decide_rr_fold(&name);
         eprintln!(
             "[harness] UA {name}: Record-Route fold = {rr_fold:?} \
@@ -431,10 +419,7 @@ impl Harness {
     /// Role-tagged `{Proxy}` so the proxy-subject RFC rules judge this lane
     /// and the per-UA dialog rules do not.
     pub async fn proxy(&self, name: impl Into<String>, addr: &str) -> Proxy {
-        Proxy::new(
-            self.agent_with_roles(name, addr, HashSet::from([sip_net::UaRole::Proxy]))
-                .await,
-        )
+        Proxy::new(self.agent_with_roles(name, addr, HashSet::from([sip_net::UaRole::Proxy])).await)
     }
 
     /// Bind a **System-Under-Test** endpoint on the shared, recording-wrapped
@@ -445,7 +430,11 @@ impl Harness {
     /// the recording remains the trace. The caller owns the spawned loop (abort
     /// it on drop). This is the seam that lets the harness drive a real proxy,
     /// not just peer-to-peer agents (ADR-0006 → ADR-0009).
-    pub async fn bind_sut(&self, name: impl Into<String>, addr: &str) -> (Box<dyn UdpEndpoint>, SocketAddr) {
+    pub async fn bind_sut(
+        &self,
+        name: impl Into<String>,
+        addr: &str,
+    ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
         self.bind_sut_with_roles(name, addr, sip_net::all_ua_roles()).await
     }
 
@@ -582,7 +571,10 @@ impl Harness {
                     self.name,
                     unused
                         .iter()
-                        .map(|w| format!("  • rule={} party={:?} position={:?}", w.rule, w.party, w.position))
+                        .map(|w| format!(
+                            "  • rule={} party={:?} position={:?}",
+                            w.rule, w.party, w.position
+                        ))
                         .collect::<Vec<_>>()
                         .join("\n"),
                 );
@@ -592,8 +584,14 @@ impl Harness {
         let audit = self.recording.close().await;
         let anchors = self.anchors.borrow().clone();
         let description = self.description.borrow().clone();
-        let report =
-            RunReport::from_recording(self.name, description, self.recorder, events, audit, anchors);
+        let report = RunReport::from_recording(
+            self.name,
+            description,
+            self.recorder,
+            events,
+            audit,
+            anchors,
+        );
         report.seed_rfc_findings(rfc_findings);
         report
     }
@@ -627,9 +625,7 @@ impl Harness {
         let gate: std::collections::HashSet<(String, String)> = {
             let waivers = self.waivers.borrow();
             let names = super::run_guards::addr_names(&self.recorder);
-            rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names)
-                .into_iter()
-                .collect()
+            rfc_hard_gate_findings(&rfc_findings, &events, &waivers, &names).into_iter().collect()
         };
         let gating: Vec<sip_net::RfcFinding> = rfc_findings
             .iter()

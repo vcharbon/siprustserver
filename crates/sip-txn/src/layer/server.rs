@@ -30,7 +30,11 @@ impl Owner {
     /// which cancels `retransmit_key`, so this stops exactly when RFC requires.
     /// Non-INVITE (Timer J) and 2xx (TU-owned §13.3.1.4 retransmit) are excluded at
     /// the arming site in `do_send_response`.
-    pub(super) async fn fire_server_retransmit(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
+    pub(super) async fn fire_server_retransmit(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        branch: &str,
+    ) {
         let (buf, dest, status) = match self.txns.get(branch) {
             Some(t)
                 if t.role == TxnRole::Server
@@ -53,9 +57,8 @@ impl Owner {
             None => return,
         };
         if let Some(next_interval) = rearm {
-            let key = self
-                .timers
-                .insert(Timer::ServerRetransmit(branch.to_string()), next_interval);
+            let key =
+                self.timers.insert(Timer::ServerRetransmit(branch.to_string()), next_interval);
             if let Some(t) = self.txns.get_mut(branch) {
                 t.retransmit_key = Some(key);
             }
@@ -75,8 +78,7 @@ impl Owner {
         let status = msg.status();
         let branch = msg.top_via().branch().map(str::to_string);
         let branch = branch.as_deref();
-        let outbound_to_tag =
-            if status > 100 { msg.to().tag().map(str::to_string) } else { None };
+        let outbound_to_tag = if status > 100 { msg.to().tag().map(str::to_string) } else { None };
         let cseq_method = msg.cseq().method().clone();
         let buf: Bytes = msg.image().clone();
 
@@ -110,11 +112,7 @@ impl Owner {
                     }
                     txn.last_response = Some(buf.clone());
                     txn.last_response_status = Some(status);
-                    txn.state = if is_final {
-                        TxnState::Completed
-                    } else {
-                        TxnState::Proceeding
-                    };
+                    txn.state = if is_final { TxnState::Completed } else { TxnState::Proceeding };
                     // Free memory on completion — only lastResponse is needed
                     // for retransmit absorption.
                     if is_final {
@@ -245,11 +243,8 @@ impl Owner {
         // This layer admits unconditionally.
 
         // ── New server transaction ─────────────────────────────────────────────
-        let kind = if req.method() == Method::Invite {
-            TxnKind::Invite
-        } else {
-            TxnKind::NonInvite
-        };
+        let kind =
+            if req.method() == Method::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         let is_invite = matches!(kind, TxnKind::Invite);
 
         // Attribute the server txn to its call so the B2BUA's acting-backup
@@ -402,11 +397,7 @@ impl Owner {
             .get(cancel_branch)
             .filter(|t| is_cancel_target(t))
             .map(|_| cancel_branch.to_string())
-            .or_else(|| {
-                self.txns
-                    .iter()
-                    .find_map(|(b, t)| is_cancel_target(t).then(|| b.clone()))
-            });
+            .or_else(|| self.txns.iter().find_map(|(b, t)| is_cancel_target(t).then(|| b.clone())));
 
         // No active INVITE server txn — a CANCEL arriving after the answer (txn
         // Completed) included — has NO effect here: no 200, no 487, no
@@ -453,27 +444,18 @@ impl Owner {
             &req,
             200,
             "OK",
-            &GenerateResponseOpts {
-                to_tag: uas_to_tag.clone(),
-                ..Default::default()
-            },
+            &GenerateResponseOpts { to_tag: uas_to_tag.clone(), ..Default::default() },
         );
         self.send_buffer(endpoint, cancel_ok.image(), src).await;
 
         // 487 Request Terminated on the matched INVITE.
-        let original = self
-            .txns
-            .get(branch.as_str())
-            .and_then(|t| t.original_request.clone());
+        let original = self.txns.get(branch.as_str()).and_then(|t| t.original_request.clone());
         if let Some(original) = original {
             let terminated = generate_response(
                 &original,
                 487,
                 "Request Terminated",
-                &GenerateResponseOpts {
-                    to_tag: uas_to_tag,
-                    ..Default::default()
-                },
+                &GenerateResponseOpts { to_tag: uas_to_tag, ..Default::default() },
             );
             let terminated_buf = terminated.image().clone();
             self.send_buffer(endpoint, &terminated_buf, src).await;

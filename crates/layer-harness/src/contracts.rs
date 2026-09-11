@@ -86,10 +86,7 @@ pub struct ParanoidViolation {
 
 impl ParanoidViolation {
     pub fn new(check: &'static str, detail: impl Into<String>) -> Self {
-        Self {
-            check,
-            detail: detail.into(),
-        }
+        Self { check, detail: detail.into() }
     }
 }
 

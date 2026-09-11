@@ -60,8 +60,8 @@ pub use driver::{
     MuxTransport,
 };
 pub use mux::{
-    labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, ClaimRule, Correlation,
-    DropDir, EndpointSpec, LegInfo, LegPicker, MuxCore, Role, TargetedDrop,
+    labelled_prefix_leg_picker, prefix_leg_picker, CallRouting, ClaimRule, Correlation, DropDir,
+    EndpointSpec, LegInfo, LegPicker, MuxCore, Role, TargetedDrop,
 };
 pub use rate::{Governor, RateHandle};
 pub use report::{Reporter, ReporterCfg};

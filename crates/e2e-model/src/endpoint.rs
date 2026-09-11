@@ -41,7 +41,9 @@ pub struct EndpointConfig {
 /// (`scenario_harness::egress`, re-exported as [`crate::egress::EgressPolicy`]).
 /// Externally tagged kebab-case, so the values are exactly `"transparent"`,
 /// `"api-call-pin"`, and `{"registrar-aor":{"domain":…}}`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum EgressPolicySpec {
     /// No rewrite: the SUT's own routing reaches the callee.
@@ -69,10 +71,7 @@ impl EgressPolicySpec {
 
 impl EndpointConfig {
     pub fn addr(&self, role: &str) -> SocketAddr {
-        *self
-            .roles
-            .get(role)
-            .unwrap_or_else(|| panic!("endpoint config is missing role {role:?}"))
+        *self.roles.get(role).unwrap_or_else(|| panic!("endpoint config is missing role {role:?}"))
     }
 
     pub fn recv_timeout(&self) -> Duration {
@@ -95,10 +94,7 @@ impl EndpointConfig {
     /// Infra shapes override this (their policy is a layout property, declared
     /// in `e2e-core::infra`); the load generator standalone is the reader.
     pub fn egress_policy(&self) -> EgressPolicy {
-        self.egress
-            .as_ref()
-            .map(EgressPolicySpec::to_policy)
-            .unwrap_or(EgressPolicy::Transparent)
+        self.egress.as_ref().map(EgressPolicySpec::to_policy).unwrap_or(EgressPolicy::Transparent)
     }
 
     /// Fail loudly when a config authored for one infra is handed to another.
@@ -128,14 +124,8 @@ mod tests {
     #[test]
     fn egress_field_parses_all_three_forms_and_defaults_transparent() {
         assert_eq!(cfg("").egress_policy(), EgressPolicy::Transparent);
-        assert_eq!(
-            cfg(r#","egress":"transparent""#).egress_policy(),
-            EgressPolicy::Transparent
-        );
-        assert_eq!(
-            cfg(r#","egress":"api-call-pin""#).egress_policy(),
-            EgressPolicy::ApiCallPin
-        );
+        assert_eq!(cfg(r#","egress":"transparent""#).egress_policy(), EgressPolicy::Transparent);
+        assert_eq!(cfg(r#","egress":"api-call-pin""#).egress_policy(), EgressPolicy::ApiCallPin);
         assert_eq!(
             cfg(r#","egress":{"registrar-aor":{"domain":"register.example"}}"#).egress_policy(),
             EgressPolicy::RegistrarAor { domain: "register.example".into() }

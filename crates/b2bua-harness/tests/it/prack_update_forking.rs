@@ -62,7 +62,8 @@ async fn prack_update_forking_answer_on_second_fork() {
     let h = Harness::with_transit_delay("b2bua-prack-update-forking", 1);
     let alice = h.agent("alice", "127.0.0.1:5067").await;
     let bob = h.agent("bob", "127.0.0.1:5077").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
 
     // Alice INVITEs with the offer in the INVITE, advertising 100rel support.
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -143,7 +144,10 @@ async fn prack_update_forking_answer_on_second_fork() {
     // Media fidelity (RFC 3264): the re-offer's media direction (hold) is
     // relayed to bob verbatim, so RTP renegotiates end-to-end correctly.
     let bob_offer = String::from_utf8_lossy(update_at_bob.request().body()).to_string();
-    assert!(bob_offer.contains("a=sendonly"), "hold re-offer direction relayed to bob: {bob_offer}");
+    assert!(
+        bob_offer.contains("a=sendonly"),
+        "hold re-offer direction relayed to bob: {bob_offer}"
+    );
     update_at_bob.respond(200, "OK").with_sdp(REANSWER_HELD).await;
     let upd_ok = update.expect(200).await;
     let alice_answer = String::from_utf8_lossy(upd_ok.body()).to_string();
@@ -288,7 +292,11 @@ async fn fake_prack_fork_prelude(
         Some("bobfork2"),
         "fork2's PRACK targets fork2's early dialog (no first-dialog fallback)",
     );
-    assert_eq!(rack_of(prack2.request()), RAck::new(1, 1, Method::Invite), "fork2 RAck (own dialog CSeq space)");
+    assert_eq!(
+        rack_of(prack2.request()),
+        RAck::new(1, 1, Method::Invite),
+        "fork2 RAck (own dialog CSeq space)"
+    );
     prack2.respond(200, "OK").await;
 
     (uas, a_tag.to_string())
@@ -402,8 +410,8 @@ async fn fake_prack_forking_answer_on_second_fork_uses_its_own_cache() {
 /// so the `.global.txt` can be reviewed for SIP correctness.
 async fn finish_with_report(h: Harness) {
     let report: RunReport = h.finish().await;
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/seq-reports/prack-update-forking");
+    let dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/seq-reports/prack-update-forking");
     let paths = scenario_harness::report::write_all(&report, &dir).expect("write report");
     for p in &paths {
         if p.extension().is_some_and(|e| e == "txt") && p.to_string_lossy().contains("global") {

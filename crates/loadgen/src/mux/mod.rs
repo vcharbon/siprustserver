@@ -49,8 +49,8 @@ pub use correlation::Correlation;
 pub use endpoint::{CallRouting, MuxNetwork};
 // The data-driven claim rules live in their shared home, `scenario-harness`
 // (like the LegPicker below); the mux consumes them as its claim demux tier.
-pub use scenario_harness::claim::ClaimRule;
 pub use loss::{DropDir, TargetedDrop};
+pub use scenario_harness::claim::ClaimRule;
 pub use stats::MuxStats;
 
 use loss::DropModel;
@@ -102,7 +102,10 @@ pub(in crate::mux) enum Key {
     CallId(String),
     /// A receiver registered under `token`, identified by its `label` (agent
     /// name) so `Drop` removes exactly this receiver from a possibly-shared slot.
-    Token { token: String, label: String },
+    Token {
+        token: String,
+        label: String,
+    },
 }
 
 /// Everything the inbound route path needs to hand a datagram to one call: its
@@ -250,12 +253,9 @@ impl MuxCore {
         let mut endpoints = HashMap::new();
         for spec in specs {
             let endpoint: Arc<dyn UdpEndpoint> = Arc::from(
-                fabric
-                    .bind_udp(BindUdpOpts::new(spec.addr, DISPATCH_QUEUE_MAX))
-                    .await
-                    .map_err(|e| {
-                        std::io::Error::other(format!("mux bind {}: {}", e.addr, e.message))
-                    })?,
+                fabric.bind_udp(BindUdpOpts::new(spec.addr, DISPATCH_QUEUE_MAX)).await.map_err(
+                    |e| std::io::Error::other(format!("mux bind {}: {}", e.addr, e.message)),
+                )?,
             );
             let local = endpoint.local_addr();
             let clock = clock.clone();

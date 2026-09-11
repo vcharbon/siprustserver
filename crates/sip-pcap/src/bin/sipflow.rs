@@ -34,11 +34,11 @@ use std::path::PathBuf;
 use clap::Parser as ClapParser;
 use sip_message::header::HeaderName;
 use sip_message::SipMessage;
+use sip_pcap::doc::FlowsDoc;
+use sip_pcap::enrich::{enrich_str, EnrichOptions};
 use sip_pcap::flow::{
     build_flows, CallGroup, CorrelateStrategy, FlowConfig, FlowLeg, DEFAULT_DEDUP_WINDOW_US,
 };
-use sip_pcap::doc::FlowsDoc;
-use sip_pcap::enrich::{enrich_str, EnrichOptions};
 use sip_pcap::query::{neighbours_of, select_groups, summary_row, Projection, Query};
 use sip_pcap::rfc::Census;
 
@@ -228,7 +228,10 @@ fn main() {
     }
     let opts = EnrichOptions::with_headers(&args.emit_headers);
     if let Some(path) = &args.enrich {
-        match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| enrich_str(&t, &opts)) {
+        match std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| enrich_str(&t, &opts))
+        {
             Ok(out) => println!("{out}"),
             Err(e) => {
                 eprintln!("cannot re-enrich {}: {e}", path.display());
@@ -242,7 +245,9 @@ fn main() {
         return;
     }
     if args.inputs.is_empty() {
-        eprintln!("no capture given (see --help; --schema, --enrich and --rfc-census read no capture)");
+        eprintln!(
+            "no capture given (see --help; --schema, --enrich and --rfc-census read no capture)"
+        );
         std::process::exit(2);
     }
     let files = expand_inputs(&args.inputs);
@@ -262,7 +267,8 @@ fn main() {
     let mut strategies = vec![CorrelateStrategy::HeaderToken { headers: args.correlate.clone() }];
     if !args.no_param_correlate {
         for spec in &args.correlate_param {
-            let Some((header, param)) = spec.split_once(':').filter(|(h, p)| !h.is_empty() && !p.is_empty())
+            let Some((header, param)) =
+                spec.split_once(':').filter(|(h, p)| !h.is_empty() && !p.is_empty())
             else {
                 eprintln!("--correlate-param wants Header:param, got {spec:?}");
                 std::process::exit(2);
@@ -438,7 +444,10 @@ fn expand_flows_documents(inputs: &[PathBuf]) -> Vec<PathBuf> {
             if kind.is_dir() {
                 walk(&path, out);
             } else if kind.is_file()
-                && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".flows.json"))
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".flows.json"))
             {
                 out.push(path);
             }
@@ -488,10 +497,9 @@ fn run_rfc_census(inputs: &[PathBuf], jobs: usize, candidates: &[rfc_rules::Rule
                             .and_then(|p| p.file_name())
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        match std::fs::read_to_string(path)
-                            .map_err(|e| e.to_string())
-                            .and_then(|t| serde_json::from_str::<FlowsDoc>(&t).map_err(|e| e.to_string()))
-                        {
+                        match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(
+                            |t| serde_json::from_str::<FlowsDoc>(&t).map_err(|e| e.to_string()),
+                        ) {
                             Ok(doc) => local.absorb(&name, &capture, &doc),
                             Err(reason) => local.fail(&name, reason),
                         }
@@ -538,9 +546,7 @@ fn expand_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
                 .unwrap_or_default();
             // Ring files: oldest-first by mtime so fragment reassembly and
             // ladders see time monotonically.
-            in_dir.sort_by_key(|p| {
-                std::fs::metadata(p).and_then(|m| m.modified()).ok()
-            });
+            in_dir.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
             files.extend(in_dir);
         } else {
             files.push(p.clone());
@@ -572,9 +578,8 @@ fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args) -> bool {
         }
     }
     if let Some(r) = &args.ruri {
-        if !any_leg(&|l| {
-            l.invite.as_ref().is_some_and(|inv| inv.ruri.text().contains(r.as_str()))
-        }) {
+        if !any_leg(&|l| l.invite.as_ref().is_some_and(|inv| inv.ruri.text().contains(r.as_str())))
+        {
             return false;
         }
     }
@@ -599,9 +604,7 @@ fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args) -> bool {
         };
         if !any_leg(&|l| {
             l.msgs.iter().any(|rec| {
-                rec.parsed
-                    .raw(HeaderName::from(name))
-                    .any(|v| want.is_none_or(|w| v.contains(w)))
+                rec.parsed.raw(HeaderName::from(name)).any(|v| want.is_none_or(|w| v.contains(w)))
             })
         }) {
             return false;

@@ -25,7 +25,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-
 use crate::plan::Plan;
 use crate::program::ItemKind;
 
@@ -129,12 +128,9 @@ impl<'p> Cursor<'p> {
     /// either order" (§6.1) — so either side may carry the field and the reading
     /// is the same.
     fn races_with(&self, frontier: &[String], armed: &[String]) -> bool {
-        let names = |a: &str, b: &str| {
-            self.plan.step(a).and_then(|s| s.overlap.as_deref()) == Some(b)
-        };
-        frontier
-            .iter()
-            .any(|id| armed.iter().any(|prev| names(id, prev) || names(prev, id)))
+        let names =
+            |a: &str, b: &str| self.plan.step(a).and_then(|s| s.overlap.as_deref()) == Some(b);
+        frontier.iter().any(|id| armed.iter().any(|prev| names(id, prev) || names(prev, id)))
     }
 
     /// Whether every step of an item is an arrival some OTHER leg has already
@@ -170,9 +166,9 @@ impl<'p> Cursor<'p> {
                 origin.leg != step.leg
                     && self.node_complete(anchor)
                     && !armed.iter().any(|prev| {
-                        self.plan.step(prev).is_some_and(|s| {
-                            s.is_expect() && s.discriminator == step.discriminator
-                        })
+                        self.plan
+                            .step(prev)
+                            .is_some_and(|s| s.is_expect() && s.discriminator == step.discriminator)
                     })
             })
     }
@@ -184,9 +180,7 @@ impl<'p> Cursor<'p> {
     /// alive for a relay standing further down the leg.
     fn all_sends(&self, frontier: &[String]) -> bool {
         !frontier.is_empty()
-            && frontier
-                .iter()
-                .all(|id| self.plan.step(id).is_some_and(|s| !s.is_expect()))
+            && frontier.iter().all(|id| self.plan.step(id).is_some_and(|s| !s.is_expect()))
     }
 
     /// The steps the run is waiting on or about to emit, per leg, in leg order.
@@ -236,14 +230,12 @@ impl<'p> Cursor<'p> {
                     break;
                 }
                 let all_optional = !frontier.is_empty()
-                    && frontier.iter().all(|id| {
-                        self.plan.step(id).is_some_and(|s| s.optional_expect())
-                    });
+                    && frontier
+                        .iter()
+                        .all(|id| self.plan.step(id).is_some_and(|s| s.optional_expect()));
                 if !caused
                     && frontier.iter().any(|id| {
-                        self.plan
-                            .step(id)
-                            .is_some_and(|s| s.is_expect() && !s.optional_expect())
+                        self.plan.step(id).is_some_and(|s| s.is_expect() && !s.optional_expect())
                     })
                 {
                     awaited = true;
@@ -298,9 +290,9 @@ impl<'p> Cursor<'p> {
                 Some(&branch) => {
                     let steps = &item.branches[branch].steps;
                     let mut out = Vec::new();
-                    for id in steps.iter().filter(|id| {
-                        self.plan.step(id).is_some_and(|s| s.leg == leg)
-                    }) {
+                    for id in
+                        steps.iter().filter(|id| self.plan.step(id).is_some_and(|s| s.leg == leg))
+                    {
                         let Some(step) = self.plan.step(id) else { continue };
                         match self.steps.get(id).copied() {
                             Some(StepStatus::Pending) => {
@@ -337,8 +329,7 @@ impl<'p> Cursor<'p> {
     /// other branch is discarded; the run never backtracks.
     pub fn commit(&mut self, step: &str) {
         let Some(loc) = self.plan.step(step).map(|s| s.loc) else { return };
-        let (Some(branch), ItemKind::Alt) =
-            (loc.branch, self.plan.program().items[loc.item].kind)
+        let (Some(branch), ItemKind::Alt) = (loc.branch, self.plan.program().items[loc.item].kind)
         else {
             return;
         };
@@ -516,9 +507,8 @@ mod tests {
     /// cross-leg origination, whose instant is the anchor plus a latency the
     /// document does not hold.
     fn relayed(id: &str, leg: &str, status: u16, from: &str) -> String {
-        let d = format!(
-            r#"{{"ms":0,"from":"step:{from}","compressible":true,"timer_linked":false}}"#
-        );
+        let d =
+            format!(r#"{{"ms":0,"from":"step:{from}","compressible":true,"timer_linked":false}}"#);
         format!(
             r#"{{"id":"{id}","leg":"{leg}","op":"expect","check":"record","msg":{{"status":{status},"cseq-method":"INVITE"}},"delay":{d}}}"#
         )
@@ -535,9 +525,8 @@ mod tests {
     }
 
     fn relayed_request(id: &str, leg: &str, method: &str, from: &str) -> String {
-        let d = format!(
-            r#"{{"ms":0,"from":"step:{from}","compressible":true,"timer_linked":false}}"#
-        );
+        let d =
+            format!(r#"{{"ms":0,"from":"step:{from}","compressible":true,"timer_linked":false}}"#);
         format!(
             r#"{{"id":"{id}","leg":"{leg}","op":"expect","check":"record","msg":{{"method":"{method}"}},"delay":{d}}}"#
         )
@@ -920,7 +909,6 @@ mod tests {
         );
     }
 
-
     /// A cross-leg anchor carrying a REAL dwell is a duration the DOCUMENT
     /// holds, and §6.7a's closing rule stands for it: its order is its own.
     /// Only the synthetic zero of a relay walks past a send.
@@ -948,15 +936,10 @@ mod tests {
             relayed_request("s3", "B", "BYE", "s1"),
             relayed("s4", "B", 200, "s1")
         );
-        let p = plan(&format!(
-            "[{},{},{}]",
-            send("s1", "A", "BYE"),
-            send("s2", "B", "INVITE"),
-            alt
-        ));
+        let p =
+            plan(&format!("[{},{},{}]", send("s1", "A", "BYE"), send("s2", "B", "INVITE"), alt));
         let mut cursor = Cursor::new(&p);
         cursor.complete("s1");
         assert_eq!(cursor.frontier(), ["s2"], "the alt waits for the send in front of it");
     }
-
 }

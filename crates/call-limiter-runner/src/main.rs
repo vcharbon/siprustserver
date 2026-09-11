@@ -24,10 +24,7 @@ use http_net::{HttpTransport, RealHttpNetwork};
 use sip_clock::Clock;
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 #[tokio::main]
@@ -41,23 +38,17 @@ async fn main() {
         active_windows: env_or("LIMITER_ACTIVE_WINDOWS", 3),
         ttl_sec: env_or("LIMITER_TTL_SECONDS", 1200),
     };
-    let janitor_secs: u64 = env_or(
-        "LIMITER_JANITOR_INTERVAL_SECONDS",
-        cfg.window_sec.max(1) as u64,
-    );
+    let janitor_secs: u64 =
+        env_or("LIMITER_JANITOR_INTERVAL_SECONDS", cfg.window_sec.max(1) as u64);
 
-    let addr = listen
-        .parse()
-        .unwrap_or_else(|e| panic!("bad LIMITER_LISTEN {listen:?}: {e}"));
+    let addr = listen.parse().unwrap_or_else(|e| panic!("bad LIMITER_LISTEN {listen:?}: {e}"));
 
     let store = Arc::new(WindowStore::new(cfg, Clock::system()));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
 
     let net = RealHttpNetwork::new();
-    let _handle = net
-        .serve(addr, server)
-        .await
-        .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
+    let _handle =
+        net.serve(addr, server).await.unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));
     tracing::info!(
         %addr,
         window_sec = cfg.window_sec,

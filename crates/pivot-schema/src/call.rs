@@ -402,7 +402,9 @@ mod tests {
     fn a_join_mechanism_outside_the_vocabulary_is_refused() {
         assert!(serde_json::from_str::<JoinedBy>(r#"{"kind":"reroute","step":"s8"}"#).is_err());
         assert!(serde_json::from_str::<JoinedBy>(r#"{"kind":"refer"}"#).is_err());
-        assert!(serde_json::from_str::<JoinedBy>(r#"{"kind":"refer","step":"s8","leg":"C"}"#).is_err());
+        assert!(
+            serde_json::from_str::<JoinedBy>(r#"{"kind":"refer","step":"s8","leg":"C"}"#).is_err()
+        );
     }
 
     #[test]

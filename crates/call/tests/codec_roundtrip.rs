@@ -56,7 +56,10 @@ fn service_timer_entry_round_trips_and_id_recipe_is_stable() {
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call, "service timer survives the replication codec");
     let restored = decoded.timers.last().unwrap();
-    assert_eq!(restored.timer_type, t, "owned-Cow deserialisation compares equal to the borrowed declaration");
+    assert_eq!(
+        restored.timer_type, t,
+        "owned-Cow deserialisation compares equal to the borrowed declaration"
+    );
 }
 
 /// Replication sanity: the release-event `subscriptions` and
@@ -107,8 +110,28 @@ fn the_reliable_provisional_map_round_trips() {
     assert_eq!(decoded, call, "no reliable provisional relayed yet");
 
     call.reliable_provisionals = vec![
-        ReliableProvisional { a_tag: "a1".into(), a_rseq: 9_000, b_leg_id: "b-1".into(), b_tag: "bf1".into(), b_cseq: 1, b_rseq: 4711, acknowledged: true, emission: None, a_cseq: Some(1) },
-        ReliableProvisional { a_tag: "a2".into(), a_rseq: 40, b_leg_id: "b-2".into(), b_tag: "bf2".into(), b_cseq: 1, b_rseq: 1, acknowledged: false, emission: None, a_cseq: Some(1) },
+        ReliableProvisional {
+            a_tag: "a1".into(),
+            a_rseq: 9_000,
+            b_leg_id: "b-1".into(),
+            b_tag: "bf1".into(),
+            b_cseq: 1,
+            b_rseq: 4711,
+            acknowledged: true,
+            emission: None,
+            a_cseq: Some(1),
+        },
+        ReliableProvisional {
+            a_tag: "a2".into(),
+            a_rseq: 40,
+            b_leg_id: "b-2".into(),
+            b_tag: "bf2".into(),
+            b_cseq: 1,
+            b_rseq: 1,
+            acknowledged: false,
+            emission: None,
+            a_cseq: Some(1),
+        },
     ];
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call, "both early dialogs' provisionals survive");
@@ -174,7 +197,8 @@ fn a_reliable_provisional_encoded_without_a_cseq_hydrates_without_one() {
         b_rseq: 4711,
         acknowledged: false,
     };
-    let decoded: ReliableProvisional = rmp_serde::from_slice(&rmp_serde::to_vec(&common).unwrap()).unwrap();
+    let decoded: ReliableProvisional =
+        rmp_serde::from_slice(&rmp_serde::to_vec(&common).unwrap()).unwrap();
     assert_eq!((decoded.a_tag.as_str(), decoded.a_rseq, decoded.b_rseq), ("a1", 9_000, 4711));
     assert_eq!(decoded.emission, None);
     assert_eq!(decoded.a_cseq, None, "no CSeq was recorded, none is invented");
@@ -238,7 +262,11 @@ fn the_retained_emitted_ack_round_trips() {
         (&datagram[..], ("10.0.0.7", 5060)),
         "the takeover node re-sends the same bytes at the destination the ACK first took",
     );
-    assert_eq!(ack.repeat(), Repeat::OnTrigger, "an ACK is repeated only when a 2xx copy provokes it");
+    assert_eq!(
+        ack.repeat(),
+        Repeat::OnTrigger,
+        "an ACK is repeated only when a 2xx copy provokes it"
+    );
     assert_eq!(
         ack.repeated(),
         &call::Repeated::request("ACK"),
@@ -255,15 +283,24 @@ fn the_retained_answered_2xx_round_trips_with_its_rung() {
 
     let codec = MsgpackCodec::new();
     let call = representative_call();
-    let answered = call.a_leg.dialogs[0].ext.answered_2xx.as_ref().expect("the fixture answered the caller");
+    let answered =
+        call.a_leg.dialogs[0].ext.answered_2xx.as_ref().expect("the fixture answered the caller");
     assert_eq!(answered.emission.repeat(), Repeat::Paced { class: Class::Final2xx, rung: 3 });
 
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded, call, "the retained 2xx survives byte-exact");
     let restored = decoded.a_leg.dialogs[0].ext.answered_2xx.as_ref().unwrap();
-    assert_eq!((restored.dialog_tag.as_str(), restored.cseq), ("b2bua-to-tag-aleg-9876", 1), "the ACK's key rides with it");
+    assert_eq!(
+        (restored.dialog_tag.as_str(), restored.cseq),
+        ("b2bua-to-tag-aleg-9876", 1),
+        "the ACK's key rides with it"
+    );
     assert_eq!(restored.emission.wire(), (common::ANSWERED_2XX, ("192.0.2.10", 5060)));
-    assert_eq!(restored.emission.repeat(), Repeat::Paced { class: Class::Final2xx, rung: 3 }, "the ladder resumes where it stood");
+    assert_eq!(
+        restored.emission.repeat(),
+        Repeat::Paced { class: Class::Final2xx, rung: 3 },
+        "the ladder resumes where it stood"
+    );
     assert_eq!(
         restored.emission.repeated(),
         &call::Repeated::response("INVITE", 200),
@@ -296,11 +333,8 @@ fn p7_binary_integrity_sizes() {
 fn policy_body_three_states_round_trip() {
     let codec = MsgpackCodec::new();
     let mut call = representative_call();
-    for v in [
-        None,
-        Some(PolicyUpdateBody::Empty),
-        Some(PolicyUpdateBody::Bytes(vec![1, 2, 3, 4])),
-    ] {
+    for v in [None, Some(PolicyUpdateBody::Empty), Some(PolicyUpdateBody::Bytes(vec![1, 2, 3, 4]))]
+    {
         call.policy_update_body = v.clone();
         let decoded = codec.decode(&codec.encode(&call)).unwrap();
         assert_eq!(decoded.policy_update_body, v);
@@ -362,14 +396,8 @@ fn sm_cursors_round_trip_and_back_compat() {
 
     // Populated map round-trips.
     let mut call = representative_call();
-    call.sm_cursors.insert(
-        MachineId::new("global-call"),
-        StateLabel::new("Active"),
-    );
-    call.sm_cursors.insert(
-        MachineId::new("transfer"),
-        StateLabel::new("CRinging"),
-    );
+    call.sm_cursors.insert(MachineId::new("global-call"), StateLabel::new("Active"));
+    call.sm_cursors.insert(MachineId::new("transfer"), StateLabel::new("CRinging"));
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
     assert_eq!(decoded.sm_cursors, call.sm_cursors);
     assert_eq!(decoded, call, "full value preserved with cursors set");
@@ -403,10 +431,8 @@ fn relay18x_messages_fields_decode_from_old_shape_bodies() {
     struct OldFeature {
         strategy: RelayFirst18xStrategy,
     }
-    let old = rmp_serde::to_vec(&OldFeature {
-        strategy: RelayFirst18xStrategy::FakePrack,
-    })
-    .unwrap();
+    let old =
+        rmp_serde::to_vec(&OldFeature { strategy: RelayFirst18xStrategy::FakePrack }).unwrap();
     let new: RelayFirst18xTo180Feature = rmp_serde::from_slice(&old).unwrap();
     assert_eq!(new.strategy, RelayFirst18xStrategy::FakePrack);
     assert_eq!(new.messages, Relay18xMessages::First, "absent messages defaults to FIRST");
@@ -417,11 +443,8 @@ fn relay18x_messages_fields_decode_from_old_shape_bodies() {
         first_relayed: bool,
         stored_a_tag: Option<String>,
     }
-    let old = rmp_serde::to_vec(&OldState {
-        first_relayed: true,
-        stored_a_tag: Some("a1".into()),
-    })
-    .unwrap();
+    let old = rmp_serde::to_vec(&OldState { first_relayed: true, stored_a_tag: Some("a1".into()) })
+        .unwrap();
     let new: call::RelayFirst18xState = rmp_serde::from_slice(&old).unwrap();
     assert!(new.first_relayed);
     assert_eq!(new.stored_a_tag.as_deref(), Some("a1"));
@@ -618,10 +641,10 @@ fn call_with_ext() -> call::Call {
     ext.insert("transfer".into(), transfer_call_ext_encoded());
     // The transfer service addresses legs by id (no leg-ext); a synthetic
     // `demo-leg-service` exercises the generic leg-ext capability on the a-leg.
-    call.a_leg.ext.get_or_insert_with(Default::default).insert(
-        "demo-leg-service".into(),
-        serde_json::json!({ "role": "media" }),
-    );
+    call.a_leg
+        .ext
+        .get_or_insert_with(Default::default)
+        .insert("demo-leg-service".into(), serde_json::json!({ "role": "media" }));
     call
 }
 
@@ -640,14 +663,9 @@ fn service_ext_pem_promoted_sdp_base64_survives() {
         .expect("promote-pem call-ext present");
     assert_eq!(slice, &pem_call_ext_encoded(), "slice survives verbatim");
     // The JSON path only ever sees the base64 string, never raw bytes.
-    assert!(
-        slice["promotedSdp"].is_string(),
-        "promotedSdp is a base64 string at rest, not bytes"
-    );
+    assert!(slice["promotedSdp"].is_string(), "promotedSdp is a base64 string at rest, not bytes");
     // Re-decoding the slice yields the original bytes.
-    let re_decoded = BASE64
-        .decode(slice["promotedSdp"].as_str().unwrap())
-        .expect("base64 decodes");
+    let re_decoded = BASE64.decode(slice["promotedSdp"].as_str().unwrap()).expect("base64 decodes");
     assert_eq!(re_decoded, PEM_SDP, "re-decodes to the original SDP bytes");
     assert_eq!(slice["resyncReinviteCSeq"], 42);
 }
@@ -672,20 +690,12 @@ fn service_ext_transfer_c_initial_sdp_base64_survives() {
     let call = call_with_ext();
     let decoded = codec.decode(&codec.encode(&call)).unwrap();
 
-    let slice = decoded
-        .ext
-        .as_ref()
-        .and_then(|e| e.get("transfer"))
-        .expect("transfer call-ext present");
+    let slice =
+        decoded.ext.as_ref().and_then(|e| e.get("transfer")).expect("transfer call-ext present");
     assert_eq!(slice, &transfer_call_ext_encoded(), "slice survives verbatim");
     // cInitialSdp is a base64 string at rest, never raw bytes.
-    assert!(
-        slice["cInitialSdp"].is_string(),
-        "cInitialSdp is a base64 string at rest, not bytes"
-    );
-    let re_decoded = BASE64
-        .decode(slice["cInitialSdp"].as_str().unwrap())
-        .expect("base64 decodes");
+    assert!(slice["cInitialSdp"].is_string(), "cInitialSdp is a base64 string at rest, not bytes");
+    let re_decoded = BASE64.decode(slice["cInitialSdp"].as_str().unwrap()).expect("base64 decodes");
     assert_eq!(re_decoded, TRANSFER_C_SDP, "re-decodes to the original bytes");
     assert_eq!(slice["phase"], "c-realigning");
     assert_eq!(slice["cLegId"], "b-2");

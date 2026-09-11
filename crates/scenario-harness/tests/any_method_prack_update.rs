@@ -26,12 +26,8 @@ async fn prack_then_update_both_directions_fallible() -> Result<(), StepError> {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
     // Alice opts into 100rel on the INVITE (RFC 3262 §3).
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .with_header("Supported", "100rel")
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).with_header("Supported", "100rel").send().await;
 
     // Bob answers RELIABLY: 183 + Require:100rel + RSeq (the `reliable` sugar).
     let mut uas = bob.try_receive("INVITE").await?;
@@ -66,11 +62,8 @@ async fn prack_then_update_both_directions_fallible() -> Result<(), StepError> {
     bob.try_receive("ACK").await?;
 
     // UPDATE alice → bob (RFC 3311): re-offer in the UPDATE, answer in its 200.
-    let mut upd_a = dialog
-        .send_request(InDialogMethod::Update)
-        .with_sdp(REOFFER_A)
-        .try_send()
-        .await?;
+    let mut upd_a =
+        dialog.send_request(InDialogMethod::Update).with_sdp(REOFFER_A).try_send().await?;
     let mut upd_uas = bob.try_receive("UPDATE").await?;
     assert!(upd_uas.request().body().starts_with(b"v=0"), "UPDATE carries the re-offer");
     upd_uas.respond(200, "OK").with_sdp(REANSWER_B).try_send().await?;
@@ -78,11 +71,8 @@ async fn prack_then_update_both_directions_fallible() -> Result<(), StepError> {
 
     // UPDATE bob → alice — the same generic surface from the UAS-side dialog.
     let mut bob_dialog = uas.dialog();
-    let mut upd_b = bob_dialog
-        .send_request(InDialogMethod::Update)
-        .with_sdp(REOFFER_B)
-        .try_send()
-        .await?;
+    let mut upd_b =
+        bob_dialog.send_request(InDialogMethod::Update).with_sdp(REOFFER_B).try_send().await?;
     let mut upd_a_uas = alice.try_receive("UPDATE").await?;
     upd_a_uas.respond(200, "OK").with_sdp(REANSWER_A).try_send().await?;
     upd_b.try_expect(200).await?;

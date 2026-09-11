@@ -118,7 +118,9 @@ impl MuxCore {
         let by = s.orphan_by_method.lock().unwrap();
         if by.is_empty() {
             for r in ["no_header", "unknown_token", "stray"] {
-                out.push_str(&format!("loadgen_mux_orphan_total{{reason=\"{r}\",method=\"none\"}} 0\n"));
+                out.push_str(&format!(
+                    "loadgen_mux_orphan_total{{reason=\"{r}\",method=\"none\"}} 0\n"
+                ));
             }
         } else {
             for ((reason, method), n) in by.iter() {
@@ -155,12 +157,20 @@ impl MuxCore {
             "loadgen_mux_claim_unfired_total {}\n",
             s.claim_unfired.load(Ordering::Relaxed)
         ));
-        out.push_str("# HELP loadgen_mux_inbox_drop_total Datagrams dropped on a full call inbox.\n");
+        out.push_str(
+            "# HELP loadgen_mux_inbox_drop_total Datagrams dropped on a full call inbox.\n",
+        );
         out.push_str("# TYPE loadgen_mux_inbox_drop_total counter\n");
-        out.push_str(&format!("loadgen_mux_inbox_drop_total {}\n", s.inbox_drop.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "loadgen_mux_inbox_drop_total {}\n",
+            s.inbox_drop.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP loadgen_mux_delivered_total Datagrams demuxed to a call.\n");
         out.push_str("# TYPE loadgen_mux_delivered_total counter\n");
-        out.push_str(&format!("loadgen_mux_delivered_total {}\n", s.delivered.load(Ordering::Relaxed)));
+        out.push_str(&format!(
+            "loadgen_mux_delivered_total {}\n",
+            s.delivered.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP loadgen_drop_total Datagrams dropped by the simulated packet-loss model, by direction.\n");
         out.push_str("# TYPE loadgen_drop_total counter\n");
         out.push_str(&format!(

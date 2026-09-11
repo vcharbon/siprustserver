@@ -141,7 +141,12 @@ pub struct ResolverConfig {
 
 impl Default for ResolverConfig {
     fn default() -> Self {
-        Self { positive_ttl_ms: 60_000, negative_ttl_ms: 5_000, max_entries: 4096, max_in_flight: 64 }
+        Self {
+            positive_ttl_ms: 60_000,
+            negative_ttl_ms: 5_000,
+            max_entries: 4096,
+            max_in_flight: 64,
+        }
     }
 }
 
@@ -224,7 +229,8 @@ impl NameCache {
     /// to enter, else a name-flood would pin the cache against real targets.
     fn store(&self, key: &str, outcome: Option<SocketAddr>) -> usize {
         let now = self.now_ms();
-        let ttl = if outcome.is_some() { self.cfg.positive_ttl_ms } else { self.cfg.negative_ttl_ms };
+        let ttl =
+            if outcome.is_some() { self.cfg.positive_ttl_ms } else { self.cfg.negative_ttl_ms };
         let mut entries = self.entries.lock().unwrap();
         if entries.len() >= self.cfg.max_entries && !entries.contains_key(key) {
             entries.retain(|_, e| e.expires_at_ms > now);
@@ -234,7 +240,10 @@ impl NameCache {
                 }
             }
         }
-        entries.insert(key.to_string(), CacheEntry { outcome, expires_at_ms: now + ttl, used_since_refresh: false });
+        entries.insert(
+            key.to_string(),
+            CacheEntry { outcome, expires_at_ms: now + ttl, used_since_refresh: false },
+        );
         entries.len()
     }
 }
@@ -345,7 +354,9 @@ impl Inner {
                 inner.metrics.record_resolver_refresh(refresh_outcome::IDLE_STOPPED);
                 return;
             }
-            inner.resolve_off_path(&target, refresh_outcome::REFRESHED, refresh_outcome::FAILED).await;
+            inner
+                .resolve_off_path(&target, refresh_outcome::REFRESHED, refresh_outcome::FAILED)
+                .await;
         });
     }
 
@@ -355,7 +366,12 @@ impl Inner {
     /// transient DNS blip must not cold a warm name) and re-arm for a retry.
     /// If the name is already in flight (a concurrent miss-resolve will store
     /// and re-arm) or the in-flight cap is hot, just re-arm. Never sends.
-    async fn resolve_off_path(self: &Arc<Self>, target: &ProxyAddr, ok: &'static str, fail: &'static str) {
+    async fn resolve_off_path(
+        self: &Arc<Self>,
+        target: &ProxyAddr,
+        ok: &'static str,
+        fail: &'static str,
+    ) {
         let key = target.to_string();
         let claimed = {
             let mut in_flight = self.in_flight.lock().unwrap();
@@ -424,7 +440,11 @@ impl NamedForwarder {
             let inner = self.0.clone();
             tokio::spawn(async move {
                 inner
-                    .resolve_off_path(&target, refresh_outcome::PREWARMED, refresh_outcome::PREWARM_FAILED)
+                    .resolve_off_path(
+                        &target,
+                        refresh_outcome::PREWARMED,
+                        refresh_outcome::PREWARM_FAILED,
+                    )
                     .await;
             });
         }
@@ -449,7 +469,8 @@ impl NamedForwarder {
             CacheLookup::Miss => {
                 let claimed = {
                     let mut in_flight = inner.in_flight.lock().unwrap();
-                    if in_flight.contains(&key) || in_flight.len() >= inner.cache.cfg.max_in_flight {
+                    if in_flight.contains(&key) || in_flight.len() >= inner.cache.cfg.max_in_flight
+                    {
                         false
                     } else {
                         in_flight.insert(key.clone());
@@ -564,7 +585,8 @@ mod tests {
     ) -> (NamedForwarder, Arc<CapturingEndpoint>, Arc<ProxyMetrics>) {
         let ep = Arc::new(CapturingEndpoint::default());
         let metrics = Arc::new(ProxyMetrics::new());
-        let fwd = NamedForwarder::new(ep.clone(), resolver, cfg, Clock::test_at(0), metrics.clone());
+        let fwd =
+            NamedForwarder::new(ep.clone(), resolver, cfg, Clock::test_at(0), metrics.clone());
         (fwd, ep, metrics)
     }
 
@@ -625,7 +647,11 @@ mod tests {
         tokio::time::advance(Duration::from_millis(60_001)).await;
         fwd.send(b"pkt2", &target).await;
         settle().await;
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "expired positive entry must re-resolve");
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            2,
+            "expired positive entry must re-resolve"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -669,9 +695,16 @@ mod tests {
     fn resolution_candidates_absolute_first_for_dotted_hosts() {
         assert_eq!(
             resolution_candidates("uas.sip-test.svc.cluster.local"),
-            vec!["uas.sip-test.svc.cluster.local.".to_string(), "uas.sip-test.svc.cluster.local".to_string()],
+            vec![
+                "uas.sip-test.svc.cluster.local.".to_string(),
+                "uas.sip-test.svc.cluster.local".to_string()
+            ],
         );
-        assert_eq!(resolution_candidates("mrf"), vec!["mrf".to_string()], "single-label skips straight to raw");
+        assert_eq!(
+            resolution_candidates("mrf"),
+            vec!["mrf".to_string()],
+            "single-label skips straight to raw"
+        );
         assert_eq!(
             resolution_candidates("uas.example."),
             vec!["uas.example.".to_string()],
@@ -683,14 +716,17 @@ mod tests {
     /// strings answer, and records every attempt in order.
     fn scripted_lookup(
         answers: &'static [&'static str],
-    ) -> (Arc<Mutex<Vec<String>>>, impl Fn(String, u16) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<SocketAddr>>>>)
-    {
+    ) -> (
+        Arc<Mutex<Vec<String>>>,
+        impl Fn(String, u16) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<SocketAddr>>>>,
+    ) {
         let attempts = Arc::new(Mutex::new(Vec::new()));
         let recorded = attempts.clone();
         let lookup = move |candidate: String, _port: u16| {
             recorded.lock().unwrap().push(candidate.clone());
             let answer = answers.contains(&candidate.as_str()).then(dst);
-            Box::pin(async move { answer }) as std::pin::Pin<Box<dyn std::future::Future<Output = Option<SocketAddr>>>>
+            Box::pin(async move { answer })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Option<SocketAddr>>>>
         };
         (attempts, lookup)
     }
@@ -699,7 +735,11 @@ mod tests {
     async fn resolve_first_tries_the_absolute_form_first() {
         let (attempts, lookup) = scripted_lookup(&["uas.example."]);
         assert_eq!(resolve_first("uas.example", 5060, lookup).await, Some(dst()));
-        assert_eq!(*attempts.lock().unwrap(), vec!["uas.example.".to_string()], "absolute answered — one lookup, no raw attempt");
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec!["uas.example.".to_string()],
+            "absolute answered — one lookup, no raw attempt"
+        );
     }
 
     #[tokio::test]
@@ -743,7 +783,11 @@ mod tests {
         // off-path and re-arms; nothing is sent by the refresh itself.
         tokio::time::advance(Duration::from_millis(55_000)).await;
         settle().await;
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "used entry must refresh before its TTL");
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            2,
+            "used entry must refresh before its TTL"
+        );
         assert_eq!(metrics.resolver_refresh_count("refreshed"), 1);
         assert_eq!(ep.sent.lock().unwrap().len(), 2, "refresh must not send anything");
 
@@ -751,7 +795,11 @@ mod tests {
         // dropped or delayed datagram.
         tokio::time::advance(Duration::from_millis(6_000)).await;
         fwd.send(b"pkt3", &target).await;
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "send after the old TTL must be a cache hit");
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            2,
+            "send after the old TTL must be a cache hit"
+        );
         assert_eq!(metrics.named_send_count("cached"), 2);
         assert_eq!(metrics.named_send_count("dropped_in_flight"), 0);
         assert_eq!(metrics.named_send_count("dropped_negative"), 0);
@@ -771,7 +819,11 @@ mod tests {
         // Refresh deadline: the entry was never USED → idle stop, no resolve.
         tokio::time::advance(Duration::from_millis(55_000)).await;
         settle().await;
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "an unused entry must not be refreshed");
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            1,
+            "an unused entry must not be refreshed"
+        );
         assert_eq!(metrics.resolver_refresh_count("idle_stopped"), 1);
         assert_eq!(metrics.resolver_refresh_count("refreshed"), 0);
 
@@ -780,8 +832,16 @@ mod tests {
         tokio::time::advance(Duration::from_millis(5_001)).await;
         fwd.send(b"pkt2", &target).await;
         settle().await;
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2, "the idle-stopped entry must expire normally");
-        assert_eq!(metrics.resolver_refresh_count("idle_stopped"), 1, "no further refresh churn before the new store's cycle");
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            2,
+            "the idle-stopped entry must expire normally"
+        );
+        assert_eq!(
+            metrics.resolver_refresh_count("idle_stopped"),
+            1,
+            "no further refresh churn before the new store's cycle"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -792,15 +852,31 @@ mod tests {
 
         fwd.prewarm(vec![target.clone()]);
         settle().await;
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "prewarm resolves off the serving path");
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            1,
+            "prewarm resolves off the serving path"
+        );
         assert_eq!(metrics.resolver_refresh_count("prewarmed"), 1);
 
         // The FIRST send is warm: outcome=cached, datagram out inline, zero
         // resolves on the send path.
         fwd.send(b"pkt1", &target).await;
-        assert_eq!(metrics.named_send_count("cached"), 1, "first send after prewarm must be a cache hit");
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1, "the send path must trigger no resolve");
-        assert_eq!(ep.sent.lock().unwrap().len(), 1, "the datagram goes out immediately (no resolve wait)");
+        assert_eq!(
+            metrics.named_send_count("cached"),
+            1,
+            "first send after prewarm must be a cache hit"
+        );
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            1,
+            "the send path must trigger no resolve"
+        );
+        assert_eq!(
+            ep.sent.lock().unwrap().len(),
+            1,
+            "the datagram goes out immediately (no resolve wait)"
+        );
         assert_eq!(ep.sent.lock().unwrap()[0].1, dst());
     }
 
@@ -819,10 +895,18 @@ mod tests {
         for round in 1..=3u64 {
             tokio::time::advance(Duration::from_millis(55_000)).await;
             settle().await;
-            assert_eq!(resolver.calls.load(Ordering::SeqCst), 1 + round, "pinned refresh round {round}");
+            assert_eq!(
+                resolver.calls.load(Ordering::SeqCst),
+                1 + round,
+                "pinned refresh round {round}"
+            );
         }
         assert_eq!(metrics.resolver_refresh_count("refreshed"), 3);
-        assert_eq!(metrics.resolver_refresh_count("idle_stopped"), 0, "a pinned name must never idle-stop");
+        assert_eq!(
+            metrics.resolver_refresh_count("idle_stopped"),
+            0,
+            "a pinned name must never idle-stop"
+        );
 
         // ~2.75 original TTLs later, still warm on the first send.
         fwd.send(b"pkt", &target).await;
@@ -851,7 +935,11 @@ mod tests {
         // A failed prewarm stores NO negative entry: the send path behaves
         // exactly as without prewarm (miss → its own single-flight resolve).
         fwd.send(b"pkt", &target).await;
-        assert_eq!(metrics.named_send_count("dropped_negative"), 0, "prewarm failure must not poison the send path");
+        assert_eq!(
+            metrics.named_send_count("dropped_negative"),
+            0,
+            "prewarm failure must not poison the send path"
+        );
     }
 
     #[tokio::test(start_paused = true)]

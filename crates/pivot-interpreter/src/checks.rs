@@ -43,9 +43,9 @@ impl Observables for MessageObservables<'_> {
     fn observe(&self, field: &str) -> Result<Option<String>, String> {
         let m = self.0;
         if let Some(rest) = field.strip_prefix("header(") {
-            let name = rest.strip_suffix(')').ok_or_else(|| {
-                format!("selector {field:?} opens `header(` and never closes it")
-            })?;
+            let name = rest
+                .strip_suffix(')')
+                .ok_or_else(|| format!("selector {field:?} opens `header(` and never closes it"))?;
             return Ok(m.header(name).map(str::to_string));
         }
         Ok(match field {
@@ -171,8 +171,8 @@ fn op_name(op: CheckOp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pivot_schema::bundle::IdentityBindings;
     use crate::state::RunState;
+    use pivot_schema::bundle::IdentityBindings;
 
     fn inbound() -> Inbound {
         Inbound {
@@ -221,10 +221,19 @@ mod tests {
             "{failed:?}"
         );
         assert!(run(&check("header(To)", CheckOp::Exists, None), &m, &state, &bindings).is_none());
-        assert!(run(&check("header(Replaces)", CheckOp::Absent, None), &m, &state, &bindings).is_none());
+        assert!(
+            run(&check("header(Replaces)", CheckOp::Absent, None), &m, &state, &bindings).is_none()
+        );
         assert!(run(&check("header(To)", CheckOp::Absent, None), &m, &state, &bindings).is_some());
-        assert!(run(&check("header(To)", CheckOp::Regex, Some("tag=t\\d+")), &m, &state, &bindings).is_none());
-        assert!(run(&check("header(To)", CheckOp::Regex, Some("^nope$")), &m, &state, &bindings).is_some());
+        assert!(run(
+            &check("header(To)", CheckOp::Regex, Some("tag=t\\d+")),
+            &m,
+            &state,
+            &bindings
+        )
+        .is_none());
+        assert!(run(&check("header(To)", CheckOp::Regex, Some("^nope$")), &m, &state, &bindings)
+            .is_some());
     }
 
     #[test]
@@ -266,7 +275,9 @@ mod tests {
         // A tag the message does not carry is ABSENT, and `eq` says so.
         let mut untagged = inbound();
         untagged.to_tag = None;
-        assert!(run(&check("to.tag", CheckOp::Absent, None), &untagged, &state, &bindings).is_none());
+        assert!(
+            run(&check("to.tag", CheckOp::Absent, None), &untagged, &state, &bindings).is_none()
+        );
         let failed = run(&check("to.tag", CheckOp::Eq, Some("t7")), &untagged, &state, &bindings);
         assert!(
             matches!(&failed, Some(Failure::CheckFailed { observed, .. }) if observed == "absent"),

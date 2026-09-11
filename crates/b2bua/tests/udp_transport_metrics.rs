@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use b2bua::tier1_brake::{build_tier1_brake_hook, Tier1BrakeConfig, Tier1BrakeCounters};
 use b2bua::UdpTransportMetrics;
-use sip_txn::IdGen;
 use sip_net::types::BindUdpOpts;
 use sip_net::{SignalingNetwork, SimulatedSignalingNetwork, UdpEndpoint};
+use sip_txn::IdGen;
 
 const TRANSIT_MS: u64 = 15;
 const QUEUE_MAX: usize = 5;
@@ -73,12 +73,8 @@ Max-Forwards: 70\r\n"
 /// `UdpTransportMetrics` whose `queueDepth`/`dropsTailDrop` read THROUGH the
 /// bound endpoint) and a raw flooder on the same fabric. Returns the fabric, the
 /// (never-drained) B2BUA endpoint, the flooder, and the metrics shape.
-async fn setup() -> (
-    SimulatedSignalingNetwork,
-    Arc<dyn UdpEndpoint>,
-    Box<dyn UdpEndpoint>,
-    UdpTransportMetrics,
-) {
+async fn setup(
+) -> (SimulatedSignalingNetwork, Arc<dyn UdpEndpoint>, Box<dyn UdpEndpoint>, UdpTransportMetrics) {
     let net = SimulatedSignalingNetwork::new(TRANSIT_MS);
     let brake = Tier1BrakeCounters::new();
     let hook = build_tier1_brake_hook(brake_config(), brake.clone(), &IdGen::seeded(3));
@@ -88,10 +84,7 @@ async fn setup() -> (
         .await
         .expect("bind b2bua")
         .into();
-    let flooder = net
-        .bind_udp(BindUdpOpts::new(flooder_addr(), 64))
-        .await
-        .expect("bind flooder");
+    let flooder = net.bind_udp(BindUdpOpts::new(flooder_addr(), 64)).await.expect("bind flooder");
 
     // Live getters over the bound endpoint — the TS `get queueDepth()` /
     // `get dropsTailDrop()`. A clone of the Arc'd endpoint is captured by each

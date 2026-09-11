@@ -106,20 +106,31 @@ async fn a_takeover_opens_this_nodes_own_root_span_linked_to_the_nominals() {
         .await
         .expect("limiter server");
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
     let decision = limited_decision();
     let mut w_b1 = fh
         .spawn_worker_limited(
-            "b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            decision.clone(), limiter_client(&http),
+            "b1",
+            "b1",
+            B1,
+            &["b2"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            decision.clone(),
+            limiter_client(&http),
         )
         .await;
     let mut w_b2 = fh
         .spawn_worker_limited(
-            "b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080),
-            decision.clone(), limiter_client(&http),
+            "b2",
+            "b2",
+            B2,
+            &["b1"],
+            ("127.0.0.1", 5070),
+            ("127.0.0.1", 5080),
+            decision.clone(),
+            limiter_client(&http),
         )
         .await;
 

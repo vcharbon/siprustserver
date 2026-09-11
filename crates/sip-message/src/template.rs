@@ -302,7 +302,8 @@ impl MessageTemplate {
         self.headers
             .iter()
             .filter(|h| {
-                h.class == HeaderClass::Structural && crate::remote_target::is_remote_target(&h.name)
+                h.class == HeaderClass::Structural
+                    && crate::remote_target::is_remote_target(&h.name)
             })
             .map(|h| (crate::remote_target::canonical(&h.name), h.value.clone()))
             .collect()
@@ -479,8 +480,7 @@ Content-Length: 0\r\n\r\n";
             ],
             Vec::new(),
         );
-        let names: Vec<String> =
-            tmpl.frozen_headers().iter().map(|h| h.name.to_string()).collect();
+        let names: Vec<String> = tmpl.frozen_headers().iter().map(|h| h.name.to_string()).collect();
         // `v` and `i` are tier-1 (dropped); `c` (Content-Type) and Subject frozen.
         assert_eq!(names, vec!["c".to_string(), "Subject".to_string()]);
     }
@@ -603,10 +603,7 @@ Content-Length: 0\r\n\r\n";
         let tmpl = MessageTemplate::from_message(&parse(raw.as_bytes()));
         let forms = tmpl.regenerated_name_forms();
         // Only the compact row yields a form (canonical Via -> v).
-        assert_eq!(
-            forms.iter().filter(|(c, _)| c.eq_ignore_ascii_case("via")).count(),
-            1,
-        );
+        assert_eq!(forms.iter().filter(|(c, _)| c.eq_ignore_ascii_case("via")).count(), 1,);
         assert!(forms.contains(&("Via".to_string(), "v".to_string())));
         // apply_name_forms rewrites EVERY Via row to the one form (the collapse).
         let headers = vec![

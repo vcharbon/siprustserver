@@ -79,11 +79,7 @@ pub struct RecordingHttpNetwork {
 impl RecordingHttpNetwork {
     /// Wrap `inner`, stamping captures with `clock`.
     pub fn new(inner: Arc<dyn HttpTransport>, clock: Clock) -> Self {
-        Self {
-            inner,
-            sink: Arc::new(Mutex::new(Vec::new())),
-            clock,
-        }
+        Self { inner, sink: Arc::new(Mutex::new(Vec::new())), clock }
     }
 
     /// Snapshot every exchange captured so far.

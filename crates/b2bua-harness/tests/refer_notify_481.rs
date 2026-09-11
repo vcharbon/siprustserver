@@ -54,10 +54,8 @@ fn assert_notify(txn: &ServerTxn, state: &str) {
 fn describe_notify(txn: &ServerTxn) -> String {
     let req = txn.request();
     let event = req.header::<Event>().and_then(|e| e.ok()).map(|e| e.token().to_string());
-    let state = req
-        .header::<SubscriptionState>()
-        .and_then(|s| s.ok())
-        .map(|s| s.token().to_string());
+    let state =
+        req.header::<SubscriptionState>().and_then(|s| s.ok()).map(|s| s.token().to_string());
     format!("{} Event={event:?} Subscription-State={state:?}", req.method())
 }
 
@@ -148,10 +146,8 @@ async fn notify_481_ends_the_subscription() {
     // The transfer's own outcome is unchanged by the 481.
     let cdrs = b2bua.cdr_records();
     assert!(
-        cdrs.iter().any(|c| c
-            .events
-            .iter()
-            .any(|e| e.reason.as_deref() == Some("transfer-completed"))),
+        cdrs.iter()
+            .any(|c| c.events.iter().any(|e| e.reason.as_deref() == Some("transfer-completed"))),
         "the transfer completes despite the referrer's 481: {cdrs:?}",
     );
 }

@@ -97,10 +97,7 @@ pub struct NetAddr {
 
 impl NetAddr {
     pub fn new(ip: impl Into<String>, port: u16) -> Self {
-        Self {
-            ip: ip.into(),
-            port,
-        }
+        Self { ip: ip.into(), port }
     }
 }
 
@@ -114,18 +111,10 @@ pub struct CodecDesc {
 }
 
 /// PCMA (A-law), payload type 8.
-pub const PCMA: CodecDesc = CodecDesc {
-    name: G711Codec::Pcma,
-    payload_type: 8,
-    clock_rate: 8000,
-};
+pub const PCMA: CodecDesc = CodecDesc { name: G711Codec::Pcma, payload_type: 8, clock_rate: 8000 };
 
 /// PCMU (µ-law), payload type 0.
-pub const PCMU: CodecDesc = CodecDesc {
-    name: G711Codec::Pcmu,
-    payload_type: 0,
-    clock_rate: 8000,
-};
+pub const PCMU: CodecDesc = CodecDesc { name: G711Codec::Pcmu, payload_type: 0, clock_rate: 8000 };
 
 use std::sync::Arc;
 

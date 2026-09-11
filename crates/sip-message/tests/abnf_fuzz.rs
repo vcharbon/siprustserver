@@ -154,7 +154,10 @@ fn fuzz_via(line: &str, s: &mut Stat) {
         if parsed.transport.is_empty() || parsed.host.is_empty() {
             s.reject(
                 entry,
-                format!("empty transport/host (transport=\"{}\" host=\"{}\")", parsed.transport, parsed.host),
+                format!(
+                    "empty transport/host (transport=\"{}\" host=\"{}\")",
+                    parsed.transport, parsed.host
+                ),
             );
             return;
         }
@@ -256,17 +259,8 @@ fn dispatch(target: &str, line: &str, s: &mut Stat) {
     }
 }
 
-const TARGETS: &[&str] = &[
-    "sip-uri",
-    "from",
-    "pai",
-    "contact",
-    "via",
-    "cseq",
-    "rack",
-    "refer-to",
-    "request-line",
-];
+const TARGETS: &[&str] =
+    &["sip-uri", "from", "pai", "contact", "via", "cseq", "rack", "refer-to", "request-line"];
 
 fn corpus_path(target: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

@@ -27,10 +27,6 @@ fn committed_endurance_baseline_loads_and_validates() {
         let d = registry
             .get(&entry.shape)
             .unwrap_or_else(|| panic!("baseline mix names unknown shape {:?}", entry.shape));
-        assert!(
-            d.load.is_some(),
-            "baseline mix shape {:?} has no load body",
-            entry.shape
-        );
+        assert!(d.load.is_some(), "baseline mix shape {:?} has no load body", entry.shape);
     }
 }

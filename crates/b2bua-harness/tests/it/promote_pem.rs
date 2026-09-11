@@ -11,7 +11,9 @@ use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
 use sip_message::error::SipParseError;
 use sip_message::header::kind::TokenKind;
-use sip_message::header::{Allow, HeaderName, HeaderValue, ParamValue, Reason, Supported, TokenListHeader};
+use sip_message::header::{
+    Allow, HeaderName, HeaderValue, ParamValue, Reason, Supported, TokenListHeader,
+};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const EARLY: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -45,12 +47,7 @@ async fn promote_pem_happy_no_resync() {
     let bob = h.agent("bob", "127.0.0.1:5811").await;
     let b2bua = b2bua_pem(&h, "b2bua", "127.0.0.1:5821", 5811).await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
 
     let mut uas = bob.receive("INVITE").await;
 
@@ -69,10 +66,7 @@ async fn promote_pem_happy_no_resync() {
     let ok = call.expect(200).await;
     assert!(!ok.body().is_empty(), "synthetic 200 carries bob's early SDP");
     assert_eq!(ok.body(), EARLY.as_bytes(), "early SDP relayed verbatim");
-    assert!(
-        ok.raw(HeaderName::PEarlyMedia).next().is_none(),
-        "P-Early-Media stripped"
-    );
+    assert!(ok.raw(HeaderName::PEarlyMedia).next().is_none(), "P-Early-Media stripped");
     let allow = ok.header::<Allow>().expect("an Allow").expect("readable Allow");
     assert_eq!(allow.to_wire(), "INVITE, ACK, BYE, CANCEL", "bob's Allow relayed verbatim");
     assert!(!has_token(ok.header::<Supported>(), "100rel"), "no 100rel");
@@ -102,14 +96,10 @@ async fn no_policy_control() {
     let h = Harness::with_transit_delay("promote-pem-no-policy-control", 0);
     let alice = h.agent("alice", "127.0.0.1:5808").await;
     let bob = h.agent("bob", "127.0.0.1:5818").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5818).start(&h, "b2bua", "127.0.0.1:5828").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5818).start(&h, "b2bua", "127.0.0.1:5828").await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
 
     uas.respond(183, "Session Progress")
@@ -149,12 +139,7 @@ async fn resync_sdp_changed() {
     let bob = h.agent("bob", "127.0.0.1:5812").await;
     let b2bua = b2bua_pem(&h, "b2bua", "127.0.0.1:5822", 5812).await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
 
     uas.respond(183, "Session Progress")
@@ -179,10 +164,7 @@ async fn resync_sdp_changed() {
     );
     let allow = req.header::<Allow>().expect("an Allow").expect("readable Allow");
     assert!(allow.contains("INVITE"), "Allow on resync re-INVITE, got {}", allow.to_wire());
-    assert!(
-        req.header::<Supported>().is_some(),
-        "Supported on resync re-INVITE"
-    );
+    assert!(req.header::<Supported>().is_some(), "Supported on resync re-INVITE");
 
     resync.respond(200, "OK").with_sdp(EARLY).await;
     // B2BUA's ACK to alice's 200 closes the window.
@@ -190,9 +172,7 @@ async fn resync_sdp_changed() {
 
     // After the window closes, in-dialog flows resume — alice's INFO is relayed
     // to bob (NOT 488'd).
-    let mut info = dialog
-        .request(sip_message::generators::InDialogMethod::Info, None)
-        .await;
+    let mut info = dialog.request(sip_message::generators::InDialogMethod::Info, None).await;
     bob.receive("INFO").await.respond(200, "OK").await;
     info.expect(200).await;
 
@@ -206,12 +186,7 @@ async fn b_fails_post_promote() {
     let bob = h.agent("bob", "127.0.0.1:5813").await;
     let b2bua = b2bua_pem(&h, "b2bua", "127.0.0.1:5823", 5813).await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
 
     uas.respond(183, "Session Progress")
@@ -244,12 +219,7 @@ async fn resync_failed_by_a() {
     let bob = h.agent("bob", "127.0.0.1:5814").await;
     let b2bua = b2bua_pem(&h, "b2bua", "127.0.0.1:5824", 5814).await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
 
     uas.respond(183, "Session Progress")
@@ -295,12 +265,7 @@ async fn a_bye_during_window() {
     let bob = h.agent("bob", "127.0.0.1:5815").await;
     let b2bua = b2bua_pem(&h, "b2bua", "127.0.0.1:5825", 5815).await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
 
     uas.respond(183, "Session Progress")
@@ -332,12 +297,7 @@ async fn forking_resync() {
     const FORK_T1: &str = "fork-tag-promoting-1";
     const FORK_T2: &str = "fork-tag-winning-2";
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
 
     // 183 + PEM with To-tag FORK_T1 (promote with that SDP).
@@ -382,12 +342,7 @@ async fn in_dialog_rejection() {
     let bob = h.agent("bob", "127.0.0.1:5817").await;
     let b2bua = b2bua_pem(&h, "b2bua", "127.0.0.1:5827", 5817).await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
 
     uas.respond(183, "Session Progress")

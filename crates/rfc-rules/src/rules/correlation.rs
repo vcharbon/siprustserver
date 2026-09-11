@@ -109,8 +109,7 @@ impl PeerDialog {
         if msg.is_request("INVITE") {
             self.took_invite = true;
             let head = msg.head.as_deref();
-            self.open_invites
-                .push((msg.via_branch.clone(), head.and_then(sniff::request_uri)));
+            self.open_invites.push((msg.via_branch.clone(), head.and_then(sniff::request_uri)));
             if self.peer_uri.is_none() {
                 self.peer_uri = head.and_then(|h| sniff::name_addr_uri(h, "From"));
             }
@@ -145,14 +144,8 @@ impl PeerDialogs {
         if msg.call_id.is_empty() {
             return;
         }
-        self.by
-            .entry((msg.src.clone(), msg.call_id.clone()))
-            .or_default()
-            .sent(msg);
-        self.by
-            .entry((msg.dst.clone(), msg.call_id.clone()))
-            .or_default()
-            .took(msg);
+        self.by.entry((msg.src.clone(), msg.call_id.clone())).or_default().sent(msg);
+        self.by.entry((msg.dst.clone(), msg.call_id.clone())).or_default().took(msg);
     }
 }
 
@@ -222,17 +215,15 @@ impl Obligation for ResponseEchoesRequestVia {
             }
             if matches!(msg.kind, Kind::Request { .. }) {
                 if !msg.repeat {
-                    sent.entry((msg.src.clone(), msg.call_id.clone())).or_default().push(
-                        SentVia {
-                            cseq: msg.cseq,
-                            method: msg.cseq_method.to_ascii_uppercase(),
-                            branch: msg.via_branch.clone(),
-                            vias: msg
-                                .head
-                                .as_deref()
-                                .map_or(0, |h| sniff::header_values(h, "Via").len()),
-                        },
-                    );
+                    sent.entry((msg.src.clone(), msg.call_id.clone())).or_default().push(SentVia {
+                        cseq: msg.cseq,
+                        method: msg.cseq_method.to_ascii_uppercase(),
+                        branch: msg.via_branch.clone(),
+                        vias: msg
+                            .head
+                            .as_deref()
+                            .map_or(0, |h| sniff::header_values(h, "Via").len()),
+                    });
                 }
                 continue;
             }
@@ -260,9 +251,8 @@ impl Obligation for ResponseEchoesRequestVia {
             // unmatchable at the taker's transaction layer — but only where the
             // taker minted a branch at all, since a branchless legacy request
             // cannot be branch-compared.
-            let branch_diverged = matched.is_none()
-                && msg.via_branch.is_some()
-                && latest.branch.is_some();
+            let branch_diverged =
+                matched.is_none() && msg.via_branch.is_some() && latest.branch.is_some();
             let reference = matched.copied().unwrap_or(latest);
             let response_vias = sniff::header_values(head, "Via").len();
             if !branch_diverged && response_vias == reference.vias {
@@ -601,10 +591,7 @@ impl Obligation for CancelViaBranch {
                         let finding = |d| charge(RuleId::CancelViaBranch, msg, mi, d);
                         if dlg.relays() {
                             out.push(finding(Decision::Undecidable(RELAYED)));
-                        } else if dlg
-                            .open_invites
-                            .iter()
-                            .any(|(b, _)| b.as_deref() == Some(branch))
+                        } else if dlg.open_invites.iter().any(|(b, _)| b.as_deref() == Some(branch))
                         {
                             out.push(finding(Decision::Compliant));
                         } else {
@@ -1128,7 +1115,10 @@ mod tests {
         else {
             panic!("via evidence: {:?}", f[0].decision)
         };
-        assert_eq!((response_branch.as_str(), request_branch.as_str()), ("z9hG4bK-other", "z9hG4bK-i"));
+        assert_eq!(
+            (response_branch.as_str(), request_branch.as_str()),
+            ("z9hG4bK-other", "z9hG4bK-i")
+        );
     }
 
     /// A grown Via stack was rewritten in transit, and the count is judged
@@ -1154,8 +1144,32 @@ mod tests {
     #[test]
     fn same_key_transactions_correlate_by_branch_not_recency() {
         let msgs = vec![
-            req(1_000, A, B, "BYE", "sip:bob@h", 5, "z9hG4bK-x", "sip:alice@h", "at", Some("bt"), 1),
-            req(1_500, A, B, "BYE", "sip:bob@h", 5, "z9hG4bK-y", "sip:alice@h", "at", Some("bt"), 1),
+            req(
+                1_000,
+                A,
+                B,
+                "BYE",
+                "sip:bob@h",
+                5,
+                "z9hG4bK-x",
+                "sip:alice@h",
+                "at",
+                Some("bt"),
+                1,
+            ),
+            req(
+                1_500,
+                A,
+                B,
+                "BYE",
+                "sip:bob@h",
+                5,
+                "z9hG4bK-y",
+                "sip:alice@h",
+                "at",
+                Some("bt"),
+                1,
+            ),
             resp(2_000, B, A, 200, 5, "BYE", "z9hG4bK-x", "at", Some("bt"), 1),
         ];
         let f = charged(run(&ResponseEchoesRequestVia, &msgs), B);
@@ -1185,9 +1199,8 @@ mod tests {
         msgs.truncate(1);
         msgs.push(resp(2_000, B, A, 200, 9, "INVITE", "z9hG4bK-i", "at", Some("bt"), 1));
         let f = charged(run(&ResponseCorrelation, &msgs), B);
-        let Decision::Violated(Evidence::ResponseCseqPhantom {
-            response_cseq, sent_cseqs, ..
-        }) = &f[0].decision
+        let Decision::Violated(Evidence::ResponseCseqPhantom { response_cseq, sent_cseqs, .. }) =
+            &f[0].decision
         else {
             panic!("correlation evidence: {:?}", f[0].decision)
         };
@@ -1207,7 +1220,19 @@ mod tests {
     #[test]
     fn an_in_dialog_request_naming_a_local_tag_is_compliant() {
         let mut msgs = opened();
-        msgs.push(req(4_000, B, A, "BYE", "sip:alice@h", 1, "z9hG4bK-b", "sip:bob@h", "bt", Some("at"), 1));
+        msgs.push(req(
+            4_000,
+            B,
+            A,
+            "BYE",
+            "sip:alice@h",
+            1,
+            "z9hG4bK-b",
+            "sip:bob@h",
+            "bt",
+            Some("at"),
+            1,
+        ));
         let f = charged(run(&MidDialogTags, &msgs), B);
         assert!(f.iter().all(|x| matches!(x.decision, Decision::Compliant)), "{f:?}");
         assert!(f.iter().any(|x| x.anchor == 3), "the BYE is an occasion: {f:?}");
@@ -1216,7 +1241,19 @@ mod tests {
     #[test]
     fn an_in_dialog_request_naming_a_foreign_tag_is_violated() {
         let mut msgs = opened();
-        msgs.push(req(4_000, B, A, "BYE", "sip:alice@h", 1, "z9hG4bK-b", "sip:bob@h", "bt", Some("nope"), 1));
+        msgs.push(req(
+            4_000,
+            B,
+            A,
+            "BYE",
+            "sip:alice@h",
+            1,
+            "z9hG4bK-b",
+            "sip:bob@h",
+            "bt",
+            Some("nope"),
+            1,
+        ));
         let f = charged(run(&MidDialogTags, &msgs), B);
         let violated = f.iter().find(|x| x.violated()).expect("a violated occasion");
         let Decision::Violated(Evidence::DialogTagForeign { tag_header, tag, local_tags, .. }) =
@@ -1235,9 +1272,33 @@ mod tests {
         // B takes A's INVITE and forwards one of its own on the same Call-ID.
         let msgs = vec![
             req(1_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1),
-            req(1_500, B, "10.0.0.3:5080", "INVITE", "sip:bob@h", 1, "z9hG4bK-j", "sip:alice@h", "at", None, 1),
+            req(
+                1_500,
+                B,
+                "10.0.0.3:5080",
+                "INVITE",
+                "sip:bob@h",
+                1,
+                "z9hG4bK-j",
+                "sip:alice@h",
+                "at",
+                None,
+                1,
+            ),
             resp(2_000, "10.0.0.3:5080", B, 200, 1, "INVITE", "z9hG4bK-j", "at", Some("ct"), 1),
-            req(3_000, A, B, "BYE", "sip:bob@h", 2, "z9hG4bK-b", "sip:alice@h", "at", Some("nope"), 1),
+            req(
+                3_000,
+                A,
+                B,
+                "BYE",
+                "sip:bob@h",
+                2,
+                "z9hG4bK-b",
+                "sip:alice@h",
+                "at",
+                Some("nope"),
+                1,
+            ),
         ];
         let f: Vec<Finding> =
             run(&MidDialogTags, &msgs).into_iter().filter(|x| x.taker == B).collect();
@@ -1250,7 +1311,19 @@ mod tests {
     #[test]
     fn a_stable_in_dialog_from_uri_is_compliant() {
         let mut msgs = opened();
-        msgs.push(req(4_000, A, B, "BYE", "sip:bob@h", 2, "z9hG4bK-b", "sip:alice@h", "at", Some("bt"), 1));
+        msgs.push(req(
+            4_000,
+            A,
+            B,
+            "BYE",
+            "sip:bob@h",
+            2,
+            "z9hG4bK-b",
+            "sip:alice@h",
+            "at",
+            Some("bt"),
+            1,
+        ));
         let f = charged(run(&PeerUriStable, &msgs), A);
         assert_eq!(f.len(), 1, "the BYE alone: {f:?}");
         assert!(matches!(f[0].decision, Decision::Compliant), "{:?}", f[0].decision);
@@ -1259,7 +1332,19 @@ mod tests {
     #[test]
     fn a_rewritten_in_dialog_from_uri_is_violated() {
         let mut msgs = opened();
-        msgs.push(req(4_000, A, B, "BYE", "sip:bob@h", 2, "z9hG4bK-b", "sip:eve@h", "at", Some("bt"), 1));
+        msgs.push(req(
+            4_000,
+            A,
+            B,
+            "BYE",
+            "sip:bob@h",
+            2,
+            "z9hG4bK-b",
+            "sip:eve@h",
+            "at",
+            Some("bt"),
+            1,
+        ));
         let f = charged(run(&PeerUriStable, &msgs), A);
         let Decision::Violated(Evidence::PeerUriRewritten { sent_uri, dialog_uri, .. }) =
             &f[0].decision
@@ -1280,7 +1365,19 @@ mod tests {
     #[test]
     fn an_in_dialog_message_keeping_its_call_id_is_compliant() {
         let mut msgs = opened();
-        msgs.push(req(4_000, A, B, "BYE", "sip:bob@h", 2, "z9hG4bK-b", "sip:alice@h", "at", Some("bt"), 1));
+        msgs.push(req(
+            4_000,
+            A,
+            B,
+            "BYE",
+            "sip:bob@h",
+            2,
+            "z9hG4bK-b",
+            "sip:alice@h",
+            "at",
+            Some("bt"),
+            1,
+        ));
         let f = charged(run(&DialogCallIdStable, &msgs), A);
         assert!(f.iter().all(|x| matches!(x.decision, Decision::Compliant)), "{f:?}");
     }
@@ -1288,8 +1385,19 @@ mod tests {
     #[test]
     fn a_changed_call_id_within_a_dialog_is_violated() {
         let mut msgs = opened();
-        let mut bye =
-            req(4_000, A, B, "BYE", "sip:bob@h", 2, "z9hG4bK-b", "sip:alice@h", "at", Some("bt"), 1);
+        let mut bye = req(
+            4_000,
+            A,
+            B,
+            "BYE",
+            "sip:bob@h",
+            2,
+            "z9hG4bK-b",
+            "sip:alice@h",
+            "at",
+            Some("bt"),
+            1,
+        );
         bye.call_id = "c2".to_string();
         msgs.push(bye);
         let f = charged(run(&DialogCallIdStable, &msgs), A);
@@ -1309,8 +1417,19 @@ mod tests {
         let mut first =
             req(1_000, A, B, "OPTIONS", "sip:bob@h", 1, "z9hG4bK-1", "sip:alice@h", "at", None, 1);
         first.call_id = "p1".to_string();
-        let mut second =
-            req(2_000, A, B, "OPTIONS", "sip:bob@h", 1, "z9hG4bK-2", "sip:alice@h", "at", Some("k"), 1);
+        let mut second = req(
+            2_000,
+            A,
+            B,
+            "OPTIONS",
+            "sip:bob@h",
+            1,
+            "z9hG4bK-2",
+            "sip:alice@h",
+            "at",
+            Some("k"),
+            1,
+        );
         second.call_id = "p2".to_string();
         assert!(run(&DialogCallIdStable, &[first, second]).is_empty());
     }
@@ -1352,12 +1471,26 @@ mod tests {
     fn a_cancel_on_a_foreign_branch_is_the_branch_rules_finding() {
         let msgs = vec![
             req(1_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1),
-            req(2_000, A, B, "CANCEL", "sip:eve@h", 1, "z9hG4bK-other", "sip:alice@h", "at", None, 1),
+            req(
+                2_000,
+                A,
+                B,
+                "CANCEL",
+                "sip:eve@h",
+                1,
+                "z9hG4bK-other",
+                "sip:alice@h",
+                "at",
+                None,
+                1,
+            ),
         ];
         assert!(run(&CancelRequestUri, &msgs).is_empty());
         let f = charged(run(&CancelViaBranch, &msgs), A);
         let Decision::Violated(Evidence::CancelBranchUnmatched {
-            cancel_branch, invite_branches, ..
+            cancel_branch,
+            invite_branches,
+            ..
         }) = &f[0].decision
         else {
             panic!("cancel-branch evidence: {:?}", f[0].decision)
@@ -1372,8 +1505,32 @@ mod tests {
     fn a_cancel_of_a_re_invite_branch_is_compliant() {
         let msgs = vec![
             req(1_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1),
-            req(2_000, A, B, "INVITE", "sip:bob@h", 2, "z9hG4bK-i2", "sip:alice@h", "at", Some("bt"), 1),
-            req(3_000, A, B, "CANCEL", "sip:bob@h", 2, "z9hG4bK-i2", "sip:alice@h", "at", Some("bt"), 1),
+            req(
+                2_000,
+                A,
+                B,
+                "INVITE",
+                "sip:bob@h",
+                2,
+                "z9hG4bK-i2",
+                "sip:alice@h",
+                "at",
+                Some("bt"),
+                1,
+            ),
+            req(
+                3_000,
+                A,
+                B,
+                "CANCEL",
+                "sip:bob@h",
+                2,
+                "z9hG4bK-i2",
+                "sip:alice@h",
+                "at",
+                Some("bt"),
+                1,
+            ),
         ];
         let f = charged(run(&CancelViaBranch, &msgs), A);
         assert!(f.iter().all(|x| matches!(x.decision, Decision::Compliant)), "{f:?}");
@@ -1383,7 +1540,17 @@ mod tests {
     #[test]
     fn a_cancel_without_any_invite_is_no_occasion() {
         let msgs = vec![req(
-            1_000, A, B, "CANCEL", "sip:bob@h", 1, "z9hG4bK-c", "sip:alice@h", "at", None, 1,
+            1_000,
+            A,
+            B,
+            "CANCEL",
+            "sip:bob@h",
+            1,
+            "z9hG4bK-c",
+            "sip:alice@h",
+            "at",
+            None,
+            1,
         )];
         assert!(run(&CancelViaBranch, &msgs).is_empty());
     }
@@ -1454,7 +1621,16 @@ mod tests {
     #[test]
     fn an_initial_request_carrying_a_to_tag_is_violated() {
         let msgs = vec![req(
-            1_000, A, B, "REFER", "sip:bob@h", 1, "z9hG4bK-r", "sip:alice@h", "at", Some("bogus"),
+            1_000,
+            A,
+            B,
+            "REFER",
+            "sip:bob@h",
+            1,
+            "z9hG4bK-r",
+            "sip:alice@h",
+            "at",
+            Some("bogus"),
             1,
         )];
         let f = charged(run(&NoToTagOnInitialRequest, &msgs), A);
@@ -1472,7 +1648,19 @@ mod tests {
     fn a_request_after_earlier_traffic_on_the_call_id_is_no_occasion() {
         let msgs = vec![
             req(1_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1),
-            req(2_000, B, A, "NOTIFY", "sip:alice@h", 1, "z9hG4bK-n", "sip:bob@h", "bt", Some("at"), 1),
+            req(
+                2_000,
+                B,
+                A,
+                "NOTIFY",
+                "sip:alice@h",
+                1,
+                "z9hG4bK-n",
+                "sip:bob@h",
+                "bt",
+                Some("at"),
+                1,
+            ),
         ];
         let f = charged(run(&NoToTagOnInitialRequest, &msgs), B);
         assert!(f.is_empty(), "B had already taken the INVITE: {f:?}");
@@ -1483,7 +1671,17 @@ mod tests {
     #[test]
     fn an_in_dialog_verb_is_no_occasion() {
         let msgs = vec![req(
-            1_000, A, B, "BYE", "sip:bob@h", 2, "z9hG4bK-b", "sip:alice@h", "at", Some("bt"), 1,
+            1_000,
+            A,
+            B,
+            "BYE",
+            "sip:bob@h",
+            2,
+            "z9hG4bK-b",
+            "sip:alice@h",
+            "at",
+            Some("bt"),
+            1,
         )];
         assert!(run(&NoToTagOnInitialRequest, &msgs).is_empty());
     }
@@ -1495,14 +1693,38 @@ mod tests {
         vec![
             req(1_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1),
             resp(2_000, B, A, 200, 1, "INVITE", "z9hG4bK-i", "at", Some("bt"), 1),
-            req(3_000, A, B, "ACK", "sip:bob@h", 1, "z9hG4bK-k", "sip:alice@h", "at", Some("bt"), 1),
+            req(
+                3_000,
+                A,
+                B,
+                "ACK",
+                "sip:bob@h",
+                1,
+                "z9hG4bK-k",
+                "sip:alice@h",
+                "at",
+                Some("bt"),
+                1,
+            ),
         ]
     }
 
     #[test]
     fn a_tagless_request_in_a_confirmed_dialog_is_violated() {
         let mut msgs = confirmed();
-        msgs.push(req(4_000, A, B, "BYE", "sip:bob@h", 2, "z9hG4bK-b", "sip:alice@h", "at", None, 1));
+        msgs.push(req(
+            4_000,
+            A,
+            B,
+            "BYE",
+            "sip:bob@h",
+            2,
+            "z9hG4bK-b",
+            "sip:alice@h",
+            "at",
+            None,
+            1,
+        ));
         let f = charged(run(&InDialogToTag, &msgs), A);
         let violated = f.iter().find(|x| x.violated()).expect("a violated occasion");
         let Decision::Violated(Evidence::RequiredHeaderAbsent { on, header, .. }) =
@@ -1516,7 +1738,19 @@ mod tests {
     #[test]
     fn a_tagged_request_in_a_confirmed_dialog_is_compliant() {
         let mut msgs = confirmed();
-        msgs.push(req(4_000, A, B, "BYE", "sip:bob@h", 2, "z9hG4bK-b", "sip:alice@h", "at", Some("bt"), 1));
+        msgs.push(req(
+            4_000,
+            A,
+            B,
+            "BYE",
+            "sip:bob@h",
+            2,
+            "z9hG4bK-b",
+            "sip:alice@h",
+            "at",
+            Some("bt"),
+            1,
+        ));
         let f = charged(run(&InDialogToTag, &msgs), A);
         assert!(f.iter().all(|x| matches!(x.decision, Decision::Compliant)), "{f:?}");
     }
@@ -1538,10 +1772,46 @@ mod tests {
     #[test]
     fn an_echoed_ack_or_cancel_is_no_occasion() {
         let mut msgs = confirmed();
-        msgs.push(req(4_000, A, B, "INVITE", "sip:bob@h", 2, "z9hG4bK-r", "sip:alice@h", "at", Some("bt"), 1));
+        msgs.push(req(
+            4_000,
+            A,
+            B,
+            "INVITE",
+            "sip:bob@h",
+            2,
+            "z9hG4bK-r",
+            "sip:alice@h",
+            "at",
+            Some("bt"),
+            1,
+        ));
         msgs.push(resp(5_000, B, A, 488, 2, "INVITE", "z9hG4bK-r", "at", Some("bt"), 1));
-        msgs.push(req(6_000, A, B, "ACK", "sip:bob@h", 2, "z9hG4bK-r", "sip:alice@h", "at", None, 1));
-        msgs.push(req(7_000, A, B, "CANCEL", "sip:bob@h", 2, "z9hG4bK-r", "sip:alice@h", "at", None, 1));
+        msgs.push(req(
+            6_000,
+            A,
+            B,
+            "ACK",
+            "sip:bob@h",
+            2,
+            "z9hG4bK-r",
+            "sip:alice@h",
+            "at",
+            None,
+            1,
+        ));
+        msgs.push(req(
+            7_000,
+            A,
+            B,
+            "CANCEL",
+            "sip:bob@h",
+            2,
+            "z9hG4bK-r",
+            "sip:alice@h",
+            "at",
+            None,
+            1,
+        ));
         let violated = run(&InDialogToTag, &msgs).iter().filter(|x| x.violated()).count();
         assert_eq!(violated, 0, "the echoed requests are no occasion");
     }
@@ -1551,7 +1821,19 @@ mod tests {
     #[test]
     fn an_establishing_invite_retransmit_after_the_2xx_is_no_occasion() {
         let mut msgs = confirmed();
-        msgs.push(req(4_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1));
+        msgs.push(req(
+            4_000,
+            A,
+            B,
+            "INVITE",
+            "sip:bob@h",
+            1,
+            "z9hG4bK-i",
+            "sip:alice@h",
+            "at",
+            None,
+            1,
+        ));
         assert!(run(&InDialogToTag, &msgs).iter().all(|x| !x.violated()), "{msgs:?}");
     }
 

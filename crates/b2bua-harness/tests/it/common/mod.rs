@@ -40,7 +40,12 @@ impl Drop for ProxySut {
 /// `Clock::test_at(0)`, and wrap the returned parts in the test-local
 /// [`ProxySut`] (the registry/observer parts are unused on this single-worker,
 /// no-health-probe path).
-pub async fn spawn_lb_proxy(h: &Harness, addr: &str, worker_name: &str, worker: SocketAddr) -> ProxySut {
+pub async fn spawn_lb_proxy(
+    h: &Harness,
+    addr: &str,
+    worker_name: &str,
+    worker: SocketAddr,
+) -> ProxySut {
     let (ep, sock) = h.bind_sut("proxy", addr).await;
     let parts = spawn_proxy_core(ep, sock, &[(worker_name, worker)], Clock::test_at(0));
     ProxySut { addr: parts.addr, metrics: parts.metrics, task: parts.task }

@@ -91,9 +91,8 @@ async fn spawn_cluster(name: &str) -> Cluster {
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane)); // lanes registered for reporting only
 
-    let proxy = fh
-        .spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())])
-        .await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
     let w_b1 = fh
         .spawn_worker_limited(
             "b1",
@@ -138,7 +137,11 @@ async fn find_backed_up_ref(backup: &ReplicatedB2buaSut, primary: &str) -> Strin
 }
 
 /// The replica body the backup holds for `call_ref`: raw and decoded.
-async fn replica(backup: &ReplicatedB2buaSut, primary: &str, call_ref: &str) -> (Vec<u8>, call::Call) {
+async fn replica(
+    backup: &ReplicatedB2buaSut,
+    primary: &str,
+    call_ref: &str,
+) -> (Vec<u8>, call::Call) {
     let body = backup.get(BAK, primary, call_ref).await.expect("replica body present");
     let call = MsgpackCodec::new().decode(&body).expect("replica body decodes");
     (body, call)
@@ -184,7 +187,12 @@ async fn reboot_and_reclaim(
 }
 
 /// The proxy learns the rebooted primary's new address and reads it alive.
-fn announce_rebooted(fh: &mut FailoverHarness, primary_ord: &str, proxy: &ProxySut, new_addr: std::net::SocketAddr) {
+fn announce_rebooted(
+    fh: &mut FailoverHarness,
+    primary_ord: &str,
+    proxy: &ProxySut,
+    new_addr: std::net::SocketAddr,
+) {
     proxy.set_address(primary_ord, new_addr);
     fh.note_worker_rebound(primary_ord, new_addr);
     proxy.set_health(primary_ord, WorkerHealth::Alive);
@@ -201,7 +209,12 @@ struct DeadlineCrossing {
 /// 2xx: a CANCEL reaching it draws a 481 (RFC 3261 §9.2). Alice's INVITE
 /// transaction took its 2xx too: any INVITE final reaching her now is a second
 /// final (§17.2.1).
-async fn cross_deadline(fh: &FailoverHarness, alice: &Agent, bob: &Agent, fire_at: i64) -> DeadlineCrossing {
+async fn cross_deadline(
+    fh: &FailoverHarness,
+    alice: &Agent,
+    bob: &Agent,
+    fire_at: i64,
+) -> DeadlineCrossing {
     let mut out = DeadlineCrossing { stray_final: None, cancels_to_bob: 0 };
     while fh.now_ms() < fire_at + 2_000 {
         fh.advance(Duration::from_secs(1)).await;
@@ -256,7 +269,9 @@ async fn settle_released(
 /// The live copy `node` serves for `call_ref` reads the caller as answered and
 /// carries no ring deadline.
 fn assert_answered_on(node: &ReplicatedB2buaSut, call_ref: &str, what: &str) {
-    let live = node.live_call(call_ref).unwrap_or_else(|| panic!("{what}: {} serves the call", node.ordinal()));
+    let live = node
+        .live_call(call_ref)
+        .unwrap_or_else(|| panic!("{what}: {} serves the call", node.ordinal()));
     assert_eq!(live.a_leg.state, LegState::Confirmed, "{what}: a-leg Confirmed");
     assert!(
         !live.timers.iter().any(|t| t.timer_type == TimerType::NoAnswer),
@@ -309,11 +324,24 @@ async fn an_answer_the_primary_never_replicated_draws_no_second_final_from_no_an
     b1.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
     b2.simulate_peer_removed(&primary_ord);
-    fh.mark(&bak_ord, Some(&primary_ord), "replication lag", "answer version lost with the primary");
+    fh.mark(
+        &bak_ord,
+        Some(&primary_ord),
+        "replication lag",
+        "answer version lost with the primary",
+    );
     b2.rewind_replica(BAK, &primary_ord, &call_ref, ringing_body).await;
     let (_, stale) = replica(b2, &primary_ord, &call_ref).await;
-    assert_ne!(stale.a_leg.state, LegState::Confirmed, "the backup still reads the call as ringing");
-    assert_eq!(no_answer_deadline(&stale), fire_at, "the stale copy still arms the route-time NoAnswer");
+    assert_ne!(
+        stale.a_leg.state,
+        LegState::Confirmed,
+        "the backup still reads the call as ringing"
+    );
+    assert_eq!(
+        no_answer_deadline(&stale),
+        fire_at,
+        "the stale copy still arms the route-time NoAnswer"
+    );
     fh.advance(Duration::from_secs(1)).await;
 
     // ── reboot → bootstrap re-hydrates pri:{self} → REAL bulk reclaim ────────
@@ -398,7 +426,11 @@ async fn an_answer_served_by_the_takeover_copy_draws_no_second_final_from_no_ans
         &primary_ord,
         None,
         "after reclaim",
-        &format!("primary serves={} survivor serves={}", b1.serves(&call_ref), b2.serves(&call_ref)),
+        &format!(
+            "primary serves={} survivor serves={}",
+            b1.serves(&call_ref),
+            b2.serves(&call_ref)
+        ),
     );
 
     let crossed = cross_deadline(&fh, &alice, &bob, fire_at).await;
@@ -483,7 +515,11 @@ async fn an_answer_served_by_the_takeover_copy_after_the_reclaim_draws_no_second
         &primary_ord,
         None,
         "before deadline",
-        &format!("primary serves={} survivor serves={}", b1.serves(&call_ref), b2.serves(&call_ref)),
+        &format!(
+            "primary serves={} survivor serves={}",
+            b1.serves(&call_ref),
+            b2.serves(&call_ref)
+        ),
     );
     assert!(fh.now_ms() < fire_at, "the answer lands before the ring deadline");
     assert_answered_on(b1, &call_ref, "the primary folded the survivor's answer");
@@ -579,7 +615,11 @@ async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final
     );
     assert!(fh.now_ms() < fire_at, "the answer lands before the ring deadline");
     assert_eq!(b1.metrics().repl_reverse_flush_refused_total(), 0, "the answer was not refused");
-    assert_answered_on(b1, &call_ref, "the primary folded the survivor's answer over its own p bump");
+    assert_answered_on(
+        b1,
+        &call_ref,
+        "the primary folded the survivor's answer over its own p bump",
+    );
 
     let crossed = cross_deadline(&fh, &alice, &bob, fire_at).await;
     let passed = crossed.stray_final.is_none() && crossed.cancels_to_bob == 0;

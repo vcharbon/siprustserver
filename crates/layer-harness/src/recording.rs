@@ -69,10 +69,7 @@ impl<Evt: Clone> ReleaseGuard<Evt> {
     /// Record `acquire` now; arm `release` to fire on drop.
     pub fn acquire(channel: Channel<Evt>, acquire: Evt, release: Evt) -> Self {
         channel.record(acquire);
-        Self {
-            channel,
-            release: Some(release),
-        }
+        Self { channel, release: Some(release) }
     }
 }
 

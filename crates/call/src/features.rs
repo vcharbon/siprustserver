@@ -223,7 +223,10 @@ mod tests {
     fn the_withhold_latch_unions_and_never_narrows() {
         let mut inherited = features(None);
         inherited.latch_withheld_option_tags(Some(&features(Some(&["100rel"]))));
-        assert_eq!(inherited.withhold_option_tags.as_deref(), Some(["100rel".to_string()].as_slice()));
+        assert_eq!(
+            inherited.withhold_option_tags.as_deref(),
+            Some(["100rel".to_string()].as_slice())
+        );
 
         let mut widened = features(Some(&["timer", "100REL"]));
         widened.latch_withheld_option_tags(Some(&features(Some(&["100rel"]))));

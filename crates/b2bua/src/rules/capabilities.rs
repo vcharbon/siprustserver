@@ -136,7 +136,11 @@ pub fn relaying_in(
     let relayed = CapabilitySet::relayed(received);
     let half = |name: HeaderName| declared_halves.contains(&name);
     CapabilitySet::stating(
-        if half(HeaderName::Allow) { declared_set.allow().cloned() } else { relayed.allow().cloned() },
+        if half(HeaderName::Allow) {
+            declared_set.allow().cloned()
+        } else {
+            relayed.allow().cloned()
+        },
         if half(HeaderName::Supported) {
             declared_set.supported().cloned()
         } else {
@@ -173,9 +177,7 @@ fn typed(declared: &AdvertisedCapabilities) -> CapabilitySet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call::features::{
-        AdvertiseCapabilitiesFeature, KeepaliveActivation, PlatformActivations,
-    };
+    use call::features::{AdvertiseCapabilitiesFeature, KeepaliveActivation, PlatformActivations};
 
     /// Feature activations declaring `caps` toward the originated face only.
     fn declaring(caps: AdvertisedCapabilities) -> FeatureActivations {
@@ -219,8 +221,10 @@ mod tests {
     /// …and the mirror: option tags alone leave the methods unstated.
     #[test]
     fn declaring_the_option_tag_half_alone_leaves_the_methods_unstated() {
-        let features =
-            declaring(AdvertisedCapabilities { allow: None, supported: Some(vec!["timer".into()]) });
+        let features = declaring(AdvertisedCapabilities {
+            allow: None,
+            supported: Some(vec!["timer".into()]),
+        });
         let caps = originated(&features);
         assert_eq!(caps.allow(), None);
         assert_eq!(caps.supported_text().as_deref(), Some("timer"));

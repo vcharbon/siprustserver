@@ -152,9 +152,7 @@ pub fn hop_rewrite_set(req: &SipRequest) -> Bytes {
             .with_flag("lr"),
     ));
     draft
-        .push_front(
-            Via::udp(PROXY_HOST, PROXY_PORT).with_branch("z9hG4bK-hop2").requesting_rport(),
-        )
+        .push_front(Via::udp(PROXY_HOST, PROXY_PORT).with_branch("z9hG4bK-hop2").requesting_rport())
         .freeze_bytes()
         .expect("a thawed draft is complete")
 }

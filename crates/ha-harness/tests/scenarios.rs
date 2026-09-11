@@ -59,10 +59,7 @@ async fn write_converges_put_update_delete() {
         Some(&b"v2"[..]),
         "update converges to latest body"
     );
-    assert!(
-        cl.node("B").get(BAK, "A", &c2).await.is_none(),
-        "delete removes c2 on B"
-    );
+    assert!(cl.node("B").get(BAK, "A", &c2).await.is_none(), "delete removes c2 on B");
     assert_eq!(cl.node("B").call_gen(BAK, "A", &c1), Some(2));
 }
 
@@ -79,8 +76,7 @@ async fn crash_then_reboot_rehydrates() {
     let bodies = ["b0", "b1", "b2"];
     for (i, body) in bodies.iter().enumerate() {
         let c = cref("A", &i.to_string());
-        cl.put("A", &c, body.as_bytes().to_vec(), 1, 0, &backup_is("B"))
-            .await;
+        cl.put("A", &c, body.as_bytes().to_vec(), 1, 0, &backup_is("B")).await;
     }
     cl.advance(ms(200)).await;
     // B holds all three in bak:A.
@@ -124,18 +120,14 @@ async fn partition_then_heal_converges() {
     let c = cref("A", "1");
     cl.put("A", &c, b"before".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(200)).await;
-    assert_eq!(
-        cl.node("B").get(BAK, "A", &c).await.as_deref(),
-        Some(&b"before"[..])
-    );
+    assert_eq!(cl.node("B").get(BAK, "A", &c).await.as_deref(), Some(&b"before"[..]));
 
     // Partition A<->B, mutate during the cut.
     cl.partition("A", "B");
     cl.advance(ms(100)).await;
     cl.put("A", &c, b"during".to_vec(), 2, 0, &backup_is("B")).await;
     let c3 = cref("A", "3");
-    cl.put("A", &c3, b"new-during".to_vec(), 1, 0, &backup_is("B"))
-        .await;
+    cl.put("A", &c3, b"new-during".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(100)).await;
 
     // Heal → converge.
@@ -167,10 +159,7 @@ async fn takeover_then_reclaim_highest_gen() {
     // A (primary) creates gen1, forward-replicates to B.
     cl.put("A", &c, b"g1".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(200)).await;
-    assert_eq!(
-        cl.node("B").get(BAK, "A", &c).await.as_deref(),
-        Some(&b"g1"[..])
-    );
+    assert_eq!(cl.node("B").get(BAK, "A", &c).await.as_deref(), Some(&b"g1"[..]));
 
     // A crashes. B (acting-backup) takes over: mutate the call via the policy
     // (B does NOT own "A|.." → Reverse). Two takeovers, gen2 then gen3.
@@ -189,11 +178,7 @@ async fn takeover_then_reclaim_highest_gen() {
         "rebooted A reclaims the acting-backup's gen3 (LWW), not stale gen1"
     );
     assert_eq!(cl.node("A").call_gen(PRI, "A", &c), Some(3));
-    assert_eq!(
-        cl.node("B").get(BAK, "A", &c).await.as_deref(),
-        Some(&b"g3"[..]),
-        "B holds gen3"
-    );
+    assert_eq!(cl.node("B").get(BAK, "A", &c).await.as_deref(), Some(&b"g3"[..]), "B holds gen3");
 }
 
 // ---------------------------------------------------------------------------
@@ -209,10 +194,7 @@ async fn dead_peer_auto_clean_then_rebootstrap() {
     let c = cref("A", "1");
     cl.put("A", &c, b"v1".to_vec(), 1, 0, &backup_is("B")).await;
     cl.advance(ms(200)).await;
-    assert_eq!(
-        cl.node("B").get(BAK, "A", &c).await.as_deref(),
-        Some(&b"v1"[..])
-    );
+    assert_eq!(cl.node("B").get(BAK, "A", &c).await.as_deref(), Some(&b"v1"[..]));
 
     // B disappears (crash). While B is gone past the dead-peer TTL (300s), A's
     // changelog cursor for B auto-cleans on reap (the per-peer propagate ZSET is
@@ -248,8 +230,7 @@ async fn watermark_survives_remove_readd() {
 
     for i in 0..3 {
         let c = cref("A", &i.to_string());
-        cl.put("A", &c, format!("b{i}").into_bytes(), 1, 0, &backup_is("B"))
-            .await;
+        cl.put("A", &c, format!("b{i}").into_bytes(), 1, 0, &backup_is("B")).await;
     }
     cl.advance(ms(200)).await;
     // The replica data B holds for A rides the **Backup** flow (B backs up A's
@@ -270,8 +251,7 @@ async fn watermark_survives_remove_readd() {
     // While parked, A adds two more.
     for i in 3..5 {
         let c = cref("A", &i.to_string());
-        cl.put("A", &c, format!("b{i}").into_bytes(), 1, 0, &backup_is("B"))
-            .await;
+        cl.put("A", &c, format!("b{i}").into_bytes(), 1, 0, &backup_is("B")).await;
     }
 
     // Re-add A → reconnect from retained W=(1,3), pull only the 2 deltas.

@@ -25,9 +25,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use callshapes::plan::{
-    ByeFeed, DwellKnob, Establishment, Script, ShapePlan, Stage, Teardown,
-};
+use callshapes::plan::{ByeFeed, DwellKnob, Establishment, Script, ShapePlan, Stage, Teardown};
 use callshapes::shapes::default_binder;
 use scenario_harness::actor::ActorScenario;
 
@@ -197,7 +195,9 @@ pub(crate) fn generated_shapes() -> Vec<ShapeDescriptor> {
             if e.needs_bob2 {
                 d = d.needs_bob2();
             }
-            out.push(d.load_shared(Arc::new(build_plan(id, est, script)) as Arc<dyn ActorScenario>));
+            out.push(
+                d.load_shared(Arc::new(build_plan(id, est, script)) as Arc<dyn ActorScenario>),
+            );
         }
     }
     out

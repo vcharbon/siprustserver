@@ -24,10 +24,7 @@ fn expect_header_round_trip(enc: &dyn RtpFraming, dec: &dyn RtpFraming) {
         .unwrap_or_else(|| panic!("{} → {} parse returned None", enc.name(), dec.name()));
     let tag = format!("{} → {}", enc.name(), dec.name());
     assert_eq!(parsed.header.payload_type, HEADER.payload_type, "{tag} pt");
-    assert_eq!(
-        parsed.header.sequence_number, HEADER.sequence_number,
-        "{tag} seq"
-    );
+    assert_eq!(parsed.header.sequence_number, HEADER.sequence_number, "{tag} seq");
     assert_eq!(parsed.header.timestamp, HEADER.timestamp, "{tag} ts");
     assert_eq!(parsed.header.ssrc, HEADER.ssrc, "{tag} ssrc");
     assert!(parsed.header.marker, "{tag} marker");

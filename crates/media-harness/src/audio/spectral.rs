@@ -74,7 +74,9 @@ fn dct(input: &[f64], coeffs: usize) -> Vec<f64> {
             input
                 .iter()
                 .enumerate()
-                .map(|(i, &v)| v * (std::f64::consts::PI * k as f64 * (i as f64 + 0.5) / n as f64).cos())
+                .map(|(i, &v)| {
+                    v * (std::f64::consts::PI * k as f64 * (i as f64 + 0.5) / n as f64).cos()
+                })
                 .sum()
         })
         .collect()
@@ -92,10 +94,7 @@ pub struct MfccOptions {
 }
 impl Default for MfccOptions {
     fn default() -> Self {
-        Self {
-            sample_rate: DEFAULT_SAMPLE_RATE,
-            voiced_floor_db: 25.0,
-        }
+        Self { sample_rate: DEFAULT_SAMPLE_RATE, voiced_floor_db: 25.0 }
     }
 }
 
@@ -157,11 +156,7 @@ pub fn signature(frames: &MfccFrames, voiced_floor_db: f64) -> Option<Vec<f64>> 
     if frames.frames.is_empty() {
         return None;
     }
-    let max_log = frames
-        .log_energy
-        .iter()
-        .copied()
-        .fold(f64::NEG_INFINITY, f64::max);
+    let max_log = frames.log_energy.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     // dB floor relative to the loudest frame (10*log10 over natural-log energy).
     let floor = max_log - (voiced_floor_db / 10.0) * std::f64::consts::LN_10;
 

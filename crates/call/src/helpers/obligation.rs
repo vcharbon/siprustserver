@@ -83,15 +83,13 @@ fn unacked_2xx(call: &Call) -> Vec<Obligation> {
         .chain(call.b_legs.iter())
         .flat_map(|leg| {
             leg.dialogs.iter().flat_map(move |d| {
-                d.ext
-                    .answered_2xx
-                    .iter()
-                    .chain(d.ext.pending_reinvite_2xx.iter())
-                    .map(move |u| Obligation::AckOf2xx {
+                d.ext.answered_2xx.iter().chain(d.ext.pending_reinvite_2xx.iter()).map(move |u| {
+                    Obligation::AckOf2xx {
                         leg: leg.leg_id.clone(),
                         dialog_tag: u.dialog_tag.clone(),
                         cseq: u.cseq,
-                    })
+                    }
+                })
             })
         })
         .collect()
@@ -102,7 +100,8 @@ fn unacked_2xx(call: &Call) -> Vec<Obligation> {
 /// ACK (RFC 3261 §13.3.1.4). A retransmitted initial ACK names no pending
 /// re-INVITE 2xx, and a b-leg ACK never names the a-leg's answer.
 pub fn acked_2xx(call: &Call, leg_id: &str, dialog_tag: &str, cseq: i64) -> Option<Obligation> {
-    let key = Obligation::AckOf2xx { leg: leg_id.to_string(), dialog_tag: dialog_tag.to_string(), cseq };
+    let key =
+        Obligation::AckOf2xx { leg: leg_id.to_string(), dialog_tag: dialog_tag.to_string(), cseq };
     unacked_2xx_slot(call, &key).map(|_| key)
 }
 
@@ -116,7 +115,10 @@ pub fn answers_initial_invite(call: &Call, obligation: &Obligation) -> bool {
     };
     *leg == call.a_leg.leg_id
         && call.a_leg.dialogs.iter().any(|d| {
-            d.ext.answered_2xx.as_ref().is_some_and(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
+            d.ext
+                .answered_2xx
+                .as_ref()
+                .is_some_and(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
         })
 }
 
@@ -196,7 +198,10 @@ fn unacked_2xx_slot<'a>(call: &'a Call, obligation: &Obligation) -> Option<&'a U
         .find(|u| u.dialog_tag == *dialog_tag && u.cseq == *cseq)
 }
 
-fn unacked_2xx_slot_mut<'a>(call: &'a mut Call, obligation: &Obligation) -> Option<&'a mut Unacked2xx> {
+fn unacked_2xx_slot_mut<'a>(
+    call: &'a mut Call,
+    obligation: &Obligation,
+) -> Option<&'a mut Unacked2xx> {
     let Obligation::AckOf2xx { leg, dialog_tag, cseq } = obligation else {
         return None;
     };

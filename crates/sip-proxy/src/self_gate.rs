@@ -615,7 +615,12 @@ mod tests {
         let (sampler, ctl) = simulated();
         let g = EluCpsGate::new(
             Arc::new(sampler),
-            ProxySelfGateConfig { cps_bucket_size: size, cps_bucket_rate: rate, elu_critical, ..Default::default() },
+            ProxySelfGateConfig {
+                cps_bucket_size: size,
+                cps_bucket_rate: rate,
+                elu_critical,
+                ..Default::default()
+            },
         );
         (g, ctl)
     }
@@ -809,7 +814,11 @@ mod tests {
             rec.record(AGE_CRITICAL_MS);
             g.sample();
         }
-        assert!(g.elu_ewma() > 0.8, "sustained critical age must cross elu_critical, got {}", g.elu_ewma());
+        assert!(
+            g.elu_ewma() > 0.8,
+            "sustained critical age must cross elu_critical, got {}",
+            g.elu_ewma()
+        );
         let d = g.try_admit_external();
         assert!(!d.admit);
         assert_eq!(d.reason.as_deref(), Some("proxy_overload_elu"));
@@ -831,7 +840,12 @@ mod tests {
         let (sampler, ctl) = simulated();
         let g = EluCpsGate::new(
             Arc::new(sampler),
-            ProxySelfGateConfig { cps_bucket_size: 50, cps_bucket_rate: 100, elu_critical: 0.8, ..Default::default() },
+            ProxySelfGateConfig {
+                cps_bucket_size: 50,
+                cps_bucket_rate: 100,
+                elu_critical: 0.8,
+                ..Default::default()
+            },
         );
         // The runner's sampler task, verbatim shape.
         let task = {
@@ -858,7 +872,11 @@ mod tests {
             tokio::time::advance(Duration::from_millis(100)).await;
             tokio::task::yield_now().await; // let the spawned tick run its sample()
         }
-        assert!(g.elu_ewma() > 0.8, "the running task must have driven the EWMA over critical, got {}", g.elu_ewma());
+        assert!(
+            g.elu_ewma() > 0.8,
+            "the running task must have driven the EWMA over critical, got {}",
+            g.elu_ewma()
+        );
 
         let d = g.try_admit_external();
         assert!(!d.admit, "a pegged ELU must shed the next external INVITE");

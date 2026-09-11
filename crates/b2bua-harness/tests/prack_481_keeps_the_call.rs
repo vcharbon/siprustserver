@@ -19,8 +19,8 @@ use std::time::Duration;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::B2buaSut;
-use scenario_harness::{Harness, WaiverScope};
 use scenario_harness::run::RunReport;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -51,13 +51,14 @@ fn decision_offering_100rel_toward_bob(port: u16) -> Arc<ScriptedDecisionEngine>
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", port);
-                r.features.advertise_capabilities = Some(call::features::AdvertiseCapabilitiesFeature {
-                    toward_originator: None,
-                    toward_originated: Some(call::features::AdvertisedCapabilities {
-                        allow: None,
-                        supported: Some(vec!["100rel".to_string()]),
-                    }),
-                });
+                r.features.advertise_capabilities =
+                    Some(call::features::AdvertiseCapabilitiesFeature {
+                        toward_originator: None,
+                        toward_originated: Some(call::features::AdvertisedCapabilities {
+                            allow: None,
+                            supported: Some(vec!["100rel".to_string()]),
+                        }),
+                    });
                 NewCallResponse::Route(r)
             })
             .build(),

@@ -63,14 +63,6 @@ impl RecordedAnomaly {
         seq: u64,
         at_ms: u64,
     ) -> Self {
-        Self {
-            kind,
-            check: check.into(),
-            detail: detail.into(),
-            bind_key,
-            severity,
-            seq,
-            at_ms,
-        }
+        Self { kind, check: check.into(), detail: detail.into(), bind_key, severity, seq, at_ms }
     }
 }

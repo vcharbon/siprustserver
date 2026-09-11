@@ -95,15 +95,12 @@ impl Recording {
     /// direction.
     pub fn first_seq_of(&self, leg: &str, dir: Dir, raw: &str) -> Option<u64> {
         let log = self.log.lock().expect("the recording lock outlives its critical sections");
-        log.by_leg
-            .get(leg)?
-            .iter()
-            .find(|m| m.dir == dir && m.raw == raw)
-            .map(|m| m.seq)
+        log.by_leg.get(leg)?.iter().find(|m| m.dir == dir && m.raw == raw).map(|m| m.seq)
     }
 
     fn push_entry(&self, leg: &str, entry: Entry<'_>) {
-        let mut log = self.log.lock().expect("the recording lock is never poisoned by a panic while held");
+        let mut log =
+            self.log.lock().expect("the recording lock is never poisoned by a panic while held");
         let entries = log.by_leg.entry(leg.to_string()).or_default();
         let seq = entries.len() as u64 + 1;
         entries.push(RecordedMessage {
@@ -223,8 +220,22 @@ mod tests {
         let rec = Recording::new();
         rec.push("A", Dir::Out, 0, "INVITE\r\n", Some("s1"), None);
         rec.push("A", Dir::In, 1, "INVITE\r\n", None, Some("looped back"));
-        rec.push_repeat("A", Dir::Out, 500, "INVITE\r\n", Some("s1"), Some("retransmission 1 of 2"));
-        rec.push_repeat("A", Dir::Out, 1500, "INVITE\r\n", Some("s1"), Some("retransmission 2 of 2"));
+        rec.push_repeat(
+            "A",
+            Dir::Out,
+            500,
+            "INVITE\r\n",
+            Some("s1"),
+            Some("retransmission 1 of 2"),
+        );
+        rec.push_repeat(
+            "A",
+            Dir::Out,
+            1500,
+            "INVITE\r\n",
+            Some("s1"),
+            Some("retransmission 2 of 2"),
+        );
         let messages = rec.legs()["A"].clone();
         assert_eq!(messages[0].repeat_of, None, "the first is what the others repeat");
         assert_eq!(messages[1].repeat_of, None, "the other direction is another stream");

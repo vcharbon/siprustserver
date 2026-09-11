@@ -121,7 +121,13 @@ fn an_unsampled_call_allocates_nothing_per_packet() {
 fn nothing_sampled() {
     let traces = untraced();
     assert_eq!(
-        traces.activate(CALL_ID, CallIdentity { call_id: CALL_ID, from_tag: "a", to_tag: "" }, 1, None, 0),
+        traces.activate(
+            CALL_ID,
+            CallIdentity { call_id: CALL_ID, from_tag: "a", to_tag: "" },
+            1,
+            None,
+            0
+        ),
         Activation::Refused,
         "the 0.0 draw refuses every call — nothing is sampled",
     );
@@ -149,7 +155,13 @@ fn one_other_call_traced() {
     ));
     const TRACED: &str = "traced@10.0.0.9";
     assert_eq!(
-        traces.activate(TRACED, CallIdentity { call_id: TRACED, from_tag: "t", to_tag: "" }, 1, None, 0),
+        traces.activate(
+            TRACED,
+            CallIdentity { call_id: TRACED, from_tag: "t", to_tag: "" },
+            1,
+            None,
+            0
+        ),
         Activation::Opened,
         "the 1.0 draw admits the one traced call",
     );

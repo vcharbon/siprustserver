@@ -69,7 +69,7 @@ use crate::StepError;
 
 pub use endpoint::{
     ActorSpec, Automatics, CtxFeed, Disposition, Feed, MediaState, SUBFLOW_EARLY, SUBFLOW_REALIGN,
-    SUBFLOW_RENEG, SUBFLOW_REFER,
+    SUBFLOW_REFER, SUBFLOW_RENEG,
 };
 pub use runner::{run_actor, ActorState};
 pub use shared_endpoint::{EndpointHandle, EndpointPump, Inbox};
@@ -78,7 +78,9 @@ pub use delta::{
     AcceptedDelta, AcceptedDeltaPolicy, DeltaContext, DeltaDecision, DeltaReaction, DialogSnapshot,
     ExpectedStimulus, ObservedStimulus,
 };
-pub use goals::{Barrier, BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind};
+pub use goals::{
+    Barrier, BodyExpect, EarlyId, FinalAssert, Goal, GoalCursor, GoalStep, RequestKind,
+};
 pub use ledger::{ObligationKey, ObligationKind, ObligationLedger};
 pub use observe::{ReceivedMessage, ReceptionContext, ReceptionObserver};
 pub use settle::{SettleBarrier, SettleVerdict, T1};
@@ -179,9 +181,7 @@ impl CallController {
         // Teardown: every leg terminated. Bounded separately (teardown can take
         // the whole flow after the last phase barrier).
         let deadline = tokio::time::Instant::now() + self.step_timeout;
-        if let Err(e) =
-            await_pred(&self.obs, "torn_down", |s| s.all_terminated(), deadline).await
-        {
+        if let Err(e) = await_pred(&self.obs, "torn_down", |s| s.all_terminated(), deadline).await {
             return CallVerdict::Failed(e);
         }
         match self.settle.wait(&self.obs).await {
@@ -265,12 +265,8 @@ pub async fn run_call_with(
         scopes.push(scope);
     }
 
-    let controller = CallController {
-        obs: obs.clone(),
-        plan: call.plan,
-        settle: call.settle,
-        step_timeout,
-    };
+    let controller =
+        CallController { obs: obs.clone(), plan: call.plan, settle: call.settle, step_timeout };
 
     let drive = async {
         // The pumps are joined with the actors: one task, one `select!` — a pump

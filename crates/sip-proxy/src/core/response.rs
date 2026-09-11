@@ -107,13 +107,18 @@ impl ProxyCore {
         if let Some(dest) = self.registry.lookup_by_address(&sent_by) {
             if dest.health == WorkerHealth::Dead {
                 match self.find_own_record_route_params(&resp) {
-                    Some(params) => match self.strategy.decode_stickiness(&params, &SipMessage::Response(resp.clone())).await {
+                    Some(params) => match self
+                        .strategy
+                        .decode_stickiness(&params, &SipMessage::Response(resp.clone()))
+                        .await
+                    {
                         DecodeResult::ForwardBackup { target, .. } => {
                             host = target.host;
                             port = target.port;
                         }
                         _ => {
-                            self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
+                            self.metrics
+                                .record_message(Direction::Outbound, MessageResult::Dropped);
                             return;
                         }
                     },
@@ -180,11 +185,7 @@ impl ProxyCore {
             if let Some(found) = self.cancel_lru.lookup(&key) {
                 let upstream_branch = next.branch().unwrap_or_default().to_string();
                 self.cancel_lru.remember(
-                    &crate::cancel_lru::ack_hop_key(
-                        call_id.as_str(),
-                        from.tag(),
-                        cseq.seq(),
-                    ),
+                    &crate::cancel_lru::ack_hop_key(call_id.as_str(), from.tag(), cseq.seq()),
                     crate::cancel_lru::CancelEntry {
                         target: ProxyAddr::from(src),
                         branch: found.branch.clone(),
@@ -201,7 +202,10 @@ impl ProxyCore {
     /// by the UAS per §16.6) — the stickiness cookie for reverse-path failover.
     /// Either face's advertise is "our" Record-Route: dual-face stamps the two
     /// halves with different hosts.
-    fn find_own_record_route_params(&self, resp: &SipResponse) -> Option<crate::strategy::RouteParams> {
+    fn find_own_record_route_params(
+        &self,
+        resp: &SipResponse,
+    ) -> Option<crate::strategy::RouteParams> {
         resp.list::<sip_message::header::RecordRouteEntry>()
             .ok()?
             .iter()
@@ -276,11 +280,22 @@ mod reverse_failover_tests {
         fn name(&self) -> &str {
             "Backup"
         }
-        async fn select_for_new_dialog(&self, _msg: &SipMessage, _opts: SelectOpts) -> Result<ProxyAddr, SelectError> {
+        async fn select_for_new_dialog(
+            &self,
+            _msg: &SipMessage,
+            _opts: SelectOpts,
+        ) -> Result<ProxyAddr, SelectError> {
             Err(SelectError::NoTarget { reason: "unused".into() })
         }
-        async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
-            DecodeResult::ForwardBackup { target: ProxyAddr::new(W2_POD, 5060), is_emergency: false }
+        async fn decode_stickiness(
+            &self,
+            _params: &RouteParams,
+            _msg: &SipMessage,
+        ) -> DecodeResult {
+            DecodeResult::ForwardBackup {
+                target: ProxyAddr::new(W2_POD, 5060),
+                is_emergency: false,
+            }
         }
         fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
             None
@@ -299,9 +314,10 @@ mod reverse_failover_tests {
             },
             WorkerEntry::alive("w2", ProxyAddr::new(W2_POD, 5060)),
         ]));
-        let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), Arc::new(BackupStrategy), reg)
-            .clock(Clock::test_at(0))
-            .build(Box::new(CapturingEndpointHandle(ep.clone())));
+        let core =
+            ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), Arc::new(BackupStrategy), reg)
+                .clock(Clock::test_at(0))
+                .build(Box::new(CapturingEndpointHandle(ep.clone())));
         (core, ep)
     }
 
@@ -349,7 +365,8 @@ Call-ID: ka-1@{UAC}\r\n\
 CSeq: 2 OPTIONS\r\n\
 Content-Length: 0\r\n\r\n"
         );
-        let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+        let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap()
+        else {
             unreachable!()
         };
         resp
@@ -408,8 +425,12 @@ mod hop_by_hop_tests {
     #[tokio::test]
     async fn trying_100_is_absorbed_not_relayed() {
         let net = SimulatedSignalingNetwork::new(1);
-        let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
-        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+        let ep = net
+            .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
+            .await
+            .unwrap();
+        let strategy: Arc<dyn RoutingStrategy> =
+            Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
         let metrics = Arc::new(ProxyMetrics::new());
         let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
         let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
@@ -427,7 +448,8 @@ Call-ID: t100-1@test\r\n\
 CSeq: 1 INVITE\r\n\
 Content-Length: 0\r\n\r\n"
         );
-        let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap() else {
+        let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap()
+        else {
             panic!("expected response")
         };
         let outbound_forwarded_before = metrics.messages_total();
@@ -447,7 +469,11 @@ Content-Length: 0\r\n\r\n"
 
     #[async_trait::async_trait]
     impl sip_net::UdpEndpoint for ByteCapturingEndpoint {
-        async fn send_to(&self, buf: &[u8], dst: std::net::SocketAddr) -> Result<(), sip_net::SendError> {
+        async fn send_to(
+            &self,
+            buf: &[u8],
+            dst: std::net::SocketAddr,
+        ) -> Result<(), sip_net::SendError> {
             self.sent.lock().unwrap().push((dst, buf.to_vec()));
             Ok(())
         }
@@ -484,7 +510,8 @@ Content-Length: 0\r\n\r\n"
     #[tokio::test]
     async fn relayed_non_2xx_final_is_never_hop_acked_and_the_upstream_ack_relays() {
         let ep = Arc::new(ByteCapturingEndpoint::default());
-        let strategy: Arc<dyn RoutingStrategy> = Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
+        let strategy: Arc<dyn RoutingStrategy> =
+            Arc::new(ForwardAllStrategy::new(ProxyAddr::new(W1, 5060)));
         let metrics = Arc::new(ProxyMetrics::new());
         let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![]));
         let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
@@ -567,7 +594,11 @@ Content-Length: 0\r\n\r\n"
         let sent = ep.sent.lock().unwrap();
         assert_eq!(sent.len(), 1, "the upstream's ACK must be relayed, not absorbed");
         let (dst, bytes) = &sent[0];
-        assert_eq!(*dst, format!("{W1}:5060").parse::<std::net::SocketAddr>().unwrap(), "the ACK goes to the node the final came from (the INVITE's target here)");
+        assert_eq!(
+            *dst,
+            format!("{W1}:5060").parse::<std::net::SocketAddr>().unwrap(),
+            "the ACK goes to the node the final came from (the INVITE's target here)"
+        );
         let ack = String::from_utf8_lossy(bytes).to_string();
         assert_eq!(
             ack.lines().next().unwrap(),
@@ -587,7 +618,11 @@ Content-Length: 0\r\n\r\n"
 
     #[async_trait::async_trait]
     impl sip_net::UdpEndpoint for EpHandle {
-        async fn send_to(&self, buf: &[u8], dst: std::net::SocketAddr) -> Result<(), sip_net::SendError> {
+        async fn send_to(
+            &self,
+            buf: &[u8],
+            dst: std::net::SocketAddr,
+        ) -> Result<(), sip_net::SendError> {
             self.0.send_to(buf, dst).await
         }
         async fn recv(&self) -> Option<sip_net::UdpPacket> {

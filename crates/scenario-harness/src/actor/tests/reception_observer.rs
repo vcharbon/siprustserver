@@ -168,7 +168,10 @@ async fn reception_observer_sees_unmatched_request_and_response_headers() {
     let obs = ObservedState::new();
     let ctx = CallCtx::new();
     let verdict = run_call_with(call, obs.clone(), &ctx, Duration::from_secs(5), None).await;
-    assert!(verdict.is_ok(), "an observer changes nothing: the call must settle OK, got {verdict:?}");
+    assert!(
+        verdict.is_ok(),
+        "an observer changes nothing: the call must settle OK, got {verdict:?}"
+    );
 
     let log = log.lock().unwrap().clone();
     let invite = one(&log, "bob", true);
@@ -209,8 +212,8 @@ async fn reception_observer_sees_unmatched_request_and_response_headers() {
 
     // Retention: with the hook installed the leg's response facts keep their
     // typed message — what the matcher-less goal above had to hand over.
-    let retained =
-        obs.with_snapshot(|s| s.leg("alice").responses().iter().filter(|f| f.typed.is_some()).count());
+    let retained = obs
+        .with_snapshot(|s| s.leg("alice").responses().iter().filter(|f| f.typed.is_some()).count());
     assert!(retained > 0, "an installed observer retains the typed responses it observes");
     h.finish().await;
 }

@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
-use b2bua::decision::{CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::decision::{
+    CallDecisionEngine, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
+};
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::B2buaSut;
@@ -40,29 +42,19 @@ async fn refresh_keeps_a_long_call_counted_across_a_window() {
     // unless refreshed.
     let http = SimulatedHttpNetwork::new();
     let store = Arc::new(WindowStore::new(
-        LimiterConfig {
-            window_sec: 1,
-            active_windows: 1,
-            ttl_sec: 60,
-        },
+        LimiterConfig { window_sec: 1, active_windows: 1, ttl_sec: 60 },
         Clock::test_at(0),
     ));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
-    let limiter: Arc<dyn CallLimiter> = Arc::new(HttpCallLimiter::new(
-        Arc::new(http.clone()),
-        laddr(),
-        Duration::from_millis(150),
-    ));
+    let limiter: Arc<dyn CallLimiter> =
+        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)));
     let decision: Arc<dyn CallDecisionEngine> = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(|_req| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.call_limiter = vec![CallLimiterEntry {
-                    id: "trunk-A".into(),
-                    limit: 1,
-                }];
+                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 1 }];
                 NewCallResponse::Route(r)
             })
             .build(),

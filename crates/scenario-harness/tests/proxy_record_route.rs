@@ -140,7 +140,13 @@ fn fwd_bye_source(
                 matches!(m, Ok(SipMessage::Request(ref r)) if r.method() == "BYE")
             }
         })
-        .unwrap_or_else(|| panic!("no alice→proxy BYE found (alice={}, proxy={})", fmt_addr(alice), fmt_addr(proxy)))
+        .unwrap_or_else(|| {
+            panic!(
+                "no alice→proxy BYE found (alice={}, proxy={})",
+                fmt_addr(alice),
+                fmt_addr(proxy)
+            )
+        })
         .raw
         .clone()
 }

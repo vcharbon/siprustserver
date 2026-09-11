@@ -44,8 +44,17 @@ impl Owner {
                 continue;
             }
             match seed {
-                TxnSeed::ClientInvite { invite, dest } => self.seed_client_invite(call_ref, invite, dest),
-                TxnSeed::ServerInvite { branch, call_id, from_tag, to_tag, leg_id, original_request } => {
+                TxnSeed::ClientInvite { invite, dest } => {
+                    self.seed_client_invite(call_ref, invite, dest)
+                }
+                TxnSeed::ServerInvite {
+                    branch,
+                    call_id,
+                    from_tag,
+                    to_tag,
+                    leg_id,
+                    original_request,
+                } => {
                     let mut txn = Transaction::new(NewTransaction {
                         branch,
                         role: TxnRole::Server,
@@ -93,8 +102,7 @@ impl Owner {
         });
         txn.timeout_kind = TimeoutKind::Transaction;
         txn.timeout_key = Some(
-            self.timers
-                .insert(Timer::ClientTimeout(branch), ms(self.invite_initial_timeout_ms)),
+            self.timers.insert(Timer::ClientTimeout(branch), ms(self.invite_initial_timeout_ms)),
         );
         self.set_txn(txn);
     }

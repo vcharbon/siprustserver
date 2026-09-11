@@ -78,9 +78,7 @@ impl Obligation for RportEcho {
                         decision,
                     };
                     if msg.head.is_none() {
-                        out.push(finding(Decision::Undecidable(
-                            "no header block at this vantage",
-                        )));
+                        out.push(finding(Decision::Undecidable("no header block at this vantage")));
                         continue;
                     }
                     let echoed_empty = match rport_of(msg) {

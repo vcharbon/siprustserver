@@ -13,10 +13,13 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use pivot_schema::bundle::{RecordedMessage, RunConfig, RunRfcAudit, RunTiming, RunVerdict};
-use pivot_schema::{PivotV3, RuleFile, canonical, lint, schedules, tiers};
+use pivot_schema::{canonical, lint, schedules, tiers, PivotV3, RuleFile};
 
 #[derive(Parser)]
-#[command(name = "pivot-schema", about = "Pivot v3 schemas, canonical formatter, lint, tier data and retransmission schedules")]
+#[command(
+    name = "pivot-schema",
+    about = "Pivot v3 schemas, canonical formatter, lint, tier data and retransmission schedules"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -106,8 +109,10 @@ fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Command::Fmt { file, as_contract, write, check } => {
-            let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-            let formatted = format_as(&text, as_contract).map_err(|e| format!("{}: {e}", file.display()))?;
+            let text =
+                std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            let formatted =
+                format_as(&text, as_contract).map_err(|e| format!("{}: {e}", file.display()))?;
             if check {
                 return if formatted == text {
                     Ok(())
@@ -116,14 +121,16 @@ fn run(cli: Cli) -> Result<(), String> {
                 };
             }
             if write {
-                std::fs::write(&file, &formatted).map_err(|e| format!("{}: {e}", file.display()))?;
+                std::fs::write(&file, &formatted)
+                    .map_err(|e| format!("{}: {e}", file.display()))?;
             } else {
                 print!("{formatted}");
             }
             Ok(())
         }
         Command::Lint { file, json } => {
-            let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            let text =
+                std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
             let report = lint::lint_str(&text);
             if json {
                 println!("{}", canonical::format(&report).map_err(|e| e.to_string())?);
@@ -140,7 +147,10 @@ fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Command::Schedules => {
-            print!("{}", canonical::format(&schedules::schedule_table()).map_err(|e| e.to_string())?);
+            print!(
+                "{}",
+                canonical::format(&schedules::schedule_table()).map_err(|e| e.to_string())?
+            );
             Ok(())
         }
     }
@@ -178,17 +188,19 @@ fn format_as(text: &str, contract: Option<Contract>) -> Result<String, String> {
         Contract::Rfc => reformat::<RunRfcAudit>(text),
         // A recording is a stream, not a document: `fmt` formats one file as one
         // value, and reformatting a line at a time would be a different tool.
-        Contract::Recording => Err(
-            "a recording is JSON Lines — one message per line, not one document; \
+        Contract::Recording => {
+            Err("a recording is JSON Lines — one message per line, not one document; \
              `schema recording` publishes the line's contract"
-                .into(),
-        ),
+                .into())
+        }
     }
 }
 
 /// Parse through the typed model, then re-serialize canonically — the same
 /// proof `fmt` gives a pivot, for the record kinds a run writes.
-fn reformat<T: serde::de::DeserializeOwned + serde::Serialize>(text: &str) -> Result<String, String> {
+fn reformat<T: serde::de::DeserializeOwned + serde::Serialize>(
+    text: &str,
+) -> Result<String, String> {
     let value: T = serde_json::from_str(text).map_err(|e| e.to_string())?;
     canonical::format(&value).map_err(|e| e.to_string())
 }

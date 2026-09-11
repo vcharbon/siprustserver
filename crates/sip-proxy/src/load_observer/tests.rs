@@ -66,7 +66,7 @@ fn band_thresholds() {
 fn hysteresis_holds_higher_band_until_below_enter_minus_h() {
     let o = obs_with(bands_cfg); // critical = 0.95, h = 0.05 (default)
     o.apply_payload("w", &payload(0.97), 1000); // above_critical
-    // stays above_critical until elu <= elu_critical − h = 0.90.
+                                                // stays above_critical until elu <= elu_critical − h = 0.90.
     o.apply_payload("w", &payload(0.93), 2000);
     assert_eq!(o.band_for("w"), Some(EluBand::AboveCritical));
     o.apply_payload("w", &payload(0.89), 3000);
@@ -292,7 +292,7 @@ fn adm_counter_decrease_worker_restart_resets_baseline() {
     // Worker restarted — adm dropped back to 50.
     o.apply_payload(W, &payload_adm(0.5, 50.0), 2000);
     assert_eq!(snap1(&o, 2000).worker_treated_rate_cps, 0.0); // reset
-    // From here forward, normal rate derivation resumes.
+                                                              // From here forward, normal rate derivation resumes.
     o.apply_payload(W, &payload_adm(0.5, 100.0), 3000);
     assert!((snap1(&o, 3000).worker_treated_rate_cps - 50.0).abs() < 1e-5);
 }
@@ -339,7 +339,11 @@ fn sweep_above_stale_threshold_triggers_conservative_decrease() {
         c.payload_stale_ms = 5000;
     });
     o.apply_payload(W, &payload(0.7), 0);
-    assert_eq!(o.sweep_stale(6000), 1, "the one stale worker is floored (feeds the aggregate counter)");
+    assert_eq!(
+        o.sweep_stale(6000),
+        1,
+        "the one stale worker is floored (feeds the aggregate counter)"
+    );
     let snap = snap1(&o, 6000);
     assert_eq!(snap.last_action, AimdAction::StaleDecrease);
     assert_eq!(snap.cap_cps, 75.0); // 100 × 0.75 — cap unchanged by seed (hold band)
@@ -392,7 +396,7 @@ fn retry_after_is_finite_when_capped_and_zero_when_unknown() {
         o.try_consume_for(W, 1000);
     }
     assert!(!o.try_consume_for(W, 1000)); // drained
-    // empty bucket, cap=10/s → (1-0)/10 = 0.1 → ceil = 1s.
+                                          // empty bucket, cap=10/s → (1-0)/10 = 0.1 → ceil = 1s.
     assert_eq!(o.retry_after_sec_for(W, 1000), 1);
 }
 

@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use call::helpers::cap_keepalive_fire_at;
 use call::{Call, CallModelState, LegState, TimerEntry, TimerType};
-use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::emergency::is_emergency_request;
+use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::{Method, SipMessage};
 
 use super::interpret::process_result;
@@ -118,13 +118,16 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
         }
         // The limiter-refresh timer is async (an HTTP call to migrate holds), so
         // it is handled outside the synchronous rule chain — like initial-INVITE.
-        if matches!(
-            &event,
-            CallEvent::Timer { timer_type: TimerType::LimiterRefresh, .. }
-        ) {
+        if matches!(&event, CallEvent::Timer { timer_type: TimerType::LimiterRefresh, .. }) {
             let before = call.clone();
             let res = handle_limiter_refresh(ctx, call, now_ms).await;
-            crate::rules::invariants::enforce(&ctx.obligations, &before, crate::rules::invariants::finalize(res), now_ms, true)
+            crate::rules::invariants::enforce(
+                &ctx.obligations,
+                &before,
+                crate::rules::invariants::finalize(res),
+                now_ms,
+                true,
+            )
         } else {
             rule_chain_turn(ctx, call, &event, &res, &call_ref, now_ms)
         }
@@ -440,7 +443,9 @@ async fn in_dialog_store_fault_gate(
 async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Option<Call> {
     let first = materialise(ctx, call_ref, Origin::Takeover).await;
     let disposition = match first {
-        Materialised::Refused(Reason::NotBackupRole) => materialise(ctx, call_ref, Origin::Reclaim(None)).await,
+        Materialised::Refused(Reason::NotBackupRole) => {
+            materialise(ctx, call_ref, Origin::Reclaim(None)).await
+        }
         other => other,
     };
     match disposition {
@@ -498,10 +503,7 @@ fn rule_chain_turn(
     };
     call.message_count = Some(bumped);
     let cap_exceeded = bumped > ctx.config.max_messages_per_call as i64
-        && !matches!(
-            call.state,
-            CallModelState::Terminating | CallModelState::Terminated
-        );
+        && !matches!(call.state, CallModelState::Terminating | CallModelState::Terminated);
     let exec = ActionExecutor {
         config: &ctx.config,
         id_gen: &ctx.id_gen,
@@ -535,7 +537,11 @@ fn rule_chain_turn(
         if let SipMessage::Response(resp) = message.as_ref() {
             if resp.status() >= 300 && resp.cseq().method() == Method::Invite {
                 if let Some(branch) = resp.top_via().branch() {
-                    call = call::helpers::close_rejected_invite_round(call, &res.source_leg_id, branch);
+                    call = call::helpers::close_rejected_invite_round(
+                        call,
+                        &res.source_leg_id,
+                        branch,
+                    );
                 }
             }
         }
@@ -570,10 +576,7 @@ fn rule_chain_turn(
         );
     }
     if cap_exceeded
-        && !matches!(
-            result.call.state,
-            CallModelState::Terminating | CallModelState::Terminated
-        )
+        && !matches!(result.call.state, CallModelState::Terminating | CallModelState::Terminated)
     {
         // Tear the runaway call down through the standard executor so per-leg
         // BYE/CANCEL, dialog-tag ownership and the safety-timer contract apply
@@ -668,7 +671,11 @@ fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call
 /// Handle a `LimiterRefresh` timer: migrate every live hold to the current
 /// window (an async `/v1/refresh` call), update the stored windows, and re-arm
 /// the timer while the call is alive.
-async fn handle_limiter_refresh(ctx: &Arc<RouterCtx>, mut call: Call, now_ms: i64) -> HandlerResult {
+async fn handle_limiter_refresh(
+    ctx: &Arc<RouterCtx>,
+    mut call: Call,
+    now_ms: i64,
+) -> HandlerResult {
     let holds = crate::limiter::live_holds(&call);
 
     let mut fx = HandlerEffects::new();

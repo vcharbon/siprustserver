@@ -97,8 +97,7 @@ impl HaNode {
         Arc<SimulatedMembership>,
         tokio::task::JoinHandle<()>,
     ) {
-        let changelog =
-            Changelog::new(gen, clock.clone()).with_ttls(wiring.ttls.0, wiring.ttls.1);
+        let changelog = Changelog::new(gen, clock.clone()).with_ttls(wiring.ttls.0, wiring.ttls.1);
         let store = ReplicatingCallStore::with_changelog(changelog.clone(), clock.clone())
             .with_default_ttl_ms(wiring.replica_backstop_ms);
 
@@ -121,10 +120,8 @@ impl HaNode {
             resolve,
             wiring.config,
         );
-        let membership = Arc::new(SimulatedMembership::with_clock(
-            wiring.peers.clone(),
-            clock.clone(),
-        ));
+        let membership =
+            Arc::new(SimulatedMembership::with_clock(wiring.peers.clone(), clock.clone()));
         supervisor.start(membership.clone() as Arc<dyn Membership>);
 
         (store, supervisor, membership, server_task)
@@ -175,8 +172,7 @@ impl HaNode {
     /// Delete `call_ref`, propagating the tombstone the same way `put` routes a
     /// body (resolve partition + direction, bump the changelog).
     pub async fn delete(&self, call_ref: &str, backup_resolver: &dyn Fn(&str) -> Option<String>) {
-        let plan =
-            b2bua::repl::ReplicationPlan::resolve(&self.ordinal, call_ref, backup_resolver);
+        let plan = b2bua::repl::ReplicationPlan::resolve(&self.ordinal, call_ref, backup_resolver);
         let opts = plan.put_opts();
         self.store
             .delete_call(plan.role, &plan.primary, call_ref, &[], &opts)
@@ -185,17 +181,8 @@ impl HaNode {
     }
 
     /// Read a stored body by `(role, primary, call_ref)` (introspection).
-    pub async fn get(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-    ) -> Option<Vec<u8>> {
-        self.store
-            .get_call(role, primary, call_ref)
-            .await
-            .expect("get")
-            .map(|b| b.to_vec())
+    pub async fn get(&self, role: PartitionRole, primary: &str, call_ref: &str) -> Option<Vec<u8>> {
+        self.store.get_call(role, primary, call_ref).await.expect("get").map(|b| b.to_vec())
     }
 
     /// The primary version counter (`p`) currently stored for a ref, or `None`
@@ -235,7 +222,11 @@ impl HaNode {
     /// The retained watermark for a specific `(peer, flow)` (introspection). The
     /// **Backup** flow (`Partition::Bak`) is the cursor that tracks the replica
     /// data this node holds for `peer`; the Reclaim accessors do not expose it.
-    pub fn flow_watermark(&self, peer: &str, partition: repl_net::Partition) -> repl_net::Watermark {
+    pub fn flow_watermark(
+        &self,
+        peer: &str,
+        partition: repl_net::Partition,
+    ) -> repl_net::Watermark {
         self.supervisor.flow_watermark(peer, partition)
     }
 

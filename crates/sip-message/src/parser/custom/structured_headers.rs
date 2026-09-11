@@ -210,7 +210,12 @@ pub fn parse_name_addr(value: &SipStr) -> ParsedNameAddr {
         match index_of(s, b';', i) {
             None => {
                 let uri = slice_trimmed(value, i, len);
-                return ParsedNameAddr { display_name: None, uri, tag: None, params: Params::new() };
+                return ParsedNameAddr {
+                    display_name: None,
+                    uri,
+                    tag: None,
+                    params: Params::new(),
+                };
             }
             Some(semi) => {
                 uri = slice_trimmed(value, i, semi);
@@ -626,7 +631,9 @@ pub fn validate_strict_host(host: &str) -> Option<String> {
     if ipv4_shape {
         for label in &labels {
             if label.len() > 1 && label.starts_with('0') {
-                return Some(format!("IPv4 octet \"{label}\" has leading zero (octal-confusion vector)"));
+                return Some(format!(
+                    "IPv4 octet \"{label}\" has leading zero (octal-confusion vector)"
+                ));
             }
             if label.len() > 3 {
                 return Some(format!("IPv4 octet \"{label}\" exceeds 1*3DIGIT"));

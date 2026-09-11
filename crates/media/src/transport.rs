@@ -32,7 +32,8 @@ use tokio::task::JoinHandle;
 
 use crate::codec::{alaw_decode, alaw_encode, mulaw_decode, mulaw_encode, G711Codec};
 use crate::rtp::{
-    encode_receiver_report, encode_sender_report, is_rtcp, RtpFraming, RtpHeader, SenderReportFields,
+    encode_receiver_report, encode_sender_report, is_rtcp, RtpFraming, RtpHeader,
+    SenderReportFields,
 };
 use crate::sdp::NegotiatedMedia;
 use crate::{
@@ -125,10 +126,7 @@ fn merge_pcm(buckets: &[&InternalBucket]) -> PcmBuffer {
     for b in buckets {
         merged.extend_from_slice(&b.pcm);
     }
-    PcmBuffer {
-        pcm: merged,
-        sample_rate: SAMPLE_RATE,
-    }
+    PcmBuffer { pcm: merged, sample_rate: SAMPLE_RATE }
 }
 
 /// A media endpoint factory bound to a [`SignalingNetwork`] and an
@@ -154,12 +152,7 @@ impl MediaEndpoint {
         framing: Arc<dyn RtpFraming>,
         clock: Clock,
     ) -> Self {
-        Self {
-            net,
-            framing,
-            next_auto_port: Arc::new(AtomicU16::new(AUTO_PORT_BASE)),
-            clock,
-        }
+        Self { net, framing, next_auto_port: Arc::new(AtomicU16::new(AUTO_PORT_BASE)), clock }
     }
 
     /// Bind one RTP port and start its inbound recorder + RTCP reporter.
@@ -172,15 +165,14 @@ impl MediaEndpoint {
         let ptime_ms = opts.ptime_ms.unwrap_or(DEFAULT_PTIME_MS);
         let rtcp_interval_ms = opts.rtcp_interval_ms.unwrap_or(DEFAULT_RTCP_INTERVAL_MS);
         let samples_per_frame = ((ptime_ms as f64 / 1000.0) * SAMPLE_RATE as f64).round() as usize;
-        let port = local_port.unwrap_or_else(|| self.next_auto_port.fetch_add(2, Ordering::Relaxed));
+        let port =
+            local_port.unwrap_or_else(|| self.next_auto_port.fetch_add(2, Ordering::Relaxed));
 
-        let addr: SocketAddr = format!("{local_ip}:{port}")
-            .parse()
-            .map_err(|e| BindError {
-                reason: sip_net::BindErrorReason::OsError,
-                addr: format!("0.0.0.0:{port}").parse().unwrap(),
-                message: format!("bad media addr {local_ip}:{port}: {e}"),
-            })?;
+        let addr: SocketAddr = format!("{local_ip}:{port}").parse().map_err(|e| BindError {
+            reason: sip_net::BindErrorReason::OsError,
+            addr: format!("0.0.0.0:{port}").parse().unwrap(),
+            message: format!("bad media addr {local_ip}:{port}: {e}"),
+        })?;
         let queue_max = opts.queue_max.unwrap_or(DEFAULT_QUEUE_MAX);
         let endpoint: Arc<dyn UdpEndpoint> =
             Arc::from(self.net.bind_udp(BindUdpOpts::new(addr, queue_max)).await?);
@@ -313,10 +305,7 @@ impl MediaTransport {
             abandoned: false,
         });
         drop(g);
-        MediaSession {
-            dialog_id: dialog_id.to_string(),
-            transport: self.clone(),
-        }
+        MediaSession { dialog_id: dialog_id.to_string(), transport: self.clone() }
     }
 
     /// Snapshot of every demuxed inbound source.
@@ -338,10 +327,9 @@ impl MediaTransport {
     /// The currently committed active-peer session, if any.
     pub fn active_peer(&self) -> Option<MediaSession> {
         let g = self.inner.lock().unwrap();
-        g.active_session_id.clone().map(|id| MediaSession {
-            dialog_id: id,
-            transport: self.clone(),
-        })
+        g.active_session_id
+            .clone()
+            .map(|id| MediaSession { dialog_id: id, transport: self.clone() })
     }
 
     /// Per-stream stats (one outbound if we've sent, plus one per inbound source).
@@ -362,11 +350,8 @@ impl MediaTransport {
             });
         }
         for b in g.sources.values() {
-            let codec = if b.payload_type == PCMU.payload_type {
-                G711Codec::Pcmu
-            } else {
-                G711Codec::Pcma
-            };
+            let codec =
+                if b.payload_type == PCMU.payload_type { G711Codec::Pcmu } else { G711Codec::Pcma };
             out.push(MediaStreamStats {
                 direction: StreamDirection::Inbound,
                 ssrc: b.ssrc,
@@ -496,11 +481,7 @@ impl MediaSession {
                     let mut g = inner.lock().unwrap();
                     // Stop if this session lost the active-peer role mid-play.
                     let still_active = g.active_session_id.as_deref() == Some(dialog_id.as_str());
-                    let abandoned = g
-                        .sessions
-                        .get(&dialog_id)
-                        .map(|s| s.abandoned)
-                        .unwrap_or(true);
+                    let abandoned = g.sessions.get(&dialog_id).map(|s| s.abandoned).unwrap_or(true);
                     if !still_active || abandoned {
                         return;
                     }
@@ -537,12 +518,7 @@ impl MediaSession {
         let g = self.transport.inner.lock().unwrap();
         let remote = match g.sessions.get(&self.dialog_id).and_then(|s| s.negotiated.as_ref()) {
             Some(n) => n.remote.clone(),
-            None => {
-                return PcmBuffer {
-                    pcm: Vec::new(),
-                    sample_rate: SAMPLE_RATE,
-                }
-            }
+            None => return PcmBuffer { pcm: Vec::new(), sample_rate: SAMPLE_RATE },
         };
         let matching: Vec<&InternalBucket> =
             g.sources.values().filter(|b| b.remote == remote).collect();
@@ -552,9 +528,6 @@ impl MediaSession {
     pub fn is_active(&self) -> bool {
         let g = self.transport.inner.lock().unwrap();
         g.active_session_id.as_deref() == Some(self.dialog_id.as_str())
-            && g.sessions
-                .get(&self.dialog_id)
-                .map(|s| !s.abandoned)
-                .unwrap_or(false)
+            && g.sessions.get(&self.dialog_id).map(|s| !s.abandoned).unwrap_or(false)
     }
 }

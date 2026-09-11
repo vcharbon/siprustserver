@@ -15,8 +15,8 @@
 use b2bua_harness::B2buaSut;
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
-use sip_message::generators::InDialogMethod;
 use sip_message::error::SipParseError;
+use sip_message::generators::InDialogMethod;
 use sip_message::header::kind::TokenKind;
 use sip_message::header::{MediaType, RAck, RSeq, Require, Supported, TokenListHeader};
 use sip_message::Method;
@@ -95,10 +95,7 @@ async fn basic() {
     uas.respond(200, "OK").await;
     let ok = call.expect(200).await;
     assert!(!ok.body().is_empty(), "alice 200 carries cached SDP");
-    assert!(
-        is_sdp(ok.header::<MediaType>()),
-        "Content-Type application/sdp on alice's 200",
-    );
+    assert!(is_sdp(ok.header::<MediaType>()), "Content-Type application/sdp on alice's 200",);
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
@@ -219,7 +216,8 @@ async fn no_policy_control() {
     let alice = h.agent("alice", "127.0.0.1:5706").await;
     let bob = h.agent("bob", "127.0.0.1:5716").await;
     // route_all_to → no relay_first_18x feature.
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5716).start(&h, "b2bua", "127.0.0.1:5726").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5716).start(&h, "b2bua", "127.0.0.1:5726").await;
 
     let mut call = alice
         .invite(&bob)
@@ -272,12 +270,8 @@ async fn delayed_offer_fallback() {
     let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5725", 5715).await;
 
     // Alice INVITE with NO body — delayed offer.
-    let mut call = alice
-        .invite(&bob)
-        .with_header("Supported", "100rel")
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_header("Supported", "100rel").through(b2bua.addr).send().await;
 
     // Outbound INVITE to bob must have Supported:100rel stripped.
     let mut uas = bob.receive("INVITE").await;
@@ -362,7 +356,13 @@ async fn update_happy() {
 /// bob1 goes reliable (183/100rel → bare 180 + B2BUA PRACK + cached SDP) then
 /// 503s; the B2BUA fails over to bob2 (unreliable). bob1's cache dies with its
 /// leg, so alice's 200 carries bob2's own SDP.
-async fn run_fake_prack_failover(scenario: &str, alice_p: u16, bob1_p: u16, bob2_p: u16, b2b_p: u16) {
+async fn run_fake_prack_failover(
+    scenario: &str,
+    alice_p: u16,
+    bob1_p: u16,
+    bob2_p: u16,
+    b2b_p: u16,
+) {
     let h = Harness::with_transit_delay(scenario, 0);
     let alice = h.agent("alice", &format!("127.0.0.1:{alice_p}")).await;
     let bob1 = h.agent("bob1", &format!("127.0.0.1:{bob1_p}")).await;

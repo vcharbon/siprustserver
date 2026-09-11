@@ -138,7 +138,10 @@ fn a_top_line_edit_leaves_the_lines_below_it_unread() {
         .freeze()
         .expect("still complete");
     let vias: Vec<&str> = hop.raw(HeaderName::Via).collect();
-    assert_eq!(vias[0], "SIP/2.0/UDP client.atlanta.com:5060;branch=z9hG4bK74bf9;received=192.0.2.7");
+    assert_eq!(
+        vias[0],
+        "SIP/2.0/UDP client.atlanta.com:5060;branch=z9hG4bK74bf9;received=192.0.2.7"
+    );
     assert_eq!(vias[1], "SIP/2.0");
 }
 

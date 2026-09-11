@@ -22,14 +22,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path as UrlPath, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use e2e_core::model::{self, ModelError};
 use e2e_core::result::CellSummary;
 use e2e_core::run::{self, JobHandle};
-use maud::{DOCTYPE, Markup, PreEscaped, html};
+use maud::{html, Markup, PreEscaped, DOCTYPE};
 use tower_http::services::ServeDir;
 
 /// The directory name under the functional runs root reserved for load runs
@@ -62,12 +62,8 @@ pub fn router_with_load_runs(
     runs_root: PathBuf,
     load_runs_root: PathBuf,
 ) -> Router {
-    let state = Arc::new(AppState {
-        e2e_dir,
-        runs_root,
-        load_runs_root,
-        jobs: Mutex::new(HashMap::new()),
-    });
+    let state =
+        Arc::new(AppState { e2e_dir, runs_root, load_runs_root, jobs: Mutex::new(HashMap::new()) });
     Router::new()
         .route("/", get(|| async { Redirect::to("/campaigns") }))
         .route("/campaigns", get(campaigns_index))
@@ -94,10 +90,7 @@ pub fn router_with_load_runs(
         .route("/schemas/{name}", get(schema_doc))
         // The vendored Monaco editor assets (the only client-side dependency
         // besides htmx). `CARGO_MANIFEST_DIR` keeps the path independent of cwd.
-        .nest_service(
-            "/static",
-            ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
-        )
+        .nest_service("/static", ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/static")))
         .with_state(state)
 }
 
@@ -518,8 +511,9 @@ async fn campaign_launch(
     st.jobs.lock().unwrap().insert(run_id.clone(), handle);
 
     if wants_json(&headers) {
-        return Ok((StatusCode::ACCEPTED, Json(serde_json::json!({ "runId": run_id })))
-            .into_response());
+        return Ok(
+            (StatusCode::ACCEPTED, Json(serde_json::json!({ "runId": run_id }))).into_response()
+        );
     }
     Ok(Redirect::to(&format!("/runs/{run_id}")).into_response())
 }
@@ -599,7 +593,9 @@ async fn runs_index(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Resp
     if wants_json(&headers) {
         let docs: Vec<_> = runs
             .iter()
-            .map(|(c, t)| serde_json::json!({ "campaign": c, "ts": t, "runId": format!("{c}/{t}") }))
+            .map(
+                |(c, t)| serde_json::json!({ "campaign": c, "ts": t, "runId": format!("{c}/{t}") }),
+            )
             .collect();
         return Json(docs).into_response();
     }
@@ -692,11 +688,8 @@ async fn cell_detail(
     // fixed re-fold bug); collapse exact (lane, detail) duplicates for display.
     // Gating rows (advisory == false) sort first — they are why the cell failed.
     let mut seen = std::collections::HashSet::new();
-    let mut rfc: Vec<&seq_report::Anomaly> = result
-        .rfc
-        .iter()
-        .filter(|a| seen.insert((a.lane.clone(), a.detail.clone())))
-        .collect();
+    let mut rfc: Vec<&seq_report::Anomaly> =
+        result.rfc.iter().filter(|a| seen.insert((a.lane.clone(), a.detail.clone()))).collect();
     rfc.sort_by_key(|a| !a.is_gating());
     let has_gating = rfc.iter().any(|a| a.is_gating());
     Ok(page(
@@ -825,9 +818,7 @@ async fn load_runs_index(State(st): State<Arc<AppState>>, headers: HeaderMap) ->
         }
     }
     // Newest-first by start time (ties broken by name for determinism).
-    runs.sort_by(|a, b| {
-        b.1.meta.started_ms.cmp(&a.1.meta.started_ms).then_with(|| a.0.cmp(&b.0))
-    });
+    runs.sort_by(|a, b| b.1.meta.started_ms.cmp(&a.1.meta.started_ms).then_with(|| a.0.cmp(&b.0)));
 
     if wants_json(&headers) {
         let docs: Vec<_> = runs
@@ -1028,7 +1019,14 @@ fn canary_row(label: &str, value: u64) -> Markup {
 
 /// The sample-page links for a `(scenario, class, case, chaos)` count row: the
 /// stored callflow pages, each served through `/load/{run}/files/…`.
-fn sample_links(run: &str, idx: &model::LoadRunIndex, scenario: &str, class: &str, case: &str, chaos: &str) -> Markup {
+fn sample_links(
+    run: &str,
+    idx: &model::LoadRunIndex,
+    scenario: &str,
+    class: &str,
+    case: &str,
+    chaos: &str,
+) -> Markup {
     let group = idx
         .samples
         .iter()
@@ -1199,7 +1197,8 @@ async fn case_view(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     // Resolve by id, searching subdirectories (cases may be organised in folders).
-    let path = run::find_case_file(&st.e2e_dir, &id).ok_or_else(|| not_found(format!("case {id:?}")))?;
+    let path =
+        run::find_case_file(&st.e2e_dir, &id).ok_or_else(|| not_found(format!("case {id:?}")))?;
     let case = model::load_test_case(&path).map_err(|_| not_found(format!("case {id:?}")))?;
     if wants_json(&headers) {
         return Ok(Json(case).into_response());
@@ -1235,8 +1234,7 @@ async fn case_save(
             format!("case id {:?} must match the path id {id:?}", case.id),
         ));
     }
-    let check_sets =
-        model::load_check_sets(&st.e2e_dir.join("checksets")).map_err(internal)?;
+    let check_sets = model::load_check_sets(&st.e2e_dir.join("checksets")).map_err(internal)?;
     if let Err(e @ ModelError::Invalid(_)) =
         model::validate_case(&case, &e2e_core::shapes::registry(), &check_sets)
     {

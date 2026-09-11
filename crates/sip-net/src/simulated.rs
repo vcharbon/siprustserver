@@ -173,9 +173,9 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
     Box::pin(async move {
         let target = {
             let routing = shared.routing.lock().unwrap();
-            routing
-                .get(&dst)
-                .map(|b| (b.queue.clone(), b.counters.clone(), b.pre_ingress.clone(), b.clock.clone()))
+            routing.get(&dst).map(|b| {
+                (b.queue.clone(), b.counters.clone(), b.pre_ingress.clone(), b.clock.clone())
+            })
         };
         let (queue, counters, pre, clock) = match target {
             Some(t) => t,
@@ -211,11 +211,7 @@ fn deliver(shared: Arc<SimShared>, raw: Vec<u8>, src: SocketAddr, dst: SocketAdd
                 });
             }
             PreIngressAction::Accept => {
-                let pkt = UdpPacket {
-                    raw,
-                    src,
-                    arrival_ms: clock.now_ms().max(0) as u64,
-                };
+                let pkt = UdpPacket { raw, src, arrival_ms: clock.now_ms().max(0) as u64 };
                 if queue.offer(pkt) {
                     counters.enqueued.fetch_add(1, Ordering::Relaxed);
                 } else {

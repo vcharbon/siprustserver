@@ -51,7 +51,13 @@ pub struct WorkerEntry {
 
 impl WorkerEntry {
     pub fn alive(id: impl Into<WorkerId>, address: ProxyAddr) -> Self {
-        Self { id: id.into(), address, health: WorkerHealth::Alive, draining_since: None, first_seen_at_ms: None }
+        Self {
+            id: id.into(),
+            address,
+            health: WorkerHealth::Alive,
+            draining_since: None,
+            first_seen_at_ms: None,
+        }
     }
 }
 

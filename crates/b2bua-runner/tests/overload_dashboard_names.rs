@@ -74,12 +74,7 @@ async fn every_dashboard_metric_name_is_emitted_by_the_exposition() {
     let (sampler, _ctl) = simulated();
     let sig = OverloadSignal::new(Arc::new(sampler));
     let brake = Tier1BrakeCounters::new();
-    let udp = UdpTransportMetrics::new(
-        8,
-        brake,
-        Arc::new(|| 0),
-        Arc::new(|| 0),
-    );
+    let udp = UdpTransportMetrics::new(8, brake, Arc::new(|| 0), Arc::new(|| 0));
     // The aggregate `b2bua_overload_rejected_total` lives on the core counter set.
     let core_metrics = B2buaMetrics::new();
     let b2bua_exposition = format!(

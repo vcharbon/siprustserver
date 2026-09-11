@@ -50,15 +50,26 @@ pub const ANSWER_WINDOW_US: u64 = 1_000_000;
 
 /// Methods a modern UA recognises — anything else is the §8.2.1 occasion.
 const RECOGNISED_METHODS: &[&str] = &[
-    "INVITE", "ACK", "BYE", "CANCEL", "OPTIONS", "REGISTER", "PRACK", "UPDATE", "INFO", "REFER",
-    "SUBSCRIBE", "NOTIFY", "MESSAGE", "PUBLISH",
+    "INVITE",
+    "ACK",
+    "BYE",
+    "CANCEL",
+    "OPTIONS",
+    "REGISTER",
+    "PRACK",
+    "UPDATE",
+    "INFO",
+    "REFER",
+    "SUBSCRIBE",
+    "NOTIFY",
+    "MESSAGE",
+    "PUBLISH",
 ];
 
 /// Option tags a modern UA recognises — a `Require` naming anything else is the
 /// §8.2.2 occasion.
-const RECOGNISED_OPTION_TAGS: &[&str] = &[
-    "100rel", "timer", "replaces", "gruu", "path", "outbound", "eventlist", "sec-agree",
-];
+const RECOGNISED_OPTION_TAGS: &[&str] =
+    &["100rel", "timer", "replaces", "gruu", "path", "outbound", "eventlist", "sec-agree"];
 
 /// The transaction one rejection obligation rides, as its TAKER names it:
 /// RFC 3261 §17's `(Call-ID, top-Via branch)` at one endpoint.
@@ -201,9 +212,9 @@ impl Obligation for UnsupportedMethod405Allow {
 
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
         let taken = |msg: &Msg| match &msg.kind {
-            Kind::Request { method } => !RECOGNISED_METHODS
-                .iter()
-                .any(|m| m.eq_ignore_ascii_case(method)),
+            Kind::Request { method } => {
+                !RECOGNISED_METHODS.iter().any(|m| m.eq_ignore_ascii_case(method))
+            }
             Kind::Response { .. } => false,
         };
         rejections(wire, RuleId::UnsupportedMethod405Allow, taken, "Allow", |occasion, answer| {
@@ -247,23 +258,29 @@ impl Obligation for UnsupportedExtension420 {
         let taken = |msg: &Msg| {
             matches!(msg.kind, Kind::Request { .. }) && !unsupported_require(msg).is_empty()
         };
-        rejections(wire, RuleId::UnsupportedExtension420, taken, "Unsupported", |occasion, answer| {
-            let discharged =
-                answer.is_some_and(|a| a.status == 420 && a.listed_rows.unwrap_or(0) > 0);
-            (
-                discharged,
-                Evidence::RejectionNotIssued {
-                    rejection_msg: occasion.msg,
-                    rejection_hop: occasion.hop,
-                    rejection_ts_us: occasion.ts_us,
-                    method: occasion.method.to_string(),
-                    branch: occasion.branch.to_string(),
-                    unsupported_tags: unsupported_require(occasion.request),
-                    answered_status: answer.map_or(0, |a| a.status),
-                    listed_rows: answer.and_then(|a| a.listed_rows).unwrap_or(0),
-                },
-            )
-        })
+        rejections(
+            wire,
+            RuleId::UnsupportedExtension420,
+            taken,
+            "Unsupported",
+            |occasion, answer| {
+                let discharged =
+                    answer.is_some_and(|a| a.status == 420 && a.listed_rows.unwrap_or(0) > 0);
+                (
+                    discharged,
+                    Evidence::RejectionNotIssued {
+                        rejection_msg: occasion.msg,
+                        rejection_hop: occasion.hop,
+                        rejection_ts_us: occasion.ts_us,
+                        method: occasion.method.to_string(),
+                        branch: occasion.branch.to_string(),
+                        unsupported_tags: unsupported_require(occasion.request),
+                        answered_status: answer.map_or(0, |a| a.status),
+                        listed_rows: answer.and_then(|a| a.listed_rows).unwrap_or(0),
+                    },
+                )
+            },
+        )
     }
 }
 
@@ -324,9 +341,12 @@ impl Obligation for UnsupportedExtension421 {
     }
 
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        sent_response_owes(wire, RuleId::UnsupportedExtension421, |status| status == 421, &[
-            "Require",
-        ])
+        sent_response_owes(
+            wire,
+            RuleId::UnsupportedExtension421,
+            |status| status == 421,
+            &["Require"],
+        )
     }
 }
 
@@ -459,8 +479,7 @@ fn rejections<'a>(
     occasions
         .iter()
         .map(|occasion| {
-            let key =
-                (occasion.emitter, occasion.request.call_id.as_str(), occasion.branch);
+            let key = (occasion.emitter, occasion.request.call_id.as_str(), occasion.branch);
             let answer = answers.get(&key).copied();
             let finding = |decision| Finding {
                 rule,
@@ -475,10 +494,12 @@ fn rejections<'a>(
                 Some(Answer { listed_rows: None, .. }) => {
                     finding(Decision::Undecidable("no header block at this vantage"))
                 }
-                None if !wire.obs.absence_decidable(occasion.ts_us, ANSWER_WINDOW_US) => finding(
-                    Decision::Undecidable("the observation stopped inside the window — \
-                                           truncation, not silence"),
-                ),
+                None if !wire.obs.absence_decidable(occasion.ts_us, ANSWER_WINDOW_US) => {
+                    finding(Decision::Undecidable(
+                        "the observation stopped inside the window — \
+                                           truncation, not silence",
+                    ))
+                }
                 answer => match judge(occasion, answer) {
                     (true, _) => finding(Decision::Compliant),
                     (false, evidence) => finding(Decision::Violated(evidence)),
@@ -793,8 +814,7 @@ mod tests {
         let f = hits(&msgs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].emitter, BOB);
-        let Decision::Violated(Evidence::CapabilitiesNotAdvertised { status, .. }) =
-            &f[0].decision
+        let Decision::Violated(Evidence::CapabilitiesNotAdvertised { status, .. }) = &f[0].decision
         else {
             panic!("{:?}", f[0].decision)
         };
@@ -805,10 +825,8 @@ mod tests {
     /// that INVITE again, not a re-offer.
     #[test]
     fn a_retransmitted_initial_invite_is_exempt() {
-        let msgs = [
-            invite(1_000, "z9hG4bK-i", 1, None, ""),
-            invite(2_000, "z9hG4bK-i", 1, None, ""),
-        ];
+        let msgs =
+            [invite(1_000, "z9hG4bK-i", 1, None, ""), invite(2_000, "z9hG4bK-i", 1, None, "")];
         assert!(eval(&msgs).is_empty(), "{:?}", eval(&msgs));
     }
 
@@ -816,10 +834,8 @@ mod tests {
     /// another attempt at establishing the dialog, never a re-offer.
     #[test]
     fn an_auth_retry_invite_is_exempt() {
-        let msgs = [
-            invite(1_000, "z9hG4bK-i1", 1, None, ""),
-            invite(2_000, "z9hG4bK-i2", 2, None, ""),
-        ];
+        let msgs =
+            [invite(1_000, "z9hG4bK-i1", 1, None, ""), invite(2_000, "z9hG4bK-i2", 2, None, "")];
         assert!(eval(&msgs).is_empty(), "{:?}", eval(&msgs));
     }
 
@@ -865,7 +881,14 @@ mod tests {
     }
 
     /// The response bob sent back on that transaction.
-    fn answered(at_us: u64, status: u16, method: &str, branch: &str, cseq: u32, extra: &str) -> Msg {
+    fn answered(
+        at_us: u64,
+        status: u16,
+        method: &str,
+        branch: &str,
+        cseq: u32,
+        extra: &str,
+    ) -> Msg {
         let head = format!(
             "SIP/2.0 {status} Response\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch={branch}\r\n\

@@ -62,9 +62,13 @@ async fn unacked_reinvite_2xx_is_retransmitted_then_byes_both_legs() {
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(REANSWER).await;
     reinv.expect(200).await; // alice receives the re-INVITE 200 — and stays silent.
-    // No `dialog.ack(...)` — the a-leg re-INVITE ACK is withheld (the lost-ACK case).
+                             // No `dialog.ack(...)` — the a-leg re-INVITE ACK is withheld (the lost-ACK case).
 
-    assert_eq!(b2bua.active_calls(), 1, "still one active call after the (un-ACKed) re-INVITE answer");
+    assert_eq!(
+        b2bua.active_calls(),
+        1,
+        "still one active call after the (un-ACKed) re-INVITE answer"
+    );
 
     // ── (a) The re-INVITE 2xx must be retransmitted to alice while her ACK is
     //    missing. Advance past the first retransmit cadence and confirm at least
@@ -151,7 +155,8 @@ async fn b2bua_with_ack_timeout(
     dest_port: u16,
     ack_timeout_sec: i64,
 ) -> B2buaSut {
-    let decision = Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", dest_port));
+    let decision =
+        Arc::new(b2bua::decision::ScriptedDecisionEngine::route_all_to("127.0.0.1", dest_port));
     B2buaSut::builder(decision)
         .tune(move |c| {
             c.ack_timeout_sec = ack_timeout_sec;

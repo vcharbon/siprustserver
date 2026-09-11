@@ -39,9 +39,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use layer_harness::NetworkTag;
-use sip_net::{
-    BindUdpOpts, SendError, UaRole, UdpEndpoint, UdpEndpointCounters, UdpPacket,
-};
+use sip_net::{BindUdpOpts, SendError, UaRole, UdpEndpoint, UdpEndpointCounters, UdpPacket};
 
 use crate::agent::{decide_rr_fold, Agent, Harness};
 use crate::legpick::{labelled_prefix_leg_picker, LegInfo};
@@ -121,12 +119,7 @@ struct SubEndpoint {
 impl SubEndpoint {
     /// Pop a previously-stashed packet for this owner, if any.
     fn pop_own(&self) -> Option<UdpPacket> {
-        self.router
-            .lock()
-            .unwrap()
-            .stash
-            .get_mut(&self.owner)
-            .and_then(|q| q.pop_front())
+        self.router.lock().unwrap().stash.get_mut(&self.owner).and_then(|q| q.pop_front())
     }
 
     /// Classify a freshly-pulled packet under a single lock: hand it back if it
@@ -188,13 +181,7 @@ impl UdpEndpoint for SubEndpoint {
     }
 
     fn queue_depth(&self) -> usize {
-        let own = self
-            .router
-            .lock()
-            .unwrap()
-            .stash
-            .get(&self.owner)
-            .map_or(0, VecDeque::len);
+        let own = self.router.lock().unwrap().stash.get(&self.owner).map_or(0, VecDeque::len);
         own + self.shared.queue_depth()
     }
 
@@ -274,12 +261,7 @@ impl<'h> CalleeGroupBuilder<'h> {
     pub async fn build(self) -> CalleeGroup {
         assert!(!self.members.is_empty(), "a callee-group needs at least one callee");
 
-        let lane_name = self
-            .members
-            .iter()
-            .map(|(n, _)| n.as_str())
-            .collect::<Vec<_>>()
-            .join("+");
+        let lane_name = self.members.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join("+");
         // One recorded lane for the shared socket — every leg's send/recv tees
         // onto it, so the RFC hard gate judges the (prefix-distinct) callee legs
         // as one peer, exactly as they land on the wire.
@@ -295,9 +277,8 @@ impl<'h> CalleeGroupBuilder<'h> {
 
         // Longest-prefix picker over the members, each prefix labelled with its
         // agent name (the shared `legpick` primitive).
-        let base = labelled_prefix_leg_picker(
-            self.members.iter().map(|(n, p)| (p.clone(), n.clone())),
-        );
+        let base =
+            labelled_prefix_leg_picker(self.members.iter().map(|(n, p)| (p.clone(), n.clone())));
         let pick: OwnerPicker = Box::new(move |leg: &LegInfo| {
             let matched = base(leg);
             (!matched.is_empty()).then_some(matched)

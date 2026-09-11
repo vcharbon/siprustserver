@@ -52,11 +52,9 @@ impl std::fmt::Display for ClaimError {
                 f,
                 "endpoint {endpoint}: every claiming leg already has its dialog; {arrived} arrived"
             ),
-            ClaimError::NoMatch { endpoint, arrived, tried } => write!(
-                f,
-                "endpoint {endpoint}: {arrived} matches no claim ({})",
-                tried.join(", ")
-            ),
+            ClaimError::NoMatch { endpoint, arrived, tried } => {
+                write!(f, "endpoint {endpoint}: {arrived} matches no claim ({})", tried.join(", "))
+            }
         }
     }
 }
@@ -85,7 +83,12 @@ impl ClaimIndex {
     /// matches on its own discriminator; an `arrival-order` candidate matches
     /// when its ordinal among the endpoint's unclaimed arrival-order
     /// candidates equals this arrival's ordinal.
-    pub fn claim(&mut self, endpoint: &str, ruri_user: &str, inbound: &Inbound) -> Result<String, ClaimError> {
+    pub fn claim(
+        &mut self,
+        endpoint: &str,
+        ruri_user: &str,
+        inbound: &Inbound,
+    ) -> Result<String, ClaimError> {
         let open: Vec<&Candidate> = self
             .candidates
             .iter()

@@ -47,12 +47,7 @@ impl ActionExecutor<'_> {
     /// Apply `actions` to a working copy of the authoritative `call`. The
     /// `ctx` view carries the event; the full struct comes in explicitly —
     /// rules never hold it (ADR-0020 X8).
-    pub fn execute(
-        &self,
-        actions: &[RuleAction],
-        call: &Call,
-        ctx: &RuleContext,
-    ) -> HandlerResult {
+    pub fn execute(&self, actions: &[RuleAction], call: &Call, ctx: &RuleContext) -> HandlerResult {
         let mut call = call.clone();
         let mut fx = HandlerEffects::new();
         for action in actions {

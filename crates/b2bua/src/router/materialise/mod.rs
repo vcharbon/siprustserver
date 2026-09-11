@@ -138,10 +138,7 @@ pub(super) async fn materialise(
             return Materialised::Refused(Reason::Terminated);
         }
         Origin::Reclaim(_)
-            if matches!(
-                call.state,
-                CallModelState::Terminated | CallModelState::Terminating
-            ) =>
+            if matches!(call.state, CallModelState::Terminated | CallModelState::Terminating) =>
         {
             let force_terminal = call.state == CallModelState::Terminating;
             discharge_materialized_terminal(ctx, call_ref, call, now_ms, force_terminal).await;
@@ -208,8 +205,14 @@ pub(super) async fn materialise(
 /// non-SIP event are the turn's to process. `Matched`: the layer re-emitted
 /// whatever it owes, so this turn ends without running the rules; `Unmatched`
 /// (a layer that cannot be asked included): the turn continues.
-pub(super) async fn reoffer_trigger(ctx: &Arc<RouterCtx>, call: &Call, event: &CallEvent) -> Reoffer {
-    let CallEvent::Sip { message, src, matched_client_txn } = event else { return Reoffer::Unmatched };
+pub(super) async fn reoffer_trigger(
+    ctx: &Arc<RouterCtx>,
+    call: &Call,
+    event: &CallEvent,
+) -> Reoffer {
+    let CallEvent::Sip { message, src, matched_client_txn } = event else {
+        return Reoffer::Unmatched;
+    };
     let offer = match message.as_ref() {
         SipMessage::Response(_) => !matched_client_txn,
         SipMessage::Request(req) if req.method() == Method::Cancel => true,

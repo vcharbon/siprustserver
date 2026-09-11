@@ -90,10 +90,8 @@ impl WaveSet {
                     if waves.len() >= MAX_KEYS {
                         return;
                     }
-                    let w = Arc::new(Mutex::new(Wave::new(
-                        self.summary_every,
-                        self.idle_close_after,
-                    )));
+                    let w =
+                        Arc::new(Mutex::new(Wave::new(self.summary_every, self.idle_close_after)));
                     waves.insert(key.to_string(), w.clone());
                     w
                 }
@@ -142,8 +140,7 @@ impl WaveSet {
         if !self.is_active() {
             return;
         }
-        let waves: Vec<Arc<Mutex<Wave>>> =
-            self.waves.lock().unwrap().values().cloned().collect();
+        let waves: Vec<Arc<Mutex<Wave>>> = self.waves.lock().unwrap().values().cloned().collect();
         for wave in waves {
             let mut w = wave.lock().unwrap();
             if w.request_close() {
@@ -165,9 +162,8 @@ impl WaveSet {
     /// Give back one burning episode. Saturating: `is_active` must never wrap
     /// to "always burning" and pin the hot paths on the map lock.
     fn release_active(&self) {
-        let _ = self.active.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-            n.checked_sub(1)
-        });
+        let _ =
+            self.active.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
     }
 
     /// Drive one episode's periodic summary and idle close. Exits at the

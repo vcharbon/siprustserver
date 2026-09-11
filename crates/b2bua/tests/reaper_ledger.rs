@@ -16,9 +16,8 @@ use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
 };
 use sip_message::header::{self, Uri, Via};
-use sip_message::SipStr;
 use sip_message::SipRequest;
-
+use sip_message::SipStr;
 
 /// The URI a fixture names as text.
 fn uri_of(text: &str) -> Uri {
@@ -29,10 +28,14 @@ fn invite(call_id: &str) -> SipRequest {
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(uri_of("sip:bob@127.0.0.1:5070")),
         call_id: call_id.into(),
-        from: Some(header::From::from_uri(uri_of("sip:alice@host")).with_tag(SipStr::from_static("atag"))),
+        from: Some(
+            header::From::from_uri(uri_of("sip:alice@host")).with_tag(SipStr::from_static("atag")),
+        ),
         to: Some(header::To::from_uri(uri_of("sip:bob@host"))),
         cseq: 1,
-        via: Some(Via::udp("127.0.0.1", 5060).with_branch(SipStr::owned(&format!("z9hG4bK{call_id}")))),
+        via: Some(
+            Via::udp("127.0.0.1", 5060).with_branch(SipStr::owned(&format!("z9hG4bK{call_id}"))),
+        ),
         contact: Some(header::Contact::from_uri(
             Uri::sip_user("alice", "127.0.0.1").with_port(5060),
         )),
@@ -96,11 +99,7 @@ async fn stale_candidates_exclude_fresh_touched_and_takeover() {
     s.touch(&fresh, now);
     s.mark_takeover(&taken);
 
-    let refs: Vec<String> = s
-        .stale_candidates(now, 50_000)
-        .into_iter()
-        .map(|(r, _)| r)
-        .collect();
+    let refs: Vec<String> = s.stale_candidates(now, 50_000).into_iter().map(|(r, _)| r).collect();
     assert_eq!(refs, vec![stale.clone()], "only the untouched primary-served call is stale");
 
     // The watermark pairs the observed stamp.

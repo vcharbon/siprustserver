@@ -134,15 +134,11 @@ async fn a_relayed_answer_is_retransmitted_whole() {
     let h = Harness::new("unacked-2xx-faithful-relay");
     let alice = h.agent("alice", "127.0.0.1:5301").await;
     let bob = h.agent("bob", "127.0.0.1:5311").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5311).start(&h, "b2bua", "127.0.0.1:5321").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5311).start(&h, "b2bua", "127.0.0.1:5321").await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .delayed_ack(HELD_ACK)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).delayed_ack(HELD_ACK).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
@@ -173,13 +169,8 @@ async fn a_masked_call_answer_is_retransmitted_whole() {
         .start(&h, "b2bua", "127.0.0.1:5322")
         .await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .delayed_ack(HELD_ACK)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).delayed_ack(HELD_ACK).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond(183, "Session Progress").with_sdp(ANSWER).await;
     call.expect(180).await;
@@ -206,9 +197,10 @@ async fn a_fake_pracked_answer_is_retransmitted_whole() {
     let h = Harness::new("unacked-2xx-faithful-fake-prack");
     let alice = h.agent("alice", "127.0.0.1:5303").await;
     let bob = h.agent("bob", "127.0.0.1:5313").await;
-    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5313, RelayFirst18xStrategy::FakePrack)
-        .start(&h, "b2bua", "127.0.0.1:5323")
-        .await;
+    let b2bua =
+        B2buaSut::route_all_to_with_18x("127.0.0.1", 5313, RelayFirst18xStrategy::FakePrack)
+            .start(&h, "b2bua", "127.0.0.1:5323")
+            .await;
 
     let mut call = alice
         .invite(&bob)
@@ -257,13 +249,8 @@ async fn a_promoted_early_media_answer_is_retransmitted_whole() {
             .start(&h, "b2bua", "127.0.0.1:5324")
             .await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .delayed_ack(HELD_ACK)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).delayed_ack(HELD_ACK).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
 
     // The 183 the promotion fires on states the same relayed headers a final

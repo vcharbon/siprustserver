@@ -71,7 +71,9 @@ async fn basic_call_over_fake_infra_with_input() {
     let invite_to_bob1 = report
         .entries()
         .into_iter()
-        .find(|e| e.from == lb && e.to == bob1 && String::from_utf8_lossy(&e.raw).starts_with("INVITE"))
+        .find(|e| {
+            e.from == lb && e.to == bob1 && String::from_utf8_lossy(&e.raw).starts_with("INVITE")
+        })
         .expect("an INVITE delivered lb→bob1");
     let text = String::from_utf8_lossy(&invite_to_bob1.raw);
     assert!(
@@ -86,13 +88,11 @@ async fn basic_call_over_fake_infra_with_input() {
 /// Infra shape (ADR-0018).
 #[tokio::test]
 async fn basic_call_over_real_infra() {
-    let roles: BTreeMap<String, SocketAddr> = [
-        ("alice", "127.0.0.1:35060"),
-        ("bob1", "127.0.0.1:35070"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v.parse().unwrap()))
-    .collect();
+    let roles: BTreeMap<String, SocketAddr> =
+        [("alice", "127.0.0.1:35060"), ("bob1", "127.0.0.1:35070")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.parse().unwrap()))
+            .collect();
     let cfg = EndpointConfig {
         schema: None,
         infra_shape: "real-loopback-direct".into(),
@@ -102,16 +102,11 @@ async fn basic_call_over_real_infra() {
         egress: None,
     };
 
-    let mut rt = RealLoopbackDirect
-        .build("basic-call/real", &cfg)
-        .await;
+    let mut rt = RealLoopbackDirect.build("basic-call/real", &cfg).await;
     BasicCall.run(&mut rt, &e2e_core::model::Input::default()).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
 
     assert!(report.passed(), "real-transport run must pass the RFC hard gate");
-    assert!(
-        report.entries().iter().all(|e| e.delivered),
-        "every hop delivered over real loopback"
-    );
+    assert!(report.entries().iter().all(|e| e.delivered), "every hop delivered over real loopback");
 }

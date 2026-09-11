@@ -24,11 +24,11 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::B2buaSut;
 use call::features::RelayFirst18xStrategy;
-use sip_net::RecordedSipEntry;
-use scenario_harness::Harness;
 use scenario_harness::run::RunReport;
+use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 use sip_message::header::Supported;
+use sip_net::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -51,7 +51,12 @@ fn write_flow_report(report: &RunReport) {
 const BOB_RSEQ: u32 = 4711;
 
 /// Every request of `method` the SUT put on `to`'s wire.
-fn requests_to(entries: &[RecordedSipEntry], from: SocketAddr, to: SocketAddr, method: &str) -> usize {
+fn requests_to(
+    entries: &[RecordedSipEntry],
+    from: SocketAddr,
+    to: SocketAddr,
+    method: &str,
+) -> usize {
     let head = format!("{method} ");
     entries
         .iter()
@@ -60,7 +65,12 @@ fn requests_to(entries: &[RecordedSipEntry], from: SocketAddr, to: SocketAddr, m
 }
 
 /// Every copy of `status` the SUT put on `to`'s wire.
-fn responses_to(entries: &[RecordedSipEntry], from: SocketAddr, to: SocketAddr, status: u16) -> usize {
+fn responses_to(
+    entries: &[RecordedSipEntry],
+    from: SocketAddr,
+    to: SocketAddr,
+    status: u16,
+) -> usize {
     let head = format!("SIP/2.0 {status} ");
     entries
         .iter()
@@ -75,13 +85,14 @@ fn decision_offering_100rel_toward_bob(port: u16) -> Arc<ScriptedDecisionEngine>
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", port);
-                r.features.advertise_capabilities = Some(call::features::AdvertiseCapabilitiesFeature {
-                    toward_originator: None,
-                    toward_originated: Some(call::features::AdvertisedCapabilities {
-                        allow: None,
-                        supported: Some(vec!["100rel".to_string()]),
-                    }),
-                });
+                r.features.advertise_capabilities =
+                    Some(call::features::AdvertiseCapabilitiesFeature {
+                        toward_originator: None,
+                        toward_originated: Some(call::features::AdvertisedCapabilities {
+                            allow: None,
+                            supported: Some(vec!["100rel".to_string()]),
+                        }),
+                    });
                 NewCallResponse::Route(r)
             })
             .build(),

@@ -159,10 +159,7 @@ pub fn simulated() -> (SimulatedLoadSampler, SimulatedLoadControl) {
         elu_bits: AtomicU64::new(0.0f64.to_bits()),
         gc_bits: AtomicU64::new(0.0f64.to_bits()),
     });
-    (
-        SimulatedLoadSampler { inner: inner.clone() },
-        SimulatedLoadControl { inner },
-    )
+    (SimulatedLoadSampler { inner: inner.clone() }, SimulatedLoadControl { inner })
 }
 
 impl LoadSampler for SimulatedLoadSampler {

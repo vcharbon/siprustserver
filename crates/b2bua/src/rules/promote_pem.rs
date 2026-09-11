@@ -16,11 +16,11 @@ use sip_message::sdp_media_equivalent;
 use sip_message::{SipHeader, SipResponse};
 
 use super::capabilities::{self, Face};
-use super::relay;
 use super::model::{
-    Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult,
-    TimerDelay, SERVICE_LAYER,
+    Match, MessageTransform, RuleAction, RuleContext, RuleDefinition, RuleHandleResult, TimerDelay,
+    SERVICE_LAYER,
 };
+use super::relay;
 
 fn rule(
     id: &'static str,
@@ -81,11 +81,8 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
         rule(
             "promote-183-pem",
             &[],
-            Match::response()
-                .method("INVITE")
-                .status_code(183)
-                .direction(Direction::FromB)
-                .filter(|ctx| {
+            Match::response().method("INVITE").status_code(183).direction(Direction::FromB).filter(
+                |ctx| {
                     if !promote_pem_active(ctx) || promoted(ctx) {
                         return false;
                     }
@@ -93,7 +90,8 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         Some(r) => !r.body().is_empty() && has_p_early_media(r),
                         None => false,
                     }
-                }),
+                },
+            ),
             |ctx| {
                 let resp = ctx.response()?;
                 let b_tag = resp.to().tag().unwrap_or_default().to_string();
@@ -175,7 +173,9 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 let leg = ctx.source_leg_id.to_string();
                 // The responder's retransmission of a provisional this stack
                 // already acknowledged: discarded outright (RFC 3262 §4).
-                if rseq.is_some_and(|rseq| ctx.call.pracked_provisional(&leg, &b_tag, invite_cseq, rseq)) {
+                if rseq.is_some_and(|rseq| {
+                    ctx.call.pracked_provisional(&leg, &b_tag, invite_cseq, rseq)
+                }) {
                     return ok(vec![]);
                 }
                 let mut actions = vec![RuleAction::AddCdrEvent {
@@ -220,9 +220,8 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 // via find_by_b_tag, so this keeps Alice's identity stable.
                 let existing = ctx.call.find_by_b_tag(&b, &b_tag);
                 let seeded = ctx.call.tag_map().iter().find(|m| m.b_leg_id == b);
-                let a_facing = existing
-                    .map(|m| m.a_tag.clone())
-                    .or_else(|| seeded.map(|m| m.a_tag.clone()));
+                let a_facing =
+                    existing.map(|m| m.a_tag.clone()).or_else(|| seeded.map(|m| m.a_tag.clone()));
 
                 let mut actions: Vec<RuleAction> = Vec::new();
                 if existing.is_none() {
@@ -243,7 +242,11 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     disposition: Some(LegDisposition::Bridged),
                 });
                 actions.push(RuleAction::ConfirmDialog { leg_id: b.clone() });
-                actions.push(RuleAction::AckLeg { leg_id: b.clone(), body: Vec::new(), content_type: None });
+                actions.push(RuleAction::AckLeg {
+                    leg_id: b.clone(),
+                    body: Vec::new(),
+                    content_type: None,
+                });
                 actions.push(RuleAction::Merge { leg_a: a.clone(), leg_b: b.clone() });
                 for other in ctx.call.b_legs() {
                     if other.leg_id != b && other.state != LegState::Terminated {
@@ -251,9 +254,8 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     }
                 }
                 actions.push(RuleAction::CancelTimer { id: format!("NoAnswer:{b}") });
-                actions.push(RuleAction::CancelTimer {
-                    id: format!("{:?}", TimerType::SetupTimeout),
-                });
+                actions
+                    .push(RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) });
                 actions.push(RuleAction::ScheduleTimer {
                     timer_type: TimerType::GlobalDuration,
                     delay: TimerDelay::secs(max_duration(ctx)),
@@ -277,13 +279,8 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     actions.push(RuleAction::SetPromotePem { state: None });
                     return ok(actions);
                 }
-                let a_dialog_cseq = ctx
-                    .call
-                    .a_leg()
-                    .dialogs
-                    .first()
-                    .map(|d| d.sip.local_cseq)
-                    .unwrap_or(0);
+                let a_dialog_cseq =
+                    ctx.call.a_leg().dialogs.first().map(|d| d.sip.local_cseq).unwrap_or(0);
                 let next_cseq = a_dialog_cseq + 1;
                 actions.push(RuleAction::SendReinvite {
                     leg_id: a,
@@ -297,10 +294,7 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                     reason: Some("promote-pem-to-200:resync-reinvite".to_string()),
                 });
                 actions.push(RuleAction::SetPromotePem {
-                    state: Some(PromotePemState {
-                        resync_reinvite_cseq: Some(next_cseq),
-                        ..state
-                    }),
+                    state: Some(PromotePemState { resync_reinvite_cseq: Some(next_cseq), ..state }),
                 });
                 ok(actions)
             },
@@ -309,20 +303,16 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
         rule(
             "promote-resync-reinvite-response",
             &[],
-            Match::response()
-                .method("INVITE")
-                .direction(Direction::FromA)
-                .filter(|ctx| {
-                    if !promote_pem_active(ctx) {
-                        return false;
-                    }
-                    let expected = ctx.call.promote_pem_state()
-                        .and_then(|s| s.resync_reinvite_cseq);
-                    match (ctx.response(), expected) {
-                        (Some(r), Some(c)) => r.cseq().seq() as i64 == c,
-                        _ => false,
-                    }
-                }),
+            Match::response().method("INVITE").direction(Direction::FromA).filter(|ctx| {
+                if !promote_pem_active(ctx) {
+                    return false;
+                }
+                let expected = ctx.call.promote_pem_state().and_then(|s| s.resync_reinvite_cseq);
+                match (ctx.response(), expected) {
+                    (Some(r), Some(c)) => r.cseq().seq() as i64 == c,
+                    _ => false,
+                }
+            }),
             |ctx| {
                 let resp = ctx.response()?;
                 // Provisional — keep waiting; consume with no effects.
@@ -331,7 +321,11 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                 }
                 if resp.status() < 300 {
                     return ok(vec![
-                        RuleAction::AckLeg { leg_id: "a".to_string(), body: Vec::new(), content_type: None },
+                        RuleAction::AckLeg {
+                            leg_id: "a".to_string(),
+                            body: Vec::new(),
+                            content_type: None,
+                        },
                         RuleAction::AddCdrEvent {
                             event_type: CdrEventType::Answer,
                             leg_id: "a".to_string(),
@@ -393,10 +387,9 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
         rule(
             "promote-absorb-a-ack",
             &[],
-            Match::request()
-                .method("ACK")
-                .direction(Direction::FromA)
-                .filter(|ctx| promote_pem_active(ctx) && promoted(ctx) && ctx.call.active_peer().is_none()),
+            Match::request().method("ACK").direction(Direction::FromA).filter(|ctx| {
+                promote_pem_active(ctx) && promoted(ctx) && ctx.call.active_peer().is_none()
+            }),
             |_ctx| {
                 ok(vec![RuleAction::AddCdrEvent {
                     event_type: CdrEventType::Provisional,
@@ -448,10 +441,7 @@ fn keepalive_interval(ctx: &RuleContext) -> i64 {
     ctx.config.keepalive_interval_sec
 }
 fn max_duration(ctx: &RuleContext) -> i64 {
-    ctx.call
-        .features()
-        .map(|f| f.platform.max_duration_sec)
-        .unwrap_or(3600)
+    ctx.call.features().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
 }
 
 #[cfg(test)]
@@ -540,8 +530,7 @@ mod tests {
     /// deliberate difference is the tag it may not claim.
     #[test]
     fn the_service_advertises_what_every_other_mint_point_resolves() {
-        let from_bob =
-            received(&[("Allow", "INVITE, ACK, BYE"), ("Supported", "100rel, timer")]);
+        let from_bob = received(&[("Allow", "INVITE, ACK, BYE"), ("Supported", "100rel, timer")]);
         let generic = capabilities::relaying_in(None, Face::Originator, &from_bob);
         let (allow, supported) = advert_relaying(None, &from_bob);
         assert_eq!(allow, generic.allow_text());
@@ -552,10 +541,8 @@ mod tests {
     /// call declares it, because Alice saw no reliable provisional from us.
     #[test]
     fn a_declared_set_wins_and_never_claims_100rel() {
-        let features = features_declaring(
-            &["INVITE", "ACK", "CANCEL", "BYE"],
-            &["100rel", "timer"],
-        );
+        let features =
+            features_declaring(&["INVITE", "ACK", "CANCEL", "BYE"], &["100rel", "timer"]);
         let (allow, supported) =
             advert_relaying(Some(&features), &received(&[("Allow", "MESSAGE")]));
         assert_eq!(allow.as_deref(), Some("INVITE, ACK, CANCEL, BYE"));

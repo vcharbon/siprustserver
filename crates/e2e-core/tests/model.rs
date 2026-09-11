@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use e2e_core::model::{self, ModelError};
-use e2e_core::{EndpointConfig, FakeLsbcB2bua, InfraShape, ShapeDescriptor, ShapeRegistry, shapes};
+use e2e_core::{shapes, EndpointConfig, FakeLsbcB2bua, InfraShape, ShapeDescriptor, ShapeRegistry};
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -150,9 +150,8 @@ fn every_validation_problem_is_reported() {
 #[test]
 fn missing_required_input_is_incompatible() {
     let mut shapes = ShapeRegistry::empty();
-    shapes.register(
-        ShapeDescriptor::new("needs-target").required_input(&["from", "rerouteTarget"]),
-    );
+    shapes
+        .register(ShapeDescriptor::new("needs-target").required_input(&["from", "rerouteTarget"]));
 
     let case = parse_case(
         r#"{
@@ -203,10 +202,7 @@ fn committed_schemas_are_current() {
     for (stem, schema) in model::schemas() {
         let path = dir.join(format!("{stem}.schema.json"));
         let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!(
-                "read {} ({e}); run `cargo run -p xtask -- e2e-schema`",
-                path.display()
-            )
+            panic!("read {} ({e}); run `cargo run -p xtask -- e2e-schema`", path.display())
         });
         let current = serde_json::to_string_pretty(&schema).unwrap();
         assert_eq!(

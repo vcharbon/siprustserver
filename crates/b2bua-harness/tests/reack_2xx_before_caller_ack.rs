@@ -40,7 +40,8 @@ async fn every_2xx_received_before_the_callers_ack_draws_its_own_ack() {
     let h = Harness::new("b2bua-reack-2xx-pre-ack");
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", BOB_ADDR).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5073).start(&h, "b2bua", "127.0.0.1:5083").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -104,12 +105,7 @@ async fn every_2xx_received_before_the_callers_ack_draws_its_own_ack() {
         .filter(|e| e.from == b2bua.addr && e.to == bob_addr && e.raw.starts_with(b"ACK "))
         .map(|e| e.raw.clone())
         .collect();
-    assert_eq!(
-        acks.len(),
-        3,
-        "one ACK per 2xx received (RFC 3261 §13.2.2.4): got {}",
-        acks.len(),
-    );
+    assert_eq!(acks.len(), 3, "one ACK per 2xx received (RFC 3261 §13.2.2.4): got {}", acks.len(),);
     assert!(
         acks.iter().all(|a| a == &acks[0]),
         "the ACK re-sent for a retransmitted 2xx is the SAME ACK",
@@ -130,7 +126,8 @@ async fn a_reinvite_2xx_repeated_before_the_ack_draws_one_ack_per_copy() {
     let h = Harness::new("b2bua-reack-reinvite-2xx-pre-ack");
     let alice = h.agent("alice", "127.0.0.1:5067").await;
     let bob = h.agent("bob", BOB_REINVITE_ADDR).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5077).start(&h, "b2bua", "127.0.0.1:5087").await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -196,7 +193,8 @@ async fn a_delayed_offer_2xx_repeated_before_the_ack_draws_one_ack_in_total() {
     let h = Harness::new("b2bua-reack-delayed-offer-pre-ack");
     let alice = h.agent("alice", "127.0.0.1:5069").await;
     let bob = h.agent("bob", BOB_DELAYED_OFFER_ADDR).await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5079).start(&h, "b2bua", "127.0.0.1:5089").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5079).start(&h, "b2bua", "127.0.0.1:5089").await;
 
     // ── alice INVITEs bodyless: the offer is bob's to make ────────────────────
     let mut call = alice.invite(&bob).through(b2bua.addr).send().await;

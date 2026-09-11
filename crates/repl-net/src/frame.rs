@@ -50,10 +50,7 @@ impl Op {
         match v {
             0 => Ok(Op::Put),
             1 => Ok(Op::Delete),
-            other => Err(UnknownDiscriminant {
-                field: "Op",
-                value: other,
-            }),
+            other => Err(UnknownDiscriminant { field: "Op", value: other }),
         }
     }
 }
@@ -87,10 +84,7 @@ impl Partition {
         match v {
             0 => Ok(Partition::Pri),
             1 => Ok(Partition::Bak),
-            other => Err(UnknownDiscriminant {
-                field: "Partition",
-                value: other,
-            }),
+            other => Err(UnknownDiscriminant { field: "Partition", value: other }),
         }
     }
 }
@@ -132,9 +126,7 @@ impl PartialOrd for Watermark {
 impl Ord for Watermark {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // gen is the high word; counter breaks ties. `(1, 0) > (0, u64::MAX)`.
-        self.gen
-            .cmp(&other.gen)
-            .then_with(|| self.counter.cmp(&other.counter))
+        self.gen.cmp(&other.gen).then_with(|| self.counter.cmp(&other.counter))
     }
 }
 

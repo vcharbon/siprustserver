@@ -28,11 +28,8 @@ const ANSWER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const HELD_ACK: Duration = Duration::from_millis(700);
 
 /// What the callee states on its `200` and the fork answer owes the caller.
-const CALLEE_STATES: &[(&str, &str)] = &[
-    ("Privacy", "none"),
-    ("P-Identifier", "112233368"),
-    ("X-Vendor-Thing", "opaque-42"),
-];
+const CALLEE_STATES: &[(&str, &str)] =
+    &[("Privacy", "none"), ("P-Identifier", "112233368"), ("X-Vendor-Thing", "opaque-42")];
 
 /// The fork service: on the callee's INVITE 2xx it answers the caller under a
 /// fresh A2 delivering that final, bridges the two legs, and retires.
@@ -215,13 +212,8 @@ async fn the_fork_ladder_repeats_the_answer() {
         .start(&h, "b2bua", "127.0.0.1:5362")
         .await;
 
-    let mut call = alice
-        .invite(&bob)
-        .with_sdp(OFFER)
-        .delayed_ack(HELD_ACK)
-        .through(b2bua.addr)
-        .send()
-        .await;
+    let mut call =
+        alice.invite(&bob).with_sdp(OFFER).delayed_ack(HELD_ACK).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
     uas.respond(183, "Session Progress").with_sdp(EARLY).await;
     call.expect(183).await;
@@ -245,7 +237,11 @@ async fn the_fork_ladder_repeats_the_answer() {
 }
 
 /// Caller-initiated BYE, both legs reaped.
-async fn teardown(b2bua: &B2buaSut, bob: &scenario_harness::Agent, dialog: &mut scenario_harness::Dialog) {
+async fn teardown(
+    b2bua: &B2buaSut,
+    bob: &scenario_harness::Agent,
+    dialog: &mut scenario_harness::Dialog,
+) {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;

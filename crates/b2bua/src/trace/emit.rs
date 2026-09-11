@@ -57,7 +57,14 @@ pub fn rule_fired(call: &Call, at_ms: i64, rule_id: &str) {
 }
 
 /// A state-machine cursor move a rule caused (ADR-0016 X1).
-pub fn rule_transition(call: &Call, at_ms: i64, rule_id: &str, machine: &str, from: &str, to: &str) {
+pub fn rule_transition(
+    call: &Call,
+    at_ms: i64,
+    rule_id: &str,
+    machine: &str,
+    from: &str,
+    to: &str,
+) {
     if !sampled(call) {
         return;
     }

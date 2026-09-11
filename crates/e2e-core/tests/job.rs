@@ -27,8 +27,9 @@ fn temp_runs_root(tag: &str) -> PathBuf {
 fn committed_smoke_campaign_runs_green() {
     let e2e = workspace_root().join("e2e");
     let runs_root = temp_runs_root("smoke");
-    let spec = run::load_spec(&e2e, &e2e.join("campaigns/smoke.json"), runs_root.clone(), "t0".into())
-        .expect("committed smoke campaign loads");
+    let spec =
+        run::load_spec(&e2e, &e2e.join("campaigns/smoke.json"), runs_root.clone(), "t0".into())
+            .expect("committed smoke campaign loads");
 
     let result = run::run_blocking(&spec).expect("smoke campaign runs");
     assert!(result.passed(), "{:#?}", result.index);
@@ -74,16 +75,13 @@ fn failing_and_crashing_cells_are_recorded_not_fatal() {
     let result = run::run_blocking(&spec).expect("campaign completes despite failures");
     assert!(!result.passed());
     assert_eq!(result.index.cells.len(), 2);
-    let by_case = |id: &str| {
-        result.index.cells.iter().find(|c| c.cell.case == id).unwrap()
-    };
+    let by_case = |id: &str| result.index.cells.iter().find(|c| c.cell.case == id).unwrap();
     assert!(by_case("basic-call-identity").passed);
     let failed = by_case("failing-check");
     assert!(!failed.passed);
     assert!(failed.error.is_none(), "a failed check is a verdict, not a crash");
     // The failing cell still wrote a full result.json with the failing verdict.
-    let failed_result =
-        e2e_core::result::read_result(&result.run_dir.join(&failed.dir)).unwrap();
+    let failed_result = e2e_core::result::read_result(&result.run_dir.join(&failed.dir)).unwrap();
     assert!(failed_result.checks.iter().any(|v| !v.passed));
 
     std::fs::remove_dir_all(&spec.runs_root).ok();
@@ -120,10 +118,7 @@ fn expansion_problems_fail_before_anything_runs() {
     let all = problems.join("\n");
     assert!(all.contains("unknown Infra shape \"no-such-infra\""), "{all}");
     assert!(all.contains("unknown Test case \"no-such-case\""), "{all}");
-    assert!(
-        !spec.runs_root.exists(),
-        "nothing may be written when expansion fails"
-    );
+    assert!(!spec.runs_root.exists(), "nothing may be written when expansion fails");
 }
 
 /// spawn_job: status reports progress and the join returns the aggregate.

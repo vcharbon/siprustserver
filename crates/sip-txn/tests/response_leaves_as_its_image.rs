@@ -34,7 +34,14 @@ async fn admitted_invite(branch: &str, call_id: &str) -> Stack {
 #[tokio::test(start_paused = true)]
 async fn a_parsed_response_leaves_as_the_datagram_it_was_parsed_from() {
     let stack = admitted_invite("z9hG4bK-img-parsed", "img-parsed").await;
-    let resp = parse_response(&response_bytes(200, "OK", "INVITE", "z9hG4bK-img-parsed", "img-parsed", true));
+    let resp = parse_response(&response_bytes(
+        200,
+        "OK",
+        "INVITE",
+        "z9hG4bK-img-parsed",
+        "img-parsed",
+        true,
+    ));
     let image = resp.image().to_vec();
 
     stack.txn.send_response(resp, addr(PEER)).await.unwrap();
@@ -48,10 +55,20 @@ async fn a_parsed_response_leaves_as_the_datagram_it_was_parsed_from() {
 #[tokio::test(start_paused = true)]
 async fn an_edited_response_leaves_as_its_frozen_image() {
     let stack = admitted_invite("z9hG4bK-img-edited", "img-edited").await;
-    let parsed = parse_response(&response_bytes(200, "OK", "INVITE", "z9hG4bK-img-edited", "img-edited", true));
+    let parsed = parse_response(&response_bytes(
+        200,
+        "OK",
+        "INVITE",
+        "z9hG4bK-img-edited",
+        "img-edited",
+        true,
+    ));
     let resp = parsed
         .thaw()
-        .push_raw(HeaderName::from("P-Charging-Vector"), "icid-value=icid-9f2c;orig-ioi=bob.example")
+        .push_raw(
+            HeaderName::from("P-Charging-Vector"),
+            "icid-value=icid-9f2c;orig-ioi=bob.example",
+        )
         .freeze()
         .expect("an edited 200 is complete");
     assert_ne!(resp.image(), parsed.image(), "the freeze rendered a new image");
@@ -63,7 +80,9 @@ async fn an_edited_response_leaves_as_its_frozen_image() {
     let wire = raw_from_b2bua(&stack);
     assert_eq!(wire, vec![image], "the wire bytes are the frozen image");
     assert!(
-        std::str::from_utf8(&wire[0]).unwrap().contains("P-Charging-Vector: icid-value=icid-9f2c;orig-ioi=bob.example\r\n"),
+        std::str::from_utf8(&wire[0])
+            .unwrap()
+            .contains("P-Charging-Vector: icid-value=icid-9f2c;orig-ioi=bob.example\r\n"),
         "the edit is on the wire",
     );
 }

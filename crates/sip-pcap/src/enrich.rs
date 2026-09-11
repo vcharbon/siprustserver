@@ -81,7 +81,7 @@ mod tests {
     use super::*;
     use crate::doc::Summary;
     use crate::flow::{build_flows, FlowConfig};
-    use crate::{DecodeStats, Datagram};
+    use crate::{Datagram, DecodeStats};
 
     fn dg(ts_us: u64, src: &str, dst: &str, payload: &[u8]) -> Datagram {
         Datagram {
@@ -89,7 +89,7 @@ mod tests {
             src: src.parse().unwrap(),
             dst: dst.parse().unwrap(),
             payload: payload.to_vec(),
-        probe: 0,
+            probe: 0,
         }
     }
 
@@ -162,10 +162,8 @@ Content-Length: 0\r\n\r\n";
     /// rewrite) reads, and the pass puts the derivations back.
     #[test]
     fn a_document_without_enrichment_reads_and_is_re_derived() {
-        let mut value: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&doc()).unwrap(),
-        )
-        .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&doc()).unwrap()).unwrap();
         value["schema"] = serde_json::json!(4);
         for leg in value["legs"].as_array_mut().unwrap() {
             for m in leg["msgs"].as_array_mut().unwrap() {
@@ -175,9 +173,10 @@ Content-Length: 0\r\n\r\n";
                 }
             }
         }
-        let back: FlowsDoc =
-            serde_json::from_str(&enrich_str(&value.to_string(), &EnrichOptions::default()).unwrap())
-                .unwrap();
+        let back: FlowsDoc = serde_json::from_str(
+            &enrich_str(&value.to_string(), &EnrichOptions::default()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(back.schema, EMIT_SCHEMA_VERSION);
         assert!(back.emit_headers.is_empty(), "no allow-list was asked for");
         assert_eq!(back.legs[0].msgs[0].identities.from.digits.as_deref(), Some("33900"));

@@ -42,7 +42,10 @@ fn in_dialog(method: &str, call_id: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-async fn setup(base: u16, specs: Vec<EndpointSpec>) -> (Arc<SimulatedSignalingNetwork>, Arc<MuxCore>, Box<dyn UdpEndpoint>) {
+async fn setup(
+    base: u16,
+    specs: Vec<EndpointSpec>,
+) -> (Arc<SimulatedSignalingNetwork>, Arc<MuxCore>, Box<dyn UdpEndpoint>) {
     let sim = Arc::new(SimulatedSignalingNetwork::new(1));
     let core = MuxCore::bind_on(
         sim.as_ref(),
@@ -60,7 +63,8 @@ async fn setup(base: u16, specs: Vec<EndpointSpec>) -> (Arc<SimulatedSignalingNe
 }
 
 async fn recv_first_line(ep: &dyn UdpEndpoint) -> String {
-    let pkt = tokio::time::timeout(RECV, ep.recv()).await.expect("recv timed out").expect("queue closed");
+    let pkt =
+        tokio::time::timeout(RECV, ep.recv()).await.expect("recv timed out").expect("queue closed");
     String::from_utf8_lossy(&pkt.raw).lines().next().unwrap_or("").to_string()
 }
 
@@ -74,7 +78,8 @@ async fn recv_first_line(ep: &dyn UdpEndpoint) -> String {
 #[tokio::test(start_paused = true)]
 async fn claims_assign_reroute_transfer_and_mrf_legs_on_one_socket() {
     let uas = addr(46101);
-    let (_sim, core, sut) = setup(46100, vec![EndpointSpec { addr: uas, role: Role::Callee }]).await;
+    let (_sim, core, sut) =
+        setup(46100, vec![EndpointSpec { addr: uas, role: Role::Callee }]).await;
 
     let routing = CallRouting::new("lgcase1")
         .claim(uas, "primary", ClaimRule::ArrivalOrder(0))
@@ -94,7 +99,12 @@ async fn claims_assign_reroute_transfer_and_mrf_legs_on_one_socket() {
     sut.send_to(&invite("sip:049177@127.0.0.1", "cid-m", "lgcase1", ""), uas).await.unwrap();
     assert_eq!(recv_first_line(mrf.as_ref()).await, "INVITE sip:049177@127.0.0.1 SIP/2.0");
     sut.send_to(
-        &invite("sip:0590100@127.0.0.1", "cid-x", "lgcase1", "Replaces: cid-p;to-tag=1;from-tag=2\r\n"),
+        &invite(
+            "sip:0590100@127.0.0.1",
+            "cid-x",
+            "lgcase1",
+            "Replaces: cid-p;to-tag=1;from-tag=2\r\n",
+        ),
         uas,
     )
     .await
@@ -117,7 +127,12 @@ async fn claims_assign_reroute_transfer_and_mrf_legs_on_one_socket() {
 
     let s = core.stats();
     assert_eq!(s.unclaimed.load(Relaxed), 0);
-    assert_eq!(s.orphan_no_header.load(Relaxed) + s.orphan_unknown_token.load(Relaxed) + s.orphan_stray.load(Relaxed), 0);
+    assert_eq!(
+        s.orphan_no_header.load(Relaxed)
+            + s.orphan_unknown_token.load(Relaxed)
+            + s.orphan_stray.load(Relaxed),
+        0
+    );
 
     drop((primary, alternate, mrf, xfer));
     assert_eq!(core.registry_size(), 0, "mux registry leak");
@@ -135,9 +150,11 @@ async fn dialback_invite_lands_on_claim_receiver_sharing_the_originating_socket(
     let (_sim, core, sut) =
         setup(46200, vec![EndpointSpec { addr: vantage, role: Role::Caller }]).await;
 
-    let routing = CallRouting::new("lgcase2")
-        .caller(vantage)
-        .claim(vantage, "xferee", ClaimRule::HasReplaces);
+    let routing = CallRouting::new("lgcase2").caller(vantage).claim(
+        vantage,
+        "xferee",
+        ClaimRule::HasReplaces,
+    );
     let net = core.network(routing);
     let alice = net.bind_udp(BindUdpOpts::new(vantage, 16)).await.unwrap();
     let xferee = net.bind_udp(BindUdpOpts::new(vantage, 16)).await.unwrap();
@@ -164,7 +181,12 @@ async fn dialback_invite_lands_on_claim_receiver_sharing_the_originating_socket(
     // same relayed token, carrying Replaces — it must land on the pending
     // claim, not on alice, and its in-dialog follow-up demuxes by Call-ID.
     sut.send_to(
-        &invite("sip:0590200@127.0.0.1", "cid-back", "lgcase2", "Replaces: cid-alice;to-tag=u1;from-tag=s1\r\n"),
+        &invite(
+            "sip:0590200@127.0.0.1",
+            "cid-back",
+            "lgcase2",
+            "Replaces: cid-alice;to-tag=u1;from-tag=s1\r\n",
+        ),
         vantage,
     )
     .await
@@ -175,7 +197,12 @@ async fn dialback_invite_lands_on_claim_receiver_sharing_the_originating_socket(
 
     let s = core.stats();
     assert_eq!(s.unclaimed.load(Relaxed), 0);
-    assert_eq!(s.orphan_no_header.load(Relaxed) + s.orphan_unknown_token.load(Relaxed) + s.orphan_stray.load(Relaxed), 0);
+    assert_eq!(
+        s.orphan_no_header.load(Relaxed)
+            + s.orphan_unknown_token.load(Relaxed)
+            + s.orphan_stray.load(Relaxed),
+        0
+    );
 
     drop((alice, xferee));
     assert_eq!(core.registry_size(), 0, "mux registry leak");
@@ -189,18 +216,27 @@ async fn dialback_invite_lands_on_claim_receiver_sharing_the_originating_socket(
 #[tokio::test(start_paused = true)]
 async fn colliding_token_registration_fails_bind_and_counts() {
     let uas = addr(46301);
-    let (_sim, core, sut) = setup(46300, vec![EndpointSpec { addr: uas, role: Role::Callee }]).await;
+    let (_sim, core, sut) =
+        setup(46300, vec![EndpointSpec { addr: uas, role: Role::Callee }]).await;
 
-    let net1 = core.network(
-        CallRouting::new("0590300").claim(uas, "bob", ClaimRule::RuriUser("0590300".into())),
-    );
+    let net1 = core.network(CallRouting::new("0590300").claim(
+        uas,
+        "bob",
+        ClaimRule::RuriUser("0590300".into()),
+    ));
     let bob = net1.bind_udp(BindUdpOpts::new(uas, 16)).await.unwrap();
 
-    let net2 = core.network(
-        CallRouting::new("0590300").claim(uas, "bob", ClaimRule::RuriUser("0590300".into())),
+    let net2 = core.network(CallRouting::new("0590300").claim(
+        uas,
+        "bob",
+        ClaimRule::RuriUser("0590300".into()),
+    ));
+    let err =
+        net2.bind_udp(BindUdpOpts::new(uas, 16)).await.err().expect("colliding bind must fail");
+    assert!(
+        err.message.contains("already registered by a concurrent call"),
+        "unexpected error: {err}"
     );
-    let err = net2.bind_udp(BindUdpOpts::new(uas, 16)).await.err().expect("colliding bind must fail");
-    assert!(err.message.contains("already registered by a concurrent call"), "unexpected error: {err}");
     assert_eq!(core.stats().token_collision.load(Relaxed), 1);
 
     sut.send_to(&invite("sip:0590300@127.0.0.1", "cid-b", "0590300", ""), uas).await.unwrap();
@@ -218,7 +254,8 @@ async fn colliding_token_registration_fails_bind_and_counts() {
 #[tokio::test(start_paused = true)]
 async fn unclaimed_invites_and_unfired_claims_are_counted_not_misdelivered() {
     let uas = addr(46401);
-    let (_sim, core, sut) = setup(46400, vec![EndpointSpec { addr: uas, role: Role::Callee }]).await;
+    let (_sim, core, sut) =
+        setup(46400, vec![EndpointSpec { addr: uas, role: Role::Callee }]).await;
 
     let routing = CallRouting::new("lgcase4")
         .claim(uas, "bob", ClaimRule::RuriUser("0590400".into()))
@@ -265,13 +302,12 @@ async fn unclaimed_invites_and_unfired_claims_are_counted_not_misdelivered() {
 #[tokio::test(start_paused = true)]
 async fn invalid_claim_configurations_fail_bind() {
     let uas = addr(46501);
-    let (_sim, core, _sut) = setup(46500, vec![EndpointSpec { addr: uas, role: Role::Callee }]).await;
+    let (_sim, core, _sut) =
+        setup(46500, vec![EndpointSpec { addr: uas, role: Role::Callee }]).await;
 
     // Claim + legacy leg on one slot.
     let net = core.network(
-        CallRouting::new("lgmix")
-            .claim(uas, "a", ClaimRule::ArrivalOrder(0))
-            .leg(uas, "b"),
+        CallRouting::new("lgmix").claim(uas, "a", ClaimRule::ArrivalOrder(0)).leg(uas, "b"),
     );
     let _a = net.bind_udp(BindUdpOpts::new(uas, 16)).await.unwrap();
     let err = net.bind_udp(BindUdpOpts::new(uas, 16)).await.err().expect("mixed slot must fail");

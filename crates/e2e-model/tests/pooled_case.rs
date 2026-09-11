@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use e2e_model::model::{ModelError, TestCase, load_test_case, validate_case};
+use e2e_model::model::{load_test_case, validate_case, ModelError, TestCase};
 use e2e_model::shape::{Anchor, ShapeSpec};
 
 /// A minimal load-time stand-in for the compiled `basic-call` shape (the full

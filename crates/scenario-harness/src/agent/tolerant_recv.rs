@@ -74,7 +74,8 @@ impl Agent {
             let Ok(SipMessage::Request(r)) = CustomParser::new().parse(&pkt.raw) else {
                 continue; // responses / unparseable noise: nothing to answer
             };
-            let Some((status, reason)) = release_verdict(r.method().as_str(), r.to().tag().is_some())
+            let Some((status, reason)) =
+                release_verdict(r.method().as_str(), r.to().tag().is_some())
             else {
                 // ACK: absorbed, never answered — but still claim any matching
                 // §17.1.1.3 obligation so a later `expect_ack` sees it settled.
@@ -117,7 +118,9 @@ impl Agent {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(resp) => panic!(
                     "{} drained an unexpected {} {} response (expecting only {answer_200:?})",
-                    self.name, resp.status(), resp.reason()
+                    self.name,
+                    resp.status(),
+                    resp.reason()
                 ),
             };
             if r.method().as_str() == "ACK" {
@@ -132,7 +135,8 @@ impl Agent {
             }
             panic!(
                 "{} drained an unexpected {} request (expecting only {answer_200:?})",
-                self.name, r.method()
+                self.name,
+                r.method()
             );
         }
     }
@@ -160,7 +164,9 @@ impl Agent {
                 SipMessage::Request(r) => r,
                 SipMessage::Response(r) => panic!(
                     "{} expected a {method} request, got a {} {} response",
-                    self.name, r.status(), r.reason()
+                    self.name,
+                    r.status(),
+                    r.reason()
                 ),
             };
             let mut txn = ServerTxn::from_request(self.clone(), r);
@@ -176,7 +182,8 @@ impl Agent {
             }
             panic!(
                 "{} expected a {method} request (tolerating {tolerate:?}), got {}",
-                self.name, txn.request.method()
+                self.name,
+                txn.request.method()
             );
         }
     }
@@ -227,8 +234,9 @@ impl Agent {
                 continue;
             }
             if tolerate.iter().any(|t| txn.request.method() == *t) {
-                let is_offer_reinvite = matches!(txn.request.method().as_str(), "INVITE" | "UPDATE")
-                    && !txn.request.body().is_empty();
+                let is_offer_reinvite =
+                    matches!(txn.request.method().as_str(), "INVITE" | "UPDATE")
+                        && !txn.request.body().is_empty();
                 let respond = txn.respond(200, "OK");
                 if is_offer_reinvite {
                     respond.with_sdp(crate::callflow::ANSWER_SDP).try_send().await?;
@@ -272,12 +280,15 @@ impl Agent {
                     }
                     panic!(
                         "{} expected a {method} request (tolerating {tolerate:?}), got {}",
-                        self.name, r.method()
+                        self.name,
+                        r.method()
                     );
                 }
                 SipMessage::Response(r) => panic!(
                     "{} expected a {method} request, got a {} {} response",
-                    self.name, r.status(), r.reason()
+                    self.name,
+                    r.status(),
+                    r.reason()
                 ),
             }
         }
@@ -321,12 +332,15 @@ impl Agent {
                     }
                     panic!(
                         "{} expected a {method} request (absorbing {absorb:?}), got {}",
-                        self.name, r.method()
+                        self.name,
+                        r.method()
                     );
                 }
                 SipMessage::Response(r) => panic!(
                     "{} expected a {method} request, got a {} {} response",
-                    self.name, r.status(), r.reason()
+                    self.name,
+                    r.status(),
+                    r.reason()
                 ),
             }
         }

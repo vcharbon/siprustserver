@@ -66,11 +66,7 @@ async fn live_play_record_over_real_udp() {
         .find(|s| s.direction == StreamDirection::Inbound)
         .expect("bob has an inbound stream");
     // Allow a little localhost loss.
-    assert!(
-        inbound.packets >= frames - 2,
-        "got {} packets, expected ~{frames}",
-        inbound.packets
-    );
+    assert!(inbound.packets >= frames - 2, "got {} packets, expected ~{frames}", inbound.packets);
     // What did arrive must be a prefix of the expected round-trip stream.
     assert!(!rec.pcm.is_empty());
     assert_eq!(&rec.pcm[..], &expected[..rec.pcm.len().min(expected.len())]);

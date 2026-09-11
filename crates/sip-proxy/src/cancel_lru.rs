@@ -255,7 +255,10 @@ mod tests {
     fn from_tag_disambiguates_the_two_dialog_directions() {
         // Both directions share the Call-ID; CSeq spaces are independent and
         // can collide on the same number — the From-tag keeps them apart.
-        assert_ne!(call_id_cseq_key("c1", Some("uac"), 5), call_id_cseq_key("c1", Some("b2bua"), 5));
+        assert_ne!(
+            call_id_cseq_key("c1", Some("uac"), 5),
+            call_id_cseq_key("c1", Some("b2bua"), 5)
+        );
     }
 
     #[test]

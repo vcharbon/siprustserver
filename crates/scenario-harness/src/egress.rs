@@ -220,10 +220,9 @@ impl EgressPolicy {
     ) -> EgressRewrite {
         match self {
             EgressPolicy::Transparent => EgressRewrite::default(),
-            EgressPolicy::RegistrarAor { .. } => EgressRewrite {
-                ruri: candidates.first().map(|c| c.uri.clone()),
-                headers: vec![],
-            },
+            EgressPolicy::RegistrarAor { .. } => {
+                EgressRewrite { ruri: candidates.first().map(|c| c.uri.clone()), headers: vec![] }
+            }
             EgressPolicy::ApiCallPin => {
                 let api = match candidates {
                     [] => return EgressRewrite::default(),
@@ -311,10 +310,13 @@ mod tests {
         // pin — no `routes`, so the deployed worker's single-dest path is unchanged.
         let rw = EgressPolicy::ApiCallPin.rewrite_for(&[target("bob1", "127.0.0.1:5070")]);
         assert_eq!(rw.ruri, None);
-        assert_eq!(rw.headers, vec![(
-            "X-Api-Call".to_string(),
-            r#"{"destination":{"host":"127.0.0.1","port":5070}}"#.to_string(),
-        )]);
+        assert_eq!(
+            rw.headers,
+            vec![(
+                "X-Api-Call".to_string(),
+                r#"{"destination":{"host":"127.0.0.1","port":5070}}"#.to_string(),
+            )]
+        );
     }
 
     #[test]
@@ -353,10 +355,21 @@ mod tests {
     #[test]
     fn registrar_dials_the_primary_aor_and_ignores_failover() {
         let policy = EgressPolicy::RegistrarAor { domain: "register.example".into() };
-        assert_eq!(policy.callee_uri("bob2", "127.0.0.1:5071".parse().unwrap()), "sip:bob2@register.example");
+        assert_eq!(
+            policy.callee_uri("bob2", "127.0.0.1:5071".parse().unwrap()),
+            "sip:bob2@register.example"
+        );
         let rw = policy.rewrite_for(&[
-            CalleeTarget { role: "bob1".into(), uri: "sip:bob1@register.example".into(), addr: "127.0.0.1:5070".parse().unwrap() },
-            CalleeTarget { role: "bob2".into(), uri: "sip:bob2@register.example".into(), addr: "127.0.0.1:5071".parse().unwrap() },
+            CalleeTarget {
+                role: "bob1".into(),
+                uri: "sip:bob1@register.example".into(),
+                addr: "127.0.0.1:5070".parse().unwrap(),
+            },
+            CalleeTarget {
+                role: "bob2".into(),
+                uri: "sip:bob2@register.example".into(),
+                addr: "127.0.0.1:5071".parse().unwrap(),
+            },
         ]);
         assert_eq!(rw.ruri.as_deref(), Some("sip:bob1@register.example"));
         assert!(rw.headers.is_empty(), "no proprietary header on the register proxy");

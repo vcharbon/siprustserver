@@ -17,9 +17,7 @@ pub fn bump_local_cseq(call: Call, leg_id: &str, identity_tag: &str, delta: i64)
 
 /// Track the other side's latest CSeq on a dialog.
 pub fn update_remote_cseq(call: Call, leg_id: &str, identity_tag: &str, remote_cseq: i64) -> Call {
-    update_dialog(call, leg_id, identity_tag, |d| {
-        d.ext.remote_cseq = Some(remote_cseq)
-    })
+    update_dialog(call, leg_id, identity_tag, |d| d.ext.remote_cseq = Some(remote_cseq))
 }
 
 /// CSeq delta for a relayed request: `inbound - sourceRemoteCSeq`, clamped ≥ 1.
@@ -123,21 +121,13 @@ pub fn add_pending_request(
 /// RFC 6026 names the interval *Accepted*). While either holds, a new INVITE
 /// on the dialog is glare and gets 491 Request Pending.
 pub fn invite_transaction_open(dialog: &Dialog) -> bool {
-    dialog
-        .ext
-        .inbound_pending_requests
-        .iter()
-        .any(|p| p.method.eq_ignore_ascii_case("INVITE"))
+    dialog.ext.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE"))
         || dialog.ext.pending_reinvite_2xx.is_some()
 }
 
 /// Find a pending transparent-relay entry by outbound CSeq.
 pub fn find_pending_request(dialog: &Dialog, outbound_cseq: i64) -> Option<&PendingRequest> {
-    dialog
-        .ext
-        .inbound_pending_requests
-        .iter()
-        .find(|p| p.outbound_cseq == outbound_cseq)
+    dialog.ext.inbound_pending_requests.iter().find(|p| p.outbound_cseq == outbound_cseq)
 }
 
 /// Mark a pending transparent-relay entry CANCELled (RFC 3261 §9): the relayed
@@ -150,11 +140,8 @@ pub fn cancel_pending_request(
     outbound_cseq: i64,
 ) -> Call {
     update_dialog(call, leg_id, identity_tag, |d| {
-        if let Some(p) = d
-            .ext
-            .inbound_pending_requests
-            .iter_mut()
-            .find(|p| p.outbound_cseq == outbound_cseq)
+        if let Some(p) =
+            d.ext.inbound_pending_requests.iter_mut().find(|p| p.outbound_cseq == outbound_cseq)
         {
             p.cancelled = true;
         }
@@ -169,9 +156,7 @@ pub fn remove_pending_request(
     outbound_cseq: i64,
 ) -> Call {
     update_dialog(call, leg_id, identity_tag, |d| {
-        d.ext
-            .inbound_pending_requests
-            .retain(|p| p.outbound_cseq != outbound_cseq)
+        d.ext.inbound_pending_requests.retain(|p| p.outbound_cseq != outbound_cseq)
     })
 }
 
@@ -194,7 +179,11 @@ pub fn cache_sdp_on_leg_dialog(mut call: Call, leg_id: &str, b_tag: &str, body: 
 /// The SDP cached on a b-leg dialog selected **strictly** by callee tag (no
 /// first-dialog fallback — a different fork's cache must never leak into this
 /// dialog's answer).
-pub fn cached_sdp_for_leg_dialog<'a>(call: &'a Call, leg_id: &str, b_tag: &str) -> Option<&'a [u8]> {
+pub fn cached_sdp_for_leg_dialog<'a>(
+    call: &'a Call,
+    leg_id: &str,
+    b_tag: &str,
+) -> Option<&'a [u8]> {
     let leg = call.b_legs.iter().find(|l| l.leg_id == leg_id)?;
     let dialog = leg.dialogs.iter().find(|d| d.sip.remote_tag == b_tag)?;
     dialog.ext.cached_sdp.as_deref()

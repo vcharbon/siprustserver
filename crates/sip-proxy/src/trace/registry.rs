@@ -307,7 +307,13 @@ mod tests {
 
     fn gate(exporter: bool, max_active: usize) -> ProxyTraces {
         ProxyTraces::new(
-            SampleAdmission::new(exporter, 1.0, max_active, RateDraw::seeded(3), TokenBucket::default_at(0)),
+            SampleAdmission::new(
+                exporter,
+                1.0,
+                max_active,
+                RateDraw::seeded(3),
+                TokenBucket::default_at(0),
+            ),
             false,
         )
     }
@@ -356,7 +362,10 @@ mod tests {
         traces.activate("c@h", id(), 1, None, 0);
 
         traces.arm_close_on_ack("c@h", Some("ft"), 2);
-        assert!(!traces.close_on_ack("c@h"), "a re-INVITE's rejection ends a transaction, not the call");
+        assert!(
+            !traces.close_on_ack("c@h"),
+            "a re-INVITE's rejection ends a transaction, not the call"
+        );
         traces.arm_close_on_ack("c@h", Some("callee"), 1);
         assert!(!traces.close_on_ack("c@h"), "nor does the callee leg's own colliding CSeq");
         assert_eq!(traces.active(), 1, "the live call keeps the span every later datagram needs");
@@ -378,7 +387,10 @@ mod tests {
         assert_eq!(traces.activate("c@h", id(), 2, None, 10), Activation::AlreadyOpen);
 
         traces.arm_close_on_ack("c@h", Some("ft"), 1);
-        assert!(!traces.close_on_ack("c@h"), "the challenged attempt is not what the call hangs on");
+        assert!(
+            !traces.close_on_ack("c@h"),
+            "the challenged attempt is not what the call hangs on"
+        );
         traces.arm_close_on_ack("c@h", Some("ft"), 2);
         assert!(traces.close_on_ack("c@h"), "the retry's own rejection ends the call");
     }
@@ -387,12 +399,20 @@ mod tests {
     fn closing_frees_the_span_its_slot_and_the_flag() {
         let traces = gate(true, 1);
         assert_eq!(traces.activate("a@h", id(), 1, None, 0), Activation::Opened);
-        assert_eq!(traces.activate("b@h", id(), 1, None, 1000), Activation::Refused, "the active cap holds");
+        assert_eq!(
+            traces.activate("b@h", id(), 1, None, 1000),
+            Activation::Refused,
+            "the active cap holds"
+        );
         traces.close("a@h");
         traces.close("a@h");
         assert_eq!(traces.active(), 0);
         assert!(!traces.any_sampled());
-        assert_eq!(traces.activate("b@h", id(), 1, None, 2000), Activation::Opened, "a closed span frees a slot");
+        assert_eq!(
+            traces.activate("b@h", id(), 1, None, 2000),
+            Activation::Opened,
+            "a closed span frees a slot"
+        );
     }
 
     #[test]

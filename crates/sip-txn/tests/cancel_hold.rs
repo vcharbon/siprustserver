@@ -29,7 +29,12 @@ fn reinvite_cancel(branch: &str) -> sip_message::SipRequest {
 }
 
 /// A CANCEL sharing the branch of [`invite_with_cr_lg`] (evict-flush test).
-fn cr_lg_cancel(call_ref: &str, call_id: &str, branch: &str, leg_id: &str) -> sip_message::SipRequest {
+fn cr_lg_cancel(
+    call_ref: &str,
+    call_id: &str,
+    branch: &str,
+    leg_id: &str,
+) -> sip_message::SipRequest {
     parse_request(&format!(
         "CANCEL sip:bob@192.0.2.20:5060 SIP/2.0\n\
          Via: SIP/2.0/UDP 127.0.0.1:15071;branch={branch};cr={call_ref};lg={leg_id}\n\
@@ -83,9 +88,7 @@ async fn cancel_for_responseless_invite_is_held_then_flushed_on_180() {
 
     // The callee answers the CANCEL (§9.2) — its Timer-E ladder goes
     // quiescent, so the only datagram this window could show is a grace copy.
-    stack
-        .inject(&response_bytes(200, "OK", "CANCEL", branch, "handle-shape-test", true))
-        .await;
+    stack.inject(&response_bytes(200, "OK", "CANCEL", branch, "handle-shape-test", true)).await;
     elapse_ms(20).await;
 
     // Cross the (disarmed) grace deadline: no second CANCEL may appear.
@@ -99,7 +102,14 @@ async fn cancel_for_responseless_invite_is_held_then_flushed_on_180() {
     // Complete the flow: the callee answers the CANCELled INVITE with 487; the
     // layer auto-ACKs it (§17.1.1.3) and surfaces the final once.
     stack
-        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            487,
+            "Request Terminated",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
@@ -134,7 +144,14 @@ async fn held_cancel_flushes_on_100_trying() {
 
     // Terminate the flow with the 487 → auto-ACK.
     stack
-        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            487,
+            "Request Terminated",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
@@ -147,16 +164,8 @@ async fn held_cancel_is_sent_at_grace_expiry_when_no_response_ever() {
 
     // In-dialog re-INVITE (To-tag present) — 32 s Timer B, the cheap variant of
     // the same client-txn state machine.
-    stack
-        .txn
-        .send_request(outbound_reinvite(branch), addr(PEER), TxnKind::Invite)
-        .await
-        .unwrap();
-    stack
-        .txn
-        .send_request(reinvite_cancel(branch), addr(PEER), TxnKind::Invite)
-        .await
-        .unwrap();
+    stack.txn.send_request(outbound_reinvite(branch), addr(PEER), TxnKind::Invite).await.unwrap();
+    stack.txn.send_request(reinvite_cancel(branch), addr(PEER), TxnKind::Invite).await.unwrap();
     assert_eq!(stack.txn.metrics().cancels_held(), 1);
 
     // Inside the grace window nothing goes out…
@@ -187,10 +196,7 @@ async fn held_cancel_is_sent_at_grace_expiry_when_no_response_ever() {
     assert_eq!(stack.txn.metrics().held_cancels_dropped(), 0);
     assert_eq!(stack.txn.metrics().held_cancels_flushed(), 0);
     assert!(
-        stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "Timer B timeout still surfaces to the caller"
     );
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
@@ -230,14 +236,28 @@ async fn grace_sent_cancel_is_resent_once_on_late_first_provisional() {
 
     // A SECOND provisional must not produce a third copy.
     stack
-        .inject(&response_bytes(183, "Session Progress", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            183,
+            "Session Progress",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0);
 
     // Terminate the flow with the 487 → auto-ACK.
     stack
-        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            487,
+            "Request Terminated",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
@@ -335,16 +355,8 @@ async fn held_cancel_is_flushed_when_the_timeout_outruns_the_grace_window() {
     let branch = "z9hG4bK-tb-outruns-grace";
 
     // In-dialog re-INVITE (To-tag present) — 32 s Timer B, far below the grace.
-    stack
-        .txn
-        .send_request(outbound_reinvite(branch), addr(PEER), TxnKind::Invite)
-        .await
-        .unwrap();
-    stack
-        .txn
-        .send_request(reinvite_cancel(branch), addr(PEER), TxnKind::Invite)
-        .await
-        .unwrap();
+    stack.txn.send_request(outbound_reinvite(branch), addr(PEER), TxnKind::Invite).await.unwrap();
+    stack.txn.send_request(reinvite_cancel(branch), addr(PEER), TxnKind::Invite).await.unwrap();
     assert_eq!(stack.txn.metrics().cancels_held(), 1);
 
     elapse_ms(35_000).await;
@@ -357,10 +369,7 @@ async fn held_cancel_is_flushed_when_the_timeout_outruns_the_grace_window() {
     assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 1);
     assert_eq!(stack.txn.metrics().held_cancels_dropped(), 0);
     assert!(
-        stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "Timer B timeout still surfaces to the caller"
     );
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
@@ -390,16 +399,8 @@ async fn strict_policy_holds_the_cancel_forever_and_drops_it_at_timer_b() {
     let branch = "z9hG4bK-strict-tb";
 
     // In-dialog re-INVITE (To-tag present) — 32 s Timer B.
-    stack
-        .txn
-        .send_request(outbound_reinvite(branch), addr(PEER), TxnKind::Invite)
-        .await
-        .unwrap();
-    stack
-        .txn
-        .send_request(reinvite_cancel(branch), addr(PEER), TxnKind::Invite)
-        .await
-        .unwrap();
+    stack.txn.send_request(outbound_reinvite(branch), addr(PEER), TxnKind::Invite).await.unwrap();
+    stack.txn.send_request(reinvite_cancel(branch), addr(PEER), TxnKind::Invite).await.unwrap();
     assert_eq!(stack.txn.metrics().cancels_held(), 1);
 
     // No grace timer exists under the strict policy: the peer never responds,
@@ -417,10 +418,7 @@ async fn strict_policy_holds_the_cancel_forever_and_drops_it_at_timer_b() {
     assert_eq!(stack.txn.metrics().held_cancels_flushed(), 0);
     assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 0);
     assert!(
-        stack
-            .drain_events()
-            .iter()
-            .any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "Timer B timeout still surfaces to the caller"
     );
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
@@ -455,7 +453,14 @@ async fn strict_policy_still_flushes_on_the_first_provisional() {
 
     // Terminate the flow with the 487 → auto-ACK.
     stack
-        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            487,
+            "Request Terminated",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
@@ -518,7 +523,14 @@ async fn cancel_after_provisional_passes_straight_through() {
 
     // Terminate the flow with the 487 → auto-ACK.
     stack
-        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            487,
+            "Request Terminated",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);

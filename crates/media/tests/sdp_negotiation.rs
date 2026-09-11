@@ -87,10 +87,7 @@ fn answer_codec_not_in_offer_is_rejected() {
 fn empty_codec_intersection_is_rejected() {
     let mut answerer = engine("10.0.0.2", 40002, vec![PCMU]);
     let offer = parse_sdp(&audio_sdp("10.0.0.1", 40000, &[(8, "PCMA")], "sendrecv", 1));
-    assert_eq!(
-        answerer.answer_to(&offer).unwrap_err().rule,
-        SdpRule::EmptyCodecIntersection
-    );
+    assert_eq!(answerer.answer_to(&offer).unwrap_err().rule, SdpRule::EmptyCodecIntersection);
 }
 
 #[test]
@@ -98,20 +95,14 @@ fn m_line_count_mismatch_is_rejected() {
     let mut offerer = engine("10.0.0.1", 40000, vec![PCMA]);
     offerer.local_offer(); // offer has 1 m-line
     let answer = parse_sdp(&audio_sdp("10.0.0.2", 40002, &[(8, "PCMA")], "sendrecv", 2));
-    assert_eq!(
-        offerer.apply_remote(&answer, true).unwrap_err().rule,
-        SdpRule::MLineCountMismatch
-    );
+    assert_eq!(offerer.apply_remote(&answer, true).unwrap_err().rule, SdpRule::MLineCountMismatch);
 }
 
 #[test]
 fn answer_without_offer_is_rejected() {
     let mut e = engine("10.0.0.1", 40000, vec![PCMA]);
     let answer = parse_sdp(&audio_sdp("10.0.0.2", 40002, &[(8, "PCMA")], "sendrecv", 1));
-    assert_eq!(
-        e.apply_remote(&answer, true).unwrap_err().rule,
-        SdpRule::AnswerWithoutOffer
-    );
+    assert_eq!(e.apply_remote(&answer, true).unwrap_err().rule, SdpRule::AnswerWithoutOffer);
 }
 
 #[test]

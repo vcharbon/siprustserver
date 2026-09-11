@@ -30,12 +30,10 @@ async fn b_leg_cancel_is_held_until_first_provisional() {
     let h = Harness::new("b2bua-cancel-held-until-1xx");
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5071").await;
-    let b2bua = B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to(
-        "127.0.0.1",
-        5071,
-    )))
-    .start(&h, "b2bua", "127.0.0.1:5081")
-    .await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071)))
+            .start(&h, "b2bua", "127.0.0.1:5081")
+            .await;
 
     // ── alice INVITEs through the B2BUA; bob receives but stays silent ───────
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -81,12 +79,10 @@ async fn b_leg_cancel_is_sent_at_grace_expiry_when_callee_stays_silent() {
     let h = Harness::new("b2bua-cancel-grace-silent-callee");
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5071").await;
-    let b2bua = B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to(
-        "127.0.0.1",
-        5071,
-    )))
-    .start(&h, "b2bua", "127.0.0.1:5081")
-    .await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071)))
+            .start(&h, "b2bua", "127.0.0.1:5081")
+            .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     h.advance(Duration::from_millis(300)).await;
@@ -125,13 +121,11 @@ async fn strict_policy_never_cancels_a_silent_callee() {
     let h = Harness::new("b2bua-cancel-strict-silent-callee");
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5071").await;
-    let b2bua = B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to(
-        "127.0.0.1",
-        5071,
-    )))
-    .tune(|c| c.cancel_strict_rfc3261_wait = true)
-    .start(&h, "b2bua", "127.0.0.1:5081")
-    .await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071)))
+            .tune(|c| c.cancel_strict_rfc3261_wait = true)
+            .start(&h, "b2bua", "127.0.0.1:5081")
+            .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     h.advance(Duration::from_millis(300)).await;
@@ -146,10 +140,7 @@ async fn strict_policy_never_cancels_a_silent_callee() {
     // to Terminating) is the deadline that reaps the silent b-leg — advance
     // exactly past it, so a regression that falls back to the 150 s
     // SetupTimeout fails here instead of passing under a longer pump.
-    h.advance(Duration::from_millis(
-        call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000,
-    ))
-    .await;
+    h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
 
     // The branch never drew a provisional: under the strict policy the CANCEL
@@ -173,12 +164,10 @@ async fn grace_sent_cancel_to_a_dead_callee_still_reaps_on_the_backstop() {
     let h = Harness::new("b2bua-cancel-grace-dead-callee");
     let alice = h.agent("alice", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5071").await;
-    let b2bua = B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to(
-        "127.0.0.1",
-        5071,
-    )))
-    .start(&h, "b2bua", "127.0.0.1:5081")
-    .await;
+    let b2bua =
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5071)))
+            .start(&h, "b2bua", "127.0.0.1:5081")
+            .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     h.advance(Duration::from_millis(300)).await;
@@ -199,10 +188,7 @@ async fn grace_sent_cancel_to_a_dead_callee_still_reaps_on_the_backstop() {
     // moved the call to Terminating) reaps the dead b-leg — advance exactly
     // past it, so a regression that falls back to the 150 s SetupTimeout fails
     // here instead of passing under a longer pump.
-    h.advance(Duration::from_millis(
-        call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000,
-    ))
-    .await;
+    h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 

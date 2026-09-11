@@ -182,14 +182,8 @@ mod tests {
 
         #[test]
         fn matches_case_insensitively() {
-            assert!(is_allowed_suffix(
-                "worker.svc.cluster.local",
-                &list(&[".svc.cluster.local"])
-            ));
-            assert!(is_allowed_suffix(
-                "WORKER.SVC.CLUSTER.LOCAL",
-                &list(&[".svc.cluster.local"])
-            ));
+            assert!(is_allowed_suffix("worker.svc.cluster.local", &list(&[".svc.cluster.local"])));
+            assert!(is_allowed_suffix("WORKER.SVC.CLUSTER.LOCAL", &list(&[".svc.cluster.local"])));
         }
 
         #[test]
@@ -277,10 +271,7 @@ mod tests {
 
         #[test]
         fn star_wildcard_short_circuits_to_allow_listed_for_non_ip() {
-            assert_eq!(
-                classify_admission("kindlab", &list(&["*"])),
-                AdmissionVerdict::AllowListed
-            );
+            assert_eq!(classify_admission("kindlab", &list(&["*"])), AdmissionVerdict::AllowListed);
         }
     }
 }

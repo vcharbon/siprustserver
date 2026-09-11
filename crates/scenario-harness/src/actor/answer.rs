@@ -102,7 +102,8 @@ pub(super) fn note_uas_answered(st: &mut ActorState<'_>, uas: &ServerTxn) {
     // Dialog-formation point: attach this leg's shared CSeq counter (ADR-0024 §6).
     dialog.set_shared_cseq_dev(st.cseq_dev.clone());
     st.dialogs.confirmed = Some(dialog);
-    st.obs.record(Observation::SeedDialog { leg: st.role, call_id: call_id.to_string(), cseq }, now);
+    st.obs
+        .record(Observation::SeedDialog { leg: st.role, call_id: call_id.to_string(), cseq }, now);
     st.obs.record(
         Observation::RequestSent {
             key: ObligationKey::new(st.role, ObligationKind::ReInvite, cseq),

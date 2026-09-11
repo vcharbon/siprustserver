@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::call::Cause;
 use crate::flow::Step;
-use crate::lint::{Index, Reach, Report, at, reach};
+use crate::lint::{at, reach, Index, Reach, Report};
 use crate::placement::ClaimBy;
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
@@ -197,12 +197,7 @@ fn abandoned(index: &Index<'_>, report: &mut Report, call: &crate::call::Call, p
 /// a BYE. A cause citing a status the leg only ever saw in-dialog attributes the
 /// release to a message that never released anything — which reads, on the
 /// attempt, as "this callee answered that", when the callee answered 200.
-fn cited_cause(
-    index: &Index<'_>,
-    report: &mut Report,
-    attempt: &crate::call::Attempt,
-    path: &str,
-) {
+fn cited_cause(index: &Index<'_>, report: &mut Report, attempt: &crate::call::Attempt, path: &str) {
     let Some(cause) = attempt.cause else { return };
     let cited = match cause {
         Cause::External(status) | Cause::Redirect(status) => Some(status),
@@ -283,10 +278,8 @@ fn joined(
         );
     }
     // The join is what ADDED the leg, so it precedes everything the leg does.
-    let first = index
-        .all_steps()
-        .find(|(_, other)| other.leg == attempt.leg)
-        .map(|(place, _)| place);
+    let first =
+        index.all_steps().find(|(_, other)| other.leg == attempt.leg).map(|(place, _)| place);
     if let Some(first) = first {
         if reach(place, first) != Reach::Ok {
             report.error(

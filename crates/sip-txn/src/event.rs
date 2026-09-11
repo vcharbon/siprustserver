@@ -161,16 +161,8 @@ use sip_message::SipRequest;
 /// transaction's branch and must NOT open a second, colliding client transaction.
 #[derive(Debug, Clone)]
 pub enum ClientTransactionHandle {
-    Invite {
-        branch: String,
-        original_invite: SipRequest,
-        destination: SocketAddr,
-    },
-    NonInvite {
-        branch: String,
-        original_request: SipRequest,
-        destination: SocketAddr,
-    },
+    Invite { branch: String, original_invite: SipRequest, destination: SocketAddr },
+    NonInvite { branch: String, original_request: SipRequest, destination: SocketAddr },
 }
 
 impl ClientTransactionHandle {

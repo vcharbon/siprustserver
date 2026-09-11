@@ -10,18 +10,12 @@ use super::lens::update_leg;
 
 /// The active `relayFirst18xTo180` strategy for this call, if any.
 pub fn relay_first_18x_strategy(call: &Call) -> Option<crate::features::RelayFirst18xStrategy> {
-    call.features
-        .as_ref()
-        .and_then(|f| f.relay_first_18x_to_180.as_ref())
-        .map(|r| r.strategy)
+    call.features.as_ref().and_then(|f| f.relay_first_18x_to_180.as_ref()).map(|r| r.strategy)
 }
 
 /// Whether the first 18x has already been relayed under the strategy.
 pub fn relay_first_18x_first_relayed(call: &Call) -> bool {
-    call.relay_first_18x
-        .as_ref()
-        .map(|s| s.first_relayed)
-        .unwrap_or(false)
+    call.relay_first_18x.as_ref().map(|s| s.first_relayed).unwrap_or(false)
 }
 
 /// The active `relay18x.messages` policy (defaults to `FIRST` when the feature
@@ -37,10 +31,7 @@ pub fn relay_first_18x_messages(call: &Call) -> crate::features::Relay18xMessage
 /// Whether an 18x with this *upstream* status value was already relayed
 /// (the `ONE_PER_VALUE` dedupe test).
 pub fn relay_first_18x_value_relayed(call: &Call, status: u16) -> bool {
-    call.relay_first_18x
-        .as_ref()
-        .map(|s| s.relayed_values.contains(&status))
-        .unwrap_or(false)
+    call.relay_first_18x.as_ref().map(|s| s.relayed_values.contains(&status)).unwrap_or(false)
 }
 
 /// Record an *upstream* 18x status value as relayed (the `ONE_PER_VALUE`
@@ -55,9 +46,7 @@ pub fn record_relay_first_18x_value(mut call: Call, status: u16) -> Call {
 
 /// The a-facing To-tag minted on the first 18x (reused on the 200 OK).
 pub fn relay_first_18x_stored_a_tag(call: &Call) -> Option<&str> {
-    call.relay_first_18x
-        .as_ref()
-        .and_then(|s| s.stored_a_tag.as_deref())
+    call.relay_first_18x.as_ref().and_then(|s| s.stored_a_tag.as_deref())
 }
 
 /// Mark the first 18x relayed and record the minted a-facing tag. Preserves the
@@ -138,24 +127,15 @@ pub fn set_call_ext(mut call: Call, service_id: &str, value: Option<serde_json::
             }
         }
         Some(v) => {
-            call.ext
-                .get_or_insert_with(ExtMap::new)
-                .insert(service_id.to_string(), v);
+            call.ext.get_or_insert_with(ExtMap::new).insert(service_id.to_string(), v);
         }
     }
     call
 }
 
 /// Write an encoded ext slice into the named leg's `ext[serviceId]`.
-pub fn set_leg_ext(
-    call: Call,
-    leg_id: &str,
-    service_id: &str,
-    value: serde_json::Value,
-) -> Call {
+pub fn set_leg_ext(call: Call, leg_id: &str, service_id: &str, value: serde_json::Value) -> Call {
     update_leg(call, leg_id, |leg| {
-        leg.ext
-            .get_or_insert_with(ExtMap::new)
-            .insert(service_id.to_string(), value);
+        leg.ext.get_or_insert_with(ExtMap::new).insert(service_id.to_string(), value);
     })
 }

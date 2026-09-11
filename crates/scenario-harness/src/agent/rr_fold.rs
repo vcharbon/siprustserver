@@ -71,11 +71,7 @@ pub(super) fn fold_record_routes(headers: &mut Vec<SipHeader>) {
     if idxs.len() < 2 {
         return;
     }
-    let combined = idxs
-        .iter()
-        .map(|&i| headers[i].value.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let combined = idxs.iter().map(|&i| headers[i].value.clone()).collect::<Vec<_>>().join(", ");
     headers[idxs[0]].value = combined.into();
     for &i in idxs[1..].iter().rev() {
         headers.remove(i);

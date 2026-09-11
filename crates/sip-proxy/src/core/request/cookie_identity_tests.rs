@@ -36,7 +36,11 @@ impl RoutingStrategy for CookieCaptureStrategy {
     fn name(&self) -> &str {
         "CookieCapture"
     }
-    async fn select_for_new_dialog(&self, _msg: &SipMessage, _opts: SelectOpts) -> Result<ProxyAddr, SelectError> {
+    async fn select_for_new_dialog(
+        &self,
+        _msg: &SipMessage,
+        _opts: SelectOpts,
+    ) -> Result<ProxyAddr, SelectError> {
         Err(SelectError::NoTarget { reason: "worker-outbound tests never select".into() })
     }
     async fn decode_stickiness(&self, _params: &RouteParams, _msg: &SipMessage) -> DecodeResult {
@@ -55,10 +59,16 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let net = SimulatedSignalingNetwork::new(1);
-    let ep = net.bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64)).await.unwrap();
+    let ep = net
+        .bind_udp(BindUdpOpts::new(format!("{PROXY_VIP}:5060").parse().unwrap(), 64))
+        .await
+        .unwrap();
     let strategy = Arc::new(CookieCaptureStrategy::default());
     let reg: Arc<dyn WorkerRegistry> =
-        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060))]));
+        Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+            "w1",
+            ProxyAddr::new(W1_POD, 5060),
+        )]));
     let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy.clone(), reg)
         .clock(Clock::test_at(0))
         .build(ep);

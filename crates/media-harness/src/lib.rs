@@ -11,7 +11,8 @@ pub mod negotiate;
 
 pub use audio::{
     classify, classify_sequence, matches_sequence, reference_clip, reference_clips, Classification,
-    ClassifyOptions, ClipName, MediaVerdict, Segment, SequenceOptions, CLIP_NAMES, CLIP_SAMPLE_RATE,
+    ClassifyOptions, ClipName, MediaVerdict, Segment, SequenceOptions, CLIP_NAMES,
+    CLIP_SAMPLE_RATE,
 };
 pub use negotiate::{corrupt_connection_addr, negotiate_call, NegotiateOptions, NegotiatedCall};
 

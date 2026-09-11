@@ -29,9 +29,8 @@ use sip_proxy::load_observer::parse_x_overload_header;
 async fn running_worker_publishes_parseable_x_overload_after_sampling() {
     let h = Harness::new("b2bua-x-overload-signal")
         .describe("a running B2buaCore publishes a proxy-parseable X-Overload signal");
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071)
-        .start(&h, "b2bua", "127.0.0.1:5092")
-        .await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5092").await;
 
     // Before any sample fires the EWMAs are exactly 0 (the zero-state header).
     let header0 = b2bua.overload().x_overload_header_value();
@@ -123,22 +122,19 @@ async fn injected_sampler_drives_published_elu_through_the_running_task() {
 async fn admit_counter_advances_the_parsed_adm() {
     let h = Harness::new("b2bua-x-overload-adm")
         .describe("worker admit counter is visible to the proxy as the parsed adm");
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071)
-        .start(&h, "b2bua", "127.0.0.1:5093")
-        .await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5071).start(&h, "b2bua", "127.0.0.1:5093").await;
 
-    let before = parse_x_overload_header(Some(&b2bua.overload().x_overload_header_value()))
-        .unwrap()
-        .adm;
+    let before =
+        parse_x_overload_header(Some(&b2bua.overload().x_overload_header_value())).unwrap().adm;
     assert_eq!(before, 0.0);
 
     for _ in 0..5 {
         b2bua.overload().increment_non_emergency_admitted();
     }
 
-    let after = parse_x_overload_header(Some(&b2bua.overload().x_overload_header_value()))
-        .unwrap()
-        .adm;
+    let after =
+        parse_x_overload_header(Some(&b2bua.overload().x_overload_header_value())).unwrap().adm;
     assert_eq!(after, before + 5.0, "proxy-parsed adm must track the worker's admits");
 
     let _report = h.finish().await;

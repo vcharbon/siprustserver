@@ -59,10 +59,8 @@ async fn initial_invite_store_fault_fails_closed_500_no_call_created() {
     // Nothing leaked: the dispatch created a per-call queue for the rejected
     // INVITE; the orphan teardown must balance it (creations == removals,
     // no stranded lock/stamp).
-    settle_until(|| {
-        s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total()
-    })
-    .await;
+    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
+        .await;
     s.b2bua.assert_fully_reaped();
 
     let _report = s.finish().await;

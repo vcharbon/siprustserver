@@ -203,7 +203,6 @@ impl SipRequest {
     }
 }
 
-
 impl SipResponse {
     pub fn status(&self) -> u16 {
         self.start.status
@@ -297,9 +296,7 @@ impl SipMessage {
         Ok(HeaderList::new(self.list::<header::RouteEntry>()?))
     }
 
-    pub fn record_route_set(
-        &self,
-    ) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
+    pub fn record_route_set(&self) -> Result<HeaderList<header::RecordRouteEntry>, SipParseError> {
         Ok(HeaderList::new(self.list::<header::RecordRouteEntry>()?))
     }
 }
@@ -329,13 +326,19 @@ CSeq: 1 INVITE\r\n\
     fn supported_or_require_listing_100rel_offers_it() {
         assert!(request("Supported: timer, 100rel\r\n").offers_100rel());
         assert!(request("Require: 100REL\r\n").offers_100rel(), "option tags are case-insensitive");
-        assert!(request("Supported: timer\r\nSupported: 100rel\r\n").offers_100rel(), "every line counts");
+        assert!(
+            request("Supported: timer\r\nSupported: 100rel\r\n").offers_100rel(),
+            "every line counts"
+        );
     }
 
     #[test]
     fn a_request_listing_it_nowhere_offers_nothing() {
         assert!(!request("").offers_100rel());
         assert!(!request("Supported: timer, replaces\r\n").offers_100rel());
-        assert!(!request("Allow: PRACK\r\n").offers_100rel(), "advertising the method is not offering the extension");
+        assert!(
+            !request("Allow: PRACK\r\n").offers_100rel(),
+            "advertising the method is not offering the extension"
+        );
     }
 }

@@ -219,10 +219,7 @@ impl HeaderValue for Via {
 
         let ver_end = scan_until(bytes, i, b"/");
         if ver_end >= bytes.len() {
-            return Err(SipParseError::new(format!(
-                "Via has no transport: {:?}",
-                value.as_str()
-            )));
+            return Err(SipParseError::new(format!("Via has no transport: {:?}", value.as_str())));
         }
         let version = sub_trimmed(&value, i, ver_end);
         i = skip_ws(bytes, ver_end + 1);

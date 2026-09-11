@@ -195,8 +195,7 @@ fn step_who(e: &StepError) -> &str {
 /// Sorted-distinct ids joined with `+`, capped at 3 (`+{n}` names the overflow)
 /// so a many-findings call can't mint an unbounded key or an absurd dir name.
 fn joined_distinct<I: IntoIterator<Item = impl Into<String>>>(ids: I) -> String {
-    let distinct: std::collections::BTreeSet<String> =
-        ids.into_iter().map(Into::into).collect();
+    let distinct: std::collections::BTreeSet<String> = ids.into_iter().map(Into::into).collect();
     let n = distinct.len();
     let mut out: Vec<String> = distinct.into_iter().take(3).collect();
     if n > 3 {

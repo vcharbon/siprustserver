@@ -80,7 +80,8 @@ mod tests {
     #[test]
     fn an_authored_identity_may_state_an_observed_value_or_none() {
         let symbolic: Identity =
-            serde_json::from_str(r#"{"name":"transferee","kind":"site","forms":["e164"]}"#).unwrap();
+            serde_json::from_str(r#"{"name":"transferee","kind":"site","forms":["e164"]}"#)
+                .unwrap();
         assert_eq!(symbolic.observed, None);
         assert!(!serde_json::to_string(&symbolic).unwrap().contains("observed"));
         // Carrying one is legal and unlinted: the discipline binds captures.
@@ -93,6 +94,8 @@ mod tests {
 
     #[test]
     fn an_unknown_identity_field_is_refused_rather_than_ignored() {
-        assert!(serde_json::from_str::<Identity>(r#"{"name":"x","kind":"site","number":"1"}"#).is_err());
+        assert!(
+            serde_json::from_str::<Identity>(r#"{"name":"x","kind":"site","number":"1"}"#).is_err()
+        );
     }
 }

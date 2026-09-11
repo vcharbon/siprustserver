@@ -34,7 +34,9 @@
 //! drive `call_gen` explicitly on the encoded body; this module only routes the
 //! already-stamped gen to the right partition/peer/direction.
 
-use crate::store::{partition_of, CallStore, PartitionRole, PropagateDirection, PutOpts, StoreError};
+use crate::store::{
+    partition_of, CallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
+};
 use call::parse_call_ref;
 
 /// Resolve a `callRef`'s primary ordinal, mirroring [`partition_of`]'s ownership

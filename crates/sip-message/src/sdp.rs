@@ -19,10 +19,7 @@ const CRLF: &str = "\r\n";
 /// Split into non-empty lines, tolerating CRLF or LF endings — mirrors the TS
 /// `split(/\r\n|\n/).filter(l => l.length > 0)`.
 pub(crate) fn split_lines(text: &str) -> Vec<&str> {
-    text.split('\n')
-        .map(|l| l.strip_suffix('\r').unwrap_or(l))
-        .filter(|l| !l.is_empty())
-        .collect()
+    text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).filter(|l| !l.is_empty()).collect()
 }
 
 /// JS `Number.parseInt(s, 10)` semantics: optional sign, leading digits, stop
@@ -93,9 +90,7 @@ pub fn validate_sdp_body(body: &[u8]) -> Result<(), SdpValidationError> {
     // v=0 — RFC 4566 §5.1 fixes the version.
     let v_line = lines.iter().find(|l| l.starts_with("v=")).unwrap();
     if *v_line != "v=0" {
-        return Err(SdpValidationError::new(format!(
-            "non-zero protocol-version: \"{v_line}\""
-        )));
+        return Err(SdpValidationError::new(format!("non-zero protocol-version: \"{v_line}\"")));
     }
 
     // o= must have exactly six SP-tokens.
@@ -224,8 +219,9 @@ pub fn validate_offer_answer_body(body: &[u8]) -> Result<(), SdpValidationError>
             // Digit string with a non-zero digit — positive without an integer
             // width the value would have to fit.
             let raw = raw.trim();
-            let positive_integer =
-                !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) && raw.bytes().any(|b| b != b'0');
+            let positive_integer = !raw.is_empty()
+                && raw.bytes().all(|b| b.is_ascii_digit())
+                && raw.bytes().any(|b| b != b'0');
             if !positive_integer {
                 return Err(SdpValidationError::new(format!("a=ptime:{raw} is not > 0")));
             }
@@ -364,15 +360,13 @@ pub struct BuildHeldSdpOptions {
 
 /// Build a synthetic held SDP offer carrying `profile`'s codec list with the
 /// m-line port set to 0 and `a=inactive` (RFC 3264 §5.1).
-pub fn build_held_sdp_from_profile(profile: &CodecProfile, options: &BuildHeldSdpOptions) -> Vec<u8> {
+pub fn build_held_sdp_from_profile(
+    profile: &CodecProfile,
+    options: &BuildHeldSdpOptions,
+) -> Vec<u8> {
     let origin_ip = sdp_origin_address(&options.local_ip);
     let sess_id = sdp_session_id(options.now_ms);
-    let pts = profile
-        .payload_types
-        .iter()
-        .map(|n| n.to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let pts = profile.payload_types.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" ");
     let mut lines: Vec<String> = vec![
         "v=0".to_string(),
         format!("o=b2bua {sess_id} {sess_id} IN IP4 {origin_ip}"),
@@ -469,11 +463,8 @@ fn parse_sdp(text: &str) -> ParsedSdp {
         let media = parts.first().copied().unwrap_or("").to_string();
         let port = parts.get(1).and_then(|p| parse_int_js(p)).unwrap_or(0);
         let proto = parts.get(2).copied().unwrap_or("RTP/AVP").to_string();
-        let payload_types: Vec<i64> = parts
-            .iter()
-            .skip(3)
-            .filter_map(|f| parse_int_js(f))
-            .collect();
+        let payload_types: Vec<i64> =
+            parts.iter().skip(3).filter_map(|f| parse_int_js(f)).collect();
 
         let mut connection: Option<String> = None;
         let mut rtpmaps: BTreeMap<i64, String> = BTreeMap::new();
@@ -685,11 +676,7 @@ pub fn build_answer_from_offer(
         "t=0 0".to_string(),
     ];
 
-    let body = format!(
-        "{}{CRLF}{}{CRLF}",
-        session_lines.join(CRLF),
-        sections.join(CRLF)
-    );
+    let body = format!("{}{CRLF}{}{CRLF}", session_lines.join(CRLF), sections.join(CRLF));
     SdpBuildResult::Ok(body.into_bytes())
 }
 

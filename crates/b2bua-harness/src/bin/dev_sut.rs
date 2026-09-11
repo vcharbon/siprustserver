@@ -68,10 +68,18 @@ impl DevArgs {
         let mut it = std::env::args().skip(1);
         while let Some(a) = it.next() {
             match a.as_str() {
-                "--sut" => sut = it.next().expect("--sut needs an addr").parse().expect("bad --sut addr"),
-                "--uas" => uas = it.next().expect("--uas needs an addr").parse().expect("bad --uas addr"),
+                "--sut" => {
+                    sut = it.next().expect("--sut needs an addr").parse().expect("bad --sut addr")
+                }
+                "--uas" => {
+                    uas = it.next().expect("--uas needs an addr").parse().expect("bad --uas addr")
+                }
                 "--recv-timeout-ms" => {
-                    let ms: u64 = it.next().expect("--recv-timeout-ms needs a value").parse().expect("bad --recv-timeout-ms");
+                    let ms: u64 = it
+                        .next()
+                        .expect("--recv-timeout-ms needs a value")
+                        .parse()
+                        .expect("bad --recv-timeout-ms");
                     recv_timeout = Duration::from_millis(ms);
                 }
                 "--relay-header" => relay_header = true,

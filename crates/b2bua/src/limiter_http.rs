@@ -78,10 +78,7 @@ impl CallLimiter for HttpCallLimiter {
         let body = AdmitRequest {
             entries: entries
                 .iter()
-                .map(|e| AdmitEntry {
-                    id: e.id.clone(),
-                    limit: e.limit,
-                })
+                .map(|e| AdmitEntry { id: e.id.clone(), limit: e.limit })
                 .collect(),
         };
         let bytes = match serde_json::to_vec(&body) {
@@ -92,16 +89,12 @@ impl CallLimiter for HttpCallLimiter {
             return AdmitOutcome::Unavailable;
         };
         match serde_json::from_slice::<AdmitResponse>(&resp.body) {
-            Ok(AdmitResponse {
-                admitted: true,
-                window: Some(window),
-                ..
-            }) => AdmitOutcome::Admitted { window },
-            Ok(AdmitResponse {
-                admitted: false,
-                rejected_id: Some(limiter_id),
-                ..
-            }) => AdmitOutcome::Rejected { limiter_id },
+            Ok(AdmitResponse { admitted: true, window: Some(window), .. }) => {
+                AdmitOutcome::Admitted { window }
+            }
+            Ok(AdmitResponse { admitted: false, rejected_id: Some(limiter_id), .. }) => {
+                AdmitOutcome::Rejected { limiter_id }
+            }
             // A malformed/contradictory body is treated as unavailable (fail-open).
             _ => AdmitOutcome::Unavailable,
         }
@@ -114,10 +107,7 @@ impl CallLimiter for HttpCallLimiter {
         let body = ReleaseRequest {
             entries: holds
                 .iter()
-                .map(|h| Hold {
-                    id: h.limiter_id.clone(),
-                    window: h.window,
-                })
+                .map(|h| Hold { id: h.limiter_id.clone(), window: h.window })
                 .collect(),
         };
         if let Ok(bytes) = serde_json::to_vec(&body) {
@@ -133,10 +123,7 @@ impl CallLimiter for HttpCallLimiter {
         let body = RefreshRequest {
             entries: holds
                 .iter()
-                .map(|h| Hold {
-                    id: h.limiter_id.clone(),
-                    window: h.window,
-                })
+                .map(|h| Hold { id: h.limiter_id.clone(), window: h.window })
                 .collect(),
         };
         let bytes = match serde_json::to_vec(&body) {
@@ -147,10 +134,7 @@ impl CallLimiter for HttpCallLimiter {
             Some(resp) => match serde_json::from_slice::<RefreshResponse>(&resp.body) {
                 Ok(RefreshResponse { entries }) => entries
                     .into_iter()
-                    .map(|h| LimiterHold {
-                        limiter_id: h.id,
-                        window: h.window,
-                    })
+                    .map(|h| LimiterHold { limiter_id: h.id, window: h.window })
                     .collect(),
                 // On a bad body, keep the old holds (no migration this cycle).
                 Err(_) => holds.to_vec(),

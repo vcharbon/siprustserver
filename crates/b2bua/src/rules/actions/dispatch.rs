@@ -18,7 +18,13 @@ use super::teardown::terminate_all;
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
-    pub(super) fn apply(&self, action: &RuleAction, ctx: &RuleContext, call: &mut Call, fx: &mut HandlerEffects) {
+    pub(super) fn apply(
+        &self,
+        action: &RuleAction,
+        ctx: &RuleContext,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+    ) {
         match action {
             RuleAction::RelayToPeer { transform } => {
                 let (peer, target_to_tag) = resolve_peer(call, ctx);
@@ -29,12 +35,7 @@ impl ActionExecutor<'_> {
             RuleAction::RelayToLeg { leg_id, transform } => {
                 self.relay_to(call, fx, ctx, leg_id, transform, None);
             }
-            RuleAction::Respond {
-                status,
-                reason,
-                body,
-                content_type,
-            } => {
+            RuleAction::Respond { status, reason, body, content_type } => {
                 self.respond(call, fx, ctx, *status, reason, body, content_type.as_deref());
             }
             RuleAction::AckLeg { leg_id, body, content_type } => {
@@ -54,21 +55,13 @@ impl ActionExecutor<'_> {
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm_dialog(call, ctx, leg_id);
             }
-            RuleAction::UpdateLegState {
-                leg_id,
-                state,
-                disposition,
-            } => {
+            RuleAction::UpdateLegState { leg_id, state, disposition } => {
                 *call = set_leg_state(call.clone(), leg_id, *state);
                 if let Some(d) = disposition {
                     *call = set_leg_disposition(call.clone(), leg_id, *d);
                 }
             }
-            RuleAction::AddTagMapping {
-                a_tag,
-                b_leg_id,
-                b_tag,
-            } => {
+            RuleAction::AddTagMapping { a_tag, b_leg_id, b_tag } => {
                 *call = add_tag_mapping(
                     call.clone(),
                     TagMapping {
@@ -130,11 +123,7 @@ impl ActionExecutor<'_> {
                     *call = remove_pending_request(call.clone(), leg_id, &t_id, *outbound_cseq);
                 }
             }
-            RuleAction::ScheduleTimer {
-                timer_type,
-                delay,
-                leg_id,
-            } => {
+            RuleAction::ScheduleTimer { timer_type, delay, leg_id } => {
                 self.schedule(call, fx, timer_type.clone(), delay.as_millis(), leg_id.clone());
             }
             RuleAction::CancelTimer { id } => {
@@ -151,18 +140,10 @@ impl ActionExecutor<'_> {
             RuleAction::BeginTermination { reason } => {
                 self.begin_termination(call, fx, ctx, reason.as_deref());
             }
-            RuleAction::TerminateLeg {
-                leg_id,
-                bye_disposition,
-            } => {
+            RuleAction::TerminateLeg { leg_id, bye_disposition } => {
                 self.terminate_leg(call, fx, leg_id, *bye_disposition);
             }
-            RuleAction::AddCdrEvent {
-                event_type,
-                leg_id,
-                status_code,
-                reason,
-            } => {
+            RuleAction::AddCdrEvent { event_type, leg_id, status_code, reason } => {
                 *call = add_cdr_event(
                     call.clone(),
                     CdrEvent {
@@ -189,14 +170,16 @@ impl ActionExecutor<'_> {
                 // realising the transition to the terminal `[*]`. Idempotent.
                 call.sm_cursors.remove(machine);
             }
-            RuleAction::SendRequestToLeg {
-                leg_id,
-                method,
-                body,
-                content_type,
-                headers,
-            } => {
-                self.send_request_to_leg(call, fx, leg_id, method, body, content_type.as_deref(), headers);
+            RuleAction::SendRequestToLeg { leg_id, method, body, content_type, headers } => {
+                self.send_request_to_leg(
+                    call,
+                    fx,
+                    leg_id,
+                    method,
+                    body,
+                    content_type.as_deref(),
+                    headers,
+                );
             }
             RuleAction::SendProvisionalToLeg {
                 leg_id,
@@ -219,12 +202,7 @@ impl ActionExecutor<'_> {
                     p_early_media.as_deref(),
                 );
             }
-            RuleAction::SendPrackToLeg {
-                leg_id,
-                rseq,
-                invite_cseq,
-                b_tag,
-            } => {
+            RuleAction::SendPrackToLeg { leg_id, rseq, invite_cseq, b_tag } => {
                 // A *suppressed* fork's reliable 1xx never rode the relay path
                 // (the only other early-dialog tracker), so register its
                 // per-To-tag dialog here — the PRACK targets strictly `(leg,
@@ -250,24 +228,22 @@ impl ActionExecutor<'_> {
             RuleAction::RelayFirstBare180 { leg_id, b_tag } => {
                 self.relay_first_bare_180(call, fx, ctx, leg_id, b_tag);
             }
-            RuleAction::SendReinvite {
-                leg_id,
-                body,
-                add_headers,
-            } => {
+            RuleAction::SendReinvite { leg_id, body, add_headers } => {
                 self.send_reinvite(call, fx, leg_id, body, add_headers);
             }
             RuleAction::SetPromotePem { state } => {
                 *call = call::helpers::set_promote_pem(call.clone(), state.clone());
             }
-            RuleAction::SendNotify {
-                leg_id,
-                event,
-                subscription_state,
-                content_type,
-                body,
-            } => {
-                self.send_notify(call, fx, leg_id, event, subscription_state, content_type.as_deref(), body);
+            RuleAction::SendNotify { leg_id, event, subscription_state, content_type, body } => {
+                self.send_notify(
+                    call,
+                    fx,
+                    leg_id,
+                    event,
+                    subscription_state,
+                    content_type.as_deref(),
+                    body,
+                );
             }
             RuleAction::ReferAsyncHttp { request } => {
                 fx.fire_and_forget.push(crate::effects::FireAndForgetEffect::ReferAsyncHttp {

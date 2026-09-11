@@ -33,7 +33,7 @@ use e2e_model::{load_endpoint_config, EndpointConfig};
 use sip_clock::Clock;
 
 use crate::{
-    serve_metrics, Canaries, CallConfig, CallTuning, ChaosLog, Correlation, Driver, DriverCfg,
+    serve_metrics, CallConfig, CallTuning, Canaries, ChaosLog, Correlation, Driver, DriverCfg,
     EndpointSpec, LoadCase, LoadRunMeta, MixEntry, MuxCore, MuxTransport, RateHandle, Reporter,
     ReporterCfg, Role, ScenarioInputs, ShapeRegistry,
 };
@@ -302,9 +302,7 @@ fn endpoint_config(args: &Args, recv_timeout_ms: u64) -> EndpointConfig {
         roles,
         recv_timeout_ms,
         transit_delay_ms: 0,
-        egress: args
-            .route_pin_to_uas
-            .then_some(e2e_model::EgressPolicySpec::ApiCallPin),
+        egress: args.route_pin_to_uas.then_some(e2e_model::EgressPolicySpec::ApiCallPin),
     }
 }
 
@@ -332,11 +330,7 @@ fn parse_scenario_spec(
     let mut entry = MixEntry::by_id(registry, name, inputs, weight).unwrap_or_else(|| {
         panic!(
             "unknown load scenario {name:?} (known: {:?})",
-            registry
-                .iter()
-                .filter(|d| d.load.is_some())
-                .map(|d| d.id)
-                .collect::<Vec<_>>()
+            registry.iter().filter(|d| d.load.is_some()).map(|d| d.id).collect::<Vec<_>>()
         )
     });
     let mut t = base;
@@ -425,7 +419,10 @@ pub async fn run_with_inputs(
     let profile = args
         .load_profile
         .as_deref()
-        .map(|p| e2e_model::load_load_profile(p).unwrap_or_else(|e| panic!("--load-profile {}: {e}", p.display())))
+        .map(|p| {
+            e2e_model::load_load_profile(p)
+                .unwrap_or_else(|e| panic!("--load-profile {}: {e}", p.display()))
+        })
         .unwrap_or_default();
 
     // Resolve each profile-overridable scalar: explicit flag wins, else profile.
@@ -447,8 +444,11 @@ pub async fn run_with_inputs(
     // The recv timeout feeds the FLAG-synthesized endpoint config only (an authored
     // `--endpoint-config` carries its own `recvTimeoutMs`, which stays the source of
     // truth for the environment axis).
-    let recv_timeout_ms =
-        if args.explicit("recv_timeout_ms") { args.recv_timeout_ms } else { profile.recv_timeout_ms };
+    let recv_timeout_ms = if args.explicit("recv_timeout_ms") {
+        args.recv_timeout_ms
+    } else {
+        profile.recv_timeout_ms
+    };
 
     // ONE process-wide monotonic-anchored clock, created here and shared with the
     // mux, every per-call binder, and the chaos log — so all call timelines and
@@ -494,7 +494,8 @@ pub async fn run_with_inputs(
     // entry without its own `case=` override.
     let global_case: Option<Arc<LoadCase>> =
         args.case.as_deref().map(|p| Arc::new(LoadCase::load(p, &check_sets, seed)));
-    let mut tuning: std::collections::HashMap<String, CallTuning> = std::collections::HashMap::new();
+    let mut tuning: std::collections::HashMap<String, CallTuning> =
+        std::collections::HashMap::new();
     let scenarios: Vec<MixEntry> = if !args.scenarios.is_empty() {
         // Explicit `--scenario` set → it wins over the profile's whole mix.
         args.scenarios
@@ -517,7 +518,8 @@ pub async fn run_with_inputs(
             .mix
             .iter()
             .map(|m| {
-                let (entry, t) = resolve_profile_mix(m, base_tuning, &registry, &inputs, &check_sets, seed);
+                let (entry, t) =
+                    resolve_profile_mix(m, base_tuning, &registry, &inputs, &check_sets, seed);
                 tuning.insert(entry.id.to_string(), t);
                 match entry.case.is_some() {
                     true => entry,
@@ -641,7 +643,9 @@ pub async fn run_with_inputs(
     let server_chaos = chaos.clone();
     let server_rate = rate.clone();
     tokio::spawn(async move {
-        if let Err(e) = serve_metrics(metrics_addr, render, Some(server_chaos), Some(server_rate)).await {
+        if let Err(e) =
+            serve_metrics(metrics_addr, render, Some(server_chaos), Some(server_rate)).await
+        {
             eprintln!("[loadgen] /metrics server stopped: {e}");
         }
     });
@@ -735,8 +739,7 @@ fn mux_canaries(core: &MuxCore) -> Canaries {
     let orphans = s.orphan_no_header.load(Ordering::Relaxed)
         + s.orphan_unknown_token.load(Ordering::Relaxed)
         + s.orphan_stray.load(Ordering::Relaxed);
-    let drops =
-        s.dropped_out.load(Ordering::Relaxed) + s.dropped_in.load(Ordering::Relaxed);
+    let drops = s.dropped_out.load(Ordering::Relaxed) + s.dropped_in.load(Ordering::Relaxed);
     Canaries { orphans, drops, ..Canaries::default() }
 }
 

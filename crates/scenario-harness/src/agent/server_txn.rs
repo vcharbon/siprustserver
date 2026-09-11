@@ -9,8 +9,8 @@ use sip_message::generators::{
 };
 use sip_message::header::{self, HeaderName, HeaderValue};
 use sip_message::{
-    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MatchOpts, MessageTemplate, Mismatch,
-    SipHeader, SipMessage, SipRequest,
+    apply_name_forms, apply_remote_target_emits, emitted_wire, EmitOpts, MatchOpts,
+    MessageTemplate, Mismatch, SipHeader, SipMessage, SipRequest,
 };
 
 use super::addressing::{next_hop, top_via_addr, top_via_branch};
@@ -118,9 +118,9 @@ impl ServerTxn {
         tmpl: &MessageTemplate,
         opts: EmitOpts,
     ) -> Respond<'t> {
-        let (status, reason) = tmpl
-            .status()
-            .unwrap_or_else(|| panic!("respond_template requires a response template, got {:?}", tmpl.start()));
+        let (status, reason) = tmpl.status().unwrap_or_else(|| {
+            panic!("respond_template requires a response template, got {:?}", tmpl.start())
+        });
         let reason = reason.to_string();
         self.respond(status, &reason).template(tmpl, opts)
     }
@@ -176,7 +176,8 @@ impl ServerTxn {
                         who: self.agent.name.clone(),
                         detail: format!(
                             "got a {} {} response, expected the ACK to this txn's final",
-                            r.status(), r.reason()
+                            r.status(),
+                            r.reason()
                         ),
                     })
                 }
@@ -341,8 +342,7 @@ impl<'a> Respond<'a> {
         // A replay emits the header block it captured: a template that states a
         // media type in ANY spelling keeps that line and the stack adds none, and
         // one that states none must not gain the stack's default.
-        self.suppress_default_ct =
-            !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
+        self.suppress_default_ct = !frozen.iter().any(|h| HeaderName::ContentType.matches(&h.name));
         // Append AFTER any prior `with_header` entries — never drop them.
         self.extra_headers.extend(frozen);
         self.template_body = Some(tmpl.body().to_vec());
@@ -362,10 +362,8 @@ impl<'a> Respond<'a> {
     /// Attach a custom header (e.g. `Require: 100rel`, `RSeq: 1` on a reliable
     /// provisional, RFC 3262). Repeatable; order is preserved.
     pub fn with_header(mut self, name: &str, value: &str) -> Self {
-        self.extra_headers.push(SipHeader {
-            name: name.to_string().into(),
-            value: value.to_string().into(),
-        });
+        self.extra_headers
+            .push(SipHeader { name: name.to_string().into(), value: value.to_string().into() });
         self
     }
 
@@ -399,7 +397,9 @@ impl<'a> Respond<'a> {
             );
         } else {
             assert!(
-                !((200..300).contains(&self.status) && !txn.early_tags.is_empty() && txn.winner.is_none()),
+                !((200..300).contains(&self.status)
+                    && !txn.early_tags.is_empty()
+                    && txn.winner.is_none()),
                 "{} early dialog(s) open — declare the winner with win(id) before the 2xx",
                 txn.early_tags.len()
             );
@@ -419,11 +419,7 @@ impl<'a> Respond<'a> {
         };
         // Contact is required on 2xx and useful on 18x to establish the early
         // dialog's remote target; omit on plain 100.
-        let contact = if self.status >= 180 {
-            Some(txn.agent.contact())
-        } else {
-            None
-        };
+        let contact = if self.status >= 180 { Some(txn.agent.contact()) } else { None };
         // A conformant UAS lists its methods/extensions on a 2xx INVITE
         // (RFC 3261 §13.2.1 SHOULD Allow, §20.37 Supported) so the peer can
         // negotiate re-INVITE/UPDATE/PRACK. The test UA answers anything, so

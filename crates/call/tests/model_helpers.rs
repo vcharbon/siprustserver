@@ -18,12 +18,7 @@ fn find_and_kind_accessors() {
     assert_eq!(find_leg(&call, "a").unwrap().leg_id, "a");
     assert_eq!(find_b_leg(&call, "b-1").unwrap().leg_id, "b-1");
     assert!(find_b_leg(&call, "nope").is_none());
-    assert_eq!(
-        find_b_leg_by_call_id(&call, "b-leg-call-id-fedcba@b2bua")
-            .unwrap()
-            .leg_id,
-        "b-1"
-    );
+    assert_eq!(find_b_leg_by_call_id(&call, "b-leg-call-id-fedcba@b2bua").unwrap().leg_id, "b-1");
     assert_eq!(leg_kind(&call.a_leg), LegKind::A);
     assert!(is_adopted(&call.a_leg));
 }
@@ -85,18 +80,11 @@ fn tag_accessors_and_mapping() {
     let call = representative_call();
     assert_eq!(b2bua_tag(&call, "a").as_deref(), Some(A_TAG));
     assert_eq!(remote_tag(&call, "a").as_deref(), Some("alice-from-tag-001"));
-    assert_eq!(
-        b2bua_tag(&call, "b-1").as_deref(),
-        Some("b2bua-from-tag-bleg-5544")
-    );
+    assert_eq!(b2bua_tag(&call, "b-1").as_deref(), Some("b2bua-from-tag-bleg-5544"));
     assert_eq!(remote_tag(&call, "b-1").as_deref(), Some(B_TAG));
 
     // Duplicate (bLegId, bTag) is a no-op.
-    let mapping = TagMapping {
-        a_tag: "other".into(),
-        b_leg_id: "b-1".into(),
-        b_tag: B_TAG.into(),
-    };
+    let mapping = TagMapping { a_tag: "other".into(), b_leg_id: "b-1".into(), b_tag: B_TAG.into() };
     let n_before = call.tag_map.len();
     let call = add_tag_mapping(call, mapping);
     assert_eq!(call.tag_map.len(), n_before);
@@ -142,13 +130,8 @@ fn ext_and_rule_helpers() {
     assert!(call.b_legs[0].ext.as_ref().unwrap().contains_key("media"));
 
     let call = deactivate_rule(call, "limit-by-subscriber");
-    let r = call
-        .active_rules
-        .as_ref()
-        .unwrap()
-        .iter()
-        .find(|r| r.id == "limit-by-subscriber")
-        .unwrap();
+    let r =
+        call.active_rules.as_ref().unwrap().iter().find(|r| r.id == "limit-by-subscriber").unwrap();
     assert!(!r.active);
 }
 
@@ -167,8 +150,7 @@ fn dialog_constructors() {
     assert_eq!(empty.ext.remote_cseq, None);
     assert!(empty.ext.inbound_pending_requests.is_empty());
 
-    let from_incoming =
-        make_dialog_from_incoming(&ctx, 500, vec!["<sip:rr;lr>".into()], 2000);
+    let from_incoming = make_dialog_from_incoming(&ctx, 500, vec!["<sip:rr;lr>".into()], 2000);
     assert_eq!(from_incoming.ext.remote_cseq, Some(500));
     assert_eq!(from_incoming.sip.route_set, vec!["<sip:rr;lr>".to_string()]);
     assert_eq!(from_incoming.sip.local_cseq, 2000);
@@ -212,10 +194,8 @@ fn dump_cursors_renders_sorted_or_dash() {
     assert_eq!(dump_cursors(&call), "-");
 
     // Multiple machines render in MachineId order, `machine=state` joined by space.
-    call.sm_cursors
-        .insert(MachineId::new("transfer"), StateLabel::new("CRinging"));
-    call.sm_cursors
-        .insert(MachineId::new("global-call"), StateLabel::new("Active"));
+    call.sm_cursors.insert(MachineId::new("transfer"), StateLabel::new("CRinging"));
+    call.sm_cursors.insert(MachineId::new("global-call"), StateLabel::new("Active"));
     assert_eq!(dump_cursors(&call), "global-call=Active transfer=CRinging");
 }
 
@@ -263,7 +243,8 @@ fn rack(rseq: i64, cseq: i64) -> RAckTokens {
 /// numbered says nothing about whether the caller's RAck acknowledges anything.
 #[test]
 fn an_rseq_this_dialog_never_showed_acknowledges_nothing() {
-    let (call, shown) = assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 13_213_449, 625_707);
+    let (call, shown) =
+        assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 13_213_449, 625_707);
     assert_eq!(shown, 625_707, "the caller is shown this stack's number, not the callee's");
     assert!(
         !unacknowledgeable_rack(&call, "a", "a1", rack(625_707, 1)),
@@ -283,13 +264,21 @@ fn an_rseq_this_dialog_never_showed_acknowledges_nothing() {
 fn a_shown_rseq_under_the_wrong_cseq_or_method_acknowledges_nothing() {
     let (call, shown) = assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 7, 4711, 9_000);
     assert!(!unacknowledgeable_rack(&call, "a", "a1", rack(shown, 1)));
-    assert!(unacknowledgeable_rack(&call, "a", "a1", rack(shown, 101)), "the CSeq token is a stranger");
+    assert!(
+        unacknowledgeable_rack(&call, "a", "a1", rack(shown, 101)),
+        "the CSeq token is a stranger"
+    );
     assert!(
         unacknowledgeable_rack(&call, "a", "a1", rack(shown, 7)),
         "the b-leg INVITE's CSeq is the callee's number, not the caller's"
     );
     assert!(
-        unacknowledgeable_rack(&call, "a", "a1", RAckTokens { rseq: shown, cseq: 1, names_invite: false }),
+        unacknowledgeable_rack(
+            &call,
+            "a",
+            "a1",
+            RAckTokens { rseq: shown, cseq: 1, names_invite: false }
+        ),
         "no reliable provisional answers anything but an INVITE"
     );
 }
@@ -303,7 +292,10 @@ fn an_entry_without_a_recorded_cseq_admits_any_cseq_token() {
     call.reliable_provisionals[0].a_cseq = None;
     assert!(!unacknowledgeable_rack(&call, "a", "a1", rack(shown, 1)));
     assert!(!unacknowledgeable_rack(&call, "a", "a1", rack(shown, 101)));
-    assert!(unacknowledgeable_rack(&call, "a", "a1", rack(shown + 1, 1)), "the RSeq token still has to match");
+    assert!(
+        unacknowledgeable_rack(&call, "a", "a1", rack(shown + 1, 1)),
+        "the RSeq token still has to match"
+    );
 }
 
 /// Another early dialog's number is another dialog's business: the ladders are
@@ -335,8 +327,14 @@ fn each_face_refuses_and_it_refuses_into_a_dialog_shown_no_reliable_provisional(
     // dialog's own tag, and bob's PRACK is matched there.
     let (call, shown) = assign_a_rseq(settled_call(), "bt1", 3, "a", "alice-tag", 4, 9271, 700);
     assert!(!unacknowledgeable_rack(&call, "b-1", "bt1", rack(shown, 3)));
-    assert!(unacknowledgeable_rack(&call, "b-1", "bt1", rack(9271, 3)), "alice's own number means nothing to bob");
-    assert!(unacknowledgeable_rack(&call, "a", "a1", rack(shown, 3)), "the b-face's ladder is not the a-face's");
+    assert!(
+        unacknowledgeable_rack(&call, "b-1", "bt1", rack(9271, 3)),
+        "alice's own number means nothing to bob"
+    );
+    assert!(
+        unacknowledgeable_rack(&call, "a", "a1", rack(shown, 3)),
+        "the b-face's ladder is not the a-face's"
+    );
 }
 
 /// RFC 3262 §3 admits a reliable provisional toward a relayed request's
@@ -360,8 +358,14 @@ fn a_relayed_provisional_is_reliable_only_to_an_invite_whose_originator_offered_
         offered_100rel,
     };
     assert!(admits_reliable_provisional(&pending("INVITE", true)));
-    assert!(!admits_reliable_provisional(&pending("INVITE", false)), "no offer, no reliable provisional");
-    assert!(!admits_reliable_provisional(&pending("UPDATE", true)), "the mechanism serves INVITE alone");
+    assert!(
+        !admits_reliable_provisional(&pending("INVITE", false)),
+        "no offer, no reliable provisional"
+    );
+    assert!(
+        !admits_reliable_provisional(&pending("UPDATE", true)),
+        "the mechanism serves INVITE alone"
+    );
     assert!(!admits_reliable_provisional(&pending("OPTIONS", false)));
 }
 
@@ -403,9 +407,22 @@ fn relayed_reinvite(mut call: Call, outbound_cseq: i64, cancelled: bool) -> Call
 #[test]
 fn a_pending_reinvite_does_not_shield_an_unshown_rack() {
     let (call, _) = assign_a_rseq(settled_call(), "a1", 1, "b-1", "bf1", 1, 13_213_449, 625_707);
-    assert!(unacknowledgeable_rack(&call, "a", "a1", rack(13_213_449, 1)), "settled: the books are complete");
-    assert!(unacknowledgeable_rack(&relayed_reinvite(call.clone(), 2, false), "a", "a1", rack(13_213_449, 1)));
-    assert!(unacknowledgeable_rack(&relayed_reinvite(call, 2, true), "a", "a1", rack(13_213_449, 1)));
+    assert!(
+        unacknowledgeable_rack(&call, "a", "a1", rack(13_213_449, 1)),
+        "settled: the books are complete"
+    );
+    assert!(unacknowledgeable_rack(
+        &relayed_reinvite(call.clone(), 2, false),
+        "a",
+        "a1",
+        rack(13_213_449, 1)
+    ));
+    assert!(unacknowledgeable_rack(
+        &relayed_reinvite(call, 2, true),
+        "a",
+        "a1",
+        rack(13_213_449, 1)
+    ));
 }
 
 /// RFC 3262 §3's give-up rejects the ORIGINAL REQUEST: the provisional of a
@@ -416,7 +433,11 @@ fn a_pending_reinvite_does_not_shield_an_unshown_rack() {
 fn the_give_up_finds_the_pending_reinvite_a_provisional_answers() {
     // Bob's 183 to the re-INVITE this stack sent him as CSeq 2.
     let (call, shown) = assign_a_rseq(settled_call(), "a1", 7, "b-1", "bf1", 2, 4711, 900);
-    assert_eq!(pending_invite_answered_by(&call, "a1", shown), None, "no relay pending: the setup's own");
+    assert_eq!(
+        pending_invite_answered_by(&call, "a1", shown),
+        None,
+        "no relay pending: the setup's own"
+    );
     assert_eq!(
         pending_invite_answered_by(&relayed_reinvite(call.clone(), 2, false), "a1", shown),
         Some(("b-1".to_string(), 2)),
@@ -448,8 +469,14 @@ fn a_stack_pracked_provisional_is_acknowledged_once() {
     let (call, again) = record_pracked_provisional(call, "b-1", "bf1", 2, 4711);
     assert!(!again, "a repeat is a retransmission, not a second PRACK");
     assert_eq!(call.pracked_provisionals.len(), 1);
-    assert!(!pracked_provisional(&call, "b-1", "bf1", 2, 4712), "the next RSeq is a new provisional");
-    assert!(!pracked_provisional(&call, "b-1", "bf1", 3, 4711), "a later INVITE restarts the sequence (§7.1)");
+    assert!(
+        !pracked_provisional(&call, "b-1", "bf1", 2, 4712),
+        "the next RSeq is a new provisional"
+    );
+    assert!(
+        !pracked_provisional(&call, "b-1", "bf1", 3, 4711),
+        "a later INVITE restarts the sequence (§7.1)"
+    );
     assert!(!pracked_provisional(&call, "b-1", "bf2", 2, 4711), "another fork's provisional");
 }
 
@@ -487,7 +514,8 @@ fn forks_collapsed_behind_one_tag_share_that_dialogs_ladder() {
 /// used on the same leg. That is a NEW provisional, never a retransmission.
 #[test]
 fn the_same_b_sequence_on_a_later_transaction_is_a_new_provisional() {
-    let (call, initial) = assign_a_rseq(representative_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000);
+    let (call, initial) =
+        assign_a_rseq(representative_call(), "a1", 1, "b-1", "bf1", 1, 4711, 9_000);
     let (call, reinvite) = assign_a_rseq(call, "a1", 1, "b-1", "bf1", 2, 4711, 9_000);
     assert_ne!(reinvite, initial, "a later INVITE transaction restarts the callee's sequence");
     assert_eq!(reinvite, initial + 1, "RFC 3262 §4: this dialog's ladder still rises by one");
@@ -505,7 +533,8 @@ fn an_a_facing_sequence_number_is_never_below_one() {
 /// Every rung a `Final2xx` emission owes under `deadline`, walked from its
 /// first rung the way the executor walks it.
 fn rungs_of_a_2xx_under(deadline: Option<std::time::Duration>) -> u32 {
-    let mut emission = common::paced_emission(common::ANSWERED_2XX, ("192.0.2.10", 5060), Class::Final2xx, 1);
+    let mut emission =
+        common::paced_emission(common::ANSWERED_2XX, ("192.0.2.10", 5060), Class::Final2xx, 1);
     let mut rungs = 1;
     while emission.advance(deadline).is_some() {
         rungs += 1;
@@ -522,8 +551,16 @@ fn a_2xx_ladder_never_runs_past_timer_l() {
     use std::time::Duration;
     let timer_l = rungs_of_a_2xx_under(None);
     assert_eq!(timer_l, 10, "rungs at 0.5, 1.5, 3.5, 7.5, then every 4 s to 31.5 s");
-    assert_eq!(rungs_of_a_2xx_under(Some(Duration::from_secs(60))), timer_l, "a later deadline adds no rung");
-    assert_eq!(rungs_of_a_2xx_under(Some(Duration::from_secs(10))), 4, "a sooner deadline cuts the ladder short");
+    assert_eq!(
+        rungs_of_a_2xx_under(Some(Duration::from_secs(60))),
+        timer_l,
+        "a later deadline adds no rung"
+    );
+    assert_eq!(
+        rungs_of_a_2xx_under(Some(Duration::from_secs(10))),
+        4,
+        "a sooner deadline cuts the ladder short"
+    );
 }
 
 /// `Scope::Provisionals` names every reliable provisional and no 2xx: the
@@ -535,7 +572,12 @@ fn the_provisionals_scope_leaves_every_unacked_2xx_alone() {
     call.b_legs[0].dialogs[0].ext.pending_reinvite_2xx = Some(Unacked2xx {
         dialog_tag: B_TAG.into(),
         cseq: 4002,
-        emission: common::paced_emission(common::ANSWERED_2XX, ("203.0.113.42", 5060), Class::Final2xx, 1),
+        emission: common::paced_emission(
+            common::ANSWERED_2XX,
+            ("203.0.113.42", 5060),
+            Class::Final2xx,
+            1,
+        ),
     });
     call.reliable_provisionals.push(ReliableProvisional {
         a_tag: A_TAG.into(),
@@ -553,6 +595,10 @@ fn the_provisionals_scope_leaves_every_unacked_2xx_alone() {
     assert_eq!(provisionals, vec![Obligation::PrackOf { a_tag: A_TAG.into(), a_rseq: 1 }]);
 
     let everything = obligations_in(&call, &Scope::Call);
-    assert_eq!(everything.len(), 3, "the a-leg answer, the b-leg re-INVITE 2xx and the provisional");
+    assert_eq!(
+        everything.len(),
+        3,
+        "the a-leg answer, the b-leg re-INVITE 2xx and the provisional"
+    );
     assert!(everything.iter().filter(|o| matches!(o, Obligation::AckOf2xx { .. })).count() == 2);
 }

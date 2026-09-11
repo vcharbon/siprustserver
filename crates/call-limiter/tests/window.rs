@@ -10,11 +10,7 @@ use call_limiter::{AdmitResult, LimiterConfig, WindowStore};
 use sip_clock::Clock;
 
 fn fast_cfg() -> LimiterConfig {
-    LimiterConfig {
-        window_sec: 1,
-        active_windows: 3,
-        ttl_sec: 4,
-    }
+    LimiterConfig { window_sec: 1, active_windows: 3, ttl_sec: 4 }
 }
 
 fn store() -> WindowStore {
@@ -22,10 +18,7 @@ fn store() -> WindowStore {
 }
 
 fn entry(id: &str, limit: i64) -> Vec<AdmitEntry> {
-    vec![AdmitEntry {
-        id: id.into(),
-        limit,
-    }]
+    vec![AdmitEntry { id: id.into(), limit }]
 }
 
 async fn advance(ms: u64) {
@@ -49,10 +42,8 @@ async fn transactional_all_or_none() {
     // Fill B to its cap of 1.
     assert!(matches!(s.admit(&entry("B", 1)), AdmitResult::Admitted { .. }));
     // A batch {A: room, B: full} must reject AND leave A un-incremented.
-    let batch = vec![
-        AdmitEntry { id: "A".into(), limit: 5 },
-        AdmitEntry { id: "B".into(), limit: 1 },
-    ];
+    let batch =
+        vec![AdmitEntry { id: "A".into(), limit: 5 }, AdmitEntry { id: "B".into(), limit: 1 }];
     match s.admit(&batch) {
         AdmitResult::Rejected { limiter_id } => assert_eq!(limiter_id, "B"),
         other => panic!("expected reject, got {other:?}"),
@@ -83,14 +74,12 @@ async fn release_floors_at_zero() {
 #[tokio::test(start_paused = true)]
 async fn sum_spans_active_windows_then_ages_out() {
     let s = store(); // 3 active 1 s windows
-    let AdmitResult::Admitted { window: w0 } = s.admit(&entry("A", 3)) else {
-        panic!()
-    };
+    let AdmitResult::Admitted { window: w0 } = s.admit(&entry("A", 3)) else { panic!() };
     advance(1000).await;
     assert!(matches!(s.admit(&entry("A", 3)), AdmitResult::Admitted { .. })); // w1
     advance(1000).await;
     assert!(matches!(s.admit(&entry("A", 3)), AdmitResult::Admitted { .. })); // w2; sum now 3
-    // At t=2 the sum {w0,w1,w2} == 3 -> next admit rejects.
+                                                                              // At t=2 the sum {w0,w1,w2} == 3 -> next admit rejects.
     assert!(matches!(s.admit(&entry("A", 3)), AdmitResult::Rejected { .. }));
     // At t=3, w0 ages out of the 3-window lookback -> headroom returns.
     advance(1000).await;
@@ -102,9 +91,7 @@ async fn sum_spans_active_windows_then_ages_out() {
 #[tokio::test(start_paused = true)]
 async fn refresh_migrates_and_never_undercounts() {
     let s = store();
-    let AdmitResult::Admitted { window: w0 } = s.admit(&entry("A", 1)) else {
-        panic!()
-    };
+    let AdmitResult::Admitted { window: w0 } = s.admit(&entry("A", 1)) else { panic!() };
     let mut holds = vec![Hold { id: "A".into(), window: w0 }];
     // Advance one window and refresh: the count moves to the current window, so
     // the call keeps occupying a slot (cap of 1 still blocks a newcomer).

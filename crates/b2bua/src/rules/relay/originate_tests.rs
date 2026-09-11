@@ -71,18 +71,20 @@ Content-Length: 0\r\n\r\n",
             None, // no NoAnswer
             &config,
             &id_gen,
-            None, // no body override
-            &[],  // no header updates
+            None,                      // no body override
+            &[],                       // no header updates
             &CapabilitySet::default(), // the stack's own set, stated in full
             None,
-            &[], // no withheld option tags
+            &[],  // no withheld option tags
             None, // Destination leg
         )
         .expect("no identity rewrites, so nothing to refuse");
 
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
         };
 
         // (a) ID-1 — fresh Call-ID, NOT the a-leg's.
@@ -106,7 +108,11 @@ Content-Length: 0\r\n\r\n",
 
         // (c) ID-3 — the b-leg dialog starts a fresh CSeq space at 1 (the a-leg's
         // INVITE was CSeq 314).
-        assert_eq!(invite.cseq().seq(), 1, "b-leg CSeq starts at 1, independent of the a-leg's 314");
+        assert_eq!(
+            invite.cseq().seq(),
+            1,
+            "b-leg CSeq starts at 1, independent of the a-leg's 314"
+        );
 
         // (d) HDR-2 — Contact is the B2BUA's own address (host = local_ip), and its
         // user is the B2BUA's, NOT the a-leg caller's ("alice").
@@ -141,18 +147,17 @@ Content-Length: 0\r\n\r\n",
             &[],
             &CapabilitySet::default(),
             None, // no charging vector
-            &[], // no withheld option tags
+            &[],  // no withheld option tags
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
         };
-        (
-            invite.top_via().to_string(),
-            contact_of(&invite).to_wire(),
-        )
+        (invite.top_via().to_string(), contact_of(&invite).to_wire())
     }
 
     // The wiring contract: an EMERGENCY call's initial b-leg INVITE (the single
@@ -232,13 +237,15 @@ Content-Length: 0\r\n\r\n",
             &[],
             &CapabilitySet::default(),
             None, // no charging vector
-            &[], // no withheld option tags
+            &[],  // no withheld option tags
             None,
         )
         .expect("the R-URI under test reads");
         match effect.body {
             OutboundBody::Request(r) => r.headers().to_vec(),
-            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
         }
     }
 
@@ -292,9 +299,7 @@ Content-Length: 0\r\n\r\n",
     #[test]
     fn the_withheld_classes_never_reach_the_callee() {
         let bob = relay_b_leg_headers(Vec::new(), None);
-        for name in
-            ["Authorization", "Session-Expires", "Timestamp", "Replaces", "Require"]
-        {
+        for name in ["Authorization", "Session-Expires", "Timestamp", "Replaces", "Require"] {
             assert!(
                 !bob.iter().any(|h| h.name.eq_ignore_ascii_case(name)),
                 "{name} must not reach the callee: {bob:?}"
@@ -325,12 +330,14 @@ Content-Length: 0\r\n\r\n",
             &updates,
             &CapabilitySet::default(),
             None, // no charging vector
-            &[], // no withheld option tags
+            &[],  // no withheld option tags
             None,
         )
         .map(|(_leg, effect)| match effect.body {
             OutboundBody::Request(r) => r.headers().to_vec(),
-            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
         })
         .expect("no identity rewrites, so nothing to refuse");
         let stated: Vec<&str> = bob
@@ -384,7 +391,9 @@ mod charging_tests {
         .expect("no identity rewrites, so nothing to refuse");
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
         };
         let name = ChargingVector::header_name();
         invite
@@ -398,8 +407,9 @@ mod charging_tests {
     /// identifier, stating where it generated it.
     #[test]
     fn an_originated_leg_carries_a_generated_identifier() {
-        let value = b_leg_vector(&a_leg_invite_carrying(&[]), Some(&ChargingVectorFeature::default()))
-            .expect("an armed call stamps a charging vector");
+        let value =
+            b_leg_vector(&a_leg_invite_carrying(&[]), Some(&ChargingVectorFeature::default()))
+                .expect("an armed call stamps a charging vector");
         let parsed = ChargingVector::parse(&SipStr::owned(&value)).expect("RFC 7315 §5.6 form");
         assert!(!parsed.icid_value().is_empty());
         assert_eq!(parsed.icid_generated_at(), Some(B2buaConfig::default().sip_local_ip.as_str()));
@@ -484,7 +494,9 @@ mod withhold_tests {
         .expect("no identity rewrites, so nothing to refuse");
         let invite = match effect.body {
             OutboundBody::Request(r) => r,
-            OutboundBody::Response(_) | OutboundBody::Datagram(_) => panic!("b-leg effect must carry a request"),
+            OutboundBody::Response(_) | OutboundBody::Datagram(_) => {
+                panic!("b-leg effect must carry a request")
+            }
         };
         invite.raw_text(name).map(|v| v.as_str().to_string()).collect()
     }
@@ -514,10 +526,7 @@ mod withhold_tests {
     #[test]
     fn nothing_withheld_leaves_the_advertisement_untouched() {
         let a = a_leg_invite_carrying(&[("Supported", "100rel, timer")]);
-        assert_eq!(
-            b_leg_values(&a, &[], HeaderName::Supported),
-            ["100rel, timer"],
-        );
+        assert_eq!(b_leg_values(&a, &[], HeaderName::Supported), ["100rel, timer"],);
     }
 
     /// A set not naming a withheld tag is left byte-identical too — the

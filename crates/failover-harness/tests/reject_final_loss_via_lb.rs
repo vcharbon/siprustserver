@@ -65,10 +65,10 @@ async fn lost_relayed_603_recovers_via_worker_timer_g_and_relayed_ack() {
             "alice",
             ALICE,
             Arc::new(move |bytes: &[u8], _src, _depth| {
-                if bytes.starts_with(b"SIP/2.0 603")
-                    && counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                        return PreIngressAction::Drop;
-                    }
+                if bytes.starts_with(b"SIP/2.0 603") && counter.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    return PreIngressAction::Drop;
+                }
                 PreIngressAction::Accept
             }),
         )

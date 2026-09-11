@@ -46,7 +46,10 @@ impl ComposedWorkerRegistry {
         // The shared self-heal loop (ADR-0012 D1/D2), identical to the one the
         // b2bua repl supervisor consumes. Every wakeup just recomposes from the
         // authoritative snapshot.
-        let task = topology::spawn_membership_reconcile(membership, RECONCILE_PERIOD, move |_snapshot| s.recompose());
+        let task =
+            topology::spawn_membership_reconcile(membership, RECONCILE_PERIOD, move |_snapshot| {
+                s.recompose()
+            });
         Self { set, task }
     }
 
@@ -83,7 +86,8 @@ mod tests {
 
     #[tokio::test]
     async fn composes_membership_and_health_end_to_end() {
-        let sim = SimulatedMembership::with_clock(vec![Peer::new("w0", "10.0.0.1")], Clock::test_at(0));
+        let sim =
+            SimulatedMembership::with_clock(vec![Peer::new("w0", "10.0.0.1")], Clock::test_at(0));
         let reg = ComposedWorkerRegistry::spawn(Arc::new(sim.clone()), 5060, Clock::test_at(0));
         let control = reg.control();
 

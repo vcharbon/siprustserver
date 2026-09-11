@@ -274,7 +274,9 @@ pub fn trace_sample_rate(raw: &[u8]) -> TraceSample {
             return TraceSample::Malformed;
         }
         return match std::str::from_utf8(value).ok().and_then(|v| v.parse::<f64>().ok()) {
-            Some(rate) if rate.is_finite() && (0.0..=1.0).contains(&rate) => TraceSample::Rate(rate),
+            Some(rate) if rate.is_finite() && (0.0..=1.0).contains(&rate) => {
+                TraceSample::Rate(rate)
+            }
             _ => TraceSample::Malformed,
         };
     }
@@ -312,8 +314,7 @@ fn header_rows_compact(raw: &[u8], name: &str) -> Vec<String> {
             break; // end of headers
         }
         let Some((h, v)) = line.split_once(':') else { continue };
-        if crate::parser::custom::compact_forms::expanded_name(h.trim())
-            .eq_ignore_ascii_case(name)
+        if crate::parser::custom::compact_forms::expanded_name(h.trim()).eq_ignore_ascii_case(name)
         {
             out.push(v.trim().to_string());
         }
@@ -447,12 +448,7 @@ pub struct UriFacts {
 impl UriFacts {
     fn of(uri: &crate::header::Uri) -> Self {
         let (host, port) = uri.host_port();
-        UriFacts {
-            uri: uri.to_string(),
-            host: host.to_string(),
-            port,
-            loose: uri.is_loose_route(),
-        }
+        UriFacts { uri: uri.to_string(), host: host.to_string(), port, loose: uri.is_loose_route() }
     }
 }
 
@@ -503,7 +499,9 @@ pub fn route_rows(raw: &[u8], name: &str) -> Vec<RouteRow> {
             break; // end of headers
         }
         if let Some((h, v)) = line.split_once(':') {
-            if crate::parser::custom::compact_forms::expanded_name(h.trim()).eq_ignore_ascii_case(name) {
+            if crate::parser::custom::compact_forms::expanded_name(h.trim())
+                .eq_ignore_ascii_case(name)
+            {
                 let hops = RouteEntry::parse_line(&crate::sip_str::SipStr::owned(v.trim()))
                     .ok()
                     .map(|hops| hops.iter().map(|h| UriFacts::of(h.uri())).collect());
@@ -551,8 +549,7 @@ pub fn via_rport(raw: &[u8]) -> ViaRport {
         if !(h.eq_ignore_ascii_case("via") || h.eq_ignore_ascii_case("v")) {
             continue;
         }
-        let Ok(vias) = Via::parse_line(&crate::sip_str::SipStr::owned(v.trim()))
-        else {
+        let Ok(vias) = Via::parse_line(&crate::sip_str::SipStr::owned(v.trim())) else {
             return ViaRport::Unreadable;
         };
         let Some(top) = vias.first() else { return ViaRport::Unreadable };
@@ -581,16 +578,17 @@ mod tests {
             "an offset inside a row names the whole row"
         );
         let body_at = raw.len() - 3;
-        assert_eq!(line_at(raw, body_at).as_deref(), Some("o=- 1 1 IN IP4 h"), "body lines read the same way");
+        assert_eq!(
+            line_at(raw, body_at).as_deref(),
+            Some("o=- 1 1 IN IP4 h"),
+            "body lines read the same way"
+        );
         assert_eq!(line_at(raw, raw.len()), None, "past the end names nothing");
     }
 
     #[test]
     fn to_tag_extracts_the_to_parameter() {
-        assert_eq!(
-            to_tag(b"SIP/2.0 180 X\r\nTo: <sip:b@h>;tag=abc\r\n\r\n"),
-            "abc"
-        );
+        assert_eq!(to_tag(b"SIP/2.0 180 X\r\nTo: <sip:b@h>;tag=abc\r\n\r\n"), "abc");
         assert_eq!(
             to_tag(b"SIP/2.0 100 Trying\r\nTo: <sip:b@h>\r\n\r\n"),
             "",
@@ -610,10 +608,7 @@ mod tests {
         assert_eq!(cseq_value(raw), "CSeq: 7   BYE");
         assert_eq!(cseq_method_label(raw), "BYE");
         assert_eq!(cseq_method_label(b"OPTIONS sip:x SIP/2.0\r\n\r\n"), "none");
-        assert_eq!(
-            cseq_method_label(b"X sip:x SIP/2.0\r\nCSeq: 1 WEIRD\r\n\r\n"),
-            "other"
-        );
+        assert_eq!(cseq_method_label(b"X sip:x SIP/2.0\r\nCSeq: 1 WEIRD\r\n\r\n"), "other");
     }
 
     #[test]
@@ -650,11 +645,7 @@ mod tests {
             request_uri(b"INVITE sip:bob@10.0.0.1:5070 SIP/2.0\r\n\r\n").as_deref(),
             Some("sip:bob@10.0.0.1:5070")
         );
-        assert_eq!(
-            request_uri(b"SIP/2.0 200 OK\r\n\r\n"),
-            None,
-            "a response has no Request-URI"
-        );
+        assert_eq!(request_uri(b"SIP/2.0 200 OK\r\n\r\n"), None, "a response has no Request-URI");
     }
 
     /// Assemble a request with the given request-line method token and extra
@@ -678,10 +669,7 @@ Content-Length: 0\r\n\r\n"
 
     #[test]
     fn to_tag_marks_in_dialog_and_admits() {
-        assert!(!is_sheddable_new_invite(&req(
-            "INVITE",
-            "To: <sip:bob@example.com>;tag=b2\r\n"
-        )));
+        assert!(!is_sheddable_new_invite(&req("INVITE", "To: <sip:bob@example.com>;tag=b2\r\n")));
     }
 
     #[test]
@@ -716,10 +704,7 @@ Content-Length: 0\r\n\r\n"
     fn emergency_invites_are_admitted() {
         // Each canonical r-value, mixed case, and a comma-separated list.
         for rph in ["esnet.0", "wps.0", "q735.0", "ESNET.0", "Wps.0", "dsn.flash, q735.0"] {
-            let raw = req(
-                "INVITE",
-                &format!("To: <sip:bob@h>\r\nResource-Priority: {rph}\r\n"),
-            );
+            let raw = req("INVITE", &format!("To: <sip:bob@h>\r\nResource-Priority: {rph}\r\n"));
             assert!(!is_sheddable_new_invite(&raw), "{rph:?} must be admitted");
         }
         // Case-insensitive header name.
@@ -740,10 +725,7 @@ Content-Length: 0\r\n\r\n"
         // `crate::emergency`: `dsn.flash` and the embedded `esnet.01` are not
         // emergency, so the new INVITE remains sheddable.
         for rph in ["dsn.flash", "esnet.01"] {
-            let raw = req(
-                "INVITE",
-                &format!("To: <sip:bob@h>\r\nResource-Priority: {rph}\r\n"),
-            );
+            let raw = req("INVITE", &format!("To: <sip:bob@h>\r\nResource-Priority: {rph}\r\n"));
             assert!(is_sheddable_new_invite(&raw), "{rph:?} is not emergency");
         }
     }
@@ -909,7 +891,10 @@ Content-Length: 0\r\n\r\n"
         let rows = route_rows(raw, "Record-Route");
         assert_eq!(rows.len(), 2, "the body's look-alike is past the blank line: {rows:?}");
         let text = |r: &RouteRow| String::from_utf8_lossy(&raw[r.span.clone()]).into_owned();
-        assert_eq!(text(&rows[0]), "Record-Route: <sip:10.0.0.9:5080;w_bak=b2;lr>, <sip:10.0.0.7;lr>\r\n");
+        assert_eq!(
+            text(&rows[0]),
+            "Record-Route: <sip:10.0.0.9:5080;w_bak=b2;lr>, <sip:10.0.0.7;lr>\r\n"
+        );
         let hops = rows[0].hops.as_ref().expect("a readable row names its hops");
         assert_eq!(hops.len(), 2, "a comma fold is split: {hops:?}");
         assert_eq!((hops[0].host.as_str(), hops[0].port), ("10.0.0.9", 5080));
@@ -936,10 +921,7 @@ Content-Length: 0\r\n\r\n"
         let via = |v: &str| format!("OPTIONS sip:x SIP/2.0\r\nVia: {v}\r\n\r\n").into_bytes();
         assert_eq!(via_rport(&via("SIP/2.0/UDP h;branch=z9")), ViaRport::Absent);
         assert_eq!(via_rport(&via("SIP/2.0/UDP h;branch=z9;rport")), ViaRport::Requested);
-        assert_eq!(
-            via_rport(&via("SIP/2.0/UDP h;branch=z9;rport=5060")),
-            ViaRport::Observed(5060),
-        );
+        assert_eq!(via_rport(&via("SIP/2.0/UDP h;branch=z9;rport=5060")), ViaRport::Observed(5060),);
         assert_eq!(via_rport(&via("SIP/2.0/UDP h;branch=z9;rport=x")), ViaRport::Unreadable);
         assert_eq!(
             via_rport(b"OPTIONS sip:x SIP/2.0\r\nCall-ID: c\r\n\r\n"),
@@ -954,7 +936,8 @@ Content-Length: 0\r\n\r\n"
 
     #[test]
     fn body_presence_is_read_off_the_header_block() {
-        let head = |extra: &str| format!("SIP/2.0 183 X\r\nCSeq: 1 INVITE\r\n{extra}\r\n").into_bytes();
+        let head =
+            |extra: &str| format!("SIP/2.0 183 X\r\nCSeq: 1 INVITE\r\n{extra}\r\n").into_bytes();
         assert_eq!(content_length(&head("Content-Length: 42\r\n")), Some(42));
         assert_eq!(content_length(&head("l: 7\r\n")), Some(7), "compact spelling");
         assert_eq!(content_length(&head("Content-Length: x\r\n")), None, "unreadable");

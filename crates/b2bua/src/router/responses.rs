@@ -12,10 +12,7 @@ use crate::repl::{Readiness, ReadinessState};
 
 /// Build a plain extension header.
 fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
-    SipHeader {
-        name: name.to_string().into(),
-        value: value.into().into(),
-    }
+    SipHeader { name: name.to_string().into(), value: value.into().into() }
 }
 
 /// `481 Call/Transaction Does Not Exist` to `req`: an in-dialog request naming
@@ -68,18 +65,13 @@ pub(crate) fn build_options_health_response(
                 .chain([hdr("X-Overload", overload.x_overload_header_value())])
                 .collect(),
         ),
-        ReadinessState::NotReady => (
-            503,
-            "Service Unavailable",
-            vec![hdr("Reason", "SIP;cause=503;text=\"not-ready\"")],
-        ),
+        ReadinessState::NotReady => {
+            (503, "Service Unavailable", vec![hdr("Reason", "SIP;cause=503;text=\"not-ready\"")])
+        }
         ReadinessState::Draining => (
             503,
             "Service Unavailable",
-            vec![
-                hdr("Reason", "SIP;cause=503;text=\"draining\""),
-                hdr("Retry-After", "0"),
-            ],
+            vec![hdr("Reason", "SIP;cause=503;text=\"draining\""), hdr("Retry-After", "0")],
         ),
     };
 
@@ -112,9 +104,6 @@ pub(super) fn build_store_fault_500(
         req,
         500,
         "Server Internal Error",
-        &GenerateResponseOpts {
-            to_tag: Some(id_gen.new_tag()),
-            ..Default::default()
-        },
+        &GenerateResponseOpts { to_tag: Some(id_gen.new_tag()), ..Default::default() },
     )
 }

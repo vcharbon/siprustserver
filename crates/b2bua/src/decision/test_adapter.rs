@@ -196,7 +196,9 @@ impl ScriptedDecisionEngine {
     pub fn route_all_with_refer(host: impl Into<String>, port: u16) -> Self {
         let dest = (host.into(), port);
         Self::builder()
-            .fallback(move |_req| NewCallResponse::Route(route_to_processing_refer(&dest.0, dest.1)))
+            .fallback(move |_req| {
+                NewCallResponse::Route(route_to_processing_refer(&dest.0, dest.1))
+            })
             .on_refer(default_call_refer)
             .build()
     }
@@ -209,10 +211,7 @@ impl ScriptedDecisionEngine {
     /// Absent / non-plan `X-Api-Call` → reject 404. This is how a test (Alice)
     /// injects an advanced numbering plan.
     pub fn numbering_plan() -> Self {
-        Self::builder()
-            .fallback(new_call_from_plan)
-            .on_failure(failure_from_context)
-            .build()
+        Self::builder().fallback(new_call_from_plan).on_failure(failure_from_context).build()
     }
 
     pub fn builder() -> ScriptedBuilder {
@@ -237,9 +236,7 @@ fn parse_api_call_plan(req: &NewCallRequest) -> Option<serde_json::Value> {
 /// True when `X-Api-Call` carries a multi-route plan (a `routes` array) — the
 /// ADR-0017 reroute/failover shape, as opposed to a single `{destination}`.
 fn api_call_has_routes(req: &NewCallRequest) -> bool {
-    parse_api_call_plan(req)
-        .and_then(|v| v.get("routes").map(|r| r.is_array()))
-        .unwrap_or(false)
+    parse_api_call_plan(req).and_then(|v| v.get("routes").map(|r| r.is_array())).unwrap_or(false)
 }
 
 /// `{name: value | null}` → [`SipHeaderUpdates`] (`null` = remove).
@@ -298,10 +295,9 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
     r.trace = obj.get("trace").and_then(|v| v.as_bool()).unwrap_or(false);
     if let Some(arr) = obj.get("call_limiter").and_then(|v| v.as_array()) {
         for e in arr {
-            if let (Some(id), Some(limit)) = (
-                e.get("id").and_then(|v| v.as_str()),
-                e.get("limit").and_then(|v| v.as_i64()),
-            ) {
+            if let (Some(id), Some(limit)) =
+                (e.get("id").and_then(|v| v.as_str()), e.get("limit").and_then(|v| v.as_i64()))
+            {
                 r.call_limiter.push(CallLimiterEntry { id: id.to_string(), limit });
             }
         }
@@ -428,7 +424,11 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
     let key = instruction.get("refer_key").and_then(|v| v.as_str()).unwrap_or("");
     match key {
         "refer-reject-403" => ReferOutcome::Allow(CallReferResponse::Reject {
-            code: instruction.get("reject_code").and_then(|v| v.as_u64()).map(|c| c as u16).unwrap_or(403),
+            code: instruction
+                .get("reject_code")
+                .and_then(|v| v.as_u64())
+                .map(|c| c as u16)
+                .unwrap_or(403),
             reason: Some(
                 instruction
                     .get("reject_reason")
@@ -451,18 +451,20 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
                 .and_then(|v| v.as_u64())
                 .map(|p| p as u16)
                 .unwrap_or(5667);
-            let new_refer_to = instruction.get("new_refer_to").and_then(|v| v.as_str()).map(str::to_string);
-            let no_answer_timeout_sec = instruction
-                .get("no_answer_timeout_sec")
-                .and_then(|v| v.as_i64());
-            let callback_context = instruction.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
-            let update_headers = instruction.get("update_headers").and_then(|v| v.as_object()).map(|m| {
-                let mut out: super::schemas::SipHeaderUpdates = BTreeMap::new();
-                for (k, val) in m {
-                    out.insert(k.clone(), val.as_str().map(str::to_string));
-                }
-                out
-            });
+            let new_refer_to =
+                instruction.get("new_refer_to").and_then(|v| v.as_str()).map(str::to_string);
+            let no_answer_timeout_sec =
+                instruction.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
+            let callback_context =
+                instruction.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
+            let update_headers =
+                instruction.get("update_headers").and_then(|v| v.as_object()).map(|m| {
+                    let mut out: super::schemas::SipHeaderUpdates = BTreeMap::new();
+                    for (k, val) in m {
+                        out.insert(k.clone(), val.as_str().map(str::to_string));
+                    }
+                    out
+                });
             ReferOutcome::Allow(CallReferResponse::Allow {
                 destination: SipDestination::new(host, port),
                 new_refer_to,
@@ -546,11 +548,7 @@ pub fn route_dest_from_api_call(req: &NewCallRequest) -> Option<(String, u16)> {
     if host.is_empty() {
         return None;
     }
-    let port = dest
-        .get("port")
-        .and_then(|p| p.as_u64())
-        .map(|p| p as u16)
-        .unwrap_or(5060);
+    let port = dest.get("port").and_then(|p| p.as_u64()).map(|p| p as u16).unwrap_or(5060);
     Some((host, port))
 }
 
@@ -724,9 +722,7 @@ impl ScriptedBuilder {
     pub fn build(self) -> ScriptedDecisionEngine {
         ScriptedDecisionEngine {
             rules: self.rules,
-            fallback: self
-                .fallback
-                .unwrap_or_else(|| Box::new(|_| reject(404, "Not Found"))),
+            fallback: self.fallback.unwrap_or_else(|| Box::new(|_| reject(404, "Not Found"))),
             failure: self.failure.unwrap_or_else(|| Box::new(|_| CallTreatment::Relay)),
             release: self.release,
             refer: self.refer.unwrap_or_else(|| {
@@ -785,9 +781,9 @@ impl CallDecisionEngine for ScriptedDecisionEngine {
             None => Ok(CallReleaseResponse::Release),
             Some(f) => match f(&req) {
                 ReleaseOutcome::Respond(resp) => Ok(resp),
-                ReleaseOutcome::Error => Err(CallDecisionError::Unavailable(
-                    "scripted call_release error".into(),
-                )),
+                ReleaseOutcome::Error => {
+                    Err(CallDecisionError::Unavailable("scripted call_release error".into()))
+                }
                 // Hangs forever; the DeadlineDecisionEngine bound resolves it.
                 ReleaseOutcome::Hang => std::future::pending().await,
             },
@@ -853,7 +849,8 @@ mod tests {
     #[tokio::test]
     async fn route_all_to_with_limiter_stress_and_header() {
         let stress = CallLimiterEntry { id: "global-stress".into(), limit: 999_999 };
-        let eng = ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, Some(stress));
+        let eng =
+            ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, Some(stress));
 
         // Header-less call: only the always-on stress entry.
         match eng.new_call(req("bob")).await.unwrap() {
@@ -903,8 +900,17 @@ mod tests {
         assert_eq!(route_dest_from_api_call(&r), Some(("10.0.0.9".to_string(), 5060)));
         // Absent header / no destination / empty host / bad JSON → None (fallback).
         assert_eq!(route_dest_from_api_call(&req("bob")), None);
-        assert_eq!(route_dest_from_api_call(&req_with_header("X-Api-Call", r#"{"action":"route"}"#)), None);
-        assert_eq!(route_dest_from_api_call(&req_with_header("X-Api-Call", r#"{"destination":{"host":""}}"#)), None);
+        assert_eq!(
+            route_dest_from_api_call(&req_with_header("X-Api-Call", r#"{"action":"route"}"#)),
+            None
+        );
+        assert_eq!(
+            route_dest_from_api_call(&req_with_header(
+                "X-Api-Call",
+                r#"{"destination":{"host":""}}"#
+            )),
+            None
+        );
         assert_eq!(route_dest_from_api_call(&req_with_header("X-Api-Call", "not json")), None);
     }
 
@@ -913,10 +919,8 @@ mod tests {
         let eng = ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, None);
 
         // Header-directed callee overrides the configured DEST for dest + R-URI.
-        let r = req_with_header(
-            "X-Api-Call",
-            r#"{"destination":{"host":"10.244.6.8","port":5060}}"#,
-        );
+        let r =
+            req_with_header("X-Api-Call", r#"{"destination":{"host":"10.244.6.8","port":5060}}"#);
         match eng.new_call(r).await.unwrap() {
             NewCallResponse::Route(d) => {
                 assert_eq!(d.destination.host, "10.244.6.8");
@@ -942,10 +946,20 @@ mod tests {
             _ => panic!("expected route"),
         }
         // Empty / absent user → userless R-URI (unchanged behaviour).
-        assert_eq!(route_user_from_api_call(&req_with_header(
-            "X-Api-Call", r#"{"destination":{"host":"10.0.0.9","user":""}}"#)), None);
-        assert_eq!(route_user_from_api_call(&req_with_header(
-            "X-Api-Call", r#"{"destination":{"host":"10.0.0.9"}}"#)), None);
+        assert_eq!(
+            route_user_from_api_call(&req_with_header(
+                "X-Api-Call",
+                r#"{"destination":{"host":"10.0.0.9","user":""}}"#
+            )),
+            None
+        );
+        assert_eq!(
+            route_user_from_api_call(&req_with_header(
+                "X-Api-Call",
+                r#"{"destination":{"host":"10.0.0.9"}}"#
+            )),
+            None
+        );
 
         // No destination in the header → fall back to the configured DEST.
         match eng.new_call(req("bob")).await.unwrap() {
@@ -964,7 +978,8 @@ mod tests {
         // userpart so a register front-proxy resolves bob1 → bob2. The `stress`
         // limiter is still appended to every leg.
         let stress = CallLimiterEntry { id: "global-stress".into(), limit: 999_999 };
-        let eng = ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, Some(stress));
+        let eng =
+            ScriptedDecisionEngine::route_all_to_with_limiter("127.0.0.1", 5070, Some(stress));
         let plan = serde_json::json!({
             "action": "route",
             "routes": [
@@ -1049,8 +1064,14 @@ mod tests {
                 assert_eq!(r.new_from.as_deref(), Some("sip:+15551000@me"));
                 assert_eq!(r.new_to.as_deref(), Some("sip:+19005678@dest"));
                 let h = r.update_headers.unwrap();
-                assert_eq!(h.get("P-Asserted-Identity").unwrap().as_deref(), Some("sip:+15551000@me"));
-                assert_eq!(h.get("P-Access-Network-Info").unwrap().as_deref(), Some("3GPP-E-UTRAN-FDD"));
+                assert_eq!(
+                    h.get("P-Asserted-Identity").unwrap().as_deref(),
+                    Some("sip:+15551000@me")
+                );
+                assert_eq!(
+                    h.get("P-Access-Network-Info").unwrap().as_deref(),
+                    Some("3GPP-E-UTRAN-FDD")
+                );
                 // No reroute / on_exhausted ⇒ no carried context.
                 assert!(r.callback_context.is_none());
             }
@@ -1188,10 +1209,7 @@ mod tests {
             CallTreatment::Relay
         ));
         // No context at all → Relay too.
-        assert!(matches!(
-            eng.call_failure(failure_req(None)).await.unwrap(),
-            CallTreatment::Relay
-        ));
+        assert!(matches!(eng.call_failure(failure_req(None)).await.unwrap(), CallTreatment::Relay));
     }
 
     #[tokio::test]
@@ -1243,7 +1261,11 @@ mod tests {
     fn only_an_absent_port_defaults_to_5060() {
         use serde_json::json;
         assert_eq!(super::super::read_stated_port(None), Some(5060), "absent ⇒ the RFC default");
-        assert_eq!(super::super::read_stated_port(Some(&json!(null))), Some(5060), "null ⇒ the RFC default");
+        assert_eq!(
+            super::super::read_stated_port(Some(&json!(null))),
+            Some(5060),
+            "null ⇒ the RFC default"
+        );
         assert_eq!(super::super::read_stated_port(Some(&json!(5070))), Some(5070));
         assert_eq!(super::super::read_stated_port(Some(&json!(65535))), Some(65535));
         for stated in [json!(65536), json!(0), json!(-1), json!("5070"), json!({})] {

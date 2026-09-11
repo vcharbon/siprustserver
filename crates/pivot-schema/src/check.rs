@@ -85,20 +85,19 @@ mod tests {
 
     #[test]
     fn a_check_may_name_the_vocabulary_it_reads() {
-        let classified =
-            check(r#"{"field":"events","op":"regex","value":"InviteReceived","class":"cdr-vocabulary"}"#);
+        let classified = check(
+            r#"{"field":"events","op":"regex","value":"InviteReceived","class":"cdr-vocabulary"}"#,
+        );
         assert_eq!(classified.class, Some(CheckClass::CdrVocabulary));
         // Unclassified is the default, and it is omitted rather than written null.
         let plain = check(r#"{"field":"to.tag","op":"exists"}"#);
         assert_eq!(plain.class, None);
         assert!(!serde_json::to_string(&plain).unwrap().contains("class"));
         // A class outside the closed vocabulary is refused, not carried.
-        assert!(
-            serde_json::from_str::<Check>(
-                r#"{"field":"events","op":"exists","class":"platform-quirk"}"#
-            )
-            .is_err()
-        );
+        assert!(serde_json::from_str::<Check>(
+            r#"{"field":"events","op":"exists","class":"platform-quirk"}"#
+        )
+        .is_err());
     }
 
     #[test]

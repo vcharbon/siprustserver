@@ -29,11 +29,7 @@ impl TokenBucket {
     /// A bucket holding `burst` tokens, refilled at `refill_per_sec`, starting
     /// full at `now_ms`.
     pub fn new(burst: f64, refill_per_sec: f64, now_ms: i64) -> Self {
-        Self {
-            burst,
-            refill_per_sec,
-            state: Mutex::new(State { tokens: burst, last_ms: now_ms }),
-        }
+        Self { burst, refill_per_sec, state: Mutex::new(State { tokens: burst, last_ms: now_ms }) }
     }
 
     /// The ADR-0026 default: burst 10, refill 1/s.

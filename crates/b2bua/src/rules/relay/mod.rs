@@ -40,8 +40,8 @@ mod originate_tests;
 pub use a_leg_response::response_to_a_leg;
 pub use ack::ack_b_leg;
 pub(crate) use ack::{ack_on_answer, acked_invite_carries_offer, acked_invite_cseq};
-pub use originate::{build_b_leg, rebuild_a_leg_invite};
 pub(crate) use originate::clamp_no_answer;
+pub use originate::{build_b_leg, rebuild_a_leg_invite};
 
 // Wire routing for what those emit.
 pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};
@@ -50,8 +50,7 @@ pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};
 pub use advert::stamp_a_facing_invite_advert;
 pub use passthrough::{
     own_the_rseq, relay_request_passthrough_headers, relay_response_passthrough_headers,
-    strip_reliability,
-    reliable_rseq,
+    reliable_rseq, strip_reliability,
 };
 
 // Reading text back into typed values (decision fields, dialog state, bodies).
@@ -61,8 +60,7 @@ pub use dialog::{target_dest, to_gen_dialog};
 
 // The relayed-failure-headers Call.ext slot.
 pub use failure_ext::{
-    failure_headers_ext, is_core_reserved_ext, relayed_failure_headers,
-    RELAYED_FAILURE_HEADERS_EXT,
+    failure_headers_ext, is_core_reserved_ext, relayed_failure_headers, RELAYED_FAILURE_HEADERS_EXT,
 };
 
 // The B2BUA's own per-leg identity.

@@ -352,11 +352,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         // still arriving.
         self.reconcile_retransmits();
         self.state_abandonment();
-        RunTiming {
-            started_at_ms: 0,
-            settled_at_ms: settled_at,
-            settle_budget_ms: settle_budget,
-        }
+        RunTiming { started_at_ms: 0, settled_at_ms: settled_at, settle_budget_ms: settle_budget }
     }
 
     /// The flow loop. `false` once a failure aborts it.
@@ -366,9 +362,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         // cannot make progress, and saying so beats spinning forever.
         let mut stall = Stall::new(self.wall_ceiling());
         loop {
-            if let Some(failure) = stall.check("the flow", || {
-                self.instance.cursor().frontier()
-            }) {
+            if let Some(failure) = stall.check("the flow", || self.instance.cursor().frontier()) {
                 self.instance.fail(failure);
                 self.end_script(None, None);
                 return false;
@@ -439,8 +433,10 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
         let first = open.first().map(|(node, _)| node.to_string());
         for (node, action) in open {
-            self.instance
-                .fail(Failure::InjectorMissing { node: node.to_string(), action: action.to_string() });
+            self.instance.fail(Failure::InjectorMissing {
+                node: node.to_string(),
+                action: action.to_string(),
+            });
         }
         let leg = first
             .as_deref()
@@ -472,9 +468,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             .frontier()
             .iter()
             .filter_map(|id| self.instance.plan().step(id))
-            .find(|step| {
-                step.is_send() && self.dwell_deadline(step).is_some_and(|at| at <= now)
-            })
+            .find(|step| step.is_send() && self.dwell_deadline(step).is_some_and(|at| at <= now))
             .cloned()
     }
 
@@ -620,12 +614,9 @@ impl<'a, 'p> Runner<'a, 'p> {
             .filter_map(|id| self.instance.plan().step(id).map(|s| (id.clone(), s)))
             .filter(|(id, step)| {
                 step.is_expect()
-                    && self
-                        .armed_at
-                        .get(id)
-                        .is_some_and(|opened| {
-                            now >= *opened + Duration::from_millis(step.within_ms)
-                        })
+                    && self.armed_at.get(id).is_some_and(|opened| {
+                        now >= *opened + Duration::from_millis(step.within_ms)
+                    })
             })
             .map(|(_, step)| step.clone())
             .collect();
@@ -666,9 +657,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         let sighting = self.absorption.sight(&bytes, &message);
         let repeat = sighting.repeat;
         if sighting.owner == Owner::TxnDuplicate {
-            let leg = self
-                .leg_by_call_id(&inbound.call_id)
-                .unwrap_or_else(|| "unattributed".to_string());
+            let leg =
+                self.leg_by_call_id(&inbound.call_id).unwrap_or_else(|| "unattributed".to_string());
             self.repeats.note(&leg, &bytes, self.now_us());
             self.record_arrival(
                 &leg,
@@ -855,8 +845,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     async fn concede_held(&mut self) -> bool {
         let Some(held) = self.held.take() else { return true };
         let Some(method) = held.inbound.method.as_deref() else { return true };
-        let Some((index, policy)) =
-            self.background_policy(&held.actor, method, Some(&held.leg))
+        let Some((index, policy)) = self.background_policy(&held.actor, method, Some(&held.leg))
         else {
             return true;
         };
@@ -1009,17 +998,15 @@ impl<'a, 'p> Runner<'a, 'p> {
                 .unwrap_or(&gated[0]);
             let reason = match gate::discriminates(closest, &inbound) {
                 GateVerdict::Rejects(why) => why,
-                GateVerdict::Matches => {
-                    match self.rides_fork(closest, &inbound) {
-                        GateVerdict::Rejects(why) => why,
-                        GateVerdict::Matches => {
-                            match gate::content_holds(closest, &inbound, &scope, &resolver) {
-                                GateVerdict::Rejects(why) => why,
-                                GateVerdict::Matches => "no armed expect matched".into(),
-                            }
+                GateVerdict::Matches => match self.rides_fork(closest, &inbound) {
+                    GateVerdict::Rejects(why) => why,
+                    GateVerdict::Matches => {
+                        match gate::content_holds(closest, &inbound, &scope, &resolver) {
+                            GateVerdict::Rejects(why) => why,
+                            GateVerdict::Matches => "no armed expect matched".into(),
                         }
                     }
-                }
+                },
             };
             let also_armed: Vec<&str> =
                 gated.iter().map(|s| s.id.as_str()).filter(|id| *id != closest.id).collect();
@@ -1082,8 +1069,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         // is recorded by name (§9.1) — the frozen values the match was scoped
         // out of, and the ones it took the datagram in spite of.
         let findings = {
-            let resolver =
-                Resolver::new(self.instance.state(), &self.instance.config().identities);
+            let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
             gate::header_findings(&step, &inbound, &resolver)
         };
         for finding in findings {
@@ -1211,9 +1197,8 @@ impl<'a, 'p> Runner<'a, 'p> {
             SipMessage::Response(r) => r.image().to_vec(),
         };
         let raw = String::from_utf8_lossy(&bytes).into_owned();
-        let leg = self
-            .leg_by_call_id(&inbound.call_id)
-            .unwrap_or_else(|| "unattributed".to_string());
+        let leg =
+            self.leg_by_call_id(&inbound.call_id).unwrap_or_else(|| "unattributed".to_string());
 
         let sighting = self.absorption.sight(&bytes, &message);
         let repeat = sighting.repeat;
@@ -1232,7 +1217,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         // counted and recorded there exactly as it is mid-flow, and it is not the
         // late arrival that fails a completed flow.
         if let Some(step) = self.repeats.note(&leg, &bytes, self.now_us()) {
-            let note = format!("retransmission of the datagram step {step:?} matched, during settle");
+            let note =
+                format!("retransmission of the datagram step {step:?} matched, during settle");
             self.instance.recording().push_repeat(
                 &leg,
                 Dir::In,
@@ -1245,10 +1231,18 @@ impl<'a, 'p> Runner<'a, 'p> {
             return;
         }
         if let Some(method) = &inbound.method {
-            if let Some((index, policy)) =
-                self.background_policy(actor, method, self.leg_by_call_id(&inbound.call_id).as_deref())
-            {
-                self.record_arrival(&leg, raw, None, Some("background policy, during settle"), repeat);
+            if let Some((index, policy)) = self.background_policy(
+                actor,
+                method,
+                self.leg_by_call_id(&inbound.call_id).as_deref(),
+            ) {
+                self.record_arrival(
+                    &leg,
+                    raw,
+                    None,
+                    Some("background policy, during settle"),
+                    repeat,
+                );
                 self.instance.note_background_answered(index);
                 self.answer_background(actor, &leg, &message, policy.status).await;
                 return;
@@ -1518,10 +1512,7 @@ impl<'a, 'p> Runner<'a, 'p> {
 
     /// The leg carrying `call_id`, where one already does.
     fn leg_by_call_id(&self, call_id: &str) -> Option<String> {
-        self.stacks
-            .iter()
-            .find(|(_, stack)| stack.call_id() == call_id)
-            .map(|(leg, _)| leg.clone())
+        self.stacks.iter().find(|(_, stack)| stack.call_id() == call_id).map(|(leg, _)| leg.clone())
     }
 
     /// Which leg an arriving datagram rides, or why none does.
@@ -1593,8 +1584,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
         let site = format!("step {:?}", step.id);
         let findings: Vec<Finding> = {
-            let resolver =
-                Resolver::new(self.instance.state(), &self.instance.config().identities);
+            let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
             step.checks
                 .iter()
                 .filter_map(|check| {
@@ -1809,12 +1799,8 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.schedule_ladder(step, &agent, &wire, dst, schedule, count);
         }
         if let Some(key) = draws {
-            let ack = DrawnAck {
-                step: step.id.clone(),
-                leg: step.leg.clone(),
-                wire: wire.clone(),
-                dst,
-            };
+            let ack =
+                DrawnAck { step: step.id.clone(), leg: step.leg.clone(), wire: wire.clone(), dst };
             // Every copy of the final that arrived while this ACK was HELD is
             // still owed one (RFC 3261 §13.2.2.4), so the hold releases them all.
             let owed = self.drawn.sent(key, ack.clone());
@@ -2025,7 +2011,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         let outstanding: BTreeSet<u32> = stack.outstanding_invites().collect();
         let sent: BTreeSet<u32> = stack.sent_invite_cseqs().collect();
         let pool = self.finals.get(&step.leg)?;
-        let newest = |seqs: &BTreeSet<u32>| pool.iter().rev().find(|r| seqs.contains(&r.cseq().seq()));
+        let newest =
+            |seqs: &BTreeSet<u32>| pool.iter().rev().find(|r| seqs.contains(&r.cseq().seq()));
         newest(&outstanding).or_else(|| newest(&sent)).cloned()
     }
 
@@ -2053,8 +2040,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             .cloned()
             .unwrap_or_default();
         let (rendered, cseq_override) = {
-            let resolver =
-                Resolver::new(self.instance.state(), &self.instance.config().identities);
+            let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
             let cx = render::Context {
                 resolver: &resolver,
                 config: self.instance.config(),
@@ -2118,10 +2104,8 @@ impl<'a, 'p> Runner<'a, 'p> {
         let acked_final = self.final_for(step);
         let sent_invites = self.sent_invites(&step.leg);
         let early_tag = self.fork_tag_of(step).map(str::to_string);
-        let stack = self
-            .stacks
-            .get_mut(&step.leg)
-            .ok_or_else(|| fail("the leg has no stack".into()))?;
+        let stack =
+            self.stacks.get_mut(&step.leg).ok_or_else(|| fail("the leg has no stack".into()))?;
 
         // Where the CSeq is NOT the stack's to choose, an override cannot be
         // honoured, and a message that quietly kept the compliant number would
@@ -2168,8 +2152,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     fail(if sent_invites.is_empty() {
                         "no final response to ACK: this leg sent no INVITE".into()
                     } else {
-                        let cseqs: Vec<String> =
-                            sent_invites.iter().map(u32::to_string).collect();
+                        let cseqs: Vec<String> = sent_invites.iter().map(u32::to_string).collect();
                         format!(
                             "no final response to ACK: nothing has answered any INVITE this \
                              leg sent, CSeq {}",
@@ -2316,8 +2299,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
         let settled_at = self.now_ms();
         let findings = {
-            let resolver =
-                Resolver::new(self.instance.state(), &self.instance.config().identities);
+            let resolver = Resolver::new(self.instance.state(), &self.instance.config().identities);
             settle::evaluate(sut, post.as_ref(), &resolver)
         };
         for finding in findings {
@@ -2366,11 +2348,7 @@ impl Stall {
 
     /// `Some` once the loop cannot be making progress, by any of the three
     /// measures. The failure names the phase and what the run was waiting for.
-    fn check(
-        &mut self,
-        phase: &str,
-        waiting_on: impl FnOnce() -> Vec<String>,
-    ) -> Option<Failure> {
+    fn check(&mut self, phase: &str, waiting_on: impl FnOnce() -> Vec<String>) -> Option<Failure> {
         let now = Instant::now();
         self.total += 1;
         if now != self.last {

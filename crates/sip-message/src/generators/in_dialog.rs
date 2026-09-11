@@ -57,7 +57,10 @@ pub(super) fn with_routes(mut draft: RequestDraft, routes: &[String]) -> Request
 /// the degenerate dialog is handled elsewhere.
 pub(super) fn with_dialog_identity(draft: RequestDraft, dialog: &StackDialog) -> RequestDraft {
     draft
-        .push_raw(HeaderName::From, emit::name_addr_text(&dialog.local_uri, Some(&dialog.local_tag)))
+        .push_raw(
+            HeaderName::From,
+            emit::name_addr_text(&dialog.local_uri, Some(&dialog.local_tag)),
+        )
         .push_raw(
             HeaderName::To,
             emit::name_addr_text(&dialog.remote_uri, Some(&dialog.remote_tag)),
@@ -166,8 +169,7 @@ pub fn generate_in_dialog_request(
     }
 
     draft = emit::extra_headers(draft, &opts.extra_headers);
-    let request =
-        emit::request(emit::framed(draft, opts.body.clone(), opts.content_type.clone()));
+    let request = emit::request(emit::framed(draft, opts.body.clone(), opts.content_type.clone()));
     let next_dialog = StackDialog { local_cseq: next_cseq, ..dialog.clone() };
     InDialogResult { request, dialog: next_dialog }
 }

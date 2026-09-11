@@ -7,7 +7,9 @@ use sip_message::header::{HeaderValue, ReferTo};
 use sip_message::{Method, SipStr};
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
-use crate::rules::model::{Effect, Match, RuleAction, RuleDefinition, RuleDiagnostic, RuleHandleResult, RuleContext};
+use crate::rules::model::{
+    Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleDiagnostic, RuleHandleResult,
+};
 use crate::rules::refer_transfer::notify::{
     notify, SUB_STATE_TERMINATED_NORESOURCE, SUB_STATE_TERMINATED_TIMEOUT,
 };
@@ -35,11 +37,7 @@ fn to_bare_uri(refer_to: &str) -> Result<String, relay::UnreadableAddress> {
 /// referrer the transfer failed (NOTIFY `terminated`, 502), disarm the transfer
 /// watchdogs and clear the slice — the same terminal shape a `/call/refer` denial
 /// takes. The call itself survives; only the transfer is abandoned.
-fn refuse_transfer(
-    ctx: &RuleContext,
-    field: &str,
-    reason: &str,
-) -> Option<RuleHandleResult> {
+fn refuse_transfer(ctx: &RuleContext, field: &str, reason: &str) -> Option<RuleHandleResult> {
     let st = state(ctx)?;
     let mut actions = Vec::new();
     actions.extend(notify(
@@ -49,16 +47,11 @@ fn refuse_transfer(
         &format!("Unreadable Transfer Target ({field})"),
     ));
     actions.extend([
-        RuleAction::CancelTimer {
-            id: timer_id(call::TimerType::ReferSubscriptionExpiry, None),
-        },
+        RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferSubscriptionExpiry, None) },
         RuleAction::CancelTimer { id: timer_id(call::TimerType::ReferOverallSafety, None) },
         RuleAction::SetTransfer { state: None },
     ]);
-    Some(
-        RuleHandleResult::new(actions)
-            .with_diagnostic(RuleDiagnostic::unreadable(field, reason)),
-    )
+    Some(RuleHandleResult::new(actions).with_diagnostic(RuleDiagnostic::unreadable(field, reason)))
 }
 
 /// Read the `reject`/`error` reject code+reason from the internal-event payload.
@@ -70,12 +63,10 @@ fn reject_code_reason(ctx: &RuleContext) -> (u16, String) {
         _ => (false, &serde_json::Value::Null),
     };
     if is_reject {
-        let code = payload.get("reject_code").and_then(|v| v.as_u64()).map(|c| c as u16).unwrap_or(603);
-        let reason = payload
-            .get("reject_reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Declined")
-            .to_string();
+        let code =
+            payload.get("reject_code").and_then(|v| v.as_u64()).map(|c| c as u16).unwrap_or(603);
+        let reason =
+            payload.get("reject_reason").and_then(|v| v.as_str()).unwrap_or("Declined").to_string();
         (code, reason)
     } else {
         (500, "Server Internal Error".to_string())

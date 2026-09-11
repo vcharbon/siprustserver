@@ -336,7 +336,10 @@ impl Obligation for RecordRoutePlacement {
                         if let Some(branch) = branch {
                             sent.insert(
                                 (msg.src.as_str(), msg.call_id.as_str(), branch),
-                                (method.as_str(), msg.to_tag.as_deref().is_some_and(|t| !t.is_empty())),
+                                (
+                                    method.as_str(),
+                                    msg.to_tag.as_deref().is_some_and(|t| !t.is_empty()),
+                                ),
                             );
                         }
                     }
@@ -376,9 +379,8 @@ impl Obligation for RecordRoutePlacement {
                     }
                     // The transaction this response answers is one the TAKER
                     // opened: it sent the request, and the response came back.
-                    let opened = branch.and_then(|b| {
-                        sent.get(&(msg.dst.as_str(), msg.call_id.as_str(), b))
-                    });
+                    let opened =
+                        branch.and_then(|b| sent.get(&(msg.dst.as_str(), msg.call_id.as_str(), b)));
                     match opened {
                         None => out.push(finding(Decision::Undecidable(
                             "no request on this transaction at this vantage",
@@ -446,8 +448,8 @@ impl Obligation for UnknownDialog481 {
             let branch = msg.via_branch.as_deref().filter(|b| !b.is_empty());
             match &msg.kind {
                 Kind::Request { method } => {
-                    let hop_by_hop = method.eq_ignore_ascii_case("ACK")
-                        || method.eq_ignore_ascii_case("CANCEL");
+                    let hop_by_hop =
+                        method.eq_ignore_ascii_case("ACK") || method.eq_ignore_ascii_case("CANCEL");
                     let from_tag = msg.from_tag.as_deref().unwrap_or_default();
                     let to_tag = msg.to_tag.as_deref().unwrap_or_default();
                     if hop_by_hop || from_tag.is_empty() || to_tag.is_empty() || call.is_empty() {
@@ -469,8 +471,7 @@ impl Obligation for UnknownDialog481 {
                     // A dialog-creating answer names both halves: the peer tag
                     // this endpoint learns, and the one it minted itself.
                     let creating = (200..300).contains(status)
-                        || (*status > 100
-                            && msg.to_tag.as_deref().is_some_and(|t| !t.is_empty()));
+                        || (*status > 100 && msg.to_tag.as_deref().is_some_and(|t| !t.is_empty()));
                     let both = msg.from_tag.as_deref().is_some_and(|t| !t.is_empty())
                         && msg.to_tag.as_deref().is_some_and(|t| !t.is_empty());
                     if creating && both && !call.is_empty() {
@@ -587,8 +588,8 @@ impl Obligation for NoByeOutsideOrEarlyDialog {
             }
             // The callee of a dialog it never accepted owes a rejection or a
             // CANCEL, not a BYE.
-            let early = bye.dialog.answered_establishing_invite
-                && !bye.dialog.accepted_establishing_invite;
+            let early =
+                bye.dialog.answered_establishing_invite && !bye.dialog.accepted_establishing_invite;
             out.push(bye.finding(
                 RuleId::NoByeOutsideOrEarlyDialog,
                 if early { evidence(true) } else { Decision::Compliant },
@@ -733,11 +734,8 @@ impl<'a> Reading<'a> {
         // A tag first seen now inherits what the pending state fixed: the
         // establishing INVITE the UAC sent before its peer had a tag.
         if !remote_tag.is_empty() && !self.dialogs.contains_key(&key) {
-            let pending = self
-                .dialogs
-                .get(&DialogKey { remote_tag: "", ..key })
-                .cloned()
-                .unwrap_or_default();
+            let pending =
+                self.dialogs.get(&DialogKey { remote_tag: "", ..key }).cloned().unwrap_or_default();
             self.dialogs.insert(key, pending);
         }
         let dialog = self.dialogs.entry(key).or_default();
@@ -808,8 +806,7 @@ impl<'a> Reading<'a> {
             && msg.to_tag.as_deref().is_some_and(|t| !t.is_empty())
         {
             dialog.answered_establishing_invite = true;
-            dialog.accepted_establishing_invite |=
-                (200..300).contains(status);
+            dialog.accepted_establishing_invite |= (200..300).contains(status);
         }
 
         // Only the UAC's route set is still open, and only a dialog-CREATING
@@ -856,10 +853,7 @@ fn set_if_empty(slot: &mut String, msg: &Msg, header: &str) {
 /// The Record-Route stack `msg` carries, in wire order. A row no reader accepts
 /// contributes nothing: an unreadable header is the grammar rules' finding.
 fn record_route_set(msg: &Msg) -> Vec<UriFacts> {
-    msg.head
-        .as_deref()
-        .and_then(|h| sniff::route_uris(h, "Record-Route"))
-        .unwrap_or_default()
+    msg.head.as_deref().and_then(|h| sniff::route_uris(h, "Record-Route")).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1411,7 +1405,8 @@ mod tests {
             "",
         );
         bye.dst = "127.0.0.1:9999".to_string();
-        let msgs = [invite(1_000, "z9hG4bK-i", ""), rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", ""), bye];
+        let msgs =
+            [invite(1_000, "z9hG4bK-i", ""), rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", ""), bye];
         let f = hits(&MidDialogWireDestination, &msgs);
         assert_eq!(f.len(), 1, "{f:?}");
         let Decision::Violated(Evidence::MidDialogWireTargetDiverged {
@@ -1512,19 +1507,7 @@ mod tests {
         let msgs = [
             invite(1_000, "z9hG4bK-i", ""),
             rsp(2_000, 200, 1, "INVITE", "z9hG4bK-i", ""),
-            req(
-                3_000,
-                ALICE,
-                BOB,
-                "INVITE",
-                B_URI,
-                "z9hG4bK-r",
-                2,
-                A_URI,
-                B_URI,
-                Some("bt"),
-                "",
-            ),
+            req(3_000, ALICE, BOB, "INVITE", B_URI, "z9hG4bK-r", 2, A_URI, B_URI, Some("bt"), ""),
             rsp(4_000, 200, 2, "INVITE", "z9hG4bK-r", "Record-Route: <sip:p1@127.0.0.1;lr>\r\n"),
         ];
         let f = hits(&RecordRoutePlacement, &msgs);
@@ -1552,7 +1535,11 @@ mod tests {
             req(3_000, ALICE, BOB, "ACK", B_URI, "z9hG4bK-i", 1, A_URI, B_URI, Some("bt"), ""),
             final_480(4_000),
         ];
-        assert!(hits(&RecordRoutePlacement, &msgs).is_empty(), "{:?}", hits(&RecordRoutePlacement, &msgs));
+        assert!(
+            hits(&RecordRoutePlacement, &msgs).is_empty(),
+            "{:?}",
+            hits(&RecordRoutePlacement, &msgs)
+        );
     }
 
     /// A response on a transaction this vantage never carried the request for
@@ -1785,8 +1772,7 @@ mod tests {
         let f = hits(&NoByeOutsideOrEarlyDialog, &msgs);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].emitter, BOB, "the callee is charged");
-        let Decision::Violated(Evidence::ByeOffDialog { early_dialog, .. }) = &f[0].decision
-        else {
+        let Decision::Violated(Evidence::ByeOffDialog { early_dialog, .. }) = &f[0].decision else {
             panic!("{:?}", f[0].decision)
         };
         assert!(early_dialog);

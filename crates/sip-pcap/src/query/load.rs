@@ -56,7 +56,10 @@ impl Query {
         }
         if let Some(ver) = obj.get("version") {
             if ver.as_u64() != Some(1) {
-                return err("$.version", format!("unsupported query version {ver}; this build reads 1"));
+                return err(
+                    "$.version",
+                    format!("unsupported query version {ver}; this build reads 1"),
+                );
             }
         }
         Ok(Query {
@@ -86,10 +89,9 @@ impl Query {
 }
 
 fn scope(v: &Value, path: &str) -> R<Scope> {
-    let obj = v.as_object().ok_or_else(|| QueryError {
-        path: path.into(),
-        msg: "expected an object".into(),
-    })?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| QueryError { path: path.into(), msg: "expected an object".into() })?;
     let mut out = Scope::default();
     for (k, val) in obj {
         match k.as_str() {
@@ -117,10 +119,9 @@ fn scope(v: &Value, path: &str) -> R<Scope> {
 }
 
 fn correlate(v: &Value, path: &str) -> R<FlowConfig> {
-    let obj = v.as_object().ok_or_else(|| QueryError {
-        path: path.into(),
-        msg: "expected an object".into(),
-    })?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| QueryError { path: path.into(), msg: "expected an object".into() })?;
     let mut cfg = FlowConfig { strategies: Vec::new(), dedup_window_us: DEFAULT_DEDUP_WINDOW_US };
     let mut saw_strategies = false;
     for (k, val) in obj {
@@ -186,13 +187,10 @@ fn strategy(v: &Value, path: &str) -> R<CorrelateStrategy> {
         }
         "header_param" => {
             let s = |name: &str| -> R<String> {
-                obj.get(name)
-                    .and_then(|x| x.as_str())
-                    .map(str::to_string)
-                    .ok_or(QueryError {
-                        path: format!("{path}.header_param.{name}"),
-                        msg: "expected a string".into(),
-                    })
+                obj.get(name).and_then(|x| x.as_str()).map(str::to_string).ok_or(QueryError {
+                    path: format!("{path}.header_param.{name}"),
+                    msg: "expected a string".into(),
+                })
             };
             Ok(CorrelateStrategy::HeaderParam { header: s("header")?, param: s("param")? })
         }
@@ -215,10 +213,9 @@ fn strategy(v: &Value, path: &str) -> R<CorrelateStrategy> {
 }
 
 fn projection(v: &Value, path: &str) -> R<Projection> {
-    let obj = v.as_object().ok_or_else(|| QueryError {
-        path: path.into(),
-        msg: "expected an object".into(),
-    })?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| QueryError { path: path.into(), msg: "expected an object".into() })?;
     for k in obj.keys() {
         if !matches!(k.as_str(), "mode" | "fields") {
             return err(path, format!("unknown key {k:?}"));
@@ -257,10 +254,9 @@ fn projection(v: &Value, path: &str) -> R<Projection> {
 }
 
 fn neighbours(v: &Value, path: &str) -> R<Neighbours> {
-    let obj = v.as_object().ok_or_else(|| QueryError {
-        path: path.into(),
-        msg: "expected an object".into(),
-    })?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| QueryError { path: path.into(), msg: "expected an object".into() })?;
     for k in obj.keys() {
         if !matches!(k.as_str(), "key" | "window_us" | "max") {
             return err(path, format!("unknown key {k:?}"));
@@ -347,10 +343,7 @@ pub fn node(v: &Value, path: &str) -> R<Node> {
             };
             let mut rest = obj.clone();
             rest.remove("where");
-            Ok(Node::CountTxn {
-                filter,
-                count: num_cmp(&Value::Object(rest), &sub)?,
-            })
+            Ok(Node::CountTxn { filter, count: num_cmp(&Value::Object(rest), &sub)? })
         }
 
         "evidence_kind" => Ok(Node::EvidenceKind(string(body, &sub)?)),
@@ -408,10 +401,9 @@ pub fn node(v: &Value, path: &str) -> R<Node> {
 }
 
 fn string(v: &Value, path: &str) -> R<String> {
-    v.as_str().map(str::to_string).ok_or(QueryError {
-        path: path.into(),
-        msg: "expected a string".into(),
-    })
+    v.as_str()
+        .map(str::to_string)
+        .ok_or(QueryError { path: path.into(), msg: "expected a string".into() })
 }
 
 fn boolean(v: &Value, path: &str) -> R<bool> {
@@ -462,7 +454,10 @@ fn num_cmp(v: &Value, path: &str) -> R<NumCmp> {
             "gt" => out.gt = Some(n),
             "lt" => out.lt = Some(n),
             other => {
-                return err(path, format!("unknown bound {other:?}; expected eq, ne, ge, le, gt or lt"))
+                return err(
+                    path,
+                    format!("unknown bound {other:?}; expected eq, ne, ge, le, gt or lt"),
+                )
             }
         }
     }
@@ -480,7 +475,10 @@ fn status_match(v: &Value, path: &str) -> R<StatusMatch> {
         if let Some(class) = s.strip_suffix("xx").and_then(|c| c.parse::<u16>().ok()) {
             return Ok(StatusMatch::Class(class));
         }
-        return err(path, format!("unknown status {s:?}; expected a code, a class like \"4xx\", or \"none\""));
+        return err(
+            path,
+            format!("unknown status {s:?}; expected a code, a class like \"4xx\", or \"none\""),
+        );
     }
     Ok(StatusMatch::Cmp(num_cmp(v, path)?))
 }

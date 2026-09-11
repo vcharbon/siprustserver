@@ -29,14 +29,9 @@ pub fn capture_svg(seconds: u64, freq: i32) -> Result<Vec<u8>, String> {
         .build()
         .map_err(|e| format!("profiler start failed (already running?): {e}"))?;
     std::thread::sleep(Duration::from_secs(seconds));
-    let report = guard
-        .report()
-        .build()
-        .map_err(|e| format!("report build failed: {e}"))?;
+    let report = guard.report().build().map_err(|e| format!("report build failed: {e}"))?;
     let mut svg = Vec::new();
-    report
-        .flamegraph(&mut svg)
-        .map_err(|e| format!("flamegraph render failed: {e}"))?;
+    report.flamegraph(&mut svg).map_err(|e| format!("flamegraph render failed: {e}"))?;
     Ok(svg)
 }
 
@@ -89,10 +84,6 @@ mod tests {
         }
         // inferno emits a standalone SVG document; the `<svg` tag always appears.
         assert!(!svg.is_empty(), "empty svg");
-        assert!(
-            svg.windows(4).any(|w| w == b"<svg"),
-            "no <svg tag in {} bytes",
-            svg.len()
-        );
+        assert!(svg.windows(4).any(|w| w == b"<svg"), "no <svg tag in {} bytes", svg.len());
     }
 }

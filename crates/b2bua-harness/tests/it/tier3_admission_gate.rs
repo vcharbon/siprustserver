@@ -57,10 +57,7 @@ async fn cps_bucket_empty_503s_a_new_invite_statelessly() {
         "503 Reason must mark the overload cause, got {}",
         reason.to_wire()
     );
-    assert!(
-        resp.header::<RetryAfter>().is_some(),
-        "overload 503 must carry a Retry-After hint"
-    );
+    assert!(resp.header::<RetryAfter>().is_some(), "overload 503 must carry a Retry-After hint");
     assert!(resp.to().tag().is_some(), "non-100 final carries a To-tag (RFC §8.2.6.2)");
 
     // No per-call state was created for the rejected INVITE: no live call, and the
@@ -156,7 +153,8 @@ async fn emergency_invite_bypasses_the_empty_bucket_and_establishes() {
 
     // Emergency admits are NOT counted on `adm` (the LB caps non-emergency only).
     assert_eq!(
-        b2bua.overload().metrics().non_emergency_admitted_total, 0,
+        b2bua.overload().metrics().non_emergency_admitted_total,
+        0,
         "emergency admits must not advance the adm counter"
     );
     assert_eq!(
@@ -193,10 +191,7 @@ async fn admitted_non_emergency_invite_advances_the_adm_counter() {
         .start(&h, "b2bua", "127.0.0.1:5085")
         .await;
 
-    assert_eq!(
-        b2bua.overload().metrics().non_emergency_admitted_total, 0,
-        "no admit yet"
-    );
+    assert_eq!(b2bua.overload().metrics().non_emergency_admitted_total, 0, "no admit yet");
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -207,7 +202,8 @@ async fn admitted_non_emergency_invite_advances_the_adm_counter() {
 
     // The admit advanced `adm` exactly once and shed nothing.
     assert_eq!(
-        b2bua.overload().metrics().non_emergency_admitted_total, 1,
+        b2bua.overload().metrics().non_emergency_admitted_total,
+        1,
         "an admitted non-emergency new dialog advances adm by 1"
     );
     assert_eq!(b2bua.metrics().overload_rejected_total(), 0);

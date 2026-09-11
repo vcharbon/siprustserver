@@ -55,10 +55,10 @@ async fn cancel_retransmits_on_the_timer_e_ladder_to_the_64t1_ceiling() {
     // The peer never answers the CANCEL (the lost-datagram scenario): the
     // ladder re-sends at T1, then doubling — assert each boundary exactly.
     for (quiet, label) in [
-        (460, "T1"),      // fire at +500
-        (960, "2*T1"),    // fire at +1500
-        (1960, "4*T1"),   // fire at +3500
-        (3960, "T2"),     // fire at +7500 (first T2-capped interval)
+        (460, "T1"),          // fire at +500
+        (960, "2*T1"),        // fire at +1500
+        (1960, "4*T1"),       // fire at +3500
+        (3960, "T2"),         // fire at +7500 (first T2-capped interval)
         (3960, "T2 plateau"), // fire at +11500 — stays at T2, not 8*T1
     ] {
         elapse_ms(quiet).await;
@@ -92,11 +92,16 @@ async fn cancel_retransmits_on_the_timer_e_ladder_to_the_64t1_ceiling() {
     // (never displaced by the branch-sharing CANCEL) and still delivers its
     // final.
     assert_eq!(stack.txn.metrics().active_transactions(), 1);
+    stack.inject(&response_bytes(200, "OK", "CANCEL", branch, "handle-shape-test", true)).await;
     stack
-        .inject(&response_bytes(200, "OK", "CANCEL", branch, "handle-shape-test", true))
-        .await;
-    stack
-        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            487,
+            "Request Terminated",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1, "non-2xx final auto-ACKed");
@@ -128,9 +133,7 @@ async fn ladder_goes_quiescent_on_the_cancel_200() {
     assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 2);
 
     // The 200 to the CANCEL stops the ladder immediately — quiescence.
-    stack
-        .inject(&response_bytes(200, "OK", "CANCEL", branch, "handle-shape-test", true))
-        .await;
+    stack.inject(&response_bytes(200, "OK", "CANCEL", branch, "handle-shape-test", true)).await;
     elapse_ms(20_000).await;
     assert_eq!(
         count_requests(&stack.drain_peer(), "CANCEL"),
@@ -142,7 +145,14 @@ async fn ladder_goes_quiescent_on_the_cancel_200() {
     // The INVITE txn was undisturbed throughout and still delivers its final.
     assert_eq!(stack.txn.metrics().active_transactions(), 1);
     stack
-        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            487,
+            "Request Terminated",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
@@ -176,7 +186,14 @@ async fn ladder_stops_when_the_invite_takes_its_final() {
     // The 487 final resolves the INVITE txn (Completed, Timer-D hold): the
     // CANCEL ladder dies with it even though its 200 never arrived.
     stack
-        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            487,
+            "Request Terminated",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
@@ -271,11 +288,16 @@ async fn a_first_provisional_reflushes_the_grace_sent_cancel() {
     assert!(before > 1, "the ladder was running before the provisional");
 
     // Complete the flow: the callee answers the CANCEL and rejects the INVITE.
+    stack.inject(&response_bytes(200, "OK", "CANCEL", branch, "handle-shape-test", true)).await;
     stack
-        .inject(&response_bytes(200, "OK", "CANCEL", branch, "handle-shape-test", true))
-        .await;
-    stack
-        .inject(&response_bytes(487, "Request Terminated", "INVITE", branch, "handle-shape-test", true))
+        .inject(&response_bytes(
+            487,
+            "Request Terminated",
+            "INVITE",
+            branch,
+            "handle-shape-test",
+            true,
+        ))
         .await;
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "ACK"), 1);
@@ -293,9 +315,7 @@ async fn ack_stays_off_the_ladder() {
         .send_request(outbound_request("INVITE", branch), addr(PEER), TxnKind::Invite)
         .await
         .unwrap();
-    stack
-        .inject(&response_bytes(200, "OK", "INVITE", branch, "handle-shape-test", true))
-        .await;
+    stack.inject(&response_bytes(200, "OK", "INVITE", branch, "handle-shape-test", true)).await;
     elapse_ms(20).await;
     stack.drain_peer();
 

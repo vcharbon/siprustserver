@@ -43,7 +43,8 @@ async fn reinvite_overtaking_the_ack_is_491ed() {
     );
     let alice = h.agent("alice", "127.0.0.1:5049").await;
     let bob = h.agent("bob", "127.0.0.1:5059").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5059).start(&h, "b2bua", "127.0.0.1:5099").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5059).start(&h, "b2bua", "127.0.0.1:5099").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -104,7 +105,8 @@ async fn caller_reinvite_overtaking_the_ack_is_491ed() {
     );
     let alice = h.agent("alice", "127.0.0.1:5041").await;
     let bob = h.agent("bob", "127.0.0.1:5051").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5051).start(&h, "b2bua", "127.0.0.1:5095").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5051).start(&h, "b2bua", "127.0.0.1:5095").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -160,7 +162,8 @@ async fn reinvite_toward_the_unacked_face_is_491ed() {
     );
     let alice = h.agent("alice", "127.0.0.1:5042").await;
     let bob = h.agent("bob", "127.0.0.1:5052").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5052).start(&h, "b2bua", "127.0.0.1:5096").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5052).start(&h, "b2bua", "127.0.0.1:5096").await;
 
     // ── call setup ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;

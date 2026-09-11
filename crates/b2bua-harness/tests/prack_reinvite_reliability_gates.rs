@@ -51,13 +51,14 @@ fn decision_offering_100rel_toward_bob(port: u16) -> Arc<ScriptedDecisionEngine>
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", port);
-                r.features.advertise_capabilities = Some(call::features::AdvertiseCapabilitiesFeature {
-                    toward_originator: None,
-                    toward_originated: Some(call::features::AdvertisedCapabilities {
-                        allow: None,
-                        supported: Some(vec!["100rel".to_string()]),
-                    }),
-                });
+                r.features.advertise_capabilities =
+                    Some(call::features::AdvertiseCapabilitiesFeature {
+                        toward_originator: None,
+                        toward_originated: Some(call::features::AdvertisedCapabilities {
+                            allow: None,
+                            supported: Some(vec!["100rel".to_string()]),
+                        }),
+                    });
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -180,7 +181,8 @@ async fn a_reliable_provisional_to_a_relayed_update_reaches_the_originator_as_no
     );
     let alice = h.agent("alice", "127.0.0.1:5104").await;
     let bob = h.agent("bob", "127.0.0.1:5105").await;
-    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5105).start(&h, "b2bua", "127.0.0.1:5106").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5105).start(&h, "b2bua", "127.0.0.1:5106").await;
 
     // ── an ordinary call ──
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -213,7 +215,10 @@ async fn a_reliable_provisional_to_a_relayed_update_reaches_the_originator_as_no
     // `expect` fails on any other status first).
     update_at_bob.respond(200, "OK").with_sdp(REANSWER).await;
     let final_200 = update.expect(200).await;
-    assert!(!requires_100rel(&final_200) && !has_rseq(&final_200), "nothing reliable reaches the originator");
+    assert!(
+        !requires_100rel(&final_200) && !has_rseq(&final_200),
+        "nothing reliable reaches the originator"
+    );
 
     // ── teardown ──
     let mut bye = alice_dialog.bye().await;

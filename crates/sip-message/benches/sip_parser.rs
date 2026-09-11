@@ -114,11 +114,17 @@ fn bench_build(c: &mut Criterion) {
     });
     group.bench_function("bye", |b| {
         b.iter(|| {
-            black_box(generate_in_dialog_request(InDialogMethod::Bye, &dialog, black_box(&bye_opts)))
+            black_box(generate_in_dialog_request(
+                InDialogMethod::Bye,
+                &dialog,
+                black_box(&bye_opts),
+            ))
         })
     });
     group.bench_function("response_200", |b| {
-        b.iter(|| black_box(generate_response(&parsed_invite, 200, "OK", black_box(&response_opts))))
+        b.iter(|| {
+            black_box(generate_response(&parsed_invite, 200, "OK", black_box(&response_opts)))
+        })
     });
     group.finish();
 }

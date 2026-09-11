@@ -97,12 +97,8 @@ pub(super) async fn try_accept_request_delta(
     let expected = ExpectedStimulus::Request(&kind);
     let observed = ObservedStimulus::Request(uas.request());
     let (expected_label, observed_label) = (expected.describe(), observed.describe());
-    let decision = policy(&DeltaContext {
-        role: st.role,
-        expected,
-        observed,
-        dialog: dialog_snapshot(st),
-    });
+    let decision =
+        policy(&DeltaContext { role: st.role, expected, observed, dialog: dialog_snapshot(st) });
     let DeltaDecision::Accepted(AcceptedDelta { rule, satisfies_steps, reaction }) = decision
     else {
         return Ok(Some(uas));

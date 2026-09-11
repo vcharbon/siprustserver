@@ -261,8 +261,7 @@ pub struct Driver {
 /// another in-flight or prior call against the same stateful SUT.
 fn next_seed(base: u64) -> u64 {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
-    base.wrapping_add(SERIAL.fetch_add(1, Ordering::Relaxed).wrapping_mul(100_000))
-        .max(1)
+    base.wrapping_add(SERIAL.fetch_add(1, Ordering::Relaxed).wrapping_mul(100_000)).max(1)
 }
 
 /// A random per-call correlation token, formatted as a valid SIP user-part.
@@ -406,15 +405,7 @@ async fn run_one(
     _permit: OwnedSemaphorePermit,
 ) {
     reporter.inc_inflight();
-    let MixEntry {
-        id,
-        body,
-        case,
-        legs,
-        emergency,
-        challenge_responder,
-        weight: _,
-    } = entry;
+    let MixEntry { id, body, case, legs, emergency, challenge_responder, weight: _ } = entry;
 
     // Resolve THIS call's binding from the attached Test case (pool walk +
     // token expansion): the core From/To/R-URI to fold into the outgoing
@@ -476,8 +467,12 @@ async fn run_one(
         next_seed(seed_base),
         tuning.drop_nth,
     );
-    let binder =
-        AgentBinder::mux(Arc::new(mux_net), transport.clock.clone(), transport.recv_timeout, record);
+    let binder = AgentBinder::mux(
+        Arc::new(mux_net),
+        transport.clock.clone(),
+        transport.recv_timeout,
+        record,
+    );
     binder.seed_ids(next_seed(seed_base));
 
     let alice = binder.agent("alice", &transport.uac_addr.to_string()).await;
@@ -493,8 +488,7 @@ async fn run_one(
         callee_agents
             .push((leg.role, binder.agent(leg.role, &transport.uas_addr.to_string()).await));
     }
-    let agent_for =
-        |role: &str| callee_agents.iter().find(|(r, _)| *r == role).map(|(_, a)| a);
+    let agent_for = |role: &str| callee_agents.iter().find(|(r, _)| *r == role).map(|(_, a)| a);
     // The primary callee: the "bob" role (every derived spec — and every downstream
     // shape — declares it), falling back to the first declared leg for an
     // exotic spec that names its primary differently.
@@ -679,11 +673,7 @@ async fn run_one(
             None
         };
         if html.is_some() || !class.is_ok() {
-            Some(RenderedSample {
-                html,
-                detail,
-                e2e_ms: e2e.as_secs_f64() * 1000.0,
-            })
+            Some(RenderedSample { html, detail, e2e_ms: e2e.as_secs_f64() * 1000.0 })
         } else {
             None
         }
@@ -776,12 +766,17 @@ pub async fn serve_metrics_on(
             // call-driving async workers to keep offering load.
             if path == "/debug/flamegraph" {
                 let secs = flamegraph_util::parse_seconds(&format!("?{query}"), 20, 120);
-                let svg = tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
-                    .await
-                    .unwrap_or_else(|e| Err(format!("join error: {e}")));
+                let svg =
+                    tokio::task::spawn_blocking(move || flamegraph_util::capture_svg(secs, 99))
+                        .await
+                        .unwrap_or_else(|e| Err(format!("join error: {e}")));
                 let (status, ctype, body) = match svg {
                     Ok(svg) => ("200 OK", "image/svg+xml", svg),
-                    Err(e) => ("500 Internal Server Error", "text/plain", format!("flamegraph failed: {e}\n").into_bytes()),
+                    Err(e) => (
+                        "500 Internal Server Error",
+                        "text/plain",
+                        format!("flamegraph failed: {e}\n").into_bytes(),
+                    ),
                 };
                 let head = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -802,7 +797,9 @@ pub async fn serve_metrics_on(
                     match query_get(&query, "ts").and_then(|s| s.parse::<u64>().ok()) {
                         Some(ts) => {
                             log.record_at(kind.clone(), target.clone(), ts);
-                            format!("ok: recorded chaos marker type={kind} target={target:?} ts={ts}\n")
+                            format!(
+                                "ok: recorded chaos marker type={kind} target={target:?} ts={ts}\n"
+                            )
                         }
                         None => {
                             log.record(kind.clone(), target.clone());
@@ -825,10 +822,7 @@ pub async fn serve_metrics_on(
                         }
                         // A missing or malformed `cps` is a client error (never a
                         // silent no-op that leaves the rate wherever it was).
-                        _ => (
-                            "400 Bad Request",
-                            "expected POST /rate?cps=<float>\n".to_string(),
-                        ),
+                        _ => ("400 Bad Request", "expected POST /rate?cps=<float>\n".to_string()),
                     },
                     // GET /rate → the current target.
                     Some(h) => ("200 OK", format!("{}\n", h.cps())),
@@ -887,6 +881,9 @@ mod load_body_tests {
         assert!(matches!(ae.body, LoadBody::Actor(_)), "actor shape → actor body");
 
         let bare = ShapeDescriptor::new("bare");
-        assert!(MixEntry::from_shape(&bare, &inputs, 1.0).is_none(), "functional-only shape has no body");
+        assert!(
+            MixEntry::from_shape(&bare, &inputs, 1.0).is_none(),
+            "functional-only shape has no body"
+        );
     }
 }
