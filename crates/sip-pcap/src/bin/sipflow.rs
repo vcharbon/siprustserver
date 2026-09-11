@@ -27,6 +27,14 @@
 //!   sipflow /tmp/sipcap --query update-rejected.json
 //!   sipflow corpus/ --query-json '{"select":{"evidence_kind":"derived_call_id"},
 //!                                  "project":{"mode":"summary","fields":["as_socket"]}}'
+//!   sipflow /tmp/sipcap --call-id 7f3a... --sut 10.0.0.9 --rfc --rfc-rules all
+//!   sipflow /tmp/sipcap --sut auto --rfc --rfc-json review.json --rfc-doc review.flows.json
+//!   sipflow --to-pcap capture.anon.flows.json --out capture.anon.pcap
+//!
+//! `--rfc` reviews the SELECTED calls: the same rules the census runs, on the
+//! document the selection would emit, with every hit placed on a side by
+//! `--sut` — so the review answers "what did the platform break on these
+//! calls", not "what is in this capture".
 
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -40,7 +48,7 @@ use sip_pcap::flow::{
     build_flows, CallGroup, CorrelateStrategy, FlowConfig, FlowLeg, DEFAULT_DEDUP_WINDOW_US,
 };
 use sip_pcap::query::{neighbours_of, select_groups, summary_row, Projection, Query};
-use sip_pcap::rfc::Census;
+use sip_pcap::rfc::{Census, LocatedHit, SutSet};
 
 /// Serialize an emitted document, exiting with the derivation error a
 /// document that cannot be re-derived must never be printed past.
@@ -100,6 +108,14 @@ struct Args {
     /// Substring match on a correlation token.
     #[arg(long)]
     token: Option<String>,
+
+    /// The system under test's own addresses, comma-separated IPs
+    /// (port-insensitive, no CIDR), or `auto` — the sockets that
+    /// re-originated a call under a derived Call-ID, as the correlation
+    /// evidence names them. Selects the call groups the SUT touched, and
+    /// places every `--rfc` hit on a side (`platform` / `peer`).
+    #[arg(long, value_delimiter = ',')]
+    sut: Vec<String>,
 
     /// Correlation headers whose (relayed) value ties B2BUA legs together —
     /// whole-value equality, the pipeline's first strategy.
@@ -172,6 +188,17 @@ struct Args {
     #[arg(long, default_value_t = false)]
     schema: bool,
 
+    /// Encode an ALREADY EMITTED flows document as a classic pcap (Ethernet /
+    /// IP / UDP, the document's own sockets and timestamps) at `--out` — an
+    /// anonymized document back into a capture every reader takes. Reads no
+    /// capture.
+    #[arg(long = "to-pcap", requires = "out", conflicts_with_all = ["json", "query", "query_json", "list", "full", "enrich", "rfc_census", "rfc"])]
+    to_pcap: Option<PathBuf>,
+
+    /// Where `--to-pcap` writes.
+    #[arg(long)]
+    out: Option<PathBuf>,
+
     /// Run the RFC-violation census (`sip_pcap::rfc`) over ALREADY EMITTED
     /// flows documents — files, or directories walked recursively for
     /// `*.flows.json` — and print the report as JSON on stdout with its
@@ -194,6 +221,30 @@ struct Args {
     /// is not a dated run the cut may read.
     #[arg(long = "rfc-census-with", value_delimiter = ',', requires = "rfc_census")]
     rfc_census_with: Vec<rfc_rules::RuleId>,
+
+    /// Review the SELECTED call groups against the RFC rules (`sip_pcap::rfc`)
+    /// in the same run: the hits under each ladder (or list line), the census
+    /// summary on stderr. Whole-capture `--json` is the one mode it does not
+    /// combine with — `--rfc-doc` writes the reviewed document instead.
+    #[arg(long, default_value_t = false, conflicts_with_all = ["json", "enrich", "rfc_census"])]
+    rfc: bool,
+
+    /// Which rules `--rfc` runs: `wire` (the corpus-backed census vocabulary),
+    /// `all` (every rule `rfc-rules` holds), or rule tokens, comma-separated.
+    /// Rules beyond `wire` are triage input: a report carrying them is not
+    /// one the census consumers read.
+    #[arg(long = "rfc-rules", value_delimiter = ',', default_values_t = ["wire".to_string()], requires = "rfc")]
+    rfc_rules: Vec<String>,
+
+    /// Write the `--rfc` report — the census shape, one document — here.
+    #[arg(long = "rfc-json", requires = "rfc")]
+    rfc_json: Option<PathBuf>,
+
+    /// Write the reviewed flows document (the selection, schema 5) here — what
+    /// the report's `document` names, so a consumer can take the cut it
+    /// speaks of.
+    #[arg(long = "rfc-doc", requires = "rfc")]
+    rfc_doc: Option<PathBuf>,
 
     /// Run a JSON query (see `sip_pcap::query`): a predicate tree over calls,
     /// legs, transactions and messages, plus the projection of a match. The
@@ -240,10 +291,30 @@ fn main() {
         }
         return;
     }
+    if let Some(path) = &args.to_pcap {
+        let out = args.out.as_ref().expect("clap: --to-pcap requires --out");
+        if let Err(e) = std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| serde_json::from_str::<FlowsDoc>(&t).map_err(|e| e.to_string()))
+            .and_then(|doc| sip_pcap::pcapout::doc_to_pcap(&doc))
+            .and_then(|bytes| std::fs::write(out, bytes).map_err(|e| e.to_string()))
+        {
+            eprintln!("cannot encode {} as a capture: {e}", path.display());
+            std::process::exit(2);
+        }
+        return;
+    }
     if !args.rfc_census.is_empty() {
         run_rfc_census(&args.rfc_census, args.rfc_census_jobs, &args.rfc_census_with);
         return;
     }
+    let rfc_rules = args.rfc.then(|| match rule_set(&args.rfc_rules) {
+        Ok(rules) => rules,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    });
     if args.inputs.is_empty() {
         eprintln!(
             "no capture given (see --help; --schema, --enrich and --rfc-census read no capture)"
@@ -292,16 +363,24 @@ fn main() {
     }
     let cfg = FlowConfig { strategies, dedup_window_us: DEFAULT_DEDUP_WINDOW_US };
 
+    let capture = capture_name(&files);
+
     if let Some(query) = load_query(&args) {
         // The query owns correlation when it says so: which strategies ran is
         // part of what a recorded query means, not ambient CLI state.
         let cfg = query.correlate.clone().unwrap_or(cfg);
         let flows = build_flows(&datagrams, &cfg);
-        run_query(&flows, &stats, &query, &opts);
+        let sut = sut_of(&args, &flows);
+        let hits = run_query(&flows, &stats, &query, &opts, sut.as_ref());
+        if let Some(rules) = &rfc_rules {
+            let review = review(&flows, &stats, &hits, &opts, rules, sut.as_ref(), &capture, &args);
+            print_review(&review, &flows, &hits, &args, true);
+        }
         return;
     }
 
     let flows = build_flows(&datagrams, &cfg);
+    let sut = sut_of(&args, &flows);
 
     if args.json {
         // Pretty + deterministic field order: the emit is committed as
@@ -310,8 +389,9 @@ fn main() {
         return;
     }
 
-    let selected: Vec<&CallGroup> =
-        flows.groups.iter().filter(|g| group_matches(g, &flows.legs, &args)).collect();
+    let selected: Vec<usize> = (0..flows.groups.len())
+        .filter(|&g| group_matches(&flows.groups[g], &flows.legs, &args, sut.as_ref()))
+        .collect();
 
     eprintln!(
         "# files={} {stats}\n# sip-messages={} capture-dups={} parse-failed={} non-sip={} legs={} call-groups={} matched={}",
@@ -325,19 +405,230 @@ fn main() {
         selected.len(),
     );
 
+    // The review is over EVERY selected group, whatever `--limit` prints: the
+    // limit bounds the reader's screen, not the question.
+    let review = rfc_rules.as_ref().map(|rules| {
+        review(&flows, &stats, &selected, &opts, rules, sut.as_ref(), &capture, &args)
+    });
+
     if args.list {
-        for (n, g) in selected.iter().enumerate() {
-            print_list_line(n, g, &flows.legs);
+        for (n, &g) in selected.iter().enumerate() {
+            print_list_line(n, &flows.groups[g], &flows.legs);
         }
     } else {
-        for (n, g) in selected.iter().take(args.limit).enumerate() {
-            print_ladder(n, g, &flows.legs, args.full);
+        for (n, &g) in selected.iter().take(args.limit).enumerate() {
+            print_ladder(n, &flows.groups[g], &flows.legs, args.full);
+            if let Some(review) = &review {
+                print_group_hits(n, review);
+            }
         }
         if selected.len() > args.limit {
             println!(
                 "… {} more matching call groups (raise --limit or add filters; --list shows all)",
                 selected.len() - args.limit
             );
+        }
+    }
+    if let Some(review) = &review {
+        print_review(review, &flows, &selected, &args, args.list);
+    }
+}
+
+/// The capture the review names: the one file's name, or the directory's
+/// when several ring files were read.
+fn capture_name(files: &[PathBuf]) -> String {
+    match files {
+        [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        many => many
+            .first()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    }
+}
+
+/// The SUT set `--sut` states, or the one the capture names under `auto`.
+/// Exits when `auto` finds no derivation: a review that guessed the platform
+/// would place every hit on a side nobody stated.
+fn sut_of(args: &Args, flows: &sip_pcap::flow::Flows) -> Option<SutSet> {
+    match args.sut.as_slice() {
+        [] => None,
+        [one] if one == "auto" => match SutSet::minted_in(flows) {
+            Some(sut) => Some(sut),
+            None => {
+                eprintln!(
+                    "--sut auto: no call group carries derived-Call-ID evidence, so the capture \
+                     names no platform; state the addresses"
+                );
+                std::process::exit(2);
+            }
+        },
+        stated => match SutSet::stated(stated) {
+            Ok(sut) => Some(sut),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        },
+    }
+}
+
+/// The `--rfc-rules` words as candidate rule ids: `wire` is the census
+/// vocabulary and needs no candidates; `all` names every rule beyond it; a
+/// token names one.
+fn rule_set(words: &[String]) -> Result<Vec<rfc_rules::RuleId>, String> {
+    let mut out = Vec::new();
+    for word in words {
+        match word.as_str() {
+            "wire" => {}
+            "all" => out.extend(rfc_rules::all_rules().iter().map(|r| r.id())),
+            token => {
+                let id = rfc_rules::all_rules()
+                    .iter()
+                    .map(|r| r.id())
+                    .find(|id| id.token() == token)
+                    .ok_or_else(|| format!("--rfc-rules: unknown rule {token:?}"))?;
+                out.push(id);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// One selection's review: the emitted document scanned into a one-document
+/// census, its hits keyed by the position each group has in `selected` — the
+/// same `#n` the ladders print.
+struct Review {
+    census: Census,
+    doc: FlowsDoc,
+}
+
+fn review(
+    flows: &sip_pcap::flow::Flows,
+    decode: &sip_pcap::DecodeStats,
+    selected: &[usize],
+    opts: &EnrichOptions,
+    candidates: &[rfc_rules::RuleId],
+    sut: Option<&SutSet>,
+    capture: &str,
+    args: &Args,
+) -> Review {
+    let doc = match sip_pcap::emit::flows_to_doc_selected(flows, decode, selected, opts) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!("flows enrichment failed: {e}");
+            std::process::exit(2);
+        }
+    };
+    let document = args
+        .rfc_doc
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| format!("{capture}#selected"));
+    let mut census = Census::with_candidates(candidates);
+    census.absorb_with_sut(&document, capture, &doc, sut);
+    census.sort();
+    Review { census, doc }
+}
+
+/// The hits of the group printed as `#n`, under its ladder.
+fn print_group_hits(n: usize, review: &Review) {
+    let hits: Vec<&LocatedHit> = review.census.hits.iter().filter(|h| h.hit.group == n).collect();
+    if hits.is_empty() {
+        println!("  rfc: no hit");
+        return;
+    }
+    for h in hits {
+        println!("  rfc: {}", hit_line(h, &review.doc));
+    }
+}
+
+/// One hit on one line: the rule, who is charged and on which side, the
+/// message the evidence anchors on, and the evidence itself as flat JSON —
+/// the rule's own proof, in the rule's own words.
+fn hit_line(h: &LocatedHit, doc: &FlowsDoc) -> String {
+    let hit = &h.hit;
+    let side = if hit.side.is_unattributed() {
+        String::new()
+    } else {
+        format!(" side={}", hit.side.token())
+    };
+    let anchor = doc
+        .legs
+        .get(hit.leg)
+        .and_then(|l| l.msgs.get(hit.evidence.anchor()))
+        .map(|m| format!("{} {} → {} {}", fmt_ts(m.ts_us), m.src, m.dst, summary_json(&m.summary)))
+        .unwrap_or_default();
+    format!(
+        "{} emitter={} role={}{}{} taker={} cseq={} leg={} @ {}  {}",
+        hit.rule.token(),
+        hit.emitter,
+        hit.emitter_role.token(),
+        side,
+        if hit.relayed { " relayed" } else { "" },
+        hit.taker,
+        hit.cseq,
+        hit.call_id,
+        anchor,
+        serde_json::to_string(&hit.evidence).expect("evidence serializes"),
+    )
+}
+
+fn summary_json(s: &sip_pcap::doc::Summary) -> String {
+    match s {
+        sip_pcap::doc::Summary::Request { method, uri, cseq, .. } => {
+            format!("{method} {uri} (CSeq {} {})", cseq.seq, cseq.method)
+        }
+        sip_pcap::doc::Summary::Response { status, reason, cseq, .. } => {
+            format!("{status} {reason} (CSeq {} {})", cseq.seq, cseq.method)
+        }
+    }
+}
+
+/// The review's tail: in list mode every hit (the ladders were not printed,
+/// so nothing carried them), then the census summary on stderr, then the
+/// files `--rfc-json` / `--rfc-doc` asked for.
+fn print_review(
+    review: &Review,
+    flows: &sip_pcap::flow::Flows,
+    selected: &[usize],
+    args: &Args,
+    hits_here: bool,
+) {
+    if hits_here {
+        for h in &review.census.hits {
+            let leg0 = selected.get(h.hit.group).map(|&g| flows.groups[g].legs[0]);
+            let t0 = leg0.map(|l| fmt_ts(flows.legs[l].t_first())).unwrap_or_default();
+            println!("rfc #{:<4} {t0} {}", h.hit.group, hit_line(h, &review.doc));
+        }
+    }
+    let sut = review
+        .census
+        .sut
+        .as_ref()
+        .map(|s| format!(" sut={} ({})", s.addresses.join(","), s.decided_by))
+        .unwrap_or_default();
+    eprint!(
+        "# rfc review: {} selected group(s), rules={}{sut}\n{}",
+        selected.len(),
+        args.rfc_rules.join(","),
+        review.census.summary_measured()
+    );
+    if let Some(path) = &args.rfc_json {
+        let text = serde_json::to_string_pretty(&review.census).expect("census serializes");
+        if let Err(e) = std::fs::write(path, text) {
+            eprintln!("cannot write {}: {e}", path.display());
+            std::process::exit(2);
+        }
+    }
+    if let Some(path) = &args.rfc_doc {
+        let text = serde_json::to_string_pretty(&review.doc).expect("document serializes");
+        if let Err(e) = std::fs::write(path, text) {
+            eprintln!("cannot write {}: {e}", path.display());
+            std::process::exit(2);
         }
     }
 }
@@ -379,8 +670,16 @@ fn run_query(
     decode: &sip_pcap::DecodeStats,
     query: &Query,
     opts: &EnrichOptions,
-) {
-    let hits = select_groups(flows, query);
+    sut: Option<&SutSet>,
+) -> Vec<usize> {
+    let mut hits = select_groups(flows, query);
+    if let Some(sut) = sut {
+        hits.retain(|&g| {
+            let legs: Vec<&FlowLeg> =
+                flows.groups[g].legs.iter().map(|&l| &flows.legs[l]).collect();
+            sut.touches(&legs)
+        });
+    }
     eprintln!(
         "# legs={} call-groups={} matched={}{}",
         flows.legs.len(),
@@ -421,6 +720,7 @@ fn run_query(
             );
         }
     }
+    hits
 }
 
 /// Every flows document under `inputs`: a named file is taken as given, a
@@ -555,8 +855,15 @@ fn expand_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
     files
 }
 
-fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args) -> bool {
+fn group_matches(group: &CallGroup, legs: &[FlowLeg], args: &Args, sut: Option<&SutSet>) -> bool {
     let any_leg = |pred: &dyn Fn(&FlowLeg) -> bool| group.legs.iter().any(|&l| pred(&legs[l]));
+
+    if let Some(sut) = sut {
+        let members: Vec<&FlowLeg> = group.legs.iter().map(|&l| &legs[l]).collect();
+        if !sut.touches(&members) {
+            return false;
+        }
+    }
 
     if let Some(cid) = &args.call_id {
         if !any_leg(&|l| l.call_id.contains(cid.as_str())) {

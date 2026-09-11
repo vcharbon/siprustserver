@@ -31,6 +31,7 @@ pub mod flow;
 mod frame;
 mod msgfacts;
 mod pcapng;
+pub mod pcapout;
 pub mod query;
 mod reassembly;
 pub mod rfc;

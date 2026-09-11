@@ -38,6 +38,11 @@ const HitHead = {
    * that, never from this.
    */
   emitter_role: Schema.Literals(["platform", "peer", "undetermined"]),
+  /**
+   * The side the SUT set stated to `sipflow --rfc --sut` placed the emitter
+   * on. Present only on a review taken with a stated set; a sweep carries none.
+   */
+  side: Schema.optionalKey(Schema.Literals(["platform", "peer"])),
   taker: Schema.String,
   cseq: Schema.Int,
   relayed: Schema.Boolean
@@ -145,6 +150,8 @@ export const RuleTally = Schema.Struct({
   occasions: Schema.Int,
   decided: Schema.Int,
   by_role: Schema.Record(Schema.String, Schema.Int),
+  /** Hits by stated side; present only when the run stated a SUT set. */
+  by_side: Schema.optionalKey(Schema.Record(Schema.String, Schema.Int)),
   relayed: Schema.Int,
   buckets: Schema.Record(Schema.String, Schema.Int)
 })
@@ -171,7 +178,14 @@ export const CensusReport = Schema.Struct({
   messages: Schema.Int,
   rules: Schema.Record(Schema.Literals(RFC_RULES), Schema.optionalKey(RuleTally)),
   hits: Schema.Array(CensusHit),
-  failures: Schema.Array(CensusFailure)
+  failures: Schema.Array(CensusFailure),
+  /** The SUT set every hit's `side` was placed by; absent on a sweep. */
+  sut: Schema.optionalKey(
+    Schema.Struct({
+      addresses: Schema.Array(Schema.String),
+      decided_by: Schema.Literals(["stated", "mint-point"])
+    })
+  )
 })
 export interface CensusReport extends Schema.Schema.Type<typeof CensusReport> {}
 

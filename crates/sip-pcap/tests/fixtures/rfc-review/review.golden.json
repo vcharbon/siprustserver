@@ -1,0 +1,114 @@
+{
+  "documents": 1,
+  "groups": 1,
+  "legs": 3,
+  "messages": 19,
+  "rules": {
+    "no-200-after-cancel": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "no-ack-to-dialog-creating-2xx": {
+      "hits": 2,
+      "documents": 1,
+      "occasions": 4,
+      "decided": 3,
+      "by_role": {
+        "platform": 2
+      },
+      "by_side": {
+        "peer": 1,
+        "platform": 1
+      },
+      "relayed": 0,
+      "buckets": {
+        "the dialog went silent": 2
+      }
+    },
+    "no-cancel-after-final": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "second-answer-repeats-the-first": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    },
+    "unacked-reliable-provisional": {
+      "hits": 0,
+      "documents": 0,
+      "occasions": 0,
+      "decided": 0,
+      "by_role": {},
+      "relayed": 0,
+      "buckets": {}
+    }
+  },
+  "hits": [
+    {
+      "document": "capture.pcap.gz#selected",
+      "capture": "capture.pcap.gz",
+      "rule": "no-ack-to-dialog-creating-2xx",
+      "group": 0,
+      "leg": 0,
+      "call_id": "170787906_133619369@198.51.100.5",
+      "emitter": "198.51.100.2:5060",
+      "emitter_role": "platform",
+      "side": "peer",
+      "taker": "192.0.2.10:5072",
+      "cseq": 694441,
+      "relayed": false,
+      "final_msg": 3,
+      "final_hop": 0,
+      "final_ts_us": 1565097701458863,
+      "to_tag": "SDg3a8799-as3d724e0d",
+      "status": 200,
+      "retransmits": 0,
+      "window_us": 21432299,
+      "emitter_window_us": 0
+    },
+    {
+      "document": "capture.pcap.gz#selected",
+      "capture": "capture.pcap.gz",
+      "rule": "no-ack-to-dialog-creating-2xx",
+      "group": 0,
+      "leg": 1,
+      "call_id": "1-170787906_133619369@198.51.100.5",
+      "emitter": "192.0.2.10:5072",
+      "emitter_role": "platform",
+      "side": "platform",
+      "taker": "198.51.100.2:5060",
+      "cseq": 347398,
+      "relayed": false,
+      "final_msg": 7,
+      "final_hop": 0,
+      "final_ts_us": 1565097701436781,
+      "to_tag": "SDg3a8799-as3d724e0d",
+      "status": 200,
+      "retransmits": 0,
+      "window_us": 21454381,
+      "emitter_window_us": 22082
+    }
+  ],
+  "failures": [],
+  "sut": {
+    "addresses": [
+      "192.0.2.10"
+    ],
+    "decided_by": "stated"
+  }
+}

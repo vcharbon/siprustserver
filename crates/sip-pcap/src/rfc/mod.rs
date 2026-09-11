@@ -43,10 +43,12 @@ mod cancel;
 mod census;
 #[cfg(test)]
 mod prack;
+mod sut;
 #[cfg(test)]
 mod testkit;
 
 pub use census::{Census, LocatedHit, ReadFailure, RuleTally};
+pub use sut::{Side, SutSet};
 
 /// The rule vocabulary and its evidence live ONCE, in `rfc-rules` (issue 29);
 /// this module is the capture ADAPTER over them. The census runs the
@@ -101,6 +103,11 @@ pub struct Hit {
     /// emitted the offending message, or that owed the one never emitted.
     pub emitter: String,
     pub emitter_role: EndpointRole,
+    /// The side a stated SUT set places the emitter on ([`SutSet`]) —
+    /// absent when no set was stated, so a report taken without one is
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Side::is_unattributed")]
+    pub side: Side,
     /// The endpoint on the other side of the obligation: where the offending
     /// message went, or who was owed the message that never came.
     pub taker: String,
@@ -158,17 +165,30 @@ pub fn scan(doc: &FlowsDoc) -> Scan {
 /// hits are tallied under its own token and never join the WIRE contract by
 /// being counted.
 pub fn scan_with(doc: &FlowsDoc, candidates: &[RfcRule]) -> Scan {
+    scan_sut(doc, candidates, None)
+}
+
+/// [`scan_with`], every hit also placed on a side by `sut` when one is
+/// stated. The topology role is computed regardless: the two answer
+/// different questions and a reader compares them.
+pub fn scan_sut(doc: &FlowsDoc, candidates: &[RfcRule], sut: Option<&SutSet>) -> Scan {
     let mut out = Scan::default();
     let span = Span::of(doc);
     for (gi, group) in doc.groups.iter().enumerate() {
         let roles = roles_of_group(doc, &group.legs);
         for &li in &group.legs {
             let Some(leg) = doc.legs.get(li) else { continue };
-            let at = Site { leg, leg_index: li, group: gi, roles: &roles, span: &span };
+            let at = Site { leg, leg_index: li, group: gi, roles: &roles, span: &span, sut };
             adapter::detect(&at, &mut out, candidates);
         }
     }
     out
+}
+
+/// The IP an `ip:port` endpoint token names (`#label` suffix and port left
+/// off), or `None` where the token is not a socket address.
+pub(crate) fn endpoint_ip(endpoint: &str) -> Option<std::net::IpAddr> {
+    rfc_rules::wire::endpoint_addr(endpoint).map(|s| s.ip())
 }
 
 /// How long the RECORDING ran, as the whole document tells it.
@@ -215,6 +235,8 @@ pub(crate) struct Site<'a> {
     pub roles: &'a BTreeMap<String, EndpointRole>,
     /// What the whole capture says about how long it kept recording.
     pub span: &'a Span,
+    /// The stated SUT set, when the scan has one.
+    pub sut: Option<&'a SutSet>,
 }
 
 impl Site<'_> {
@@ -236,6 +258,7 @@ impl Site<'_> {
             call_id: self.leg.call_id.clone(),
             emitter: emitter.to_string(),
             emitter_role: self.roles.get(emitter).copied().unwrap_or(EndpointRole::Undetermined),
+            side: self.sut.map_or(Side::Unattributed, |s| s.side_of(emitter)),
             taker: taker.to_string(),
             cseq,
             relayed,

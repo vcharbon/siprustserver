@@ -15,7 +15,7 @@ use crate::doc::FlowsDoc;
 
 use rfc_rules::rules::retransmit::Class as RungClass;
 
-use super::{scan_with, Evidence, Hit, RfcRule};
+use super::{scan_sut, Evidence, Hit, RfcRule, SutSet};
 
 /// What one rule found across the whole sweep.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -30,6 +30,10 @@ pub struct RuleTally {
     pub decided: u64,
     /// Hits by emitter role token.
     pub by_role: BTreeMap<String, u64>,
+    /// Hits by the side a stated SUT set placed the emitter on
+    /// ([`super::Side`]); empty — and absent — when no set was stated.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_side: BTreeMap<String, u64>,
     /// Hits whose emitter forwarded the message on rather than originating the
     /// behaviour (see [`Hit::relayed`]).
     pub relayed: u64,
@@ -71,6 +75,10 @@ pub struct Census {
     pub rules: BTreeMap<String, RuleTally>,
     pub hits: Vec<LocatedHit>,
     pub failures: Vec<ReadFailure>,
+    /// The SUT set every hit's `side` was placed by; absent when none was
+    /// stated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sut: Option<SutSet>,
     /// Rules run beside the WIRE vocabulary to take their baseline (see
     /// [`scan_with`]). Sweep configuration, not a result: it is not reported.
     #[serde(skip)]
@@ -96,11 +104,30 @@ impl Census {
 
     /// Scan one document into the census.
     pub fn absorb(&mut self, document: &str, capture: &str, doc: &FlowsDoc) {
+        self.absorb_with_sut(document, capture, doc, None);
+    }
+
+    /// [`Census::absorb`] with every hit placed on a side by `sut`. The set
+    /// is recorded on the census so the report says what placed its sides;
+    /// a census is one set's — a second, different set is refused.
+    pub fn absorb_with_sut(
+        &mut self,
+        document: &str,
+        capture: &str,
+        doc: &FlowsDoc,
+        sut: Option<&SutSet>,
+    ) {
+        if let Some(sut) = sut {
+            match &self.sut {
+                None => self.sut = Some(sut.clone()),
+                Some(mine) => assert_eq!(mine, sut, "one census, one SUT set"),
+            }
+        }
         self.documents += 1;
         self.groups += doc.groups.len() as u64;
         self.legs += doc.legs.len() as u64;
         self.messages += doc.legs.iter().map(|l| l.msgs.len() as u64).sum::<u64>();
-        let scan = scan_with(doc, &self.candidates);
+        let scan = scan_sut(doc, &self.candidates, sut);
         // Each detector brings its own denominators; the census only adds them
         // up under the token the detector counted them against.
         for (token, population) in scan.population {
@@ -117,6 +144,9 @@ impl Census {
                 tally.documents += 1;
             }
             *tally.by_role.entry(hit.emitter_role.token().to_string()).or_default() += 1;
+            if !hit.side.is_unattributed() {
+                *tally.by_side.entry(hit.side.token().to_string()).or_default() += 1;
+            }
             if hit.relayed {
                 tally.relayed += 1;
             }
@@ -150,12 +180,18 @@ impl Census {
             for (role, n) in tally.by_role {
                 *mine.by_role.entry(role).or_default() += n;
             }
+            for (side, n) in tally.by_side {
+                *mine.by_side.entry(side).or_default() += n;
+            }
             for (bucket, n) in tally.buckets {
                 *mine.buckets.entry(bucket).or_default() += n;
             }
         }
         self.hits.extend(other.hits);
         self.failures.extend(other.failures);
+        if self.sut.is_none() {
+            self.sut = other.sut;
+        }
     }
 
     /// Put the sweep's output in a stable order, so two runs over one corpus
@@ -175,6 +211,17 @@ impl Census {
 
     /// The human summary, one block per rule.
     pub fn summary(&self) -> String {
+        self.render(false)
+    }
+
+    /// The summary over the rules that had an occasion: what a review of a
+    /// few calls under the whole vocabulary reads, where most rules never
+    /// came due.
+    pub fn summary_measured(&self) -> String {
+        self.render(true)
+    }
+
+    fn render(&self, measured_only: bool) -> String {
         let mut out = String::new();
         out.push_str(&format!(
             "scanned {} document(s): {} group(s), {} leg(s), {} message(s); {} unreadable\n",
@@ -185,6 +232,9 @@ impl Census {
             self.failures.len()
         ));
         for (token, tally) in &self.rules {
+            if measured_only && tally.occasions == 0 {
+                continue;
+            }
             out.push_str(&format!(
                 "{token}: {} hit(s) in {} document(s)\n  \
                  {} occasion(s) → {} the capture could decide → {} violation(s)\n",
@@ -195,6 +245,9 @@ impl Census {
             }
             for (role, n) in &tally.by_role {
                 out.push_str(&format!("  emitter {role}: {n}\n"));
+            }
+            for (side, n) in &tally.by_side {
+                out.push_str(&format!("  side {side}: {n}\n"));
             }
             out.push_str(&format!(
                 "  originated {} / relayed onward {}\n",
