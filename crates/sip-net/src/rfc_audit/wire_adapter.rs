@@ -3959,9 +3959,51 @@ impl CrossMessageAuditRule for CancelViaBranchRule {
     }
 }
 
+/// The status a violated `tag-consistency` finding flipped the tag on; `None`
+/// for every other decision.
+fn tag_flip_status(f: &rfc_rules::Finding) -> Option<u16> {
+    match &f.decision {
+        Decision::Violated(rfc_rules::Evidence::UasTagFlipped { status, .. }) => Some(*status),
+        _ => None,
+    }
+}
+
+/// The detail line both `tag-consistency` arms report, off the flip evidence.
+fn tag_flip_detail(f: &rfc_rules::Finding) -> String {
+    let Decision::Violated(rfc_rules::Evidence::UasTagFlipped {
+        status,
+        branch,
+        final_tag,
+        provisional_tags,
+        ..
+    }) = &f.decision
+    else {
+        return String::new();
+    };
+    format!(
+        "UAS To-tag mismatch on {status} (branch {branch}): prior provisional(s) established \
+         tag(s) [{seen}] but the final carries \"{final_tag}\" — RFC 3261 §17.2.1 / §12.1.1",
+        seen = provisional_tags.join(", "),
+    )
+}
+
+/// The flips this bind's `tag-consistency` findings name, at the emitter's
+/// vantage, whose status `class` admits.
+fn tag_flips(
+    events: &[Stamped<SignalingNetworkEvent>],
+    class: impl Fn(u16) -> bool,
+) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+    at_vantage(
+        events,
+        &rfc_rules::rules::correlation::TagConsistency,
+        |f, bind| f.emitter == *bind && tag_flip_status(f).is_some_and(&class),
+        |f, _cid| tag_flip_detail(f),
+    )
+}
+
 /// RFC 3261 §17.2.1 / §12.1.1 live: the merged `tag-consistency` rule at this
-/// bind's vantage — the UAS mints the tag, so the bind is charged for its own
-/// final.
+/// bind's vantage on a **2xx** final — the UAS mints the tag, so the bind is
+/// charged for its own final.
 ///
 /// The live policy this bind adds to the rule body: the finding is ADVISORY. A
 /// forking B2BUA legitimately relays one early dialog's provisional (tag A) and
@@ -3969,6 +4011,9 @@ impl CrossMessageAuditRule for CancelViaBranchRule {
 /// transaction — §12.1.2 / §13.2.2.4 permit a 2xx establishing a fresh dialog,
 /// and per branch that is indistinguishable from a UAS tag flip. The finding is
 /// recorded for review and never gates.
+///
+/// The waiver reaches no further than its own argument: a NON-2xx final
+/// establishes no dialog, so [`TagConsistencyNon2xxRule`] gates it.
 pub struct TagConsistencyRule;
 
 impl CrossMessageAuditRule for TagConsistencyRule {
@@ -3988,24 +4033,34 @@ impl CrossMessageAuditRule for TagConsistencyRule {
         &self,
         events: &[Stamped<SignalingNetworkEvent>],
     ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
-        surfaced(events, &rfc_rules::rules::correlation::TagConsistency, |f, _cid| {
-            let Decision::Violated(rfc_rules::Evidence::UasTagFlipped {
-                status,
-                branch,
-                final_tag,
-                provisional_tags,
-                ..
-            }) = &f.decision
-            else {
-                return String::new();
-            };
-            format!(
-                "UAS To-tag mismatch on {status} (branch {branch}): prior provisional(s) \
-                 established tag(s) [{seen}] but the final carries \"{final_tag}\" — RFC 3261 \
-                 §17.2.1 / §12.1.1",
-                seen = provisional_tags.join(", "),
-            )
-        })
+        tag_flips(events, |status| (200..300).contains(&status))
+    }
+}
+
+/// RFC 3261 §17.2.1 / §12.1.1 live: the same merged `tag-consistency` rule on a
+/// **non-2xx** final, which GATES.
+///
+/// Only a 2xx establishes a dialog (§12.1.1), so the forked-answer waiver
+/// [`TagConsistencyRule`] carries has nothing to say here: a non-2xx final ends
+/// the transaction under a tag no provisional showed, leaving the caller in an
+/// early dialog nothing ever terminates. Reported under the same rule token —
+/// one obligation, two severities.
+pub struct TagConsistencyNon2xxRule;
+
+impl CrossMessageAuditRule for TagConsistencyNon2xxRule {
+    fn name(&self) -> &'static str {
+        rfc_rules::RuleId::TagConsistency.token()
+    }
+
+    fn check(&self, events: &[Stamped<SignalingNetworkEvent>]) -> Vec<(LaneKey, String)> {
+        self.check_positioned(events).into_iter().map(|(b, d, _, _)| (b, d)).collect()
+    }
+
+    fn check_positioned(
+        &self,
+        events: &[Stamped<SignalingNetworkEvent>],
+    ) -> Vec<(LaneKey, String, Option<usize>, Option<LaneKey>)> {
+        tag_flips(events, |status| !(200..300).contains(&status))
     }
 }
 
@@ -4500,6 +4555,7 @@ pub fn cross_rules() -> Vec<std::sync::Arc<dyn CrossMessageAuditRule>> {
         std::sync::Arc::new(CancelRequestUriRule),
         std::sync::Arc::new(CancelViaBranchRule),
         std::sync::Arc::new(TagConsistencyRule),
+        std::sync::Arc::new(TagConsistencyNon2xxRule),
         std::sync::Arc::new(No100relRequireOnNonInviteRule),
         std::sync::Arc::new(Reliable1xxHeadersRule),
         std::sync::Arc::new(CancelCseqMethodRule),
@@ -5598,13 +5654,25 @@ mod tests {
     /// body and forgets to surface it here would otherwise run nowhere and say
     /// nothing — the adapter is the ONLY live consumer, so the two registries
     /// are one fact stated twice.
+    ///
+    /// One token may carry SEVERAL adapters: a live policy that waives part of
+    /// an obligation states the waived arm and the gating arm separately, and
+    /// they answer to the same rule. Two adapters agreeing on severity are a
+    /// duplicate, not a split, and the rung says so.
     #[test]
     fn every_merged_rule_has_a_live_adapter() {
-        let mut surfaced: Vec<&str> = cross_rules().iter().map(|r| r.name()).collect();
-        surfaced.sort_unstable();
-        let before = surfaced.len();
-        surfaced.dedup();
-        assert_eq!(before, surfaced.len(), "a rule is surfaced twice");
+        let mut by_token: std::collections::BTreeMap<&str, Vec<bool>> =
+            std::collections::BTreeMap::new();
+        for rule in cross_rules() {
+            by_token.entry(rule.name()).or_default().push(rule.force_advisory());
+        }
+        for (token, mut severities) in by_token.clone() {
+            let arms = severities.len();
+            severities.sort_unstable();
+            severities.dedup();
+            assert_eq!(arms, severities.len(), "{token} is surfaced twice at one severity");
+        }
+        let surfaced: Vec<&str> = by_token.keys().copied().collect();
         let mut declared: Vec<&str> =
             rfc_rules::RuleId::ALL.iter().map(|r| r.token()).collect();
         declared.sort_unstable();
@@ -6905,10 +6973,11 @@ a=sendrecv\r\n";
         assert!(named(HashSet::from([UaRole::Uas])).is_empty(), "a plain UAS lane is not judged");
     }
 
-    /// A UAS To-tag flip is SURFACED and never gates: a forking B2BUA answering
-    /// off a later early dialog is indistinguishable from one per branch.
+    /// A UAS To-tag flip on a **2xx** is SURFACED and never gates: a forking
+    /// B2BUA answering off a later early dialog is indistinguishable from one
+    /// per branch.
     #[test]
-    fn a_uas_tag_flip_is_advisory() {
+    fn a_uas_tag_flip_on_a_2xx_is_advisory() {
         let evs = vec![
             sent(SUT, resp(180, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 0),
             sent(SUT, resp(200, 1, "INVITE", "bt2", "z9hG4bK-i"), ALICE, 1),
@@ -6921,6 +6990,38 @@ a=sendrecv\r\n";
         assert_eq!(f[0].lane, SUT);
         assert!(f[0].advisory, "the tag flip is informational");
         assert!(f[0].detail.contains("To-tag mismatch"), "{}", f[0].detail);
+    }
+
+    /// The same flip on a NON-2xx GATES, and is reported once: a final that
+    /// establishes no dialog cannot be a fresh early dialog's answer, so the
+    /// forked-2xx waiver does not reach it.
+    #[test]
+    fn a_uas_tag_flip_on_a_non_2xx_gates() {
+        let evs = vec![
+            sent(SUT, resp(180, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 0),
+            sent(SUT, resp(486, 1, "INVITE", "bt2", "z9hG4bK-i"), ALICE, 1),
+        ];
+        let f: Vec<RfcFinding> = evaluate_rfc_findings(&evs)
+            .into_iter()
+            .filter(|f| f.rule == TagConsistencyNon2xxRule.name())
+            .collect();
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].lane, SUT);
+        assert!(!f[0].advisory, "a non-2xx tag flip fails the run");
+        assert!(f[0].detail.contains("To-tag mismatch on 486"), "{}", f[0].detail);
+    }
+
+    /// A final carrying a tag one of the transaction's own provisionals showed
+    /// is compliant on either arm — the rule charges the FLIP, not the fork.
+    #[test]
+    fn a_final_under_a_shown_tag_charges_neither_arm() {
+        let evs = vec![
+            sent(SUT, resp(180, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 0),
+            sent(SUT, resp(486, 1, "INVITE", "bt", "z9hG4bK-i"), ALICE, 1),
+        ];
+        assert!(evaluate_rfc_findings(&evs)
+            .into_iter()
+            .all(|f| f.rule != TagConsistencyRule.name()));
     }
 
     // ── rack-without-known-invite (merged, via this adapter) ────────────────

@@ -197,9 +197,15 @@ impl ActionExecutor<'_> {
 
     /// Broker an unadopted leg's SDP onto the a-leg as an unreliable provisional
     /// (RFC 3262 §3 early media). Only the a-leg has a stored UAS INVITE to
-    /// answer; a non-a target or a non-1xx status is skipped. `to_tag` set ⇒
-    /// ephemeral forked early dialog (verbatim, not persisted); absent ⇒ the
-    /// B2BUA's own early identity (reuse/mint+persist).
+    /// answer; a non-a target or a non-1xx status is skipped. `to_tag` set ⇒ the
+    /// caller's early identity, stated by the service; absent ⇒ the B2BUA's own
+    /// (reuse/mint).
+    ///
+    /// Either way the tag the caller is SHOWN becomes the a-dialog's, so the
+    /// non-2xx final ending this transaction answers under it (§17.2.1) rather
+    /// than under a tag the caller was never in — a b-leg confirm may have minted
+    /// one before she saw anything. Only a 2xx supersedes it, under A2
+    /// ([`Self::answer_a_leg_new_dialog`]).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn send_provisional_to_leg(
         &self,
@@ -216,11 +222,18 @@ impl ActionExecutor<'_> {
         if !(100..200).contains(&status) || leg_id != call.a_leg.leg_id {
             return;
         }
-        // `to_tag` provided → an ephemeral forked early dialog, used verbatim and
-        // NOT persisted onto the a-dialog. Absent → the B2BUA's own early identity:
-        // reuse the existing a-dialog tag or mint and persist one.
+        // `to_tag` provided → the service states the caller's early identity: it
+        // seeds the a-dialog, and re-stamps one a b-leg confirm minted before any
+        // caller-facing response carried it. Absent → the B2BUA's own early
+        // identity: reuse the existing a-dialog tag or mint and persist one.
         let to_tag = match to_tag {
-            Some(t) => t.to_string(),
+            Some(t) => {
+                self.ensure_a_dialog_with(call, Some(t.to_string()));
+                if let Some(d) = call.a_leg.dialogs.first_mut() {
+                    d.sip.local_tag = t.to_string();
+                }
+                t.to_string()
+            }
             None => self.ensure_a_dialog(call),
         };
         // SDP early-media body defaults to application/sdp (mirrors the request path).

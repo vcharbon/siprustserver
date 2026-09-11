@@ -638,9 +638,10 @@ impl Obligation for CancelViaBranch {
 /// reconcile the two by.
 ///
 /// The occasion is one final response the endpoint sent on a transaction (top-Via
-/// branch) whose provisionals had already established a tag; a final on a
-/// transaction with no prior tagged provisional establishes the dialog itself and
-/// owes nothing. Charges the responding UAS.
+/// branch AND CSeq method — §17.2.3 gives a CANCEL its own server transaction on
+/// the INVITE's branch) whose provisionals had already established a tag; a final
+/// on a transaction with no prior tagged provisional establishes the dialog itself
+/// and owes nothing. Charges the responding UAS.
 pub struct TagConsistency;
 
 impl Obligation for TagConsistency {
@@ -649,8 +650,9 @@ impl Obligation for TagConsistency {
     }
 
     fn eval(&self, wire: &WireView<'_>) -> Vec<Finding> {
-        // (emitter, branch) -> the tags its provisionals established, in order.
-        let mut committed: HashMap<(String, String), Vec<String>> = HashMap::new();
+        // (emitter, branch, CSeq method) -> the tags its provisionals established,
+        // in order.
+        let mut committed: HashMap<(String, String, String), Vec<String>> = HashMap::new();
         let mut out = Vec::new();
         for (mi, msg) in wire.msgs.iter().enumerate() {
             if msg.repeat {
@@ -660,7 +662,7 @@ impl Obligation for TagConsistency {
             let (Some(branch), Some(tag)) = (msg.via_branch.clone(), msg.to_tag.clone()) else {
                 continue;
             };
-            let key = (msg.src.clone(), branch.clone());
+            let key = (msg.src.clone(), branch.clone(), msg.cseq_method.to_ascii_uppercase());
             if (101..200).contains(&status) {
                 committed.entry(key).or_default().push(tag);
                 continue;
@@ -1422,6 +1424,22 @@ mod tests {
             resp(3_000, B, A, 200, 1, "INVITE", "z9hG4bK-i", "at", Some("bt"), 1),
         ];
         assert!(run(&TagConsistency, &msgs).is_empty());
+    }
+
+    /// §17.2.3: a CANCEL rides the INVITE's branch but forms its OWN server
+    /// transaction, so the INVITE's provisional tag commits nothing on it — the
+    /// answer to a CANCEL that matches no transaction states a tag of its own.
+    #[test]
+    fn a_cancel_answered_on_the_invite_branch_is_its_own_transaction() {
+        let msgs = vec![
+            req(1_000, A, B, "INVITE", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1),
+            resp(2_000, B, A, 180, 1, "INVITE", "z9hG4bK-i", "at", Some("bt"), 1),
+            resp(3_000, B, A, 200, 1, "INVITE", "z9hG4bK-i", "at", Some("bt"), 1),
+            req(4_000, A, B, "CANCEL", "sip:bob@h", 1, "z9hG4bK-i", "sip:alice@h", "at", None, 1),
+            resp(5_000, B, A, 481, 1, "CANCEL", "z9hG4bK-i", "at", Some("fallback"), 1),
+        ];
+        let f = charged(run(&TagConsistency, &msgs), B);
+        assert!(f.iter().all(|f| matches!(f.decision, Decision::Compliant)), "{f:?}");
     }
 
     // ── no-to-tag-on-initial-request ────────────────────────────────────────
