@@ -45,7 +45,7 @@ Target crate: `crates/scenario-harness`, new `src/actor/` module; `realcall/*`,
   construction).
 - **RFC hard gate** — the *default* answer path answers offer-carrying
   INVITE/UPDATE with SDP; it MUST NOT fall through to a bodyless 200 (RFC 3264 §5).
-- **WSL2** — one `cargo` build/test at a time; none concurrent with a load run.
+- **One builder** — one `cargo` build/test at a time; none concurrent with a load run.
 
 ---
 

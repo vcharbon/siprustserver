@@ -99,8 +99,7 @@ SIP_SUBNET=10.80.0.0/16 SIP_PORT=5080 ./run.sh deploy
 
 ## System requirements (kind host)
 
-The runner is developed on WSL2 but runs on any Linux box with rootful Docker
-(e.g. a VMware VM). `run.sh up` runs a host preflight (cgroups + sysctls,
+The runner runs on any Linux box with rootful Docker (a VM included). `run.sh up` runs a host preflight (cgroups + sysctls,
 advisory by default — see the knobs above) before creating the cluster.
 
 | Requirement | Minimum / note |
@@ -130,7 +129,7 @@ cd deploy/k8s
 ```
 
 It is a **shell script, not a `cargo test`** — real kind clusters + image builds
-are slow and WSL2-flaky, so it must never gate `cargo test --workspace`. The
+are slow and host-sensitive, so it must never gate `cargo test --workspace`. The
 delta-translation logic it exercises *is* unit-tested fast (`cargo test -p
 topology --features kube`); chaos.sh is the end-to-end signal you run on demand.
 
@@ -150,7 +149,7 @@ diverge (the chaos/endurance scenarios especially):
 
 | Artifact | Location (was a symlink) | Note |
 |---|---|---|
-| Cluster topology | `deploy/k8s/cluster.yaml` | Copied from `sipjsserver/tests/k8s/cluster.yaml`; **same cluster name `sip-e2e`** (WSL one-cluster switch) |
+| Cluster topology | `deploy/k8s/cluster.yaml` | Copied from `sipjsserver/tests/k8s/cluster.yaml`; **same cluster name `sip-e2e`** (the one-cluster switch) |
 | SIPp scenarios | `deploy/k8s/sipp/scenarios/` | Copied from the sipjs sipp chart; free to diverge |
 | SIPp image | built in `run.sh` from `deploy/k8s/sipp/Dockerfile` | One `sipp:dev` driver, built from the vendored context |
 
@@ -158,9 +157,9 @@ To still compare Node vs Rust head-to-head, keep the *scenarios* byte-identical
 where you want comparable results; everything else is SUT-specific and lives
 here.
 
-### WSL one-cluster constraint
+### One cluster at a time
 
-This host runs **one** kind cluster at a time, and both SUTs deliberately use the
+The host runs **one** kind cluster at a time, and both SUTs deliberately use the
 cluster name **`sip-e2e`**. `run.sh up` (and `all`) **first** run
 `kind delete cluster --name sip-e2e` — destroying any existing `sip-e2e` cluster,
 including sipjsserver's. That is the intended "stop the other, run this" switch;

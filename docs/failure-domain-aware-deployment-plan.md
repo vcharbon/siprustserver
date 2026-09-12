@@ -170,7 +170,7 @@ stays a config knob for degenerate clusters.
   needs revisiting against sipext: whichever nodes host the proxies must be the
   (only) ones dual-homed onto the sipext bridge.
 
-> **WSL2 memory caveat.** 6 app + control-plane ≈ 7 kind nodes is still heavier
+> **Host memory caveat.** 6 app + control-plane ≈ 7 kind nodes is still heavier
 > than today's cluster — see the endurance OOM history
 > (`deploy/observability/.../cap-kind-memory.sh`, MEMORY: *endurance+chaos
 > suite*). Run `cap-kind-memory.sh` first. A smaller "mechanism-only" variant

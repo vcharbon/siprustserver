@@ -428,6 +428,6 @@ reroute loss soak is wanted.
 
 - `docs/testing/test-clock.md` before ANY timed test; `docs/testing/harness-layers.md`
   for harness selection; every test terminates every call + asserts release.
-- One compiling/testing agent at a time (WSL2 memory); cap heavy cargo runs.
+- One compiling/testing agent at a time; cap heavy cargo runs on a small host.
 - SUT output stays RFC-compliant; `allow_violation` only for deliberate peer-side
   deltas, never to mute SUT findings.

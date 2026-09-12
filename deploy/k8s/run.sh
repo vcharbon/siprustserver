@@ -15,8 +15,8 @@
 # can diverge — especially the endurance/chaos scenarios. Reuses the SAME kind
 # cluster name (`sip-e2e`).
 #
-# >>> WSL ONE-CLUSTER CONSTRAINT <<<
-# Only one kind cluster runs at a time on this host. `up` is NON-DESTRUCTIVE: if a
+# >>> ONE-CLUSTER CONSTRAINT <<<
+# Only one kind cluster runs at a time on the host. `up` is NON-DESTRUCTIVE: if a
 # `sip-e2e` cluster already exists it REFUSES rather than wiping it, so a cluster
 # left behind by a failed run survives for analysis. Destruction is explicit —
 # `down` — and `up` never auto-tears-down on failure either. To reclaim the host

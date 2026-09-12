@@ -3,7 +3,7 @@
 //! A SIGPROF-sampling profiler (pprof-rs) that, on request, samples ALL threads
 //! of the current process for a fixed window and renders an inferno flamegraph
 //! SVG. No `perf`, no privileges, no kernel PMU — works in an unprivileged
-//! container on the WSL2 kernel where `perf` is unavailable. Backs the
+//! container on a kernel where `perf` is unavailable. Backs the
 //! `/debug/flamegraph` HTTP route on the b2bua-worker + front-proxy metrics
 //! servers, so an endurance run can profile either tier live (e.g. around a
 //! chaos reboot) without rebuilding or redeploying.

@@ -23,13 +23,13 @@ The loadgen is chaos-aware and auto-buckets accepted collateral (`POST /chaos`
 **Triage `chaos="clear"`.** See
 [crates/loadgen/README.md](../../crates/loadgen/README.md).
 
-## Known non-SUT artifact: host clock skew (WSL2 endurance)
+## Known non-SUT artifact: host clock skew (endurance on a VM host)
 
 A failed-over call whose backup fires an in-dialog keepalive OPTIONS **~one
 keepalive interval early** (e.g. at T+10 s on a 300 s cadence, racing the
 failed-over re-INVITE that triggered the takeover) is a **host clock-step
 artifact**, not a failover bug. Each pod anchors wall time once at start
-(`sip_clock::Clock::system`); when the shared WSL2 host clock **steps**
+(`sip_clock::Clock::system`); when the shared host clock **steps**
 (post-sleep drift "corrected" by stepping timesyncd), pods anchored on either
 side of the step diverge permanently, and a replicated absolute `fire_at` from
 the dead node becomes past-due on the takeover node. Root case:

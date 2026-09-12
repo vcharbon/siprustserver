@@ -2,14 +2,14 @@
 
 Project is ultra early, not in production, do not worry about upgrade
 compatibility when designing solutions.
-To show a html file to user use tha bash alias  'firefox ./path/to/file/index.html' so that it works on wsl.
+To show a html file or a URL to the user, `xdg-open ./path/to/file/index.html` / `xdg-open "http://localhost:.../"`.
 
 ## Coding rules
 
 Doc comments state present-tense contracts and invariants. History (dates, commit hashes, ticket IDs, "previously/replaces/no longer") lives in git and ADRs — a comment may cite ADR-00xx in one line, never retell it. If a comment needs more than ~5 lines to justify a behavior rather than describe it, either the behavior is wrong — write FIXME(scope): <one-line defect + one-line fix direction> — or the rationale is architectural and belongs in an ADR with a one-line pointer. By default however do not write FIXME, implement correct behavior unless specifically asked to delay specific corner cases.
 Each file must have it own concern. No not mix concerns.
 Never implement SIP header or message extraction in crates other than sip-message.
-Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only, shared byte-for-byte with newkahsip). The host cargo shim formats every touched `.rs` before a build, and `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it.
+Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only, shared byte-for-byte with newkahsip). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it.
 
 
 ## Where the details live (progressive disclosure)
@@ -129,14 +129,14 @@ A test that installs process-global state (a trace registry, the allocation
 counter, a real socket, process env) stays a `tests/*.rs` target of its own —
 folded in, it does not fail the suite, it wedges it.
 
-## Agent & build concurrency (WSL2 resource limits)
+## Agent & build concurrency
 
 **Never run more than ONE agent (subagent / workflow stage) at a time that
-compiles or runs tests.**
-Cap heavy commands on this box:
-`systemd-run --user --scope -q -p MemoryMax=12G -p CPUQuota=1200% nice -n 10
-cargo build … --jobs 6`; long-lived test processes (SUT, loadgen, e2e-web) get
-their own small scopes (e.g. `-p MemoryMax=2G -p CPUQuota=400%`).
+compiles or runs tests.** Builds serialise on the target directory and a build
+racing a running SUT or loadgen skews what the run measures. On a host short on
+memory, cap a heavy command in a scope:
+`systemd-run --user --scope -q -p MemoryMax=12G cargo build … --jobs 6`; a
+long-lived test process (SUT, loadgen, e2e-web) then gets its own small scope.
 
 ## HA / chaos — summary ([acceptance guide](docs/testing/ha-acceptance.md))
 
@@ -145,7 +145,7 @@ established calls — a confirmed call dropping is always genuine. Accepted
 collateral: a dialog whose state changed within the acceptance window (default
 200 ms) of a kill (the confirm-race); the loadgen auto-buckets `chaos="near"`
 vs `chaos="clear"` — triage `clear`. A takeover keepalive firing ~one interval
-early on WSL2 endurance is a host clock-STEP artifact (fix is infra; the SUT
+early on an endurance run is a host clock-STEP artifact (fix is infra; the SUT
 re-anchors restored timers to bound the residual). Design invariants — never
 reintroduce: time-based settle/handback (reconciliation is `(p,b)`-causal
 only), smoothing or skew re-anchoring inside the timer driver, reclaim
