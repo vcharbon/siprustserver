@@ -27,6 +27,7 @@ mod decision_lands_on_cancelled_call;
 mod failure;
 mod failure_header_relay;
 mod fake_prack;
+mod foreign_dialog_tag;
 mod info_body_relay;
 mod keepalive;
 mod keepalive_481;

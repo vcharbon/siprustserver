@@ -140,7 +140,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
             // no INVITE for it; naming no call either, it draws the RFC 3261
             // §9.2 481 here. Every other unroutable request is the peer's to
             // re-send or give up on.
-            reject_stray_cancel(ctx, &event).await;
+            reject_stray_cancel(ctx, None, &event).await;
             ctx.metrics.bump_unroutable_dropped();
             return;
         }

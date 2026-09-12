@@ -102,6 +102,11 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
                 crate::trace::emit::sip_in(&call, now_ms, *src, message.image());
             }
         }
+        // A request in a dialog this call does not hold is refused before any
+        // of the machinery below reads it (RFC 3261 §12.2.2).
+        if refuse_foreign_dialog(ctx, &call, &event, &res).await {
+            return;
+        }
         // The layer emitted this datagram with no transaction to match it; a
         // materialisation — this turn's or an earlier one's, whose seeds went in
         // after the datagram was emitted — may hold one now. Re-offered, a match
@@ -110,10 +115,11 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             return;
         }
         // A CANCEL reaches the router only when the transaction layer matched
-        // no active INVITE for it; the re-offer above was the seeded INVITE's
-        // chance. Otherwise RFC 3261 §9.2: 481, and no effect on the call. The
-        // rules never see a CANCEL request.
-        if reject_stray_cancel(ctx, &event).await {
+        // no INVITE for it; the re-offer above was the seeded INVITE's chance.
+        // Otherwise RFC 3261 §9.2: 481, and no effect on the call. The rules
+        // never see a CANCEL request.
+        let own_tag = call::helpers::b2bua_tag(&call, &res.source_leg_id);
+        if reject_stray_cancel(ctx, own_tag.as_deref(), &event).await {
             return;
         }
         // The limiter-refresh timer is async (an HTTP call to migrate holds), so
@@ -454,16 +460,47 @@ async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Optio
     }
 }
 
+/// RFC 3261 §12.2.2 for a mid-dialog request on a live call: a To-tag naming
+/// no dialog this stack holds on the leg it arrived on draws 481 and touches
+/// nothing. An ACK draws no response at all (§17.1.1.3) and is dropped, so the
+/// §13.3.1.4 ladder keeps repeating the 2xx it failed to acknowledge. A CANCEL
+/// is matched by transaction (§9.1) and never read here. `true` when refused.
+async fn refuse_foreign_dialog(
+    ctx: &RouterCtx,
+    call: &Call,
+    event: &CallEvent,
+    res: &Resolution,
+) -> bool {
+    let CallEvent::Sip { message, src, .. } = event else { return false };
+    let SipMessage::Request(req) = message.as_ref() else { return false };
+    if req.method() == Method::Cancel {
+        return false;
+    }
+    let Some(tag) = req.to().tag() else { return false };
+    if call::helpers::holds_local_tag(call, &res.source_leg_id, tag) != Some(false) {
+        return false;
+    }
+    if req.method() != Method::Ack {
+        let _ = ctx.txn.send_response(build_481(req, None), *src).await;
+    }
+    true
+}
+
 /// RFC 3261 §9.2 for a CANCEL that matched no INVITE transaction in the layer
-/// and none a call here could rebuild: 481, and no effect on any call. `true`
-/// when `event` was such a CANCEL and has been answered.
-pub(super) async fn reject_stray_cancel(ctx: &RouterCtx, event: &CallEvent) -> bool {
+/// and none a call here could rebuild: 481 under `to_tag`, the tag the call's
+/// final to the INVITE carried where a call resolves, and no effect on any
+/// call. `true` when `event` was such a CANCEL and has been answered.
+pub(super) async fn reject_stray_cancel(
+    ctx: &RouterCtx,
+    to_tag: Option<&str>,
+    event: &CallEvent,
+) -> bool {
     let CallEvent::Sip { message, src, .. } = event else { return false };
     let SipMessage::Request(req) = message.as_ref() else { return false };
     if req.method() != Method::Cancel {
         return false;
     }
-    let _ = ctx.txn.send_response(build_481(req), *src).await;
+    let _ = ctx.txn.send_response(build_481(req, to_tag), *src).await;
     true
 }
 
@@ -723,7 +760,7 @@ async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
     if let CallEvent::Sip { message, src, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
             if req.method() != "ACK" {
-                let _ = ctx.txn.send_response(build_481(req), *src).await;
+                let _ = ctx.txn.send_response(build_481(req, None), *src).await;
             }
         }
     }

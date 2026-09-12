@@ -16,10 +16,13 @@ fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
 }
 
 /// `481 Call/Transaction Does Not Exist` to `req`: an in-dialog request naming
-/// no call this node holds (RFC 3261 §12.2.2), or a CANCEL matching no INVITE
-/// transaction here (§9.2).
-pub(super) fn build_481(req: &SipRequest) -> SipResponse {
-    generate_response(req, 481, "Call/Transaction Does Not Exist", &GenerateResponseOpts::default())
+/// no dialog this node holds (RFC 3261 §12.2.2), or a CANCEL matching no INVITE
+/// transaction here (§9.2). `to_tag` is the tag this node's final to the
+/// INVITE carried, when a call resolves and `req`'s To has none (§9.2: the
+/// CANCEL's response shares that tag); a tagged To is echoed as it came.
+pub(super) fn build_481(req: &SipRequest, to_tag: Option<&str>) -> SipResponse {
+    let opts = GenerateResponseOpts { to_tag: to_tag.map(str::to_owned), ..Default::default() };
+    generate_response(req, 481, "Call/Transaction Does Not Exist", &opts)
 }
 
 /// Build the self-reported readiness reply to an out-of-dialog OPTIONS

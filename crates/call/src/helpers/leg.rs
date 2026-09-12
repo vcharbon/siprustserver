@@ -131,6 +131,22 @@ pub fn b2bua_tag(call: &Call, leg_id: &str) -> Option<String> {
     Some(b.dialogs.first().map(|d| d.sip.local_tag.clone()).unwrap_or_else(|| b.from_tag.clone()))
 }
 
+/// Whether `tag` is one this stack put on `leg_id`: the `localTag` of any of
+/// its dialogs, an a-facing fork tag in the tag map, or the From-tag the leg's
+/// own INVITE carried (a b-leg). `None` while the leg holds no tag of its own,
+/// so a request's To-tag has nothing to be measured against (RFC 3261 §12.2.2).
+pub fn holds_local_tag(call: &Call, leg_id: &str, tag: &str) -> Option<bool> {
+    let leg = find_leg(call, leg_id)?;
+    let mut own: Vec<&str> =
+        leg.dialogs.iter().map(|d| d.sip.local_tag.as_str()).filter(|t| !t.is_empty()).collect();
+    if leg_id == "a" {
+        own.extend(call.tag_map.iter().map(|m| m.a_tag.as_str()).filter(|t| !t.is_empty()));
+    } else if !leg.from_tag.is_empty() {
+        own.push(leg.from_tag.as_str());
+    }
+    (!own.is_empty()).then(|| own.contains(&tag))
+}
+
 /// The remote party's tag for a leg (`sip.remoteTag` of `dialogs[0]`).
 pub fn remote_tag(call: &Call, leg_id: &str) -> Option<String> {
     if leg_id == "a" {
