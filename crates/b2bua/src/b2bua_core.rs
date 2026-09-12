@@ -213,6 +213,7 @@ impl B2buaCore {
                 // `cancel_strict_rfc3261_wait` selects the literal §9.1 wait.
                 cancel_hold_grace_ms: (!config.cancel_strict_rfc3261_wait)
                     .then_some(sip_txn::timers::CANCEL_HOLD_GRACE),
+                strict_to_tag: true,
             },
         );
         let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());

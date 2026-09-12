@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use sip_message::{SipMessage, SipParser, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 use tokio::sync::{mpsc, oneshot};
@@ -55,6 +56,12 @@ pub struct TransactionConfig {
     /// txn dies first — a callee that never sends one is never CANCELed
     /// (ADR-0028 documents when that trade is acceptable).
     pub cancel_hold_grace_ms: Option<u64>,
+    /// Whether a response the TU hands over under a To-tag other than the
+    /// bound one fails a debug build loudly (`debug_assert!`) besides being
+    /// re-rendered. The wire is corrected either way; `true` — the default —
+    /// makes the defect a test failure, and a test that exercises the
+    /// correction itself turns it off.
+    pub strict_to_tag: bool,
 }
 
 impl Default for TransactionConfig {
@@ -65,6 +72,7 @@ impl Default for TransactionConfig {
             invite_initial_timeout_ms: crate::timers::INVITE_INITIAL_TIMEOUT,
             invite_first_response_timeout_ms: crate::timers::TIMER_B,
             cancel_hold_grace_ms: Some(crate::timers::CANCEL_HOLD_GRACE),
+            strict_to_tag: true,
         }
     }
 }
@@ -79,7 +87,7 @@ pub(super) enum Command {
     SendResponse {
         msg: Box<SipResponse>,
         dest: SocketAddr,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Bytes>,
     },
     SendRaw {
         buf: Vec<u8>,
@@ -165,6 +173,7 @@ impl TransactionLayer {
             config.invite_initial_timeout_ms,
             config.invite_first_response_timeout_ms,
             config.cancel_hold_grace_ms,
+            config.strict_to_tag,
         );
         let owner_abort = tokio::spawn(run(owner, endpoint, cmd_rx)).abort_handle();
 
@@ -209,15 +218,16 @@ impl TransactionLayer {
             .await
     }
 
-    /// Send an outbound SIP response through its server transaction. The bytes
-    /// on the wire are `msg.image()`, verbatim: a TU that retains the image is
-    /// retaining what left the socket (ADR-0029 X3), so this layer never
-    /// re-renders a response.
+    /// Send an outbound SIP response through its server transaction and
+    /// return the datagram that left. The bytes are `msg.image()` verbatim
+    /// unless the To-tag had to be bound to the transaction's (`bind_to_tag`),
+    /// so a TU that retains an image for a repeat retains what is returned
+    /// here (ADR-0029 X3).
     pub async fn send_response(
         &self,
         msg: SipResponse,
         dest: SocketAddr,
-    ) -> Result<(), TransactionLayerClosed> {
+    ) -> Result<Bytes, TransactionLayerClosed> {
         self.roundtrip(|reply| Command::SendResponse { msg: Box::new(msg), dest, reply }).await
     }
 

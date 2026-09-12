@@ -17,7 +17,24 @@ fn fallback_to_tag(call_id: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     call_id.hash(&mut hasher);
-    format!("b2bua-fb-{:016x}", hasher.finish())
+    format!("{FALLBACK_TAG_PREFIX}{:016x}", hasher.finish())
+}
+
+const FALLBACK_TAG_PREFIX: &str = "b2bua-fb-";
+
+/// Whether `tag` is one [`fallback_to_tag`] minted: the shape a caller that
+/// knew the dialog's tag would never have produced, so a layer holding that
+/// tag may replace it.
+pub fn is_fallback_to_tag(tag: &str) -> bool {
+    tag.strip_prefix(FALLBACK_TAG_PREFIX)
+        .is_some_and(|rest| rest.len() == 16 && rest.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// `response` re-rendered with `tag` as its To-tag (RFC 3261 §8.2.6.2), every
+/// other line and the body kept. `None` where the response's To does not read
+/// or the draft will not freeze — the caller keeps what it had.
+pub fn retag_response(response: &SipResponse, tag: &str) -> Option<SipResponse> {
+    response.thaw().update::<To>(|to| to.with_tag(SipStr::owned(tag))).ok()?.freeze().ok()
 }
 
 /// Inputs for [`generate_response`]. Via / From / To / Call-ID / CSeq are not

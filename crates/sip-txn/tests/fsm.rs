@@ -706,10 +706,10 @@ async fn unmatched_cancel_is_handed_up_unanswered() {
     assert_eq!(active(&stack), 0, "and builds no transaction");
 }
 
-/// A CANCEL arriving after the INVITE was answered (200 raced the CANCEL, then
-/// the CANCEL retransmits) finds the server txn Completed — not active — so it
-/// draws no 487 that would tear the established call down; it is handed up for
-/// the TU's §9.2 481, and the Completed INVITE txn is untouched.
+/// A CANCEL arriving after the INVITE was answered (200 raced the CANCEL) finds
+/// the server txn held past its final (RFC 6026 §7.1), so the layer answers it
+/// 200 itself (RFC 3261 §9.2): no 487 that would tear the established call
+/// down, nothing handed up, and the INVITE txn is untouched.
 #[tokio::test(start_paused = true)]
 async fn cancel_after_answer_does_not_tear_down_the_call() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -728,14 +728,15 @@ async fn cancel_after_answer_does_not_tear_down_the_call() {
     stack.inject(&inbound_request("CANCEL", branch, call_id, None)).await;
     elapse_ms(60).await;
     let out = stack.drain_peer();
-    assert!(out.is_empty(), "a late CANCEL draws nothing from the layer: {out:?}");
+    assert_eq!(count_responses(&out, 200), 1, "the late CANCEL is answered 200: {out:?}");
+    assert_eq!(count_responses(&out, 487), 0, "and draws no 487: {out:?}");
     let events = stack.drain_events();
     assert!(
         !events.iter().any(|e| matches!(e, TransactionEvent::Cancelled { .. })),
         "no Cancelled for a CANCEL after answer"
     );
-    assert!(has_message_request(&events, "CANCEL"), "the late CANCEL is the TU's to 481");
-    assert_eq!(active(&stack), 1, "the Completed INVITE txn stays for Timer H");
+    assert!(!has_message_request(&events, "CANCEL"), "the layer answered it; nothing handed up");
+    assert_eq!(active(&stack), 1, "the answered INVITE txn stays for its timer");
 }
 
 // ── ACK absorption (server INVITE) ──────────────────────────────────────────

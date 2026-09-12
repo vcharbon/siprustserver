@@ -69,6 +69,7 @@ impl Owner {
                         destination: None,
                     });
                     txn.uas_to_tag = to_tag.filter(|t| !t.is_empty());
+                    txn.early_tags.extend(txn.uas_to_tag.clone());
                     self.set_txn(txn);
                 }
             }

@@ -240,7 +240,16 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
                     "a raw response bypass is a retained datagram, never a re-serialized Response: {}",
                     eff.label
                 );
-                let _ = ctx.txn.send_response(resp.clone(), dest).await;
+                // The layer holds the To-tag to the bound one; a rule that
+                // retained this image for a repeat must have composed it
+                // right, or the repeat and the wire disagree.
+                if let Ok(sent) = ctx.txn.send_response(resp.clone(), dest).await {
+                    debug_assert!(
+                        sent == *resp.image(),
+                        "{}: the response left re-rendered under the bound To-tag",
+                        eff.label
+                    );
+                }
             }
             (OutboundBody::Request(req), OutboundTxnMode::NewClient(kind)) => {
                 let _ = ctx.txn.send_request(req.clone(), dest, *kind).await;

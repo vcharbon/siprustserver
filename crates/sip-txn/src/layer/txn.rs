@@ -141,6 +141,8 @@ impl Transaction {
             destination: head.destination,
             created_at: tokio::time::Instant::now(),
             uas_to_tag: None,
+            early_tags: Vec::new(),
+            final_to_tag: None,
             retransmit_key: None,
             timeout_key: None,
             cleanup_key: None,
@@ -177,6 +179,14 @@ pub(super) struct Transaction {
     pub(super) created_at: tokio::time::Instant,
     /// UAS To-tag pinned on the first >100 response (RFC 3261 §17.2.1).
     pub(super) uas_to_tag: Option<String>,
+    /// Every To-tag a provisional to this INVITE carried, in order — one
+    /// early dialog each (RFC 3261 §12.1.1); the last is the tag a CANCEL
+    /// answer takes while no final has been sent.
+    pub(super) early_tags: Vec<String>,
+    /// The To-tag the final to this INVITE carried: the dialog's local tag,
+    /// fixed from then on — every later response for this transaction or its
+    /// CANCEL carries it (§9.2, §12.1.1).
+    pub(super) final_to_tag: Option<String>,
     // DelayQueue keys so a txn's timers cancel in O(1).
     pub(super) retransmit_key: Option<Key>,
     pub(super) timeout_key: Option<Key>,

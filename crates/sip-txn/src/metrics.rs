@@ -247,6 +247,17 @@ pub(crate) struct MetricsInner {
     /// leave raw with no Timer G ladder, so a materialisation that answered an
     /// INVITE it never seeded shows here.
     pub server_final_unseen_branch: AtomicU64,
+    /// Responses the TU handed over under a To-tag other than the one this
+    /// layer had bound to the transaction or dialog, re-rendered under the
+    /// bound tag before they left (RFC 3261 §9.2, §12.1.1). A climb is a TU
+    /// defect the wire no longer shows.
+    pub to_tag_coerced: AtomicU64,
+    /// Responses that arrived with no usable To-tag — none, or the message
+    /// generator's fallback — and left under the tag this layer had bound.
+    pub to_tag_filled: AtomicU64,
+    /// Responses that left carrying the generator's fallback To-tag because
+    /// nothing here had a tag bound for them.
+    pub fallback_to_tag_used: AtomicU64,
     /// Inbound packets the parser rejected (dropped). A persistent climb here vs a
     /// flat `messages_processed` is the signature of a malformed-traffic flood or a
     /// parser regression — distinguishable from "no traffic arrived".
@@ -279,6 +290,9 @@ impl MetricsInner {
             txn_seeded: AtomicU64::new(0),
             txn_seed_skipped: AtomicU64::new(0),
             server_final_unseen_branch: AtomicU64::new(0),
+            to_tag_coerced: AtomicU64::new(0),
+            to_tag_filled: AtomicU64::new(0),
+            fallback_to_tag_used: AtomicU64::new(0),
             parse_errors: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
         }
@@ -428,6 +442,22 @@ impl TransactionMetrics {
     /// Non-2xx INVITE finals that left raw on an unseen branch (counter).
     pub fn server_final_unseen_branch(&self) -> u64 {
         self.inner.server_final_unseen_branch.load(Ordering::Relaxed)
+    }
+
+    /// Responses re-rendered under the bound To-tag (counter).
+    pub fn to_tag_coerced(&self) -> u64 {
+        self.inner.to_tag_coerced.load(Ordering::Relaxed)
+    }
+
+    /// Responses whose missing or fallback To-tag was filled from the bound
+    /// one (counter).
+    pub fn to_tag_filled(&self) -> u64 {
+        self.inner.to_tag_filled.load(Ordering::Relaxed)
+    }
+
+    /// Responses that left under the generator's fallback To-tag (counter).
+    pub fn fallback_to_tag_used(&self) -> u64 {
+        self.inner.fallback_to_tag_used.load(Ordering::Relaxed)
     }
 
     /// Inbound packets the parser rejected and dropped (counter).

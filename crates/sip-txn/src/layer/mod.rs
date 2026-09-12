@@ -17,9 +17,11 @@
 //!
 //! Module map: `handle` (public API + the command funnel) · `owner` (the actor
 //! loop + map/wheel bookkeeping) · `client` (RFC 3261 §17.1 UAC FSM) ·
-//! `server` (§17.2 UAS FSM) · `seed` (ADR-0014 seeding + re-offer) · `events`
-//! (output-queue discipline) · `txn` (per-transaction state + timing policy).
+//! `server` (§17.2 UAS FSM) · `bind` (the To-tag every outbound response is
+//! held to) · `seed` (ADR-0014 seeding + re-offer) · `events` (output-queue
+//! discipline) · `txn` (per-transaction state + timing policy).
 
+mod bind;
 mod client;
 mod events;
 mod handle;

@@ -15,9 +15,9 @@
 //!       bob answers 200 while the CANCEL is still held → the CANCEL dies
 //!       with the answered txn (never on the wire); B2BUA ACKs bob, relays
 //!       nothing to alice (she has her 487) → call still up
-//!   cancel_after_reinvite_answered_is_481_and_keeps_call
-//!       the re-INVITE was already answered end-to-end → late CANCEL gets 481
-//!       (txn layer, §9.2), call untouched
+//!   cancel_after_reinvite_answered_is_200_and_keeps_call
+//!       the re-INVITE was already answered end-to-end → late CANCEL gets 200
+//!       (txn layer, §9.2 / RFC 6026 §7.1), call untouched
 //! ```
 //!
 //! The initial-INVITE CANCEL teardown path is unchanged and stays pinned by
@@ -186,11 +186,12 @@ async fn cancel_reinvite_crossing_200_is_acked_and_absorbed() {
 }
 
 /// A CANCEL that arrives after the re-INVITE was answered end-to-end (bob's
-/// 200 already relayed to alice) matches no active INVITE server transaction:
-/// the txn layer rejects it 481 (RFC 3261 §9.2) and the established call is
-/// untouched — the in-dialog analog of `cancel_after_answer.rs`.
+/// 200 already relayed to alice) matches a server INVITE transaction held past
+/// its final: the txn layer answers it 200 (RFC 3261 §9.2, RFC 6026 §7.1) and
+/// the established call is untouched — the in-dialog analog of
+/// `cancel_after_answer.rs`.
 #[tokio::test]
-async fn cancel_after_reinvite_answered_is_481_and_keeps_call() {
+async fn cancel_after_reinvite_answered_is_200_and_keeps_call() {
     let h = Harness::with_transit_delay("b2bua-reinvite-cancel-late", 0);
     // Alice's post-ACK CANCEL of the completed re-INVITE violates RFC 3261
     // §9.1 by design — the buggy caller this test exists to absorb — so it is
@@ -226,9 +227,9 @@ async fn cancel_after_reinvite_answered_is_481_and_keeps_call() {
     dialog.ack(None).await;
     bob.receive("ACK").await;
 
-    // ── a LATE CANCEL for the completed re-INVITE: 481, nothing else ──
+    // ── a LATE CANCEL for the completed re-INVITE: 200, nothing else ──
     let mut cxl = reinv.cancel().await;
-    cxl.expect(481).await;
+    cxl.expect(200).await;
 
     // ── call untouched; BYE completes ──
     assert_eq!(b2bua.active_calls(), 1, "late re-INVITE CANCEL is a no-op");

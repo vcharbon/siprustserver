@@ -674,6 +674,12 @@ impl B2buaSut {
         self.cdr.snapshot()
     }
 
+    /// The transaction layer's own counters — what left under a bound,
+    /// filled or fallback To-tag, the queue drops the call-level set omits.
+    pub fn txn_metrics(&self) -> &sip_txn::TransactionMetrics {
+        self._core.txn_metrics()
+    }
+
     pub fn metrics(&self) -> &B2buaMetrics {
         &self.metrics
     }

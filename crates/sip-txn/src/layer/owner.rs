@@ -16,10 +16,10 @@ use tokio_util::time::{delay_queue::Key, DelayQueue};
 use crate::event::TransactionEvent;
 use crate::metrics::MetricsInner;
 use crate::rng::IdGen;
-use crate::timers::{ms, TXN_SWEEP_INTERVAL};
+use crate::timers::{ms, TIMER_L, TXN_SWEEP_INTERVAL};
 
 use super::handle::Command;
-use super::txn::{sweep_max_age, CancelWire, Timer, Transaction};
+use super::txn::{sweep_max_age, CancelWire, Timer, Transaction, TxnRole};
 
 pub(super) struct Owner {
     pub(super) txns: HashMap<String, Transaction>,
@@ -76,6 +76,13 @@ pub(super) struct Owner {
     /// the CANCEL is sent regardless (ADR-0028); `None` is the strict §9.1
     /// wait (hold until provisional, drop with the txn).
     pub(super) cancel_hold_grace_ms: Option<u64>,
+    /// The To-tag this node bound to a dialog it answered as UAS, by
+    /// (Call-ID, From-tag), kept for Timer L past the transaction so a
+    /// CANCEL or a stray answered after the transaction is gone still carries
+    /// it (RFC 3261 §9.2, §12.1.1). Swept with the transactions.
+    pub(super) recent_uas_tags: HashMap<(String, String), (String, tokio::time::Instant)>,
+    /// [`TransactionConfig::strict_to_tag`](crate::TransactionConfig).
+    pub(super) strict_to_tag: bool,
 }
 
 /// The next expired timer. Only ever awaited while `q` is non-empty — an empty
@@ -150,6 +157,7 @@ impl Owner {
         invite_initial_timeout_ms: u64,
         invite_first_response_timeout_ms: u64,
         cancel_hold_grace_ms: Option<u64>,
+        strict_to_tag: bool,
     ) -> Self {
         Self {
             txns: HashMap::new(),
@@ -166,6 +174,8 @@ impl Owner {
             invite_initial_timeout_ms,
             invite_first_response_timeout_ms,
             cancel_hold_grace_ms,
+            recent_uas_tags: HashMap::new(),
+            strict_to_tag,
         }
     }
 
@@ -228,6 +238,11 @@ impl Owner {
     pub(super) fn delete_txn(&mut self, branch: &str) -> bool {
         match self.txns.remove(branch) {
             Some(t) => {
+                if t.role == TxnRole::Server {
+                    if let Some(tag) = t.final_to_tag.as_deref().or(t.uas_to_tag.as_deref()) {
+                        self.remember_uas_tag(&t.call_id, &t.from_tag, tag);
+                    }
+                }
                 self.cancel_timer(t.retransmit_key);
                 self.cancel_timer(t.timeout_key);
                 self.cancel_timer(t.cleanup_key);
@@ -367,6 +382,7 @@ impl Owner {
         for branch in stale {
             self.delete_txn(&branch);
         }
+        self.recent_uas_tags.retain(|_, (_, since)| since.elapsed() < ms(TIMER_L));
         // Census the retained retransmit-buffer bytes (same periodic pass) so a
         // buffer-retention leak is visible vs flat txns.
         let buf_bytes: u64 = self
@@ -386,8 +402,8 @@ impl Owner {
                 let _ = reply.send(handle);
             }
             Command::SendResponse { msg, dest, reply } => {
-                self.do_send_response(endpoint, *msg, dest).await;
-                let _ = reply.send(());
+                let sent = self.do_send_response(endpoint, *msg, dest).await;
+                let _ = reply.send(sent);
             }
             Command::SendRaw { buf, dest, reply } => {
                 // Bypasses transaction management AND the byte counters; still

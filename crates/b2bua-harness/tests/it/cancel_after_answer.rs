@@ -1,21 +1,20 @@
 //! **Late CANCEL after answer (CANCEL-2)** — a CANCEL that arrives once the call
-//! is already up must NOT tear it down. RFC 3261 §9.2: a CANCEL only has effect
-//! on a server INVITE transaction that has not yet sent a final response. By the
-//! time the call is answered, the a-leg INVITE *server* transaction is
-//! `Completed`, so the transaction layer rejects the late CANCEL with `481
-//! Call/Transaction Does Not Exist` and never surfaces a `Cancelled` event to the
-//! B2BUA — the rule engine's `handle-cancel` (`rules/defaults.rs`) is never
-//! reached, and the bridged dialog stays up.
+//! is already up must NOT tear it down. RFC 3261 §9.2 with RFC 6026 §7.1: the
+//! a-leg INVITE server transaction is held past its 2xx, so the transaction
+//! layer answers the late CANCEL 200 itself and never surfaces a `Cancelled`;
+//! the rule engine's `handle-cancel` is never reached and the bridged dialog
+//! stays up.
 //!
-//! The transaction-layer half of this is pinned by sip-txn's
-//! `cancel_after_answer_does_not_tear_down_the_call` (481, no 487, no `Cancelled`
-//! event). This test adds the value sip-txn cannot see: that *end to end through a
-//! real B2BUA* the late CANCEL is absorbed (alice gets 481), bob is NOT BYE'd, and
-//! a normal BYE afterward still tears the call down cleanly (one CDR, fully
-//! reaped) — i.e. the call survived the CANCEL intact.
+//! The transaction-layer half is pinned by sip-txn's `cancel_after_final.rs`.
+//! This test adds what sip-txn cannot see: end to end through a real B2BUA the
+//! late CANCEL is absorbed (alice gets 200) under the dialog's own To-tag —
+//! never a tag the answer's generator fell back to — bob is NOT BYE'd, and a
+//! normal BYE afterward still tears the call down cleanly (one CDR, fully
+//! reaped).
 
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Harness, WaiverScope};
+use sip_message::generators::response::is_fallback_to_tag;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -45,15 +44,25 @@ async fn cancel_after_answer_does_not_tear_down() {
     uas.respond(180, "Ringing").await;
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
+    let answer = call.expect(200).await;
+    let dialog_tag = answer.to().tag().expect("the 2xx binds the dialog's tag").to_string();
     let mut alice_dialog = call.ack().await;
     bob.receive("ACK").await;
 
-    // ── alice sends a LATE CANCEL (the a-leg INVITE server txn is Completed) ──
-    // RFC 3261 §9.2 / §9.1: the transaction layer answers 481 and the CANCEL
-    // never reaches the B2BUA rule engine, so the established dialog is untouched.
+    // ── alice sends a LATE CANCEL (the a-leg INVITE server txn holds its 2xx) ──
+    // RFC 3261 §9.2: the transaction layer answers 200 and the CANCEL never
+    // reaches the B2BUA rule engine, so the established dialog is untouched.
     let mut cxl = call.cancel().await;
-    cxl.expect(481).await; // 481 Call/Transaction Does Not Exist — not a 487/200
+    let cancel_ok = cxl.expect(200).await; // 200 OK to the CANCEL — no 481, no 487
+    assert_eq!(
+        cancel_ok.to().tag(),
+        Some(dialog_tag.as_str()),
+        "the CANCEL's answer carries the tag the 2xx bound (RFC 3261 §9.2)"
+    );
+    assert!(!is_fallback_to_tag(&dialog_tag), "a bound tag is never the generator's fallback");
+    let txn = b2bua.txn_metrics();
+    assert_eq!(txn.fallback_to_tag_used(), 0, "no response of this call left under a fallback tag");
+    assert_eq!(txn.to_tag_coerced(), 0, "nothing handed over a wrong tag");
 
     // The call must still be up: drive a real BYE and confirm the B2BUA still has
     // a confirmed b-leg to tear down (had the CANCEL torn the call down, bob would

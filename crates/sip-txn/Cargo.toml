@@ -18,6 +18,7 @@ tokio-util = { workspace = true }
 sip-retransmit = { path = "../sip-retransmit" }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
+tracing.workspace = true
 
 [dev-dependencies]
 # `test-util` adds the paused-clock lever (`tokio::time::pause`/`advance`) —

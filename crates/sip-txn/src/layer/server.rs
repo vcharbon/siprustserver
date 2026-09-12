@@ -65,21 +65,38 @@ impl Owner {
         }
     }
 
+    /// Send a TU response through its server transaction and return the
+    /// datagram that left: the response's own image (ADR-0025, ADR-0029 X3),
+    /// re-rendered only where `bind_to_tag` held it to the bound To-tag.
     pub(super) async fn do_send_response(
         &mut self,
         endpoint: &dyn UdpEndpoint,
         msg: SipResponse,
         dest: SocketAddr,
-    ) {
-        // The response leaves as its own image — the one datagram a typed
-        // message IS (ADR-0025: parsed or frozen, never edited in place) — so a
-        // TU that retains `image()` for a §13.3.1.4 / RFC 3262 §3 repeat holds
-        // the wire bytes themselves (ADR-0029 X3). Nothing here re-renders it.
+    ) -> Bytes {
         let status = msg.status();
+        let cseq_method = msg.cseq().method().clone();
         let branch = msg.top_via().branch().map(str::to_string);
         let branch = branch.as_deref();
+
+        // RFC 3261 §17.2.1: a Completed server txn has already sent its final
+        // and now only retransmits the STORED response on a request
+        // retransmit. DROP any further final from the TU here (a 200 racing
+        // handle_cancel's autonomous 487, or a duplicate relayed final) —
+        // re-sending it would put a second final with a different To-tag on
+        // the wire, flip the ACK 2xx/non-2xx classifier (last_response_status),
+        // and orphan a duplicate Timer H/J. A CANCEL's answer shares the branch
+        // and is not the INVITE's final.
+        if cseq_method != Method::Cancel {
+            if let Some(txn) = branch.and_then(|b| self.txns.get(b)) {
+                if txn.role == TxnRole::Server && txn.state == TxnState::Completed {
+                    return msg.image().clone();
+                }
+            }
+        }
+
+        let msg = self.bind_to_tag(msg);
         let outbound_to_tag = if status > 100 { msg.to().tag().map(str::to_string) } else { None };
-        let cseq_method = msg.cseq().method().clone();
         let buf: Bytes = msg.image().clone();
 
         // A CANCEL response shares its INVITE's branch and this layer holds no
@@ -87,24 +104,13 @@ impl Owner {
         // by — the INVITE transaction on that branch.
         if cseq_method == Method::Cancel {
             self.send_buffer(endpoint, &buf, dest).await;
-            return;
+            return buf;
         }
 
         if let Some(branch) = branch {
+            self.record_uas_tag(branch, &msg);
             if let Some(txn) = self.txns.get_mut(branch) {
                 if txn.role == TxnRole::Server {
-                    // RFC 3261 §17.2.1: a Completed server txn has already sent its
-                    // final and now only retransmits the STORED response on a
-                    // request retransmit. DROP any further final from the TU here
-                    // (a 200 racing handle_cancel's autonomous 487, or a duplicate
-                    // relayed final) — re-sending it would put a second final with a
-                    // different To-tag on the wire, flip the ACK 2xx/non-2xx
-                    // classifier (last_response_status), and orphan a duplicate
-                    // Timer H/J. The stored final + dup-absorption cover retransmits.
-                    if txn.state == TxnState::Completed {
-                        return;
-                    }
-
                     let is_final = status >= 200;
                     // Pin the UAS To-tag on the first >100 response (§17.2.1).
                     if txn.uas_to_tag.is_none() {
@@ -133,6 +139,7 @@ impl Owner {
         }
 
         self.send_buffer(endpoint, &buf, dest).await;
+        buf
     }
 
     /// Arm a server txn's post-final timers (RFC 3261 §17.2): the Timer H/J
@@ -357,6 +364,26 @@ impl Owner {
         true
     }
 
+    /// The To-tag the server INVITE txn on `branch` has bound — its final's,
+    /// else its newest early dialog's, else the one pinned on its first
+    /// response (RFC 3261 §9.2, §17.2.1) — pinned now where none was yet.
+    fn uas_to_tag_of(&mut self, branch: &str) -> Option<String> {
+        let known = self.txns.get(branch).and_then(|t| {
+            t.final_to_tag
+                .clone()
+                .or_else(|| t.early_tags.last().cloned())
+                .or_else(|| t.uas_to_tag.clone())
+        });
+        if known.is_some() {
+            return known;
+        }
+        let pinned = self.id_gen.new_tag();
+        if let Some(txn) = self.txns.get_mut(branch) {
+            txn.uas_to_tag = Some(pinned.clone());
+        }
+        Some(pinned)
+    }
+
     /// RFC 3261 §9.2 at this layer: a CANCEL matching an active INVITE server
     /// transaction is answered 200 and its INVITE 487, and `Cancelled` is
     /// emitted; `true`. One matching nothing here is the TU's to answer — a
@@ -399,9 +426,41 @@ impl Owner {
             .map(|_| cancel_branch.to_string())
             .or_else(|| self.txns.iter().find_map(|(b, t)| is_cancel_target(t).then(|| b.clone())));
 
-        // No active INVITE server txn — a CANCEL arriving after the answer (txn
-        // Completed) included — has NO effect here: no 200, no 487, no
-        // Cancelled that would tear an established call down upstream. The TU
+        // A server INVITE txn that has sent its final is still held — Accepted
+        // after a 2xx for Timer L (RFC 6026 §7.1), Completed after a non-2xx for
+        // Timer H (RFC 3261 §17.2.1) — so a CANCEL matching it has no effect and
+        // is answered 200 under the final's To-tag (RFC 3261 §9.2): no 487, no
+        // `Cancelled`, and the established call upstream is untouched.
+        if matched_branch.is_none() {
+            let is_answered_target = |t: &Transaction| {
+                t.role == TxnRole::Server
+                    && t.kind == TxnKind::Invite
+                    && t.call_id == call_id.as_str()
+                    && t.from_tag == from_tag
+                    && t.state == TxnState::Completed
+            };
+            let answered = self
+                .txns
+                .get(cancel_branch)
+                .filter(|t| is_answered_target(t))
+                .map(|_| cancel_branch.to_string())
+                .or_else(|| {
+                    self.txns.iter().find_map(|(b, t)| is_answered_target(t).then(|| b.clone()))
+                });
+            if let Some(branch) = answered {
+                let to_tag = self.uas_to_tag_of(&branch);
+                let cancel_ok = generate_response(
+                    &req,
+                    200,
+                    "OK",
+                    &GenerateResponseOpts { to_tag, ..Default::default() },
+                );
+                self.send_buffer(endpoint, cancel_ok.image(), src).await;
+                return true;
+            }
+        }
+
+        // No INVITE server txn at all: no 200, no 487, no Cancelled. The TU
         // decides between the §9.2 481 and a re-offer against a rebuilt INVITE.
         let branch = match matched_branch {
             Some(b) => b,
@@ -430,14 +489,7 @@ impl Owner {
             .unwrap_or((None, false));
 
         // Resolve (and lazily pin) the UAS To-tag on the matched INVITE.
-        let mut uas_to_tag = self.txns.get(branch.as_str()).and_then(|t| t.uas_to_tag.clone());
-        if uas_to_tag.is_none() {
-            let pinned = self.id_gen.new_tag();
-            if let Some(txn) = self.txns.get_mut(branch.as_str()) {
-                txn.uas_to_tag = Some(pinned.clone());
-            }
-            uas_to_tag = Some(pinned);
-        }
+        let uas_to_tag = self.uas_to_tag_of(&branch);
 
         // 200 OK to the CANCEL itself.
         let cancel_ok = generate_response(

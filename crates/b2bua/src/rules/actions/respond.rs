@@ -53,7 +53,16 @@ impl ActionExecutor<'_> {
                     }
                 }
             }
+            // A request naming no dialog is answered under the leg's own tag
+            // (RFC 3261 §8.2.6.2), never a minted one; a tagged To is echoed.
+            let to_tag = req
+                .to()
+                .tag()
+                .is_none()
+                .then(|| call::helpers::b2bua_tag(call, ctx.source_leg_id))
+                .flatten();
             let opts = GenerateResponseOpts {
+                to_tag,
                 body: body.to_vec(),
                 content_type: content_type.and_then(relay::media_type),
                 ..Default::default()
