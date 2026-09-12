@@ -18,9 +18,8 @@ v0.1 interpreter's keepalive elision: callflow knowledge inside an interpreter
 is a design failure of the format, and `background` (§5.1) is where that
 particular knowledge now lives — as document data.
 
-Rationale and the design record live in `.scratch/replay-refine/scenario-v3.md`
-and in the `## Comments` log of `.scratch/replay-refine/issues/16-scenario-v3-schema.md`.
-This file states the contract and nothing else.
+Rationale and the design record live with the consumer that authored the
+format. This file states the contract and nothing else.
 
 > **AMENDED 2026-08-22.** Lane-scoped assert classes (§9.1), `rfc_violations`
 > (§11.1), the in-dialog final marker and the `cause` citation rule (§4.1,
@@ -103,8 +102,7 @@ riding the move forward.
 | `ack-relay-delta-relayed` is GONE — nothing declines for that reason any more. `ack-relay-delta-rebased` names what a move re-based | §13.2's flag table, `case.annotations.flags` |
 
 **2026-08-26 — `auto` is a composition marker, not a storage policy.** Ruling
-of issue 76
-(`.scratch/replay-refine/issues/76-delayed-offer-answer-has-no-home.md`). The
+of the design record. The
 closed field list on an auto step was the ONE departure from the three-tier
 model in the pipeline, and it left an ACK's frozen headers and the delayed
 offer's ANSWER with no home: measured over 400 captures / 8910 steps, scripted
@@ -130,8 +128,7 @@ response to negotiate in), so the delta registry accepts it there and NOWHERE
 else; the charging and network context on the same message stays a finding.
 
 **2026-08-26 — an auto ACK's transaction is LEG STATE's, not the token's.**
-Ruling of issue 72
-(`.scratch/replay-refine/issues/72-auto-ack-resolved-by-document-cseq.md`). No
+Ruling of the design record. No
 field shape changes; the CONTRACT does. The interpreter honoured §8's "`cseq` is
 a pairing identity token, NEVER replayed" on the auto EXPECT path and broke it on
 the auto SEND path, resolving an auto ACK's target INVITE by the captured number.
@@ -160,8 +157,8 @@ completed transaction, which is the very violation the source's 481 records.
 | `no-cancel-after-final` joins the SUT-invalid rules, deferred like the other two: withdrawn where the case declares every charged coordinate | generator |
 
 **2026-08-25 — SUT-invalid captures are NEGATIVE cases; `unexpected-prack`
-joins the vocabulary; every cannot-go-on abort closes.** Ruling of issue 42
-(`.scratch/replay-refine/issues/42-interpreter-remainder.md`). This RETIRES the
+joins the vocabulary; every cannot-go-on abort closes.** Ruling of the design
+record. This RETIRES the
 2026-08-23 SUT-invalid EXCLUSION: a call group whose own system under test the
 census charges is no longer refused — the generator derives the `must_fail`
 that predicts the replay's divergence and writes the case as a NEGATIVE one,
@@ -180,8 +177,7 @@ survives solely as a DEFERRED guard on the residue no declaration can anchor.
 | every abort site where the run truly cannot go on arms the generic close (`Abandoned.leg` now optional for the legless sites); a gating inline check no longer aborts at all — the finding fails the verdict and the flow keeps walking | interpreter (Q53) |
 
 **2026-08-23 — `must_fail`: a document declares the failure its run MUST
-produce.** Ruling of the third evidence round, recorded in
-`.scratch/replay-refine/issues/23-negative-cases-must-fail.md`. A source whose
+produce.** Ruling of the third evidence round. A source whose
 peer withheld an ACK recorded a ladder this platform does not run, and the goal
 is to replay reality rather than something like it: the run fails, and the
 document states in advance exactly how. A new top-level field is a format
@@ -213,8 +209,7 @@ read by the run that carries it. No field changes; the run bundle gains a
 | the run keeps replaying past a declared datagram, so a negative case still tears its call down, settles and evaluates its postconditions. The gate, the lint rules and the recording are untouched | §10, §11.2 |
 
 **2026-08-23 — `must_fail`: the declaration INCLUDES, and the derivation goes
-first.** Ruling Q47 (b) of the collision round, recorded in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`. The two entries
+first.** Ruling Q47 (b) of the collision round. The two entries
 above read "the declared failure and nothing else", which no corpus negative can
 meet: replaying a capture the replay is known to diverge from makes the tail
 diverge too. No field changes; the run bundle gains a `tolerated` list, and the
@@ -227,8 +222,7 @@ generator stops refusing a case it can declare.
 | where the census charges the capture's own SUT with the withheld ACK, the DERIVATION decides first: the case is generated as a negative one wherever it anchors a declaration for every charged hit, and refused by category only where it cannot. The unPRACKed-provisional rule still refuses outright | §11.2, §0.1 (2026-08-23) |
 
 **2026-08-24 — what ends a script is being unable to GO ON, on every
-document.** Ruling Q52, recorded in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`, correcting the
+document.** Ruling Q52, correcting the
 trigger the entry below states. Ending early has nothing to do with whether a
 document is positive or negative: it is about whether the run can compose its
 next message. No field changes; what moves is where the rule is written, since it
@@ -241,8 +235,7 @@ is run semantics and not a property of a declaration.
 | the rule and the generic close are POLARITY-FREE and move to §14, where run semantics live. A positive run that cannot go on is abandoned, closed and settled exactly like a negative one — and still fails. §11.2 keeps only what a declaration adds | §10, §11.2, §14 |
 
 **2026-08-23 — `must_fail`: the first delta ends the SCRIPT, and the call is
-closed generically.** Ruling Q50, recorded in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`. The two entries
+closed generically.** Ruling Q50. The two entries
 above have a negative run keep replaying past its divergence, which scripts a
 conversation neither party is having; and the tail's own aborting deltas were
 piling a settle failure on top of the declaration anyway. No field changes; the
@@ -257,8 +250,7 @@ observed.
 | a declaration that arrived after the script ended is observed by the RECORDING, listed as `recorded` beside the `observed` a gate's failure fills. The CDR expectation still gates: the call is billed like any other | §10, §11.2 |
 
 **2026-08-23 — `flow[].confirms_dialog` names the ACK that completes the
-handshake.** Ruling of the third evidence round in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`. `in_dialog` says an
+handshake.** Ruling of the third evidence round. `in_dialog` says an
 ACK runs inside an established dialog; it does not say whether that ACK is the
 one that established it. A new field is a format change, so it lands here.
 
@@ -270,8 +262,8 @@ one that established it. A new field is a format change, so it lands here.
 | the generator stamps it in the pass that stamps `in_dialog`, so its own output passes that lint | generator |
 
 **2026-08-23 — a `content-type` is stored VERBATIM, and the boundary is the ONLY
-thing emission regenerates.** Ruling 4 of the second evidence round in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`: the payload is
+thing emission regenerates.** Ruling 4 of the second evidence round: the
+payload is
 properly managed, binary-identical outside the SDP rewrite. No field is added or
 removed; what changes is what a stored `content-type` MEANS and, on one arm,
 when it is written — which is exactly what this index is for.
@@ -284,8 +276,7 @@ when it is written — which is exactly what this index is for.
 | the generator stored a part's bare media type and dropped its parameters; it stores the wire value | generator |
 
 **2026-08-23 — `no-ack-to-dialog-creating-2xx` joins the closed vocabulary.**
-Headline ruling of the second evidence round in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`. A closed enum
+Headline ruling of the second evidence round. A closed enum
 growing IS a format change, so it lands here. (The SUT-side EXCLUSION this
 batch also introduced is RETIRED by the 2026-08-25 entry above.)
 
@@ -293,8 +284,7 @@ batch also introduced is RETIRED by the 2026-08-25 entry above.)
 |---|---|
 | `rfc_violations[].rule` gains `no-ack-to-dialog-creating-2xx` (RFC 3261 §13.2.2.4), with its detector in `crates/sip-pcap/src/rfc/ack.rs` and the report field it carries | §11.1 |
 
-**2026-08-23 — `flow[].in_dialog` is TOTAL.** Ruling Q31 in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`. No field shape
+**2026-08-23 — `flow[].in_dialog` is TOTAL.** Ruling Q31. No field shape
 changes; the CONTRACT does, which is what this index is for — a document that
 marked only the finals §4.1 reads is now a lint error, so the batch lands across
 this document, `pivot-schema`'s lint and the generator exactly as an amendment
@@ -307,7 +297,7 @@ does.
 | the generator stamps it mechanically, so its own output passes that lint | generator |
 
 **2026-08-22 — lane scoping, RFC violations, in-dialog finals, optional
-release.** Rulings recorded in `.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+release.** Rulings of the design record.
 
 | change | where |
 |---|---|
@@ -322,7 +312,7 @@ an `allowed` flag on a violation, generator auto-plumbing of `rfc_violations`,
 any flows-schema change, and any auto-exclusion rule keyed on a violation.
 
 **2026-08-22 — removals: `setup_deadline_ms` and REFER with `Replaces`.**
-Rulings recorded in `.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+Rulings of the design record.
 
 | change | where |
 |---|---|
@@ -344,8 +334,7 @@ examples, drafts and staged fixtures now; the bulk corpus picks it up at
 regeneration (issue 07).
 
 **2026-08-22 — forked early dialogs: an accessor namespace, and UPDATE inside
-one.** Rulings Q29 and Q38 in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+one.** Rulings Q29 and Q38.
 
 | change | where |
 |---|---|
@@ -356,8 +345,7 @@ The authored `forked-100rel-prack-per-early-dialog` draft is the exercise: its
 "each PRACK rides its own fork" assertion was an `RAck` regex proxy and now
 reads the two forks' own tags and RSeqs.
 
-**2026-08-22 — verbatim body fidelity: a part's own entity block.** Ruling Q35
-in `.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+**2026-08-22 — verbatim body fidelity: a part's own entity block.** Ruling Q35.
 
 | change | where |
 |---|---|
@@ -371,8 +359,7 @@ emitted shape. A flows document produced before this batch states no part
 headers because its producer read none — the corpus picks them up at
 regeneration (issue 07).
 
-**2026-08-22 — the ACK ladder: drawn, and collapsed once.** Ruling Q34 in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+**2026-08-22 — the ACK ladder: drawn, and collapsed once.** Ruling Q34.
 
 | change | where |
 |---|---|
@@ -384,8 +371,7 @@ The drawn shape is exercised end to end by the authored
 the bulk corpus still show the pre-collapse encoding; they pick it up at
 regeneration (issue 07).
 
-**2026-08-22 — ratified working readings.** Ruling Q38 in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md` accepted these as
+**2026-08-22 — ratified working readings.** Ruling Q38 accepted these as
 readings of the format, amendable like anything else here. Each is now stated
 where its section already discusses the matter.
 
@@ -404,7 +390,7 @@ enforced by the interpreter's plan, is now mirrored in lint as
 `deviation/verbatim-emission-auto`, so a generator learns it at lint time.
 
 **2026-08-23 — the `rfc_violations` rule vocabulary grows a second member.**
-Ruling Q30, recorded in `.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+Ruling Q30.
 
 | change | where |
 |---|---|
