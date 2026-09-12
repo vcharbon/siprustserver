@@ -9,7 +9,7 @@
 use call::helpers::is_fully_resolved;
 use call::{Call, CallModelState, CdrEvent, CdrEventType, LegState, MachineId, StateLabel};
 
-use crate::effects::{CriticalStateEffect, HandlerResult, OutboundBody};
+use crate::effects::{CriticalStateEffect, HandlerResult};
 use crate::obligations::ObligationSet;
 
 /// The always-on global call machine (ADR-0016 X2). Its cursor is a uniform,
@@ -101,39 +101,27 @@ pub fn enforce(
 ///
 /// Guards, in order:
 ///  - `before.a_leg.state ∈ {Trying, Early}` — the a-leg entered this turn
-///    unanswered. Any earlier turn that answered moved it (reject_call →
-///    Terminated, confirm-dialog → Confirmed, and `BeginTermination` marks a
-///    Trying/Early a-leg Terminated when a ≥200 final to it rides the same
-///    turn's effects).
-///  - no final response to the a-leg among THIS turn's outbound effects (the
-///    reject/relay/setup-timeout paths all answer through effects).
-///  - no a-leg `Cancel` CDR event: on CANCEL the txn layer answers 487
-///    autonomously — the 487 IS the final (`cancel_during_slow_decision`).
+///    unanswered (an answered a-leg reads `Confirmed` or `Terminated`).
 ///  - a non-empty `a_leg_invite` snapshot (nothing to answer otherwise —
 ///    degenerate synthetic fixtures).
+///  - `a_leg.invite_final_sent` is `None` — the transaction carries no final
+///    yet: neither a reject / relay / setup-timeout final of this turn nor the
+///    487 the txn layer sent autonomously on a CANCEL.
 ///
-/// Idempotence backstop: even if a guard is ever wrong, the a-leg server txn
-/// drops a second final in `Completed` state (sip-txn `do_send_response`), so
-/// the synthesis can only ever double-answer a caller that a *swept* (≥ 193 s
-/// old) transaction once served — a harmless late raw datagram.
+/// The 503 leaves through `response_to_a_leg`, the one seam every a-facing
+/// final rides: it records the final on the leg and refuses any later one on
+/// that transaction. sip-txn drops a second final on the branch as well — in
+/// `Completed`, through the Timer I `Confirmed` hold after the ACK, and on a
+/// branch it no longer holds (`server_final_unseen_branch`).
 fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms: i64) {
     let unanswered_entering = matches!(before.a_leg.state, LegState::Trying | LegState::Early);
     if !unanswered_entering || result.call.a_leg_invite.headers.is_empty() {
         return;
     }
-    let a_leg_id = before.a_leg.leg_id.as_str();
-    let answered_this_turn = result.effects.outbound.iter().any(|e| {
-        e.leg_id.as_deref() == Some(a_leg_id)
-            && matches!(&e.body, OutboundBody::Response(r) if r.status() >= 200)
-    });
-    let cancelled = result
-        .call
-        .cdr_events
-        .iter()
-        .any(|e| e.event_type == CdrEventType::Cancel && e.leg_id == a_leg_id);
-    if answered_this_turn || cancelled {
+    if result.call.a_leg.invite_final_sent.is_some() {
         return;
     }
+    let a_leg_id = before.a_leg.leg_id.as_str();
     let a_invite = super::relay::rebuild_a_leg_invite(&result.call.a_leg_invite);
     // Reuse the a-dialog tag when an 18x already pinned one (Early); otherwise
     // `generate_response`'s deterministic fallback tag applies.
@@ -144,7 +132,9 @@ fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms:
         .first()
         .map(|d| d.sip.local_tag.clone())
         .filter(|t| !t.is_empty());
-    let mut effect = super::relay::response_to_a_leg(
+    let Some(mut effect) = super::relay::response_to_a_leg(
+        &mut result.call,
+        &mut result.effects,
         &a_invite,
         503,
         "Service Unavailable",
@@ -154,7 +144,9 @@ fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms:
         None,
         None,
         vec![],
-    );
+    ) else {
+        return;
+    };
     effect.label = "503 (terminated unanswered) → a-leg".to_string();
     result.effects.outbound.push(effect);
     // Before `obligations.settle` reads the snapshot, so the CDR carries it.

@@ -384,8 +384,37 @@ fn max_duration_fire_on_a_live_subscribed_call_still_consults() {
     );
 }
 
-/// The named decision-fold rule's output for an internal event of
-/// `topic`/`outcome` carrying `payload` on `call`.
+/// An internal event of `topic`/`outcome` carrying `payload` on `call`.
+fn fold_event(
+    call: &call::Call,
+    topic: &str,
+    outcome: &str,
+    payload: serde_json::Value,
+) -> CallEvent {
+    CallEvent::InternalEvent {
+        call_ref: call.call_ref.clone(),
+        topic: topic.into(),
+        outcome: outcome.into(),
+        payload,
+        body: Vec::new(),
+    }
+}
+
+/// The ids the executor admits for the fold on `call`.
+fn fold_candidates(
+    call: &call::Call,
+    topic: &str,
+    outcome: &str,
+    payload: serde_json::Value,
+) -> Vec<&'static str> {
+    let event = fold_event(call, topic, outcome, payload);
+    let config = B2buaConfig::default();
+    let ctx = ctx_for(call, &event, &config);
+    pick_ranked(&default_rules(), call, &ctx).iter().map(|r| r.id).collect()
+}
+
+/// The named decision-fold rule's own output for the fold on `call` — the
+/// handler reached directly, whatever selection would admit.
 fn fold_result(
     call: &call::Call,
     rule_id: &str,
@@ -393,29 +422,11 @@ fn fold_result(
     outcome: &str,
     payload: serde_json::Value,
 ) -> Vec<RuleAction> {
-    let event = CallEvent::InternalEvent {
-        call_ref: call.call_ref.clone(),
-        topic: topic.into(),
-        outcome: outcome.into(),
-        payload,
-        body: Vec::new(),
-    };
-    let ctx = RuleContext {
-        call: RuleCall::new(call),
-        call_ref: &call.call_ref,
-        event: &event,
-        source_leg_id: "a",
-        direction: Direction::FromA,
-        now_ms: 0,
-        config: &B2buaConfig::default(),
-        discharged: None,
-    };
+    let event = fold_event(call, topic, outcome, payload);
+    let config = B2buaConfig::default();
+    let ctx = ctx_for(call, &event, &config);
     let rules = default_rules();
-    let ranked = pick_ranked(&rules, call, &ctx);
-    let rule = ranked
-        .iter()
-        .find(|r| r.id == rule_id)
-        .unwrap_or_else(|| panic!("{rule_id} is a candidate"));
+    let rule = rules.iter().find(|r| r.id == rule_id).unwrap_or_else(|| panic!("{rule_id} exists"));
     (rule.handle)(&ctx).unwrap_or_else(|| panic!("{rule_id} handles its fold")).actions
 }
 
@@ -430,9 +441,12 @@ fn route_fold_payload() -> serde_json::Value {
 #[test]
 fn decision_folds_on_a_terminating_call_are_dropped_whole() {
     // A `/calls` decision result landing on a call already going away drives
-    // no forward progress, whatever it decides: no
-    // failover/reroute leg toward a caller-less callee, no second final on the
-    // a-leg's completed transaction (RFC 3261 §17.2.1), no re-termination.
+    // no forward progress, whatever it decides: no failover/reroute leg toward
+    // a caller-less callee, no second final on the a-leg's completed
+    // transaction (RFC 3261 §17.2.1), no re-termination. Two layers pin it:
+    // the executor's going-away gate keeps every fold rule from being a
+    // candidate at all, and each handler still drops the fold whole when
+    // reached directly (defense in depth).
     let mut call = test_call();
     call.state = CallModelState::Terminating;
     call.callback_context = Some("cb".into());
@@ -463,6 +477,11 @@ fn decision_folds_on_a_terminating_call_are_dropped_whole() {
         ("release-result-release", "call-release-result", "release", serde_json::json!({})),
         ("release-result-reroute", "call-release-result", "reroute", route_fold_payload()),
     ] {
+        let candidates = fold_candidates(&call, topic, outcome, payload.clone());
+        assert!(
+            candidates.is_empty(),
+            "the gate admits no fold rule on a terminating call, got {candidates:?}",
+        );
         let actions = fold_result(&call, rule_id, topic, outcome, payload);
         assert!(
             actions.is_empty(),
@@ -699,7 +718,9 @@ fn no_synthesized_final_when_the_turn_already_answered() {
     call.a_leg.state = LegState::Terminated;
     let a_invite = b2bua::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     let mut result = HandlerResult::new(call);
-    result.effects.outbound.push(b2bua::rules::relay::response_to_a_leg(
+    let effect = b2bua::rules::relay::response_to_a_leg(
+        &mut result.call,
+        &mut result.effects,
         &a_invite,
         486,
         "Busy Here",
@@ -709,7 +730,10 @@ fn no_synthesized_final_when_the_turn_already_answered() {
         None,
         None,
         vec![],
-    ));
+    )
+    .expect("the transaction's first final is admitted");
+    result.effects.outbound.push(effect);
+    assert_eq!(result.call.a_leg.invite_final_sent, Some(486), "the final is recorded on the leg");
     let result =
         invariants::enforce(&b2bua::obligations::ObligationSet::core(), &before, result, 0, true);
     let finals_to_a = result
@@ -722,6 +746,195 @@ fn no_synthesized_final_when_the_turn_already_answered() {
         })
         .count();
     assert_eq!(finals_to_a, 1, "exactly the rule's own final — no synthesized duplicate");
+}
+
+#[test]
+fn no_synthesized_final_when_the_txn_layer_answered_the_cancel() {
+    // The CANCEL path: sip-txn sent the 487 itself, so the a-leg reads Early
+    // through the whole terminating window and the only trace of the final is
+    // the leg fact the `Cancelled` turn recorded. The funnel reads that fact —
+    // no per-turn scan, no CDR event — and answers nothing.
+    let mut call = test_call();
+    let before = call.clone();
+    call.state = CallModelState::Terminated;
+    call = call::helpers::record_invite_final(call, "a", 487);
+    let result = invariants::enforce(
+        &b2bua::obligations::ObligationSet::core(),
+        &before,
+        HandlerResult::new(call),
+        0,
+        true,
+    );
+    assert!(
+        result.effects.outbound.is_empty(),
+        "an a-leg carrying its 487 is not answered again: {:?}",
+        result.effects.outbound
+    );
+    assert!(
+        !result
+            .call
+            .cdr_events
+            .iter()
+            .any(|e| e.reason.as_deref() == Some("unanswered_at_termination")),
+        "no synthesized-final CDR event either"
+    );
+    assert_eq!(result.call.a_leg.invite_final_sent, Some(487));
+}
+
+/// One executor turn, one Cancelled-shaped context, over `call`.
+fn execute_on(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
+    let event = CallEvent::Cancelled {
+        call_id: call.a_leg.call_id.clone(),
+        from_tag: call.a_leg.from_tag.clone(),
+        invite_cseq: None,
+        in_dialog: false,
+        headers: vec![],
+    };
+    let config = B2buaConfig::default();
+    let ctx = RuleContext {
+        call: RuleCall::new(call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &config,
+        discharged: None,
+    };
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
+    exec.execute(actions, call, &ctx)
+}
+
+fn finals_to_a(result: &HandlerResult) -> Vec<u16> {
+    result
+        .effects
+        .outbound
+        .iter()
+        .filter(|e| e.leg_id.as_deref() == Some("a"))
+        .filter_map(|e| match &e.body {
+            b2bua::effects::OutboundBody::Response(r) if r.status() >= 200 => Some(r.status()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn refusals(result: &HandlerResult) -> Vec<(u16, u16)> {
+    result
+        .effects
+        .buffered
+        .iter()
+        .filter_map(|e| match e {
+            BufferedObservabilityEffect::SecondFinalRefused { status, carried } => {
+                Some((*status, *carried))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_second_final_to_the_a_leg_is_refused_and_reported() {
+    // Two authored finals in one turn (a reject, then a relayed failure): the
+    // a-leg seam admits the first, records it, and refuses the second — not
+    // built, not pushed — reporting it for the `second_final_refused` count.
+    let call = test_call();
+    let reject = |status: u16, reason: &str| RuleAction::RespondToALeg {
+        status,
+        reason: reason.into(),
+        header_updates: vec![],
+        contacts: vec![],
+    };
+    let result = execute_on(
+        &call,
+        &[
+            reject(486, "Busy Here"),
+            reject(480, "Temporarily Unavailable"),
+            RuleAction::RelayFailureToALeg { status: 503, reason: "Service Unavailable".into() },
+        ],
+    );
+    assert_eq!(finals_to_a(&result), vec![486], "exactly the first final leaves");
+    assert_eq!(result.call.a_leg.invite_final_sent, Some(486));
+    assert_eq!(
+        refusals(&result),
+        vec![(480, 486), (503, 486)],
+        "every later final is refused against the one the transaction carries"
+    );
+}
+
+#[test]
+fn a_final_after_the_autonomous_487_is_refused() {
+    // The `Cancelled` turn recorded sip-txn's 487; a later rule answering the
+    // cancelled call (a service timer, a relayed callee failure) is refused.
+    let call = call::helpers::record_invite_final(test_call(), "a", 487);
+    let result = execute_on(
+        &call,
+        &[RuleAction::RespondToALeg {
+            status: 480,
+            reason: "Temporarily Unavailable".into(),
+            header_updates: vec![],
+            contacts: vec![],
+        }],
+    );
+    assert!(finals_to_a(&result).is_empty(), "nothing reaches the caller after the 487");
+    assert_eq!(refusals(&result), vec![(480, 487)]);
+    assert_eq!(result.call.a_leg.invite_final_sent, Some(487), "the 487 stands");
+}
+
+#[test]
+fn a_provisional_is_not_refused_by_the_final_guard() {
+    // The seam guards finals only; a relayed 18x on an unanswered leg passes
+    // and leaves no fact behind.
+    let call = test_call();
+    let result = execute_on(
+        &call,
+        &[RuleAction::SendProvisionalToLeg {
+            leg_id: "a".into(),
+            status: 183,
+            reason: "Session Progress".into(),
+            body: vec![],
+            content_type: None,
+            to_tag: None,
+            p_early_media: None,
+        }],
+    );
+    let provisionals = result
+        .effects
+        .outbound
+        .iter()
+        .filter(
+            |e| matches!(&e.body, b2bua::effects::OutboundBody::Response(r) if r.status() == 183),
+        )
+        .count();
+    assert_eq!(provisionals, 1, "the 183 leaves: {:?}", result.effects.outbound);
+    assert_eq!(result.call.a_leg.invite_final_sent, None, "a provisional records no final");
+    assert!(refusals(&result).is_empty());
+}
+
+#[test]
+fn begin_termination_resolves_an_a_leg_whose_invite_carries_its_final() {
+    // The `Cancelled` turn: the a-leg is still Early (sip-txn sent the 487,
+    // no TU response moved it) but its INVITE carries that final, so
+    // `BeginTermination` records it Terminated — resolved, never re-answered.
+    let mut call = test_call();
+    call.a_leg.state = LegState::Early;
+    let call = call::helpers::record_invite_final(call, "a", 487);
+    let result =
+        execute_on(&call, &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }]);
+    assert_eq!(result.call.a_leg.state, LegState::Terminated);
+    assert_eq!(result.call.a_leg.bye_disposition, Some(call::ByeDisposition::None));
+
+    // An a-leg with NO final yet stays Early: the ADR-0022 funnel still owes
+    // that caller its 503 at `→ terminated`.
+    let mut call = test_call();
+    call.a_leg.state = LegState::Early;
+    let result = execute_on(&call, &[RuleAction::BeginTermination { reason: Some("BYE".into()) }]);
+    assert_eq!(result.call.a_leg.state, LegState::Early);
 }
 
 // ── ADR-0016 slice 2: global call machine projection ────────────────────────
@@ -830,6 +1043,7 @@ fn sm_rule(handle: fn(&RuleContext) -> Option<RuleHandleResult>) -> RuleDefiniti
         active_states: &SM_ACTIVE_S0,
         transitions: &SM_TRANSITIONS,
         effects: &[],
+        teardown: false,
     }
 }
 
@@ -1095,6 +1309,7 @@ fn b_leg_pending() -> Leg {
         ext: None,
         kind: Some(LegKind::Destination),
         adopted: None,
+        invite_final_sent: None,
     }
 }
 
@@ -3885,5 +4100,238 @@ mod ladder_give_up {
             settled.call.reliable_provisionals[0].emission.is_none(),
             "the provisional's emission is spent with its ladder"
         );
+    }
+}
+
+// ── The going-away gate (executor) ───────────────────────────────────────────
+//
+// An asynchronous trigger — a timer fire, a transaction timeout, an
+// internal-event fold — on a `Terminating`/`Terminated` call reaches only its
+// teardown rules (`RuleDefinition::teardown`); every other candidate is
+// absorbed and counted. A peer's message keeps its per-rule filters, and
+// `BeginTermination` disarms every service watchdog and deactivates every
+// service machine, so the fire is stopped at the source too.
+mod going_away_gate {
+    use super::*;
+    use b2bua::obligations::ObligationSet;
+    use call::CdrEventType;
+
+    const SVC: MachineId = MachineId::new("svc-gate");
+    const DEADLINE: TimerType = TimerType::service(SVC, "deadline");
+    static ARMED: [StateLabel; 1] = [StateLabel::new("Armed")];
+    static TO_TERMINAL: [(StateLabel, StateLabel); 1] =
+        [(StateLabel::new("Armed"), StateLabel::terminal())];
+    static REJECT_EFFECTS: [Effect; 2] = [
+        Effect::Respond { status: 480, label: "answer the caller" },
+        Effect::LifecycleCommand { label: "tear the call down" },
+    ];
+    const SCRUB_REASON: &str = "deadline-scrub";
+
+    /// The misbehaving shape: a deadline that answers the caller and tears
+    /// down, guard-less.
+    fn reject_on_deadline(_: &RuleContext) -> Option<RuleHandleResult> {
+        Some(RuleHandleResult::new(vec![
+            RuleAction::RespondToALeg {
+                status: 480,
+                reason: "Temporarily Unavailable".into(),
+                header_updates: vec![],
+                contacts: vec![],
+            },
+            RuleAction::BeginTermination { reason: Some("deadline".into()) },
+            RuleAction::ClearState { machine: SVC },
+        ]))
+    }
+
+    /// A teardown rule's shape: the same deadline only books its passing.
+    fn scrub_on_deadline(_: &RuleContext) -> Option<RuleHandleResult> {
+        Some(RuleHandleResult::new(vec![RuleAction::AddCdrEvent {
+            event_type: CdrEventType::Timeout,
+            leg_id: "a".into(),
+            status_code: None,
+            reason: Some(SCRUB_REASON.into()),
+        }]))
+    }
+
+    fn watchdog_rule(
+        id: &'static str,
+        handle: fn(&RuleContext) -> Option<RuleHandleResult>,
+    ) -> RuleDefinition {
+        RuleDefinition {
+            id,
+            layer: SERVICE_LAYER,
+            overrides: &[],
+            matcher: Match::timer().timer_type(DEADLINE),
+            handle,
+            machine: Some(SVC),
+            active_states: &ARMED,
+            transitions: &TO_TERMINAL,
+            effects: &REJECT_EFFECTS,
+            teardown: false,
+        }
+    }
+
+    /// A ringing call with the service seeded `Armed` in `state`.
+    fn armed_call(state: CallModelState) -> call::Call {
+        let mut call = test_call();
+        call.state = state;
+        call.a_leg.state = LegState::Early;
+        call = call::helpers::add_b_leg(call, b_leg_pending());
+        call.sm_cursors.insert(SVC, StateLabel::new("Armed"));
+        call
+    }
+
+    fn deadline_fire(call: &call::Call) -> CallEvent {
+        CallEvent::Timer { timer_type: DEADLINE, call_ref: call.call_ref.clone(), leg_id: None }
+    }
+
+    fn run(rules: &[RuleDefinition], call: &call::Call, event: &CallEvent) -> HandlerResult {
+        let config = B2buaConfig::default();
+        let id_gen = IdGen::seeded(1);
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
+        let ctx = ctx_for(call, event, &config);
+        execute_rules(rules, call, &ctx, &exec, &ObligationSet::core())
+    }
+
+    fn absorbed_of(result: &HandlerResult) -> Vec<(&'static str, &'static str)> {
+        result
+            .effects
+            .buffered
+            .iter()
+            .filter_map(|e| match e {
+                BufferedObservabilityEffect::GoingAwayAbsorbed { event, rule } => {
+                    Some((*event, *rule))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_service_watchdog_on_a_going_away_call_is_absorbed_and_counted() {
+        for state in [CallModelState::Terminating, CallModelState::Terminated] {
+            let call = armed_call(state);
+            let rules = vec![watchdog_rule("gate-reject", reject_on_deadline)];
+            let result = run(&rules, &call, &deadline_fire(&call));
+            assert!(result.effects.outbound.is_empty(), "nothing leaves on {state:?}");
+            assert_eq!(result.call.state, state, "the rule never ran: no lifecycle move");
+            assert_eq!(
+                result.call.sm_cursors.get(&SVC),
+                Some(&StateLabel::new("Armed")),
+                "the rule never ran: its cursor did not move",
+            );
+            assert_eq!(
+                absorbed_of(&result),
+                vec![("timer", "gate-reject")],
+                "the absorbed fire is counted once, naming the rule",
+            );
+        }
+    }
+
+    #[test]
+    fn a_teardown_rule_still_runs_on_a_going_away_call() {
+        let call = armed_call(CallModelState::Terminating);
+        let rules = vec![
+            watchdog_rule("gate-reject", reject_on_deadline),
+            watchdog_rule("gate-scrub", scrub_on_deadline).runs_while_terminating(),
+        ];
+        let result = run(&rules, &call, &deadline_fire(&call));
+        assert!(result.effects.outbound.is_empty(), "the guard-less rule was absorbed");
+        assert!(
+            result.call.cdr_events.iter().any(|e| e.reason.as_deref() == Some(SCRUB_REASON)),
+            "the teardown rule ran: {:?}",
+            result.call.cdr_events,
+        );
+        assert_eq!(absorbed_of(&result), vec![("timer", "gate-reject")]);
+    }
+
+    #[test]
+    fn the_gate_is_inert_on_a_live_call() {
+        let call = armed_call(CallModelState::Active);
+        let rules = vec![watchdog_rule("gate-reject", reject_on_deadline)];
+        let result = run(&rules, &call, &deadline_fire(&call));
+        assert!(
+            result.effects.outbound.iter().any(|e| e.label.starts_with("480")),
+            "on a live call the deadline answers the caller: {:?}",
+            result.effects.outbound.iter().map(|e| &e.label).collect::<Vec<_>>(),
+        );
+        assert!(absorbed_of(&result).is_empty(), "nothing absorbed on a live call");
+    }
+
+    #[test]
+    fn a_peer_message_is_not_gated() {
+        // A machine-bound rule on an in-dialog INFO stays a candidate on a
+        // terminating call: the gate covers the call's own clocks, not what a
+        // peer says.
+        let mut call = test_call();
+        call.state = CallModelState::Terminating;
+        call.sm_cursors.insert(MachineId::new(TEST_MACHINE), StateLabel::new("S0"));
+        let event = info_event();
+        let config = B2buaConfig::default();
+        let ctx = ctx_for(&call, &event, &config);
+        let rules = vec![sm_rule(handle_to_s1)];
+        assert_eq!(pick_ranked(&rules, &call, &ctx).len(), 1, "a peer's INFO reaches the rule");
+    }
+
+    #[test]
+    fn begin_termination_disarms_service_watchdogs_and_deactivates_machines() {
+        // Entering `terminating` takes every service watchdog out of the
+        // ledger and the driver — beside the per-leg NoAnswer entries — and
+        // removes every service machine's cursor; the call-level deadline and
+        // the lifecycle projection stay.
+        let mut call = armed_call(CallModelState::Active);
+        let no_answer_id = TimerType::NoAnswer.timer_id(Some("b-1"));
+        let deadline_id = DEADLINE.timer_id(None);
+        for (id, timer_type, leg_id) in [
+            (no_answer_id.clone(), TimerType::NoAnswer, Some("b-1".to_string())),
+            (deadline_id.clone(), DEADLINE, None),
+            (TimerType::GlobalDuration.timer_id(None), TimerType::GlobalDuration, None),
+        ] {
+            call.timers.push(call::TimerEntry { id, timer_type, fire_at: 5_000, leg_id });
+        }
+        call.sm_cursors
+            .insert(b2bua::rules::invariants::GLOBAL_CALL_MACHINE, StateLabel::new("Active"));
+        let event = CallEvent::Cancelled {
+            call_id: call.a_leg.call_id.clone(),
+            from_tag: call.a_leg.from_tag.clone(),
+            invite_cseq: None,
+            in_dialog: false,
+            headers: vec![],
+        };
+        let config = B2buaConfig::default();
+        let ctx = ctx_for(&call, &event, &config);
+        let id_gen = IdGen::seeded(1);
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
+        let result = exec.execute(
+            &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }],
+            &call,
+            &ctx,
+        );
+        let ledger: Vec<&str> = result.call.timers.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ledger,
+            vec!["GlobalDuration", "TerminatingTimeout"],
+            "NoAnswer and the service watchdog left the ledger; the call-level cap stays",
+        );
+        for id in [&no_answer_id, &deadline_id] {
+            assert!(
+                result.effects.critical.iter().any(
+                    |e| matches!(e, CriticalStateEffect::CancelTimer { id: cancelled } if cancelled == id)
+                ),
+                "the live fiber {id} is cancelled, got {:?}",
+                result.effects.critical,
+            );
+        }
+        let machines: Vec<&str> = result.call.sm_cursors.keys().map(|m| m.as_str()).collect();
+        assert_eq!(machines, vec!["global-call"], "every service machine is deactivated");
     }
 }

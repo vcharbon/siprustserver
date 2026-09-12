@@ -172,6 +172,7 @@ pub fn build_initial_call(
         kind: Some(LegKind::A),
         // Derived from kind (the a-leg is always adopted); see `is_adopted`.
         adopted: None,
+        invite_final_sent: None,
     };
     let topology = topology_from_cookie(invite, &config.self_ordinal, &call_ref);
     let a_leg_invite = ALegInviteSnapshot {
@@ -405,8 +406,11 @@ pub(crate) fn reject_call(
             );
         }
     };
+    let mut effects = HandlerEffects::new();
     // A non-100 final response needs a To-tag (the B2BUA's a-facing tag).
-    let effect = relay::response_to_a_leg(
+    if let Some(effect) = relay::response_to_a_leg(
+        &mut call,
+        &mut effects,
         a_invite,
         status,
         &reason,
@@ -416,18 +420,18 @@ pub(crate) fn reject_call(
         None,
         None,
         extra_headers,
-    );
-    call.cdr_events.push(CdrEvent {
-        event_type: CdrEventType::Reject,
-        timestamp: now_ms,
-        leg_id: "a".to_string(),
-        status_code: Some(status as i64),
-        reason: Some(reason),
-    });
+    ) {
+        effects.outbound.push(effect);
+        call.cdr_events.push(CdrEvent {
+            event_type: CdrEventType::Reject,
+            timestamp: now_ms,
+            leg_id: "a".to_string(),
+            status_code: Some(status as i64),
+            reason: Some(reason),
+        });
+    }
     call.a_leg.state = LegState::Terminated;
     call.state = CallModelState::Terminated;
-    let mut effects = HandlerEffects::new();
-    effects.outbound.push(effect);
     HandlerResult { call, effects }
 }
 

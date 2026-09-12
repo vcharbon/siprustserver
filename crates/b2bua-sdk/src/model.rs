@@ -297,6 +297,13 @@ pub struct RuleDefinition {
     /// executor verifies the handler's emitted actions are a subset of these *by
     /// [`EffectKind`]* (cursor moves + bookkeeping are auto-allowed).
     pub effects: &'static [Effect],
+    /// A teardown rule stays a selection candidate on a `Terminating` /
+    /// `Terminated` call for an asynchronous trigger — a timer fire, a
+    /// transaction timeout, an internal-event fold
+    /// ([`CallEvent::is_asynchronous_trigger`]). Every other rule is absorbed
+    /// there: a call already going away makes no forward progress on its own
+    /// clock. A peer's message and a CANCEL keep their per-rule filters.
+    pub teardown: bool,
 }
 
 impl RuleDefinition {
@@ -320,7 +327,16 @@ impl RuleDefinition {
             active_states: &[],
             transitions: &[],
             effects: &[],
+            teardown: false,
         }
+    }
+
+    /// Mark this a teardown rule ([`Self::teardown`]): it still runs on a
+    /// going-away call for an asynchronous trigger — to resolve a leg, scrub
+    /// a spent ledger entry, or reap a wedged teardown.
+    pub fn runs_while_terminating(mut self) -> Self {
+        self.teardown = true;
+        self
     }
 }
 

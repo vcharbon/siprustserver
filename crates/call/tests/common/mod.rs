@@ -152,6 +152,7 @@ pub fn representative_call() -> Call {
         ext: None,
         kind: None,
         adopted: None,
+        invite_final_sent: Some(200),
     };
     a_leg.dialogs[0].ext.answered_2xx = Some(Unacked2xx {
         dialog_tag: "b2bua-to-tag-aleg-9876".into(),
@@ -185,6 +186,7 @@ pub fn representative_call() -> Call {
         ext: None,
         kind: None,
         adopted: None,
+        invite_final_sent: None,
     };
     b_leg.dialogs[0].ext.emitted_ack = Some(RetainedEmission::on_trigger(
         EMITTED_ACK.to_vec(),
@@ -624,6 +626,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
             arb_ext(),
             proptest::option::of(arb_leg_kind()),
             proptest::option::of(any::<bool>()),
+            proptest::option::of(200u16..700),
         ),
     )
         .prop_map(
@@ -637,7 +640,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
                 dialogs,
                 (no_answer_timeout_sec, bye_disposition),
                 (local_uri, remote_uri, invite_request_uri),
-                (pending_invite_txn, ext, kind, adopted),
+                (pending_invite_txn, ext, kind, adopted, invite_final_sent),
             )| Leg {
                 leg_id,
                 call_id,
@@ -655,6 +658,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
                 ext,
                 kind,
                 adopted,
+                invite_final_sent,
             },
         )
 }

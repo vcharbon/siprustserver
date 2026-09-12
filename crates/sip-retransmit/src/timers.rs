@@ -12,6 +12,10 @@ pub const T1: u64 = 500;
 /// Max retransmit interval for non-INVITE (ms) — Timer E caps here.
 pub const T2: u64 = 4000;
 
+/// Maximum time a message stays in the network (ms, RFC 3261 §17.1.2.2) — the
+/// bound on how late a retransmitted ACK can still arrive (Timer I).
+pub const T4: u64 = 5000;
+
 /// INVITE client transaction timeout (Timer B = 64·T1 = 32 s): the bound of an
 /// INVITE — initial or in-dialog — that has drawn no response at all (RFC 3261
 /// §17.1.1.2 scopes it to Calling), and (as Timer F) of every non-INVITE —
@@ -40,6 +44,17 @@ pub const TIMER_H: u64 = 64 * T1;
 
 /// Non-INVITE server txn cleanup after a final response (Timer J, §17.2.2).
 pub const TIMER_J: u64 = 64 * T1;
+
+/// INVITE *server* txn Confirmed-state hold after the ACK for a non-2xx final
+/// (Timer I, RFC 3261 §17.2.1): T4 on UDP, the transport this layer rides —
+/// long enough to absorb the ACK's retransmissions and to refuse a second
+/// final on the branch. `TIMER_I_RELIABLE` is its value on a reliable
+/// transport, where no ACK retransmission can follow.
+pub const TIMER_I: u64 = T4;
+
+/// Timer I on a reliable transport (RFC 3261 §17.2.1): zero, the transaction
+/// leaves at once.
+pub const TIMER_I_RELIABLE: u64 = 0;
 
 /// INVITE *client* txn Completed-state hold after ACKing a non-2xx final (Timer D,
 /// §17.1.1.2). ≥ 32 s for unreliable transports — long enough to re-ACK + absorb

@@ -95,6 +95,32 @@ fn release_subscriptions_and_reroute_round_trip() {
     assert_eq!(decoded, call, "mid-reroute shape");
 }
 
+/// The final a leg's initial INVITE carries is replicated state — a takeover
+/// node must refuse a second final on that transaction exactly as the node
+/// that sent the first would — so it survives the replication codec in both
+/// shapes (unanswered / answered).
+#[test]
+fn the_invite_final_sent_fact_round_trips() {
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+
+    call.a_leg.invite_final_sent = None;
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "unanswered a-leg");
+    assert_eq!(decoded.a_leg.invite_final_sent, None);
+
+    call.a_leg.invite_final_sent = Some(487);
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "a-leg carrying its final");
+    assert_eq!(decoded.a_leg.invite_final_sent, Some(487));
+
+    // The helper records the first final only.
+    let call = call::helpers::record_invite_final(call, "a", 480);
+    assert_eq!(call.a_leg.invite_final_sent, Some(487), "the first final stands");
+    let call = call::helpers::record_invite_final(call, "b-1", 200);
+    assert_eq!(call.b_legs[0].invite_final_sent, Some(200));
+}
+
 /// RFC 3262 §7.1: the a-facing reliable-provisional map is replicated state —
 /// a PRACK arriving after a takeover must still translate onto the b-leg number
 /// it acknowledges, so the map has to survive the replication codec.

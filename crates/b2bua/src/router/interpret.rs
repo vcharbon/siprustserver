@@ -125,6 +125,12 @@ pub(super) async fn process_result(
     for eff in &result.effects.buffered {
         match eff {
             BufferedObservabilityEffect::WriteCdr => ctx.cdr.write(&result.call, now_ms).await,
+            BufferedObservabilityEffect::SecondFinalRefused { .. } => {
+                ctx.metrics.bump_second_final_refused()
+            }
+            BufferedObservabilityEffect::GoingAwayAbsorbed { .. } => {
+                ctx.metrics.bump_going_away_absorbed()
+            }
         }
     }
 

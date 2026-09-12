@@ -334,6 +334,7 @@ mod tests {
             active_states: &STUB_ACTIVE,
             transitions: &STUB_TRANS,
             effects: &[],
+            teardown: false,
         }]
     }
     fn stub_init(_: &crate::rules::RuleCall) -> Option<ServiceSeed> {

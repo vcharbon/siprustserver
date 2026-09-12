@@ -12,11 +12,14 @@
 //!
 //! The invariant: a leg/call already going away makes NO forward progress —
 //! no failure consult, no new final on a transaction that already carries
-//! one. Two layers pin it here: `BeginTermination` scrubs the per-leg
-//! `NoAnswer` entries at the source, and the `no-answer` spent-check absorbs
-//! a fire that still reaches a going-away leg (the reclaim-restored shape).
-//! The third test pins the `handle-timeout` sibling: the b-leg INVITE
-//! transaction backstop firing on a caller-CANCELed leg resolves it locally.
+//! one. `BeginTermination` scrubs the per-leg `NoAnswer` entries and every
+//! service watchdog at the source; the executor absorbs a fire that still
+//! reaches a going-away call unless the rule is a teardown rule; and the
+//! `no-answer` spent-check (a teardown rule) absorbs the reclaim-restored
+//! shape — pinned at the rule seam in `b2bua/tests/rules.rs`. The second test
+//! pins the source scrub for a service watchdog; the third pins the
+//! `handle-timeout` sibling: the b-leg INVITE transaction backstop firing on
+//! a caller-CANCELed leg resolves it locally.
 //!
 //! The b-leg CANCEL toward the response-less callee is HELD by sip-txn for
 //! the grace window, then sent regardless (RFC 3261 §9.1 bounded per
@@ -103,9 +106,10 @@ mod stalerestore {
         rules: [ inject_stale_entry() ],
     }
 
-    /// Re-arms the b-leg's `NoAnswer` on the terminating call — the ledger
-    /// shape a reboot reclaim restores when the entry's cancel died with the
-    /// node.
+    /// Would re-arm the b-leg's `NoAnswer` on the terminating call — the
+    /// ledger shape a reboot reclaim restores when the entry's cancel died
+    /// with the node. Its own watchdog is disarmed at the caller's CANCEL,
+    /// so this never runs.
     fn inject_stale_entry() -> RuleDefinition {
         sm_rule! {
             id: "stalerestore-inject",
@@ -236,12 +240,12 @@ async fn no_answer_deadline_on_a_caller_cancelled_call_is_inert() {
     );
 }
 
-/// The reclaim shape: a stale `NoAnswer` entry restored INTO the terminating
-/// window (its scrub died with a crashed node) still fires — the spent-check
-/// absorbs it on the going-away leg: no consult, no second final, and the
-/// terminating backstop reaps the call on schedule.
+/// A service watchdog armed before the caller's CANCEL is disarmed at
+/// termination: its deadline passes inside the terminating window with no
+/// fire — nothing to absorb, nothing re-armed, no consult, no second final —
+/// and the terminating backstop reaps the call on schedule.
 #[tokio::test(start_paused = true)]
-async fn stale_no_answer_fire_during_the_terminating_window_is_absorbed() {
+async fn a_service_watchdog_armed_before_the_cancel_is_disarmed_at_termination() {
     let h = Harness::new("no-answer-stale-terminating");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -266,18 +270,22 @@ async fn stale_no_answer_fire_during_the_terminating_window_is_absorbed() {
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_some(),
         "the grace expiry puts the b-leg CANCEL on the wire (ADR-0028)",
     );
-    // Then cross ONLY the probe's inject deadline: the stale per-b-leg NoAnswer
-    // entry is re-armed on the now-Terminating call (+STALE_FIRE_SEC).
+    // Then cross ONLY the probe's inject deadline: disarmed at the CANCEL, it
+    // never fires, so no stale per-b-leg NoAnswer entry is re-armed.
     h.advance(
         Duration::from_secs(stalerestore::INJECT_AT_SEC as u64)
             - Duration::from_millis(sip_txn::timers::CANCEL_HOLD_GRACE + 500),
     )
     .await;
-    // Cross ONLY the stale NoAnswer deadline. Pre-fix this consulted
-    // /calls/failure and 480'd the a-leg's completed transaction.
+    // And the deadline the probe would have armed.
     h.advance(Duration::from_secs(stalerestore::STALE_FIRE_SEC as u64 + 1)).await;
 
     assert_eq!(consults.load(Ordering::SeqCst), 0, "no consult on a going-away leg");
+    assert_eq!(
+        b2bua.metrics().going_away_absorbed_total(),
+        0,
+        "the probe's watchdog left the ledger at termination: nothing fired",
+    );
     assert!(
         alice.try_receive_tolerating("CANCEL", &[]).await.is_none(),
         "nothing may reach the caller after the 487",

@@ -15,9 +15,8 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{hops, Method, SipHeader, SipMessage, SipParser};
 use sip_txn::TxnKind;
 
-use crate::effects::{
-    CriticalStateEffect, HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode,
-};
+use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::rules::invariants::GLOBAL_CALL_MACHINE;
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
 
@@ -30,11 +29,19 @@ impl ActionExecutor<'_> {
     /// `bye_received`), or `cancelling` (a `cancel-leg` CANCEL is already in
     /// flight) — issue the right teardown: confirmed → BYE + `bye_sent`;
     /// trying/early b-leg → CANCEL + `cancelled` + terminated; trying/early
-    /// a-leg → `none` (the rule already sent the SIP reply) — and, when a final
-    /// to the a-leg is among this turn's outbound effects, → terminated too
-    /// (the answered leg is resolved, so the ADR-0022 unanswered-a-leg
-    /// invariant stays a pure safety net). Then enter `terminating` and arm the
-    /// safety timer.
+    /// a-leg → `none` (the rule already sent the SIP reply) — and, when its
+    /// INVITE carries its final (`invite_final_sent`), → terminated too (the
+    /// answered leg is resolved, so the ADR-0022 unanswered-a-leg invariant
+    /// stays a pure safety net). Then enter `terminating` and arm the safety
+    /// timer.
+    ///
+    /// A terminating call makes no forward progress on its own clock: every
+    /// per-leg `NoAnswer` entry and every service watchdog leaves the ledger
+    /// and the driver, the ladders end, and every service machine is
+    /// deactivated (its cursor removed) — so no fire reaches the terminating
+    /// window and a reclaim cannot restore one into it. A rule that keeps its
+    /// machine through the teardown re-installs its cursor with a `SetState`
+    /// after this action.
     ///
     /// A relayed INVITE still pending on any dialog is answered first (RFC 3261
     /// §15.1.2: a UAS ending a dialog still responds to its pending requests,
@@ -125,23 +132,15 @@ impl ActionExecutor<'_> {
                     if is_a {
                         // a-leg trying/early: the rule already sent the SIP reply.
                         *call = set_bye_disposition(call.clone(), &id, ByeDisposition::None);
-                        // Parity with the b-leg arm: when that reply is REAL — a
-                        // ≥200 final to the a-leg among THIS turn's outbound
-                        // effects (`RespondToALeg` / `RelayFailureToALeg` are
-                        // wire-only and never move leg state) — the leg is
-                        // resolved; record it `Terminated` so a later turn's
-                        // `→ terminated` edge doesn't read a still-`Early` a-leg
-                        // and have the ADR-0022 invariant re-answer a spurious
-                        // 503 (observed: a crossing BYE from the parked media
-                        // leg right after the reject). A leg with NO final this
-                        // turn deliberately stays Trying/Early —
-                        // `answer_a_leg_if_unanswered` still owes that caller
-                        // its 503.
-                        let answered_this_turn = fx.outbound.iter().any(|e| {
-                            e.leg_id.as_deref() == Some(id.as_str())
-                                && matches!(&e.body, OutboundBody::Response(r) if r.status() >= 200)
-                        });
-                        if answered_this_turn {
+                        // Parity with the b-leg arm: an a-leg whose INVITE
+                        // carries its final — this turn's reject, or the txn
+                        // layer's autonomous 487 — is resolved; recorded
+                        // `Terminated` so a later turn's `→ terminated` edge
+                        // never reads a still-`Early` a-leg and re-answers it
+                        // (ADR-0022). A leg with NO final yet stays
+                        // Trying/Early — `answer_a_leg_if_unanswered` still
+                        // owes that caller its 503.
+                        if call.a_leg.invite_final_sent.is_some() {
                             *call = set_leg_state(call.clone(), &id, LegState::Terminated);
                         }
                     } else {
@@ -161,26 +160,18 @@ impl ActionExecutor<'_> {
                 LegState::Terminated => {}
             }
         }
-        // Nothing awaits an answer once the call is terminating: scrub every
-        // per-leg `NoAnswer` ledger entry — including entries of legs the loop
-        // skipped as already `Cancelling` — so the fire never reaches a
-        // terminating call and a reclaim cannot restore it into one.
-        let no_answer_ids: Vec<String> = call
-            .timers
-            .iter()
-            .filter(|t| t.timer_type == TimerType::NoAnswer)
-            .map(|t| t.id.clone())
-            .collect();
-        if !no_answer_ids.is_empty() {
-            call.timers.retain(|t| t.timer_type != TimerType::NoAnswer);
-            for id in no_answer_ids {
-                fx.critical.push(CriticalStateEffect::CancelTimer { id });
-            }
-        }
+        // Nothing awaits an answer and no service makes progress once the
+        // call is terminating: every per-leg `NoAnswer` entry — including a
+        // leg the loop skipped as already `Cancelling` — and every service
+        // watchdog leaves the ledger and the driver.
+        self.scrub_where(call, fx, |t| {
+            matches!(t.timer_type, TimerType::NoAnswer | TimerType::Service { .. })
+        });
         // Nothing is repeated into a terminating call either: every ladder
         // ends with the setup (a caller who CANCELled must not keep receiving
         // rungs), so a reclaim cannot restore one into it.
         self.retire(call, fx, Scope::Call);
+        deactivate_service_machines(call);
         call.state = call::CallModelState::Terminating;
         self.schedule(call, fx, TimerType::TerminatingTimeout, TERMINATING_TIMEOUT_MS, None);
     }
@@ -517,6 +508,15 @@ impl ActionExecutor<'_> {
             leg_id: Some(leg_id.to_string()),
         })
     }
+}
+
+/// Remove every service machine's cursor: a terminating call is the core
+/// teardown's alone, so no machine-bound rule is a candidate on it. The
+/// `global-call` projection stays — it is the lifecycle itself, re-projected
+/// by `invariants::finalize`, which also restores the engine's own
+/// projections (`transfer`, `relayFirst18x`) from their authoritative slices.
+fn deactivate_service_machines(call: &mut Call) {
+    call.sm_cursors.retain(|machine, _| *machine == GLOBAL_CALL_MACHINE);
 }
 
 /// A re-INVITE CANCEL ready to leave, with the identity of the dialog whose

@@ -235,6 +235,18 @@ impl Owner {
         }
     }
 
+    /// Take the txn at `branch` off its call's books while it stays resident:
+    /// `has_txns_for` / `ActiveTxnCount` no longer see it, and a watched call
+    /// it was the last transaction of hears `CallQuiesced` at end of turn
+    /// (ADR-0014), exactly as if the txn had been deleted.
+    pub(super) fn detach_from_call(&mut self, branch: &str) {
+        let Some(cr) = self.txns.get_mut(branch).and_then(|t| t.call_ref.take()) else { return };
+        self.untrack_call_ref(&Some(cr.clone()), branch);
+        if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
+            self.pending_quiesce.push(cr);
+        }
+    }
+
     pub(super) fn delete_txn(&mut self, branch: &str) -> bool {
         match self.txns.remove(branch) {
             Some(t) => {
@@ -267,7 +279,9 @@ impl Owner {
                 // protocol event (the ACK/Timeout that drove the delete), so defer
                 // it to `flush_pending_quiesce`. (For a 2xx INVITE the server txn
                 // lingers in `Completed` until Timer H — the ACK reuses a different
-                // branch — so this naturally fires at Timer H, after the ACK relay.)
+                // branch — so this naturally fires at Timer H, after the ACK relay.
+                // A non-2xx INVITE server txn detached on its ACK, `call_ref`
+                // already `None`, was accounted then.)
                 if let Some(cr) = t.call_ref {
                     if self.self_release_watch.contains(&cr) && !self.has_txns_for(&cr) {
                         self.pending_quiesce.push(cr);

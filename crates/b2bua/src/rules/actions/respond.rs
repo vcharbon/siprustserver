@@ -112,7 +112,9 @@ impl ActionExecutor<'_> {
             call.emergency == Some(true),
         );
         let extra = failure_headers_answering(ctx, call);
-        fx.outbound.push(relay::response_to_a_leg(
+        if let Some(effect) = relay::response_to_a_leg(
+            call,
+            fx,
             &a_invite,
             status,
             reason,
@@ -122,7 +124,9 @@ impl ActionExecutor<'_> {
             None,
             None,
             extra,
-        ));
+        ) {
+            fx.outbound.push(effect);
+        }
     }
 
     /// Answer the a-leg INVITE with a decision-authored Reject/Redirect final
@@ -176,7 +180,9 @@ impl ActionExecutor<'_> {
                 }
             }
         }
-        fx.outbound.push(relay::response_to_a_leg(
+        if let Some(effect) = relay::response_to_a_leg(
+            call,
+            fx,
             &a_invite,
             status,
             &reason,
@@ -186,7 +192,9 @@ impl ActionExecutor<'_> {
             None,
             None,
             extra,
-        ));
+        ) {
+            fx.outbound.push(effect);
+        }
     }
 
     /// The one seam every a-facing initial-INVITE **2xx** leaves through — the
@@ -268,7 +276,9 @@ impl ActionExecutor<'_> {
                 value: SipStr::owned(pem),
             });
         }
-        fx.outbound.push(relay::response_to_a_leg(
+        if let Some(effect) = relay::response_to_a_leg(
+            call,
+            fx,
             &a_invite,
             status,
             reason,
@@ -278,7 +288,9 @@ impl ActionExecutor<'_> {
             content_type,
             None,
             extra_headers,
-        ));
+        ) {
+            fx.outbound.push(effect);
+        }
     }
 
     /// A-side fork-confirm ([`crate::rules::model::RuleAction::AnswerALegNewDialog`]):
@@ -332,18 +344,6 @@ impl ActionExecutor<'_> {
         // Minting via the IdGen guarantees A2 ≠ A1 (distinct from the pinned
         // early-media tag), the RFC 3264 §5.1 requirement.
         let a2 = to_tag.map(str::to_string).unwrap_or_else(|| self.id_gen.new_tag());
-        // Seed the a-dialog if absent (fresh minting adopts A2 directly); when it
-        // already exists under the early-media A1, `ensure_a_dialog_with` returns
-        // A1 unchanged, so re-stamp local_tag to A2 explicitly — the early dialog
-        // is superseded, not kept. The answer SDP becomes the dialog's
-        // `cached_sdp`, as `confirm_dialog` keeps it.
-        self.ensure_a_dialog_with(call, Some(a2.clone()));
-        if let Some(d) = call.a_leg.dialogs.first_mut() {
-            d.sip.local_tag = a2.clone();
-            if !body.is_empty() {
-                d.ext.cached_sdp = Some(body.to_vec());
-            }
-        }
         // SDP answer defaults to application/sdp (mirrors the provisional path).
         let content_type = content_type
             .and_then(relay::media_type)
@@ -384,17 +384,35 @@ impl ActionExecutor<'_> {
                 })
                 .collect();
         relay::stamp_a_facing_invite_advert(&mut extra_headers, &service_owned, &advert);
-        let effect = relay::response_to_a_leg(
+        // Built before the a-dialog moves to A2: a refused answer (the INVITE
+        // already carries its final) leaves the dialog the caller holds intact.
+        let Some(effect) = relay::response_to_a_leg(
+            call,
+            fx,
             &a_invite,
             status,
             reason,
-            Some(a2),
+            Some(a2.clone()),
             Some(contact),
             body.to_vec(),
             content_type,
             None,
             extra_headers,
-        );
+        ) else {
+            return;
+        };
+        // Seed the a-dialog if absent (fresh minting adopts A2 directly); when it
+        // already exists under the early-media A1, `ensure_a_dialog_with` returns
+        // A1 unchanged, so re-stamp local_tag to A2 explicitly — the early dialog
+        // is superseded, not kept. The answer SDP becomes the dialog's
+        // `cached_sdp`, as `confirm_dialog` keeps it.
+        self.ensure_a_dialog_with(call, Some(a2.clone()));
+        if let Some(d) = call.a_leg.dialogs.first_mut() {
+            d.sip.local_tag = a2;
+            if !body.is_empty() {
+                d.ext.cached_sdp = Some(body.to_vec());
+            }
+        }
         // This 2xx answers the caller: it goes through the one seam that
         // retains the datagram + arms the §13.3.1.4 ladder.
         self.send_a_leg_answer(call, fx, effect);

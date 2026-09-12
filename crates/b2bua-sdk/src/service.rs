@@ -180,6 +180,7 @@ macro_rules! sm_rule {
             active_states: __ACTIVE,
             transitions: __TRANS,
             effects: __EFFECTS,
+            teardown: false,
         }
     }};
 }

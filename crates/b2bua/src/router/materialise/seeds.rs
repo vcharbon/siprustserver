@@ -317,6 +317,7 @@ mod tests {
             ext: None,
             kind: Some(LegKind::Destination),
             adopted: None,
+            invite_final_sent: None,
         }
     }
 

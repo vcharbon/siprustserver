@@ -80,6 +80,18 @@ struct Inner {
     // completed transaction. A non-zero rate measures the caller-gives-up-
     // during-routing race, not a fault.
     decision_dropped_cancelled: AtomicU64,
+    // Second-final refusal (RFC 3261 §17.2.1): a final the call layer authored
+    // toward the a-leg's initial INVITE while that transaction already carried
+    // one — refused at the a-leg response seam, never built. A rule made
+    // progress on a call already answered or going away; expected 0 in any
+    // healthy run.
+    second_final_refused: AtomicU64,
+    // Going-away gate: an asynchronous trigger (timer fire, transaction
+    // timeout, internal-event fold) that landed on a Terminating/Terminated
+    // call and matched a rule that is not a teardown rule — absorbed before
+    // it ran. Measures the race between a call's own clocks and its teardown,
+    // not a fault; a rule named here on a live call would have made progress.
+    going_away_absorbed: AtomicU64,
     // Injectable store-fault seam (ADR-0023): `store_fault_rejected` = live
     // lookups that failed CLOSED with a 500 final (initial-INVITE dialog-
     // existence check or in-dialog request fetch); `store_fault_audit_skipped`
@@ -278,6 +290,9 @@ impl B2buaMetrics {
         decision_dropped_cancelled_total,
         decision_dropped_cancelled
     );
+    // Second-final refusal (RFC 3261 §17.2.1) and the going-away gate.
+    counter!(bump_second_final_refused, second_final_refused_total, second_final_refused);
+    counter!(bump_going_away_absorbed, going_away_absorbed_total, going_away_absorbed);
     // Injectable store-fault seam (ADR-0023).
     counter!(bump_store_fault_rejected, store_fault_rejected_total, store_fault_rejected);
     counter!(
@@ -612,6 +627,9 @@ impl B2buaMetrics {
         counter("b2bua_overload_rejected_total", "new INVITEs shed with a stateless 503 by the Tier-3 admission gate (CPS token bucket empty OR panic-ELU backstop tripped; a non-zero rate flags the LB's AIMD absent/misconfigured/overloaded)", self.overload_rejected_total());
         // ── decision-application drop guard (069) ──
         counter("b2bua_decision_dropped_cancelled_total", "decision results (route/reject) dropped whole because the caller CANCELed the initial INVITE while the decision was in flight (the 487 is the transaction's one final; no b-leg is launched)", self.decision_dropped_cancelled_total());
+        // ── a call already going away authors no further progress ──
+        counter("b2bua_second_final_refused_total", "finals toward the a-leg's initial INVITE refused because that transaction already carries one (RFC 3261 §17.2.1); a rule made progress on an answered or going-away call — expected 0", self.second_final_refused_total());
+        counter("b2bua_going_away_absorbed_total", "asynchronous triggers (timer fire / transaction timeout / internal-event fold) absorbed on a Terminating or Terminated call because the rule they matched is not a teardown rule; the race between a call's own clocks and its teardown, not a fault", self.going_away_absorbed_total());
         // ── injectable store-fault seam (ADR-0023) ──
         counter("b2bua_store_fault_rejected_total", "live store lookups that failed CLOSED (a 500 final to the initial INVITE or in-dialog request; a faulted ACK is dropped un-answered; 0 unless a fault is armed)", self.store_fault_rejected_total());
         counter("b2bua_store_fault_audit_skipped_total", "keepalive/audit cycles skipped FAIL-OPEN on a store fault (call kept up, timer re-armed; 0 unless a fault is armed)", self.store_fault_audit_skipped_total());

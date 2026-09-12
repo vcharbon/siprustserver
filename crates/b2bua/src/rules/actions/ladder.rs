@@ -19,8 +19,7 @@ use sip_message::{Method, SipMessage, SipResponse};
 use sip_retransmit::{Class, Schedule};
 
 use crate::effects::{
-    CriticalStateEffect, HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect,
-    OutboundTxnMode,
+    HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode,
 };
 use crate::event::CallEvent;
 use crate::rules::defaults::unacked_2xx_give_up_actions;
@@ -342,15 +341,10 @@ impl ActionExecutor<'_> {
     }
 
     /// Remove one ladder timer from the replicated ledger AND the live driver
-    /// (the one schedule/cancel id recipe, `TimerType::timer_id`). A timer the
-    /// ledger does not hold is not in the driver either.
+    /// (the one schedule/cancel id recipe, `TimerType::timer_id`).
     fn scrub_timer(&self, call: &mut Call, fx: &mut HandlerEffects, timer_type: &TimerType) {
         let id = timer_type.timer_id(None);
-        let before = call.timers.len();
-        call.timers.retain(|t| t.id != id);
-        if call.timers.len() != before {
-            fx.critical.push(CriticalStateEffect::CancelTimer { id });
-        }
+        self.scrub_where(call, fx, |t| t.id == id);
     }
 
     /// The bound of a §13.3.1.4 ladder — no rung is scheduled at or past it:

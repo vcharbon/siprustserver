@@ -48,6 +48,15 @@ pub fn set_bye_disposition(call: Call, leg_id: &str, bye: ByeDisposition) -> Cal
     update_leg(call, leg_id, |l| l.bye_disposition = Some(bye))
 }
 
+/// Record the final sent on a leg's initial inbound INVITE
+/// ([`Leg::invite_final_sent`]). The first final stands: a leg that already
+/// carries one is left as is — the transaction took exactly that one final.
+pub fn record_invite_final(call: Call, leg_id: &str, status: u16) -> Call {
+    update_leg(call, leg_id, |l| {
+        l.invite_final_sent.get_or_insert(status);
+    })
+}
+
 /// Whether a single leg has reached a terminal resolution for termination
 /// bookkeeping. A `trying` leg with no `byeDisposition` never established, so it
 /// is considered resolved.

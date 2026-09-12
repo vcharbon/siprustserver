@@ -1201,8 +1201,13 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }
             }
             ok(vec![RuleAction::BeginTermination { reason: Some("timeout".into()) }])
-        }),
+        })
+        // Teardown rule: on a terminating call the dead transaction still
+        // resolves its leg.
+        .runs_while_terminating(),
         // ── timers ──────────────────────────────────────────────────────────
+        // The three setup/duration deadlines are teardown rules: on a
+        // terminating call they run to scrub their spent ledger entry.
         rule("no-answer", &[], Match::timer().timer_type(TimerType::NoAnswer), |ctx| {
             // NoAnswer is armed PER B-LEG: a fire for leg X is spent iff X is
             // no longer awaiting an answer — Confirmed, absent from the call
@@ -1265,7 +1270,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }
             }
             ok(actions)
-        }),
+        })
+        .runs_while_terminating(),
         // Call-level a-leg setup deadline (armed at route time, cancelled at
         // answer). Deliberately NOT per-b-leg: reroute/failover creates fresh
         // b-legs (each with its own optional NoAnswer), while this caps the
@@ -1310,7 +1316,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 },
                 RuleAction::BeginTermination { reason: Some("setup-timeout".into()) },
             ])
-        }),
+        })
+        .runs_while_terminating(),
         rule("max-duration", &[], Match::timer().timer_type(TimerType::GlobalDuration), |ctx| {
             // A **subscribed** max-call-duration on an ANSWERED
             // call with a callback_context consults the engine (`call_release`
@@ -1365,7 +1372,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 },
                 RuleAction::BeginTermination { reason: Some("max-duration".into()) },
             ])
-        }),
+        })
+        .runs_while_terminating(),
         rule(
             "keepalive",
             &[],
@@ -1552,7 +1560,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // invariant then promotes → Terminated and discharges the obligations
         // (CDR + limiter) exactly once. The `discharge` outcome deliberately
         // has NO rule (the router's bypass branch owns it — rules are the
-        // thing that failed by then).
+        // thing that failed by then). Teardown rules: a wedged terminating
+        // call is exactly what a verdict reaps.
         rule(
             "reaper-stale",
             &[],
@@ -1560,7 +1569,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .topic(crate::reaper::REAPER_TOPIC)
                 .outcome(crate::reaper::OUTCOME_STALE),
             |ctx| reap_force_terminal(ctx, "reaper-stale"),
-        ),
+        )
+        .runs_while_terminating(),
         rule(
             "reaper-fatal-error",
             &[],
@@ -1568,7 +1578,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .topic(crate::reaper::REAPER_TOPIC)
                 .outcome(crate::reaper::OUTCOME_FATAL),
             |ctx| reap_force_terminal(ctx, "handler-panic"),
-        ),
+        )
+        .runs_while_terminating(),
         rule(
             "terminating-safety-timeout",
             &[],
@@ -1601,6 +1612,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 }
                 ok(actions)
             },
-        ),
+        )
+        .runs_while_terminating(),
     ]
 }

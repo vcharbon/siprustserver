@@ -841,6 +841,12 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     s.push_str("# HELP b2bua_txn_retransmit_buf_bytes Sum of per-txn retransmit-buffer bytes retained for retransmission.\n");
     s.push_str("# TYPE b2bua_txn_retransmit_buf_bytes gauge\n");
     s.push_str(&format!("b2bua_txn_retransmit_buf_bytes {}\n", m.retransmit_buf_bytes()));
+    s.push_str("# HELP b2bua_txn_server_final_unseen_branch_total Non-2xx INVITE finals dropped because no server transaction held their branch (RFC 3261 section 17.2.1, one final per transaction); expected 0.\n");
+    s.push_str("# TYPE b2bua_txn_server_final_unseen_branch_total counter\n");
+    s.push_str(&format!(
+        "b2bua_txn_server_final_unseen_branch_total {}\n",
+        m.server_final_unseen_branch()
+    ));
     s.push_str("# HELP b2bua_txn_event_queue_depth Inbound->app events channel current depth.\n");
     s.push_str("# TYPE b2bua_txn_event_queue_depth gauge\n");
     s.push_str(&format!("b2bua_txn_event_queue_depth {}\n", m.event_queue_depth()));

@@ -477,7 +477,9 @@ impl ActionExecutor<'_> {
                 resp,
                 &mut passthrough,
             );
-            let effect = relay::response_to_a_leg(
+            let Some(effect) = relay::response_to_a_leg(
+                call,
+                fx,
                 &a_invite,
                 status,
                 &reason,
@@ -487,7 +489,9 @@ impl ActionExecutor<'_> {
                 relay_content_type,
                 None,
                 passthrough,
-            );
+            ) else {
+                return;
+            };
             // A 2xx answers the caller: it goes through the one seam that
             // retains the datagram + arms the §13.3.1.4 ladder.
             if (200..300).contains(&status) {
@@ -545,7 +549,9 @@ impl ActionExecutor<'_> {
             resp,
             &mut passthrough,
         );
-        let effect = relay::response_to_a_leg(
+        let Some(effect) = relay::response_to_a_leg(
+            call,
+            fx,
             &a_invite,
             status,
             &reason,
@@ -555,7 +561,9 @@ impl ActionExecutor<'_> {
             relay_content_type,
             None,
             passthrough,
-        );
+        ) else {
+            return;
+        };
         // A 2xx answers the caller: it goes through the one seam that retains
         // the datagram + arms the §13.3.1.4 ladder.
         if (200..300).contains(&status) {

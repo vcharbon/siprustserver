@@ -112,15 +112,16 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<()>,
     },
-    /// Count the transactions (any role/state) still resident in the map for
-    /// `call_ref`. The B2BUA's acting-backup **self-release** (ADR-0014) polls
-    /// this after serving a takeover event: when it reaches **0** the backup's
-    /// served transaction(s) have fully cleaned up (final response + ACK for an
-    /// INVITE, Timer J/H for a non-INVITE, or Timer B/F on failure), so the
-    /// acting-backup may shed its live takeover copy. "Resident in the map" — not
-    /// merely `is_active()` — is deliberate: an INVITE server txn lingers in
+    /// Count the transactions (any role/state) still attributed to `call_ref`.
+    /// The B2BUA's acting-backup **self-release** (ADR-0014) polls this after
+    /// serving a takeover event: when it reaches **0** the backup's served
+    /// transaction(s) have met their obligation to the call (final response +
+    /// ACK for an INVITE, Timer J/H for a non-INVITE, or Timer B/F on failure),
+    /// so the acting-backup may shed its live takeover copy. Attribution — not
+    /// `is_active()` — is deliberate: an INVITE server txn lingers in
     /// `Completed` until its ACK, and shedding before the ACK would strand the
-    /// ACK relay.
+    /// ACK relay. A txn that lives on past its obligation (a non-2xx INVITE
+    /// server txn in Confirmed for Timer I) is detached and no longer counted.
     ActiveTxnCount {
         call_ref: String,
         reply: oneshot::Sender<usize>,

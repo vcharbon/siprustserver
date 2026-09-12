@@ -1,8 +1,9 @@
 //! RFC 3261 §17.2 server (UAS) transactions: inbound request admission
-//! (auto-100, cached-response replay for duplicates), ACK absorption,
-//! CANCEL→200+487, TU response sending (Timer H/J arming), and Timer G non-2xx
-//! final retransmission. The client (UAC) side does NOT live here — see
-//! `layer::client`; a server INVITE rebuilt from a record is `layer::seed`'s.
+//! (auto-100, cached-response replay for duplicates), ACK absorption and the
+//! Timer I Confirmed hold, CANCEL→200+487, TU response sending (Timer H/J
+//! arming), and Timer G non-2xx final retransmission. The client (UAC) side
+//! does NOT live here — see `layer::client`; a server INVITE rebuilt from a
+//! record is `layer::seed`'s.
 
 use std::net::SocketAddr;
 
@@ -14,7 +15,7 @@ use sip_message::{Method, SipMessage, SipRequest, SipResponse};
 use sip_net::UdpEndpoint;
 
 use crate::event::{TransactionEvent, TxnKind};
-use crate::timers::{ms, TIMER_H, TIMER_J};
+use crate::timers::{ms, TIMER_H, TIMER_I, TIMER_J};
 use sip_retransmit::{Class, Ladder, Schedule};
 
 use super::owner::Owner;
@@ -26,8 +27,8 @@ impl Owner {
     /// MIN(2×interval, T2). The auto-100 we already sent silenced the UAC's INVITE
     /// retransmit, so the passive "replay the cached final on a request retransmit"
     /// path never fires — without this a single dropped reject wedges the caller
-    /// for the full 32 s (Timer H). The ACK (or Timer H) `delete_txn`s the branch,
-    /// which cancels `retransmit_key`, so this stops exactly when RFC requires.
+    /// for the full 32 s (Timer H). The ACK (`hold_for_timer_i`) or Timer H
+    /// cancels `retransmit_key`, so this stops exactly when RFC requires.
     /// Non-INVITE (Timer J) and 2xx (TU-owned §13.3.1.4 retransmit) are excluded at
     /// the arming site in `do_send_response`.
     pub(super) async fn fire_server_retransmit(
@@ -46,7 +47,7 @@ impl Owner {
                     _ => return, // no cached final / destination — nothing to resend
                 }
             }
-            _ => return, // ACKed (deleted), Timer-H'd, or no longer a completed INVITE server txn
+            _ => return, // ACKed (Confirmed), Timer-H'd, or no longer a completed INVITE server txn
         };
 
         self.send_buffer(endpoint, &buf, dest).await;
@@ -79,17 +80,20 @@ impl Owner {
         let branch = msg.top_via().branch().map(str::to_string);
         let branch = branch.as_deref();
 
-        // RFC 3261 §17.2.1: a Completed server txn has already sent its final
-        // and now only retransmits the STORED response on a request
-        // retransmit. DROP any further final from the TU here (a 200 racing
-        // handle_cancel's autonomous 487, or a duplicate relayed final) —
-        // re-sending it would put a second final with a different To-tag on
-        // the wire, flip the ACK 2xx/non-2xx classifier (last_response_status),
-        // and orphan a duplicate Timer H/J. A CANCEL's answer shares the branch
-        // and is not the INVITE's final.
+        // RFC 3261 §17.2.1: a server txn that has sent its final (Completed,
+        // or Confirmed once the ACK landed) only retransmits the STORED
+        // response. DROP any further final from the TU here (a 200 racing
+        // handle_cancel's autonomous 487, a duplicate relayed final, a
+        // teardown timer answering a cancelled call) — re-sending it would put
+        // a second final with a different To-tag on the wire, flip the ACK
+        // 2xx/non-2xx classifier (last_response_status), and orphan a
+        // duplicate Timer H/J. A CANCEL's answer shares the branch and is not
+        // the INVITE's final.
         if cseq_method != Method::Cancel {
             if let Some(txn) = branch.and_then(|b| self.txns.get(b)) {
-                if txn.role == TxnRole::Server && txn.state == TxnState::Completed {
+                if txn.role == TxnRole::Server
+                    && matches!(txn.state, TxnState::Completed | TxnState::Confirmed)
+                {
                     return msg.image().clone();
                 }
             }
@@ -128,18 +132,41 @@ impl Owner {
                     }
                 }
             } else if status >= 300 && cseq_method == Method::Invite {
-                // Every status on an unseen branch leaves raw. A non-2xx INVITE
-                // final owes a Timer G ladder, which only the transaction that
-                // admitted the INVITE — or its seed (ADR-0014) — can run:
-                // counted, so a takeover that materialised without one shows.
+                // A non-2xx INVITE final on a branch no transaction holds is
+                // DROPPED: the transaction that admitted the INVITE — or its
+                // seed (ADR-0014) — has either sent its one final and left, or
+                // never existed here, and only it can run the Timer G ladder
+                // the final owes. Counted, so a takeover that materialised
+                // without a seed shows. Every other status on an unseen branch
+                // leaves raw.
                 self.metrics
                     .server_final_unseen_branch
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return buf;
             }
         }
 
         self.send_buffer(endpoint, &buf, dest).await;
         buf
+    }
+
+    /// Park the Completed INVITE server txn at `branch` in Confirmed for
+    /// Timer I (RFC 3261 §17.2.1): the ACK ended Timer G and Timer H, and the
+    /// branch keeps absorbing ACK retransmissions and refusing a second final
+    /// until the T4 cleanup deletes it. Its protocol obligation to the call is
+    /// met, so it leaves the call's books now (ADR-0014).
+    fn hold_for_timer_i(&mut self, branch: &str) {
+        let Some(txn) = self.txns.get_mut(branch) else { return };
+        let (timer_g, timer_h) = (txn.retransmit_key.take(), txn.cleanup_key.take());
+        txn.state = TxnState::Confirmed;
+        txn.ladder = None;
+        self.cancel_timer(timer_g);
+        self.cancel_timer(timer_h);
+        let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(TIMER_I));
+        if let Some(txn) = self.txns.get_mut(branch) {
+            txn.cleanup_key = Some(key);
+        }
+        self.detach_from_call(branch);
     }
 
     /// Arm a server txn's post-final timers (RFC 3261 §17.2): the Timer H/J
@@ -196,18 +223,17 @@ impl Owner {
         // ── ACK ──────────────────────────────────────────────────────────────
         if req.method() == Method::Ack {
             if let Some(existing) = self.txns.get(branch) {
-                if existing.role == TxnRole::Server
-                    && existing.kind == TxnKind::Invite
-                    && existing.state == TxnState::Completed
-                {
-                    match existing.last_response_status {
-                        // ACK for non-2xx (3xx-6xx) — absorb, terminate.
-                        Some(s) if s >= 300 => {
-                            self.delete_txn(branch);
+                if existing.role == TxnRole::Server && existing.kind == TxnKind::Invite {
+                    match (existing.state, existing.last_response_status) {
+                        // A retransmitted ACK in Confirmed — absorbed (§17.2.1).
+                        (TxnState::Confirmed, _) => return,
+                        // ACK for non-2xx (3xx-6xx) — absorb, hold for Timer I.
+                        (TxnState::Completed, Some(s)) if s >= 300 => {
+                            self.hold_for_timer_i(branch);
                             return;
                         }
                         // ACK for 2xx — pass through to app, terminate.
-                        Some(s) if (200..300).contains(&s) => {
+                        (TxnState::Completed, Some(s)) if (200..300).contains(&s) => {
                             self.delete_txn(branch);
                             self.emit(TransactionEvent::Message {
                                 message: Box::new(SipMessage::Request(req)),
@@ -428,16 +454,17 @@ impl Owner {
 
         // A server INVITE txn that has sent its final is still held — Accepted
         // after a 2xx for Timer L (RFC 6026 §7.1), Completed after a non-2xx for
-        // Timer H (RFC 3261 §17.2.1) — so a CANCEL matching it has no effect and
-        // is answered 200 under the final's To-tag (RFC 3261 §9.2): no 487, no
-        // `Cancelled`, and the established call upstream is untouched.
+        // Timer H and Confirmed after its ACK for Timer I (RFC 3261 §17.2.1) —
+        // so a CANCEL matching it has no effect and is answered 200 under the
+        // final's To-tag (RFC 3261 §9.2): no 487, no `Cancelled`, and the
+        // established call upstream is untouched.
         if matched_branch.is_none() {
             let is_answered_target = |t: &Transaction| {
                 t.role == TxnRole::Server
                     && t.kind == TxnKind::Invite
                     && t.call_id == call_id.as_str()
                     && t.from_tag == from_tag
-                    && t.state == TxnState::Completed
+                    && matches!(t.state, TxnState::Completed | TxnState::Confirmed)
             };
             let answered = self
                 .txns

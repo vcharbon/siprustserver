@@ -1,8 +1,9 @@
 //! RFC 3261 §9.2 for a CANCEL that lands after the INVITE's final left: the
 //! server transaction is still held — Accepted for Timer L after a 2xx (RFC
-//! 6026 §7.1), Completed for Timer H after a non-2xx (§17.2.1) — so the CANCEL
-//! matches it, has no effect, and is answered 200 under the To-tag the final
-//! carried. No 481 is left to the TU, no 487 and no second final go out.
+//! 6026 §7.1), Completed for Timer H after a non-2xx and Confirmed for Timer I
+//! after its ACK (§17.2.1) — so the CANCEL matches it, has no effect, and is
+//! answered 200 under the To-tag the final carried. No 481 is left to the TU,
+//! no 487 and no second final go out.
 
 mod common;
 use common::*;
@@ -78,5 +79,33 @@ async fn cancel_after_a_non_2xx_final_is_answered_200_and_the_final_stands() {
     assert!(
         !stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Cancelled { .. })),
         "no Cancelled for a CANCEL after the final"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancel_after_the_ack_for_a_non_2xx_final_is_answered_200_and_the_final_stands() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-cxl-after-486-ack", "cxl-after-486-ack");
+    invite_answered(&mut stack, branch, call_id, 486).await;
+    stack.inject(&inbound_request("ACK", branch, call_id, Some("peer-tag"))).await;
+    elapse_ms(20).await;
+    let _ = stack.drain_events();
+
+    stack.inject(&inbound_request("CANCEL", branch, call_id, None)).await;
+    elapse_ms(20).await;
+    let out = stack.drain_peer();
+    let answer = the_cancel_answer(&out);
+    assert_eq!(answer.status(), 200);
+    assert_eq!(answer.to().tag(), Some("peer-tag"), "the To-tag is the 486's (RFC 3261 §9.2)");
+    assert_eq!(count_responses(&out, 487), 0, "the ACKed 486 stands: {out:?}");
+    let events = stack.drain_events();
+    assert!(
+        !events.iter().any(|e| matches!(e, TransactionEvent::Cancelled { .. })),
+        "no Cancelled for a CANCEL in Confirmed"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, TransactionEvent::Message { message, .. }
+            if matches!(message.as_ref(), SipMessage::Request(r) if r.method() == "CANCEL"))),
+        "the layer answered the CANCEL; the TU never sees it"
     );
 }

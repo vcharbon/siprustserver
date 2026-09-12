@@ -108,4 +108,11 @@ pub struct Leg {
     /// Whether generic relay/keepalive rules own this leg; read via
     /// [`crate::helpers::is_adopted`].
     pub adopted: Option<bool>,
+    /// Status of the final this stack has sent on the leg's initial inbound
+    /// INVITE; `None` while that transaction is unanswered. Every TU final
+    /// records itself here and so does the autonomous 487 the transaction
+    /// layer sends on a CANCEL; a leg carrying one is never sent a second
+    /// final (RFC 3261 §17.2.1). Trailing under the positional codec.
+    #[serde(default)]
+    pub invite_final_sent: Option<u16>,
 }

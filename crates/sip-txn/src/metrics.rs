@@ -243,9 +243,10 @@ pub(crate) struct MetricsInner {
     /// datagram that triggered the materialisation, or a transaction this node
     /// built itself.
     pub txn_seed_skipped: AtomicU64,
-    /// Non-2xx INVITE finals sent on a branch no server transaction held: they
-    /// leave raw with no Timer G ladder, so a materialisation that answered an
-    /// INVITE it never seeded shows here.
+    /// Non-2xx INVITE finals DROPPED because no server transaction held their
+    /// branch (RFC 3261 §17.2.1: only that transaction may author the final and
+    /// run its Timer G ladder). A materialisation that answered an INVITE it
+    /// never seeded shows here; a healthy node holds it at zero.
     pub server_final_unseen_branch: AtomicU64,
     /// Responses the TU handed over under a To-tag other than the one this
     /// layer had bound to the transaction or dialog, re-rendered under the
@@ -439,7 +440,7 @@ impl TransactionMetrics {
         self.inner.txn_seed_skipped.load(Ordering::Relaxed)
     }
 
-    /// Non-2xx INVITE finals that left raw on an unseen branch (counter).
+    /// Non-2xx INVITE finals dropped on an unseen branch (counter, expected 0).
     pub fn server_final_unseen_branch(&self) -> u64 {
         self.inner.server_final_unseen_branch.load(Ordering::Relaxed)
     }

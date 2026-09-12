@@ -10,6 +10,7 @@ use common::*;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 use sip_retransmit::Class;
+use sip_txn::timers::TIMER_I;
 use sip_txn::{Reoffer, TimeoutKind, TransactionEvent, TxnSeed};
 
 const TRANSIT: u64 = 5;
@@ -167,7 +168,8 @@ async fn a_seeded_client_invite_gives_up_on_the_invite_bound() {
 // ── The server seed ─────────────────────────────────────────────────────────
 
 /// A seeded server INVITE ladders a non-2xx final on Timer G until the ACK on
-/// its branch, then falls silent.
+/// its branch, then falls silent in Confirmed — off the call's books at once
+/// (ADR-0014), out of the map at Timer I.
 #[tokio::test(start_paused = true)]
 async fn a_seeded_server_invite_ladders_a_final_on_timer_g_until_the_ack() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -196,9 +198,17 @@ async fn a_seeded_server_invite_ladders_a_final_on_timer_g_until_the_ack() {
 
     stack.inject(&inbound_request("ACK", branch, call_id, Some("peer-tag"))).await;
     elapse_ms(60).await;
-    assert_eq!(active(&stack), 0, "the ACK on the INVITE's branch terminates the seed");
-    elapse_ms(5_000).await;
+    assert_eq!(active(&stack), 1, "the ACK on the INVITE's branch holds the seed in Confirmed");
+    assert_eq!(
+        stack.txn.active_txn_count_for_call(CALL_REF).await.unwrap(),
+        0,
+        "a Confirmed seed no longer counts for its call"
+    );
+    elapse_ms(TIMER_I - 100).await;
     assert_eq!(count_responses(&stack.drain_peer(), 486), 0, "no retransmit after the ACK");
+    assert_eq!(active(&stack), 1, "held inside Timer I");
+    elapse_ms(200).await;
+    assert_eq!(active(&stack), 0, "Timer I terminates the seed");
     let _ = stack.drain_events();
 }
 
@@ -231,6 +241,8 @@ async fn a_seeded_server_invite_with_its_request_answers_a_cancel() {
 
     stack.inject(&inbound_request("ACK", branch, call_id, Some("peer-tag"))).await;
     elapse_ms(60).await;
+    assert_eq!(active(&stack), 1, "Confirmed on the ACK until Timer I");
+    elapse_ms(TIMER_I + 100).await;
     assert_eq!(active(&stack), 0);
 
     // Without the request: the CANCEL is unanswerable here and is the TU's.
@@ -277,11 +289,12 @@ async fn a_seed_on_an_occupied_branch_is_skipped_and_counted() {
     );
 }
 
-/// A non-2xx INVITE final on a branch no transaction holds leaves raw, once,
-/// builds nothing and bumps `server_final_unseen_branch` (D14); a 2xx on such a
-/// branch leaves raw and counts nothing.
+/// A non-2xx INVITE final on a branch no transaction holds is dropped —
+/// nothing on the wire, no transaction built — and bumps
+/// `server_final_unseen_branch` (D14); a 2xx on such a branch leaves raw and
+/// counts nothing.
 #[tokio::test(start_paused = true)]
-async fn a_final_on_an_unseen_branch_leaves_raw_once_and_is_counted() {
+async fn a_non_2xx_final_on_an_unseen_branch_is_dropped_and_counted() {
     let stack = Stack::build(TRANSIT, 64, 64).await;
     let resp = parse_response(&response_bytes(
         486,
@@ -293,9 +306,9 @@ async fn a_final_on_an_unseen_branch_leaves_raw_once_and_is_counted() {
     ));
     stack.txn.send_response(resp, addr(PEER)).await.unwrap();
     elapse_ms(60).await;
-    assert_eq!(count_responses(&stack.drain_peer(), 486), 1, "the 486 leaves once");
+    assert_eq!(count_responses(&stack.drain_peer(), 486), 0, "the 486 never leaves");
     assert_eq!(active(&stack), 0, "and builds no transaction");
-    assert_eq!(stack.txn.metrics().server_final_unseen_branch(), 1);
+    assert_eq!(stack.txn.metrics().server_final_unseen_branch(), 1, "counted as dropped");
 
     elapse_ms(8_000).await;
     assert_eq!(

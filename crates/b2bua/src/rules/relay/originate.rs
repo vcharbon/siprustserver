@@ -385,6 +385,7 @@ pub fn build_b_leg(
         // Derive adoption from the kind (don't pin it): Destination ⇒ adopted,
         // Media ⇒ unadopted. See `call::helpers::is_adopted`.
         adopted: None,
+        invite_final_sent: None,
     };
 
     let effect = OutboundSipEffect {

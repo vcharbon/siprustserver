@@ -198,6 +198,7 @@ mod tests {
             ext: None,
             kind: None,
             adopted: None,
+            invite_final_sent: None,
         }
     }
 

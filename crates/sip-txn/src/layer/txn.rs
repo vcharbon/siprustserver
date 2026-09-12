@@ -19,14 +19,20 @@ pub(super) enum TxnRole {
     Server,
 }
 
-/// Transaction lifecycle. A final response deletes the transaction outright
-/// (after its Timer D/H/J hold) rather than parking it in a `Terminated`
-/// state, so `Completed` is the last state a resident txn can be in.
+/// Transaction lifecycle. There is no `Terminated` state: the hold that
+/// follows a final (Timer D/H/J, or Timer I after the ACK) ends by deleting
+/// the transaction from the map. A resident txn that has sent or received
+/// its final is `Completed` or `Confirmed`; either refuses a second final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TxnState {
     Trying,
     Proceeding,
+    /// A final sent or received; held for Timer D/H/J.
     Completed,
+    /// INVITE server txn whose non-2xx final is ACKed (RFC 3261 §17.2.1):
+    /// held for Timer I, absorbing ACK retransmissions and any further final
+    /// the TU offers on the branch. Nothing retransmits or times out here.
+    Confirmed,
 }
 
 impl TxnState {

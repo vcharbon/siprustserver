@@ -104,6 +104,18 @@ impl CallEvent {
         }
     }
 
+    /// An asynchronous trigger: a timer fire, a transaction timeout, or an
+    /// internal-event fold — a source of progress on the call's own clock,
+    /// not a peer's message. On a call already going away the rule executor
+    /// absorbs these unless the rule is a teardown rule
+    /// (`RuleDefinition::teardown`).
+    pub fn is_asynchronous_trigger(&self) -> bool {
+        matches!(
+            self,
+            CallEvent::Timer { .. } | CallEvent::Timeout { .. } | CallEvent::InternalEvent { .. }
+        )
+    }
+
     /// Short discriminator for logs / reports.
     pub fn kind(&self) -> &'static str {
         match self {

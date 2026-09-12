@@ -76,6 +76,21 @@ pub enum SoftBoundedEffect {
 #[derive(Debug, Clone)]
 pub enum BufferedObservabilityEffect {
     WriteCdr,
+    /// A final of `status` toward the a-leg's initial INVITE was refused: that
+    /// transaction already carries `carried` (RFC 3261 §17.2.1). The router
+    /// counts it as `second_final_refused`.
+    SecondFinalRefused {
+        status: u16,
+        carried: u16,
+    },
+    /// An asynchronous trigger (`event`: timer / timeout / internal-event)
+    /// landed on a call already going away and `rule` — the highest-registered
+    /// non-teardown rule it matched — was kept from running. The router counts
+    /// it as `going_away_absorbed`.
+    GoingAwayAbsorbed {
+        event: &'static str,
+        rule: &'static str,
+    },
 }
 
 /// Fire-and-forget effects — detached work / re-entrant events.

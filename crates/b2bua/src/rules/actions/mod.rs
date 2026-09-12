@@ -80,6 +80,24 @@ impl ActionExecutor<'_> {
         fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
     }
 
+    /// Remove every ledger entry `spent` selects from the replicated ledger AND
+    /// the live driver — one `CancelTimer` per removed id, minted from the id
+    /// the entry was scheduled under. A timer the ledger does not hold is not
+    /// in the driver either, so nothing is cancelled twice.
+    fn scrub_where(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        spent: impl Fn(&TimerEntry) -> bool,
+    ) {
+        let (gone, kept): (Vec<TimerEntry>, Vec<TimerEntry>) =
+            std::mem::take(&mut call.timers).into_iter().partition(|t| spent(t));
+        call.timers = kept;
+        for t in gone {
+            fx.critical.push(CriticalStateEffect::CancelTimer { id: t.id });
+        }
+    }
+
     /// `fire_at` for a minted timer, with a `Keepalive` held to one keepalive
     /// interval (the configured cadence — every arming site re-arms at exactly
     /// that, so a farther deadline is a defect at the caller and trips here in

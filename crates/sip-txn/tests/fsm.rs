@@ -10,6 +10,7 @@ mod common;
 use common::*;
 use sip_message::SipMessage;
 use sip_retransmit::Class;
+use sip_txn::timers::TIMER_I;
 use sip_txn::{RetransmitRow, TransactionEvent, TxnKind};
 
 const TRANSIT: u64 = 5;
@@ -756,6 +757,9 @@ async fn invite_then_final(stack: &mut Stack, branch: &str, call_id: &str, statu
     assert_eq!(active(stack), 1, "completed txn pinned for Timer H");
 }
 
+/// RFC 3261 §17.2.1: the ACK for a non-2xx final moves the server txn to
+/// Confirmed, where it stays for Timer I absorbing retransmitted ACKs, and
+/// only then leaves the map.
 #[tokio::test(start_paused = true)]
 async fn ack_for_non_2xx_is_absorbed() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
@@ -765,11 +769,24 @@ async fn ack_for_non_2xx_is_absorbed() {
     stack.inject(&inbound_request("ACK", branch, "ackn-call", Some("peer-tag"))).await;
     elapse_ms(60).await;
 
-    assert_eq!(active(&stack), 0, "ACK for non-2xx terminates the txn");
+    assert_eq!(active(&stack), 1, "ACK for non-2xx holds the txn in Confirmed for Timer I");
     assert!(
         !has_message_request(&stack.drain_events(), "ACK"),
         "ACK for non-2xx must NOT surface to the app"
     );
+
+    // A retransmitted ACK inside Timer I is absorbed the same way.
+    stack.inject(&inbound_request("ACK", branch, "ackn-call", Some("peer-tag"))).await;
+    elapse_ms(60).await;
+    assert_eq!(active(&stack), 1, "still Confirmed");
+    assert!(
+        !has_message_request(&stack.drain_events(), "ACK"),
+        "a retransmitted ACK in Confirmed is absorbed silently"
+    );
+    assert!(stack.drain_peer().is_empty(), "nothing leaves on an ACK");
+
+    elapse_ms(TIMER_I).await;
+    assert_eq!(active(&stack), 0, "Timer I terminates the txn");
 }
 
 #[tokio::test(start_paused = true)]
@@ -824,7 +841,27 @@ async fn duplicate_final_on_completed_server_txn_is_dropped() {
         !has_message_request(&stack.drain_events(), "ACK"),
         "ACK for 487 absorbed, not surfaced as a 2xx ACK"
     );
-    assert_eq!(active(&stack), 0);
+    assert_eq!(active(&stack), 1, "Confirmed for Timer I");
+
+    // A final offered after the ACK (a teardown timer answering a cancelled
+    // call) is dropped just the same: the branch carries its final.
+    let third =
+        parse_response(&response_bytes(480, "Unavailable", "INVITE", branch, call_id, true));
+    stack.txn.send_response(third, addr(PEER)).await.unwrap();
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 480), 0, "a final in Confirmed is dropped");
+    assert_eq!(stack.txn.metrics().server_final_unseen_branch(), 0, "the branch is held");
+
+    elapse_ms(TIMER_I).await;
+    assert_eq!(active(&stack), 0, "Timer I terminates the txn");
+
+    // And once the transaction is gone, a non-2xx final on the branch is
+    // dropped and counted rather than put on the wire raw.
+    let late = parse_response(&response_bytes(480, "Unavailable", "INVITE", branch, call_id, true));
+    stack.txn.send_response(late, addr(PEER)).await.unwrap();
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 480), 0, "no final on a branch without a txn");
+    assert_eq!(stack.txn.metrics().server_final_unseen_branch(), 1, "counted as dropped");
 }
 
 // ── Timer G: server INVITE non-2xx final retransmit (§17.2.1) ───────────────
@@ -878,16 +915,21 @@ async fn server_invite_non_2xx_final_retransmits_on_timer_g() {
     );
     assert_eq!(active(&stack), 1, "still Completed (unACKed), bounded by Timer H");
 
-    // The ACK finally lands → Timer G cancelled, txn terminated, silence after.
+    // The ACK finally lands → Timer G cancelled, txn Confirmed for Timer I,
+    // silence after.
     stack.inject(&inbound_request("ACK", branch, call_id, Some("peer-tag"))).await;
     elapse_ms(60).await;
-    assert_eq!(active(&stack), 0, "ACK terminates the txn (Timer G cancelled)");
-    elapse_ms(5_000).await;
+    assert_eq!(active(&stack), 1, "the ACK holds the txn in Confirmed (Timer G cancelled)");
+    elapse_ms(TIMER_I - 100).await;
     assert_eq!(
         count_responses(&stack.drain_peer(), 603),
         0,
-        "no retransmit after the ACK — Timer G was cancelled with the txn"
+        "no retransmit after the ACK — Timer G was cancelled on entering Confirmed"
     );
+    assert_eq!(active(&stack), 1, "still Confirmed inside Timer I");
+    elapse_ms(200).await;
+    assert_eq!(active(&stack), 0, "Timer I terminates the txn");
+    assert!(stack.drain_peer().is_empty(), "silence past Timer I");
 }
 
 /// A 2xx final on an INVITE server txn is EXEMPT from Timer G (§17.2.1: the
