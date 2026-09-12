@@ -752,7 +752,13 @@ impl LegStack {
                 cseq,
                 ..Default::default()
             };
-            Ok(generate_ack_for_2xx(Some(&txn), &self.dialog, &opts))
+            // The ACK rides the dialog the 2xx created, under ITS To-tag (RFC
+            // 3261 §13.2.2.4) — not whatever tag the leg learned since.
+            let dialog = match response.to().tag() {
+                Some(tag) => StackDialog { remote_tag: tag.to_string(), ..self.dialog.clone() },
+                None => self.dialog.clone(),
+            };
+            Ok(generate_ack_for_2xx(Some(&txn), &dialog, &opts))
         } else if cseq.is_some() {
             Err(StackError::CseqOverrideOnAbsorbedAck { leg: self.leg.clone() })
         } else {
@@ -770,22 +776,29 @@ impl LegStack {
         Ok(generate_cancel(&txn, &frozen(headers)))
     }
 
-    /// Learn the dialog facts a response carries: the remote tag, the remote
-    /// target and the route set (reversed Record-Route, RFC 3261 §12.1.2).
+    /// Learn the dialog facts a response carries: the remote tag and the route
+    /// set from a 1xx/2xx to a dialog-creating request alone (RFC 3261
+    /// §12.1.2), the remote target from any non-final or 2xx (§12.2.1.2). A
+    /// final to a CANCEL or a BYE, or a non-2xx final, states no dialog fact
+    /// and leaves the dialog as it is.
     pub fn learn_response(&mut self, response: &SipResponse) {
-        let tag = response.to().tag().map(|t| t.to_string()).unwrap_or_default();
-        if !tag.is_empty() {
-            self.dialog.remote_tag = tag;
+        let status = response.status();
+        if establishes_dialog(response) {
+            if let Some(tag) = response.to().tag() {
+                self.dialog.remote_tag = tag.to_string();
+            }
+            let routes: Vec<String> = response
+                .raw_text(sip_message::HeaderName::RecordRoute)
+                .map(|s| s.to_string())
+                .collect();
+            if !routes.is_empty() {
+                self.dialog.route_set = routes.into_iter().rev().collect();
+            }
         }
-        if let Some(contact) = response.contacts().as_slice().first() {
-            self.dialog.remote_target = contact.uri().to_string();
-        }
-        let routes: Vec<String> = response
-            .raw_text(sip_message::HeaderName::RecordRoute)
-            .map(|s| s.to_string())
-            .collect();
-        if !routes.is_empty() {
-            self.dialog.route_set = routes.into_iter().rev().collect();
+        if status < 300 {
+            if let Some(contact) = response.contacts().as_slice().first() {
+                self.dialog.remote_target = contact.uri().to_string();
+            }
         }
         let mut rseq = None;
         if (101..200).contains(&response.status()) && reliably(response) {
@@ -923,6 +936,15 @@ fn rseq_of(response: &SipResponse) -> Option<u32> {
 /// The document's frozen headers, as generator input.
 fn frozen(headers: &[TemplateHeader]) -> Vec<SipHeader> {
     headers.iter().map(|h| SipHeader::new(h.name.clone(), h.value.clone())).collect()
+}
+
+/// Whether a response creates or confirms a dialog on the side that sent the
+/// request: a 1xx (other than 100) or 2xx to an INVITE or SUBSCRIBE (RFC 3261
+/// §12.1, RFC 6665 §4.1.2). Every other response states no dialog fact.
+fn establishes_dialog(response: &SipResponse) -> bool {
+    let status = response.status();
+    let creating = matches!(response.cseq().method(), Method::Invite | Method::Subscribe);
+    creating && (101..300).contains(&status)
 }
 
 fn out_of_dialog_method(method: &Method) -> Option<OutOfDialogMethod> {
@@ -1611,6 +1633,68 @@ mod tests {
         uac.learn_response(&ok);
         let ack = uac.ack_for(&ok, &[], Vec::new(), None, None).expect("the caller ACKs");
         assert_eq!(ack.cseq().seq(), 9, "the ACK repeats the INVITE's number");
+    }
+
+    /// RFC 3261 §12.1.2: only a response to the dialog-creating request names
+    /// the remote tag. A 481 to the CANCEL, minted under a tag of its own, does
+    /// not move the dialog the 2xx confirmed: the ACK to that 2xx and the BYE
+    /// after it stay under the 2xx's tag.
+    #[test]
+    fn a_final_to_the_cancel_does_not_retag_the_dialog_the_2xx_confirmed() {
+        let mut uac = calling();
+        let (mut uas, _) = ringing("B");
+        let rings = uas
+            .respond(
+                &Answer {
+                    status: 180,
+                    reason: "Ringing",
+                    cseq_method: Some("INVITE"),
+                    early_tag: None,
+                },
+                &[],
+                Vec::new(),
+                None,
+            )
+            .expect("the callee rings");
+        uac.learn_response(&rings);
+        let ok = uas
+            .respond(
+                &Answer { status: 200, reason: "OK", cseq_method: Some("INVITE"), early_tag: None },
+                &[],
+                Vec::new(),
+                None,
+            )
+            .expect("the callee answers");
+        uac.learn_response(&ok);
+        let dialog_tag = to_tag(&ok);
+        assert_eq!(to_tag(&rings), dialog_tag);
+
+        // The CANCEL crosses the 2xx and is refused by a stack that knows no
+        // transaction for it, under a tag that is nobody's dialog.
+        let cancel = uac.cancel(&[]).expect("the caller CANCELs");
+        let mut stray = stack("B", "other");
+        stray.learn_request(&cancel);
+        let refused = stray
+            .respond(
+                &Answer {
+                    status: 481,
+                    reason: "Call/Transaction Does Not Exist",
+                    cseq_method: Some("CANCEL"),
+                    early_tag: None,
+                },
+                &[],
+                Vec::new(),
+                None,
+            )
+            .expect("the CANCEL is refused");
+        assert_ne!(to_tag(&refused), dialog_tag, "the refusal carries a tag of its own");
+        uac.learn_response(&refused);
+
+        assert_eq!(uac.remote_tag(), Some(dialog_tag.as_str()), "the dialog keeps the 2xx's tag");
+        let ack = uac.ack_for(&ok, &[], Vec::new(), None, None).expect("the caller ACKs the 2xx");
+        assert_eq!(ack.to().tag(), Some(dialog_tag.as_str()), "the ACK rides the 2xx's dialog");
+        let bye = uac.in_dialog(Method::Bye, &[], Vec::new(), None, None).expect("the caller BYEs");
+        assert_eq!(bye.to().tag(), Some(dialog_tag.as_str()), "the BYE rides the 2xx's dialog");
     }
 
     /// RFC 3261 §13.2.1: the ACK to a 2xx carries the CSeq NUMBER of the INVITE
