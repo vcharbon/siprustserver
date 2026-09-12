@@ -1335,9 +1335,9 @@ wireup() {
     log "wireup: loading images into kind"
     # sipp:dev is NOT kind-loaded: all SIPp generators run as docker containers
     # on the sipext bridge straight off the host image (built above).
-    kind load docker-image "$SUT_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
-    kind load docker-image "$KEEPALIVED_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
-    kind load docker-image "$RABBITMQ_IMAGE" --name "$CLUSTER" >>"$RUNLOG" 2>&1
+    kind_load "$SUT_IMAGE" >>"$RUNLOG" 2>&1
+    kind_load "$KEEPALIVED_IMAGE" >>"$RUNLOG" 2>&1
+    kind_load "$RABBITMQ_IMAGE" >>"$RUNLOG" 2>&1
   fi
   # Capacity preflight BEFORE deploy launches the sipp-uas docker pool: prove
   # the summed UAS memory caps fit the HOST (generators ride the WSL2 host

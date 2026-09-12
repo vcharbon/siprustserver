@@ -210,7 +210,7 @@ build_load_extra_images() {
     log "building extra image $name (EXTRA_IMAGE_BUILDS)"
     docker_build -f "$dockerfile" -t "$name" ${args[@]+"${args[@]}"} "$context"
     log "loading extra image $name into kind"
-    kind load docker-image "$name" --name "$CLUSTER"
+    kind_load "$name"
   done
 }
 
@@ -294,11 +294,11 @@ up() {
   log "pulling RabbitMQ image $RABBITMQ_IMAGE (CDR transport)"
   docker image inspect "$RABBITMQ_IMAGE" >/dev/null 2>&1 || docker pull "$RABBITMQ_IMAGE"
   log "loading images into kind"
-  kind load docker-image "$SUT_IMAGE" --name "$CLUSTER"
+  kind_load "$SUT_IMAGE"
   # sipp:dev is NOT kind-loaded: all SIPp generators (UAC + UAS) run as plain
   # docker containers on the sipext bridge now, straight off the host image.
-  kind load docker-image "$KEEPALIVED_IMAGE" --name "$CLUSTER"
-  kind load docker-image "$RABBITMQ_IMAGE" --name "$CLUSTER"
+  kind_load "$KEEPALIVED_IMAGE"
+  kind_load "$RABBITMQ_IMAGE"
   # Downstream overlay hook: extra images to build + side-load (empty default =
   # exact historical behaviour, nothing extra happens).
   build_load_extra_images

@@ -11,3 +11,24 @@
 # Source me AFTER lib/net-env.sh (same as the other libs). Safe to source twice.
 
 kubectl() { command kubectl --context "${KCTX:-kind-${CLUSTER:-sip-e2e}}" "$@"; }
+
+# kind_load <image> — side-load a host docker image into every node of $CLUSTER.
+# Goes through a single-platform archive: under docker's containerd image store
+# `docker save` of a multi-platform image writes an index whose foreign-platform
+# blobs are not present, and kind's `ctr import --all-platforms` then fails on
+# the missing digest. Saving the daemon's own platform keeps the archive
+# complete. A docker whose `save` has no --platform gets the plain load.
+kind_load() {
+  local image="$1" platform tar
+  if ! docker save --help 2>/dev/null | grep -q -- '--platform'; then
+    kind load docker-image "$image" --name "$CLUSTER"
+    return
+  fi
+  platform="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')"
+  tar="$(mktemp "${TMPDIR:-/tmp}/kind-load.XXXXXX.tar")"
+  docker save --platform "$platform" -o "$tar" "$image" \
+    && kind load image-archive "$tar" --name "$CLUSTER"
+  local rc=$?
+  rm -f "$tar"
+  return "$rc"
+}
