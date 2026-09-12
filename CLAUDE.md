@@ -9,7 +9,7 @@ To show a html file or a URL to the user, `xdg-open ./path/to/file/index.html` /
 Doc comments state present-tense contracts and invariants. History (dates, commit hashes, ticket IDs, "previously/replaces/no longer") lives in git and ADRs — a comment may cite ADR-00xx in one line, never retell it. If a comment needs more than ~5 lines to justify a behavior rather than describe it, either the behavior is wrong — write FIXME(scope): <one-line defect + one-line fix direction> — or the rationale is architectural and belongs in an ADR with a one-line pointer. By default however do not write FIXME, implement correct behavior unless specifically asked to delay specific corner cases.
 Each file must have it own concern. No not mix concerns.
 Never implement SIP header or message extraction in crates other than sip-message.
-Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only, shared byte-for-byte with newkahsip). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it.
+Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it.
 
 
 ## Where the details live (progressive disclosure)

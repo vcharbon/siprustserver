@@ -352,7 +352,7 @@ one.** Rulings Q29 and Q38 in
 | `${early:<id>.tag}` and `${early:<id>.rseq}`: a fourth accessor namespace reading ONE fork of a forking leg, named by the `early` id its steps carry. A leg ringing two forks has two To-tags and two RSeq spaces (RFC 3261 §12.1.1, RFC 3262 §3), which a single-valued leg accessor cannot state; `${leg:<id>.rseq}` keeps its last-sighted reading unchanged. Lint refuses an id no step declares, and an id two legs declare | §6.1, §8.1 |
 | an UPDATE runs inside an EARLY dialog (RFC 3311 §5.1), reversing the rung-2 refuse-until-confirmed reading. `early` on an UPDATE or a PRACK `send` names the fork the request RIDES; an UPDATE naming no fork on a leg ringing exactly one rides that one; several forks and no name is a refusal | §6.1 |
 
-The authored `san-01-prack-managed-by-as-forking` draft is the exercise: its
+The authored `forked-100rel-prack-per-early-dialog` draft is the exercise: its
 "each PRACK rides its own fork" assertion was an `RAck` regex proxy and now
 reads the two forks' own tags and RSeqs.
 
@@ -716,7 +716,7 @@ the platform accepted, the request that inserted the resource).
 
 **`joined_by` and `cause` are orthogonal.** One says how a leg ENTERED the call,
 the other why the platform LEFT it, and a leg that joined fails like any other.
-Two corners the format must state, and does: a SAN reroute-fail, where the
+Two corners the format must state, and does: a reroute after a join, where the
 joined leg is dialed, fails and the hunt goes on; and an automatic transfer
 whose target is busy, where the platform reroutes INTERNALLY and never notifies
 the transferor — one attempt carrying `joined_by` AND `cause: busy`, followed by
