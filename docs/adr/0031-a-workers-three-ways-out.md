@@ -25,7 +25,7 @@ EndpointSlice API (`ready`, `serving`, `terminating`; the last two GA since Kube
 | **4. Restarted in place** (OOM-kill, kubelet restart, a readiness flap under load) | the pod object stays; the container restarts, or only the probe fails | `ready=false, serving=false, terminating=false`, still in the slice, **same address** | 0 (container restart) or the whole time (readiness flap: the process is alive and serving) | the same container, same address, seconds later |
 
 What each element believed about the leaving worker, per case, from the harness's views
-ledger and the production logs:
+ledger and the kind cluster's logs:
 
 - **The proxy** learns of cases 1, 2 and 4 from membership (the ordinal leaves the
   projection when `ready` drops) and of case 3a from its OPTIONS probe only (`Dead` after two
