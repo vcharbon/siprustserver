@@ -30,8 +30,8 @@ ledger and the production logs:
 - **The proxy** learns of cases 1, 2 and 4 from membership (the ordinal leaves the
   projection when `ready` drops) and of case 3a from its OPTIONS probe only (`Dead` after two
   missed windows, ~2–3.5 s). Its request path fails an absent or `Dead` primary over to the
-  cookie's `w_bak`; its response path does so for `Dead`, and since the tombstone, for a
-  departed address.
+  cookie's `w_bak`; its response path does so for an INVITE response from a `Dead` worker
+  and, since the tombstone, from a departed address.
 - **The peers** learn of cases 1, 2 and 4 from membership and **park** the ordinal: pullers
   cancelled, watermark kept. The informer today emits only `ready` endpoints, so leaving the
   routable set and leaving the membership set are one event. Replication is pull-only, so
@@ -132,7 +132,10 @@ writes its own. (Amends ADR-0014 §3.)
 **D4 — Routing around a leaving worker has two signals, one branch.** Membership
 (cases 1, 2 and 4: the address is tombstoned `Dead`) and the OPTIONS probe (case 3a: `Dead`
 after the miss threshold) both land on the same `Dead` health, and the request and response
-paths already take the backup on it. The tombstone is **re-armed by every response the
+paths already take the backup on it. The response path takes the backup for
+**INVITE responses only**: a non-INVITE response answers a client transaction
+only its sender holds (RFC 3261 §17.1.2), so it follows the Via to its sender
+whatever that sender's health. The tombstone is **re-armed by every response the
 proxy sees from that address**, so it lives Timer H past the last sign of life, whatever
 the drain grace is set to; a fixed TTL from departure would expire under a live elder
 whose grace was raised. The proxy's `Draining` grace (in-dialog traffic sticks to a draining

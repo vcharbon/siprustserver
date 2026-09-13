@@ -37,7 +37,8 @@ use failover_harness::{
     PartitionRole, PeerLink, ReplicatedB2buaSut, WorkerHealth,
 };
 use scenario_harness::Agent;
-use sip_message::SipMessage;
+use sip_message::parser::custom::CustomParser;
+use sip_message::{Method, SipMessage, SipParser};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -220,7 +221,9 @@ async fn a_member_flapping_not_ready_is_departed_by_the_proxy_and_still_pulled()
     // The elder authors the 480 to the caller and the CANCEL to the callee; the
     // callee answers the CANCEL and terminates its INVITE (RFC 3261 §9.2). The
     // callee's responses travel the proxy's response path, where the elder's
-    // address reads `Dead`, so they reverse-fail to the survivor.
+    // address reads `Dead`: the 487 is an INVITE response and reverse-fails to
+    // the survivor, while the 200 to the CANCEL answers a client transaction
+    // only the elder holds (§17.1.2) and returns to the elder.
     assert!(fh.now_ms() < fire_at, "the flap precedes the ring deadline");
     let mut finals_to_alice: Vec<u16> = Vec::new();
     // The callee answers the CANCEL and terminates its INVITE the instant the
@@ -262,10 +265,35 @@ async fn a_member_flapping_not_ready_is_departed_by_the_proxy_and_still_pulled()
         ),
     );
     assert_eq!(finals_to_alice, vec![480], "the caller takes exactly one final, the elder's 480");
-    assert!(
-        cancels_to_bob <= 2,
-        "the callee's ringing INVITE takes one CANCEL, at most retransmitted once: {cancels_to_bob}"
-    );
+    assert_eq!(cancels_to_bob, 1, "the callee's TU takes exactly one CANCEL");
+
+    // The callee's transaction layer answers a byte-identical CANCEL repeat
+    // from its Completed server transaction (§17.2.2), below the TU the count
+    // above sees. Only the recording says the 200 reached its sender and
+    // stopped the elder's Timer E ladder.
+    let parser = CustomParser::new();
+    let entries = fh.sip_entries();
+    let bob_addr: SocketAddr = BOB.parse().unwrap();
+    let cancels_on_wire = entries
+        .iter()
+        .filter(|e| {
+            e.from == proxy.addr()
+                && e.to == bob_addr
+                && matches!(parser.parse(&e.raw), Ok(SipMessage::Request(r)) if r.method() == &Method::Cancel)
+        })
+        .count();
+    assert_eq!(cancels_on_wire, 1, "exactly one CANCEL datagram reaches the callee");
+    let cancel_200_to_elder = entries
+        .iter()
+        .filter(|e| {
+            e.from == proxy.addr()
+                && e.to == elder_addr
+                && e.delivered
+                && matches!(parser.parse(&e.raw), Ok(SipMessage::Response(r))
+                    if r.status() == 200 && r.cseq().method() == &Method::Cancel)
+        })
+        .count();
+    assert_eq!(cancel_200_to_elder, 1, "the CANCEL's 200 follows the Via to the departed elder");
 
     // The terminal state the elder authored while unroutable reached the
     // survivor: the replica is terminated or already deleted.

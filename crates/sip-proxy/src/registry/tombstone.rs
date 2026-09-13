@@ -3,8 +3,8 @@
 //!
 //! A worker that leaves membership (or moves to a new host) can still be bound
 //! and still answering: its in-flight INVITE server transactions live on until
-//! Timer H. A response arriving from such an address must be recognised as
-//! coming from a worker the pool no longer routes to, so the response path
+//! Timer H. An INVITE response arriving from such an address must be recognised
+//! as coming from a worker the pool does not route to, so the response path
 //! reverse-fails it to the cookie's backup instead of relaying it back to a node
 //! that has left. Tombstones are keyed by **address**, never by ordinal, so
 //! ordinal resolution is untouched: a departed ordinal still resolves to `None`,
