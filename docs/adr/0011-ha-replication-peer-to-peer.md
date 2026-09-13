@@ -170,13 +170,14 @@ drain keeps its old one alive) — the same `ArcSwap` discipline the registry us
 ## Decision X9 — wire protocol: positional-msgpack frames
 
 Each message is a positional-msgpack array (ADR-0008 ethos), tag-discriminated by
-element 0. The **canonical frame set is four frames — see
+element 0. The **canonical frame set — see
 [ADR-0014](0014-reactive-only-takeover-version-vector.md) §12**: `PullRequest`
 (opens one flow; bootstrap is implicit when `since==(0,0)`), `Data` (one mutation,
 carrying the `(p,b)` version vector — `call_gen`/`call_bgen`), `Noop` (catch-up
 edge + idle keepalive), `ResetToBootstrap` (the watermark fell off the compacted
-tail). The earlier `Ack` frame and the `PullMode` / `Bootstrap`-vs-`Replog`
-two-request handshake are **removed**.
+tail), `Position` (client→server, what the puller has applied — the drain's exit
+signal, ADR-0031 D2). The earlier `Ack` frame and the `PullMode` /
+`Bootstrap`-vs-`Replog` two-request handshake are **removed**.
 
 **Two distinct generations** (a source-side terminology trap, `EpochCounter` vs
 the call body's `_topology.gen`): `gen` = incarnation (per worker-restart, high

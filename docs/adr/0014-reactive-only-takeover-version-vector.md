@@ -158,6 +158,7 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     | **Data** | S→C | `at, op, partition, call_ref, p, b, body_ttl_ms, indexes, body?` | One mutation. `op∈{Put,Delete}` — **Create and Update are merged into one idempotent `Put`** (carries a body); `Delete` carries none (delete-wins). |
     | **Noop** | S→C | `at` | Catch-up edge (first ⇒ ready) + 20s idle keepalive. |
     | **ResetToBootstrap** | S→C | `reason` | `since` fell below the compacted tail → re-bootstrap from `(0,0)`. |
+    | **Position** | C→S | `at` | "I have applied everything up to `at`" — the drain's exit signal only (ADR-0031 D2), never a retention or readiness input. |
 
     **Removed:** `Ack` (ADR-0031 D2 adds a puller position frame for the drain's exit only, never a retention or readiness input) (was a no-op retention hint — retention now bounded by
     time/size, a too-slow puller re-bootstraps via `ResetToBootstrap`); the

@@ -291,6 +291,16 @@ position — never read from or written to a call's `(p,b)` version vector (the
 two-generations trap). Retained per `(ordinal, flow)` across disconnects so a
 returning peer resumes rather than re-bootstraps.
 
+**Position frame** (the drain's own signal, ADR-0031 D2):
+The one client→server frame past the opening `PullRequest`: a puller answers each
+post-bootstrap `Data` and every `Noop` with "I have applied everything up to
+`at`". The serving node records it per `(peer, flow)` and reads it in ONE place —
+whether a draining worker's live calls are held by the peers that back them up.
+Never an apply gate, a retention hint or a readiness input (the roles ADR-0014
+§12 retired `Ack` from).
+_Avoid_: "Ack" (the removed retention frame); calling it a handshake — nothing
+waits for it.
+
 **Current flag** (`everCaughtUp`):
 Set the instant the **first `Noop`** arrives on a stream — the server emits it on
 the **catch-up edge** (backlog drained below one batch / to head), so it means "I
@@ -304,7 +314,14 @@ k8s, via the `/ready` HTTP probe. **Ready** = every **Reclaim** stream to a
 *reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
 dead/slow peer cannot hang readiness). **Backup** streams are opened only *after*
 `Ready` and **never gate it** (fire-and-forget; observable via the store + metrics,
-not a readiness sub-state). **Draining** = latched on SIGTERM; terminal. The drain exits on the first of: live calls cleared, the grace, or — for a worker that has observed its own withdrawal — every live call's backup holding its changelog head (ADR-0031 D2, D6).
+not a readiness sub-state). **Draining** = latched on SIGTERM, or on the worker's own observation that its
+endpoint is withdrawn; terminal. The drain exits on the first of: live calls
+cleared (`quiescent`), every live call's backup holding its changelog head once
+the floor `B2BUA_DRAIN_MIN_MS` has passed, for a worker that has observed its own
+withdrawal (`caught_up`), or the grace `B2BUA_DRAIN_GRACE_MS` — as `grace` for a
+worker that is not withdrawn (quiescence-or-grace) and as `grace_peers_behind`
+for one that is, which means a flush window was lost (ADR-0031 D2, D6). The four
+reasons are the `reason` label of `b2bua_drain_exits_total`.
 
 ## HTTP call-decision adaptation
 

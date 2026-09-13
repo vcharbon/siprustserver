@@ -286,6 +286,8 @@ peers do not hold the calls.
   the D2 predicate, the floor and the withdrawal precondition; the exit reason is a counter,
   time-in-drain a histogram, pulled-not-ready peers a gauge, refused forward flushes a
   counter beside the reverse one.
+- The reason set is four: a non-withdrawn worker reaching the ceiling is `grace`, distinct
+  from a withdrawn one's `grace_peers_behind`.
 - `ApplyMode::ForwardOrBootstrap` splits; the Forward mode refuses a backup regression on
   `Put` and on `Delete`; the primary's fold adopts `b`.
 - The worker's supervisor evaluates its own endpoint (D6).
