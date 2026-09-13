@@ -35,11 +35,14 @@
 //! the first `Noop`; before it, frames apply ungated and do not move `W`.
 //!
 //! ## `ApplyMode = f(flow, bootstrapped)`
-//! - **Backup** flow (`Bak`) — always *apply-unless-dominated* (a Forward
-//!   primary→backup update is the same rule as a bootstrap import).
-//! - **Reclaim** flow (`Pri`) — *apply-unless-dominated* before the first `Noop`
-//!   (bulk bootstrap recovery), then the *Reverse* rule after (`p_in == sp &&
-//!   b_in > sb`: a backup reverse-flushed one of our calls).
+//! - **Backup** flow (`Bak`) — *Forward*, bootstrapped or not: apply unless
+//!   dominated AND never behind the Element's own `b` (ADR-0031 D3). A bulk
+//!   re-seed of `bak:{peer}` is a forward flush in bulk; the backup's progress
+//!   is just as real there.
+//! - **Reclaim** flow (`Pri`) — *Bootstrap* before the first `Noop` (recovering
+//!   our own partition: take the replica's `(p,b)` as-is, ADR-0014 §3), then
+//!   the *Reverse* rule after (`p_in == sp && b_in > sb`: a backup
+//!   reverse-flushed one of our calls).
 //!
 //! ## FSM
 //! ```text
@@ -73,6 +76,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use call::{CallBodyCodec, CallModelState, MsgpackCodec};
 use repl_net::frame::{Frame, Op, Partition, Watermark};
 use repl_net::transport::{ReplicationConnection, ReplicationNetwork};
 use tokio::sync::{mpsc, watch};
@@ -81,6 +85,13 @@ use topology::Peer;
 use super::{AddrResolver, ReplicatingCallStore};
 use crate::router::ReplCommand;
 use crate::store::{partition_of, CallStore, PartitionRole, PutOpts};
+
+/// Probe for "does this node hold a **live** copy of this call?". The Forward
+/// `Delete` guard reads it: an Element beside a live copy is not the call's last
+/// record, so the authority's delete is honoured; an Element alone is, and the
+/// guard keeps it (ADR-0031 D3). Absent outside a live `B2buaCore` — the unit /
+/// sim pullers hold no live map, and read as "nothing is live".
+pub type LiveCallProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// Default backoff floor / ceiling (ms). Exposed via [`PullerConfig`] for tests.
 const DEFAULT_BACKOFF_INIT_MS: u64 = 100;
@@ -98,15 +109,19 @@ const DEFAULT_BOOTSTRAP_HARD_TIMEOUT_MS: u64 = 10_000;
 const PROTO_VER: u16 = 3;
 
 /// How an inbound `Data` frame is reconciled into the local store
-/// ([`Puller::apply_to_store`]). Selected per frame from `(flow, bootstrapped)`:
-/// the bulk pre-seed (recovering our own partition) and a Forward primary→backup
-/// update both take the replica unless dominated; the Reclaim-flow steady tail
-/// applies the direction-aware Reverse rule.
+/// ([`Puller::apply_to_store`]). Selected per frame from `(flow, bootstrapped)`
+/// — one mode per direction, because the direction is what says whose progress
+/// the frame may overwrite.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ApplyMode {
-    /// Apply-unless-dominated — bootstrap recovery or a Forward primary→backup
-    /// update (the follower defers to the authority).
-    ForwardOrBootstrap,
+    /// Reclaim flow before its first catch-up `Noop` — a node recovering its
+    /// own partition takes the replica's `(p,b)` as-is (recovery, not a merge),
+    /// skipping only a strictly dominated copy (ADR-0014 §3).
+    Bootstrap,
+    /// Backup flow — a primary→backup update. The follower defers to the
+    /// authority, but never regresses progress an acting backup authored on the
+    /// Element itself (ADR-0031 D3).
+    Forward,
     /// Reclaim-flow steady tail — apply the ADR-0014 Reverse `(p,b)` rule.
     Reverse,
 }
@@ -229,6 +244,11 @@ pub struct Puller {
     /// `None` outside a live `B2buaCore` (the sim/unit puller tests drive the
     /// store directly), so the existing constructors stay source-compatible.
     repl_tx: Option<mpsc::UnboundedSender<ReplCommand>>,
+    /// Decoder for a stored Element's body. The Forward `Delete` guard reads the
+    /// Element's lifecycle state, and the store persists the same encoding.
+    codec: MsgpackCodec,
+    /// Live-copy probe for the Forward `Delete` guard ([`LiveCallProbe`]).
+    live: Option<LiveCallProbe>,
     /// When this puller's bootstrap started — the `duration_ms` on the
     /// bootstrap-complete lifecycle line. `None` for a warm resume (no
     /// bootstrap to time). Written from the single task that runs the FSM; the
@@ -275,6 +295,8 @@ impl Puller {
                 status_tx,
                 metrics,
                 repl_tx: None,
+                codec: MsgpackCodec::new(),
+                live: None,
                 bootstrap_started_at: std::sync::Mutex::new(
                     (!warm).then(tokio::time::Instant::now),
                 ),
@@ -288,6 +310,14 @@ impl Puller {
     /// tests, which assert on the store directly) are unchanged.
     pub fn with_repl_sink(mut self, tx: mpsc::UnboundedSender<ReplCommand>) -> Self {
         self.repl_tx = Some(tx);
+        self
+    }
+
+    /// Attach the live-copy probe the Forward `Delete` guard reads
+    /// ([`LiveCallProbe`]). Builder, for the same reason as
+    /// [`with_repl_sink`](Self::with_repl_sink).
+    pub fn with_live_probe(mut self, live: LiveCallProbe) -> Self {
+        self.live = Some(live);
         self
     }
 
@@ -621,10 +651,10 @@ impl Puller {
                 }) => {
                     // Apply under the `(p,b)` rule for this flow + phase. No
                     // watermark gate — `(p,b)` dominance is the only idempotency.
-                    let mode = if self.is_reclaim() && bootstrapped {
-                        ApplyMode::Reverse
-                    } else {
-                        ApplyMode::ForwardOrBootstrap
+                    let mode = match (self.is_reclaim(), bootstrapped) {
+                        (true, true) => ApplyMode::Reverse,
+                        (true, false) => ApplyMode::Bootstrap,
+                        (false, _) => ApplyMode::Forward,
                     };
                     let refused_body = body.clone();
                     let applied = self
@@ -644,35 +674,19 @@ impl Puller {
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
                     }
+                    if op == Op::Put {
+                        self.signal_put_outcome(
+                            mode,
+                            applied,
+                            &call_ref,
+                            refused_body,
+                            origin_now_ms,
+                        );
+                    }
                     // Pre-bootstrap frames share `at = W`; only the post-bootstrap
-                    // tail advances W (and signals the per-call reclaim straggler).
+                    // tail advances W.
                     if bootstrapped {
                         self.status_tx.send_modify(|s| s.watermark = at);
-                        // Reclaim straggler: a backup reverse-flushed one of OUR
-                        // calls after the bulk sweep — re-materialise + re-serve it.
-                        // Only when the reverse-flush ACTUALLY applied: a Put the
-                        // `(p,b)` gate dropped as dominated left the store untouched,
-                        // so re-serving from it would be a spurious reclaim of a
-                        // stale body (idempotent, but wasted work).
-                        if self.is_reclaim() && op == Op::Put {
-                            if let Some(tx) = &self.repl_tx {
-                                let cmd = if applied {
-                                    ReplCommand::ReclaimCall(call_ref.clone())
-                                } else {
-                                    // The vector refused it; the call model gets to
-                                    // read the body for lifecycle progress the
-                                    // counters cannot carry (ADR-0014 amendment).
-                                    ReplCommand::ReverseFlushRefused {
-                                        call_ref: call_ref.clone(),
-                                        body: refused_body
-                                            .clone()
-                                            .unwrap_or_else(|| Arc::from(Vec::new())),
-                                        origin_now_ms,
-                                    }
-                                };
-                                let _ = tx.send(cmd);
-                            }
-                        }
                         // Report the applied position so a withdrawn peer's drain
                         // can see its calls held here (ADR-0031 D2). Pre-bootstrap
                         // frames all share `at = W`: claiming W before the whole
@@ -755,14 +769,24 @@ impl Puller {
     ///
     /// Apply decision (`(call_gen, call_bgen)` = incoming `(p,b)`; `(sp, sb)` =
     /// stored):
-    /// - **Delete** → apply unconditionally (delete-wins, both directions).
-    /// - [`ForwardOrBootstrap`](ApplyMode::ForwardOrBootstrap) `Put` → apply
-    ///   unless the stored `(sp, sb)` strictly dominates (the follower / bootstrap
-    ///   recovery defers to the authority but won't regress to a stale re-delivery).
-    /// - [`Reverse`](ApplyMode::Reverse) `Put` → apply iff the primary has **not**
-    ///   itself mutated past the backup's branch point and the backup genuinely
-    ///   advanced: `p_in == sp && b_in > sb` (or no local copy yet → accept; the
-    ///   reactive reclaim materialises it). Else keep our own.
+    ///
+    /// | mode | `Put` | `Delete` |
+    /// |---|---|---|
+    /// | [`Bootstrap`](ApplyMode::Bootstrap) | apply unless `(sp, sb)` dominates | apply |
+    /// | [`Forward`](ApplyMode::Forward) | apply unless `(sp, sb)` dominates **or** `sb > b_in` | apply unless `sb > b_in`, the body is non-terminal, and no live copy stands beside it |
+    /// | [`Reverse`](ApplyMode::Reverse) | apply iff `p_in == sp && b_in > sb` | apply |
+    ///
+    /// Bootstrap recovery and the Reverse tail keep delete-wins outright. Forward
+    /// is the one direction that yields (ADR-0031 D3): a `b_in` behind the
+    /// Element's own `b` is a branch off a version an acting backup authored and
+    /// the flushing authority never saw — a stale view of the call for a `Put`,
+    /// and for a `Delete` the authority's own view of a call it lost, which must
+    /// not evict a call nobody ended. A `Delete` names the `(p,b)` its sender
+    /// deleted at, so an authority that folded the backup's progress first
+    /// deletes cleanly.
+    /// A no-local-copy Reverse `Put` is accepted (the reactive reclaim
+    /// materialises it). Both Forward refusals count into
+    /// `b2bua_repl_forward_flush_refused_total{op}`.
     ///
     /// (Tombstone-suppress — never resurrect a locally-deleted call — is deferred:
     /// it needs a reaped tombstone set; deletes already win, so the remaining gap
@@ -802,10 +826,23 @@ impl Puller {
                 // bootstrap frame — all sharing `at = W` — safe to apply.
                 let dominated = |sp: i64, sb: i64| sp >= call_gen && sb >= call_bgen;
                 let apply = match mode {
-                    // Bootstrap recovery / Forward primary→backup: authority's
-                    // body, monotone by `(p,b)`.
-                    ApplyMode::ForwardOrBootstrap => match stored {
+                    // Bootstrap recovery: the authority's body, monotone by `(p,b)`.
+                    ApplyMode::Bootstrap => match stored {
                         Some((sp, sb)) => !dominated(sp, sb),
+                        None => true,
+                    },
+                    // Forward (primary → backup): the same monotone rule, plus the
+                    // D3 guard — a `b_in` behind the Element's own `b` is a branch
+                    // off a view an acting backup has already moved past.
+                    ApplyMode::Forward => match stored {
+                        Some((sp, sb)) => {
+                            if sb > call_bgen {
+                                self.metrics.record_repl_forward_flush_refused("put");
+                                false
+                            } else {
+                                !dominated(sp, sb)
+                            }
+                        }
                         None => true,
                     },
                     // Reverse (backup → primary): accept iff untouched-by-us since
@@ -848,6 +885,12 @@ impl Puller {
                 apply
             }
             Op::Delete => {
+                if mode == ApplyMode::Forward
+                    && self.element_still_served(role, &primary, call_ref, call_bgen).await
+                {
+                    self.metrics.record_repl_forward_flush_refused("delete");
+                    return false;
+                }
                 let _ = self
                     .store
                     .delete_call(role, &primary, call_ref, indexes, &PutOpts::default())
@@ -856,6 +899,69 @@ impl Puller {
                 true
             }
         }
+    }
+
+    /// Whether the stored Element is the **last record** of a call an acting
+    /// backup carried past what the deleting authority saw: `sb > b_in`, a
+    /// non-terminal body, and no live copy of the call on this node (where one
+    /// exists it is the record, not the Element, and delete-wins holds). The
+    /// read is the **non-evicting**
+    /// [`peek_body_raw`](ReplicatingCallStore::peek_body_raw) — the guard must
+    /// not destroy the Element it protects.
+    async fn element_still_served(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+        call_bgen: i64,
+    ) -> bool {
+        let Some((_, sb)) = self.store.current_cv(role, primary, call_ref) else {
+            return false;
+        };
+        if sb <= call_bgen {
+            return false;
+        }
+        if self.live.as_ref().is_some_and(|live| live(call_ref)) {
+            return false;
+        }
+        let Some(raw) = self.store.peek_body_raw(role, primary, call_ref).await else {
+            return false;
+        };
+        self.codec.decode(&raw).is_ok_and(|call| call.state != CallModelState::Terminated)
+    }
+
+    /// Hand a `Put`'s outcome up to the router (ADR-0011 X11 / ADR-0014 /
+    /// ADR-0031 D3). An applied reverse flush is reclaimed; a refused one, in
+    /// either direction, rides up **with its body**, because the call model can
+    /// read lifecycle progress in it that the counters cannot carry. A bootstrap
+    /// import signals nothing — the bulk reclaim covers the whole partition once.
+    fn signal_put_outcome(
+        &self,
+        mode: ApplyMode,
+        applied: bool,
+        call_ref: &str,
+        body: Option<Arc<[u8]>>,
+        origin_now_ms: i64,
+    ) {
+        let Some(tx) = &self.repl_tx else { return };
+        let refused_body = || body.clone().unwrap_or_else(|| Arc::from(Vec::new()));
+        let cmd = match (mode, applied) {
+            // Reclaim straggler: a backup reverse-flushed one of OUR calls after
+            // the bulk sweep — re-materialise + re-serve it.
+            (ApplyMode::Reverse, true) => ReplCommand::ReclaimCall(call_ref.to_string()),
+            (ApplyMode::Reverse, false) => ReplCommand::ReverseFlushRefused {
+                call_ref: call_ref.to_string(),
+                body: refused_body(),
+                origin_now_ms,
+            },
+            (ApplyMode::Forward, false) => ReplCommand::ForwardFlushRefused {
+                call_ref: call_ref.to_string(),
+                body: refused_body(),
+                origin_now_ms,
+            },
+            (ApplyMode::Forward, true) | (ApplyMode::Bootstrap, _) => return,
+        };
+        let _ = tx.send(cmd);
     }
 }
 

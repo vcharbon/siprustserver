@@ -271,6 +271,10 @@ impl B2buaCore {
                 // Pullers forward X11 fail-back commands to the router; wire the
                 // sink BEFORE `start` so the initial pullers carry it.
                 supervisor.set_repl_sink(repl_tx.clone());
+                // The Forward `Delete` guard asks whether this node still serves
+                // the call before it keeps an Element against the authority.
+                let live_map = state.clone();
+                supervisor.set_live_probe(Arc::new(move |r: &str| live_map.peek(r).is_some()));
                 supervisor.start(setup.membership.clone());
 
                 // Serve our changelog to pulling peers. `ReplServer` reads bodies

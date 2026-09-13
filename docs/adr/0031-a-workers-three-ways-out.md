@@ -304,3 +304,33 @@ peers do not hold the calls.
   exits.
 - Out of scope: a push-based flush (replication stays pull-only, ADR-0011); stopping a
   worker from authoring (D5).
+
+## Amendment — progress is a chain, and every refusal moves the counter
+
+**Lifecycle progress is a chain, not a rank.** A refused flush folds into a live copy only
+when it made every step that copy made and at least one more, on both monotone axes:
+*answered* (unanswered < the caller was answered) and *ending* (active < terminating <
+terminated). A terminal body whose caller was never answered, reaching a live copy whose
+caller **is** answered, is a pre-answer teardown on a view its owner left behind — a branch,
+not progress — and is refused in both directions. "Answered" is read from the final the
+a-leg's initial INVITE server transaction took (`call::helpers::caller_answered`), which is
+durable: it stays true once the leg is `Terminated`, where `LegState::Confirmed` does not.
+
+**A fold adopts both counters, and so does a refusal.** A fold takes `max(p)` and `max(b)`
+of the two views before the store bumps this node's own. A *refusal* takes only the axis the
+other owner bumps — `b` at a primary, `p` at a backup — because seeing a version is not
+taking it, and adopting our own axis too would make two live owners raise each other in
+turn. Without this the split never closes: the refused owner keeps flushing behind the
+Element's `b` and every later flush, delete included, is refused in its turn.
+
+**The `Delete` rule is the `Put` rule plus two escapes.** A `Delete` frame carries the
+`(p, b)` its sender held for the ref, so the guard is the same compare — refuse when
+`b_stored > b_in` — and it yields where the Element is not the call's last record: a
+terminal Element (the call is over whoever ended it) and an Element beside a **live copy on
+this node** (the live copy is the record). Only an Element that stands alone, ahead of the
+authority, and for a call nobody ended is kept.
+
+Residual, as it stands: a partitioned primary that tore down and discharged a call the
+survivor kept serving has written its own no-answer record, and its resurrection tombstone
+then refuses the terminal the survivor defers to it — so the answered call's record is the
+one that is lost, not the stale one.

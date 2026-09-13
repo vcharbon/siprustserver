@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use call::{Call, CallModelState, LegState, TimerType};
+use call::{helpers::caller_answered, Call, CallModelState, TimerType};
 
 use super::interpret::process_result;
 use super::materialise::{materialise, Materialised, Origin, Reason};
@@ -55,6 +55,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
         Some(live) => {
             if !reverse_flush_dominates(&replica, &live) {
                 ctx.metrics.bump_repl_reverse_flush_refused();
+                adopt_seen_counter(ctx, FlushDirection::Reverse, &live, &replica);
                 return;
             }
             // Rare by construction (a backup served an in-dialog request for a
@@ -81,6 +82,7 @@ pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str
                 // state in and let the timer service follow the folded ledger. No
                 // discharge — the call continues.
                 CallModelState::Active => {
+                    adopt_counters(&mut replica, &live);
                     resync_timers(ctx, call_ref, &live, &mut replica, skew_offset_ms, now_ms).await;
                     ctx.state.update(replica);
                 }
@@ -226,14 +228,46 @@ pub(super) fn format_pb(call: &Call) -> String {
     }
 }
 
-/// Fold a reverse flush the store's `(p,b)` gate refused (the body rides the
-/// command, the store never took it): the call model reads it for lifecycle
-/// progress ([`lifecycle_rank`]) our live copy lacks — a backup's answer or
-/// teardown of a call we reclaimed as still ringing — and folds exactly as an
-/// applied flush would. Anything else stays refused; a call we do not serve
-/// live is not resurrected from it.
-pub(super) async fn fold_refused_reverse_flush(
+/// Which side a refused flush came from. The fold is ONE rule in both
+/// directions; the direction picks the refusal counter and labels the line.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum FlushDirection {
+    /// An acting backup's flush toward the primary that owns the call.
+    Reverse,
+    /// A primary's flush toward a backup that holds its Element (ADR-0031 D3).
+    Forward,
+}
+
+impl FlushDirection {
+    /// The label an operator correlates the fold line by.
+    fn label(self) -> &'static str {
+        match self {
+            FlushDirection::Reverse => "reverse",
+            FlushDirection::Forward => "forward",
+        }
+    }
+
+    /// Count a fold refusal. The forward direction is already counted by op
+    /// where the store refused it (`b2bua_repl_forward_flush_refused_total`), so
+    /// only the reverse direction — whose sole refusal site is this fold —
+    /// counts here.
+    fn count_refused(self, metrics: &crate::metrics::B2buaMetrics) {
+        if let FlushDirection::Reverse = self {
+            metrics.bump_repl_reverse_flush_refused();
+        }
+    }
+}
+
+/// Fold a flush the store's `(p,b)` gate refused (the body rides the command,
+/// the store never took it): the call model reads it for lifecycle progress
+/// ([`carries_progress`]) our live copy lacks — the other owner's answer or
+/// teardown of a call we read one step behind — and folds exactly as an applied
+/// flush would. Anything else stays refused. **A live copy is required**: an
+/// Element alone is kept as it is, its merge deferred to the next
+/// materialisation, and a call we do not serve live is never resurrected here.
+pub(super) async fn fold_refused_flush(
     ctx: &Arc<RouterCtx>,
+    direction: FlushDirection,
     call_ref: &str,
     body: &[u8],
     origin_now_ms: i64,
@@ -241,23 +275,32 @@ pub(super) async fn fold_refused_reverse_flush(
     let Some(mut replica) = ctx.state.decode_body(body) else {
         return;
     };
+    // No live copy ⇒ nothing to fold — tested BEFORE the per-call lock, because
+    // locking a call this node does not serve inserts a `locks` entry only a
+    // release clears, and an Element with no live copy is the common case.
+    if ctx.state.peek(call_ref).is_none() {
+        return;
+    }
     let _guard = ctx.state.lock(call_ref).await;
     let now_ms = ctx.clock.now_ms();
     let Some(live) = ctx.state.peek(call_ref) else {
+        ctx.state.discard_orphan(call_ref);
         return;
     };
-    if lifecycle_rank(&replica) <= lifecycle_rank(&live) {
-        ctx.metrics.bump_repl_reverse_flush_refused();
+    if !carries_progress(&replica, &live) {
+        direction.count_refused(&ctx.metrics);
+        adopt_seen_counter(ctx, direction, &live, &replica);
         return;
     }
     tracing::info!(
         node = observe::node(),
         call_ref,
         call_id = %live.a_leg.call_id,
+        direction = direction.label(),
         state = ?replica.state,
         replica_pb = %format_pb(&replica),
         live_pb = %format_pb(&live),
-        "reverse-flush reconcile (lifecycle progress over the vector)"
+        "refused flush folded (lifecycle progress over the vector)"
     );
     let skew_offset_ms = if origin_now_ms > 0 { now_ms - origin_now_ms } else { 0 };
     match replica.state {
@@ -265,6 +308,7 @@ pub(super) async fn fold_refused_reverse_flush(
             discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
         }
         CallModelState::Active => {
+            adopt_counters(&mut replica, &live);
             resync_timers(ctx, call_ref, &live, &mut replica, skew_offset_ms, now_ms).await;
             ctx.state.update(replica);
         }
@@ -272,28 +316,81 @@ pub(super) async fn fold_refused_reverse_flush(
     }
 }
 
+/// A fold adopts BOTH counters: the folded body takes `max` of the two views on
+/// each axis before [`CallState::update`](crate::store::CallState::update) bumps
+/// this node's own. The next flush this node sends therefore dominates every
+/// version either owner published, so the split vector heals instead of each
+/// side refusing the other for ever (ADR-0031 D3). A body without topology is
+/// not replicable and is left alone.
+fn adopt_counters(folded: &mut Call, live: &Call) {
+    if let (Some(f), Some(l)) = (folded.topology.as_mut(), live.topology.as_ref()) {
+        f.gen = f.gen.max(l.gen);
+        f.bak_gen = f.bak_gen.max(l.bak_gen);
+    }
+}
+
+/// A REFUSED flush still moves the counter: seeing a version is not taking it,
+/// but this node's next flush must dominate that version or the two views refuse
+/// each other for ever (ADR-0031 D3). The live copy keeps its own content and
+/// adopts only the axis the *other* owner bumps — `b` at a primary, `p` at a
+/// backup. Adopting our own axis too would make two live owners raise each
+/// other in turn, one flush per round.
+fn adopt_seen_counter(
+    ctx: &Arc<RouterCtx>,
+    direction: FlushDirection,
+    live: &Call,
+    replica: &Call,
+) {
+    let (Some(l), Some(r)) = (live.topology.as_ref(), replica.topology.as_ref()) else {
+        return;
+    };
+    let mut seen = live.clone();
+    let Some(t) = seen.topology.as_mut() else { return };
+    match direction {
+        FlushDirection::Reverse if r.bak_gen > l.bak_gen => t.bak_gen = r.bak_gen,
+        FlushDirection::Forward if r.gen > l.gen => t.gen = r.gen,
+        // Already at or past the refused version — writing would only churn our
+        // own counter on every re-delivery.
+        _ => return,
+    }
+    ctx.state.update(seen);
+}
+
 /// The ADR-0014 **Reverse** apply rule for a live-map fold. The reverse-flushed
 /// `replica` dominates our `live` copy when the `(p,b)` vector says so (`p`
 /// unchanged since the backup branched, `b` advanced) OR when it carries
-/// lifecycle progress ([`lifecycle_rank`]) a reclaimed copy cannot have made on
-/// its own: a `p` bump from a turn on a stale record does not outrank the
+/// lifecycle progress ([`carries_progress`]) a reclaimed copy cannot have made
+/// on its own: a `p` bump from a turn on a stale record does not outrank the
 /// backup's answer or teardown. A call with no topology never folds.
 fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
     let (Some(r), Some(l)) = (replica.topology.as_ref(), live.topology.as_ref()) else {
         return false;
     };
-    (r.gen == l.gen && r.bak_gen > l.bak_gen) || lifecycle_rank(replica) > lifecycle_rank(live)
+    (r.gen == l.gen && r.bak_gen > l.bak_gen) || carries_progress(replica, live)
 }
 
-/// Where a call stands on its lifecycle: unanswered, the caller answered,
-/// ending, ended. Only forward progress along this order is a fact a backup can
-/// carry that the primary lacks.
-fn lifecycle_rank(call: &Call) -> u8 {
-    match call.state {
-        CallModelState::Terminated => 3,
-        CallModelState::Terminating => 2,
-        CallModelState::Active => u8::from(call.a_leg.state == LegState::Confirmed),
-    }
+/// **Lifecycle progress is a chain, not a rank** (ADR-0031 D3). A call moves
+/// along two monotone axes — whether its caller was answered, and how far it has
+/// gone toward ending — and `replica` carries progress `live` lacks only when it
+/// made every step `live` made on BOTH axes and at least one more. A terminal
+/// body whose caller was never answered, reaching a live copy whose caller IS
+/// answered, is a pre-answer teardown on a view its owner left behind: a branch,
+/// not progress, and folding it would end a call the other owner is serving.
+fn carries_progress(replica: &Call, live: &Call) -> bool {
+    let r = progress(replica);
+    let l = progress(live);
+    r.0 >= l.0 && r.1 >= l.1 && r != l
+}
+
+/// Where a call stands on the two axes, each monotone over the call's life:
+/// `(the caller was answered, active < terminating < terminated)`.
+fn progress(call: &Call) -> (u8, u8) {
+    let ending = match call.state {
+        CallModelState::Active => 0,
+        CallModelState::Terminating => 1,
+        CallModelState::Terminated => 2,
+    };
+    (u8::from(caller_answered(call)), ending)
 }
 
 /// The live timer service follows the folded ledger: every entry the folded
@@ -432,4 +529,131 @@ pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_m
         true,
     );
     process_result(ctx, call_ref, result, now_ms).await;
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pins the fold predicate ([`reverse_flush_dominates`]) directly: which
+    //! bodies carry lifecycle progress a live copy lacks, and which are a
+    //! branch off a stale view (ADR-0031 D3).
+
+    use std::net::SocketAddr;
+
+    use call::{Call, CallModelState, CallTopology, LegDisposition, LegState};
+    use sip_message::parser::custom::CustomParser;
+    use sip_message::{SipMessage, SipParser, SipRequest};
+
+    use super::reverse_flush_dominates;
+    use crate::config::B2buaConfig;
+    use crate::initial_invite::build_initial_call;
+
+    fn invite() -> SipRequest {
+        let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-fold\r\n\
+             Record-Route: <sip:10.0.0.1:5060;v=3;w_pri=w0;w_bak=w1;e=0;kid=k1;sig=abc;lr>\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@example.com>;tag=alicetag\r\n\
+             To: <sip:bob@example.com>\r\n\
+             Call-ID: fold@10.0.0.9\r\n\
+             CSeq: 1 INVITE\r\n\
+             Contact: <sip:alice@10.0.0.9:5060>\r\n\
+             Content-Length: 0\r\n\r\n";
+        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+            SipMessage::Request(r) => r,
+            _ => panic!("expected a request"),
+        }
+    }
+
+    /// A replicable call at `(p, b)`.
+    fn base(p: i64, b: i64) -> Call {
+        let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
+        let src = SocketAddr::from(([10, 0, 0, 9], 5060));
+        let mut call = build_initial_call(&invite(), src, &config, 0);
+        call.topology =
+            Some(CallTopology { pri: "w0".into(), bak: "w1".into(), gen: p, bak_gen: b });
+        call
+    }
+
+    /// The caller is ringing: no final has left toward her yet.
+    fn unanswered(p: i64, b: i64, state: CallModelState) -> Call {
+        let mut call = base(p, b);
+        call.state = state;
+        call.a_leg.state =
+            if state == CallModelState::Active { LegState::Early } else { LegState::Terminated };
+        call.a_leg.disposition = LegDisposition::Pending;
+        call.a_leg.invite_final_sent = (state != CallModelState::Active).then_some(480);
+        call
+    }
+
+    /// The caller was answered — a durable fact of the body: the 2xx this stack
+    /// sent her is recorded on the leg and the pair is bridged, both of which
+    /// outlive the leg going `Terminated`.
+    fn answered(p: i64, b: i64, state: CallModelState) -> Call {
+        let mut call = base(p, b);
+        call.state = state;
+        call.a_leg.state = if state == CallModelState::Active {
+            LegState::Confirmed
+        } else {
+            LegState::Terminated
+        };
+        call.a_leg.disposition = LegDisposition::Bridged;
+        call.a_leg.invite_final_sent = Some(200);
+        call
+    }
+
+    /// Lifecycle progress is a CHAIN: the replica folds only when it made every
+    /// step the live copy made and at least one more. A teardown of a caller who
+    /// was never answered, arriving at a live copy whose caller IS answered, is a
+    /// ring-deadline teardown on a stale view — a branch, and refused (ADR-0031
+    /// D3). Folding it ends a call the other owner is serving.
+    #[test]
+    fn a_terminal_body_that_never_answered_does_not_fold_into_an_answered_live_copy() {
+        let replica = unanswered(1, 0, CallModelState::Terminated);
+        let live = answered(3, 1, CallModelState::Active);
+        assert!(
+            !reverse_flush_dominates(&replica, &live),
+            "an unanswered teardown is a branch off a stale view, not progress",
+        );
+    }
+
+    /// The same shape one step along the chain: a teardown of a call the replica
+    /// ALSO reads as answered is genuine progress and folds.
+    #[test]
+    fn a_terminal_body_that_answered_folds_into_an_answered_live_copy() {
+        let replica = answered(1, 1, CallModelState::Terminated);
+        let live = answered(3, 0, CallModelState::Active);
+        assert!(
+            reverse_flush_dominates(&replica, &live),
+            "ending is the second axis: terminated over active, both answered",
+        );
+    }
+
+    /// The answer itself: the replica answered the caller our live copy still
+    /// reads as ringing.
+    #[test]
+    fn an_answer_folds_into_an_unanswered_live_copy() {
+        let replica = answered(1, 1, CallModelState::Active);
+        let live = unanswered(3, 0, CallModelState::Active);
+        assert!(reverse_flush_dominates(&replica, &live), "answered over unanswered");
+    }
+
+    /// And the reverse of that is not progress.
+    #[test]
+    fn an_unanswered_body_does_not_fold_into_an_answered_live_copy() {
+        let replica = unanswered(1, 1, CallModelState::Active);
+        let live = answered(2, 1, CallModelState::Active);
+        assert!(
+            !reverse_flush_dominates(&replica, &live),
+            "a ringing view never outranks an answered one; the vector says nothing here",
+        );
+    }
+
+    /// The vector clause is untouched: `p` unchanged since the backup branched
+    /// and `b` advanced still folds, whatever the chain says.
+    #[test]
+    fn the_vector_clause_still_folds_an_advanced_backup_counter() {
+        let replica = answered(1, 2, CallModelState::Active);
+        let live = answered(1, 1, CallModelState::Active);
+        assert!(reverse_flush_dominates(&replica, &live), "p unchanged, b advanced");
+    }
 }

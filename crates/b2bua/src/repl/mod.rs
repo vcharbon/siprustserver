@@ -28,7 +28,7 @@ mod supervisor;
 pub use changelog::{
     BodySource, Changelog, RefMeta, DEFAULT_DEAD_PEER_TTL_MS, DEFAULT_TOMBSTONE_TTL_MS,
 };
-pub use puller::{Puller, PullerConfig, PullerStatus};
+pub use puller::{LiveCallProbe, Puller, PullerConfig, PullerStatus};
 pub use readiness::{Readiness, ReadinessSource, ReadinessState};
 pub use replication::{flush_replicated, replication_target, ReplicationPlan};
 pub use self_endpoint::{SelfEndpoint, WithdrawalCondition};
@@ -59,6 +59,9 @@ mod s10_tests;
 
 #[cfg(test)]
 mod s11_tests;
+
+#[cfg(test)]
+mod s12_tests;
 
 #[cfg(test)]
 mod real_transport_tests;

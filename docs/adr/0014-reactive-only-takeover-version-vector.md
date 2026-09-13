@@ -430,6 +430,10 @@ carries are cancelled, the ones it carries are armed through the restore
 hygiene seam. The `(p,b)` vector stays the only gate at the store, and the
 only rule for everything that is not lifecycle progress.
 
+The fold rule is sharpened by [ADR-0031](0031-a-workers-three-ways-out.md)'s "Amendment —
+progress is a chain": the four-step order below is two monotone axes a body must not regress
+on, and the fold adopts both counters.
+
 Not closed here: an answer version that died with the primary before any copy
 held it. No record can carry that fact; closing it needs the answer durable at
 the backup before the 2xx leaves (an accepted trade-off above rejects it) or a wire check at

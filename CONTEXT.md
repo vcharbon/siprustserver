@@ -311,14 +311,20 @@ _Avoid_: "Deactivate"/"handback" (the removed watermark handshake); "ghost backu
 Each call carries `(p, b)` = `(primary_counter, backup_counter)` =
 `CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter on a local
 mutation, so the *other* counter on a propagated update is the **branch point**.
-Merge is direction-aware: **Forward** (primary→backup) and **Bootstrap** apply
-unless the stored vector dominates (follower defers to authority); **Reverse**
-(backup→primary) applies iff `p_in == p_cur && b_in > b_cur` (untouched-by-primary
-since the backup branched, genuinely newer backup mutation); **deletes** apply
-unconditionally both ways. Closes the latent equal-`gen` divergence the single
-counter suffered.
-_Avoid_: "call_gen LWW"/"highest gen wins" (the reverse path is now the meaningful
-guard; forward is monotone-authority).
+Merge is direction-aware: **Bootstrap** (a node recovering its own partition)
+applies unless the stored vector dominates; **Forward** (primary→backup) applies
+on that same rule *and* never behind the Element's own `b` (ADR-0031 D3 — an
+Element an acting backup authored holds a version the authority never saw);
+**Reverse** (backup→primary) applies iff `p_in == p_cur && b_in > b_cur`
+(untouched-by-primary since the backup branched, genuinely newer backup
+mutation). **Deletes** apply unconditionally except Forward, which carries the
+sender's own `(p,b)` and yields to an Element ahead of it whose body is
+non-terminal and which this node holds no live copy of. A refused flush is folded into
+a live copy when it carries lifecycle progress the vector cannot see, and the
+fold adopts `max` of both counters so the split heals. Closes the latent
+equal-`gen` divergence the single counter suffered.
+_Avoid_: "call_gen LWW"/"highest gen wins" (both propagating directions guard:
+reverse on the branch point, forward on the backup's own progress).
 
 **Informal aliases** (do not use in code or test names):
 Conversational shorthands map onto the canonical terms above — "switch to backup"

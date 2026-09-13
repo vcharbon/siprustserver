@@ -161,6 +161,10 @@ struct Inner {
     repl_takeover_refused_terminated: AtomicU64,
     // Reverse flushes a live primary refused to fold; the gate is `router::reclaim`.
     repl_reverse_flush_refused: AtomicU64,
+    // Forward flushes a backup refused because they would regress the progress an
+    // acting backup already authored on the Element (ADR-0031 D3), keyed by the
+    // operation refused (`put`, `delete`). The gate is `repl::puller`.
+    repl_forward_flush_refused: Mutex<BTreeMap<String, u64>>,
     // Fail-back (ADR-0011 X11 / ADR-0014): `reclaimed` = calls a rebooted primary
     // re-materialised into its live map (active reclaim); `self_release` = acting-
     // backup takeover copies the backup *self-released* once the transaction(s) it
@@ -360,6 +364,25 @@ impl B2buaMetrics {
     /// Drains that returned for `reason` (test/observability).
     pub fn drain_exits(&self, reason: &str) -> u64 {
         self.inner.drain_exits.lock().unwrap().get(reason).copied().unwrap_or(0)
+    }
+
+    /// Count one forward flush the Backup flow refused because it would regress
+    /// the backup's own progress (ADR-0031 D3). `op` is the refused operation:
+    /// `put` (a `b'` behind the Element's `b`) or `delete` (an Element carrying
+    /// `b > 0` and a non-terminal body).
+    pub fn record_repl_forward_flush_refused(&self, op: &str) {
+        *self
+            .inner
+            .repl_forward_flush_refused
+            .lock()
+            .unwrap()
+            .entry(op.to_string())
+            .or_insert(0) += 1;
+    }
+
+    /// Forward flushes refused for `op` (test/observability).
+    pub fn repl_forward_flush_refused(&self, op: &str) -> u64 {
+        self.inner.repl_forward_flush_refused.lock().unwrap().get(op).copied().unwrap_or(0)
     }
 
     /// Count one inbound request by SIP method, for `b2bua_requests_total{method}`.
@@ -790,6 +813,11 @@ impl B2buaMetrics {
             s.push_str(&format!(
                 "b2bua_repl_noops_sent_total{{flow=\"{flow}\",peer=\"{peer}\"}} {v}\n"
             ));
+        }
+
+        s.push_str("# HELP b2bua_repl_forward_flush_refused_total forward flushes (primary\u{2192}backup) a backup refused because they would regress progress an acting backup already authored on the Element (op=put|delete, ADR-0031 D3): a rising count means a primary is flushing a branch of a call one of its backups took over — expected across a partition heal or a drain, sustained means the two views never converge\n# TYPE b2bua_repl_forward_flush_refused_total counter\n");
+        for (op, v) in self.inner.repl_forward_flush_refused.lock().unwrap().iter() {
+            s.push_str(&format!("b2bua_repl_forward_flush_refused_total{{op=\"{op}\"}} {v}\n"));
         }
 
         s.push_str("# HELP b2bua_drain_exits_total drains by why they returned (reason=quiescent|caught_up|grace|grace_peers_behind, ADR-0031 D2); grace_peers_behind means a departing worker abandoned live calls no peer reported holding — a lost flush window, never a clean drain\n# TYPE b2bua_drain_exits_total counter\n");

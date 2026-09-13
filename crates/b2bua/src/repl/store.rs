@@ -88,10 +88,22 @@ pub struct ReplicatingCallStore {
     /// ref deleted within [`RESURRECTION_TOMBSTONE_MS`] is rejected so a late
     /// reverse-flush cannot re-create a just-discharged call (delete-wins, extended
     /// from the replica to the apply path). Pruned in [`reap`](Self::reap).
-    tombstones: Arc<Mutex<HashMap<String, i64>>>,
+    tombstones: Arc<Mutex<HashMap<String, Tombstone>>>,
     /// Backstop TTL applied when a call is stored with `ttl_ms <= 0`
     /// ([`DEFAULT_REPLICATED_TTL_MS`] by default; tests inject a short value).
     default_ttl_ms: i64,
+}
+
+/// What a delete leaves behind: when the ref went, and the `(p,b)` it carried.
+/// The instant drives the resurrection guard (a late flush must not re-create a
+/// discharged call); the vector rides the outbound `Delete` frame, so a receiver
+/// can tell a delete that has seen a backup's progress from one that has not
+/// (ADR-0031 D3).
+#[derive(Clone, Copy, Debug)]
+struct Tombstone {
+    deleted_at_ms: i64,
+    call_gen: i64,
+    call_bgen: i64,
 }
 
 impl ReplicatingCallStore {
@@ -316,7 +328,7 @@ impl ReplicatingCallStore {
         self.tombstones
             .lock()
             .unwrap()
-            .retain(|_, &mut deleted_at| now_ms - deleted_at < RESURRECTION_TOMBSTONE_MS);
+            .retain(|_, t| now_ms - t.deleted_at_ms < RESURRECTION_TOMBSTONE_MS);
         self.changelog.reap(now_ms);
     }
 }
@@ -355,8 +367,8 @@ impl CallStore for ReplicatingCallStore {
         // Put is lost.
         {
             let now = self.clock.now_ms();
-            if let Some(&deleted_at) = self.tombstones.lock().unwrap().get(call_ref) {
-                if now - deleted_at < RESURRECTION_TOMBSTONE_MS {
+            if let Some(&tomb) = self.tombstones.lock().unwrap().get(call_ref) {
+                if now - tomb.deleted_at_ms < RESURRECTION_TOMBSTONE_MS {
                     return Ok(());
                 }
             }
@@ -424,10 +436,16 @@ impl CallStore for ReplicatingCallStore {
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
         self.inner.delete_call(role, primary, call_ref, indexes, opts).await?;
-        self.meta.lock().unwrap().remove(call_ref);
+        let gone = self.meta.lock().unwrap().remove(call_ref);
         // Tombstone the ref so a late reverse-flush cannot resurrect it (see
-        // `put_call`); pruned in `reap`.
-        self.tombstones.lock().unwrap().insert(call_ref.to_string(), self.clock.now_ms());
+        // `put_call`) and so the outbound `Delete` frame can still name the
+        // `(p,b)` this node deleted at; pruned in `reap`.
+        let (call_gen, call_bgen) =
+            gone.map(|m| (m.meta.call_gen, m.meta.call_bgen)).unwrap_or((0, 0));
+        self.tombstones.lock().unwrap().insert(
+            call_ref.to_string(),
+            Tombstone { deleted_at_ms: self.clock.now_ms(), call_gen, call_bgen },
+        );
 
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);
@@ -491,6 +509,10 @@ impl BodySource for ReplicatingCallStore {
 
     fn read_meta(&self, call_ref: &str) -> Option<RefMeta> {
         self.meta.lock().unwrap().get(call_ref).map(|m| m.meta.clone())
+    }
+
+    fn deleted_cv(&self, call_ref: &str) -> Option<(i64, i64)> {
+        self.tombstones.lock().unwrap().get(call_ref).map(|t| (t.call_gen, t.call_bgen))
     }
 
     fn scan_refs(&self, role: PartitionRole, primary: &str) -> Vec<String> {

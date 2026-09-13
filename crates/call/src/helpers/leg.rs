@@ -172,3 +172,14 @@ pub fn remote_tag(call: &Call, leg_id: &str) -> Option<String> {
     let b = find_b_leg(call, leg_id)?;
     b.dialogs.first().map(|d| d.sip.remote_tag.clone())
 }
+
+/// Whether this stack answered the caller — a **durable** fact of the record,
+/// true from the 2xx onward and still true once the leg is `Terminated`. It
+/// reads the final the a-leg's initial INVITE server transaction took
+/// (`invite_final_sent`, written at the one a-facing final seam), not
+/// `LegState::Confirmed`, which the teardown clears. Replication reconciliation
+/// compares two copies of a call on this fact, so it must not read differently
+/// before and after the call ends.
+pub fn caller_answered(call: &Call) -> bool {
+    matches!(call.a_leg.invite_final_sent, Some(status) if (200..300).contains(&status))
+}
