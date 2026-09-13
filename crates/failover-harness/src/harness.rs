@@ -1068,7 +1068,7 @@ impl FailoverHarness {
             (cut.contains(&src) || cut.contains(&dst))
                 .then(|| format!("{src} is cut off the signalling fabric"))
         });
-        let harness = Harness::with_transit_delay_and_send_fault(name, 1, fault).describe(
+        let harness = Harness::with_transit_delay_and_send_fault(name, 1, Some(fault)).describe(
             "S10b goal-2 simulated failover: alice → proxy → 2 replicating b2buas \
              over the SIM SIP + SIM repl fabrics under one fake clock.",
         );
@@ -1104,6 +1104,12 @@ impl FailoverHarness {
             .enumerate()
             .map(|(i, ord)| ((*ord).to_string(), repl_addr_for(i)))
             .collect();
+        // Name every node on the repl fabric, so a `partition` reaches the
+        // streams its pullers open from ephemeral locals, not just the listen
+        // pair (each `PullRequest` carries the caller's ordinal).
+        for (ord, addr) in &repl_addrs {
+            repl_sim.declare_endpoint(ord, *addr);
+        }
         let event_seq_for_views = event_seq.clone();
         Self {
             clock: clock.clone(),
@@ -1585,51 +1591,17 @@ impl FailoverHarness {
         });
     }
 
-    /// Partition two workers on the repl fabric: block a fresh `connect`
-    /// between their listen addresses AND stop delivery on every stream their
-    /// pullers already opened, both directions. A puller connects from an
-    /// ephemeral client address, so the listen-pair fault alone never reaches a
-    /// live stream — the established directions are named here from the
-    /// `PullRequest` each puller opened with. A stalled direction buffers in
-    /// order and flushes on [`heal`](Self::heal). Marker.
+    /// Partition two workers on the repl fabric, both directions and for every
+    /// stream between them — the ones their pullers already opened, and any they
+    /// open while the cut lasts. The fabric attributes each stream to the node
+    /// that opened it (the `caller` on its `PullRequest`) and holds delivery on
+    /// the owner pair, so a reconnect from a fresh ephemeral local does not slip
+    /// through. A held direction buffers in order and flushes on
+    /// [`heal`](Self::heal). Marker.
     pub fn partition(&mut self, a: &str, b: &str) {
         let (aa, ba) = (self.repl_addrs[a], self.repl_addrs[b]);
         self.repl_sim.apply_fault(Fault::Partition { a: aa, b: ba });
-        for (src, dst) in self.live_stream_pairs(a, b) {
-            self.repl_sim.apply_fault(Fault::Stall { src, dst });
-        }
         self.mark(a, Some(b), "partition", "");
-    }
-
-    /// Every established directed pair between `a` and `b`'s replication
-    /// endpoints: each one's listener against the other's puller client
-    /// addresses, both ways. A client address is recovered from the `caller`
-    /// its opening `PullRequest` names, so a stream is attributed to the node
-    /// that opened it rather than guessed from the frame's direction.
-    fn live_stream_pairs(&self, a: &str, b: &str) -> Vec<(SocketAddr, SocketAddr)> {
-        let report = self.repl_report();
-        let clients_of = |ordinal: &str| -> std::collections::BTreeSet<SocketAddr> {
-            report
-                .frames
-                .iter()
-                .filter_map(|f| match &f.frame {
-                    repl_net::frame::Frame::PullRequest { caller, .. } if caller == ordinal => {
-                        Some(f.from)
-                    }
-                    _ => None,
-                })
-                .filter(|addr| !self.repl_addrs.values().any(|l| l == addr))
-                .collect()
-        };
-        let mut pairs = Vec::new();
-        for (server, client_owner) in [(a, b), (b, a)] {
-            let listener = self.repl_addrs[server];
-            for client in clients_of(client_owner) {
-                pairs.push((listener, client));
-                pairs.push((client, listener));
-            }
-        }
-        pairs
     }
 
     /// Delay delivery on every replication stream `from`'s listener serves by
@@ -1670,14 +1642,11 @@ impl FailoverHarness {
         self.mark(ordinal, None, "sip-heal", &format!("{addr} reachable again"));
     }
 
-    /// Heal a repl-fabric partition: unblock `connect` and resume every stalled
+    /// Heal a repl-fabric partition: unblock `connect` and release every held
     /// stream, which flushes what buffered while the cut lasted, in order.
     /// Marker.
     pub fn heal(&mut self, a: &str, b: &str) {
         let (aa, ba) = (self.repl_addrs[a], self.repl_addrs[b]);
-        for (src, dst) in self.live_stream_pairs(a, b) {
-            self.repl_sim.apply_fault(Fault::Resume { src, dst });
-        }
         self.repl_sim.apply_fault(Fault::Heal { a: aa, b: ba });
         self.mark(a, Some(b), "heal", "");
     }

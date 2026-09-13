@@ -259,10 +259,6 @@ struct SupervisorInner {
     /// (the live `B2buaCore` does, before `start`); the sim/test supervisors leave
     /// it unset so pullers drive the store only.
     repl_tx: Mutex<Option<mpsc::UnboundedSender<crate::router::ReplCommand>>>,
-    /// Live-copy probe handed to every puller for the Forward `Delete` guard
-    /// (ADR-0031 D3). `None` until
-    /// [`set_live_probe`](ReplicationSupervisor::set_live_probe) wires it.
-    live_probe: Mutex<Option<super::LiveCallProbe>>,
     /// Set once the Reclaim flows are all ready and the Backup streams may open
     /// (ADR-0014 boot order). Latched true; subsequent reconciles spawn Backup
     /// pullers for any newly-added peer.
@@ -340,7 +336,6 @@ impl ReplicationSupervisor {
                 metrics,
                 reconcile_period: DEFAULT_RECONCILE_PERIOD,
                 repl_tx: Mutex::new(None),
-                live_probe: Mutex::new(None),
                 backup_enabled: AtomicBool::new(false),
                 membership: Mutex::new(None),
                 peers: Mutex::new(HashMap::new()),
@@ -355,12 +350,6 @@ impl ReplicationSupervisor {
     /// so the initial pullers pick it up; a re-spawned puller reads it too.
     pub fn set_repl_sink(&self, tx: mpsc::UnboundedSender<crate::router::ReplCommand>) {
         *self.inner.repl_tx.lock().unwrap() = Some(tx);
-    }
-
-    /// Wire the live-copy probe every puller's Forward `Delete` guard reads
-    /// (ADR-0031 D3). Same timing as [`set_repl_sink`](Self::set_repl_sink).
-    pub fn set_live_probe(&self, live: super::LiveCallProbe) {
-        *self.inner.live_probe.lock().unwrap() = Some(live);
     }
 
     /// Spawn the Reclaim pullers per current peer (excluding self), keep them in
@@ -596,10 +585,6 @@ impl ReplicationSupervisor {
         // Forward X11 fail-back commands to the router when a live core wired a sink.
         let puller = match self.inner.repl_tx.lock().unwrap().clone() {
             Some(tx) => puller.with_repl_sink(tx),
-            None => puller,
-        };
-        let puller = match self.inner.live_probe.lock().unwrap().clone() {
-            Some(live) => puller.with_live_probe(live),
             None => puller,
         };
         let (cancel_tx, cancel_rx) = watch::channel(false);

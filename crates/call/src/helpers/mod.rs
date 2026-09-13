@@ -10,6 +10,8 @@
 //! Concern map:
 //!   - [`lens`] — the base `update_leg` / `update_dialog` lenses
 //!   - [`leg`] — role, lookup, state/disposition setters, resolution, tags
+//!   - [`lifecycle`] — the two monotone axes of a call's life and how two copies
+//!     of one call compare on them (replication reconciliation)
 //!   - [`dialog`] — CSeq, ACK branch, pending relays, SDP cache, constructors
 //!   - [`peering`] — tag map, active peer pair, relay-peer resolution
 //!   - [`reliable`] — the a-facing reliable-provisional sequence (RFC 3262)
@@ -28,6 +30,7 @@ pub mod decision_log;
 pub mod dialog;
 pub mod leg;
 pub mod lens;
+pub mod lifecycle;
 pub mod message_ring;
 pub mod obligation;
 pub mod peering;
@@ -52,6 +55,7 @@ pub use leg::{
     set_bye_disposition, set_leg_disposition, set_leg_state,
 };
 pub use lens::{update_dialog, update_leg};
+pub use lifecycle::{lifecycle_advances, lifecycle_position, lifecycle_regresses};
 pub use message_ring::record_message;
 pub use obligation::{
     acked_2xx, advance_ladder, answers_initial_invite, clear_retained, obligations_in,

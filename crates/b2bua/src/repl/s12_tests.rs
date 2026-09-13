@@ -6,12 +6,15 @@
 //! Element. Once an acting backup has bumped `b` on that Element, the
 //! authority's own `(p+k, 0)` view is a branch, not a newer version:
 //!
-//! - a `Put` whose `b'` is behind the Element's `b` is refused;
-//! - a `Delete` — which carries the `(p,b)` its sender deleted at — is refused
-//!   on that same compare, and only while the Element is the call's last
-//!   record: a terminal body and a live copy on this node both yield to
-//!   delete-wins.
+//! - a `Put` whose BODY stands behind the Element on the call's lifecycle is a
+//!   branch of the call, and is refused; so is one whose `b'` is behind the
+//!   Element's `b`;
+//! - a `Delete` is refused while the authority's view is that branch and the
+//!   Element's body is not terminal. An authority whose flushes still land — on
+//!   the same chain, however far behind on `(p,b)` — deletes cleanly.
 //!
+//! The Backup flow is Forward in BOTH phases: a bulk re-seed after a
+//! `ResetToBootstrap` is a forward flush in bulk, and the guard holds there too.
 //! Two directions are pinned unchanged beside it: the **Bootstrap** phase of the
 //! Reclaim flow (a node recovering its own partition takes the replica's `(p,b)`
 //! as-is, ADR-0014 §3) and the **Reverse** rule's delete-wins.
@@ -24,7 +27,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::{Call, CallBodyCodec, CallModelState, LegState, MsgpackCodec};
+use call::{Call, CallBodyCodec, CallModelState, LegDisposition, LegState, MsgpackCodec};
 use repl_net::transport::SimulatedReplicationNetwork;
 use sip_clock::Clock;
 use sip_message::parser::custom::CustomParser;
@@ -70,10 +73,22 @@ fn invite(pri: &str, bak: &str, cid: &str) -> SipRequest {
 
 /// A call `pri` owns and `bak` backs up, in `state` with its a-leg in
 /// `a_state`. `a_state == Confirmed` is the caller-answered body an acting
-/// backup writes; `Early` the ringing one its primary still holds.
+/// backup writes; `Early` the ringing one its primary still holds, whose own
+/// teardown ends in the ring deadline's `480`. Whether the caller was answered
+/// is a DURABLE fact of the body — the final the a-leg's initial INVITE server
+/// transaction took — so it is written here beside the leg state, as the live
+/// path writes it.
 fn call_in(pri: &str, bak: &str, cid: &str, a_state: LegState, state: CallModelState) -> Call {
     let config = B2buaConfig { self_ordinal: pri.into(), ..Default::default() };
     let mut call = build_initial_call(&invite(pri, bak, cid), src(), &config, 0);
+    let answered = a_state == LegState::Confirmed;
+    call.a_leg.disposition =
+        if answered { LegDisposition::Bridged } else { LegDisposition::Pending };
+    call.a_leg.invite_final_sent = match (answered, state) {
+        (true, _) => Some(200),
+        (false, CallModelState::Active) => None,
+        (false, _) => Some(480),
+    };
     call.a_leg.state = a_state;
     call.state = state;
     call
@@ -205,11 +220,56 @@ async fn forward_put_at_or_ahead_of_the_elements_backup_counter_applies() {
     );
     assert_eq!(b.store.current_cv(BAK, "A", &call_ref), Some((2, 1)));
 
-    // And a `b'` past the Element's is a version the Element has never seen.
-    let ahead = call_in("A", "B", "s12-ahead", LegState::Confirmed, CallModelState::Active);
+    // And a `b'` past the Element's is a version the Element has never seen. The
+    // body still moves ALONG the call (the teardown completes); a body that went
+    // back down the chain would be a branch whatever the counters said.
+    let ahead = call_in("A", "B", "s12-ahead", LegState::Confirmed, CallModelState::Terminated);
     forward(&a.store, &ahead, 3, 2).await;
     tick(200).await;
     assert_eq!(b.store.current_cv(BAK, "A", &call_ref), Some((3, 2)), "an advanced b' applies");
+}
+
+// ---------------------------------------------------------------------------
+// FORWARD `Put`: a body that goes BACK down the call's lifecycle is a branch,
+// whatever the counters say. Two live owners exchange versions across a split
+// and each keeps adopting the other's axis, so `b'` level with the Element is
+// the ordinary case — only the bodies say which of the two views is this call.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn forward_put_whose_body_leaves_the_calls_chain_is_refused_at_a_level_counter() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let (a, b, b_sup) = primary_and_backup(&net, &clock, 19).await;
+
+    let ringing = call_in("A", "B", "s12-branch", LegState::Early, CallModelState::Active);
+    let call_ref = ringing.call_ref.clone();
+    forward(&a.store, &ringing, 1, 0).await;
+    tick(150).await;
+    let answered = call_in("A", "B", "s12-branch", LegState::Confirmed, CallModelState::Active);
+    element(&b.store, &answered, 1, 1).await;
+
+    // A has adopted the Element's `b` but never took its answer: it flushes its
+    // own unanswered teardown at a LEVEL `b`.
+    let teardown = call_in("A", "B", "s12-branch", LegState::Early, CallModelState::Terminating);
+    forward(&a.store, &teardown, 2, 1).await;
+    tick(200).await;
+
+    assert_eq!(
+        stored_state(&b.store, BAK, "A", &call_ref).await,
+        (CallModelState::Active, LegState::Confirmed),
+        "an unanswered teardown never overwrites the answer the Element records",
+    );
+    assert_eq!(b_sup.metrics().repl_forward_flush_refused("put"), 1, "counted, by op");
+
+    // And the `Delete` that branch's discharge propagates is refused with it.
+    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
+    tick(200).await;
+    assert!(
+        b.store.get_call(BAK, "A", &call_ref).await.unwrap().is_some(),
+        "the teardown of a branch evicts nothing",
+    );
+    assert_eq!(b_sup.metrics().repl_forward_flush_refused("delete"), 1, "counted, by op");
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +292,11 @@ async fn forward_delete_of_a_live_element_with_backup_progress_is_refused() {
     let answered = call_in("A", "B", "s12-del", LegState::Confirmed, CallModelState::Active);
     element(&b.store, &answered, 1, 1).await;
 
-    // A discharges its own unanswered copy and propagates the delete.
+    // A tears its own unanswered copy down — the flush that shows B the two
+    // views have parted — and then discharges and propagates the delete.
+    let teardown = call_in("A", "B", "s12-del", LegState::Early, CallModelState::Terminating);
+    forward(&a.store, &teardown, 2, 0).await;
+    tick(150).await;
     a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
     tick(200).await;
 
@@ -247,7 +311,47 @@ async fn forward_delete_of_a_live_element_with_backup_progress_is_refused() {
     );
     assert_eq!(b.store.current_cv(BAK, "A", &call_ref), Some((1, 1)));
     assert_eq!(b_sup.metrics().repl_forward_flush_refused("delete"), 1, "counted, by op");
-    assert_eq!(b_sup.metrics().repl_forward_flush_refused("put"), 0);
+    assert_eq!(b_sup.metrics().repl_forward_flush_refused("put"), 1, "the branch flush too");
+}
+
+// ---------------------------------------------------------------------------
+// FORWARD `Delete`: an authority merely BEHIND on `(p,b)` is not a branch. Two
+// live owners run one flush apart for as long as both serve the call, so a
+// counter lag says nothing about what happened to it — only a refused body does.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn forward_delete_applies_when_the_authority_is_only_behind_on_the_vector() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let (a, b, b_sup) = primary_and_backup(&net, &clock, 21).await;
+
+    let answered = call_in("A", "B", "s12-del-lag", LegState::Confirmed, CallModelState::Active);
+    let call_ref = answered.call_ref.clone();
+    forward(&a.store, &answered, 1, 0).await;
+    tick(150).await;
+    // B serves the call on and its `b` runs ahead of everything A has seen.
+    element(&b.store, &answered, 1, 4).await;
+
+    // A ends the call it and B agree on, one `b` behind.
+    a.store
+        .put_call(PRI, "A", &call_ref, body(&answered), &[], 600_000, 2, 1, &fwd("B"))
+        .await
+        .unwrap();
+    tick(150).await;
+    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
+    tick(200).await;
+
+    assert!(
+        b.store.get_call(BAK, "A", &call_ref).await.unwrap().is_none(),
+        "an authority on the same chain ends the call, however far behind its vector",
+    );
+    assert_eq!(b_sup.metrics().repl_forward_flush_refused("delete"), 0);
+    assert_eq!(
+        b_sup.metrics().repl_forward_flush_refused("put"),
+        1,
+        "its flush was still refused: `b` behind the Element is a version it never saw",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -326,38 +430,107 @@ async fn forward_delete_applies_once_the_authority_has_adopted_the_elements_back
 }
 
 // ---------------------------------------------------------------------------
-// FORWARD `Delete`: the guard keeps the LAST record of the call, not every
-// Element. Where this node still serves a live copy, that copy is the record
-// and the authority's delete is honoured.
+// FORWARD is the Backup flow in BOTH phases. A `ResetToBootstrap` sends the flow
+// back through a bulk re-seed of `bak:{peer}`; those pre-Noop frames are forward
+// flushes in bulk, and the guard holds over them exactly as over the tail.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
-async fn forward_delete_applies_while_this_node_serves_a_live_copy_of_the_call() {
+async fn a_bulk_re_seed_after_a_reset_still_refuses_a_regressing_put() {
+    use std::time::Duration;
+
+    use repl_net::frame::{Frame, Op, Partition, Watermark};
+    use repl_net::transport::ReplicationNetwork;
+
     let clock = Clock::test_at(0);
     let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
-    let a = Node::spawn("A", addr(15), 1, &net, &clock).await;
-    let b = Node::spawn("B", addr(16), 1, &net, &clock).await;
-    let b_sup =
-        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_config());
-    // B serves a live takeover copy of every call it is asked about.
-    b_sup.set_live_probe(Arc::new(|_: &str| true));
-    b_sup.start(one_peer("A", &clock));
-    tick(200).await;
 
-    let ringing = call_in("A", "B", "s12-del-live", LegState::Early, CallModelState::Active);
-    let call_ref = ringing.call_ref.clone();
-    forward(&a.store, &ringing, 1, 0).await;
-    tick(150).await;
-    let answered = call_in("A", "B", "s12-del-live", LegState::Confirmed, CallModelState::Active);
+    // B holds the Element it authored as the acting backup: answered, (1,1).
+    let b = Node::spawn("B", addr(17), 1, &net, &clock).await;
+    let answered = call_in("A", "B", "s12-reseed", LegState::Confirmed, CallModelState::Active);
+    let call_ref = answered.call_ref.clone();
     element(&b.store, &answered, 1, 1).await;
 
-    a.store.delete_call(PRI, "A", &call_ref, &[], &fwd("B")).await.unwrap();
-    tick(200).await;
-    assert!(
-        b.store.get_call(BAK, "A", &call_ref).await.unwrap().is_none(),
-        "the live copy is the record; the Element beside it takes delete-wins",
+    // Hand-rolled peer "A". Its Reclaim flow is answered with a bare catch-up
+    // Noop (the Backup streams open only once the Reclaim flows are ready).
+    // Its Backup flow runs three rounds: 1 = catch-up Noop (the flow bootstraps
+    // warm), 2 = ResetToBootstrap, 3 = the bulk re-seed — A's own teardown view
+    // at (2,0), the very Put the Forward rule must refuse.
+    let a_addr = addr(18);
+    let listener = net.listen(a_addr).await.unwrap();
+    let regressing =
+        body(&call_in("A", "B", "s12-reseed", LegState::Early, CallModelState::Terminating));
+    let seed_ref = call_ref.clone();
+    let rounds: Arc<std::sync::Mutex<u32>> = Arc::new(std::sync::Mutex::new(0));
+    tokio::spawn(async move {
+        while let Some(conn) = listener.accept().await {
+            let (regressing, seed_ref, rounds) =
+                (regressing.clone(), seed_ref.clone(), rounds.clone());
+            tokio::spawn(async move {
+                let Some(Frame::PullRequest { partition, .. }) = conn.recv().await else {
+                    return;
+                };
+                if partition == Partition::Pri {
+                    let _ = conn.send(Frame::Noop { at: Watermark::new(1, 0) }).await;
+                    // Hold the Reclaim stream open; it is not what this pins.
+                    tokio::time::sleep(Duration::from_secs(3_600)).await;
+                    return;
+                }
+                let round = {
+                    let mut r = rounds.lock().unwrap();
+                    *r += 1;
+                    *r
+                };
+                match round {
+                    1 => {
+                        let _ = conn.send(Frame::Noop { at: Watermark::new(1, 5) }).await;
+                    }
+                    2 => {
+                        let _ =
+                            conn.send(Frame::ResetToBootstrap { reason: "compacted".into() }).await;
+                    }
+                    _ => {
+                        let _ = conn
+                            .send(Frame::Data {
+                                at: Watermark::new(2, 1),
+                                op: Op::Put,
+                                partition: Partition::Bak,
+                                call_ref: seed_ref,
+                                call_gen: 2,
+                                call_bgen: 0,
+                                body_ttl_ms: 600_000,
+                                origin_now_ms: 0,
+                                indexes: Vec::new(),
+                                body: Some(regressing.into()),
+                            })
+                            .await;
+                        let _ = conn.send(Frame::Noop { at: Watermark::new(2, 1) }).await;
+                        // Hold the stream open: the re-seed is the last word.
+                        tokio::time::sleep(Duration::from_secs(3_600)).await;
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            });
+        }
+    });
+
+    let b_sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a_addr)], fast_config());
+    b_sup.start(one_peer("A", &clock));
+    tick(1_500).await;
+
+    assert_eq!(
+        stored_state(&b.store, BAK, "A", &call_ref).await,
+        (CallModelState::Active, LegState::Confirmed),
+        "the bulk re-seed regressed the Element the backup authored",
     );
-    assert_eq!(b_sup.metrics().repl_forward_flush_refused("delete"), 0);
+    assert_eq!(
+        b.store.current_cv(BAK, "A", &call_ref),
+        Some((1, 1)),
+        "a re-seed behind the Element's b is refused like any forward Put",
+    );
+    assert_eq!(b_sup.metrics().repl_forward_flush_refused("put"), 1, "counted, by op");
 }
 
 // ---------------------------------------------------------------------------

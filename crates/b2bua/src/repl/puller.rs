@@ -86,13 +86,6 @@ use super::{AddrResolver, ReplicatingCallStore};
 use crate::router::ReplCommand;
 use crate::store::{partition_of, CallStore, PartitionRole, PutOpts};
 
-/// Probe for "does this node hold a **live** copy of this call?". The Forward
-/// `Delete` guard reads it: an Element beside a live copy is not the call's last
-/// record, so the authority's delete is honoured; an Element alone is, and the
-/// guard keeps it (ADR-0031 D3). Absent outside a live `B2buaCore` — the unit /
-/// sim pullers hold no live map, and read as "nothing is live".
-pub type LiveCallProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
-
 /// Default backoff floor / ceiling (ms). Exposed via [`PullerConfig`] for tests.
 const DEFAULT_BACKOFF_INIT_MS: u64 = 100;
 const DEFAULT_BACKOFF_MAX_MS: u64 = 30_000;
@@ -124,6 +117,18 @@ enum ApplyMode {
     Forward,
     /// Reclaim-flow steady tail — apply the ADR-0014 Reverse `(p,b)` rule.
     Reverse,
+}
+
+/// What [`Puller::apply_to_store`] did with a `Data` frame. `Dominated` and
+/// `Refused` both leave the store untouched but mean opposite things: a
+/// dominated frame is a re-delivery of a version already held, a refused one is
+/// a version the local copy will not take — the two views have split, and only
+/// that case is counted and handed to the fold (ADR-0031 D3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ApplyOutcome {
+    Applied,
+    Dominated,
+    Refused,
 }
 
 /// Backoff knobs for a puller (tests inject short values).
@@ -247,8 +252,6 @@ pub struct Puller {
     /// Decoder for a stored Element's body. The Forward `Delete` guard reads the
     /// Element's lifecycle state, and the store persists the same encoding.
     codec: MsgpackCodec,
-    /// Live-copy probe for the Forward `Delete` guard ([`LiveCallProbe`]).
-    live: Option<LiveCallProbe>,
     /// When this puller's bootstrap started — the `duration_ms` on the
     /// bootstrap-complete lifecycle line. `None` for a warm resume (no
     /// bootstrap to time). Written from the single task that runs the FSM; the
@@ -296,7 +299,6 @@ impl Puller {
                 metrics,
                 repl_tx: None,
                 codec: MsgpackCodec::new(),
-                live: None,
                 bootstrap_started_at: std::sync::Mutex::new(
                     (!warm).then(tokio::time::Instant::now),
                 ),
@@ -310,14 +312,6 @@ impl Puller {
     /// tests, which assert on the store directly) are unchanged.
     pub fn with_repl_sink(mut self, tx: mpsc::UnboundedSender<ReplCommand>) -> Self {
         self.repl_tx = Some(tx);
-        self
-    }
-
-    /// Attach the live-copy probe the Forward `Delete` guard reads
-    /// ([`LiveCallProbe`]). Builder, for the same reason as
-    /// [`with_repl_sink`](Self::with_repl_sink).
-    pub fn with_live_probe(mut self, live: LiveCallProbe) -> Self {
-        self.live = Some(live);
         self
     }
 
@@ -657,7 +651,7 @@ impl Puller {
                         (false, _) => ApplyMode::Forward,
                     };
                     let refused_body = body.clone();
-                    let applied = self
+                    let outcome = self
                         .apply_to_store(
                             op,
                             partition,
@@ -677,7 +671,7 @@ impl Puller {
                     if op == Op::Put {
                         self.signal_put_outcome(
                             mode,
-                            applied,
+                            outcome,
                             &call_ref,
                             refused_body,
                             origin_now_ms,
@@ -773,30 +767,32 @@ impl Puller {
     /// | mode | `Put` | `Delete` |
     /// |---|---|---|
     /// | [`Bootstrap`](ApplyMode::Bootstrap) | apply unless `(sp, sb)` dominates | apply |
-    /// | [`Forward`](ApplyMode::Forward) | apply unless `(sp, sb)` dominates **or** `sb > b_in` | apply unless `sb > b_in`, the body is non-terminal, and no live copy stands beside it |
+    /// | [`Forward`](ApplyMode::Forward) | apply unless `(sp, sb)` dominates, refuse when the body branches off the Element or `sb > b_in` | apply unless the authority's view branched off the Element and the stored body is non-terminal |
     /// | [`Reverse`](ApplyMode::Reverse) | apply iff `p_in == sp && b_in > sb` | apply |
     ///
+    /// With no local copy every mode applies; the store's own resurrection
+    /// tombstone, not this gate, is what stops a re-create of a just-deleted ref.
+    /// An EXPIRED Element is already gone by the time the gate reads it — it has
+    /// no vector to compare, so a `Delete` lands and a `Put` is taken as a create.
+    ///
     /// Bootstrap recovery and the Reverse tail keep delete-wins outright. Forward
-    /// is the one direction that yields (ADR-0031 D3): a `b_in` behind the
-    /// Element's own `b` is a branch off a version an acting backup authored and
-    /// the flushing authority never saw — a stale view of the call for a `Put`,
-    /// and for a `Delete` the authority's own view of a call it lost, which must
-    /// not evict a call nobody ended. A `Delete` names the `(p,b)` its sender
-    /// deleted at, so an authority that folded the backup's progress first
-    /// deletes cleanly.
-    /// A no-local-copy Reverse `Put` is accepted (the reactive reclaim
-    /// materialises it). Both Forward refusals count into
-    /// `b2bua_repl_forward_flush_refused_total{op}`.
+    /// is the one direction that yields (ADR-0031 D3): a flush whose body stands
+    /// behind the Element on the call's lifecycle, or whose `b_in` is behind the
+    /// Element's own `b`, is a branch of the call the Element records — a stale
+    /// view for a `Put`, and for a `Delete` the teardown of that branch, which
+    /// must not evict a call nobody ended. An authority whose flushes still land
+    /// deletes cleanly, however far behind on `(p,b)`. Both Forward refusals
+    /// count into `b2bua_repl_forward_flush_refused_total{op}`.
     ///
     /// (Tombstone-suppress — never resurrect a locally-deleted call — is deferred:
     /// it needs a reaped tombstone set; deletes already win, so the remaining gap
     /// is only a late reverse-create racing a delete, which the watermark + reap
     /// bound.)
-    /// Returns whether the mutation actually changed the store: a `Put` the
-    /// `(p,b)` gate dropped as dominated returns `false`; an applied `Put` and any
-    /// `Delete` (delete-wins) return `true`. The reclaim tail reclaims on an
-    /// applied reverse flush and hands a refused one up with its body, so the
-    /// call model can fold lifecycle progress the vector cannot see.
+    /// Returns the [`ApplyOutcome`]: a dominated re-delivery and a refusal both
+    /// leave the store untouched, and only the refusal is a split of the two
+    /// views. The reclaim tail reclaims on an applied reverse flush and hands a
+    /// refused flush up with its body, so the call model can fold lifecycle
+    /// progress the vector cannot see.
     #[allow(clippy::too_many_arguments)]
     async fn apply_to_store(
         &self,
@@ -810,7 +806,7 @@ impl Puller {
         indexes: &[String],
         body: Option<Arc<[u8]>>,
         mode: ApplyMode,
-    ) -> bool {
+    ) -> ApplyOutcome {
         let primary = partition_of(&self.self_ordinal, call_ref).1;
         let role = match partition {
             Partition::Bak => PartitionRole::Backup,
@@ -825,36 +821,42 @@ impl Puller {
                 // idempotency (no watermark apply-gate): it is what makes every
                 // bootstrap frame — all sharing `at = W` — safe to apply.
                 let dominated = |sp: i64, sb: i64| sp >= call_gen && sb >= call_bgen;
-                let apply = match mode {
+                let outcome = match mode {
                     // Bootstrap recovery: the authority's body, monotone by `(p,b)`.
                     ApplyMode::Bootstrap => match stored {
-                        Some((sp, sb)) => !dominated(sp, sb),
-                        None => true,
+                        Some((sp, sb)) if dominated(sp, sb) => ApplyOutcome::Dominated,
+                        _ => ApplyOutcome::Applied,
                     },
-                    // Forward (primary → backup): the same monotone rule, plus the
-                    // D3 guard — a `b_in` behind the Element's own `b` is a branch
-                    // off a view an acting backup has already moved past.
-                    ApplyMode::Forward => match stored {
-                        Some((sp, sb)) => {
-                            if sb > call_bgen {
-                                self.metrics.record_repl_forward_flush_refused("put");
-                                false
-                            } else {
-                                !dominated(sp, sb)
-                            }
-                        }
-                        None => true,
-                    },
+                    // Forward (primary → backup): the D3 guard, counters first and
+                    // then the bodies.
+                    ApplyMode::Forward => {
+                        self.forward_put_outcome(
+                            role,
+                            &primary,
+                            call_ref,
+                            stored,
+                            (call_gen, call_bgen),
+                            body.as_deref(),
+                        )
+                        .await
+                    }
                     // Reverse (backup → primary): accept iff untouched-by-us since
                     // the backup branched (`p_in == sp`) AND a genuinely newer
                     // backup mutation (`b_in > sb`); no local copy → accept (the
-                    // reactive reclaim materialises it). Else keep our own.
+                    // reactive reclaim materialises it). Else keep our own — and
+                    // hand it up, re-delivery included: the fold reads the body for
+                    // progress the vector cannot carry (ADR-0014 amendment).
                     ApplyMode::Reverse => match stored {
-                        Some((sp, sb)) => call_gen == sp && call_bgen > sb,
-                        None => true,
+                        Some((sp, sb)) if call_gen != sp || call_bgen <= sb => {
+                            ApplyOutcome::Refused
+                        }
+                        _ => ApplyOutcome::Applied,
                     },
                 };
-                if apply {
+                if outcome == ApplyOutcome::Refused && mode == ApplyMode::Forward {
+                    self.metrics.record_repl_forward_flush_refused("put");
+                }
+                if outcome == ApplyOutcome::Applied {
                     let body = body.map(|b| b.to_vec()).unwrap_or_default();
                     let _ = self
                         .store
@@ -882,46 +884,113 @@ impl Puller {
                     let op = if stored.is_none() { "create" } else { "update" };
                     self.metrics.record_repl_applied(self.flow_label(), self.peer_ordinal(), op);
                 }
-                apply
+                outcome
             }
             Op::Delete => {
                 if mode == ApplyMode::Forward
-                    && self.element_still_served(role, &primary, call_ref, call_bgen).await
+                    && self.element_outlives_the_delete(role, &primary, call_ref).await
                 {
                     self.metrics.record_repl_forward_flush_refused("delete");
-                    return false;
+                    return ApplyOutcome::Refused;
                 }
                 let _ = self
                     .store
                     .delete_call(role, &primary, call_ref, indexes, &PutOpts::default())
                     .await;
                 self.metrics.record_repl_applied(self.flow_label(), self.peer_ordinal(), "delete");
-                true
+                ApplyOutcome::Applied
             }
         }
     }
 
-    /// Whether the stored Element is the **last record** of a call an acting
-    /// backup carried past what the deleting authority saw: `sb > b_in`, a
-    /// non-terminal body, and no live copy of the call on this node (where one
-    /// exists it is the record, not the Element, and delete-wins holds). The
-    /// read is the **non-evicting**
-    /// [`peek_body_raw`](ReplicatingCallStore::peek_body_raw) — the guard must
-    /// not destroy the Element it protects.
-    async fn element_still_served(
+    /// The Forward `Put` decision (ADR-0031 D3), in three checks:
+    ///
+    /// 1. `(sp, sb)` dominates the frame ⇒ a re-delivery of a version already
+    ///    held. Not a split; nothing to report.
+    /// 2. `sb > 0` (an acting backup authored this Element) and the frame's body
+    ///    stands behind the Element on either lifecycle axis
+    ///    (`call::helpers::lifecycle_regresses`) ⇒ the authority is serving a
+    ///    BRANCH of this call. Refused, and noted on the ref so the authority's
+    ///    `Delete` for that branch is refused too. This is the one read that
+    ///    decodes; `sb == 0` skips it, so ordinary replication never pays for it.
+    /// 3. `sb > b_in` ⇒ the frame names a version behind the one the Element
+    ///    carries. Refused: whatever its body says, its sender has not seen what
+    ///    an acting backup wrote here.
+    async fn forward_put_outcome(
         &self,
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
-        call_bgen: i64,
+        stored: Option<(i64, i64)>,
+        incoming: (i64, i64),
+        body: Option<&[u8]>,
+    ) -> ApplyOutcome {
+        let (call_gen, call_bgen) = incoming;
+        let Some((sp, sb)) = stored else {
+            return ApplyOutcome::Applied;
+        };
+        if sp >= call_gen && sb >= call_bgen {
+            return ApplyOutcome::Dominated;
+        }
+        if sb > 0 && self.regresses_the_element(role, primary, call_ref, body).await {
+            // A disagreement about what happened to the call, not a lag: remember
+            // it, so the authority's `Delete` for this branch is refused too.
+            self.store.note_forward_branch(call_ref);
+            return ApplyOutcome::Refused;
+        }
+        if sb > call_bgen {
+            return ApplyOutcome::Refused;
+        }
+        ApplyOutcome::Applied
+    }
+
+    /// Whether the flushed `body` stands behind the stored Element on either
+    /// lifecycle axis. Both reads are non-destructive: the Element is read with
+    /// the **non-evicting** [`peek_body_raw`](ReplicatingCallStore::peek_body_raw).
+    /// An undecodable or absent body answers `false` — the counters stay the only
+    /// gate where the model cannot speak.
+    async fn regresses_the_element(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+        body: Option<&[u8]>,
     ) -> bool {
-        let Some((_, sb)) = self.store.current_cv(role, primary, call_ref) else {
+        let Some(Ok(incoming)) = body.map(|b| self.codec.decode(b)) else {
             return false;
         };
-        if sb <= call_bgen {
+        let Some(raw) = self.store.peek_body_raw(role, primary, call_ref).await else {
             return false;
-        }
-        if self.live.as_ref().is_some_and(|live| live(call_ref)) {
+        };
+        self.codec
+            .decode(&raw)
+            .is_ok_and(|held| call::helpers::lifecycle_regresses(&incoming, &held))
+    }
+
+    /// Whether the stored Element records a call the deleting authority is not
+    /// ending: the authority's view of it is a BRANCH
+    /// ([`forward_branched`](ReplicatingCallStore::forward_branched)) and the
+    /// Element's body is not terminal. Such an Element outlives the `Delete` — the
+    /// authority tore down its own branch, and this Element is what is left of the
+    /// call. A terminal Element, or one whose authority is still on the same chain
+    /// (its flushes land; it may simply be a version behind), takes delete-wins as
+    /// it always did (ADR-0031 D3). The vector says nothing here: an authority on
+    /// a branch adopts the Element's `b` like any other, so a level `b` is no
+    /// evidence that it saw what the backup wrote.
+    ///
+    /// The answer never depends on whether this node also holds a LIVE copy: a
+    /// takeover copy is ephemeral by construction — it self-releases the moment
+    /// its transactions clear, and the Element is then the call's only record.
+    /// The read is the **non-evicting**
+    /// [`peek_body_raw`](ReplicatingCallStore::peek_body_raw) — the guard must
+    /// not destroy the Element it protects.
+    async fn element_outlives_the_delete(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+    ) -> bool {
+        if !self.store.forward_branched(call_ref) {
             return false;
         }
         let Some(raw) = self.store.peek_body_raw(role, primary, call_ref).await else {
@@ -938,28 +1007,31 @@ impl Puller {
     fn signal_put_outcome(
         &self,
         mode: ApplyMode,
-        applied: bool,
+        outcome: ApplyOutcome,
         call_ref: &str,
         body: Option<Arc<[u8]>>,
         origin_now_ms: i64,
     ) {
+        use ApplyOutcome::{Applied, Dominated, Refused};
         let Some(tx) = &self.repl_tx else { return };
         let refused_body = || body.clone().unwrap_or_else(|| Arc::from(Vec::new()));
-        let cmd = match (mode, applied) {
+        let cmd = match (mode, outcome) {
             // Reclaim straggler: a backup reverse-flushed one of OUR calls after
             // the bulk sweep — re-materialise + re-serve it.
-            (ApplyMode::Reverse, true) => ReplCommand::ReclaimCall(call_ref.to_string()),
-            (ApplyMode::Reverse, false) => ReplCommand::ReverseFlushRefused {
+            (ApplyMode::Reverse, Applied) => ReplCommand::ReclaimCall(call_ref.to_string()),
+            (ApplyMode::Reverse, Dominated | Refused) => ReplCommand::ReverseFlushRefused {
                 call_ref: call_ref.to_string(),
                 body: refused_body(),
                 origin_now_ms,
             },
-            (ApplyMode::Forward, false) => ReplCommand::ForwardFlushRefused {
+            // Forward: only a SPLIT rides up. A dominated re-delivery says nothing
+            // the live copy does not already hold.
+            (ApplyMode::Forward, Refused) => ReplCommand::ForwardFlushRefused {
                 call_ref: call_ref.to_string(),
                 body: refused_body(),
                 origin_now_ms,
             },
-            (ApplyMode::Forward, true) | (ApplyMode::Bootstrap, _) => return,
+            (ApplyMode::Forward, Applied | Dominated) | (ApplyMode::Bootstrap, _) => return,
         };
         let _ = tx.send(cmd);
     }

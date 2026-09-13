@@ -24,6 +24,8 @@ mod release;
 mod resolve;
 mod responses;
 mod restore_hygiene;
+#[cfg(test)]
+mod test_support;
 
 pub(crate) use reclaim::reap_expired_replicas;
 // Consumed by the S7 readiness tests (`repl::s7_tests`) only.

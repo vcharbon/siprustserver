@@ -63,6 +63,13 @@ struct CallMeta {
     /// on a locally-originated write (no cross-node skew to correct). The offset
     /// includes one transit latency — acceptable at in-cluster ms scale.
     skew_offset_ms: Option<i64>,
+    /// The last forward flush for this ref was refused because its BODY stood
+    /// behind the Element on the call's lifecycle: the authority is serving a
+    /// branch of this call, not a version of it (ADR-0031 D3). Reset by the next
+    /// forward flush the Element takes; read by the `Delete` guard, which yields
+    /// to an authority whose view is still on the same chain. Lives with the meta,
+    /// so it goes when the ref does.
+    forward_branch: bool,
 }
 
 /// A [`CallStore`] that replicates mutations through an in-memory backing store
@@ -88,22 +95,10 @@ pub struct ReplicatingCallStore {
     /// ref deleted within [`RESURRECTION_TOMBSTONE_MS`] is rejected so a late
     /// reverse-flush cannot re-create a just-discharged call (delete-wins, extended
     /// from the replica to the apply path). Pruned in [`reap`](Self::reap).
-    tombstones: Arc<Mutex<HashMap<String, Tombstone>>>,
+    tombstones: Arc<Mutex<HashMap<String, i64>>>,
     /// Backstop TTL applied when a call is stored with `ttl_ms <= 0`
     /// ([`DEFAULT_REPLICATED_TTL_MS`] by default; tests inject a short value).
     default_ttl_ms: i64,
-}
-
-/// What a delete leaves behind: when the ref went, and the `(p,b)` it carried.
-/// The instant drives the resurrection guard (a late flush must not re-create a
-/// discharged call); the vector rides the outbound `Delete` frame, so a receiver
-/// can tell a delete that has seen a backup's progress from one that has not
-/// (ADR-0031 D3).
-#[derive(Clone, Copy, Debug)]
-struct Tombstone {
-    deleted_at_ms: i64,
-    call_gen: i64,
-    call_bgen: i64,
 }
 
 impl ReplicatingCallStore {
@@ -273,6 +268,27 @@ impl ReplicatingCallStore {
         }
     }
 
+    /// Note that the authority's forward flush for `call_ref` is a BRANCH of the
+    /// call the Element records, not a version of it: its body stood behind the
+    /// Element on the call's lifecycle (ADR-0031 D3). No-op for a ref we hold no
+    /// meta for.
+    pub fn note_forward_branch(&self, call_ref: &str) {
+        if let Some(m) = self.meta.lock().unwrap().get_mut(call_ref) {
+            m.forward_branch = true;
+        }
+    }
+
+    /// Is the authority's view of `call_ref` a branch of the Element's call — the
+    /// last forward flush refused for its body ([`note_forward_branch`])? The
+    /// `Delete` guard yields to an authority that is still on the same chain: a
+    /// version vector one flush behind is a lag, only a branch is a disagreement
+    /// about what happened to the call.
+    ///
+    /// [`note_forward_branch`]: Self::note_forward_branch
+    pub fn forward_branched(&self, call_ref: &str) -> bool {
+        self.meta.lock().unwrap().get(call_ref).is_some_and(|m| m.forward_branch)
+    }
+
     /// Is this call's body past its TTL? (lazy-eviction gate; pure read.)
     fn is_expired(&self, call_ref: &str) -> bool {
         let now = self.clock.now_ms();
@@ -282,19 +298,33 @@ impl ReplicatingCallStore {
 
     /// Lazily evict an expired body + meta on access; returns `true` if evicted.
     ///
+    /// The body is deleted at the `(role, primary)` the META records, never the
+    /// caller's: the meta is keyed by callRef alone, so a read at the other role
+    /// would drop the meta and leave the body behind for ever — unreachable by
+    /// every later expiry check and immortal.
+    ///
     /// The meta's captured `indexes` ride the delete: an expired ghost must free
     /// its `idx:*` entries too (all per-call state released, CLAUDE.md) — the
     /// meta is removed in the same step, so this is the LAST moment the index
     /// keys are recoverable. Leaving them stranded both leaked the index map and
     /// let `resolve_from_replica_index` resolve a takeover to a dead callRef.
-    async fn evict_if_expired(&self, role: PartitionRole, primary: &str, call_ref: &str) -> bool {
+    async fn evict_if_expired(&self, call_ref: &str) -> bool {
         if !self.is_expired(call_ref) {
             return false;
         }
-        let indexes =
-            self.meta.lock().unwrap().remove(call_ref).map(|m| m.meta.indexes).unwrap_or_default();
-        let _ =
-            self.inner.delete_call(role, primary, call_ref, &indexes, &PutOpts::default()).await;
+        let Some(gone) = self.meta.lock().unwrap().remove(call_ref) else {
+            return false;
+        };
+        let _ = self
+            .inner
+            .delete_call(
+                gone.role,
+                &gone.primary,
+                call_ref,
+                &gone.meta.indexes,
+                &PutOpts::default(),
+            )
+            .await;
         true
     }
 
@@ -328,7 +358,7 @@ impl ReplicatingCallStore {
         self.tombstones
             .lock()
             .unwrap()
-            .retain(|_, t| now_ms - t.deleted_at_ms < RESURRECTION_TOMBSTONE_MS);
+            .retain(|_, &mut deleted_at| now_ms - deleted_at < RESURRECTION_TOMBSTONE_MS);
         self.changelog.reap(now_ms);
     }
 }
@@ -341,7 +371,7 @@ impl CallStore for ReplicatingCallStore {
         primary: &str,
         call_ref: &str,
     ) -> Result<Option<Arc<[u8]>>, StoreError> {
-        if self.evict_if_expired(role, primary, call_ref).await {
+        if self.evict_if_expired(call_ref).await {
             return Ok(None);
         }
         self.inner.get_call(role, primary, call_ref).await
@@ -365,10 +395,13 @@ impl CallStore for ReplicatingCallStore {
         // just-discharged call (which would trigger a SECOND discharge). A
         // tombstoned ref names a dead call (callRefs are unique), so no legitimate
         // Put is lost.
+        // FIXME(repl): the resurrection tombstone refuses a deferred terminal for a
+        // ref this node already discharged, so an answered call's record is lost;
+        // the guard must yield to a terminal whose `b` it never saw.
         {
             let now = self.clock.now_ms();
-            if let Some(&tomb) = self.tombstones.lock().unwrap().get(call_ref) {
-                if now - tomb.deleted_at_ms < RESURRECTION_TOMBSTONE_MS {
+            if let Some(&deleted_at) = self.tombstones.lock().unwrap().get(call_ref) {
+                if now - deleted_at < RESURRECTION_TOMBSTONE_MS {
                     return Ok(());
                 }
             }
@@ -415,6 +448,8 @@ impl CallStore for ReplicatingCallStore {
                     backup,
                     expiry_at_ms,
                     skew_offset_ms,
+                    // An applied flush is the authority back on this call's chain.
+                    forward_branch: false,
                 },
             );
         }
@@ -436,16 +471,10 @@ impl CallStore for ReplicatingCallStore {
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
         self.inner.delete_call(role, primary, call_ref, indexes, opts).await?;
-        let gone = self.meta.lock().unwrap().remove(call_ref);
+        self.meta.lock().unwrap().remove(call_ref);
         // Tombstone the ref so a late reverse-flush cannot resurrect it (see
-        // `put_call`) and so the outbound `Delete` frame can still name the
-        // `(p,b)` this node deleted at; pruned in `reap`.
-        let (call_gen, call_bgen) =
-            gone.map(|m| (m.meta.call_gen, m.meta.call_bgen)).unwrap_or((0, 0));
-        self.tombstones.lock().unwrap().insert(
-            call_ref.to_string(),
-            Tombstone { deleted_at_ms: self.clock.now_ms(), call_gen, call_bgen },
-        );
+        // `put_call`); pruned in `reap`.
+        self.tombstones.lock().unwrap().insert(call_ref.to_string(), self.clock.now_ms());
 
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);
@@ -509,10 +538,6 @@ impl BodySource for ReplicatingCallStore {
 
     fn read_meta(&self, call_ref: &str) -> Option<RefMeta> {
         self.meta.lock().unwrap().get(call_ref).map(|m| m.meta.clone())
-    }
-
-    fn deleted_cv(&self, call_ref: &str) -> Option<(i64, i64)> {
-        self.tombstones.lock().unwrap().get(call_ref).map(|t| (t.call_gen, t.call_bgen))
     }
 
     fn scan_refs(&self, role: PartitionRole, primary: &str) -> Vec<String> {

@@ -5,13 +5,13 @@
 
 use std::sync::Arc;
 
-use call::{helpers::caller_answered, Call, CallModelState, TimerType};
+use call::{helpers::lifecycle_advances, Call, CallModelState, TimerType};
 
 use super::interpret::process_result;
 use super::materialise::{materialise, Materialised, Origin, Reason};
 use super::restore_hygiene::{reanchor_timers, sanitize_restored_timers, Smoothing};
 use super::RouterCtx;
-use crate::store::MaterialiseOrigin;
+use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
 
 /// Apply a backup's reverse-flushed mutation that the puller just landed in our
 /// `pri:{self}` partition into our **live** map (ADR-0014 Reclaim-tail
@@ -247,6 +247,17 @@ impl FlushDirection {
         }
     }
 
+    /// The role this node must play for the ref for a flush of this direction to
+    /// be meaningful: a Reverse flush reaches the ref's PRIMARY, a Forward flush
+    /// its backup. A command that names the other role is a misrouted frame and
+    /// the fold does nothing with it.
+    fn expected_role(self) -> PartitionRole {
+        match self {
+            FlushDirection::Reverse => PartitionRole::Primary,
+            FlushDirection::Forward => PartitionRole::Backup,
+        }
+    }
+
     /// Count a fold refusal. The forward direction is already counted by op
     /// where the store refused it (`b2bua_repl_forward_flush_refused_total`), so
     /// only the reverse direction — whose sole refusal site is this fold —
@@ -260,7 +271,7 @@ impl FlushDirection {
 
 /// Fold a flush the store's `(p,b)` gate refused (the body rides the command,
 /// the store never took it): the call model reads it for lifecycle progress
-/// ([`carries_progress`]) our live copy lacks — the other owner's answer or
+/// ([`lifecycle_advances`]) our live copy lacks — the other owner's answer or
 /// teardown of a call we read one step behind — and folds exactly as an applied
 /// flush would. Anything else stays refused. **A live copy is required**: an
 /// Element alone is kept as it is, its merge deferred to the next
@@ -272,6 +283,9 @@ pub(super) async fn fold_refused_flush(
     body: &[u8],
     origin_now_ms: i64,
 ) {
+    if role_of(&ctx.config.self_ordinal, call_ref) != direction.expected_role() {
+        return;
+    }
     let Some(mut replica) = ctx.state.decode_body(body) else {
         return;
     };
@@ -281,14 +295,30 @@ pub(super) async fn fold_refused_flush(
     if ctx.state.peek(call_ref).is_none() {
         return;
     }
-    let _guard = ctx.state.lock(call_ref).await;
+    let guard = ctx.state.lock(call_ref).await;
     let now_ms = ctx.clock.now_ms();
     let Some(live) = ctx.state.peek(call_ref) else {
+        // The call was released between the peek and the lock. Drop the guard
+        // FIRST: `discard_orphan` removes the very `locks` entry this guard is
+        // held on, and a live guard would re-strand it.
+        drop(guard);
         ctx.state.discard_orphan(call_ref);
         return;
     };
-    if !carries_progress(&replica, &live) {
+    if !lifecycle_advances(&replica, &live) {
         direction.count_refused(&ctx.metrics);
+        adopt_seen_counter(ctx, direction, &live, &replica);
+        return;
+    }
+    let skew_offset_ms = if origin_now_ms > 0 { now_ms - origin_now_ms } else { 0 };
+    // Whose ending signals end the call is the direction: toward a PRIMARY the
+    // live copy defers to the record it owns, so a folded terminal is discharged
+    // (Model Y, ADR-0014 §2 / ADR-0020 X3); toward a BACKUP the live takeover
+    // copy IS the record and only its own signals end it, so an ending body is
+    // read for its counter alone and the call plays on.
+    let ends_the_call =
+        matches!(direction, FlushDirection::Reverse) && replica.state == CallModelState::Terminated;
+    if !ends_the_call && replica.state != CallModelState::Active {
         adopt_seen_counter(ctx, direction, &live, &replica);
         return;
     }
@@ -302,18 +332,16 @@ pub(super) async fn fold_refused_flush(
         live_pb = %format_pb(&live),
         "refused flush folded (lifecycle progress over the vector)"
     );
-    let skew_offset_ms = if origin_now_ms > 0 { now_ms - origin_now_ms } else { 0 };
-    match replica.state {
-        CallModelState::Terminated => {
-            discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
-        }
-        CallModelState::Active => {
-            adopt_counters(&mut replica, &live);
-            resync_timers(ctx, call_ref, &live, &mut replica, skew_offset_ms, now_ms).await;
-            ctx.state.update(replica);
-        }
-        CallModelState::Terminating => {}
+    if ends_the_call {
+        // The delete this discharge propagates must name the version the other
+        // owner reached, or the Element it should evict refuses it in its turn.
+        adopt_seen_counter(ctx, direction, &live, &replica);
+        discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
+        return;
     }
+    adopt_counters(&mut replica, &live);
+    resync_timers(ctx, call_ref, &live, &mut replica, skew_offset_ms, now_ms).await;
+    ctx.state.update(replica);
 }
 
 /// A fold adopts BOTH counters: the folded body takes `max` of the two views on
@@ -332,9 +360,15 @@ fn adopt_counters(folded: &mut Call, live: &Call) {
 /// A REFUSED flush still moves the counter: seeing a version is not taking it,
 /// but this node's next flush must dominate that version or the two views refuse
 /// each other for ever (ADR-0031 D3). The live copy keeps its own content and
-/// adopts only the axis the *other* owner bumps — `b` at a primary, `p` at a
-/// backup. Adopting our own axis too would make two live owners raise each
-/// other in turn, one flush per round.
+/// takes only the axis the *other* owner bumps — `b` at a primary, `p` at a
+/// backup — through [`adopt_version`](crate::store::CallState::adopt_version),
+/// which records it without the authoritative bump an ordinary mutation makes.
+///
+/// The adopted view is **flushed**, not only written to the live map: an
+/// adoption that never reaches the store is inert — it is lost if a takeover
+/// copy self-releases before the next local mutation, and until then this node's
+/// stored `(p,b)` still names the version the other owner refuses, so the split
+/// stays open and its next delete is refused in turn.
 fn adopt_seen_counter(
     ctx: &Arc<RouterCtx>,
     direction: FlushDirection,
@@ -344,53 +378,26 @@ fn adopt_seen_counter(
     let (Some(l), Some(r)) = (live.topology.as_ref(), replica.topology.as_ref()) else {
         return;
     };
-    let mut seen = live.clone();
-    let Some(t) = seen.topology.as_mut() else { return };
-    match direction {
-        FlushDirection::Reverse if r.bak_gen > l.bak_gen => t.bak_gen = r.bak_gen,
-        FlushDirection::Forward if r.gen > l.gen => t.gen = r.gen,
-        // Already at or past the refused version — writing would only churn our
-        // own counter on every re-delivery.
-        _ => return,
+    let (gen, bak_gen) = match direction {
+        FlushDirection::Reverse => (l.gen, r.bak_gen),
+        FlushDirection::Forward => (r.gen, l.bak_gen),
+    };
+    if let Some(adopted) = ctx.state.adopt_version(&live.call_ref, gen, bak_gen) {
+        ctx.state.flush(&adopted);
     }
-    ctx.state.update(seen);
 }
 
 /// The ADR-0014 **Reverse** apply rule for a live-map fold. The reverse-flushed
 /// `replica` dominates our `live` copy when the `(p,b)` vector says so (`p`
 /// unchanged since the backup branched, `b` advanced) OR when it carries
-/// lifecycle progress ([`carries_progress`]) a reclaimed copy cannot have made
+/// lifecycle progress ([`lifecycle_advances`]) a reclaimed copy cannot have made
 /// on its own: a `p` bump from a turn on a stale record does not outrank the
 /// backup's answer or teardown. A call with no topology never folds.
 fn reverse_flush_dominates(replica: &Call, live: &Call) -> bool {
     let (Some(r), Some(l)) = (replica.topology.as_ref(), live.topology.as_ref()) else {
         return false;
     };
-    (r.gen == l.gen && r.bak_gen > l.bak_gen) || carries_progress(replica, live)
-}
-
-/// **Lifecycle progress is a chain, not a rank** (ADR-0031 D3). A call moves
-/// along two monotone axes — whether its caller was answered, and how far it has
-/// gone toward ending — and `replica` carries progress `live` lacks only when it
-/// made every step `live` made on BOTH axes and at least one more. A terminal
-/// body whose caller was never answered, reaching a live copy whose caller IS
-/// answered, is a pre-answer teardown on a view its owner left behind: a branch,
-/// not progress, and folding it would end a call the other owner is serving.
-fn carries_progress(replica: &Call, live: &Call) -> bool {
-    let r = progress(replica);
-    let l = progress(live);
-    r.0 >= l.0 && r.1 >= l.1 && r != l
-}
-
-/// Where a call stands on the two axes, each monotone over the call's life:
-/// `(the caller was answered, active < terminating < terminated)`.
-fn progress(call: &Call) -> (u8, u8) {
-    let ending = match call.state {
-        CallModelState::Active => 0,
-        CallModelState::Terminating => 1,
-        CallModelState::Terminated => 2,
-    };
-    (u8::from(caller_answered(call)), ending)
+    (r.gen == l.gen && r.bak_gen > l.bak_gen) || lifecycle_advances(replica, live)
 }
 
 /// The live timer service follows the folded ledger: every entry the folded
@@ -533,42 +540,25 @@ pub(super) async fn discharge_as_own(ctx: &Arc<RouterCtx>, call_ref: &str, now_m
 
 #[cfg(test)]
 mod tests {
-    //! Pins the fold predicate ([`reverse_flush_dominates`]) directly: which
-    //! bodies carry lifecycle progress a live copy lacks, and which are a
-    //! branch off a stale view (ADR-0031 D3).
+    //! Pins the fold predicate ([`reverse_flush_dominates`]) directly — which
+    //! bodies carry lifecycle progress a live copy lacks, and which are a branch
+    //! off a stale view — and the direction rule of [`fold_refused_flush`]
+    //! itself: who may end a call on a folded body (ADR-0031 D3).
 
-    use std::net::SocketAddr;
+    use call::{
+        Call, CallBodyCodec, CallModelState, CallTopology, LegDisposition, LegState, MsgpackCodec,
+    };
 
-    use call::{Call, CallModelState, CallTopology, LegDisposition, LegState};
-    use sip_message::parser::custom::CustomParser;
-    use sip_message::{SipMessage, SipParser, SipRequest};
-
-    use super::reverse_flush_dominates;
+    use super::{fold_refused_flush, reverse_flush_dominates, FlushDirection};
     use crate::config::B2buaConfig;
     use crate::initial_invite::build_initial_call;
+    use crate::router::test_support::{invite, node, src};
+    use crate::store::MaterialiseOrigin;
 
-    fn invite() -> SipRequest {
-        let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
-             Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-fold\r\n\
-             Record-Route: <sip:10.0.0.1:5060;v=3;w_pri=w0;w_bak=w1;e=0;kid=k1;sig=abc;lr>\r\n\
-             Max-Forwards: 70\r\n\
-             From: <sip:alice@example.com>;tag=alicetag\r\n\
-             To: <sip:bob@example.com>\r\n\
-             Call-ID: fold@10.0.0.9\r\n\
-             CSeq: 1 INVITE\r\n\
-             Contact: <sip:alice@10.0.0.9:5060>\r\n\
-             Content-Length: 0\r\n\r\n";
-        match CustomParser::new().parse(raw.as_bytes()).unwrap() {
-            SipMessage::Request(r) => r,
-            _ => panic!("expected a request"),
-        }
-    }
-
-    /// A replicable call at `(p, b)`.
+    /// A replicable call at `(p, b)`, owned by `w0` and backed up by `w1`.
     fn base(p: i64, b: i64) -> Call {
         let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        let src = SocketAddr::from(([10, 0, 0, 9], 5060));
-        let mut call = build_initial_call(&invite(), src, &config, 0);
+        let mut call = build_initial_call(&invite("w0", "w1", "fold"), src(), &config, 0);
         call.topology =
             Some(CallTopology { pri: "w0".into(), bak: "w1".into(), gen: p, bak_gen: b });
         call
@@ -655,5 +645,83 @@ mod tests {
         let replica = answered(1, 2, CallModelState::Active);
         let live = answered(1, 1, CallModelState::Active);
         assert!(reverse_flush_dominates(&replica, &live), "p unchanged, b advanced");
+    }
+
+    /// The `(p,b)` of the live copy `n` holds for `call_ref`.
+    fn live_pb(n: &crate::router::test_support::Node, call_ref: &str) -> (i64, i64) {
+        let t = n.core.router_ctx().state.peek(call_ref).expect("the copy is live").topology;
+        let t = t.expect("the copy is replicable");
+        (t.gen, t.bak_gen)
+    }
+
+    /// **Only a primary discharges.** A primary's terminal body reaching the
+    /// BACKUP that took its call over carries real progress — but the live
+    /// takeover copy is the call's record and only its own signals end it
+    /// (ADR-0014 §2 / ADR-0020 X3). The fold reads the body for its counter
+    /// alone: no CDR, no release, the call plays on.
+    #[tokio::test(start_paused = true)]
+    async fn a_forward_terminal_ends_no_call_at_the_backup_and_its_counter_is_adopted() {
+        let n = node("w1").await;
+        let ctx = n.core.router_ctx();
+        let live = answered(1, 2, CallModelState::Active);
+        let call_ref = live.call_ref.clone();
+        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+
+        // The partitioned primary tore its own copy down and flushed it forward.
+        let replica = answered(3, 1, CallModelState::Terminated);
+        let body = MsgpackCodec::new().encode(&replica);
+        fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
+        sip_clock::testkit::settle().await;
+
+        let after = ctx.state.peek(&call_ref).expect("the takeover copy still serves the call");
+        assert_eq!(after.state, CallModelState::Active, "no discharge in the Forward direction");
+        assert!(
+            n.cdr.snapshot().is_empty(),
+            "an acting backup writes no CDR for a folded terminal"
+        );
+        // `p` is taken from the flush; `b` is untouched — adopting a version is a
+        // read this node records, not a mutation of the call.
+        assert_eq!(live_pb(&n, &call_ref), (3, 2), "the seen `p` is adopted, and only it");
+    }
+
+    /// A `Terminating` body ends no call in either direction — it is a teardown
+    /// still in flight — but the version it names is still seen, so the counter
+    /// is adopted and this node's next flush is not refused in its turn.
+    #[tokio::test(start_paused = true)]
+    async fn a_forward_terminating_body_only_moves_the_counter() {
+        let n = node("w1").await;
+        let ctx = n.core.router_ctx();
+        let live = answered(1, 2, CallModelState::Active);
+        let call_ref = live.call_ref.clone();
+        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+
+        let replica = answered(4, 1, CallModelState::Terminating);
+        let body = MsgpackCodec::new().encode(&replica);
+        fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
+        sip_clock::testkit::settle().await;
+
+        let after = ctx.state.peek(&call_ref).expect("the copy still serves the call");
+        assert_eq!(after.state, CallModelState::Active, "a teardown in flight ends nothing");
+        assert_eq!(live_pb(&n, &call_ref), (4, 2), "the seen `p` is adopted, and only it");
+    }
+
+    /// The direction must match the role this node plays for the ref: a
+    /// Forward-labelled command for a call this node is PRIMARY of is a
+    /// misrouted frame and folds nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_direction_that_contradicts_this_nodes_role_folds_nothing() {
+        let n = node("w0").await; // w0 is the ref's primary, so Forward is wrong.
+        let ctx = n.core.router_ctx();
+        let live = answered(1, 2, CallModelState::Active);
+        let call_ref = live.call_ref.clone();
+        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+
+        let replica = answered(5, 1, CallModelState::Terminated);
+        let body = MsgpackCodec::new().encode(&replica);
+        fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
+        sip_clock::testkit::settle().await;
+
+        assert_eq!(live_pb(&n, &call_ref), (1, 2), "nothing was read, nothing was written");
+        assert!(n.cdr.snapshot().is_empty(), "and nothing was discharged");
     }
 }

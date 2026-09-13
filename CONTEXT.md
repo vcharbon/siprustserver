@@ -317,12 +317,13 @@ on that same rule *and* never behind the Element's own `b` (ADR-0031 D3 — an
 Element an acting backup authored holds a version the authority never saw);
 **Reverse** (backup→primary) applies iff `p_in == p_cur && b_in > b_cur`
 (untouched-by-primary since the backup branched, genuinely newer backup
-mutation). **Deletes** apply unconditionally except Forward, which carries the
-sender's own `(p,b)` and yields to an Element ahead of it whose body is
-non-terminal and which this node holds no live copy of. A refused flush is folded into
-a live copy when it carries lifecycle progress the vector cannot see, and the
-fold adopts `max` of both counters so the split heals. Closes the latent
-equal-`gen` divergence the single counter suffered.
+mutation). A Forward `Put` whose BODY stands behind the Element on the call's
+lifecycle is a **branch** of the call, refused and remembered on the ref;
+**deletes** apply unconditionally except Forward, which yields exactly while
+that memory stands and the Element's body is non-terminal. A refused flush is
+folded into a live copy when it carries lifecycle progress the vector cannot
+see, and the fold adopts `max` of both counters so the split heals. Closes the
+latent equal-`gen` divergence the single counter suffered.
 _Avoid_: "call_gen LWW"/"highest gen wins" (both propagating directions guard:
 reverse on the branch point, forward on the backup's own progress).
 

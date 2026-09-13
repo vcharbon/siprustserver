@@ -117,7 +117,7 @@ puller's `ForwardOrBootstrap` mode to split into `Forward` and `Bootstrap`; boot
 ADR-0014 §3's "take the replica's `(p,b)` as-is". In Forward: a `Put` `(p', b')` is refused
 when the stored Element carries `b > b'`; a `Delete` is refused when the Element carries
 `b > 0` and its body is not terminal (delete-wins stays for everything else). Both are
-counted. A refused body is folded only where a live copy exists: if this node holds a live
+counted. (Both rules as amended below.) A refused body is folded only where a live copy exists: if this node holds a live
 takeover copy of the call, the body is handed to the live fold (unanswered < caller
 answered < terminating < terminated, ADR-0014's rule); an Element alone is kept as it is,
 its merge deferred to the next materialisation. After a refusal the vector is split
@@ -127,7 +127,7 @@ next forward flush is accepted and the split heals. Serves case 3 (the heal) and
 under D1 (the draining worker's last flushes); in case 2 it is active for the park latency
 only. Residual, unchanged from ADR-0014's dual-owner window: a partitioned primary that
 terminated a call the survivor kept serving has already written its CDR; the survivor
-writes its own. (Amends ADR-0014 §3.)
+writes its own (residual as amended below). (Amends ADR-0014 §3.)
 
 **D4 — Routing around a leaving worker has two signals, one branch.** Membership
 (cases 1, 2 and 4: the address is tombstoned `Dead`) and the OPTIONS probe (case 3a: `Dead`
@@ -318,19 +318,39 @@ durable: it stays true once the leg is `Terminated`, where `LegState::Confirmed`
 
 **A fold adopts both counters, and so does a refusal.** A fold takes `max(p)` and `max(b)`
 of the two views before the store bumps this node's own. A *refusal* takes only the axis the
-other owner bumps — `b` at a primary, `p` at a backup — because seeing a version is not
-taking it, and adopting our own axis too would make two live owners raise each other in
-turn. Without this the split never closes: the refused owner keeps flushing behind the
-Element's `b` and every later flush, delete included, is refused in its turn.
+other owner bumps — `b` at a primary, `p` at a backup — and takes it **without** the
+authoritative bump an ordinary mutation makes: adopting a version another owner published is
+a read this node records, and bumping our own axis for it would make two live owners raise
+each other in turn, one flush per round. The adopted view is **flushed**, not only held in
+the live map: an adoption that never reaches the store is lost when a takeover copy
+self-releases, and this node's next delete then names a version its peer has long moved
+past. Without any of this the split never closes: the refused owner keeps flushing behind the
+Element's `b` and every later flush is refused in its turn.
 
-**The `Delete` rule is the `Put` rule plus two escapes.** A `Delete` frame carries the
-`(p, b)` its sender held for the ref, so the guard is the same compare — refuse when
-`b_stored > b_in` — and it yields where the Element is not the call's last record: a
-terminal Element (the call is over whoever ended it) and an Element beside a **live copy on
-this node** (the live copy is the record). Only an Element that stands alone, ahead of the
-authority, and for a call nobody ended is kept.
+**A split is a disagreement about the call, not a lag in the counters.** Two live owners of
+one call run a flush apart for as long as both serve it, so `b_stored > b_in` alone cannot
+tell an authority that is merely behind from one that is somewhere else. The body tells
+them apart: while the vector is split (`b_stored > 0`), a forward `Put` whose body stands
+BEHIND the Element on either lifecycle axis is a **branch** of the call — it is refused, and
+that is remembered on the ref until the next forward flush the Element takes. So the `Put`
+rule is "refuse a branch, and refuse a `b'` behind the Element's `b`", and the `Delete` rule
+is "refuse exactly while the authority's view is that branch and the Element's body is not
+terminal": the authority tore down its own branch, and the Element is what is left of the
+call. An authority whose flushes still land deletes cleanly, however far behind its vector,
+and a terminal Element goes with any delete — the call is over whoever ended it. A live
+takeover copy beside the Element is **not** an escape: it is ephemeral by construction and
+self-releases the moment its transactions clear, so honouring a delete under it leaves the
+answered call recorded nowhere. This paragraph supersedes D3's `Put` and `Delete` rules and
+its "folded only where a live copy exists" clause above.
 
-Residual, as it stands: a partitioned primary that tore down and discharged a call the
-survivor kept serving has written its own no-answer record, and its resurrection tombstone
-then refuses the terminal the survivor defers to it — so the answered call's record is the
-one that is lost, not the stale one.
+**The fold is one rule, but only a primary discharges.** A refused flush folded toward a
+PRIMARY may end the call — the primary is the sole discharge authority (ADR-0014 §2 /
+ADR-0020 X3). Toward a BACKUP the live takeover copy is the record and only its own signals
+end it, so a `Terminating` or `Terminated` body folds no further than its counter: no CDR,
+no limiter release, no reverse delete. A `Terminating` body ends no call in either
+direction; its counter is adopted and the terminal flush is awaited.
+
+Residual, as it stands (superseding D3's "the survivor writes its own"): a partitioned
+primary that tore down and discharged a call the survivor kept serving has written its own
+no-answer record, and its resurrection tombstone then refuses the terminal the survivor
+defers to it — so the answered call's record is the one that is lost, not the stale one.

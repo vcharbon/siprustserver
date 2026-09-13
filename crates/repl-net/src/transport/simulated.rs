@@ -238,7 +238,16 @@ struct SimShared {
     /// Endpoints to drop-on-overflow by default for a fresh direction.
     drop_on_overflow_pairs: Mutex<HashSet<Pair>>,
     /// Partitions blocking new `connect`s (unordered pair, stored both ways).
+    /// Enforced on the OWNER of each end, so a stream a puller opens from an
+    /// ephemeral local is cut with its node, new streams included.
     partitions: Mutex<HashSet<Pair>>,
+    /// Node ordinal → its listen address, declared by the harness. The bridge
+    /// from a `PullRequest`'s `caller` name to an address the fault tables key on.
+    endpoints: Mutex<HashMap<String, SocketAddr>>,
+    /// Client-side ephemeral address → the listen address of the node whose
+    /// puller opened the stream, learned from the `caller` on its first
+    /// `PullRequest`.
+    stream_owner: Mutex<HashMap<SocketAddr, SocketAddr>>,
     /// Live in-flight frame count (across all delivery actors) — harness
     /// introspection, mirrors sip-net's `in_flight`.
     in_flight: AtomicI64,
@@ -254,6 +263,35 @@ impl SimShared {
                 Arc::new(DirState::new(self.default_delay_ms, drop_on, self.buffer_cap))
             })
             .clone()
+    }
+
+    /// The node an address belongs to: a declared listen address is its own
+    /// owner, a client ephemeral is the node whose puller opened the stream, and
+    /// an unattributed address stands for itself.
+    fn owner(&self, addr: SocketAddr) -> SocketAddr {
+        self.stream_owner.lock().unwrap().get(&addr).copied().unwrap_or(addr)
+    }
+
+    /// Attribute the stream opened from `client` to the node `caller` names.
+    fn attribute(&self, client: SocketAddr, caller: &str) {
+        let Some(owner) = self.endpoints.lock().unwrap().get(caller).copied() else {
+            return;
+        };
+        self.stream_owner.lock().unwrap().insert(client, owner);
+    }
+
+    /// Is `src → dst` partitioned, reading each end as its owning node?
+    fn partitioned(&self, src: SocketAddr, dst: SocketAddr) -> bool {
+        let (so, du) = (self.owner(src), self.owner(dst));
+        let p = self.partitions.lock().unwrap();
+        p.contains(&(src, dst)) || p.contains(&(so, du))
+    }
+
+    /// Wake every live direction, so a partition change is re-read at once.
+    fn wake_all(&self) {
+        for d in self.dir_state.lock().unwrap().values() {
+            d.wake.notify_waiters();
+        }
     }
 }
 
@@ -279,6 +317,8 @@ impl SimulatedReplicationNetwork {
                 dir_state: Mutex::new(HashMap::new()),
                 drop_on_overflow_pairs: Mutex::new(HashSet::new()),
                 partitions: Mutex::new(HashSet::new()),
+                endpoints: Mutex::new(HashMap::new()),
+                stream_owner: Mutex::new(HashMap::new()),
                 in_flight: AtomicI64::new(0),
             }),
         }
@@ -326,17 +366,25 @@ impl SimulatedReplicationNetwork {
                     st.cut.store(true, Ordering::SeqCst);
                     st.wake.notify_waiters();
                 }
+                // Streams the two nodes' pullers already opened run between
+                // ephemeral locals, not the listen pair: they are held at
+                // delivery on the owner compare, so wake them to re-read it.
+                self.shared.wake_all();
             }
             Fault::Heal { a, b } => {
-                let mut p = self.shared.partitions.lock().unwrap();
-                p.remove(&(a, b));
-                p.remove(&(b, a));
-                // The cut DirStates stay cut (existing conns are dead); a fresh
-                // connect creates new DirStates. Drop the stale ones so the new
-                // direction starts clean.
-                let mut ds = self.shared.dir_state.lock().unwrap();
-                ds.remove(&(a, b));
-                ds.remove(&(b, a));
+                {
+                    let mut p = self.shared.partitions.lock().unwrap();
+                    p.remove(&(a, b));
+                    p.remove(&(b, a));
+                    // The cut DirStates stay cut (existing conns are dead); a fresh
+                    // connect creates new DirStates. Drop the stale ones so the new
+                    // direction starts clean.
+                    let mut ds = self.shared.dir_state.lock().unwrap();
+                    ds.remove(&(a, b));
+                    ds.remove(&(b, a));
+                }
+                // Held streams between the two nodes flush now, in order.
+                self.shared.wake_all();
             }
             Fault::DropOnOverflow { src, dst } => {
                 self.shared.drop_on_overflow_pairs.lock().unwrap().insert((src, dst));
@@ -368,6 +416,15 @@ impl SimulatedReplicationNetwork {
     pub fn with_fault(self, fault: Fault) -> Self {
         self.apply_fault(fault);
         self
+    }
+
+    /// Declare `ordinal`'s replication listen address, so a stream its puller
+    /// opens from an ephemeral local is attributed to it (the `caller` on the
+    /// opening `PullRequest` names the ordinal). Without a declaration a stream
+    /// stands for its own address and a [`Fault::Partition`] between two listen
+    /// addresses reaches only fresh `connect`s.
+    pub fn declare_endpoint(&self, ordinal: &str, listen: SocketAddr) {
+        self.shared.endpoints.lock().unwrap().insert(ordinal.to_string(), listen);
     }
 
     /// Live count of frames in transit across all delivery actors. Mirrors
@@ -417,8 +474,9 @@ impl SimulatedReplicationNetwork {
         local: SocketAddr,
         dst: SocketAddr,
     ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
-        // Partitioned? refuse.
-        if self.shared.partitions.lock().unwrap().contains(&(local, dst)) {
+        // Partitioned? refuse — reading each end as its owning node, so a
+        // reconnect from an already-attributed local is refused too.
+        if self.shared.partitioned(local, dst) {
             return Err(ConnectError::Blocked { addr: dst, reason: "partitioned".into() });
         }
 
@@ -453,6 +511,7 @@ impl SimulatedReplicationNetwork {
         let client = SimConnection {
             local,
             peer: dst,
+            shared: self.shared.clone(),
             out: c2s.staging_tx,
             out_dir: c2s.dir.clone(),
             inbound: tokio::sync::Mutex::new(s2c.inbound_rx),
@@ -461,6 +520,7 @@ impl SimulatedReplicationNetwork {
         let server = SimConnection {
             local: dst,
             peer: local,
+            shared: self.shared.clone(),
             out: s2c.staging_tx,
             out_dir: s2c.dir,
             inbound: tokio::sync::Mutex::new(c2s.inbound_rx),
@@ -577,8 +637,9 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                 }
             }
 
-            // Stalled: hold everything until resumed / cut.
-            if dir_actor.stalled.load(Ordering::SeqCst) {
+            // Stalled, or partitioned by owner: hold everything until resumed /
+            // healed / cut. A held direction buffers in order and flushes whole.
+            if dir_actor.stalled.load(Ordering::SeqCst) || shared_actor.partitioned(src, dst) {
                 dir_actor.wake.notified().await;
                 continue;
             }
@@ -598,7 +659,7 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                 drop(inbound_tx);
                 return;
             }
-            if dir_actor.stalled.load(Ordering::SeqCst) {
+            if dir_actor.stalled.load(Ordering::SeqCst) || shared_actor.partitioned(src, dst) {
                 continue;
             }
 
@@ -681,6 +742,8 @@ impl Drop for SimListener {
 struct SimConnection {
     local: SocketAddr,
     peer: SocketAddr,
+    /// The fabric, for the owner attribution a `PullRequest` carries.
+    shared: Arc<SimShared>,
     /// Outbound staging: `send` pushes encoded bytes (ordered).
     out: mpsc::UnboundedSender<Vec<u8>>,
     /// Outbound direction state — `send` fails fast once it is cut.
@@ -695,6 +758,11 @@ struct SimConnection {
 #[async_trait]
 impl ReplicationConnection for SimConnection {
     async fn send(&self, frame: Frame) -> Result<(), SendError> {
+        // A puller names itself on every `PullRequest`: that is what ties this
+        // stream's ephemeral local to the node that owns it, for the partition.
+        if let Frame::PullRequest { caller, .. } = &frame {
+            self.shared.attribute(self.local, caller);
+        }
         // A simulated network error wins over a clean cut.
         if self.out_dir.errored.load(Ordering::SeqCst) {
             return Err(SendError::Io("simulated network error".into()));

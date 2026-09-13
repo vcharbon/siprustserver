@@ -23,18 +23,29 @@
 //!   after     an in-dialog request re-takes the call over from the Element
 //! ```
 //!
-//! Neither may land: `(p+1, 0)` is a branch off a view the survivor left behind,
-//! not a newer version of it. If either does, the answered call is destroyed on
-//! the only node that still holds it — the caller's next in-dialog request finds
-//! no call, or re-materialises a torn-down one and authors a second final on an
-//! INVITE server transaction she already ACKed (RFC 3261 §17.2.1, §13.3.1.4).
+//! Neither may land: the primary's teardown is a branch off a view the survivor
+//! left behind, not a newer version of it. If either does, the answered call is
+//! destroyed on the only node that still holds it — the caller's next in-dialog
+//! request finds no call, or re-materialises a torn-down one and authors a second
+//! final on an INVITE server transaction she already ACKed (RFC 3261 §17.2.1,
+//! §13.3.1.4).
 //!
-//! Residual, stated rather than asserted away (ADR-0031 D3): the partitioned
-//! primary tore down a call the survivor kept serving. Each cell ends with one
-//! record for the call — in the Put cell the answered call's, discharged by the
-//! primary once it reclaims the survivor's terminal; in the Delete cell the
-//! primary's own no-answer record, because it discharged behind the cut and its
-//! resurrection tombstone then refuses the terminal the survivor defers to it.
+//! Each cell runs twice, on [`HealAt`]: with the cut healing while the survivor
+//! still SERVES its takeover copy, and with it healing once that copy has
+//! self-released and the Element is the call's last record.
+//!
+//! The heal here delivers the whole history the cut held back, in order — a real
+//! reconnect compacts the peer log to one entry per ref first, so the Delete
+//! cell's exposure is narrower in production than it is here: the survivor sees
+//! every intermediate version of the primary's teardown, not just its last.
+//!
+//! Residual, measured rather than narrated (ADR-0031 D3): the partitioned primary
+//! tore down a call the survivor kept serving. The Put cell ends with the answered
+//! call's one record, discharged by the primary once it reclaims the survivor's
+//! terminal. The Delete cell ends with the primary's own no-answer record and NO
+//! record of the answered call: the primary discharged behind the cut, and its
+//! resurrection tombstone then refuses the terminal the survivor defers to it, so
+//! that terminal is counted lost when the Element ages out.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -339,8 +350,43 @@ impl Pending {
     }
 }
 
+/// The caller's in-dialog re-INVITE, answered end to end. Whichever node the
+/// proxy routes it to re-materialises the call from the Element to serve it.
+async fn reinvite(
+    fh: &FailoverHarness,
+    dialog: &mut scenario_harness::Dialog,
+    bob: &Agent,
+    offer: &str,
+) {
+    let mut round = dialog.request(InDialogMethod::Invite, Some(offer)).await;
+    let mut peer = bob.receive_tolerating("INVITE", &["OPTIONS"]).await;
+    peer.respond(200, "OK").with_sdp(ANSWER).await;
+    round.expect_tolerating(200, &["OPTIONS"]).await;
+    dialog.ack(None).await;
+    bob.receive_tolerating("ACK", &["OPTIONS"]).await;
+    fh.advance(Duration::from_millis(500)).await;
+}
+
+/// When the cut heals — the two moments the refusal has to hold at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HealAt {
+    /// While the survivor still SERVES the takeover copy: the refusal must leave
+    /// the live call alone. Nothing is folded (the flush carries no progress the
+    /// copy lacks), so no CDR is written, no delete is propagated back, and the
+    /// call plays on to its own BYE.
+    BeforeTimerH,
+    /// Once that copy has self-released and the Element is the call's last
+    /// record: the flush must not regress or evict it.
+    AfterShed,
+}
+
+/// The CDRs `nodes` wrote for `call_ref`.
+fn cdrs_on(node: &ReplicatedB2buaSut, call_ref: &str) -> usize {
+    node.cdr_records().into_iter().filter(|r| r.call_ref == call_ref).count()
+}
+
 /// One run of the scenario, from the ringing call to the cluster-wide release.
-async fn run(name: &str, title: &str, pending: Pending) {
+async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = spawn_cluster(name).await;
 
     // ── ring: the route arms NoAnswer and the ringing version reaches the backup
@@ -422,6 +468,47 @@ async fn run(name: &str, title: &str, pending: Pending) {
         fh.mark(&pri_ord, None, "discharge", "the delete is pending on the healed flow");
     }
 
+    let op = match pending {
+        Pending::Put => "put",
+        Pending::Delete => "delete",
+    };
+
+    // ── heal while the takeover copy is still LIVE: the refusal is silent ─────
+    if heal_at == HealAt::BeforeTimerH {
+        // The Delete cell's primary needs its whole teardown to complete before
+        // it deletes, which outlives Timer H: the caller's next in-dialog request
+        // re-takes the call over, so the flush still lands under a LIVE copy.
+        if !survivor.serves(&call_ref) {
+            reinvite(&fh, &mut dialog, &bob, OFFER).await;
+            assert!(survivor.serves(&call_ref), "the survivor re-took the call over");
+        }
+        let before = survivor.live_call(&call_ref).expect("the survivor serves the call");
+        fh.heal(&pri_ord, &bak_ord);
+        fh.advance(Duration::from_secs(1)).await;
+        let after = survivor.live_call(&call_ref).expect("the live call survived the flush");
+        assert_eq!(after.state, CallModelState::Active, "the live copy is untouched");
+        assert_eq!(after.a_leg.state, LegState::Confirmed, "and still reads the caller answered");
+        assert_eq!(
+            after.timers.iter().map(|t| (t.timer_type.clone(), t.fire_at)).collect::<Vec<_>>(),
+            before.timers.iter().map(|t| (t.timer_type.clone(), t.fire_at)).collect::<Vec<_>>(),
+            "a refused flush carries no progress: the ledger is not resynced",
+        );
+        assert!(
+            survivor.metrics().repl_forward_flush_refused(op) >= 1,
+            "the refusal is counted, by the operation refused",
+        );
+        assert_eq!(
+            cdrs_on(survivor, &call_ref),
+            0,
+            "the acting backup wrote no record: only its primary discharges (ADR-0020 X3)",
+        );
+        assert!(
+            primary.holds_any_trace(&call_ref).await || matches!(pending, Pending::Delete),
+            "no reverse delete rode back: the primary still holds what it holds",
+        );
+        fh.mark(&bak_ord, Some(&pri_ord), "refused (live)", "the takeover copy serves on");
+    }
+
     // ── the takeover copy self-releases: the Element is all that is left ─────
     let shed = fh
         .pump_until(Duration::from_secs(1), Duration::from_secs(60), async || {
@@ -436,8 +523,10 @@ async fn run(name: &str, title: &str, pending: Pending) {
     );
 
     // ── heal: the primary's pending forward flush lands ──────────────────────
-    fh.heal(&pri_ord, &bak_ord);
-    fh.advance(Duration::from_secs(5)).await;
+    if heal_at == HealAt::AfterShed {
+        fh.heal(&pri_ord, &bak_ord);
+        fh.advance(Duration::from_secs(5)).await;
+    }
 
     // THE HEADLINE: neither the Put nor the Delete may regress the Element.
     assert_eq!(
@@ -445,29 +534,22 @@ async fn run(name: &str, title: &str, pending: Pending) {
         Some((CallModelState::Active, LegState::Confirmed)),
         "a forward flush regressed the answered Element the survivor is the last holder of",
     );
-    assert_eq!(
-        survivor.call_bgen(BAK, &pri_ord, &call_ref),
-        Some(answered_b),
-        "the Element keeps the backup counter it was authored at",
+    assert!(
+        survivor.call_bgen(BAK, &pri_ord, &call_ref).is_some_and(|b| b >= answered_b),
+        "the Element never goes back below the backup counter it was authored at",
     );
-    let op = match pending {
-        Pending::Put => "put",
-        Pending::Delete => "delete",
-    };
-    assert_eq!(
-        survivor.metrics().repl_forward_flush_refused(op),
-        1,
+    // Not `== 1`: across the heal the two owners exchange several flushes, each
+    // adopting the counter the other published, and every one of the primary's
+    // is refused while its view stays a branch of the call. The exact count per
+    // input is pinned in `b2bua`'s `repl::s12_tests`, where one frame is one
+    // frame; here what matters is that the refusal happened at all.
+    assert!(
+        survivor.metrics().repl_forward_flush_refused(op) >= 1,
         "the refusal is counted, by the operation refused",
     );
 
     // ── the caller's next in-dialog request re-takes the call over ───────────
-    let mut reinvite = dialog.request(InDialogMethod::Invite, Some(OFFER)).await;
-    let mut peer = bob.receive_tolerating("INVITE", &["OPTIONS"]).await;
-    peer.respond(200, "OK").with_sdp(ANSWER).await;
-    reinvite.expect_tolerating(200, &["OPTIONS"]).await;
-    dialog.ack(None).await;
-    bob.receive_tolerating("ACK", &["OPTIONS"]).await;
-    fh.advance(Duration::from_millis(500)).await;
+    reinvite(&fh, &mut dialog, &bob, OFFER).await;
     assert!(survivor.serves(&call_ref), "the survivor re-materialised the call from the Element");
 
     // ── nothing the re-materialised copy carries ends the call by itself ─────
@@ -490,6 +572,7 @@ async fn run(name: &str, title: &str, pending: Pending) {
     bye.expect_tolerating(200, &["OPTIONS"]).await;
     fh.restore_signalling(&pri_ord, pri_sip);
     let nodes: [&ReplicatedB2buaSut; 2] = [&*primary, survivor];
+    let lost_before = survivor.metrics().repl_terminal_lost_total();
     match pending {
         // The primary still held its own torn-down copy at the heal, so it
         // reclaims the terminal the survivor defers to it and discharges the
@@ -497,26 +580,57 @@ async fn run(name: &str, title: &str, pending: Pending) {
         Pending::Put => settle_released(&fh, &alice, &bob, &nodes[..], &call_ref).await,
         // Nobody reclaims it: this primary discharged the call behind the cut,
         // and its resurrection tombstone refuses the terminal the survivor
-        // defers to it. That Element leaves at the replica TTL instead, so the
-        // wait is a blind pump past it rather than a probe loop.
+        // defers to it. That Element leaves at the replica TTL instead — one
+        // second at a time, answering the keepalive OPTIONS the workers send
+        // along the way (a single leap would cross two deadlines at once).
         Pending::Delete => {
-            fh.advance(REPLICA_TTL_WAIT).await;
-            fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+            // Wait on the LOSS COUNTER, not on the body: reading the body is
+            // what evicts it, so a probe loop over the store would race the reap
+            // and destroy the very measurement. One second at a time, answering
+            // the keepalive OPTIONS the workers send along the way.
+            let aged_out = fh
+                .pump_until(Duration::from_secs(1), REPLICA_TTL_WAIT, async || {
+                    if let Some(mut t) = alice.try_receive_tolerating("OPTIONS", &[]).await {
+                        t.respond(200, "OK").await;
+                    }
+                    if let Some(mut t) = bob.try_receive_tolerating("OPTIONS", &[]).await {
+                        t.respond(200, "OK").await;
+                    }
+                    survivor.metrics().repl_terminal_lost_total() > lost_before
+                })
+                .await;
+            assert!(aged_out, "the unreclaimed deferred terminal left at the replica TTL");
             failover_harness::assert_call_fully_released(&nodes[..], &call_ref).await;
         }
     }
     fh.mark(&pri_ord, None, "residual", pending.residual());
-    assert_eq!(
-        failover_harness::total_cdrs_for(&nodes[..], &call_ref),
-        1,
-        "one record for the call across the cluster — neither lost nor double-billed",
-    );
-    if let Pending::Put = pending {
-        assert_eq!(
-            answered_cdrs(&nodes[..], &call_ref),
-            1,
-            "the one record is the answered call's",
-        );
+    match pending {
+        // One record, and it is the answered call's: the primary reclaimed the
+        // terminal the survivor deferred to it.
+        Pending::Put => {
+            assert_eq!(
+                failover_harness::total_cdrs_for(&nodes[..], &call_ref),
+                1,
+                "one record for the call across the cluster",
+            );
+            assert_eq!(answered_cdrs(&nodes[..], &call_ref), 1, "and it is the answered call's",);
+        }
+        // One record too — but the WRONG one. The residual is measured, not
+        // narrated: the answered call has no record at all, and the terminal the
+        // survivor deferred is counted as lost when the Element ages out.
+        Pending::Delete => {
+            assert_eq!(
+                failover_harness::total_cdrs_for(&nodes[..], &call_ref),
+                1,
+                "one record for the call across the cluster: the primary's own",
+            );
+            assert_eq!(answered_cdrs(&nodes[..], &call_ref), 0, "{}", pending.residual(),);
+            assert_eq!(
+                survivor.metrics().repl_terminal_lost_total() - lost_before,
+                1,
+                "the deferred terminal nobody reclaimed is counted lost, exactly once",
+            );
+        }
     }
 
     fh.assert_sip_rfc_clean(name);
@@ -531,19 +645,49 @@ async fn a_forward_put_behind_the_elements_backup_counter_leaves_the_answered_ca
         "forward-flush-guard-put",
         "A forward Put behind the Element's backup counter",
         Pending::Put,
+        HealAt::AfterShed,
     )
     .await;
 }
 
 /// **The refused `Delete`.** The primary completes its teardown behind the cut
 /// and propagates the delete; the Element the survivor answered on must survive
-/// it too — delete-wins yields to a backup that is still serving.
+/// it too — delete-wins yields to an authority that tore down a branch.
 #[tokio::test(start_paused = true)]
 async fn a_forward_delete_of_the_answered_element_leaves_the_answered_call_alive() {
     run(
         "forward-flush-guard-delete",
         "A forward Delete of an Element its backup answered on",
         Pending::Delete,
+        HealAt::AfterShed,
+    )
+    .await;
+}
+
+/// **The refused `Put`, with the copy still live.** The same flush, landing
+/// while the survivor still serves the call: it carries no progress the live
+/// copy lacks, so nothing folds — the answered call is untouched and plays on.
+#[tokio::test(start_paused = true)]
+async fn a_forward_put_refused_under_a_live_takeover_copy_leaves_the_call_untouched() {
+    run(
+        "forward-flush-guard-put-live",
+        "A forward Put refused under a live takeover copy",
+        Pending::Put,
+        HealAt::BeforeTimerH,
+    )
+    .await;
+}
+
+/// **The refused `Delete`, with the copy still live.** The Element is kept, the
+/// copy serves on and self-releases on its own terms, and the call is still
+/// there for the caller's next in-dialog request.
+#[tokio::test(start_paused = true)]
+async fn a_forward_delete_refused_under_a_live_takeover_copy_keeps_the_element() {
+    run(
+        "forward-flush-guard-delete-live",
+        "A forward Delete refused under a live takeover copy",
+        Pending::Delete,
+        HealAt::BeforeTimerH,
     )
     .await;
 }

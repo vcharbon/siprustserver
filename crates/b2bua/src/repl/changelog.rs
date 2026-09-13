@@ -87,14 +87,6 @@ pub trait BodySource: Send + Sync {
     /// The per-ref metadata (call_gen / ttl / indexes), or `None` if gone.
     fn read_meta(&self, call_ref: &str) -> Option<RefMeta>;
 
-    /// The `(p, b)` the ref carried when this node deleted it, for as long as
-    /// the store remembers the deletion. It rides the `Delete` frame so the
-    /// receiver can tell a delete that has seen a backup's progress from one
-    /// that has not (ADR-0031 D3). `None` ⇒ the frame carries `(0, 0)`.
-    fn deleted_cv(&self, _call_ref: &str) -> Option<(i64, i64)> {
-        None
-    }
-
     /// Snapshot the live callRef KEYS in `(role, primary)` under a BRIEF lock.
     /// The **Reclaim** bootstrap copies the `bak:{caller}` keyset this way.
     fn scan_refs(&self, _role: PartitionRole, _primary: &str) -> Vec<String> {
@@ -403,8 +395,7 @@ impl Changelog {
         for (counter, call_ref, op) in due {
             let at = Watermark::new(self.gen, counter);
             if op == Op::Delete {
-                let (p, b) = source.deleted_cv(&call_ref).unwrap_or((0, 0));
-                frames.push(delete_frame(at, partition, call_ref, p, b));
+                frames.push(delete_frame(at, partition, call_ref));
                 continue;
             }
             // Body read at send time — lock already dropped. Stamp the SENDER's
@@ -429,10 +420,7 @@ impl Changelog {
                     body: Some(body),
                 }),
                 // Gone between snapshot and read → emit a delete.
-                _ => {
-                    let (p, b) = source.deleted_cv(&call_ref).unwrap_or((0, 0));
-                    frames.push(delete_frame(at, partition, call_ref, p, b))
-                }
+                _ => frames.push(delete_frame(at, partition, call_ref)),
             }
         }
         frames
@@ -482,26 +470,18 @@ impl Changelog {
     }
 }
 
-/// Build a `Delete` `Data` frame (nil body) at `at`/`partition`, carrying the
-/// `(p, b)` the deleting node held for the ref — `(0, 0)` when it no longer
-/// remembers. The receiver's Forward guard reads it (ADR-0031 D3).
+/// Build a `Delete` `Data` frame (nil body, zero meta) at `at`/`partition`.
 ///
 /// `origin_now_ms` is `0`: a delete carries no re-anchorable timers, so the
 /// receiver-side skew offset is never read for it.
-fn delete_frame(
-    at: Watermark,
-    partition: Partition,
-    call_ref: String,
-    call_gen: i64,
-    call_bgen: i64,
-) -> Frame {
+fn delete_frame(at: Watermark, partition: Partition, call_ref: String) -> Frame {
     Frame::Data {
         at,
         op: Op::Delete,
         partition,
         call_ref,
-        call_gen,
-        call_bgen,
+        call_gen: 0,
+        call_bgen: 0,
         body_ttl_ms: 0,
         origin_now_ms: 0,
         indexes: Vec::new(),
