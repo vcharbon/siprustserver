@@ -94,6 +94,22 @@ fn timer_global_duration_selects_max_duration() {
     assert_eq!(ranked.first().map(|r| r.id), Some("max-duration"));
 }
 
+/// A rule reads the decision ordinal current at its turn: `0` on a call no
+/// decision touched, then the count of applied decisions.
+#[test]
+fn rule_call_reads_the_current_decision_ordinal() {
+    let call = test_call();
+    assert_eq!(RuleCall::new(&call).decision_ordinal(), 0, "no decision yet");
+    let call = call::helpers::mark_decision(
+        call,
+        1_000,
+        call::DecisionKind::Route,
+        Some("a".to_string()),
+        Some("first".to_string()),
+    );
+    assert_eq!(RuleCall::new(&call).decision_ordinal(), 1, "one decision applied");
+}
+
 /// The `no-answer` rule's output for a fire naming `fired_leg_id` on `call`.
 fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
     let event = CallEvent::Timer {

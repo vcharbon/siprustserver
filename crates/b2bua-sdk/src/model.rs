@@ -1252,6 +1252,12 @@ impl<'a> RuleCall<'a> {
     pub fn cdr_events(&self) -> &'a [CdrEvent] {
         &self.0.cdr_events
     }
+    /// The count of decisions applied to the call so far — the ordinal every
+    /// message and event written now is stamped with; `0` before the first
+    /// decision. A service records its own marks under the same ordinal.
+    pub fn decision_ordinal(&self) -> u32 {
+        self.0.decision_ordinal
+    }
 }
 
 /// The resolved context a rule sees. Built by the executor/router from the
