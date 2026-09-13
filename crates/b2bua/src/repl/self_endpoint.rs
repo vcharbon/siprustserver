@@ -20,8 +20,12 @@ use topology::Peer;
 /// stopped being routable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WithdrawalCondition {
-    /// The endpoint left the routable set of the membership snapshot.
+    /// The endpoint left the membership snapshot entirely.
     Absent,
+    /// The endpoint is still in the snapshot, `ready = false` and `terminating`:
+    /// the orchestrator is removing the member, which stays a replication peer
+    /// until its pod is gone (ADR-0031 D1).
+    Terminating,
 }
 
 impl WithdrawalCondition {
@@ -29,6 +33,7 @@ impl WithdrawalCondition {
     pub fn as_str(self) -> &'static str {
         match self {
             WithdrawalCondition::Absent => "absent",
+            WithdrawalCondition::Terminating => "terminating",
         }
     }
 }
@@ -125,11 +130,15 @@ impl SelfObserver {
     }
 }
 
-/// `None` when `self_ordinal` is routable in `snapshot`, else the condition that
-/// withdraws it. The informer emits ready endpoints only, so presence is
-/// routability.
+/// `None` when `self_ordinal` still belongs here in `snapshot`, else the
+/// condition that withdraws it: gone from the slice, or in it as a `terminating`
+/// endpoint the orchestrator is removing. A not-ready endpoint that is NOT
+/// terminating is a readiness flap on a member the orchestrator keeps
+/// (ADR-0031 case 4): `Draining` is terminal, so latching it there would remove
+/// for good a worker that is meant to come back.
 fn classify(snapshot: &[Peer], self_ordinal: &str) -> Option<WithdrawalCondition> {
     match snapshot.iter().find(|p| p.ordinal == self_ordinal) {
+        Some(p) if p.terminating && !p.ready => Some(WithdrawalCondition::Terminating),
         Some(_) => None,
         None => Some(WithdrawalCondition::Absent),
     }
@@ -159,6 +168,35 @@ mod tests {
         assert_eq!(o.observe(&peers(&[]), true), None);
         assert_eq!(o.observe(&peers(&["w1"]), true), None);
         assert_eq!(o.current(), SelfEndpoint::Unobserved);
+    }
+
+    #[test]
+    fn a_terminating_own_endpoint_still_in_the_slice_is_a_withdrawal() {
+        // The graceful shape: the endpoint stays in the slice (its peers keep
+        // pulling it, D1) reading `ready=false, terminating=true`.
+        let o = SelfObserver::new("w0");
+        o.enable();
+        assert_eq!(o.observe(&peers(&["w0", "w1"]), true), Some(SelfEndpoint::Routable));
+        let terminating =
+            vec![Peer::with_conditions("w0", "w0", false, true), Peer::new("w1", "w1")];
+        assert_eq!(
+            o.observe(&terminating, true),
+            Some(SelfEndpoint::Withdrawn(WithdrawalCondition::Terminating))
+        );
+        assert!(o.is_withdrawn());
+    }
+
+    #[test]
+    fn a_readiness_flap_is_not_a_withdrawal() {
+        // Case 4: not ready, not terminating, same address — the orchestrator
+        // keeps the member and expects it back, and `Draining` is terminal.
+        let o = SelfObserver::new("w0");
+        o.enable();
+        assert_eq!(o.observe(&peers(&["w0", "w1"]), true), Some(SelfEndpoint::Routable));
+        let flapping = vec![Peer::with_conditions("w0", "w0", false, false), Peer::new("w1", "w1")];
+        assert_eq!(o.observe(&flapping, true), None);
+        assert!(!o.is_withdrawn());
+        assert_eq!(o.observe(&peers(&["w0", "w1"]), true), None, "and it comes back silently");
     }
 
     #[test]
