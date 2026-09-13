@@ -470,6 +470,19 @@ impl Agent {
         n
     }
 
+    /// Every TU-visible datagram already queued at this UA, pulled without
+    /// waiting and counted. What the §17.2 receive view absorbs — a final the
+    /// peer repeats on Timer G, the hop ACK it draws — is read and answered as a
+    /// live UA's socket would, and never counted: a body asserting that nothing
+    /// further reached its TU reads this, not [`drain`](Agent::drain).
+    pub async fn drain_tu(&self) -> usize {
+        let mut n = 0;
+        while self.take_queued().await.is_some() {
+            n += 1;
+        }
+        n
+    }
+
     /// The next TU-visible datagram already queued at this UA, WITHOUT waiting
     /// — `None` when nothing is pending. For a body that observes what a window
     /// it held open delivered (the rungs of a ladder the peer is still
