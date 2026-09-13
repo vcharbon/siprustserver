@@ -176,6 +176,35 @@ async fn forks_open_freely_and_the_final_binds_the_cancel_answer() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_cancel_before_the_final_is_answered_under_the_first_provisionals_tag() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-bind-f", "bind-f");
+    stack.inject(&inbound_request("INVITE", branch, call_id, None)).await;
+    elapse_ms(20).await;
+    let _ = stack.drain_peer();
+
+    // Two early dialogs mirrored from a forking downstream.
+    send(&stack, tu_response(180, "INVITE", branch, call_id, Some("t1"))).await;
+    send(&stack, tu_response(180, "INVITE", branch, call_id, Some("t2"))).await;
+    let out = stack.drain_peer();
+    assert_eq!(to_tags(&out, 180), ["t1", "t2"], "each early dialog keeps its tag");
+
+    // No final yet: the tag pinned on the first response is the transaction's
+    // identity toward the requester (§8.2.6.2, §17.2.1); the CANCEL's 200 and
+    // the 487 both carry it (§9.2), not the newest early dialog's.
+    stack.inject(&inbound_request("CANCEL", branch, call_id, None)).await;
+    elapse_ms(20).await;
+    let out = stack.drain_peer();
+    assert_eq!(to_tags(&out, 200), ["t1"], "the CANCEL's 200 carries the first tag: {out:?}");
+    assert_eq!(to_tags(&out, 487), ["t1"], "the 487 carries the first tag: {out:?}");
+    stack.inject(&inbound_request("ACK", branch, call_id, Some("t1"))).await;
+    elapse_ms(20).await;
+    let m = stack.txn.metrics();
+    assert_eq!(m.to_tag_coerced(), 0);
+    assert_eq!(m.to_tag_filled(), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_in_dialog_answer_echoes_the_requests_tag_untouched() {
     let mut stack = Stack::build(TRANSIT, 64, 64).await;
     let (branch, call_id) = ("z9hG4bK-bind-d", "bind-d");

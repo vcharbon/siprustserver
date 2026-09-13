@@ -26,13 +26,11 @@ enum Bound {
     Free,
 }
 
-/// The tag a server INVITE transaction has bound: its final's, else the
-/// newest early dialog's, else the one pinned for its CANCEL answer.
+/// The tag a server INVITE transaction has bound: its final's, else the one
+/// pinned on its first response (§17.2.1) — a later early dialog mirrored
+/// from a forking downstream does not move it.
 fn bound_tag_of(txn: &Transaction) -> Option<String> {
-    txn.final_to_tag
-        .clone()
-        .or_else(|| txn.early_tags.last().cloned())
-        .or_else(|| txn.uas_to_tag.clone())
+    txn.final_to_tag.clone().or_else(|| txn.uas_to_tag.clone())
 }
 
 impl Owner {
@@ -109,21 +107,16 @@ impl Owner {
         bound_tag_of(txn).or_else(|| self.recall_uas_tag(response)).map_or(Bound::Free, Bound::Fill)
     }
 
-    /// Record what a response this layer just sent on a server INVITE
-    /// transaction bound: an early dialog's tag, or the final's — the dialog's,
-    /// remembered past the transaction.
+    /// Record what a final this layer just sent on a server INVITE
+    /// transaction bound: the dialog's tag, remembered past the transaction.
+    /// A provisional binds nothing here — the first one's tag is pinned as
+    /// `uas_to_tag` by the sender.
     pub(super) fn record_uas_tag(&mut self, branch: &str, response: &SipResponse) {
         let Some(tag) = response.to().tag().map(str::to_string) else { return };
-        let status = response.status();
         let (call_id, from_tag) = {
             let Some(txn) = self.txns.get_mut(branch) else { return };
-            if txn.role != TxnRole::Server || txn.kind != TxnKind::Invite || status <= 100 {
-                return;
-            }
-            if status < 200 {
-                if !txn.early_tags.contains(&tag) {
-                    txn.early_tags.push(tag);
-                }
+            if txn.role != TxnRole::Server || txn.kind != TxnKind::Invite || response.status() < 200
+            {
                 return;
             }
             txn.final_to_tag = Some(tag.clone());

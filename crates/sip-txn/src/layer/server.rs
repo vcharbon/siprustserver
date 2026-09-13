@@ -391,15 +391,13 @@ impl Owner {
     }
 
     /// The To-tag the server INVITE txn on `branch` has bound — its final's,
-    /// else its newest early dialog's, else the one pinned on its first
-    /// response (RFC 3261 §9.2, §17.2.1) — pinned now where none was yet.
+    /// else the one pinned on its first response (RFC 3261 §9.2, §17.2.1) —
+    /// pinned now where none was yet.
     fn uas_to_tag_of(&mut self, branch: &str) -> Option<String> {
-        let known = self.txns.get(branch).and_then(|t| {
-            t.final_to_tag
-                .clone()
-                .or_else(|| t.early_tags.last().cloned())
-                .or_else(|| t.uas_to_tag.clone())
-        });
+        let known = self
+            .txns
+            .get(branch)
+            .and_then(|t| t.final_to_tag.clone().or_else(|| t.uas_to_tag.clone()));
         if known.is_some() {
             return known;
         }
