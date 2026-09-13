@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The one home for SIP retransmission pacing (ADR-0029): the RFC 3261 §17 timer constants and the schedule every ladder rides — transaction (Timer A/E/G, the CANCEL sub-ladder) and dialog-level (§13.3.1.4, RFC 3262 §3) alike. Pure: no clock, no timers, no I/O."
+description = "The one home for SIP retransmission pacing (ADR-0032): the RFC 3261 §17 timer constants and the schedule every ladder rides — transaction (Timer A/E/G, the CANCEL sub-ladder) and dialog-level (§13.3.1.4, RFC 3262 §3) alike. Pure: no clock, no timers, no I/O."
 
 [lints]
 workspace = true
@@ -16,9 +16,9 @@ serde = { workspace = true, optional = true }
 # Schedules an RFC does not prescribe: a capture's own measured gaps, and
 # `once`. Enabled by the replay interpreter and the harnesses — NEVER by
 # `sip-txn` or `b2bua`, so a non-RFC ladder is not expressable in the SUT
-# (ADR-0029 X1).
+# (ADR-0032 X1).
 authored = []
 # `Serialize`/`Deserialize` on `Class` alone, so a replicated ladder can name
-# the class it paces by (ADR-0029 X3). Off by default: the crate carries no
+# the class it paces by (ADR-0032 X3). Off by default: the crate carries no
 # dependency unless a consumer asks for this.
 serde = ["dep:serde"]

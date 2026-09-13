@@ -9,7 +9,7 @@
 //!      unconditionally terminating, so the backend can reroute — and the
 //!      consult says which timeout fired (`timeout_kind`): `response` when the
 //!      hop answered nothing at all (the tightened first-response bound,
-//!      ADR-0029 X1 amendment), `transaction` when it rang and went silent.
+//!      ADR-0032 X1 amendment), `transaction` when it rang and went silent.
 //!   3. A failover **Route is honored like an initial route**: its
 //!      `call_limiter` entries are admitted against the reroute target and the
 //!      holds are released at termination; a limiter reject on the failover
@@ -245,7 +245,7 @@ fn invites_delivered_to(report: &scenario_harness::RunReport, to: SocketAddr) ->
 }
 
 /// The dead-hop case under a tightened first-response bound
-/// (`invite_first_response_timeout_sec = 5`, ADR-0029 X1 amendment): carol
+/// (`invite_first_response_timeout_sec = 5`, ADR-0032 X1 amendment): carol
 /// answers NOTHING — not even a `100` — so the b-leg gives up at 5 s, not at
 /// Timer B, after exactly the three Timer A re-sends the bound buys
 /// (0.5 / 1.5 / 3.5 s), and the `/call/failure` consult says

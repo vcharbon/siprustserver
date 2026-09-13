@@ -3831,7 +3831,7 @@ fn relay_ack_pushes_no_ladder_plumbing() {
     );
 }
 
-// ADR-0029 X5 — a ladder give-up's settlement after the rules (`settle_give_up`,
+// ADR-0032 X5 — a ladder give-up's settlement after the rules (`settle_give_up`,
 // the router's step after the rule chain on every `RepeatGiveUp`): an un-ACKed
 // 2xx ends the session whatever a service rule made of the give-up, and a
 // reliable provisional's give-up is left to the rules' own RFC 3262 §3 policy.

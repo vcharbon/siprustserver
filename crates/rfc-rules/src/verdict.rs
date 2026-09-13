@@ -463,7 +463,7 @@ pub enum RuleId {
     /// message, byte for byte — the request the client transaction re-sends,
     /// the final the server transaction re-passes, the 2xx and the reliable
     /// provisional their UAS re-sends. Charges the emitter of a copy whose
-    /// bytes differ from the first under one transaction identity (ADR-0029 X3).
+    /// bytes differ from the first under one transaction identity (ADR-0032 X3).
     #[serde(rename = "rung-byte-identical")]
     RungByteIdentical,
 }

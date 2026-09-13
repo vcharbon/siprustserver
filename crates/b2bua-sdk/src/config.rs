@@ -198,7 +198,7 @@ pub struct B2buaConfig {
     /// 2xx to an INVITE — initial or re-INVITE — the peer is gone and the
     /// session ends: the B2BUA BYEs the a-leg dialog and the b-leg it bridges.
     /// Only the deadline is configured: the 2xx ladder always runs to Timer L
-    /// and the teardown always acts (ADR-0029 X5). `<= 0` is NOT allowed —
+    /// and the teardown always acts (ADR-0032 X5). `<= 0` is NOT allowed —
     /// [`validate`](Self::validate) refuses it, and a harness config that
     /// writes it anyway gets the default
     /// ([`ack_timeout_ms`](Self::ack_timeout_ms)), as

@@ -1094,7 +1094,7 @@ pub struct UdpTransportMetrics {
     queue_max: usize,
     drops_tail_drop: LiveGauge,
     /// Outbound datagrams the socket refused because its send buffer was
-    /// full (ADR-0031): a live getter over the bound endpoint.
+    /// full (ADR-0033): a live getter over the bound endpoint.
     send_would_block: LiveGauge,
     brake: Tier1BrakeCounters,
     buffered_send: BufferedSendCounters,
@@ -1181,7 +1181,7 @@ impl UdpTransportMetrics {
         (self.drops_tail_drop)()
     }
     /// Outbound datagrams refused by a full send buffer (never a suspended
-    /// send — ADR-0031).
+    /// send — ADR-0033).
     pub fn send_would_block(&self) -> u64 {
         (self.send_would_block)()
     }
@@ -1269,7 +1269,7 @@ impl UdpTransportMetrics {
         counter(
             &mut s,
             "b2bua_udp_send_would_block_total",
-            "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the transaction owner; ADR-0031).",
+            "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the transaction owner; ADR-0033).",
             self.send_would_block(),
         );
 

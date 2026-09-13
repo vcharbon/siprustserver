@@ -9,7 +9,7 @@
 //! "retransmitted" (RFC 3262 §3). None of them says "a response like it": the
 //! peer's transaction layer matched the first copy, and every byte a second
 //! copy changes is a byte that peer may read differently — a moved header, a
-//! normalised value, a re-rendered body. ADR-0029 X3 makes the divergence
+//! normalised value, a re-rendered body. ADR-0032 X3 makes the divergence
 //! unexpressable in the emitter's types; this rule is the same invariant read
 //! off the wire, so a refactor that re-renders a rung is charged however it is
 //! paced.

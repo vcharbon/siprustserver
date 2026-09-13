@@ -6,7 +6,7 @@
 //! Exported so a generator that projects a ladder onto a timeline — the cut's
 //! drawn-ACK count asks how many copies of a final land before the ACK — reads
 //! the one schedule the SUT and the interpreter ride instead of walking T1/T2
-//! a second time (ADR-0029 X1). The table is finite because every class gives
+//! a second time (ADR-0032 X1). The table is finite because every class gives
 //! up, and the walk is [`sip_retransmit::Ladder`]'s own, never restated here.
 
 use schemars::JsonSchema;

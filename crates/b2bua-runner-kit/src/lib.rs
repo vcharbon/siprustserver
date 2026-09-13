@@ -210,7 +210,7 @@ pub struct RunnerEnv {
     pub queue_max: usize,
     /// `B2BUA_UDP_SNDBUF` — `SO_SNDBUF` requested on the signalling socket,
     /// bytes (default empty = the kernel's `wmem_default`; clamped at
-    /// `wmem_max`). See ADR-0031.
+    /// `wmem_max`). See ADR-0033.
     pub udp_sndbuf: Option<usize>,
     /// `B2BUA_CDR_QUEUE` — buffered-CDR submit queue depth (default 1024).
     pub cdr_queue: usize,
@@ -263,7 +263,7 @@ pub struct RunnerEnv {
     pub call_control_timeout_ms: i64,
     /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261
     /// §13.3.1.4, 64·T1 = 32 s; <= 0 tears nothing down — the ladder itself
-    /// always runs, ADR-0029 X5).
+    /// always runs, ADR-0032 X5).
     pub ack_timeout_sec: i64,
     /// `B2BUA_CPS_BUCKET_SIZE` — Tier-3 admission gate bucket size (default 1000).
     pub cps_bucket_size: u32,

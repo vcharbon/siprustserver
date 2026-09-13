@@ -122,7 +122,7 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
 const LATE_ACK_TIMEOUT_SEC: i64 = 60;
 
 /// Every rung a `Final2xx` ladder owes inside Timer L, from the one schedule
-/// the stack itself walks (ADR-0029 X1).
+/// the stack itself walks (ADR-0032 X1).
 fn rungs_inside_timer_l() -> usize {
     let (mut ladder, _) =
         Ladder::armed(Schedule::rfc(Class::Final2xx)).expect("a 2xx owes its first re-send");
@@ -227,7 +227,7 @@ async fn a_deadline_past_timer_l_does_not_extend_the_2xx_ladder() {
     );
 }
 
-/// ADR-0029 X5: the give-up is a deadline, not a switch. A config that writes a
+/// ADR-0032 X5: the give-up is a deadline, not a switch. A config that writes a
 /// non-positive `ack_timeout_sec` — bypassing `validate`, as a harness does —
 /// still ends the session, at the 32 s default (Timer L).
 #[tokio::test(start_paused = true)]
@@ -322,7 +322,7 @@ mod parking {
     }
 }
 
-/// ADR-0029 X5: a service may re-author the give-up's teardown, not decline it.
+/// ADR-0032 X5: a service may re-author the give-up's teardown, not decline it.
 /// With the parking service outranking `unacked-2xx-give-up`, the session still
 /// ends at the deadline on both legs, under the CORE CDR marker.
 #[tokio::test(start_paused = true)]

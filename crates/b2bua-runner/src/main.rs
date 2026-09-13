@@ -38,7 +38,7 @@
 //!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
 //!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default empty =
-//!                   kernel wmem_default; clamped at wmem_max) — ADR-0031
+//!                   kernel wmem_default; clamped at wmem_max) — ADR-0033
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
 //!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024)
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)

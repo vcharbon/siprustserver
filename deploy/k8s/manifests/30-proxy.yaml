@@ -151,7 +151,7 @@ spec:
               echo 2 > /proc/sys/net/ipv4/conf/lo/arp_announce
               # A next hop the kernel cannot resolve holds every datagram sent to
               # it on the neighbour's unresolved queue, still charged to the
-              # sending socket, for the whole ARP cycle (ADR-0031). The queue's
+              # sending socket, for the whole ARP cycle (ADR-0033). The queue's
               # default (212992 B) equals a default socket send buffer, so one
               # dead peer pins a whole socket. Bound it to 16 KiB per neighbour;
               # PROXY_UDP_SNDBUF sizes the socket far above that. The neighbour
@@ -190,7 +190,7 @@ spec:
             - { name: PROXY_ADVERTISE_EXT,   value: "${SIPEXT_VIP}:${SIP_PORT}" }
             - { name: PROXY_FACE_INT_CIDRS,  value: "${PROXY_FACE_INT_CIDRS}" }
             - { name: PROXY_METRICS,   value: "0.0.0.0:9090" }
-            # SO_SNDBUF on every signalling socket (ADR-0031): far above what
+            # SO_SNDBUF on every signalling socket (ADR-0033): far above what
             # one unresolved neighbour can pin (16 KiB, set by vip-loopback).
             # The kernel clamps at the host's net.core.wmem_max (host preflight).
             - { name: PROXY_UDP_SNDBUF, value: "4194304" }

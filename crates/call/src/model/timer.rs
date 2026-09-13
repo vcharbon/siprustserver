@@ -37,7 +37,7 @@ pub enum TimerType {
     Keepalive,
     KeepaliveTimeout,
     /// The next rung of the ladder repeating the retained emission
-    /// `obligation` is owed for (ADR-0029 X4): the un-ACKed 2xx (RFC 3261
+    /// `obligation` is owed for (ADR-0032 X4): the un-ACKed 2xx (RFC 3261
     /// §13.3.1.4) or the un-PRACKed reliable provisional (RFC 3262 §3). The
     /// framework re-sends the retained datagram and re-arms the next rung
     /// itself — no rule sees a rung. Retired with the obligation: by the

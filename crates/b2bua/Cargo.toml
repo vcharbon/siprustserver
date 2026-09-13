@@ -27,7 +27,7 @@ call = { path = "../call" }
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
-# The class a retained emission's ladder paces by (ADR-0029 X3).
+# The class a retained emission's ladder paces by (ADR-0032 X3).
 sip-retransmit = { path = "../sip-retransmit" }
 sip-clock = { path = "../sip-clock" }
 repl-net = { path = "../repl-net" }

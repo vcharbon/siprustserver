@@ -1,4 +1,4 @@
-//! What discharges a dialog-level retransmission ladder (ADR-0029 X4): the
+//! What discharges a dialog-level retransmission ladder (ADR-0032 X4): the
 //! key the framework matches an inbound ACK or PRACK against. A ladder is
 //! armed under one of these, its rung and give-up timers carry it, and the
 //! engine retires all three when the discharging request arrives — a rule

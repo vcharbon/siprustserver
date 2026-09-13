@@ -67,7 +67,7 @@ impl Owner {
     }
 
     /// Send a TU response through its server transaction and return the
-    /// datagram that left: the response's own image (ADR-0025, ADR-0029 X3),
+    /// datagram that left: the response's own image (ADR-0025, ADR-0032 X3),
     /// re-rendered only where `bind_to_tag` held it to the bound To-tag.
     pub(super) async fn do_send_response(
         &mut self,

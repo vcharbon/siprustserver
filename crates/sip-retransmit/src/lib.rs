@@ -1,4 +1,4 @@
-//! sip-retransmit — the one home for SIP retransmission pacing (ADR-0029).
+//! sip-retransmit — the one home for SIP retransmission pacing (ADR-0032).
 //!
 //! A **ladder** is the whole sequence of scheduled re-sends of one message; a
 //! **rung** is one step on it (rung 0 is the original send, rung 1 the first
@@ -249,7 +249,7 @@ impl Schedule {
 /// A cursor walking one [`Schedule`]: which rung the ladder stands on, and how
 /// long it has been running. A ladder that never [`retarget`](Self::retarget)s
 /// rebuilds whole from its rung alone ([`Ladder::at_rung`]), which is what a
-/// replicated body stores (ADR-0029 X2).
+/// replicated body stores (ADR-0032 X2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ladder {
     schedule: Schedule,

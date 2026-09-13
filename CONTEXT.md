@@ -99,7 +99,7 @@ The whole sequence of scheduled re-sends of one message, and the schedule that
 paces it. A ladder belongs either to a **transaction** (Timer A/E/G, the CANCEL
 sub-ladder — the transaction layer drives them and its consumers never see
 them) or to a **dialog-level obligation** (RFC 3261 §13.3.1.4, RFC 3262 §3 —
-replicated with the call, visible to rules only as its give-up). See ADR-0029.
+replicated with the call, visible to rules only as its give-up). See ADR-0032.
 _Avoid_: "retry", "attempt" (they carry HTTP retry semantics elsewhere in the
 workspace), "cadence" for the schedule as a whole.
 
@@ -111,7 +111,7 @@ the whole of a ladder's state — no epoch anchor, so it survives takeover.
 **Retained emission**:
 The exact serialized datagram of a message that owes repeats, kept opaque and
 replicated with the call. A rung re-sends these bytes; it never re-composes an
-equivalent message (ADR-0029 X3).
+equivalent message (ADR-0032 X3).
 
 **Obligation**:
 What discharges a dialog-level ladder, as a key the framework matches on:
@@ -221,7 +221,7 @@ storage-only step).
 **Seed**: a transaction the materialisation rebuilds from the record: a
 Proceeding client INVITE from an INVITE handle, a Proceeding server INVITE
 from the a-leg snapshot or a pending relayed re-INVITE. Never a 2xx, PRACK or
-re-ACK: those are ADR-0029 obligations replicated with the call.
+re-ACK: those are ADR-0032 obligations replicated with the call.
 
 **Self-release** (acting-backup takeover-copy lifecycle) — replaces Activate/Deactivate (ADR-0014):
 A backup holds a **takeover copy** only *while actively serving* the rerouted

@@ -48,7 +48,7 @@ fn no_transform() -> MessageTransform {
 /// CDR names the leg that owed the ACK under the marker of the 2xx it never
 /// acknowledged: the call's own answer, or a relayed re-INVITE's. The verdict
 /// of both CORE give-up rules, and the framework's when a service rule
-/// re-authored the give-up without ending the session (ADR-0029 X5).
+/// re-authored the give-up without ending the session (ADR-0032 X5).
 pub(crate) fn unacked_2xx_give_up_actions(
     call: &RuleCall,
     obligation: &Obligation,
@@ -1424,7 +1424,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
-        // ── ladder give-ups (ADR-0029 X4/X5) ─────────────────────────────────
+        // ── ladder give-ups (ADR-0032 X4/X5) ─────────────────────────────────
         // The one ladder event a rule sees is `RepeatGiveUp { obligation }`,
         // its timers already scrubbed; these CORE rules say what the silence
         // means, per obligation, and a service may re-author them. For a 2xx

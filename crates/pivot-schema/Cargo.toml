@@ -14,7 +14,7 @@ workspace = true
 # publishes is enumerated from it, never transcribed.
 sip-message = { path = "../sip-message" }
 rfc-rules = { path = "../rfc-rules" }
-# The one schedule every ladder rides (ADR-0029): the `schedules` export walks
+# The one schedule every ladder rides (ADR-0032): the `schedules` export walks
 # each class to its give-up, never restating T1/T2.
 sip-retransmit = { path = "../sip-retransmit" }
 serde = { workspace = true }

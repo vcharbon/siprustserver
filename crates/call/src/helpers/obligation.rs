@@ -1,4 +1,4 @@
-//! The books of the dialog-level retransmission obligations (ADR-0029 X4):
+//! The books of the dialog-level retransmission obligations (ADR-0032 X4):
 //! which [`Obligation`]s the call owes, the retained emission each ladder
 //! repeats, the key an inbound ACK discharges, and the scopes a ladder is
 //! retired under. Pure reads and value-returning writes; the timers that pace

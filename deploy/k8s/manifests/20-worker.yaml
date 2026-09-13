@@ -107,7 +107,7 @@ spec:
             # directly would bypass the LB and leak internal addressing.
             - { name: B2BUA_REQUIRE_OUTBOUND_PROXY, value: "1" }
             - { name: B2BUA_METRICS, value: "0.0.0.0:9091" }
-            # SO_SNDBUF on the signalling socket (ADR-0031); clamped at the
+            # SO_SNDBUF on the signalling socket (ADR-0033); clamped at the
             # host's net.core.wmem_max.
             - { name: B2BUA_UDP_SNDBUF, value: "4194304" }
             # --- CDR sink: publish one JSON CDR per terminated call to RabbitMQ

@@ -25,7 +25,7 @@
 //!   - [`leg`] — [`Leg`] + state / disposition / role enums
 //!   - [`dialog`] — §12 dialog state + B2BUA-only dialog extensions
 //!   - [`emission`] / [`obligation`] — the retained emission a ladder repeats
-//!     and the key that discharges it (ADR-0029)
+//!     and the key that discharges it (ADR-0032)
 //!   - [`invite_txn`] — in-flight INVITE client-transaction handle
 //!   - [`timer`] — serializable timer intents ([`TimerType`] / [`TimerEntry`])
 //!   - [`cdr`] — CDR event records

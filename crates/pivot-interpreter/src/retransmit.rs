@@ -11,7 +11,7 @@
 //!   Timer A for an INVITE (§17.1.1.2), Timer E for another request
 //!   (§17.1.2.2), §13.3.1.4 for a 2xx, §17.2.1 for another INVITE final, RFC
 //!   3262 §3 for a reliable provisional — on the one [`sip_retransmit::Schedule`]
-//!   the SUT rides (ADR-0029), so the oracle and the thing it confronts cannot
+//!   the SUT rides (ADR-0032), so the oracle and the thing it confronts cannot
 //!   disagree about a schedule. A message with no ladder of its own is REFUSED
 //!   by name rather than paced by a default nobody wrote down (§14).
 //! - **Drawing.** One ladder is neither paced nor refused: an auto ACK step's

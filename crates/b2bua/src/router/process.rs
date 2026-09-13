@@ -547,7 +547,7 @@ fn rule_chain_turn(
         now_ms,
         wire_faults: &ctx.wire_faults,
     };
-    // The dialog-level ladders are the framework's (ADR-0029 X4): a rung is
+    // The dialog-level ladders are the framework's (ADR-0032 X4): a rung is
     // repeated here and never reaches a rule; the discharging ACK or PRACK
     // retires its ladder before the rules run and they read the fact; a
     // give-up's timers are scrubbed before the CORE give-up rule decides, and

@@ -15,7 +15,7 @@ serde_json = { workspace = true }
 serde_bytes = { workspace = true }
 rmp-serde = { workspace = true }
 thiserror = { workspace = true }
-# The class a replicated ladder paces by (ADR-0029 X3); `serde` so it rides the body.
+# The class a replicated ladder paces by (ADR-0032 X3); `serde` so it rides the body.
 sip-retransmit = { path = "../sip-retransmit", features = ["serde"] }
 
 [dev-dependencies]

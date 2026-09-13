@@ -237,7 +237,7 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
             }
             // A response goes through its server transaction, whatever the mode
             // says: `Raw` is for requests, and the only raw path for response
-            // bytes is a retained `Datagram` (ADR-0029 X3). The layer sends the
+            // bytes is a retained `Datagram` (ADR-0032 X3). The layer sends the
             // response's image verbatim, so what a rule retained from that
             // same image is what leaves here.
             (OutboundBody::Response(resp), mode) => {

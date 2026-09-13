@@ -736,7 +736,7 @@ impl ProxyMetrics {
             udp_drop,
         );
         g(&mut s, "sip_proxy_intake_shed_total", "New non-emergency INVITEs dropped by the depth-watermark pre-ingress shed (the selective last-line guard below the admission layer).", "counter", udp_shed);
-        g(&mut s, "sip_proxy_udp_send_would_block_total", "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the recv shard; ADR-0031). Summed over recv shards and both faces.", "counter", udp_would_block);
+        g(&mut s, "sip_proxy_udp_send_would_block_total", "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the recv shard; ADR-0033). Summed over recv shards and both faces.", "counter", udp_would_block);
         g(&mut s, "sip_proxy_recv_shards_stalled", "Recv shards that dequeued a packet more than PROXY_SHARD_STALL_MS ago and have not returned to waiting: parked, not idle. Non-zero flips /readyz.", "gauge", self.recv_shards_stalled.load(Ordering::Relaxed));
         g(
             &mut s,

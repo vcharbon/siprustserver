@@ -30,7 +30,7 @@ sip-proxy = { path = "../sip-proxy" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 # The one schedule the SUT walks, so a test counts the rungs an RFC class
-# owes rather than restating T1/T2 arithmetic (ADR-0029 X1).
+# owes rather than restating T1/T2 arithmetic (ADR-0032 X1).
 sip-retransmit = { path = "../sip-retransmit" }
 # CANCEL-during-slow-decision test: wraps the decision engine to stall new_call.
 async-trait = { workspace = true }

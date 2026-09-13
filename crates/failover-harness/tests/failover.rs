@@ -1028,7 +1028,7 @@ async fn matrix_crash_mid_invite() {
 /// primary's server transaction absorbs the a-leg copy, the callee absorbs the
 /// b-leg copy, the call completes on the survivor, and the recorded trace is
 /// clean under `rung-byte-identical`: the proxy's own cookie row is the one
-/// row the auditor leaves to the emitter (ADR-0029 X3).
+/// row the auditor leaves to the emitter (ADR-0032 X3).
 #[tokio::test(start_paused = true)]
 async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
     let mut fh = FailoverHarness::new("s10b-backup-crash-between-timer-a-copies", &["b1", "b2"]);

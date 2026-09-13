@@ -23,7 +23,7 @@ pub enum OutboundTxnMode {
     /// until the branch's first provisional, dropped if the txn dies first).
     /// Requests only: a response never bypasses its server transaction as a
     /// `Response` — the one raw path for response bytes is a retained
-    /// [`OutboundBody::Datagram`] (ADR-0029 X3).
+    /// [`OutboundBody::Datagram`] (ADR-0032 X3).
     Raw,
 }
 
@@ -32,7 +32,7 @@ pub enum OutboundTxnMode {
 pub enum OutboundBody {
     Request(SipRequest),
     Response(SipResponse),
-    /// A retained emission repeated as the bytes it left as (ADR-0029 X3):
+    /// A retained emission repeated as the bytes it left as (ADR-0032 X3):
     /// they reach the socket with no parse and no serialize, so a repeat
     /// cannot differ from the message it repeats. Always raw, whatever the
     /// mode says — the transaction that emitted the original is `Completed`

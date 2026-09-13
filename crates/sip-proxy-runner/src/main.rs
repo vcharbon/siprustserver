@@ -43,7 +43,7 @@
 //!   PROXY_UDP_SNDBUF SO_SNDBUF requested on every signalling socket, bytes
 //!                    (default empty = kernel wmem_default; the kernel clamps
 //!                    at wmem_max). Size it well above the neighbour
-//!                    unresolved queue (unres_qlen_bytes) — ADR-0031
+//!                    unresolved queue (unres_qlen_bytes) — ADR-0033
 //!   PROXY_SHARD_STALL_MS  a recv shard still on one packet past this is
 //!                    stalled: /readyz NotReady, gauge
 //!                    sip_proxy_recv_shards_stalled       (default 2000)

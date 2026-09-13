@@ -6,7 +6,7 @@
 //! pre-ingress hook at arrival time exactly as the source's `socket.on(
 //! "message")` handler did. Every send is one non-blocking `sendto`: a full
 //! send buffer drops the datagram and counts it, it never suspends the caller
-//! (ADR-0031 — the kernel can hold a socket's send buffer for seconds on an
+//! (ADR-0033 — the kernel can hold a socket's send buffer for seconds on an
 //! unresolved next hop, and the caller is an ingress loop). Trace recording is NOT here — in this port the
 //! typed `Recorder` channel (the recording decorator in `contracts.rs`) is the
 //! single recording path, replacing the source's `realTracing` boolean split.

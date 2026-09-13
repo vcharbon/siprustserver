@@ -1105,7 +1105,7 @@ impl<'a> RuleCall<'a> {
     /// answering either give-up may re-author the teardown — its cause, its
     /// CDR, the order the legs go — but not decline it: a call left Active
     /// after an `AckOf2xx` give-up is torn down by the framework with the CORE
-    /// verdict (ADR-0029 X5). A `PrackOf` give-up carries no such floor.
+    /// verdict (ADR-0032 X5). A `PrackOf` give-up carries no such floor.
     pub fn answers_initial_invite(&self, obligation: &Obligation) -> bool {
         call::helpers::answers_initial_invite(self.0, obligation)
     }
@@ -1240,7 +1240,7 @@ pub struct RuleContext<'a> {
     pub now_ms: i64,
     pub config: &'a B2buaConfig,
     /// The dialog-level ladder this event's ACK or PRACK discharged before the
-    /// rules ran (ADR-0029 X4) — the engine already retired its timers and
+    /// rules ran (ADR-0032 X4) — the engine already retired its timers and
     /// retained emission; a rule reads the fact and owns none of the plumbing.
     /// `None` for every other event, and for an ACK or PRACK that named no
     /// live ladder (a retransmitted ACK, a repeat PRACK).

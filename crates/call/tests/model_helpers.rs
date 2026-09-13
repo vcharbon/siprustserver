@@ -528,7 +528,7 @@ fn an_a_facing_sequence_number_is_never_below_one() {
     assert_eq!(a_rseq, 1, "RFC 3262 §3: zero is not a sequence number");
 }
 
-// ── Retained-emission ladders (ADR-0029 X3/X5) ───────────────────────────────
+// ── Retained-emission ladders (ADR-0032 X3/X5) ───────────────────────────────
 
 /// Every rung a `Final2xx` emission owes under `deadline`, walked from its
 /// first rung the way the executor walks it.
