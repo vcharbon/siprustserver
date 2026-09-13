@@ -477,8 +477,9 @@ is enforced on *identity + membership source*, not *address representation*
 The instant a worker's endpoint leaves the routable set — `ready=false` in its
 EndpointSlice, or the endpoint gone. The proxy drops the ordinal and tombstones
 its address; the process is untouched but **observes** it: the informer shows a
-worker its own endpoint, and once it has seen itself routable, its disappearance
-latches `Draining` whether or not SIGTERM has come (ADR-0031 D6; `is_withdrawn`
+worker its own endpoint, and once it has seen itself routable, a `terminating` or
+absent own endpoint (never a readiness flap: `Draining` is terminal) latches
+`Draining` whether or not SIGTERM has come (ADR-0031 D6; `is_withdrawn`
 on the supervisor, the `b2bua_withdrawn_running` gauge). A static membership
 never shows a worker itself. Four ways out — graceful, abrupt, vanished, restarted in
 place — in ADR-0031.

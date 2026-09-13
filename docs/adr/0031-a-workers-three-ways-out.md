@@ -151,7 +151,8 @@ to takeover copies (ADR-0014). The SIGTERM-versus-informer race (tens of millise
 either way) is benign because of D1: an INVITE served in it is replicated.
 
 **D6 — A worker observes its own endpoint.** The worker already runs the informer; one
-predicate on its own `targetRef.name` tells it it is withdrawn (`ready=false` or absent).
+predicate on its own `targetRef.name` tells it it is withdrawn (`terminating` and not
+`ready`, or absent — a not-ready endpoint that is not terminating is a readiness flap).
 On that signal it latches `Draining` even if SIGTERM is late (a preStop hook, a stuck
 kubelet), and it is the precondition D2 needs to know that nothing new will arrive. A
 worker on a static membership never observes itself and keeps today's behaviour. This
@@ -268,7 +269,7 @@ incarnation once it listens again (the same reconnect as today's reboot).
 | D3 forward-flush guard | active on the last flushes | active for the park latency | **active on the heal** | inert |
 | D4 tombstone / probe `Dead` | tombstone, re-armed on sight | tombstone | probe, then tombstone in 3b | tombstone |
 | D5 keep serving, never stand down | drain finishes what reaches it | 2 s into a void | timers only | unchanged |
-| D6 self-observation | active | active (the endpoint is absent) | 3b only | active |
+| D6 self-observation | active | active (the endpoint is absent) | 3b only | inert (a flap is no withdrawal) |
 
 D3 is the one rule every case shares, and it is a refusal, not a new flow. D2 is the one
 rule that could cut a drain short, and its three preconditions make it inert wherever the

@@ -311,6 +311,17 @@ impl ReplicatedB2buaSut {
             .unwrap_or_else(|| repl_net::frame::Watermark::new(0, 0))
     }
 
+    /// Whether `peer`'s flow on `partition` is connected to THIS node's
+    /// replication server and has reported applying everything this node ever
+    /// logged for it (ADR-0031 D2) — the per-flow predicate the drain's
+    /// caught-up exit is built from. `false` while crashed or unreplicated.
+    pub fn flow_caught_up(&self, peer: &str, partition: repl_net::frame::Partition) -> bool {
+        self.core
+            .as_ref()
+            .and_then(|c| c.repl_store())
+            .is_some_and(|s| s.changelog().flow_caught_up(peer, partition))
+    }
+
     /// **Ground-truth** live in-memory call count (the actual `inner.calls` map
     /// size), bypassing the `creations − removals` counters. The X11 reclaim/
     /// handback accounting is exactly what's under test, so assertions key on this

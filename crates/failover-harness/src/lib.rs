@@ -222,4 +222,9 @@ macro_rules! transparent_matrix {
 // needs only this crate (+ scenario-harness) for the canonical scenario.
 pub use b2bua::repl::PeerLink;
 pub use b2bua::store::PartitionRole;
+/// The replication **flow** a changelog sub-log feeds (`Bak` = forward flushes to
+/// a backup, `Pri` = takeover copies a peer reclaims), as
+/// [`ReplicatedB2buaSut::flow_caught_up`] names it. Distinct from
+/// [`PartitionRole`], which names a body's keyspace in the store.
+pub use repl_net::frame::Partition;
 pub use sip_proxy::registry::WorkerHealth;
