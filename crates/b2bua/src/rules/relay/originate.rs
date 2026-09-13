@@ -70,6 +70,31 @@ fn removed(header_updates: &[(String, Option<String>)], header: &HeaderName) -> 
     header_updates.iter().any(|(name, value)| value.is_none() && header.matches(name))
 }
 
+/// The call's own offer on an originated leg's assembled headers: the
+/// `Supported` set states every tag in `offered`, once — an absent line comes
+/// into being for them, a line already naming them all is left byte-identical.
+fn apply_offered_option_tags(extra_headers: &mut Vec<MsgHeader>, offered: &[String]) {
+    if offered.is_empty() {
+        return;
+    }
+    let name = <header::kind::Supported as header::kind::HeaderKind>::name();
+    let lines: Vec<TokenListHeader<header::kind::Supported>> = extra_headers
+        .iter()
+        .filter(|h| name.matches(&h.name))
+        .filter_map(|h| TokenListHeader::parse(&h.value).ok())
+        .collect();
+    let stated = TokenListHeader::combine(lines).unwrap_or_else(TokenListHeader::empty);
+    if offered.iter().all(|tag| stated.contains(tag)) {
+        return;
+    }
+    let widened = offered.iter().fold(stated, |s, tag| s.with(tag.as_str()));
+    extra_headers.retain(|h| !name.matches(&h.name));
+    extra_headers.push(MsgHeader {
+        name: SipStr::owned(name.as_wire_str()),
+        value: SipStr::owned(&widened.to_wire()),
+    });
+}
+
 /// The call-scoped withhold on an originated leg's assembled headers: the
 /// `Supported` and `Require` sets are narrowed by `withheld`, and a set the
 /// narrowing empties drops its header — a withheld tag leaves ONE wire form on
@@ -181,6 +206,11 @@ pub fn build_b_leg(
     // source stated them — the withhold is the call's declared incapability
     // and outranks every advertisement.
     withheld_option_tags: &[String],
+    // The tags the call offers this leg on the stack's own behalf
+    // (`rules::capabilities::offered_option_tags`): stated on the assembled
+    // `Supported` line whatever source stated it, before the withhold, which
+    // outranks it.
+    offered_option_tags: &[String],
     // Leg role (ADR-0014/0016). `None` ⇒ [`LegKind::Destination`]. `adopted` is
     // left `None` so it derives from the kind (`is_adopted`): a `media` leg is
     // unadopted and thus gated out of the generic relay-to-peer fallback.
@@ -231,11 +261,10 @@ pub fn build_b_leg(
         .collect();
     // Advertise this face's capability set on the originated b-leg INVITE (RFC
     // 3261 §20.5/§20.37/§20.1) — the originator's own, relayed, unless the
-    // call declares one; a half nobody stated carries no line. When a
-    // `relayFirst18x` strategy is active, `apply_supported_for_18x` runs after
-    // this and rewrites `Supported` from alice's value (stripping `100rel` as
-    // the strategy dictates). Neither clobbers a caller-supplied value from
-    // `header_updates`.
+    // call declares one; a half nobody stated carries no line. A
+    // `relayFirst18x` strategy that keeps the originated leg unreliable strips
+    // `100rel` after this (`narrow_supported_for_18x`). Neither clobbers a
+    // caller-supplied value from `header_updates`.
     for (name, value) in capabilities.lines() {
         if !extra_headers.iter().any(|h| name.matches(&h.name)) {
             extra_headers.push(MsgHeader {
@@ -279,9 +308,11 @@ pub fn build_b_leg(
         }
     }
 
-    // The call-scoped withhold: narrow the assembled option-tag sets by the
-    // tags the call never offers an originated leg — after every source has
-    // stated its lines, so no later mint of the same names can resurface one.
+    // The call's own offer, then its withhold, on the assembled option-tag
+    // sets — after every source has stated its lines, so no later mint of the
+    // same names can resurface a withheld tag or lose an offered one; the
+    // withhold runs last and outranks the offer.
+    apply_offered_option_tags(&mut extra_headers, offered_option_tags);
     apply_withheld_option_tags(&mut extra_headers, withheld_option_tags);
 
     // RFC 7315 §5.6: the element that STARTS a leg generates the identifier its

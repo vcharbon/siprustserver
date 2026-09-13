@@ -120,7 +120,8 @@ CSeq: 314 INVITE\r\n"
             header_updates,
             capabilities,
             None, // no charging vector
-            &[],  // no withheld option tags
+            &[],
+            &[], // no withheld option tags
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
@@ -362,6 +363,7 @@ Content-Length: 0\r\n\r\n";
             &caps,
             None,
             &[],
+            &[],
             None,
         )
         .expect("nothing to refuse");
@@ -392,6 +394,7 @@ Content-Length: 0\r\n\r\n";
             &[],
             &caps,
             None,
+            &[],
             &[],
             None,
         )

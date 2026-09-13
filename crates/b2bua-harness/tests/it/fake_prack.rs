@@ -1,11 +1,12 @@
 //! fake-prack — `relayFirst18xTo180` strategy `fake-prack`. Port of
 //! `tests/scenarios/fake-prack.ts`.
 //!
-//! The B2BUA keeps bob on reliable provisional (Supported:100rel forwarded),
-//! downgrades the first 18x to a bare 180 for alice, **originates** the PRACK
-//! toward bob itself, caches bob's reliable-1xx SDP per dialog, and substitutes
-//! the cached SDP into the 200 OK toward alice. Locally answers in-dialog UPDATE
-//! (skeleton-fit SDP from alice's offer, else 488).
+//! The B2BUA puts bob on reliable provisional (Supported:100rel offered on its
+//! own behalf, whatever alice advertised — it acknowledges bob's reliable 1xx
+//! itself), downgrades the first 18x to a bare 180 for alice, **originates**
+//! the PRACK toward bob itself, caches bob's reliable-1xx SDP per dialog, and
+//! substitutes the cached SDP into the 200 OK toward alice. Locally answers
+//! in-dialog UPDATE (skeleton-fit SDP from alice's offer, else 488).
 //!
 //! The `forking` / `failover` cases ride the `/call/failure` b-leg failover path:
 //! bob1 goes reliable (183/100rel + PRACK + cached SDP) then 503s; the B2BUA fails
@@ -96,6 +97,54 @@ async fn basic() {
     let ok = call.expect(200).await;
     assert!(!ok.body().is_empty(), "alice 200 carries cached SDP");
     assert!(is_sdp(ok.header::<MediaType>()), "Content-Type application/sdp on alice's 200",);
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _ = h.finish().await;
+}
+
+/// The offer is the stack's own (RFC 3262 §3): an originator that advertises
+/// no option tag at all still gets bob solicited for reliable provisionals,
+/// PRACKed by the B2BUA, and answered with the cached 18x SDP.
+#[tokio::test]
+async fn offers_100rel_where_the_originator_advertised_nothing() {
+    let h = Harness::with_transit_delay("fake-prack-offers-100rel", 0);
+    let alice = h.agent("alice", "127.0.0.1:5708").await;
+    let bob = h.agent("bob", "127.0.0.1:5718").await;
+    let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5728", 5718).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+
+    let mut uas = bob.receive("INVITE").await;
+    assert!(
+        has_token(uas.request().header::<Supported>(), "100rel"),
+        "100rel offered to bob on the stack's own behalf",
+    );
+
+    uas.respond(183, "Session Progress")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "1")
+        .with_sdp(ANSWER)
+        .await;
+
+    let p180 = call.expect(180).await;
+    assert!(p180.body().is_empty(), "bare 180, no body");
+    assert!(!has_token(p180.header::<Require>(), "100rel"));
+    assert!(p180.header::<RSeq>().is_none());
+
+    let mut prack = bob.receive("PRACK").await;
+    assert!(rack_matches(prack.request(), 1, Method::Invite), "RAck 1 .. INVITE");
+    prack.respond(200, "OK").await;
+
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    assert!(!ok.body().is_empty(), "alice 200 carries cached SDP");
+    assert!(is_sdp(ok.header::<MediaType>()), "Content-Type application/sdp on alice's 200");
 
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;

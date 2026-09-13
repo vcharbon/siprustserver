@@ -75,6 +75,7 @@ Content-Length: 0\r\n\r\n",
             &[],                       // no header updates
             &CapabilitySet::default(), // the stack's own set, stated in full
             None,
+            &[],
             &[],  // no withheld option tags
             None, // Destination leg
         )
@@ -147,7 +148,8 @@ Content-Length: 0\r\n\r\n",
             &[],
             &CapabilitySet::default(),
             None, // no charging vector
-            &[],  // no withheld option tags
+            &[],
+            &[], // no withheld option tags
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
@@ -237,7 +239,8 @@ Content-Length: 0\r\n\r\n",
             &[],
             &CapabilitySet::default(),
             None, // no charging vector
-            &[],  // no withheld option tags
+            &[],
+            &[], // no withheld option tags
             None,
         )
         .expect("the R-URI under test reads");
@@ -330,7 +333,8 @@ Content-Length: 0\r\n\r\n",
             &updates,
             &CapabilitySet::default(),
             None, // no charging vector
-            &[],  // no withheld option tags
+            &[],
+            &[], // no withheld option tags
             None,
         )
         .map(|(_leg, effect)| match effect.body {
@@ -385,6 +389,7 @@ mod charging_tests {
             &[],
             &CapabilitySet::default(),
             charging,
+            &[],
             &[], // no withheld option tags
             None,
         )
@@ -458,9 +463,10 @@ mod charging_tests {
 }
 
 mod withhold_tests {
-    //! The call-scoped option-tag withhold on a leg the B2BUA originates
-    //! (`features.withhold_option_tags`): a withheld tag never rides the
-    //! originated INVITE, whichever source stated its line.
+    //! The call-scoped option-tag withhold and offer on a leg the B2BUA
+    //! originates (`features.withhold_option_tags`, the strategy's own offer):
+    //! a withheld tag never rides the originated INVITE, whichever source
+    //! stated its line; an offered one always does, unless withheld.
     use super::super::advert::advertisement_tests::a_leg_invite_carrying;
     use super::*;
     use sip_message::header::HeaderName;
@@ -468,6 +474,16 @@ mod withhold_tests {
     /// Build the originated b-leg INVITE under `withheld` and return every
     /// value line of `name` on it, verbatim.
     fn b_leg_values(a: &SipRequest, withheld: &[String], name: HeaderName) -> Vec<String> {
+        b_leg_values_offering(a, withheld, &[], name)
+    }
+
+    /// [`b_leg_values`] with `offered` stated on the stack's own behalf too.
+    fn b_leg_values_offering(
+        a: &SipRequest,
+        withheld: &[String],
+        offered: &[String],
+        name: HeaderName,
+    ) -> Vec<String> {
         let (_leg, effect) = build_b_leg(
             "w0|call-ref|xyz",
             "b-1",
@@ -489,6 +505,7 @@ mod withhold_tests {
             ),
             None, // no charging vector
             withheld,
+            offered,
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
@@ -538,5 +555,35 @@ mod withhold_tests {
             b_leg_values(&a, &withheld_100rel(), HeaderName::Supported),
             ["timer, replaces"],
         );
+    }
+
+    /// An offered tag rides the originated INVITE whatever the originator
+    /// advertised: a `Supported` comes into being where it sent none, the tag
+    /// is added to the set it did send, and a set already naming it is left
+    /// byte-identical.
+    #[test]
+    fn an_offered_tag_is_stated_once_whatever_the_originator_advertised() {
+        let offered = withheld_100rel();
+        let none = a_leg_invite_carrying(&[]);
+        assert_eq!(b_leg_values_offering(&none, &[], &offered, HeaderName::Supported), ["100rel"]);
+        let other = a_leg_invite_carrying(&[("Supported", "timer")]);
+        assert_eq!(
+            b_leg_values_offering(&other, &[], &offered, HeaderName::Supported),
+            ["timer, 100rel"],
+        );
+        let same = a_leg_invite_carrying(&[("Supported", "100rel, timer")]);
+        assert_eq!(
+            b_leg_values_offering(&same, &[], &offered, HeaderName::Supported),
+            ["100rel, timer"],
+        );
+    }
+
+    /// The withhold outranks the offer: a tag the call both offers and
+    /// withholds never rides.
+    #[test]
+    fn a_withheld_tag_never_rides_even_when_offered() {
+        let a = a_leg_invite_carrying(&[]);
+        let tags = withheld_100rel();
+        assert!(b_leg_values_offering(&a, &tags, &tags, HeaderName::Supported).is_empty());
     }
 }

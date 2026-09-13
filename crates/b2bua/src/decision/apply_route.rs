@@ -239,6 +239,7 @@ pub async fn apply_route(
         &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
         call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
         call.features.as_ref().and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]),
+        &capabilities::offered_option_tags(&call, None),
         None,
     ) {
         Ok(built) => built,
@@ -278,10 +279,11 @@ pub async fn apply_route(
         }
         // ── relayFirst18xTo180 → strategy-aware Supported: 100rel + self-disable ─
         //
-        // The B2BUA forwards alice's `Supported` to bob; the 18x-management policy
-        // then strips `100rel` (and self-disables) depending on the strategy and
-        // whether alice offered SDP. Port of `applyRoute.ts`'s Supported handling.
-        draft = apply_supported_for_18x(draft, a_invite, &mut call);
+        // The mint stated bob's `Supported` (alice's relayed, or the declared
+        // set, plus the `100rel` fake-prack offers on the stack's own behalf);
+        // a strategy that keeps bob unreliable strips `100rel` here, and the
+        // fake-prack delayed-offer fallback self-disables.
+        draft = narrow_supported_for_18x(draft, a_invite, &mut call);
         if let Ok(edited) = draft.freeze() {
             *req = edited;
         }
@@ -561,18 +563,19 @@ fn defers_routing(call: &Call) -> bool {
     })
 }
 
-/// Forward alice's `Supported` onto the b-leg INVITE with strategy-aware
-/// `100rel` handling, and self-disable the policy on the delayed-offer fallback.
-/// Port of the `relayFirst18xTo180` block in `applyRoute.ts`:
+/// The strategy-aware `100rel` narrowing of the b-leg INVITE's `Supported`,
+/// and the self-disable of the policy on the delayed-offer fallback:
 ///   - `drop-sdp`/`keep-sdp`: strip `100rel` (we never relay PRACK, alice was
 ///     not told to expect reliable provisional).
-///   - `fake-prack` with alice SDP: keep `100rel` (bob goes reliable so we can
-///     originate PRACK + cache his SDP).
+///   - `fake-prack` with alice SDP: the mint's statement stands — it offers
+///     `100rel` on the stack's own behalf whatever alice advertised
+///     (`capabilities::offered_option_tags`), so bob goes reliable and we
+///     originate the PRACK + cache his SDP.
 ///   - `fake-prack` with NO alice SDP (delayed offer): strip `100rel` AND
 ///     disable the policy (fall back to plain relay; no half-active state).
 ///
 /// `promote-pem-to-200` is owned by the PEM service (Slice 4) and is left alone.
-fn apply_supported_for_18x(
+fn narrow_supported_for_18x(
     draft: RequestDraft,
     a_invite: &SipRequest,
     call: &mut Call,
@@ -593,7 +596,9 @@ fn apply_supported_for_18x(
             .and_then(Result::ok)
             .is_some_and(|ct| ct.is("application/sdp"));
 
-    let keep_100rel = strategy == RelayFirst18xStrategy::FakePrack && alice_has_sdp;
+    if strategy == RelayFirst18xStrategy::FakePrack && alice_has_sdp {
+        return draft;
+    }
     let withheld =
         call.features.as_ref().and_then(|f| f.withhold_option_tags.clone()).unwrap_or_default();
 
@@ -605,10 +610,10 @@ fn apply_supported_for_18x(
     }
 
     // Compute the Supported value to forward to bob. The call-scoped withhold
-    // (`features.withhold_option_tags`) outranks the strategy's own keep: a
-    // withheld tag never rides, whichever machine states the line.
+    // (`features.withhold_option_tags`) outranks the strategy: a withheld tag
+    // never rides, whichever machine states the line.
     let supported_out = alice_supported.and_then(|offered| {
-        let kept = if keep_100rel { offered } else { offered.without("100rel") };
+        let kept = offered.without("100rel");
         let kept = withheld.iter().fold(kept, |set, tag| set.without(tag));
         (!kept.is_empty()).then_some(kept)
     });

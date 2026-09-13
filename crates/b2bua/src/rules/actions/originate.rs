@@ -92,6 +92,7 @@ impl ActionExecutor<'_> {
             &capabilities::relaying_for_leg(call, &leg_id, a_invite.headers()),
             call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
             call.features.as_ref().and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]),
+            &capabilities::offered_option_tags(call, kind),
             kind,
         ) {
             Ok(built) => built,
