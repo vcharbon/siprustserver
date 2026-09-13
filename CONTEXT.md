@@ -304,7 +304,7 @@ k8s, via the `/ready` HTTP probe. **Ready** = every **Reclaim** stream to a
 *reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
 dead/slow peer cannot hang readiness). **Backup** streams are opened only *after*
 `Ready` and **never gate it** (fire-and-forget; observable via the store + metrics,
-not a readiness sub-state). **Draining** = latched on SIGTERM; terminal.
+not a readiness sub-state). **Draining** = latched on SIGTERM; terminal. The drain exits on the first of: live calls cleared, every pulling peer caught up to this node's changelog head, the grace (ADR-0031 D2).
 
 ## HTTP call-decision adaptation
 
@@ -454,6 +454,23 @@ delta non-fatal (ADR-0012 D1/D2). The repl puller additionally resolves a
 the proxy reaches workers by the informer-fed Pod IP (ADR-0012 D4). Consistency
 is enforced on *identity + membership source*, not *address representation*
 (ADR-0012 D5).
+
+**Withdrawal**:
+The instant a worker's endpoint leaves the routable set — `ready=false` in its
+EndpointSlice, or the endpoint gone. The proxy drops the ordinal and tombstones
+its address; the process is untouched and learns nothing from it (SIGTERM is its
+only signal). Three ways out — graceful, abrupt, vanished — in ADR-0031.
+
+**Terminating member**:
+An endpoint with `serving=true, terminating=true` (a graceful delete, for its
+grace). Still a **replication peer** (pulled until it disappears), no longer a
+**routing target** (ADR-0031 D1: one snapshot, two predicates).
+
+**Departed-address tombstone**:
+The proxy registry's memory of an address that left the set: resolvable by
+`lookup_by_address` as its last ordinal with health `Dead` for Timer H, keyed by
+address, so a response still arriving from it reverse-fails to the cookie's
+backup; a join at the address clears it. Never affects ordinal resolution.
 
 ## Call reaper vocabulary
 

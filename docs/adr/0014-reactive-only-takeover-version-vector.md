@@ -47,7 +47,8 @@ primary+backup mutations (a latent equal-`gen` divergence).
    Apply rules (direction resolved by the partition):
    - **Delete** → apply unconditionally (delete-wins, both directions).
    - **Forward** (primary → backup) Create/Update → apply **always** (follower
-     defers to authority), except a `call_ref` the backup locally deleted.
+     defers to authority), except a `call_ref` the backup locally deleted and,
+     since ADR-0031 D3, a backup regression (refused, lifecycle progress folded).
    - **Reverse** (backup → primary) Create/Update → apply iff `p_in == p_cur && b_in > b_cur`
      (untouched-by-primary since the backup branched, and a genuinely newer backup
      mutation); else keep our own. No local copy → accept.
