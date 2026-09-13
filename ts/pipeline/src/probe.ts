@@ -122,10 +122,12 @@ export interface ShapeProbe extends ProbeSite {
 /**
  * A received body that differs from the one the expectation states, both
  * sides as the wire carried them — the fold under `compare` decided there IS
- * a difference and erased nothing from the record of it. Under `sdp` there
- * is one probe per differing line key, {@link BodyProbe.sdp} naming the
- * section and the key, and each side is that key's verbatim lines joined
- * by `\n`.
+ * a difference and erased nothing from the record of it. Each side is a list
+ * the way a header probe's is: under `exact` and `xml` one element, the whole
+ * text; under `sdp` there is one probe per differing line key,
+ * {@link BodyProbe.sdp} naming the section and the key, and each side is that
+ * key's verbatim lines in wire order, one element per line (a `document` row
+ * carries the whole text as its one element).
  */
 export interface BodyProbe extends ProbeSite {
   readonly kind: "body"
@@ -133,10 +135,10 @@ export interface BodyProbe extends ProbeSite {
   readonly mediaType: string
   readonly scope: MsgScope
   readonly compare: Body.BodyCompare
-  /** The text the expectation states. */
-  readonly captured: string
-  /** The text the run received; `""` where the message carried no body. */
-  readonly replayed: string
+  /** What the expectation states: the whole text, or the key's lines under `sdp`. */
+  readonly captured: ReadonlyArray<string>
+  /** What the run received: the whole text (`""` where the message carried no body), or the key's lines under `sdp`. */
+  readonly replayed: ReadonlyArray<string>
   /** Where in the session description the difference sits; set under `sdp` only. */
   readonly sdp?: { readonly section: string; readonly line: string }
 }

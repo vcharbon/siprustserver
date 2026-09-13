@@ -462,8 +462,8 @@ describe("an expected body held against the one received", () => {
       step: "s9",
       mediaType: "application/example+xml",
       compare: "exact",
-      captured: XML,
-      replayed: wrapped
+      captured: [XML],
+      replayed: [wrapped]
     })
     expect(signature(probe)).toBe("body:application/example+xml:request:INFO:in-dialog")
   })
@@ -480,13 +480,13 @@ describe("an expected body held against the one received", () => {
     const probes = run(resource("xml"), retargeted)
     expect(probes).toHaveLength(1)
     // The record keeps both sides as the wire carried them: the fold decides, it does not edit.
-    expect(probes[0]!.probe.kind === "body" && probes[0]!.probe.replayed).toBe(retargeted)
+    expect(probes[0]!.probe.kind === "body" && probes[0]!.probe.replayed).toEqual([retargeted])
   })
 
   it("a reception with no body at all is confronted, as the empty text", () => {
     const probes = run(resource(), undefined)
     expect(probes).toHaveLength(1)
-    expect(probes[0]!.probe.kind === "body" && probes[0]!.probe.replayed).toBe("")
+    expect(probes[0]!.probe.kind === "body" && probes[0]!.probe.replayed).toEqual([""])
   })
 
   it("a resource with no `mode` is text, and is held against the file", () => {
@@ -551,11 +551,24 @@ describe("an expected body held against the one received", () => {
         step: "s9",
         mediaType: "application/sdp",
         compare: "sdp",
-        captured: "a=ptime:20",
-        replayed: "a=ptime:30",
+        captured: ["a=ptime:20"],
+        replayed: ["a=ptime:30"],
         sdp: { section: "m0", line: "a=ptime" }
       })
       expect(signature(probe)).toBe("body:sdp:m0:a=ptime:request:INFO:in-dialog")
+    })
+
+    it("carries one element per verbatim line of the key, the way a header record carries one per value", () => {
+      const probes = runSdp(OFFER.replace("a=rtpmap:8 PCMA/8000", "a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000"))
+      expect(probes).toHaveLength(1)
+      const at = probes[0]!
+      expect(at.probe.kind === "body" && at.probe).toMatchObject({
+        captured: ["a=rtpmap:8 PCMA/8000"],
+        replayed: ["a=rtpmap:8 PCMA/8000", "a=rtpmap:101 telephone-event/8000"]
+      })
+      const record = recordOf({ lane: "l", capture: "c", case: "k", run: 0 }, at, { class: "unlisted", rule: "", ticket: "" })
+      expect(record.captured).toEqual(["a=rtpmap:8 PCMA/8000"])
+      expect(record.replayed).toEqual(["a=rtpmap:8 PCMA/8000", "a=rtpmap:101 telephone-event/8000"])
     })
 
     it("equal under the mask produces nothing; the mask reads the tokens only where the run rebooked", () => {
@@ -569,10 +582,18 @@ describe("an expected body held against the one received", () => {
       ])
     })
 
+    it("on a verbatim run the same structure in other bytes is one `document:bytes` row", () => {
+      const bareLf = OFFER.replace(/\r\n/g, "\n")
+      expect(runSdp(bareLf, "rebooked")).toEqual([])
+      const probes = runSdp(bareLf, "verbatim")
+      expect(probes.map((p) => signature(p.probe))).toEqual(["body:sdp:document:bytes:request:INFO:in-dialog"])
+      expect(probes[0]!.probe.kind === "body" && probes[0]!.probe).toMatchObject({ captured: [OFFER], replayed: [bareLf] })
+    })
+
     it("a body the system dropped whole is one `document` row, the captured text against the empty one", () => {
       const probes = runSdp(undefined)
       expect(probes.map((p) => signature(p.probe))).toEqual(["body:sdp:document:sdp:request:INFO:in-dialog"])
-      expect(probes[0]!.probe.kind === "body" && probes[0]!.probe).toMatchObject({ captured: OFFER, replayed: "" })
+      expect(probes[0]!.probe.kind === "body" && probes[0]!.probe).toMatchObject({ captured: [OFFER], replayed: [""] })
     })
   })
 
@@ -636,8 +657,8 @@ describe("recordOf", () => {
           mediaType: "application/example+xml",
           scope: { kind: "request", method: "INFO", inDialog: true },
           compare: "exact",
-          captured: "<a/>",
-          replayed: "<b><a/></b>"
+          captured: ["<a/>"],
+          replayed: ["<b><a/></b>"]
         }
       },
       { class: "unlisted", rule: "", ticket: "" }

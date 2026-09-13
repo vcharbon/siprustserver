@@ -23,7 +23,10 @@ export type BodyMode = typeof BodyMode.Type
  * between tags removed, ends trimmed — nothing else); or as an SDP session
  * description (sections by position, lines per section as a multiset, `o=`
  * sess-id and sess-version masked always, the fields the expect's `rewrite`
- * tokens name masked where the run rebooked media). Absent means `exact`.
+ * tokens name — `c=addr` the address of a `c=IN IP4` line, `m=port` the
+ * non-zero port of an `m=` line with its `/count` kept, `a=rtcp` never —
+ * masked where the run rebooked media; on a verbatim run the same bytes once
+ * the structure matches). Absent means `exact`.
  */
 export const BodyCompare = Schema.Literals(["exact", "xml", "sdp"])
 export type BodyCompare = typeof BodyCompare.Type

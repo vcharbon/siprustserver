@@ -86,16 +86,25 @@ describe("expectBody", () => {
     expect(expectBody(bare, "uac1_r0")).toEqual({ body: { mode: "absent" }, resources: [], flags: [] })
   })
 
-  it("leaves a binary payload undeclared, whatever its type", () => {
-    const text = info()
+  /** The message as extraction hands a binary payload over: `head` + `body_b64`. */
+  const asBinary = (text: Flows.Msg): Flows.Msg => {
     const { raw, ...rest } = text as Flows.Msg & { raw: string }
     const cut = raw.indexOf("\r\n\r\n")
-    const binary: Flows.Msg = {
+    return {
       ...rest,
       head: raw.slice(0, cut),
       body_b64: Buffer.from(raw.slice(cut + 4), "latin1").toString("base64")
     } as Flows.Msg
-    expect(expectBody(binary, "uac1_r0")).toEqual({ body: undefined, resources: [], flags: [] })
+  }
+
+  it("leaves a binary payload undeclared, whatever its type", () => {
+    expect(expectBody(asBinary(info()), "uac1_r0")).toEqual({ body: undefined, resources: [], flags: [] })
+  })
+
+  it("stores a binary SDP as a resource written back as the bytes it came as, as the send side does", () => {
+    const stored = expectBody(asBinary(info({ contentType: "application/sdp", text: "v=0\r\n" })), "uac1_r0")
+    expect(stored.body).toMatchObject({ ref: "resources/uac1_r0_0.sdp", compare: "sdp" })
+    expect(stored.resources).toEqual([{ relPath: "resources/uac1_r0_0.sdp", text: "v=0\r\n", binary: true }])
   })
 })
 

@@ -38,7 +38,8 @@ pub struct ResourceBody {
     /// Rewrite tokens the lane applies before emission (e.g. `c=addr`,
     /// `m=port` on SDP). Omitted where the body replays byte-exact. On an
     /// expect the tokens name the lane-owned fields the `sdp` compare masks
-    /// where the run rebooked media.
+    /// where the run rebooked media: `c=addr` the address of a `c=IN IP4`
+    /// line, `m=port` the non-zero port of an `m=` line, its `/count` kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rewrite: Vec<String>,
     /// Handling mode, on a body the registry freezes.
@@ -71,9 +72,12 @@ pub enum BodyCompare {
     /// As an SDP session description: session section then media sections by
     /// position; within a section lines compare as a multiset (attribute order
     /// erased); `o=` sess-id and sess-version are masked always, and every
-    /// field a `rewrite` token of the expect names (`c=addr`: `c=` and
-    /// `a=rtcp` address; `m=port`: `m=` and `a=rtcp` port) is masked where the
-    /// run's media plane rebooked it. Nothing else.
+    /// field a `rewrite` token of the expect names — exactly what the render
+    /// writes: `c=addr` the address of a `c=IN IP4` line, `m=port` the non-zero
+    /// port of an `m=` line with its `/count` kept; `a=rtcp` never — is masked
+    /// where the run's media plane rebooked it. On a verbatim run the tokens
+    /// mask nothing and two descriptions the structure cannot tell apart must
+    /// be the same bytes. Nothing else.
     Sdp,
 }
 

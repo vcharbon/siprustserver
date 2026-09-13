@@ -81,10 +81,10 @@ only.
 
 | change | where |
 |---|---|
-| `BodyCompare` gains `sdp`: session section then media sections by position, lines per section as a multiset (attribute order erased), `o=` sess-id and sess-version masked always, and every field the expect's own `rewrite` tokens name (`c=addr`: `c=` and `a=rtcp` address; `m=port`: `m=` and `a=rtcp` port) masked where the run's media plane REBOOKED it — on a verbatim run the tokens mask nothing. Refused on a body whose stated content type is not `application/sdp` by `body/compare-sdp-type` | §8.3, `pivot-schema`, `@sip/contracts` |
+| `BodyCompare` gains `sdp`: session section then media sections by position, lines per section as a multiset (attribute order erased), `o=` sess-id and sess-version masked always, and every field the expect's own `rewrite` tokens name — exactly what the render writes: `c=addr` the address of a `c=IN IP4` line, `m=port` the non-zero port of an `m=` line with its `/count` kept, `a=rtcp` never — masked where the run's media plane REBOOKED it; on a verbatim run the tokens mask nothing and two descriptions the structure cannot tell apart must be the same bytes (one `document:bytes` record otherwise). Refused on a body whose stated content type is not `application/sdp` by `body/compare-sdp-type` | §8.3, `pivot-schema`, `@sip/contracts` |
 | the generator stores an expected SDP as `{ ref, rewrite, compare: "sdp" }` plus its resource file, under the expect-side name `resources/<actor>_r<n>_0.sdp`; multipart stays a shape | §8.3, generator |
 | the interpreter gates a `compare: sdp` resource on presence AND media type, exactly as the `sdp-present` shape gates; the content is the confrontation's | §6.3, §8.3, `pivot-interpreter` |
-| the confrontation states one `body` record per differing line key, `body:sdp:<section>:<line>:<scope>` (sections `session`, `m<i>`), a side that is no session description as one `body:sdp:document:sdp:<scope>` record, a media section on one side only as one `body:sdp:m<i>:section:<scope>` record — every line verbatim; the driver reads the run's media mode off the bundle and hands it to the confrontation | the pipeline's `confront`, `sdpfold`, the driver |
+| the confrontation states one `body` record per differing line key, `body:sdp:<section>:<line>:<scope>` (sections `session`, `m<i>`), a side that is no session description as one `body:sdp:document:sdp:<scope>` record, a media section on one side only as one `body:sdp:m<i>:section:<scope>` record, two descriptions a verbatim run carried as different bytes with the structure equal as one `body:sdp:document:bytes:<scope>` record — every line verbatim, each side one element per line as a header record carries one per value; the driver reads the run's media mode off the bundle and hands it to the confrontation | the pipeline's `confront`, `sdpfold`, the driver |
 
 **2026-09-13 — an expected body is asserted by CONTENT, and the confrontation
 states the difference.** A single body on an expect was a declared shape and
@@ -1905,12 +1905,19 @@ trailing whitespace trimmed) and nothing else — no attribute reordering, no
 entity work; or `sdp`: both sides as a session description — the session
 section then the media sections by position; within a section lines compare
 as a multiset (attribute order erased); `o=` sess-id and sess-version are
-masked always, and every field a `rewrite` token of the expect names
-(`c=addr`: `c=` and `a=rtcp` address; `m=port`: `m=` and `a=rtcp` port) is
-masked where the run's media plane rebooked it. Nothing else. **The tokens
-name WHICH fields are lane-owned; the run's media mode says whether they were
-applied**: on a `verbatim` run the tokens mask nothing, so a `c=` or an `m=`
-the system alters is a difference. The generator stores every expected SDP
+masked always, and every field a `rewrite` token of the expect names is
+masked where the run's media plane rebooked it. The mask states exactly what
+the render writes: `c=addr` masks the address of a `c=IN IP4` line and no
+IP6 line; `m=port` masks the port of an `m=` line where it is non-zero, its
+`/count` kept, and no port-0 stream; `a=rtcp` is never written and never
+masked. Nothing else. **The tokens name WHICH fields are lane-owned; the
+run's media mode says whether they were applied**: on a `verbatim` run the
+tokens mask nothing, so a `c=` or an `m=` the system alters is a difference,
+and the system relays the description byte for byte, so two descriptions the
+structure cannot tell apart — an attribute reordered inside a section, a
+bare-LF line ending, trailing whitespace, an inner blank line — must be the
+same bytes; on a `rebooked` run those are erased, because the render
+re-assembles the line endings there. The generator stores every expected SDP
 this way and leaves `compare` unstated on every other body; `xml` is authored,
 where a document has to say that a re-serialised body is the same body, and
 `{ "mode": "sdp-present" }` stays an authored shape for a document that
@@ -1930,10 +1937,13 @@ classify. Under `sdp` there is one record per differing line key,
 `body:sdp:<section>:<line>:<scope>` — `<section>` is `session` or `m<i>`
 (0-based, wire order), `<line>` is `<type>=` for a session line or `a=<name>`
 for an attribute, the four direction attributes under one key `a=direction` —
-each side carrying that section's verbatim lines of that key in wire order; a
-side that is empty or no session description is one `document:sdp` record
-with both texts whole; a media section on one side only is one `m<i>:section`
-record with that side's lines. A reception carrying NO body where content is asserted is confronted
+each side carrying that section's verbatim lines of that key in wire order,
+one element per line the way a header record carries one per value; a side
+that is empty or no session description is one `document:sdp` record with
+both texts whole; a media section on one side only is one `m<i>:section`
+record with that side's lines; two descriptions a verbatim run carried as
+different bytes with the structure equal are one `document:bytes` record
+with both texts whole. A reception carrying NO body where content is asserted is confronted
 as the empty text; under `check: assert` the interpreter also refuses it, and
 under `check: record` — every generated expect — the confrontation's record is
 the only statement of it.

@@ -8,48 +8,62 @@
  * media sections BY POSITION (`m<i>`, 0-based, wire order); within a section
  * the lines compare as a multiset keyed by line type (`<type>=`) or attribute
  * name (`a=<name>`, the four RFC 4566 §6 direction attributes under one key
- * `a=direction`), so attribute order is erased and nothing else is. Every
- * difference is one {@link SdpDifference} per differing key, carrying that
- * key's VERBATIM lines on both sides: the fold decides, it edits nothing.
+ * `a=direction`). Every structural difference is one {@link SdpDifference}
+ * per differing key, carrying that key's VERBATIM lines on both sides: the
+ * fold decides, it edits nothing.
  *
- * The mask is the contract between the document and the run. `o=` sess-id and
- * sess-version are masked always (RFC 4566 §5.2 owner values no replay
- * reproduces). The expect's own `rewrite` tokens name WHICH fields are
- * lane-owned — `c=addr`: the `c=` address and the `a=rtcp` address (RFC 3605);
- * `m=port`: the `m=` port and the `a=rtcp` port — and the run's media mode
- * says whether the lane applied them: on a `rebooked` run those fields are
- * masked, on a `verbatim` run the tokens mask nothing, so a `c=` or an `m=`
- * the system alters is a difference. A token the fold does not list masks
- * nothing.
+ * The mask is the contract between the document and the run, and it states
+ * exactly what the render writes (`sip_message::rewrite_connection_and_ports`).
+ * `o=` sess-id and sess-version are masked always (RFC 4566 §5.2 owner values
+ * no replay reproduces). The expect's own `rewrite` tokens name WHICH fields
+ * are lane-owned — `c=addr`: the address of a `c=IN IP4` line, an IP6 line is
+ * never written; `m=port`: the port of an `m=` line where it is non-zero, a
+ * `/count` suffix kept and a port-0 stream never written — and `a=rtcp` is
+ * never written, so a difference there is always the system's. The run's
+ * media mode says whether the lane applied the tokens: on a `rebooked` run
+ * those fields are masked and the structural rows are the whole comparison,
+ * because the render re-assembles line endings there; on a `verbatim` run the
+ * tokens mask nothing and the two texts must be the same BYTES — an attribute
+ * reorder, a line ending, trailing whitespace or a blank line the structural
+ * pass erases is then one `document:bytes` row with both texts whole.
  */
 import type { Bundle } from "@sip/contracts"
 
-/** Which lane-owned fields the fold sets aside, beside the `o=` floor it always masks. */
+/** Which lane-owned fields the fold sets aside, beside the `o=` floor it always masks, and whether the bytes must match. */
 export interface SdpMask {
-  /** The `c=` address and the `a=rtcp` address. */
+  /** The address of a `c=IN IP4` line. */
   readonly connectionAddress: boolean
-  /** The `m=` port and the `a=rtcp` port. */
+  /** The port of an `m=` line where it is non-zero, its `/count` kept. */
   readonly mediaPort: boolean
+  /** A verbatim run: once the structure matches, the two texts must be the same bytes. */
+  readonly verbatim: boolean
 }
 
-/** The floor: `o=` sess-id and sess-version only. */
-export const FLOOR: SdpMask = { connectionAddress: false, mediaPort: false }
+/** The floor of a rebooked run: `o=` sess-id and sess-version only. */
+export const FLOOR: SdpMask = { connectionAddress: false, mediaPort: false, verbatim: false }
+
+/** The mask of a verbatim run: the floor, and the bytes must match. */
+export const VERBATIM: SdpMask = { ...FLOOR, verbatim: true }
 
 /**
  * The mask an expect's `rewrite` tokens declare under the run's media mode:
  * a token names a lane-owned field, the mode says whether the lane wrote it.
  */
 export const maskOf = (rewrite: ReadonlyArray<string> | undefined, media: Bundle.MediaMode): SdpMask => {
-  if (media !== "rebooked") return FLOOR
+  if (media !== "rebooked") return VERBATIM
   const tokens = new Set(rewrite ?? [])
-  return { connectionAddress: tokens.has("c=addr"), mediaPort: tokens.has("m=port") }
+  return { connectionAddress: tokens.has("c=addr"), mediaPort: tokens.has("m=port"), verbatim: false }
 }
 
 /** One differing line key of one section, both sides' verbatim lines in wire order. */
 export interface SdpDifference {
   /** `session`, `m<i>`, or `document` where a side is no session description. */
   readonly section: string
-  /** The line key (`m=`, `a=rtpmap`, …), `section` for a media section one side lacks, `sdp` for the document. */
+  /**
+   * The line key (`m=`, `a=rtpmap`, …); `section` for a media section one side
+   * lacks; `sdp` for a document one side is not; `bytes` for two descriptions
+   * a verbatim run carried as different bytes.
+   */
   readonly line: string
   readonly captured: ReadonlyArray<string>
   readonly replayed: ReadonlyArray<string>
@@ -86,39 +100,47 @@ export const lineKey = (line: string): string => {
   return `${type}${name}`
 }
 
-/** The line with every masked field replaced by `*`. */
+/**
+ * The line with every masked field replaced by `*`, and only the fields the
+ * render writes: the `o=` owner values always; the address of a `c=IN IP4`
+ * line under `connectionAddress`; the port of an `m=` line under `mediaPort`
+ * where it is a non-zero number, its `/count` kept (`6000/2` keeps the `/2`).
+ */
 export const maskLine = (mask: SdpMask, line: string): string => {
-  const fields = line.slice(2).split(" ")
-  const star = (index: number) => {
-    if (index < fields.length) fields[index] = "*"
-  }
   if (line.startsWith("o=")) {
-    star(1)
-    star(2)
-  } else if (line.startsWith("c=") && mask.connectionAddress) {
-    star(2)
-  } else if (line.startsWith("m=") && mask.mediaPort) {
-    star(1)
-  } else if (line.startsWith("a=rtcp:")) {
-    // RFC 3605: `a=rtcp:<port> [<nettype> <addrtype> <address>]`.
-    if (mask.mediaPort) fields[0] = "rtcp:*"
-    if (mask.connectionAddress) star(3)
-  } else {
-    return line
+    const fields = line.slice(2).split(" ")
+    for (const index of [1, 2]) if (index < fields.length) fields[index] = "*"
+    return `o=${fields.join(" ")}`
   }
-  return `${line.slice(0, 2)}${fields.join(" ")}`
+  if (line.startsWith("c=IN IP4 ") && mask.connectionAddress) return "c=IN IP4 *"
+  if (line.startsWith("m=") && mask.mediaPort) {
+    const fields = line.slice(2).split(" ")
+    if (fields.length < 2) return line
+    const slash = fields[1]!.indexOf("/")
+    const port = slash === -1 ? fields[1]! : fields[1]!.slice(0, slash)
+    if (!/^[0-9]+$/.test(port) || Number(port) === 0 || Number(port) > 65535) return line
+    fields[1] = slash === -1 ? "*" : `*${fields[1]!.slice(slash)}`
+    return `m=${fields.join(" ")}`
+  }
+  return line
 }
 
 const sortedMasked = (mask: SdpMask, lines: ReadonlyArray<string>): ReadonlyArray<string> =>
   lines.map((line) => maskLine(mask, line)).sort()
 
 /**
- * The text a body compares as under `sdp`: a session description as its
- * sections in order, each section its masked lines sorted, sections joined by
- * a blank line; anything else verbatim. Two texts fold equal exactly when
- * {@link diffSdp} states no difference between them.
+ * The text a body compares as under `sdp`. On a verbatim run it is the text
+ * itself: the bytes must match. On a rebooked run a session description is
+ * its sections in order, each section its masked lines sorted, sections
+ * joined by a blank line; anything else verbatim. Two texts fold equal
+ * exactly when {@link diffSdp} states no difference between them.
  */
 export const foldSdp = (mask: SdpMask, text: string): string => {
+  if (mask.verbatim) return text
+  return structuralFold(mask, text)
+}
+
+const structuralFold = (mask: SdpMask, text: string): string => {
   const lines = linesOf(text)
   if (!isDescription(lines)) return text
   return sectionsOf(lines)
@@ -126,9 +148,20 @@ export const foldSdp = (mask: SdpMask, text: string): string => {
     .join("\n\n")
 }
 
-/** Every difference between two texts read as session descriptions under the mask. */
+/**
+ * Every difference between two texts read as session descriptions under the
+ * mask: the structural rows, or — on a verbatim run whose structure matches
+ * while the bytes do not — the one `document:bytes` row.
+ */
 export const diffSdp = (mask: SdpMask, captured: string, replayed: string): ReadonlyArray<SdpDifference> => {
   if (captured === replayed) return []
+  const structural = diffStructure(mask, captured, replayed)
+  if (structural.length > 0 || !mask.verbatim) return structural
+  return [{ section: "document", line: "bytes", captured: [captured], replayed: [replayed] }]
+}
+
+/** The structural rows: sections by position, lines per section as a masked multiset. */
+const diffStructure = (mask: SdpMask, captured: string, replayed: string): ReadonlyArray<SdpDifference> => {
   const left = linesOf(captured)
   const right = linesOf(replayed)
   if (!isDescription(left) || !isDescription(right)) {

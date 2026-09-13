@@ -180,10 +180,10 @@ const NO_BODY: StoredBody = { body: { mode: "absent" }, resources: [], flags: []
  * and asserted by content (`compare` left absent: exact); an SDP is stored
  * as a resource under the registry's rewrite tokens and compared as a session
  * description (`compare: sdp`), the tokens naming the fields the fold masks
- * where the run rebooked them; multipart is asserted by shape, absence as its
- * own claim. A binary payload — one extraction handed over as `head` +
- * `body_b64`, whatever its type — stays undeclared: the recording it would be
- * confronted with is text.
+ * where the run rebooked them, its resource written back as the bytes it came
+ * as; multipart is asserted by shape, absence as its own claim. Any other
+ * binary payload — one extraction handed over as `head` + `body_b64` — stays
+ * undeclared: the recording it would be confronted with is text.
  */
 export const expectBody = (m: Flows.Msg, slug: string): StoredBody => {
   const payload = wireBody(m)
@@ -201,7 +201,7 @@ export const expectBody = (m: Flows.Msg, slug: string): StoredBody => {
           : { "content-type": payload.contentType }),
         compare: "sdp"
       },
-      resources: [{ relPath, text: payload.text }],
+      resources: [{ relPath, text: payload.text, ...(payload.binary ? { binary: true as const } : {}) }],
       flags: []
     }
   }

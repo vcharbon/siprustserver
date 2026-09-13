@@ -18,7 +18,8 @@
  *   expectation's `compare` mode; the expected texts come from the caller,
  *   keyed by ref, and a ref the caller did not supply is the caller's error.
  *   Under `sdp` the fold masks the lane-owned fields the expect's `rewrite`
- *   names only where the run's media mode says the lane rebooked them.
+ *   names only where the run's media mode says the lane rebooked them, and
+ *   on a verbatim run holds the two texts to the same bytes.
  * - **shape** — the verdict's structural failures, restated in the delta-record
  *   vocabulary (a final answered with another status, a datagram nothing
  *   expected — serviced by the leg or not — an expectation nothing satisfied).
@@ -189,11 +190,7 @@ export const recordOf = (
 ): Confrontation.ConfrontationRecord => {
   const delta = probeSetDelta(at.probe)
   const [captured, replayed] =
-    at.probe.kind === "header"
-      ? [at.probe.captured, at.probe.replayed]
-      : at.probe.kind === "body"
-        ? [[at.probe.captured], [at.probe.replayed]]
-        : shapeSides(at.probe.shapeKind)
+    at.probe.kind === "shape" ? shapeSides(at.probe.shapeKind) : [at.probe.captured, at.probe.replayed]
   return {
     lane: meta.lane,
     capture: meta.capture,
@@ -277,7 +274,8 @@ const headerProbes = (
 /**
  * One probe per recorded reception whose `expect` asserts a text resource body
  * the reception does not carry under the expectation's `compare` mode — one
- * per differing line key under `sdp`. A resource body is text unless its
+ * per differing line key under `sdp`, each side one element per line the
+ * way a header probe carries one per value. A resource body is text unless its
  * `mode` is `frozen-binary`. A reception with no body at all is confronted
  * too, as `""`: the assertion stands whether or not anything arrived. A binary
  * resource asserts presence only, which the interpreter gates, and is not read
@@ -345,13 +343,13 @@ const bodyProbe = (
       mediaType,
       scope,
       compare,
-      captured: d.captured.join("\n"),
-      replayed: d.replayed.join("\n"),
+      captured: d.captured,
+      replayed: d.replayed,
       sdp: { section: d.section, line: d.line }
     }))
   }
   if (bodiesEqual(compare, captured, replayed)) return []
-  return [{ kind: "body", step, mediaType, scope, compare, captured, replayed }]
+  return [{ kind: "body", step, mediaType, scope, compare, captured: [captured], replayed: [replayed] }]
 }
 
 /** One datagram the run put on the wire toward the system, in run order. */

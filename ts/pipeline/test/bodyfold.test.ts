@@ -36,7 +36,8 @@ describe("foldBody", () => {
         over.dir ?? "a=sendrecv",
         ""
       ].join("\r\n")
-    const rebooked = { connectionAddress: true, mediaPort: true }
+    const rebooked = { connectionAddress: true, mediaPort: true, verbatim: false }
+    const verbatim = { connectionAddress: false, mediaPort: false, verbatim: true }
 
     it("is true across attribute order, line endings, the `o=` floor and the masked fields", () => {
       expect(bodiesEqual("sdp", offer(), offer().replace(/\r\n/g, "\n"))).toBe(true)
@@ -53,6 +54,13 @@ describe("foldBody", () => {
       expect(bodiesEqual("sdp", offer(), offer({ dir: "a=sendonly" }), rebooked)).toBe(false)
       expect(bodiesEqual("sdp", offer(), `${offer()}m=video 0 RTP/AVP 96\r\n`, rebooked)).toBe(false)
       expect(bodiesEqual("sdp", offer(), "", rebooked)).toBe(false)
+    })
+
+    it("on a verbatim run is identity: the same bytes and nothing less", () => {
+      expect(foldBody("sdp", offer(), verbatim)).toBe(offer())
+      expect(bodiesEqual("sdp", offer(), offer(), verbatim)).toBe(true)
+      expect(bodiesEqual("sdp", offer(), offer().replace(/\r\n/g, "\n"), verbatim)).toBe(false)
+      expect(bodiesEqual("sdp", offer(), offer({ c: "c=IN IP4 127.0.0.2" }), verbatim)).toBe(false)
     })
   })
 })
