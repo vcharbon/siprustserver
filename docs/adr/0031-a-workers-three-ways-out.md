@@ -1,6 +1,6 @@
 # 0031 — A worker's ways out: graceful, abrupt, vanished, restarted in place — one membership rule for a member still in the slice, one guard for the forward flush
 
-**Status:** proposed (2026-09-13; revised the same day after two independent reviews)
+**Status:** accepted (2026-09-13)
 
 **Source:** this codebase. Triggered by the failover-harness scenario
 `crates/failover-harness/tests/withdrawn_primary_answers_in_its_window.rs` and its views
@@ -78,9 +78,9 @@ health or re-arm the fresh-pod guard). *Pullable* is "present in the slice", wha
 conditions: the supervisor pulls it like a ready peer until it leaves the slice. *Routable*
 is `ready`: the proxy's `WorkerSet::recompose` filters the snapshot at the projection, so a
 `ready=false` member departs exactly as today — the ordinal leaves the projection and its
-address is tombstoned — and the response-path failover is unchanged. Keying pullable on
-presence rather than on `serving` is deliberate: the draining worker's own `/ready` 503
-drives `serving=false` within seconds, and `serving` would buy two seconds, not the drain.
+address is tombstoned — and the response-path failover is unchanged. Pullable is keyed
+on presence, not on `serving`: the draining worker's own `/ready` 503 drives
+`serving=false` within seconds of SIGTERM, long before its drain ends.
 Serves case 1 (the peers ingest what the draining worker authors within one 100 ms poll
 tick) and case 4 (a readiness flap no longer parks replication). Case 2 presents at most one
 `terminating` event before the removal: harmless. Case 3b keeps pulling a member that is
@@ -98,8 +98,8 @@ elapsed since SIGTERM, so an INVITE the proxy routed before the slice update is 
 served; (iii) for **every live call** this worker serves, the Backup flow from the peer the
 call names as its backup (`topology.bak`) is connected and has **applied** this worker's
 changelog head. "Applied" is reported by the puller in a new position frame (the drain's
-own signal, never a correctness gate for takeover; ADR-0014 §12 removed `Ack` as a
-readiness input, this is not that). A call whose backup flow is absent or behind keeps the
+own signal, never a takeover or readiness gate — the role ADR-0014 §12 retired `Ack`
+from). A call whose backup flow is absent or behind keeps the
 drain waiting; the grace (5 s) stays the ceiling and live calls clearing stays an exit. The
 exit reason is counted (`quiescent`, `caught_up`, `grace_peers_behind`): the last one is
 "a flush window was lost" and must be visible. A worker that is not withdrawn (direct-bound,
