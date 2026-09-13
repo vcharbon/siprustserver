@@ -106,7 +106,9 @@ pub fn is_fully_resolved(call: &Call) -> bool {
     std::iter::once(&call.a_leg).chain(call.b_legs.iter()).all(leg_is_resolved)
 }
 
-/// Add a new b-leg.
+/// Attach a b-leg without recording anything: the event-less attach for
+/// fixtures and replica images. A leg this element originates goes through
+/// [`super::add_originated_b_leg`], which records its INVITE.
 pub fn add_b_leg(mut call: Call, leg: Leg) -> Call {
     call.b_legs.push(leg);
     call

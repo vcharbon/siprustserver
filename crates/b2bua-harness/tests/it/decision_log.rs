@@ -209,6 +209,7 @@ async fn a_rerouted_call_logs_two_labelled_decisions_and_stamps_their_ordinals()
     assert_eq!(ev[0], (CdrEventType::InviteReceived, "a", 0));
     assert_eq!(ev[1], (CdrEventType::InviteSent, "b-1", 1));
     assert_eq!(ev[2], (CdrEventType::Reject, "b-1", 1), "the failure that raised the consult");
+    assert_eq!(ev[3], (CdrEventType::InviteSent, "b-2", 2), "the replacement leg's INVITE");
     assert!(
         ev[3..].iter().all(|e| e.2 == 2),
         "every event after the reroute is under the second decision: {ev:?}"

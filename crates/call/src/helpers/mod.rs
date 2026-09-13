@@ -16,7 +16,8 @@
 //!   - [`obligation`] — the dialog-level retransmission obligations: what the
 //!     call owes, what an ACK discharges, the scopes a ladder is retired under
 //!   - [`services`] — per-service slice accessors + opaque ext writes
-//!   - [`record`] — CDR append, rule deactivation, SM-cursor rendering
+//!   - [`record`] — CDR append (and the originated leg's attach-and-record), rule
+//!     deactivation, SM-cursor rendering
 //!   - [`decision_log`] — the decision-log append and its ordinal
 //!   - [`message_ring`] — the message-ring append and its call-wide sequence
 //!   - [`termination`] — the termination record and its message-ring cut
@@ -60,7 +61,7 @@ pub use peering::{
     add_tag_mapping, all_peered_legs, find_by_a_tag, find_by_b_tag, get_peer, merge_leg,
     relay_peer_dialog, relay_peer_dialog_ready, resolve_relay_peer, split_leg,
 };
-pub use record::{add_cdr_event, deactivate_rule, dump_cursors};
+pub use record::{add_cdr_event, add_originated_b_leg, deactivate_rule, dump_cursors};
 pub use reliable::{
     admits_reliable_provisional, advance_reliable_ladder, assign_a_rseq, b_rseq_for,
     clear_all_reliable_provisional_emissions, clear_reliable_provisional_emission, leg_shown,

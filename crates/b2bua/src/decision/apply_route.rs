@@ -2,11 +2,8 @@
 //! b-leg INVITE. Port of `decision/apply/applyRoute.ts` (the load-bearing path:
 //! attach features, seed service ext, run the limiter, create the b-leg).
 
-use call::helpers::{add_cdr_event, mark_decision, set_call_ext};
-use call::{
-    Call, CallLimiterState, CdrEvent, CdrEventType, DecisionKind, TerminationCause, TimerEntry,
-    TimerType,
-};
+use call::helpers::{add_originated_b_leg, mark_decision, set_call_ext};
+use call::{Call, CallLimiterState, DecisionKind, TerminationCause, TimerEntry, TimerType};
 use sip_clock::Clock;
 use sip_message::SipRequest;
 use sip_txn::IdGen;
@@ -318,18 +315,7 @@ pub async fn apply_route(
         }
     }
 
-    call.b_legs.push(leg);
-    call = add_cdr_event(
-        call,
-        CdrEvent {
-            event_type: CdrEventType::InviteSent,
-            timestamp: now_ms,
-            leg_id: leg_id.to_string(),
-            status_code: None,
-            reason: None,
-            decision_ordinal: 0,
-        },
-    );
+    call = add_originated_b_leg(call, leg, now_ms);
     fx.outbound.push(effect);
 
     // No-answer ring timer (cancelled by confirm-dialog).

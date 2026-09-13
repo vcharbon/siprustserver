@@ -3,7 +3,7 @@
 //! the generic in-dialog request (`SendRequestToLeg`). Relaying an *inbound*
 //! request does NOT live here — see [`super::relay_request`].
 
-use call::helpers::{add_b_leg, add_cdr_event, bump_local_cseq};
+use call::helpers::{add_cdr_event, add_originated_b_leg, bump_local_cseq};
 use call::{Call, CdrEvent, LegKind, TerminationCause, TimerType};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::{Event, HeaderValue, RAck, SubscriptionState};
@@ -28,7 +28,8 @@ impl ActionExecutor<'_> {
     /// suffix allow-list is a config bug; surface it as a terminate so the call
     /// doesn't hang waiting for an answer that will never come. No leg /
     /// outbound is built; the call is torn down and a `Reject` CDR records the
-    /// cause.
+    /// cause. An admitted leg is recorded with its `InviteSent` as its INVITE
+    /// leaves, under the decision current at this turn.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn create_leg(
         &self,
@@ -130,7 +131,7 @@ impl ActionExecutor<'_> {
         if let Some(ctx_str) = callback_context {
             call.callback_context = Some(ctx_str.to_string());
         }
-        *call = add_b_leg(call.clone(), leg);
+        *call = add_originated_b_leg(call.clone(), leg, self.now_ms);
         fx.outbound.push(effect);
         if let Some(secs) = no_answer_timeout_sec {
             self.schedule(call, fx, TimerType::NoAnswer, secs * 1000, Some(leg_id));

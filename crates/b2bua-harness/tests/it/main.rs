@@ -31,6 +31,7 @@ mod fake_prack;
 mod foreign_dialog_tag;
 mod going_away_gate;
 mod info_body_relay;
+mod invite_sent;
 mod keepalive;
 mod keepalive_481;
 mod keepalive_configurable_interval;
