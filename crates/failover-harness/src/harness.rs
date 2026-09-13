@@ -351,6 +351,13 @@ impl ReplicatedB2buaSut {
         self.store.current_cv(role, primary, call_ref).map(|(p, _)| p)
     }
 
+    /// The backup version counter (`b`) currently stored for a ref, or `None`
+    /// — the other half of the `(p,b)` vector. `b > 0` means an acting backup
+    /// has authored a version of this Element.
+    pub fn call_bgen(&self, role: PartitionRole, primary: &str, call_ref: &str) -> Option<i64> {
+        self.store.current_cv(role, primary, call_ref).map(|(_, b)| b)
+    }
+
     /// The live callRef KEYS this worker holds in `bak:{primary}` (the replicated
     /// partition for `primary`). Lets a test discover the replicated call's ref
     /// without re-deriving it from SIP state.
@@ -986,6 +993,12 @@ pub struct FailoverHarness {
     /// [`spawn_replacement`](Self::spawn_replacement) can stand a second
     /// incarnation of an ordinal up with the original's wiring.
     worker_specs: HashMap<String, WorkerSpec>,
+    /// SIP addresses cut off the signalling fabric: every send from or to one
+    /// of them fails at its endpoint, so the node is unreachable while its
+    /// process keeps running and keeps firing its own timers. Read by the
+    /// fabric's send-fault hook; written by
+    /// [`cut_signalling`](Self::cut_signalling).
+    sip_cut: Arc<Mutex<std::collections::BTreeSet<SocketAddr>>>,
 }
 
 /// How one worker ordinal was spawned — everything a replacement incarnation of
@@ -1047,7 +1060,15 @@ impl FailoverHarness {
     pub fn new(name: &str, worker_ordinals: &[&str]) -> Self {
         let clock = Clock::test_at(0);
         // SIP plane: a recording harness with 1 ms transit (0 is coerced anyway).
-        let harness = Harness::with_transit_delay(name, 1).describe(
+        let sip_cut: Arc<Mutex<std::collections::BTreeSet<SocketAddr>>> =
+            Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+        let cut = sip_cut.clone();
+        let fault: sip_net::SendFault = Arc::new(move |src: SocketAddr, dst: SocketAddr| {
+            let cut = cut.lock().unwrap();
+            (cut.contains(&src) || cut.contains(&dst))
+                .then(|| format!("{src} is cut off the signalling fabric"))
+        });
+        let harness = Harness::with_transit_delay_and_send_fault(name, 1, fault).describe(
             "S10b goal-2 simulated failover: alice → proxy → 2 replicating b2buas \
              over the SIM SIP + SIM repl fabrics under one fake clock.",
         );
@@ -1102,6 +1123,7 @@ impl FailoverHarness {
             worker_tune: Arc::new(|_| {}),
             views: ViewLedger::new(clock, event_seq_for_views),
             worker_specs: HashMap::new(),
+            sip_cut,
         }
     }
 
@@ -1563,11 +1585,51 @@ impl FailoverHarness {
         });
     }
 
-    /// Partition two workers on the repl fabric (cut both directions). Marker.
+    /// Partition two workers on the repl fabric: block a fresh `connect`
+    /// between their listen addresses AND stop delivery on every stream their
+    /// pullers already opened, both directions. A puller connects from an
+    /// ephemeral client address, so the listen-pair fault alone never reaches a
+    /// live stream — the established directions are named here from the
+    /// `PullRequest` each puller opened with. A stalled direction buffers in
+    /// order and flushes on [`heal`](Self::heal). Marker.
     pub fn partition(&mut self, a: &str, b: &str) {
         let (aa, ba) = (self.repl_addrs[a], self.repl_addrs[b]);
         self.repl_sim.apply_fault(Fault::Partition { a: aa, b: ba });
+        for (src, dst) in self.live_stream_pairs(a, b) {
+            self.repl_sim.apply_fault(Fault::Stall { src, dst });
+        }
         self.mark(a, Some(b), "partition", "");
+    }
+
+    /// Every established directed pair between `a` and `b`'s replication
+    /// endpoints: each one's listener against the other's puller client
+    /// addresses, both ways. A client address is recovered from the `caller`
+    /// its opening `PullRequest` names, so a stream is attributed to the node
+    /// that opened it rather than guessed from the frame's direction.
+    fn live_stream_pairs(&self, a: &str, b: &str) -> Vec<(SocketAddr, SocketAddr)> {
+        let report = self.repl_report();
+        let clients_of = |ordinal: &str| -> std::collections::BTreeSet<SocketAddr> {
+            report
+                .frames
+                .iter()
+                .filter_map(|f| match &f.frame {
+                    repl_net::frame::Frame::PullRequest { caller, .. } if caller == ordinal => {
+                        Some(f.from)
+                    }
+                    _ => None,
+                })
+                .filter(|addr| !self.repl_addrs.values().any(|l| l == addr))
+                .collect()
+        };
+        let mut pairs = Vec::new();
+        for (server, client_owner) in [(a, b), (b, a)] {
+            let listener = self.repl_addrs[server];
+            for client in clients_of(client_owner) {
+                pairs.push((listener, client));
+                pairs.push((client, listener));
+            }
+        }
+        pairs
     }
 
     /// Delay delivery on every replication stream `from`'s listener serves by
@@ -1591,9 +1653,31 @@ impl FailoverHarness {
         self.mark(from, Some(to), "delay", &format!("{ms}ms on {listener} → {clients:?}"));
     }
 
-    /// Heal a repl-fabric partition. Marker.
+    /// **Cut `addr` off the signalling fabric, both directions** — the node is
+    /// unreachable on the SIP plane while its process keeps running, keeps its
+    /// calls and keeps firing their timers. Every datagram it sends and every
+    /// datagram addressed to it fails at the sending endpoint, so nothing
+    /// crosses and nothing queues. The replication fabric is separate
+    /// ([`partition`](Self::partition)). Marker.
+    pub fn cut_signalling(&mut self, ordinal: &str, addr: SocketAddr) {
+        self.sip_cut.lock().unwrap().insert(addr);
+        self.mark(ordinal, None, "sip-partition", &format!("{addr} unreachable on the SIP plane"));
+    }
+
+    /// Restore a signalling cut. Marker.
+    pub fn restore_signalling(&mut self, ordinal: &str, addr: SocketAddr) {
+        self.sip_cut.lock().unwrap().remove(&addr);
+        self.mark(ordinal, None, "sip-heal", &format!("{addr} reachable again"));
+    }
+
+    /// Heal a repl-fabric partition: unblock `connect` and resume every stalled
+    /// stream, which flushes what buffered while the cut lasted, in order.
+    /// Marker.
     pub fn heal(&mut self, a: &str, b: &str) {
         let (aa, ba) = (self.repl_addrs[a], self.repl_addrs[b]);
+        for (src, dst) in self.live_stream_pairs(a, b) {
+            self.repl_sim.apply_fault(Fault::Resume { src, dst });
+        }
         self.repl_sim.apply_fault(Fault::Heal { a: aa, b: ba });
         self.mark(a, Some(b), "heal", "");
     }
