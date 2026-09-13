@@ -2,8 +2,8 @@
 //! route to the next Via (received/rport precedence); reverse-path failover
 //! to the cookie's `w_bak` when the destination worker is confirmed Dead; pop
 //! the top Via entry (comma-aware); forward; remember the ACK-relay hop for a
-//! non-2xx INVITE final — the final's sender + the INVITE's outbound branch
-//! (the ACK itself travels end-to-end — see `core/request`).
+//! non-2xx INVITE final — the node the final arrived from (the ACK itself
+//! travels end-to-end — see `core/request`).
 //!
 //! An address that LEFT the worker set counts as `Dead` here for Timer H
 //! (`registry::tombstone`): a node whose endpoint is withdrawn while its process
@@ -175,13 +175,13 @@ impl ProxyCore {
         // memo written here.
         //
         // The memo carries the hop to repeat: the node the final ARRIVED from
-        // — after a failover that is the survivor, not the INVITE's target —
-        // and the INVITE's outbound branch, which the sender's server
-        // transaction is keyed on. Gating the relay on the memo (not the
-        // INVITE entry alone) keeps a takeover worker's 2xx ACK safe when its
-        // reset `IdGen` re-mints a branch aliasing the dead primary's INVITE
-        // (see `core/request`). Short TTL: the upstream ACKs within its
-        // final-retransmit window (a re-sent final refreshes the memo).
+        // — after a failover that is the survivor, not the INVITE's target.
+        // The branch the sender's server transaction is keyed on is §16.11's
+        // function of the ACK itself (`crate::branch`). Gating the relay on
+        // the memo (not the INVITE entry alone) keeps a takeover worker's 2xx
+        // ACK safe when its reset `IdGen` re-mints a branch aliasing the dead
+        // primary's INVITE (see `core/request`). Short TTL: the upstream ACKs
+        // within its final-retransmit window (a re-sent final refreshes it).
         if (300..700).contains(&resp.status()) && cseq.method() == Method::Invite {
             // The response echoes the request's From (tag included), so this
             // re-builds exactly the key the INVITE was remembered under.

@@ -4,8 +4,9 @@
 //! It binds one UDP endpoint, runs a recv loop, parses each datagram, and
 //! dispatches to [`request`](self) / [`response`](self) handling. It owns the
 //! routing-policy seam ([`RoutingStrategy`]), the worker registry, the
-//! `(Call-ID|CSeq#)` LRU, an [`IdGen`] for Via branches, a [`Clock`], metrics,
-//! a logger, and the self-gate (ELU/CPS admission). A hop thaws the received
+//! `(Call-ID|CSeq#)` LRU, an [`IdGen`] for the To-tags of the finals it
+//! generates itself, a [`Clock`], metrics, a logger, and the self-gate
+//! (ELU/CPS admission). A hop thaws the received
 //! message into a draft, touches only the routing headers, and freezes it to
 //! the wire bytes it forwards — every untouched line is memcpy'd, never
 //! re-parsed (ADR-0025).
