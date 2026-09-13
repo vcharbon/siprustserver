@@ -43,6 +43,31 @@ impl ClockMode {
     }
 }
 
+/// What the run's media plane did to the session descriptions it sent
+/// (`PCAP2TEST_PIVOT_V3.md` §8.3): whether the lane REBOOKED the lane-owned
+/// tokens a body states — every `c=` address and every active `m=` port taken
+/// from the lane's booking — or left every session description VERBATIM, the
+/// tokens read as the body's content label only. A lane that exercises no
+/// media runs verbatim, so what its peers relay is the captured description
+/// byte for byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaMode {
+    /// The lane's booking wrote its address and ports into every body stating
+    /// the tokens.
+    #[default]
+    Rebooked,
+    /// No body was rewritten: every session description rode as stored.
+    Verbatim,
+}
+
+impl MediaMode {
+    /// The default, and so the reading of a bundle that states nothing.
+    fn is_rebooked(&self) -> bool {
+        matches!(self, MediaMode::Rebooked)
+    }
+}
+
 /// Wall time a run may burn ON TOP of the timeline its document declares: the
 /// allowance for its own overhead, and the whole ceiling for a clock that
 /// spends no wall time on the timeline itself.
@@ -132,6 +157,13 @@ pub struct RunConfig {
     /// a lane that states none gates on everything.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub known_bugs: BTreeSet<KnownBug>,
+    /// What the media plane did to the session descriptions this run sent.
+    /// The interpreter states it from the lane's booking as it arms the bundle,
+    /// so the record reads what the render applied rather than what a lane
+    /// claimed; omitted at the default, which is how a bundle predating the
+    /// field reads.
+    #[serde(default, skip_serializing_if = "MediaMode::is_rebooked")]
+    pub media: MediaMode,
 }
 
 impl RunConfig {
@@ -150,7 +182,14 @@ impl RunConfig {
             endpoint_addresses: BTreeMap::new(),
             check_scoping: BTreeMap::new(),
             known_bugs: BTreeSet::new(),
+            media: MediaMode::Rebooked,
         }
+    }
+
+    /// State what the media plane did to this run's session descriptions.
+    pub fn with_media(mut self, media: MediaMode) -> Self {
+        self.media = media;
+        self
     }
 
     /// State what a check class costs on this lane, whatever the origin lane
@@ -268,6 +307,21 @@ mod tests {
         let text = serde_json::to_string(&unbound).unwrap();
         assert!(!text.contains("identities"), "{text}");
         assert_eq!(serde_json::from_str::<RunConfig>(&text).unwrap(), unbound);
+    }
+
+    /// The media mode is written only when it is not the default, and a bundle
+    /// stating none reads as rebooked.
+    #[test]
+    fn the_media_mode_is_omitted_at_its_default_and_read_back_otherwise() {
+        let rebooked = RunConfig::new("upstream-fake", ClockMode::Virtual, "h:1");
+        let text = serde_json::to_string(&rebooked).unwrap();
+        assert!(!text.contains("media"), "{text}");
+        assert_eq!(serde_json::from_str::<RunConfig>(&text).unwrap().media, MediaMode::Rebooked);
+
+        let verbatim = rebooked.with_media(MediaMode::Verbatim);
+        let text = serde_json::to_string(&verbatim).unwrap();
+        assert!(text.contains(r#""media":"verbatim""#), "{text}");
+        assert_eq!(serde_json::from_str::<RunConfig>(&text).unwrap(), verbatim);
     }
 
     /// What `check_scoping` MEANS is the interpreter's (`Scope`); this crate

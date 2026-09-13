@@ -1852,6 +1852,14 @@ what rides beside the ref: `rewrite` tokens where the body is rewritten
 (`frozen` / `frozen-binary`) plus the captured `content-type` where it replays
 byte-exact.
 
+**The tokens name what the LANE may rewrite, not what it must.** They are
+applied through the lane's media booking, and a lane that exercises no media
+runs a VERBATIM booking: every session description then rides byte for byte as
+stored, `c=` address and `m=` port included, and the tokens still label the
+body `application/sdp`. Which plane a run took is stated in its run
+configuration (`"media": "verbatim"`; absent reads as `rebooked`), so a reader
+of the bundle knows whether a relayed description can be held to the capture.
+
 **A `content-type` is stored VERBATIM, its MIME parameters included**, because
 emission writes the stored value back as the message's own `Content-Type`
 (`message/sipfrag;version=2.0` replays under its version, not without it). The
@@ -1945,7 +1953,9 @@ kind, a `<port>/<count>` pair count, the transport, the format list — byte-exa
 (RFC 4566 §5.14). A port-0 stream is one the capture rejected or disabled
 (RFC 3264 §5.1): it keeps its zero, books nothing and takes no index. A booking
 is held per `(leg, stream)` for the whole run, so a re-offer and a retransmission
-carry the port their first emission did.
+carry the port their first emission did. A lane without media runs a verbatim
+booking that answers neither token (§8.3): the same document then emits every
+session description as stored, and the run configuration says so.
 
 What the document does not store is regenerated rather than replayed, and the
 list is ONE item long: the container's `boundary`. The container type is held

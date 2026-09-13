@@ -97,7 +97,7 @@ pub(crate) mod stack;
 pub(crate) mod state;
 
 pub use exec::{Lane, Outcome};
-pub use media::Booking;
+pub use media::{Booking, MediaMode};
 pub use plan::{Plan, PlanError};
 pub use recording::Recording;
 pub use render::UriComposer;

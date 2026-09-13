@@ -106,7 +106,8 @@ pub struct Lane<'a> {
     /// The system under test's ingress: where an out-of-dialog request goes.
     pub route_target: std::net::SocketAddr,
     /// The lane's media plane: the address an SDP body's connection line is
-    /// rewritten to and the port book its media lines draw from.
+    /// rewritten to and the port book its media lines draw from, or the
+    /// verbatim booking of a lane without media.
     pub media: crate::media::Booking,
     /// Where a body resource reference resolves from.
     pub base_dir: PathBuf,

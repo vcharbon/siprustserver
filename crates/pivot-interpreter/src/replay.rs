@@ -60,7 +60,9 @@ impl std::error::Error for ReplayError {
 /// `out_dir` is the run's record: whatever a previous run left there is
 /// removed, never mixed into this bundle. A run body that panics still leaves
 /// its ladder — the writer is armed before the body and writes on unwind,
-/// under a verdict stating the run never returned.
+/// under a verdict stating the run never returned. The bundle's run
+/// configuration states the media mode the lane's booking ran, whatever
+/// `config` said.
 pub async fn replay(
     document: PivotV3,
     config: RunConfig,
@@ -69,6 +71,7 @@ pub async fn replay(
     out_dir: impl Into<PathBuf>,
 ) -> Result<Outcome, ReplayError> {
     let out_dir = out_dir.into();
+    let config = config.with_media(lane.media.mode());
     let case = document.case.id.clone();
     let canonical = document.to_canonical_json();
     let plan = Plan::compile(document).map_err(ReplayError::Plan)?;

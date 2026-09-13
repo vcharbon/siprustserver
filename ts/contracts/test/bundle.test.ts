@@ -24,6 +24,7 @@ import {
   Failure,
   failureStep,
   headersForCall,
+  mediaModeOf,
   resolveBinding,
   rfcAuditPassed,
   rfcGating,
@@ -158,6 +159,15 @@ describe("the run configuration", () => {
   it("refuses an unknown knob rather than dropping it into a default", () => {
     expect(() =>
       decodeRunConfigSync({ lane: "upstream-fake", clock: "virtual", route_target: "h:1", lame: true })
+    ).toThrow()
+  })
+
+  it("reads the media plane the run took, and an unstated one as rebooked", () => {
+    const stated = decodeRunConfigSync({ lane: "upstream-fake", clock: "virtual", route_target: "h:1", media: "verbatim" })
+    expect(mediaModeOf(stated)).toBe("verbatim")
+    expect(mediaModeOf(config)).toBe("rebooked")
+    expect(() =>
+      decodeRunConfigSync({ lane: "upstream-fake", clock: "virtual", route_target: "h:1", media: "rewritten" })
     ).toThrow()
   })
 })

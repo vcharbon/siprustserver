@@ -30,7 +30,7 @@ pub mod verdict;
 pub use bindings::{BindingError, IdentityBindings};
 pub use recording::{Dir, RecordedMessage};
 pub use rfc::{RfcFinding, RunRfcAudit};
-pub use runconfig::{CheckDisposition, ClockMode, RunConfig};
+pub use runconfig::{CheckDisposition, ClockMode, MediaMode, RunConfig};
 pub use timing::RunTiming;
 pub use verdict::{
     Abandoned, Arrived, CloseAct, CloseOwed, DeclaredNote, Failure, GatedOn, Informative,

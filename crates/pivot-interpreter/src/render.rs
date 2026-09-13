@@ -250,9 +250,11 @@ impl Rewrite {
 
 /// Load a body resource and derive its content type. SDP (declared by its
 /// rewrite tags, direct or as a part) is the ONE content rewritten, and only the
-/// lines its tokens name; every other payload, every part's `Content-ID` and
-/// every part entity header rides exactly as stored (§8.3). A single reference
-/// declaring neither rewrite tags nor a type is REFUSED rather than mislabelled.
+/// lines its tokens name, and only where the lane's booking answers them — a
+/// verbatim booking leaves the body as stored under the type the tags declare;
+/// every other payload, every part's `Content-ID` and every part entity header
+/// rides exactly as stored (§8.3). A single reference declaring neither rewrite
+/// tags nor a type is REFUSED rather than mislabelled.
 fn load_body(
     body: &Body,
     base_dir: &Path,
@@ -335,7 +337,8 @@ fn read(base_dir: &Path, reference: &str) -> Result<Vec<u8>, RenderError> {
 /// The line grammar is `sip_message::sdp`'s; this binds it to the lane's
 /// booking: `stream` carries the body's active-media index across the body, so
 /// the i-th active `m=` line takes the i-th port booked for `leg`, and a
-/// rejected (port-0) stream consumes no index.
+/// rejected (port-0) stream consumes no index. A booking that answers no token
+/// (a lane without media) leaves every line as stored.
 fn rewrite_sdp(
     sdp: &str,
     rewrite: Rewrite,
@@ -343,12 +346,14 @@ fn rewrite_sdp(
     leg: &str,
     stream: &mut usize,
 ) -> String {
-    sip_message::rewrite_connection_and_ports(sdp, rewrite.addr.then(|| media.addr()), |pairs| {
-        rewrite.port.then(|| {
-            let port = media.port(leg, *stream, pairs);
-            *stream += 1;
-            port
-        })
+    let addr = if rewrite.addr { media.addr() } else { None };
+    sip_message::rewrite_connection_and_ports(sdp, addr, |pairs| {
+        if !rewrite.port {
+            return None;
+        }
+        let port = media.port(leg, *stream, pairs);
+        *stream += 1;
+        port
     })
 }
 
@@ -789,6 +794,44 @@ mod tests {
             rewrite_sdp(sdp, port_only, &media, "A", &mut stream),
             "c=IN IP4 1.2.3.4\r\nm=audio 40000 RTP/AVP 0\r\n"
         );
+    }
+
+    /// On a lane without media the booking answers neither token: a body
+    /// stating both rides byte for byte, `c=` address and `m=` port as captured,
+    /// under the type the tokens declare, and nothing is booked. The same body
+    /// on a rebooked lane is still rewritten.
+    #[test]
+    fn a_verbatim_booking_leaves_a_tokened_body_byte_for_byte() {
+        let dir =
+            std::env::temp_dir().join(format!("pivot-render-verbatim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stored =
+            "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\nc=IN IP4 1.2.3.4\r\nm=audio 5000 RTP/AVP 0\r\n\
+                      c=IN IP4 0.0.0.0\r\nm=video 5002/2 RTP/AVP 96\r\n";
+        std::fs::write(dir.join("offer.sdp"), stored).unwrap();
+        let body = Body::Resource(pivot_schema::body::ResourceBody {
+            reference: "offer.sdp".into(),
+            rewrite: vec!["c=addr".into(), "m=port".into()],
+            mode: None,
+            content_type: None,
+            compare: None,
+        });
+        let verbatim = Booking::verbatim();
+        let (bytes, ct) = load_body(&body, &dir, &verbatim, "A").unwrap();
+        assert_eq!(String::from_utf8_lossy(&bytes), stored, "no line is rewritten");
+        assert_eq!(ct.as_deref(), Some("application/sdp"), "the tokens still label the body");
+        assert_eq!(verbatim.held("A", 0), None, "and the port book stays empty");
+
+        let rebooked = Booking::new("127.0.0.1", 40000);
+        let (bytes, _) = load_body(&body, &dir, &rebooked, "A").unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            "v=0\r\no=- 1 1 IN IP4 1.2.3.4\r\nc=IN IP4 127.0.0.1\r\nm=audio 40000 RTP/AVP 0\r\n\
+             c=IN IP4 127.0.0.1\r\nm=video 40002/2 RTP/AVP 96\r\n",
+            "a rebooked lane still rewrites"
+        );
+        assert_eq!(rebooked.held("A", 1), Some(40002));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A body stating NO rewrite token is not SDP at all: it rides byte-exact
