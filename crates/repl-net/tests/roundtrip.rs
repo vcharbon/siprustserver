@@ -123,6 +123,12 @@ fn roundtrip_noop() {
 }
 
 #[test]
+fn roundtrip_position() {
+    assert_roundtrip(&Frame::Position { at: Watermark::new(7, 41) });
+    assert_roundtrip(&Frame::Position { at: Watermark::new(0, 0) });
+}
+
+#[test]
 fn roundtrip_reset_to_bootstrap() {
     assert_roundtrip(&Frame::ResetToBootstrap { reason: "since fell off compacted tail".into() });
     assert_roundtrip(&Frame::ResetToBootstrap { reason: String::new() });
@@ -132,7 +138,7 @@ fn roundtrip_reset_to_bootstrap() {
 
 #[test]
 fn err_unknown_tag() {
-    // [9, ...] — tag 9 is not one of the four.
+    // [9, ...] — tag 9 is not one of the known frame tags.
     let mut bytes = Vec::new();
     rmp::encode::write_array_len(&mut bytes, 2).unwrap();
     rmp::encode::write_uint(&mut bytes, 9).unwrap();

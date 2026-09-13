@@ -129,6 +129,12 @@ fn write_frame(buf: &mut Vec<u8>, frame: &Frame) {
             encode::write_uint(buf, tag::RESET_TO_BOOTSTRAP).unwrap();
             encode::write_str(buf, reason).unwrap();
         }
+        Frame::Position { at } => {
+            encode::write_array_len(buf, 3).unwrap();
+            encode::write_uint(buf, tag::POSITION).unwrap();
+            encode::write_uint(buf, at.gen).unwrap();
+            encode::write_uint(buf, at.counter).unwrap();
+        }
     }
 }
 
@@ -152,6 +158,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, ReplCodecError> {
         tag::DATA => decode_data(&mut rd, len),
         tag::NOOP => decode_noop(&mut rd, len),
         tag::RESET_TO_BOOTSTRAP => decode_reset(&mut rd, len),
+        tag::POSITION => decode_position(&mut rd, len),
         other => Err(ReplCodecError::UnknownTag(other)),
     }
 }
@@ -220,6 +227,13 @@ fn decode_noop(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
     let gen = read_u64(rd, "gen")?;
     let counter = read_u64(rd, "counter")?;
     Ok(Frame::Noop { at: Watermark::new(gen, counter) })
+}
+
+fn decode_position(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
+    expect_len(len, 3, "Position")?;
+    let gen = read_u64(rd, "gen")?;
+    let counter = read_u64(rd, "counter")?;
+    Ok(Frame::Position { at: Watermark::new(gen, counter) })
 }
 
 fn decode_reset(rd: &mut &[u8], len: u32) -> Result<Frame, ReplCodecError> {
