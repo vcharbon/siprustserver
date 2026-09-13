@@ -358,7 +358,12 @@ async fn main() {
                             let peers: Vec<String> = m
                                 .snapshot()
                                 .into_iter()
-                                .map(|p| format!("{}@{}", p.ordinal, p.host))
+                                .map(|p| {
+                                    format!(
+                                        "{}@{} ready={} terminating={}",
+                                        p.ordinal, p.host, p.ready, p.terminating
+                                    )
+                                })
                                 .collect();
                             tracing::info!(peers = %peers.join(", "), "repl membership snapshot");
                         }

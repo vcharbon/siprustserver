@@ -219,5 +219,6 @@ macro_rules! transparent_matrix {
 
 // Re-export the engine value types the failover tests + DSL touch so a consumer
 // needs only this crate (+ scenario-harness) for the canonical scenario.
+pub use b2bua::repl::PeerLink;
 pub use b2bua::store::PartitionRole;
 pub use sip_proxy::registry::WorkerHealth;

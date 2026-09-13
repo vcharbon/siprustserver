@@ -9,11 +9,18 @@
 //!
 //! ```text
 //!   ringing · elder serves · survivor holds the ringing replica
-//!   t0        endpoint withdrawn (registry + peers drop the ordinal) + SIGTERM
-//!   +0.5 s    a replacement of the SAME ordinal comes up and reclaims the ringing copy
+//!   t0        endpoint withdrawn + SIGTERM
+//!             A, C: registry + peers drop the ordinal
+//!             B:    the endpoint stays in the slice as terminating — the proxy
+//!                   departs it, the peers keep pulling it (ADR-0031 case 1)
+//!   +0.5 s    A, C: a replacement of the SAME ordinal comes up alongside and
+//!                   reclaims the ringing copy
 //!   +1.1 s    the callee answers 200 — the elder is still bound and still serving
-//!   +1.8 s    the replacement's address is published, then judged alive
-//!   +2.1 s    SIGKILL (A) · +5 s the drain returns (B) · dead since t0 (C)
+//!   +1.8 s    A, C: the replacement's address is published, then judged alive
+//!   +2.1 s    A: SIGKILL · C: dead since t0
+//!   +5 s      B: the drain returns, the endpoint leaves the slice (peers park it),
+//!                the process exits; only then the replacement comes up, reclaims
+//!                the answered copy and is published
 //!   INVITE+30 s  the ring deadline fires on the reclaimed copy
 //! ```
 //!
@@ -27,9 +34,11 @@
 //! answered, so no ring deadline authors a second final on an INVITE server
 //! transaction the caller already ACKed (RFC 3261 §17.2.1, §13.3.1.4).
 //!
-//! The three cases differ only in how the elder's process ends: A forces the
-//! removal, B removes it gracefully (no kill at all), C makes the process die
-//! WITH its endpoint. The answer reaches the caller in all three.
+//! The three cases differ in how the elder leaves: A forces the removal (the
+//! endpoint leaves the slice, the peers park it, SIGKILL mid-window), B removes
+//! it gracefully (the endpoint stays in the slice as `terminating`, the peers
+//! keep pulling it through its drain, no kill at all — ADR-0031 case 1), C makes
+//! the process die WITH its endpoint. The answer reaches the caller in all three.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -43,8 +52,8 @@ use b2bua::decision::{
 use b2bua::limiter::NoopLimiter;
 use call::{CallBodyCodec, LegState, MsgpackCodec, TimerType};
 use failover_harness::{
-    assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
-    ProxySut, ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
+    assert_call_fully_released, total_cdrs_for, worker_ordinals, Belief, FailoverHarness,
+    PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
 };
 use scenario_harness::Agent;
 use sip_message::SipMessage;
@@ -263,6 +272,68 @@ async fn cross_deadline(
     out
 }
 
+/// The callee answers at `t0 + ANSWER_AT`, inside the elder's window: the 2xx
+/// must reach the caller whichever incarnation sent the INVITE, and her ACK
+/// follows. Marks the route the answer took and who serves the call after it;
+/// returns the caller's established dialog.
+#[allow(clippy::too_many_arguments)]
+async fn answer_inside_window(
+    fh: &mut FailoverHarness,
+    pri_ord: &str,
+    t0: i64,
+    uas: &mut scenario_harness::ServerTxn,
+    call: &mut scenario_harness::ClientInvite,
+    drain: Option<&mut failover_harness::PendingDrain>,
+    elder: &ReplicatedB2buaSut,
+    replacement: Option<&ReplicatedB2buaSut>,
+    survivor: &ReplicatedB2buaSut,
+    call_ref: &str,
+) -> scenario_harness::Dialog {
+    advance_to(fh, t0, ANSWER_AT).await;
+    fh.mark(pri_ord, None, "answer", "the callee answers inside the window");
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    fh.advance(Duration::from_millis(300)).await;
+    if let Some(d) = drain {
+        d.poll();
+    }
+    // Read the answer's route off the recording rather than waiting on the
+    // caller: a lost answer must cost no clock.
+    let alice_addr: SocketAddr = ALICE.parse().unwrap();
+    let answered = hops(fh, "SIP/2.0 200", "INVITE")
+        .iter()
+        .any(|(_, to, delivered)| *delivered && *to == alice_addr);
+    assert!(answered, "the callee's 2xx reached the caller");
+    call.expect(200).await;
+    let dialog = call.ack().await;
+    fh.advance(Duration::from_millis(200)).await;
+    fh.mark(
+        pri_ord,
+        None,
+        "answer route",
+        &format!(
+            "2xx relayed to {:?}; caller ACK relayed to {:?}",
+            relayed_to(&hops(fh, "SIP/2.0 200", "INVITE")),
+            relayed_to(&hops(fh, "ACK ", "ACK")),
+        ),
+    );
+    fh.mark(
+        pri_ord,
+        None,
+        "after answer",
+        &format!(
+            "caller answered={answered} elder({}) serves={} replacement={} survivor serves={}",
+            elder.sip_addr(),
+            elder.serves(call_ref),
+            match replacement {
+                Some(r) => format!("{} serves={}", r.sip_addr(), r.serves(call_ref)),
+                None => "none yet".to_string(),
+            },
+            survivor.serves(call_ref),
+        ),
+    );
+    dialog
+}
+
 /// Pump until no node holds a trace of `call_ref`, then assert the cluster-wide
 /// release. Answers keepalive OPTIONS along the way.
 async fn settle_released(
@@ -300,10 +371,12 @@ fn report_dir(stem: &str) -> PathBuf {
 /// How the elder incarnation leaves: the three removals under test.
 #[derive(Clone, Copy)]
 enum Removal {
-    /// Endpoint withdrawn, SIGTERM answered by a drain, SIGKILL mid-window.
+    /// Endpoint gone from the slice, SIGTERM answered by a drain, SIGKILL
+    /// mid-window.
     Forced,
-    /// Endpoint withdrawn, SIGTERM answered by a drain, no kill — the process
-    /// exits when its grace runs out.
+    /// Endpoint `terminating` but still in the slice (withdrawn from routing,
+    /// still pulled), SIGTERM answered by a drain, no kill — the process exits
+    /// when its grace runs out.
     Graceful,
     /// The process dies WITH its endpoint: no window at all.
     Crash,
@@ -329,7 +402,6 @@ async fn run(name: &str, title: &str, removal: Removal) {
     let call_ref = find_backed_up_ref(survivor, &pri_ord).await;
     let fire_at = ring_deadline(survivor, &pri_ord, &call_ref).await;
     assert!(elder.serves(&call_ref), "the primary serves the ringing call");
-    let elder_addr = elder.sip_addr();
 
     // ── t0: the endpoint is withdrawn; the process is signalled ──────────────
     // From here the dialog has two potential owners of one leg, so ADR-0014's
@@ -341,7 +413,14 @@ async fn run(name: &str, title: &str, removal: Removal) {
          ordinal runs two incarnations",
     );
     let t0 = fh.now_ms();
-    fh.withdraw(&pri_ord);
+    match removal {
+        Removal::Graceful => fh.withdraw_routing(&pri_ord),
+        _ => fh.withdraw(&pri_ord),
+    }
+    // A `w_bak` cookie minted on the withdrawn member resolves to nothing until
+    // the replacement joins: in a two-worker cluster the survivor's own calls
+    // have no failover for the window.
+    assert!(proxy.health(&pri_ord).is_none(), "the withdrawn ordinal does not resolve");
     let mut drain: Option<failover_harness::PendingDrain> = match removal {
         Removal::Crash => {
             fh.mark(&pri_ord, None, "crash", "the process dies with its endpoint");
@@ -351,80 +430,74 @@ async fn run(name: &str, title: &str, removal: Removal) {
         _ => Some(fh.begin_drain_pending(elder, GRACE)),
     };
 
-    // ── t0 + 0.4 s: a replacement of the SAME ordinal ─────────────────────────
-    advance_to(&fh, t0, REPLACEMENT_AT).await;
-    let replacement = fh.spawn_replacement(&pri_ord).await;
-    let reclaimed = fh
-        .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
-            replacement.is_ready() && replacement.serves(&call_ref)
-        })
-        .await;
-    if let Some(d) = drain.as_mut() {
-        d.poll();
-    }
-    assert!(reclaimed, "the replacement bootstrapped and reclaimed the ringing copy");
-    fh.mark(
-        &pri_ord,
-        None,
-        "reclaimed",
-        &format!("the replacement holds the ringing copy at +{} ms", fh.now_ms() - t0),
-    );
+    // ── t0 + 0.4 s (A, C): a replacement of the SAME ordinal, alongside ──────
+    // In the graceful case (B) a StatefulSet creates the replacement only once
+    // the elder's pod is gone, so none exists yet.
+    let mut replacement: Option<ReplicatedB2buaSut> = match removal {
+        Removal::Graceful => None,
+        _ => {
+            advance_to(&fh, t0, REPLACEMENT_AT).await;
+            let replacement = fh.spawn_replacement(&pri_ord).await;
+            let reclaimed = fh
+                .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
+                    replacement.is_ready() && replacement.serves(&call_ref)
+                })
+                .await;
+            if let Some(d) = drain.as_mut() {
+                d.poll();
+            }
+            assert!(reclaimed, "the replacement bootstrapped and reclaimed the ringing copy");
+            fh.mark(
+                &pri_ord,
+                None,
+                "reclaimed",
+                &format!("the replacement holds the ringing copy at +{} ms", fh.now_ms() - t0),
+            );
+            Some(replacement)
+        }
+    };
 
     // ── t0 + 1.0 s: the callee answers, inside the elder's window ────────────
-    advance_to(&fh, t0, ANSWER_AT).await;
-    fh.mark(&pri_ord, None, "answer", "the callee answers inside the window");
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    fh.advance(Duration::from_millis(300)).await;
-    if let Some(d) = drain.as_mut() {
-        d.poll();
-    }
-    // Read the answer's route off the recording rather than waiting on the
-    // caller: a lost answer must cost no clock.
-    let alice_addr: SocketAddr = ALICE.parse().unwrap();
-    let answered = hops(&fh, "SIP/2.0 200", "INVITE")
-        .iter()
-        .any(|(_, to, delivered)| *delivered && *to == alice_addr);
-    assert!(answered, "the callee's 2xx reached the caller");
-    call.expect(200).await;
-    let mut dialog = call.ack().await;
-    fh.advance(Duration::from_millis(200)).await;
-    fh.mark(
+    let mut dialog = answer_inside_window(
+        &mut fh,
         &pri_ord,
-        None,
-        "answer route",
-        &format!(
-            "2xx relayed to {:?}; caller ACK relayed to {:?}",
-            relayed_to(&hops(&fh, "SIP/2.0 200", "INVITE")),
-            relayed_to(&hops(&fh, "ACK ", "ACK")),
-        ),
-    );
-    fh.mark(
-        &pri_ord,
-        None,
-        "after answer",
-        &format!(
-            "caller answered={answered} elder({elder_addr}) serves={} \
-             replacement({}) serves={} survivor serves={}",
-            elder.serves(&call_ref),
-            replacement.sip_addr(),
-            replacement.serves(&call_ref),
-            survivor.serves(&call_ref),
-        ),
-    );
+        t0,
+        &mut uas,
+        &mut call,
+        drain.as_mut(),
+        elder,
+        replacement.as_ref(),
+        survivor,
+        &call_ref,
+    )
+    .await;
 
-    // ── t0 + 1.8 s: the replacement's address is published ───────────────────
-    advance_to(&fh, t0, READMIT_AT).await;
-    fh.readmit(&pri_ord, replacement.sip_addr());
-
-    // ── t0 + 2.0 s: the elder's process finally ends ─────────────────────────
+    // ── how the elder leaves, and when its replacement is published ──────────
+    let survivor_key = format!("{}#g1", survivor.ordinal());
     match removal {
-        Removal::Forced => {
-            advance_to(&fh, t0, SIGKILL_AT).await;
-            drop(drain.take()); // the SIGKILL ends the drain with the process
-            fh.mark(&pri_ord, None, "crash", "SIGKILL ends the drained incarnation");
-            elder.crash();
+        Removal::Forced | Removal::Crash => {
+            // t0 + 1.8 s: the replacement's address is published.
+            advance_to(&fh, t0, READMIT_AT).await;
+            fh.readmit(&pri_ord, replacement.as_ref().expect("spawned alongside").sip_addr());
+            if let Removal::Forced = removal {
+                // t0 + 2.0 s: SIGKILL ends the drain with the process.
+                advance_to(&fh, t0, SIGKILL_AT).await;
+                drop(drain.take());
+                fh.mark(&pri_ord, None, "crash", "SIGKILL ends the drained incarnation");
+                elder.crash();
+            } else {
+                drop(drain.take());
+            }
         }
         Removal::Graceful => {
+            // The survivor's supervisor pulls the terminating member on presence
+            // alone (ADR-0031 D1): the link reads kept, and nothing parks it
+            // while the drain runs out with the endpoint still in the slice.
+            assert_eq!(
+                survivor.peer_link(&pri_ord),
+                failover_harness::PeerLink::Kept,
+                "the survivor keeps pulling the terminating member"
+            );
             let mut residual = None;
             for _ in 0..120 {
                 fh.advance(Duration::from_millis(100)).await;
@@ -435,16 +508,61 @@ async fn run(name: &str, title: &str, removal: Removal) {
             }
             drop(drain.take());
             let residual = residual.expect("the drain returned inside its grace");
+            let survivor_view = fh.view_ledger().beliefs(&survivor_key, &pri_ord);
+            assert!(
+                !survivor_view.contains(&Belief::PeerParked),
+                "nothing parked the peer through the drain: {survivor_view:?}"
+            );
+            assert_eq!(
+                survivor.peer_link(&pri_ord),
+                failover_harness::PeerLink::Kept,
+                "the link is still running when the drain returns"
+            );
+            assert!(
+                proxy.health(&pri_ord).is_none(),
+                "no replacement has joined: the ordinal still resolves to nothing"
+            );
             fh.mark(
                 &pri_ord,
                 None,
                 "exit",
                 &format!("the drain returned with {residual} live call(s); the process exits"),
             );
+            // The pod is gone: its endpoint leaves the slice and the process ends.
+            fh.depart(&pri_ord);
             elder.crash();
+            fh.advance(Duration::from_millis(200)).await;
+            assert_eq!(
+                survivor.peer_link(&pri_ord),
+                failover_harness::PeerLink::Parked,
+                "leaving the slice is what parks the peer"
+            );
+
+            // The StatefulSet creates the same ordinal again, on a new address;
+            // it bootstraps from the survivor and reclaims the answered copy.
+            let r = fh.spawn_replacement(&pri_ord).await;
+            let reclaimed = fh
+                .pump_until(Duration::from_millis(100), Duration::from_secs(30), async || {
+                    r.is_ready() && r.serves(&call_ref)
+                })
+                .await;
+            assert!(reclaimed, "the replacement bootstrapped and reclaimed the answered copy");
+            fh.mark(
+                &pri_ord,
+                None,
+                "reclaimed",
+                &format!("the replacement holds the answered copy at +{} ms", fh.now_ms() - t0),
+            );
+            fh.readmit(&pri_ord, r.sip_addr());
+            replacement = Some(r);
         }
-        Removal::Crash => drop(drain.take()),
     }
+    let replacement = replacement.expect("the replacement exists in every case");
+    assert_eq!(
+        proxy.health(&pri_ord),
+        Some(WorkerHealth::Unknown),
+        "the ordinal resolves again once the replacement joins"
+    );
 
     // ── t0 + 2.2 s: the replacement is judged alive ──────────────────────────
     advance_to(&fh, t0, ALIVE_AT).await;

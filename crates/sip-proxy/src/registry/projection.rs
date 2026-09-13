@@ -24,6 +24,11 @@
 //! - **Departed addresses** live in [`Tombstones`], keyed by address: an address
 //!   the set stopped serving still resolves as `Dead` for Timer H, so a response
 //!   from a node that left the pool is recognised as such.
+//! - **Only a `ready` member is routable** (ADR-0031 D1). The filter is applied
+//!   here, at the projection, so a member whose endpoint is not ready
+//!   departs exactly as a removed one: its ordinal leaves the projection and its
+//!   address is tombstoned. Filtering in the LB instead would keep a live entry
+//!   and never insert the tombstone.
 //! - **The projection** is cached in one [`ArcSwap`] for lock-free hot reads and
 //!   is a pure function of the two authoritative sources — never an independent
 //!   source of truth, always re-derivable, inherently lag-immune (it recomposes
@@ -260,12 +265,14 @@ impl WorkerSet {
         self.clock.now_ms().max(0) as u64
     }
 
-    /// Recompute the projection from the authoritative membership snapshot + the
-    /// annotation overlay, and keep the departed-address overlay in step: an
-    /// address the set stopped serving is tombstoned, an address a worker joined
-    /// at is forgotten. Idempotent; the single write path for every registry.
+    /// Recompute the projection from the **ready** members of the authoritative
+    /// membership snapshot + the annotation overlay, and keep the departed-address
+    /// overlay in step: an address the set stopped serving — the member left, or
+    /// its endpoint reads not `ready` — is tombstoned, an address a worker
+    /// joined at is forgotten. A `terminating` flip on a ready member changes
+    /// nothing. Idempotent; the single write path for every registry.
     pub(crate) fn recompose(&self) {
-        let peers = self.membership.snapshot();
+        let peers: Vec<Peer> = self.membership.snapshot().into_iter().filter(|p| p.ready).collect();
         let now_ms = self.now_ms();
         let departed = self.annotations.sync_membership(&peers, now_ms, self.default_port);
         let annots = self.annotations.snapshot();
@@ -465,6 +472,55 @@ mod tests {
         set.recompose();
         let joined = set.lookup_by_address(&addr).expect("the new tenant of the address");
         assert_eq!((joined.id.as_str(), joined.health), ("w9", WorkerHealth::Unknown));
+    }
+
+    #[test]
+    fn a_member_no_longer_ready_departs_and_its_address_reads_dead() {
+        let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+        set.set_health("w1", WorkerHealth::Alive);
+        sim.set_conditions("w1", false, true);
+        set.recompose();
+
+        assert!(set.resolve("w1").is_none(), "a not-ready member is out of the projection");
+        assert_eq!(set.snapshot().len(), 1);
+        let gone = set
+            .lookup_by_address(&ProxyAddr::new("10.0.0.2", 5060))
+            .expect("the not-ready member's address is tombstoned");
+        assert_eq!((gone.id.as_str(), gone.health), ("w1", WorkerHealth::Dead));
+        assert!(sim.resolve("w1").is_some(), "membership still holds it — it is only unroutable");
+    }
+
+    #[test]
+    fn a_member_ready_again_joins_fresh_and_clears_its_tombstone() {
+        let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+        set.set_health("w0", WorkerHealth::Alive);
+        sim.set_conditions("w0", false, false);
+        set.recompose();
+        let addr = ProxyAddr::new("10.0.0.1", 5060);
+        assert_eq!(set.lookup_by_address(&addr).unwrap().health, WorkerHealth::Dead);
+
+        sim.set_conditions("w0", true, false);
+        set.recompose();
+        let back = set.resolve("w0").expect("routable again");
+        assert_eq!(back.health, WorkerHealth::Unknown, "a returning endpoint awaits its probe");
+        assert!(back.first_seen_at_ms.is_some(), "the fresh-pod guard engages on the join");
+        let live = set.lookup_by_address(&addr).unwrap();
+        assert_eq!((live.id.as_str(), live.health), ("w0", WorkerHealth::Unknown));
+    }
+
+    #[test]
+    fn a_terminating_flip_on_a_ready_member_changes_nothing() {
+        let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+        set.set_health("w0", WorkerHealth::Alive);
+        let before = set.resolve("w0").unwrap();
+        sim.set_conditions("w0", true, true);
+        set.recompose();
+        assert_eq!(set.resolve("w0").unwrap(), before, "health and first_seen kept");
+        assert_eq!(
+            set.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060)).unwrap().health,
+            WorkerHealth::Alive,
+            "no tombstone for an address still served"
+        );
     }
 
     #[test]

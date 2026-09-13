@@ -9,7 +9,8 @@
 //!
 //! ## Two writers, one ledger
 //! 1. **The primitives** ([`FailoverHarness::withdraw`](crate::FailoverHarness::withdraw),
-//!    `readmit`, `spawn_replacement`, `crash`, drain …) record what they did at
+//!    `withdraw_routing`, `flap_not_ready`, `flap_ready`, `depart`, `readmit`,
+//!    `spawn_replacement`, `crash`, drain …) record what they did at
 //!    the instant they act; the `signal` is the primitive's own name.
 //! 2. **The sampler** ([`ViewLedger::sample`]) reads the LIVE components after
 //!    every advance chunk and records only what moved; the `signal` names what
@@ -52,8 +53,11 @@ pub enum Belief {
     Absent,
     /// The proxy registry holds the subject at this health.
     Registered(WorkerHealth),
-    /// A replication peer whose flows are running.
+    /// A replication peer whose flows are running toward a ready member.
     PeerActive,
+    /// A replication peer that is still pulled although its endpoint is no
+    /// longer ready — present in membership, not a routing target (ADR-0031 D1).
+    PeerKept,
     /// A replication peer that left membership: flows interrupted, watermarks
     /// retained.
     PeerParked,
@@ -67,6 +71,8 @@ pub enum Belief {
     Withdrawn,
     /// Orchestrator: the endpoint is published again.
     Admitted,
+    /// Orchestrator: the endpoint is gone from the slice — the pod is deleted.
+    Departed,
 }
 
 impl Belief {
@@ -76,22 +82,27 @@ impl Belief {
             Belief::Absent => "absent".into(),
             Belief::Registered(h) => format!("present/{h:?}"),
             Belief::PeerActive => "peer active".into(),
+            Belief::PeerKept => "peer kept (not ready)".into(),
             Belief::PeerParked => "peer parked".into(),
             Belief::Running { gen } => format!("running gen {gen}"),
             Belief::Draining { gen } => format!("draining gen {gen}"),
             Belief::Dead { gen } => format!("dead gen {gen}"),
             Belief::Withdrawn => "withdrawn".into(),
             Belief::Admitted => "admitted".into(),
+            Belief::Departed => "departed".into(),
         }
     }
 
     /// The comparable classification two observers are said to agree on.
     pub fn stance(&self) -> &'static str {
         match self {
-            Belief::Absent | Belief::PeerParked | Belief::Withdrawn => "absent",
+            Belief::Absent | Belief::PeerParked | Belief::Withdrawn | Belief::Departed => "absent",
             Belief::Registered(WorkerHealth::Dead) | Belief::Dead { .. } => "dead",
             Belief::Registered(WorkerHealth::Draining) | Belief::Draining { .. } => "draining",
-            Belief::Registered(_) | Belief::PeerActive | Belief::Running { .. } => "present",
+            Belief::Registered(_)
+            | Belief::PeerActive
+            | Belief::PeerKept
+            | Belief::Running { .. } => "present",
             Belief::Admitted => "present",
         }
     }
@@ -320,6 +331,7 @@ impl ViewLedger {
                 }
                 let belief = match supervisor.peer_link(subject) {
                     PeerLink::Active => Belief::PeerActive,
+                    PeerLink::Kept => Belief::PeerKept,
                     PeerLink::Parked => Belief::PeerParked,
                     PeerLink::Absent => Belief::Absent,
                 };

@@ -288,6 +288,28 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().map(|c| c.is_withdrawn()).unwrap_or(false)
     }
 
+    /// This node's replication link toward `peer` as its supervisor holds it
+    /// (`Absent` while crashed or unreplicated).
+    pub fn peer_link(&self, peer: &str) -> b2bua::repl::PeerLink {
+        self.core
+            .as_ref()
+            .and_then(|c| c.supervisor())
+            .map(|s| s.peer_link(peer))
+            .unwrap_or(b2bua::repl::PeerLink::Absent)
+    }
+
+    /// The retained watermark of the **Backup** flow this node pulls from
+    /// `peer` — the stream that carries the peer's forward flushes into this
+    /// node's backup partition. Continuous across a condition flip (no puller
+    /// respawn); `(0,0)` while crashed or unreplicated.
+    pub fn backup_flow_watermark(&self, peer: &str) -> repl_net::frame::Watermark {
+        self.core
+            .as_ref()
+            .and_then(|c| c.supervisor())
+            .map(|s| s.flow_watermark(peer, repl_net::frame::Partition::Bak))
+            .unwrap_or_else(|| repl_net::frame::Watermark::new(0, 0))
+    }
+
     /// **Ground-truth** live in-memory call count (the actual `inner.calls` map
     /// size), bypassing the `creations − removals` counters. The X11 reclaim/
     /// handback accounting is exactly what's under test, so assertions key on this
@@ -822,6 +844,15 @@ impl ProxySut {
             draining_since: None,
             first_seen_at_ms: None,
         });
+    }
+
+    /// The health the proxy holds for the worker bound at `addr`, an address
+    /// that left the set included (`Dead` for Timer H after a departure; `None`
+    /// once its window closed or for an address the pool never served).
+    pub fn health_at(&self, addr: SocketAddr) -> Option<WorkerHealth> {
+        self.registry
+            .lookup_by_address(&ProxyAddr::new(addr.ip().to_string(), addr.port()))
+            .map(|w| w.health)
     }
 
     /// The proxy's CURRENT health view of a worker (as the registry holds it).
@@ -1562,6 +1593,90 @@ impl FailoverHarness {
         }
         for (_, membership) in self.views.live_incarnations_of(ordinal) {
             membership.remove(ordinal);
+        }
+    }
+
+    /// **Withdraw `ordinal` from routing, keep it a replication peer** — the
+    /// graceful shape (ADR-0031 case 1): the orchestrator has begun to remove the
+    /// worker, so its endpoint reads `ready=false, terminating=true` but STAYS in
+    /// the slice until the pod is gone. The proxy departs the ordinal (out of the
+    /// projection, address tombstoned; no cookie resolves it) while every other
+    /// live worker keeps pulling it on presence alone (D1). The process is
+    /// untouched and keeps serving whatever still reaches it. Records the
+    /// orchestrator's, the proxy's and every peer's belief at this instant.
+    pub fn withdraw_routing(&mut self, ordinal: &str) {
+        self.mark(
+            ordinal,
+            None,
+            "withdraw_routing",
+            "endpoint not ready + terminating, still in the slice; process still running",
+        );
+        self.views.record("orchestrator", ordinal, Belief::Withdrawn, "withdraw_routing");
+        self.set_member_ready(ordinal, false, true, "withdraw_routing");
+    }
+
+    /// **Flap `ordinal` not ready at the same address** — the restarted-in-place
+    /// shape (ADR-0031 case 4): a readiness probe fails, the endpoint reads
+    /// `ready=false, terminating=false` and stays in the slice. The proxy departs
+    /// the ordinal and tombstones its address; every other live worker keeps
+    /// pulling it (D1). The process is untouched.
+    pub fn flap_not_ready(&mut self, ordinal: &str) {
+        self.mark(
+            ordinal,
+            None,
+            "flap_not_ready",
+            "endpoint not ready, same address, in the slice",
+        );
+        self.views.record("orchestrator", ordinal, Belief::Withdrawn, "flap_not_ready");
+        self.set_member_ready(ordinal, false, false, "flap_not_ready");
+    }
+
+    /// **Flap `ordinal` ready again** — the counterpart of
+    /// [`flap_not_ready`](Self::flap_not_ready): the endpoint reads `ready=true`
+    /// at the same address. The proxy publishes it as a fresh `Unknown` endpoint
+    /// (nothing has probed it yet); every other live worker's link is a plain
+    /// active peer again, with no puller respawn (ADR-0031 D1).
+    pub fn flap_ready(&mut self, ordinal: &str) {
+        self.mark(ordinal, None, "flap_ready", "endpoint ready again at the same address");
+        self.views.record("orchestrator", ordinal, Belief::Admitted, "flap_ready");
+        self.set_member_ready(ordinal, true, false, "flap_ready");
+    }
+
+    /// Drive one endpoint-condition change into the proxy's registry and every
+    /// live peer's membership, recording what each observer is expected to hold:
+    /// the proxy departs a not-ready member and publishes a ready one `Unknown`;
+    /// a peer keeps a not-ready member and treats a ready one as plain active.
+    fn set_member_ready(&mut self, ordinal: &str, ready: bool, terminating: bool, signal: &str) {
+        if let Some(registry) = self.views.proxy_registry() {
+            registry.set_ready(ordinal, ready);
+            let belief =
+                if ready { Belief::Registered(WorkerHealth::Unknown) } else { Belief::Absent };
+            self.views.record("proxy", ordinal, belief, signal);
+        }
+        let belief = if ready { Belief::PeerActive } else { Belief::PeerKept };
+        for (observer, membership) in self.views.live_peers_of(ordinal) {
+            membership.set_conditions(ordinal, ready, terminating);
+            self.views.record(&observer, ordinal, belief, signal);
+        }
+    }
+
+    /// **Depart `ordinal`: its endpoint leaves the slice** — the pod is gone
+    /// (ADR-0031 case 1, the instant after the drain). The proxy drops the
+    /// ordinal (it was already unroutable under
+    /// [`withdraw_routing`](Self::withdraw_routing)) and every other live
+    /// worker's membership drops the peer, so its supervisor parks the flows.
+    /// The process, if still running, is untouched: pair with `crash` to model
+    /// the exit.
+    pub fn depart(&mut self, ordinal: &str) {
+        self.mark(ordinal, None, "depart", "endpoint gone from the slice");
+        self.views.record("orchestrator", ordinal, Belief::Departed, "depart");
+        if let Some(registry) = self.views.proxy_registry() {
+            registry.remove(ordinal);
+            self.views.record("proxy", ordinal, Belief::Absent, "depart");
+        }
+        for (observer, membership) in self.views.live_peers_of(ordinal) {
+            membership.remove(ordinal);
+            self.views.record(&observer, ordinal, Belief::PeerParked, "depart");
         }
     }
 

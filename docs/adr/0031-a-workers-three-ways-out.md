@@ -73,8 +73,9 @@ quiescence-or-grace.
 
 **D1 — A member still in the slice stays a replication peer; only a `ready` member is a
 routing target.** The informer emits every endpoint in the slice as a `Peer` carrying
-`ready` and `terminating`; a condition flip is a delta, never a host move (it must not reset
-health or re-arm the fresh-pod guard). *Pullable* is "present in the slice", whatever its
+`ready` and `terminating`; a condition flip is a delta, never a host move: a `terminating`
+flip on a ready member must not reset the proxy's health or re-arm its fresh-pod guard, while a
+`ready` flip departs the member at the proxy and a return rejoins it as a fresh endpoint. *Pullable* is "present in the slice", whatever its
 conditions: the supervisor pulls it like a ready peer until it leaves the slice. *Routable*
 is `ready`: the proxy's `WorkerSet::recompose` filters the snapshot at the projection, so a
 `ready=false` member departs exactly as today — the ordinal leaves the projection and its

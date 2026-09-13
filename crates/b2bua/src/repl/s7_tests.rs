@@ -27,7 +27,7 @@ use sip_message::SipRequest;
 use sip_message::SipStr;
 use sip_txn::IdGen;
 
-use super::{Readiness, ReadinessSource};
+use super::{PeerLink, Readiness, ReadinessSource};
 use crate::overload::OverloadSignal;
 use crate::router::build_options_health_response;
 
@@ -555,4 +555,49 @@ fn options_200_advertises_the_node_capability_set() {
         Some("INVITE, ACK, CANCEL, BYE, OPTIONS")
     );
     assert_eq!(value(&resp, HeaderName::Supported).as_deref(), Some("timer"));
+}
+
+/// A member that is present but **not ready** is pulled and never waited on
+/// (ADR-0031 D1): its Reclaim flow may be unreachable, mid-bootstrap or lost,
+/// and the endpoint may linger in the slice indefinitely (a pod stuck
+/// `Terminating`), so the readiness gates exclude it while the puller keeps
+/// running toward it.
+#[tokio::test(start_paused = true)]
+async fn a_not_ready_member_is_pulled_but_does_not_gate_readiness() {
+    let clock = Clock::test_at(0);
+    // No B server is ever spawned: B's Reclaim flow never connects and, before
+    // the hard timer, is neither current nor bootstrap-complete.
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b_addr = addr(4);
+    let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| {
+        assert_eq!(peer.ordinal, "B");
+        b_addr
+    }));
+    let a_store = ReplicatingCallStore::new(2, clock.clone());
+    let a_sup = ReplicationSupervisor::with_config(
+        "A",
+        net.clone(),
+        a_store.clone(),
+        resolve,
+        fast_config(),
+    );
+    let membership =
+        Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone()));
+    a_sup.start(membership.clone());
+    tick(100).await;
+    assert!(!a_sup.all_current(), "a ready peer still pending gates readiness (sanity)");
+    assert!(!a_sup.all_bootstrapped());
+
+    // B's endpoint flips not ready and stays in the slice.
+    membership.set_conditions("B", false, true);
+    tick(100).await;
+    assert!(a_sup.is_running("B"), "a not-ready member is still pulled");
+    assert_eq!(a_sup.peer_link("B"), PeerLink::Kept);
+    assert!(a_sup.all_bootstrapped(), "a pulled-not-ready member does not gate bootstrap");
+    assert!(a_sup.all_current(), "a pulled-not-ready member does not gate readiness");
+
+    // Ready again before its hard timer: it gates once more.
+    membership.set_conditions("B", true, false);
+    tick(100).await;
+    assert!(!a_sup.all_current(), "a ready peer that is still pending gates readiness again");
 }
