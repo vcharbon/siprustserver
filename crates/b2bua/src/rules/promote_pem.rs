@@ -484,6 +484,7 @@ mod tests {
         FeatureActivations {
             platform: PlatformActivations {
                 max_duration_sec: 3_600,
+                max_duration_anchor: Default::default(),
                 keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
             refer: None,

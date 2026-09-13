@@ -278,6 +278,7 @@ pub fn representative_call() -> Call {
         features: Some(FeatureActivations {
             platform: PlatformActivations {
                 max_duration_sec: 3600,
+                max_duration_anchor: Default::default(),
                 keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
             refer: None,
@@ -708,6 +709,7 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
     let platform = (any::<i64>(), any::<i64>(), any::<i64>()).prop_map(
         |(max_duration_sec, interval_sec, max_missed)| PlatformActivations {
             max_duration_sec,
+            max_duration_anchor: Default::default(),
             keepalive: KeepaliveActivation { interval_sec, max_missed },
         },
     );

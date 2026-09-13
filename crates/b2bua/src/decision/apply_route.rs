@@ -185,9 +185,16 @@ pub async fn apply_route(
     // `call.ext[<id>].defer_routing == true`), the normal destination leg is NOT
     // created here — the service's `init` owns leg creation (e.g. an unadopted
     // media leg toward an MRF, dialing the real destination later). The
-    // GlobalDuration backstop below still arms for the call.
+    // GlobalDuration backstop below still arms for the call under its anchor.
     if defers_routing(&call) {
-        arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+        if route.features.platform.arms_cap_at_creation(config.setup_timeout_sec) {
+            arm_global_duration(
+                &mut call,
+                &mut fx,
+                route.features.platform.max_duration_sec,
+                now_ms,
+            );
+        }
         arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_sec, now_ms);
         return HandlerResult { call, effects: fx };
     }
@@ -334,7 +341,14 @@ pub async fn apply_route(
     // answered call is unaffected (the re-arm supersedes via the driver's epoch
     // bump and `replace_timer_by_id`'s id-dedup); a stuck-in-setup call is now
     // reaped at the cap by the existing `max-duration` rule.
-    arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+    //
+    // Under the `Answer` anchor (`MaxDurationAnchor`) the cap bounds the
+    // established call only, so it is armed at the answer alone whenever the
+    // `SetupTimeout` deadline bounds the setup; with that deadline disabled the
+    // creation-time backstop arms as above.
+    if route.features.platform.arms_cap_at_creation(config.setup_timeout_sec) {
+        arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+    }
     arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_sec, now_ms);
 
     HandlerResult { call, effects: fx }
