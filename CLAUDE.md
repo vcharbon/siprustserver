@@ -105,7 +105,11 @@ at its source (see the clock guide, rule 5).
 fast signal (no codegen), `just test [filter]` / `just test-slow`, `just lint`,
 `just image` for the k8s image, `just doctor` when a machine looks broken,
 `just disk` / `just clean-incremental` under disk pressure. Every recipe is a
-plain cargo call, so a hand-typed `cargo test` behaves identically.
+plain cargo call, so a hand-typed `cargo test` behaves identically — including
+the parallelism cap: `.cargo/config.toml` sets `[build] jobs = 4`, because this
+workspace links ~250 test binaries and the concurrent mold links at one job per
+core exhaust a 32 GB host (ADR-0029 X5). `--jobs N` overrides it per call:
+lower on a shared host, never higher for a whole-workspace run.
 
 Prerequisites: mold and gcc >= 12. Do not:
 
@@ -133,9 +137,10 @@ folded in, it does not fail the suite, it wedges it.
 
 **Never run more than ONE agent (subagent / workflow stage) at a time that
 compiles or runs tests.** Builds serialise on the target directory and a build
-racing a running SUT or loadgen skews what the run measures. On a host short on
-memory, cap a heavy command in a scope:
-`systemd-run --user --scope -q -p MemoryMax=12G cargo build … --jobs 6`; a
+racing a running SUT or loadgen skews what the run measures. The jobs cap in
+`.cargo/config.toml` is sized for a quiet host; beside other builds lower it
+(`cargo test --workspace --jobs 2`) and, on a host short on memory, cap the
+command in a scope: `systemd-run --user --scope -q -p MemoryMax=12G cargo …`; a
 long-lived test process (SUT, loadgen, e2e-web) then gets its own small scope.
 
 ## HA / chaos — summary ([acceptance guide](docs/testing/ha-acceptance.md))
