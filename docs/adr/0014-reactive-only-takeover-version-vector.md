@@ -159,7 +159,7 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     | **Noop** | S→C | `at` | Catch-up edge (first ⇒ ready) + 20s idle keepalive. |
     | **ResetToBootstrap** | S→C | `reason` | `since` fell below the compacted tail → re-bootstrap from `(0,0)`. |
 
-    **Removed:** `Ack` (was a no-op retention hint — retention now bounded by
+    **Removed:** `Ack` (ADR-0031 D2 later adds a puller position frame for the drain's exit only, never a retention or readiness input) (was a no-op retention hint — retention now bounded by
     time/size, a too-slow puller re-bootstraps via `ResetToBootstrap`); the
     `PullMode` enum + the `Bootstrap`/`Replog` two-request handshake (collapsed into
     the `since==(0,0)` rule); `Deactivate`/tag 5 (already retired — ensure no

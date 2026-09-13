@@ -304,7 +304,7 @@ k8s, via the `/ready` HTTP probe. **Ready** = every **Reclaim** stream to a
 *reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
 dead/slow peer cannot hang readiness). **Backup** streams are opened only *after*
 `Ready` and **never gate it** (fire-and-forget; observable via the store + metrics,
-not a readiness sub-state). **Draining** = latched on SIGTERM; terminal. The drain exits on the first of: live calls cleared, every pulling peer caught up to this node's changelog head, the grace (ADR-0031 D2).
+not a readiness sub-state). **Draining** = latched on SIGTERM; terminal. The drain exits on the first of: live calls cleared, the grace, or — for a worker that has observed its own withdrawal — every live call's backup holding its changelog head (ADR-0031 D2, D6).
 
 ## HTTP call-decision adaptation
 
@@ -445,9 +445,10 @@ _Avoid_: "clear state" in prose for the *concept* (say a machine **deactivates**
 
 **K8sMembership**:
 The real `topology::Membership` source (S11): a kube EndpointSlice informer over
-the headless worker Service. *Ready* endpoints → `Peer{ordinal = pod name, host
-= pod IP}`; written once, consumed by both proxy and b2bua (ADR-0011 X7 / ADR-0012
-D4). Its delta consumers **self-heal**: a `Lagged` broadcast re-reconciles from
+the headless worker Service. Every endpoint in the slice → `Peer{ordinal = pod
+name, host = pod IP, ready, terminating}`; written once, consumed by both proxy
+and b2bua (ADR-0011 X7 / ADR-0012 D4), each with its own predicate: the proxy
+routes to *ready* peers, the b2bua pulls every peer (ADR-0031 D1). Its delta consumers **self-heal**: a `Lagged` broadcast re-reconciles from
 `snapshot()` (never `return`s) and a periodic snapshot reconcile makes a missed
 delta non-fatal (ADR-0012 D1/D2). The repl puller additionally resolves a
 **stable per-pod DNS name fresh per connect** as defense-in-depth (ADR-0012 D3);
@@ -462,9 +463,12 @@ its address; the process is untouched and learns nothing from it (SIGTERM is its
 only signal). Three ways out — graceful, abrupt, vanished — in ADR-0031.
 
 **Terminating member**:
-An endpoint with `serving=true, terminating=true` (a graceful delete, for its
-grace). Still a **replication peer** (pulled until it disappears), no longer a
-**routing target** (ADR-0031 D1: one snapshot, two predicates).
+A worker the orchestrator has begun to remove and that still runs. Still a
+**replication peer** (pulled until it is gone from membership), no longer a
+**routing target** (ADR-0031 D1: one membership snapshot, two predicates —
+*pullable* is "still a member", *routable* is "ready").
+_Avoid_: "withdrawn" for the replication event — **withdrawal** is routing-only;
+the replication event is the peer **departing** (parked).
 
 **Departed-address tombstone**:
 The proxy registry's memory of an address that left the set: resolvable by
