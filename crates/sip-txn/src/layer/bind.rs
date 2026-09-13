@@ -76,10 +76,13 @@ impl Owner {
         let branch = response.top_via().branch().unwrap_or_default();
         let txn = self.txns.get(branch).filter(|t| t.role == TxnRole::Server);
         // A CANCEL shares its INVITE's branch (§9.1) and its answer that
-        // INVITE's tag (§9.2) — held by the transaction, or remembered past it.
+        // INVITE's tag (§9.2): the one the INVITE's own To named (§8.2.6.2),
+        // else the one the transaction bound, else the one remembered past it.
         if *response.cseq().method() == Method::Cancel {
             return txn
-                .and_then(|t| t.bound_to_tag().map(str::to_string))
+                .and_then(|t| t.original_request.as_ref())
+                .and_then(|r| r.to().tag().map(str::to_string))
+                .or_else(|| txn.and_then(|t| t.bound_to_tag().map(str::to_string)))
                 .or_else(|| self.recall_uas_tag(response))
                 .map_or(Bound::Free, Bound::Exact);
         }

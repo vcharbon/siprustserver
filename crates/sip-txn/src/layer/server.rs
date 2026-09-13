@@ -391,13 +391,20 @@ impl Owner {
     }
 
     /// The To-tag the server INVITE txn on `branch` has bound
-    /// (`Transaction::bound_to_tag`), pinned now where none was yet.
+    /// (`Transaction::bound_to_tag`), pinned now where none was yet: a request
+    /// that named the dialog is answered under its own To-tag (RFC 3261
+    /// §8.2.6.2), any other under a fresh one.
     fn uas_to_tag_of(&mut self, branch: &str) -> Option<String> {
         let known = self.txns.get(branch).and_then(|t| t.bound_to_tag().map(str::to_string));
         if known.is_some() {
             return known;
         }
-        let pinned = self.id_gen.new_tag();
+        let requested = self
+            .txns
+            .get(branch)
+            .and_then(|t| t.original_request.as_ref())
+            .and_then(|r| r.to().tag().map(str::to_string));
+        let pinned = requested.unwrap_or_else(|| self.id_gen.new_tag());
         if let Some(txn) = self.txns.get_mut(branch) {
             txn.uas_to_tag = Some(pinned.clone());
         }
@@ -532,17 +539,16 @@ impl Owner {
             );
             let terminated_buf = terminated.image().clone();
             self.send_buffer(endpoint, &terminated_buf, src).await;
+            self.record_uas_tag(&branch, &terminated);
             if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                 txn.state = TxnState::Completed;
                 txn.last_response = Some(terminated_buf);
                 txn.last_response_status = Some(487);
                 txn.original_request = None;
             }
-            // Timer-H-487 cleanup if the ACK for 487 never arrives.
-            let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(TIMER_H));
-            if let Some(txn) = self.txns.get_mut(branch.as_str()) {
-                txn.cleanup_key = Some(key);
-            }
+            // The layer's own final holds the transaction like a TU's: Timer G
+            // repeats the 487 until the ACK, Timer H bounds it (§17.2.1).
+            self.arm_final_hold(&branch, TxnKind::Invite, 487, src);
         }
 
         // Critical: we already answered 200 + 487 on the wire; a dropped Cancelled
