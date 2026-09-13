@@ -204,6 +204,19 @@ impl PeerEntry {
     }
 }
 
+/// This node's link state toward one peer, as the supervisor holds it —
+/// read-only introspection ([`peer_link`](ReplicationSupervisor::peer_link)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerLink {
+    /// The ordinal was never in this node's membership view.
+    Absent,
+    /// The peer left the membership set: both flows are interrupted, the
+    /// retained watermarks survive for a warm resume.
+    Parked,
+    /// The Reclaim flow's puller is running toward the peer.
+    Active,
+}
+
 /// Ties pullers to topology; owns the per-`(ordinal, flow)` retained watermarks.
 #[derive(Clone)]
 pub struct ReplicationSupervisor {
@@ -645,6 +658,18 @@ impl ReplicationSupervisor {
             .get(peer)
             .map(|e| e.flow(partition).watermark)
             .unwrap_or_else(|| Watermark::new(0, 0))
+    }
+
+    /// This node's link state toward `peer` ([`PeerLink`]): `Active` while its
+    /// Reclaim puller runs, `Parked` once it left the membership set (the entry
+    /// and its watermarks are retained), `Absent` when the ordinal was never
+    /// seen. Pure read — it folds no puller status and spawns nothing.
+    pub fn peer_link(&self, peer: &str) -> PeerLink {
+        match self.inner.peers.lock().unwrap().get(peer) {
+            None => PeerLink::Absent,
+            Some(e) if e.reclaim.status_rx.is_some() => PeerLink::Active,
+            Some(_) => PeerLink::Parked,
+        }
     }
 
     /// Whether the **Reclaim** puller is currently running (not Parked) for `peer`.

@@ -203,6 +203,7 @@ impl ReplReport {
             lanes,
             rows,
             anomalies: Vec::new(),
+            views: Vec::new(),
             epoch_base_ms: None,
         }
     }

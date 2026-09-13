@@ -26,7 +26,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use b2bua::cdr::{CdrRecord, InMemoryCdrWriter};
@@ -54,6 +55,7 @@ use tokio::task::JoinHandle;
 use topology::{Peer, SimulatedMembership};
 
 use crate::rfc_acceptance::{lane_details, Finding, RfcAcceptance};
+use crate::views::{Belief, Incarnation, ViewLedger};
 
 /// Changelog TTLs `(tombstone, dead_peer)`: long enough that a backed-up call
 /// survives the whole scenario, short enough that dead-peer auto-clean is
@@ -69,8 +71,10 @@ const DEFAULT_TTLS: (i64, i64) = (60_000, 600_000);
 struct ReplWiring {
     /// Shared (recording) replication fabric every node listens/connects on.
     network: Arc<dyn ReplicationNetwork>,
-    /// `ordinal → repl addr` for the supervisor's address resolver.
-    addr_map: HashMap<String, SocketAddr>,
+    /// The cluster's LIVE `ordinal → repl addr` map, shared by every node: the
+    /// resolver reads it per connect attempt (ADR-0012 D3), so re-pointing an
+    /// ordinal at a replacement's listen address reaches the running peers.
+    addr_map: Arc<Mutex<HashMap<String, SocketAddr>>>,
     /// The peers this node pulls from (its membership snapshot).
     peers: Vec<Peer>,
     /// This node's repl listen address (stable across reboots).
@@ -95,11 +99,15 @@ impl ReplWiring {
             Arc::new(SimulatedMembership::with_clock(self.peers.clone(), clock.clone()));
         let membership: Arc<dyn topology::Membership> = sim_membership.clone();
         let addr_map = self.addr_map.clone();
-        // The resolver is now async (ADR-0012 D3); wrap the sim's ordinal→addr map
-        // in the sync-closure adapter.
+        // The resolver is now async (ADR-0012 D3); wrap the cluster's live
+        // ordinal→addr map in the sync-closure adapter. It is READ per connect
+        // attempt, so a peer that moved (a replacement on a fresh listen addr)
+        // is reached on the next reconnect without respawning anything.
         let addr_resolver: b2bua::repl::AddrResolver =
             Arc::new(b2bua::repl::FnPeerResolver(move |peer: &Peer| {
                 *addr_map
+                    .lock()
+                    .unwrap()
                     .get(&peer.ordinal)
                     .unwrap_or_else(|| panic!("no repl addr for peer {}", peer.ordinal))
             }));
@@ -163,6 +171,13 @@ pub struct ReplicatedB2buaSut {
     /// of this node (initial spawn AND each reboot), so a tuned knob survives
     /// crash/reboot cycles. Default no-op.
     tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
+    /// The cluster's views ledger, shared with the harness: this node registers
+    /// each incarnation it spawns and records its own lifecycle beliefs here.
+    views: Arc<ViewLedger>,
+    /// The LIVE incarnation's presence flag — cleared by `crash`/`reboot` so the
+    /// ledger's sampler sees the process go, and the parked handles of a dead
+    /// incarnation stop being read as a running node.
+    alive: Arc<AtomicBool>,
 }
 
 /// A shared handle to the `scenario_harness::Harness` so a worker can re-bind its
@@ -224,6 +239,12 @@ impl ReplicatedB2buaSut {
     /// This worker's current incarnation gen (bumped on each reboot).
     pub fn gen(&self) -> u64 {
         self.gen
+    }
+
+    /// The SIP wire address this incarnation is bound on (a reboot or a
+    /// replacement moves it — a new pod IP).
+    pub fn sip_addr(&self) -> SocketAddr {
+        self.sip_addr
     }
 
     /// The CDR records this worker has written (call lifecycle assertions).
@@ -464,6 +485,57 @@ impl ReplicatedB2buaSut {
         }
         // Wipe memory: a lingering `get` now sees an empty store at this gen.
         self.store = Arc::new(ReplicatingCallStore::new(self.gen, self.clock.clone()));
+        self.retire_incarnation("crash");
+    }
+
+    /// The ledger key of this node's live incarnation (`b1#g2`).
+    pub fn incarnation_key(&self) -> String {
+        format!("{}#g{}", self.ordinal, self.gen)
+    }
+
+    /// Mark the live incarnation's process gone and record it on the ledger.
+    fn retire_incarnation(&self, signal: &str) {
+        self.alive.store(false, Ordering::SeqCst);
+        self.views.record(
+            &self.incarnation_key(),
+            &self.ordinal,
+            Belief::Dead { gen: self.gen },
+            signal,
+        );
+    }
+
+    /// Register the incarnation this node just spawned with the views ledger:
+    /// its identity plus the live handles (supervisor peer links, drain latch,
+    /// membership) the sampler and the cluster primitives read.
+    fn register_incarnation(&self, core: &B2buaCore) {
+        self.views.register(Incarnation {
+            ordinal: self.ordinal.clone(),
+            gen: self.gen,
+            sip_addr: self.sip_addr,
+            repl_addr: self.wiring.listen_addr,
+            alive: self.alive.clone(),
+            supervisor: core.supervisor().cloned(),
+            readiness: core.readiness(),
+            membership: self.membership.clone(),
+        });
+    }
+
+    /// Begin a graceful drain of this incarnation ([`B2buaCore::drain`]): latch
+    /// `Draining` — the proxy's OPTIONS probe then steers new calls away — and
+    /// wait for the live calls to clear, bounded by `grace`. Returns the
+    /// residual live-call count (`0` ⇒ fully quiesced). The process keeps
+    /// serving throughout: draining is not death.
+    pub async fn begin_drain(&self, grace: Duration) -> usize {
+        self.views.record(
+            &self.incarnation_key(),
+            &self.ordinal,
+            Belief::Draining { gen: self.gen },
+            "drain",
+        );
+        match self.core.as_ref() {
+            Some(core) => core.drain(grace).await,
+            None => 0,
+        }
     }
 
     /// Drive a `MemberDelta::Removed` for `ordinal` into THIS node's membership —
@@ -518,6 +590,8 @@ impl ReplicatedB2buaSut {
         if let Some(mut core) = self.core.take() {
             core.abort();
         }
+        self.retire_incarnation("reboot");
+        self.alive = Arc::new(AtomicBool::new(true));
         self.gen += 1;
         // New pod IP: rebind on a fresh address so there is no network continuity
         // with the dead incarnation. Update both the typed addr and the bind str
@@ -529,7 +603,9 @@ impl ReplicatedB2buaSut {
         let (setup, store, membership) = self.wiring.setup(self.gen, &self.clock);
         self.store = store;
         self.membership = membership;
-        self.core = Some(self.spawn_core(Some(setup)).await);
+        let core = self.spawn_core(Some(setup)).await;
+        self.register_incarnation(&core);
+        self.core = Some(core);
 
         // Pristine BEFORE reclaim: no settle/advance has run since spawn, so the
         // supervisor's bootstrap pull has not materialised anything yet.
@@ -685,6 +761,27 @@ impl ProxySut {
         self.registry.set_address(ordinal, ProxyAddr::new(addr.ip().to_string(), addr.port()));
     }
 
+    /// Drop `ordinal` from the proxy's MEMBERSHIP — the endpoint is gone from
+    /// its view entirely (not a health annotation: the ordinal no longer
+    /// resolves, so nothing routes to it and no cookie can name it). The
+    /// worker's process is untouched.
+    pub fn remove_worker(&self, ordinal: &str) {
+        self.registry.remove(ordinal);
+    }
+
+    /// Publish `ordinal` at `addr` in the proxy's membership, health `Unknown`
+    /// — a freshly observed endpoint the probe has not judged yet. Use
+    /// [`set_health`](Self::set_health) to state a judged health.
+    pub fn add_worker(&self, ordinal: &str, addr: SocketAddr) {
+        self.registry.add(sip_proxy::registry::WorkerEntry {
+            id: ordinal.to_string(),
+            address: ProxyAddr::new(addr.ip().to_string(), addr.port()),
+            health: WorkerHealth::Unknown,
+            draining_since: None,
+            first_seen_at_ms: None,
+        });
+    }
+
     /// The proxy's CURRENT health view of a worker (as the registry holds it).
     /// When a health probe is running this reflects real probe replies; callers
     /// poll it to wait for a rebooted worker to be re-confirmed `Alive` by the
@@ -726,13 +823,14 @@ pub struct FailoverHarness {
     repl_recording: RecordingReplicationNetwork,
     /// The underlying repl sim fabric — fault controls go here directly.
     repl_sim: Arc<SimulatedReplicationNetwork>,
-    /// `ordinal → repl addr` (stable across reboots), for fault/lane mapping.
+    /// `ordinal → DECLARED repl addr` (stable across reboots), for fault/lane
+    /// mapping. A replacement listens elsewhere — see `repl_resolver`.
     repl_addrs: HashMap<String, SocketAddr>,
-    /// `ordinal → LATEST SIP wire addr`, so the unified report's combiner can
-    /// collapse a worker's SIP + repl + lifecycle rows onto one column. A reboot
-    /// re-binds the worker on a NEW address (new pod IP), so this is updated on
-    /// reboot to the live incarnation's addr.
-    worker_sip_addrs: HashMap<String, SocketAddr>,
+    /// The cluster's LIVE `ordinal → repl addr` map every node's resolver reads
+    /// per connect attempt (ADR-0012 D3). Initialised from `repl_addrs`;
+    /// [`spawn_replacement`](Self::spawn_replacement) re-points an ordinal at
+    /// the new incarnation's listen address.
+    repl_resolver: Arc<Mutex<HashMap<String, SocketAddr>>>,
     /// EVERY worker SIP addr ever bound, across all incarnations. The
     /// endpoint-scoped RFC CSeq audit excludes worker binds (a transparent
     /// failover splits one dialog's CSeq stream across workers, which the audit
@@ -779,6 +877,27 @@ pub struct FailoverHarness {
     /// (after the parity defaults) — set via
     /// [`with_worker_tune`](Self::with_worker_tune) BEFORE spawning workers.
     worker_tune: Arc<dyn Fn(&mut b2bua::B2buaConfig) + Send + Sync>,
+    /// The views ledger: every observer's belief about every worker, written by
+    /// the cluster primitives and by the per-chunk sampler in
+    /// [`advance`](Self::advance). Shared with each worker SUT.
+    views: Arc<ViewLedger>,
+    /// Per-ordinal spawn recipe, kept so
+    /// [`spawn_replacement`](Self::spawn_replacement) can stand a second
+    /// incarnation of an ordinal up with the original's wiring.
+    worker_specs: HashMap<String, WorkerSpec>,
+}
+
+/// How one worker ordinal was spawned — everything a replacement incarnation of
+/// the same ordinal needs.
+#[derive(Clone)]
+struct WorkerSpec {
+    sip_name: String,
+    sip_base_addr: SocketAddr,
+    peers: Vec<String>,
+    dest: (String, u16),
+    outbound_proxy: (String, u16),
+    decision: Arc<dyn CallDecisionEngine>,
+    limiter: Arc<dyn CallLimiter>,
 }
 
 /// The in-dialog CSeq-ordering audit rule (`rfc_rules::rules::cseq`), named here so
@@ -837,14 +956,15 @@ impl FailoverHarness {
             .enumerate()
             .map(|(i, ord)| ((*ord).to_string(), repl_addr_for(i)))
             .collect();
+        let event_seq_for_views = event_seq.clone();
         Self {
-            clock,
+            clock: clock.clone(),
             name: name.to_string(),
             report_on_drop: std::cell::Cell::new(true),
             repl_recording,
             repl_sim,
+            repl_resolver: Arc::new(Mutex::new(repl_addrs.clone())),
             repl_addrs,
-            worker_sip_addrs: HashMap::new(),
             all_worker_sip_addrs: Vec::new(),
             relay_sip_addrs: Vec::new(),
             markers: Vec::new(),
@@ -853,6 +973,8 @@ impl FailoverHarness {
             worker_clock_offsets: HashMap::new(),
             rfc_acceptance: RfcAcceptance::default(),
             worker_tune: Arc::new(|_| {}),
+            views: ViewLedger::new(clock, event_seq_for_views),
+            worker_specs: HashMap::new(),
         }
     }
 
@@ -1061,6 +1183,9 @@ impl FailoverHarness {
             None
         };
 
+        // The registry is the `proxy` observer's source — the ledger samples it
+        // for presence ⊕ health after every advance chunk.
+        self.views.attach_proxy(registry.clone());
         ProxySut { addr: sock, ext_addr: None, registry, metrics, task, probe_task }
     }
 
@@ -1202,17 +1327,41 @@ impl FailoverHarness {
             .repl_addrs
             .get(ordinal)
             .unwrap_or_else(|| panic!("worker {ordinal} was not declared in FailoverHarness::new"));
-        let sip_addr: SocketAddr = sip_bind.parse().expect("sip addr");
-        self.worker_sip_addrs.insert(ordinal.to_string(), sip_addr);
+        let spec = WorkerSpec {
+            sip_name: sip_name.to_string(),
+            sip_base_addr: sip_bind.parse().expect("sip addr"),
+            peers: peers.iter().map(|p| (*p).to_string()).collect(),
+            dest: (dest.0.to_string(), dest.1),
+            outbound_proxy: (outbound_proxy.0.to_string(), outbound_proxy.1),
+            decision,
+            limiter,
+        };
+        self.worker_specs.insert(ordinal.to_string(), spec.clone());
+        self.spawn_incarnation(ordinal, &spec, 1, spec.sip_base_addr, listen_addr).await
+    }
+
+    /// Stand ONE incarnation of `ordinal` up: bind its SIP endpoint at
+    /// `sip_addr`, listen for replication at `listen_addr`, and spawn a core at
+    /// incarnation `gen` over a fresh empty store. Shared by the first spawn and
+    /// by [`spawn_replacement`](Self::spawn_replacement); a reboot re-spawns
+    /// in place on the SUT itself.
+    async fn spawn_incarnation(
+        &mut self,
+        ordinal: &str,
+        spec: &WorkerSpec,
+        gen: u64,
+        sip_addr: SocketAddr,
+        listen_addr: SocketAddr,
+    ) -> ReplicatedB2buaSut {
         self.all_worker_sip_addrs.push(sip_addr);
 
-        // The full addr-resolver map (covers this node + every peer) is known up
-        // front from the declared cluster — no post-spawn linking needed.
-        let addr_map = self.repl_addrs.clone();
-        let peer_list: Vec<Peer> = peers.iter().map(|p| Peer::new(*p, *p)).collect();
+        // Every node resolves peers through the cluster's ONE live map
+        // (ADR-0012 D3), so a later replacement re-points this ordinal without
+        // touching the running peers.
+        let peer_list: Vec<Peer> = spec.peers.iter().map(|p| Peer::new(p, p)).collect();
         let wiring = ReplWiring {
             network: Arc::new(self.repl_recording.clone()) as Arc<dyn ReplicationNetwork>,
-            addr_map,
+            addr_map: self.repl_resolver.clone(),
             peers: peer_list,
             listen_addr,
             ttls: DEFAULT_TTLS,
@@ -1227,30 +1376,33 @@ impl FailoverHarness {
         let mut sut = ReplicatedB2buaSut {
             ordinal: ordinal.to_string(),
             sip_addr,
-            sip_base_addr: sip_addr,
-            sip_name: sip_name.to_string(),
-            sip_bind: sip_bind.to_string(),
-            gen: 1,
+            sip_base_addr: spec.sip_base_addr,
+            sip_name: spec.sip_name.clone(),
+            sip_bind: sip_addr.to_string(),
+            gen,
             cdr: cdr.clone(),
             metrics: B2buaMetrics::new(),
-            dest: (dest.0.to_string(), dest.1),
-            outbound_proxy: Some((outbound_proxy.0.to_string(), outbound_proxy.1)),
+            dest: spec.dest.clone(),
+            outbound_proxy: Some(spec.outbound_proxy.clone()),
             wiring,
             clock: node_clock.clone(),
             core: None,
-            store: Arc::new(ReplicatingCallStore::new(1, node_clock.clone())),
+            store: Arc::new(ReplicatingCallStore::new(gen, node_clock.clone())),
             // Placeholder; replaced by the real handle setup() builds, just below.
             membership: Arc::new(SimulatedMembership::with_clock(vec![], node_clock.clone())),
             harness: self.harness.clone(),
-            decision,
-            limiter,
+            decision: spec.decision.clone(),
+            limiter: spec.limiter.clone(),
             tune: self.worker_tune.clone(),
+            views: self.views.clone(),
+            alive: Arc::new(AtomicBool::new(true)),
         };
-        let (setup, store, membership) = sut.wiring.setup(1, &node_clock);
+        let (setup, store, membership) = sut.wiring.setup(gen, &node_clock);
         sut.store = store;
         sut.membership = membership;
         let core = sut.spawn_core(Some(setup)).await;
         sut.metrics = core.metrics().clone();
+        sut.register_incarnation(&core);
         sut.core = Some(core);
         sut
     }
@@ -1309,13 +1461,136 @@ impl FailoverHarness {
         self.mark(a, Some(b), "heal", "");
     }
 
+    // -- membership primitives (the orchestrator's hand) ---------------------
+
+    /// **Withdraw `ordinal`'s endpoint** — the orchestrator takes the worker out
+    /// of the cluster's view WITHOUT touching its process: the proxy's registry
+    /// drops the ordinal (nothing routes to it, no cookie resolves it) and every
+    /// other live worker's membership drops the peer (its supervisor parks the
+    /// flows). The process stays bound and keeps serving whatever still reaches
+    /// it — the zombie shape. Records the orchestrator's, the proxy's and every
+    /// peer's belief at this instant; the sampler then records what each
+    /// component actually did with it.
+    pub fn withdraw(&mut self, ordinal: &str) {
+        self.mark(ordinal, None, "withdraw", "endpoint withdrawn; process still running");
+        self.views.record("orchestrator", ordinal, Belief::Withdrawn, "withdraw");
+        if let Some(registry) = self.views.proxy_registry() {
+            registry.remove(ordinal);
+            self.views.record("proxy", ordinal, Belief::Absent, "withdraw");
+        }
+        for (observer, membership) in self.views.live_peers_of(ordinal) {
+            membership.remove(ordinal);
+            self.views.record(&observer, ordinal, Belief::Absent, "withdraw");
+        }
+    }
+
+    /// **Re-admit `ordinal` at `addr`** — the counterpart of
+    /// [`withdraw`](Self::withdraw): the proxy publishes the endpoint again at
+    /// `addr` with health `Unknown` (nothing has probed it yet) and every other
+    /// live worker's membership re-adds the peer.
+    pub fn readmit(&mut self, ordinal: &str, addr: SocketAddr) {
+        self.mark(ordinal, None, "readmit", &format!("endpoint published at {addr}"));
+        self.views.record("orchestrator", ordinal, Belief::Admitted, "readmit");
+        if let Some(registry) = self.views.proxy_registry() {
+            registry.add(sip_proxy::registry::WorkerEntry {
+                id: ordinal.to_string(),
+                address: ProxyAddr::new(addr.ip().to_string(), addr.port()),
+                health: WorkerHealth::Unknown,
+                draining_since: None,
+                first_seen_at_ms: None,
+            });
+            self.views.record(
+                "proxy",
+                ordinal,
+                Belief::Registered(WorkerHealth::Unknown),
+                "readmit",
+            );
+        }
+        for (observer, membership) in self.views.live_peers_of(ordinal) {
+            membership.add(Peer::new(ordinal, ordinal));
+            self.views.record(&observer, ordinal, Belief::PeerActive, "readmit");
+        }
+    }
+
+    /// **Start a replacement incarnation of `ordinal` ALONGSIDE the running
+    /// one** — the orchestrator recreating a withdrawn worker while its old
+    /// process is still up. The new incarnation comes up at gen+1 on a fresh SIP
+    /// address (a new pod IP, like a reboot) AND a fresh replication listen
+    /// address, since the old incarnation still holds the declared one; the
+    /// cluster's resolver map is re-pointed at it, so peers reach the
+    /// replacement on their next connect (ADR-0012 D3). The old incarnation is
+    /// untouched — the caller keeps its handle and decides when it dies.
+    ///
+    /// The replacement's SIP + repl binds are asserted, never assumed: a core
+    /// whose replication listen fails is silently unreachable, which would read
+    /// as a replication bug three assertions later.
+    pub async fn spawn_replacement(&mut self, ordinal: &str) -> ReplicatedB2buaSut {
+        let spec = self
+            .worker_specs
+            .get(ordinal)
+            .cloned()
+            .unwrap_or_else(|| panic!("worker {ordinal} was never spawned"));
+        let gen = self.views.max_gen(ordinal) + 1;
+        let octet = u8::try_from(gen).expect("gen fits a host octet (< 256 incarnations)");
+        let sip_addr = SocketAddr::from(([127, 0, octet, 1], spec.sip_base_addr.port()));
+        let declared = self.repl_addrs[ordinal];
+        let listen_addr = SocketAddr::from((
+            declared.ip(),
+            declared.port() + 100 * u16::try_from(gen - 1).expect("gen fits"),
+        ));
+        // Peers must find the replacement, not the incarnation it replaces.
+        self.repl_resolver.lock().unwrap().insert(ordinal.to_string(), listen_addr);
+
+        let sut = self.spawn_incarnation(ordinal, &spec, gen, sip_addr, listen_addr).await;
+        self.assert_repl_listening(ordinal, listen_addr).await;
+        self.mark(
+            ordinal,
+            None,
+            "replacement",
+            &format!(
+                "gen={gen} alongside the running incarnation; sip={sip_addr} repl={listen_addr}"
+            ),
+        );
+        self.views.record("orchestrator", ordinal, Belief::Running { gen }, "spawn_replacement");
+        sut
+    }
+
+    /// Assert `ordinal`'s new incarnation really owns `listen_addr` on the repl
+    /// fabric. `B2buaCore` spawns its replication server in a task and swallows
+    /// the listen error, so a duplicate bind would otherwise show up only as a
+    /// peer that never pulls.
+    async fn assert_repl_listening(&self, ordinal: &str, listen_addr: SocketAddr) {
+        sip_clock::testkit::settle().await;
+        match self.repl_sim.connect(listen_addr).await {
+            Ok(_probe) => {}
+            Err(e) => panic!(
+                "{ordinal}'s replacement did not take its replication listen address                  {listen_addr} ({e:?}) — its peers would never reach it",
+            ),
+        }
+    }
+
+    /// **Begin a graceful drain of `node`** ([`B2buaCore::drain`]): latch
+    /// `Draining` — so the proxy steers new calls away — and wait for its live
+    /// calls to clear, bounded by `grace`. Returns the residual live-call count
+    /// (`0` ⇒ fully quiesced). The process keeps serving throughout.
+    pub async fn begin_drain(&mut self, node: &ReplicatedB2buaSut, grace: Duration) -> usize {
+        self.mark(node.ordinal(), None, "drain", &format!("grace={:?}", grace));
+        node.begin_drain(grace).await
+    }
+
+    /// The views ledger — every observer's belief about every worker, and when
+    /// it moved (see [`crate::views`]).
+    pub fn view_ledger(&self) -> &ViewLedger {
+        &self.views
+    }
+
     // -- clock -------------------------------------------------------------
 
     /// Advance the paused clock by `dur`, driving BOTH the SIP and repl sim
     /// pipelines with the proven settle/advance/settle discipline (CLAUDE.md).
     /// Drive the protocol BETWEEN advances: advance to the deadline, then assert.
     pub async fn advance(&self, dur: Duration) {
-        sip_clock::testkit::pump(dur).await;
+        sip_clock::testkit::pump_sampled(dur, || self.views.sample()).await;
     }
 
     /// **Fine-grained pump toward an unknown timer deadline.** Advances the
@@ -1559,10 +1834,12 @@ impl FailoverHarness {
         // request and so sees the whole 1,2,3 sequence) are each CSeq-monotonic.
         // The endpoint/proxy binds still catch a genuine same-leg CSeq collision
         // (e.g. a keepalive OPTIONS and a later BYE reusing one CSeq toward bob).
+        let incarnation_binds = self.views.all_sip_addrs();
         let worker_binds: std::collections::HashSet<String> = self
             .all_worker_sip_addrs
             .iter()
             .chain(self.relay_sip_addrs.iter())
+            .chain(incarnation_binds.iter())
             .map(|a| a.to_string())
             .collect();
         let snapshot = self.harness.recording().channel().snapshot();
@@ -1574,43 +1851,50 @@ impl FailoverHarness {
             .collect()
     }
 
-    /// Record a rebooted worker's NEW SIP address. Updates the report's
-    /// latest-addr map (so the unified report's column tracks the live
-    /// incarnation) AND accumulates it into the RFC-audit exclusion set — the
-    /// PRE-reboot incarnation's bind must stay excluded too, else the
+    /// Record a rebooted worker's NEW SIP address into the RFC-audit exclusion
+    /// set — the PRE-reboot incarnation's bind must stay excluded too, else the
     /// endpoint-scoped audit would mistake the worker's internal per-leg CSeq
     /// stream (split across incarnations) for an endpoint skip, or read its
-    /// reclaimed in-dialog keepalive as a request outside any dialog.
+    /// reclaimed in-dialog keepalive as a request outside any dialog. The
+    /// report's own column follows the views ledger's incarnation registry, so
+    /// nothing here is needed for the diagram.
     ///
     /// **Every reboot that re-points traffic at the new address calls this** —
     /// a worker bind the exclusion set does not name is audited as if it were a
     /// real UA, which [`audited_events`](Self::audited_events) exists to prevent.
-    pub fn note_worker_rebound(&mut self, ordinal: &str, new_addr: SocketAddr) {
-        self.worker_sip_addrs.insert(ordinal.to_string(), new_addr);
+    pub fn note_worker_rebound(&mut self, _ordinal: &str, new_addr: SocketAddr) {
         self.all_worker_sip_addrs.push(new_addr);
     }
 
     /// Snapshot the replication recording (captured frames + markers + lanes).
     pub fn repl_report(&self) -> ReplReport {
-        let lanes: BTreeMap<SocketAddr, String> =
+        let mut lanes: BTreeMap<SocketAddr, String> =
             self.repl_addrs.iter().map(|(ord, addr)| (*addr, ord.clone())).collect();
+        // A replacement listens elsewhere than its ordinal's declared address —
+        // name every incarnation's listen addr so no repl lane renders raw.
+        for axis in self.views.axes() {
+            lanes.insert(axis.repl_addr, axis.ordinal.clone());
+        }
         ReplReport { frames: self.repl_recording.captured(), markers: self.markers.clone(), lanes }
     }
 
-    /// The worker axes (ordinal ↔ SIP addr ↔ repl addr) for the unified report's
-    /// combiner, in declaration order so the columns read `b1, b2`.
+    /// The worker axes for the unified report's combiner — one column per
+    /// ordinal, or one per INCARNATION for an ordinal that ran two at once (a
+    /// replacement), grouped under the ordinal. Ordered by declaration (the
+    /// repl-addr port order, so the columns read `b1, b2`), incarnations of one
+    /// ordinal kept adjacent so their group bracket is contiguous.
     fn worker_axes(&self) -> Vec<crate::combine::WorkerAxis> {
-        // Declaration order is the repl-addr port order (9400, 9401, …).
-        let mut by_ord: Vec<(&String, &SocketAddr)> = self.repl_addrs.iter().collect();
-        by_ord.sort_by_key(|(_, addr)| addr.port());
-        by_ord
-            .into_iter()
-            .filter_map(|(ord, repl_addr)| {
-                self.worker_sip_addrs.get(ord).map(|sip_addr| crate::combine::WorkerAxis {
-                    ordinal: ord.clone(),
-                    sip_addr: *sip_addr,
-                    repl_addr: *repl_addr,
-                })
+        let mut axes = self.views.axes();
+        axes.sort_by_key(|a| {
+            (self.repl_addrs.get(&a.ordinal).map(|d| d.port()).unwrap_or(u16::MAX), a.gen)
+        });
+        axes.into_iter()
+            .map(|a| crate::combine::WorkerAxis {
+                id: if a.fanned { format!("{}#g{}", a.ordinal, a.gen) } else { a.ordinal.clone() },
+                group: a.fanned.then(|| a.ordinal.clone()),
+                ordinal: a.ordinal,
+                sip_addr: a.sip_addr,
+                repl_addr: a.repl_addr,
             })
             .collect()
     }
@@ -1639,6 +1923,7 @@ impl FailoverHarness {
             &scenario,
             &repl,
             &self.worker_axes(),
+            &self.views.views(),
         );
         // RFC 3261 status MUST be reflected in the report: a trace that violates a
         // gating rule can NEVER show PASS. Fold the findings into the doc anomalies

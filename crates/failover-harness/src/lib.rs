@@ -16,6 +16,8 @@
 //!   request, which names the primary and backup worker of a call.
 //! - [`rfc_acceptance`] — RFC-audit acceptance scoping: which recorded deviations
 //!   gate the run and which a scenario declared accepted for a bounded window.
+//! - [`views`] — the views ledger: what the orchestrator, the proxy and each
+//!   worker incarnation believed about every worker, and where they disagreed.
 //! - the `transparent_failover!` matrix macro ([`matrix`]) — expands a
 //!   `(scenario × safe-point × fault × recovery)` table into one named
 //!   `#[tokio::test]` per legal cell (`tests/transparent_v1.rs`).
@@ -27,12 +29,14 @@ pub mod oracle;
 pub mod rfc_acceptance;
 pub mod runner;
 pub mod scenario;
+pub mod views;
 
 pub use combine::{combine_doc, WorkerAxis};
 pub use cookie::{cookie_field, worker_ordinals};
 pub use harness::{FailoverHarness, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER};
 pub use runner::run_cell;
 pub use scenario::{Cell, DialogState, Event, Fault, Party, Recovery};
+pub use views::{Belief, View, ViewLedger};
 
 /// Run one matrix cell as a differential transparency check: drive it clean
 /// (baseline) and with the failover injected (variant), assert the two external

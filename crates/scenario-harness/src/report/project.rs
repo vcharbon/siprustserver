@@ -185,6 +185,9 @@ pub fn sip_doc_with_overlay(
         lanes,
         rows,
         anomalies,
+        // The SIP plane records no beliefs — the views plane is the HA
+        // harness's (see `seq_report::views`).
+        views: Vec::new(),
         epoch_base_ms,
     }
 }

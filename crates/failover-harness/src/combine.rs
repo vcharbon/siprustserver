@@ -27,22 +27,35 @@ use std::net::SocketAddr;
 use ha_harness::{frame_summary, ReplReport};
 use layer_harness::{NetworkTag, RecordedScenario};
 use repl_net::transport::Direction;
-use seq_report::{Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow};
+use seq_report::{Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow, ViewChange};
 use sip_net::RecordedSipEntry;
 
 use scenario_harness::report::wire::{facets, wire_text};
 
-/// One worker's identity across the planes: its ordinal (the column key + the
-/// marker `node` + the repl lane label), its SIP wire address, and its repl
-/// listen address. Built by the harness from its own `repl_addrs` + the SIP
-/// bindings.
+/// The lane id (and observer name) of the harness itself — the hand that
+/// withdraws, replaces and re-admits endpoints.
+const ORCHESTRATOR: &str = "orchestrator";
+
+/// One worker incarnation's identity across the planes: the column it owns, its
+/// ordinal, its SIP wire address and its repl listen address. Built by the
+/// harness from the views ledger's incarnation registry.
+///
+/// One column per ORDINAL is the norm. An ordinal that ran two incarnations at
+/// once (a replacement started beside the worker it replaces) fans out into one
+/// column per incarnation — `id` is then `b1#g2` and `group` is `b1`, so the
+/// renderer brackets them under one ordinal header and each incarnation's own
+/// SIP + repl traffic lands on its own lifeline.
 #[derive(Clone, Debug)]
 pub struct WorkerAxis {
-    /// Cluster ordinal (`b1`/`b2`) — the shared column id.
+    /// The column id rows reference (`b1`, or `b1#g2` when fanned out).
+    pub id: String,
+    /// Cluster ordinal (`b1`/`b2`) — the lifecycle marker `node`.
     pub ordinal: String,
-    /// The worker's SIP wire address (e.g. `127.0.0.1:5091`).
+    /// `Some(ordinal)` when this ordinal renders as per-incarnation sub-lanes.
+    pub group: Option<String>,
+    /// This incarnation's SIP wire address (e.g. `127.0.0.1:5091`).
     pub sip_addr: SocketAddr,
-    /// The worker's repl listen address (e.g. `127.0.0.1:9400`).
+    /// This incarnation's repl listen address (e.g. `127.0.0.1:9400`).
     pub repl_addr: SocketAddr,
 }
 
@@ -60,6 +73,7 @@ pub fn combine_doc(
     scenario: &RecordedScenario,
     repl: &ReplReport,
     workers: &[WorkerAxis],
+    views: &[crate::views::View],
 ) -> SeqDoc {
     // --- 1. the shared lane axis -------------------------------------------
     // SIP addr → column id, and repl addr → column id (collapsing the repl node
@@ -67,11 +81,40 @@ pub fn combine_doc(
     let mut sip_addr_col: BTreeMap<SocketAddr, String> = BTreeMap::new();
     let mut repl_addr_col: BTreeMap<SocketAddr, String> = BTreeMap::new();
     for w in workers {
-        sip_addr_col.insert(w.sip_addr, w.ordinal.clone());
-        repl_addr_col.insert(w.repl_addr, w.ordinal.clone());
+        sip_addr_col.insert(w.sip_addr, w.id.clone());
+        repl_addr_col.insert(w.repl_addr, w.id.clone());
     }
 
-    let lanes = build_lanes(workers, scenario, &sip_addr_col);
+    let lanes = build_lanes(workers, scenario, &sip_addr_col, views);
+    // A marker names an ORDINAL; when that ordinal fanned out into
+    // per-incarnation sub-lanes, anchor it on its first (oldest) incarnation.
+    let marker_col = |node: &str| -> String {
+        if lanes.iter().any(|l| l.id == node) {
+            return node.to_string();
+        }
+        workers
+            .iter()
+            .find(|w| w.ordinal == node)
+            .map(|w| w.id.clone())
+            .unwrap_or_else(|| node.to_string())
+    };
+    // An observer is a lane (`proxy` resolves to the proxy's address lane, an
+    // incarnation key to its own sub-lane, an ordinal to its column).
+    let observer_col = |observer: &str| -> String {
+        if lanes.iter().any(|l| l.id == observer) {
+            return observer.to_string();
+        }
+        if let Some(w) = workers.iter().find(|w| w.id == observer || w.ordinal == observer) {
+            return w.id.clone();
+        }
+        if observer == "proxy" {
+            if let Some(l) = lanes.iter().find(|l| l.kind == LaneKind::Sut && l.id != ORCHESTRATOR)
+            {
+                return l.id.clone();
+            }
+        }
+        observer.to_string()
+    };
 
     // Column resolver for a SIP address: a worker column if it is a worker SIP
     // addr, else the lane's own address string (alice/proxy/bob).
@@ -150,7 +193,7 @@ pub fn combine_doc(
         rows.push(SeqRow {
             at_ms: m.at_ms,
             seq: m.seq,
-            from: m.node.clone(),
+            from: marker_col(&m.node),
             to: None,
             label: marker_label(m),
             detail,
@@ -175,6 +218,21 @@ pub fn combine_doc(
         })
         .collect();
 
+    // The views plane: each belief change anchored on its observer's column.
+    let view_changes: Vec<ViewChange> = views
+        .iter()
+        .map(|v| ViewChange {
+            at_ms: v.at_ms,
+            seq: v.seq,
+            observer: v.observer.clone(),
+            lane: observer_col(&v.observer),
+            subject: v.subject.clone(),
+            belief: v.belief.label(),
+            stance: v.belief.stance().to_string(),
+            signal: v.signal.clone(),
+        })
+        .collect();
+
     SeqDoc {
         title: title.to_string(),
         description: description.map(str::to_string),
@@ -182,6 +240,7 @@ pub fn combine_doc(
         lanes,
         rows,
         anomalies,
+        views: view_changes,
         // Paused-clock failover view: `at_ms` is virtual time, so no absolute-UTC
         // anchor (relative `T+…` only).
         epoch_base_ms: None,
@@ -262,6 +321,7 @@ fn build_lanes(
     workers: &[WorkerAxis],
     scenario: &RecordedScenario,
     sip_addr_col: &BTreeMap<SocketAddr, String>,
+    views: &[crate::views::View],
 ) -> Vec<Lane> {
     // Friendly names from the recording.
     let name_of = |addr: SocketAddr| -> Option<String> {
@@ -296,6 +356,11 @@ fn build_lanes(
     };
 
     let mut lanes: Vec<Lane> = Vec::new();
+    // The orchestrator gets a column only when it acted (withdraw / readmit /
+    // replacement) — a run it never touched renders exactly as before.
+    if views.iter().any(|v| v.observer == ORCHESTRATOR) {
+        lanes.push(Lane::new(ORCHESTRATOR, ORCHESTRATOR, LaneKind::Sut));
+    }
     // Caller-side UA first (alice).
     for (addr, name) in uas.iter().take(uas.len().saturating_sub(1)) {
         lanes.push(Lane::new(addr.to_string(), label(name, &addr.to_string()), LaneKind::Ua));
@@ -308,11 +373,11 @@ fn build_lanes(
     // repl + lifecycle all collapse here. The column caption pairs the ordinal
     // with its SIP wire address.
     for w in workers {
-        lanes.push(Lane::new(
-            w.ordinal.clone(),
-            format!("{} ({})", w.ordinal, w.sip_addr),
-            LaneKind::Node,
-        ));
+        let lane = Lane::new(w.id.clone(), format!("{} ({})", w.id, w.sip_addr), LaneKind::Node);
+        lanes.push(match &w.group {
+            Some(group) => lane.with_group(group.clone()),
+            None => lane,
+        });
     }
     // Callee-side UA last (bob).
     if let Some((addr, name)) = uas.last() {

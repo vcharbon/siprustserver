@@ -516,6 +516,13 @@ impl B2buaCore {
         self.supervisor.as_ref()
     }
 
+    /// This core's readiness handle (clone-cheap, shares the latches). Exposed
+    /// so a harness can observe the node's own drain/readiness state after the
+    /// core itself is no longer reachable.
+    pub fn readiness(&self) -> crate::repl::Readiness {
+        self.readiness.clone()
+    }
+
     /// The worker-side overload signal. Callers advance the `adm`
     /// counter on a non-emergency new-dialog admit
     /// ([`OverloadSignal::increment_non_emergency_admitted`]) and read the

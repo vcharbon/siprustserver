@@ -43,16 +43,26 @@
 //!   plane tag in text) so a human can tell them apart at a glance.
 //! - [`RowKind::Lifecycle`] is a full-width BAND across all lanes (`to == None`),
 //!   a centred annotation in time order (e.g. `crash b1`, `reboot b1`).
+//!
+//! ## The views plane
+//! [`SeqDoc::views`] carries a fourth, optional plane: what each actor BELIEVED
+//! about another at each instant ([`ViewChange`]). It renders as a tinted chip on
+//! the observer's own column in the sequence, plus a views table and a
+//! disagreements list under the diagram — see [`views`].
 
 mod html;
 mod normalize;
 mod sanitize;
 mod text;
+mod views;
 
 pub use html::{render_embed, render_html, render_svg};
 pub use normalize::{normalize, role_map_from_lanes};
 pub use sanitize::sanitize_name;
 pub use text::render_global_txt;
+pub use views::{
+    disagreements, views_table, Disagreement, ViewCell, ViewChange, ViewsRow, ViewsTable,
+};
 
 /// What an actor lane represents — drives only its styling/label decoration, not
 /// its position (the projector fixes column order via the `lanes` vector).
@@ -216,6 +226,11 @@ pub struct SeqDoc {
     pub rows: Vec<SeqRow>,
     /// Recorded findings to list under the diagram.
     pub anomalies: Vec<Anomaly>,
+    /// Belief changes on the views plane (empty for a doc that records none):
+    /// what each observer held true about each subject, and when it moved. See
+    /// the [`views`] module.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<ViewChange>,
     /// Wall-clock epoch (ms) corresponding to the timeline base ([`base_ms`]).
     /// `Some` only when `at_ms` is real wall-clock-aligned time (the load driver's
     /// `Clock::system()` recording) — the renderers then show an ABSOLUTE UTC
@@ -230,8 +245,10 @@ pub struct SeqDoc {
 }
 
 impl SeqDoc {
-    /// Return the rows in canonical render order — shared by both renderers so
-    /// HTML and text agree.
+    /// The rows AND the view-change chips in canonical render order — what both
+    /// renderers walk, so HTML and text agree. A view chip occupies an ordinal
+    /// like any row (it is not clickable and carries no payload), so the diagram
+    /// and the payload blocks stay in lockstep.
     ///
     /// The primary key is `seq`, the GLOBAL recording-order sequence: every
     /// source stamps its rows from one shared counter at the instant each event
@@ -240,15 +257,13 @@ impl SeqDoc {
     /// tiebreaker — under a paused test clock many events collide on one
     /// millisecond, and ordering those by `at_ms` would mis-order them (e.g. a
     /// reboot marker would float after the bootstrap pull it caused). `at_ms`
-    /// breaks a `seq` tie only as a last resort (two rows that genuinely share a
-    /// sequence number — which a single shared sequencer never produces).
-    pub(crate) fn sorted_rows(&self) -> Vec<&SeqRow> {
-        let mut rows: Vec<&SeqRow> = self.rows.iter().collect();
-        // Stable sort so equal-`seq` rows keep their input order as a final
-        // backstop (a projector that left every `seq` at 0 falls back to its own
-        // insertion order, which it is expected to build in timeline order).
-        rows.sort_by(|a, b| a.seq.cmp(&b.seq).then(a.at_ms.cmp(&b.at_ms)));
-        rows
+    /// breaks a `seq` tie only as a last resort. The sort is stable, so equal-
+    /// `seq` entries keep their input order as a final backstop.
+    pub(crate) fn sorted_items(&self) -> Vec<Item<'_>> {
+        let mut items: Vec<Item<'_>> =
+            self.rows.iter().map(Item::Row).chain(self.views.iter().map(Item::View)).collect();
+        items.sort_by(|a, b| a.seq().cmp(&b.seq()).then(a.at_ms().cmp(&b.at_ms())));
+        items
     }
 
     /// The timeline base (earliest row timestamp), for relative `T+…` stamps.
@@ -261,6 +276,39 @@ impl SeqDoc {
     /// timeline offset back onto real time: `epoch_base + (at_ms - base)`.
     pub(crate) fn epoch_at(&self, at_ms: i64) -> Option<i64> {
         self.epoch_base_ms.map(|e| e + (at_ms - self.base_ms()))
+    }
+}
+
+/// One entry on the rendered timeline: a message/lifecycle [`SeqRow`] or a
+/// [`ViewChange`] chip. Both renderers walk [`SeqDoc::sorted_items`].
+pub(crate) enum Item<'a> {
+    Row(&'a SeqRow),
+    View(&'a ViewChange),
+}
+
+impl Item<'_> {
+    pub(crate) fn seq(&self) -> u64 {
+        match self {
+            Item::Row(r) => r.seq,
+            Item::View(v) => v.seq,
+        }
+    }
+
+    pub(crate) fn at_ms(&self) -> i64 {
+        match self {
+            Item::Row(r) => r.at_ms,
+            Item::View(v) => v.at_ms,
+        }
+    }
+
+    /// The caption shown on the timeline.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Item::Row(r) => r.label.clone(),
+            Item::View(v) => {
+                format!("{}: {} = {} ({})", v.observer, v.subject, v.belief, v.signal)
+            }
+        }
     }
 }
 
@@ -348,6 +396,7 @@ mod tests {
                 },
             ],
             anomalies: vec![],
+            views: vec![],
             epoch_base_ms: None,
         }
     }
@@ -390,6 +439,7 @@ mod tests {
                 },
             ],
             anomalies: vec![],
+            views: vec![],
             epoch_base_ms: None,
         };
         let txt = render_global_txt(&doc);
@@ -736,6 +786,63 @@ mod tests {
         assert!(html.contains("10.0.0.9:5070</text>"), "group header text:\n{html}");
         assert!(html.contains(">callee</text>"));
         assert!(html.contains(">alt</text>"));
+    }
+
+    /// A doc carrying beliefs renders the third piece of the views plane in BOTH
+    /// outputs: the in-sequence chip on the observer's own column, the views
+    /// table, and the disagreements list naming the conflicting beliefs.
+    #[test]
+    fn views_render_as_chip_table_and_disagreement_list() {
+        let mut doc = mixed_doc();
+        doc.views = vec![
+            ViewChange {
+                at_ms: 50,
+                seq: 4,
+                observer: "b1".into(),
+                lane: "b1".into(),
+                subject: "b1".into(),
+                belief: "running gen 1".into(),
+                stance: "present".into(),
+                signal: "core".into(),
+            },
+            ViewChange {
+                at_ms: 100,
+                seq: 5,
+                observer: "b2".into(),
+                lane: "b2".into(),
+                subject: "b1".into(),
+                belief: "absent".into(),
+                stance: "absent".into(),
+                signal: "withdraw".into(),
+            },
+        ];
+        let html = render_html(&doc);
+        // (a) the chip rides the sequence, anchored on the observer's column.
+        assert!(html.contains("b1: b1 = running gen 1 (core)"), "view chip in the diagram");
+        // (b) the views table names the observers as columns.
+        assert!(html.contains("class=\"views\""), "views section present");
+        assert!(html.contains("<th>b1</th>") && html.contains("<th>b2</th>"), "{html}");
+        // (c) the disagreement is listed with both beliefs and their signals.
+        assert!(html.contains("Disagreements (1)"), "{html}");
+        assert!(html.contains("believes absent"), "{html}");
+        assert!(html.contains("class=\"disputed"), "the conflicting cells are tinted");
+
+        let txt = render_global_txt(&doc);
+        assert!(txt.contains("[VIEW] b1: b1 = running gen 1 (core)"), "{txt}");
+        assert!(txt.contains("Views — what each observer believed"), "{txt}");
+        assert!(txt.contains("Disagreements (1)"), "{txt}");
+        assert!(txt.contains("b2 believes absent (withdraw)"), "{txt}");
+    }
+
+    /// A doc with no beliefs renders exactly as before: no views section, no
+    /// disagreements list.
+    #[test]
+    fn a_doc_without_views_renders_no_views_sections() {
+        let html = render_html(&mixed_doc());
+        assert!(!html.contains("class=\"views\""));
+        assert!(!html.contains("Disagreements"));
+        let txt = render_global_txt(&mixed_doc());
+        assert!(!txt.contains("Disagreements"));
     }
 
     /// 036 ask C: SIP rows carrying a `conn` (the Call-ID) are coloured per

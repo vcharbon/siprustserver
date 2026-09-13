@@ -1,12 +1,15 @@
 //! The `global.txt` companion — a plain-text rendering of the unified timeline.
 //!
 //! One line per row, in `(at_ms, seq)` order, tagged with the plane so SIP,
-//! replication, and lifecycle events are distinguishable in a terminal. A
+//! replication, lifecycle and views events are distinguishable in a terminal. A
 //! lifecycle row renders as a centred `=== … ===` band (matching the historic
-//! ha-harness text band). Message rows carry their detail (full wire text for
-//! SIP) indented under the line so the file is self-contained.
+//! ha-harness text band); a belief change renders as a `[VIEW]` line on its
+//! observer. Message rows carry their detail (full wire text for SIP) indented
+//! under the line so the file is self-contained. The views table and the
+//! disagreements list close the file, mirroring the HTML report.
 
-use crate::{format_relative, RowKind, SeqDoc, SeqRow};
+use crate::views::{disagreements, views_table, ViewChange};
+use crate::{format_relative, Item, RowKind, SeqDoc, SeqRow};
 
 const SEP_WIDTH: usize = 80;
 
@@ -28,6 +31,9 @@ pub fn render_global_txt(doc: &SeqDoc) -> String {
         count(doc, |k| matches!(k, RowKind::Repl { .. })),
         count(doc, |k| matches!(k, RowKind::Lifecycle)),
     ));
+    if !doc.views.is_empty() {
+        out.push_str(&format!("  View changes: {}\n", doc.views.len()));
+    }
     out.push_str(&"=".repeat(SEP_WIDTH));
     out.push('\n');
     if let Some(desc) = doc.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
@@ -41,13 +47,17 @@ pub fn render_global_txt(doc: &SeqDoc) -> String {
 
     // Legend so the plane tags are self-describing.
     out.push_str(
-        "  legend: [SIP] request/response · [REPL] replication frame · === lifecycle ===\n",
+        "  legend: [SIP] request/response · [REPL] replication frame · \
+         [VIEW] belief change · === lifecycle ===\n",
     );
     out.push_str(&"-".repeat(SEP_WIDTH));
     out.push('\n');
 
-    for row in doc.sorted_rows() {
-        render_row(&mut out, row, base, doc);
+    for item in doc.sorted_items() {
+        match item {
+            Item::Row(row) => render_row(&mut out, row, base, doc),
+            Item::View(v) => render_view(&mut out, v, base),
+        }
     }
 
     if !doc.anomalies.is_empty() {
@@ -62,7 +72,81 @@ pub fn render_global_txt(doc: &SeqDoc) -> String {
         }
     }
 
+    render_views_sections(&mut out, doc, base);
+
     out
+}
+
+/// The views table + the disagreements list — the same two views the HTML
+/// report renders under the diagram.
+fn render_views_sections(out: &mut String, doc: &SeqDoc, base: i64) {
+    if doc.views.is_empty() {
+        return;
+    }
+    let table = views_table(&doc.views);
+    out.push('\n');
+    out.push_str(&"-".repeat(SEP_WIDTH));
+    out.push('\n');
+    out.push_str("Views — what each observer believed (‡ = observers disagree):\n");
+    out.push_str(&format!(
+        "  {:<14} {:<10} {}\n",
+        "time",
+        "subject",
+        table.observers.iter().map(|o| format!("{o:<24}")).collect::<Vec<_>>().join(""),
+    ));
+    for row in &table.rows {
+        let cells: String = row
+            .cells
+            .iter()
+            .map(|c| match c {
+                Some(cell) => {
+                    let mark = if cell.changed { "*" } else { " " };
+                    format!("{:<24}", format!("{mark}{}", cell.belief))
+                }
+                None => format!("{:<24}", "—"),
+            })
+            .collect();
+        out.push_str(&format!(
+            "{} {:<14} {:<10} {cells}\n",
+            if row.disputed { "‡" } else { " " },
+            format_relative(row.at_ms - base),
+            row.subject,
+        ));
+    }
+
+    let conflicts = disagreements(&doc.views);
+    out.push('\n');
+    out.push_str(&format!("Disagreements ({}):\n", conflicts.len()));
+    if conflicts.is_empty() {
+        out.push_str("  (none — every observer agreed about every subject)\n");
+    }
+    for d in &conflicts {
+        let until = match d.to_ms {
+            Some(t) => format_relative(t - base),
+            None => "end of run".to_string(),
+        };
+        out.push_str(&format!(
+            "  • {} .. {} about {}:\n",
+            format_relative(d.from_ms - base),
+            until,
+            d.subject,
+        ));
+        for (observer, belief, signal) in &d.holders {
+            out.push_str(&format!("      {observer} believes {belief} ({signal})\n"));
+        }
+    }
+}
+
+/// One belief change, named by its observer.
+fn render_view(out: &mut String, v: &ViewChange, base: i64) {
+    out.push_str(&format!(
+        "[{}] [VIEW] {}: {} = {} ({})\n",
+        format_relative(v.at_ms - base),
+        v.observer,
+        v.subject,
+        v.belief,
+        v.signal,
+    ));
 }
 
 fn render_row(out: &mut String, row: &SeqRow, base: i64, doc: &SeqDoc) {

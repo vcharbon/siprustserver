@@ -32,7 +32,7 @@ pub use readiness::{Readiness, ReadinessSource, ReadinessState};
 pub use replication::{flush_replicated, replication_target, ReplicationPlan};
 pub use server::ReplServer;
 pub use store::ReplicatingCallStore;
-pub use supervisor::{AddrResolver, FnPeerResolver, PeerResolver, ReplicationSupervisor};
+pub use supervisor::{AddrResolver, FnPeerResolver, PeerLink, PeerResolver, ReplicationSupervisor};
 
 #[cfg(test)]
 mod tests;

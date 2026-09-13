@@ -132,6 +132,13 @@ impl Readiness {
         }
     }
 
+    /// Whether the drain latch is set — the raw SIGTERM flag, read WITHOUT
+    /// evaluating (or latching) the readiness gates. Introspection only;
+    /// [`state`](Self::state) remains the state machine.
+    pub fn is_draining(&self) -> bool {
+        self.inner.draining.load(Ordering::SeqCst)
+    }
+
     /// The current readiness state (Draining wins; else latched/gated Ready;
     /// else NotReady). Latches `Ready` the first time the gates are all true —
     /// and only over a SYNCED membership view, so the informer's empty boot
