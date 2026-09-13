@@ -320,8 +320,8 @@ impl ActionExecutor<'_> {
     ///
     /// The sip-txn layer only *stores* `uas_to_tag` from the first >100 response
     /// (the 183's A1) and never rewrites a later final's `to.tag`, so the `200`
-    /// leaves under A2 verbatim; a late CANCEL's autonomous 487 still carries the
-    /// pinned A1, which harmlessly matches the caller's abandoned early dialog.
+    /// leaves under A2 verbatim. A CANCEL before the 2xx is answered 200 + 487
+    /// under A1 by the layer; after it, 200 under A2 and no 487 (RFC 3261 §9.2).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn answer_a_leg_new_dialog(
         &self,

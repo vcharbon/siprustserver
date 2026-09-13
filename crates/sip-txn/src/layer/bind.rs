@@ -14,7 +14,7 @@ use crate::event::TxnKind;
 use crate::timers::{ms, TIMER_L};
 
 use super::owner::Owner;
-use super::txn::{Transaction, TxnRole};
+use super::txn::TxnRole;
 
 /// What the layer holds one response to.
 enum Bound {
@@ -24,13 +24,6 @@ enum Bound {
     Fill(String),
     /// Nothing bound yet: the TU's tag stands and may become the bound one.
     Free,
-}
-
-/// The tag a server INVITE transaction has bound: its final's, else the one
-/// pinned on its first response (§17.2.1) — a later early dialog mirrored
-/// from a forking downstream does not move it.
-fn bound_tag_of(txn: &Transaction) -> Option<String> {
-    txn.final_to_tag.clone().or_else(|| txn.uas_to_tag.clone())
 }
 
 impl Owner {
@@ -86,7 +79,7 @@ impl Owner {
         // INVITE's tag (§9.2) — held by the transaction, or remembered past it.
         if *response.cseq().method() == Method::Cancel {
             return txn
-                .and_then(bound_tag_of)
+                .and_then(|t| t.bound_to_tag().map(str::to_string))
                 .or_else(|| self.recall_uas_tag(response))
                 .map_or(Bound::Free, Bound::Exact);
         }
@@ -104,7 +97,10 @@ impl Owner {
         if txn.kind == TxnKind::Invite {
             return Bound::Free;
         }
-        bound_tag_of(txn).or_else(|| self.recall_uas_tag(response)).map_or(Bound::Free, Bound::Fill)
+        txn.bound_to_tag()
+            .map(str::to_string)
+            .or_else(|| self.recall_uas_tag(response))
+            .map_or(Bound::Free, Bound::Fill)
     }
 
     /// Record what a final this layer just sent on a server INVITE

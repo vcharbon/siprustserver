@@ -390,14 +390,10 @@ impl Owner {
         true
     }
 
-    /// The To-tag the server INVITE txn on `branch` has bound — its final's,
-    /// else the one pinned on its first response (RFC 3261 §9.2, §17.2.1) —
-    /// pinned now where none was yet.
+    /// The To-tag the server INVITE txn on `branch` has bound
+    /// (`Transaction::bound_to_tag`), pinned now where none was yet.
     fn uas_to_tag_of(&mut self, branch: &str) -> Option<String> {
-        let known = self
-            .txns
-            .get(branch)
-            .and_then(|t| t.final_to_tag.clone().or_else(|| t.uas_to_tag.clone()));
+        let known = self.txns.get(branch).and_then(|t| t.bound_to_tag().map(str::to_string));
         if known.is_some() {
             return known;
         }

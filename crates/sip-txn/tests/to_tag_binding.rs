@@ -2,13 +2,16 @@
 //! §12.1.1): the final to an INVITE binds this node's tag to the dialog, and
 //! nothing the TU hands over for that transaction or its CANCEL leaves under
 //! another one — re-rendered and counted where the TU chose wrong, filled
-//! where it chose nothing, untouched where nothing is bound.
+//! where it chose nothing, untouched where nothing is bound. Before the final,
+//! the tag pinned on the first provisional (§17.2.1) binds the CANCEL answer
+//! and the 487 — a later early dialog does not move it.
 
 mod common;
 use common::*;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
-use sip_message::{SipMessage, SipRequest};
-use sip_txn::{IdGen, TransactionConfig, TransactionEvent};
+use sip_message::parser::custom::CustomParser;
+use sip_message::{SipMessage, SipParser, SipRequest};
+use sip_txn::{IdGen, TransactionConfig, TransactionEvent, TxnSeed};
 use std::sync::Arc;
 
 const TRANSIT: u64 = 5;
@@ -56,6 +59,11 @@ fn handed_up(events: &[TransactionEvent], method: &str) -> SipRequest {
         .collect();
     assert_eq!(reqs.len(), 1, "one {method} handed to the TU: {events:?}");
     reqs[0].clone()
+}
+
+/// Whether a `Cancelled` was emitted in a drained batch.
+fn cancelled(events: &[TransactionEvent]) -> bool {
+    events.iter().any(|e| matches!(e, TransactionEvent::Cancelled { .. }))
 }
 
 /// The To-tags of every response of `status` in a drained batch.
@@ -197,6 +205,49 @@ async fn a_cancel_before_the_final_is_answered_under_the_first_provisionals_tag(
     let out = stack.drain_peer();
     assert_eq!(to_tags(&out, 200), ["t1"], "the CANCEL's 200 carries the first tag: {out:?}");
     assert_eq!(to_tags(&out, 487), ["t1"], "the 487 carries the first tag: {out:?}");
+    assert!(cancelled(&stack.drain_events()), "Cancelled reaches the TU");
+    stack.inject(&inbound_request("ACK", branch, call_id, Some("t1"))).await;
+    elapse_ms(20).await;
+    let m = stack.txn.metrics();
+    assert_eq!(m.to_tag_coerced(), 0);
+    assert_eq!(m.to_tag_filled(), 0);
+}
+
+/// A seeded server INVITE transaction pins the tag its seed names — the one
+/// the requester's early dialog already holds — exactly as a first provisional
+/// this layer sent would have: a later early dialog under another tag does
+/// not move it, and the CANCEL's 200 and the 487 carry it.
+#[tokio::test(start_paused = true)]
+async fn a_seeded_transaction_pins_the_seeds_tag_for_the_cancel_answer() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, call_id) = ("z9hG4bK-bind-g", "bind-g");
+    let invite = match CustomParser::new().parse(&inbound_request("INVITE", branch, call_id, None))
+    {
+        Ok(SipMessage::Request(r)) => r,
+        other => panic!("the seed's INVITE: {other:?}"),
+    };
+    let seed = TxnSeed::ServerInvite {
+        branch: branch.to_string(),
+        call_id: call_id.to_string(),
+        from_tag: "caller-tag".to_string(),
+        to_tag: Some("t1".to_string()),
+        leg_id: Some("a".to_string()),
+        original_request: Some(invite),
+    };
+    assert_eq!(stack.txn.seed("w0|bind-g|atag", vec![seed]).await.unwrap(), 1);
+
+    // A second early dialog, mirrored from a forking downstream after the
+    // take-over, leaves under its own tag and binds nothing.
+    send(&stack, tu_response(180, "INVITE", branch, call_id, Some("t2"))).await;
+    let out = stack.drain_peer();
+    assert_eq!(to_tags(&out, 180), ["t2"], "the early dialog keeps its tag: {out:?}");
+
+    stack.inject(&inbound_request("CANCEL", branch, call_id, None)).await;
+    elapse_ms(20).await;
+    let out = stack.drain_peer();
+    assert_eq!(to_tags(&out, 200), ["t1"], "the CANCEL's 200 carries the seeded tag: {out:?}");
+    assert_eq!(to_tags(&out, 487), ["t1"], "the 487 carries the seeded tag: {out:?}");
+    assert!(cancelled(&stack.drain_events()), "Cancelled reaches the TU");
     stack.inject(&inbound_request("ACK", branch, call_id, Some("t1"))).await;
     elapse_ms(20).await;
     let m = stack.txn.metrics();

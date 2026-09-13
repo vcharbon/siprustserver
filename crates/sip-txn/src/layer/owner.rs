@@ -251,7 +251,7 @@ impl Owner {
         match self.txns.remove(branch) {
             Some(t) => {
                 if t.role == TxnRole::Server {
-                    if let Some(tag) = t.final_to_tag.as_deref().or(t.uas_to_tag.as_deref()) {
+                    if let Some(tag) = t.bound_to_tag() {
                         self.remember_uas_tag(&t.call_id, &t.from_tag, tag);
                     }
                 }

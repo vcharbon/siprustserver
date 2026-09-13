@@ -159,6 +159,14 @@ impl Transaction {
             timeout_kind: TimeoutKind::Response,
         }
     }
+
+    /// The To-tag this server INVITE transaction has bound: its final's, else
+    /// the one pinned on its first >100 response (RFC 3261 §8.2.6.2, §9.2,
+    /// §12.1.1). A later early dialog mirrored from a forking downstream does
+    /// not move it.
+    pub(super) fn bound_to_tag(&self) -> Option<&str> {
+        self.final_to_tag.as_deref().or(self.uas_to_tag.as_deref())
+    }
 }
 
 pub(super) struct Transaction {
