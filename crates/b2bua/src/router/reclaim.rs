@@ -333,8 +333,8 @@ pub(super) async fn fold_refused_flush(
         "refused flush folded (lifecycle progress over the vector)"
     );
     if ends_the_call {
-        // The delete this discharge propagates must name the version the other
-        // owner reached, or the Element it should evict refuses it in its turn.
+        // The discharge writes and propagates from this view: it must name the
+        // version the other owner reached, or the next flush is refused in turn.
         adopt_seen_counter(ctx, direction, &live, &replica);
         discharge_folded_terminal(ctx, call_ref, &live, replica, now_ms).await;
         return;
@@ -368,7 +368,7 @@ fn adopt_counters(folded: &mut Call, live: &Call) {
 /// adoption that never reaches the store is inert — it is lost if a takeover
 /// copy self-releases before the next local mutation, and until then this node's
 /// stored `(p,b)` still names the version the other owner refuses, so the split
-/// stays open and its next delete is refused in turn.
+/// stays open and its next flush is refused in turn.
 fn adopt_seen_counter(
     ctx: &Arc<RouterCtx>,
     direction: FlushDirection,
@@ -682,6 +682,35 @@ mod tests {
         // `p` is taken from the flush; `b` is untouched — adopting a version is a
         // read this node records, not a mutation of the call.
         assert_eq!(live_pb(&n, &call_ref), (3, 2), "the seen `p` is adopted, and only it");
+    }
+
+    /// **The answer crosses the split toward a backup too.** A forward `Put`
+    /// refused on the counters alone (`sb > b_in`) can still carry the authority's
+    /// own answer for a call this node's takeover copy reads as ringing. That is
+    /// progress the copy lacks, so it folds: the copy takes the answer, both
+    /// counters are adopted, and nothing is discharged — the call plays on.
+    #[tokio::test(start_paused = true)]
+    async fn a_forward_answer_folds_into_a_ringing_takeover_copy_without_ending_it() {
+        let n = node("w1").await;
+        let ctx = n.core.router_ctx();
+        let live = unanswered(1, 2, CallModelState::Active);
+        let call_ref = live.call_ref.clone();
+        assert!(ctx.state.materialize_if_absent(live, MaterialiseOrigin::Reclaim));
+
+        // The authority answered the caller and flushed; its `b` is behind the
+        // Element's, so the store refused the frame and handed the body up.
+        let replica = answered(3, 1, CallModelState::Active);
+        let body = MsgpackCodec::new().encode(&replica);
+        fold_refused_flush(ctx, FlushDirection::Forward, &call_ref, &body, 0).await;
+        sip_clock::testkit::settle().await;
+
+        let after = ctx.state.peek(&call_ref).expect("the takeover copy still serves the call");
+        assert_eq!(after.state, CallModelState::Active, "the fold ends no call");
+        assert!(call::helpers::caller_answered(&after), "the copy took the authority's answer");
+        assert!(n.cdr.snapshot().is_empty(), "a fold that ends nothing writes no record");
+        // A fold adopts `max` on BOTH axes — (3,2) — and the write that lands it
+        // is this node's own mutation, so its own axis bumps once on top.
+        assert_eq!(live_pb(&n, &call_ref), (3, 3), "both counters adopted, ours bumped once");
     }
 
     /// A `Terminating` body ends no call in either direction — it is a teardown

@@ -280,6 +280,15 @@ impl SimShared {
         self.stream_owner.lock().unwrap().insert(client, owner);
     }
 
+    /// Forget a closed stream's attribution. [`synth_local`] draws its ephemeral
+    /// ports from a wrapping counter, so an entry left behind would hand a later
+    /// stream the owner of a long-dead one — and with it that node's partitions.
+    /// A listen address is never a key here, so dropping the server end is a
+    /// no-op.
+    fn forget_stream(&self, client: SocketAddr) {
+        self.stream_owner.lock().unwrap().remove(&client);
+    }
+
     /// Is `src → dst` partitioned, reading each end as its owning node?
     fn partitioned(&self, src: SocketAddr, dst: SocketAddr) -> bool {
         let (so, du) = (self.owner(src), self.owner(dst));
@@ -821,6 +830,12 @@ impl ReplicationConnection for SimConnection {
 
     fn local_addr(&self) -> SocketAddr {
         self.local
+    }
+}
+
+impl Drop for SimConnection {
+    fn drop(&mut self) {
+        self.shared.forget_stream(self.local);
     }
 }
 

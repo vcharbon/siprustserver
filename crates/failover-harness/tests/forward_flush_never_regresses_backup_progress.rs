@@ -62,6 +62,8 @@ use failover_harness::{
     worker_ordinals, FailoverHarness, PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth,
     RULE_CSEQ_IN_DIALOG_ORDER,
 };
+use repl_net::frame::{Frame, Op};
+use repl_net::transport::Direction;
 use scenario_harness::Agent;
 use sip_message::generators::InDialogMethod;
 use sip_message::SipMessage;
@@ -387,6 +389,28 @@ fn cdrs_on(node: &ReplicatedB2buaSut, call_ref: &str) -> usize {
     node.cdr_records().into_iter().filter(|r| r.call_ref == call_ref).count()
 }
 
+/// Every replication `Delete` for `call_ref` that left `ordinal`'s listener —
+/// what an acting backup discharging a folded body would propagate back to the
+/// primary. The lane map names each node's listen address, and a listener's
+/// frames are the ones it SENDS from that address.
+fn deletes_sent_by(fh: &FailoverHarness, ordinal: &str, call_ref: &str) -> usize {
+    let report = fh.repl_report();
+    let listener = report
+        .lanes
+        .iter()
+        .find(|(_, ord)| ord.as_str() == ordinal)
+        .map(|(addr, _)| *addr)
+        .expect("the node's replication lane is named");
+    report
+        .frames
+        .iter()
+        .filter(|f| f.dir == Direction::Sent && f.from == listener)
+        .filter(|f| {
+            matches!(&f.frame, Frame::Data { op: Op::Delete, call_ref: r, .. } if r == call_ref)
+        })
+        .count()
+}
+
 /// One run of the scenario, from the ringing call to the cluster-wide release.
 async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = spawn_cluster(name).await;
@@ -504,9 +528,11 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
             0,
             "the acting backup wrote no record: only its primary discharges (ADR-0020 X3)",
         );
-        assert!(
-            primary.holds_any_trace(&call_ref).await || matches!(pending, Pending::Delete),
-            "no reverse delete rode back: the primary still holds what it holds",
+        assert_eq!(
+            deletes_sent_by(&fh, &bak_ord, &call_ref),
+            0,
+            "an acting backup propagates no delete: only its primary ends the call \
+             (ADR-0014 §2 / ADR-0020 X3)",
         );
         fh.mark(&bak_ord, Some(&pri_ord), "refused (live)", "the takeover copy serves on");
     }

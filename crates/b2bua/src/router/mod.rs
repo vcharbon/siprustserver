@@ -152,7 +152,9 @@ pub enum ReplCommand {
     /// A primary's forward flush this backup refused (ADR-0031 D3): the body is
     /// handed up on the same terms as the reverse case, and folds only where a
     /// live takeover copy of the call exists — an Element alone is kept as it
-    /// is, its merge deferred to the next materialisation.
+    /// is, its merge deferred to the next materialisation. Only the steady tail
+    /// sends it: a bulk re-seed's refusals are the state of the two views, not
+    /// events, and are counted alone.
     ForwardFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
 }
 

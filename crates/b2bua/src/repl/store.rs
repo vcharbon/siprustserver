@@ -63,13 +63,15 @@ struct CallMeta {
     /// on a locally-originated write (no cross-node skew to correct). The offset
     /// includes one transit latency — acceptable at in-cluster ms scale.
     skew_offset_ms: Option<i64>,
-    /// The last forward flush for this ref was refused because its BODY stood
-    /// behind the Element on the call's lifecycle: the authority is serving a
-    /// branch of this call, not a version of it (ADR-0031 D3). Reset by the next
-    /// forward flush the Element takes; read by the `Delete` guard, which yields
-    /// to an authority whose view is still on the same chain. Lives with the meta,
-    /// so it goes when the ref does.
-    forward_branch: bool,
+    /// Whether a forward flush has ever shown this Element an ANSWERED call —
+    /// the authority's own view of it, taken or refused. Set by the forward
+    /// apply path alone; every other write (an acting backup's own mutation, an
+    /// adoption flush) carries it over, so it keeps naming what the AUTHORITY
+    /// published and not what this node did afterwards. Monotone, like the fact
+    /// it records: an answered call never un-answers. The `Delete` guard reads
+    /// it — an authority that never published the answer is ending a call it does
+    /// not know happened (ADR-0031 D3).
+    authority_answered: bool,
 }
 
 /// A [`CallStore`] that replicates mutations through an in-memory backing store
@@ -268,25 +270,25 @@ impl ReplicatingCallStore {
         }
     }
 
-    /// Note that the authority's forward flush for `call_ref` is a BRANCH of the
-    /// call the Element records, not a version of it: its body stood behind the
-    /// Element on the call's lifecycle (ADR-0031 D3). No-op for a ref we hold no
+    /// Record that a forward flush has shown this Element the authority's own
+    /// ANSWERED view of the call. Latches: the answer is durable on the body, so
+    /// once the authority has published it, it has it. No-op for a ref we hold no
     /// meta for.
-    pub fn note_forward_branch(&self, call_ref: &str) {
+    pub fn note_authority_answer(&self, call_ref: &str) {
         if let Some(m) = self.meta.lock().unwrap().get_mut(call_ref) {
-            m.forward_branch = true;
+            m.authority_answered = true;
         }
     }
 
-    /// Is the authority's view of `call_ref` a branch of the Element's call — the
-    /// last forward flush refused for its body ([`note_forward_branch`])? The
-    /// `Delete` guard yields to an authority that is still on the same chain: a
-    /// version vector one flush behind is a lag, only a branch is a disagreement
-    /// about what happened to the call.
+    /// Has the authority ever published an answered view of `call_ref`
+    /// ([`note_authority_answer`])? `false` for an Element no forward flush has
+    /// carried an answer to — including one no forward flush has reached at all.
+    /// The `Delete` guard protects exactly that case: a call answered on this
+    /// Element by somebody else (ADR-0031 D3).
     ///
-    /// [`note_forward_branch`]: Self::note_forward_branch
-    pub fn forward_branched(&self, call_ref: &str) -> bool {
-        self.meta.lock().unwrap().get(call_ref).is_some_and(|m| m.forward_branch)
+    /// [`note_authority_answer`]: Self::note_authority_answer
+    pub fn authority_answered(&self, call_ref: &str) -> bool {
+        self.meta.lock().unwrap().get(call_ref).is_some_and(|m| m.authority_answered)
     }
 
     /// Is this call's body past its TTL? (lazy-eviction gate; pure read.)
@@ -395,9 +397,8 @@ impl CallStore for ReplicatingCallStore {
         // just-discharged call (which would trigger a SECOND discharge). A
         // tombstoned ref names a dead call (callRefs are unique), so no legitimate
         // Put is lost.
-        // FIXME(repl): the resurrection tombstone refuses a deferred terminal for a
-        // ref this node already discharged, so an answered call's record is lost;
-        // the guard must yield to a terminal whose `b` it never saw.
+        // FIXME(repl): the tombstone refuses a deferred terminal for a ref this node
+        // already discharged, losing the record; yield to a terminal it never saw.
         {
             let now = self.clock.now_ms();
             if let Some(&deleted_at) = self.tombstones.lock().unwrap().get(call_ref) {
@@ -421,37 +422,50 @@ impl CallStore for ReplicatingCallStore {
         // absolute timer deadlines. `None` on a locally-originated write.
         let skew_offset_ms = opts.origin_now_ms.map(|origin| now - origin);
 
-        // Update per-ref metadata atomically (single critical section).
+        // Update per-ref metadata atomically (single critical section). A write
+        // CARRIES OVER every field it does not itself carry: the backup ordinal,
+        // the skew offset and the authority's view of the answer are facts about
+        // the ref that only their own writer may change, and rebuilding the entry
+        // from this write alone would silently clear each of them.
         {
             let mut meta = self.meta.lock().unwrap();
-            // Capture/preserve the backup ordinal: a Forward flush carries it as
-            // `opts.peer`; any other write keeps whatever we already knew.
-            let backup = match (opts.direction, &opts.peer) {
+            let ref_meta =
+                RefMeta { call_gen, call_bgen, body_ttl_ms: ttl_ms, indexes: indexes.to_vec() };
+            // A Forward flush carries the backup ordinal as `opts.peer`.
+            let flushed_backup = match (opts.direction, &opts.peer) {
                 (Some(PropagateDirection::Forward), Some(p)) => Some(p.clone()),
-                _ => meta.get(call_ref).and_then(|m| m.backup.clone()),
+                _ => None,
             };
-            // Preserve a prior skew offset when this write carries none (e.g. a
-            // local refresh of a replica that first arrived with an offset).
-            let skew_offset_ms =
-                skew_offset_ms.or_else(|| meta.get(call_ref).and_then(|m| m.skew_offset_ms));
-            meta.insert(
-                call_ref.to_string(),
-                CallMeta {
-                    meta: RefMeta {
-                        call_gen,
-                        call_bgen,
-                        body_ttl_ms: ttl_ms,
-                        indexes: indexes.to_vec(),
-                    },
-                    role,
-                    primary: primary.to_string(),
-                    backup,
-                    expiry_at_ms,
-                    skew_offset_ms,
-                    // An applied flush is the authority back on this call's chain.
-                    forward_branch: false,
-                },
-            );
+            match meta.get_mut(call_ref) {
+                Some(m) => {
+                    m.meta = ref_meta;
+                    m.role = role;
+                    m.primary = primary.to_string();
+                    m.expiry_at_ms = expiry_at_ms;
+                    if flushed_backup.is_some() {
+                        m.backup = flushed_backup;
+                    }
+                    if skew_offset_ms.is_some() {
+                        m.skew_offset_ms = skew_offset_ms;
+                    }
+                }
+                None => {
+                    meta.insert(
+                        call_ref.to_string(),
+                        CallMeta {
+                            meta: ref_meta,
+                            role,
+                            primary: primary.to_string(),
+                            backup: flushed_backup,
+                            expiry_at_ms,
+                            skew_offset_ms,
+                            // Until a forward flush shows one, no answer of the
+                            // authority's own stands on this Element.
+                            authority_answered: false,
+                        },
+                    );
+                }
+            }
         }
 
         // HA path only: non-blocking changelog bump for the pulling peer.

@@ -368,8 +368,9 @@ impl B2buaMetrics {
 
     /// Count one forward flush the Backup flow refused because it would regress
     /// the backup's own progress (ADR-0031 D3). `op` is the refused operation:
-    /// `put` (a `b'` behind the Element's `b`) or `delete` (an Element carrying
-    /// `b > 0` and a non-terminal body).
+    /// `put` (a body that branches off the Element, or a `b'` behind the
+    /// Element's `b`) or `delete` (an `Active` Element whose caller was answered
+    /// and whose answer the authority never took).
     pub fn record_repl_forward_flush_refused(&self, op: &str) {
         *self
             .inner
