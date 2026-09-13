@@ -3,7 +3,10 @@
 //! attach features, seed service ext, run the limiter, create the b-leg).
 
 use call::helpers::{add_cdr_event, mark_decision, set_call_ext};
-use call::{Call, CallLimiterState, CdrEvent, CdrEventType, DecisionKind, TimerEntry, TimerType};
+use call::{
+    Call, CallLimiterState, CdrEvent, CdrEventType, DecisionKind, TerminationCause, TimerEntry,
+    TimerType,
+};
 use sip_clock::Clock;
 use sip_message::SipRequest;
 use sip_txn::IdGen;
@@ -59,6 +62,7 @@ pub async fn apply_route(
             &[],
             id_gen,
             now_ms,
+            TerminationCause::Admission,
         );
     }
 
@@ -118,6 +122,7 @@ pub async fn apply_route(
             &[],
             id_gen,
             now_ms,
+            TerminationCause::Admission,
         );
     }
 
@@ -281,6 +286,7 @@ pub async fn apply_route(
                 &[],
                 id_gen,
                 now_ms,
+                TerminationCause::Admission,
             );
         }
     };
@@ -399,6 +405,7 @@ async fn limiter_reject_failover(
             &[],
             id_gen,
             now_ms,
+            TerminationCause::Admission,
         );
     }
     let req = limiter_failure_request(&call, &limiter_id);
@@ -458,6 +465,7 @@ async fn limiter_reject_failover(
                 &rd.contacts,
                 id_gen,
                 now_ms,
+                TerminationCause::DecisionReject,
             )
         }
         // Relay with no captured failure (a limiter reject is pre-leg) → 480
@@ -474,6 +482,7 @@ async fn limiter_reject_failover(
                 &[],
                 id_gen,
                 now_ms,
+                TerminationCause::DecisionReject,
             )
         }
         Err(_) => crate::initial_invite::reject_call(
@@ -485,6 +494,7 @@ async fn limiter_reject_failover(
             &[],
             id_gen,
             now_ms,
+            TerminationCause::Admission,
         ),
     }
 }

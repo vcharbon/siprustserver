@@ -7,10 +7,10 @@
 
 use std::net::SocketAddr;
 
-use call::helpers::{add_cdr_event, mark_decision};
+use call::helpers::{add_cdr_event, mark_decision, record_termination};
 use call::{
     ALegInviteSnapshot, Call, CallModelState, CallTopology, CdrEvent, CdrEventType, DecisionKind,
-    Leg, LegDisposition, LegKind, LegState, RemoteInfo,
+    Leg, LegDisposition, LegKind, LegState, RemoteInfo, TerminationCause,
 };
 use sip_clock::Clock;
 use sip_message::emergency::is_emergency_request;
@@ -240,6 +240,7 @@ pub fn build_initial_call(
         message_seq: 0,
         decision_log: Vec::new(),
         decision_ordinal: 0,
+        termination: None,
         sm_cursors: std::collections::BTreeMap::new(),
     }
 }
@@ -333,6 +334,7 @@ pub async fn handle_initial_invite(
                 &rd.contacts,
                 id_gen,
                 now_ms,
+                TerminationCause::DecisionReject,
             )
         }
         // `Relay` is a failover-only treatment; with no captured downstream
@@ -348,6 +350,7 @@ pub async fn handle_initial_invite(
                 &[],
                 id_gen,
                 now_ms,
+                TerminationCause::DecisionReject,
             )
         }
         // No decision was returned: nothing to record, the stack's own final.
@@ -360,6 +363,7 @@ pub async fn handle_initial_invite(
             &[],
             id_gen,
             now_ms,
+            TerminationCause::Admission,
         ),
     }
 }
@@ -386,7 +390,8 @@ fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
 /// per entry (used for a 3xx redirect — ADR-0017). Structural headers are
 /// skipped (the generator owns them, header-ownership matrix X2). Marks no
 /// decision: the caller marks the one it applies, and a final of the stack's
-/// own is none.
+/// own is none. `cause` is the termination record's: the decision layer's
+/// refusal, or the stack's own admission.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reject_call(
     mut call: Call,
@@ -397,6 +402,7 @@ pub(crate) fn reject_call(
     contacts: &[RedirectContact],
     id_gen: &IdGen,
     now_ms: i64,
+    cause: TerminationCause,
 ) -> HandlerResult {
     let reason = reason.unwrap_or_else(|| default_reason(status));
     // A redirect whose target does not read cannot be authored: the caller dials
@@ -420,6 +426,7 @@ pub(crate) fn reject_call(
                 &[],
                 id_gen,
                 now_ms,
+                TerminationCause::Admission,
             );
         }
     };
@@ -452,6 +459,7 @@ pub(crate) fn reject_call(
             },
         );
     }
+    call = record_termination(call, now_ms, cause, None);
     call.a_leg.state = LegState::Terminated;
     call.state = CallModelState::Terminated;
     HandlerResult { call, effects }

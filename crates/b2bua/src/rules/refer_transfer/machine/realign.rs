@@ -4,7 +4,7 @@
 //! (begin-termination BYEs A, B and C).
 
 use b2bua_sdk::sm_rule;
-use call::{CdrEventType, Direction, LegState, TransferPhase};
+use call::{CdrEventType, Direction, LegState, TerminationCause, TimeoutKind, TransferPhase};
 use sip_message::Method;
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
@@ -112,7 +112,11 @@ pub(super) fn c_realign_fail() -> RuleDefinition {
                     reason: Some("transfer-rollback-c-realign".to_string()),
                 });
             }
-            actions.push(RuleAction::BeginTermination { reason: None });
+            actions.push(RuleAction::BeginTermination {
+                reason: None,
+                cause: TerminationCause::RemoteFinal,
+                by_leg: st.c_leg_id.clone(),
+            });
             ok(actions)
         },
     }
@@ -147,7 +151,11 @@ pub(super) fn c_realign_timeout() -> RuleDefinition {
                     reason: Some("transfer-rollback-c-realign".to_string()),
                 });
             }
-            actions.push(RuleAction::BeginTermination { reason: None });
+            actions.push(RuleAction::BeginTermination {
+                reason: None,
+                cause: TerminationCause::Timeout(TimeoutKind::NoAnswer),
+                by_leg: st.c_leg_id.clone(),
+            });
             ok(actions)
         },
     }
@@ -237,7 +245,11 @@ pub(super) fn a_realign_fail() -> RuleDefinition {
                     status_code: Some(resp.status() as i64),
                     reason: Some("transfer-rollback-a-realign".to_string()),
                 },
-                RuleAction::BeginTermination { reason: None },
+                RuleAction::BeginTermination {
+                    reason: None,
+                    cause: TerminationCause::RemoteFinal,
+                    by_leg: Some("a".to_string()),
+                },
             ])
         },
     }
@@ -277,7 +289,11 @@ pub(super) fn a_realign_timeout() -> RuleDefinition {
                     status_code: None,
                     reason: Some("transfer-rollback-a-realign".to_string()),
                 },
-                RuleAction::BeginTermination { reason: None },
+                RuleAction::BeginTermination {
+                    reason: None,
+                    cause: TerminationCause::Timeout(TimeoutKind::NoAnswer),
+                    by_leg: Some("a".to_string()),
+                },
             ])
         },
     }

@@ -602,6 +602,11 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
         "every event after the route carries its ordinal: {:?}",
         cdr.events
     );
+    // The termination record rode the body too: the backup took the caller's
+    // BYE, and the primary that discharged the call restates it.
+    let termination = cdr.termination.as_ref().expect("the record names who ended the call");
+    assert_eq!(termination.cause, call::TerminationCause::RemoteBye);
+    assert_eq!(termination.by_leg.as_deref(), Some("a"));
 }
 
 // =============================================================================

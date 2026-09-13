@@ -4,9 +4,12 @@
 //! `crate::rules::invariants`.
 
 use call::helpers::{
-    set_bye_disposition, set_leg_disposition, set_leg_state, Scope, TERMINATING_TIMEOUT_MS,
+    record_termination, set_bye_disposition, set_leg_disposition, set_leg_state, Scope,
+    TERMINATING_TIMEOUT_MS,
 };
-use call::{ByeDisposition, Call, LegDisposition, LegState, StackDialog, TimerType};
+use call::{
+    ByeDisposition, Call, LegDisposition, LegState, StackDialog, TerminationCause, TimerType,
+};
 use sip_message::generators::{
     self, GenerateInDialogRequestOpts, InDialogMethod, InviteClientTransactionHandle, RelayScope,
 };
@@ -54,13 +57,19 @@ impl ActionExecutor<'_> {
     /// `source_leg_id` is intentionally *not* special-cased here: rules that
     /// consume a BYE/CANCEL pre-mark their source leg's disposition before
     /// emitting begin-termination, so the skip guard below leaves it untouched.
+    ///
+    /// `ended` is the termination record's `(cause, by_leg)`, written with
+    /// this turn's clock when the call carries no record yet: the first
+    /// termination names who ended the call.
     pub(super) fn begin_termination(
         &self,
         call: &mut Call,
         fx: &mut HandlerEffects,
         ctx: &RuleContext,
         reason: Option<&str>,
+        ended: (TerminationCause, Option<String>),
     ) {
+        *call = record_termination(call.clone(), self.now_ms, ended.0, ended.1);
         let pending_invites: Vec<(String, i64)> = std::iter::once(&call.a_leg)
             .chain(call.b_legs.iter())
             .flat_map(|leg| leg.dialogs.iter().map(move |d| (leg, d)))
@@ -597,8 +606,15 @@ fn relayed_teardown_hops(ctx: &RuleContext) -> Option<u32> {
 
 /// Hard-terminate every leg and the call ([`crate::rules::model::RuleAction::TerminateCall`],
 /// and the `CreateLeg` admission reject). No wire traffic — the firing rule owns
-/// any final/BYE already sent.
-pub(super) fn terminate_all(call: &mut Call) {
+/// any final/BYE already sent. Writes the termination record under `cause`
+/// and `by_leg` when the call carries none yet.
+pub(super) fn terminate_all(
+    call: &mut Call,
+    now_ms: i64,
+    cause: TerminationCause,
+    by_leg: Option<String>,
+) {
+    *call = record_termination(call.clone(), now_ms, cause, by_leg);
     *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Terminated);
     let ids: Vec<String> = call.b_legs.iter().map(|l| l.leg_id.clone()).collect();
     for id in ids {

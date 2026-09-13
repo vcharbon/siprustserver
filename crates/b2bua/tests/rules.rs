@@ -14,7 +14,7 @@ use b2bua::rules::{
 };
 use call::{
     B2buaDialogExt, CallModelState, Dialog, Direction, Leg, LegDisposition, LegKind, LegState,
-    MachineId, RemoteInfo, StackDialog, StateLabel, TimerType,
+    MachineId, RemoteInfo, StackDialog, StateLabel, TerminationCause, TimerType,
 };
 use sip_message::generators::{
     generate_out_of_dialog_request, CapabilitySet, GenerateOutOfDialogRequestOpts,
@@ -171,15 +171,12 @@ fn no_answer_fire_on_own_pending_leg_fires_despite_other_leg_confirmed() {
     pending.state = LegState::Trying;
     call = call::helpers::add_b_leg(call, pending);
     let actions = no_answer_result(&call, "b-2");
+    // No consult here: the caller's 480 and the teardown follow the destroy.
     match actions.as_slice() {
-        [RuleAction::AddCdrEvent { leg_id, reason, .. }, RuleAction::DestroyLeg { leg_id: destroyed }, tail]
+        [RuleAction::AddCdrEvent { leg_id, reason, .. }, RuleAction::DestroyLeg { leg_id: destroyed }, RuleAction::RespondToALeg { status: 480, .. }, RuleAction::BeginTermination { .. }]
             if leg_id == "b-2"
                 && reason.as_deref() == Some("no_answer_timeout")
-                && destroyed == "b-2"
-                && matches!(
-                    tail,
-                    RuleAction::BeginTermination { .. } | RuleAction::FailureAsyncHttp { .. }
-                ) => {}
+                && destroyed == "b-2" => {}
         other => panic!("genuine fire runs the normal no-answer body, got {other:?}"),
     }
 }
@@ -581,7 +578,11 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
     let result = exec.execute(
-        &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }],
+        &[RuleAction::BeginTermination {
+            reason: Some("CANCEL".into()),
+            cause: TerminationCause::RemoteCancel,
+            by_leg: Some("a".into()),
+        }],
         &call,
         &ctx,
     );
@@ -669,6 +670,8 @@ fn invariants_append_cleanup_on_terminated() {
     let mut call = test_call();
     let before = call.clone();
     call.state = CallModelState::Terminated;
+    // A synthetic terminal states its cause as every live path does.
+    call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
     call.a_leg.state = LegState::Terminated;
     let result = invariants::enforce(
         &b2bua::obligations::ObligationSet::core(),
@@ -716,6 +719,8 @@ fn no_synthesized_final_when_the_turn_already_answered() {
     let mut call = test_call();
     let before = call.clone();
     call.state = CallModelState::Terminated;
+    // A synthetic terminal states its cause as every live path does.
+    call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
     call.a_leg.state = LegState::Terminated;
     let a_invite = b2bua::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     let mut result = HandlerResult::new(call);
@@ -759,6 +764,8 @@ fn no_synthesized_final_when_the_txn_layer_answered_the_cancel() {
     let mut call = test_call();
     let before = call.clone();
     call.state = CallModelState::Terminated;
+    // A synthetic terminal states its cause as every live path does.
+    call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
     call = call::helpers::record_invite_final(call, "a", 487);
     let result = invariants::enforce(
         &b2bua::obligations::ObligationSet::core(),
@@ -927,8 +934,14 @@ fn begin_termination_resolves_an_a_leg_whose_invite_carries_its_final() {
     let mut call = test_call();
     call.a_leg.state = LegState::Early;
     let call = call::helpers::record_invite_final(call, "a", 487);
-    let result =
-        execute_on(&call, &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }]);
+    let result = execute_on(
+        &call,
+        &[RuleAction::BeginTermination {
+            reason: Some("CANCEL".into()),
+            cause: TerminationCause::RemoteCancel,
+            by_leg: Some("a".into()),
+        }],
+    );
     assert_eq!(result.call.a_leg.state, LegState::Terminated);
     assert_eq!(result.call.a_leg.bye_disposition, Some(call::ByeDisposition::None));
 
@@ -936,7 +949,14 @@ fn begin_termination_resolves_an_a_leg_whose_invite_carries_its_final() {
     // that caller its 503 at `→ terminated`.
     let mut call = test_call();
     call.a_leg.state = LegState::Early;
-    let result = execute_on(&call, &[RuleAction::BeginTermination { reason: Some("BYE".into()) }]);
+    let result = execute_on(
+        &call,
+        &[RuleAction::BeginTermination {
+            reason: Some("BYE".into()),
+            cause: TerminationCause::RemoteBye,
+            by_leg: Some("a".into()),
+        }],
+    );
     assert_eq!(result.call.a_leg.state, LegState::Early);
 }
 
@@ -3225,6 +3245,15 @@ mod enforce_equivalence {
 
             let mut after = test_call();
             after.state = after_state;
+            if after_state != CallModelState::Active {
+                // A synthetic terminal states its cause as every live path does.
+                after = call::helpers::record_termination(
+                    after,
+                    0,
+                    TerminationCause::Supervisor,
+                    None,
+                );
+            }
             after.limiter_entries = entries;
             after.timers = (0..timer_count)
                 .map(|i| TimerEntry {
@@ -4143,7 +4172,11 @@ mod going_away_gate {
                 header_updates: vec![],
                 contacts: vec![],
             },
-            RuleAction::BeginTermination { reason: Some("deadline".into()) },
+            RuleAction::BeginTermination {
+                reason: Some("deadline".into()),
+                cause: TerminationCause::Timeout(call::TimeoutKind::Setup),
+                by_leg: None,
+            },
             RuleAction::ClearState { machine: SVC },
         ]))
     }
@@ -4319,7 +4352,11 @@ mod going_away_gate {
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
         let result = exec.execute(
-            &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }],
+            &[RuleAction::BeginTermination {
+                reason: Some("CANCEL".into()),
+                cause: TerminationCause::RemoteCancel,
+                by_leg: Some("a".into()),
+            }],
             &call,
             &ctx,
         );

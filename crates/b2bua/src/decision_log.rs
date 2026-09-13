@@ -26,6 +26,12 @@ pub(crate) const FAILURE_TOPIC: &str = "call-failure-result";
 pub(crate) const RELEASE_TOPIC: &str = "call-release-result";
 pub(crate) const REFER_TOPIC: &str = "refer-http-result";
 
+/// Whether a fold's payload carries [`STACK_ORIGIN`]: the callout resolved
+/// it on the stack's own account, no decision behind it.
+pub(crate) fn stack_authored(payload: &serde_json::Value) -> bool {
+    payload.get(STACK_ORIGIN).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
 /// Mark the decision a fold carries, if it is one the stack applies: the kind
 /// from the topic and outcome, the label from the payload, the leg from the
 /// payload's failed leg (a failover) or the transfer's referrer (a refer).
@@ -33,7 +39,7 @@ pub(crate) fn fold_decided(call: Call, event: &CallEvent, now_ms: i64) -> Call {
     let CallEvent::InternalEvent { topic, outcome, payload, .. } = event else {
         return call;
     };
-    if payload.get(STACK_ORIGIN).and_then(|v| v.as_bool()).unwrap_or(false)
+    if stack_authored(payload)
         || matches!(call.state, CallModelState::Terminating | CallModelState::Terminated)
     {
         return call;

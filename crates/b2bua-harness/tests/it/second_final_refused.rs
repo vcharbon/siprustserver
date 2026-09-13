@@ -71,7 +71,11 @@ mod latereject {
                         header_updates: vec![],
                         contacts: vec![],
                     },
-                    RuleAction::BeginTermination { reason: Some("latereject".into()) },
+                    RuleAction::BeginTermination {
+                        reason: Some("latereject".into()),
+                        cause: call::TerminationCause::Timeout(call::TimeoutKind::Setup),
+                        by_leg: None,
+                    },
                     RuleAction::ClearState { machine: LATEREJECT },
                 ]))
             },

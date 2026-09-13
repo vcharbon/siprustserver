@@ -40,8 +40,8 @@
 //! from either party still rides `relay-bye` and ends the call.
 
 use call::{
-    ByeDisposition, CdrEventType, Direction, LegDisposition, LegState, MachineId, ReroutePhase,
-    RerouteState, TimerType,
+    ByeDisposition, CdrEventType, Direction, LegDisposition, LegState, MachineId, ReleaseEventKind,
+    ReroutePhase, RerouteState, TerminationCause, TimerType,
 };
 
 use super::model::{
@@ -78,6 +78,8 @@ fn is_new_leg(ctx: &RuleContext) -> bool {
 /// the `release` outcome would, recording why. `BeginTermination` BYEs every
 /// confirmed leg (A + old B + a confirmed new leg) and CANCELs a still-ringing
 /// new leg; the `→ terminated` invariant settles obligations exactly once.
+/// The call ends under the decision layer's release: the reroute it asked
+/// for could not complete.
 fn fail_teardown(ctx: &RuleContext, reason: &'static str) -> Vec<RuleAction> {
     vec![
         RuleAction::cancel_timer(&guard_timer(), None),
@@ -88,8 +90,32 @@ fn fail_teardown(ctx: &RuleContext, reason: &'static str) -> Vec<RuleAction> {
             reason: Some("max_duration".into()),
         },
         RuleAction::SetReroute { state: None },
-        RuleAction::BeginTermination { reason: Some(reason.into()) },
+        RuleAction::BeginTermination {
+            reason: Some(reason.into()),
+            cause: TerminationCause::DecisionRelease,
+            by_leg: None,
+        },
     ]
+}
+
+/// What ended the call when a release consult folds `release`: the decision
+/// layer's release, or a route it answered that the limiter refused — the
+/// layer ended the call either way; an unanswered consult (engine error,
+/// deadline) ends it under the event that raised the consult, which the fold
+/// names.
+fn release_fold_cause(payload: &serde_json::Value) -> TerminationCause {
+    let unanswered = crate::decision_log::stack_authored(payload)
+        && payload.get("reason").and_then(|v| v.as_str()) != Some("limiter_rejected");
+    if !unanswered {
+        return TerminationCause::DecisionRelease;
+    }
+    let event = payload
+        .get("event")
+        .and_then(|v| serde_json::from_value::<ReleaseEventKind>(v.clone()).ok())
+        .unwrap_or(ReleaseEventKind::MaxCallDuration);
+    match event {
+        ReleaseEventKind::MaxCallDuration => TerminationCause::MaxDuration,
+    }
 }
 
 /// The release/reroute rule set (CORE; registered before the generic core
@@ -111,6 +137,11 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                 if super::defaults::fold_lands_on_going_away_call(ctx) {
                     return ok(vec![]);
                 }
+                let payload = match ctx.event {
+                    crate::event::CallEvent::InternalEvent { payload, .. } => payload,
+                    _ => return None,
+                };
+                let cause = release_fold_cause(payload);
                 ok(vec![
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Bye,
@@ -118,7 +149,11 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         status_code: None,
                         reason: Some("max_duration".into()),
                     },
-                    RuleAction::BeginTermination { reason: Some("max-duration".into()) },
+                    RuleAction::BeginTermination {
+                        reason: Some("max-duration".into()),
+                        cause,
+                        by_leg: None,
+                    },
                 ])
             },
         ),

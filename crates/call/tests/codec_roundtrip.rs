@@ -136,6 +136,48 @@ fn the_decision_log_round_trips() {
     assert_eq!(decoded.cdr_events.last().unwrap().decision_ordinal, 2);
 }
 
+/// The termination record is replicated state — the node that discharges a
+/// call a peer began terminating writes the record the peer wrote — so it
+/// survives the codec in every shape: none, a leg-caused one not yet cut, a
+/// deadline cut at a seq.
+#[test]
+fn the_termination_record_round_trips() {
+    use call::helpers::{record_termination, seal_termination_seq};
+    use call::{TerminationCause, TimeoutKind};
+
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+
+    call.termination = None;
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "a live call");
+
+    let call = record_termination(call, 3_000, TerminationCause::RemoteBye, Some("b-1".into()));
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "the callee's BYE, not yet cut");
+    let t = decoded.termination.as_ref().unwrap();
+    assert_eq!(
+        (t.at_ms, t.cause, t.by_leg.as_deref(), t.last_seq),
+        (3_000, TerminationCause::RemoteBye, Some("b-1"), 0)
+    );
+
+    let mut call = call;
+    call.termination = None;
+    call.message_seq = 9;
+    let call = record_termination(
+        call,
+        4_000,
+        TerminationCause::Timeout(TimeoutKind::Keepalive),
+        Some("a".into()),
+    );
+    let call = seal_termination_seq(call);
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "a deadline, cut");
+    let t = decoded.termination.as_ref().unwrap();
+    assert_eq!(t.cause, TerminationCause::Timeout(TimeoutKind::Keepalive));
+    assert_eq!(t.last_seq, 9);
+}
+
 /// The final a leg's initial INVITE carries is replicated state — a takeover
 /// node must refuse a second final on that transaction exactly as the node
 /// that sent the first would — so it survives the replication codec in both

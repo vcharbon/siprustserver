@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use call::helpers::seal_termination_seq;
 use call::CallModelState;
 use sip_message::Method;
 use sip_txn::TxnKind;
@@ -25,10 +26,15 @@ pub(super) async fn process_result(
     result: HandlerResult,
     now_ms: i64,
 ) {
-    // What the turn sends is on the record before the record lands.
+    // What the turn sends is on the record before the record lands, and a
+    // termination this turn began is cut after it: every ring entry with
+    // `seq <= termination.last_seq` was received or sent as part of
+    // beginning the termination, every later one came after (the peer's 200
+    // to the relayed BYE, the ACK to a 487). With the ring off the cut stays
+    // `0`.
     let result = match crate::message_ring::Ring::of(&ctx.config) {
         Some(ring) => HandlerResult {
-            call: ring.sent(result.call, &result.effects.outbound, now_ms),
+            call: seal_termination_seq(ring.sent(result.call, &result.effects.outbound, now_ms)),
             effects: result.effects,
         },
         None => result,
@@ -138,6 +144,9 @@ pub(super) async fn process_result(
             }
             BufferedObservabilityEffect::GoingAwayAbsorbed { .. } => {
                 ctx.metrics.bump_going_away_absorbed()
+            }
+            BufferedObservabilityEffect::TerminationUnrecorded => {
+                ctx.metrics.bump_termination_unrecorded()
             }
         }
     }

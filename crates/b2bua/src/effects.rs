@@ -110,6 +110,10 @@ pub enum BufferedObservabilityEffect {
         event: &'static str,
         rule: &'static str,
     },
+    /// A call reached `Terminated` carrying no termination record: a path to
+    /// terminal states no cause. The router counts it as
+    /// `termination_unrecorded`.
+    TerminationUnrecorded,
 }
 
 /// Fire-and-forget effects — detached work / re-entrant events.

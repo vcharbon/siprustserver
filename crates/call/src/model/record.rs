@@ -14,6 +14,7 @@ use super::services::{
     ExtMap, PromotePemState, RelayFirst18xState, ReleaseEventKind, RerouteState, TransferState,
 };
 use super::sm::{MachineId, StateLabel};
+use super::termination::Termination;
 use super::timer::TimerEntry;
 
 /// Maps a B-leg's real tag to the B2BUA-generated tag shown to Alice.
@@ -306,6 +307,11 @@ pub struct Call {
     /// so a stamp reads it without a length; `0` before the first decision.
     #[serde(default)]
     pub decision_ordinal: u32,
+    /// Who ended the call and why ([`crate::helpers::record_termination`] is
+    /// the one writer, the first termination's record stands); `None` while
+    /// the call is live.
+    #[serde(default)]
+    pub termination: Option<Termination>,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate

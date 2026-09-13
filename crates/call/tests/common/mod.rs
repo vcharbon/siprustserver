@@ -320,6 +320,7 @@ pub fn representative_call() -> Call {
         message_seq: 0,
         decision_log: vec![representative_mark()],
         decision_ordinal: 1,
+        termination: None,
         sm_cursors: BTreeMap::new(),
     }
 }
@@ -766,6 +767,43 @@ fn arb_decision_log() -> impl Strategy<Value = Vec<DecisionMark>> {
     })
 }
 
+fn arb_termination_cause() -> impl Strategy<Value = TerminationCause> {
+    let timeout = prop_oneof![
+        Just(TimeoutKind::Setup),
+        Just(TimeoutKind::NoAnswer),
+        Just(TimeoutKind::Prack),
+        Just(TimeoutKind::Ack),
+        Just(TimeoutKind::Keepalive),
+        Just(TimeoutKind::Transaction),
+    ];
+    prop_oneof![
+        Just(TerminationCause::RemoteBye),
+        Just(TerminationCause::RemoteCancel),
+        Just(TerminationCause::RemoteFinal),
+        Just(TerminationCause::DecisionReject),
+        Just(TerminationCause::DecisionRelease),
+        Just(TerminationCause::MaxDuration),
+        timeout.prop_map(TerminationCause::Timeout),
+        Just(TerminationCause::Admission),
+        Just(TerminationCause::MessageCap),
+        Just(TerminationCause::Supervisor),
+    ]
+}
+
+/// Varied termination records: none (a live call) through every cause, with
+/// and without a leg, cut or not yet.
+fn arb_termination() -> impl Strategy<Value = Option<Termination>> {
+    proptest::option::of(
+        (any::<i64>(), arb_termination_cause(), proptest::option::of(arb_tag()), any::<u32>())
+            .prop_map(|(at_ms, cause, by_leg, last_seq)| Termination {
+                at_ms,
+                cause,
+                by_leg,
+                last_seq,
+            }),
+    )
+}
+
 /// Varied message rings: empty (the ring off) through a few entries with an
 /// eviction count.
 fn arb_message_ring() -> impl Strategy<Value = MessageRing> {
@@ -934,6 +972,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
     let release = (
         proptest::collection::vec(arb_reliable_provisional(), 0..3),
         arb_decision_log(),
+        arb_termination(),
         proptest::collection::vec(Just(ReleaseEventKind::MaxCallDuration), 0..2),
         proptest::option::of(
             (arb_tag(), proptest::option::of(arb_tag()), any::<i64>(), any::<bool>()).prop_map(
@@ -969,7 +1008,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
                 sm_cursors,
                 message_seq,
             ),
-            (reliable_provisionals, decision_log, subscriptions, reroute),
+            (reliable_provisionals, decision_log, termination, subscriptions, reroute),
         )| Call {
             call_ref,
             a_leg,
@@ -1009,6 +1048,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             message_seq,
             decision_ordinal: decision_log.len() as u32,
             decision_log,
+            termination,
             sm_cursors,
         },
     )

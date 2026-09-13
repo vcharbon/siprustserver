@@ -4,7 +4,7 @@
 //! final the decision authors.
 
 use call::helpers::{mark_decision, set_call_ext};
-use call::{Call, DecisionKind};
+use call::{Call, DecisionKind, TerminationCause};
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
@@ -40,5 +40,6 @@ pub(crate) fn apply_reject(
         &[],
         id_gen,
         now_ms,
+        TerminationCause::DecisionReject,
     )
 }

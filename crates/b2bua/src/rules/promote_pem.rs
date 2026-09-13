@@ -9,7 +9,9 @@
 //! the typed `Call.promote_pem` slice.
 
 use call::features::{FeatureActivations, RelayFirst18xStrategy};
-use call::{CdrEventType, Direction, LegDisposition, LegState, PromotePemState, TimerType};
+use call::{
+    CdrEventType, Direction, LegDisposition, LegState, PromotePemState, TerminationCause, TimerType,
+};
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
 use sip_message::sdp_media_equivalent;
@@ -345,7 +347,11 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         reason: Some(format!("promote-pem-to-200:resync-failed:{reason}")),
                     },
                     RuleAction::SetPromotePem { state: None },
-                    RuleAction::BeginTermination { reason: Some(reason) },
+                    RuleAction::BeginTermination {
+                        reason: Some(reason),
+                        cause: TerminationCause::RemoteFinal,
+                        by_leg: Some("a".to_string()),
+                    },
                 ])
             },
         ),
@@ -425,11 +431,15 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
                         reason: Some(format!("promote-pem-to-200:b-failed:{reason}")),
                     },
                     RuleAction::TerminateLeg {
-                        leg_id: b,
+                        leg_id: b.clone(),
                         bye_disposition: Some(call::ByeDisposition::Rejected),
                     },
                     RuleAction::SetPromotePem { state: None },
-                    RuleAction::BeginTermination { reason: Some(reason) },
+                    RuleAction::BeginTermination {
+                        reason: Some(reason),
+                        cause: TerminationCause::RemoteFinal,
+                        by_leg: Some(b),
+                    },
                 ])
             },
         ),

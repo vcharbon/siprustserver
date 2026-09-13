@@ -31,6 +31,7 @@
 //!   - [`cdr`] — CDR event records
 //!   - [`decision_log`] — the applied decisions, in order
 //!   - [`message_ring`] — the capped per-leg history of distinct SIP messages
+//!   - [`termination`] — who ended the call and why, and the ring cut
 //!   - [`services`] — per-service typed runtime slices + opaque [`ExtMap`]
 //!   - [`sm`] — state-machine identifiers (ADR-0016)
 
@@ -45,6 +46,7 @@ pub mod obligation;
 pub mod record;
 pub mod services;
 pub mod sm;
+pub mod termination;
 pub mod timer;
 
 pub use cdr::{CdrEvent, CdrEventType};
@@ -64,4 +66,5 @@ pub use services::{
     TransferPhase, TransferState,
 };
 pub use sm::{MachineId, StateLabel};
+pub use termination::{Termination, TerminationCause, TimeoutKind};
 pub use timer::{TimerEntry, TimerType};

@@ -668,3 +668,31 @@ fn marks_number_the_decisions_and_stamp_what_follows() {
         call.cdr_events.iter().rev().take(3).rev().map(|e| e.decision_ordinal).collect();
     assert_eq!(events, vec![0, 1, 2]);
 }
+
+/// The first termination's record stands: a second write under another
+/// cause changes nothing, and the cut is taken once — the ring's last seq at
+/// the seal, never moved by a later seal.
+#[test]
+fn the_first_termination_is_recorded_once_and_cut_once() {
+    let mut call = representative_call();
+    call.termination = None;
+    call.message_seq = 4;
+    assert_eq!(seal_termination_seq(call.clone()).termination, None, "nothing to cut");
+
+    let call = record_termination(call, 10, TerminationCause::RemoteCancel, Some("a".into()));
+    let call = record_termination(call, 20, TerminationCause::Supervisor, None);
+    assert_eq!(
+        call.termination,
+        Some(Termination {
+            at_ms: 10,
+            cause: TerminationCause::RemoteCancel,
+            by_leg: Some("a".into()),
+            last_seq: 0,
+        })
+    );
+    let mut call = seal_termination_seq(call);
+    assert_eq!(call.termination.as_ref().unwrap().last_seq, 4, "cut at the seal");
+    call.message_seq = 7;
+    let call = seal_termination_seq(call);
+    assert_eq!(call.termination.as_ref().unwrap().last_seq, 4, "a later seal moves nothing");
+}

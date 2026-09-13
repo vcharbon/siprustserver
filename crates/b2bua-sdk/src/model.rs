@@ -10,7 +10,7 @@ use call::helpers::RAckTokens;
 use call::{
     ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, CdrEventType, Dialog,
     Direction, ExtMap, Leg, LegDisposition, LegKind, LegState, MachineId, Obligation,
-    PromotePemState, StateLabel, TagMapping, TimerType, TransferState,
+    PromotePemState, StateLabel, TagMapping, TerminationCause, TimerType, TransferState,
 };
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
@@ -651,9 +651,23 @@ pub enum RuleAction {
         id: String,
     },
     CancelAllTimers,
-    TerminateCall,
+    /// Hard-terminate every leg and the call, no wire traffic: the firing
+    /// rule owns any final or BYE already sent. `cause` and `by_leg` are the
+    /// call's termination record (`Call::termination`, written once by the
+    /// first termination).
+    TerminateCall {
+        cause: TerminationCause,
+        by_leg: Option<String>,
+    },
+    /// Graceful teardown of every unresolved leg, then `Terminating`.
+    /// `reason` is a label — an RFC 3326 `SIP;cause=…` value rides the minted
+    /// BYEs, anything else is not emitted; `cause` and `by_leg` are the
+    /// call's termination record (`Call::termination`, written once by the
+    /// first termination: who ended the call and why).
     BeginTermination {
         reason: Option<String>,
+        cause: TerminationCause,
+        by_leg: Option<String>,
     },
     TerminateLeg {
         leg_id: String,
@@ -1003,7 +1017,7 @@ impl RuleAction {
             | RuleAction::SendNotify { .. } => EffectKind::LegMessage,
             // Call-lifecycle commands — the one service → global hop (X3).
             RuleAction::BeginTermination { .. }
-            | RuleAction::TerminateCall
+            | RuleAction::TerminateCall { .. }
             | RuleAction::Merge { .. }
             | RuleAction::Split { .. } => EffectKind::CallLifecycleCommand,
             // Guard timers.

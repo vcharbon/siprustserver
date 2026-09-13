@@ -361,9 +361,10 @@ async fn failure_outcome(
 }
 
 /// The `terminate` fold's payload: the failed final's status and reason the
-/// seed stashed and the failed leg. `decided` is the relay decision's label
-/// when the decision layer returned one; `None` is an unanswered consult, the
-/// stack's own resolution.
+/// seed stashed, the failure's origin (what raised the consult: a final, a
+/// deadline, a limiter) and the failed leg. `decided` is the relay decision's
+/// label when the decision layer returned one; `None` is an unanswered
+/// consult, the stack's own resolution.
 fn terminate_payload(
     request: &serde_json::Value,
     failed_leg_id: &str,
@@ -375,6 +376,9 @@ fn terminate_payload(
     }
     if let Some(v) = request.get("sip_reason") {
         p.insert("reason".into(), v.clone());
+    }
+    if let Some(v) = request.get("origin") {
+        p.insert("origin".into(), v.clone());
     }
     p.insert("failed_leg_id".into(), json!(failed_leg_id));
     match decided {
@@ -409,6 +413,10 @@ pub(super) fn spawn_release_callout(
     tokio::spawn(async move {
         let sent_at_ms = ctx2.clock.now_ms();
         let req = parse_call_release_request(&request, snapshot);
+        // Every `release` fold names the event that raised the consult, so
+        // the rule that applies it can end the call under that event where
+        // no decision stands behind the fold.
+        let event = json!(req.event);
         let (outcome, payload) = match ctx2.decision.call_release(req).await {
             Ok(CallReleaseResponse::Route(route)) => {
                 match admit_route_limiters(ctx2.limiter.as_ref(), &route).await {
@@ -418,15 +426,20 @@ pub(super) fn spawn_release_callout(
                     // going down anyway, so the reject degrades to the release
                     // default (local teardown) instead of a recursive failover
                     // walk.
-                    Err(_) => {
-                        ("release", json!({"reason": "limiter_rejected", STACK_ORIGIN: true}))
-                    }
+                    Err(_) => (
+                        "release",
+                        json!({"reason": "limiter_rejected", "event": event, STACK_ORIGIN: true}),
+                    ),
                 }
             }
             // Release, engine error, or deadline expiry → the local teardown
             // (the fail-safe the request demands).
-            Ok(CallReleaseResponse::Release { label }) => ("release", json!({ "label": label })),
-            Err(_) => ("release", json!({"reason": "engine_error", STACK_ORIGIN: true})),
+            Ok(CallReleaseResponse::Release { label }) => {
+                ("release", json!({ "label": label, "event": event }))
+            }
+            Err(_) => {
+                ("release", json!({"reason": "engine_error", "event": event, STACK_ORIGIN: true}))
+            }
         };
         record_round_trip(
             &trace,

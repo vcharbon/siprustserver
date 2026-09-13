@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::helpers::cap_keepalive_fire_at;
-use call::{Call, CallModelState, LegState, TimerEntry, TimerType};
+use call::{Call, CallModelState, LegState, TerminationCause, TimerEntry, TimerType};
 use sip_message::emergency::is_emergency_request;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::{Method, SipMessage};
@@ -318,6 +318,7 @@ async fn initial_invite_turn(
             &[],
             &ctx.id_gen,
             now_ms,
+            TerminationCause::Admission,
         )
     } else {
         // `req.image()` is the datagram this INVITE arrived as — the only place
@@ -693,6 +694,8 @@ fn rule_chain_turn(
         }
         cap_actions.push(RuleAction::BeginTermination {
             reason: Some("SIP;cause=503;text=\"message-cap-exceeded\"".into()),
+            cause: TerminationCause::MessageCap,
+            by_leg: None,
         });
         let before = result.call.clone();
         let cap = exec.execute(&cap_actions, &result.call, &cap_ctx);

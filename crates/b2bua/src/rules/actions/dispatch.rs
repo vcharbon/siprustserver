@@ -134,11 +134,11 @@ impl ActionExecutor<'_> {
                 call.timers.clear();
                 fx.critical.push(CriticalStateEffect::CancelAllTimers);
             }
-            RuleAction::TerminateCall => {
-                terminate_all(call);
+            RuleAction::TerminateCall { cause, by_leg } => {
+                terminate_all(call, self.now_ms, *cause, by_leg.clone());
             }
-            RuleAction::BeginTermination { reason } => {
-                self.begin_termination(call, fx, ctx, reason.as_deref());
+            RuleAction::BeginTermination { reason, cause, by_leg } => {
+                self.begin_termination(call, fx, ctx, reason.as_deref(), (*cause, by_leg.clone()));
             }
             RuleAction::TerminateLeg { leg_id, bye_disposition } => {
                 self.terminate_leg(call, fx, leg_id, *bye_disposition);

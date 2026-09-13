@@ -9,11 +9,11 @@
 use call::helpers::RAckTokens;
 use call::{
     ByeDisposition, CallModelState, CdrEventType, Direction, LegDisposition, LegState, Obligation,
-    TimerType,
+    TerminationCause, TimeoutKind, TimerType,
 };
 use sip_message::header::RAck;
 use sip_message::Method;
-use sip_txn::TimeoutKind;
+use sip_txn::TimeoutKind as TxnTimeoutKind;
 
 use crate::rules::model::{
     Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
@@ -68,7 +68,11 @@ pub(crate) fn unacked_2xx_give_up_actions(
             status_code: None,
             reason: Some(marker.into()),
         },
-        RuleAction::BeginTermination { reason: Some(reason.into()) },
+        RuleAction::BeginTermination {
+            reason: Some(reason.into()),
+            cause: TerminationCause::Timeout(TimeoutKind::Ack),
+            by_leg: Some(leg.clone()),
+        },
     ]
 }
 
@@ -114,6 +118,37 @@ fn keepalive_timeout(ctx: &RuleContext) -> i64 {
 fn max_duration(ctx: &RuleContext) -> i64 {
     ctx.call.features().map(|f| f.platform.max_duration_sec).unwrap_or(3600)
 }
+/// What ended the call when a failure consult lets the failure stand (the
+/// `terminate` fold): the failed leg's final where it drew one, else the
+/// deadline the consult was raised for — a leg that never answered, or a
+/// transaction that drew nothing. An unanswered consult and an explicit
+/// relay decision both land here; the record does not tell them apart (the
+/// decision log does: the relay is marked, the unanswered consult is not).
+fn failure_let_stand_cause(payload: &serde_json::Value) -> TerminationCause {
+    if payload.get("status").is_some() {
+        return TerminationCause::RemoteFinal;
+    }
+    match payload.get("origin").and_then(|v| v.as_str()) {
+        Some("no_answer_timeout") => TerminationCause::Timeout(TimeoutKind::NoAnswer),
+        _ => TerminationCause::Timeout(TimeoutKind::Transaction),
+    }
+}
+
+/// The caller's final when a failure with no final of its own is let stand,
+/// authored in the terminating turn so it precedes the record's cut: 480 for
+/// a callee that never answered, 408 for a transaction that drew nothing.
+fn let_stand_final(payload: &serde_json::Value) -> RuleAction {
+    let (status, reason) = match payload.get("origin").and_then(|v| v.as_str()) {
+        Some("no_answer_timeout") => (480, "Temporarily Unavailable"),
+        _ => (408, "Request Timeout"),
+    };
+    RuleAction::RespondToALeg {
+        status,
+        reason: reason.into(),
+        header_updates: vec![],
+        contacts: vec![],
+    }
+}
 /// Shared body of the reaper-verdict rules (ADR-0020 X1): force every
 /// still-unresolved leg terminal (mirroring `is_fully_resolved`, like
 /// `terminating-safety-timeout`), record the reason on the CDR, and command
@@ -139,7 +174,11 @@ fn reap_force_terminal(ctx: &RuleContext, reason: &'static str) -> Option<RuleHa
         status_code: None,
         reason: Some(reason.into()),
     });
-    actions.push(RuleAction::BeginTermination { reason: Some(reason.into()) });
+    actions.push(RuleAction::BeginTermination {
+        reason: Some(reason.into()),
+        cause: TerminationCause::Supervisor,
+        by_leg: None,
+    });
     ok(actions)
 }
 
@@ -619,7 +658,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     // tear the whole call down (the pre-failover behaviour).
                     None => {
                         actions.push(RuleAction::RelayToPeer { transform: no_transform() });
-                        actions.push(RuleAction::TerminateCall);
+                        actions.push(RuleAction::TerminateCall {
+                            cause: TerminationCause::RemoteFinal,
+                            by_leg: Some(b.clone()),
+                        });
                     }
                 }
                 ok(actions)
@@ -699,16 +741,28 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     _ => return None,
                 };
                 let mut actions = Vec::new();
-                if let Some(status) = payload.get("status").and_then(|v| v.as_u64()) {
-                    let reason = payload
-                        .get("reason")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Server Internal Error")
-                        .to_string();
-                    actions.push(RuleAction::RelayFailureToALeg { status: status as u16, reason });
+                match payload.get("status").and_then(|v| v.as_u64()) {
+                    Some(status) => {
+                        let reason = payload
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Server Internal Error")
+                            .to_string();
+                        actions
+                            .push(RuleAction::RelayFailureToALeg { status: status as u16, reason });
+                    }
+                    // A timeout let stand: the caller's final is this turn's,
+                    // under the termination record's cut.
+                    None => actions.push(let_stand_final(payload)),
                 }
                 actions.push(RuleAction::BeginTermination {
                     reason: Some("failover-declined".into()),
+                    cause: failure_let_stand_cause(payload),
+                    by_leg: payload
+                        .get("failed_leg_id")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
                 });
                 ok(actions)
             },
@@ -743,9 +797,20 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 if !service_ext.is_empty() {
                     actions.push(RuleAction::MergeCallExt { ext: service_ext });
                 }
+                // The limiter chain's terminal 486 is the stack's own capacity
+                // statement, not a decision.
+                let cause = if crate::decision_log::stack_authored(payload) {
+                    TerminationCause::Admission
+                } else {
+                    TerminationCause::DecisionReject
+                };
                 actions.extend([
                     RuleAction::RespondToALeg { status, reason, header_updates, contacts: vec![] },
-                    RuleAction::BeginTermination { reason: Some("failover-reject".into()) },
+                    RuleAction::BeginTermination {
+                        reason: Some("failover-reject".into()),
+                        cause,
+                        by_leg: None,
+                    },
                 ]);
                 ok(actions)
             },
@@ -788,7 +853,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     .unwrap_or_default();
                 ok(vec![
                     RuleAction::RespondToALeg { status, reason, header_updates, contacts },
-                    RuleAction::BeginTermination { reason: Some("failover-redirect".into()) },
+                    RuleAction::BeginTermination {
+                        reason: Some("failover-redirect".into()),
+                        cause: TerminationCause::DecisionReject,
+                        by_leg: None,
+                    },
                 ])
             },
         ),
@@ -813,6 +882,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             }),
             |ctx| {
                 let src = ctx.source_leg_id.to_string();
+                // A 481 to the liveness probe is the probe's failure — the
+                // peer holds no dialog to answer it in — and ends the call
+                // under the keepalive deadline; to anything else it is the
+                // peer's final denying the dialog.
+                let cause = if ctx.response().is_some_and(|r| r.cseq().method() == Method::Options)
+                {
+                    TerminationCause::Timeout(TimeoutKind::Keepalive)
+                } else {
+                    TerminationCause::RemoteFinal
+                };
                 ok(vec![
                     RuleAction::TerminateLeg {
                         leg_id: src.clone(),
@@ -820,11 +899,15 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Bye,
-                        leg_id: src,
+                        leg_id: src.clone(),
                         status_code: Some(481),
                         reason: Some("Call/Transaction Does Not Exist".into()),
                     },
-                    RuleAction::BeginTermination { reason: Some("481".into()) },
+                    RuleAction::BeginTermination {
+                        reason: Some("481".into()),
+                        cause,
+                        by_leg: Some(src),
+                    },
                 ])
             },
         ),
@@ -984,7 +1067,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         status_code: None,
                         reason: None,
                     },
-                    RuleAction::BeginTermination { reason: Some("BYE".into()) },
+                    RuleAction::BeginTermination {
+                        reason: Some("BYE".into()),
+                        cause: TerminationCause::RemoteBye,
+                        by_leg: Some(ctx.source_leg_id.to_string()),
+                    },
                 ])
             },
         ),
@@ -1116,7 +1203,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 status_code: None,
                 reason: None,
             });
-            actions.push(RuleAction::BeginTermination { reason: Some("CANCEL".into()) });
+            actions.push(RuleAction::BeginTermination {
+                reason: Some("CANCEL".into()),
+                cause: TerminationCause::RemoteCancel,
+                by_leg: Some(ctx.call.a_leg().leg_id.clone()),
+            });
             ok(actions)
         }),
         rule("handle-timeout", &[], Match::timeout(), |ctx| {
@@ -1167,8 +1258,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     // nothing answered) apart from a callee that rang and
                     // went silent ("transaction").
                     let timeout_kind = match ctx.timeout_kind() {
-                        Some(TimeoutKind::Response) => "response",
-                        Some(TimeoutKind::Transaction) | None => "transaction",
+                        Some(TxnTimeoutKind::Response) => "response",
+                        Some(TxnTimeoutKind::Transaction) | None => "transaction",
                     };
                     return ok(vec![
                         RuleAction::AddCdrEvent {
@@ -1195,7 +1286,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     ]);
                 }
             }
-            ok(vec![RuleAction::BeginTermination { reason: Some("timeout".into()) }])
+            ok(vec![RuleAction::BeginTermination {
+                reason: Some("timeout".into()),
+                cause: TerminationCause::Timeout(TimeoutKind::Transaction),
+                by_leg: Some(ctx.source_leg_id.to_string()),
+            }])
         })
         // Teardown rule: on a terminating call the dead transaction still
         // resolves its leg.
@@ -1260,9 +1355,21 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         }),
                     },
                 ]),
-                None => {
-                    actions.push(RuleAction::BeginTermination { reason: Some("no-answer".into()) })
-                }
+                // No consult: the caller's 480 is this turn's, under the
+                // termination record's cut, then the teardown.
+                None => actions.extend([
+                    RuleAction::RespondToALeg {
+                        status: 480,
+                        reason: "Temporarily Unavailable".into(),
+                        header_updates: vec![],
+                        contacts: vec![],
+                    },
+                    RuleAction::BeginTermination {
+                        reason: Some("no-answer".into()),
+                        cause: TerminationCause::Timeout(TimeoutKind::NoAnswer),
+                        by_leg: Some(leg),
+                    },
+                ]),
             }
             ok(actions)
         })
@@ -1309,7 +1416,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     header_updates: vec![],
                     contacts: vec![],
                 },
-                RuleAction::BeginTermination { reason: Some("setup-timeout".into()) },
+                RuleAction::BeginTermination {
+                    reason: Some("setup-timeout".into()),
+                    cause: TerminationCause::Timeout(TimeoutKind::Setup),
+                    by_leg: None,
+                },
             ])
         })
         .runs_while_terminating(),
@@ -1365,7 +1476,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     status_code: None,
                     reason: Some("max_duration".into()),
                 },
-                RuleAction::BeginTermination { reason: Some("max-duration".into()) },
+                RuleAction::BeginTermination {
+                    reason: Some("max-duration".into()),
+                    cause: TerminationCause::MaxDuration,
+                    by_leg: None,
+                },
             ])
         })
         .runs_while_terminating(),
@@ -1415,7 +1530,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         status_code: None,
                         reason: Some("keepalive timeout".into()),
                     },
-                    RuleAction::BeginTermination { reason: Some("keepalive-timeout".into()) },
+                    RuleAction::BeginTermination {
+                        reason: Some("keepalive-timeout".into()),
+                        cause: TerminationCause::Timeout(TimeoutKind::Keepalive),
+                        by_leg: Some(ctx.source_leg_id.to_string()),
+                    },
                 ])
             },
         ),
@@ -1542,7 +1661,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         header_updates: vec![],
                         contacts: vec![],
                     },
-                    RuleAction::BeginTermination { reason: Some("prack-timeout".into()) },
+                    RuleAction::BeginTermination {
+                        reason: Some("prack-timeout".into()),
+                        cause: TerminationCause::Timeout(TimeoutKind::Prack),
+                        by_leg: Some(ctx.call.a_leg().leg_id.clone()),
+                    },
                 ])
             },
         ),

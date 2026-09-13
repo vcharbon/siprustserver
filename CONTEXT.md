@@ -160,6 +160,40 @@ where the fold lands, before any rule reads it.
 _Avoid_: "routing key" or any decision-layer meaning for the label (opaque
 here); "decision count" for the ordinal (it is the stamp, not a statistic).
 
+**Termination record**:
+Who ended the call and why, replicated with the call (`Call.termination`),
+written once by the first termination the call enters — a later termination
+of a terminating call (the safety timer, a reaper verdict) leaves it. The
+**cause** is a closed set: the peer's own BYE, CANCEL or final (**remote
+bye**, **remote cancel**, **remote final** — a callee failure let stand, a
+481 denying the dialog); the decision layer's refusal of the call (**decision
+reject**: a reject, a redirect, a relayed failure it authored, on the initial
+path or on a failover) or its treatment's end of the call (**decision
+release**: a release result, a route it answered that could not complete, a
+media program run to its end); the duration cap (**max duration**); a
+deadline by kind (**timeout**: a call-level completion deadline — the setup
+deadline or a transfer's overall guard —, no answer, PRACK, ACK, keepalive —
+the probe unanswered or denied with a 481 —, transaction); the stack's own
+refusal (**admission**: a limiter, the target
+admission, a spent hop budget, a malformed INVITE, an unreadable or unanswered
+decision); the per-call message cap; the **supervisor** (a reaper strike, a
+forced terminal). The record names the leg whose message or timer caused it
+(**by leg**: the caller for its BYE or CANCEL, the callee for its BYE, final
+or unanswered probe; none for a decision, the stack or its supervisor), the
+turn's clock, and the **cut** (`last_seq`): the `seq` of the last message-ring
+entry the terminating turn recorded, so every entry at or under it was
+received or sent as part of beginning the termination (the peer's BYE and its
+200, the BYE or CANCEL relayed to the other leg, the 487, the caller's final
+where a deadline ends an unanswered call) and every entry above it came after
+(the other leg's 200 to that BYE, the ACK to the 487); `0` while the ring is
+off. Every action that begins a termination states its cause
+(`BeginTermination`, `TerminateCall`), as does every direct path to terminal
+(a decision reject, an admission refusal, the reaper's discharge); a terminal
+reached without one is counted (`termination_unrecorded`).
+_Avoid_: "reason" for the cause (the free-text `reason` is a label the rules
+pass, an RFC 3326 value at most — the cause is typed); "snapshot" for the cut
+(the ring is whole; the cut is a `seq`).
+
 ## HA replication glossary
 
 The peer-to-peer call-replication vocabulary (ADR-0011 / `docs/plan/

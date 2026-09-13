@@ -120,6 +120,10 @@ fn call_in(pri: &str, bak: &str, cid: &str, state: CallModelState, clock: &Clock
     let config = B2buaConfig { self_ordinal: pri.into(), ..Default::default() };
     let mut call = build_initial_call(&invite(pri, bak, cid), src(), &config, 0);
     call.state = state;
+    if state != CallModelState::Active {
+        // A synthetic terminal states its cause as every live path does.
+        call = call::helpers::record_termination(call, 0, call::TerminationCause::Supervisor, None);
+    }
     call.timers.push(TimerEntry {
         id: format!("keepalive-{cid}"),
         timer_type: TimerType::Keepalive,

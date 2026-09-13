@@ -79,6 +79,7 @@ mod suppress_18x;
 mod target_admission_gate;
 mod teardown_header_relay;
 mod teardown_races;
+mod termination;
 mod tier3_admission_gate;
 mod unacked_2xx_reap;
 mod unacked_reinvite_2xx_reap;

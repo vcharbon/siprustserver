@@ -4,7 +4,7 @@
 //! request does NOT live here — see [`super::relay_request`].
 
 use call::helpers::{add_b_leg, add_cdr_event, bump_local_cseq};
-use call::{Call, CdrEvent, LegKind, TimerType};
+use call::{Call, CdrEvent, LegKind, TerminationCause, TimerType};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::{Event, HeaderValue, RAck, SubscriptionState};
 use sip_message::{Method, SipStr};
@@ -61,7 +61,7 @@ impl ActionExecutor<'_> {
                     decision_ordinal: 0,
                 },
             );
-            terminate_all(call);
+            terminate_all(call, self.now_ms, TerminationCause::Admission, None);
             return;
         }
         let n = call.b_legs.len() + 1;
@@ -123,7 +123,7 @@ impl ActionExecutor<'_> {
                         decision_ordinal: 0,
                     },
                 );
-                terminate_all(call);
+                terminate_all(call, self.now_ms, TerminationCause::Admission, None);
                 return;
             }
         };

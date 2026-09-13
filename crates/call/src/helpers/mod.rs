@@ -19,6 +19,7 @@
 //!   - [`record`] — CDR append, rule deactivation, SM-cursor rendering
 //!   - [`decision_log`] — the decision-log append and its ordinal
 //!   - [`message_ring`] — the message-ring append and its call-wide sequence
+//!   - [`termination`] — the termination record and its message-ring cut
 //!   - [`timer`] — the timer ledger (`replace_timer_by_id`, terminating cap,
 //!     the keepalive one-interval ceiling)
 
@@ -32,6 +33,7 @@ pub mod peering;
 pub mod record;
 pub mod reliable;
 pub mod services;
+pub mod termination;
 pub mod timer;
 
 pub use decision_log::mark_decision;
@@ -74,4 +76,5 @@ pub use services::{
     set_call_ext, set_leg_ext, set_promote_pem, set_relay_first_18x_relayed, set_reroute,
     set_transfer, transfer_active, transfer_state,
 };
+pub use termination::{record_termination, seal_termination_seq};
 pub use timer::{cap_keepalive_fire_at, replace_timer_by_id, TERMINATING_TIMEOUT_MS};
