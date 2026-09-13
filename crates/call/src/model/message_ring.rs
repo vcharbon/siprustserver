@@ -34,7 +34,10 @@ pub struct MessageEntry {
     pub code: Option<u16>,
     pub to_tag: Option<String>,
     /// The count of decisions applied to the call when the message was
-    /// handled; `0` until the decision log stamps it.
+    /// handled (`Call::decision_ordinal` at the append); `0` before the
+    /// first decision. The decision current at handling, not the leg's: a
+    /// late message of an earlier leg — its 487 arriving after a failover
+    /// folded — is stamped with the failover's ordinal.
     pub decision_ordinal: u32,
     pub headers: Vec<(String, String)>,
 }

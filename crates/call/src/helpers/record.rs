@@ -3,8 +3,10 @@
 
 use crate::model::{Call, CdrEvent};
 
-/// Append a CDR event.
-pub fn add_cdr_event(mut call: Call, event: CdrEvent) -> Call {
+/// Append a CDR event, stamped with the count of decisions applied so far
+/// (`Call::decision_ordinal`).
+pub fn add_cdr_event(mut call: Call, mut event: CdrEvent) -> Call {
+    event.decision_ordinal = call.decision_ordinal;
     call.cdr_events.push(event);
     call
 }

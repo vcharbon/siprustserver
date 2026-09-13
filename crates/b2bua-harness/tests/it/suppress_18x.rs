@@ -520,7 +520,7 @@ async fn a_rejection_after_failover_rides_the_owned_180_s_tag() {
                     r.callback_context = Some("suppress-18x-failover-rejection".into());
                     CallFailureResponse::Route(r)
                 } else {
-                    CallFailureResponse::Relay
+                    CallFailureResponse::Relay { label: None }
                 }
             })
             .build(),

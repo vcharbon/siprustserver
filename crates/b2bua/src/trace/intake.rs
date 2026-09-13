@@ -131,7 +131,7 @@ fn treatment_name(treatment: &NewCallResponse) -> &'static str {
         NewCallResponse::Route(_) => "route",
         NewCallResponse::Redirect(_) => "redirect",
         NewCallResponse::Reject(_) => "reject",
-        NewCallResponse::Relay => "relay",
+        NewCallResponse::Relay { .. } => "relay",
     }
 }
 

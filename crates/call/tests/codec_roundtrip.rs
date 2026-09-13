@@ -95,6 +95,47 @@ fn release_subscriptions_and_reroute_round_trip() {
     assert_eq!(decoded, call, "mid-reroute shape");
 }
 
+/// The decision log and the ordinal stamped on events and ring entries are
+/// replicated state — a takeover node's record names the decision every
+/// message was handled under — so they survive the codec in every shape: no
+/// decision yet, one labelled mark, a second mark without a label.
+#[test]
+fn the_decision_log_round_trips() {
+    use call::helpers::{add_cdr_event, mark_decision};
+    use call::{CdrEvent, CdrEventType, DecisionKind};
+
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+
+    call.decision_log = Vec::new();
+    call.decision_ordinal = 0;
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "no decision yet");
+
+    let call =
+        mark_decision(call, 1_000, DecisionKind::Route, Some("a".into()), Some("first".into()));
+    let call = mark_decision(call, 2_000, DecisionKind::FailoverRoute, Some("b-1".into()), None);
+    let call = add_cdr_event(
+        call,
+        CdrEvent {
+            event_type: CdrEventType::InviteSent,
+            timestamp: 2_000,
+            leg_id: "b-2".into(),
+            status_code: None,
+            reason: None,
+            decision_ordinal: 0,
+        },
+    );
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "two marks");
+    assert_eq!(decoded.decision_ordinal, 2);
+    let labels: Vec<Option<&str>> =
+        decoded.decision_log.iter().map(|m| m.label.as_deref()).collect();
+    assert_eq!(labels, vec![Some("first"), None]);
+    assert_eq!(decoded.decision_log[1].ordinal, 2);
+    assert_eq!(decoded.cdr_events.last().unwrap().decision_ordinal, 2);
+}
+
 /// The final a leg's initial INVITE carries is replicated state — a takeover
 /// node must refuse a second final on that transaction exactly as the node
 /// that sent the first would — so it survives the replication codec in both

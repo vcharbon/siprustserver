@@ -602,3 +602,69 @@ fn the_provisionals_scope_leaves_every_unacked_2xx_alone() {
     );
     assert!(everything.iter().filter(|o| matches!(o, Obligation::AckOf2xx { .. })).count() == 2);
 }
+
+/// Every mark bumps the ordinal and carries it; the ring append and the CDR
+/// append stamp whatever count stands at that instant, so an entry written
+/// between two decisions keeps the first one's ordinal after the second lands.
+#[test]
+fn marks_number_the_decisions_and_stamp_what_follows() {
+    let mut call = representative_call();
+    call.decision_log.clear();
+    call.decision_ordinal = 0;
+    call.b_legs[0].messages = MessageRing::default();
+    let entry = || MessageEntry {
+        seq: 0,
+        at_ms: 5,
+        direction: MessageDirection::Relayed,
+        method: "INVITE".into(),
+        cseq: 1,
+        code: None,
+        to_tag: None,
+        decision_ordinal: 99,
+        headers: Vec::new(),
+    };
+    let cdr = || CdrEvent {
+        event_type: CdrEventType::InviteSent,
+        timestamp: 5,
+        leg_id: "b-1".into(),
+        status_code: None,
+        reason: None,
+        decision_ordinal: 99,
+    };
+
+    let call = record_message(call, "b-1", 8, entry());
+    let call = add_cdr_event(call, cdr());
+    let call = mark_decision(call, 10, DecisionKind::Route, Some("a".into()), Some("first".into()));
+    let call = record_message(call, "b-1", 8, entry());
+    let call = add_cdr_event(call, cdr());
+    let call = mark_decision(call, 20, DecisionKind::FailoverRoute, Some("b-1".into()), None);
+    let call = record_message(call, "b-1", 8, entry());
+    let call = add_cdr_event(call, cdr());
+
+    assert_eq!(call.decision_ordinal, 2);
+    assert_eq!(
+        call.decision_log,
+        vec![
+            DecisionMark {
+                ordinal: 1,
+                at_ms: 10,
+                kind: DecisionKind::Route,
+                leg_id: Some("a".into()),
+                label: Some("first".into()),
+            },
+            DecisionMark {
+                ordinal: 2,
+                at_ms: 20,
+                kind: DecisionKind::FailoverRoute,
+                leg_id: Some("b-1".into()),
+                label: None,
+            },
+        ]
+    );
+    let ring: Vec<u32> =
+        call.b_legs[0].messages.entries.iter().map(|e| e.decision_ordinal).collect();
+    assert_eq!(ring, vec![0, 1, 2]);
+    let events: Vec<u32> =
+        call.cdr_events.iter().rev().take(3).rev().map(|e| e.decision_ordinal).collect();
+    assert_eq!(events, vec![0, 1, 2]);
+}

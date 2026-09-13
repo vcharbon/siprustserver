@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::cdr::CdrEvent;
+use super::decision_log::DecisionMark;
 use super::emission::RetainedEmission;
 use super::leg::Leg;
 use super::services::{
@@ -296,6 +297,15 @@ pub struct Call {
     /// while nothing is recorded.
     #[serde(default)]
     pub message_seq: u32,
+    /// The decisions applied to the call, in order
+    /// ([`crate::helpers::mark_decision`] is the one writer); empty until the
+    /// first decision.
+    #[serde(default)]
+    pub decision_log: Vec<DecisionMark>,
+    /// The count of applied decisions — `decision_log.len()`, kept as a field
+    /// so a stamp reads it without a length; `0` before the first decision.
+    #[serde(default)]
+    pub decision_ordinal: u32,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate

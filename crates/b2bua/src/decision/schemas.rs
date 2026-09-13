@@ -147,15 +147,23 @@ pub struct RouteDecision {
     /// monotonic: it can only turn a call's trace ON.
     #[serde(default)]
     pub trace: bool,
+    /// An opaque string the decision layer may attach to the decision,
+    /// recorded on the call's decision log and read by nothing here.
+    pub label: Option<String>,
 }
 
 /// A "reject" decision — answer the INVITE with a failure response the decision
-/// layer authors (code + reason-phrase + extra headers, e.g. `Reason:`).
+/// layer authors (code + reason-phrase + extra headers, e.g. `Reason:`). It
+/// seeds `service_ext` exactly as a route does: the slices a rejected call's
+/// record carries.
 #[derive(Debug, Clone, Serialize)]
 pub struct RejectDecision {
     pub reject_code: u16,
     pub reject_reason: Option<String>,
     pub update_headers: Option<SipHeaderUpdates>,
+    pub service_ext: BTreeMap<String, serde_json::Value>,
+    /// See [`RouteDecision::label`].
+    pub label: Option<String>,
 }
 
 /// One redirect target in a [`RedirectDecision`]'s Contact list. `q` is the
@@ -177,6 +185,8 @@ pub struct RedirectDecision {
     pub reason: Option<String>,
     pub contacts: Vec<RedirectContact>,
     pub update_headers: Option<SipHeaderUpdates>,
+    /// See [`RouteDecision::label`].
+    pub label: Option<String>,
 }
 
 /// The single **call treatment** the decision layer returns — at *every* hop
@@ -193,7 +203,10 @@ pub enum CallTreatment {
     Route(RouteDecision),
     Redirect(RedirectDecision),
     Reject(RejectDecision),
-    Relay,
+    Relay {
+        /// See [`RouteDecision::label`].
+        label: Option<String>,
+    },
 }
 
 /// Response to a new INVITE. An alias for [`CallTreatment`] — `new_call` returns
@@ -349,7 +362,10 @@ pub struct CallReleaseRequest {
 #[allow(clippy::large_enum_variant)] // mirror of CallTreatment's choice
 pub enum CallReleaseResponse {
     /// Tear the call down locally, exactly as an unsubscribed event would.
-    Release,
+    Release {
+        /// See [`RouteDecision::label`].
+        label: Option<String>,
+    },
     /// Reroute the established call to `RouteDecision::destination`.
     Route(RouteDecision),
 }
@@ -383,10 +399,14 @@ pub enum CallReferResponse {
         no_answer_timeout_sec: Option<i64>,
         /// Callback context propagated onto the transfer slice.
         callback_context: Option<String>,
+        /// See [`RouteDecision::label`].
+        label: Option<String>,
     },
     Reject {
         code: u16,
         reason: Option<String>,
+        /// See [`RouteDecision::label`].
+        label: Option<String>,
     },
 }
 

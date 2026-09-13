@@ -4,8 +4,8 @@
 //! respond / dialog_track / teardown).
 
 use call::helpers::{
-    add_cdr_event, add_tag_mapping, deactivate_rule, merge_leg, remove_pending_request,
-    set_leg_disposition, set_leg_state, split_leg,
+    add_cdr_event, add_tag_mapping, deactivate_rule, mark_decision, merge_leg,
+    remove_pending_request, set_leg_disposition, set_leg_state, split_leg,
 };
 use call::{Call, CdrEvent, TagMapping};
 
@@ -152,8 +152,13 @@ impl ActionExecutor<'_> {
                         leg_id: leg_id.clone(),
                         status_code: *status_code,
                         reason: reason.clone(),
+                        decision_ordinal: 0,
                     },
                 );
+            }
+            RuleAction::MarkDecision { kind, leg_id, label } => {
+                *call =
+                    mark_decision(call.clone(), self.now_ms, *kind, leg_id.clone(), label.clone());
             }
             RuleAction::DeactivateRule { rule_id } => {
                 *call = deactivate_rule(call.clone(), rule_id);

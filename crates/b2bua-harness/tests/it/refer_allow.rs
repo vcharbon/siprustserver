@@ -8,7 +8,8 @@
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
+use call::{CdrEventType, DecisionKind};
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -73,7 +74,7 @@ async fn refer_allow_happy() {
     let mut refer = bob_dialog
         .send_request(InDialogMethod::Refer)
         .with_header("Refer-To", &refer_to_charlie())
-        .with_header("X-Api-Call", &x_api_allow_c(""))
+        .with_header("X-Api-Call", &x_api_allow_c(r#","label":"xfer""#))
         .send()
         .await;
     refer.expect(202).await;
@@ -112,6 +113,29 @@ async fn refer_allow_happy() {
     charlie.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
     let _ = &mut charlie_dialog;
+
+    // The decision log: the route, then the transfer authorization with its
+    // label, named for the referring leg; C's answer is stamped under it.
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    let cdr = &b2bua.cdr_records()[0];
+    let marks: Vec<(DecisionKind, Option<&str>, Option<&str>)> = cdr
+        .decision_log
+        .iter()
+        .map(|m| (m.kind, m.leg_id.as_deref(), m.label.as_deref()))
+        .collect();
+    assert_eq!(
+        marks,
+        vec![
+            (DecisionKind::Route, Some("a"), None),
+            (DecisionKind::TransferAllow, Some("b-1"), Some("xfer")),
+        ]
+    );
+    let c_answer = cdr
+        .events
+        .iter()
+        .find(|e| e.event_type == CdrEventType::Answer && e.leg_id == "b-2")
+        .expect("C's answer is recorded");
+    assert_eq!(c_answer.decision_ordinal, 2);
 
     let _ = h.finish().await;
 }

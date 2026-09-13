@@ -43,9 +43,11 @@ pub use model::{
 // The retained emission every dialog-level retransmission repeats (ADR-0032 X3)
 // and the obligation that discharges its ladder (X4).
 pub use model::{Obligation, Repeat, Repeated, RetainedEmission};
-// Timers, CDR events and the message ring on the replicated body.
+// Timers, CDR events, the message ring and the decision log on the
+// replicated body.
 pub use model::{
-    CdrEvent, CdrEventType, MessageDirection, MessageEntry, MessageRing, TimerEntry, TimerType,
+    CdrEvent, CdrEventType, DecisionKind, DecisionMark, MessageDirection, MessageEntry,
+    MessageRing, TimerEntry, TimerType,
 };
 // Per-service slices + state-machine identifiers (ADR-0016).
 pub use model::{

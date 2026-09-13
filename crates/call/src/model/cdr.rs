@@ -24,4 +24,9 @@ pub struct CdrEvent {
     pub leg_id: String,
     pub status_code: Option<i64>,
     pub reason: Option<String>,
+    /// The count of decisions applied to the call when the event was
+    /// written (`Call::decision_ordinal` at the append); `0` before the
+    /// first decision.
+    #[serde(default)]
+    pub decision_ordinal: u32,
 }

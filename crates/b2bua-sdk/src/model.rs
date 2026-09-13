@@ -861,6 +861,18 @@ pub enum RuleAction {
     SetSubscriptions {
         events: Vec<call::ReleaseEventKind>,
     },
+    /// Record a decision a service's own rule applies on the call's decision
+    /// log (`call::helpers::mark_decision`), ahead of the actions that carry
+    /// it out, so every message and event they emit is stamped with its
+    /// ordinal. The engine's own decisions never need it: the initial route
+    /// and reject mark directly, and an async fold is marked where it lands,
+    /// before any rule reads it.
+    MarkDecision {
+        kind: call::DecisionKind,
+        /// The leg whose event the decision answers; see `DecisionMark`.
+        leg_id: Option<String>,
+        label: Option<String>,
+    },
     /// Overwrite the per-call established-call **reroute** runtime slice
     /// (`None` clears it — completion / rollback; mirrors [`Self::SetTransfer`]).
     SetReroute {
@@ -1015,6 +1027,7 @@ impl RuleAction {
             | RuleAction::FailureAsyncHttp { .. }
             | RuleAction::ReleaseAsyncHttp { .. }
             | RuleAction::SetSubscriptions { .. }
+            | RuleAction::MarkDecision { .. }
             | RuleAction::SetReroute { .. }
             | RuleAction::SetFeatures { .. }
             | RuleAction::MergeCallExt { .. }

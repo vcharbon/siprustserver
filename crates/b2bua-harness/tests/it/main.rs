@@ -24,6 +24,7 @@ mod cdr_write_before_remove;
 mod decision_context;
 mod decision_deadline;
 mod decision_lands_on_cancelled_call;
+mod decision_log;
 mod failure;
 mod failure_header_relay;
 mod fake_prack;

@@ -63,6 +63,8 @@ fn failover_capable_decision(port: u16, consults: Arc<AtomicUsize>) -> Arc<dyn C
                     reject_code: 480,
                     reject_reason: Some("Temporarily Unavailable".into()),
                     update_headers: None,
+                    service_ext: Default::default(),
+                    label: None,
                 })
             })
             .build(),
@@ -350,6 +352,8 @@ async fn invite_transaction_timeout_on_a_caller_cancelled_call_is_inert() {
                     reject_code: 480,
                     reject_reason: Some("Temporarily Unavailable".into()),
                     update_headers: None,
+                    service_ext: Default::default(),
+                    label: None,
                 })
             })
             .build(),

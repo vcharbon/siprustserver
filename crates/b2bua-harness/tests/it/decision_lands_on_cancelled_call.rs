@@ -414,6 +414,8 @@ async fn failover_reject_fold_landing_after_the_callers_cancel_is_dropped() {
                 reject_code: 480,
                 reject_reason: Some("Temporarily Unavailable".into()),
                 update_headers: None,
+                service_ext: Default::default(),
+                label: None,
             })
         },
         consults,

@@ -138,6 +138,28 @@ the layer absorbs on a client transaction is not a message of the call's.
 _Avoid_: "history" alone (the CDR vocabulary of a consumer), "log" (the
 decision log is a different record).
 
+**Decision log**:
+The record of every decision the decision layer returned AND this stack
+applied to a call, in application order, replicated with the call
+(`Call.decision_log`). One **mark** per decision: its 1-based **ordinal**, the
+turn's clock, its **kind** — the decision point crossed with the treatment
+(route, reject, redirect, relay; failover route / reject / redirect /
+terminate; release, release route; transfer allow / reject) — the leg whose
+event it answers, and the **label**: an opaque string the decision layer may
+attach to any decision, recorded and read by nothing here. The count of marks
+is the **decision ordinal**; every message-ring entry and every CDR event is
+stamped with the ordinal standing when it was written, so the decision a
+message was handled under is read from the log whatever a later decision
+replaced on the call (a failover's `service_ext` is latest-wins); a late
+message of an earlier leg is stamped with the decision current at handling.
+`0` = before any decision (the caller's INVITE and its 100). A route the
+limiter, the hop budget or the target admission refused, an unanswered
+consult (engine error, deadline), a limiter-refused reroute and every final
+the stack authors on its own mark nothing. The async folds are marked once,
+where the fold lands, before any rule reads it.
+_Avoid_: "routing key" or any decision-layer meaning for the label (opaque
+here); "decision count" for the ordinal (it is the stamp, not a statistic).
+
 ## HA replication glossary
 
 The peer-to-peer call-replication vocabulary (ADR-0011 / `docs/plan/

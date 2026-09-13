@@ -78,7 +78,7 @@ async fn failure_request_carries_snapshot_and_failed_response_headers() {
             })
             .on_failure(move |req| {
                 cap.lock().unwrap().push(req.clone());
-                CallTreatment::Relay
+                CallTreatment::Relay { label: None }
             })
             .build(),
     );

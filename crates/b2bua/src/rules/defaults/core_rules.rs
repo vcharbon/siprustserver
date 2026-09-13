@@ -21,7 +21,7 @@ use crate::rules::model::{
 };
 
 use super::route_fold::{
-    fold_lands_on_going_away_call, parse_header_updates, parse_route_fold,
+    fold_lands_on_going_away_call, parse_header_updates, parse_route_fold, parse_service_ext,
     route_fold_parity_actions,
 };
 
@@ -737,10 +737,17 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     .unwrap_or("Declined")
                     .to_string();
                 let header_updates = parse_header_updates(payload);
-                ok(vec![
+                // A reject seeds its service slices exactly as a route does.
+                let mut actions = Vec::new();
+                let service_ext = parse_service_ext(payload);
+                if !service_ext.is_empty() {
+                    actions.push(RuleAction::MergeCallExt { ext: service_ext });
+                }
+                actions.extend([
                     RuleAction::RespondToALeg { status, reason, header_updates, contacts: vec![] },
                     RuleAction::BeginTermination { reason: Some("failover-reject".into()) },
-                ])
+                ]);
+                ok(actions)
             },
         ),
         // `redirect` → the plan authored a 3xx with a Contact list. Send it to A

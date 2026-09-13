@@ -17,10 +17,12 @@
 //!     call owes, what an ACK discharges, the scopes a ladder is retired under
 //!   - [`services`] — per-service slice accessors + opaque ext writes
 //!   - [`record`] — CDR append, rule deactivation, SM-cursor rendering
+//!   - [`decision_log`] — the decision-log append and its ordinal
 //!   - [`message_ring`] — the message-ring append and its call-wide sequence
 //!   - [`timer`] — the timer ledger (`replace_timer_by_id`, terminating cap,
 //!     the keepalive one-interval ceiling)
 
+pub mod decision_log;
 pub mod dialog;
 pub mod leg;
 pub mod lens;
@@ -32,6 +34,7 @@ pub mod reliable;
 pub mod services;
 pub mod timer;
 
+pub use decision_log::mark_decision;
 pub use dialog::{
     add_pending_request, bump_local_cseq, cache_sdp_on_leg_dialog, cached_sdp_for_leg_dialog,
     cancel_pending_request, close_rejected_invite_round, find_pending_request,

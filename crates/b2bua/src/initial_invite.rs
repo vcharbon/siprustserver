@@ -7,9 +7,10 @@
 
 use std::net::SocketAddr;
 
+use call::helpers::{add_cdr_event, mark_decision};
 use call::{
-    ALegInviteSnapshot, Call, CallModelState, CallTopology, CdrEvent, CdrEventType, Leg,
-    LegDisposition, LegKind, LegState, RemoteInfo,
+    ALegInviteSnapshot, Call, CallModelState, CallTopology, CdrEvent, CdrEventType, DecisionKind,
+    Leg, LegDisposition, LegKind, LegState, RemoteInfo,
 };
 use sip_clock::Clock;
 use sip_message::emergency::is_emergency_request;
@@ -18,6 +19,7 @@ use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
+use crate::decision::apply_reject::apply_reject;
 use crate::decision::apply_route::apply_route;
 use crate::decision::{
     CallDecisionEngine, NewCallRequest, NewCallResponse, RedirectContact, SipHeaderUpdates,
@@ -201,6 +203,7 @@ pub fn build_initial_call(
             leg_id: "a".to_string(),
             status_code: None,
             reason: None,
+            decision_ordinal: 0,
         }],
         state: CallModelState::Active,
         created_at: now_ms,
@@ -235,6 +238,8 @@ pub fn build_initial_call(
         reliable_provisionals: Vec::new(),
         pracked_provisionals: Vec::new(),
         message_seq: 0,
+        decision_log: Vec::new(),
+        decision_ordinal: 0,
         sm_cursors: std::collections::BTreeMap::new(),
     }
 }
@@ -307,38 +312,45 @@ pub async fn handle_initial_invite(
             let setup_event = setup_event(&result.call, &a_invite);
             seed_services(result, services, &exec, &setup_event, "a", call::Direction::FromA)
         }
-        Ok(NewCallResponse::Reject(reject)) => reject_call(
+        Ok(NewCallResponse::Reject(reject)) => apply_reject(
             call,
+            reject,
+            DecisionKind::Reject,
+            Some("a".into()),
             &a_invite,
-            reject.reject_code,
-            reject.reject_reason,
-            reject.update_headers.as_ref(),
-            &[],
             id_gen,
             now_ms,
         ),
-        Ok(NewCallResponse::Redirect(rd)) => reject_call(
-            call,
-            &a_invite,
-            rd.code,
-            rd.reason,
-            rd.update_headers.as_ref(),
-            &rd.contacts,
-            id_gen,
-            now_ms,
-        ),
+        Ok(NewCallResponse::Redirect(rd)) => {
+            let call =
+                mark_decision(call, now_ms, DecisionKind::Redirect, Some("a".into()), rd.label);
+            reject_call(
+                call,
+                &a_invite,
+                rd.code,
+                rd.reason,
+                rd.update_headers.as_ref(),
+                &rd.contacts,
+                id_gen,
+                now_ms,
+            )
+        }
         // `Relay` is a failover-only treatment; with no captured downstream
         // failure at new-call time it falls back to 480 (ADR-0017 X5).
-        Ok(NewCallResponse::Relay) => reject_call(
-            call,
-            &a_invite,
-            480,
-            Some("Temporarily Unavailable".into()),
-            None,
-            &[],
-            id_gen,
-            now_ms,
-        ),
+        Ok(NewCallResponse::Relay { label }) => {
+            let call = mark_decision(call, now_ms, DecisionKind::Relay, Some("a".into()), label);
+            reject_call(
+                call,
+                &a_invite,
+                480,
+                Some("Temporarily Unavailable".into()),
+                None,
+                &[],
+                id_gen,
+                now_ms,
+            )
+        }
+        // No decision was returned: nothing to record, the stack's own final.
         Err(_unavailable) => reject_call(
             call,
             &a_invite,
@@ -367,11 +379,14 @@ fn setup_event(call: &Call, a_invite: &SipRequest) -> CallEvent {
     }
 }
 
-/// Answer the a-leg with a final failure / redirect the decision layer authors.
-/// `update_headers` adds non-structural headers (e.g. `Reason:`, RFC 3326);
-/// `contacts` renders one `Contact: <uri>;q=…` header per entry (used for a 3xx
-/// redirect — ADR-0017). Structural headers are skipped (the generator owns
-/// them, header-ownership matrix X2).
+/// Answer the a-leg with a final failure / redirect the decision layer authors,
+/// or one this stack authors on its own account (an unavailable backend, a
+/// refused target). `update_headers` adds non-structural headers (e.g.
+/// `Reason:`, RFC 3326); `contacts` renders one `Contact: <uri>;q=…` header
+/// per entry (used for a 3xx redirect — ADR-0017). Structural headers are
+/// skipped (the generator owns them, header-ownership matrix X2). Marks no
+/// decision: the caller marks the one it applies, and a final of the stack's
+/// own is none.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reject_call(
     mut call: Call,
@@ -425,13 +440,17 @@ pub(crate) fn reject_call(
         crate::effects::Provenance::Authored,
     ) {
         effects.outbound.push(effect);
-        call.cdr_events.push(CdrEvent {
-            event_type: CdrEventType::Reject,
-            timestamp: now_ms,
-            leg_id: "a".to_string(),
-            status_code: Some(status as i64),
-            reason: Some(reason),
-        });
+        call = add_cdr_event(
+            call,
+            CdrEvent {
+                event_type: CdrEventType::Reject,
+                timestamp: now_ms,
+                leg_id: "a".to_string(),
+                status_code: Some(status as i64),
+                reason: Some(reason),
+                decision_ordinal: 0,
+            },
+        );
     }
     call.a_leg.state = LegState::Terminated;
     call.state = CallModelState::Terminated;

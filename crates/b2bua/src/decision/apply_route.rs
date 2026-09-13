@@ -2,8 +2,8 @@
 //! b-leg INVITE. Port of `decision/apply/applyRoute.ts` (the load-bearing path:
 //! attach features, seed service ext, run the limiter, create the b-leg).
 
-use call::helpers::set_call_ext;
-use call::{Call, CallLimiterState, CdrEvent, CdrEventType, TimerEntry, TimerType};
+use call::helpers::{add_cdr_event, mark_decision, set_call_ext};
+use call::{Call, CallLimiterState, CdrEvent, CdrEventType, DecisionKind, TimerEntry, TimerType};
 use sip_clock::Clock;
 use sip_message::SipRequest;
 use sip_txn::IdGen;
@@ -180,6 +180,15 @@ pub async fn apply_route(
         }
     }
 
+    // The route is admitted: it is what the call is handled under from here
+    // on, and the leg it dials, or the service that dials for it, is stamped
+    // under this mark. A route the hop budget, the target admission or the
+    // limiter refused was never applied and is no mark; a limiter failover's
+    // route answers no failed leg.
+    let kind = if depth == 0 { DecisionKind::Route } else { DecisionKind::FailoverRoute };
+    let leg_id = (depth == 0).then(|| "a".to_string());
+    call = mark_decision(call, now_ms, kind, leg_id, route.label.clone());
+
     // Announcement / deferred-routing services (ADR-0016 slice 8): when the
     // decision attaches a `service_ext` slice that defers routing (it set
     // `call.ext[<id>].defer_routing == true`), the normal destination leg is NOT
@@ -304,13 +313,17 @@ pub async fn apply_route(
     }
 
     call.b_legs.push(leg);
-    call.cdr_events.push(CdrEvent {
-        event_type: CdrEventType::InviteSent,
-        timestamp: now_ms,
-        leg_id: leg_id.to_string(),
-        status_code: None,
-        reason: None,
-    });
+    call = add_cdr_event(
+        call,
+        CdrEvent {
+            event_type: CdrEventType::InviteSent,
+            timestamp: now_ms,
+            leg_id: leg_id.to_string(),
+            status_code: None,
+            reason: None,
+            decision_ordinal: 0,
+        },
+    );
     fx.outbound.push(effect);
 
     // No-answer ring timer (cancelled by confirm-dialog).
@@ -424,38 +437,45 @@ async fn limiter_reject_failover(
             ))
             .await
         }
-        Ok(CallTreatment::Reject(rj)) => crate::initial_invite::reject_call(
+        // A limiter refusal names no failed leg: these marks carry none.
+        Ok(CallTreatment::Reject(rj)) => super::apply_reject::apply_reject(
             call,
-            a_invite,
-            rj.reject_code,
-            rj.reject_reason,
-            rj.update_headers.as_ref(),
-            &[],
-            id_gen,
-            now_ms,
-        ),
-        Ok(CallTreatment::Redirect(rd)) => crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            rd.code,
-            rd.reason,
-            rd.update_headers.as_ref(),
-            &rd.contacts,
-            id_gen,
-            now_ms,
-        ),
-        // Relay with no captured failure (a limiter reject is pre-leg) → 480
-        // fallback (ADR-0017 X5); a backend error → 486 Busy Here.
-        Ok(CallTreatment::Relay) => crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            480,
-            Some("Temporarily Unavailable".into()),
+            rj,
+            DecisionKind::FailoverReject,
             None,
-            &[],
+            a_invite,
             id_gen,
             now_ms,
         ),
+        Ok(CallTreatment::Redirect(rd)) => {
+            let call = mark_decision(call, now_ms, DecisionKind::FailoverRedirect, None, rd.label);
+            crate::initial_invite::reject_call(
+                call,
+                a_invite,
+                rd.code,
+                rd.reason,
+                rd.update_headers.as_ref(),
+                &rd.contacts,
+                id_gen,
+                now_ms,
+            )
+        }
+        // Relay with no captured failure (a limiter reject is pre-leg) → 480
+        // fallback (ADR-0017 X5); a backend error → 486 Busy Here, the
+        // stack's own final, no decision behind it and no mark.
+        Ok(CallTreatment::Relay { label }) => {
+            let call = mark_decision(call, now_ms, DecisionKind::FailoverTerminate, None, label);
+            crate::initial_invite::reject_call(
+                call,
+                a_invite,
+                480,
+                Some("Temporarily Unavailable".into()),
+                None,
+                &[],
+                id_gen,
+                now_ms,
+            )
+        }
         Err(_) => crate::initial_invite::reject_call(
             call,
             a_invite,
@@ -507,7 +527,7 @@ fn record_failure_round_trip(
                 CallTreatment::Route(_) => "route",
                 CallTreatment::Redirect(_) => "redirect",
                 CallTreatment::Reject(_) => "reject",
-                CallTreatment::Relay => "relay",
+                CallTreatment::Relay { .. } => "relay",
             },
             crate::trace::intake::json_body(treatment),
         ),

@@ -63,7 +63,7 @@ fn reroute_once(
                     r.callback_context = Some("reroute-test".into());
                     CallFailureResponse::Route(r)
                 } else {
-                    CallFailureResponse::Relay
+                    CallFailureResponse::Relay { label: None }
                 }
             })
             .build(),

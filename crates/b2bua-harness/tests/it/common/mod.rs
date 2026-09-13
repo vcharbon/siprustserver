@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+pub mod probe_cdr;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 

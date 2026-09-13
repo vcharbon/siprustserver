@@ -15,6 +15,7 @@ use crate::decision::{
     CallFailureRequest, CallReferResponse, CallReleaseResponse, CallSnapshot, CallTreatment,
     FailureInfo, RouteDecision, SipHeaderUpdates,
 };
+use crate::decision_log::STACK_ORIGIN;
 use crate::event::CallEvent;
 use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
 
@@ -125,6 +126,9 @@ struct ReferAllowPayload {
     no_answer_timeout_sec: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     callback_context: Option<String>,
+    /// The decision's label, for the fold's `MarkDecision`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
 }
 
 /// Kick the async `/call/refer` round-trip and fold the decision back in as a
@@ -151,6 +155,7 @@ pub(super) fn spawn_refer_callout(
                 update_headers,
                 no_answer_timeout_sec,
                 callback_context,
+                label,
             }) => (
                 "allow",
                 to_payload(ReferAllowPayload {
@@ -164,12 +169,13 @@ pub(super) fn spawn_refer_callout(
                     update_headers,
                     no_answer_timeout_sec,
                     callback_context,
+                    label,
                 }),
             ),
-            Ok(CallReferResponse::Reject { code, reason }) => {
-                ("reject", json!({ "reject_code": code, "reject_reason": reason }))
+            Ok(CallReferResponse::Reject { code, reason, label }) => {
+                ("reject", json!({ "reject_code": code, "reject_reason": reason, "label": label }))
             }
-            Err(_) => ("error", json!({})),
+            Err(_) => ("error", json!({ STACK_ORIGIN: true })),
         };
         record_round_trip(&trace, &ctx2, "/call/refer", sent_at_ms, &request, outcome, &payload);
         send_internal(&ctx2, call_ref, "refer-http-result", outcome, payload, Vec::new());
@@ -191,6 +197,12 @@ struct FailureRejectPayload {
     /// the peer's relayed headers (ADR-0017 X2).
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<&'static str>,
+    /// The reject's service slices, merged by the fold as a route's are.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    service_ext: std::collections::BTreeMap<String, serde_json::Value>,
+    /// The decision's label, for the fold's `MarkDecision`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -212,6 +224,9 @@ struct FailureRedirectPayload {
     /// See [`FailureRejectPayload::origin`].
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<&'static str>,
+    /// The decision's label, for the fold's `MarkDecision`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
 }
 
 /// Kick the async `/call/failure` decision (b-leg failover) and fold the
@@ -290,6 +305,7 @@ async fn failure_outcome(
                                 "reason": "Busy Here",
                                 "failed_leg_id": failed_leg_id,
                                 "origin": "call_limiter",
+                                STACK_ORIGIN: true,
                             }),
                         );
                     }
@@ -307,6 +323,8 @@ async fn failure_outcome(
                         update_headers: rj.update_headers,
                         failed_leg_id,
                         origin: (depth > 0).then_some("call_limiter"),
+                        service_ext: rj.service_ext,
+                        label: rj.label,
                     }),
                 );
             }
@@ -325,25 +343,50 @@ async fn failure_outcome(
                         update_headers: rd.update_headers,
                         failed_leg_id,
                         origin: (depth > 0).then_some("call_limiter"),
+                        label: rd.label,
                     }),
                 );
             }
             // Explicit `Relay`, or a backend error → relay the original b-leg
             // failure (response path) + tear the call down. Echo the failure's
             // status/reason the seed stashed for the relay.
-            Ok(CallTreatment::Relay) | Err(_) => {
-                let mut p = serde_json::Map::new();
-                if let Some(v) = request.get("sip_code") {
-                    p.insert("status".into(), v.clone());
-                }
-                if let Some(v) = request.get("sip_reason") {
-                    p.insert("reason".into(), v.clone());
-                }
-                p.insert("failed_leg_id".into(), json!(failed_leg_id));
-                return ("terminate", serde_json::Value::Object(p));
+            Ok(CallTreatment::Relay { label }) => {
+                return ("terminate", terminate_payload(request, &failed_leg_id, Some(label)));
+            }
+            Err(_) => {
+                return ("terminate", terminate_payload(request, &failed_leg_id, None));
             }
         }
     }
+}
+
+/// The `terminate` fold's payload: the failed final's status and reason the
+/// seed stashed and the failed leg. `decided` is the relay decision's label
+/// when the decision layer returned one; `None` is an unanswered consult, the
+/// stack's own resolution.
+fn terminate_payload(
+    request: &serde_json::Value,
+    failed_leg_id: &str,
+    decided: Option<Option<String>>,
+) -> serde_json::Value {
+    let mut p = serde_json::Map::new();
+    if let Some(v) = request.get("sip_code") {
+        p.insert("status".into(), v.clone());
+    }
+    if let Some(v) = request.get("sip_reason") {
+        p.insert("reason".into(), v.clone());
+    }
+    p.insert("failed_leg_id".into(), json!(failed_leg_id));
+    match decided {
+        Some(Some(label)) => {
+            p.insert("label".into(), json!(label));
+        }
+        Some(None) => {}
+        None => {
+            p.insert(STACK_ORIGIN.into(), json!(true));
+        }
+    }
+    serde_json::Value::Object(p)
 }
 
 // ── call_release ────────────────────────────────────────────────────────────
@@ -375,13 +418,15 @@ pub(super) fn spawn_release_callout(
                     // going down anyway, so the reject degrades to the release
                     // default (local teardown) instead of a recursive failover
                     // walk.
-                    Err(_) => ("release", json!({"reason": "limiter_rejected"})),
+                    Err(_) => {
+                        ("release", json!({"reason": "limiter_rejected", STACK_ORIGIN: true}))
+                    }
                 }
             }
             // Release, engine error, or deadline expiry → the local teardown
             // (the fail-safe the request demands).
-            Ok(CallReleaseResponse::Release) => ("release", json!({})),
-            Err(_) => ("release", json!({"reason": "engine_error"})),
+            Ok(CallReleaseResponse::Release { label }) => ("release", json!({ "label": label })),
+            Err(_) => ("release", json!({"reason": "engine_error", STACK_ORIGIN: true})),
         };
         record_round_trip(
             &trace,
@@ -541,6 +586,9 @@ struct RoutePayload {
     call_limiter: Option<CallLimiterPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
     failed_leg_id: Option<String>,
+    /// The decision's label, for the fold's `MarkDecision`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
 }
 
 /// Serialize a [`RouteDecision`] into the [`RoutePayload`] internal-event JSON.
@@ -580,6 +628,7 @@ fn route_result_payload(
                 .collect(),
         }),
         failed_leg_id,
+        label: route.label,
     })
 }
 

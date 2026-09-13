@@ -76,6 +76,7 @@ fn limited_decision_with_max_duration(max_duration_sec: i64) -> Arc<dyn CallDeci
                 let mut r = route_to("127.0.0.1", 5070);
                 r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 8 }];
                 r.features.platform.max_duration_sec = max_duration_sec;
+                r.label = Some("trunk-route".into());
                 NewCallResponse::Route(r)
             })
             .build(),
@@ -581,6 +582,25 @@ async fn c6_bye_on_backup__primary_crashed__reboot_reclaim() {
         w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
         0,
         "reboot-within-budget reclaimed the deferral; no lossy cleanup should fire",
+    );
+    // The record the reclaiming primary wrote comes from the replicated body:
+    // the decision log rode it, mark and label intact, and the BYE the backup
+    // served is stamped under that decision.
+    let cdr = [&w_b1, &w_b2]
+        .iter()
+        .flat_map(|n| n.cdr_records())
+        .find(|r| r.call_ref == call_ref)
+        .expect("the one CDR");
+    let marks: Vec<(call::DecisionKind, Option<&str>)> =
+        cdr.decision_log.iter().map(|m| (m.kind, m.label.as_deref())).collect();
+    assert_eq!(marks, vec![(call::DecisionKind::Route, Some("trunk-route"))]);
+    assert!(
+        cdr.events
+            .iter()
+            .all(|e| e.decision_ordinal
+                == u32::from(e.event_type != call::CdrEventType::InviteReceived)),
+        "every event after the route carries its ordinal: {:?}",
+        cdr.events
     );
 }
 

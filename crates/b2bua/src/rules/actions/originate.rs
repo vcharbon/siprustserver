@@ -58,6 +58,7 @@ impl ActionExecutor<'_> {
                     leg_id: ctx.source_leg_id.to_string(),
                     status_code: Some(503),
                     reason: Some(format!("admission_reject host={}", destination.0)),
+                    decision_ordinal: 0,
                 },
             );
             terminate_all(call);
@@ -119,6 +120,7 @@ impl ActionExecutor<'_> {
                         leg_id: ctx.source_leg_id.to_string(),
                         status_code: Some(500),
                         reason: Some(format!("unreadable_address field={}", err.field)),
+                        decision_ordinal: 0,
                     },
                 );
                 terminate_all(call);

@@ -248,6 +248,7 @@ pub fn representative_call() -> Call {
                 leg_id: "a".into(),
                 status_code: None,
                 reason: None,
+                decision_ordinal: 0,
             },
             CdrEvent {
                 event_type: CdrEventType::Answer,
@@ -255,6 +256,7 @@ pub fn representative_call() -> Call {
                 leg_id: "b-1".into(),
                 status_code: Some(200),
                 reason: None,
+                decision_ordinal: 1,
             },
         ],
         state: CallModelState::Active,
@@ -316,7 +318,20 @@ pub fn representative_call() -> Call {
         reliable_provisionals: Vec::new(),
         pracked_provisionals: Vec::new(),
         message_seq: 0,
+        decision_log: vec![representative_mark()],
+        decision_ordinal: 1,
         sm_cursors: BTreeMap::new(),
+    }
+}
+
+/// The one decision the representative call was routed under.
+fn representative_mark() -> DecisionMark {
+    DecisionMark {
+        ordinal: 1,
+        at_ms: 1_779_440_042_010,
+        kind: DecisionKind::Route,
+        leg_id: Some("a".into()),
+        label: Some("plan-7".into()),
     }
 }
 
@@ -707,6 +722,50 @@ fn arb_message_entry() -> impl Strategy<Value = MessageEntry> {
         )
 }
 
+fn arb_decision_kind() -> impl Strategy<Value = DecisionKind> {
+    prop_oneof![
+        Just(DecisionKind::Route),
+        Just(DecisionKind::Reject),
+        Just(DecisionKind::Redirect),
+        Just(DecisionKind::Relay),
+        Just(DecisionKind::FailoverRoute),
+        Just(DecisionKind::FailoverReject),
+        Just(DecisionKind::FailoverRedirect),
+        Just(DecisionKind::FailoverTerminate),
+        Just(DecisionKind::Release),
+        Just(DecisionKind::ReleaseRoute),
+        Just(DecisionKind::TransferAllow),
+        Just(DecisionKind::TransferReject),
+    ]
+}
+
+/// Varied decision logs: empty (no decision yet) through a few marks, each
+/// numbered by its position, with and without a label.
+fn arb_decision_log() -> impl Strategy<Value = Vec<DecisionMark>> {
+    proptest::collection::vec(
+        (
+            any::<i64>(),
+            arb_decision_kind(),
+            proptest::option::of(arb_tag()),
+            proptest::option::of("[ -~]{0,24}"),
+        ),
+        0..4,
+    )
+    .prop_map(|marks| {
+        marks
+            .into_iter()
+            .enumerate()
+            .map(|(i, (at_ms, kind, leg_id, label))| DecisionMark {
+                ordinal: i as u32 + 1,
+                at_ms,
+                kind,
+                leg_id,
+                label,
+            })
+            .collect()
+    })
+}
+
 /// Varied message rings: empty (the ring off) through a few entries with an
 /// eviction count.
 fn arb_message_ring() -> impl Strategy<Value = MessageRing> {
@@ -726,13 +785,10 @@ fn arb_cdr() -> impl Strategy<Value = CdrEvent> {
         arb_tag(),
         proptest::option::of(100i64..700),
         proptest::option::of("[a-z ]{0,20}"),
+        any::<u32>(),
     )
-        .prop_map(|(event_type, timestamp, leg_id, status_code, reason)| CdrEvent {
-            event_type,
-            timestamp,
-            leg_id,
-            status_code,
-            reason,
+        .prop_map(|(event_type, timestamp, leg_id, status_code, reason, decision_ordinal)| {
+            CdrEvent { event_type, timestamp, leg_id, status_code, reason, decision_ordinal }
         })
 }
 fn arb_limiter() -> impl Strategy<Value = CallLimiterState> {
@@ -877,6 +933,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
     // ride the replicated body like `features`/`transfer` do.
     let release = (
         proptest::collection::vec(arb_reliable_provisional(), 0..3),
+        arb_decision_log(),
         proptest::collection::vec(Just(ReleaseEventKind::MaxCallDuration), 0..2),
         proptest::option::of(
             (arb_tag(), proptest::option::of(arb_tag()), any::<i64>(), any::<bool>()).prop_map(
@@ -912,7 +969,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
                 sm_cursors,
                 message_seq,
             ),
-            (reliable_provisionals, subscriptions, reroute),
+            (reliable_provisionals, decision_log, subscriptions, reroute),
         )| Call {
             call_ref,
             a_leg,
@@ -950,6 +1007,8 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             reliable_provisionals,
             pracked_provisionals: Vec::new(),
             message_seq,
+            decision_ordinal: decision_log.len() as u32,
+            decision_log,
             sm_cursors,
         },
     )

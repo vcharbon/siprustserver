@@ -29,11 +29,13 @@
 //!   - [`invite_txn`] — in-flight INVITE client-transaction handle
 //!   - [`timer`] — serializable timer intents ([`TimerType`] / [`TimerEntry`])
 //!   - [`cdr`] — CDR event records
+//!   - [`decision_log`] — the applied decisions, in order
 //!   - [`message_ring`] — the capped per-leg history of distinct SIP messages
 //!   - [`services`] — per-service typed runtime slices + opaque [`ExtMap`]
 //!   - [`sm`] — state-machine identifiers (ADR-0016)
 
 pub mod cdr;
+pub mod decision_log;
 pub mod dialog;
 pub mod emission;
 pub mod invite_txn;
@@ -46,6 +48,7 @@ pub mod sm;
 pub mod timer;
 
 pub use cdr::{CdrEvent, CdrEventType};
+pub use decision_log::{DecisionKind, DecisionMark};
 pub use dialog::{B2buaDialogExt, Dialog, Direction, PendingRequest, StackDialog, Unacked2xx};
 pub use emission::{Repeat, Repeated, RetainedEmission};
 pub use invite_txn::{HostPort, InviteTxnHandle};

@@ -238,13 +238,17 @@ pub fn discharge_result(mut call: Call, now_ms: i64) -> HandlerResult {
             leg.bye_disposition = Some(ByeDisposition::ByeTimeout);
         }
     }
-    call.cdr_events.push(CdrEvent {
-        event_type: CdrEventType::Bye,
-        timestamp: now_ms,
-        leg_id: a_leg_id,
-        status_code: None,
-        reason: Some("reaper-discharge".to_string()),
-    });
+    let mut call = call::helpers::add_cdr_event(
+        call,
+        CdrEvent {
+            event_type: CdrEventType::Bye,
+            timestamp: now_ms,
+            leg_id: a_leg_id,
+            status_code: None,
+            reason: Some("reaper-discharge".to_string()),
+            decision_ordinal: 0,
+        },
+    );
     call.state = CallModelState::Terminated;
     HandlerResult::new(call)
 }

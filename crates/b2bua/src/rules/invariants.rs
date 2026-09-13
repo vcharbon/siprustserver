@@ -157,5 +157,6 @@ fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms:
         leg_id: a_leg_id.to_string(),
         status_code: Some(503),
         reason: Some("unanswered_at_termination".to_string()),
+        decision_ordinal: result.call.decision_ordinal,
     });
 }

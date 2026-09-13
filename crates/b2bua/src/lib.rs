@@ -23,6 +23,7 @@ pub mod b2bua_core;
 pub mod cdr;
 pub mod config;
 pub mod decision;
+pub(crate) mod decision_log;
 pub mod dispatch;
 pub mod drain;
 pub mod effects;

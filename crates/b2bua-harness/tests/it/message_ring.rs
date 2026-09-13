@@ -11,11 +11,9 @@
 //! store flushes it (`MsgpackCodec`).
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use b2bua::cdr::{CdrRecord, CdrWriter, InMemoryCdrWriter};
 use b2bua::config::{B2buaConfig, CdrConfig};
 use b2bua::decision::ScriptedDecisionEngine;
 use b2bua::limiter::NoopLimiter;
@@ -29,6 +27,8 @@ use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 use sip_txn::IdGen;
 
+use crate::common::probe_cdr::{ProbeCdr, TerminatedCalls};
+
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const REOFFER: &str = "v=0\r\no=alice 1 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10002 RTP/AVP 0\r\n";
@@ -38,32 +38,6 @@ const ALICE: &str = "127.0.0.1:5060";
 const BOB: &str = "127.0.0.1:5070";
 const B2BUA: &str = "127.0.0.1:5080";
 const ORDINAL: &str = "w0";
-
-/// The terminated calls the SUT wrote, as the record saw them.
-#[derive(Clone, Default)]
-struct TerminatedCalls(Arc<Mutex<Vec<Call>>>);
-
-impl TerminatedCalls {
-    fn snapshot(&self) -> Vec<Call> {
-        self.0.lock().unwrap().clone()
-    }
-}
-
-struct ProbeCdr {
-    inner: InMemoryCdrWriter,
-    terminated: TerminatedCalls,
-}
-
-#[async_trait]
-impl CdrWriter for ProbeCdr {
-    async fn write(&self, call: &Call, terminated_at: i64) {
-        self.terminated.0.lock().unwrap().push(call.clone());
-        self.inner.write(call, terminated_at).await;
-    }
-    async fn read_all(&self) -> Vec<CdrRecord> {
-        self.inner.read_all().await
-    }
-}
 
 /// A bare SUT routing everything to bob, its ring configured by `cdr`.
 struct Sut {
@@ -105,10 +79,7 @@ impl Sut {
             config,
             decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070)),
             limiter: Arc::new(NoopLimiter),
-            cdr: Arc::new(ProbeCdr {
-                inner: InMemoryCdrWriter::new(),
-                terminated: terminated.clone(),
-            }),
+            cdr: Arc::new(ProbeCdr::new(terminated.clone())),
             store: Arc::new(InMemoryCallStore::new()),
             store_faults: Default::default(),
             wire_faults: Default::default(),

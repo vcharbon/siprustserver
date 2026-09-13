@@ -83,18 +83,7 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
             .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string))).collect())
             .unwrap_or_default(),
         features: payload.get("features").and_then(|v| serde_json::from_value(v.clone()).ok()),
-        // A core-reserved key is not a service slice and no service id may
-        // collide with it (ADR-0016) — a decision response cannot write it.
-        service_ext: payload
-            .get("service_ext")
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter(|(k, _)| !crate::rules::relay::is_core_reserved_ext(k))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        service_ext: parse_service_ext(payload),
         subscriptions: payload
             .get("subscriptions")
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
@@ -117,6 +106,27 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
             Some((entries, window))
         }),
     })
+}
+
+/// The decision's `label` on a fold payload, read by the router's fold mark
+/// (`decision_log::fold_decided`): absent (or not a string) = none.
+pub(crate) fn parse_label(payload: &serde_json::Value) -> Option<String> {
+    payload.get("label").and_then(|v| v.as_str()).map(str::to_string)
+}
+
+/// The decision's `service_ext` on a fold payload — a reject's, merged as a
+/// route's are; a core-reserved key is not a service slice (ADR-0016).
+pub(super) fn parse_service_ext(payload: &serde_json::Value) -> call::ExtMap {
+    payload
+        .get("service_ext")
+        .and_then(|v| v.as_object())
+        .map(|m| {
+            m.iter()
+                .filter(|(k, _)| !crate::rules::relay::is_core_reserved_ext(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The output-parity bookkeeping actions BOTH async route folds emit before
