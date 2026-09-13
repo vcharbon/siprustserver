@@ -627,6 +627,14 @@ impl B2buaCore {
         self.ctx.state.active_count()
     }
 
+    /// [`active_calls`](Self::active_calls) as an OWNED probe — the single input
+    /// [`drain`](Self::drain) waits on, handed out so a caller can run the drain
+    /// without borrowing the core. Read-only.
+    pub fn active_calls_probe(&self) -> Arc<dyn Fn() -> usize + Send + Sync> {
+        let ctx = self.ctx.clone();
+        Arc::new(move || ctx.state.active_count())
+    }
+
     /// Does this worker currently **serve** `call_ref` (hold it live in its call
     /// map — i.e. it would emit the call's keepalive and answer in-dialog traffic)?
     /// The cluster-level invariant the failover tests assert is "exactly one node

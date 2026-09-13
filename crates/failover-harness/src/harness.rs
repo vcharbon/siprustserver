@@ -538,6 +538,35 @@ impl ReplicatedB2buaSut {
         }
     }
 
+    /// [`begin_drain`](Self::begin_drain) without the wait: latch `Draining`
+    /// now and hand the wait back as a [`PendingDrain`] the test polls while it
+    /// drives the timeline. The wait holds only the core's active-call probe, so
+    /// the process can still be killed mid-drain.
+    pub fn begin_drain_detached(&self, grace: Duration) -> PendingDrain {
+        self.views.record(
+            &self.incarnation_key(),
+            &self.ordinal,
+            Belief::Draining { gen: self.gen },
+            "drain",
+        );
+        let probe = self.core.as_ref().map(|core| {
+            core.begin_draining();
+            core.active_calls_probe()
+        });
+        let mut pending = PendingDrain {
+            fut: Box::pin(async move {
+                match probe {
+                    Some(p) => b2bua::drain::drain_until_quiescent(move || p(), grace).await,
+                    None => 0,
+                }
+            }),
+            residual: None,
+        };
+        // One poll arms the first poll-interval sleep on the paused clock.
+        pending.poll();
+        pending
+    }
+
     /// Drive a `MemberDelta::Removed` for `ordinal` into THIS node's membership —
     /// the simulation of k8s dropping a killed pod's endpoint from the survivor's
     /// view. The node's supervisor reconciles it to a Park. Under reactive-only
@@ -908,6 +937,31 @@ pub const RULE_CSEQ_IN_DIALOG_ORDER: &str = "cseq-in-dialog-order";
 /// `127.0.0.1:9400+n` — a stable per-ordinal repl listen address.
 fn repl_addr_for(index: usize) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9400 + index as u16))
+}
+
+/// A drain the test started and has not waited out: the node is latched
+/// `Draining` and keeps serving its live calls while the timeline runs. Owns
+/// its wait (an active-call probe, not the node), so the caller stays free to
+/// kill the process mid-drain. Created by
+/// [`FailoverHarness::begin_drain_pending`].
+pub struct PendingDrain {
+    fut: std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send>>,
+    residual: Option<usize>,
+}
+
+impl PendingDrain {
+    /// The residual live-call count once the drain has returned (`0` ⇒ fully
+    /// quiesced), `None` while it still waits. Re-polls the drain, so call it
+    /// after every advance — nothing else drives this future.
+    pub fn poll(&mut self) -> Option<usize> {
+        if self.residual.is_none() {
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            if let std::task::Poll::Ready(n) = self.fut.as_mut().poll(&mut cx) {
+                self.residual = Some(n);
+            }
+        }
+        self.residual
+    }
 }
 
 impl FailoverHarness {
@@ -1576,6 +1630,20 @@ impl FailoverHarness {
     pub async fn begin_drain(&mut self, node: &ReplicatedB2buaSut, grace: Duration) -> usize {
         self.mark(node.ordinal(), None, "drain", &format!("grace={:?}", grace));
         node.begin_drain(grace).await
+    }
+
+    /// **Begin a graceful drain of `node` WITHOUT waiting for it** — the same
+    /// [`B2buaCore::drain`] the shutdown path runs, latched now and left in
+    /// flight so the test keeps driving the timeline inside the drain window.
+    /// Poll the returned [`PendingDrain`] after each advance to learn when the
+    /// drain returned and with what residual.
+    pub fn begin_drain_pending(
+        &mut self,
+        node: &ReplicatedB2buaSut,
+        grace: Duration,
+    ) -> PendingDrain {
+        self.mark(node.ordinal(), None, "drain", &format!("grace={grace:?}, not awaited"));
+        node.begin_drain_detached(grace)
     }
 
     /// The views ledger — every observer's belief about every worker, and when

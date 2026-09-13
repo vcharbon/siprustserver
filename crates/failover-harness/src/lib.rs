@@ -33,7 +33,9 @@ pub mod views;
 
 pub use combine::{combine_doc, WorkerAxis};
 pub use cookie::{cookie_field, worker_ordinals};
-pub use harness::{FailoverHarness, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER};
+pub use harness::{
+    FailoverHarness, PendingDrain, ProxySut, ReplicatedB2buaSut, RULE_CSEQ_IN_DIALOG_ORDER,
+};
 pub use runner::run_cell;
 pub use scenario::{Cell, DialogState, Event, Fault, Party, Recovery};
 pub use views::{Belief, View, ViewLedger};
