@@ -362,6 +362,33 @@ impl SdpOrigin {
             && self.addrtype == other.addrtype
             && self.unicast_address == other.unicast_address
     }
+
+    /// The `o=` line a re-offer of THIS session states (RFC 3264 §8): the five
+    /// identity fields unchanged, the version one above this one.
+    pub fn next_version_line(&self) -> String {
+        format!(
+            "o={} {} {} {} {} {}",
+            self.username,
+            self.session_id,
+            self.session_version + 1,
+            self.nettype,
+            self.addrtype,
+            self.unicast_address
+        )
+    }
+}
+
+/// `new_offer` re-stated as a re-offer of the session `previous` described
+/// (RFC 3264 §8): its `o=` line is replaced by `previous`'s with the version
+/// incremented by one, every other line kept as written. `None` where either
+/// body carries no readable `o=` line — the caller then has no session to
+/// continue and sends the offer as it is.
+pub fn reoffer_continuing(new_offer: &[u8], previous: &[u8]) -> Option<Vec<u8>> {
+    let prior = parse_origin(previous)?;
+    let current = parse_origin(new_offer)?;
+    let text = String::from_utf8_lossy(new_offer);
+    let replaced = text.replacen(&current.raw_origin_line, &prior.next_version_line(), 1);
+    Some(replaced.into_bytes())
 }
 
 #[cfg(test)]
@@ -524,5 +551,21 @@ a=inactive\r\n";
         let moved = parse_origin(b"v=0\r\no=alice 1 1 IN IP4 10.0.0.2\r\n").expect("c");
         assert!(a.identifies_same_session(&bumped), "only the version rose");
         assert!(!a.identifies_same_session(&moved), "the address is part of the identity");
+    }
+
+    /// RFC 3264 §8: a re-offer keeps the previous description's `o=` identity
+    /// and increments only its version; the new offer's other lines ride as
+    /// written.
+    #[test]
+    fn a_continuing_reoffer_carries_the_previous_origin_one_version_up() {
+        let previous = b"v=0\r\no=- 56623135 20000000 IN IP4 10.1.1.1\r\ns=-\r\nc=IN IP4 10.1.1.1\r\nt=0 0\r\nm=audio 38278 RTP/AVP 8\r\n";
+        let new_offer = b"v=0\r\no=- 3997628865 3997628865 IN IP4 10.2.2.2\r\ns=oms\r\nc=IN IP4 10.2.2.2\r\nt=0 0\r\nm=audio 30550 RTP/AVP 9 8\r\na=sendrecv\r\n";
+        let out = reoffer_continuing(new_offer, previous).expect("both carry o=");
+        assert_eq!(
+            out,
+            b"v=0\r\no=- 56623135 20000001 IN IP4 10.1.1.1\r\ns=oms\r\nc=IN IP4 10.2.2.2\r\nt=0 0\r\nm=audio 30550 RTP/AVP 9 8\r\na=sendrecv\r\n".to_vec()
+        );
+        assert!(reoffer_continuing(new_offer, b"v=0\r\ns=-\r\n").is_none(), "no previous origin");
+        assert!(reoffer_continuing(b"", previous).is_none(), "no offer");
     }
 }
