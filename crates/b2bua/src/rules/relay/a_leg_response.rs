@@ -9,6 +9,7 @@ use sip_message::{Method, SipHeader as MsgHeader, SipRequest};
 
 use crate::effects::{
     BufferedObservabilityEffect, HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode,
+    Provenance,
 };
 
 /// Build a UAS response on the a-leg's inbound INVITE (toward alice). `to_tag`
@@ -66,5 +67,7 @@ pub fn response_to_a_leg(
         destination: dest,
         label: format!("{status} → a-leg"),
         leg_id: Some("a".to_string()),
+        // The stack's own unless the caller marks it a relayed one.
+        provenance: Provenance::Authored,
     })
 }

@@ -12,7 +12,9 @@ use sip_message::generators::{self, GenerateResponseOpts};
 use sip_message::header::{HeaderClass, HeaderName};
 use sip_message::{SipHeader, SipStr};
 
-use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{
+    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+};
 use crate::rules::capabilities::{self, Face};
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
@@ -79,6 +81,7 @@ impl ActionExecutor<'_> {
                 destination: dest,
                 label: format!("{status} (respond)"),
                 leg_id: Some(ctx.source_leg_id.to_string()),
+                provenance: Provenance::Authored,
             });
         }
     }
@@ -125,7 +128,7 @@ impl ActionExecutor<'_> {
             None,
             extra,
         ) {
-            fx.outbound.push(effect);
+            fx.outbound.push(OutboundSipEffect { provenance: Provenance::Relayed, ..effect });
         }
     }
 

@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use b2bua::cdr::{BufferedCdrWriter, CdrRecord, CdrWriter};
-use b2bua::config::B2buaConfig;
+use b2bua::config::{B2buaConfig, CdrConfig};
 use b2bua::decision::CallDecisionEngine;
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::limiter_http::HttpCallLimiter;
@@ -289,6 +289,12 @@ pub struct RunnerEnv {
     /// names copied from the a-leg INVITE onto every originated b-leg INVITE
     /// (default empty = no relay; structural headers never relayable).
     pub relay_headers: Vec<String>,
+    /// `B2BUA_CDR_MESSAGE_RING` — the per-leg message-ring cap on the call
+    /// record (default 0 = off).
+    pub cdr_message_ring: usize,
+    /// `B2BUA_CDR_CAPTURED_HEADERS` — the header names every ring entry
+    /// captures the values of, comma-separated (default empty).
+    pub cdr_captured_headers: Vec<String>,
     /// `LIMITER_URL` — shared limiter base URL; empty → `NoopLimiter` (fail-open).
     pub limiter_url: String,
     /// `LIMITER_TIMEOUT_MS` — per-request fail-open budget (default 150).
@@ -394,6 +400,10 @@ impl RunnerEnv {
                 .parse()
                 .expect("B2BUA_RETRY_AFTER_JITTER_SEC"),
             relay_headers: split_csv(&env_or("B2BUA_RELAY_HEADERS", "")),
+            cdr_message_ring: env_or("B2BUA_CDR_MESSAGE_RING", "0")
+                .parse()
+                .expect("B2BUA_CDR_MESSAGE_RING"),
+            cdr_captured_headers: split_csv(&env_or("B2BUA_CDR_CAPTURED_HEADERS", "")),
             limiter_url: env_or("LIMITER_URL", ""),
             limiter_timeout_ms: env_or("LIMITER_TIMEOUT_MS", "150").parse().unwrap_or(150),
             limiter_refresh_sec: env_or("LIMITER_WINDOW_SECONDS", "300").parse().unwrap_or(300),
@@ -574,6 +584,10 @@ impl RunnerEnv {
             retry_after_base_sec: self.retry_after_base_sec,
             worker_allowed_target_suffixes: self.worker_allowed_target_suffixes.clone(),
             relay_headers: self.relay_headers.clone(),
+            cdr: CdrConfig {
+                message_ring: self.cdr_message_ring,
+                captured_headers: self.cdr_captured_headers.clone(),
+            },
             ..Default::default()
         };
         // Forbid booting with a config that would silently break HA (too-short a

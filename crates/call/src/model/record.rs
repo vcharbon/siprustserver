@@ -291,6 +291,11 @@ pub struct Call {
     /// responder's retransmission of one recognisable as such.
     #[serde(default)]
     pub pracked_provisionals: Vec<PrackedProvisional>,
+    /// The `seq` of the last message recorded on any leg's ring — the
+    /// call-wide sequence [`crate::helpers::record_message`] draws from; `0`
+    /// while nothing is recorded.
+    #[serde(default)]
+    pub message_seq: u32,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate

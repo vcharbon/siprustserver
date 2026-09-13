@@ -9,6 +9,7 @@
 //! construction: [`draft`] and [`generators`].
 
 mod access;
+pub mod capture;
 pub mod draft;
 pub mod error;
 pub mod header;

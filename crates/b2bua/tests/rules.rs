@@ -1310,6 +1310,7 @@ fn b_leg_pending() -> Leg {
         kind: Some(LegKind::Destination),
         adopted: None,
         invite_final_sent: None,
+        messages: Default::default(),
     }
 }
 

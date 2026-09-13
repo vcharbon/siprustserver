@@ -17,12 +17,14 @@
 //!     call owes, what an ACK discharges, the scopes a ladder is retired under
 //!   - [`services`] — per-service slice accessors + opaque ext writes
 //!   - [`record`] — CDR append, rule deactivation, SM-cursor rendering
+//!   - [`message_ring`] — the message-ring append and its call-wide sequence
 //!   - [`timer`] — the timer ledger (`replace_timer_by_id`, terminating cap,
 //!     the keepalive one-interval ceiling)
 
 pub mod dialog;
 pub mod leg;
 pub mod lens;
+pub mod message_ring;
 pub mod obligation;
 pub mod peering;
 pub mod record;
@@ -44,6 +46,7 @@ pub use leg::{
     set_bye_disposition, set_leg_disposition, set_leg_state,
 };
 pub use lens::{update_dialog, update_leg};
+pub use message_ring::record_message;
 pub use obligation::{
     acked_2xx, advance_ladder, answers_initial_invite, clear_retained, obligations_in,
     retained_for, Scope,

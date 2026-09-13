@@ -9,7 +9,7 @@ use call::helpers::{
 };
 use call::{Call, CdrEvent, TagMapping};
 
-use crate::effects::{CriticalStateEffect, HandlerEffects};
+use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance};
 use crate::rules::model::{MessageTransform, RuleAction, RuleContext};
 use crate::rules::relay;
 
@@ -50,7 +50,7 @@ impl ActionExecutor<'_> {
                         .and_then(relay::media_type)
                         .or_else(|| Some(relay::sdp()))
                 };
-                self.ack_leg(call, fx, leg_id, body.clone(), ct);
+                self.ack_leg(call, fx, leg_id, body.clone(), ct, Provenance::Authored);
             }
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm_dialog(call, ctx, leg_id);

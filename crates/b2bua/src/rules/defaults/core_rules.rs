@@ -398,20 +398,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .leg_states(&[LegState::Confirmed, LegState::Terminated])
                 .filter(|ctx| {
                     let Some(d) = ctx.source_dialog() else { return false };
-                    if d.ext.ack_branch.is_none() {
-                        return false;
-                    }
                     let Some(resp) = ctx.response() else { return false };
-                    // A retransmission is the SAME dialog's 2xx: every fork of one
-                    // INVITE answers on that INVITE's CSeq (§12.1.2), so the CSeq
-                    // alone would take a losing fork's late 2xx for a repeat and
-                    // ACK it with the WINNER's tag, at the winner's target.
-                    if resp.to().tag().unwrap_or_default() != d.sip.remote_tag {
-                        return false;
-                    }
-                    let cseq = resp.cseq().seq() as i64;
-                    crate::rules::relay::acked_invite_cseq(d) == Some(resp.cseq().seq())
-                        && call::helpers::find_pending_request(d, cseq).is_none()
+                    crate::rules::relay::retransmitted_2xx(d, resp)
                 }),
             |ctx| {
                 ok(vec![RuleAction::AckLeg {

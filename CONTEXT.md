@@ -121,6 +121,21 @@ obligation — the transaction layer owns its own.
 _Avoid_: "watchdog" (the old name for the 2xx pair — it named the timer, not
 the thing owed).
 
+**Message ring**:
+The capped per-leg history of the distinct SIP messages a leg received or sent,
+in handling order, replicated with the call (`Leg.messages`, off by default —
+`cdr.message_ring`). One entry per message: its direction (**received**,
+**relayed** — a peer leg's message forwarded — or **authored** — minted by this
+stack), method, CSeq, status, To-tag, the values of the configured header names
+(`cdr.captured_headers`) and a call-wide `seq`. A rung, a re-ACK or a layer
+replay records nothing: a repeat is the message it repeats. The transaction
+layer's own answers to a message the call does see — the 100 to an INVITE, a
+CANCEL's 200 and 487, the hop ACK of a non-2xx INVITE final — are recorded as
+authored; a 100 it absorbs on a client transaction is not a message of the
+call's.
+_Avoid_: "history" alone (the CDR vocabulary of a consumer), "log" (the
+decision log is a different record).
+
 ## HA replication glossary
 
 The peer-to-peer call-replication vocabulary (ADR-0011 / `docs/plan/

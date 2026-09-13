@@ -42,6 +42,7 @@ mod limiter_refresh;
 mod long_ring;
 mod max_duration_anchor;
 mod max_forwards;
+mod message_ring;
 mod no_answer_absorb;
 mod no_answer_cancelled_call;
 mod numbering_plan;

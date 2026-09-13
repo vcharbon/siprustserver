@@ -10,7 +10,9 @@ use sip_message::header::{HeaderName, MediaType, RAck};
 use sip_message::{hops, Method};
 use sip_txn::TxnKind;
 
-use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{
+    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+};
 use crate::rules::capabilities;
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
@@ -23,6 +25,8 @@ use super::ActionExecutor;
 impl ActionExecutor<'_> {
     /// ACK `leg_id`'s confirmed dialog, carrying `body`/`content_type` through
     /// (a delayed-offer answer rides the ACK, RFC 3261 §13.2.2.4 / RFC 3264 §4).
+    /// `provenance` says whose ACK it is: the peer's, relayed, or one this
+    /// stack composes on its own account.
     pub(super) fn ack_leg(
         &self,
         call: &mut Call,
@@ -30,6 +34,7 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         body: Vec<u8>,
         content_type: Option<MediaType>,
+        provenance: Provenance,
     ) {
         let leg = if leg_id == call.a_leg.leg_id {
             Some(&call.a_leg)
@@ -79,7 +84,7 @@ impl ActionExecutor<'_> {
                     ),
                 );
             }
-            fx.outbound.push(e);
+            fx.outbound.push(OutboundSipEffect { provenance, ..e });
             // Retain the ACK branch so a retransmitted 2xx is re-ACKed on the
             // SAME transaction (§13.2.2.4 — `re-ack-retransmitted-2xx`).
             *call = call::helpers::retain_ack_branch(call.clone(), leg_id, &branch);
@@ -129,7 +134,14 @@ impl ActionExecutor<'_> {
                 return;
             }
             let content_type = req.raw(HeaderName::ContentType).next().and_then(relay::media_type);
-            self.ack_leg(call, fx, target_leg, req.body().to_vec(), content_type);
+            self.ack_leg(
+                call,
+                fx,
+                target_leg,
+                req.body().to_vec(),
+                content_type,
+                Provenance::Relayed,
+            );
             return;
         }
         let Some(method) = in_dialog_method(req.method()) else {
@@ -307,6 +319,7 @@ impl ActionExecutor<'_> {
             destination: dest,
             label: format!("relay {} → {target_leg}", req.method()),
             leg_id: Some(target_leg.to_string()),
+            provenance: Provenance::Relayed,
         });
     }
 }

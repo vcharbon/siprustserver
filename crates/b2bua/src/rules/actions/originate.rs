@@ -10,7 +10,9 @@ use sip_message::header::{Event, HeaderValue, RAck, SubscriptionState};
 use sip_message::{Method, SipStr};
 use sip_txn::TxnKind;
 
-use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{
+    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+};
 use crate::rules::capabilities;
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
@@ -208,6 +210,7 @@ impl ActionExecutor<'_> {
             destination: dest,
             label: format!("NOTIFY → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance: Provenance::Authored,
         });
     }
 
@@ -301,6 +304,7 @@ impl ActionExecutor<'_> {
             destination: dest,
             label: format!("resync re-INVITE → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance: Provenance::Authored,
         });
     }
 
@@ -431,6 +435,7 @@ impl ActionExecutor<'_> {
             destination: dest,
             label: format!("{method} → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance: Provenance::Authored,
         });
     }
 
@@ -527,6 +532,7 @@ impl ActionExecutor<'_> {
             destination: dest,
             label: format!("PRACK → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance: Provenance::Authored,
         });
     }
 }

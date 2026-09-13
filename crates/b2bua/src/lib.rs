@@ -31,6 +31,7 @@ pub mod initial_invite;
 pub mod lifecycle;
 pub mod limiter;
 pub mod limiter_http;
+pub(crate) mod message_ring;
 pub mod metrics;
 pub mod obligations;
 pub mod overload;

@@ -318,6 +318,7 @@ mod tests {
             kind: Some(LegKind::Destination),
             adopted: None,
             invite_final_sent: None,
+            messages: Default::default(),
         }
     }
 

@@ -29,6 +29,7 @@
 //!   - [`invite_txn`] — in-flight INVITE client-transaction handle
 //!   - [`timer`] — serializable timer intents ([`TimerType`] / [`TimerEntry`])
 //!   - [`cdr`] — CDR event records
+//!   - [`message_ring`] — the capped per-leg history of distinct SIP messages
 //!   - [`services`] — per-service typed runtime slices + opaque [`ExtMap`]
 //!   - [`sm`] — state-machine identifiers (ADR-0016)
 
@@ -37,6 +38,7 @@ pub mod dialog;
 pub mod emission;
 pub mod invite_txn;
 pub mod leg;
+pub mod message_ring;
 pub mod obligation;
 pub mod record;
 pub mod services;
@@ -48,6 +50,7 @@ pub use dialog::{B2buaDialogExt, Dialog, Direction, PendingRequest, StackDialog,
 pub use emission::{Repeat, Repeated, RetainedEmission};
 pub use invite_txn::{HostPort, InviteTxnHandle};
 pub use leg::{ByeDisposition, Leg, LegDisposition, LegKind, LegState, RemoteInfo};
+pub use message_ring::{MessageDirection, MessageEntry, MessageRing};
 pub use obligation::Obligation;
 pub use record::{
     ALegInviteSnapshot, ActivePeer, ActiveRule, Call, CallLimiterState, CallModelState,

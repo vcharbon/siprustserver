@@ -293,7 +293,10 @@ pub async fn apply_route(
                     d.ext.cached_sdp = None;
                 }
             }
-            BodyUpdate::Replace(s) => draft = draft.with_body(s.clone().into_bytes().into()),
+            BodyUpdate::Replace(s) => {
+                draft = draft.with_body(s.clone().into_bytes().into());
+                effect.provenance = crate::effects::Provenance::Authored;
+            }
         }
         if let Ok(edited) = draft.freeze() {
             *req = edited;

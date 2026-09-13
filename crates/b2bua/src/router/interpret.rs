@@ -25,6 +25,14 @@ pub(super) async fn process_result(
     result: HandlerResult,
     now_ms: i64,
 ) {
+    // What the turn sends is on the record before the record lands.
+    let result = match crate::message_ring::Ring::of(&ctx.config) {
+        Some(ring) => HandlerResult {
+            call: ring.sent(result.call, &result.effects.outbound, now_ms),
+            effects: result.effects,
+        },
+        None => result,
+    };
     // Persist first (state lands before effects run).
     ctx.state.update(result.call.clone());
 

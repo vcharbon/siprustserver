@@ -18,7 +18,7 @@ use sip_message::{hops, Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
 
 use crate::config::B2buaConfig;
-use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
 
 use super::address::{address, UnreadableAddress};
 use super::body::{media_type, sdp};
@@ -417,6 +417,7 @@ pub fn build_b_leg(
         // Media ⇒ unadopted. See `call::helpers::is_adopted`.
         adopted: None,
         invite_final_sent: None,
+        messages: Default::default(),
     };
 
     let effect = OutboundSipEffect {
@@ -425,6 +426,12 @@ pub fn build_b_leg(
         destination: wire_dest,
         label: format!("b-leg INVITE ({leg_id})"),
         leg_id: Some(leg_id.to_string()),
+        // The originator's INVITE forwarded, unless the decision put its own
+        // body on it — then the offer, and the message, are this stack's.
+        provenance: match body_override {
+            Some(_) => Provenance::Authored,
+            None => Provenance::Relayed,
+        },
     };
     Ok((leg, effect))
 }

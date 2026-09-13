@@ -13,7 +13,9 @@ use sip_message::generators::{self, GenerateRelayedResponseOpts, SourceBody};
 use sip_message::header::{HeaderName, HeaderValue, MediaType, To, Via};
 use sip_message::{Method, SipHeader, SipStr};
 
-use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{
+    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+};
 use crate::rules::capabilities::{self, Face};
 use crate::rules::model::{MessageTransform, RuleContext};
 use crate::rules::relay;
@@ -155,24 +157,8 @@ impl ActionExecutor<'_> {
         // party's own further copies are this stack's §3 ladder
         // (`arm_reliable_provisional_ladder`), never the responder's clock; a
         // responder's DISTINCT next provisional matches no entry and relays.
-        if cseq_method == "INVITE" && (101..200).contains(&resp.status()) {
-            if let Some(b_rseq) = relay::reliable_rseq(resp) {
-                if call::helpers::reliable_provisional_relayed(
-                    call,
-                    &source_leg_id,
-                    &to_tag,
-                    cseq_num,
-                    b_rseq,
-                ) || call::helpers::pracked_provisional(
-                    call,
-                    &source_leg_id,
-                    &to_tag,
-                    cseq_num,
-                    b_rseq,
-                ) {
-                    return;
-                }
-            }
+        if relay::repeated_reliable_provisional(call, &source_leg_id, resp) {
+            return;
         }
 
         // ── Pending transparent-relay correlation (§8.1.3.3) ──
@@ -354,7 +340,14 @@ impl ActionExecutor<'_> {
                         *call =
                             call::helpers::retain_ack_branch(call.clone(), &source_leg_id, &branch);
                         let answering_leg = source_leg_id.clone();
-                        self.ack_leg(call, fx, &answering_leg, Vec::new(), None);
+                        self.ack_leg(
+                            call,
+                            fx,
+                            &answering_leg,
+                            Vec::new(),
+                            None,
+                            Provenance::Authored,
+                        );
                     }
                     self.retain_reinvite_2xx(call, fx, &relayed, dest.clone(), target_leg);
                 }
@@ -364,6 +357,7 @@ impl ActionExecutor<'_> {
                     destination: dest,
                     label: format!("{status} {cseq_method} → {target_leg}"),
                     leg_id: Some(target_leg.to_string()),
+                    provenance: Provenance::Relayed,
                 };
                 // A reliable provisional leaving under our own number is ours
                 // to repeat until PRACKed (RFC 3262 §3): retain it + arm the
@@ -492,6 +486,7 @@ impl ActionExecutor<'_> {
             ) else {
                 return;
             };
+            let effect = OutboundSipEffect { provenance: Provenance::Relayed, ..effect };
             // A 2xx answers the caller: it goes through the one seam that
             // retains the datagram + arms the §13.3.1.4 ladder.
             if (200..300).contains(&status) {
@@ -564,6 +559,7 @@ impl ActionExecutor<'_> {
         ) else {
             return;
         };
+        let effect = OutboundSipEffect { provenance: Provenance::Relayed, ..effect };
         // A 2xx answers the caller: it goes through the one seam that retains
         // the datagram + arms the §13.3.1.4 ladder.
         if (200..300).contains(&status) {

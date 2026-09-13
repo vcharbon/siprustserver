@@ -153,6 +153,7 @@ pub fn representative_call() -> Call {
         kind: None,
         adopted: None,
         invite_final_sent: Some(200),
+        messages: Default::default(),
     };
     a_leg.dialogs[0].ext.answered_2xx = Some(Unacked2xx {
         dialog_tag: "b2bua-to-tag-aleg-9876".into(),
@@ -187,6 +188,7 @@ pub fn representative_call() -> Call {
         kind: None,
         adopted: None,
         invite_final_sent: None,
+        messages: Default::default(),
     };
     b_leg.dialogs[0].ext.emitted_ack = Some(RetainedEmission::on_trigger(
         EMITTED_ACK.to_vec(),
@@ -313,6 +315,7 @@ pub fn representative_call() -> Call {
         }),
         reliable_provisionals: Vec::new(),
         pracked_provisionals: Vec::new(),
+        message_seq: 0,
         sm_cursors: BTreeMap::new(),
     }
 }
@@ -629,6 +632,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
             proptest::option::of(any::<bool>()),
             proptest::option::of(200u16..700),
         ),
+        arb_message_ring(),
     )
         .prop_map(
             |(
@@ -642,6 +646,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
                 (no_answer_timeout_sec, bye_disposition),
                 (local_uri, remote_uri, invite_request_uri),
                 (pending_invite_txn, ext, kind, adopted, invite_final_sent),
+                messages,
             )| Leg {
                 leg_id,
                 call_id,
@@ -660,8 +665,53 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
                 kind,
                 adopted,
                 invite_final_sent,
+                messages,
             },
         )
+}
+
+fn arb_message_direction() -> impl Strategy<Value = MessageDirection> {
+    prop_oneof![
+        Just(MessageDirection::Received),
+        Just(MessageDirection::Relayed),
+        Just(MessageDirection::Authored),
+    ]
+}
+
+fn arb_message_entry() -> impl Strategy<Value = MessageEntry> {
+    (
+        any::<u32>(),
+        any::<i64>(),
+        arb_message_direction(),
+        "(INVITE|ACK|BYE|PRACK|OPTIONS)",
+        any::<u32>(),
+        proptest::option::of(100u16..700),
+        proptest::option::of(arb_tag()),
+        any::<u32>(),
+        proptest::collection::vec(("(Allow|Accept|Privacy)", "[a-zA-Z0-9, ]{0,24}"), 0..3),
+    )
+        .prop_map(
+            |(seq, at_ms, direction, method, cseq, code, to_tag, decision_ordinal, headers)| {
+                MessageEntry {
+                    seq,
+                    at_ms,
+                    direction,
+                    method,
+                    cseq,
+                    code,
+                    to_tag,
+                    decision_ordinal,
+                    headers,
+                }
+            },
+        )
+}
+
+/// Varied message rings: empty (the ring off) through a few entries with an
+/// eviction count.
+fn arb_message_ring() -> impl Strategy<Value = MessageRing> {
+    (proptest::collection::vec(arb_message_entry(), 0..4), 0u32..5)
+        .prop_map(|(entries, dropped)| MessageRing { entries, dropped })
 }
 
 fn arb_timer() -> impl Strategy<Value = TimerEntry> {
@@ -897,6 +947,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             reroute,
             reliable_provisionals,
             pracked_provisionals: Vec::new(),
+            message_seq: 0,
             sm_cursors,
         },
     )

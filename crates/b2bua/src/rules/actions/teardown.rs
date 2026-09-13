@@ -15,7 +15,9 @@ use sip_message::parser::custom::CustomParser;
 use sip_message::{hops, Method, SipHeader, SipMessage, SipParser};
 use sip_txn::TxnKind;
 
-use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{
+    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+};
 use crate::rules::invariants::GLOBAL_CALL_MACHINE;
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
@@ -352,6 +354,7 @@ impl ActionExecutor<'_> {
             destination: dest,
             label: format!("BYE → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance: Provenance::Authored,
         })
     }
 
@@ -471,6 +474,7 @@ impl ActionExecutor<'_> {
             destination: dest,
             label: format!("{status} INVITE → {originator}"),
             leg_id: Some(originator),
+            provenance: Provenance::Authored,
         });
         self.commit_pending_reinvite_cancel(call, fx, leg_id, outbound_cseq, cancel);
     }
@@ -506,6 +510,7 @@ impl ActionExecutor<'_> {
             destination: (handle.destination.host.clone(), handle.destination.port),
             label: format!("CANCEL → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance: Provenance::Authored,
         })
     }
 }
@@ -556,6 +561,7 @@ fn pending_reinvite_cancel(
             destination: (handle.destination.host.clone(), handle.destination.port),
             label: format!("CANCEL re-INVITE → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance: Provenance::Authored,
         },
     })
 }

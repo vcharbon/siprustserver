@@ -173,6 +173,7 @@ pub fn build_initial_call(
         // Derived from kind (the a-leg is always adopted); see `is_adopted`.
         adopted: None,
         invite_final_sent: None,
+        messages: Default::default(),
     };
     let topology = topology_from_cookie(invite, &config.self_ordinal, &call_ref);
     let a_leg_invite = ALegInviteSnapshot {
@@ -233,6 +234,7 @@ pub fn build_initial_call(
         reroute: None,
         reliable_provisionals: Vec::new(),
         pracked_provisionals: Vec::new(),
+        message_seq: 0,
         sm_cursors: std::collections::BTreeMap::new(),
     }
 }

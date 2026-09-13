@@ -41,6 +41,17 @@ pub enum OutboundBody {
     Datagram(RetainedEmission),
 }
 
+/// Whose message an outbound emission carries: a peer leg's, forwarded (the
+/// RFC 3261 §16 half of a B2BUA), or this stack's own (a UAS/UAC-authored
+/// final, an ACK or PRACK it owes, a keepalive, a teardown). Read by the
+/// message ring; a retained datagram's repeat carries the value of the message
+/// it repeats and is never recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    Relayed,
+    Authored,
+}
+
 /// One SIP message to emit.
 #[derive(Debug, Clone)]
 pub struct OutboundSipEffect {
@@ -49,6 +60,7 @@ pub struct OutboundSipEffect {
     pub destination: (String, u16),
     pub label: String,
     pub leg_id: Option<String>,
+    pub provenance: Provenance,
 }
 
 /// Critical state effects — run first, under an uninterruptible wrap; state is

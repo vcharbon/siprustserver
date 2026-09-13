@@ -11,7 +11,7 @@ use sip_message::header::MediaType;
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
-use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
 use crate::rules::model::{RuleAction, RuleContext};
 
 use super::dialog::{target_dest, to_gen_dialog};
@@ -77,6 +77,8 @@ pub fn ack_b_leg(
             destination: dest,
             label: format!("ACK → {}", leg.leg_id),
             leg_id: Some(leg.leg_id.clone()),
+            // The stack's own unless the caller relays a peer's ACK through it.
+            provenance: Provenance::Authored,
         },
         branch,
     ))

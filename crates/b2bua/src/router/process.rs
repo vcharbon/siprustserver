@@ -291,7 +291,11 @@ async fn initial_invite_turn(
         ctx.overload.increment_non_emergency_admitted();
     }
 
-    let call = build_initial_call(req, src, &ctx.config, now_ms);
+    let mut call = build_initial_call(req, src, &ctx.config, now_ms);
+    if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
+        let a_leg = call.a_leg.leg_id.clone();
+        call = ring.invite_received(call, &a_leg, req, now_ms);
+    }
     ctx.state.create(call.clone());
     // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The
     // caller's From tag IS the a-leg dialog's remote tag, so admitting a
@@ -592,6 +596,11 @@ fn rule_chain_turn(
     if let CallEvent::Timer { timer_type: TimerType::RepeatGiveUp { obligation }, .. } = event {
         ctx.metrics.record_repeat_give_up(obligation.kind());
         exec.give_up(&mut call, &mut ladder_fx, obligation);
+    }
+    // The record names the message before the rules read it, so what the
+    // turn sends follows what it received.
+    if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
+        call = ring.received(call, &res.source_leg_id, event, discharged.as_ref(), now_ms);
     }
     let rule_ctx = RuleContext {
         call: RuleCall::new(&call),

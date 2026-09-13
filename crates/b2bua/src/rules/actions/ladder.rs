@@ -19,7 +19,7 @@ use sip_message::{Method, SipMessage, SipResponse};
 use sip_retransmit::{Class, Schedule};
 
 use crate::effects::{
-    HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode,
+    HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
 use crate::event::CallEvent;
 use crate::rules::defaults::unacked_2xx_give_up_actions;
@@ -446,5 +446,6 @@ pub(super) fn repeat_of(
         destination: (host.to_string(), port),
         label,
         leg_id: Some(leg_id.to_string()),
+        provenance: Provenance::Authored,
     }
 }
