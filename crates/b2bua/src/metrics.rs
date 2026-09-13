@@ -816,7 +816,7 @@ impl B2buaMetrics {
             ));
         }
 
-        s.push_str("# HELP b2bua_repl_forward_flush_refused_total forward flushes (primary\u{2192}backup) a backup refused because they would regress progress an acting backup already authored on the Element (op=put|delete, ADR-0031 D3): a rising count means a primary is flushing a branch of a call one of its backups took over — expected across a partition heal or a drain, sustained means the two views never converge\n# TYPE b2bua_repl_forward_flush_refused_total counter\n");
+        s.push_str("# HELP b2bua_repl_forward_flush_refused_total forward flushes (primary\u{2192}backup) a backup refused (ADR-0031 D3): op=put, a body behind the Element on a lifecycle axis or behind its b; op=delete, a teardown of an answered Active Element by an authority that never published the answer. A rising count means a primary is flushing a branch of a call one of its backups took over — expected across a partition heal or a drain, sustained means the two views never converge\n# TYPE b2bua_repl_forward_flush_refused_total counter\n");
         for (op, v) in self.inner.repl_forward_flush_refused.lock().unwrap().iter() {
             s.push_str(&format!("b2bua_repl_forward_flush_refused_total{{op=\"{op}\"}} {v}\n"));
         }
