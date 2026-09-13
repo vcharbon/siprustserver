@@ -459,8 +459,12 @@ is enforced on *identity + membership source*, not *address representation*
 **Withdrawal**:
 The instant a worker's endpoint leaves the routable set — `ready=false` in its
 EndpointSlice, or the endpoint gone. The proxy drops the ordinal and tombstones
-its address; the process is untouched and learns nothing from it (SIGTERM is its
-only signal). Three ways out — graceful, abrupt, vanished — in ADR-0031.
+its address; the process is untouched but **observes** it: the informer shows a
+worker its own endpoint, and once it has seen itself routable, its disappearance
+latches `Draining` whether or not SIGTERM has come (ADR-0031 D6; `is_withdrawn`
+on the supervisor, the `b2bua_withdrawn_running` gauge). A static membership
+never shows a worker itself. Three ways out — graceful, abrupt, vanished — in
+ADR-0031.
 
 **Terminating member**:
 A worker the orchestrator has begun to remove and that still runs. Still a

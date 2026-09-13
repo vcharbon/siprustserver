@@ -384,6 +384,19 @@ impl ViewLedger {
             .unwrap_or(0)
     }
 
+    /// The live incarnations OF `ordinal`, as `(key, membership)` — the worker's
+    /// own view of the pool, which the informer shows it (ADR-0031 D6).
+    pub fn live_incarnations_of(&self, ordinal: &str) -> Vec<(String, Arc<SimulatedMembership>)> {
+        self.inner
+            .lock()
+            .unwrap()
+            .incarnations
+            .iter()
+            .filter(|i| i.ordinal == ordinal && i.is_alive())
+            .map(|i| (i.key(), i.membership.clone()))
+            .collect()
+    }
+
     /// The live incarnations that are NOT of `ordinal`, as `(key, membership)` —
     /// the peers a cluster membership primitive must drive.
     pub fn live_peers_of(&self, ordinal: &str) -> Vec<(String, Arc<SimulatedMembership>)> {

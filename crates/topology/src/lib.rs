@@ -92,6 +92,13 @@ pub trait Membership: Send + Sync {
     fn synced(&self) -> bool {
         true
     }
+    /// Whether this source shows a member **its own** endpoint, so a worker can
+    /// observe its own withdrawal from routing (ADR-0031 D6). True for an
+    /// informer over the pool the worker belongs to (and its simulation); false
+    /// for a static list, which is fixed by hand and withdraws nobody.
+    fn observes_self(&self) -> bool {
+        false
+    }
 }
 
 /// Layer-build-time parse failure for the `ordinal@host,...` grammar.
@@ -410,6 +417,11 @@ impl Membership for SimulatedMembership {
     }
     fn changes(&self) -> broadcast::Receiver<MemberDelta> {
         self.state.changes()
+    }
+    /// The simulation stands in for the informer: a node's own ordinal is in
+    /// its snapshot while the orchestrator publishes it.
+    fn observes_self(&self) -> bool {
+        true
     }
 }
 

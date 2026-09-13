@@ -275,6 +275,19 @@ impl ReplicatedB2buaSut {
         self.core.as_ref().map(|c| c.is_ready()).unwrap_or(false)
     }
 
+    /// The drain latch, whichever set it: SIGTERM or the worker's own observed
+    /// withdrawal (ADR-0031 D6). `false` while crashed — a dead incarnation
+    /// holds no latch; the views ledger keeps what it believed before.
+    pub fn is_draining(&self) -> bool {
+        self.core.as_ref().map(|c| c.readiness().is_draining()).unwrap_or(false)
+    }
+
+    /// Whether this worker has observed its own endpoint withdrawn from routing
+    /// (ADR-0031 D6). `false` while crashed, as [`is_draining`](Self::is_draining).
+    pub fn is_withdrawn(&self) -> bool {
+        self.core.as_ref().map(|c| c.is_withdrawn()).unwrap_or(false)
+    }
+
     /// **Ground-truth** live in-memory call count (the actual `inner.calls` map
     /// size), bypassing the `creations − removals` counters. The X11 reclaim/
     /// handback accounting is exactly what's under test, so assertions key on this
@@ -1411,8 +1424,18 @@ impl FailoverHarness {
 
         // Every node resolves peers through the cluster's ONE live map
         // (ADR-0012 D3), so a later replacement re-points this ordinal without
-        // touching the running peers.
-        let peer_list: Vec<Peer> = spec.peers.iter().map(|p| Peer::new(p, p)).collect();
+        // touching the running peers. A first incarnation's list holds the node
+        // itself, as the informer's slice shows a published pod: that is how it
+        // observes its own withdrawal (ADR-0031 D6); the supervisor never pulls
+        // itself. A replacement is published by `readmit`, not at spawn.
+        let published = if gen == 1 { Some(ordinal) } else { None };
+        let peer_list: Vec<Peer> = spec
+            .peers
+            .iter()
+            .map(String::as_str)
+            .chain(published)
+            .map(|p| Peer::new(p, p))
+            .collect();
         let wiring = ReplWiring {
             network: Arc::new(self.repl_recording.clone()) as Arc<dyn ReplicationNetwork>,
             addr_map: self.repl_resolver.clone(),
@@ -1521,10 +1544,11 @@ impl FailoverHarness {
     /// of the cluster's view WITHOUT touching its process: the proxy's registry
     /// drops the ordinal (nothing routes to it, no cookie resolves it) and every
     /// other live worker's membership drops the peer (its supervisor parks the
-    /// flows). The process stays bound and keeps serving whatever still reaches
-    /// it — the zombie shape. Records the orchestrator's, the proxy's and every
-    /// peer's belief at this instant; the sampler then records what each
-    /// component actually did with it.
+    /// flows), and so does the worker's own — it observes its withdrawal and
+    /// latches Draining (ADR-0031 D6). The process stays bound and keeps serving
+    /// whatever still reaches it — the zombie shape. Records the orchestrator's,
+    /// the proxy's and every peer's belief at this instant; the sampler then
+    /// records what each component actually did with it.
     pub fn withdraw(&mut self, ordinal: &str) {
         self.mark(ordinal, None, "withdraw", "endpoint withdrawn; process still running");
         self.views.record("orchestrator", ordinal, Belief::Withdrawn, "withdraw");
@@ -1535,6 +1559,9 @@ impl FailoverHarness {
         for (observer, membership) in self.views.live_peers_of(ordinal) {
             membership.remove(ordinal);
             self.views.record(&observer, ordinal, Belief::Absent, "withdraw");
+        }
+        for (_, membership) in self.views.live_incarnations_of(ordinal) {
+            membership.remove(ordinal);
         }
     }
 
@@ -1563,6 +1590,9 @@ impl FailoverHarness {
         for (observer, membership) in self.views.live_peers_of(ordinal) {
             membership.add(Peer::new(ordinal, ordinal));
             self.views.record(&observer, ordinal, Belief::PeerActive, "readmit");
+        }
+        for (_, membership) in self.views.live_incarnations_of(ordinal) {
+            membership.add(Peer::new(ordinal, ordinal));
         }
     }
 

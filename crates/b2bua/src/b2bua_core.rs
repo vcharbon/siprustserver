@@ -304,6 +304,23 @@ impl B2buaCore {
                 // what it has pulled and keeps pulling.
 
                 let readiness = Readiness::new(Arc::new(supervisor.clone()));
+                // The worker's own withdrawal from routing latches Draining
+                // whether or not SIGTERM has arrived (ADR-0031 D6). A watch, not
+                // a handle held by the supervisor: readiness already owns the
+                // supervisor, and a cycle would outlive `abort`.
+                let mut self_endpoint = supervisor.self_endpoint();
+                let latch = readiness.clone();
+                tasks.push(tokio::spawn(async move {
+                    loop {
+                        if self_endpoint.borrow_and_update().is_withdrawn() {
+                            latch.set_withdrawn();
+                            return;
+                        }
+                        if self_endpoint.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                }));
                 (readiness, Some(supervisor))
             }
             // Legacy/default path: always-200 OPTIONS, no replication.
@@ -579,6 +596,13 @@ impl B2buaCore {
         for call_ref in self.ctx.state.live_call_refs() {
             traces.close(&call_ref);
         }
+    }
+
+    /// Whether this worker has observed its own endpoint withdrawn from routing
+    /// (ADR-0031 D6): the proxy routes nothing new here. `false` without
+    /// replication or on a membership that does not show the worker itself.
+    pub fn is_withdrawn(&self) -> bool {
+        self.supervisor.as_ref().is_some_and(|s| s.is_withdrawn())
     }
 
     /// Latch this worker into the `Draining` readiness state (SIGTERM → drain).

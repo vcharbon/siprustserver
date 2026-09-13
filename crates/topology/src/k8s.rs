@@ -121,6 +121,10 @@ impl Membership for K8sMembership {
     fn synced(&self) -> bool {
         self.synced.load(std::sync::atomic::Ordering::SeqCst)
     }
+    /// The slice set of the pool holds the watching worker's own endpoint.
+    fn observes_self(&self) -> bool {
+        true
+    }
 }
 
 /// Translate a set of EndpointSlices into the desired [`Peer`] set: one peer per

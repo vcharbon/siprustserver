@@ -14,6 +14,13 @@
 //!   `(ordinal, flow)`.
 //! - `AddressChanged` → reconnect both flows to the new addr from the retained W.
 //!
+//! Every snapshot is also read for this node's **own** endpoint before self is
+//! filtered out of the desired set: once seen routable, its disappearance is the
+//! node's withdrawal from routing (ADR-0031 D6, [`SelfEndpoint`]), exposed as
+//! [`is_withdrawn`](ReplicationSupervisor::is_withdrawn) and on a watch the core
+//! turns into the `Draining` latch. Only a source that shows a member itself
+//! ([`Membership::observes_self`]) is read this way.
+//!
 //! ## Boot order: Reclaim first, Backup deferred
 //! A rebooting node prioritises reclaiming **its own** partition over taking on
 //! backup duty for others. Reclaim streams open immediately; the Backup streams
@@ -49,6 +56,7 @@ use tokio::sync::{mpsc, watch};
 use topology::{Membership, Peer};
 
 use super::puller::{Puller, PullerConfig, PullerStatus};
+use super::self_endpoint::{SelfEndpoint, SelfObserver};
 use super::ReplicatingCallStore;
 
 /// Default cadence of the supervisor's belt-and-suspenders snapshot reconcile
@@ -225,6 +233,8 @@ pub struct ReplicationSupervisor {
 
 struct SupervisorInner {
     self_ordinal: String,
+    /// This node's own endpoint as the membership shows it (ADR-0031 D6).
+    self_endpoint: SelfObserver,
     network: Arc<dyn ReplicationNetwork>,
     store: ReplicatingCallStore,
     resolve: AddrResolver,
@@ -303,8 +313,10 @@ impl ReplicationSupervisor {
         config: PullerConfig,
         metrics: crate::metrics::B2buaMetrics,
     ) -> Self {
+        let self_ordinal = self_ordinal.into();
         Self {
             inner: Arc::new(SupervisorInner {
+                self_endpoint: SelfObserver::new(self_ordinal.clone()),
                 self_ordinal: self_ordinal.into(),
                 network,
                 store,
@@ -341,6 +353,9 @@ impl ReplicationSupervisor {
     /// handling (ADR-0012 D1/D2).
     pub fn start(&self, membership: Arc<dyn Membership>) {
         *self.inner.membership.lock().unwrap() = Some(membership.clone());
+        if membership.observes_self() {
+            self.inner.self_endpoint.enable();
+        }
         let this = self.clone();
         let period = self.inner.reconcile_period;
         let handle =
@@ -419,6 +434,7 @@ impl ReplicationSupervisor {
     /// loop vs. the backup gate) cannot interleave check-then-spawn and
     /// double-spawn a flow.
     fn reconcile_from_snapshot(&self, snapshot: Vec<Peer>) {
+        self.observe_self(&snapshot);
         let desired: Vec<Peer> =
             snapshot.into_iter().filter(|p| p.ordinal != self.inner.self_ordinal).collect();
         let backup_enabled = self.inner.backup_enabled.load(Ordering::SeqCst);
@@ -477,6 +493,29 @@ impl ReplicationSupervisor {
                 entry.park();
             }
         }
+    }
+
+    /// Read this node's own endpoint out of `snapshot` (ADR-0031 D6). A
+    /// withdrawal raises the `b2bua_withdrawn_running` gauge; the readiness
+    /// latch follows through [`self_endpoint`](Self::self_endpoint).
+    fn observe_self(&self, snapshot: &[Peer]) {
+        let synced = self.membership_synced();
+        if let Some(SelfEndpoint::Withdrawn(_)) = self.inner.self_endpoint.observe(snapshot, synced)
+        {
+            self.inner.metrics.set_withdrawn_running(true);
+        }
+    }
+
+    /// Whether this node has observed its own endpoint withdrawn from routing
+    /// (ADR-0031 D6): nothing new is routed here. Sticky. Always `false` on a
+    /// membership that does not show the node itself (static list).
+    pub fn is_withdrawn(&self) -> bool {
+        self.inner.self_endpoint.is_withdrawn()
+    }
+
+    /// The node's own endpoint state, as a watch that wakes on each transition.
+    pub fn self_endpoint(&self) -> watch::Receiver<SelfEndpoint> {
+        self.inner.self_endpoint.subscribe()
     }
 
     /// (Re)spawn one flow's puller into `flow`, seeded from its retained W. Cancels
@@ -670,6 +709,11 @@ impl ReplicationSupervisor {
             Some(e) if e.reclaim.status_rx.is_some() => PeerLink::Active,
             Some(_) => PeerLink::Parked,
         }
+    }
+
+    /// The metrics handle this supervisor and its pullers write.
+    pub fn metrics(&self) -> &crate::metrics::B2buaMetrics {
+        &self.inner.metrics
     }
 
     /// Whether the **Reclaim** puller is currently running (not Parked) for `peer`.
