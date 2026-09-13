@@ -298,6 +298,10 @@ pub struct RunnerEnv {
     pub limiter_refresh_sec: i64,
     /// `B2BUA_DRAIN_GRACE_MS` — SIGTERM drain grace before exit (default 5000).
     pub drain_grace_ms: u64,
+    /// `B2BUA_DRAIN_MIN_MS` — floor a withdrawn worker's caught-up drain exit
+    /// waits out, so a request routed before the withdrawal reached the proxy is
+    /// still served (default 1000; ADR-0031 D2).
+    pub drain_min_ms: u64,
 }
 
 impl RunnerEnv {
@@ -394,6 +398,7 @@ impl RunnerEnv {
             limiter_timeout_ms: env_or("LIMITER_TIMEOUT_MS", "150").parse().unwrap_or(150),
             limiter_refresh_sec: env_or("LIMITER_WINDOW_SECONDS", "300").parse().unwrap_or(300),
             drain_grace_ms: env_or("B2BUA_DRAIN_GRACE_MS", "5000").parse().unwrap_or(5000),
+            drain_min_ms: env_or("B2BUA_DRAIN_MIN_MS", "1000").parse().unwrap_or(1000),
         }
     }
 
@@ -805,12 +810,14 @@ impl RunnerBase {
 
     /// Graceful shutdown: SIGTERM (k8s pod termination) latches Draining —
     /// OPTIONS self-reports 503 and the readiness probe flips NotReady so the
-    /// proxy steers new calls away — then waits up to the drain grace
-    /// (`B2BUA_DRAIN_GRACE_MS`) for in-flight calls to finish. Ctrl-C
+    /// proxy steers new calls away — then waits for the first of: the in-flight
+    /// calls finishing, a withdrawn worker's backups holding them past
+    /// `B2BUA_DRAIN_MIN_MS` (ADR-0031 D2), or `B2BUA_DRAIN_GRACE_MS`. Ctrl-C
     /// (interactive) exits immediately. Returns when the process should exit.
     pub async fn run_until_shutdown(&self, core: &Arc<B2buaCore>) {
         let name = &self.name;
         let drain_grace_ms = self.env.drain_grace_ms;
+        let drain_min_ms = self.env.drain_min_ms;
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!(service = name, signal = "SIGINT", "shutting down");
@@ -820,20 +827,34 @@ impl RunnerBase {
                     service = name,
                     signal = "SIGTERM",
                     drain_grace_ms,
+                    drain_min_ms,
                     "begin draining"
                 );
-                // Latch Draining, then wait for the live call map to clear —
-                // capped at the grace. A node with no calls exits at once; a
-                // busy node is bounded; a residual is logged, never silently cut.
-                let residual = core.drain(std::time::Duration::from_millis(drain_grace_ms)).await;
-                if residual == 0 {
-                    tracing::info!(service = name, residual = 0, "drained cleanly — exiting");
-                } else {
-                    tracing::warn!(
-                        service = name,
-                        residual,
-                        "drain grace elapsed with calls still active — exiting"
-                    );
+                // Latch Draining, then wait. A node with no calls exits at once;
+                // a withdrawn node whose backups hold its calls exits past the
+                // floor; anything else is bounded by the grace. The exit reason
+                // and the residual are logged, never silently cut.
+                let out = core
+                    .drain(b2bua::drain::DrainBounds {
+                        grace: std::time::Duration::from_millis(drain_grace_ms),
+                        floor: std::time::Duration::from_millis(drain_min_ms),
+                    })
+                    .await;
+                let reason = out.exit.label();
+                let residual = out.residual;
+                match out.exit {
+                    b2bua::drain::DrainExit::Quiescent | b2bua::drain::DrainExit::CaughtUp => {
+                        tracing::info!(service = name, reason, residual, "drained — exiting");
+                    }
+                    b2bua::drain::DrainExit::Grace
+                    | b2bua::drain::DrainExit::GracePeersBehind => {
+                        tracing::warn!(
+                            service = name,
+                            reason,
+                            residual,
+                            "drain grace elapsed with calls still active — exiting"
+                        );
+                    }
                 }
             }
         }

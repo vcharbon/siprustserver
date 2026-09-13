@@ -288,6 +288,7 @@ pub fn frame_summary(frame: &Frame) -> String {
         }
         Frame::Noop { at } => format!("Noop at=({},{})", at.gen, at.counter),
         Frame::ResetToBootstrap { reason } => format!("ResetToBootstrap reason={reason}"),
+        Frame::Position { at } => format!("Position applied=({},{})", at.gen, at.counter),
     }
 }
 

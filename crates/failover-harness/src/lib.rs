@@ -31,6 +31,7 @@ pub mod runner;
 pub mod scenario;
 pub mod views;
 
+pub use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
 pub use combine::{combine_doc, WorkerAxis};
 pub use cookie::{cookie_field, worker_ordinals};
 pub use harness::{

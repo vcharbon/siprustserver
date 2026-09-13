@@ -86,6 +86,11 @@ const ALIVE_AT: i64 = 2_200;
 /// so case A's kill lands inside the drain and case B's drain runs it out.
 const GRACE: Duration = Duration::from_secs(5);
 
+/// The drain's bounds: the same 5 s ceiling, with the caught-up exit's 1 s floor
+/// (ADR-0031 D2) — a request routed before the withdrawal is still served.
+const BOUNDS: failover_harness::DrainBounds =
+    failover_harness::DrainBounds { grace: GRACE, floor: Duration::from_millis(1000) };
+
 /// The deployed shape: a failover-capable route (callback context) arming the
 /// per-b-leg `NoAnswer`, whose `no_answer_timeout` failure consult answers with
 /// a `480` reject.
@@ -427,7 +432,7 @@ async fn run(name: &str, title: &str, removal: Removal) {
             elder.crash();
             None
         }
-        _ => Some(fh.begin_drain_pending(elder, GRACE)),
+        _ => Some(fh.begin_drain_pending(elder, BOUNDS)),
     };
 
     // ── t0 + 0.4 s (A, C): a replacement of the SAME ordinal, alongside ──────
@@ -498,16 +503,31 @@ async fn run(name: &str, title: &str, removal: Removal) {
                 failover_harness::PeerLink::Kept,
                 "the survivor keeps pulling the terminating member"
             );
-            let mut residual = None;
+            let mut outcome = None;
             for _ in 0..120 {
                 fh.advance(Duration::from_millis(100)).await;
-                if let Some(r) = drain.as_mut().and_then(|d| d.poll()) {
-                    residual = Some(r);
+                if let Some(o) = drain.as_mut().and_then(|d| d.poll()) {
+                    outcome = Some(o);
                     break;
                 }
             }
             drop(drain.take());
-            let residual = residual.expect("the drain returned inside its grace");
+            let outcome = outcome.expect("the drain returned inside its grace");
+            // D1 keeps the survivor pulling, so the elder's last flushes land and
+            // its Backup flow reports the head: the drain exits on the peers
+            // holding the call, not on the ceiling (ADR-0031 D2).
+            assert_eq!(
+                outcome.exit,
+                failover_harness::DrainExit::CaughtUp,
+                "the drain exited on its backup holding the call, in {:?}",
+                outcome.elapsed
+            );
+            assert!(
+                outcome.elapsed < GRACE,
+                "the caught-up exit is inside the grace, got {:?}",
+                outcome.elapsed
+            );
+            let residual = outcome.residual;
             let survivor_view = fh.view_ledger().beliefs(&survivor_key, &pri_ord);
             assert!(
                 !survivor_view.contains(&Belief::PeerParked),

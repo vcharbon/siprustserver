@@ -39,6 +39,8 @@ spec:
       nodeSelector: { tier: app }
       # Drain grace: SIGTERM latches Draining (OPTIONS 503 + /ready NotReady),
       # the runner waits B2BUA_DRAIN_GRACE_MS, then exits. Keep this > grace.
+      # A withdrawn worker exits earlier, once past B2BUA_DRAIN_MIN_MS every live
+      # call's backup has applied its changelog head (ADR-0031 D2).
       terminationGracePeriodSeconds: 30
       containers:
         - name: b2bua-worker
@@ -160,6 +162,7 @@ spec:
             - { name: B2BUA_REPL_PORT,      value: "${REPL_PORT}" }
             - { name: B2BUA_REPL_SERVICE,   value: "b2bua-worker" }
             - { name: B2BUA_DRAIN_GRACE_MS, value: "5000" }
+            - { name: B2BUA_DRAIN_MIN_MS,   value: "1000" }
             # The binary uses jemalloc (#[global_allocator], see b2bua-runner
             # src/main.rs). The 2026-06-14 probe proved the RSS climb is a REAL
             # APP LEAK — jemalloc_allocated (live heap) grows ~176 MB/h at flat

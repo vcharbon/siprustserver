@@ -8,6 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::tier1_brake::Tier1BrakeCounters;
 
+/// Upper bounds (seconds) of the `b2bua_drain_seconds` buckets, ascending; the
+/// implicit `+Inf` bucket is the observation count.
+const DRAIN_BUCKETS: [f64; 8] = [0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0];
+
 /// The `b2bua_retransmits_total` row key: method uppercased, the code's
 /// digits or nothing for a request.
 fn retransmit_key(ladder: &str, method: &str, code: Option<u16>) -> String {
@@ -40,6 +44,16 @@ struct Inner {
     // all the peer's reclaimable/backed-up calls. A flatlined series names a stuck
     // serve loop / dead subscriber the body-count gauges can't see.
     repl_noops_sent: Mutex<BTreeMap<String, u64>>,
+    // Why each drain returned, keyed by reason label (`quiescent`, `caught_up`,
+    // `grace`, `grace_peers_behind` — ADR-0031 D2). `grace_peers_behind` means a
+    // departing worker abandoned live calls no peer reported holding: a lost
+    // flush window, the one reason that must never be read as a clean drain.
+    drain_exits: Mutex<BTreeMap<String, u64>>,
+    // Time-in-drain: fixed-bucket cumulative counts (`le` in seconds), the sum in
+    // milliseconds and the observation count.
+    drain_seconds_buckets: [AtomicU64; DRAIN_BUCKETS.len()],
+    drain_seconds_sum_ms: AtomicU64,
+    drain_seconds_count: AtomicU64,
     // dispatcher
     queue_drops: AtomicU64,
     cap_drops: AtomicU64,
@@ -323,6 +337,26 @@ impl B2buaMetrics {
     pub fn record_repl_noop_sent(&self, flow: &str, peer: &str) {
         *self.inner.repl_noops_sent.lock().unwrap().entry(format!("{flow}|{peer}")).or_insert(0) +=
             1;
+    }
+
+    /// Record one completed drain: its reason label into
+    /// `b2bua_drain_exits_total{reason}` and its duration into the
+    /// `b2bua_drain_seconds` histogram (ADR-0031 D2).
+    pub fn record_drain_exit(&self, reason: &str, elapsed: std::time::Duration) {
+        *self.inner.drain_exits.lock().unwrap().entry(reason.to_string()).or_insert(0) += 1;
+        let secs = elapsed.as_secs_f64();
+        for (i, le) in DRAIN_BUCKETS.iter().enumerate() {
+            if secs <= *le {
+                self.inner.drain_seconds_buckets[i].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.inner.drain_seconds_sum_ms.fetch_add(elapsed.as_millis() as u64, Ordering::Relaxed);
+        self.inner.drain_seconds_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Drains that returned for `reason` (test/observability).
+    pub fn drain_exits(&self, reason: &str) -> u64 {
+        self.inner.drain_exits.lock().unwrap().get(reason).copied().unwrap_or(0)
     }
 
     /// Count one inbound request by SIP method, for `b2bua_requests_total{method}`.
@@ -753,6 +787,21 @@ impl B2buaMetrics {
                 "b2bua_repl_noops_sent_total{{flow=\"{flow}\",peer=\"{peer}\"}} {v}\n"
             ));
         }
+
+        s.push_str("# HELP b2bua_drain_exits_total drains by why they returned (reason=quiescent|caught_up|grace|grace_peers_behind, ADR-0031 D2); grace_peers_behind means a departing worker abandoned live calls no peer reported holding — a lost flush window, never a clean drain\n# TYPE b2bua_drain_exits_total counter\n");
+        for (reason, v) in self.inner.drain_exits.lock().unwrap().iter() {
+            s.push_str(&format!("b2bua_drain_exits_total{{reason=\"{reason}\"}} {v}\n"));
+        }
+        let drain_count = self.inner.drain_seconds_count.load(Ordering::Relaxed);
+        let drain_sum_s = self.inner.drain_seconds_sum_ms.load(Ordering::Relaxed) as f64 / 1_000.0;
+        s.push_str("# HELP b2bua_drain_seconds time a graceful drain spent waiting before it returned (ADR-0031 D2)\n# TYPE b2bua_drain_seconds histogram\n");
+        for (i, le) in DRAIN_BUCKETS.iter().enumerate() {
+            let n = self.inner.drain_seconds_buckets[i].load(Ordering::Relaxed);
+            s.push_str(&format!("b2bua_drain_seconds_bucket{{le=\"{le}\"}} {n}\n"));
+        }
+        s.push_str(&format!("b2bua_drain_seconds_bucket{{le=\"+Inf\"}} {drain_count}\n"));
+        s.push_str(&format!("b2bua_drain_seconds_sum {drain_sum_s}\n"));
+        s.push_str(&format!("b2bua_drain_seconds_count {drain_count}\n"));
 
         // Gauges last (direct writes — they end the `counter` closure's borrow).
         s.push_str("# HELP b2bua_active_calls live calls this worker is serving (creations - removals; now a true gauge since the two are paired)\n# TYPE b2bua_active_calls gauge\n");
@@ -1276,6 +1325,26 @@ mod tests {
         assert!(txt.contains("b2bua_requests_total{method=\"BYE\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"INVITE\",code=\"200\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"BYE\",code=\"200\"} 1"));
+    }
+
+    #[test]
+    fn drain_exits_and_duration_render() {
+        let m = B2buaMetrics::new();
+        m.record_drain_exit("caught_up", std::time::Duration::from_millis(1_200));
+        m.record_drain_exit("grace_peers_behind", std::time::Duration::from_secs(5));
+        assert_eq!(m.drain_exits("caught_up"), 1);
+        assert_eq!(m.drain_exits("grace_peers_behind"), 1);
+        assert_eq!(m.drain_exits("quiescent"), 0);
+        let txt = m.prometheus_text();
+        assert!(txt.contains("b2bua_drain_exits_total{reason=\"caught_up\"} 1"));
+        assert!(txt.contains("b2bua_drain_exits_total{reason=\"grace_peers_behind\"} 1"));
+        // 1.2 s falls in every bucket from 2 up; 5 s in the 5 and 10 buckets.
+        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"1\"} 0"));
+        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"2\"} 1"));
+        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"5\"} 2"));
+        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"+Inf\"} 2"));
+        assert!(txt.contains("b2bua_drain_seconds_sum 6.2"));
+        assert!(txt.contains("b2bua_drain_seconds_count 2"));
     }
 
     #[test]

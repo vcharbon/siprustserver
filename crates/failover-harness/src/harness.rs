@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use b2bua::cdr::{CdrRecord, InMemoryCdrWriter};
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
+use b2bua::drain::{DrainBounds, DrainExit, DrainOutcome};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::repl::{Changelog, ReplicatingCallStore};
@@ -557,10 +558,11 @@ impl ReplicatedB2buaSut {
 
     /// Begin a graceful drain of this incarnation ([`B2buaCore::drain`]): latch
     /// `Draining` — the proxy's OPTIONS probe then steers new calls away — and
-    /// wait for the live calls to clear, bounded by `grace`. Returns the
-    /// residual live-call count (`0` ⇒ fully quiesced). The process keeps
-    /// serving throughout: draining is not death.
-    pub async fn begin_drain(&self, grace: Duration) -> usize {
+    /// wait for the first of the live calls clearing, a withdrawn worker's
+    /// backups holding them past the floor, or the grace. Returns the named
+    /// exit + residual. The process keeps serving throughout: draining is not
+    /// death.
+    pub async fn begin_drain(&self, bounds: DrainBounds) -> DrainOutcome {
         self.views.record(
             &self.incarnation_key(),
             &self.ordinal,
@@ -568,16 +570,18 @@ impl ReplicatedB2buaSut {
             "drain",
         );
         match self.core.as_ref() {
-            Some(core) => core.drain(grace).await,
-            None => 0,
+            Some(core) => core.drain(bounds).await,
+            None => {
+                DrainOutcome { exit: DrainExit::Quiescent, residual: 0, elapsed: Duration::ZERO }
+            }
         }
     }
 
     /// [`begin_drain`](Self::begin_drain) without the wait: latch `Draining`
     /// now and hand the wait back as a [`PendingDrain`] the test polls while it
-    /// drives the timeline. The wait holds only the core's active-call probe, so
-    /// the process can still be killed mid-drain.
-    pub fn begin_drain_detached(&self, grace: Duration) -> PendingDrain {
+    /// drives the timeline. The wait holds only the core's owned probes, so the
+    /// process can still be killed mid-drain.
+    pub fn begin_drain_detached(&self, bounds: DrainBounds) -> PendingDrain {
         self.views.record(
             &self.incarnation_key(),
             &self.ordinal,
@@ -586,16 +590,29 @@ impl ReplicatedB2buaSut {
         );
         let probe = self.core.as_ref().map(|core| {
             core.begin_draining();
-            core.active_calls_probe()
+            core.drain_probe()
         });
+        let metrics = self.core.as_ref().map(|core| core.metrics().clone());
         let mut pending = PendingDrain {
             fut: Box::pin(async move {
                 match probe {
-                    Some(p) => b2bua::drain::drain_until_quiescent(move || p(), grace).await,
-                    None => 0,
+                    Some(p) => {
+                        let out = b2bua::drain::drain_until_quiescent(p, bounds).await;
+                        // The detached wait stands in for `B2buaCore::drain`, so
+                        // it records the same exit reason the runner would.
+                        if let Some(m) = metrics {
+                            m.record_drain_exit(out.exit.label(), out.elapsed);
+                        }
+                        out
+                    }
+                    None => DrainOutcome {
+                        exit: DrainExit::Quiescent,
+                        residual: 0,
+                        elapsed: Duration::ZERO,
+                    },
                 }
             }),
-            residual: None,
+            outcome: None,
         };
         // One poll arms the first poll-interval sleep on the paused clock.
         pending.poll();
@@ -989,22 +1006,23 @@ fn repl_addr_for(index: usize) -> SocketAddr {
 /// kill the process mid-drain. Created by
 /// [`FailoverHarness::begin_drain_pending`].
 pub struct PendingDrain {
-    fut: std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send>>,
-    residual: Option<usize>,
+    fut: std::pin::Pin<Box<dyn std::future::Future<Output = DrainOutcome> + Send>>,
+    outcome: Option<DrainOutcome>,
 }
 
 impl PendingDrain {
-    /// The residual live-call count once the drain has returned (`0` ⇒ fully
-    /// quiesced), `None` while it still waits. Re-polls the drain, so call it
-    /// after every advance — nothing else drives this future.
-    pub fn poll(&mut self) -> Option<usize> {
-        if self.residual.is_none() {
+    /// The drain's outcome once it has returned — why it exited, the residual
+    /// live-call count and how long it waited — `None` while it still waits.
+    /// Re-polls the drain, so call it after every advance: nothing else drives
+    /// this future.
+    pub fn poll(&mut self) -> Option<DrainOutcome> {
+        if self.outcome.is_none() {
             let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-            if let std::task::Poll::Ready(n) = self.fut.as_mut().poll(&mut cx) {
-                self.residual = Some(n);
+            if let std::task::Poll::Ready(out) = self.fut.as_mut().poll(&mut cx) {
+                self.outcome = Some(out);
             }
         }
-        self.residual
+        self.outcome
     }
 }
 
@@ -1658,6 +1676,12 @@ impl FailoverHarness {
             membership.set_conditions(ordinal, ready, terminating);
             self.views.record(&observer, ordinal, belief, signal);
         }
+        // The informer shows a worker its own endpoint too: a condition flip
+        // reaches the member itself, which is how it observes its own
+        // withdrawal (ADR-0031 D6).
+        for (_, membership) in self.views.live_incarnations_of(ordinal) {
+            membership.set_conditions(ordinal, ready, terminating);
+        }
     }
 
     /// **Depart `ordinal`: its endpoint leaves the slice** — the pod is gone
@@ -1769,12 +1793,16 @@ impl FailoverHarness {
     }
 
     /// **Begin a graceful drain of `node`** ([`B2buaCore::drain`]): latch
-    /// `Draining` — so the proxy steers new calls away — and wait for its live
-    /// calls to clear, bounded by `grace`. Returns the residual live-call count
-    /// (`0` ⇒ fully quiesced). The process keeps serving throughout.
-    pub async fn begin_drain(&mut self, node: &ReplicatedB2buaSut, grace: Duration) -> usize {
-        self.mark(node.ordinal(), None, "drain", &format!("grace={:?}", grace));
-        node.begin_drain(grace).await
+    /// `Draining` — so the proxy steers new calls away — and wait out its
+    /// bounds. Returns the named exit + residual live-call count. The process
+    /// keeps serving throughout.
+    pub async fn begin_drain(
+        &mut self,
+        node: &ReplicatedB2buaSut,
+        bounds: DrainBounds,
+    ) -> DrainOutcome {
+        self.mark(node.ordinal(), None, "drain", &format!("{bounds:?}"));
+        node.begin_drain(bounds).await
     }
 
     /// **Begin a graceful drain of `node` WITHOUT waiting for it** — the same
@@ -1785,10 +1813,10 @@ impl FailoverHarness {
     pub fn begin_drain_pending(
         &mut self,
         node: &ReplicatedB2buaSut,
-        grace: Duration,
+        bounds: DrainBounds,
     ) -> PendingDrain {
-        self.mark(node.ordinal(), None, "drain", &format!("grace={grace:?}, not awaited"));
-        node.begin_drain_detached(grace)
+        self.mark(node.ordinal(), None, "drain", &format!("{bounds:?}, not awaited"));
+        node.begin_drain_detached(bounds)
     }
 
     /// The views ledger — every observer's belief about every worker, and when
