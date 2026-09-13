@@ -6,7 +6,7 @@
 //! [`super::ladder`].
 
 use call::helpers::{set_leg_state, Scope};
-use call::{Call, LegState};
+use call::{Call, LegState, TimerType};
 use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateResponseOpts};
 use sip_message::header::{HeaderClass, HeaderName};
@@ -418,6 +418,21 @@ impl ActionExecutor<'_> {
         self.send_a_leg_answer(call, fx, effect);
         // The caller now holds a confirmed dialog under A2 — confirm the a-leg.
         *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
+        // An answer the B2BUA authors on its own behalf is an answer the caller
+        // receives: under the `Answer` anchor the overall call ceiling runs from
+        // it (`MaxDurationAnchor`), as `confirm-dialog` anchors it at a 2xx it
+        // relays. Under `Creation` the creation-time arm stands.
+        if let Some(platform) = call.features.as_ref().map(|f| f.platform.clone()) {
+            if platform.max_duration_anchor == call::features::MaxDurationAnchor::Answer {
+                self.schedule(
+                    call,
+                    fx,
+                    TimerType::GlobalDuration,
+                    platform.max_duration_sec * 1000,
+                    None,
+                );
+            }
+        }
     }
 }
 

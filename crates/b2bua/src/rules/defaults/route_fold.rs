@@ -128,12 +128,16 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
     let mut actions = Vec::new();
     if let Some(f) = &fold.features {
         // Re-arm the duration cap from the reroute's features, as the initial
-        // path does at route time (ScheduleTimer id-dedups).
-        actions.push(RuleAction::ScheduleTimer {
-            timer_type: TimerType::GlobalDuration,
-            delay: TimerDelay::secs(f.platform.max_duration_sec),
-            leg_id: None,
-        });
+        // path does at route time (ScheduleTimer id-dedups) — under the same
+        // anchor: with the cap anchored at the answer, the answer this fold leads
+        // to arms it (`MaxDurationAnchor`).
+        if f.platform.arms_cap_at_creation(ctx.config.setup_timeout_sec) {
+            actions.push(RuleAction::ScheduleTimer {
+                timer_type: TimerType::GlobalDuration,
+                delay: TimerDelay::secs(f.platform.max_duration_sec),
+                leg_id: None,
+            });
+        }
         actions.push(RuleAction::SetFeatures { features: f.clone() });
     }
     if !fold.service_ext.is_empty() {
