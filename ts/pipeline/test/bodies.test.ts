@@ -1,8 +1,9 @@
 /**
  * The expect side of the body registry: a frozen text body is stored and
- * asserted by content, SDP and multipart by shape, absence as its own claim,
- * and a binary payload stays undeclared. The send side is covered where the
- * flow is synthesized (`flowsteps.test.ts`).
+ * asserted by content, an SDP stored and compared as a session description,
+ * multipart by shape, absence as its own claim, and a binary payload stays
+ * undeclared. The send side is covered where the flow is synthesized
+ * (`flowsteps.test.ts`).
  */
 import type { Flows } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
@@ -63,12 +64,22 @@ describe("expectBody", () => {
     expect(stored.flags.map((f) => f.kind)).toEqual(["unrecognized-body-part"])
   })
 
-  it("asserts SDP, multipart and absence by shape, with no resource", () => {
+  it("stores an SDP as a resource compared as a session description, under the registry's rewrite tokens", () => {
     const sdp = response({
       callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE",
       src: sut, dst: caller, ts_ms: 1_000, toTag: "sut-tag", sdp: "v=0\r\n"
     })
-    expect(expectBody(sdp, "uac1_r0")).toEqual({ body: { mode: "sdp-present" }, resources: [], flags: [] })
+    expect(expectBody(sdp, "uac1_r0")).toEqual({
+      body: { ref: "resources/uac1_r0_0.sdp", rewrite: ["c=addr", "m=port"], compare: "sdp" },
+      resources: [{ relPath: "resources/uac1_r0_0.sdp", text: "v=0\r\n" }],
+      flags: []
+    })
+    // A parameterised type is stated, as on the send side; bare `application/sdp` is derived.
+    const typed = expectBody(info({ contentType: "application/sdp;charset=utf-8", text: "v=0\r\n" }), "uac1_r0")
+    expect(typed.body).toMatchObject({ "content-type": "application/sdp;charset=utf-8", compare: "sdp" })
+  })
+
+  it("asserts multipart and absence by shape, with no resource", () => {
     const mixed = info({ contentType: 'multipart/mixed;boundary="b"', text: "--b\r\n--b--\r\n" })
     expect(expectBody(mixed, "uac1_r0")).toEqual({ body: { mode: "multipart-present" }, resources: [], flags: [] })
     const bare = request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: caller, dst: sut, ts_ms: 1_005, toTag: "sut-tag" })
@@ -135,5 +146,41 @@ describe("an expected body in a synthesized flow", () => {
     expect(byPath.get(refOf(sent))).toBe(XML)
     expect(byPath.get(refOf(expected))).toBe(XML)
     expect(flow.resources.map((r) => r.relPath)).toHaveLength(new Set(flow.resources.map((r) => r.relPath)).size)
+  })
+
+  it("an SDP relayed on the INVITE is stored on the send and on the expect under two names", () => {
+    const offer = "v=0\r\no=- 1 2 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 6000 RTP/AVP 8\r\n"
+    const flows = doc(
+      [
+        leg(CALLER_CALL_ID, oneHop(caller, sut), [
+          request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: caller, dst: sut, ts_ms: 0, body: { contentType: "application/sdp", text: offer } }),
+          response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 1_000, toTag: "sut-tag" }),
+          request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: caller, dst: sut, ts_ms: 1_005, toTag: "sut-tag" }),
+          request({ callId: CALLER_CALL_ID, seq: 2, method: "BYE", src: caller, dst: sut, ts_ms: 2_000, toTag: "sut-tag" }),
+          response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: sut, dst: caller, ts_ms: 2_005, toTag: "sut-tag" })
+        ]),
+        leg(CALLEE_CALL_ID, oneHop(sut, callee), [
+          request({ callId: CALLEE_CALL_ID, seq: 1, method: "INVITE", src: sut, dst: callee, ts_ms: 10, body: { contentType: "application/sdp", text: offer } }),
+          response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: callee, dst: sut, ts_ms: 990, toTag: "callee-tag" }),
+          request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: sut, dst: callee, ts_ms: 1_010, toTag: "callee-tag" }),
+          request({ callId: CALLEE_CALL_ID, seq: 2, method: "BYE", src: sut, dst: callee, ts_ms: 2_010, toTag: "callee-tag" }),
+          response({ callId: CALLEE_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "BYE", src: callee, dst: sut, ts_ms: 2_015, toTag: "callee-tag" })
+        ])
+      ],
+      [{ legs: [0, 1] }]
+    )
+    const flow = synthesize(flows, build(flows, BOTH, sutSet(), plan(), derivesOnePrefix), plan())
+    const invites = flow.steps.filter((s) => (s.msg.method ?? "").toUpperCase() === "INVITE")
+    const sent = invites.find((s) => s.op === "send")!
+    const expected = invites.find((s) => s.op === "expect")!
+    const refOf = (s: typeof sent) => (s.msg.body as { ref: string }).ref
+    expect(sent.msg.body).toEqual({ ref: refOf(sent), rewrite: ["c=addr", "m=port"] })
+    expect(refOf(sent)).toMatch(/^resources\/[a-z0-9]+_\d+_0\.sdp$/)
+    expect(expected.msg.body).toEqual({ ref: refOf(expected), rewrite: ["c=addr", "m=port"], compare: "sdp" })
+    expect(refOf(expected)).toMatch(/^resources\/[a-z0-9]+_r\d+_0\.sdp$/)
+    expect(refOf(sent)).not.toBe(refOf(expected))
+    const byPath = new Map(flow.resources.map((r) => [r.relPath, r.text]))
+    expect(byPath.get(refOf(sent))).toBe(offer)
+    expect(byPath.get(refOf(expected))).toBe(offer)
   })
 })

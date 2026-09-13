@@ -800,6 +800,37 @@ fn a_body_compare_mode_belongs_to_an_expect_and_to_nothing_else() {
     assert_clean("body/compare-on-send", info("expect", None));
 }
 
+/// §8.3: `compare: sdp` reads a session description, so it rides a body whose
+/// stated content type is `application/sdp` — bare or with parameters — or one
+/// stating no type, which is what a bare `application/sdp` resource omits.
+#[test]
+fn an_sdp_compare_rides_a_session_description_and_nothing_else() {
+    let described = |content_type: Option<&str>, compare: &str| {
+        let content_type = content_type.map(str::to_string);
+        let compare = compare.to_string();
+        move |d: &mut Value| {
+            answered(d);
+            let mut step = json!({
+                "id": "s5", "leg": "B", "op": "expect", "check": "record", "in_dialog": true,
+                "msg": { "method": "INFO", "body": {
+                    "ref": "resources/uas1_r0_0.sdp", "rewrite": ["c=addr", "m=port"],
+                    "compare": compare
+                } },
+                "delay": { "ms": 0, "from": "step:s4", "compressible": true, "timer_linked": false }
+            });
+            if let Some(content_type) = content_type {
+                step["msg"]["body"]["content-type"] = json!(content_type);
+            }
+            flow(d).push(step);
+        }
+    };
+    assert_fires("body/compare-sdp-type", described(Some("application/example+xml"), "sdp"));
+    assert_clean("body/compare-sdp-type", described(None, "sdp"));
+    assert_clean("body/compare-sdp-type", described(Some("application/sdp;charset=utf-8"), "sdp"));
+    assert_clean("body/compare-sdp-type", described(Some("Application/SDP"), "sdp"));
+    assert_clean("body/compare-sdp-type", described(Some("application/example+xml"), "exact"));
+}
+
 /// §6.3: a transaction-derived ACK is composed from the final that answered the
 /// INVITE, so a flow that ACKs a transaction it never finalises names a message
 /// nothing can build.

@@ -70,6 +70,22 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-09-14 — an expected session description is asserted by CONTENT, the
+lane-owned fields masked where the run rebooked them.** An expected SDP was a
+declared shape (`sdp-present`) and nothing read its lines, so a description the
+system altered — a payload dropped from the `m=` list, an `a=fmtp` lost, a
+direction changed, an answer dropped from an ACK — replayed as transparent. The
+generator now stores every expected SDP as a resource compared as a session
+description; the shape stays for an authored document that asserts presence
+only.
+
+| change | where |
+|---|---|
+| `BodyCompare` gains `sdp`: session section then media sections by position, lines per section as a multiset (attribute order erased), `o=` sess-id and sess-version masked always, and every field the expect's own `rewrite` tokens name (`c=addr`: `c=` and `a=rtcp` address; `m=port`: `m=` and `a=rtcp` port) masked where the run's media plane REBOOKED it — on a verbatim run the tokens mask nothing. Refused on a body whose stated content type is not `application/sdp` by `body/compare-sdp-type` | §8.3, `pivot-schema`, `@sip/contracts` |
+| the generator stores an expected SDP as `{ ref, rewrite, compare: "sdp" }` plus its resource file, under the expect-side name `resources/<actor>_r<n>_0.sdp`; multipart stays a shape | §8.3, generator |
+| the interpreter gates a `compare: sdp` resource on presence AND media type, exactly as the `sdp-present` shape gates; the content is the confrontation's | §6.3, §8.3, `pivot-interpreter` |
+| the confrontation states one `body` record per differing line key, `body:sdp:<section>:<line>:<scope>` (sections `session`, `m<i>`), a side that is no session description as one `body:sdp:document:sdp:<scope>` record, a media section on one side only as one `body:sdp:m<i>:section:<scope>` record — every line verbatim; the driver reads the run's media mode off the bundle and hands it to the confrontation | the pipeline's `confront`, `sdpfold`, the driver |
+
 **2026-09-13 — an expected body is asserted by CONTENT, and the confrontation
 states the difference.** A single body on an expect was a declared shape and
 nothing else, so a frozen text body the capture carried — a control document,
@@ -1089,7 +1105,7 @@ do not, and a body stored on them would be emitted by nobody, so lint refuses it
 the **ACK to a non-2xx**, absorbed by the INVITE transaction (RFC 3261
 §17.1.1.3) and reaching no TU that could read one. An EXPECT composes
 nothing — its body, a shape or a resource, asserts what arrived (§8.3) — so an
-expect may state one on any class, and the relayed ACK's `sdp-present` is what
+expect may state one on any class, and the relayed ACK's SDP resource is what
 lets the confrontation see a dropped answer at all.
 
 `cseq` is the CSeq NUMBER the CAPTURE carried, and it is a PAIRING TOKEN: it
@@ -1868,27 +1884,40 @@ render derives exactly, so the stored and derived values cannot drift; an SDP
 body whose captured type carried parameters states them and replays under them.
 
 A single body on an EXPECT is asserted by SHAPE or by CONTENT, and the
-registry decides which. SDP and multipart are shapes —
-`{ "mode": "sdp-present" | "multipart-present" }` — because their content is
-rebooked or reframed at replay; a message that carried no body states
-`{ "mode": "absent" }`, and that IS the assertion. Every other TEXT body the
-registry freezes is stored as a resource and asserted by content, in the same
-form the send side stores it:
+registry decides which. Multipart is a shape — `{ "mode": "multipart-present" }`
+— because it is reframed at replay; a message that carried no body states
+`{ "mode": "absent" }`, and that IS the assertion. Every TEXT body the registry
+freezes is stored as a resource and asserted by content, in the same form the
+send side stores it, and so is every SDP:
 
 ```json
 "body": { "ref": "resources/uas1_r3_0.xml", "mode": "frozen",
           "content-type": "application/example+xml", "compare": "xml" }
+"body": { "ref": "resources/uas1_r0_0.sdp", "rewrite": ["c=addr", "m=port"],
+          "compare": "sdp" }
 ```
 
 `compare` says how the received body is held against the file — `exact`, byte
-for byte, which is what an absent `compare` means, or `xml`: both sides as XML
+for byte, which is what an absent `compare` means; `xml`: both sides as XML
 text after ONE normalisation (the XML declaration dropped, whitespace-only text
 between two tags removed wherever it sits, mixed content included, leading and
 trailing whitespace trimmed) and nothing else — no attribute reordering, no
-entity work. The generator leaves `compare` unstated; `xml` is authored, where
-a document has to say that a re-serialised body is the same body. `compare` on
-a SEND describes a check nobody runs and lint refuses it
-(`body/compare-on-send`).
+entity work; or `sdp`: both sides as a session description — the session
+section then the media sections by position; within a section lines compare
+as a multiset (attribute order erased); `o=` sess-id and sess-version are
+masked always, and every field a `rewrite` token of the expect names
+(`c=addr`: `c=` and `a=rtcp` address; `m=port`: `m=` and `a=rtcp` port) is
+masked where the run's media plane rebooked it. Nothing else. **The tokens
+name WHICH fields are lane-owned; the run's media mode says whether they were
+applied**: on a `verbatim` run the tokens mask nothing, so a `c=` or an `m=`
+the system alters is a difference. The generator stores every expected SDP
+this way and leaves `compare` unstated on every other body; `xml` is authored,
+where a document has to say that a re-serialised body is the same body, and
+`{ "mode": "sdp-present" }` stays an authored shape for a document that
+asserts presence alone. `compare` on a SEND describes a check nobody runs and
+lint refuses it (`body/compare-on-send`); `sdp` on a body whose stated content
+type is not `application/sdp` names a fold that cannot read the file
+(`body/compare-sdp-type`).
 
 The two halves of the assertion run at two times, and only one of them
 depends on `check`. The interpreter gates on PRESENCE alone, and only under
@@ -1897,7 +1926,14 @@ body never abandons the call: the message is answered, the dialog walks to its
 captured teardown, and the post-run confrontation states the difference as a
 `body` record (`body:<type/subtype>:<scope>`, the expected text and the
 received text side by side, both verbatim), which a lane's rule lists then
-classify. A reception carrying NO body where content is asserted is confronted
+classify. Under `sdp` there is one record per differing line key,
+`body:sdp:<section>:<line>:<scope>` — `<section>` is `session` or `m<i>`
+(0-based, wire order), `<line>` is `<type>=` for a session line or `a=<name>`
+for an attribute, the four direction attributes under one key `a=direction` —
+each side carrying that section's verbatim lines of that key in wire order; a
+side that is empty or no session description is one `document:sdp` record
+with both texts whole; a media section on one side only is one `m<i>:section`
+record with that side's lines. A reception carrying NO body where content is asserted is confronted
 as the empty text; under `check: assert` the interpreter also refuses it, and
 under `check: record` — every generated expect — the confrontation's record is
 the only statement of it.
@@ -2520,7 +2556,7 @@ Lint's rule groups:
 | `attempt/*`, `call/*` | `(branch, position)` unique, non-terminal attempts carry a cause, `no_answer_ms` inside the armable band, a `joined_by` leg joins at an unconditional step of its own call that precedes the leg's first message |
 | `claim/*`, `lanes/*` | a lane verdict matches what the document asks the lane to do |
 | `auto/*`, `check/*`, `optional/*`, `delay/*` | what a step may state given its `op` and its `auto` |
-| `body/*` | `compare` rides an expect's resource body and no send's (§8.3) |
+| `body/*` | `compare` rides an expect's resource body and no send's; `sdp` rides an `application/sdp` body (§8.3) |
 | `alt/*` | discriminability: two branches minimum, unique names, none empty, none opening on a `send` or an `optional`, no first message two branches both match |
 | `unordered/*`, `inject/*` | an order-free group holds two or more expects; an injection names an action |
 | `background/*` | a settle-time counter states a bound, and the bounds agree |

@@ -7,7 +7,8 @@
  * captured media type; anything unrecognized is frozen and flagged when it
  * carries number-like digits, so a new handler is a decision and not an
  * omission. The expect side reads the same registry: a frozen TEXT body is
- * stored and asserted by content, SDP and multipart by shape, absence as its
+ * stored and asserted by content, SDP stored and compared as a session
+ * description under its rewrite tokens, multipart by shape, absence as its
  * own claim, and a binary payload stays undeclared — the recording it would be
  * confronted with is text.
  *
@@ -176,17 +177,34 @@ const NO_BODY: StoredBody = { body: { mode: "absent" }, resources: [], flags: []
 
 /**
  * The expect-side body assertion. A frozen TEXT body is stored as a resource
- * and asserted by content (`compare` left absent: exact); SDP and multipart
- * are asserted by shape, absence as its own claim. A binary payload — one
- * extraction handed over as `head` + `body_b64`, whatever its type — stays
- * undeclared: the recording it would be confronted with is text.
+ * and asserted by content (`compare` left absent: exact); an SDP is stored
+ * as a resource under the registry's rewrite tokens and compared as a session
+ * description (`compare: sdp`), the tokens naming the fields the fold masks
+ * where the run rebooked them; multipart is asserted by shape, absence as its
+ * own claim. A binary payload — one extraction handed over as `head` +
+ * `body_b64`, whatever its type — stays undeclared: the recording it would be
+ * confronted with is text.
  */
 export const expectBody = (m: Flows.Msg, slug: string): StoredBody => {
   const payload = wireBody(m)
   if (!payload) return NO_BODY
   if (payload.boundary !== undefined) return { ...NO_BODY, body: { mode: "multipart-present" } }
-  if (mimeKey(payload.mediaType) === "application/sdp") return { ...NO_BODY, body: { mode: "sdp-present" } }
   const h = handlerFor(payload.mediaType)
+  if (mimeKey(payload.mediaType) === "application/sdp") {
+    const relPath = resourceName(slug, 0, payload.mediaType)
+    return {
+      body: {
+        ref: relPath,
+        ...(h.rewrite ? { rewrite: h.rewrite } : {}),
+        ...(payload.contentType === "application/sdp"
+          ? {}
+          : { "content-type": payload.contentType }),
+        compare: "sdp"
+      },
+      resources: [{ relPath, text: payload.text }],
+      flags: []
+    }
+  }
   if (h.mode !== "frozen" || payload.binary) return { ...NO_BODY, body: undefined }
   const relPath = resourceName(slug, 0, payload.mediaType)
   return {

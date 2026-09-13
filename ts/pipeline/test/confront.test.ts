@@ -518,6 +518,64 @@ describe("an expected body held against the one received", () => {
     expect(sent.probes.filter((p) => p.probe.kind === "body")).toEqual([])
   })
 
+  describe("compared as a session description", () => {
+    const SDP_REF = "resources/uas1_r0_0.sdp"
+    const OFFER =
+      "v=0\r\no=- 1 2 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\n" +
+      "m=audio 6000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=ptime:20\r\na=sendrecv\r\n"
+    const described: Body.ResourceBody = { ref: SDP_REF, rewrite: ["c=addr", "m=port"], compare: "sdp" }
+    const sdpInfo = (body: string | undefined): string =>
+      crlf([
+        "INFO sip:callee@127.0.0.1 SIP/2.0",
+        "To: <sip:+331@h.fr>;tag=b",
+        "CSeq: 2 INFO",
+        ...(body === undefined ? [] : ["Content-Type: application/sdp"]),
+        `Content-Length: ${body?.length ?? 0}`
+      ]) + (body ?? "")
+    const runSdp = (received: string | undefined, media?: Bundle.MediaMode) =>
+      confront({
+        pivot: expecting(described),
+        verdict: verdictWith([]),
+        recordings: new Map([
+          ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: sdpInfo(received) }] as Array<Bundle.RecordedMessage>]
+        ]),
+        resources: new Map([[SDP_REF, OFFER]]),
+        ...(media === undefined ? {} : { media })
+      }).probes.filter((p) => p.probe.kind === "body")
+
+    it("one probe per differing line key, signed by section and key, the media type kept as the name", () => {
+      const probes = runSdp(OFFER.replace("a=ptime:20", "a=ptime:30"))
+      expect(probes).toHaveLength(1)
+      const probe = probes[0]!.probe
+      expect(probe.kind === "body" && probe).toMatchObject({
+        step: "s9",
+        mediaType: "application/sdp",
+        compare: "sdp",
+        captured: "a=ptime:20",
+        replayed: "a=ptime:30",
+        sdp: { section: "m0", line: "a=ptime" }
+      })
+      expect(signature(probe)).toBe("body:sdp:m0:a=ptime:request:INFO:in-dialog")
+    })
+
+    it("equal under the mask produces nothing; the mask reads the tokens only where the run rebooked", () => {
+      const rebooked = OFFER.replace("c=IN IP4 192.0.2.10", "c=IN IP4 127.0.0.2").replace("m=audio 6000", "m=audio 40000")
+      expect(runSdp(OFFER.replace("o=- 1 2", "o=- 9 9"))).toEqual([])
+      expect(runSdp(rebooked)).toEqual([])
+      expect(runSdp(rebooked, "rebooked")).toEqual([])
+      expect(runSdp(rebooked, "verbatim").map((p) => signature(p.probe))).toEqual([
+        "body:sdp:session:c=:request:INFO:in-dialog",
+        "body:sdp:m0:m=:request:INFO:in-dialog"
+      ])
+    })
+
+    it("a body the system dropped whole is one `document` row, the captured text against the empty one", () => {
+      const probes = runSdp(undefined)
+      expect(probes.map((p) => signature(p.probe))).toEqual(["body:sdp:document:sdp:request:INFO:in-dialog"])
+      expect(probes[0]!.probe.kind === "body" && probes[0]!.probe).toMatchObject({ captured: OFFER, replayed: "" })
+    })
+  })
+
   it("a status-substituted step keeps the substitution alone: its body probe is dropped with its header probes", () => {
     const answer = (status: number, body: string): string =>
       crlf([

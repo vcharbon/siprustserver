@@ -18,11 +18,14 @@ export const BodyMode = Schema.Literals(["frozen", "frozen-binary"])
 export type BodyMode = typeof BodyMode.Type
 
 /**
- * How an expect holds the received body against its resource: byte for byte,
- * or as XML text after normalisation (declaration dropped, whitespace-only text
- * between tags removed, ends trimmed — nothing else). Absent means `exact`.
+ * How an expect holds the received body against its resource: byte for byte;
+ * as XML text after normalisation (declaration dropped, whitespace-only text
+ * between tags removed, ends trimmed — nothing else); or as an SDP session
+ * description (sections by position, lines per section as a multiset, `o=`
+ * sess-id and sess-version masked always, the fields the expect's `rewrite`
+ * tokens name masked where the run rebooked media). Absent means `exact`.
  */
-export const BodyCompare = Schema.Literals(["exact", "xml"])
+export const BodyCompare = Schema.Literals(["exact", "xml", "sdp"])
 export type BodyCompare = typeof BodyCompare.Type
 
 /** The declared shape of an expected body. */

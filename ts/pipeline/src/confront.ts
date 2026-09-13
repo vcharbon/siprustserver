@@ -13,10 +13,12 @@
  *   `unreferenced` — never an empty difference list. Each probe also carries
  *   the relay input the run drove for that message, so a rule can tell a header
  *   the system dropped from one it was never handed.
- * - **bodies** — each such reception whose `expect` states a frozen text
- *   resource is held against that resource's text, both sides folded under the
+ * - **bodies** — each such reception whose `expect` states a text resource is
+ *   held against that resource's text, both sides folded under the
  *   expectation's `compare` mode; the expected texts come from the caller,
  *   keyed by ref, and a ref the caller did not supply is the caller's error.
+ *   Under `sdp` the fold masks the lane-owned fields the expect's `rewrite`
+ *   names only where the run's media mode says the lane rebooked them.
  * - **shape** — the verdict's structural failures, restated in the delta-record
  *   vocabulary (a final answered with another status, a datagram nothing
  *   expected — serviced by the leg or not — an expectation nothing satisfied).
@@ -30,6 +32,7 @@ import type { Bundle, Deviation, Flow } from "@sip/contracts"
 import { Body, Confrontation, Flows, Pivot } from "@sip/contracts"
 import { mimeKey } from "./bodies.js"
 import { bodiesEqual } from "./bodyfold.js"
+import { diffSdp, maskOf } from "./sdpfold.js"
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
 import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
@@ -53,6 +56,8 @@ export interface ConfrontInput {
   readonly flows?: Flows.FlowsDoc
   /** Resource ref → its text, for every resource body an `expect` step states. */
   readonly resources?: ReadonlyMap<string, string>
+  /** What the run's media plane did to its session descriptions; absent reads as `rebooked`. */
+  readonly media?: Bundle.MediaMode
 }
 
 /** One probe, at the flow step it was observed at (empty when unattributed). */
@@ -271,11 +276,12 @@ const headerProbes = (
 
 /**
  * One probe per recorded reception whose `expect` asserts a text resource body
- * the reception does not carry under the expectation's `compare` mode. A
- * resource body is text unless its `mode` is `frozen-binary`. A reception with
- * no body at all is confronted too, as `""`: the assertion stands whether or
- * not anything arrived. A binary resource asserts presence only, which the
- * interpreter gates, and is not read here.
+ * the reception does not carry under the expectation's `compare` mode — one
+ * per differing line key under `sdp`. A resource body is text unless its
+ * `mode` is `frozen-binary`. A reception with no body at all is confronted
+ * too, as `""`: the assertion stands whether or not anything arrived. A binary
+ * resource asserts presence only, which the interpreter gates, and is not read
+ * here.
  */
 export const bodyProbes = (
   input: ConfrontInput,
@@ -291,15 +297,17 @@ export const bodyProbes = (
       if (body === undefined || !Body.isResourceBody(body) || body.mode === "frozen-binary") continue
       const scope = scopeOfRaw(message.raw)
       if (scope === undefined) continue
-      const probe = bodyProbe(
+      for (const probe of bodyProbe(
         step.id,
         body,
         mediaTypeOf(body, message.raw),
         scope,
         expectedText(input.resources, body.ref),
-        bodyOfRaw(message.raw)
-      )
-      if (probe !== undefined) out.push({ step: step.id, probe })
+        bodyOfRaw(message.raw),
+        input.media ?? "rebooked"
+      )) {
+        out.push({ step: step.id, probe })
+      }
     }
   }
   return out
@@ -326,11 +334,24 @@ const bodyProbe = (
   mediaType: string,
   scope: MsgScope,
   captured: string,
-  replayed: string
-): BodyProbe | undefined => {
+  replayed: string,
+  media: Bundle.MediaMode
+): ReadonlyArray<BodyProbe> => {
   const compare = body.compare ?? "exact"
-  if (bodiesEqual(compare, captured, replayed)) return undefined
-  return { kind: "body", step, mediaType, scope, compare, captured, replayed }
+  if (compare === "sdp") {
+    return diffSdp(maskOf(body.rewrite, media), captured, replayed).map((d) => ({
+      kind: "body",
+      step,
+      mediaType,
+      scope,
+      compare,
+      captured: d.captured.join("\n"),
+      replayed: d.replayed.join("\n"),
+      sdp: { section: d.section, line: d.line }
+    }))
+  }
+  if (bodiesEqual(compare, captured, replayed)) return []
+  return [{ kind: "body", step, mediaType, scope, compare, captured, replayed }]
 }
 
 /** One datagram the run put on the wire toward the system, in run order. */

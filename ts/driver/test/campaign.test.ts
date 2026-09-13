@@ -12,7 +12,17 @@ import { afterEach, describe, expect, it } from "vitest"
 import { exitCodeOf, runCampaign, summarize, type CampaignRun } from "../src/campaign.js"
 import { CAMPAIGN_INDEX, CONFRONTATION_FILE, ERROR_FILE, RULE_HITS_FILE, SKIP_FILE, SPECS_DIR } from "../src/layout.js"
 import { LanePresets, LaneUnknown } from "../src/lanes.js"
-import { caseExpectingBody, caseNamed, caseWithLanes, pivotDocument, rig, runDir, stubTests, type RigOptions } from "./harness.js"
+import {
+  caseExpectingBody,
+  caseExpectingSdp,
+  caseNamed,
+  caseWithLanes,
+  pivotDocument,
+  rig,
+  runDir,
+  stubTests,
+  type RigOptions
+} from "./harness.js"
 
 const CASE = pivotDocument("transparent-defect.v3.json")
 
@@ -140,6 +150,28 @@ describe("an expected body", () => {
         replayed: ["<other/>"]
       }
     ])
+  })
+
+  it("compared as a session description names the differing media line, lane-owned fields aside", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const stored =
+      "v=0\r\no=- 1 2 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\n" +
+      "m=audio 6000 RTP/AVP 8\r\na=sendrecv\r\na=rtpmap:8 PCMA/8000\r\na=ptime:20\r\n"
+    const run = await campaign([replayCell({ case: caseExpectingSdp(cases, stored) })])
+    const cell = run.index.cells[0]!
+    expect(cell.error).toBeUndefined()
+    const records = Confrontation.parseConfrontationLines(
+      fs.readFileSync(path.join(run.dir, cell.dir, CONFRONTATION_FILE), "utf8")
+    )
+    // The stub ran verbatim, so the `c=` address it changed is a row beside
+    // the codec; `o=` and the attribute order are not.
+    expect(records.filter((r) => r.kind === "body").map((r) => [r.signature, r.captured, r.replayed])).toEqual([
+      ["body:sdp:session:c=:request:INFO:in-dialog", ["c=IN IP4 192.0.2.10"], ["c=IN IP4 10.0.0.1"]],
+      ["body:sdp:m0:m=:request:INFO:in-dialog", ["m=audio 6000 RTP/AVP 8"], ["m=audio 4000 RTP/AVP 0"]],
+      ["body:sdp:m0:a=rtpmap:request:INFO:in-dialog", ["a=rtpmap:8 PCMA/8000"], ["a=rtpmap:0 PCMU/8000"]]
+    ])
+    expect(records.filter((r) => r.kind === "body").every((r) => r.name === "application/sdp")).toBe(true)
   })
 })
 

@@ -146,6 +146,11 @@ describe("the untagged shapes", () => {
     const body = (compared.flow[0] as Flow.Step).msg.body
     expect(body !== undefined && Body.isResourceBody(body) && body.compare).toBe("xml")
     expect(() => decodePivotSync(withMsg({ body: { ref: "r.xml", compare: "exact" } }))).not.toThrow()
+    const described = decodePivotSync(
+      withMsg({ body: { ref: "r.sdp", rewrite: ["c=addr", "m=port"], compare: "sdp" } })
+    )
+    const sdp = (described.flow[0] as Flow.Step).msg.body
+    expect(sdp !== undefined && Body.isResourceBody(sdp) && sdp.compare).toBe("sdp")
     expect(() => decodePivotSync(withMsg({ body: { mode: "frozen", compare: "exact" } }))).toThrow()
     expect(() => decodePivotSync(withMsg({ body: { mode: "absent", compare: "exact" } }))).toThrow()
     expect(() => decodePivotSync(withMsg({ body: { ref: "r.xml", compare: "loose" } }))).toThrow()

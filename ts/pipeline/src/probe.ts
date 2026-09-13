@@ -122,7 +122,10 @@ export interface ShapeProbe extends ProbeSite {
 /**
  * A received body that differs from the one the expectation states, both
  * sides as the wire carried them — the fold under `compare` decided there IS
- * a difference and erased nothing from the record of it.
+ * a difference and erased nothing from the record of it. Under `sdp` there
+ * is one probe per differing line key, {@link BodyProbe.sdp} naming the
+ * section and the key, and each side is that key's verbatim lines joined
+ * by `\n`.
  */
 export interface BodyProbe extends ProbeSite {
   readonly kind: "body"
@@ -134,14 +137,20 @@ export interface BodyProbe extends ProbeSite {
   readonly captured: string
   /** The text the run received; `""` where the message carried no body. */
   readonly replayed: string
+  /** Where in the session description the difference sits; set under `sdp` only. */
+  readonly sdp?: { readonly section: string; readonly line: string }
 }
 
 export type Probe = HeaderProbe | ShapeProbe | BodyProbe
 
-/** The stable grouping key, e.g. `header:contact:response:200:INVITE`. */
+/** The stable grouping key, e.g. `header:contact:response:200:INVITE`, `body:sdp:m0:a=rtpmap:response:200:INVITE`. */
 export const signature = (probe: Probe): string => {
   if (probe.kind === "header") return `header:${canonicalName(probe.name)}:${scopeText(probe.scope)}`
-  if (probe.kind === "body") return `body:${probe.mediaType}:${scopeText(probe.scope)}`
+  if (probe.kind === "body") {
+    return probe.sdp === undefined
+      ? `body:${probe.mediaType}:${scopeText(probe.scope)}`
+      : `body:sdp:${probe.sdp.section}:${probe.sdp.line}:${scopeText(probe.scope)}`
+  }
   const base = `shape:${shapeText(probe.shapeKind)}`
   return probe.scope === undefined ? base : `${base}:${scopeText(probe.scope)}`
 }

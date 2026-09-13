@@ -36,7 +36,9 @@ pub struct ResourceBody {
     #[serde(rename = "ref")]
     pub reference: String,
     /// Rewrite tokens the lane applies before emission (e.g. `c=addr`,
-    /// `m=port` on SDP). Omitted where the body replays byte-exact.
+    /// `m=port` on SDP). Omitted where the body replays byte-exact. On an
+    /// expect the tokens name the lane-owned fields the `sdp` compare masks
+    /// where the run rebooked media.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rewrite: Vec<String>,
     /// Handling mode, on a body the registry freezes.
@@ -66,6 +68,13 @@ pub enum BodyCompare {
     /// trailing whitespace trimmed. Nothing else — no attribute reordering, no
     /// entity work.
     Xml,
+    /// As an SDP session description: session section then media sections by
+    /// position; within a section lines compare as a multiset (attribute order
+    /// erased); `o=` sess-id and sess-version are masked always, and every
+    /// field a `rewrite` token of the expect names (`c=addr`: `c=` and
+    /// `a=rtcp` address; `m=port`: `m=` and `a=rtcp` port) is masked where the
+    /// run's media plane rebooked it. Nothing else.
+    Sdp,
 }
 
 /// A body asserted by SHAPE rather than content.
@@ -221,6 +230,14 @@ mod tests {
             panic!("a resource body")
         };
         assert_eq!(exact.compare, Some(BodyCompare::Exact));
+        let sdp =
+            r#"{"ref":"resources/uas1_r0_0.sdp","rewrite":["c=addr","m=port"],"compare":"sdp"}"#;
+        let Body::Resource(described) = parse(sdp) else { panic!("a resource body") };
+        assert_eq!(described.compare, Some(BodyCompare::Sdp));
+        assert_eq!(described.rewrite, ["c=addr", "m=port"]);
+        assert_eq!(serde_json::to_string(&described).unwrap(), sdp);
+        // The shape stays for an authored document that asserts presence only.
+        assert!(matches!(parse(r#"{"mode":"sdp-present"}"#), Body::Shape(_)));
         assert!(serde_json::from_str::<Body>(r#"{"mode":"absent","compare":"exact"}"#).is_err());
         assert!(serde_json::from_str::<Body>(r#"{"mode":"frozen","compare":"exact"}"#).is_err());
         assert!(serde_json::from_str::<Body>(r#"{"ref":"r.xml","compare":"loose"}"#).is_err());

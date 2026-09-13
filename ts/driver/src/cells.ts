@@ -35,6 +35,7 @@ import {
   RESULT_FILE,
   RFC_FILE,
   RULE_HITS_FILE,
+  RUN_CONFIG_FILE,
   runSpecFile,
   SKIP_FILE,
   SPECS_DIR,
@@ -309,11 +310,17 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
       ? undefined
       : yield* Flows.parseFlows(yield* fs.readFileString(cell.flows))
   const resources = yield* readExpectedBodies(path.dirname(yield* documentPath(cell.case)), pivot)
+  // The run configuration states what the media plane did to the session
+  // descriptions the run sent, which decides what an expected SDP is held to.
+  const config = yield* Bundle.decodeRunConfig(
+    JSON.parse(yield* fs.readFileString(path.join(absolute, RUN_CONFIG_FILE))) as unknown
+  )
   const confronted = Confront.confront({
     pivot,
     verdict,
     recordings,
     resources,
+    media: Bundle.mediaModeOf(config),
     ...(flows === undefined ? {} : { flows })
   })
 

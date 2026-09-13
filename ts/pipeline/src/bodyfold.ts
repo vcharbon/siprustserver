@@ -7,14 +7,21 @@
  * `exact` is identity. `xml` erases exactly three things and nothing else:
  * the XML declaration is dropped, whitespace-only text between two tags is
  * removed wherever it sits (mixed content included), and the ends are
- * trimmed. Attributes keep their order and entities stay as written. Widening
- * the fold is how a body oracle goes blind, so what it does not list, it does
- * not do.
+ * trimmed. Attributes keep their order and entities stay as written. `sdp`
+ * reads both sides as a session description under a mask (`./sdpfold.ts`),
+ * the one fold that takes a parameter: the mask is the document's and the
+ * run's, never the fold's own. Widening a fold is how a body oracle goes
+ * blind, so what it does not list, it does not do.
  */
 import type { Body } from "@sip/contracts"
+import { FLOOR, foldSdp, type SdpMask } from "./sdpfold.js"
 
-/** The text a body compares as under `compare`. */
-export const foldBody = (compare: Body.BodyCompare | undefined, text: string): string => {
+/** The text a body compares under `compare`; `mask` reads only under `sdp`. */
+export const foldBody = (
+  compare: Body.BodyCompare | undefined,
+  text: string,
+  mask: SdpMask = FLOOR
+): string => {
   switch (compare ?? "exact") {
     case "exact":
       return text
@@ -23,6 +30,8 @@ export const foldBody = (compare: Body.BodyCompare | undefined, text: string): s
         .replace(/^\s*<\?xml\b[^>]*\?>/, "")
         .replace(/>\s+</g, "><")
         .trim()
+    case "sdp":
+      return foldSdp(mask, text)
   }
 }
 
@@ -30,5 +39,6 @@ export const foldBody = (compare: Body.BodyCompare | undefined, text: string): s
 export const bodiesEqual = (
   compare: Body.BodyCompare | undefined,
   captured: string,
-  replayed: string
-): boolean => foldBody(compare, captured) === foldBody(compare, replayed)
+  replayed: string,
+  mask: SdpMask = FLOOR
+): boolean => foldBody(compare, captured, mask) === foldBody(compare, replayed, mask)
