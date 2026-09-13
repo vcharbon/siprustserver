@@ -68,6 +68,7 @@ impl ActionExecutor<'_> {
                 self.id_gen,
                 body,
                 content_type,
+                provenance,
             )
         });
         if let Some((e, branch)) = ack {
@@ -84,7 +85,7 @@ impl ActionExecutor<'_> {
                     ),
                 );
             }
-            fx.outbound.push(OutboundSipEffect { provenance, ..e });
+            fx.outbound.push(e);
             // Retain the ACK branch so a retransmitted 2xx is re-ACKed on the
             // SAME transaction (§13.2.2.4 — `re-ack-retransmitted-2xx`).
             *call = call::helpers::retain_ack_branch(call.clone(), leg_id, &branch);

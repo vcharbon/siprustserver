@@ -422,6 +422,7 @@ pub(crate) fn reject_call(
         None,
         None,
         extra_headers,
+        crate::effects::Provenance::Authored,
     ) {
         effects.outbound.push(effect);
         call.cdr_events.push(CdrEvent {

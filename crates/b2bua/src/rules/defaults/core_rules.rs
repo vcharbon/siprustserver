@@ -399,7 +399,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .filter(|ctx| {
                     let Some(d) = ctx.source_dialog() else { return false };
                     let Some(resp) = ctx.response() else { return false };
-                    crate::rules::relay::retransmitted_2xx(d, resp)
+                    d.ext.ack_branch.is_some() && crate::rules::relay::retransmitted_2xx(d, resp)
                 }),
             |ctx| {
                 ok(vec![RuleAction::AckLeg {

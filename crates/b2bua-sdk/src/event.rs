@@ -38,6 +38,8 @@ pub enum CallEvent {
         /// The CANCEL's own header lines — the canceller's `Reason` (RFC 3326
         /// §2) among them, which the CANCEL this stack sends onward restates.
         headers: Vec<SipHeader>,
+        /// The To-tag the layer's 200 and 487 carried.
+        to_tag: Option<String>,
     },
     /// A client transaction (b-leg INVITE, BYE, …) timed out with no final.
     Timeout {
@@ -87,8 +89,15 @@ impl CallEvent {
             TransactionEvent::Message { message, src, matched_client_txn } => {
                 CallEvent::Sip { message, src, matched_client_txn }
             }
-            TransactionEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers } => {
-                CallEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers }
+            TransactionEvent::Cancelled {
+                call_id,
+                from_tag,
+                invite_cseq,
+                in_dialog,
+                headers,
+                to_tag,
+            } => {
+                CallEvent::Cancelled { call_id, from_tag, invite_cseq, in_dialog, headers, to_tag }
             }
             TransactionEvent::Timeout { branch, call_ref, leg_id, method, destination, kind } => {
                 CallEvent::Timeout {

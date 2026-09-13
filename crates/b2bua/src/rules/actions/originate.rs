@@ -429,13 +429,16 @@ impl ActionExecutor<'_> {
             dest,
         );
         let kind = if m == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
+        // The one in-dialog OPTIONS this stack originates is the keepalive.
+        let provenance =
+            if m == InDialogMethod::Options { Provenance::Probe } else { Provenance::Authored };
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(kind),
             destination: dest,
             label: format!("{method} → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
-            provenance: Provenance::Authored,
+            provenance,
         });
     }
 

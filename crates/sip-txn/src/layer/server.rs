@@ -516,7 +516,8 @@ impl Owner {
             .map(|r| (Some(r.cseq().seq()), r.to().tag().is_some()))
             .unwrap_or((None, false));
 
-        // Resolve (and lazily pin) the UAS To-tag on the matched INVITE.
+        // Resolve (and lazily pin) the UAS To-tag on the matched INVITE: the
+        // tag both answers carry, reported upstream with the event.
         let uas_to_tag = self.uas_to_tag_of(&branch);
 
         // 200 OK to the CANCEL itself.
@@ -535,7 +536,7 @@ impl Owner {
                 &original,
                 487,
                 "Request Terminated",
-                &GenerateResponseOpts { to_tag: uas_to_tag, ..Default::default() },
+                &GenerateResponseOpts { to_tag: uas_to_tag.clone(), ..Default::default() },
             );
             let terminated_buf = terminated.image().clone();
             self.send_buffer(endpoint, &terminated_buf, src).await;
@@ -559,6 +560,7 @@ impl Owner {
             invite_cseq,
             in_dialog,
             headers: req.headers().to_vec(),
+            to_tag: uas_to_tag,
         });
         true
     }

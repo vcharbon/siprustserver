@@ -24,7 +24,9 @@ use super::identity::leg_via;
 ///
 /// Returns the effect **and the Via branch it used**, so the caller can retain
 /// the branch on the dialog ([`call::helpers::retain_ack_branch`]) for a
-/// §13.2.2.4 re-ACK of a retransmitted 2xx.
+/// §13.2.2.4 re-ACK of a retransmitted 2xx. `provenance` says whose ACK it
+/// is: the peer's relayed, or one this stack composes on its own account.
+#[allow(clippy::too_many_arguments)]
 pub fn ack_b_leg(
     call_ref: &str,
     leg: &Leg,
@@ -33,6 +35,7 @@ pub fn ack_b_leg(
     id_gen: &IdGen,
     body: Vec<u8>,
     content_type: Option<MediaType>,
+    provenance: Provenance,
 ) -> Option<(OutboundSipEffect, String)> {
     let dialog = leg.dialogs.first()?;
     // A leg with no 2xx in hand cannot be ACKed — the ACK would acknowledge a
@@ -77,8 +80,7 @@ pub fn ack_b_leg(
             destination: dest,
             label: format!("ACK → {}", leg.leg_id),
             leg_id: Some(leg.leg_id.clone()),
-            // The stack's own unless the caller relays a peer's ACK through it.
-            provenance: Provenance::Authored,
+            provenance,
         },
         branch,
     ))

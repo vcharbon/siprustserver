@@ -24,7 +24,7 @@ use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps};
 use b2bua_harness::settle_until;
 use call::{Call, CallBodyCodec, MessageDirection, MessageEntry, MsgpackCodec};
-use scenario_harness::{Agent, Harness};
+use scenario_harness::{Agent, Harness, WaiverScope};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 use sip_txn::IdGen;
@@ -74,6 +74,10 @@ struct Sut {
 
 impl Sut {
     async fn spawn(h: &Harness, cdr: CdrConfig) -> Self {
+        Self::spawn_tuned(h, cdr, |_| {}).await
+    }
+
+    async fn spawn_tuned(h: &Harness, cdr: CdrConfig, tune: impl FnOnce(&mut B2buaConfig)) -> Self {
         // A UA on both faces, as `B2buaSut` declares it; the harness baseline
         // tuning (the keepalive cadence, the panic-ELU backstop off under a
         // paused clock) as `B2buaSut::start` applies it.
@@ -85,18 +89,20 @@ impl Sut {
             )
             .await;
         let terminated = TerminatedCalls::default();
+        let mut config = B2buaConfig {
+            self_ordinal: ORDINAL.into(),
+            sip_local_ip: addr.ip().to_string(),
+            sip_local_port: addr.port(),
+            worker_allowed_target_suffixes: vec!["*".into()],
+            keepalive_interval_sec: 30,
+            keepalive_timeout_sec: 5,
+            overload_panic_elu_threshold: 1.1,
+            cdr,
+            ..Default::default()
+        };
+        tune(&mut config);
         let deps = B2buaDeps {
-            config: B2buaConfig {
-                self_ordinal: ORDINAL.into(),
-                sip_local_ip: addr.ip().to_string(),
-                sip_local_port: addr.port(),
-                worker_allowed_target_suffixes: vec!["*".into()],
-                keepalive_interval_sec: 30,
-                keepalive_timeout_sec: 5,
-                overload_panic_elu_threshold: 1.1,
-                cdr,
-                ..Default::default()
-            },
+            config,
             decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070)),
             limiter: Arc::new(NoopLimiter),
             cdr: Arc::new(ProbeCdr {
@@ -250,7 +256,8 @@ async fn a_basic_call_records_every_distinct_message_on_both_legs() {
     assert_eq!(live.a_leg.messages.entries[1].to_tag, None);
     assert!(live.a_leg.messages.entries[2].to_tag.is_some(), "the 180 carries the a-dialog tag");
 
-    // ── The body measurement of the inventory's §5, ring on ───────────────
+    // ── The replicated body at steady state, ring on: the bytes the store
+    // flushes, against the same call with its rings blanked ─────────────
     let codec = MsgpackCodec::new();
     let with_ring = codec.encode(&live).len();
     let mut blank = live.clone();
@@ -412,7 +419,6 @@ async fn retransmissions_add_nothing() {
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
     let sut = Sut::spawn(&h, ring_on()).await;
-    let bob_addr: SocketAddr = BOB.parse().unwrap();
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut uas = bob.receive("INVITE").await;
@@ -425,7 +431,6 @@ async fn retransmissions_add_nothing() {
     pump(&h, &[&alice]).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
-    let invite_cseq = call.invite_cseq();
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     pump(&h, &[&alice, &bob]).await;
@@ -451,7 +456,6 @@ async fn retransmissions_add_nothing() {
     assert_eq!(rows(&after.a_leg.messages.entries), rows(&baseline.a_leg.messages.entries));
     assert_eq!(rows(&b_leg(&after).messages.entries), rows(&b_leg(&baseline).messages.entries));
     assert_eq!(after.message_seq, baseline.message_seq);
-    let _ = invite_cseq;
 
     // The caller's BYE again: the non-INVITE server transaction replays its
     // 200 (§17.2.1); nothing reaches the call.
@@ -465,7 +469,6 @@ async fn retransmissions_add_nothing() {
     assert_eq!(terminating.a_leg.messages.entries.len(), 7);
     assert_eq!(terminating.message_seq, baseline.message_seq + 3, "BYE, its 200, the relayed BYE");
     bob_bye.respond(200, "OK").await;
-    let _ = bob_addr;
 
     let done = sut.assert_reaped().await;
     assert_eq!(done.message_seq, baseline.message_seq + 4);
@@ -601,4 +604,284 @@ async fn the_ring_off_records_nothing() {
     assert_eq!(done.message_seq, 0);
 
     let _report = h.finish().await;
+}
+
+/// The liveness probe this stack originates — the in-dialog OPTIONS
+/// keepalive — and its answer are not dialog history: a long call keeps its
+/// setup rows under a cap the probes alone would have overrun.
+#[tokio::test(start_paused = true)]
+async fn keepalive_rounds_add_nothing_and_evict_nothing() {
+    let h = Harness::new("message-ring-keepalive");
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    // Three rounds would add twelve rows across the legs — over this cap.
+    let sut = Sut::spawn(&h, CdrConfig { message_ring: 8, captured_headers: Vec::new() }).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let invite_cseq = call.invite_cseq();
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    for _ in 0..3 {
+        h.advance(Duration::from_secs(30)).await;
+        alice.receive("OPTIONS").await.respond(200, "OK").await;
+        bob.receive("OPTIONS").await.respond(200, "OK").await;
+    }
+    h.advance(Duration::from_secs(1)).await;
+
+    let live = sut.live(&call.call_id(), dialog.local_tag());
+    assert_eq!(
+        rows(&live.a_leg.messages.entries),
+        vec![
+            (Received, "INVITE", invite_cseq, None),
+            (Authored, "INVITE", invite_cseq, Some(100)),
+            (Relayed, "INVITE", invite_cseq, Some(180)),
+            (Relayed, "INVITE", invite_cseq, Some(200)),
+            (Received, "ACK", invite_cseq, None),
+        ],
+        "the setup rows survive three keepalive rounds"
+    );
+    assert_eq!(b_leg(&live).messages.entries.len(), 4);
+    assert_eq!(live.a_leg.messages.dropped, 0);
+    assert_eq!(b_leg(&live).messages.dropped, 0);
+    assert_eq!(live.message_seq, 9);
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    let done = sut.assert_reaped().await;
+    assert_eq!(done.a_leg.messages.entries.len(), 7);
+    assert_eq!(done.a_leg.messages.dropped, 0);
+
+    let _report = h.finish().await;
+}
+
+/// A callee's 200 to a CANCEL carries the INVITE's CSeq number and tag: it is
+/// a message of its own, never a copy of the INVITE 2xx the stack ACKed when
+/// the answer crossed the CANCEL.
+#[tokio::test(start_paused = true)]
+async fn a_200_to_cancel_crossing_the_answer_is_recorded() {
+    let h = Harness::new("message-ring-cancel-crossing");
+    // The crossing under test is bob's deliberate 200 after the CANCEL (RFC
+    // 3261 §9.2); the SUT's own output stays under the audit.
+    h.waive(
+        WaiverScope::rule(
+            "no-200-after-cancel",
+            "bob deliberately answers 200 after taking the CANCEL — the crossing under test",
+        )
+        .on_party("bob"),
+    );
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    let sut = Sut::spawn(&h, ring_on()).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+
+    let mut cxl = call.cancel().await;
+    cxl.expect(200).await;
+    call.expect(487).await;
+    let mut bob_cancel = bob.receive("CANCEL").await;
+    // Crossing: bob answers the INVITE before the CANCEL takes effect, then
+    // answers the CANCEL; the stack ACKs the answer and BYEs the leg.
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    bob_cancel.respond(200, "OK").await;
+    bob.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    h.advance(Duration::from_secs(1)).await;
+
+    let done = sut.assert_reaped().await;
+    let b = rows(&b_leg(&done).messages.entries);
+    let b_cseq = b[0].2;
+    assert!(
+        b.contains(&(Received, "CANCEL", b_cseq, Some(200))),
+        "the 200 to the CANCEL is a row of its own: {b:?}"
+    );
+    assert!(b.contains(&(Received, "INVITE", b_cseq, Some(200))), "{b:?}");
+    assert_eq!(b.iter().filter(|r| r.0 == Received && r.3 == Some(200)).count(), 3, "{b:?}");
+    assert_eq!(b.last().map(|r| (r.0, r.1, r.3)), Some((Received, "BYE", Some(200))), "{b:?}");
+
+    let _report = h.finish().await;
+}
+
+/// A delayed-offer answer: the callee repeats its 200 until the caller's ACK
+/// supplies the answer (RFC 3261 §13.3.1.4); every copy is the 2xx the
+/// dialog took, one row.
+#[tokio::test(start_paused = true)]
+async fn a_repeated_delayed_offer_answer_is_one_row() {
+    let h = Harness::new("message-ring-delayed-offer");
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    let sut = Sut::spawn(&h, ring_on()).await;
+
+    let mut call = alice.invite(&bob).through(sut.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    // Two more copies before alice's ACK.
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    pump(&h, &[&alice]).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    pump(&h, &[&alice]).await;
+    let invite_cseq = call.invite_cseq();
+    let mut dialog = call.ack_with(Some(OFFER)).await;
+    bob.receive("ACK").await;
+    pump(&h, &[&alice, &bob]).await;
+
+    let live = sut.live(&call.call_id(), dialog.local_tag());
+    let b = rows(&b_leg(&live).messages.entries);
+    let b_cseq = b[0].2;
+    assert_eq!(
+        b,
+        vec![
+            (Relayed, "INVITE", b_cseq, None),
+            (Received, "INVITE", b_cseq, Some(180)),
+            (Received, "INVITE", b_cseq, Some(200)),
+            (Relayed, "ACK", b_cseq, None),
+        ],
+        "one 200, and the caller's ACK relayed with its answer"
+    );
+    assert_eq!(
+        rows(&live.a_leg.messages.entries),
+        vec![
+            (Received, "INVITE", invite_cseq, None),
+            (Authored, "INVITE", invite_cseq, Some(100)),
+            (Relayed, "INVITE", invite_cseq, Some(180)),
+            (Relayed, "INVITE", invite_cseq, Some(200)),
+            (Received, "ACK", invite_cseq, None),
+        ]
+    );
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    sut.assert_reaped().await;
+
+    let _report = h.finish().await;
+}
+
+/// A caller's first ACK arriving after the §13.3.1.4 ladder gave up on it is
+/// still the first: the ring records it, an obligation or not.
+#[tokio::test(start_paused = true)]
+async fn a_late_first_ack_after_the_give_up_is_recorded() {
+    let h = Harness::new("message-ring-late-ack");
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    let sut = Sut::spawn_tuned(&h, ring_on(), |c| c.ack_timeout_sec = 6).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let invite_cseq = call.invite_cseq();
+    bob.receive("ACK").await;
+
+    // Alice holds her ACK past the give-up: the stack BYEs both legs.
+    h.advance(Duration::from_secs(8)).await;
+    alice.drain().await;
+    let mut alice_bye = alice.receive("BYE").await;
+    let mut bob_bye = bob.receive("BYE").await;
+    // Her ACK lands now, on a terminating call.
+    let dialog = call.ack().await;
+    pump(&h, &[&alice, &bob]).await;
+    let live = sut.live(&call.call_id(), dialog.local_tag());
+    let a = rows(&live.a_leg.messages.entries);
+    assert!(
+        a.contains(&(Received, "ACK", invite_cseq, None)),
+        "the late ACK is the first of its 2xx: {a:?}"
+    );
+    assert_eq!(a.iter().filter(|r| r.1 == "ACK").count(), 1, "{a:?}");
+
+    alice_bye.respond(200, "OK").await;
+    bob_bye.respond(200, "OK").await;
+    sut.assert_reaped().await;
+
+    let _report = h.finish().await;
+}
+
+/// A CANCEL arriving once the INVITE transaction is gone matches nothing and
+/// draws the router's 481 (RFC 3261 §9.2): the call is live, so both are
+/// rows of its a-leg.
+#[tokio::test(start_paused = true)]
+async fn a_stray_cancel_and_its_481_are_recorded() {
+    let h = Harness::new("message-ring-stray-cancel");
+    // The stray CANCEL is alice's deliberate one (RFC 3261 §9.1 left her
+    // nothing to cancel); the SUT's 481 stays under the audit.
+    h.waive(
+        WaiverScope::rule(
+            "no-cancel-after-final",
+            "alice deliberately CANCELs a completed INVITE — the stray CANCEL under test",
+        )
+        .on_party("alice"),
+    );
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    // No keepalive round inside the wait for Timer L (RFC 6026 §7.1, 32 s).
+    let sut = Sut::spawn_tuned(&h, ring_on(), |c| c.keepalive_interval_sec = 120).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let invite_cseq = call.invite_cseq();
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    // Past Timer L (RFC 6026 §7.1): the INVITE server transaction is gone.
+    h.advance(Duration::from_secs(40)).await;
+
+    let invite = recorded(&h, alice.addr(), sut.addr, b"INVITE ");
+    let cancel = cancel_of(&invite);
+    alice.try_send_datagram(&cancel, sut.addr).await.unwrap();
+    pump(&h, &[&alice, &bob]).await;
+
+    let live = sut.live(&call.call_id(), dialog.local_tag());
+    let a = rows(&live.a_leg.messages.entries);
+    assert_eq!(
+        a[5..],
+        [(Received, "CANCEL", invite_cseq, None), (Authored, "CANCEL", invite_cseq, Some(481))],
+        "{a:?}"
+    );
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    sut.assert_reaped().await;
+
+    let _report = h.finish().await;
+}
+
+/// The CANCEL of a recorded INVITE datagram (RFC 3261 §9.1): the same
+/// Request-URI, Via, From, To, Call-ID and CSeq number, no body.
+fn cancel_of(invite: &[u8]) -> Vec<u8> {
+    let text = std::str::from_utf8(invite).expect("the INVITE is text");
+    let head = text.split("\r\n\r\n").next().unwrap_or(text);
+    let mut out = String::new();
+    for (i, line) in head.split("\r\n").enumerate() {
+        let lower = line.to_ascii_lowercase();
+        if i == 0 {
+            out.push_str(&line.replacen("INVITE ", "CANCEL ", 1));
+        } else if lower.starts_with("cseq:") {
+            out.push_str(&line.replace("INVITE", "CANCEL"));
+        } else if lower.starts_with("content-") || lower.starts_with("contact:") {
+            continue;
+        } else {
+            out.push_str(line);
+        }
+        out.push_str("\r\n");
+    }
+    out.push_str("Content-Length: 0\r\n\r\n");
+    out.into_bytes()
 }

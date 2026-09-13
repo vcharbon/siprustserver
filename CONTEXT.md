@@ -128,11 +128,13 @@ in handling order, replicated with the call (`Leg.messages`, off by default —
 **relayed** — a peer leg's message forwarded — or **authored** — minted by this
 stack), method, CSeq, status, To-tag, the values of the configured header names
 (`cdr.captured_headers`) and a call-wide `seq`. A rung, a re-ACK or a layer
-replay records nothing: a repeat is the message it repeats. The transaction
-layer's own answers to a message the call does see — the 100 to an INVITE, a
-CANCEL's 200 and 487, the hop ACK of a non-2xx INVITE final — are recorded as
-authored; a 100 it absorbs on a client transaction is not a message of the
-call's.
+replay records nothing: a repeat is the message it repeats; a UAS's periodic
+re-sends of an unreliable 1xx are each recorded. The keepalive probe this
+stack originates and its answer are not dialog history and are not recorded.
+The transaction layer's own answers to a message the call does see — the 100
+to an INVITE, a CANCEL's 200 and 487, the hop ACK of a non-2xx INVITE final —
+are recorded as authored, as are the router's 481s to a stray request; a 100
+the layer absorbs on a client transaction is not a message of the call's.
 _Avoid_: "history" alone (the CDR vocabulary of a consumer), "log" (the
 decision log is a different record).
 

@@ -483,10 +483,10 @@ impl ActionExecutor<'_> {
                 relay_content_type,
                 None,
                 passthrough,
+                Provenance::Relayed,
             ) else {
                 return;
             };
-            let effect = OutboundSipEffect { provenance: Provenance::Relayed, ..effect };
             // A 2xx answers the caller: it goes through the one seam that
             // retains the datagram + arms the §13.3.1.4 ladder.
             if (200..300).contains(&status) {
@@ -556,10 +556,10 @@ impl ActionExecutor<'_> {
             relay_content_type,
             None,
             passthrough,
+            Provenance::Relayed,
         ) else {
             return;
         };
-        let effect = OutboundSipEffect { provenance: Provenance::Relayed, ..effect };
         // A 2xx answers the caller: it goes through the one seam that retains
         // the datagram + arms the §13.3.1.4 ladder.
         if (200..300).contains(&status) {

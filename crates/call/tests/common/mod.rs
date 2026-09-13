@@ -871,6 +871,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         proptest::option::of(any::<i64>()),
         proptest::option::of(proptest::collection::vec(arb_tag(), 0..3)),
         arb_sm_cursors(),
+        any::<u32>(),
     );
     // Release-event subscriptions + the in-flight reroute slice
     // ride the replicated body like `features`/`transfer` do.
@@ -909,6 +910,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
                 message_count,
                 terminating_refresh_legs,
                 sm_cursors,
+                message_seq,
             ),
             (reliable_provisionals, subscriptions, reroute),
         )| Call {
@@ -947,7 +949,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             reroute,
             reliable_provisionals,
             pracked_provisionals: Vec::new(),
-            message_seq: 0,
+            message_seq,
             sm_cursors,
         },
     )

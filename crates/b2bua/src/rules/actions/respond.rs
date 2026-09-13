@@ -127,8 +127,9 @@ impl ActionExecutor<'_> {
             None,
             None,
             extra,
+            Provenance::Relayed,
         ) {
-            fx.outbound.push(OutboundSipEffect { provenance: Provenance::Relayed, ..effect });
+            fx.outbound.push(effect);
         }
     }
 
@@ -195,6 +196,7 @@ impl ActionExecutor<'_> {
             None,
             None,
             extra,
+            Provenance::Authored,
         ) {
             fx.outbound.push(effect);
         }
@@ -291,6 +293,7 @@ impl ActionExecutor<'_> {
             content_type,
             None,
             extra_headers,
+            Provenance::Authored,
         ) {
             fx.outbound.push(effect);
         }
@@ -401,6 +404,7 @@ impl ActionExecutor<'_> {
             content_type,
             None,
             extra_headers,
+            Provenance::Authored,
         ) else {
             return;
         };

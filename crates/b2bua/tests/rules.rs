@@ -560,6 +560,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         invite_cseq: None,
         in_dialog: false,
         headers: vec![],
+        to_tag: None,
     };
     let config = B2buaConfig::default();
     let ctx = RuleContext {
@@ -730,6 +731,7 @@ fn no_synthesized_final_when_the_turn_already_answered() {
         None,
         None,
         vec![],
+        b2bua::effects::Provenance::Authored,
     )
     .expect("the transaction's first final is admitted");
     result.effects.outbound.push(effect);
@@ -789,6 +791,7 @@ fn execute_on(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
         invite_cseq: None,
         in_dialog: false,
         headers: vec![],
+        to_tag: None,
     };
     let config = B2buaConfig::default();
     let ctx = RuleContext {
@@ -4304,6 +4307,7 @@ mod going_away_gate {
             invite_cseq: None,
             in_dialog: false,
             headers: vec![],
+            to_tag: None,
         };
         let config = B2buaConfig::default();
         let ctx = ctx_for(&call, &event, &config);

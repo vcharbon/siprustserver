@@ -2,12 +2,16 @@
 //! the transaction layer handed the call and what it sent on the call's
 //! behalf for it, then what the turn itself puts on the wire. One entry per
 //! distinct message, in handling order — a repeat the layer hands the TU
-//! again, or a retained datagram re-sent, adds nothing.
+//! again, or a retained datagram re-sent, adds nothing. A UAS's periodic
+//! re-sends of an unreliable provisional (RFC 3261 §13.3.1.1) are each a
+//! message of their own and are recorded per copy: that is what the wire
+//! shows. The liveness probe this stack originates and its answer are not
+//! dialog history and are recorded on neither face.
 //!
 //! The header values an entry keeps are read off the parsed message by
 //! `sip-message` here, once; nothing downstream re-reads a datagram.
 
-use call::helpers::{confirmed_dialog, find_leg, record_message};
+use call::helpers::{confirmed_dialog, find_leg, find_pending_request, record_message};
 use call::{Call, MessageDirection, MessageEntry, Obligation};
 use sip_message::{HeaderName, Method, SipMessage, SipRequest, SipResponse};
 
@@ -56,7 +60,9 @@ impl Ring {
     ) -> Call {
         match event {
             CallEvent::Sip { message, matched_client_txn, .. } => {
-                if repeated(&call, leg_id, message, discharged) {
+                if repeated(&call, leg_id, message, discharged)
+                    || probe_answer(&call, leg_id, message)
+                {
                     return call;
                 }
                 match message.as_ref() {
@@ -86,12 +92,12 @@ impl Ring {
                     }
                 }
             }
-            CallEvent::Cancelled { invite_cseq, in_dialog, headers, .. } => {
+            CallEvent::Cancelled { invite_cseq, in_dialog, headers, to_tag, .. } => {
                 let cseq = invite_cseq.unwrap_or(0);
-                let own_tag = call::helpers::b2bua_tag(&call, leg_id);
-                // The CANCEL names the INVITE's dialog: this stack's tag when
-                // the INVITE was in one, none when it was not.
-                let cancel_tag = if *in_dialog { own_tag.clone() } else { None };
+                // The CANCEL names the INVITE's dialog: the tag the INVITE
+                // carried when it was in one, none when it was not; both
+                // answers carry the tag the layer bound.
+                let cancel_tag = if *in_dialog { to_tag.clone() } else { None };
                 let cancel = MessageEntry {
                     seq: 0,
                     at_ms: now_ms,
@@ -99,13 +105,14 @@ impl Ring {
                     method: Method::Cancel.to_string(),
                     cseq,
                     code: None,
-                    to_tag: cancel_tag.clone(),
+                    to_tag: cancel_tag,
                     decision_ordinal: 0,
                     headers: sip_message::capture::captured_headers(headers, &self.names),
                 };
                 let cancel_ok = MessageEntry {
                     direction: MessageDirection::Authored,
                     code: Some(200),
+                    to_tag: to_tag.clone(),
                     headers: Vec::new(),
                     ..cancel.clone()
                 };
@@ -113,7 +120,7 @@ impl Ring {
                     direction: MessageDirection::Authored,
                     method: Method::Invite.to_string(),
                     code: Some(487),
-                    to_tag: own_tag,
+                    to_tag: to_tag.clone(),
                     headers: Vec::new(),
                     ..cancel.clone()
                 };
@@ -144,15 +151,46 @@ impl Ring {
         self.record(call, leg_id, trying)
     }
 
+    /// Record a request the router refused on the call's behalf without a
+    /// turn — one naming a dialog the leg does not hold, a CANCEL matching no
+    /// transaction (RFC 3261 §12.2.2, §9.2) — with the answer it sent, if any
+    /// (an ACK draws none).
+    pub(crate) fn refused(
+        &self,
+        call: Call,
+        leg_id: &str,
+        req: &SipRequest,
+        answer: Option<&SipResponse>,
+        now_ms: i64,
+    ) -> Call {
+        let call = if req.method() == Method::Invite {
+            self.invite_received(call, leg_id, req, now_ms)
+        } else {
+            self.record(call, leg_id, self.request_entry(req, now_ms))
+        };
+        match answer {
+            Some(resp) => {
+                let entry = MessageEntry {
+                    direction: MessageDirection::Authored,
+                    ..self.response_entry(resp, now_ms)
+                };
+                self.record(call, leg_id, entry)
+            }
+            None => call,
+        }
+    }
+
     /// Record what a turn puts on the wire, in emission order. A retained
     /// datagram's repeat is the message it repeats and adds nothing; an
-    /// emission naming no leg belongs to no ring.
+    /// emission naming no leg belongs to no ring, and a liveness probe to
+    /// none.
     pub(crate) fn sent(&self, call: Call, outbound: &[OutboundSipEffect], now_ms: i64) -> Call {
         outbound.iter().fold(call, |call, eff| {
             let Some(leg_id) = eff.leg_id.as_deref() else { return call };
             let direction = match eff.provenance {
                 Provenance::Relayed => MessageDirection::Relayed,
                 Provenance::Authored => MessageDirection::Authored,
+                Provenance::Probe => return call,
             };
             let entry = match &eff.body {
                 OutboundBody::Request(req) => self.request_entry(req, now_ms),
@@ -199,10 +237,11 @@ impl Ring {
 }
 
 /// Whether the layer handed the TU a message it already handled: an ACK that
-/// names a dialog this leg holds yet discharges no 2xx awaiting it (RFC 3261
-/// §13.3.1.4), a copy of a 2xx the dialog already ACKed (§13.2.2.4), or a
-/// reliable provisional already relayed or PRACKed (RFC 3262 §4) — the same
-/// readings the executor absorbs and re-ACKs by.
+/// discharges no 2xx awaiting it while the ring already holds the peer's ACK
+/// of that same (tag, CSeq) — a late first ACK after the ladder gave up is
+/// still the first — a copy of an INVITE 2xx the dialog already took
+/// (RFC 3261 §13.3.1.4), or a reliable provisional already relayed or
+/// PRACKed (RFC 3262 §4) — the readings the executor absorbs and re-ACKs by.
 fn repeated(
     call: &Call,
     leg_id: &str,
@@ -214,8 +253,11 @@ fn repeated(
         SipMessage::Request(req) => {
             req.method() == Method::Ack
                 && discharged.is_none()
-                && req.to().tag().is_some_and(|tag| {
-                    call::helpers::holds_local_tag(call, leg_id, tag) == Some(true)
+                && leg.messages.entries.iter().any(|e| {
+                    e.direction == MessageDirection::Received
+                        && e.method == Method::Ack.as_str()
+                        && e.cseq == req.cseq().seq()
+                        && e.to_tag.as_deref() == req.to().tag()
                 })
         }
         SipMessage::Response(resp) => {
@@ -225,4 +267,19 @@ fn repeated(
                 || crate::rules::relay::repeated_reliable_provisional(call, leg_id, resp)
         }
     }
+}
+
+/// Whether `message` answers the liveness probe this stack sent on `leg_id`:
+/// a response to an OPTIONS no pending relay on the leg's dialog accounts
+/// for — the reading the keepalive absorbs by. A relayed OPTIONS leaves a
+/// pending request, so its answer is dialog history and is recorded.
+fn probe_answer(call: &Call, leg_id: &str, message: &SipMessage) -> bool {
+    let SipMessage::Response(resp) = message else { return false };
+    if resp.cseq().method() != Method::Options {
+        return false;
+    }
+    let cseq = i64::from(resp.cseq().seq());
+    find_leg(call, leg_id)
+        .and_then(|leg| confirmed_dialog(leg).or_else(|| leg.dialogs.first()))
+        .is_none_or(|d| find_pending_request(d, cseq).is_none())
 }

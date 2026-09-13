@@ -39,6 +39,10 @@ pub enum TransactionEvent {
         /// and BYE, so the request the layer already answered is the only place
         /// the canceller's cause is ever stated.
         headers: Vec<SipHeader>,
+        /// The To-tag the layer answered under — on the 200 to the CANCEL and
+        /// the 487 to the INVITE alike: the tag the INVITE's UAS transaction
+        /// had bound, or pinned for it here. `None` only when none could be.
+        to_tag: Option<String>,
     },
     /// A client transaction's Timer B/F (or the configured out-of-dialog
     /// INVITE bound, default 158 s) fired with no final response — the

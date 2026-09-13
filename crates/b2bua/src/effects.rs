@@ -41,15 +41,22 @@ pub enum OutboundBody {
     Datagram(RetainedEmission),
 }
 
-/// Whose message an outbound emission carries: a peer leg's, forwarded (the
-/// RFC 3261 §16 half of a B2BUA), or this stack's own (a UAS/UAC-authored
-/// final, an ACK or PRACK it owes, a keepalive, a teardown). Read by the
-/// message ring; a retained datagram's repeat carries the value of the message
-/// it repeats and is never recorded.
+/// Whose message an outbound emission carries, as the message ring records
+/// it. A retained datagram's repeat carries the value of the message it
+/// repeats and is never recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provenance {
+    /// A peer leg's message forwarded (the RFC 3261 §16 half of a B2BUA), or
+    /// sent in reaction to one — a masked or promoted provisional, a failure
+    /// restated from the callee's final.
     Relayed,
+    /// This stack's own: a UAS/UAC-authored final, an ACK or PRACK it owes, a
+    /// teardown, a decision's reject.
     Authored,
+    /// A liveness probe this stack originates — the in-dialog OPTIONS
+    /// keepalive. Its own, and not dialog history: the ring records neither
+    /// it nor its answer.
+    Probe,
 }
 
 /// One SIP message to emit.

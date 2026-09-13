@@ -14,7 +14,8 @@ use crate::effects::{
 
 /// Build a UAS response on the a-leg's inbound INVITE (toward alice). `to_tag`
 /// pins the stable a-facing dialog tag; `contact` is stamped only where
-/// [`response_states_contact`] states it for an INVITE response.
+/// [`response_states_contact`] states it for an INVITE response; `provenance`
+/// says whose response it is — a callee's forwarded, or this stack's own.
 ///
 /// A final (≥ 200) is admitted once per transaction (RFC 3261 §17.2.1): the
 /// first records itself as [`call::Leg::invite_final_sent`]; any later one is
@@ -33,6 +34,7 @@ pub fn response_to_a_leg(
     content_type: Option<MediaType>,
     incoming_source: Option<(String, u16)>,
     extra_headers: Vec<MsgHeader>,
+    provenance: Provenance,
 ) -> Option<OutboundSipEffect> {
     if status >= 200 {
         if let Some(carried) = call.a_leg.invite_final_sent {
@@ -67,7 +69,6 @@ pub fn response_to_a_leg(
         destination: dest,
         label: format!("{status} → a-leg"),
         leg_id: Some("a".to_string()),
-        // The stack's own unless the caller marks it a relayed one.
-        provenance: Provenance::Authored,
+        provenance,
     })
 }
