@@ -59,13 +59,17 @@
 
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
-  <!-- EXPLICIT cap-rejection branch: a rejected call gets 486 (optionally after a
-       100). Catch it BEFORE the mandatory 200 so it does not fall through to that
-       recv as an unexpected message. sipp's UAC mode auto-ACKs the 486 final
-       response (closing the INVITE client transaction), and `next` jumps past the
-       ACK/hold/BYE to the terminal `rejected` label → the call ends cleanly and is
-       counted Successful. When the call is admitted instead, no 486 arrives, this
-       optional recv is skipped, and the mandatory 200 below matches normally. -->
+  <!-- EXPLICIT rejection branch: a cap-rejected call gets 486, an overload-shed
+       one 503 (480 from admission control), optionally after a 100. Catch them
+       BEFORE the mandatory 200 so they do not fall through to that recv as an
+       unexpected message. sipp's UAC mode auto-ACKs the final response (closing
+       the INVITE client transaction), and `next` jumps past the ACK/hold/BYE to
+       the terminal `rejected` label → the call ends cleanly and is counted
+       Successful; the SUT's own limiter / shed counters carry the decision. When
+       the call is admitted instead, no final but the 200 arrives, these optional
+       recvs are skipped, and the mandatory 200 below matches normally. -->
+  <recv response="503" optional="true" next="rejected"/>
+  <recv response="480" optional="true" next="rejected"/>
   <recv response="486" optional="true" next="rejected"/>
   <!-- 200 OK = admitted. -->
   <recv response="200" rtd="true" rrs="true"/>
@@ -125,8 +129,9 @@
   <recv response="200" crlf="true"/>
 
   <!-- Terminal join point: the admitted path falls through here after its BYE/200;
-       the cap-rejected 486 path jumps straight here (auto-ACKed, nothing more to
-       do). Reaching the end of the scenario counts the call Successful either way. -->
+       a rejected initial INVITE (486/503/480) jumps straight here (auto-ACKed,
+       nothing more to do). Reaching the end of the scenario counts the call
+       Successful either way. -->
   <label id="rejected"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
