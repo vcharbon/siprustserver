@@ -271,7 +271,11 @@ impl Changelog {
             let now = self.clock.now_ms();
             let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now));
             log.serving += 1;
-            log.sub_mut(partition).streams += 1;
+            let sub = log.sub_mut(partition);
+            sub.streams += 1;
+            // A new flow starts unknown: a claim left by a flow the peer never
+            // closed (a dead node sends no FIN) must not vouch for this one.
+            sub.applied = None;
         }
         ServeGuard { changelog: self.clone(), peer: peer.to_string(), partition }
     }
@@ -290,8 +294,9 @@ impl Changelog {
     }
 
     /// Whether `peer`'s flow on `partition` is connected AND has reported
-    /// applying everything this sub-log ever logged (ADR-0031 D2). A sub-log
-    /// nothing was ever logged into is current as soon as a flow carries it.
+    /// applying everything this sub-log ever logged (ADR-0031 D2). A report is
+    /// required even for an empty sub-log: a reaped peer log restarts at head 0,
+    /// so an unreported flow is unknown, never vacuously current.
     pub fn flow_caught_up(&self, peer: &str, partition: Partition) -> bool {
         let inner = self.inner.lock().unwrap();
         let Some(log) = inner.peers.get(peer) else {
@@ -301,7 +306,7 @@ impl Changelog {
         if sub.streams == 0 {
             return false;
         }
-        sub.head == 0 || sub.applied.is_some_and(|a| a >= Watermark::new(self.gen, sub.head))
+        sub.applied.is_some_and(|a| a >= Watermark::new(self.gen, sub.head))
     }
 
     /// Whether a warm puller on `partition` resuming from `since` must
@@ -524,11 +529,43 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_sublog_with_a_connected_flow_is_caught_up() {
+    fn an_empty_sublog_is_caught_up_only_once_its_flow_reports() {
         let cl = changelog();
         assert!(!cl.flow_caught_up("A", Partition::Bak), "no peer log at all");
         let _guard = cl.serving("A", Partition::Bak);
-        assert!(cl.flow_caught_up("A", Partition::Bak), "nothing was ever logged for it");
+        assert!(!cl.flow_caught_up("A", Partition::Bak), "connected, nothing reported");
+        // The first catch-up Noop reports the scan head: current from then on.
+        cl.note_applied("A", Partition::Bak, Watermark::new(7, 0));
+        assert!(cl.flow_caught_up("A", Partition::Bak));
+    }
+
+    #[test]
+    fn a_reaped_peer_log_is_not_vacuously_current_on_return() {
+        let cl = changelog().with_ttls(1_000, 1_000);
+        {
+            let _guard = cl.serving("A", Partition::Bak);
+            cl.bump("A", "call-1", Op::Put, Partition::Bak);
+            cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
+            assert!(cl.flow_caught_up("A", Partition::Bak));
+        }
+        cl.reap(10_000);
+        assert!(!cl.has_peer("A"), "idle past the dead-peer TTL: the log is gone");
+        let _again = cl.serving("A", Partition::Bak);
+        assert!(!cl.flow_caught_up("A", Partition::Bak), "a fresh log has no claim");
+    }
+
+    #[test]
+    fn a_second_flow_does_not_inherit_a_dead_flows_claim() {
+        let cl = changelog();
+        let _dead = cl.serving("A", Partition::Bak);
+        cl.bump("A", "call-1", Op::Put, Partition::Bak);
+        cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
+        assert!(cl.flow_caught_up("A", Partition::Bak));
+        // The peer reconnects while its old socket is still open server-side.
+        let _fresh = cl.serving("A", Partition::Bak);
+        assert!(!cl.flow_caught_up("A", Partition::Bak), "the new flow has reported nothing");
+        cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
+        assert!(cl.flow_caught_up("A", Partition::Bak));
     }
 
     #[test]
