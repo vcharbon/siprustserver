@@ -18,6 +18,13 @@
 //! `limit` so a huge backlog streams in batches). The `serving` count keeps a
 //! peer log reap-immune while a serve task is active.
 //!
+//! ## Flow progress (ADR-0031 D2)
+//! Each sub-log also carries the position its puller last reported applying and
+//! whether a flow is connected at all, so a draining worker can ask
+//! [`flow_caught_up`](Changelog::flow_caught_up) whether a peer holds everything
+//! it ever logged for that peer. Purely observational — no apply or send
+//! decision reads it.
+//!
 //! ## Lock discipline (ADR-0011 X8)
 //! [`bump`](Changelog::bump) takes the lock *briefly* (move ref + bump counter).
 //! [`drain_since`](Changelog::drain_since) collects the due callRefs under a brief
@@ -115,6 +122,17 @@ struct SubLog {
     /// missed). A warm puller resuming below this has fallen off the compacted
     /// tail and must re-bootstrap ([`needs_reset`](Changelog::needs_reset)).
     retained_floor: u64,
+    /// Highest counter ever assigned in this sub-log. Unlike `entries`, it
+    /// survives compaction and reaping — it is the position a caught-up puller
+    /// must have reported (ADR-0031 D2), not a live-set bound.
+    head: u64,
+    /// The position the flow's puller last reported applying
+    /// ([`Frame::Position`]). `None` while no flow is connected or none has
+    /// reported yet: a disconnected flow's position is unknown, never stale.
+    applied: Option<Watermark>,
+    /// Serve tasks currently streaming this sub-log. `0` ⇒ no flow carries this
+    /// partition to the peer, so nothing it holds can be current.
+    streams: usize,
 }
 
 impl SubLog {
@@ -125,6 +143,7 @@ impl SubLog {
         }
         self.entries.insert(counter, call_ref.to_string());
         self.by_ref.insert(call_ref.to_string(), RefState { counter, op, expiry_at_ms });
+        self.head = self.head.max(counter);
     }
 
     /// The due `(counter, callRef, op)` above `since` (or all when `cold`),
@@ -171,11 +190,14 @@ impl PeerLog {
     }
 }
 
-/// RAII handle keeping a peer log reap-immune while a serve task drains it.
-/// Decrements the `serving` count on drop.
+/// RAII handle keeping a peer log reap-immune while a serve task drains ONE of
+/// its sub-logs. Drop decrements both the peer's reap-immunity count and the
+/// sub-log's connected-flow count, and clears the flow's reported position — a
+/// disconnected flow holds nothing current (ADR-0031 D2).
 pub struct ServeGuard {
     changelog: Changelog,
     peer: String,
+    partition: Partition,
 }
 
 impl Drop for ServeGuard {
@@ -183,6 +205,11 @@ impl Drop for ServeGuard {
         let mut inner = self.changelog.inner.lock().unwrap();
         if let Some(log) = inner.peers.get_mut(&self.peer) {
             log.serving = log.serving.saturating_sub(1);
+            let sub = log.sub_mut(self.partition);
+            sub.streams = sub.streams.saturating_sub(1);
+            if sub.streams == 0 {
+                sub.applied = None;
+            }
         }
     }
 }
@@ -235,16 +262,46 @@ impl Changelog {
         self.clock.now_ms()
     }
 
-    /// Register a serve task for `peer`, keeping its log reap-immune until the
-    /// returned [`ServeGuard`] drops. Creates the peer log if absent.
-    pub fn serving(&self, peer: &str) -> ServeGuard {
+    /// Register a serve task for `(peer, partition)`: keeps the peer's log
+    /// reap-immune and marks the partition's flow connected, until the returned
+    /// [`ServeGuard`] drops. Creates the peer log if absent.
+    pub fn serving(&self, peer: &str, partition: Partition) -> ServeGuard {
         {
             let mut inner = self.inner.lock().unwrap();
             let now = self.clock.now_ms();
             let log = inner.peers.entry(peer.to_string()).or_insert_with(|| PeerLog::new(now));
             log.serving += 1;
+            log.sub_mut(partition).streams += 1;
         }
-        ServeGuard { changelog: self.clone(), peer: peer.to_string() }
+        ServeGuard { changelog: self.clone(), peer: peer.to_string(), partition }
+    }
+
+    /// Record a puller's reported applied position for `(peer, partition)`
+    /// ([`Frame::Position`], ADR-0031 D2). Monotonic — a lower report never
+    /// regresses the recorded one — and ignored for a peer with no log.
+    pub fn note_applied(&self, peer: &str, partition: Partition, at: Watermark) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(log) = inner.peers.get_mut(peer) {
+            let sub = log.sub_mut(partition);
+            if sub.applied.is_none_or(|prev| at > prev) {
+                sub.applied = Some(at);
+            }
+        }
+    }
+
+    /// Whether `peer`'s flow on `partition` is connected AND has reported
+    /// applying everything this sub-log ever logged (ADR-0031 D2). A sub-log
+    /// nothing was ever logged into is current as soon as a flow carries it.
+    pub fn flow_caught_up(&self, peer: &str, partition: Partition) -> bool {
+        let inner = self.inner.lock().unwrap();
+        let Some(log) = inner.peers.get(peer) else {
+            return false;
+        };
+        let sub = log.sub(partition);
+        if sub.streams == 0 {
+            return false;
+        }
+        sub.head == 0 || sub.applied.is_some_and(|a| a >= Watermark::new(self.gen, sub.head))
     }
 
     /// Whether a warm puller on `partition` resuming from `since` must
@@ -440,5 +497,73 @@ fn reap_sublog(sub: &mut SubLog, now_ms: i64) {
             sub.entries.remove(&st.counter);
             sub.retained_floor = sub.retained_floor.max(st.counter);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn changelog() -> Changelog {
+        Changelog::new(7, Clock::test_at(0))
+    }
+
+    #[test]
+    fn a_flow_below_the_head_is_not_caught_up_and_at_the_head_is() {
+        let cl = changelog();
+        let _guard = cl.serving("A", Partition::Bak);
+        cl.bump("A", "call-1", Op::Put, Partition::Bak);
+        cl.bump("A", "call-2", Op::Put, Partition::Bak);
+        assert!(!cl.flow_caught_up("A", Partition::Bak), "nothing reported yet");
+        cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
+        assert!(!cl.flow_caught_up("A", Partition::Bak), "reported below the head");
+        cl.note_applied("A", Partition::Bak, Watermark::new(7, 2));
+        assert!(cl.flow_caught_up("A", Partition::Bak), "reported the head");
+        // The other partition has its own flow: nothing carries it.
+        assert!(!cl.flow_caught_up("A", Partition::Pri));
+    }
+
+    #[test]
+    fn an_empty_sublog_with_a_connected_flow_is_caught_up() {
+        let cl = changelog();
+        assert!(!cl.flow_caught_up("A", Partition::Bak), "no peer log at all");
+        let _guard = cl.serving("A", Partition::Bak);
+        assert!(cl.flow_caught_up("A", Partition::Bak), "nothing was ever logged for it");
+    }
+
+    #[test]
+    fn a_disconnected_flow_holds_no_position() {
+        let cl = changelog();
+        let guard = cl.serving("A", Partition::Bak);
+        cl.bump("A", "call-1", Op::Put, Partition::Bak);
+        cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
+        assert!(cl.flow_caught_up("A", Partition::Bak));
+        drop(guard);
+        assert!(!cl.flow_caught_up("A", Partition::Bak), "a cut flow's position is unknown");
+        // A fresh flow starts from "unknown", not from the cleared claim.
+        let _again = cl.serving("A", Partition::Bak);
+        assert!(!cl.flow_caught_up("A", Partition::Bak));
+    }
+
+    #[test]
+    fn the_head_survives_compaction_of_the_same_ref() {
+        let cl = changelog();
+        let _guard = cl.serving("A", Partition::Bak);
+        cl.bump("A", "call-1", Op::Put, Partition::Bak);
+        cl.bump("A", "call-1", Op::Put, Partition::Bak);
+        assert_eq!(cl.peer_len("A", Partition::Bak), 1, "compacted to one entry");
+        cl.note_applied("A", Partition::Bak, Watermark::new(7, 1));
+        assert!(!cl.flow_caught_up("A", Partition::Bak), "counter 1 was moved to 2");
+        cl.note_applied("A", Partition::Bak, Watermark::new(7, 2));
+        assert!(cl.flow_caught_up("A", Partition::Bak));
+    }
+
+    #[test]
+    fn a_position_from_an_older_incarnation_never_reaches_the_head() {
+        let cl = changelog();
+        let _guard = cl.serving("A", Partition::Bak);
+        cl.bump("A", "call-1", Op::Put, Partition::Bak);
+        cl.note_applied("A", Partition::Bak, Watermark::new(6, u64::MAX));
+        assert!(!cl.flow_caught_up("A", Partition::Bak));
     }
 }

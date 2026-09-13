@@ -10,7 +10,15 @@
 //! us → peer:  [bootstrap store-scan if since==(0,0)]    # snapshot, stamped at W=head
 //!             Data…(entries > W, batched) ; Noop(head)  # poll-drain, catch-up Noop
 //!             …sleep ~100ms; drain again; Noop only on the catch-up edge + 20s idle…
+//! peer → us:  Position{ at }                            # what the peer has applied
 //! ```
+//!
+//! ## The peer's back-channel
+//! A separate per-connection task is the only reader past the opening request: it
+//! records each [`Frame::Position`] on the flow's sub-log (ADR-0031 D2) and, on a
+//! close, flags the serve loop to end. It exists because a real socket's `recv`
+//! is not cancel-safe mid-read, so it can never be an arm of the serve loop's
+//! `select!`. Any other frame from the client is ignored.
 //!
 //! ## Pure poll, no `Notify`
 //! The server is a `sleep`-poll loop (ADR-0014): every ~100ms it drains up to
@@ -118,12 +126,13 @@ impl ReplServer {
     /// Serve one accepted connection: recv the opening `PullRequest`, then drive
     /// its single flow to completion (until the socket closes).
     async fn serve_connection(self, conn: Box<dyn ReplicationConnection>) {
+        let conn: Arc<dyn ReplicationConnection> = Arc::from(conn);
         let (caller, partition, since) = match conn.recv().await {
             Some(Frame::PullRequest { caller, partition, since, .. }) => (caller, partition, since),
             // Anything other than an opening PullRequest, or a close → done.
             _ => return,
         };
-        self.serve_flow(conn.as_ref(), &caller, partition, since).await;
+        self.serve_flow(conn, &caller, partition, since).await;
     }
 
     /// `(role, primary)` body keyspace for a flow (fixed by the partition):
@@ -138,13 +147,30 @@ impl ReplServer {
     /// Drive one flow: optional bootstrap store-scan (cold), then the poll-tail.
     async fn serve_flow(
         &self,
-        conn: &dyn ReplicationConnection,
+        conn: Arc<dyn ReplicationConnection>,
         caller: &str,
         partition: Partition,
         since: Watermark,
     ) {
-        // Keep this peer's changelog reap-immune while we serve it.
-        let _guard = self.changelog.serving(caller);
+        // Keep this peer's changelog reap-immune, and this partition's flow
+        // marked connected, while we serve it.
+        let _guard = self.changelog.serving(caller, partition);
+        // The peer's back-channel: positions in, and a close that ends us.
+        let (closed_tx, mut closed) = tokio::sync::watch::channel(false);
+        let _recv = AbortOnDrop(tokio::spawn({
+            let conn = conn.clone();
+            let changelog = self.changelog.clone();
+            let peer = caller.to_string();
+            async move {
+                while let Some(frame) = conn.recv().await {
+                    if let Frame::Position { at } = frame {
+                        changelog.note_applied(&peer, partition, at);
+                    }
+                }
+                let _ = closed_tx.send(true);
+            }
+        }));
+        let conn = conn.as_ref();
         let (role, primary) = self.keyspace(partition, caller);
         // Stream-kind label for the per-(flow, peer) Noop-sent liveness counter.
         let flow = match partition {
@@ -235,7 +261,11 @@ impl ReplServer {
                     idle_cycles = 0;
                 }
             }
-            tokio::time::sleep(POLL).await;
+            // `sleep` is cancel-safe, so the peer's close can race it here.
+            tokio::select! {
+                _ = tokio::time::sleep(POLL) => {}
+                _ = closed.changed() => return,
+            }
         }
     }
 
@@ -302,5 +332,15 @@ impl ReplServer {
     #[cfg(test)]
     pub fn self_ordinal(&self) -> &str {
         &self.self_ordinal
+    }
+}
+
+/// Aborts the wrapped task on drop, so a finished serve flow leaves no reader on
+/// a connection it no longer owns.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }

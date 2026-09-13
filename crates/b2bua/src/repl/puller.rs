@@ -53,6 +53,9 @@
 //!   [`ReclaimAll`](ReplCommand::ReclaimAll); advance `W` if greater.
 //! - `ResetToBootstrap` → discard `W`, clear bootstrap-complete, bump
 //!   `reset_gen`, disconnect (reconnect re-bootstraps from `(0,0)`).
+//! - after a post-bootstrap `Data` and on every `Noop` → `Position{at}` back to
+//!   the server, the only client→server frame past the opening `PullRequest`
+//!   (ADR-0031 D2).
 //! - recv `None` / send `Err` → `Backoff` (RETAIN W).
 //! - `Backoff`: `sleep(min(init·2^attempt, max))` + a select on cancel (a plain
 //!   `sleep`+`select`, **not** a `DelayQueue` — CLAUDE.md aliasing hazard).
@@ -670,6 +673,14 @@ impl Puller {
                                 let _ = tx.send(cmd);
                             }
                         }
+                        // Report the applied position so a withdrawn peer's drain
+                        // can see its calls held here (ADR-0031 D2). Pre-bootstrap
+                        // frames all share `at = W`: claiming W before the whole
+                        // scan is applied would be false, so the bootstrap claim
+                        // is made once, on the first catch-up `Noop`.
+                        if conn.send(Frame::Position { at }).await.is_err() {
+                            return RunOutcome::Disconnected;
+                        }
                     }
                 }
                 Some(Frame::Noop { at }) => {
@@ -693,6 +704,13 @@ impl Puller {
                             self.metrics.set_repl_bootstrap_last_applied(applied_in_bootstrap);
                             self.signal_reclaim_all();
                         }
+                    }
+                    // Every `Noop` is answered with the position it announced:
+                    // the first one is the bootstrap's own claim (every scan body
+                    // is applied by now), the idle ones keep the claim fresh
+                    // (ADR-0031 D2).
+                    if conn.send(Frame::Position { at }).await.is_err() {
+                        return RunOutcome::Disconnected;
                     }
                 }
                 Some(Frame::ResetToBootstrap { .. }) => {
