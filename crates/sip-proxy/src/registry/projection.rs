@@ -21,6 +21,9 @@
 //!   port-agnostic — the port is a consumer concern. In production every worker
 //!   uses the cluster-wide `default_port`; `static`/`simulated` may set a
 //!   per-worker `port_override`.
+//! - **Departed addresses** live in [`Tombstones`], keyed by address: an address
+//!   the set stopped serving still resolves as `Dead` for Timer H, so a response
+//!   from a node that left the pool is recognised as such.
 //! - **The projection** is cached in one [`ArcSwap`] for lock-free hot reads and
 //!   is a pure function of the two authoritative sources — never an independent
 //!   source of truth, always re-derivable, inherently lag-immune (it recomposes
@@ -35,6 +38,7 @@ use topology::{Membership, Peer};
 
 use crate::addr::ProxyAddr;
 
+use super::tombstone::{Tombstones, DEPARTED_ADDRESS_TTL_MS};
 use super::{WorkerEntry, WorkerHealth, WorkerId};
 
 /// Per-ordinal proxy annotation — everything a [`WorkerEntry`] carries that
@@ -99,13 +103,25 @@ impl WorkerAnnotations {
     /// moved (a recreated pod must be re-probed — a stale `Dead`/`Alive` must not
     /// survive). An unchanged ordinal keeps its probe-written health and port.
     /// This is the only proxy-specific lifecycle rule; it has no membership twin.
-    fn sync_membership(&self, peers: &[Peer], now_ms: u64) {
+    ///
+    /// Returns the `(ordinal, address)` pairs the overlay stopped serving — a
+    /// departure or a host move — for the caller to tombstone.
+    fn sync_membership(
+        &self,
+        peers: &[Peer],
+        now_ms: u64,
+        default_port: u16,
+    ) -> Vec<(WorkerId, ProxyAddr)> {
         let live: HashSet<&str> = peers.iter().map(|p| p.ordinal.as_str()).collect();
+        let mut departed = Vec::new();
         // Membership deltas are rare state changes: each gets its own line. The
         // diff is read before the `rcu` update so a retried closure cannot
         // double-log it.
         {
             let current = self.snapshot();
+            let addr_of = |rec: &Annot| {
+                ProxyAddr::new(rec.host.clone(), rec.port_override.unwrap_or(default_port))
+            };
             for (id, rec) in current.iter() {
                 if !live.contains(id.as_str()) {
                     tracing::info!(
@@ -114,18 +130,22 @@ impl WorkerAnnotations {
                         host = %rec.host,
                         "worker left the registry"
                     );
+                    departed.push((id.clone(), addr_of(rec)));
                 }
             }
             for p in peers {
                 match current.get(&p.ordinal) {
                     Some(rec) if rec.host == p.host => {}
-                    Some(rec) => tracing::info!(
-                        node = observe::node(),
-                        worker = %p.ordinal,
-                        from_host = %rec.host,
-                        host = %p.host,
-                        "worker re-created at a new host"
-                    ),
+                    Some(rec) => {
+                        tracing::info!(
+                            node = observe::node(),
+                            worker = %p.ordinal,
+                            from_host = %rec.host,
+                            host = %p.host,
+                            "worker re-created at a new host"
+                        );
+                        departed.push((p.ordinal.clone(), addr_of(rec)));
+                    }
                     None => tracing::info!(
                         node = observe::node(),
                         worker = %p.ordinal,
@@ -146,6 +166,7 @@ impl WorkerAnnotations {
                 }
             }
         });
+        departed
     }
 
     /// Annotate health (the OPTIONS probe write / `WorkerRegistryControl`). No-op
@@ -213,6 +234,7 @@ fn project(
 pub(crate) struct WorkerSet {
     membership: Arc<dyn Membership>,
     annotations: WorkerAnnotations,
+    tombstones: Tombstones,
     projection: ArcSwap<Vec<WorkerEntry>>,
     default_port: u16,
     clock: Clock,
@@ -225,6 +247,7 @@ impl WorkerSet {
         let set = Self {
             membership,
             annotations: WorkerAnnotations::default(),
+            tombstones: Tombstones::default(),
             projection: ArcSwap::from_pointee(Vec::new()),
             default_port,
             clock,
@@ -238,12 +261,30 @@ impl WorkerSet {
     }
 
     /// Recompute the projection from the authoritative membership snapshot + the
-    /// annotation overlay. Idempotent; the single write path for every registry.
+    /// annotation overlay, and keep the departed-address overlay in step: an
+    /// address the set stopped serving is tombstoned, an address a worker joined
+    /// at is forgotten. Idempotent; the single write path for every registry.
     pub(crate) fn recompose(&self) {
         let peers = self.membership.snapshot();
-        self.annotations.sync_membership(&peers, self.now_ms());
+        let now_ms = self.now_ms();
+        let departed = self.annotations.sync_membership(&peers, now_ms, self.default_port);
         let annots = self.annotations.snapshot();
-        self.projection.store(Arc::new(project(&peers, &annots, self.default_port)));
+        let entries = project(&peers, &annots, self.default_port);
+        for (id, address) in departed {
+            tracing::info!(
+                node = observe::node(),
+                worker = %id,
+                address = %address,
+                ttl_ms = DEPARTED_ADDRESS_TTL_MS,
+                "departed worker address tombstoned"
+            );
+            self.tombstones.insert(address, id, now_ms);
+        }
+        for e in &entries {
+            self.tombstones.clear(&e.address);
+        }
+        self.tombstones.prune(now_ms);
+        self.projection.store(Arc::new(entries));
     }
 
     /// Annotate a worker's health (the OPTIONS write seam) and recompose.
@@ -297,8 +338,16 @@ impl WorkerSet {
     pub(crate) fn resolve(&self, id: &str) -> Option<WorkerEntry> {
         self.projection.load().iter().find(|w| w.id == id).cloned()
     }
+    /// The worker bound at `addr`. An address that left the set answers as its
+    /// last ordinal with health `Dead` for [`DEPARTED_ADDRESS_TTL_MS`], so a
+    /// response still coming from it is recognised as a departed worker's.
     pub(crate) fn lookup_by_address(&self, addr: &ProxyAddr) -> Option<WorkerEntry> {
-        self.projection.load().iter().find(|w| &w.address == addr).cloned()
+        self.projection
+            .load()
+            .iter()
+            .find(|w| &w.address == addr)
+            .cloned()
+            .or_else(|| self.tombstones.lookup(addr, self.now_ms()))
     }
     pub(crate) fn membership(&self) -> &Arc<dyn Membership> {
         &self.membership
@@ -307,6 +356,8 @@ impl WorkerSet {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use topology::SimulatedMembership;
 
@@ -357,6 +408,63 @@ mod tests {
         set.recompose();
         assert!(set.resolve("w1").is_none());
         assert!(set.resolve("w0").is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_departed_address_reads_dead_for_timer_h_then_nothing() {
+        let (set, sim) = ws(&[("w0", "10.0.0.1"), ("w1", "10.0.0.2")], 5060);
+        set.set_health("w1", WorkerHealth::Alive);
+        let gone = ProxyAddr::new("10.0.0.2", 5060);
+        sim.remove("w1");
+        set.recompose();
+
+        let dead = set.lookup_by_address(&gone).expect("the departed address still resolves");
+        assert_eq!(dead.id, "w1");
+        assert_eq!(dead.health, WorkerHealth::Dead);
+        assert!(set.resolve("w1").is_none(), "the ordinal stays gone on the request path");
+
+        tokio::time::advance(Duration::from_millis(DEPARTED_ADDRESS_TTL_MS - 1)).await;
+        assert!(set.lookup_by_address(&gone).is_some(), "inside the window");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(set.lookup_by_address(&gone).is_none(), "the window closed at Timer H");
+    }
+
+    #[test]
+    fn a_host_move_tombstones_the_old_address_and_leaves_the_new_one_unknown() {
+        let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+        set.set_health("w0", WorkerHealth::Alive);
+        sim.change_address(Peer::new("w0", "10.0.0.2"));
+        set.recompose();
+
+        let old = set
+            .lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060))
+            .expect("the host it moved off is tombstoned");
+        assert_eq!((old.id.as_str(), old.health), ("w0", WorkerHealth::Dead));
+        let new = set.lookup_by_address(&ProxyAddr::new("10.0.0.2", 5060)).expect("the new host");
+        assert_eq!(new.health, WorkerHealth::Unknown, "the fresh endpoint awaits its probe");
+        assert_eq!(set.resolve("w0").unwrap().address, ProxyAddr::new("10.0.0.2", 5060));
+
+        // The tombstone is address-keyed, so the live ordinal's health writes
+        // never reach it.
+        set.set_health("w0", WorkerHealth::Alive);
+        assert_eq!(
+            set.lookup_by_address(&ProxyAddr::new("10.0.0.1", 5060)).unwrap().health,
+            WorkerHealth::Dead
+        );
+    }
+
+    #[test]
+    fn a_join_at_a_tombstoned_address_clears_it() {
+        let (set, sim) = ws(&[("w0", "10.0.0.1")], 5060);
+        let addr = ProxyAddr::new("10.0.0.1", 5060);
+        sim.remove("w0");
+        set.recompose();
+        assert_eq!(set.lookup_by_address(&addr).unwrap().health, WorkerHealth::Dead);
+
+        sim.add(Peer::new("w9", "10.0.0.1"));
+        set.recompose();
+        let joined = set.lookup_by_address(&addr).expect("the new tenant of the address");
+        assert_eq!((joined.id.as_str(), joined.health), ("w9", WorkerHealth::Unknown));
     }
 
     #[test]

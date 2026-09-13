@@ -18,22 +18,18 @@
 //! ```
 //!
 //! The proxy identifies the worker a response belongs to by the Via **sent-by**
-//! — the address the registry published for it. A withdrawn ordinal resolves to
-//! nothing, so the reverse-path failover of RFC-3261-§16.7 relaying never
-//! applies and the 2xx is relayed to the address it came from: the elder, which
-//! bridges it to the caller. No copy of that answer reaches the replacement,
-//! whose reclaimed record still reads the call as ringing and still arms the
-//! route-time ring deadline. At that deadline the no-answer treatment authors a
-//! **second final on an INVITE server transaction the caller already ACKed**
-//! (RFC 3261 §17.2.1, §13.3.1.4). The caller's ACK does not follow the answer:
-//! the withdrawn ordinal resolves to nothing on the request path either, so the
-//! ACK takes the cookie's backup and the survivor takes the dialog over. One
-//! answered call then has three live owners, and the two that never saw the
-//! answer both run the ring deadline.
+//! — the address the registry published for it. An address that left the worker
+//! set keeps resolving as `Dead` for Timer H, so the callee's 2xx reverse-fails
+//! to the cookie's backup instead of returning to the incarnation that sent the
+//! INVITE: the survivor's takeover copy answers the caller, the caller's ACK
+//! follows the same cookie to it, and the reverse-flush fold hands the answer to
+//! the replacement's reclaimed copy. Every owner then reads the call as
+//! answered, so no ring deadline authors a second final on an INVITE server
+//! transaction the caller already ACKed (RFC 3261 §17.2.1, §13.3.1.4).
 //!
-//! The three cases separate the causes: A forces the removal, B removes it
-//! gracefully (no kill at all), C makes the process die WITH its endpoint. A and
-//! B share the window; C has none.
+//! The three cases differ only in how the elder's process ends: A forces the
+//! removal, B removes it gracefully (no kill at all), C makes the process die
+//! WITH its endpoint. The answer reaches the caller in all three.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -314,9 +310,9 @@ enum Removal {
 }
 
 /// One run of the scenario, from the ringing call to the cluster-wide release.
-/// The assertions state the CORRECT outcome: the caller's INVITE server
-/// transaction carries exactly the finals it is owed — none once she has been
-/// answered — whichever incarnation relayed the answer.
+/// The assertions state the outcome the callee's answer is owed: it reaches the
+/// caller whichever incarnation sent the INVITE, and her already-ACKed INVITE
+/// server transaction carries no further final.
 async fn run(name: &str, title: &str, removal: Removal) {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } = spawn_cluster(name).await;
 
@@ -388,12 +384,9 @@ async fn run(name: &str, title: &str, removal: Removal) {
     let answered = hops(&fh, "SIP/2.0 200", "INVITE")
         .iter()
         .any(|(_, to, delivered)| *delivered && *to == alice_addr);
-    let mut dialog = if answered {
-        call.expect(200).await;
-        Some(call.ack().await)
-    } else {
-        None
-    };
+    assert!(answered, "the callee's 2xx reached the caller");
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
     fh.advance(Duration::from_millis(200)).await;
     fh.mark(
         &pri_ord,
@@ -461,54 +454,27 @@ async fn run(name: &str, title: &str, removal: Removal) {
     // ── the ring deadline on the reclaimed copy ──────────────────────────────
     assert!(fh.now_ms() < fire_at, "the window closes before the ring deadline");
     let crossed = cross_deadline(&fh, &call, &alice, &bob, fire_at).await;
-    // An answered call owes the caller nothing more and the callee no CANCEL; an
-    // unrelayed answer leaves the deadline to author the caller's ONE final and
-    // to cancel the b-leg it still reads as ringing.
-    let passed = if answered {
-        crossed.finals_to_alice.is_empty() && crossed.cancels_to_bob == 0
-    } else {
-        crossed.finals_to_alice == vec![480]
-    };
+    // An answered call owes the caller nothing more and the callee no CANCEL.
+    let passed = crossed.finals_to_alice.is_empty() && crossed.cancels_to_bob == 0;
     let written = fh
         .write_unified_report(&report_dir(name), "report", title, passed)
         .expect("report written");
     eprintln!("report: {}", written[0].display());
 
-    if answered {
-        assert_eq!(
-            crossed.stray_final(),
-            None,
-            "a second final on the caller's already-ACKed INVITE server transaction \
-             (RFC 3261 §17.2.1) — finals {:?}",
-            crossed.finals_to_alice,
-        );
-        assert_eq!(crossed.cancels_to_bob, 0, "the callee's answered INVITE takes no CANCEL");
-    } else {
-        assert_eq!(
-            crossed.finals_to_alice,
-            vec![480],
-            "an answer nobody relayed leaves the ring deadline to author the caller's \
-             ONE final",
-        );
-        assert!(
-            crossed.cancels_to_bob > 0,
-            "the b-leg the deadline still reads ringing is cancelled"
-        );
-    }
+    assert_eq!(
+        crossed.stray_final(),
+        None,
+        "a second final on the caller's already-ACKed INVITE server transaction \
+         (RFC 3261 §17.2.1) — finals {:?}",
+        crossed.finals_to_alice,
+    );
+    assert_eq!(crossed.cancels_to_bob, 0, "the callee's answered INVITE takes no CANCEL");
 
     // ── the call terminates end-to-end and the cluster releases it ───────────
     let nodes: [&ReplicatedB2buaSut; 3] = [&*elder, survivor, &replacement];
-    if let Some(dialog) = dialog.as_mut() {
-        let mut bye = dialog.bye().await;
-        bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
-        bye.expect_tolerating(200, &["OPTIONS"]).await;
-    } else {
-        // RFC 3261 §13.3.1.4: the callee's 2xx drew no ACK, so the callee gives
-        // up on it and BYEs the dialog it answered.
-        let mut bye = uas.dialog().bye().await;
-        fh.advance(Duration::from_secs(1)).await;
-        bye.expect_tolerating(200, &["OPTIONS", "CANCEL"]).await;
-    }
+    let mut bye = dialog.bye().await;
+    bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
+    bye.expect_tolerating(200, &["OPTIONS"]).await;
     settle_released(&fh, &alice, &bob, &nodes[..], &call_ref).await;
     assert_eq!(total_cdrs_for(&nodes[..], &call_ref), 1, "exactly one CDR across the cluster");
 
@@ -522,13 +488,10 @@ async fn run(name: &str, title: &str, removal: Removal) {
 
 /// **Forced removal.** The endpoint is withdrawn, the SIGTERM is answered by a
 /// drain and the SIGKILL lands 2 s later. The callee answers in between: the
-/// proxy relays the 2xx to the elder, which bridges it to the caller, while the
-/// replacement holds the reclaimed ringing copy. The ring deadline must not
-/// author a second final on the caller's answered INVITE.
+/// elder's address is tombstoned, so the 2xx reverse-fails to the survivor,
+/// which answers the caller and takes the dialog over. The ring deadline on the
+/// replacement's reclaimed copy must not author a second final.
 #[tokio::test(start_paused = true)]
-#[ignore = "open half: a withdrawn ordinal resolves to no registry entry, so the 2xx \
-            relayed by Via sent-by reaches the incarnation that still runs and the \
-            replacement's reclaimed record never learns the call was answered"]
 async fn a_force_removed_primary_answering_in_its_window_draws_no_second_final() {
     run(
         "withdrawn-primary-answers-forced",
@@ -539,12 +502,9 @@ async fn a_force_removed_primary_answering_in_its_window_draws_no_second_final()
 }
 
 /// **Graceful removal.** The same withdrawal and the same drain, with no kill at
-/// all: the process exits when its grace runs out. If the second final shows up
-/// here too, the window is the drain, not the force.
+/// all: the process exits when its grace runs out — the window is the drain, not
+/// the force, and the answer takes the same route through it.
 #[tokio::test(start_paused = true)]
-#[ignore = "open half: the window is the drain, not the kill — a draining incarnation \
-            keeps serving after its endpoint is withdrawn, so the same answer lands on \
-            it and never reaches the replacement's reclaimed record"]
 async fn a_gracefully_removed_primary_answering_in_its_drain_draws_no_second_final() {
     run(
         "withdrawn-primary-answers-graceful",
@@ -555,10 +515,10 @@ async fn a_gracefully_removed_primary_answering_in_its_drain_draws_no_second_fin
 }
 
 /// **Control: a true crash.** The process dies WITH its endpoint, so there is no
-/// window: the callee's answer reaches nobody. The reclaimed copy is then the
-/// only owner and its ring deadline authors the caller's ONE final.
+/// window at all. The address it left behind is tombstoned all the same, so the
+/// answer reaches the survivor rather than the socket nobody is bound to.
 #[tokio::test(start_paused = true)]
-async fn a_primary_that_dies_with_its_endpoint_leaves_the_answer_unrelayed() {
+async fn a_primary_that_dies_with_its_endpoint_still_has_its_answer_delivered() {
     run(
         "withdrawn-primary-answers-crashed",
         "A primary that dies with its endpoint",
