@@ -538,8 +538,9 @@ fn frozen_value(want: &Header, resolver: &Resolver<'_>) -> Result<String, String
 
 /// A declared body SHAPE on an expect, and the lane-declarable known bug that
 /// names the miss where one does. A resource or multipart body on an expect
-/// states what the capture held rather than a shape, so it asserts presence
-/// only — the confrontation pass compares the bytes.
+/// gates on PRESENCE only: the content assertion a text resource carries is the
+/// post-run confrontation's, read off the recording (§8.3), and a binary
+/// resource is presence-only everywhere.
 ///
 /// The one nameable miss is a body on a PROVISIONAL the document expects
 /// stripped: that is a SUT that did not apply the 18x rewrite its routing

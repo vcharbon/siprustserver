@@ -70,6 +70,24 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-09-13 — an expected body is asserted by CONTENT, and the confrontation
+states the difference.** A single body on an expect was a declared shape and
+nothing else, so a frozen text body the capture carried — a control document,
+a sipfrag — was not stored on the expect side and a replay that received any
+document at all read as transparent: the confrontation diffed headers and
+never read a body. The registry now decides the expect side as it decides the
+send side. SDP and multipart stay shapes, absence stays its own claim, a
+binary payload stays undeclared, and every other frozen text body is stored as
+a resource beside the send-side files and held against the received body
+after the run.
+
+| change | where |
+|---|---|
+| `ResourceBody` gains `compare` (`exact`, the meaning of absence, or `xml`: declaration dropped, whitespace-only text between tags removed, ends trimmed, nothing else). Refused on a send by `body/compare-on-send` | §8.3, `pivot-schema`, `@sip/contracts` |
+| the generator stores a frozen TEXT body on an expect as `{ ref, mode: "frozen", content-type }` plus its resource file, under the expect-side name `resources/<actor>_r<n>_<part>.<ext>` — its own counter, so nothing a send stored is renamed | §8.3, §8.4, generator |
+| the interpreter keeps gating PRESENCE for a resource body on an expect, under `check: assert` alone; the content is the confrontation's, read off the recording, and on a `check: record` step its record is the only statement of the body. `auto/body-not-composable` reads sends only: an expect composes nothing on any class | §6.3, §8.3, `pivot-schema`, `pivot-interpreter` |
+| the confrontation gains `body` records: `body:<type/subtype>:<scope>`, the expected and received texts one a side, both verbatim; a reception carrying no body confronts as the empty text; the driver supplies every expect-side resource from the case directory and a ref it did not supply is a driver error | `ConfrontationRecord.kind`, the pipeline's `confront`, the driver |
+
 **2026-08-30 — an expect-side ladder states its FACTS and the interpreter
 excuses nothing.** Ticket 211. §6.9 splits a ladder — the count is the
 document's, the pacing is RFC 3261's per message class — and on a `send` step
@@ -1069,10 +1087,10 @@ ANSWER rides (RFC 3261 §13.2.1), and **PRACK with its 2xx** (RFC 3262 §5). Two
 do not, and a body stored on them would be emitted by nobody, so lint refuses it
 (`auto/body-not-composable`): a **100 Trying**, which negotiates nothing, and
 the **ACK to a non-2xx**, absorbed by the INVITE transaction (RFC 3261
-§17.1.1.3) and reaching no TU that could read one. A declared SHAPE
-(`body.mode`) is not a stored body — it asserts what arrived and composes
-nothing — so an expect may declare one on any class, and the relayed ACK's
-`sdp-present` is what lets the confrontation see a dropped answer at all.
+§17.1.1.3) and reaching no TU that could read one. An EXPECT composes
+nothing — its body, a shape or a resource, asserts what arrived (§8.3) — so an
+expect may state one on any class, and the relayed ACK's `sdp-present` is what
+lets the confrontation see a dropped answer at all.
 
 `cseq` is the CSeq NUMBER the CAPTURE carried, and it is a PAIRING TOKEN: it
 names which transaction the captured automatic belonged to, for confrontation,
@@ -1841,8 +1859,46 @@ ONE value left unstated is bare `application/sdp` on a rewritten body, which
 render derives exactly, so the stored and derived values cannot drift; an SDP
 body whose captured type carried parameters states them and replays under them.
 
-A single body on an EXPECT is a declared shape and nothing else:
-`{ "mode": "sdp-present" | "absent" | "multipart-present" }`.
+A single body on an EXPECT is asserted by SHAPE or by CONTENT, and the
+registry decides which. SDP and multipart are shapes —
+`{ "mode": "sdp-present" | "multipart-present" }` — because their content is
+rebooked or reframed at replay; a message that carried no body states
+`{ "mode": "absent" }`, and that IS the assertion. Every other TEXT body the
+registry freezes is stored as a resource and asserted by content, in the same
+form the send side stores it:
+
+```json
+"body": { "ref": "resources/uas1_r3_0.xml", "mode": "frozen",
+          "content-type": "application/example+xml", "compare": "xml" }
+```
+
+`compare` says how the received body is held against the file — `exact`, byte
+for byte, which is what an absent `compare` means, or `xml`: both sides as XML
+text after ONE normalisation (the XML declaration dropped, whitespace-only text
+between two tags removed wherever it sits, mixed content included, leading and
+trailing whitespace trimmed) and nothing else — no attribute reordering, no
+entity work. The generator leaves `compare` unstated; `xml` is authored, where
+a document has to say that a re-serialised body is the same body. `compare` on
+a SEND describes a check nobody runs and lint refuses it
+(`body/compare-on-send`).
+
+The two halves of the assertion run at two times, and only one of them
+depends on `check`. The interpreter gates on PRESENCE alone, and only under
+`check: assert` — a body must have arrived, whatever it holds — so a differing
+body never abandons the call: the message is answered, the dialog walks to its
+captured teardown, and the post-run confrontation states the difference as a
+`body` record (`body:<type/subtype>:<scope>`, the expected text and the
+received text side by side, both verbatim), which a lane's rule lists then
+classify. A reception carrying NO body where content is asserted is confronted
+as the empty text; under `check: assert` the interpreter also refuses it, and
+under `check: record` — every generated expect — the confrontation's record is
+the only statement of it.
+
+A resource body on an expect is TEXT unless its `mode` is `frozen-binary`; a
+`mode` left unstated is text. The ONE exception is that binary payload: the
+recording the confrontation reads is text, so a binary body on an expect is
+not stored at all — the expectation states nothing about it — and were one
+authored it would assert presence only.
 
 Multipart bodies reference DECOMPOSED parts:
 
@@ -1918,10 +1974,14 @@ silent freeze.
 
 ### 8.4 Resource naming
 
-A resource ref is `resources/<actor>_<n>_<part>.<ext>`: the actor, its ordinal
-over the case's emitted messages, and the part index within that message. The
-name is **step-index-free** (v2 friction H1) — renumbering the flow, inserting a
-step, splitting a deviation, none of it renames a file on disk.
+A resource ref is `resources/<actor>_<n>_<part>.<ext>` on a send — the actor,
+its ordinal over the messages it emits, and the part index within that message
+— and `resources/<actor>_r<n>_<part>.<ext>` on an expect, the ordinal counted
+over the messages the actor expects. Every message takes an ordinal whether or
+not it carries a body, and the two counters are separate, so a send and an
+expect of one actor never name one file. The name is **step-index-free** (v2
+friction H1) — renumbering the flow, inserting a step, splitting a deviation,
+none of it renames a file on disk.
 
 ### 8.5 The identity registry
 
@@ -2450,6 +2510,7 @@ Lint's rule groups:
 | `attempt/*`, `call/*` | `(branch, position)` unique, non-terminal attempts carry a cause, `no_answer_ms` inside the armable band, a `joined_by` leg joins at an unconditional step of its own call that precedes the leg's first message |
 | `claim/*`, `lanes/*` | a lane verdict matches what the document asks the lane to do |
 | `auto/*`, `check/*`, `optional/*`, `delay/*` | what a step may state given its `op` and its `auto` |
+| `body/*` | `compare` rides an expect's resource body and no send's (§8.3) |
 | `alt/*` | discriminability: two branches minimum, unique names, none empty, none opening on a `send` or an `optional`, no first message two branches both match |
 | `unordered/*`, `inject/*` | an order-free group holds two or more expects; an injection names an action |
 | `background/*` | a settle-time counter states a bound, and the bounds agree |

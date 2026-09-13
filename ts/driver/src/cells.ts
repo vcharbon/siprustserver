@@ -16,7 +16,7 @@
  * ran. A cell whose document declares its lane BLOCKED is not red either: it
  * leaves a `skipped.json` and never reaches the interpreter.
  */
-import { Bundle, Campaign, CellHits, Confrontation, E2e, Flows, Pivot, Tokens } from "@sip/contracts"
+import { Body, Bundle, Campaign, CellHits, Confrontation, E2e, Flows, Pivot, Tokens } from "@sip/contracts"
 import { Classifier, Confront, Reclassifier } from "@sip/pipeline"
 import { ReplayCli, runner as toolchainRunner } from "@sip/toolchain"
 import * as Cause from "effect/Cause"
@@ -308,10 +308,12 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
     cell.flows === undefined
       ? undefined
       : yield* Flows.parseFlows(yield* fs.readFileString(cell.flows))
+  const resources = yield* readExpectedBodies(path.dirname(yield* documentPath(cell.case)), pivot)
   const confronted = Confront.confront({
     pivot,
     verdict,
     recordings,
+    resources,
     ...(flows === undefined ? {} : { flows })
   })
 
@@ -348,6 +350,27 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
     Confrontation.emitClassificationSummary(summary)
   )
   return summary
+})
+
+/**
+ * Every resource an `expect` step's body references, read from the case
+ * directory and keyed by its ref — the texts the confrontation holds the
+ * received bodies against.
+ */
+const readExpectedBodies = Effect.fn("Driver.readExpectedBodies")(function* (
+  caseDir: string,
+  pivot: Pivot.PivotV3
+) {
+  const fs = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+  const out = new Map<string, string>()
+  for (const step of Pivot.pivotSteps(pivot)) {
+    const body = step.msg.body
+    if (step.op !== "expect" || body === undefined || !Body.isResourceBody(body)) continue
+    if (out.has(body.ref)) continue
+    out.set(body.ref, yield* fs.readFileString(path.join(caseDir, body.ref)))
+  }
+  return out
 })
 
 /** Every per-leg recording of one finished bundle, keyed by leg name. */

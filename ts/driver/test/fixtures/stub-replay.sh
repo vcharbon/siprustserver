@@ -51,6 +51,18 @@ JSON
   "status": "ok"
 }
 JSON
-    exit 0
     ;;
 esac
+
+# A case expecting a body leaves the reception the confrontation reads it off:
+# one in-dialog INFO on leg B, attributed to step s9, carrying another document
+# than the one the case stores.
+case "$case_path" in
+  *expects-body*)
+    mkdir -p "$out_dir/recording"
+    cat > "$out_dir/recording/B.jsonl" <<'JSONL'
+{"seq":1,"dir":"in","at_us":1200,"step":"s9","raw":"INFO sip:uas1@127.0.0.1 SIP/2.0\r\nTo: <sip:+331@h.fr>;tag=b\r\nCSeq: 2 INFO\r\nContent-Type: application/example+xml\r\nContent-Length: 8\r\n\r\n<other/>"}
+JSONL
+    ;;
+esac
+exit 0

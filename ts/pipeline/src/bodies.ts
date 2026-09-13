@@ -1,12 +1,15 @@
 /**
  * Message-body decomposition into a pivot `body` plus the sibling resource files
- * the runner replays.
+ * the runner replays, or — on an expect — confronts the received body with.
  *
  * Registry policy: `application/sdp` carries the `c=` / `m=` rewrites (ports
  * rebooked at replay); a known non-SDP type is frozen byte-exact under its
  * captured media type; anything unrecognized is frozen and flagged when it
  * carries number-like digits, so a new handler is a decision and not an
- * omission.
+ * omission. The expect side reads the same registry: a frozen TEXT body is
+ * stored and asserted by content, SDP and multipart by shape, absence as its
+ * own claim, and a binary payload stays undeclared — the recording it would be
+ * confronted with is text.
  *
  * A multipart body is decomposed only where extraction handed the parts over
  * (`./parts.ts`). This module owns the per-part HANDLING, never the split.
@@ -27,11 +30,15 @@ export interface ResourceFile {
   readonly binary?: true
 }
 
-export interface BodyResult {
+/** What a step states about its body, and the files that statement references. */
+export interface StoredBody {
   /** The body the step states, and `undefined` where it states none. */
   readonly body: Body.Body | undefined
   readonly resources: ReadonlyArray<ResourceFile>
   readonly flags: ReadonlyArray<Case.Flag>
+}
+
+export interface BodyResult extends StoredBody {
   /** A multipart body extraction did not decompose — nothing was emitted. */
   readonly undecomposed: boolean
 }
@@ -165,21 +172,35 @@ const numericFlag = (h: Handling, text: string, what: string): Array<Case.Flag> 
 /** Whether the captured datagram carried a body at all. */
 export const carriesBody = (m: Flows.Msg): boolean => wireBody(m) !== undefined
 
-/** The expect-side body assertion: presence by shape, absence as its own claim. */
-export const expectBody = (m: Flows.Msg): Body.Body | undefined => {
+const NO_BODY: StoredBody = { body: { mode: "absent" }, resources: [], flags: [] }
+
+/**
+ * The expect-side body assertion. A frozen TEXT body is stored as a resource
+ * and asserted by content (`compare` left absent: exact); SDP and multipart
+ * are asserted by shape, absence as its own claim. A binary payload — one
+ * extraction handed over as `head` + `body_b64`, whatever its type — stays
+ * undeclared: the recording it would be confronted with is text.
+ */
+export const expectBody = (m: Flows.Msg, slug: string): StoredBody => {
   const payload = wireBody(m)
-  if (!payload) return { mode: "absent" }
-  if (payload.boundary !== undefined) return { mode: "multipart-present" }
-  if (mimeKey(payload.mediaType) === "application/sdp") return { mode: "sdp-present" }
-  // A present body of a shape this side does not model stays undeclared.
-  return undefined
+  if (!payload) return NO_BODY
+  if (payload.boundary !== undefined) return { ...NO_BODY, body: { mode: "multipart-present" } }
+  if (mimeKey(payload.mediaType) === "application/sdp") return { ...NO_BODY, body: { mode: "sdp-present" } }
+  const h = handlerFor(payload.mediaType)
+  if (h.mode !== "frozen" || payload.binary) return { ...NO_BODY, body: undefined }
+  const relPath = resourceName(slug, 0, payload.mediaType)
+  return {
+    body: { ref: relPath, mode: "frozen", "content-type": payload.contentType },
+    resources: [{ relPath, text: payload.text }],
+    flags: numericFlag(h, payload.text, `${slug} body is ${payload.contentType}`)
+  }
 }
 
 /**
  * The body registry's LOOKUP KEY: `type/subtype` lowercased, parameters stripped
  * (§8.2). Never what the pivot stores — the stored value is verbatim.
  */
-const mimeKey = (contentType: string): string =>
+export const mimeKey = (contentType: string): string =>
   (contentType.split(";")[0] ?? "").trim().toLowerCase()
 
 const resourceName = (slug: string, n: number, contentType: string): string => {

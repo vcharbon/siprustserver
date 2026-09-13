@@ -552,6 +552,7 @@ mod tests {
             rewrite: vec![],
             mode: None,
             content_type: None,
+            compare: None,
         });
         assert!(matches!(
             load_body(&unlabelled, &dir, &Booking::new("127.0.0.1", 40000), "A"),
@@ -562,6 +563,7 @@ mod tests {
             rewrite: vec![],
             mode: Some(pivot_schema::body::BodyMode::FrozenBinary),
             content_type: Some("application/EmergencyCallData.eCall.MSD".into()),
+            compare: None,
         });
         let (bytes, ct) = load_body(&typed, &dir, &Booking::new("127.0.0.1", 40000), "A").unwrap();
         assert_eq!(bytes, b"\x00\x01");
@@ -802,6 +804,7 @@ mod tests {
             rewrite: vec![],
             mode: Some(pivot_schema::body::BodyMode::Frozen),
             content_type: Some("application/sdp".into()),
+            compare: None,
         });
         let media = Booking::new("127.0.0.1", 40000);
         let (bytes, ct) = load_body(&body, &dir, &media, "A").unwrap();

@@ -750,15 +750,54 @@ fn a_body_is_refused_where_the_stack_could_not_place_it() {
             "delay": { "ms": 0, "from": "step:s1", "compressible": true, "timer_linked": false }
         });
     });
-    // A SHAPE asserts what arrived and composes nothing, so it rides any class.
-    assert_clean("auto/body-not-composable", |d| {
-        flow(d)[1] = json!({
-            "id": "s2", "leg": "A", "op": "expect", "check": "record", "auto": true,
-            "msg": { "status": 100, "reason": "Trying", "cseq-method": "INVITE", "cseq": 1,
-                     "body": { "mode": "absent" } },
-            "delay": { "ms": 0, "from": "step:s1", "compressible": true, "timer_linked": false }
+    // An EXPECT asserts what arrived and composes nothing, so its body — a
+    // shape or a resource — rides any class.
+    for body in [
+        json!({ "mode": "absent" }),
+        json!({ "ref": "resources/uac1_r0_0.xml", "mode": "frozen", "content-type": "application/example+xml" }),
+    ] {
+        assert_clean("auto/body-not-composable", |d| {
+            flow(d)[1] = json!({
+                "id": "s2", "leg": "A", "op": "expect", "check": "record", "auto": true,
+                "msg": { "status": 100, "reason": "Trying", "cseq-method": "INVITE", "cseq": 1,
+                         "body": body },
+                "delay": { "ms": 0, "from": "step:s1", "compressible": true, "timer_linked": false }
+            });
         });
-    });
+    }
+}
+
+/// §8.3: `compare` says how an EXPECT holds the received body against its
+/// resource. A send emits the resource and compares it with nothing.
+#[test]
+fn a_body_compare_mode_belongs_to_an_expect_and_to_nothing_else() {
+    let info = |op: &str, compare: Option<&str>| {
+        let op = op.to_string();
+        let compare = compare.map(str::to_string);
+        move |d: &mut Value| {
+            answered(d);
+            let mut step = json!({
+                "id": "s5", "leg": "B", "op": op, "in_dialog": true,
+                "msg": { "method": "INFO", "body": {
+                    "ref": "resources/uas1_r0_0.xml", "mode": "frozen",
+                    "content-type": "application/example+xml"
+                } },
+                "delay": { "ms": 0, "from": "step:s4", "compressible": true, "timer_linked": false }
+            });
+            if let Some(compare) = compare {
+                step["msg"]["body"]["compare"] = json!(compare);
+            }
+            if op == "expect" {
+                step["check"] = json!("record");
+            }
+            flow(d).push(step);
+        }
+    };
+    assert_fires("body/compare-on-send", info("send", Some("xml")));
+    assert_fires("body/compare-on-send", info("send", Some("exact")));
+    assert_clean("body/compare-on-send", info("send", None));
+    assert_clean("body/compare-on-send", info("expect", Some("xml")));
+    assert_clean("body/compare-on-send", info("expect", None));
 }
 
 /// §6.3: a transaction-derived ACK is composed from the final that answered the

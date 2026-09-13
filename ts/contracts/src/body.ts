@@ -1,8 +1,9 @@
 /**
  * Message bodies (`PCAP2TEST_PIVOT_V3.md` §8.3), mirroring `pivot_schema::body`.
  *
- * Three shapes, and a body is exactly one of them: a resource the send emits, a
- * declared shape the expect checks, or a decomposed multipart. The three are
+ * Three shapes, and a body is exactly one of them: a resource the send emits (or
+ * the expect asserts by content), a declared shape the expect checks, or a
+ * decomposed multipart. The three are
  * UNTAGGED on the wire and told apart structurally, so the union below is a
  * plain `Schema.Union` — decode strictly (`onExcessProperty: "error"`) or a
  * resource body carrying a shape mode would be accepted by the wrong arm.
@@ -15,6 +16,14 @@ import * as Schema from "effect/Schema"
 /** How the registry handles a stored body or part. */
 export const BodyMode = Schema.Literals(["frozen", "frozen-binary"])
 export type BodyMode = typeof BodyMode.Type
+
+/**
+ * How an expect holds the received body against its resource: byte for byte,
+ * or as XML text after normalisation (declaration dropped, whitespace-only text
+ * between tags removed, ends trimmed — nothing else). Absent means `exact`.
+ */
+export const BodyCompare = Schema.Literals(["exact", "xml"])
+export type BodyCompare = typeof BodyCompare.Type
 
 /** The declared shape of an expected body. */
 export const BodyShape = Schema.Literals(["sdp-present", "absent", "multipart-present"])
@@ -60,7 +69,8 @@ export const ResourceBody = Schema.Struct({
   ref: Schema.String,
   rewrite: Schema.optionalKey(Schema.Array(Schema.String)),
   mode: Schema.optionalKey(BodyMode),
-  "content-type": Schema.optionalKey(Schema.String)
+  "content-type": Schema.optionalKey(Schema.String),
+  compare: Schema.optionalKey(BodyCompare)
 })
 export interface ResourceBody extends Schema.Schema.Type<typeof ResourceBody> {}
 
