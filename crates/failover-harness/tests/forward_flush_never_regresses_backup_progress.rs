@@ -107,6 +107,8 @@ fn no_answer_decision() -> Arc<dyn CallDecisionEngine> {
                     reject_code: 480,
                     reject_reason: Some("Temporarily Unavailable".into()),
                     update_headers: None,
+                    service_ext: Default::default(),
+                    label: None,
                 })
             })
             .build(),
