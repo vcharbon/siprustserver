@@ -23,9 +23,11 @@
 //! the cursor is set at call setup (the router finalizes `handle_initial_invite`'s
 //! result) — before the first 18x — and maintained on every event. Activation is
 //! therefore implicit in the strategy: the delayed-offer fallback that nulls the
-//! feature in `apply_route` (no alice SDP under `fake-prack`) deactivates the
-//! machine the same turn, so the rules go inert and the call falls back to plain
-//! relay. Each rule is gated by `active_states`; the `fake-prack`-only rules
+//! feature in `apply_route` (an initial INVITE minted without an offer under
+//! `fake-prack`) deactivates the machine the same turn, so the rules go inert
+//! and the call falls back to plain relay. A leg minted later without an offer
+//! is kept unreliable instead (`capabilities::withheld_by_strategy_in`) and
+//! the mask stays up: its 2xx carries the offer and is relayed as-is. Each rule is gated by `active_states`; the `fake-prack`-only rules
 //! keep an `is_fake_prack` filter because the machine is active for all three
 //! strategies.
 //!

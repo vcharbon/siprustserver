@@ -71,6 +71,12 @@ impl ActionExecutor<'_> {
         let no_answer_timeout_sec = no_answer_timeout_sec
             .map(|secs| relay::clamp_no_answer(self.config, &call.call_ref, secs));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        // Whether the INVITE this leg is minted with carries an offer: the
+        // override's body where one is given (empty = none), else the a-leg's.
+        let offers_sdp = match body_override {
+            Some(body) => !body.is_empty(),
+            None => relay::carries_sdp(&a_invite),
+        };
         // Same refusal as the admission reject above, for the other way a
         // decision can name no destination: an address field that does not read
         // (055). The leg is not created and no INVITE goes out — originating on
@@ -91,7 +97,7 @@ impl ActionExecutor<'_> {
             header_updates,
             &capabilities::relaying_for_leg(call, &leg_id, a_invite.headers()),
             call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
-            call.features.as_ref().and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]),
+            &capabilities::withheld_option_tags(call, kind, offers_sdp),
             &capabilities::offered_option_tags(call, kind),
             kind,
         ) {

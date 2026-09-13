@@ -5,8 +5,6 @@
 use call::helpers::set_call_ext;
 use call::{Call, CallLimiterState, CdrEvent, CdrEventType, TimerEntry, TimerType};
 use sip_clock::Clock;
-use sip_message::draft::RequestDraft;
-use sip_message::header::{HeaderName, MediaType, Supported};
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
@@ -218,6 +216,15 @@ pub async fn apply_route(
         .as_ref()
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
+    // Whether the INVITE this route mints carries an offer: the relayed
+    // a-leg body under `Keep`, none under `Drop`, the substitute under
+    // `Replace`. The strategy's withhold and the `fake-prack` delayed-offer
+    // fallback both read it.
+    let offers_sdp = match &route.update_body {
+        BodyUpdate::Keep => relay::carries_sdp(a_invite),
+        BodyUpdate::Drop => false,
+        BodyUpdate::Replace(body) => !body.is_empty(),
+    };
     // A decision field that does not read has no destination behind it: refuse
     // the route rather than originate toward a fabricated address (055). The
     // caller gets a final (ADR-0022's guarantee holds) and the CDR names the
@@ -238,7 +245,7 @@ pub async fn apply_route(
         &header_updates,
         &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
         call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
-        call.features.as_ref().and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]),
+        &capabilities::withheld_option_tags(&call, None, offers_sdp),
         &capabilities::offered_option_tags(&call, None),
         None,
     ) {
@@ -262,9 +269,13 @@ pub async fn apply_route(
         }
     };
 
-    // Body substitution on the b-leg INVITE (route.update_body), then the
-    // relayFirst18xTo180 Supported rewrite — one thaw/freeze, so the INVITE the
-    // wire sees and the image it carries stay the same message.
+    // After the mint read the armed strategy's withhold: the fallback the
+    // INVITE was minted under is the one the call now runs.
+    disable_fake_prack_on_a_delayed_offer(&mut call, offers_sdp);
+
+    // Body substitution on the b-leg INVITE (route.update_body) — one
+    // thaw/freeze, so the INVITE the wire sees and the image it carries stay
+    // the same message.
     if let crate::effects::OutboundBody::Request(req) = &mut effect.body {
         let mut draft = req.thaw();
         match &route.update_body {
@@ -277,13 +288,6 @@ pub async fn apply_route(
             }
             BodyUpdate::Replace(s) => draft = draft.with_body(s.clone().into_bytes().into()),
         }
-        // ── relayFirst18xTo180 → strategy-aware Supported: 100rel + self-disable ─
-        //
-        // The mint stated bob's `Supported` (alice's relayed, or the declared
-        // set, plus the `100rel` fake-prack offers on the stack's own behalf);
-        // a strategy that keeps bob unreliable strips `100rel` here, and the
-        // fake-prack delayed-offer fallback self-disables.
-        draft = narrow_supported_for_18x(draft, a_invite, &mut call);
         if let Ok(edited) = draft.freeze() {
             *req = edited;
         }
@@ -563,66 +567,23 @@ fn defers_routing(call: &Call) -> bool {
     })
 }
 
-/// The strategy-aware `100rel` narrowing of the b-leg INVITE's `Supported`,
-/// and the self-disable of the policy on the delayed-offer fallback:
-///   - `drop-sdp`/`keep-sdp`: strip `100rel` (we never relay PRACK, alice was
-///     not told to expect reliable provisional).
-///   - `fake-prack` with alice SDP: the mint's statement stands — it offers
-///     `100rel` on the stack's own behalf whatever alice advertised
-///     (`capabilities::offered_option_tags`), so bob goes reliable and we
-///     originate the PRACK + cache his SDP.
-///   - `fake-prack` with NO alice SDP (delayed offer): strip `100rel` AND
-///     disable the policy (fall back to plain relay; no half-active state).
-///
-/// `promote-pem-to-200` is owned by the PEM service (Slice 4) and is left alone.
-fn narrow_supported_for_18x(
-    draft: RequestDraft,
-    a_invite: &SipRequest,
-    call: &mut Call,
-) -> RequestDraft {
+/// The `fake-prack` delayed-offer fallback: an INVITE with no offer leaves
+/// the stack nothing to acknowledge a reliable provisional's answer with, so
+/// the strategy disables itself and the call falls back to plain relay — no
+/// half-active state. The INVITE's `Supported` is the mint's
+/// (`capabilities::withheld_option_tags` keeps `100rel` off it); nothing is
+/// rewritten here. Every other strategy stands. The initial route alone
+/// falls back: a leg minted later without an offer is kept unreliable by the
+/// same withhold, and the mask stays up — the caller was shown one early
+/// dialog and the 2xx owes it that To-tag (`relay_first_18x`).
+fn disable_fake_prack_on_a_delayed_offer(call: &mut Call, offers_sdp: bool) {
     use call::features::RelayFirst18xStrategy;
-    let strategy = match call::helpers::relay_first_18x_strategy(call) {
-        Some(s) => s,
-        None => return draft,
-    };
-    if strategy == RelayFirst18xStrategy::PromotePemTo200 {
-        return draft; // PEM service owns this.
+    if offers_sdp
+        || call::helpers::relay_first_18x_strategy(call) != Some(RelayFirst18xStrategy::FakePrack)
+    {
+        return;
     }
-
-    let alice_supported = a_invite.header::<Supported>().and_then(Result::ok);
-    let alice_has_sdp = !a_invite.body().is_empty()
-        && a_invite
-            .header::<MediaType>()
-            .and_then(Result::ok)
-            .is_some_and(|ct| ct.is("application/sdp"));
-
-    if strategy == RelayFirst18xStrategy::FakePrack && alice_has_sdp {
-        return draft;
-    }
-    let withheld =
-        call.features.as_ref().and_then(|f| f.withhold_option_tags.clone()).unwrap_or_default();
-
-    // Self-disable on the fake-prack delayed-offer fallback.
-    if strategy == RelayFirst18xStrategy::FakePrack && !alice_has_sdp {
-        if let Some(f) = call.features.as_mut() {
-            f.relay_first_18x_to_180 = None;
-        }
-    }
-
-    // Compute the Supported value to forward to bob. The call-scoped withhold
-    // (`features.withhold_option_tags`) outranks the strategy: a withheld tag
-    // never rides, whichever machine states the line.
-    let supported_out = alice_supported.and_then(|offered| {
-        let kept = offered.without("100rel");
-        let kept = withheld.iter().fold(kept, |set, tag| set.without(tag));
-        (!kept.is_empty()).then_some(kept)
-    });
-
-    // This strategy path owns `Supported` on the b-leg INVITE: whatever
-    // build_b_leg stated is replaced by alice's value (or dropped entirely).
-    let draft = draft.remove(&HeaderName::Supported);
-    match supported_out {
-        Some(val) => draft.push(val),
-        None => draft,
+    if let Some(f) = call.features.as_mut() {
+        f.relay_first_18x_to_180 = None;
     }
 }

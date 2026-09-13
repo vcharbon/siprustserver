@@ -200,11 +200,12 @@ pub fn build_b_leg(
     // sent is relayed either way and never re-minted — re-minting it breaks the
     // correlation between the two operators' records.
     charging: Option<&call::features::ChargingVectorFeature>,
-    // The call-scoped withhold (`features.withhold_option_tags`, latched across
-    // reroutes): option tags this call never offers a leg it originates. The
+    // The option tags this call never offers a leg it originates
+    // (`rules::capabilities::withheld_option_tags`): the call-scoped
+    // declaration, latched across reroutes, and the armed strategy's own. The
     // assembled `Supported`/`Require` lines are narrowed by them, whatever
-    // source stated them — the withhold is the call's declared incapability
-    // and outranks every advertisement.
+    // source stated them — the withhold is the call's incapability and
+    // outranks every advertisement.
     withheld_option_tags: &[String],
     // The tags the call offers this leg on the stack's own behalf
     // (`rules::capabilities::offered_option_tags`): stated on the assembled
@@ -261,9 +262,8 @@ pub fn build_b_leg(
         .collect();
     // Advertise this face's capability set on the originated b-leg INVITE (RFC
     // 3261 §20.5/§20.37/§20.1) — the originator's own, relayed, unless the
-    // call declares one; a half nobody stated carries no line. A
-    // `relayFirst18x` strategy that keeps the originated leg unreliable strips
-    // `100rel` after this (`narrow_supported_for_18x`). Neither clobbers a
+    // call declares one; a half nobody stated carries no line. The offer and
+    // the withhold narrow the assembled sets after this. Neither clobbers a
     // caller-supplied value from `header_updates`.
     for (name, value) in capabilities.lines() {
         if !extra_headers.iter().any(|h| name.matches(&h.name)) {

@@ -163,10 +163,11 @@ pub struct FeatureActivations {
     pub charging_vector: Option<ChargingVectorFeature>,
     /// Option tags the B2BUA WITHHOLDS from every leg it originates: whatever
     /// `Supported` set would ride the originated INVITE is narrowed by these
-    /// tags (an emptied set stays as the value-less line) and a relayed
-    /// `Require` naming one is narrowed or dropped. Independent of the
-    /// 18x-downgrade strategies — a declaration that never offers `100rel`
-    /// leaves 18x relay untouched. The declaration is a call-lifetime LATCH:
+    /// tags (an emptied set drops its line) and a relayed `Require` naming
+    /// one is narrowed or dropped. Independent of the 18x-downgrade
+    /// strategies, which withhold on their own beside it — a declaration that
+    /// never offers `100rel` leaves 18x relay untouched. The declaration is a
+    /// call-lifetime LATCH:
     /// every applied route's list unions into the standing one
     /// ([`FeatureActivations::latch_withheld_option_tags`], run by
     /// `apply_route` and `SetFeatures`), so a failover route whose decision

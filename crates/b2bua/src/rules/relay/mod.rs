@@ -55,7 +55,7 @@ pub use passthrough::{
 
 // Reading text back into typed values (decision fields, dialog state, bodies).
 pub use address::{redirect_contact, UnreadableAddress};
-pub use body::{media_type, sdp};
+pub use body::{carries_sdp, media_type, sdp};
 pub use dialog::{target_dest, to_gen_dialog};
 
 // The relayed-failure-headers Call.ext slot.

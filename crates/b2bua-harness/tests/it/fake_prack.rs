@@ -477,3 +477,79 @@ async fn forking() {
 async fn failover() {
     run_fake_prack_failover("fake-prack-failover", 5740, 5741, 5742, 5743).await;
 }
+
+/// A failover route that drops the body mints bob2's INVITE without an offer:
+/// `100rel` is withheld from it — a reliable provisional would carry an answer
+/// this stack cannot acknowledge — while the mask stays up, so alice's 200
+/// keeps the first 180's To-tag and carries the session description bob2's
+/// 200 brought.
+#[tokio::test]
+async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mask() {
+    use b2bua::decision::test_adapter::route_to_with_18x;
+    use b2bua::decision::{
+        BodyUpdate, CallFailureResponse, NewCallResponse, ScriptedDecisionEngine,
+    };
+    use std::sync::Arc;
+
+    let h = Harness::with_transit_delay("fake-prack-failover-no-offer", 0);
+    let alice = h.agent("alice", "127.0.0.1:5730").await;
+    let bob1 = h.agent("bob1", "127.0.0.1:5731").await;
+    let bob2 = h.agent("bob2", "127.0.0.1:5732").await;
+    let b2bua = B2buaSut::builder(Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_req| {
+                let mut r = route_to_with_18x("127.0.0.1", 5731, RelayFirst18xStrategy::FakePrack);
+                // A callback context is what makes a failure consultable.
+                r.callback_context = Some("failover-no-offer".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|_req| {
+                let mut r = route_to_with_18x("127.0.0.1", 5732, RelayFirst18xStrategy::FakePrack);
+                r.new_ruri = Some("sip:+1234@127.0.0.1:5732".into());
+                r.update_body = BodyUpdate::Drop;
+                CallFailureResponse::Route(r)
+            })
+            .build(),
+    ))
+    .start(&h, "b2bua", "127.0.0.1:5733")
+    .await;
+
+    let mut call = alice
+        .invite(&bob1)
+        .with_sdp(OFFER)
+        .with_header("Supported", "100rel")
+        .through(b2bua.addr)
+        .send()
+        .await;
+
+    // bob1 is offered `100rel`, rings unreliably, then rejects.
+    let mut uas1 = bob1.receive("INVITE").await;
+    assert!(has_token(uas1.request().header::<Supported>(), "100rel"), "100rel offered to bob1");
+    uas1.respond(180, "Ringing").await;
+    let p180 = call.expect(180).await;
+    let first_to_tag = p180.to().tag().expect("180 has a To-tag").to_string();
+    uas1.respond(503, "Service Unavailable").await;
+    bob1.receive("ACK").await;
+
+    // bob2: no offer, and so no `100rel` — the withhold outranks the offer.
+    let mut uas2 = bob2.receive("INVITE").await;
+    assert!(uas2.request().body().is_empty(), "the failover INVITE carries no body");
+    assert!(
+        !has_token(uas2.request().header::<Supported>(), "100rel"),
+        "100rel withheld from a leg minted without an offer",
+    );
+    uas2.respond(180, "Ringing").await;
+    uas2.respond(200, "OK").with_sdp(ANSWER).await;
+
+    let ok = call.expect(200).await;
+    assert_eq!(ok.to().tag(), Some(first_to_tag.as_str()), "the mask's To-tag rides the 200");
+    assert!(is_sdp(ok.header::<MediaType>()), "alice's 200 carries bob2's session description");
+
+    let mut dialog = call.ack().await;
+    bob2.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob2.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _ = h.finish().await;
+}
