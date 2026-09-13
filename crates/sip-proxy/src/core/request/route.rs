@@ -364,9 +364,30 @@ impl ProxyCore {
             } else {
                 self.metrics.record_cancel_lookup("miss");
                 decision = RoutingDecisionKind::Cancel;
-                match self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await {
-                    Ok(t) => target = Some(t),
-                    Err(e) => return self.reply_select_failure(req, src, e).await,
+                if is_worker_outbound {
+                    // §9.1: a CANCEL goes where its INVITE went. A worker's own
+                    // b-leg INVITE went to the R-URI, memo or no memo — a
+                    // fresh selection would hand a worker's CANCEL to a worker
+                    // that never saw the INVITE.
+                    match req.request_uri() {
+                        uri if !uri.is_opaque() => {
+                            let (host, port) = uri.host_port();
+                            target = Some(ProxyAddr::new(host, port));
+                        }
+                        _ => {
+                            self.reply(req, src, 400, "Bad Request", &[]).await;
+                            self.metrics.record_reject("malformed_request_uri");
+                            return RouteOutcome {
+                                decision: RoutingDecisionKind::Reject,
+                                target: None,
+                            };
+                        }
+                    }
+                } else {
+                    match self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await {
+                        Ok(t) => target = Some(t),
+                        Err(e) => return self.reply_select_failure(req, src, e).await,
+                    }
                 }
             }
         } else if let Some(found) = ack_hop {

@@ -87,7 +87,7 @@ Host preflight knobs (see system requirements below):
 |---|---|---|
 | `PREFLIGHT_STRICT` | `0` | `1` makes a failed cgroup/sysctl check **abort** `up` instead of warning. |
 | `PREFLIGHT_FIX_SYSCTLS` | `0` | `1` auto-raises any low sysctl (needs root / passwordless sudo). |
-| `REQUIRED_SYSCTLS` | `fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288 fs.file-max=2097152` | Space-separated `key=min` pairs checked at `up`. |
+| `REQUIRED_SYSCTLS` | `fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288 fs.file-max=2097152 net.core.wmem_max=4194304` | Space-separated `key=min` pairs checked at `up`. |
 
 ```bash
 # Example: run the whole stack on a different subnet + LB port (e.g. 172.20 collides
@@ -106,7 +106,7 @@ advisory by default — see the knobs above) before creating the cluster.
 |---|---|
 | Tools on `PATH` | `docker` (rootful), `docker compose`, `kind`, `kubectl`, `envsubst` (gettext) — checked by `run.sh` preflight. |
 | **cgroups** | **v2 strongly preferred** (default on Ubuntu 22.04+, Debian 12, Fedora 35+, RHEL/Rocky 9). On cgroup **v1** the host must boot with `cgroup_enable=memory swapaccount=1`, otherwise `cap-kind-memory.sh`'s `--memory-swap` node ceiling is **silently ignored**. Verify: `docker info \| grep -i cgroup` → `Cgroup Version: 2`. |
-| **sysctls** | A 6-node kind cluster (`cluster.yaml`) exhausts default inotify/fd limits. Set `fs.inotify.max_user_instances≥512`, `fs.inotify.max_user_watches≥524288`, `fs.file-max≥2097152` (persist in `/etc/sysctl.d/`), plus the kind-standard `net.ipv4.ip_forward=1` and `net.bridge.bridge-nf-call-iptables=1`. |
+| **sysctls** | A 6-node kind cluster (`cluster.yaml`) exhausts default inotify/fd limits. Set `fs.inotify.max_user_instances≥512`, `fs.inotify.max_user_watches≥524288`, `fs.file-max≥2097152` (persist in `/etc/sysctl.d/`), plus the kind-standard `net.ipv4.ip_forward=1` and `net.bridge.bridge-nf-call-iptables=1`. `net.core.wmem_max≥4194304` lets the SIP sockets take the 4 MiB `SO_SNDBUF` the manifests request (ADR-0031); it is the host's, a kind node cannot raise it. |
 | Kernel modules | `sch_netem` (needed by `chaos.sh` `tc netem`), `br_netfilter`, `overlay`. |
 | RAM | ~16 GiB. The cluster ceiling alone is 9.5 GiB (`cap-kind-memory.sh`, tunable via `TOTAL_CAP_MB` and the per-tier `*_CAP_MB`). |
 | Network | `$SIP_SUBNET` (default `172.20.0.0/16`) **must be free** on the host — no vmnet / route / other docker network may overlap it. On VMware, check `ip route \| grep 172.20` and `docker network ls`; if it collides, set a free `SIP_SUBNET`. |

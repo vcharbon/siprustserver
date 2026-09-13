@@ -91,11 +91,13 @@ async fn setup(
     // closure so the shape reads the instantaneous value on every access.
     let ep_depth = b2bua.clone();
     let ep_tail = b2bua.clone();
+    let ep_would_block = b2bua.clone();
     let metrics = UdpTransportMetrics::new(
         QUEUE_MAX,
         brake,
         Arc::new(move || ep_depth.queue_depth() as u64),
         Arc::new(move || ep_tail.counters().tail_dropped),
+        Arc::new(move || ep_would_block.counters().send_would_block),
     );
 
     (net, b2bua, flooder, metrics)
@@ -148,6 +150,7 @@ async fn metrics_shape_reports_brake_drops_and_queue_depth() {
     assert!(txt.contains("b2bua_udp_queue_depth 2"));
     assert!(txt.contains("b2bua_udp_queue_max 5"));
     assert!(txt.contains("b2bua_udp_tail_dropped_total 0"));
+    assert!(txt.contains("b2bua_udp_send_would_block_total 0"));
 }
 
 /// The tail-drop count is a LIVE proxy of `endpoint.counters.tail_dropped`. The brake

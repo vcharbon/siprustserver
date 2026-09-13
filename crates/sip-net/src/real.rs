@@ -4,7 +4,10 @@
 //! Each `bind_udp` opens a real UDP socket and spawns a receive task that
 //! pumps `recv_from` into the endpoint's bounded [`PacketQueue`], applying the
 //! pre-ingress hook at arrival time exactly as the source's `socket.on(
-//! "message")` handler did. Trace recording is NOT here — in this port the
+//! "message")` handler did. Every send is one non-blocking `sendto`: a full
+//! send buffer drops the datagram and counts it, it never suspends the caller
+//! (ADR-0031 — the kernel can hold a socket's send buffer for seconds on an
+//! unresolved next hop, and the caller is an ingress loop). Trace recording is NOT here — in this port the
 //! typed `Recorder` channel (the recording decorator in `contracts.rs`) is the
 //! single recording path, replacing the source's `realTracing` boolean split.
 
@@ -32,13 +35,21 @@ use crate::types::{
 /// IP rather than fail the send) and `SO_REUSEPORT`. N reuse-port sockets on
 /// one port shard the recv path across N tasks; the kernel flow-hashes on the
 /// 4-tuple, so all datagrams from one src:port land on ONE socket and per-flow
-/// ordering (INVITE→CANCEL, retransmits) is preserved. Public so a test reads
-/// the options back off the very socket the bind path produces.
-pub fn build_bound_socket(addr: SocketAddr, reuse_port: bool) -> std::io::Result<socket2::Socket> {
+/// ordering (INVITE→CANCEL, retransmits) is preserved. `send_buffer` is the
+/// requested `SO_SNDBUF` (`None` keeps the kernel default). Public so a test
+/// reads the options back off the very socket the bind path produces.
+pub fn build_bound_socket(
+    addr: SocketAddr,
+    reuse_port: bool,
+    send_buffer: Option<usize>,
+) -> std::io::Result<socket2::Socket> {
     let domain = socket2::Domain::for_address(addr);
     let raw = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     if reuse_port {
         raw.set_reuse_port(true)?;
+    }
+    if let Some(bytes) = send_buffer {
+        raw.set_send_buffer_size(bytes)?;
     }
     pin_fragmentation(&raw, addr.is_ipv4())?;
     // tokio's reactor requires the fd non-blocking.
@@ -72,7 +83,8 @@ impl SignalingNetwork for RealSignalingNetwork {
             addr: opts.addr,
             message: e.to_string(),
         };
-        let raw = build_bound_socket(opts.addr, opts.reuse_port).map_err(os_err)?;
+        let raw = build_bound_socket(opts.addr, opts.reuse_port, opts.send_buffer_bytes)
+            .map_err(os_err)?;
         let socket = UdpSocket::from_std(raw.into()).map_err(os_err)?;
         let local = socket.local_addr().map_err(|e| BindError {
             reason: BindErrorReason::OsError,
@@ -163,7 +175,7 @@ async fn recv_loop(
                 // a failure is COUNTED, never printed: this crate reports
                 // through counters alone, and a peer that rejects every reply
                 // would otherwise print once per datagram on the receive path.
-                if socket.send_to(&bytes, src).await.is_err() {
+                if send_now(&socket, &counters, &bytes, src).is_err() {
                     counters.pre_ingress_reply_failures.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -186,6 +198,29 @@ async fn recv_loop(
     queue.close();
 }
 
+/// The one send path of a real socket: one non-blocking `sendto` on the fd,
+/// never a suspension. A full send buffer (`EAGAIN`) is a counted drop. The
+/// kernel charges a datagram to the socket until the interface transmits it,
+/// and a next hop it cannot resolve holds it for the whole ARP cycle — a
+/// blocking send would park the caller for seconds per cycle, and every
+/// caller is an ingress loop. The syscall is made directly rather than through
+/// tokio's `try_send_to`: that one answers from the reactor's readiness cache,
+/// which reads "not writable" on a fresh socket until the first poll.
+fn send_now(
+    socket: &UdpSocket,
+    counters: &Counters,
+    buf: &[u8],
+    dst: SocketAddr,
+) -> Result<(), SendError> {
+    socket2::SockRef::from(socket).send_to(buf, &dst.into()).map(|_| ()).map_err(|e| {
+        let err = SendError::from(e);
+        if err.kind == crate::types::SendErrorKind::WouldBlock {
+            counters.send_would_block.fetch_add(1, Ordering::Relaxed);
+        }
+        err
+    })
+}
+
 struct RealEndpoint {
     socket: Arc<UdpSocket>,
     queue: Arc<PacketQueue>,
@@ -198,7 +233,7 @@ struct RealEndpoint {
 #[async_trait]
 impl UdpEndpoint for RealEndpoint {
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError> {
-        self.socket.send_to(buf, dst).await.map(|_| ()).map_err(SendError::from)
+        send_now(&self.socket, &self.counters, buf, dst)
     }
 
     async fn recv(&self) -> Option<UdpPacket> {

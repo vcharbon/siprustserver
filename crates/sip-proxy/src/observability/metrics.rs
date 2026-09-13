@@ -252,7 +252,7 @@ pub struct ProxyMetrics {
     /// metric names/meaning dashboards already use. Not hot: written every
     /// sweep tick, read at render.
     /// `[depth, max, enqueued, tail_dropped, pre_ingress_dropped]`.
-    udp_shards: Mutex<BTreeMap<usize, [u64; 5]>>,
+    udp_shards: Mutex<BTreeMap<usize, [u64; 6]>>,
     health: HealthGauges,
     /// `1` ⇒ the worker pool has **zero routable (`Alive`) workers** — the proxy
     /// can serve no new dialog. Set from the registry by the runner's health
@@ -260,6 +260,8 @@ pub struct ProxyMetrics {
     /// is otherwise silent (the proxy just black-holes every INVITE). Pairs with
     /// the `/readyz` gate; alert on `sip_proxy_worker_pool_empty == 1`.
     worker_pool_empty: AtomicU64,
+    /// Recv shards currently past the stall threshold (see `liveness`).
+    recv_shards_stalled: AtomicU64,
     /// Per-face traffic counters (dual-face mode): `[face][direction]` where
     /// face ∈ {int, ext} and direction ∈ {inbound (recv), outbound (egress)}.
     /// A single-face proxy only ever touches the `int` slots — cheap fixed
@@ -427,18 +429,19 @@ impl ProxyMetrics {
         enqueued: u64,
         tail_dropped: u64,
         pre_ingress_dropped: u64,
+        send_would_block: u64,
     ) {
-        self.udp_shards
-            .lock()
-            .unwrap()
-            .insert(shard, [queue_depth, queue_max, enqueued, tail_dropped, pre_ingress_dropped]);
+        self.udp_shards.lock().unwrap().insert(
+            shard,
+            [queue_depth, queue_max, enqueued, tail_dropped, pre_ingress_dropped, send_would_block],
+        );
     }
 
     /// Cross-shard aggregate
-    /// `[depth, max, enqueued, tail_dropped, pre_ingress_dropped]`.
-    fn udp_totals(&self) -> [u64; 5] {
+    /// `[depth, max, enqueued, tail_dropped, pre_ingress_dropped, send_would_block]`.
+    fn udp_totals(&self) -> [u64; 6] {
         let shards = self.udp_shards.lock().unwrap();
-        let mut t = [0u64; 5];
+        let mut t = [0u64; 6];
         for v in shards.values() {
             for (acc, x) in t.iter_mut().zip(v) {
                 *acc += x;
@@ -464,6 +467,11 @@ impl ProxyMetrics {
         self.health.unknown.store(unknown, Ordering::Relaxed);
         self.health.dead.store(dead, Ordering::Relaxed);
         self.worker_pool_empty.store(u64::from(alive == 0), Ordering::Relaxed);
+    }
+
+    /// Publish how many recv shards are stalled (the readiness gate's reading).
+    pub fn set_recv_shards_stalled(&self, n: u64) {
+        self.recv_shards_stalled.store(n, Ordering::Relaxed);
     }
 
     // --- read helpers (tests) ---
@@ -698,7 +706,7 @@ impl ProxyMetrics {
             "counter",
             self.send_failures.load(Ordering::Relaxed),
         );
-        let [udp_depth, udp_max, udp_enq, udp_drop, udp_shed] = self.udp_totals();
+        let [udp_depth, udp_max, udp_enq, udp_drop, udp_shed, udp_would_block] = self.udp_totals();
         g(
             &mut s,
             "sip_proxy_udp_queue_depth",
@@ -728,6 +736,8 @@ impl ProxyMetrics {
             udp_drop,
         );
         g(&mut s, "sip_proxy_intake_shed_total", "New non-emergency INVITEs dropped by the depth-watermark pre-ingress shed (the selective last-line guard below the admission layer).", "counter", udp_shed);
+        g(&mut s, "sip_proxy_udp_send_would_block_total", "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the recv shard; ADR-0031). Summed over recv shards and both faces.", "counter", udp_would_block);
+        g(&mut s, "sip_proxy_recv_shards_stalled", "Recv shards that dequeued a packet more than PROXY_SHARD_STALL_MS ago and have not returned to waiting: parked, not idle. Non-zero flips /readyz.", "gauge", self.recv_shards_stalled.load(Ordering::Relaxed));
         g(
             &mut s,
             "sip_proxy_worker_pool_empty",

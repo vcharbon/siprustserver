@@ -146,6 +146,23 @@ Content-Length: 0\r\n\r\n"
     ))
 }
 
+/// A worker's own b-leg CANCEL: it rides the proxy's `;outbound` self-Route,
+/// the direction marker the proxy stamped on the worker-facing half of its
+/// double Record-Route.
+fn worker_cancel(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> SipMessage {
+    parse_req(&format!(
+        "CANCEL sip:bob@10.0.0.50:5060 SIP/2.0\r\n\
+Via: SIP/2.0/UDP {W1}:5060;branch={branch};rport\r\n\
+Route: <sip:{PROXY_VIP}:5060;lr;outbound>\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@{W1}>;tag={from_tag}\r\n\
+To: <sip:bob@10.0.0.50>\r\n\
+Call-ID: {call_id}\r\n\
+CSeq: {cseq} CANCEL\r\n\
+Content-Length: 0\r\n\r\n"
+    ))
+}
+
 /// The upstream's §17.1.1.3 ACK for a non-2xx final: same branch as its
 /// INVITE (same transaction), To-tag echoed from the final.
 fn ack(call_id: &str, from_tag: &str, cseq: u32, branch: &str) -> SipMessage {
@@ -228,6 +245,24 @@ async fn cancel_after_a_minute_of_ringing_still_follows_the_invite() {
         "CANCEL must follow the INVITE, not re-select"
     );
     assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 1, "no fallback selection for the CANCEL");
+}
+
+// A worker's b-leg CANCEL whose INVITE this proxy never saw (the INVITE copy
+// was lost before it arrived) still goes where the INVITE went — the R-URI.
+// Re-selecting would forward a worker's own CANCEL to a worker: the
+// downstream endpoint, the only party that can answer it, never sees it.
+#[tokio::test(start_paused = true)]
+async fn a_worker_cancel_without_its_invite_goes_to_the_request_uri() {
+    let f = fixture(&[ProxyAddr::new(W1, 5060), ProxyAddr::new(W2, 5060)]).await;
+    let cxl = worker_cancel("lost-invite-1@test", "tag-w", 3, "z9hG4bKw1c");
+    let outcome = f.core.route_request(&cxl, format!("{W1}:5060").parse().unwrap()).await;
+    assert_eq!(outcome.decision, RoutingDecisionKind::Cancel);
+    assert_eq!(
+        outcome.target,
+        Some(ProxyAddr::new("10.0.0.50", 5060)),
+        "the CANCEL follows the R-URI, where the worker's INVITE went"
+    );
+    assert_eq!(f.strategy.calls.load(Ordering::SeqCst), 0, "a worker's CANCEL never selects");
 }
 
 // Same window for the response side: a late non-2xx final must still find

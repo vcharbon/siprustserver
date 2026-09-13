@@ -23,7 +23,12 @@ use crate::types::{
 /// routing-table slot.
 #[async_trait]
 pub trait UdpEndpoint: Send + Sync {
-    /// Fire-and-forget send (mirrors `tokio::net::UdpSocket::send_to`).
+    /// Fire-and-forget send. Never suspends on the transport's readiness: a
+    /// datagram the transport cannot take now fails with
+    /// [`SendErrorKind::WouldBlock`](crate::types::SendErrorKind::WouldBlock)
+    /// and is counted, so an ingress loop that sends inline is never parked by
+    /// a peer it cannot reach (`docs/adr/0031`). The `async` is for the
+    /// simulated fabric's own bookkeeping, not for waiting on a socket.
     async fn send_to(&self, buf: &[u8], dst: SocketAddr) -> Result<(), SendError>;
 
     /// Await the next inbound packet (the TS `take`). `None` once the
@@ -148,6 +153,7 @@ pub struct Counters {
     pub pre_ingress_dropped: AtomicU64,
     pub pre_ingress_replies: AtomicU64,
     pub pre_ingress_reply_failures: AtomicU64,
+    pub send_would_block: AtomicU64,
 }
 
 impl Counters {
@@ -158,6 +164,7 @@ impl Counters {
             pre_ingress_dropped: self.pre_ingress_dropped.load(Ordering::Relaxed),
             pre_ingress_replies: self.pre_ingress_replies.load(Ordering::Relaxed),
             pre_ingress_reply_failures: self.pre_ingress_reply_failures.load(Ordering::Relaxed),
+            send_would_block: self.send_would_block.load(Ordering::Relaxed),
         }
     }
 }

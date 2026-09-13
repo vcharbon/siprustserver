@@ -1004,6 +1004,9 @@ pub struct UdpTransportMetrics {
     queue_depth: LiveGauge,
     queue_max: usize,
     drops_tail_drop: LiveGauge,
+    /// Outbound datagrams the socket refused because its send buffer was
+    /// full (ADR-0031): a live getter over the bound endpoint.
+    send_would_block: LiveGauge,
     brake: Tier1BrakeCounters,
     buffered_send: BufferedSendCounters,
     buffered_send_peer_count: LiveGauge,
@@ -1017,6 +1020,7 @@ impl std::fmt::Debug for UdpTransportMetrics {
             .field("queue_max", &self.queue_max)
             .field("drops_tier1_brake", &self.drops_tier1_brake())
             .field("drops_tail_drop", &self.drops_tail_drop())
+            .field("send_would_block", &self.send_would_block())
             .field("tier1_reject_sent", &self.tier1_reject_sent())
             .field("buffered_send", &self.buffered_send)
             .field("buffered_send_peer_count", &self.buffered_send_peer_count())
@@ -1043,11 +1047,13 @@ impl UdpTransportMetrics {
         brake: Tier1BrakeCounters,
         queue_depth: LiveGauge,
         drops_tail_drop: LiveGauge,
+        send_would_block: LiveGauge,
     ) -> Self {
         Self {
             queue_depth,
             queue_max,
             drops_tail_drop,
+            send_would_block,
             brake,
             buffered_send: BufferedSendCounters::new(),
             buffered_send_peer_count: Arc::new(|| 0),
@@ -1084,6 +1090,11 @@ impl UdpTransportMetrics {
     /// `endpoint.counters.tailDropped`).
     pub fn drops_tail_drop(&self) -> u64 {
         (self.drops_tail_drop)()
+    }
+    /// Outbound datagrams refused by a full send buffer (never a suspended
+    /// send — ADR-0031).
+    pub fn send_would_block(&self) -> u64 {
+        (self.send_would_block)()
     }
     /// Stateless 503s the brake emitted (`tier1RejectSent`).
     pub fn tier1_reject_sent(&self) -> u64 {
@@ -1165,6 +1176,12 @@ impl UdpTransportMetrics {
             "b2bua_udp_tail_dropped_total",
             "Datagrams tail-dropped by the full inbound queue (port of UdpTransportMetrics.dropsTailDrop).",
             self.drops_tail_drop(),
+        );
+        counter(
+            &mut s,
+            "b2bua_udp_send_would_block_total",
+            "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the transaction owner; ADR-0031).",
+            self.send_would_block(),
         );
 
         // ── Buffered (non-blocking) outbound send (port of
@@ -1342,6 +1359,7 @@ mod tests {
             brake.clone(),
             Arc::new(move || d.load(Ordering::Relaxed)),
             Arc::new(move || t.load(Ordering::Relaxed)),
+            Arc::new(|| 0),
         );
         (m, brake, depth, tail)
     }

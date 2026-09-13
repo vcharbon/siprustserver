@@ -17,7 +17,7 @@
 PREFLIGHT_STRICT="${PREFLIGHT_STRICT:-0}"
 PREFLIGHT_FIX_SYSCTLS="${PREFLIGHT_FIX_SYSCTLS:-0}"
 # Space-separated "key=min" pairs. A node is OK when its current value >= min.
-REQUIRED_SYSCTLS="${REQUIRED_SYSCTLS:-fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288 fs.file-max=2097152}"
+REQUIRED_SYSCTLS="${REQUIRED_SYSCTLS:-fs.inotify.max_user_instances=512 fs.inotify.max_user_watches=524288 fs.file-max=2097152 net.core.wmem_max=4194304}"
 
 # Reuse the caller's log/warn/die if present (run.sh defines log+die); otherwise
 # provide minimal fallbacks so the lib is sourceable standalone.

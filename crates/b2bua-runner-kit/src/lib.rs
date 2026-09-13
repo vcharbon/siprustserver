@@ -208,6 +208,10 @@ pub struct RunnerEnv {
     pub metrics_addr: String,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
     pub queue_max: usize,
+    /// `B2BUA_UDP_SNDBUF` — `SO_SNDBUF` requested on the signalling socket,
+    /// bytes (default empty = the kernel's `wmem_default`; clamped at
+    /// `wmem_max`). See ADR-0031.
+    pub udp_sndbuf: Option<usize>,
     /// `B2BUA_CDR_QUEUE` — buffered-CDR submit queue depth (default 1024).
     pub cdr_queue: usize,
     /// `B2BUA_ORDINAL` — worker ordinal stamped in callRef (default `w0`).
@@ -321,6 +325,10 @@ impl RunnerEnv {
                 .unwrap_or(false),
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
             queue_max: env_or("B2BUA_QUEUE", "8192").parse().expect("B2BUA_QUEUE"),
+            udp_sndbuf: match env_or("B2BUA_UDP_SNDBUF", "") {
+                s if s.is_empty() => None,
+                s => Some(s.parse().expect("B2BUA_UDP_SNDBUF")),
+            },
             cdr_queue: env_or("B2BUA_CDR_QUEUE", "1024").parse().expect("B2BUA_CDR_QUEUE"),
             ordinal: env_or("B2BUA_ORDINAL", "w0"),
             // Dispatch throttle ceilings — deliberately high so they never cap
@@ -441,25 +449,33 @@ impl RunnerEnv {
         // boxed clone (it drives the recv loop), while a second clone backs the
         // `UdpTransportMetrics` live `queueDepth`/`dropsTailDrop` getters.
         let net = RealSignalingNetwork::new();
+        let mut bind_opts =
+            BindUdpOpts::new(listen_sa, self.queue_max).with_pre_ingress(brake_hook);
+        if let Some(bytes) = self.udp_sndbuf {
+            bind_opts = bind_opts.with_send_buffer(bytes);
+        }
         let endpoint: Arc<dyn UdpEndpoint> = net
-            .bind_udp(BindUdpOpts::new(listen_sa, self.queue_max).with_pre_ingress(brake_hook))
+            .bind_udp(bind_opts)
             .await
             .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"))
             .into();
         let local = endpoint.local_addr();
 
         // The `UdpTransport` facade's Prometheus-visible shape: the brake
-        // counters + live queue depth / queue_max / tail-drop proxied off the
-        // bound endpoint. The buffered-send facets are permanently zero
-        // (`BufferedUdpEndpoint` was a Node-era guard with no tokio analogue).
+        // counters + live queue depth / queue_max / tail-drop / refused sends
+        // proxied off the bound endpoint. The buffered-send facets are
+        // permanently zero (`BufferedUdpEndpoint` was a Node-era guard with no
+        // tokio analogue).
         let udp_metrics = {
             let ep_depth = endpoint.clone();
             let ep_tail = endpoint.clone();
+            let ep_would_block = endpoint.clone();
             UdpTransportMetrics::new(
                 self.queue_max,
                 brake_counters.clone(),
                 Arc::new(move || ep_depth.queue_depth() as u64),
                 Arc::new(move || ep_tail.counters().tail_dropped),
+                Arc::new(move || ep_would_block.counters().send_would_block),
             )
         };
         tracing::info!(
