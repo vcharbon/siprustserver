@@ -41,7 +41,11 @@ use crate::store::{
 pub const DEFAULT_REPLICATED_TTL_MS: i64 = 3_600_000;
 
 /// Per-callRef side metadata kept in lockstep with the body so the drain can
-/// fill a `Frame::Data` without touching the typed call map.
+/// fill a `Frame::Data` without touching the typed call map. Keyed by callRef
+/// alone and rewritten by every local writer, so a `put_call` replaces only
+/// the fields the write carries and carries over every other one (`backup`,
+/// `skew_offset_ms`, `authority_answered`): each of those is written by its own
+/// writer and would otherwise be cleared by the next write of another.
 #[derive(Clone, Debug)]
 struct CallMeta {
     meta: RefMeta,
