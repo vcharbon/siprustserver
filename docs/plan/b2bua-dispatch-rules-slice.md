@@ -155,7 +155,7 @@ b2bua_core.rs          B2buaCore: composes dispatcher + router + store + txn + t
 
 ### Call store + HA seam (`store/`)
 - `CallStore` trait (async), shaped after `PartitionedRelayStorage`:
-  `get_call/put_call/delete_call/refresh_call/get_index/scan_calls`, each taking
+  `get_call/put_call/delete_call/get_index/scan_calls`, each taking
   `(role: PartitionRole, primary: &str, call_ref, …, indexes, ttl, call_gen,
   PutOpts{peer, direction})`. `InMemoryCallStore` keeps a `HashMap<key, Vec<u8>>`
   + index map and **ignores** `role/primary/peer/direction/call_gen/ttl` (HA is a

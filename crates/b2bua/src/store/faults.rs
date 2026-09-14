@@ -58,7 +58,6 @@ pub enum StoreFaultPoint {
     GetCall,
     PutCall,
     DeleteCall,
-    RefreshCall,
     GetIndex,
     ScanCalls,
     // ── live-path probes (the router's sync lookup sites) ──
@@ -75,7 +74,6 @@ struct Inner {
     get_call: AtomicBool,
     put_call: AtomicBool,
     delete_call: AtomicBool,
-    refresh_call: AtomicBool,
     get_index: AtomicBool,
     scan_calls: AtomicBool,
     live_initial_invite: AtomicBool,
@@ -103,7 +101,6 @@ impl StoreFaults {
             StoreFaultPoint::GetCall => &self.inner.get_call,
             StoreFaultPoint::PutCall => &self.inner.put_call,
             StoreFaultPoint::DeleteCall => &self.inner.delete_call,
-            StoreFaultPoint::RefreshCall => &self.inner.refresh_call,
             StoreFaultPoint::GetIndex => &self.inner.get_index,
             StoreFaultPoint::ScanCalls => &self.inner.scan_calls,
             StoreFaultPoint::LiveInitialInvite => &self.inner.live_initial_invite,
@@ -128,7 +125,6 @@ impl StoreFaults {
             StoreFaultPoint::GetCall,
             StoreFaultPoint::PutCall,
             StoreFaultPoint::DeleteCall,
-            StoreFaultPoint::RefreshCall,
             StoreFaultPoint::GetIndex,
             StoreFaultPoint::ScanCalls,
             StoreFaultPoint::LiveInitialInvite,
@@ -216,21 +212,6 @@ impl CallStore for FaultInjectingCallStore {
     ) -> Result<(), StoreError> {
         self.faults.check(StoreFaultPoint::DeleteCall)?;
         self.inner.delete_call(role, primary, call_ref, indexes, opts).await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn refresh_call(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-        indexes: &[String],
-        ttl_ms: i64,
-        call_gen: i64,
-        call_bgen: i64,
-    ) -> Result<(), StoreError> {
-        self.faults.check(StoreFaultPoint::RefreshCall)?;
-        self.inner.refresh_call(role, primary, call_ref, indexes, ttl_ms, call_gen, call_bgen).await
     }
 
     async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError> {

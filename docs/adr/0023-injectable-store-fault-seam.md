@@ -28,7 +28,7 @@ lookups *fallible* by consulting a probe before the map read.
 `b2bua::store::faults` provides:
 
 - **`FaultInjectingCallStore`** — a decorator over any `Arc<dyn CallStore>`;
-  each op (`get_call`/`put_call`/`delete_call`/`refresh_call`/`get_index`/
+  each op (`get_call`/`put_call`/`delete_call`/`get_index`/
   `scan_calls`) can be made to return `StoreError::Backend`.
 - **`StoreFaults`** — the shared, clone-cheap control handle: atomic per-path
   switches (`arm`/`disarm`, one `StoreFaultPoint` per decorator op and per live

@@ -497,33 +497,6 @@ impl CallStore for ReplicatingCallStore {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn refresh_call(
-        &self,
-        _role: PartitionRole,
-        _primary: &str,
-        call_ref: &str,
-        indexes: &[String],
-        ttl_ms: i64,
-        call_gen: i64,
-        call_bgen: i64,
-    ) -> Result<(), StoreError> {
-        // Unlike the in-memory no-op, honour the ttl/(p,b) now: bump the
-        // body's absolute expiry and refresh the drained metadata.
-        let now = self.clock.now_ms();
-        let mut meta = self.meta.lock().unwrap();
-        if let Some(m) = meta.get_mut(call_ref) {
-            m.meta.call_gen = call_gen;
-            m.meta.call_bgen = call_bgen;
-            m.meta.body_ttl_ms = ttl_ms;
-            if !indexes.is_empty() {
-                m.meta.indexes = indexes.to_vec();
-            }
-            m.expiry_at_ms = self.expiry_for(now, ttl_ms);
-        }
-        Ok(())
-    }
-
     async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError> {
         self.inner.get_index(index_key).await
     }

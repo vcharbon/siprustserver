@@ -143,21 +143,6 @@ impl CallStore for InMemoryCallStore {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn refresh_call(
-        &self,
-        _role: PartitionRole,
-        _primary: &str,
-        _call_ref: &str,
-        _indexes: &[String],
-        _ttl_ms: i64,
-        _call_gen: i64,
-        _call_bgen: i64,
-    ) -> Result<(), StoreError> {
-        // TTL is meaningless for the in-memory store (no eviction clock).
-        Ok(())
-    }
-
     async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError> {
         let inner = self.inner.lock().unwrap();
         Ok(inner.indexes.get(&format!("idx:{index_key}")).cloned())
