@@ -372,7 +372,7 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
       ack("s5", "A")
     ])
     expect(charged).toEqual([
-      { final: "s2", invite: "s1", leg: "A", continuation: "s3", method: "INVITE" }
+      { final: "s2", invite: "s1", leg: "A", ground: "continuation", continuation: "s3", method: "INVITE" }
     ])
   })
 
@@ -512,6 +512,64 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
       step("s6", "A", "send", { method: "INFO" })
     ])
     expect(charged.map((c) => [c.final, c.invite, c.continuation])).toEqual([["s5", "s4", "s6"]])
+  })
+
+  /** A step at a capture instant, in ms from the capture's origin. */
+  const at = (s: Flow.Step, ms: number, msg = 0): Flow.Step => ({
+    ...s,
+    observed: { leg: s.leg === "A" ? 1 : 2, msg, at_us: ms * 1000 }
+  })
+
+  /**
+   * The actor dials, the far party answers, the SUT relays the 2xx and the far
+   * leg expects the ACK the SUT relays back; the actor's leg then carries only a
+   * BYE. Both proofs of a lost ACK sit in the 2xx itself: `retransmits` (a
+   * repeated 2xx is one no ACK reached, §13.3.1.4) and `observed.at_us` (the
+   * silence the leg measured after it, which is proof only past the first rung).
+   */
+  const relayedShape = (twoxx: Partial<Flow.Step>, byeAtMs: number): ReadonlyArray<Flow.Step> => [
+    at(offerless("s1", "A"), 0),
+    at(offerless("s2", "B", "expect"), 50),
+    at(final("s3", "B", 200), 1000, 5),
+    at({ ...final("s4", "A", 200, "expect"), ...twoxx }, 1010, 3),
+    at(ack("s5", "B", "expect"), 1056, 6),
+    at(step("s6", "A", "send", { method: "BYE" }), byeAtMs, 4)
+  ]
+
+  it("charges a 2xx the platform never repeated when the far leg expects its ACK relayed", () => {
+    // No rung behind the 2xx over 25 s and the far leg's ACK step 46 ms after
+    // it: the actor's ACK reached the platform and the trace lost it.
+    const charged = unackedTakenFinals(relayedShape({}, 26_010))
+    expect(charged).toEqual([
+      {
+        final: "s4",
+        invite: "s1",
+        leg: "A",
+        ground: "relayed-ack",
+        continuation: "s5",
+        method: "ACK",
+        groundLeg: "B",
+        silenceMs: 25_000,
+        observed: { leg: 1, msg: 3, at_us: 1_010_000 },
+        inviteObserved: { leg: 1, msg: 0, at_us: 0 },
+        continuationObserved: { leg: 2, msg: 6, at_us: 1_056_000 }
+      }
+    ])
+    expect(unackedTakenLine("capture.pcap.gz", "auto", charged)).toBe(
+      `capture.pcap.gz: case 'auto' EXCLUDED ${ACTOR_ACK_NOT_CAPTURED} — leg A step s4 ` +
+        "(capture leg 1 msg 3) answers the actor's INVITE at s1 (capture leg 1 msg 0) and " +
+        "the leg captured no ACK for it, yet the 2xx never repeated over the 25000 ms the leg " +
+        "stayed silent and leg B step s5 (capture leg 2 msg 6) expects that ACK relayed"
+    )
+  })
+
+  it("keeps a 2xx the document declares REPEATED — the ladder is the proof no ACK reached it", () => {
+    expect(unackedTakenFinals(relayedShape({ retransmits: 1 }, 26_010))).toEqual([])
+  })
+
+  it("keeps a 2xx the leg is silent behind for less than the first rung — nothing was measured", () => {
+    expect(unackedTakenFinals(relayedShape({}, 1_400))).toEqual([])
+    expect(unackedTakenFinals(relayedShape({}, 1_510)).map((c) => c.silenceMs)).toEqual([500])
   })
 
   it("carries the capture coordinates of all three steps into the finding", () => {

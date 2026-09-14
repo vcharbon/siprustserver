@@ -13,8 +13,9 @@
  * - {@link unackedFinals} — the final is there and the ACK is not. The SUT sent
  *   the INVITE and took a 2xx, so the SUT owes the ACK; the capture holds none.
  * - {@link unackedTakenFinals} — the same hole on the other side of the arrow.
- *   The ACTOR sent the INVITE and took a 2xx, and the leg goes on to carry a new
- *   in-dialog transaction, which only a CONFIRMED dialog carries.
+ *   The ACTOR sent the INVITE and took a 2xx, and either the leg goes on to
+ *   carry a new in-dialog transaction, which only a CONFIRMED dialog carries, or
+ *   the 2xx never repeated and the far leg expects the ACK relayed.
  * - {@link orphanResponses} — the response is there and the request is not, with
  *   the method left open. A response belongs to a transaction, so a leg holding
  *   one and not the request that opened it lost that request to the trace,
@@ -38,7 +39,7 @@
  * only the one owing no answer body ({@link offeredIngress}, RFC 3264 §4), and
  * {@link unackedFinals} charges on that.
  */
-import { Body, Flow } from "@sip/contracts"
+import { Body, Flow, Schedules } from "@sip/contracts"
 
 /** The reason token a document ACKing an unfinalled transaction is refused by. */
 export const FINAL_NOT_CAPTURED = "source-final-not-captured"
@@ -306,6 +307,13 @@ export const unackedLine = (
  */
 export const ACTOR_ACK_NOT_CAPTURED = "source-actor-ack-not-captured"
 
+/**
+ * What proves the actor's missing ACK crossed the wire: a later in-dialog
+ * request on the leg (`continuation`), or a 2xx the leg never took repeated
+ * while the far leg expects its ACK relayed (`relayed-ack`).
+ */
+export type LostAckGroundKind = "continuation" | "relayed-ack"
+
 /** One dialog-creating 2xx the ACTOR owed an ACK for, and what proves it sent one. */
 export interface UnackedTakenFinal {
   /** The step id of the 2xx the leg took. */
@@ -313,20 +321,34 @@ export interface UnackedTakenFinal {
   /** The id of the INVITE step the actor had sent on this leg. */
   readonly invite: string
   readonly leg: string
-  /** The id of the later in-dialog request the leg carries. */
+  readonly ground: LostAckGroundKind
+  /**
+   * The id of the step that proves it: the later in-dialog request the leg
+   * carries, or the far leg's ACK step.
+   */
   readonly continuation: string
-  /** The method that request names. */
+  /** The method that step names. */
   readonly method: string
+  /** The leg the proving step sits on, where it is not this one. */
+  readonly groundLeg?: string
+  /**
+   * How long the leg stayed silent after the 2xx, in ms, on a `relayed-ack`
+   * ground: at least the first rung of the 2xx ladder, or no proof.
+   */
+  readonly silenceMs?: number
   /** Where the 2xx sits in the capture, where the step states it. */
   readonly observed?: Flow.Observed
   /** Where the INVITE sits in the capture, where the step states it. */
   readonly inviteObserved?: Flow.Observed
-  /** Where the continuing request sits in the capture, where the step states it. */
+  /** Where the proving step sits in the capture, where the step states it. */
   readonly continuationObserved?: Flow.Observed
 }
 
-/** The finding before the continuation that proves it. */
-type UnackedTaken = Omit<UnackedTakenFinal, "continuation" | "method">
+/** The finding before the ground that proves it. */
+type UnackedTaken = Omit<
+  UnackedTakenFinal,
+  "ground" | "continuation" | "method" | "groundLeg" | "silenceMs" | "continuationObserved"
+>
 
 /**
  * Whether a request on the leg is one only a CONFIRMED dialog carries. ACK and
@@ -423,14 +445,12 @@ const answeredRequestPending = (
 }
 
 /**
- * What proves the ACK to an unsettled 2xx CROSSED THE WIRE and the trace lost
- * it: the first new in-dialog transaction the leg carries after the 2xx
+ * The first new in-dialog transaction the leg carries after the 2xx
  * ({@link isContinuation}), traffic no unconfirmed dialog carries. A re-INVITE
  * the peer answered 491 is not that traffic ({@link answeredRequestPending});
- * the continuation after it still is. Undefined where the leg carries none,
- * and the abandoned-dialog reading stands.
+ * the continuation after it still is. Undefined where the leg carries none.
  */
-const lostAckGround = (
+const continuationAfter = (
   steps: ReadonlyArray<Flow.Step>,
   at: number,
   leg: string
@@ -441,6 +461,87 @@ const lostAckGround = (
     return s
   }
   return undefined
+}
+
+/** The wait before the first repeat of a 2xx, T1 (RFC 3261 §13.3.1.4). */
+const FIRST_2XX_RUNG_MS = Schedules.SCHEDULES.classes.find((c) => c.class === "final-2xx")!
+  .rung_intervals_ms[0]!
+
+/**
+ * How long the leg stayed silent after the step at `at`, in ms, as the capture
+ * measured it: from the step's `observed.at_us` to the next step's on the same
+ * leg, whatever it is. Undefined where either coordinate is unstated, or the
+ * leg carries nothing after it — nothing was measured.
+ */
+const silenceAfter = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): number | undefined => {
+  const from = steps[at]!.observed?.at_us
+  const to = steps.slice(at + 1).find((s) => s.leg === leg)?.observed?.at_us
+  if (from === undefined || to === undefined) return undefined
+  return Math.round((to - from) / 1000)
+}
+
+/**
+ * The far leg's ACK step to the transaction whose 2xx the SUT relayed onto this
+ * leg at `at`: the far leg is the one that SENT the nearest 2xx-to-INVITE
+ * before it, and its ACK is the first one it EXPECTS after it, up to the far
+ * leg's next INVITE, which owns every ACK past it. Undefined where the far leg
+ * expects none.
+ */
+const relayedAckAfter = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): Flow.Step | undefined => {
+  const relayed = steps
+    .slice(0, at)
+    .findLast((s) => s.leg !== leg && s.op === "send" && isInviteSuccess(s))
+  if (relayed === undefined) return undefined
+  for (let i = at + 1; i < steps.length; i += 1) {
+    const s = steps[i]!
+    if (s.leg !== relayed.leg) continue
+    if (isInvite(s)) return undefined
+    if (isAckArrival(s)) return s
+  }
+  return undefined
+}
+
+/** What proves the missing ACK was lost, as {@link lostAckGround} finds it. */
+type LostAckGround =
+  | { readonly kind: "continuation"; readonly step: Flow.Step }
+  | { readonly kind: "relayed-ack"; readonly step: Flow.Step; readonly silenceMs: number }
+
+/**
+ * What proves the ACK to an unsettled 2xx CROSSED THE WIRE and the trace lost
+ * it. Two proofs, the first that holds:
+ *
+ * - a continuation on the leg ({@link continuationAfter});
+ * - the far leg expects that ACK relayed ({@link relayedAckAfter}) and the 2xx
+ *   never repeated: a UAS repeats a 2xx from T1 on until the ACK arrives
+ *   (§13.3.1.4), so a 2xx the document declares un-repeated across a silence
+ *   the capture measured past the first rung ({@link silenceAfter}) is one the
+ *   ACK reached. A shorter silence proves nothing, and a 2xx declared REPEATED
+ *   is the ladder stating the opposite, so both keep the abandoned-dialog
+ *   reading.
+ *
+ * Undefined where neither holds, and the abandoned-dialog reading stands.
+ */
+const lostAckGround = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): LostAckGround | undefined => {
+  const continuation = continuationAfter(steps, at, leg)
+  if (continuation !== undefined) return { kind: "continuation", step: continuation }
+  if (repeats(steps[at]!)) return undefined
+  const silenceMs = silenceAfter(steps, at, leg)
+  if (silenceMs === undefined || silenceMs < FIRST_2XX_RUNG_MS) return undefined
+  const relayed = relayedAckAfter(steps, at, leg)
+  if (relayed === undefined) return undefined
+  return { kind: "relayed-ack", step: relayed, silenceMs }
 }
 
 /**
@@ -464,7 +565,10 @@ const lostAckGround = (
  * proves the missing ACK was LOST rather than never sent
  * ({@link lostAckGround}) is the second discriminator, because an actor that
  * truly never ACKs is a corner case worth REPLAYING — our own reaper answers
- * it — and looks identical up to this point.
+ * it — and looks identical up to this point. The far leg's ACK step is the
+ * actor's ACK relayed: where the actor never sent one it waits on a datagram
+ * the document never scripts, and the case is refused, never completed from
+ * the far leg's step.
  *
  * Charged on the 2xx, so an INVITE the actor sent and nobody answered is
  * untouched, and a non-2xx final is out of scope: its ACK is the client
@@ -475,13 +579,18 @@ export const unackedTakenFinals = (
 ): ReadonlyArray<UnackedTakenFinal> => {
   const steps = flow.flatMap((node) => Flow.flowNodeSteps(node))
   return unsettledTakenFinals(steps).flatMap(({ at, final }) => {
-    const next = lostAckGround(steps, at, final.leg)
-    if (next === undefined) return []
+    const ground = lostAckGround(steps, at, final.leg)
+    if (ground === undefined) return []
+    const proof = ground.step
     return [{
       ...final,
-      continuation: next.id,
-      method: method(next),
-      ...(next.observed === undefined ? {} : { continuationObserved: next.observed })
+      ground: ground.kind,
+      continuation: proof.id,
+      method: method(proof),
+      ...(ground.kind === "relayed-ack"
+        ? { groundLeg: proof.leg, silenceMs: ground.silenceMs }
+        : {}),
+      ...(proof.observed === undefined ? {} : { continuationObserved: proof.observed })
     }]
   })
 }
@@ -490,9 +599,13 @@ export const unackedTakenFinals = (
 const unackedTakenClause = (c: UnackedTakenFinal): string => {
   const where = (o: Flow.Observed | undefined): string =>
     o === undefined ? "" : ` (capture leg ${o.leg} msg ${o.msg})`
+  const proof = c.ground === "continuation"
+    ? `goes on to carry the ${c.method} at ${c.continuation}${where(c.continuationObserved)}`
+    : `the 2xx never repeated over the ${c.silenceMs} ms the leg stayed silent and leg ` +
+      `${c.groundLeg} step ${c.continuation}${where(c.continuationObserved)} expects that ` +
+      `ACK relayed`
   return `leg ${c.leg} step ${c.final}${where(c.observed)} answers the actor's INVITE at ` +
-    `${c.invite}${where(c.inviteObserved)} and the leg captured no ACK for it, yet goes on ` +
-    `to carry the ${c.method} at ${c.continuation}${where(c.continuationObserved)}`
+    `${c.invite}${where(c.inviteObserved)} and the leg captured no ACK for it, yet ${proof}`
 }
 
 /** The one-line finding, for stderr and for `excluded.json`. */
