@@ -419,6 +419,34 @@ impl LegStack {
         body: Vec<u8>,
         content_type: Option<String>,
     ) -> Result<SipResponse, StackError> {
+        self.respond_selected(answer, headers, body, content_type, |_| true)
+    }
+
+    /// [`respond`](Self::respond) to ONE named server transaction: the request
+    /// with this CSeq number on the dialog `to_tag` names — two forks number
+    /// their first in-dialog request alike, so the tag is part of the name.
+    pub fn respond_to(
+        &mut self,
+        cseq: u32,
+        to_tag: Option<&str>,
+        answer: &Answer<'_>,
+        headers: &[TemplateHeader],
+        body: Vec<u8>,
+        content_type: Option<String>,
+    ) -> Result<SipResponse, StackError> {
+        self.respond_selected(answer, headers, body, content_type, |r| {
+            r.cseq().seq() == cseq && r.to().tag() == to_tag
+        })
+    }
+
+    fn respond_selected(
+        &mut self,
+        answer: &Answer<'_>,
+        headers: &[TemplateHeader],
+        body: Vec<u8>,
+        content_type: Option<String>,
+        selected: impl Fn(&SipRequest) -> bool,
+    ) -> Result<SipResponse, StackError> {
         let Answer { status, reason, cseq_method, early_tag } = *answer;
         let wanted = cseq_method.map(Method::from_wire);
         let matching = || {
@@ -426,6 +454,7 @@ impl LegStack {
                 .iter()
                 .rev()
                 .filter(|r| wanted.as_ref().is_none_or(|m| r.cseq().method() == m))
+                .filter(|r| selected(r))
         };
         // The newest transaction of that method still OPEN, and only then the
         // newest at all. A capture may answer two outstanding transactions of
@@ -921,7 +950,7 @@ fn media_type(text: &str) -> MediaType {
 
 /// Whether a provisional is reliable (RFC 3262 §3: `Require: 100rel`). Header
 /// reading is `sip-message`'s.
-fn reliably(response: &SipResponse) -> bool {
+pub(crate) fn reliably(response: &SipResponse) -> bool {
     response
         .header::<header::Require>()
         .and_then(Result::ok)
@@ -929,7 +958,7 @@ fn reliably(response: &SipResponse) -> bool {
 }
 
 /// The `RSeq` a response carries, where it carries a readable one.
-fn rseq_of(response: &SipResponse) -> Option<u32> {
+pub(crate) fn rseq_of(response: &SipResponse) -> Option<u32> {
     response.header::<header::RSeq>().and_then(Result::ok).map(|r| r.value())
 }
 
@@ -1360,6 +1389,44 @@ mod tests {
         let second = uac.prack(None, &[], Vec::new(), None, None).expect("fork 2 is PRACKed");
         assert_eq!(second.to().tag(), Some("B-early-f2"));
         assert_eq!(second.cseq().seq(), 2, "fork 2's INVITE was its CSeq 1");
+    }
+
+    /// [`respond_to`](LegStack::respond_to) answers the transaction it names,
+    /// not the newest of the method: two forks' PRACKs are both CSeq 2, so the
+    /// To-tag is what tells fork 1's from fork 2's.
+    #[test]
+    fn respond_to_answers_the_named_transaction_not_the_newest_of_its_method() {
+        let mut uac = calling();
+        let (mut uas, _) = ringing("B");
+        for (fork, rseq) in [("B-early-f1", "1"), ("B-early-f2", "1")] {
+            let rings = uas
+                .respond(
+                    &Answer {
+                        status: 180,
+                        reason: "Ringing",
+                        cseq_method: Some("INVITE"),
+                        early_tag: Some(fork),
+                    },
+                    &reliable(rseq),
+                    Vec::new(),
+                    None,
+                )
+                .expect("the fork rings");
+            uac.learn_response(&rings);
+            let prack = uac.prack(Some(fork), &[], Vec::new(), None, None).expect("PRACKed");
+            assert_eq!(prack.cseq().seq(), 2, "each fork's own space");
+            uas.learn_request(&prack);
+        }
+        let answer =
+            Answer { status: 200, reason: "OK", cseq_method: Some("PRACK"), early_tag: None };
+        let first = uas
+            .respond_to(2, Some("B-early-f1"), &answer, &[], Vec::new(), None)
+            .expect("fork 1's PRACK is answered by name");
+        assert_eq!(first.to().tag(), Some("B-early-f1"), "not the newest PRACK, fork 2's");
+        assert!(
+            uas.respond_to(2, Some("B-early-f9"), &answer, &[], Vec::new(), None).is_err(),
+            "a transaction the leg never took is refused"
+        );
     }
 
     #[test]

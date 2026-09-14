@@ -26,9 +26,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pivot_schema::bundle::{CloseOwed, Dir, RecordedMessage};
 use sip_message::parser::custom::CustomParser;
-use sip_message::{HeaderName, Method, SipMessage, SipParser, SipRequest, SipResponse};
+use sip_message::{Method, SipMessage, SipParser, SipRequest, SipResponse};
 
 use crate::recording::Recording;
+use crate::stack;
 
 /// What one scripted leg still owes once its script has ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,8 +44,9 @@ pub enum Owed {
     /// This leg ANSWERED the dialog, so the far side closes it (RFC 3261 §15)
     /// and this end answers whatever teardown arrives.
     AwaitTeardown,
-    /// A request this leg took and never answered with a final.
-    Answer { cseq_method: String, status: u16 },
+    /// A request this leg took and never answered with a final: the
+    /// transaction it names (CSeq and the dialog's To-tag), and the status.
+    Answer { cseq_method: String, cseq: u32, to_tag: Option<String>, status: u16 },
     /// A final this leg took and never acknowledged (RFC 3261 §13.2.2.4 for a
     /// 2xx, §17.1.1.3 for anything else).
     Ack(Box<SipResponse>),
@@ -84,7 +86,7 @@ impl std::fmt::Display for Owed {
                 "answered the dialog, and the teardown its far side owes has not \
                              arrived",
             ),
-            Owed::Answer { cseq_method, status } => {
+            Owed::Answer { cseq_method, status, .. } => {
                 write!(f, "owes a {status} to the {cseq_method} it took")
             }
             Owed::Ack(response) => {
@@ -123,14 +125,30 @@ struct LegView {
     /// Whether a CANCEL arrived for the INVITE this leg took.
     took_cancel: bool,
     /// Requests taken and not answered with a final, oldest first.
-    unanswered: Vec<(Method, u32)>,
-    /// The reliable provisionals this leg SENT, as `(RSeq, INVITE CSeq)`, and
-    /// the ones a PRACK it answered 2xx has acknowledged (RFC 3262 §3).
-    sent_reliable: BTreeSet<(u32, u32)>,
-    acknowledged: BTreeSet<(u32, u32)>,
-    /// The RAck of every PRACK this leg took, by the PRACK's own CSeq.
-    took_prack: BTreeMap<u32, Option<(u32, u32)>>,
+    unanswered: Vec<Open>,
+    /// The reliable provisionals this leg SENT and the ones a PRACK it answered
+    /// 2xx has acknowledged (RFC 3262 §3).
+    sent_reliable: BTreeSet<Reliable>,
+    acknowledged: BTreeSet<Reliable>,
+    /// What the RAck of every PRACK this leg took names, by transaction.
+    took_prack: BTreeMap<Transaction, Option<Reliable>>,
 }
+
+/// A request this leg took and has not answered with a final.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Open {
+    method: Method,
+    transaction: Transaction,
+}
+
+/// A server transaction as the dialog it rides names it: the request's CSeq
+/// number and its To-tag (RFC 3261 §17.2.3 matches the transaction, §12 the
+/// dialog — two forks number their first in-dialog request alike).
+type Transaction = (u32, Option<String>);
+
+/// A reliable provisional as its PRACK names it (RFC 3262 §3, §7.2): the
+/// early dialog's To-tag, its RSeq and the INVITE CSeq it answers.
+type Reliable = (Option<String>, u32, u32);
 
 /// What one leg owes, read off its recorded ladder.
 fn owed(messages: &[RecordedMessage]) -> Owed {
@@ -138,8 +156,8 @@ fn owed(messages: &[RecordedMessage]) -> Owed {
 
     // A request the peer is still waiting on comes first: an unanswered server
     // transaction retransmits, and every other obligation is behind it.
-    if let Some((method, status)) = view.to_answer() {
-        return Owed::Answer { cseq_method: method.as_str().to_string(), status };
+    if let Some((open, status)) = view.to_answer() {
+        return open.answer(status);
     }
     // The dialog this leg OPENED.
     if view.sent_invite.is_some() {
@@ -169,35 +187,46 @@ fn owed(messages: &[RecordedMessage]) -> Owed {
     Owed::Nothing
 }
 
+impl Open {
+    fn answer(&self, status: u16) -> Owed {
+        Owed::Answer {
+            cseq_method: self.method.as_str().to_string(),
+            cseq: self.transaction.0,
+            to_tag: self.transaction.1.clone(),
+            status,
+        }
+    }
+}
+
 impl LegView {
-    /// The request this leg answers first, and the status its method's own
-    /// termination needs.
+    /// The request this leg answers first, and the status it is answered with.
     ///
     /// A CANCEL jumps the queue (RFC 3261 §9.2 answers it at once and the INVITE
-    /// it names becomes a 487); otherwise the oldest unanswered request goes
-    /// first, because that is the one the peer has been retransmitting longest.
-    fn to_answer(&self) -> Option<(Method, u16)> {
-        let cancel = self.unanswered.iter().find(|(method, _)| *method == Method::Cancel);
-        let first = cancel.or_else(|| {
-            self.unanswered.iter().find(|(method, _)| {
-                *method == Method::Prack || answer_status(method, false).is_some()
-            })
+    /// it names becomes a 487), then a PRACK: its client transaction is the one
+    /// running a timer (§17.1.2), and a non-2xx INVITE final first would end
+    /// the early dialog its answer rides (§12.3). Otherwise the oldest
+    /// unanswered request goes first, because that is the one the peer has
+    /// been retransmitting longest.
+    fn to_answer(&self) -> Option<(Open, u16)> {
+        let first_of = |method: Method| self.unanswered.iter().find(|open| open.method == method);
+        let first = first_of(Method::Cancel).or_else(|| first_of(Method::Prack)).or_else(|| {
+            self.unanswered.iter().find(|open| answer_status(&open.method, false).is_some())
         })?;
-        let (method, cseq) = first;
-        let status = match method {
-            Method::Prack => self.prack_status(*cseq),
-            _ => answer_status(method, self.took_cancel)?,
+        let status = match first.method {
+            Method::Prack => self.prack_status(&first.transaction),
+            _ => answer_status(&first.method, self.took_cancel)?,
         };
-        Some((method.clone(), status))
+        Some((first.clone(), status))
     }
 
     /// The final a PRACK this leg took is answered with (RFC 3262 §3): 2xx when
-    /// its RAck names a reliable provisional this leg sent and no PRACK has
-    /// acknowledged yet, 481 otherwise.
-    fn prack_status(&self, cseq: u32) -> u16 {
-        match self.took_prack.get(&cseq).copied().flatten() {
-            Some(rack)
-                if self.sent_reliable.contains(&rack) && !self.acknowledged.contains(&rack) =>
+    /// its RAck names a reliable provisional this leg sent in the same early
+    /// dialog and no PRACK has acknowledged yet, 481 otherwise — a PRACK with
+    /// no well-formed RAck names nothing and draws the 481 too.
+    fn prack_status(&self, transaction: &Transaction) -> u16 {
+        match self.took_prack.get(transaction).cloned().flatten() {
+            Some(named)
+                if self.sent_reliable.contains(&named) && !self.acknowledged.contains(&named) =>
             {
                 200
             }
@@ -228,23 +257,22 @@ pub fn unscripted(messages: &[RecordedMessage], trigger: &SipMessage) -> Option<
     let view = view(messages);
     match trigger {
         SipMessage::Request(request) if *request.method() == Method::Cancel => {
-            let (method, status) = view.to_answer()?;
             // Only the pair §9.2 makes this CANCEL's own: the CANCEL itself, and
-            // the INVITE it names.
-            matches!(&method, Method::Cancel | Method::Invite)
-                .then(|| Owed::Answer { cseq_method: method.as_str().to_string(), status })
+            // then the INVITE it names — whatever else the leg holds open.
+            let open = |method| view.unanswered.iter().find(|open| open.method == method);
+            match open(Method::Cancel) {
+                Some(cancel) => Some(cancel.answer(200)),
+                None => open(Method::Invite).map(|invite| invite.answer(487)),
+            }
         }
         // RFC 3262 §3: a UAS answers every PRACK — 2xx for the unacknowledged
         // reliable provisional its RAck names, 481 for anything else — so the
         // relay it rode gets its own final and the caller's PRACK is not left
         // to time out on this leg's silence.
         SipMessage::Request(request) if *request.method() == Method::Prack => {
-            let cseq = request.cseq().seq();
-            let open = view.unanswered.iter().any(|(m, seq)| *m == Method::Prack && *seq == cseq);
-            open.then(|| Owed::Answer {
-                cseq_method: Method::Prack.as_str().to_string(),
-                status: view.prack_status(cseq),
-            })
+            let transaction = transaction_of(request);
+            let open = view.unanswered.iter().find(|open| open.transaction == transaction)?;
+            Some(open.answer(view.prack_status(&transaction)))
         }
         SipMessage::Response(response)
             if *response.cseq().method() == Method::Invite && response.status() >= 300 =>
@@ -276,6 +304,12 @@ fn answer_status(method: &Method, cancelled: bool) -> Option<u16> {
 fn view(messages: &[RecordedMessage]) -> LegView {
     let mut view = LegView::default();
     for recorded in messages {
+        // A byte-identical repeat is the same transaction retransmitting, not a
+        // second one: it re-opens nothing a final already ended (RFC 3261
+        // §17.2.2, §17.2.1 answer a repeat with the last response or silence).
+        if recorded.repeat_of.is_some() {
+            continue;
+        }
         let Some(message) = parse(&recorded.raw) else { continue };
         match (recorded.dir, message) {
             (Dir::Out, SipMessage::Request(request)) => {
@@ -291,41 +325,54 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                 }
             }
             (Dir::In, SipMessage::Request(request)) => {
-                let cseq = request.cseq().seq();
+                let transaction = transaction_of(&request);
                 match request.method() {
                     Method::Invite => view.took_invite = true,
                     Method::Cancel => view.took_cancel = true,
                     Method::Bye => view.bye_seen = true,
                     Method::Prack => {
-                        view.took_prack.insert(cseq, rack_of(&request));
+                        view.took_prack.insert(transaction.clone(), rack_of(&request));
                     }
                     _ => {}
                 }
                 // An ACK answers no transaction of its own, so it is never owed
                 // a response; everything else the leg took may be.
                 if request.method() != Method::Ack {
-                    view.unanswered.push((request.method().clone(), cseq));
+                    view.unanswered.push(Open { method: request.method().clone(), transaction });
                 }
             }
             (Dir::Out, SipMessage::Response(response)) => {
                 let cseq = response.cseq();
+                let to_tag = response.to().tag().map(str::to_string);
                 if response.status() < 200 {
-                    if cseq.method() == Method::Invite {
-                        if let Some(rseq) = rseq_of(&response) {
-                            view.sent_reliable.insert((rseq, cseq.seq()));
+                    if cseq.method() == Method::Invite && stack::reliably(&response) {
+                        if let Some(rseq) = stack::rseq_of(&response) {
+                            view.sent_reliable.insert((to_tag, rseq, cseq.seq()));
                         }
                     }
                     continue;
                 }
-                view.unanswered
-                    .retain(|(method, seq)| !(method == cseq.method() && *seq == cseq.seq()));
+                // The transaction this final ends. A request that carried no
+                // To-tag (an INVITE, the CANCEL it draws) is ended by its CSeq
+                // alone; one that did is answered under that tag (§8.2.6.2).
+                let ended = |open: &Open| {
+                    &open.method == cseq.method()
+                        && open.transaction.0 == cseq.seq()
+                        && open
+                            .transaction
+                            .1
+                            .as_ref()
+                            .is_none_or(|tag| Some(tag) == to_tag.as_ref())
+                };
+                if cseq.method() == Method::Prack && (200..300).contains(&response.status()) {
+                    let transaction = (cseq.seq(), to_tag.clone());
+                    if let Some(named) = view.took_prack.get(&transaction).cloned().flatten() {
+                        view.acknowledged.insert(named);
+                    }
+                }
+                view.unanswered.retain(|open| !ended(open));
                 if cseq.method() == Method::Invite {
                     view.answered_invite = Some(response.status());
-                }
-                if cseq.method() == Method::Prack && (200..300).contains(&response.status()) {
-                    if let Some(rack) = view.took_prack.get(&cseq.seq()).copied().flatten() {
-                        view.acknowledged.insert(rack);
-                    }
                 }
             }
             (Dir::In, SipMessage::Response(response)) => {
@@ -347,16 +394,17 @@ fn parse(raw: &str) -> Option<SipMessage> {
     CustomParser::new().parse(raw.as_bytes()).ok()
 }
 
-/// The RSeq a reliable provisional carries (RFC 3262 §7.1), where it does.
-fn rseq_of(response: &SipResponse) -> Option<u32> {
-    response.raw(HeaderName::RSeq).next().and_then(|v| v.trim().parse().ok())
+/// The server transaction a taken request opens, as the dialog names it.
+fn transaction_of(request: &SipRequest) -> Transaction {
+    (request.cseq().seq(), request.to().tag().map(str::to_string))
 }
 
-/// The `(RSeq, INVITE CSeq)` a PRACK's RAck names, where it carries a
-/// well-formed one naming an INVITE (RFC 3262 §7.2).
-fn rack_of(request: &SipRequest) -> Option<(u32, u32)> {
+/// The reliable provisional a PRACK's RAck names in the PRACK's own dialog,
+/// where it carries a well-formed one naming an INVITE (RFC 3262 §7.2).
+fn rack_of(request: &SipRequest) -> Option<Reliable> {
     let rack = request.optional().rack.as_ref().ok()?.as_ref()?;
-    (*rack.method() == Method::Invite).then(|| (rack.rseq(), rack.seq()))
+    (*rack.method() == Method::Invite)
+        .then(|| (request.to().tag().map(str::to_string), rack.rseq(), rack.seq()))
 }
 
 #[cfg(test)]
@@ -395,24 +443,63 @@ mod tests {
         )
     }
 
-    /// A leg's ladder, as `(dir, raw)` pairs in wire order.
-    fn leg(entries: &[(Dir, String)]) -> Owed {
+    /// A request this leg TOOK, on the dialog `to_tag` names, with `extra`
+    /// headers ahead of the CSeq.
+    fn taken(method: &str, cseq: &str, to_tag: Option<&str>, extra: &str) -> String {
+        let tag = to_tag.map(|t| format!(";tag={t}")).unwrap_or_default();
+        format!(
+            "{method} sip:bob@127.0.0.1:5080 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-{cseq}\r\n\
+             From: <sip:alice@example.test>;tag=a1\r\n\
+             To: <sip:bob@example.test>{tag}\r\n\
+             Call-ID: call-a\r\n\
+             {extra}CSeq: {cseq}\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+    }
+
+    /// A reliable provisional this leg SENT under `to_tag` (RFC 3262 §7.1).
+    fn rang(status: u16, to_tag: &str, rseq: u32) -> String {
+        response(status, "1 INVITE")
+            .replace("tag=b1", &format!("tag={to_tag}"))
+            .replace("CSeq:", &format!("Require: 100rel\r\nRSeq: {rseq}\r\nCSeq:"))
+    }
+
+    /// The answer a taken request is owed, as the close states it.
+    fn answer(cseq_method: &str, cseq: u32, to_tag: Option<&str>, status: u16) -> Owed {
+        Owed::Answer {
+            cseq_method: cseq_method.into(),
+            cseq,
+            to_tag: to_tag.map(str::to_string),
+            status,
+        }
+    }
+
+    /// A ladder's entries: `(dir, raw)`, and whether the datagram is a byte-
+    /// identical repeat of an earlier one the recording marks as such.
+    fn record(entries: &[(Dir, String, bool)]) -> Recording {
         let recording = Recording::new();
         recording.declare("A");
-        for (at, (dir, raw)) in entries.iter().enumerate() {
-            recording.push("A", *dir, at as u64, raw.clone(), None, None);
+        for (at, (dir, raw, repeat)) in entries.iter().enumerate() {
+            if *repeat {
+                recording.push_repeat("A", *dir, at as u64, raw.clone(), None, None);
+            } else {
+                recording.push("A", *dir, at as u64, raw.clone(), None, None);
+            }
         }
-        obligations(&recording).remove("A").expect("the leg was recorded")
+        recording
+    }
+
+    /// A leg's ladder, as `(dir, raw)` pairs in wire order.
+    fn leg(entries: &[(Dir, String)]) -> Owed {
+        let entries: Vec<_> = entries.iter().map(|(d, r)| (*d, r.clone(), false)).collect();
+        obligations(&record(&entries)).remove("A").expect("the leg was recorded")
     }
 
     /// The same ladder, as the recorded messages [`unscripted`] reads.
     fn ladder(entries: &[(Dir, String)]) -> Vec<RecordedMessage> {
-        let recording = Recording::new();
-        recording.declare("A");
-        for (at, (dir, raw)) in entries.iter().enumerate() {
-            recording.push("A", *dir, at as u64, raw.clone(), None, None);
-        }
-        recording.legs().remove("A").expect("the leg was recorded")
+        let entries: Vec<_> = entries.iter().map(|(d, r)| (*d, r.clone(), false)).collect();
+        record(&entries).legs().remove("A").expect("the leg was recorded")
     }
 
     fn message(raw: &str) -> SipMessage {
@@ -503,21 +590,18 @@ mod tests {
         let invite = (Dir::In, INVITE.to_string());
         // An INVITE it has not answered is answered now: the script stopped, and
         // the platform is holding a transaction open on it.
-        assert_eq!(
-            leg(std::slice::from_ref(&invite)),
-            Owed::Answer { cseq_method: "INVITE".into(), status: 480 }
-        );
+        assert_eq!(leg(std::slice::from_ref(&invite)), answer("INVITE", 1, None, 480));
 
         let ok = (Dir::Out, response(200, "1 INVITE"));
         assert_eq!(leg(&[invite.clone(), ok.clone()]), Owed::AwaitTeardown);
 
-        let ack = (Dir::In, request("ACK", "1 ACK"));
+        let ack = (Dir::In, taken("ACK", "1 ACK", Some("b1"), ""));
         assert_eq!(leg(&[invite.clone(), ok.clone(), ack.clone()]), Owed::AwaitTeardown);
 
-        let bye = (Dir::In, request("BYE", "2 BYE"));
+        let bye = (Dir::In, taken("BYE", "2 BYE", Some("b1"), ""));
         assert_eq!(
             leg(&[invite.clone(), ok.clone(), ack.clone(), bye.clone()]),
-            Owed::Answer { cseq_method: "BYE".into(), status: 200 }
+            answer("BYE", 2, Some("b1"), 200)
         );
 
         let answered = (Dir::Out, response(200, "2 BYE"));
@@ -530,48 +614,137 @@ mod tests {
     fn a_cancelled_invite_is_answered_487_and_the_cancel_itself_first() {
         let invite = (Dir::In, INVITE.to_string());
         let ringing = (Dir::Out, response(180, "1 INVITE"));
-        let cancel = (Dir::In, request("CANCEL", "1 CANCEL"));
+        let cancel = (Dir::In, taken("CANCEL", "1 CANCEL", None, ""));
         assert_eq!(
             leg(&[invite.clone(), ringing.clone(), cancel.clone()]),
-            Owed::Answer { cseq_method: "CANCEL".into(), status: 200 }
+            answer("CANCEL", 1, None, 200)
         );
         let answered = (Dir::Out, response(200, "1 CANCEL"));
-        assert_eq!(
-            leg(&[invite, ringing, cancel, answered]),
-            Owed::Answer { cseq_method: "INVITE".into(), status: 487 }
-        );
+        assert_eq!(leg(&[invite, ringing, cancel, answered]), answer("INVITE", 1, None, 487));
     }
 
     /// RFC 3262 §3, both halves: a PRACK whose RAck names the reliable
     /// provisional this leg sent and nothing has acknowledged draws a 200, and
-    /// one naming anything else — another RSeq, or a provisional a PRACK it
-    /// answered already acknowledged — draws a 481.
+    /// one naming anything else — another RSeq, a provisional a PRACK it
+    /// answered already acknowledged, or no well-formed RAck at all — draws a
+    /// 481. Once answered, the same PRACK owes nothing more.
     #[test]
     fn an_unscripted_prack_draws_200_for_the_provisional_it_names_and_481_otherwise() {
         let invite = (Dir::In, INVITE.to_string());
-        let reliable = (Dir::Out, response(180, "1 INVITE").replace("CSeq:", "RSeq: 7\r\nCSeq:"));
-        let prack_raw = request("PRACK", "2 PRACK").replace("CSeq:", "RAck: 7 1 INVITE\r\nCSeq:");
+        let reliable = (Dir::Out, rang(180, "b1", 7));
+        let prack_raw = taken("PRACK", "2 PRACK", Some("b1"), "RAck: 7 1 INVITE\r\n");
         let prack = (Dir::In, prack_raw.clone());
-        let ok = Owed::Answer { cseq_method: "PRACK".into(), status: 200 };
-        let refused = Some(Owed::Answer { cseq_method: "PRACK".into(), status: 481 });
+        let ok = answer("PRACK", 2, Some("b1"), 200);
 
         let named = ladder(&[invite.clone(), reliable.clone(), prack.clone()]);
         assert_eq!(unscripted(&named, &message(&prack_raw)), Some(ok.clone()));
-        // The generic close answers the same PRACK once the older INVITE
-        // transaction is ended (§3 lets the final precede the PRACK's answer).
-        let ended = (Dir::Out, response(480, "1 INVITE"));
-        assert_eq!(leg(&[invite.clone(), reliable.clone(), prack.clone(), ended]), ok);
+        // The generic close answers it ahead of the older INVITE transaction:
+        // the PRACK's client transaction is the one running a timer, and a
+        // non-2xx final first would end the early dialog it rides (§12.3).
+        assert_eq!(leg(&[invite.clone(), reliable.clone(), prack.clone()]), ok);
 
         let other_raw = prack_raw.replace("RAck: 7 1 INVITE", "RAck: 9 1 INVITE");
         let other = ladder(&[invite.clone(), reliable.clone(), (Dir::In, other_raw.clone())]);
+        let refused = Some(answer("PRACK", 2, Some("b1"), 481));
         assert_eq!(unscripted(&other, &message(&other_raw)), refused);
+
+        let bare_raw = taken("PRACK", "2 PRACK", Some("b1"), "");
+        let bare = ladder(&[invite.clone(), reliable.clone(), (Dir::In, bare_raw.clone())]);
+        assert_eq!(unscripted(&bare, &message(&bare_raw)), refused, "no RAck names nothing");
 
         let answered = (Dir::Out, response(200, "2 PRACK"));
         let done = ladder(&[invite.clone(), reliable.clone(), prack.clone(), answered.clone()]);
         assert_eq!(unscripted(&done, &message(&prack_raw)), None, "one final per transaction");
-        let again_raw = prack_raw.replace("CSeq: 2 PRACK", "CSeq: 3 PRACK");
+        let again_raw = taken("PRACK", "3 PRACK", Some("b1"), "RAck: 7 1 INVITE\r\n");
         let again = ladder(&[invite, reliable, prack, answered, (Dir::In, again_raw.clone())]);
-        assert_eq!(unscripted(&again, &message(&again_raw)), refused);
+        assert_eq!(
+            unscripted(&again, &message(&again_raw)),
+            Some(answer("PRACK", 3, Some("b1"), 481))
+        );
+    }
+
+    /// The CANCEL pair is the CANCEL's own whatever else the leg holds open: a
+    /// PRACK still unanswered does not stand between the 200 to the CANCEL and
+    /// the 487 to the INVITE it names (§9.2).
+    #[test]
+    fn an_unscripted_cancel_still_draws_the_487_past_an_open_prack() {
+        let cancel_raw = taken("CANCEL", "1 CANCEL", None, "");
+        let ladder = ladder(&[
+            (Dir::In, INVITE.to_string()),
+            (Dir::Out, rang(180, "b1", 7)),
+            (Dir::In, taken("PRACK", "2 PRACK", Some("b1"), "RAck: 7 1 INVITE\r\n")),
+            (Dir::In, cancel_raw.clone()),
+            (Dir::Out, response(200, "1 CANCEL")),
+        ]);
+        assert_eq!(
+            unscripted(&ladder, &message(&cancel_raw)),
+            Some(answer("INVITE", 1, None, 487))
+        );
+    }
+
+    /// A byte-identical repeat of a request the leg already answered re-opens
+    /// nothing: the server transaction is Completed and RFC 3261 §17.2.2 lets it
+    /// re-send the last response or stay silent, never emit a second final.
+    #[test]
+    fn a_repeat_of_an_answered_request_reopens_no_transaction() {
+        let prack = taken("PRACK", "2 PRACK", Some("b1"), "RAck: 7 1 INVITE\r\n");
+        let recording = record(&[
+            (Dir::In, INVITE.to_string(), false),
+            (Dir::Out, rang(180, "b1", 7), false),
+            (Dir::In, prack.clone(), false),
+            (Dir::Out, response(200, "2 PRACK"), false),
+            // The peer's retransmission crossed the 200 on the wire.
+            (Dir::In, prack, true),
+            (Dir::Out, response(486, "1 INVITE"), false),
+        ]);
+        assert_eq!(obligations(&recording).remove("A"), Some(Owed::Nothing));
+    }
+
+    /// RFC 3262 §3 matches a PRACK within the SAME early dialog as the
+    /// provisional: two forks on one leg may each ring under `RSeq: 1` and be
+    /// acknowledged by a PRACK numbered 2 in their own space, so the dialog's
+    /// To-tag is part of the key — for the provisional, the PRACK, and the
+    /// answer that closes the PRACK's transaction.
+    #[test]
+    fn a_prack_is_matched_within_its_own_early_dialog() {
+        let invite = (Dir::In, INVITE.to_string());
+        let fork1 = (Dir::Out, rang(183, "t1", 1));
+        let fork2 = (Dir::Out, rang(180, "t2", 1));
+        let prack1_raw = taken("PRACK", "2 PRACK", Some("t1"), "RAck: 1 1 INVITE\r\n");
+        let prack2_raw = taken("PRACK", "2 PRACK", Some("t2"), "RAck: 1 1 INVITE\r\n");
+        let prack1 = (Dir::In, prack1_raw.clone());
+        let prack2 = (Dir::In, prack2_raw.clone());
+        let ok1 = (Dir::Out, response(200, "2 PRACK").replace("tag=b1", "tag=t1"));
+
+        // Fork 1's 200 closes fork 1's PRACK only: fork 2's is still owed its own.
+        let both = ladder(&[invite.clone(), fork1.clone(), fork2.clone(), prack1, prack2, ok1]);
+        assert_eq!(
+            unscripted(&both, &message(&prack2_raw)),
+            Some(answer("PRACK", 2, Some("t2"), 200))
+        );
+        // A PRACK carrying fork 1's RAck under fork 2's tag names no provisional
+        // of fork 2's.
+        let crossed_raw = prack1_raw.replace("tag=t1", "tag=t2").replace("RAck: 1", "RAck: 3");
+        let crossed = ladder(&[invite, fork1, fork2, (Dir::In, crossed_raw.clone())]);
+        assert_eq!(
+            unscripted(&crossed, &message(&crossed_raw)),
+            Some(answer("PRACK", 2, Some("t2"), 481))
+        );
+    }
+
+    /// Two PRACKs open on one dialog are answered oldest first, and each with
+    /// ITS OWN status: the obligation names the transaction it answers, not
+    /// only the method.
+    #[test]
+    fn two_open_pracks_are_answered_in_order_each_with_its_own_status() {
+        let invite = (Dir::In, INVITE.to_string());
+        let reliable = (Dir::Out, rang(180, "b1", 7));
+        let named = (Dir::In, taken("PRACK", "2 PRACK", Some("b1"), "RAck: 7 1 INVITE\r\n"));
+        let stray = (Dir::In, taken("PRACK", "3 PRACK", Some("b1"), "RAck: 9 1 INVITE\r\n"));
+        let mut ladder = vec![invite, reliable, named, stray];
+        assert_eq!(leg(&ladder), answer("PRACK", 2, Some("b1"), 200));
+        ladder.push((Dir::Out, response(200, "2 PRACK")));
+        assert_eq!(leg(&ladder), answer("PRACK", 3, Some("b1"), 481));
     }
 
     /// A method the RFC gives no termination answer for is left alone: it holds
@@ -579,7 +752,7 @@ mod tests {
     /// asked for.
     #[test]
     fn a_request_no_rule_answers_is_left_to_the_platform() {
-        let options = (Dir::In, request("OPTIONS", "9 OPTIONS"));
+        let options = (Dir::In, taken("OPTIONS", "9 OPTIONS", None, ""));
         assert_eq!(leg(&[options]), Owed::Nothing);
     }
 
@@ -591,10 +764,7 @@ mod tests {
         assert_eq!(Owed::AwaitTeardown.act(), None);
         assert_eq!(Owed::Bye.act(), Some(CloseOwed::Bye));
         assert_eq!(Owed::Cancel.act(), Some(CloseOwed::Cancel));
-        assert_eq!(
-            Owed::Answer { cseq_method: "BYE".into(), status: 200 }.act(),
-            Some(CloseOwed::Answer)
-        );
+        assert_eq!(answer("BYE", 2, Some("b1"), 200).act(), Some(CloseOwed::Answer));
         // Waiting is still OPEN: the close is not finished while a teardown the
         // far side owes has not arrived.
         assert!(Owed::AwaitTeardown.open());
@@ -607,22 +777,16 @@ mod tests {
     fn an_unscripted_cancel_draws_the_200_and_then_the_487() {
         let invite = (Dir::In, INVITE.to_string());
         let ringing = (Dir::Out, response(180, "1 INVITE"));
-        let raw = request("CANCEL", "1 CANCEL");
+        let raw = taken("CANCEL", "1 CANCEL", None, "");
         let cancel = (Dir::In, raw.clone());
         let trigger = message(&raw);
 
         let first = ladder(&[invite.clone(), ringing.clone(), cancel.clone()]);
-        assert_eq!(
-            unscripted(&first, &trigger),
-            Some(Owed::Answer { cseq_method: "CANCEL".into(), status: 200 })
-        );
+        assert_eq!(unscripted(&first, &trigger), Some(answer("CANCEL", 1, None, 200)));
 
         let answered = (Dir::Out, response(200, "1 CANCEL"));
         let second = ladder(&[invite.clone(), ringing.clone(), cancel.clone(), answered.clone()]);
-        assert_eq!(
-            unscripted(&second, &trigger),
-            Some(Owed::Answer { cseq_method: "INVITE".into(), status: 487 })
-        );
+        assert_eq!(unscripted(&second, &trigger), Some(answer("INVITE", 1, None, 487)));
 
         let terminated = (Dir::Out, response(487, "1 INVITE"));
         let third = ladder(&[invite, ringing, cancel, answered, terminated]);
@@ -669,7 +833,7 @@ mod tests {
         let invite = (Dir::In, INVITE.to_string());
         let ok = (Dir::Out, response(200, "1 INVITE"));
         for method in ["OPTIONS", "INFO", "BYE"] {
-            let raw = request(method, &format!("9 {method}"));
+            let raw = taken(method, &format!("9 {method}"), None, "");
             let arrival = (Dir::In, raw.clone());
             assert_eq!(
                 unscripted(&ladder(&[invite.clone(), ok.clone(), arrival]), &message(&raw)),
@@ -683,14 +847,14 @@ mod tests {
     /// answers nothing for it: the CANCEL's own pair is the whole scope.
     #[test]
     fn a_cancel_answers_its_own_pair_and_no_other_request_the_leg_holds() {
-        let options = (Dir::In, request("OPTIONS", "9 OPTIONS"));
-        let raw = request("CANCEL", "1 CANCEL");
+        let options = (Dir::In, taken("OPTIONS", "9 OPTIONS", None, ""));
+        let raw = taken("CANCEL", "1 CANCEL", None, "");
         let cancel = (Dir::In, raw.clone());
         let trigger = message(&raw);
         let answered = (Dir::Out, response(200, "1 CANCEL"));
         assert_eq!(
             unscripted(&ladder(&[options.clone(), cancel.clone()]), &trigger),
-            Some(Owed::Answer { cseq_method: "CANCEL".into(), status: 200 })
+            Some(answer("CANCEL", 1, None, 200))
         );
         assert_eq!(
             unscripted(&ladder(&[options, cancel, answered]), &trigger),

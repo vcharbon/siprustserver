@@ -1438,7 +1438,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         let route_target = self.lane.route_target;
         let stack = self.stacks.get_mut(leg).ok_or_else(|| fail("the leg has no stack".into()))?;
         let (message, dst) = match owed {
-            Owed::Answer { cseq_method, status } => {
+            Owed::Answer { cseq_method, cseq, to_tag, status } => {
                 let answer = crate::stack::Answer {
                     status: *status,
                     reason: reason_for(*status),
@@ -1446,7 +1446,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     early_tag: None,
                 };
                 let response = stack
-                    .respond(&answer, &[], Vec::new(), None)
+                    .respond_to(*cseq, to_tag.as_deref(), &answer, &[], Vec::new(), None)
                     .map_err(|e| fail(e.to_string()))?;
                 let dst = stack.response_target(Some(cseq_method)).unwrap_or(route_target);
                 (SipMessage::Response(response), dst)
@@ -2456,6 +2456,7 @@ fn reason_for(status: u16) -> &'static str {
         202 => "Accepted",
         404 => "Not Found",
         480 => "Temporarily Unavailable",
+        481 => "Call/Transaction Does Not Exist",
         486 => "Busy Here",
         487 => "Request Terminated",
         488 => "Not Acceptable Here",
