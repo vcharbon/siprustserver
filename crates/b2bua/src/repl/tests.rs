@@ -503,3 +503,166 @@ async fn reap_frees_expired_replica_index_entries() {
     assert_eq!(store.get_index("leg:cid-2|tag-b").await.unwrap(), None);
     assert_eq!(store.get_index("leg:cid-2").await.unwrap(), None);
 }
+
+// ---------------------------------------------------------------------------
+// Per-ref metadata across writers: the record is keyed by callRef alone and
+// every local writer rewrites it. A write carries over each field it does not
+// itself carry (`backup`, `skew_offset_ms`, `authority_answered`) and replaces
+// the ones it does (`(p,b)`, expiry, role/primary, the index set — every writer
+// computes the full index set from the body, so `indexes` is carried by the
+// write, not lost). Nothing here is scheduled: the store is synchronous under
+// one mutex, so the order of the writes IS the order of the calls.
+// ---------------------------------------------------------------------------
+
+/// The puller's apply: a local write stamped with the origin node's wall clock
+/// (`peer: None`, so nothing propagates).
+fn applied(origin_now_ms: i64) -> PutOpts {
+    PutOpts { origin_now_ms: Some(origin_now_ms), ..PutOpts::default() }
+}
+
+/// The four kinds of local write, each named for the failing assertion.
+fn every_writer() -> Vec<(&'static str, PutOpts)> {
+    vec![
+        ("peerless", PutOpts::default()),
+        ("reverse", rev(SELF)),
+        ("forward", fwd("w1")),
+        ("apply", applied(70_000)),
+    ]
+}
+
+/// The writers that lose `field`, as named by `every_writer`: each is run on a
+/// fresh store seeded by one put under `seed_opts` then `after_seed`, and
+/// `holds` reads the field back.
+async fn writers_losing(
+    field: &str,
+    seed_opts: &PutOpts,
+    after_seed: impl Fn(&ReplicatingCallStore),
+    holds: impl Fn(&ReplicatingCallStore) -> bool,
+) -> Vec<&'static str> {
+    let mut lost = Vec::new();
+    for (writer, opts) in every_writer() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
+        put(&store, "c1", b"v1", 0, 1, seed_opts).await;
+        after_seed(&store);
+        assert!(holds(&store), "{field} not seeded before {writer}");
+        put(&store, "c1", b"v2", 0, 2, &opts).await;
+        if !holds(&store) {
+            lost.push(writer);
+        }
+    }
+    lost
+}
+
+/// The backup ordinal is carried only by a Forward write: the peerless write,
+/// the acting backup's Reverse write and the puller's apply all keep it, and a
+/// Forward write to another backup replaces it.
+#[tokio::test(start_paused = true)]
+async fn backup_ordinal_survives_every_write_that_does_not_carry_one() {
+    use super::BodySource;
+    let backed_by_w1 =
+        |store: &ReplicatingCallStore| store.scan_refs_backed_by(SELF, "w1") == ["c1".to_string()];
+    let lost = writers_losing("backup", &fwd("w1"), |_| {}, backed_by_w1).await;
+    assert!(lost.is_empty(), "backup lost by {lost:?}");
+
+    let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
+    put(&store, "c1", b"v1", 0, 1, &fwd("w1")).await;
+    put(&store, "c1", b"v3", 0, 3, &fwd("w2")).await;
+    assert!(store.scan_refs_backed_by(SELF, "w1").is_empty(), "backup frozen across a forward");
+    assert_eq!(store.scan_refs_backed_by(SELF, "w2"), vec!["c1".to_string()]);
+}
+
+/// The skew offset is carried only by an origin-stamped write (the puller's
+/// apply): every local flush keeps it, and a later apply replaces it.
+#[tokio::test(start_paused = true)]
+async fn skew_offset_survives_every_write_that_does_not_carry_one() {
+    let lost = writers_losing(
+        "skew offset",
+        &applied(70_000),
+        |_| {},
+        |store| store.skew_offset_ms("c1") == Some(30_000),
+    )
+    .await;
+    assert!(lost.is_empty(), "skew offset lost by {lost:?}");
+
+    let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
+    put(&store, "c1", b"v1", 0, 1, &applied(70_000)).await;
+    put(&store, "c1", b"v3", 0, 3, &applied(60_000)).await;
+    assert_eq!(store.skew_offset_ms("c1"), Some(40_000), "skew offset frozen across an apply");
+}
+
+/// The authority's answer is carried by no write at all: every kind of local
+/// write and `reestablish_backup` keep it, and only the ref's own delete clears
+/// it — a fresh record for the same ref starts unanswered.
+#[tokio::test(start_paused = true)]
+async fn authority_answer_survives_every_write_and_leaves_with_the_ref() {
+    let lost = writers_losing(
+        "authority answer",
+        &PutOpts::default(),
+        |store| {
+            assert!(!store.authority_answered("c1"), "unanswered until the authority publishes");
+            store.note_authority_answer("c1");
+        },
+        |store| store.authority_answered("c1"),
+    )
+    .await;
+    assert!(lost.is_empty(), "authority answer lost by {lost:?}");
+
+    let clock = Clock::test_at(100_000);
+    let store = ReplicatingCallStore::new(1, clock.clone());
+    put(&store, "c1", b"v1", 0, 1, &PutOpts::default()).await;
+    store.note_authority_answer("c1");
+    store.reestablish_backup("c1", "w1");
+    assert!(store.authority_answered("c1"), "authority answer lost by reestablish_backup");
+
+    store.delete_call(PRI, SELF, "c1", &[], &PutOpts::default()).await.unwrap();
+    assert!(!store.authority_answered("c1"), "the answer leaves with the ref");
+
+    // Past the resurrection tombstone, a fresh record under the same ref stands
+    // and starts unanswered: the mark belonged to the record, not the ref.
+    tokio::time::advance(Duration::from_millis(300_001)).await;
+    store.reap(clock.now_ms()).await;
+    put(&store, "c1", b"v3", 0, 3, &PutOpts::default()).await;
+    assert_eq!(store.current_cv(PRI, SELF, "c1"), Some((3, 0)), "the fresh put stands");
+    assert!(!store.authority_answered("c1"), "a fresh record starts unanswered");
+}
+
+/// The fields a write does carry are replaced by every writer: the `(p,b)`
+/// version reads the new value after each write, and the expiry is refreshed
+/// (the body outlives the TTL of the write before, inside the last one's).
+#[tokio::test(start_paused = true)]
+async fn carried_fields_are_replaced_by_every_write() {
+    let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
+    store.put_call(PRI, SELF, "c1", b"v0".to_vec(), &[], 500, 1, 0, &fwd("w1")).await.unwrap();
+    assert_eq!(store.current_cv(PRI, SELF, "c1"), Some((1, 0)));
+
+    let mut previous = "seed";
+    for (i, (writer, opts)) in every_writer().into_iter().enumerate() {
+        // 300 ms on: inside the previous write's TTL, past the TTL of the one
+        // before it — from the second write on, a body still here proves the
+        // previous write refreshed the expiry.
+        tokio::time::advance(Duration::from_millis(300)).await;
+        assert!(
+            store.get_call(PRI, SELF, "c1").await.unwrap().is_some(),
+            "expiry not refreshed by {previous}"
+        );
+        let (p, b) = (10 + i as i64, 1 + i as i64);
+        store.put_call(PRI, SELF, "c1", b"v".to_vec(), &[], 500, p, b, &opts).await.unwrap();
+        assert_eq!(
+            store.current_cv(PRI, SELF, "c1"),
+            Some((p, b)),
+            "version not replaced by {writer}"
+        );
+        previous = writer;
+    }
+    // 600 ms after the last write: past the write before it, inside its own TTL.
+    tokio::time::advance(Duration::from_millis(300)).await;
+    assert!(
+        store.get_call(PRI, SELF, "c1").await.unwrap().is_some(),
+        "expiry not refreshed by {previous}"
+    );
+    tokio::time::advance(Duration::from_millis(300)).await;
+    assert!(
+        store.get_call(PRI, SELF, "c1").await.unwrap().is_none(),
+        "the refreshed TTL still expires"
+    );
+}
