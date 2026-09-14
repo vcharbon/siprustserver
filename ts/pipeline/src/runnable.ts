@@ -342,9 +342,9 @@ const isContinuation = (step: Flow.Step): boolean =>
 /** One INVITE transaction the actor opened on a leg, as the leg's state holds it. */
 interface TakenTransaction {
   readonly invite: Flow.Step
-  /** The final the leg took for it, and where; absent while it is still open. */
+  /** The final the leg last took for it, and where; absent while it is still open. */
   final?: { readonly step: Flow.Step; readonly at: number }
-  /** Whether an ACK the actor sent on the leg discharged it. */
+  /** Whether an ACK the actor sent on the leg discharged that final. */
   acked: boolean
 }
 
@@ -354,15 +354,11 @@ interface TakenTransaction {
  * apart from what proves the missing ACK was lost.
  *
  * Leg state names the transaction an ACK settles, never the step's captured
- * `cseq`, as the run resolves it: an ACK the actor sends discharges the NEWEST
- * INVITE it sent on that leg that holds a final and no ACK yet, and each ACK
- * discharges its own. RFC 3261 §14.1 leaves one outstanding, so a compliant
- * actor offers one candidate; an actor that re-INVITEs over its own un-ACKed
- * 2xx offers two, and the ACK to the re-INVITE's final (491 under RFC 6026
- * Accepted, or any other) takes the newer one, leaving the 2xx standing for
- * the ACK the leg captures later. A non-2xx final consumes an ACK the same way
- * (§17.1.1.3) and is never owed here. An ACK while nothing awaits one is a
- * repeat of one already sent and settles nothing further.
+ * `cseq`, as the interpreter's `final_for` resolves an auto ACK: the newest
+ * INVITE the leg sent that holds a final and no ACK yet, each ACK its own. A
+ * non-2xx final consumes an ACK the same way (§17.1.1.3) and is never owed. A
+ * second final on the same INVITE — a fork's 2xx, a re-emission — is its own
+ * step owed its own ACK (§13.2.2.4); a repeat the document folds is no step.
  */
 const unsettledTakenFinals = (
   steps: ReadonlyArray<Flow.Step>
@@ -379,7 +375,10 @@ const unsettledTakenFinals = (
     if (step.op === "send" && isInvite(step)) on(step.leg).push({ invite: step, acked: false })
     else if (step.op === "expect" && isInviteFinal(step)) {
       const newest = on(step.leg).at(-1)
-      if (newest !== undefined) newest.final = { step, at }
+      if (newest !== undefined) {
+        newest.final = { step, at }
+        newest.acked = false
+      }
     } else if (step.op === "send" && isAck(step)) {
       const awaiting = on(step.leg).findLast((t) => t.final !== undefined && !t.acked)
       if (awaiting !== undefined) awaiting.acked = true
@@ -405,17 +404,44 @@ const unsettledTakenFinals = (
 }
 
 /**
+ * Whether the request at `at` is an INVITE the leg's next INVITE final travelling
+ * the other way answers 491: RFC 6026 Accepted glare, the answering side stating
+ * an earlier INVITE is still un-ACKed at that moment — the opposite of a
+ * confirmed dialog.
+ */
+const answeredRequestPending = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): boolean => {
+  const request = steps[at]!
+  if (!isInvite(request)) return false
+  const final = steps
+    .slice(at + 1)
+    .find((s) => s.leg === leg && s.op !== request.op && isInviteFinal(s))
+  return final?.msg.status === 491
+}
+
+/**
  * What proves the ACK to an unsettled 2xx CROSSED THE WIRE and the trace lost
  * it: the first new in-dialog transaction the leg carries after the 2xx
- * ({@link isContinuation}), traffic no unconfirmed dialog carries. Undefined
- * where the leg carries none, and the abandoned-dialog reading stands.
+ * ({@link isContinuation}), traffic no unconfirmed dialog carries. A re-INVITE
+ * the peer answered 491 is not that traffic ({@link answeredRequestPending});
+ * the continuation after it still is. Undefined where the leg carries none,
+ * and the abandoned-dialog reading stands.
  */
 const lostAckGround = (
   steps: ReadonlyArray<Flow.Step>,
   at: number,
   leg: string
-): Flow.Step | undefined =>
-  steps.slice(at + 1).find((s) => s.leg === leg && isContinuation(s))
+): Flow.Step | undefined => {
+  for (let i = at + 1; i < steps.length; i += 1) {
+    const s = steps[i]!
+    if (s.leg !== leg || !isContinuation(s) || answeredRequestPending(steps, i, leg)) continue
+    return s
+  }
+  return undefined
+}
 
 /**
  * Every dialog-creating 2xx the actor takes, never ACKs, and goes on to use.

@@ -407,9 +407,10 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
     ).toEqual([])
   })
 
-  it("charges it still when the 491 round's ACK is the only one the leg carries", () => {
-    // Each ACK discharges its own transaction: the 491's ACK is the re-INVITE's
-    // (§17.1.1.3), so the 2xx stands unsettled and the re-INVITE proves the loss.
+  it("keeps it when the 491 round's ACK is the only one the leg carries — nothing proves a loss", () => {
+    // The 491's ACK is the re-INVITE's (§17.1.1.3), so the 2xx stands unsettled;
+    // but the 491 is the peer saying the dialog is still unconfirmed, and the BYE
+    // is the actor giving up — the never-ACKing corner the rule replays.
     expect(
       unackedTakenFinals([
         offerless("s1", "A"),
@@ -418,8 +419,35 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
         final("s4", "A", 491, "expect"),
         ack("s5", "A"),
         step("s6", "A", "send", { method: "BYE" })
+      ])
+    ).toEqual([])
+  })
+
+  it("charges it on the INFO past a 491'd re-INVITE — the next continuation still counts", () => {
+    expect(
+      unackedTakenFinals([
+        offerless("s1", "A"),
+        final("s2", "A", 200, "expect"),
+        reinvite("s3", "A"),
+        final("s4", "A", 491, "expect"),
+        ack("s5", "A"),
+        step("s6", "A", "send", { method: "INFO" })
       ]).map((c) => [c.final, c.invite, c.continuation])
-    ).toEqual([["s2", "s1", "s3"]])
+    ).toEqual([["s2", "s1", "s6"]])
+  })
+
+  it("charges a second 2xx to an INVITE already ACKed once — each 2xx received draws its own ACK", () => {
+    // A fork's other-To-tag 2xx, or a re-emission past the transaction's
+    // envelope, is its own step and its own ACK owed (RFC 3261 §13.2.2.4).
+    expect(
+      unackedTakenFinals([
+        offerless("s1", "A"),
+        final("s2", "A", 200, "expect"),
+        ack("s3", "A"),
+        final("s4", "A", 200, "expect"),
+        step("s5", "A", "send", { method: "INFO" })
+      ]).map((c) => [c.final, c.invite, c.continuation])
+    ).toEqual([["s4", "s1", "s5"]])
   })
 
   it("takes an in-dialog request the SUT sends INTO the leg as the same proof", () => {
