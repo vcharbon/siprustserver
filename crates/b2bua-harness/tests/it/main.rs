@@ -11,6 +11,7 @@
 // Shared fixtures, reached from a test module as `crate::common::…`.
 mod common;
 
+mod ack_body_relayed;
 mod announcement;
 mod basic_call;
 mod basic_call_media;

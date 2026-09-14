@@ -1,21 +1,23 @@
 //! RFC 3261 §13.2.2.4 — the B2BUA MUST **re-ACK a retransmitted 2xx** whose
 //! first ACK was lost. The ACK for a 2xx is a UAC-**core** responsibility (a
 //! separate transaction), and the answerer re-sends its 2xx end-to-end until
-//! ACKed (up to its Timer H ≈ 32 s). So when the B2BUA's ACK to a callee is lost,
-//! the callee retransmits its 200 and the B2BUA MUST re-emit the ACK on the SAME
-//! client transaction — reusing the first ACK's Via branch + the INVITE CSeq.
+//! ACKed (up to its Timer H ≈ 32 s). So when the ACK relayed to a callee is
+//! lost, the callee retransmits its 200 and the B2BUA MUST re-pass THAT ACK on
+//! the SAME client transaction — the retained datagram, its Via branch and the
+//! INVITE CSeq.
 //!
 //! Without this, a single lost ACK strands the callee's INVITE server txn: the
 //! confirmed, bridged call is never fully reaped (leak) or times out late — a
 //! genuine SUT bug under real-network packet loss (a confirmed call dropping is
 //! always genuine, per `docs/testing/ha-acceptance.md`). This is the b-leg twin
 //! of the a-leg `unacked-2xx-retransmit` (which retransmits the B2BUA's *own* 2xx
-//! to a silent caller); here the B2BUA is the ACKing party.
+//! to a silent caller); here the B2BUA is the re-passing hop.
 //!
-//! The scenario establishes a call, then bob (the callee) retransmits its 200 as
-//! though the relayed ACK never arrived. The RFC-correct B2BUA re-ACKs — a second
-//! ACK to bob, reusing the first ACK's Via branch (a *fresh* branch would mint a
-//! new transaction and never quiesce bob) — and the call still reaps cleanly. The
+//! The scenario establishes a call — the caller's ACK relayed to the callee —
+//! then bob (the callee) retransmits his 200 as though that ACK never arrived.
+//! The RFC-correct B2BUA re-ACKs — a second ACK to bob, reusing the first ACK's
+//! Via branch (a *fresh* branch would mint a new transaction and never quiesce
+//! bob) — and the call still reaps cleanly. The
 //! harness inbox dedups a same-`(Call-ID, branch, method)` retransmit, so the
 //! re-ACK is asserted on the recorded trace (not a second `receive`). This is the
 //! default-lane functional gate the slow-lane loadgen loss-soak mirrors

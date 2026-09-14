@@ -315,40 +315,19 @@ impl ActionExecutor<'_> {
                 // snapshot either — so a reclaim/realign leg never arms this.
                 if cseq_method == "INVITE" && (200..300).contains(&status) {
                     // RFC 3261 §13.2.2.4 on the ANSWERING leg — `confirm_dialog`'s
-                    // in-dialog twin, settled on the same one gate: does the
-                    // re-INVITE this dialog sent carry the offer?
-                    //
-                    // It does: the ACK is composable here, so the UAC core sends it
-                    // on receipt, alongside the relayed 2xx. Every
-                    // retransmitted copy then re-ACKs on that one branch
-                    // (`re-ack-retransmitted-2xx`) and the originator's own ACK is
-                    // hop-local. The ladder is discharged by RECEIVING that ACK
-                    // (the engine matches it on the originator's dialog), never
-                    // by relaying it, so nothing here depends on the ACK going
-                    // onward.
-                    //
-                    // It does not (delayed offer): the ACK carries the answer only
-                    // the originator's ACK supplies (RFC 3264 §4), so that one ACK
-                    // relays end-to-end and the obligation is armed for its CSeq.
+                    // in-dialog twin: the ACK this 2xx owes is the originator's
+                    // own, relayed end-to-end when it arrives, so arm the
+                    // obligation for the CSeq it carries (the originator's own
+                    // re-INVITE CSeq). Its emission mints the ACK's client
+                    // transaction and retains the branch every later copy of the
+                    // 2xx is re-ACKed on. The ladder below is discharged by
+                    // RECEIVING that ACK (the engine matches it on the
+                    // originator's dialog), never by relaying it.
                     *call = call::helpers::set_awaited_ack_cseq(
                         call.clone(),
                         &source_leg_id,
                         Some(pending.inbound_cseq),
                     );
-                    if relay::acked_invite_carries_offer(&src_dialog) {
-                        let branch = self.id_gen.new_branch();
-                        *call =
-                            call::helpers::retain_ack_branch(call.clone(), &source_leg_id, &branch);
-                        let answering_leg = source_leg_id.clone();
-                        self.ack_leg(
-                            call,
-                            fx,
-                            &answering_leg,
-                            Vec::new(),
-                            None,
-                            Provenance::Authored,
-                        );
-                    }
                     self.retain_reinvite_2xx(call, fx, &relayed, dest.clone(), target_leg);
                 }
                 let effect = OutboundSipEffect {

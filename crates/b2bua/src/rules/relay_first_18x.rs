@@ -494,10 +494,9 @@ fn confirm_dialog_actions(ctx: &RuleContext) -> Vec<RuleAction> {
         RuleAction::Merge { leg_a: a, leg_b: b.clone() },
         RuleAction::RelayToPeer { transform: MessageTransform::default() },
     ];
-    // RFC 3261 §13.2.2.4: the b-leg UAC core ACKs this 2xx on receipt, after the
-    // caller has its answer — the masking service changes who the caller sees,
-    // never who owes the callee its ACK.
-    actions.extend(relay::ack_on_answer(ctx, &b));
+    // RFC 3261 §13.2.2.4: the ACK this 2xx owes is the caller's own, relayed —
+    // the masking service changes who the caller sees, never whose ACK the
+    // callee gets.
     actions.extend(vec![
         RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
         RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },

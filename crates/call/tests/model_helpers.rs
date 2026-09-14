@@ -696,3 +696,58 @@ fn the_first_termination_is_recorded_once_and_cut_once() {
     let call = seal_termination_seq(call);
     assert_eq!(call.termination.as_ref().unwrap().last_seq, 4, "a later seal moves nothing");
 }
+
+/// RFC 3261 §14.1 / RFC 6026 *Accepted* — every mark that keeps an INVITE
+/// transaction open on a dialog makes a newcomer INVITE glare: a relayed
+/// INVITE awaiting its final, a re-INVITE 2xx this side sent, the call's own
+/// answer, and a 2xx taken here whose ACK has not been relayed yet. A dialog
+/// carrying none of the four is free for a new INVITE.
+#[test]
+fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
+    let pristine = |call: &Call| {
+        let mut d = call.b_legs[0].dialogs[0].clone();
+        d.ext.inbound_pending_requests.clear();
+        d.ext.pending_reinvite_2xx = None;
+        d.ext.answered_2xx = None;
+        d.ext.awaited_ack_cseq = None;
+        d
+    };
+    let call = representative_call();
+    let base = pristine(&call);
+    assert!(!invite_transaction_open(&base), "no mark, no glare");
+
+    // Rule 1: a relayed INVITE still awaiting its final response.
+    let mut relayed = base.clone();
+    relayed.ext.inbound_pending_requests =
+        call.b_legs[0].dialogs[0].ext.inbound_pending_requests.clone();
+    assert!(
+        !relayed.ext.inbound_pending_requests.is_empty(),
+        "the fixture dialog carries a pending relayed INVITE"
+    );
+    assert!(invite_transaction_open(&relayed));
+
+    let unacked = || Unacked2xx {
+        dialog_tag: B_TAG.into(),
+        cseq: 4002,
+        emission: common::paced_emission(
+            common::ANSWERED_2XX,
+            ("203.0.113.42", 5060),
+            Class::Final2xx,
+            1,
+        ),
+    };
+
+    // Rule 2, a 2xx this side sent: a relayed re-INVITE's, and the call's answer.
+    let mut reinvite = base.clone();
+    reinvite.ext.pending_reinvite_2xx = Some(unacked());
+    assert!(invite_transaction_open(&reinvite));
+
+    let mut answered = base.clone();
+    answered.ext.answered_2xx = Some(unacked());
+    assert!(invite_transaction_open(&answered));
+
+    // Rule 2, a 2xx taken here: its ACK is the peer's, not relayed yet.
+    let mut owes_ack = base.clone();
+    owes_ack.ext.awaited_ack_cseq = Some(4002);
+    assert!(invite_transaction_open(&owes_ack));
+}

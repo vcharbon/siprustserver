@@ -49,6 +49,11 @@ fn no_transform() -> MessageTransform {
 /// acknowledged: the call's own answer, or a relayed re-INVITE's. The verdict
 /// of both CORE give-up rules, and the framework's when a service rule
 /// re-authored the give-up without ending the session (ADR-0032 X5).
+///
+/// §13.2.2.4's "after acknowledging … MUST terminate with a BYE" still binds
+/// the far face: a b-leg whose 2xx this stack can acknowledge on its own
+/// ([`still_owed_bare_ack`]) is ACKed before the BYE, so the answerer's INVITE
+/// server transaction quiesces instead of laddering under a BYE it cannot match.
 pub(crate) fn unacked_2xx_give_up_actions(
     call: &RuleCall,
     obligation: &Obligation,
@@ -61,7 +66,10 @@ pub(crate) fn unacked_2xx_give_up_actions(
     } else {
         ("reinvite_ack_timeout", "reinvite-ack-timeout")
     };
-    vec![
+    let mut actions: Vec<RuleAction> = still_owed_bare_ack(call)
+        .map(|leg_id| RuleAction::AckLeg { leg_id, body: Vec::new(), content_type: None })
+        .collect();
+    actions.extend([
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Bye,
             leg_id: leg.clone(),
@@ -73,7 +81,21 @@ pub(crate) fn unacked_2xx_give_up_actions(
             cause: TerminationCause::Timeout(TimeoutKind::Ack),
             by_leg: Some(leg.clone()),
         },
-    ]
+    ]);
+    actions
+}
+
+/// Every b-leg still holding a 2xx whose ACK this stack can compose alone: the
+/// §13.2.2.4 obligation is armed and undischarged, and the INVITE that leg sent
+/// carried the offer, so the ACK owes no answer body (RFC 3264 §4). A
+/// delayed-offer b-leg is absent — only the acknowledging peer's own ACK
+/// supplies its answer, and that peer is the one that went silent.
+fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
+    call.b_legs().iter().filter_map(|leg| {
+        let d = leg.dialogs.first()?;
+        (d.ext.awaited_ack_cseq.is_some() && crate::rules::relay::acked_invite_carries_offer(d))
+            .then(|| leg.leg_id.clone())
+    })
 }
 
 /// Locate the leg carrying the still-pending relayed re-INVITE a CANCEL
@@ -266,12 +288,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // Re-INVITE glare (RFC 3261 §14.1 / RFC 5407 §3.1): an INVITE arrives
         // while an INVITE transaction is still open on the dialog it arrived on
         // OR on the dialog its relay would be regenerated on — a relayed
-        // re-INVITE awaiting its final (§14.1 rule 1) or a 2xx we sent still
-        // awaiting its ACK (§14.1 rule 2; RFC 6026 *Accepted*) → reject the
-        // newcomer 491 Request Pending. The peer-dialog arm keeps the B2BUA
-        // from emitting its own overtaking INVITE toward a face whose prior
-        // INVITE transaction has not finished. More specific than
-        // `relay-reinvite` (no filter), so it wins on glare.
+        // re-INVITE awaiting its final (§14.1 rule 1), or a 2xx un-ACKed on
+        // either face: one we sent awaiting the peer's ACK, one we took whose
+        // relayed ACK has not left (§14.1 rule 2; RFC 6026 *Accepted*) →
+        // reject the newcomer 491 Request Pending. Relaying it instead would
+        // reset that face's ACK obligation and strand the answerer's 2xx. The
+        // peer-dialog arm keeps the B2BUA from emitting its own overtaking
+        // INVITE toward a face whose prior INVITE transaction has not
+        // finished. Matches INBOUND INVITEs only, so a rule originating its
+        // own re-INVITE is unaffected. More specific than `relay-reinvite`
+        // (no filter), so it wins on glare.
         rule(
             "reinvite-glare",
             &["relay-reinvite"],
@@ -397,31 +423,26 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             |_ctx| ok(vec![RuleAction::RelayToPeer { transform: no_transform() }]),
         ),
         // RFC 3261 §13.2.2.4 — re-ACK a **retransmitted 2xx** whose first ACK was
-        // lost. The ACK for a 2xx is a UAC-core responsibility and the answerer
-        // re-sends its 2xx end-to-end until ACKed (up to its Timer H ≈ 32 s), so
-        // the B2BUA — as the ACKing UAC on its own realign/reroute re-INVITE, or
-        // when it ACKs a callee's 2xx — MUST re-emit the ACK on the SAME client
-        // transaction (reusing the retained `ack_branch` + the INVITE CSeq) for
-        // every retransmit — otherwise a single lost ACK on a realign/reroute
-        // (or initial) leg strands the answerer's INVITE server txn and the
-        // confirmed call is never fully reaped (leak) or times out late under
-        // real-network packet loss. This is the b-leg / realign twin of the
+        // lost. §13.2.2.4 gives one ACK per 2xx and re-passes THAT ACK to the
+        // transport for every copy, so the re-ACK MUST reuse the client
+        // transaction the ACK went out on (the retained `ack_branch` + the INVITE
+        // CSeq) — a fresh branch would mint a new transaction and never quiesce
+        // the answerer's INVITE server txn, leaking the confirmed call or timing
+        // it out late under packet loss. `ack_leg` re-passes the retained
+        // datagram (`emitted_ack`) raw, so whatever body the acknowledging party
+        // put on it rides every repeat. This is the b-leg / realign twin of the
         // a-leg `unacked-2xx-retransmit` (which retransmits the B2BUA's *own* 2xx
-        // to a silent caller). The re-ACK is THE ACK the 2xx triggered: `ack_leg`
-        // re-passes the retained datagram (`emitted_ack`) raw, so a delayed-offer
-        // answer rides every repeat; where none is retained yet it composes a
-        // bare ACK on the retained branch — branch + CSeq quiesce the answerer.
+        // to a silent caller).
         //
         // Fires ONLY on a genuine retransmit that nothing else claims: the source
-        // dialog holds an `ack_branch` — its ACK client transaction, armed when the
-        // 2xx was taken (`confirm_dialog`) or minted by the first ACK, and reset on
-        // every new INVITE txn — the response echoes that INVITE's CSeq, and no
-        // pending-relay snapshot is open (a first-time re-INVITE final is claimed by
-        // `relay-reinvite-response` / the realign-200 rules, whose `ack_branch` is
-        // still `None`). A delayed-offer initial 2xx is the one shape whose copies
-        // draw nothing before the caller's ACK: no ACK is composable yet, so no
-        // branch exists to re-send. Everywhere else the obligation is one ACK per
-        // 2xx received, not one per lost ACK.
+        // dialog holds an `ack_branch` — its ACK client transaction, minted by the
+        // ACK's emission and reset on every new INVITE txn — the response echoes
+        // that INVITE's CSeq, and no pending-relay snapshot is open (a first-time
+        // re-INVITE final is claimed by `relay-reinvite-response` / the
+        // realign-200 rules, whose `ack_branch` is still `None`). A 2xx whose ACK
+        // has not left yet draws nothing: no branch exists to re-send on, and the
+        // answerer's own ladder is the mechanism §13.3.1.4 provides while that
+        // ACK is on its way.
         // Absorbs (AckLeg only — no relay to the peer, which already saw the first
         // final).
         //
@@ -488,11 +509,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     RuleAction::Merge { leg_a: a, leg_b: b.clone() },
                     RuleAction::RelayToPeer { transform: no_transform() },
                 ];
-                // RFC 3261 §13.2.2.4: the b-leg UAC core ACKs this 2xx on
-                // receipt, after the caller has its answer. Only a delayed-offer
-                // INVITE's ACK waits for the caller's (it carries the answer),
-                // and `ack_on_answer` is empty for it.
-                actions.extend(crate::rules::relay::ack_on_answer(ctx, &b));
+                // RFC 3261 §13.2.2.4: the ACK this 2xx owes is the caller's own,
+                // relayed when it arrives (`confirm_dialog` arms the obligation).
+                // Nothing is composed here.
                 actions.extend(vec![
                     RuleAction::CancelTimer { id: format!("NoAnswer:{b}") },
                     RuleAction::CancelTimer { id: format!("{:?}", TimerType::SetupTimeout) },

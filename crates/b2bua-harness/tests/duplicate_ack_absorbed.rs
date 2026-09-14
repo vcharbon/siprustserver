@@ -1,15 +1,16 @@
 //! **One b-leg ACK per 2xx RECEIVED, never one per a-leg ACK.** RFC 3261
-//! §13.2.2.4 puts the ACK in the UAC core: the obligation is drawn by the 2xx
-//! copies this stack takes off the b-leg, so a caller that ACKs twice for one
-//! answer says nothing about the callee's transaction and must draw nothing.
+//! §13.2.2.4 gives the UAC core one ACK per 2xx received: the first caller ACK
+//! discharges the obligation the b-leg 2xx armed, so a caller that ACKs twice
+//! for one answer says nothing more about the callee's transaction and its
+//! second ACK must draw nothing.
 //!
 //! The duplicate is legal input either way it arrives — §8.1.1.7 exempts only a
 //! CANCEL and a non-2xx ACK from branch uniqueness, so a caller that GENERATES a
 //! second ACK carries a fresh branch while one that RE-PASSES the first carries
 //! the same. Both are the same obligation, so absorption keys on dialog + CSeq
-//! and never on the branch. Ticket 146.
+//! and never on the branch.
 //!
-//! Boundary, held by `reack_retransmitted_2xx` / `reack_2xx_before_caller_ack`:
+//! Boundary, held by `reack_retransmitted_2xx` / `repeated_2xx_before_caller_ack`:
 //! absorbing a surplus ACK must not absorb an ACK owed to a repeated 2xx.
 
 use std::net::SocketAddr;

@@ -5,16 +5,22 @@
 //! transaction to reach `Confirmed` — the ACK, not merely the final (RFC 6026
 //! calls the interval `Accepted`). Relaying the newcomer instead would make the
 //! B2BUA emit its own overtaking INVITE toward the peer face, where the prior
-//! 2xx is likewise still un-ACKed. `reinvite-glare`'s un-ACKed-2xx arm
-//! (`pending_reinvite_2xx` on the source dialog OR the relay-target dialog)
-//! answers the newcomer 491 locally, on BOTH faces.
+//! 2xx is likewise still un-ACKed, AND reset that face's ACK obligation, so the
+//! answerer's 2xx would never be acknowledged at all. `reinvite-glare`'s
+//! un-ACKed-2xx arm reads every mark of the interval — a 2xx this stack sent
+//! awaiting the peer's ACK, and a 2xx it took whose relayed ACK has not left —
+//! on the source dialog OR the relay-target dialog, and answers the newcomer
+//! 491 locally on BOTH faces. The call's own answer counts like a
+//! renegotiation's: the interval is the same one.
 //!
 //! `reinvite.rs::crossing_reinvite_glare` pins the OTHER glare shape — two
 //! peers re-INVITEing at once — caught by the inbound pending request on the
 //! source dialog.
 
+use std::net::SocketAddr;
+
 use b2bua_harness::B2buaSut;
-use scenario_harness::Harness;
+use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -36,10 +42,13 @@ async fn reinvite_overtaking_the_ack_is_491ed() {
     // Bob's overtaking re-INVITE is the corner case under test: he is the buggy
     // peer here, and the deviation stays on the peer side — the SUT's own output
     // is what the 491 assertion pins.
-    h.allow_violation(
-        "no-re-invite-while-invite-in-progress",
-        "bob deliberately re-INVITEs before ACKing the prior 2xx — the peer \
-         misbehaviour this test exists to interwork with",
+    h.waive(
+        WaiverScope::rule(
+            "no-re-invite-while-invite-in-progress",
+            "bob deliberately re-INVITEs before ACKing the prior 2xx — the peer \
+             misbehaviour this test exists to interwork with",
+        )
+        .on_party("bob"),
     );
     let alice = h.agent("alice", "127.0.0.1:5049").await;
     let bob = h.agent("bob", "127.0.0.1:5059").await;
@@ -98,10 +107,13 @@ async fn reinvite_overtaking_the_ack_is_491ed() {
 #[tokio::test]
 async fn caller_reinvite_overtaking_the_ack_is_491ed() {
     let h = Harness::with_transit_delay("b2bua-reinvite-before-ack-a", 0);
-    h.allow_violation(
-        "no-re-invite-while-invite-in-progress",
-        "alice deliberately re-INVITEs before ACKing the prior 2xx — the peer \
-         misbehaviour this test exists to interwork with",
+    h.waive(
+        WaiverScope::rule(
+            "no-re-invite-while-invite-in-progress",
+            "alice deliberately re-INVITEs before ACKing the prior 2xx — the peer \
+             misbehaviour this test exists to interwork with",
+        )
+        .on_party("alice"),
     );
     let alice = h.agent("alice", "127.0.0.1:5041").await;
     let bob = h.agent("bob", "127.0.0.1:5051").await;
@@ -154,12 +166,8 @@ async fn reinvite_toward_the_unacked_face_is_491ed() {
     let h = Harness::with_transit_delay("b2bua-reinvite-before-ack-x", 0);
     // Alice's re-INVITE lands while her own 2xx to bob's re-INVITE is not yet
     // confirmed (bob's ACK has not been relayed) — the racing-peer shape under
-    // test; the waiver is conditional and the SUT's own output stays compliant.
-    h.allow_violation(
-        "no-re-invite-while-invite-in-progress",
-        "alice re-INVITEs while the prior renegotiation is still un-ACKed — \
-         the racing-peer shape this test exists to interwork with",
-    );
+    // test. The audit's §14.1 rule charges a party that overtakes an INVITE IT
+    // sent, and alice sent none here, so nothing is waived.
     let alice = h.agent("alice", "127.0.0.1:5042").await;
     let bob = h.agent("bob", "127.0.0.1:5052").await;
     let b2bua =
@@ -182,10 +190,6 @@ async fn reinvite_toward_the_unacked_face_is_491ed() {
     let mut alice_uas = alice.receive("INVITE").await;
     alice_uas.respond(200, "OK").with_sdp(REANSWER).await;
     reinv1.expect(200).await;
-    // bob's re-INVITE carried the offer, so the ACK for alice's 200 owes no body
-    // and the UAC core composes it on receipt (§13.2.2.4) — it reaches her before
-    // bob has moved. What holds the face un-ACKed is bob's own silence.
-    alice.receive("ACK").await;
 
     // ── alice re-INVITEs into the un-ACKed face → 491, bob sees nothing ──
     let mut alice_reinv = alice_dialog.request(InDialogMethod::Invite, Some(LATE_OFFER)).await;
@@ -193,8 +197,9 @@ async fn reinvite_toward_the_unacked_face_is_491ed() {
     assert_eq!(b2bua.active_calls(), 1, "a 491'd re-INVITE must not disturb the call");
 
     // ── bob ACKs #1; the first renegotiation was never disturbed ──
-    // Hop-local: alice's face was ACKed on receipt, so nothing is owed onward.
+    // That ACK is what alice gets: it is the one the 2xx owes (§13.2.2.4).
     bob_dialog.ack_for(cseq1, None).await;
+    alice.receive("ACK").await;
 
     // ── alice retries and the renegotiation completes ──
     let mut reinv3 = alice_dialog.request(InDialogMethod::Invite, Some(LATE_OFFER)).await;
@@ -212,4 +217,141 @@ async fn reinvite_toward_the_unacked_face_is_491ed() {
 
     let _report = h.finish().await;
     b2bua.assert_fully_reaped();
+}
+
+/// **The call's own answer.** alice re-INVITEs before ACKing the INITIAL 2xx,
+/// so her own INVITE server transaction is still `Accepted` on the a-leg and
+/// the b-leg's 2xx has no ACK yet. The newcomer is 491'd locally and never
+/// reaches the callee — relaying it would reset the b-leg's ACK obligation and
+/// leave bob's 200 unacknowledged for good. Her late ACK then relays (exactly
+/// once), and the §14.1 retry renegotiates normally.
+#[tokio::test]
+async fn caller_reinvite_overtaking_the_initial_ack_is_491ed() {
+    const BOB: &str = "127.0.0.1:5053";
+    let h = Harness::with_transit_delay("b2bua-reinvite-before-initial-ack-a", 0);
+    // Alice's overtaking re-INVITE is the corner case: she is the buggy peer,
+    // and the deviation stays on the peer side.
+    h.waive(
+        WaiverScope::rule(
+            "no-re-invite-while-invite-in-progress",
+            "alice deliberately re-INVITEs before ACKing the 2xx that answered her own \
+             INVITE — the overtaking peer this test exists to interwork with",
+        )
+        .on_party("alice"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5043").await;
+    let bob = h.agent("bob", BOB).await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5053).start(&h, "b2bua", "127.0.0.1:5097").await;
+    let bob_addr: SocketAddr = BOB.parse().unwrap();
+
+    // ── call answered; alice sits on her ACK ──
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let initial_cseq = call.invite_cseq();
+
+    // ── her re-INVITE overtakes that ACK → 491, answered locally ──
+    let mut early = call.send_request(InDialogMethod::Invite).with_sdp(REOFFER2).send().await;
+    early.expect(491).await;
+    assert_eq!(b2bua.active_calls(), 1, "a 491'd re-INVITE must not disturb the call");
+
+    // ── the late ACK relays; bob's 2xx is acknowledged exactly once ──
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // ── the §14.1 retry renegotiates normally ──
+    let mut retry = alice_dialog.request(InDialogMethod::Invite, Some(REOFFER2)).await;
+    let retry_cseq = alice_dialog.local_cseq();
+    let mut bob_uas = bob.receive("INVITE").await;
+    assert!(!bob_uas.request().body().is_empty(), "alice's retried offer reaches bob");
+    bob_uas.respond(200, "OK").with_sdp(LATE_ANSWER).await;
+    retry.expect(200).await;
+    alice_dialog.ack_for(retry_cseq, None).await;
+    bob.receive("ACK").await;
+
+    // ── teardown ──
+    let mut bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let report = h.finish().await;
+    b2bua.assert_fully_reaped();
+
+    // The 491'd newcomer left no trace on the b-leg: two INVITEs (the setup and
+    // the retry), and one ACK per 2xx received.
+    let to_bob = |prefix: &[u8]| {
+        report
+            .entries()
+            .iter()
+            .filter(|e| e.from == b2bua.addr && e.to == bob_addr && e.raw.starts_with(prefix))
+            .count()
+    };
+    assert_eq!(to_bob(b"INVITE "), 2, "the setup and the retry — never the 491'd newcomer");
+    assert_eq!(to_bob(b"ACK "), 2, "one ACK per 2xx the callee sent");
+    assert_ne!(initial_cseq, retry_cseq, "the retry spends a CSeq of its own");
+}
+
+/// **The mirrored case, on the callee face.** bob re-INVITEs before ACKing the
+/// initial 2xx this stack answered him with, so the b-leg dialog still holds
+/// that un-ACKed answer. The newcomer is 491'd on the b-leg and alice never
+/// sees a second INVITE; alice's ACK then relays and bob's retry goes through.
+#[tokio::test]
+async fn callee_reinvite_before_the_initial_ack_is_491ed() {
+    const ALICE: &str = "127.0.0.1:5044";
+    let h = Harness::with_transit_delay("b2bua-reinvite-before-initial-ack-b", 0);
+    // Bob's re-INVITE lands while the 2xx he sent is still un-ACKed. The audit's
+    // §14.1 rule charges a party that overtakes an INVITE IT sent, and bob sent
+    // none here, so nothing is waived: the SUT's 491 is the whole subject.
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", "127.0.0.1:5054").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5054).start(&h, "b2bua", "127.0.0.1:5098").await;
+    let alice_addr: SocketAddr = ALICE.parse().unwrap();
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut bob_dialog = uas.dialog();
+
+    // ── bob re-INVITEs while his own 200 is un-ACKed → 491 ──
+    let mut early = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER)).await;
+    early.expect(491).await;
+    assert_eq!(b2bua.active_calls(), 1, "a 491'd re-INVITE must not disturb the call");
+
+    // ── alice's ACK relays and quiesces bob's INVITE server transaction ──
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // ── bob's §14.1 retry now relays to alice and completes ──
+    let mut retry = bob_dialog.request(InDialogMethod::Invite, Some(REOFFER2)).await;
+    let retry_cseq = retry.sent_invite().expect("the re-INVITE bob just sent").cseq().seq();
+    let mut alice_uas = alice.receive("INVITE").await;
+    assert!(!alice_uas.request().body().is_empty(), "bob's retried offer reaches alice");
+    alice_uas.respond(200, "OK").with_sdp(LATE_ANSWER).await;
+    retry.expect(200).await;
+    bob_dialog.ack_for(retry_cseq, None).await;
+    alice.receive("ACK").await;
+
+    // ── teardown ──
+    let mut bye = alice_dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let report = h.finish().await;
+    b2bua.assert_fully_reaped();
+
+    // Alice saw exactly one in-dialog INVITE — bob's retry, never the 491'd one.
+    let relayed_invites = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == b2bua.addr && e.to == alice_addr && e.raw.starts_with(b"INVITE "))
+        .count();
+    assert_eq!(relayed_invites, 1, "only the retry crossed the bridge");
 }

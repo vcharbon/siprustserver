@@ -3533,7 +3533,7 @@ async fn a_background_policy_does_not_absorb_the_arrival_an_open_expect_waits_fo
 /// the wrong request, and the relayed answer then reaches the far leg before the
 /// step gated on that answer is armed to receive it.
 ///
-/// The poll is dwelled onto the audit cadence on purpose — one hair short of the
+/// The poll is dwelled onto the audit cadence on purpose — just short of the
 /// eighth 2 s interval — so the collision is the test and not an accident of
 /// pacing.
 #[tokio::test(start_paused = true)]
@@ -3547,9 +3547,11 @@ async fn an_open_expect_holds_out_for_the_relay_when_an_audit_lands_in_the_same_
     send_options.id = "s101".into();
     send_options.msg.method = Some("OPTIONS".into());
     send_options.msg.headers = vec![mark.clone()];
-    // Eight audit intervals into the talk phase, less the hair that puts the
-    // poll's own send in front of the audit it collides with.
-    send_options.delay.ms = 2000 * 8 - 1;
+    // Eight audit intervals into the talk phase, less the slack that puts the
+    // poll's own send in front of the audit it collides with and the relay of
+    // that poll behind it — the relay trails its send by the two transit hops it
+    // crosses, so the audit has to fall inside those.
+    send_options.delay.ms = 2000 * 8 - 300;
     let mut expect_options = step_of(&mut case, "s11").clone();
     expect_options.id = "s102".into();
     expect_options.msg.method = Some("OPTIONS".into());

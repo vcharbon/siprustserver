@@ -112,11 +112,12 @@ pub struct B2buaDialogExt {
     pub pending_reinvite_2xx: Option<Unacked2xx>,
     /// CSeq (in the acknowledging peer's own sequence space) of the ACK this
     /// dialog's 2xx still awaits from that peer (RFC 3261 §13.2.2.4): armed when
-    /// the 2xx is taken, discharged by the ACK actually leaving — whether this
-    /// stack composed it on receipt or relayed the peer's. `None` = nothing owed,
-    /// so a further peer ACK is absorbed rather than put on a quiesced
+    /// the 2xx is taken, discharged by the ACK actually leaving — the peer's
+    /// relayed, or one this stack composed on its own account. `None` = nothing
+    /// owed, so a further peer ACK is absorbed rather than put on a quiesced
     /// transaction; a retransmitted 2xx re-ACKs via `ack_branch` without
-    /// consulting this.
+    /// consulting this. While it is armed the dialog is in RFC 6026 *Accepted*,
+    /// so a newcomer INVITE there is glare (`invite_transaction_open`).
     #[serde(default)]
     pub awaited_ack_cseq: Option<i64>,
     /// RFC 3261 §13.3.1.4 — the initial-INVITE 2xx this call answered the

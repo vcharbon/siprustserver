@@ -40,7 +40,7 @@ mod originate_tests;
 // Originating a leg + answering/acknowledging on an existing one.
 pub use a_leg_response::response_to_a_leg;
 pub use ack::ack_b_leg;
-pub(crate) use ack::{ack_on_answer, acked_invite_carries_offer, acked_invite_cseq};
+pub(crate) use ack::{acked_invite_carries_offer, acked_invite_cseq};
 pub(crate) use originate::clamp_no_answer;
 pub use originate::{build_b_leg, rebuild_a_leg_invite};
 pub(crate) use repeat::{repeated_reliable_provisional, retransmitted_2xx};

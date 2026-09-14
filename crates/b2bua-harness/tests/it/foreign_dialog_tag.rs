@@ -1,9 +1,10 @@
 //! A mid-dialog request whose To-tag names no dialog this B2BUA holds on the
 //! leg it arrived on (RFC 3261 §12.2.2). A BYE so tagged is refused `481` and
 //! the call it did not name stays up; an ACK so tagged draws no response
-//! (§17.1.1.3) and discharges nothing, so the 2xx it failed to acknowledge is
-//! repeated (§13.3.1.4) until the right ACK lands. The dialog's own tag then
-//! ends the call as usual and nothing leaks.
+//! (§17.1.1.3), discharges nothing and reaches no far leg, so the 2xx it failed
+//! to acknowledge is repeated (§13.3.1.4) until the right ACK lands — and it is
+//! THAT ACK the callee gets. The dialog's own tag then ends the call as usual
+//! and nothing leaks.
 
 use std::time::Duration;
 
@@ -62,7 +63,6 @@ async fn ack_under_a_foreign_to_tag_discharges_nothing_and_the_2xx_is_repeated()
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER_SDP).await;
     let answer = call.expect(200).await;
-    s.bob.receive("ACK").await;
 
     // An ACK for that 2xx under a tag the B2BUA never minted: same Call-ID,
     // From-tag and CSeq, so only the dialog id is wrong.
@@ -109,8 +109,10 @@ async fn ack_under_a_foreign_to_tag_discharges_nothing_and_the_2xx_is_repeated()
         "the §13.3.1.4 ladder ran"
     );
 
-    // The right ACK stops the ladder; the call is up and ends cleanly.
+    // The right ACK stops the ladder, and it is what reaches the callee
+    // (RFC 3261 §13.2.2.4); the call is up and ends cleanly.
     let mut dialog = call.ack().await;
+    s.bob.receive("ACK").await;
     let ladder_so_far = s.b2bua.metrics().retransmits_total("final-2xx", "INVITE", Some(200));
     s.h.advance(Duration::from_secs(3)).await;
     assert_eq!(

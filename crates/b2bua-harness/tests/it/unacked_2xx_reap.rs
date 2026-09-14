@@ -16,6 +16,11 @@
 //!   (b) at the ACK-timeout deadline, **BYE the a-leg AND tear down the b-leg**
 //!       (BYE to bob), driving `active_calls` back to 0.
 //!
+//! §13.2.2.4's "after acknowledging … MUST terminate with a BYE" orders (b) on
+//! the callee face: a b-leg whose 2xx this stack can acknowledge alone gets the
+//! ACK first, then the BYE. A delayed-offer b-leg gets the BYE alone — its ACK
+//! owes the answer only the silent caller could supply.
+//!
 //! Paused-clock; the harness pins a short `ack_timeout_sec` so the give-up
 //! deadline is reached in a handful of `advance`s (CLAUDE.md test-runtime policy:
 //! cut churn at the source — the window, not real time).
@@ -25,7 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua_harness::{settle_until, B2buaSut};
-use scenario_harness::{Harness, RunReport};
+use scenario_harness::{Harness, RunReport, WaiverScope};
 use sip_message::{CustomParser, Method, SipMessage, SipParser};
 use sip_retransmit::{Class, Ladder, Schedule};
 
@@ -41,8 +46,8 @@ const ACK_TIMEOUT_SEC: i64 = 6;
 async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     let h = Harness::new("b2bua-unacked-2xx-reap");
     // ONE knowingly-unmet §13.2.2.4 obligation, and it is alice's: her silence IS
-    // the reap under test. The b-leg keeps its own — the SUT ACKs bob on receipt
-    // of his 200, so nothing there waits on the caller.
+    // the reap under test. The b-leg keeps its own — the give-up composes bob's
+    // ACK before the BYE, since the INVITE this stack sent him carried the offer.
     h.allow_violation(
         "no-ack-to-dialog-creating-2xx",
         "alice deliberately never ACKs — the reap under test",
@@ -58,9 +63,9 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
-                            // bob is ACKed regardless: the ACK for his 2xx is drawn by the response the
-                            // UAC core received, not by anything alice does (§13.2.2.4).
-    bob.receive("ACK").await;
+    let b_leg_invite_cseq = uas.request().cseq().seq();
+    let bob_tag = uas.dialog().local_tag().to_string();
+    let b_leg_call_id = uas.request().call_id().as_str().to_string();
 
     assert_eq!(
         b2bua.metrics().creations_total() - b2bua.metrics().removals_total(),
@@ -98,6 +103,15 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     // she receives is the give-up BYE (the BYE client txn retransmits, so one is
     // still in flight after the drain).
     alice.drain().await;
+    // §13.2.2.4: "after acknowledging … MUST terminate with a BYE" — the callee
+    // sees the ACK for his 2xx FIRST, bare, on that INVITE's CSeq and in his own
+    // dialog, and the BYE after it.
+    let give_up_ack = bob.receive("ACK").await;
+    let ack = give_up_ack.request();
+    assert!(ack.body().is_empty(), "the give-up ACK owes no answer: the offer was in the INVITE");
+    assert_eq!(ack.cseq().seq(), b_leg_invite_cseq, "the ACK echoes the INVITE's CSeq");
+    assert_eq!(ack.to().tag(), Some(bob_tag.as_str()), "in the callee's own dialog");
+    assert_eq!(ack.call_id().as_str(), b_leg_call_id, "on the b-leg's Call-ID");
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
@@ -181,7 +195,6 @@ async fn a_deadline_past_timer_l_does_not_extend_the_2xx_ladder() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
-    bob.receive("ACK").await;
 
     // ── Past Timer L, well short of the deadline: the ladder has ceased and
     //    the deployment has not yet acted ──
@@ -198,6 +211,7 @@ async fn a_deadline_past_timer_l_does_not_extend_the_2xx_ladder() {
     h.advance(Duration::from_secs(9)).await;
     alice.drain().await;
     alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
@@ -257,7 +271,6 @@ async fn a_nonpositive_deadline_still_ends_the_session_at_timer_l() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
-    bob.receive("ACK").await;
 
     // Short of Timer L the call stands; at it the session ends on both legs.
     h.advance(Duration::from_secs(31)).await;
@@ -270,6 +283,7 @@ async fn a_nonpositive_deadline_still_ends_the_session_at_timer_l() {
     h.advance(Duration::from_secs(1)).await;
     alice.drain().await;
     alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
@@ -350,11 +364,11 @@ async fn a_service_that_parks_the_give_up_does_not_keep_the_session() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await; // alice receives the 200 — and deliberately stays silent.
-    bob.receive("ACK").await;
 
     h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
     alice.drain().await;
     alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
@@ -370,6 +384,57 @@ async fn a_service_that_parks_the_give_up_does_not_keep_the_session() {
     );
 
     let _report = h.finish().await;
+}
+
+/// The delayed-offer counter-case to the give-up ACK: alice's INVITE carried no
+/// offer, so the ACK for bob's 2xx owes the answer only her own ACK supplies
+/// (RFC 3264 §4). This stack cannot compose it, so bob gets the BYE alone and
+/// his 2xx stays un-ACKed — his own §13.3.1.4 ladder is what covered the wait.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_offer_callee_gets_the_give_up_bye_with_no_ack() {
+    let h = Harness::new("b2bua-unacked-2xx-delayed-offer-give-up");
+    // Both un-ACKed 2xx are the scenario: alice's silence leaves the answer
+    // relayed to her un-ACKed, and the callee's delayed-offer 2xx can only be
+    // acknowledged by her own ACK (RFC 3264 §4), which never came.
+    h.waive(
+        WaiverScope::rule(
+            "no-ack-to-dialog-creating-2xx",
+            "the caller deliberately never ACKs, so neither her answer nor the callee's \
+             delayed-offer 2xx — whose ACK owes the answer only she could supply — is \
+             acknowledged; that silence is the give-up under test",
+        )
+        .on_party("b2bua"),
+    );
+    let alice = h.agent("alice", "127.0.0.1:5064").await;
+    let bob = h.agent("bob", "127.0.0.1:5074").await;
+    let b2bua = b2bua_with_ack_timeout(&h, "b2bua", "127.0.0.1:5084", 5074, ACK_TIMEOUT_SEC).await;
+
+    // ── alice INVITEs bodyless: the offer is bob's to make ───────────────────
+    let mut call = alice.invite(&bob).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    assert!(uas.request().body().is_empty(), "the offerless INVITE reached bob with a body");
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(OFFER).await;
+    call.expect(200).await; // alice receives the offer — and deliberately stays silent.
+
+    // ── At the deadline: the BYE, and only the BYE, reaches the callee ───────
+    h.advance(Duration::from_secs(ACK_TIMEOUT_SEC as u64)).await;
+    alice.drain().await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    let mut bob_bye = bob.receive("BYE").await;
+    bob_bye.respond(200, "OK").await;
+
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+
+    let report = h.finish().await;
+    let acks = report
+        .entries()
+        .iter()
+        .filter(|e| e.from == b2bua.addr && e.to == bob.addr() && e.raw.starts_with(b"ACK "))
+        .count();
+    assert_eq!(acks, 0, "a delayed-offer b-leg cannot be ACKed by this stack");
 }
 
 /// A B2BUA that routes every call to `dest_port` with a short `ack_timeout_sec`

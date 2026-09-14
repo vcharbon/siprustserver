@@ -1,8 +1,8 @@
 //! RFC 3261 §13.2.2.4 — a copy of a **delayed-offer** 2xx that lands AFTER the
 //! caller's ACK has been relayed re-sends THAT ACK, body and all.
 //!
-//! On a delayed offer the b-leg ACK is not minted: it relays end to end, because
-//! only the caller's own ACK carries the answer to the callee's offer (RFC 3261
+//! The b-leg ACK is the caller's, relayed end to end, and on a delayed offer it
+//! is also the only carrier of the answer to the callee's offer (RFC 3261
 //! §13.2.1, RFC 3264 §4). §13.2.2.4 says "the ACK MUST be passed to the client
 //! transport every time a retransmission of the 2xx final response that
 //! triggered the ACK arrives" — **the** ACK, the one that 2xx triggered. A
@@ -11,8 +11,8 @@
 //! where the first ACK was lost.
 //!
 //! The pre-caller-ACK half of the same shape is gated by
-//! `reack_2xx_before_caller_ack.rs` (a copy inside the wait draws nothing, since
-//! there is no ACK yet to re-send); the minted, offer-in-INVITE half by
+//! `repeated_2xx_before_caller_ack.rs` (a copy inside the wait draws nothing,
+//! since there is no ACK yet to re-send); the bare, offer-in-INVITE half by
 //! `reack_retransmitted_2xx.rs`. This file is the after-the-relayed-ACK half.
 
 use std::net::SocketAddr;
@@ -96,9 +96,9 @@ const REINVITE_ALICE_ADDR: &str = "127.0.0.1:5994";
 const REINVITE_BOB_ADDR: &str = "127.0.0.1:5995";
 
 /// The ACK a copy re-sends belongs to ONE INVITE transaction. A re-INVITE opens
-/// the next one, and its 2xx carries the answer, so its ACK is minted and bare —
-/// re-sending the initial delayed-offer ACK's answer here would replay a spent
-/// negotiation onto a renegotiated session.
+/// the next one, and its 2xx carries the answer, so the ACK relayed for it is
+/// bare — re-sending the initial delayed-offer ACK's answer here would replay a
+/// spent negotiation onto a renegotiated session.
 #[tokio::test(start_paused = true)]
 async fn a_reinvite_2xx_copy_re_sends_its_own_bare_ack_not_the_initial_answer() {
     let h = Harness::new("b2bua-reack-delayed-offer-then-reinvite");
@@ -116,7 +116,7 @@ async fn a_reinvite_2xx_copy_re_sends_its_own_bare_ack_not_the_initial_answer() 
     let mut dialog = call.ack_with(Some(ANSWER)).await;
     bob.receive("ACK").await;
 
-    // ── alice renegotiates, offering this time: the b-leg ACK is minted bare ──
+    // ── alice renegotiates, offering this time, and ACKs bare ────────────────
     let mut reinv = dialog.reinvite(Some(REOFFER)).await;
     let reinvite_cseq = dialog.local_cseq();
     let mut bob_reinv = bob.receive("INVITE").await;
@@ -148,7 +148,7 @@ async fn a_reinvite_2xx_copy_re_sends_its_own_bare_ack_not_the_initial_answer() 
     );
     assert!(
         reinvite_acks.iter().all(|a| a.ends_with(b"Content-Length: 0\r\n\r\n")),
-        "a minted ACK stays bare: the initial transaction's answer is not replayed onto it",
+        "the relayed bare ACK stays bare: the initial transaction's answer is not replayed onto it",
     );
 }
 

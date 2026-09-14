@@ -1,28 +1,20 @@
-//! RFC 3261 §13.2.2.4 — the UAC core owes **one ACK per 2xx received**, including
-//! the 2xx copies that arrive before the caller's own ACK has reached the B2BUA.
+//! RFC 3261 §13.2.2.4 — the UAC core generates **one ACK per 2xx received** and
+//! re-passes THAT ACK to the transport for every retransmitted copy. On a
+//! relayed INVITE the ACK is the caller's own, so before it arrives there is no
+//! ACK: a copy of the 2xx landing inside that wait draws nothing, and the
+//! answerer's own §13.3.1.4 ladder is the mechanism the RFC provides while the
+//! ACK is on its way.
 //!
-//! The B2BUA ACKs an offer-carrying 2xx on receipt, so the first copy draws its
-//! ACK before the caller has said anything — and the callee's §13.3.1.4 ladder
-//! can still repeat that 2xx if the ACK is lost. Each copy is a 2xx received by
-//! the UAC core and MUST draw its own ACK; they are byte-identical, on the one
-//! client transaction the first ACK minted (`ack_branch` + the INVITE CSeq).
+//! Once the caller's ACK has left, a further copy re-sends that exact datagram —
+//! same Via branch, same bytes, body included. The post-ACK half is gated by
+//! `it/reack_retransmitted_2xx.rs`; this is the pre-ACK half, and the repeats
+//! must not re-enter answer processing (one Answer CDR event, one bridge).
 //!
-//! The post-caller-ACK half of §13.2.2.4 is gated by `reack_retransmitted_2xx.rs`;
-//! this is the pre-caller-ACK half, and the retransmitted 2xx must NOT re-enter
-//! answer processing (one Answer CDR event, one bridge).
-//!
-//! `a_reinvite_2xx_repeated_before_the_ack_draws_one_ack_per_copy` is the same
-//! obligation on an in-dialog re-INVITE: the leg is Confirmed long before, so
-//! nothing re-confirms it, and the ACK's client transaction is minted — and its
-//! first ACK sent — where the re-INVITE's 2xx is taken (`relay_response`).
-//!
-//! The DELAYED-OFFER shape is the one exception, and
-//! `a_delayed_offer_2xx_repeated_before_the_ack_draws_one_ack_in_total` pins it:
-//! an ACK that owes the answer cannot be composed from the dialog, so nothing is
-//! sent and no client transaction is minted when the 2xx is taken
-//! (`acked_invite_carries_offer`) — a copy inside the wait has no ACK to
-//! re-send. What separates the shapes is the BODY the ACK owes, never whether it
-//! confirms the dialog.
+//! The three arms differ only in where the 2xx is taken: at dialog confirmation
+//! (initial INVITE), on the answering leg of a relayed re-INVITE, and on a
+//! delayed-offer initial INVITE whose ACK additionally owes the answer
+//! (RFC 3264 §4). All three count the same, because what separates them is the
+//! BODY the ACK carries, never who owes it.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -35,8 +27,11 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 const BOB_ADDR: &str = "127.0.0.1:5073";
 
+/// The INITIAL 2xx, repeated twice while the caller holds her ACK: the callee
+/// sees no ACK at all. Her ACK then goes end to end, and a copy arriving after
+/// it re-sends that same datagram.
 #[tokio::test(start_paused = true)]
-async fn every_2xx_received_before_the_callers_ack_draws_its_own_ack() {
+async fn a_2xx_repeated_before_the_callers_ack_draws_none_then_hers_relays() {
     let h = Harness::new("b2bua-reack-2xx-pre-ack");
     let alice = h.agent("alice", "127.0.0.1:5063").await;
     let bob = h.agent("bob", BOB_ADDR).await;
@@ -50,22 +45,24 @@ async fn every_2xx_received_before_the_callers_ack_draws_its_own_ack() {
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
 
-    // ── bob's §13.3.1.4 ladder runs while the caller still holds its ACK ──────
-    // Two more copies of the same 200. Each is a 2xx the UAC core received, so
-    // each owes an ACK. Kept inside the a-leg `AckOf2xx` ladder's first
-    // rung (T1 = 500 ms) so the SUT's own 2xx ladder is not part of what is
-    // counted.
+    // ── bob's §13.3.1.4 ladder runs while the caller still holds her ACK ──────
+    // Two more copies of the same 200. No ACK exists yet, so none of the three
+    // draws one. Kept inside the a-leg `AckOf2xx` ladder's first rung
+    // (T1 = 500 ms) so the SUT's own 2xx ladder is not part of what is counted.
     for _ in 0..2 {
         uas.respond(200, "OK").with_sdp(ANSWER).await;
         for _ in 0..2 {
             h.advance(Duration::from_millis(100)).await;
-            bob.drain().await;
+            assert_eq!(bob.drain().await, 0, "a copy inside the wait draws no ACK");
         }
     }
 
-    // The caller ACKs at last — hop-local, since bob's own ACK went out on
-    // receipt. The third copy's ACK is the one still queued for him.
+    // ── the caller ACKs at last; THAT ACK is what bob gets ────────────────────
     let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    // ── a copy landing once the ACK EXISTS draws its own, on that branch ──────
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
     bob.receive("ACK").await;
     for _ in 0..4 {
         h.advance(Duration::from_millis(100)).await;
@@ -88,16 +85,17 @@ async fn every_2xx_received_before_the_callers_ack_draws_its_own_ack() {
         .iter()
         .filter(|e| format!("{:?}", e.event_type).contains("Answer"))
         .count();
-    assert_eq!(answers, 1, "exactly one Answer CDR event for three copies of one 200");
+    assert_eq!(answers, 1, "exactly one Answer CDR event for four copies of one 200");
     assert_eq!(records[0].b_legs.len(), 1, "no re-bridge: one b-leg");
 
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
 
-    // §13.2.2.4: three 2xx received, three ACKs sent — byte-identical, one
-    // client transaction (a fresh branch would mint a new one and never quiesce
-    // bob's INVITE server transaction).
+    // Four 2xx received, TWO ACKs sent: the two copies inside the wait drew
+    // none, the caller's ACK relayed, and the copy after it re-sent that exact
+    // datagram — one client transaction (a fresh branch would mint a new one and
+    // never quiesce bob's INVITE server transaction).
     let bob_addr: SocketAddr = BOB_ADDR.parse().unwrap();
     let acks: Vec<Vec<u8>> = report
         .entries()
@@ -105,9 +103,10 @@ async fn every_2xx_received_before_the_callers_ack_draws_its_own_ack() {
         .filter(|e| e.from == b2bua.addr && e.to == bob_addr && e.raw.starts_with(b"ACK "))
         .map(|e| e.raw.clone())
         .collect();
-    assert_eq!(acks.len(), 3, "one ACK per 2xx received (RFC 3261 §13.2.2.4): got {}", acks.len(),);
-    assert!(
-        acks.iter().all(|a| a == &acks[0]),
+    assert_eq!(acks.len(), 2, "the caller's ACK, then that same ACK re-sent: got {}", acks.len());
+    assert_eq!(
+        String::from_utf8_lossy(&acks[1]),
+        String::from_utf8_lossy(&acks[0]),
         "the ACK re-sent for a retransmitted 2xx is the SAME ACK",
     );
 }
@@ -118,11 +117,11 @@ const REANSWER: &str = "v=0\r\no=bob 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127
 const BOB_REINVITE_ADDR: &str = "127.0.0.1:5077";
 
 /// The **re-INVITE** twin: a renegotiation's 2xx repeated while the originator's
-/// ACK is still owed. §13.2.2.4 counts copies, not dialogs, so each one draws its
-/// own ACK on the one client transaction — and here no `ConfirmDialog` runs to
-/// mint that transaction, since the leg was confirmed by the initial INVITE.
+/// ACK is still owed. The 2xx is taken on the answering leg rather than at
+/// dialog confirmation, and the count is the same — nothing before the ACK, that
+/// ACK once it lands, and the same datagram for the copy after it.
 #[tokio::test(start_paused = true)]
-async fn a_reinvite_2xx_repeated_before_the_ack_draws_one_ack_per_copy() {
+async fn a_reinvite_2xx_repeated_before_the_ack_draws_none_then_the_originators_relays() {
     let h = Harness::new("b2bua-reack-reinvite-2xx-pre-ack");
     let alice = h.agent("alice", "127.0.0.1:5067").await;
     let bob = h.agent("bob", BOB_REINVITE_ADDR).await;
@@ -146,10 +145,12 @@ async fn a_reinvite_2xx_repeated_before_the_ack_draws_one_ack_per_copy() {
     reinv.expect(200).await;
     bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
     h.advance(Duration::from_millis(100)).await;
+    assert_eq!(bob.drain().await, 0, "a copy inside the wait draws no ACK");
 
-    // ── alice ACKs once; bob is owed one ACK per copy ─────────────────────────
+    // ── alice ACKs once; that ACK relays, and the next copy re-sends it ───────
     dialog.ack_for(reinvite_cseq, None).await;
     bob.receive("ACK").await;
+    bob_reinv.respond(200, "OK").with_sdp(REANSWER).await;
     bob.receive("ACK").await;
 
     let mut bye = dialog.bye().await;
@@ -172,7 +173,7 @@ async fn a_reinvite_2xx_repeated_before_the_ack_draws_one_ack_per_copy() {
         .map(|e| e.raw.clone())
         .filter(|raw| sip_message::sniff::cseq_number(raw) == Some(reinvite_cseq))
         .collect();
-    assert_eq!(reinvite_acks.len(), 2, "one ACK per re-INVITE 2xx received (§13.2.2.4)");
+    assert_eq!(reinvite_acks.len(), 2, "the originator's ACK, then that same ACK re-sent");
     assert_eq!(
         reinvite_acks[0], reinvite_acks[1],
         "the re-ACK for a retransmitted re-INVITE 2xx is the SAME ACK",
@@ -181,15 +182,12 @@ async fn a_reinvite_2xx_repeated_before_the_ack_draws_one_ack_per_copy() {
 
 const BOB_DELAYED_OFFER_ADDR: &str = "127.0.0.1:5079";
 
-/// The **delayed-offer** twin, and the one shape where the copies draw NOTHING:
-/// alice's INVITE carries no offer, so bob's 2xx holds it and the answer rides
-/// the ACK (RFC 3261 §13.2.1, RFC 3264 §4). That ACK cannot be composed from
-/// the dialog alone, so no client transaction is minted when the 2xx is taken
-/// (`acked_invite_carries_offer`) and a copy arriving while the answer is still
-/// owed has no ACK to re-send. Alice's ACK supplies it, ONE goes out, and it is
-/// what mints the branch every LATER copy re-sends.
+/// The **delayed-offer** twin, where the ACK additionally owes the answer: alice
+/// INVITEs bodyless, so bob's 2xx holds the offer and the answer rides her ACK
+/// (RFC 3261 §13.2.1, RFC 3264 §4). The count is unchanged; what the retained
+/// datagram carries is not, so the copy after her ACK re-sends the answer too.
 #[tokio::test(start_paused = true)]
-async fn a_delayed_offer_2xx_repeated_before_the_ack_draws_one_ack_in_total() {
+async fn a_delayed_offer_2xx_repeated_before_the_ack_draws_none_then_the_answer_relays() {
     let h = Harness::new("b2bua-reack-delayed-offer-pre-ack");
     let alice = h.agent("alice", "127.0.0.1:5069").await;
     let bob = h.agent("bob", BOB_DELAYED_OFFER_ADDR).await;
@@ -213,7 +211,7 @@ async fn a_delayed_offer_2xx_repeated_before_the_ack_draws_one_ack_in_total() {
     uas.respond(200, "OK").with_sdp(OFFER).await;
     for _ in 0..2 {
         h.advance(Duration::from_millis(100)).await;
-        bob.drain().await;
+        assert_eq!(bob.drain().await, 0, "a copy inside the wait draws no ACK");
     }
 
     // ── alice ACKs once, carrying the answer; ONE ACK reaches bob ─────────────
@@ -240,7 +238,10 @@ async fn a_delayed_offer_2xx_repeated_before_the_ack_draws_one_ack_in_total() {
     let report = h.finish().await;
 
     // Three 2xx received, TWO ACKs sent: the copy inside the wait drew none, the
-    // one after it drew its own — byte-identical, one client transaction.
+    // one after the ACK exists re-sent it — byte-identical, one client
+    // transaction, and it reuses alice's branch AND carries the answer she
+    // supplied (a copy that drew a bare ACK would leave bob's offer unanswered,
+    // `reack_delayed_offer_after_caller_ack.rs`).
     let bob_addr: SocketAddr = BOB_DELAYED_OFFER_ADDR.parse().unwrap();
     let acks: Vec<Vec<u8>> = report
         .entries()
@@ -252,13 +253,9 @@ async fn a_delayed_offer_2xx_repeated_before_the_ack_draws_one_ack_in_total() {
     assert_eq!(
         acks.len(),
         2,
-        "the held copy draws no ACK; the one after the ACK exists draws its own: got {}",
+        "the held copy draws no ACK; the one after the ACK exists re-sends it: got {}",
         acks.len(),
     );
-    // One client transaction, one datagram: the re-ACK is alice's ACK repeated,
-    // so it reuses her branch AND carries the answer she supplied — a copy that
-    // drew a bare ACK would leave bob's offer unanswered
-    // (`reack_delayed_offer_after_caller_ack.rs`).
     assert_eq!(
         String::from_utf8_lossy(&acks[1]),
         String::from_utf8_lossy(&acks[0]),

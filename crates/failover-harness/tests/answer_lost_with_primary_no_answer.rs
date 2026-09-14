@@ -557,6 +557,9 @@ async fn an_answer_served_by_the_takeover_copy_after_the_reclaim_draws_no_second
 /// routing to the primary before the survivor's answer version reaches it —
 /// so alice's ACK lands on the primary's ringing copy first. The survivor's
 /// answer must still be taken: no second final at the ring deadline.
+///
+/// The ACK that landed on a ringing copy acknowledged nothing, so the handshake
+/// completes on alice's §13.2.2.4 re-pass once the answer has folded in.
 #[tokio::test(start_paused = true)]
 async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final() {
     let Cluster { mut fh, alice, bob, proxy, mut w_b1, mut w_b2 } =
@@ -564,6 +567,7 @@ async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final
 
     // ── ring: the route arms NoAnswer and the ringing version reaches the backup
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let invite_cseq = call.invite_cseq();
     let mut uas = bob.receive("INVITE").await;
     let (pri_ord, bak_ord) = worker_ordinals(uas.request());
     let (b1, b2): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
@@ -594,7 +598,6 @@ async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final
     //    takeover copy answers alice ────────────────────────────────────────────
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
-    bob.receive("ACK").await;
 
     // ── the proxy reads the primary alive before the answer version lands:
     //    alice's ACK goes to the primary's ringing copy ─────────────────────────
@@ -603,6 +606,13 @@ async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final
     let mut dialog = call.ack().await;
     fh.advance(Duration::from_millis(500)).await;
     fh.advance(Duration::from_secs(4)).await; // the delayed answer version lands
+                                              // The copy alice's ACK reached was still ringing, so it acknowledged nothing.
+                                              // That is what the §13.3.1.4 ladder is for: the copy holding the answer
+                                              // repeats it and alice re-passes her ACK (RFC 3261 §13.2.2.4), which this
+                                              // time reaches a copy that owes the callee one.
+    alice.drain().await;
+    dialog.ack_for(invite_cseq, None).await;
+    bob.receive("ACK").await;
     while bob.take_queued().await.is_some() {} // a re-relayed ACK, if any
     fh.mark(
         &primary_ord,

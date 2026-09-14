@@ -120,8 +120,8 @@ impl ActionExecutor<'_> {
         //
         // Relayed ONLY while the target dialog holds an armed, undischarged ACK
         // obligation for this CSeq — a 2xx in hand that nothing has ACKed yet.
-        // Anything else is absorbed: an ACK the target's own UAC core already
-        // composed on receipt is not owed twice, an early dialog owes no ACK (a
+        // Anything else is absorbed: an ACK a rule already composed on this
+        // stack's own account is not owed twice, an early dialog owes no ACK (a
         // §17.1.1.3 reject-ACK is hop-local, never relayed), and a surplus peer
         // ACK — fresh Via branch or repeated — must not re-ACK an acknowledged
         // 2xx. A repeated 2xx re-ACKs via `re-ack-retransmitted-2xx`, which never

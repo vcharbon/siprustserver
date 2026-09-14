@@ -117,12 +117,15 @@ pub fn add_pending_request(
 
 /// Whether an INVITE transaction is still open on this dialog (RFC 3261
 /// §14.1): a transparently relayed INVITE awaiting its final response
-/// (rule 1), or a 2xx this side sent that still awaits its ACK (rule 2 —
-/// RFC 6026 names the interval *Accepted*). While either holds, a new INVITE
-/// on the dialog is glare and gets 491 Request Pending.
+/// (rule 1), or a 2xx un-ACKed on either face — one this side sent (a
+/// re-INVITE's or the call's own answer) or one taken here whose ACK has not
+/// left yet (rule 2; RFC 6026 names the interval *Accepted*). While any holds,
+/// a new INVITE on the dialog is glare and gets 491 Request Pending.
 pub fn invite_transaction_open(dialog: &Dialog) -> bool {
     dialog.ext.inbound_pending_requests.iter().any(|p| p.method.eq_ignore_ascii_case("INVITE"))
         || dialog.ext.pending_reinvite_2xx.is_some()
+        || dialog.ext.answered_2xx.is_some()
+        || dialog.ext.awaited_ack_cseq.is_some()
 }
 
 /// Find a pending transparent-relay entry by outbound CSeq.

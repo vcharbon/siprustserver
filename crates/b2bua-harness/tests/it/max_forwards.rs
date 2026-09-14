@@ -274,6 +274,7 @@ async fn every_relayed_request_states_one_hop_less() {
     assert_eq!(hops(bob_uas.request(), "the relayed re-INVITE"), 69, "the relay spends one hop");
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     reinv.expect(200).await;
+    dialog.ack(None).await;
     bob.receive("ACK").await;
 
     // ── and so does the teardown the caller sends ──

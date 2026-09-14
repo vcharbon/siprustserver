@@ -144,10 +144,10 @@ async fn a_relayed_answer_is_retransmitted_whole() {
     call.expect(180).await;
     answer_stating(&mut uas, Some(ANSWER)).await;
     call.expect(200).await;
-    bob.receive("ACK").await;
-
-    // Alice holds her ACK past T1 — the ladder fires — then confirms.
+    // Alice holds her ACK past T1 — the ladder fires — then confirms, and that
+    // ACK is what the callee gets (RFC 3261 §13.2.2.4: one ACK per 2xx).
     let mut dialog = call.ack_delayed().await;
+    bob.receive("ACK").await;
     alice.drain().await;
 
     teardown(&h, &b2bua, &bob, &mut dialog).await;
@@ -176,9 +176,8 @@ async fn a_masked_call_answer_is_retransmitted_whole() {
     call.expect(180).await;
     answer_stating(&mut uas, Some(ANSWER)).await;
     call.expect(200).await;
-    bob.receive("ACK").await;
-
     let mut dialog = call.ack_delayed().await;
+    bob.receive("ACK").await;
     alice.drain().await;
 
     teardown(&h, &b2bua, &bob, &mut dialog).await;
@@ -223,9 +222,8 @@ async fn a_fake_pracked_answer_is_retransmitted_whole() {
     answer_stating(&mut uas, None).await;
     let ok = call.expect(200).await;
     assert!(!ok.body().is_empty(), "the a-leg 200 carries the cached reliable-18x SDP");
-    bob.receive("ACK").await;
-
     let mut dialog = call.ack_delayed().await;
+    bob.receive("ACK").await;
     alice.drain().await;
 
     teardown(&h, &b2bua, &bob, &mut dialog).await;

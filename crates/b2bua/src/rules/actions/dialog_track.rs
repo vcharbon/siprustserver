@@ -195,22 +195,12 @@ impl ActionExecutor<'_> {
             }
             leg.state = LegState::Confirmed;
             leg.disposition = LegDisposition::Bridged;
-            // RFC 3261 §13.2.2.4: taking a 2xx mints the ACK's client transaction,
-            // so every 2xx copy is re-ACKed on this one branch
-            // (`re-ack-retransmitted-2xx`). Minted only when the ACK owes no answer
-            // body; a delayed-offer INVITE's ACK is composable only once the
-            // caller's own ACK supplies the answer.
-            //
-            // The relay-ACK obligation is armed for the caller's ACK CSeq
-            // REGARDLESS: confirming a dialog cannot know who will compose the
-            // ACK — `ack_on_answer` composes it here for a plain answered call,
-            // several service rules compose their own, and a rule that composes
-            // none (an MRF-answered callee) still needs the caller's relayed on.
-            // Whichever emission wins discharges it (`ack_leg`).
+            // RFC 3261 §13.2.2.4: the ACK this 2xx owes is the caller's own,
+            // relayed — arm the obligation for the CSeq that ACK will carry.
+            // Its emission mints the ACK's client transaction and retains the
+            // branch every later copy of the 2xx is re-ACKed on
+            // (`re-ack-retransmitted-2xx`), so no branch exists until then.
             if let Some(d) = leg.dialogs.first_mut() {
-                if d.ext.ack_branch.is_none() && relay::acked_invite_carries_offer(d) {
-                    d.ext.ack_branch = Some(self.id_gen.new_branch());
-                }
                 d.ext.awaited_ack_cseq = Some(awaited_ack_cseq);
             }
         }

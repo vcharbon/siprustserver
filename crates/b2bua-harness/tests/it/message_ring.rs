@@ -203,7 +203,7 @@ async fn a_basic_call_records_every_distinct_message_on_both_legs() {
             (Relayed, "INVITE", b_cseq, None),
             (Received, "INVITE", b_cseq, Some(180)),
             (Received, "INVITE", b_cseq, Some(200)),
-            (Authored, "ACK", b_cseq, None),
+            (Relayed, "ACK", b_cseq, None),
         ],
         "the b-leg so far"
     );
@@ -365,10 +365,10 @@ async fn a_prack_round_and_a_reinvite_round_add_their_rows() {
             (Relayed, "PRACK", b_prack, None),
             (Received, "PRACK", b_prack, Some(200)),
             (Received, "INVITE", b_cseq, Some(200)),
-            (Authored, "ACK", b_cseq, None),
+            (Relayed, "ACK", b_cseq, None),
             (Relayed, "INVITE", b_reinvite, None),
             (Received, "INVITE", b_reinvite, Some(200)),
-            (Authored, "ACK", b_reinvite, None),
+            (Relayed, "ACK", b_reinvite, None),
         ],
         "the b-leg: the same rounds, as this stack sent them"
     );
@@ -756,11 +756,13 @@ async fn a_late_first_ack_after_the_give_up_is_recorded() {
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let invite_cseq = call.invite_cseq();
-    bob.receive("ACK").await;
 
-    // Alice holds her ACK past the give-up: the stack BYEs both legs.
+    // Alice holds her ACK past the give-up. The callee's 2xx owes an ACK this
+    // stack can compose on its own (its INVITE carried the offer), so bob gets
+    // ACK then BYE (RFC 3261 §13.2.2.4) and alice gets the BYE.
     h.advance(Duration::from_secs(8)).await;
     alice.drain().await;
+    bob.receive("ACK").await;
     let mut alice_bye = alice.receive("BYE").await;
     let mut bob_bye = bob.receive("BYE").await;
     // Her ACK lands now, on a terminating call.
