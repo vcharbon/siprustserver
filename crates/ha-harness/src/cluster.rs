@@ -251,9 +251,12 @@ impl HaCluster {
         self.mark(a, Some(b), "heal", "");
     }
 
-    /// Cut one direction `from → to`: every wire carrying it closes (`to`'s
-    /// pullers see the stream end) and one reopened under the cut closes as
-    /// soon as it is attributed, until [`reconnect`](Self::reconnect). Marker.
+    /// Cut one direction `from → to`: every wire carrying it closes — what
+    /// `from`'s listener serves down to `to`'s pullers, and what `from`'s own
+    /// pullers send up to `to`'s listener — `to`'s pullers see the stream end,
+    /// `from`'s pullers see their sends fail, and a stream reopened under the
+    /// cut closes as soon as it is attributed, until
+    /// [`reconnect`](Self::reconnect). Marker.
     pub fn cut(&mut self, from: &str, to: &str) {
         let (fa, ta) = (self.addrs[from], self.addrs[to]);
         self.sim.apply_fault(Fault::Cut { src: fa, dst: ta });

@@ -1,5 +1,5 @@
 //! Goal-1 fault + report scenarios: slow/crashing bootstrap holds no lock,
-//! buffer-full → drop-subscriber → reconnect, and the recording-report test.
+//! cut → drop-subscriber → reconnect, and the recording-report test.
 //! All under `#[tokio::test(start_paused = true)]`; drive BETWEEN advances.
 
 use std::time::Duration;
@@ -76,14 +76,14 @@ async fn unreachable_peer_does_not_block_other_peer() {
 }
 
 // ---------------------------------------------------------------------------
-// buffer-full → drop subscriber → reconnect: arm drop-on-overflow on the A→B
-// server→client direction, flood, the subscriber is dropped, then reconnect
-// (heal) and converge. We arm BEFORE the subscription opens so the established
-// stream's direction inherits the drop-on-overflow flag.
+// cut → subscriber dropped → reconnect: cut the established A→B direction so
+// B's pullers lose their streams, add calls while it is down, then reconnect
+// (heal) and converge — a fresh subscription re-pulls from the retained
+// watermark.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
-async fn buffer_full_drop_then_reconnect_converges() {
+async fn cut_drops_the_subscriber_then_reconnect_converges() {
     let mut cl = HaCluster::new(&["A", "B"]).await;
     cl.advance(ms(200)).await;
 
