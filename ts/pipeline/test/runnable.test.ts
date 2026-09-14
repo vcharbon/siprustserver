@@ -390,6 +390,38 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
     ).toEqual([["s2", "s1", "s3"]])
   })
 
+  it("keeps a 2xx whose ACK lands AFTER a premature re-INVITE the peer answered 491", () => {
+    // The actor re-INVITEs over its own un-ACKed 2xx (§14.1), the peer answers
+    // 491 (RFC 6026 Accepted), the ACK to the 491 discharges the re-INVITE, and
+    // the ACK to the original 2xx follows: the leg captured it, nothing was lost.
+    expect(
+      unackedTakenFinals([
+        offerless("s1", "A"),
+        final("s2", "A", 200, "expect"),
+        reinvite("s3", "A"),
+        final("s4", "A", 491, "expect"),
+        ack("s5", "A"),
+        ack("s6", "A"),
+        step("s7", "A", "send", { method: "BYE" })
+      ])
+    ).toEqual([])
+  })
+
+  it("charges it still when the 491 round's ACK is the only one the leg carries", () => {
+    // Each ACK discharges its own transaction: the 491's ACK is the re-INVITE's
+    // (§17.1.1.3), so the 2xx stands unsettled and the re-INVITE proves the loss.
+    expect(
+      unackedTakenFinals([
+        offerless("s1", "A"),
+        final("s2", "A", 200, "expect"),
+        reinvite("s3", "A"),
+        final("s4", "A", 491, "expect"),
+        ack("s5", "A"),
+        step("s6", "A", "send", { method: "BYE" })
+      ]).map((c) => [c.final, c.invite, c.continuation])
+    ).toEqual([["s2", "s1", "s3"]])
+  })
+
   it("takes an in-dialog request the SUT sends INTO the leg as the same proof", () => {
     expect(
       unackedTakenFinals([

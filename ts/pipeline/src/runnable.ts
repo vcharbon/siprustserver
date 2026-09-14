@@ -339,6 +339,84 @@ type UnackedTaken = Omit<UnackedTakenFinal, "continuation" | "method">
 const isContinuation = (step: Flow.Step): boolean =>
   isRequest(step) && !["ACK", "BYE", "CANCEL"].includes(method(step))
 
+/** One INVITE transaction the actor opened on a leg, as the leg's state holds it. */
+interface TakenTransaction {
+  readonly invite: Flow.Step
+  /** The final the leg took for it, and where; absent while it is still open. */
+  final?: { readonly step: Flow.Step; readonly at: number }
+  /** Whether an ACK the actor sent on the leg discharged it. */
+  acked: boolean
+}
+
+/**
+ * Every 2xx the actor takes on a leg and no ACK on that leg ever settles, each
+ * at its position in the step list, in document order — the SETTLE predicate,
+ * apart from what proves the missing ACK was lost.
+ *
+ * Leg state names the transaction an ACK settles, never the step's captured
+ * `cseq`, as the run resolves it: an ACK the actor sends discharges the NEWEST
+ * INVITE it sent on that leg that holds a final and no ACK yet, and each ACK
+ * discharges its own. RFC 3261 §14.1 leaves one outstanding, so a compliant
+ * actor offers one candidate; an actor that re-INVITEs over its own un-ACKed
+ * 2xx offers two, and the ACK to the re-INVITE's final (491 under RFC 6026
+ * Accepted, or any other) takes the newer one, leaving the 2xx standing for
+ * the ACK the leg captures later. A non-2xx final consumes an ACK the same way
+ * (§17.1.1.3) and is never owed here. An ACK while nothing awaits one is a
+ * repeat of one already sent and settles nothing further.
+ */
+const unsettledTakenFinals = (
+  steps: ReadonlyArray<Flow.Step>
+): ReadonlyArray<{ readonly at: number; readonly final: UnackedTaken }> => {
+  const legs = new Map<string, Array<TakenTransaction>>()
+  const on = (leg: string): Array<TakenTransaction> => {
+    const held = legs.get(leg)
+    if (held !== undefined) return held
+    const fresh: Array<TakenTransaction> = []
+    legs.set(leg, fresh)
+    return fresh
+  }
+  steps.forEach((step, at) => {
+    if (step.op === "send" && isInvite(step)) on(step.leg).push({ invite: step, acked: false })
+    else if (step.op === "expect" && isInviteFinal(step)) {
+      const newest = on(step.leg).at(-1)
+      if (newest !== undefined) newest.final = { step, at }
+    } else if (step.op === "send" && isAck(step)) {
+      const awaiting = on(step.leg).findLast((t) => t.final !== undefined && !t.acked)
+      if (awaiting !== undefined) awaiting.acked = true
+    }
+  })
+  return [...legs.values()]
+    .flat()
+    .flatMap((t) => {
+      if (t.acked || t.final === undefined || !isInviteSuccess(t.final.step)) return []
+      const final = t.final.step
+      return [{
+        at: t.final.at,
+        final: {
+          final: final.id,
+          invite: t.invite.id,
+          leg: final.leg,
+          ...(final.observed === undefined ? {} : { observed: final.observed }),
+          ...(t.invite.observed === undefined ? {} : { inviteObserved: t.invite.observed })
+        }
+      }]
+    })
+    .sort((a, b) => a.at - b.at)
+}
+
+/**
+ * What proves the ACK to an unsettled 2xx CROSSED THE WIRE and the trace lost
+ * it: the first new in-dialog transaction the leg carries after the 2xx
+ * ({@link isContinuation}), traffic no unconfirmed dialog carries. Undefined
+ * where the leg carries none, and the abandoned-dialog reading stands.
+ */
+const lostAckGround = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): Flow.Step | undefined =>
+  steps.slice(at + 1).find((s) => s.leg === leg && isContinuation(s))
+
 /**
  * Every dialog-creating 2xx the actor takes, never ACKs, and goes on to use.
  * Empty for a document cut from a vantage that captured its whole call.
@@ -353,60 +431,33 @@ const isContinuation = (step: Flow.Step): boolean =>
  * that peer step waiting on a datagram the document never scripts, whatever the
  * offer model was.
  *
- * The continuation is the second discriminator, because an actor that truly
- * never ACKs is a corner case worth REPLAYING — our own reaper answers it — and
- * looks identical up to this point. So the charge rests on what the leg carries
- * AFTERWARDS: a new in-dialog transaction ({@link isContinuation}) is traffic no
- * unconfirmed dialog carries, and its presence means the ACK crossed the wire
- * and the trace lost it. Where the leg carries none, the abandoned-dialog
- * reading stands and the case is kept.
+ * Two questions, answered apart. Whether an ACK on the leg SETTLES the 2xx
+ * ({@link unsettledTakenFinals}) reads the whole leg: an ACK the leg captures
+ * for that transaction settles it wherever it sits, before or after a
+ * continuation, and only a 2xx no ACK on the leg ever answers is charged. What
+ * proves the missing ACK was LOST rather than never sent
+ * ({@link lostAckGround}) is the second discriminator, because an actor that
+ * truly never ACKs is a corner case worth REPLAYING — our own reaper answers
+ * it — and looks identical up to this point.
  *
- * One forward pass per leg. Charged on the 2xx, so an INVITE the actor sent and
- * nobody answered is untouched, and a non-2xx final is out of scope: its ACK is
- * the client transaction's (§17.1.1.3), composed from the final itself.
+ * Charged on the 2xx, so an INVITE the actor sent and nobody answered is
+ * untouched, and a non-2xx final is out of scope: its ACK is the client
+ * transaction's (§17.1.1.3), composed from the final itself.
  */
 export const unackedTakenFinals = (
   flow: ReadonlyArray<Flow.FlowNode>
 ): ReadonlyArray<UnackedTakenFinal> => {
   const steps = flow.flatMap((node) => Flow.flowNodeSteps(node))
-  const opened = new Map<string, Flow.Step>()
-  const owed = new Map<string, { readonly at: number; readonly final: UnackedTaken }>()
-  const charged: Array<UnackedTakenFinal> = []
-  const settle = (leg: string): void => {
-    const pending = owed.get(leg)
-    owed.delete(leg)
-    if (pending === undefined) return
-    const next = steps.slice(pending.at + 1).find((s) => s.leg === leg && isContinuation(s))
-    if (next === undefined) return
-    charged.push({
-      ...pending.final,
+  return unsettledTakenFinals(steps).flatMap(({ at, final }) => {
+    const next = lostAckGround(steps, at, final.leg)
+    if (next === undefined) return []
+    return [{
+      ...final,
       continuation: next.id,
       method: method(next),
       ...(next.observed === undefined ? {} : { continuationObserved: next.observed })
-    })
-  }
-  steps.forEach((step, at) => {
-    if (isInvite(step)) {
-      settle(step.leg)
-      if (step.op === "send") opened.set(step.leg, step)
-      else opened.delete(step.leg)
-    } else if (step.op === "expect" && isInviteSuccess(step)) {
-      const invite = opened.get(step.leg)
-      if (invite === undefined) return
-      owed.set(step.leg, {
-        at,
-        final: {
-          final: step.id,
-          invite: invite.id,
-          leg: step.leg,
-          ...(step.observed === undefined ? {} : { observed: step.observed }),
-          ...(invite.observed === undefined ? {} : { inviteObserved: invite.observed })
-        }
-      })
-    } else if (step.op === "send" && isAck(step)) owed.delete(step.leg)
+    }]
   })
-  for (const leg of [...owed.keys()]) settle(leg)
-  return charged
 }
 
 /** One charged 2xx as the refusal's line states it. */
