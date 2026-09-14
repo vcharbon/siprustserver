@@ -60,12 +60,14 @@ struct CallMeta {
     /// Absolute body-expiry deadline (lazy TTL); `None` when `ttl_ms <= 0`.
     expiry_at_ms: Option<i64>,
     /// Receive-time **wall-clock skew offset** `receiver_now_ms − origin_now_ms`
-    /// (clock-skew hardening), computed on an inbound replica `Put` from
-    /// `PutOpts.origin_now_ms`. A later failover/reclaim re-anchors the call's
-    /// ABSOLUTE `TimerEntry.fire_at` deadlines (minted on the ORIGIN node's clock)
-    /// by adding this offset, bounding restore skew to ~replication latency. `None`
-    /// on a locally-originated write (no cross-node skew to correct). The offset
-    /// includes one transit latency — acceptable at in-cluster ms scale.
+    /// (clock-skew hardening), computed on an origin-stamped write
+    /// (`PutOpts.origin_now_ms`, the puller's apply), kept across every write
+    /// that carries no origin, `None` for a record no origin-stamped write has
+    /// reached. A later failover/reclaim re-anchors the call's ABSOLUTE
+    /// `TimerEntry.fire_at` deadlines (minted on the ORIGIN node's clock) by
+    /// adding this offset, bounding restore skew to ~replication latency. The
+    /// offset includes one transit latency — acceptable at in-cluster ms scale.
+    // FIXME(repl): a local write re-mints the body's deadlines in this node's frame, so the carried offset re-anchors them wrongly on a later takeover; a local write should carry "no offset".
     skew_offset_ms: Option<i64>,
     /// Whether a forward flush has ever shown this Element an ANSWERED call —
     /// the authority's own view of it, taken or refused. Set by the forward

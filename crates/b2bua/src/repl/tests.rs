@@ -12,7 +12,7 @@ use std::time::Duration;
 use repl_net::frame::{Frame, Op, Partition, Watermark};
 use sip_clock::Clock;
 
-use super::{Changelog, ReplicatingCallStore};
+use super::{BodySource, Changelog, ReplicatingCallStore};
 use crate::store::{CallStore, PartitionRole, PropagateDirection, PutOpts};
 
 const PRI: PartitionRole = PartitionRole::Primary;
@@ -530,17 +530,24 @@ fn every_writer() -> Vec<(&'static str, PutOpts)> {
     ]
 }
 
-/// The writers that lose `field`, as named by `every_writer`: each is run on a
-/// fresh store seeded by one put under `seed_opts` then `after_seed`, and
-/// `holds` reads the field back.
+/// `every_writer` without the one that carries the field under test.
+fn every_writer_but(carrier: &str) -> Vec<(&'static str, PutOpts)> {
+    every_writer().into_iter().filter(|(w, _)| *w != carrier).collect()
+}
+
+/// The writers among `writers` — the writers that carry no value for `field`,
+/// named as in `every_writer` — that lose it: each is run on a fresh store
+/// seeded by one put under `seed_opts` then `after_seed`, and `holds` reads
+/// the field back.
 async fn writers_losing(
     field: &str,
+    writers: Vec<(&'static str, PutOpts)>,
     seed_opts: &PutOpts,
     after_seed: impl Fn(&ReplicatingCallStore),
     holds: impl Fn(&ReplicatingCallStore) -> bool,
 ) -> Vec<&'static str> {
     let mut lost = Vec::new();
-    for (writer, opts) in every_writer() {
+    for (writer, opts) in writers {
         let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
         put(&store, "c1", b"v1", 0, 1, seed_opts).await;
         after_seed(&store);
@@ -553,15 +560,17 @@ async fn writers_losing(
     lost
 }
 
-/// The backup ordinal is carried only by a Forward write: the peerless write,
-/// the acting backup's Reverse write and the puller's apply all keep it, and a
-/// Forward write to another backup replaces it.
+/// The backup ordinal is carried only by a Forward write: every write that
+/// carries none keeps it, and a Forward write to another backup replaces it.
+/// The reverse write stays in the loop although a `bak:` record never holds a
+/// backup ordinal: the store's carry-over is role-agnostic.
 #[tokio::test(start_paused = true)]
 async fn backup_ordinal_survives_every_write_that_does_not_carry_one() {
-    use super::BodySource;
     let backed_by_w1 =
         |store: &ReplicatingCallStore| store.scan_refs_backed_by(SELF, "w1") == ["c1".to_string()];
-    let lost = writers_losing("backup", &fwd("w1"), |_| {}, backed_by_w1).await;
+    let lost =
+        writers_losing("backup", every_writer_but("forward"), &fwd("w1"), |_| {}, backed_by_w1)
+            .await;
     assert!(lost.is_empty(), "backup lost by {lost:?}");
 
     let store = ReplicatingCallStore::new(1, Clock::test_at(100_000));
@@ -577,6 +586,7 @@ async fn backup_ordinal_survives_every_write_that_does_not_carry_one() {
 async fn skew_offset_survives_every_write_that_does_not_carry_one() {
     let lost = writers_losing(
         "skew offset",
+        every_writer_but("apply"),
         &applied(70_000),
         |_| {},
         |store| store.skew_offset_ms("c1") == Some(30_000),
@@ -597,6 +607,7 @@ async fn skew_offset_survives_every_write_that_does_not_carry_one() {
 async fn authority_answer_survives_every_write_and_leaves_with_the_ref() {
     let lost = writers_losing(
         "authority answer",
+        every_writer(),
         &PutOpts::default(),
         |store| {
             assert!(!store.authority_answered("c1"), "unanswered until the authority publishes");
@@ -638,13 +649,16 @@ async fn carried_fields_are_replaced_by_every_write() {
     let mut previous = "seed";
     for (i, (writer, opts)) in every_writer().into_iter().enumerate() {
         // 300 ms on: inside the previous write's TTL, past the TTL of the one
-        // before it — from the second write on, a body still here proves the
-        // previous write refreshed the expiry.
+        // before it — so from the second write on, a body still here proves
+        // the previous write refreshed the expiry. The first check would sit
+        // inside the seed's own TTL and prove nothing, so it is skipped.
         tokio::time::advance(Duration::from_millis(300)).await;
-        assert!(
-            store.get_call(PRI, SELF, "c1").await.unwrap().is_some(),
-            "expiry not refreshed by {previous}"
-        );
+        if i > 0 {
+            assert!(
+                store.get_call(PRI, SELF, "c1").await.unwrap().is_some(),
+                "expiry not refreshed by {previous}"
+            );
+        }
         let (p, b) = (10 + i as i64, 1 + i as i64);
         store.put_call(PRI, SELF, "c1", b"v".to_vec(), &[], 500, p, b, &opts).await.unwrap();
         assert_eq!(

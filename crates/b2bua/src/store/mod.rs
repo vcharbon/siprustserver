@@ -478,7 +478,7 @@ impl CallState {
     /// rebooted primary actually re-*serve*, not just re-*store*). Empty when no
     /// replicating store is wired.
     /// Each entry pairs the decoded call with its persisted receive-time
-    /// clock-skew offset (`0` when the body was written locally / carries none) —
+    /// clock-skew offset (`0` when the record carries none) —
     /// the router re-anchors the call's absolute timer deadlines by this offset
     /// before re-arming them (clock-skew hardening).
     pub async fn reclaim_scan(&self) -> Vec<(Call, i64)> {
