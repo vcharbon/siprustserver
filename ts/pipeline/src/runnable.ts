@@ -39,7 +39,8 @@
  * only the one owing no answer body ({@link offeredIngress}, RFC 3264 §4), and
  * {@link unackedFinals} charges on that.
  */
-import { Body, Flow, Schedules } from "@sip/contracts"
+import { Body, Flow, Schedules, Tokens } from "@sip/contracts"
+import { PROXIMITY_US } from "./delay.js"
 
 /** The reason token a document ACKing an unfinalled transaction is refused by. */
 export const FINAL_NOT_CAPTURED = "source-final-not-captured"
@@ -309,46 +310,47 @@ export const ACTOR_ACK_NOT_CAPTURED = "source-actor-ack-not-captured"
 
 /**
  * What proves the actor's missing ACK crossed the wire: a later in-dialog
- * request on the leg (`continuation`), or a 2xx the leg never took repeated
- * while the far leg expects its ACK relayed (`relayed-ack`).
+ * request on the leg (`continuation`), or a 2xx that never repeated while the
+ * far leg expects its ACK relayed (`relayed-ack`).
  */
 export type LostAckGroundKind = "continuation" | "relayed-ack"
 
-/** One dialog-creating 2xx the ACTOR owed an ACK for, and what proves it sent one. */
-export interface UnackedTakenFinal {
+/** One dialog-creating 2xx the ACTOR owed an ACK for, and the step that proves it sent one. */
+interface UnackedTaken {
   /** The step id of the 2xx the leg took. */
   readonly final: string
   /** The id of the INVITE step the actor had sent on this leg. */
   readonly invite: string
   readonly leg: string
-  readonly ground: LostAckGroundKind
-  /**
-   * The id of the step that proves it: the later in-dialog request the leg
-   * carries, or the far leg's ACK step.
-   */
-  readonly continuation: string
-  /** The method that step names. */
-  readonly method: string
-  /** The leg the proving step sits on, where it is not this one. */
-  readonly groundLeg?: string
-  /**
-   * How long the leg stayed silent after the 2xx, in ms, on a `relayed-ack`
-   * ground: at least the first rung of the 2xx ladder, or no proof.
-   */
-  readonly silenceMs?: number
   /** Where the 2xx sits in the capture, where the step states it. */
   readonly observed?: Flow.Observed
   /** Where the INVITE sits in the capture, where the step states it. */
   readonly inviteObserved?: Flow.Observed
-  /** Where the proving step sits in the capture, where the step states it. */
-  readonly continuationObserved?: Flow.Observed
 }
 
-/** The finding before the ground that proves it. */
-type UnackedTaken = Omit<
-  UnackedTakenFinal,
-  "ground" | "continuation" | "method" | "groundLeg" | "silenceMs" | "continuationObserved"
->
+/** The finding with its ground: one arm per proof. */
+export type UnackedTakenFinal =
+  & UnackedTaken
+  & {
+    /** The id of the step that proves it. */
+    readonly proof: string
+    /** Where the proving step sits in the capture, where the step states it. */
+    readonly proofObserved?: Flow.Observed
+  }
+  & (
+    | {
+      readonly ground: "continuation"
+      /** The method the later in-dialog request on the leg names. */
+      readonly method: string
+    }
+    | {
+      readonly ground: "relayed-ack"
+      /** The far leg whose ACK step is the actor's ACK relayed. */
+      readonly groundLeg: string
+      /** How long the leg stayed silent after the 2xx, in ms: past the first rung. */
+      readonly silenceMs: number
+    }
+  )
 
 /**
  * Whether a request on the leg is one only a CONFIRMED dialog carries. ACK and
@@ -464,45 +466,82 @@ const continuationAfter = (
 }
 
 /** The wait before the first repeat of a 2xx, T1 (RFC 3261 §13.3.1.4). */
-const FIRST_2XX_RUNG_MS = Schedules.SCHEDULES.classes.find((c) => c.class === "final-2xx")!
-  .rung_intervals_ms[0]!
+const FIRST_2XX_RUNG_MS = Schedules.rungIntervalsMs("final-2xx")[0]!
+
+/** Whether the step ends the dialog it sits in, whichever side sends it. */
+const endsDialog = (step: Flow.Step): boolean =>
+  isRequest(step) && ["BYE", "CANCEL"].includes(method(step))
 
 /**
- * How long the leg stayed silent after the step at `at`, in ms, as the capture
- * measured it: from the step's `observed.at_us` to the next step's on the same
- * leg, whatever it is. Undefined where either coordinate is unstated, or the
- * leg carries nothing after it — nothing was measured.
+ * How long the leg stayed silent after the 2xx at `at`, in ms, as the capture
+ * measured it: from the 2xx's `observed.at_us` to the first same-leg step that
+ * ends the dialog ({@link endsDialog}), or the leg's last step where none
+ * does. The ladder the platform owed is folded over the whole envelope, so a
+ * step that keeps the dialog going does not close the window. Undefined where
+ * either coordinate is unstated or the leg carries nothing after the 2xx.
  */
 const silenceAfter = (
   steps: ReadonlyArray<Flow.Step>,
   at: number,
   leg: string
 ): number | undefined => {
+  const rest = steps.slice(at + 1).filter((s) => s.leg === leg)
+  const bound = rest.find(endsDialog) ?? rest.at(-1)
   const from = steps[at]!.observed?.at_us
-  const to = steps.slice(at + 1).find((s) => s.leg === leg)?.observed?.at_us
+  const to = bound?.observed?.at_us
   if (from === undefined || to === undefined) return undefined
-  return Math.round((to - from) / 1000)
+  return Math.floor((to - from) / 1000)
+}
+
+const isRelayedSuccess = (step: Flow.Step, leg: string): boolean =>
+  step.leg !== leg && step.op === "send" && isInviteSuccess(step)
+
+/**
+ * The index of the far leg's 2xx the SUT relayed onto `leg` as the 2xx at
+ * `at`: the step the 2xx's delay is anchored on, where the cut stamped a
+ * cross-leg 2xx-to-INVITE there — the relay the classifier read (§6.9) — and
+ * otherwise the nearest cross-leg 2xx sent within relay proximity of the 2xx's
+ * own instant, before or after it in the merged order: two captures, two
+ * clocks, and the classifier anchors a relay stamped later than its arrival
+ * on the arrival's own leg. -1 where none.
+ */
+const relayedSuccessOf = (
+  steps: ReadonlyArray<Flow.Step>,
+  at: number,
+  leg: string
+): number => {
+  const step = steps[at]!
+  const anchor = Tokens.anchorStep(step.delay.from)
+  const stamped = anchor === undefined ? -1 : steps.findIndex((s) => s.id === anchor)
+  if (stamped >= 0 && isRelayedSuccess(steps[stamped]!, leg)) return stamped
+  const t = step.observed?.at_us
+  if (t === undefined) return -1
+  let nearest = -1
+  steps.forEach((s, i) => {
+    const u = s.observed?.at_us
+    if (!isRelayedSuccess(s, leg) || u === undefined || Math.abs(u - t) >= PROXIMITY_US) return
+    if (nearest < 0 || Math.abs(u - t) < Math.abs(steps[nearest]!.observed!.at_us - t)) nearest = i
+  })
+  return nearest
 }
 
 /**
  * The far leg's ACK step to the transaction whose 2xx the SUT relayed onto this
- * leg at `at`: the far leg is the one that SENT the nearest 2xx-to-INVITE
- * before it, and its ACK is the first one it EXPECTS after it, up to the far
- * leg's next INVITE, which owns every ACK past it. Undefined where the far leg
- * expects none.
+ * leg at `at` ({@link relayedSuccessOf}): the first ACK that leg EXPECTS after
+ * its 2xx, up to the far leg's next INVITE, which owns every ACK past it.
+ * Undefined where the far leg expects none.
  */
 const relayedAckAfter = (
   steps: ReadonlyArray<Flow.Step>,
   at: number,
   leg: string
 ): Flow.Step | undefined => {
-  const relayed = steps
-    .slice(0, at)
-    .findLast((s) => s.leg !== leg && s.op === "send" && isInviteSuccess(s))
-  if (relayed === undefined) return undefined
-  for (let i = at + 1; i < steps.length; i += 1) {
+  const relayed = relayedSuccessOf(steps, at, leg)
+  if (relayed < 0) return undefined
+  const far = steps[relayed]!.leg
+  for (let i = relayed + 1; i < steps.length; i += 1) {
     const s = steps[i]!
-    if (s.leg !== relayed.leg) continue
+    if (s.leg !== far) continue
     if (isInvite(s)) return undefined
     if (isAckArrival(s)) return s
   }
@@ -519,13 +558,15 @@ type LostAckGround =
  * it. Two proofs, the first that holds:
  *
  * - a continuation on the leg ({@link continuationAfter});
- * - the far leg expects that ACK relayed ({@link relayedAckAfter}) and the 2xx
- *   never repeated: a UAS repeats a 2xx from T1 on until the ACK arrives
- *   (§13.3.1.4), so a 2xx the document declares un-repeated across a silence
- *   the capture measured past the first rung ({@link silenceAfter}) is one the
- *   ACK reached. A shorter silence proves nothing, and a 2xx declared REPEATED
- *   is the ladder stating the opposite, so both keep the abandoned-dialog
- *   reading.
+ * - the far leg expects that ACK relayed ({@link relayedAckAfter}) and the
+ *   platform's 2xx toward the actor never repeated: a UAS repeats a 2xx from
+ *   T1 on until the ACK arrives (§13.3.1.4), so a 2xx the document declares
+ *   un-repeated across a silence the capture measured past the first rung
+ *   ({@link silenceAfter}) is one the ACK reached. A silence of T1 or less
+ *   gave the ladder no instant to fire, and a 2xx declared REPEATED is the
+ *   ladder stating the opposite, so both keep the abandoned-dialog reading.
+ *   The far leg's ACK is read as the actor's relayed, which a platform that
+ *   ACKs the far leg on its own would falsify.
  *
  * Undefined where neither holds, and the abandoned-dialog reading stands.
  */
@@ -538,14 +579,14 @@ const lostAckGround = (
   if (continuation !== undefined) return { kind: "continuation", step: continuation }
   if (repeats(steps[at]!)) return undefined
   const silenceMs = silenceAfter(steps, at, leg)
-  if (silenceMs === undefined || silenceMs < FIRST_2XX_RUNG_MS) return undefined
+  if (silenceMs === undefined || silenceMs <= FIRST_2XX_RUNG_MS) return undefined
   const relayed = relayedAckAfter(steps, at, leg)
   if (relayed === undefined) return undefined
   return { kind: "relayed-ack", step: relayed, silenceMs }
 }
 
 /**
- * Every dialog-creating 2xx the actor takes, never ACKs, and goes on to use.
+ * Every dialog-creating 2xx the actor takes, never ACKs, and demonstrably ACKed.
  * Empty for a document cut from a vantage that captured its whole call.
  *
  * The mirror of {@link unackedFinals}: there the peer answers the SUT and the
@@ -582,16 +623,16 @@ export const unackedTakenFinals = (
     const ground = lostAckGround(steps, at, final.leg)
     if (ground === undefined) return []
     const proof = ground.step
-    return [{
+    const stated = {
       ...final,
-      ground: ground.kind,
-      continuation: proof.id,
-      method: method(proof),
-      ...(ground.kind === "relayed-ack"
-        ? { groundLeg: proof.leg, silenceMs: ground.silenceMs }
-        : {}),
-      ...(proof.observed === undefined ? {} : { continuationObserved: proof.observed })
-    }]
+      proof: proof.id,
+      ...(proof.observed === undefined ? {} : { proofObserved: proof.observed })
+    }
+    return [
+      ground.kind === "continuation"
+        ? { ...stated, ground: ground.kind, method: method(proof) }
+        : { ...stated, ground: ground.kind, groundLeg: proof.leg, silenceMs: ground.silenceMs }
+    ]
   })
 }
 
@@ -600,10 +641,9 @@ const unackedTakenClause = (c: UnackedTakenFinal): string => {
   const where = (o: Flow.Observed | undefined): string =>
     o === undefined ? "" : ` (capture leg ${o.leg} msg ${o.msg})`
   const proof = c.ground === "continuation"
-    ? `goes on to carry the ${c.method} at ${c.continuation}${where(c.continuationObserved)}`
+    ? `goes on to carry the ${c.method} at ${c.proof}${where(c.proofObserved)}`
     : `the 2xx never repeated over the ${c.silenceMs} ms the leg stayed silent and leg ` +
-      `${c.groundLeg} step ${c.continuation}${where(c.continuationObserved)} expects that ` +
-      `ACK relayed`
+      `${c.groundLeg} step ${c.proof}${where(c.proofObserved)} expects that ACK relayed`
   return `leg ${c.leg} step ${c.final}${where(c.observed)} answers the actor's INVITE at ` +
     `${c.invite}${where(c.inviteObserved)} and the leg captured no ACK for it, yet ${proof}`
 }

@@ -372,7 +372,7 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
       ack("s5", "A")
     ])
     expect(charged).toEqual([
-      { final: "s2", invite: "s1", leg: "A", ground: "continuation", continuation: "s3", method: "INVITE" }
+      { final: "s2", invite: "s1", leg: "A", ground: "continuation", proof: "s3", method: "INVITE" }
     ])
   })
 
@@ -386,7 +386,7 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
         reinvite("s3", "A"),
         final("s4", "A", 200, "expect"),
         ack("s5", "A")
-      ]).map((c) => [c.final, c.invite, c.continuation])
+      ]).map((c) => [c.final, c.invite, c.proof])
     ).toEqual([["s2", "s1", "s3"]])
   })
 
@@ -432,7 +432,7 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
         final("s4", "A", 491, "expect"),
         ack("s5", "A"),
         step("s6", "A", "send", { method: "INFO" })
-      ]).map((c) => [c.final, c.invite, c.continuation])
+      ]).map((c) => [c.final, c.invite, c.proof])
     ).toEqual([["s2", "s1", "s6"]])
   })
 
@@ -446,7 +446,7 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
         ack("s3", "A"),
         final("s4", "A", 200, "expect"),
         step("s5", "A", "send", { method: "INFO" })
-      ]).map((c) => [c.final, c.invite, c.continuation])
+      ]).map((c) => [c.final, c.invite, c.proof])
     ).toEqual([["s4", "s1", "s5"]])
   })
 
@@ -456,7 +456,7 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
         offerless("s1", "A"),
         final("s2", "A", 200, "expect"),
         step("s3", "A", "expect", { method: "UPDATE" })
-      ]).map((c) => [c.continuation, c.method])
+      ]).map((c) => [c.proof, c.ground === "continuation" ? c.method : undefined])
     ).toEqual([["s3", "UPDATE"]])
   })
 
@@ -511,29 +511,42 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
       final("s5", "A", 200, "expect"),
       step("s6", "A", "send", { method: "INFO" })
     ])
-    expect(charged.map((c) => [c.final, c.invite, c.continuation])).toEqual([["s5", "s4", "s6"]])
+    expect(charged.map((c) => [c.final, c.invite, c.proof])).toEqual([["s5", "s4", "s6"]])
   })
+
+  const LEG_NO: Record<string, number> = { A: 1, B: 2, C: 3 }
 
   /** A step at a capture instant, in ms from the capture's origin. */
   const at = (s: Flow.Step, ms: number, msg = 0): Flow.Step => ({
     ...s,
-    observed: { leg: s.leg === "A" ? 1 : 2, msg, at_us: ms * 1000 }
+    observed: { leg: LEG_NO[s.leg]!, msg, at_us: ms * 1000 }
   })
 
+  /** A step whose delay the cut anchored on another step, as the classifier stamps it. */
+  const anchored = (s: Flow.Step, on: string): Flow.Step => ({
+    ...s,
+    delay: { ...s.delay, from: Tokens.anchorToken({ _tag: "step", step: on }) }
+  })
+
+  const bye = (id: string, leg: string, op: "send" | "expect" = "send") =>
+    step(id, leg, op, { method: "BYE" })
+
   /**
-   * The actor dials, the far party answers, the SUT relays the 2xx and the far
-   * leg expects the ACK the SUT relays back; the actor's leg then carries only a
-   * BYE. Both proofs of a lost ACK sit in the 2xx itself: `retransmits` (a
-   * repeated 2xx is one no ACK reached, §13.3.1.4) and `observed.at_us` (the
-   * silence the leg measured after it, which is proof only past the first rung).
+   * The actor dials, the far party answers, the SUT relays the 2xx (the
+   * actor's 2xx anchored on the far leg's send, as the cut stamps a relay) and
+   * the far leg expects the ACK the SUT relays back; the actor's leg then
+   * carries only a BYE. Both proofs of a lost ACK sit in the 2xx itself:
+   * `retransmits` (a repeated 2xx is one no ACK reached, §13.3.1.4) and
+   * `observed.at_us` (the silence the leg measured after it, which is proof
+   * only past the first rung).
    */
   const relayedShape = (twoxx: Partial<Flow.Step>, byeAtMs: number): ReadonlyArray<Flow.Step> => [
     at(offerless("s1", "A"), 0),
     at(offerless("s2", "B", "expect"), 50),
     at(final("s3", "B", 200), 1000, 5),
-    at({ ...final("s4", "A", 200, "expect"), ...twoxx }, 1010, 3),
+    at(anchored({ ...final("s4", "A", 200, "expect"), ...twoxx }, "s3"), 1010, 3),
     at(ack("s5", "B", "expect"), 1056, 6),
-    at(step("s6", "A", "send", { method: "BYE" }), byeAtMs, 4)
+    at(bye("s6", "A"), byeAtMs, 4)
   ]
 
   it("charges a 2xx the platform never repeated when the far leg expects its ACK relayed", () => {
@@ -546,13 +559,12 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
         invite: "s1",
         leg: "A",
         ground: "relayed-ack",
-        continuation: "s5",
-        method: "ACK",
+        proof: "s5",
         groundLeg: "B",
         silenceMs: 25_000,
         observed: { leg: 1, msg: 3, at_us: 1_010_000 },
         inviteObserved: { leg: 1, msg: 0, at_us: 0 },
-        continuationObserved: { leg: 2, msg: 6, at_us: 1_056_000 }
+        proofObserved: { leg: 2, msg: 6, at_us: 1_056_000 }
       }
     ])
     expect(unackedTakenLine("capture.pcap.gz", "auto", charged)).toBe(
@@ -567,9 +579,132 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
     expect(unackedTakenFinals(relayedShape({ retransmits: 1 }, 26_010))).toEqual([])
   })
 
-  it("keeps a 2xx the leg is silent behind for less than the first rung — nothing was measured", () => {
+  it("keeps a 2xx the leg is silent behind for the first rung or less — the ladder had no instant to fire", () => {
     expect(unackedTakenFinals(relayedShape({}, 1_400))).toEqual([])
-    expect(unackedTakenFinals(relayedShape({}, 1_510)).map((c) => c.silenceMs)).toEqual([500])
+    expect(unackedTakenFinals(relayedShape({}, 1_510))).toEqual([])
+    expect(unackedTakenFinals(relayedShape({}, 1_511)).map((c) => c.ground === "relayed-ack" && c.silenceMs))
+      .toEqual([501])
+    // A half-millisecond past the rung is still within it: the window rounds down.
+    expect(
+      unackedTakenFinals([
+        ...relayedShape({}, 0).slice(0, 5),
+        { ...bye("s6", "A"), observed: { leg: 1, msg: 4, at_us: 1_510_500 } }
+      ])
+    ).toEqual([])
+  })
+
+  it("keeps a 2xx no far leg answered — the actor's own answers on the leg are not a far leg", () => {
+    // The SUT dialled the actor, the actor answered and was ACKed; its later
+    // re-INVITE the SUT answered itself, and no other leg holds an ACK for it.
+    expect(
+      unackedTakenFinals([
+        at(offerless("s1", "A", "expect"), 0),
+        at(final("s2", "A", 200), 10),
+        at(ack("s3", "A", "expect"), 20),
+        at(offerless("s4", "A"), 500),
+        at(final("s5", "A", 200, "expect"), 1_000),
+        at(bye("s6", "A"), 26_000)
+      ])
+    ).toEqual([])
+  })
+
+  it("measures the silence to the step that ends the dialog, past a 491'd re-INVITE", () => {
+    // The ladder is folded over the whole envelope, so a step that keeps the
+    // dialog going does not close the window; the BYE 25 s later does.
+    expect(
+      unackedTakenFinals([
+        ...relayedShape({}, 26_000).slice(0, 5),
+        at(offerless("s6", "A"), 1_410),
+        at(final("s7", "A", 491, "expect"), 1_420),
+        at(ack("s8", "A"), 1_425),
+        at(bye("s9", "A"), 26_000)
+      ]).map((c) => [c.final, c.proof, c.ground === "relayed-ack" && c.silenceMs])
+    ).toEqual([["s4", "s5", 24_990]])
+  })
+
+  it("keeps a 2xx whose silence no capture coordinate bounds", () => {
+    const shape = relayedShape({}, 26_010)
+    const unstated = (s: Flow.Step): Flow.Step => {
+      const { observed: _, ...rest } = s
+      return rest
+    }
+    expect(unackedTakenFinals(shape.map((s) => (s.id === "s4" ? unstated(s) : s)))).toEqual([])
+    expect(unackedTakenFinals(shape.map((s) => (s.id === "s6" ? unstated(s) : s)))).toEqual([])
+  })
+
+  it("names the far leg by the anchor the cut stamped, not by the nearest answer", () => {
+    // A fork: B answers 503 and expects the SUT's ACK to it, C answers 200 and
+    // the SUT relays that one. The ACK the proof rests on is C's.
+    expect(
+      unackedTakenFinals([
+        at(offerless("s1", "A"), 0),
+        at(offerless("s2", "B", "expect"), 50),
+        at(offerless("s3", "C", "expect"), 60),
+        at(final("s4", "B", 503), 900),
+        at(ack("s5", "B", "expect"), 910),
+        at(final("s6", "C", 200), 1_000),
+        at(anchored(final("s7", "A", 200, "expect"), "s6"), 1_010),
+        at(ack("s8", "C", "expect"), 1_056),
+        at(bye("s9", "A"), 26_000)
+      ]).map((c) => [c.proof, c.ground === "relayed-ack" && c.groundLeg])
+    ).toEqual([["s8", "C"]])
+  })
+
+  it("keeps it where the far leg opens a new INVITE before its ACK — that ACK is the new one's", () => {
+    expect(
+      unackedTakenFinals([
+        ...relayedShape({}, 26_010).slice(0, 4),
+        at(offerless("s7", "B", "expect"), 1_040),
+        at(ack("s5", "B", "expect"), 1_056),
+        at(bye("s6", "A"), 26_010)
+      ])
+    ).toEqual([])
+  })
+
+  it("finds the far leg's 2xx within relay proximity when the vantage stamped it AFTER the actor's", () => {
+    // Two captures, two clocks: the relayed 2xx sits 30 ms before the far leg's
+    // send in the merged order, and no anchor is stated.
+    expect(
+      unackedTakenFinals([
+        at(offerless("s1", "A"), 0),
+        at(offerless("s2", "B", "expect"), 50),
+        at(final("s3", "A", 200, "expect"), 1_000),
+        at(final("s4", "B", 200), 1_030),
+        at(ack("s5", "B", "expect"), 1_076),
+        at(bye("s6", "A"), 26_000)
+      ]).map((c) => [c.final, c.proof])
+    ).toEqual([["s3", "s5"]])
+  })
+
+  it("finds the far leg's 2xx by proximity where the cut anchored a skewed relay on the actor's own leg", () => {
+    // The classifier reads only what precedes an arrival, so a relay the far
+    // vantage stamped later is anchored on the leg's own 100: the anchor names
+    // no far leg, the instant does.
+    expect(
+      unackedTakenFinals([
+        at(offerless("s1", "A"), 0),
+        at(offerless("s2", "B", "expect"), 50),
+        at(step("s3", "A", "expect", { status: 100, "cseq-method": "INVITE" }, true), 60),
+        at(anchored(final("s4", "A", 200, "expect"), "s3"), 1_000),
+        at(final("s5", "B", 200), 1_030),
+        at(ack("s6", "B", "expect"), 1_076),
+        at(bye("s7", "A"), 26_000)
+      ]).map((c) => [c.final, c.proof])
+    ).toEqual([["s4", "s6"]])
+  })
+
+  it("keeps a 2xx no far leg answered within relay proximity — the SUT minted it", () => {
+    // The actor's re-INVITE the SUT answered itself, seconds after the far
+    // leg's last answer: no relay, so no far-leg ACK is the actor's.
+    expect(
+      unackedTakenFinals([
+        ...relayedShape({}, 26_010).slice(0, 5),
+        at(ack("s6", "A"), 1_020),
+        at(offerless("s7", "A"), 900_005),
+        at(anchored(final("s8", "A", 200, "expect"), "s7"), 900_020),
+        at(bye("s9", "A"), 930_000)
+      ])
+    ).toEqual([])
   })
 
   it("carries the capture coordinates of all three steps into the finding", () => {
