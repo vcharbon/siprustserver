@@ -344,6 +344,12 @@ impl SimShared {
         self.endpoints.lock().unwrap().values().any(|a| *a == addr)
     }
 
+    /// Is `addr` a listener's own address — live on the routing table or
+    /// declared — rather than a client end's ephemeral local?
+    fn is_listener(&self, addr: SocketAddr) -> bool {
+        self.routing.lock().unwrap().contains_key(&addr) || self.is_declared(addr)
+    }
+
     /// The node fault on a resolved owner pair ([`WireView::owners`]).
     fn node_fault_on(&self, owners: Pair) -> NodeFault {
         self.node_faults.lock().unwrap().get(&owners).copied().unwrap_or_default()
@@ -994,11 +1000,14 @@ impl ReplicationConnection for SimConnection {
         // A puller names itself on its opening `PullRequest`: that is what ties
         // this stream's ephemeral local to the node that owns it — on the
         // fabric's map and on both of the stream's wires, before either actor
-        // judges a frame on it.
+        // judges a frame on it. Only a client end is attributed: a listener's
+        // address is its own owner.
         if let Frame::PullRequest { caller, .. } = &frame {
-            if let Some(owner) = self.shared.attribute(self.local, caller) {
-                self.out_view.learn(self.local, owner);
-                self.in_view.learn(self.local, owner);
+            if !self.shared.is_listener(self.local) {
+                if let Some(owner) = self.shared.attribute(self.local, caller) {
+                    self.out_view.learn(self.local, owner);
+                    self.in_view.learn(self.local, owner);
+                }
             }
         }
         // A simulated network error wins over a clean cut; a cut on the wire
@@ -1650,6 +1659,25 @@ mod tests {
             "a frame on a stall named on the listen pair was delivered: the wire lost its \
              owner when the handle dropped before the actor's first poll"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_pull_request_from_a_server_end_attributes_nothing() {
+        let net = SimulatedReplicationNetwork::with_delay(1);
+        let (a, b) = (addr(3108), addr(3208));
+        net.declare_endpoint("A", a);
+        net.declare_endpoint("B", b);
+        let listener = net.listen(b).await.unwrap();
+        let (client, server) = attributed_pair(&net, &*listener, b, "A").await;
+
+        // The listener's end names A on a `PullRequest`: its address stays its
+        // own owner, and the client's attribution stands.
+        server.send(pull_request("A")).await.unwrap();
+        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        assert_eq!(client.recv().await, Some(pull_request("A")));
+        let owners = net.shared.stream_owner.lock().unwrap().clone();
+        assert!(!owners.contains_key(&b), "the listener end was attributed: {owners:?}");
+        assert_eq!(owners.get(&client.local_addr()), Some(&a), "the client end keeps its owner");
     }
 
     #[tokio::test(start_paused = true)]
