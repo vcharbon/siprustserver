@@ -67,7 +67,8 @@ struct CallMeta {
     /// `TimerEntry.fire_at` deadlines (minted on the ORIGIN node's clock) by
     /// adding this offset, bounding restore skew to ~replication latency. The
     /// offset includes one transit latency — acceptable at in-cluster ms scale.
-    // FIXME(repl): a local write re-mints the body's deadlines in this node's frame, so the carried offset re-anchors them wrongly on a later takeover; a local write should carry "no offset".
+    // FIXME(repl): a local write re-mints the deadlines in this node's frame, so the
+    // carried offset re-anchors them wrongly on a later takeover; it should carry "none".
     skew_offset_ms: Option<i64>,
     /// Whether a forward flush has ever shown this Element an ANSWERED call —
     /// the authority's own view of it, taken or refused. Set by the forward
