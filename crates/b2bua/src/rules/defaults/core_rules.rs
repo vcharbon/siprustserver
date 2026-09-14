@@ -51,7 +51,7 @@ fn no_transform() -> MessageTransform {
 /// re-authored the give-up without ending the session (ADR-0032 X5).
 ///
 /// §13.2.2.4's "after acknowledging … MUST terminate with a BYE" still binds
-/// the far face: a b-leg whose 2xx this stack can acknowledge on its own
+/// the other face: a dialog whose 2xx this stack can acknowledge on its own
 /// ([`still_owed_bare_ack`]) is ACKed before the BYE, so the answerer's INVITE
 /// server transaction quiesces instead of laddering under a BYE it cannot match.
 pub(crate) fn unacked_2xx_give_up_actions(
@@ -85,13 +85,15 @@ pub(crate) fn unacked_2xx_give_up_actions(
     actions
 }
 
-/// Every b-leg still holding a 2xx whose ACK this stack can compose alone: the
-/// §13.2.2.4 obligation is armed and undischarged, and the INVITE that leg sent
-/// carried the offer, so the ACK owes no answer body (RFC 3264 §4). A
-/// delayed-offer b-leg is absent — only the acknowledging peer's own ACK
-/// supplies its answer, and that peer is the one that went silent.
+/// Every leg still holding a 2xx whose ACK this stack can compose alone: the
+/// §13.2.2.4 obligation is armed and undischarged, and the INVITE this stack
+/// sent on that dialog carried the offer, so the ACK owes no answer body
+/// (RFC 3264 §4). Either face qualifies — a b-leg answering the call, or the
+/// caller's face answering a relayed callee re-INVITE. Absent: a delayed-offer
+/// dialog (only the silent peer's own ACK supplies its answer) and the a-leg's
+/// initial round, where this stack sent no INVITE and owes no ACK.
 fn still_owed_bare_ack<'a>(call: &'a RuleCall) -> impl Iterator<Item = String> + 'a {
-    call.b_legs().iter().filter_map(|leg| {
+    std::iter::once(call.a_leg()).chain(call.b_legs().iter()).filter_map(|leg| {
         let d = leg.dialogs.first()?;
         (d.ext.awaited_ack_cseq.is_some() && crate::rules::relay::acked_invite_carries_offer(d))
             .then(|| leg.leg_id.clone())
