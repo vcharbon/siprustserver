@@ -24,20 +24,26 @@ fn secs(n: u64) -> Duration {
 // progress never holds the call-map lock across the socket, so the rest of the
 // node keeps working. C's bootstrap completes best-effort (the node serves
 // despite the unreachable peer) rather than wedging readiness forever.
+//
+// Clock: A's Backup flows open once its Reclaim flows are all current-or-
+// unreachable (boot order: Reclaim first, Backup deferred), and C becomes
+// "unreachable" at the puller's bootstrap hard timeout (2 s under the fast
+// test config) — so A backs up B from ~2 s on, never before.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
 async fn unreachable_peer_does_not_block_other_peer() {
     let mut cl = HaCluster::new(&["A", "B", "C"]).await;
-    // Partition A <-> C immediately (before any puller connects). A's puller for
-    // B is unaffected.
+    // Partition A <-> C immediately (before any puller connects): A's connects
+    // to C are refused. A's puller for B is unaffected.
     cl.partition("A", "C");
     cl.advance(ms(300)).await;
 
     // B forward-replicates a call to A (B's backup is A in this slice's mesh).
+    // A's Backup pull of B opens once C times out as unreachable (t = 2 s).
     let c = cref("B", "1");
     cl.put("B", &c, b"served".to_vec(), 1, 0, &backup_is("A")).await;
-    cl.advance(secs(1)).await;
+    cl.advance(secs(3)).await;
 
     // A keeps serving B's stream despite the unreachable C: it backs up B.
     assert_eq!(

@@ -1524,8 +1524,13 @@ impl FailoverHarness {
             .chain(published)
             .map(|p| Peer::new(p, p))
             .collect();
+        // The node connects through its own handle on the fabric: a stream it
+        // opens is attributed to it at `connect`, so a partition refuses the
+        // connect rather than holding a stream the puller already counts as
+        // reached. A reboot keeps the handle — the ordinal does not change.
+        let network = self.repl_recording.over(Arc::new(self.repl_sim.as_node(ordinal)));
         let wiring = ReplWiring {
-            network: Arc::new(self.repl_recording.clone()) as Arc<dyn ReplicationNetwork>,
+            network: Arc::new(network) as Arc<dyn ReplicationNetwork>,
             addr_map: self.repl_resolver.clone(),
             peers: peer_list,
             listen_addr,
@@ -1591,38 +1596,41 @@ impl FailoverHarness {
         });
     }
 
+    /// The replication listen address of `ordinal`'s current incarnation — the
+    /// one the cluster's resolver hands out, so a fault names the node that is
+    /// serving now, a replacement included.
+    fn repl_listen(&self, ordinal: &str) -> SocketAddr {
+        self.repl_resolver.lock().unwrap().get(ordinal).copied().unwrap_or_else(|| {
+            panic!("{ordinal} has no replication listen address in the cluster's resolver")
+        })
+    }
+
     /// Partition two workers on the repl fabric, both directions and for every
     /// stream between them — the ones their pullers already opened, and any they
-    /// open while the cut lasts. The fabric attributes each stream to the node
-    /// that opened it (the `caller` on its `PullRequest`) and holds delivery on
-    /// the owner pair, so a reconnect from a fresh ephemeral local does not slip
-    /// through. A held direction buffers in order and flushes on
-    /// [`heal`](Self::heal). Marker.
+    /// try to open while the cut lasts. The fabric attributes each stream to
+    /// the node that opened it (at `connect`, through the node's own handle)
+    /// and holds delivery on the owner pair; a connect across the cut is
+    /// refused, so a reconnect from a fresh ephemeral local does not slip
+    /// through and the puller never reads the peer as reached. A held
+    /// direction buffers in order and flushes on [`heal`](Self::heal). Names
+    /// each ordinal's current incarnation. Marker.
     pub fn partition(&mut self, a: &str, b: &str) {
-        let (aa, ba) = (self.repl_addrs[a], self.repl_addrs[b]);
+        let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
         self.repl_sim.apply_fault(Fault::Partition { a: aa, b: ba });
         self.mark(a, Some(b), "partition", "");
     }
 
-    /// Delay delivery on every replication stream `from`'s listener serves by
-    /// `ms` — the frames it sends down the connections pullers opened to it
-    /// (both of `to`'s flows). A flush `from` writes lands on `to` only `ms`
-    /// later. Marker.
-    pub fn delay_streams_from(&mut self, from: &str, to: &str, ms: u64) {
-        let listener = self.repl_addrs[from];
-        let listeners: Vec<SocketAddr> = self.repl_addrs.values().copied().collect();
-        let clients: std::collections::BTreeSet<SocketAddr> = self
-            .repl_report()
-            .frames
-            .iter()
-            .filter(|f| f.from == listener && !listeners.contains(&f.to))
-            .map(|f| f.to)
-            .collect();
-        assert!(!clients.is_empty(), "no replication stream from {from}'s listener to a puller");
-        for client in &clients {
-            self.repl_sim.apply_fault(Fault::Delay { src: listener, dst: *client, ms });
-        }
-        self.mark(from, Some(to), "delay", &format!("{ms}ms on {listener} → {clients:?}"));
+    /// Delay delivery by `ms` on every replication stream from `from` to `to`,
+    /// present and future, in that direction — the frames `from`'s listener
+    /// serves down the streams `to`'s pullers opened, and the ones `from`'s own
+    /// pullers send up to `to`. A flush `from` writes lands on `to` no earlier
+    /// than `ms` after it left; a stream `to` reopens later inherits the delay.
+    /// Names each ordinal's current incarnation; lifted by
+    /// [`heal`](Self::heal). Marker.
+    pub fn delay(&mut self, from: &str, to: &str, ms: u64) {
+        let (src, dst) = (self.repl_listen(from), self.repl_listen(to));
+        self.repl_sim.apply_fault(Fault::Delay { src, dst, ms });
+        self.mark(from, Some(to), "delay", &format!("{ms}ms on {src} → {dst}"));
     }
 
     /// **Cut `addr` off the signalling fabric, both directions** — the node is
@@ -1642,11 +1650,12 @@ impl FailoverHarness {
         self.mark(ordinal, None, "sip-heal", &format!("{addr} reachable again"));
     }
 
-    /// Heal a repl-fabric partition: unblock `connect` and release every held
-    /// stream, which flushes what buffered while the cut lasted, in order.
-    /// Marker.
+    /// Heal the repl fabric between two workers: unblock `connect`, lift every
+    /// directed fault between them ([`delay`](Self::delay) included) and
+    /// release every held stream, which flushes what buffered while the cut
+    /// lasted, in order. Names each ordinal's current incarnation. Marker.
     pub fn heal(&mut self, a: &str, b: &str) {
-        let (aa, ba) = (self.repl_addrs[a], self.repl_addrs[b]);
+        let (aa, ba) = (self.repl_listen(a), self.repl_listen(b));
         self.repl_sim.apply_fault(Fault::Heal { a: aa, b: ba });
         self.mark(a, Some(b), "heal", "");
     }
@@ -1825,8 +1834,12 @@ impl FailoverHarness {
             declared.ip(),
             declared.port() + 100 * u16::try_from(gen - 1).expect("gen fits"),
         ));
-        // Peers must find the replacement, not the incarnation it replaces.
+        // Peers must find the replacement, not the incarnation it replaces, and
+        // the fabric must read the ordinal's streams as the replacement's, so a
+        // fault named on the ordinal reaches them (both maps before the spawn:
+        // the streams it opens are attributed to this address).
         self.repl_resolver.lock().unwrap().insert(ordinal.to_string(), listen_addr);
+        self.repl_sim.declare_endpoint(ordinal, listen_addr);
 
         let sut = self.spawn_incarnation(ordinal, &spec, gen, sip_addr, listen_addr).await;
         self.assert_repl_listening(ordinal, listen_addr).await;

@@ -592,7 +592,7 @@ async fn an_answer_the_reclaimed_copy_saw_the_ack_of_first_draws_no_second_final
     assert!(b1.serves(&call_ref), "the rebooted primary reclaimed the ringing call");
 
     // ── the survivor's flushes toward the primary now take 3 s to land ──────
-    fh.delay_streams_from(&bak_ord, &primary_ord, 3_000);
+    fh.delay(&bak_ord, &primary_ord, 3_000);
 
     // ── the callee answers: the proxy still routes to the survivor, whose
     //    takeover copy answers alice ────────────────────────────────────────────

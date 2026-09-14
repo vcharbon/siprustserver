@@ -104,9 +104,13 @@ impl HaCluster {
             clock.clone(),
         );
 
+        // Name every node on the fabric: a directed verb below then reaches
+        // the streams its pullers open from ephemeral locals (each opening
+        // `PullRequest` carries the caller's ordinal), not just the listen pair.
         let mut addrs = HashMap::new();
         for (i, ord) in node_ordinals.iter().enumerate() {
             addrs.insert((*ord).to_string(), addr_for(i));
+            sim.declare_endpoint(ord, addr_for(i));
         }
 
         let mut cluster = Self {
@@ -125,7 +129,7 @@ impl HaCluster {
         for ord in node_ordinals {
             let peers: Vec<Peer> =
                 node_ordinals.iter().filter(|o| *o != ord).map(|o| Peer::new(*o, *o)).collect();
-            let wiring = cluster.wiring_for(peers);
+            let wiring = cluster.wiring_for(ord, peers);
             let addr = cluster.addrs[*ord];
             let node = HaNode::spawn(ord, addr, 1, cluster.clock.clone(), &wiring).await;
             cluster.nodes.insert((*ord).to_string(), node);
@@ -143,11 +147,14 @@ impl HaCluster {
         self.clock.now_ms()
     }
 
-    /// Build the per-node wiring (network = the recording fabric, addr map,
-    /// peers, config, ttls) the node uses to (re)build its server+supervisor.
-    fn wiring_for(&self, peers: Vec<Peer>) -> NodeWiring {
+    /// Build the per-node wiring (network = the recording over `ordinal`'s own
+    /// handle on the fabric, addr map, peers, config, ttls) the node uses to
+    /// (re)build its server+supervisor. The node's handle attributes every
+    /// stream it opens at `connect`, so a partition refuses its connects.
+    fn wiring_for(&self, ordinal: &str, peers: Vec<Peer>) -> NodeWiring {
+        let network = self.recording.over(Arc::new(self.sim.as_node(ordinal)));
         NodeWiring {
-            network: Arc::new(self.recording.clone()) as Arc<dyn ReplicationNetwork>,
+            network: Arc::new(network) as Arc<dyn ReplicationNetwork>,
             addr_map: self.addrs.clone(),
             peers,
             config: self.config,
@@ -215,43 +222,55 @@ impl HaCluster {
             .filter(|o| o != ordinal)
             .map(|o| Peer::new(o.clone(), o))
             .collect();
-        let wiring = self.wiring_for(peers);
+        let wiring = self.wiring_for(ordinal, peers);
         self.node_mut(ordinal).reboot(&wiring).await;
         let new_gen = self.node(ordinal).gen();
         self.mark(ordinal, None, "reboot", &format!("gen={new_gen}"));
     }
 
     // -- fabric controls ---------------------------------------------------
+    //
+    // Every verb names two nodes, and applies to every stream between them in
+    // the direction named — the ones their pullers already opened from
+    // ephemeral locals, and any opened while the fault lasts.
 
-    /// Partition two nodes (cut both directions + block reconnect). Marker.
+    /// Partition two nodes: hold delivery both directions on every stream
+    /// between them and block a reconnect, until [`heal`](Self::heal) releases
+    /// what was held, in order. Marker.
     pub fn partition(&mut self, a: &str, b: &str) {
         let (aa, ba) = (self.addrs[a], self.addrs[b]);
         self.sim.apply_fault(Fault::Partition { a: aa, b: ba });
         self.mark(a, Some(b), "partition", "");
     }
 
-    /// Heal a partition between two nodes. Marker.
+    /// Heal the fabric between two nodes: unblock reconnects and lift every
+    /// directed fault between them, both directions. Marker.
     pub fn heal(&mut self, a: &str, b: &str) {
         let (aa, ba) = (self.addrs[a], self.addrs[b]);
         self.sim.apply_fault(Fault::Heal { a: aa, b: ba });
         self.mark(a, Some(b), "heal", "");
     }
 
-    /// Cut one direction `from → to`. Marker.
+    /// Cut one direction `from → to`: every wire carrying it closes (`to`'s
+    /// pullers see the stream end) and one reopened under the cut closes as
+    /// soon as it is attributed, until [`reconnect`](Self::reconnect). Marker.
     pub fn cut(&mut self, from: &str, to: &str) {
         let (fa, ta) = (self.addrs[from], self.addrs[to]);
         self.sim.apply_fault(Fault::Cut { src: fa, dst: ta });
         self.mark(from, Some(to), "cut", "");
     }
 
-    /// Raise the transit delay `from → to`.
+    /// Raise the transit delay `from → to`: a frame staged after the verb lands
+    /// no earlier than `ms` after it left, on present and future streams.
+    /// Marker.
     pub fn delay(&mut self, from: &str, to: &str, ms: u64) {
         let (fa, ta) = (self.addrs[from], self.addrs[to]);
         self.sim.apply_fault(Fault::Delay { src: fa, dst: ta, ms });
         self.mark(from, Some(to), "delay", &format!("{ms}ms"));
     }
 
-    /// Stall delivery `from → to` (buffer grows, nothing delivered).
+    /// Stall delivery `from → to` (buffer grows, nothing delivered) until
+    /// [`resume`](Self::resume) flushes it in order. Marker.
     pub fn stall(&mut self, from: &str, to: &str) {
         let (fa, ta) = (self.addrs[from], self.addrs[to]);
         self.sim.apply_fault(Fault::Stall { src: fa, dst: ta });
@@ -268,7 +287,9 @@ impl HaCluster {
 
     /// Black-hole `from → to`: the peer stops pulling, so `send` BLOCKS once the
     /// in-flight window fills (a hung/half-open peer that never resets). No error,
-    /// no close — cleared by [`resume`](Self::resume). Marker.
+    /// no close — cleared by [`resume`](Self::resume). Names the wire that
+    /// literally runs on the listen pair, so it reaches a stream opened by
+    /// `connect_from` on that pair, not a puller's. Marker.
     pub fn block(&mut self, from: &str, to: &str) {
         let (fa, ta) = (self.addrs[from], self.addrs[to]);
         self.sim.apply_fault(Fault::Block { src: fa, dst: ta });
@@ -277,21 +298,26 @@ impl HaCluster {
 
     /// Fail `from → to` with a network error after `ms`: an established `send`
     /// returns an Io error, `recv` closes (reset), and a fresh connect on the pair
-    /// is rejected — modelling ECONNRESET some time into the connection. Marker.
+    /// is rejected — modelling ECONNRESET some time into the connection. Names
+    /// the wire that literally runs on the listen pair, like
+    /// [`block`](Self::block). Marker.
     pub fn error_after(&mut self, from: &str, to: &str, ms: u64) {
         let (fa, ta) = (self.addrs[from], self.addrs[to]);
         self.sim.apply_fault(Fault::ErrorAfter { src: fa, dst: ta, ms });
         self.mark(from, Some(to), "error_after", &format!("{ms}ms"));
     }
 
-    /// Arm buffer-overflow → drop-subscriber on `from → to`.
+    /// Arm buffer-overflow → drop-subscriber on `from → to`. Names the wire
+    /// that literally runs on the listen pair, like [`block`](Self::block).
+    /// Marker.
     pub fn drop_on_overflow(&mut self, from: &str, to: &str) {
         let (fa, ta) = (self.addrs[from], self.addrs[to]);
         self.sim.apply_fault(Fault::DropOnOverflow { src: fa, dst: ta });
         self.mark(from, Some(to), "drop_on_overflow", "");
     }
 
-    /// `reconnect(a,b)` — heal the pair so a fresh connect succeeds (an alias for
+    /// `reconnect(a,b)` — heal the pair so a fresh connect succeeds and a
+    /// [`cut`](Self::cut) between the two is lifted (an alias for
     /// [`heal`](Self::heal) named per the slice API; recorded as `reconnect`).
     pub fn reconnect(&mut self, a: &str, b: &str) {
         let (aa, ba) = (self.addrs[a], self.addrs[b]);

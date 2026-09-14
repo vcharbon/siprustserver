@@ -431,7 +431,7 @@ async fn delay_lands_a_frame_no_earlier_than_the_delay() {
     let pri_listen = listen_of(&fh.repl_report(), &pri_ord);
 
     // ── the delay, then the primary flushes: the callee answers ──────────────
-    fh.delay_streams_from(&pri_ord, &bak_ord, DELAY_MS);
+    fh.delay(&pri_ord, &bak_ord, DELAY_MS);
     let delay_seq = last_marker_seq(&fh);
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
@@ -528,13 +528,18 @@ async fn delay_reaches_a_stream_opened_after_the_fault() {
     let pri_listen = listen_of(&fh.repl_report(), &pri_ord);
 
     // ── the delay, then the receiving node dies and comes back ───────────────
-    fh.delay_streams_from(&pri_ord, &bak_ord, DELAY_MS);
+    fh.delay(&pri_ord, &bak_ord, DELAY_MS);
     fh.mark(&bak_ord, None, "crash", "the backup dies under the delay");
     backup.crash();
     proxy.set_health(&bak_ord, WorkerHealth::Dead);
     primary.simulate_peer_removed(&bak_ord);
     fh.advance(Duration::from_millis(300)).await;
     reboot_and_ready(&mut fh, backup, primary, &bak_ord, &proxy).await;
+    // Readiness is the Reclaim flow's first Noop; the Backup flow — the one
+    // that carries the ringing body — opens after it and its bootstrap lands
+    // DELAY_MS later. Pump past that so every fresh stream's frame has both
+    // captures to judge on.
+    fh.advance(Duration::from_millis(DELAY_MS + 1_000)).await;
     let reboot_seq = fh
         .repl_report()
         .markers
