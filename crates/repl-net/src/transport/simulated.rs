@@ -870,6 +870,48 @@ mod tests {
         Frame::Noop { at: crate::Watermark::new(1, counter) }
     }
 
+    /// The opening frame of a puller that names itself `caller` — what
+    /// attributes the stream's ephemeral local to the declared node.
+    fn pull_request(caller: &str) -> Frame {
+        Frame::PullRequest {
+            proto_ver: 3,
+            caller: caller.into(),
+            partition: crate::Partition::Bak,
+            since: crate::Watermark::new(1, 0),
+        }
+    }
+
+    /// Open a stream from a synthetic local to `b`'s listener and attribute
+    /// it to the node `caller` names, the way a puller does: `connect`, then a
+    /// `PullRequest` the server end reads.
+    async fn attributed_pair(
+        net: &SimulatedReplicationNetwork,
+        listener: &dyn ReplicationListener,
+        b: SocketAddr,
+        caller: &str,
+    ) -> (Box<dyn ReplicationConnection>, Box<dyn ReplicationConnection>) {
+        let client = net.connect(b).await.unwrap();
+        let server = listener.accept().await.unwrap();
+        client.send(pull_request(caller)).await.unwrap();
+        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        assert_eq!(server.recv().await, Some(pull_request(caller)));
+        (client, server)
+    }
+
+    /// Whether `conn` has a frame to `recv` right now, without waiting.
+    async fn has_frame(conn: &dyn ReplicationConnection) -> Option<Frame> {
+        tokio::time::timeout(Duration::from_micros(1), conn.recv()).await.ok().flatten()
+    }
+
+    /// `send`, then let the delivery actor stamp the frame's deadline at this
+    /// instant — a deadline is computed when the actor is polled, so a send
+    /// followed straight by an `advance` would be stamped after the advance.
+    async fn send_now(conn: &dyn ReplicationConnection, frame: Frame) -> Result<(), SendError> {
+        let r = conn.send(frame).await;
+        sip_clock::testkit::settle().await;
+        r
+    }
+
     /// Open a connected (client, server) pair from A to B's listener.
     async fn connected_pair(
         net: &SimulatedReplicationNetwork,
@@ -1188,5 +1230,135 @@ mod tests {
             matches!(r, Err(ConnectError::Io(_))),
             "a fresh connect is rejected with a network error after the delay"
         );
+    }
+    // --- Directed faults named on the listen pair reach attributed streams ---
+    //
+    // A puller opens its stream from an ephemeral local, so a `Delay`, `Stall`
+    // or `Cut` named on the two listen addresses runs on a pair no wire uses
+    // unless the fabric reads each end as its owning node. Each test declares
+    // both endpoints, attributes the stream through a `PullRequest`, then
+    // names the fault on the listen pair in the server → client direction.
+
+    #[tokio::test(start_paused = true)]
+    async fn attributed_stream_obeys_a_delay_named_on_the_listen_pair() {
+        let net = SimulatedReplicationNetwork::with_delay(1);
+        let (a, b) = (addr(3100), addr(3200));
+        net.declare_endpoint("A", a);
+        net.declare_endpoint("B", b);
+        let listener = net.listen(b).await.unwrap();
+        let (client, server) = attributed_pair(&net, &*listener, b, "A").await;
+
+        net.apply_fault(Fault::Delay { src: b, dst: a, ms: 50 });
+        send_now(&*server, noop(1)).await.unwrap();
+        advance_in_100ms_chunks(Duration::from_millis(40)).await;
+        assert_eq!(
+            has_frame(&*client).await,
+            None,
+            "a delay named on the listen pair did not reach the attributed stream: the frame \
+             landed before 50 ms"
+        );
+        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        assert_eq!(client.recv().await, Some(noop(1)), "the frame lands once the delay elapses");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attributed_stream_obeys_a_stall_named_on_the_listen_pair() {
+        let net = SimulatedReplicationNetwork::with_delay(1);
+        let (a, b) = (addr(3101), addr(3201));
+        net.declare_endpoint("A", a);
+        net.declare_endpoint("B", b);
+        let listener = net.listen(b).await.unwrap();
+        let (client, server) = attributed_pair(&net, &*listener, b, "A").await;
+
+        net.apply_fault(Fault::Stall { src: b, dst: a });
+        for i in 0..3 {
+            send_now(&*server, noop(i)).await.unwrap();
+        }
+        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        assert_eq!(
+            has_frame(&*client).await,
+            None,
+            "a stall named on the listen pair did not reach the attributed stream: a frame \
+             landed"
+        );
+        net.apply_fault(Fault::Resume { src: b, dst: a });
+        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        for i in 0..3 {
+            assert_eq!(client.recv().await, Some(noop(i)), "in order after the resume");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attributed_stream_obeys_a_cut_named_on_the_listen_pair() {
+        let net = SimulatedReplicationNetwork::with_delay(1);
+        let (a, b) = (addr(3102), addr(3202));
+        net.declare_endpoint("A", a);
+        net.declare_endpoint("B", b);
+        let listener = net.listen(b).await.unwrap();
+        let (client, server) = attributed_pair(&net, &*listener, b, "A").await;
+
+        net.apply_fault(Fault::Cut { src: b, dst: a });
+        let _ = send_now(&*server, noop(1)).await;
+        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        assert_eq!(
+            client.recv().await,
+            None,
+            "a cut named on the listen pair did not reach the attributed stream: recv did not \
+             close"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_opened_after_a_listen_pair_fault_obeys_it() {
+        let net = SimulatedReplicationNetwork::with_delay(1);
+        let (a, b) = (addr(3103), addr(3203));
+        net.declare_endpoint("A", a);
+        net.declare_endpoint("B", b);
+        let listener = net.listen(b).await.unwrap();
+        // An earlier stream exists when the fault is named, as a puller's does.
+        let (_client0, _server0) = attributed_pair(&net, &*listener, b, "A").await;
+
+        net.apply_fault(Fault::Delay { src: b, dst: a, ms: 50 });
+        let (client, server) = attributed_pair(&net, &*listener, b, "A").await;
+        send_now(&*server, noop(1)).await.unwrap();
+        advance_in_100ms_chunks(Duration::from_millis(40)).await;
+        assert_eq!(
+            has_frame(&*client).await,
+            None,
+            "a stream opened after the fault did not inherit the delay named on the listen \
+             pair: the frame landed before 50 ms"
+        );
+        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        assert_eq!(client.recv().await, Some(noop(1)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_undeclared_pair_keeps_per_direction_semantics() {
+        let net = SimulatedReplicationNetwork::with_delay(1);
+        let (a, b) = (addr(3104), addr(3204));
+        let listener = net.listen(b).await.unwrap();
+        // An explicit local IS the directed pair the fault names.
+        let explicit = net.connect_from(a, b).await.unwrap();
+        let explicit_server = listener.accept().await.unwrap();
+        // A synthetic local with no declaration stands for itself.
+        let (synthetic, synthetic_server) = attributed_pair(&net, &*listener, b, "A").await;
+
+        net.apply_fault(Fault::Delay { src: b, dst: a, ms: 50 });
+        send_now(&*explicit_server, noop(1)).await.unwrap();
+        send_now(&*synthetic_server, noop(2)).await.unwrap();
+        advance_in_100ms_chunks(Duration::from_millis(10)).await;
+        assert_eq!(
+            has_frame(&*explicit).await,
+            None,
+            "the explicit-local pair is the direction named: its frame waits the delay"
+        );
+        assert_eq!(
+            synthetic.recv().await,
+            Some(noop(2)),
+            "an undeclared synthetic-local stream is not the direction named: its frame lands \
+             on the default transit"
+        );
+        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        assert_eq!(explicit.recv().await, Some(noop(1)));
     }
 }
