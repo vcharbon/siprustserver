@@ -122,19 +122,6 @@ and a post-run tolerance re-counts them.
 | `retransmit-count-mismatch` gates unconditionally: the interpreter counts the ladder and excuses no count, on any lane | §6.9, `pivot-interpreter` |
 | the tolerance is `ladder-recounted-under-rfc-pacing`, a second bless premise on the post-run reclassifier: expect-side, one stated gap per declared rung, the captured pacing putting the DECLARED rungs in the dwell and the RFC ladder the OBSERVED ones — all four or the failure stands | the downstream rules package (`ladder-recount.ts`), audited by issue 163 |
 
-**2026-08-29 — the ACK-relay delta reads the offer, and a moved ACK carries its
-dependents.** Ticket 189. The transform was gated on the call having run a
-local-ACK mechanism, so an ordinary answered call kept a causality the replay
-never reproduces; the gate is GONE and the offer decides alone. And moving the
-ACK is only half of it: a step the capture anchored on that ACK is re-based onto
-the ACK's own captured anchor, so it keeps its captured instant instead of
-riding the move forward.
-
-| change | where |
-|---|---|
-| the mechanism gate is deleted; every propagated ACK to a 2xx is transformed, the delayed-offer exception and the undetermined reading unchanged | §13.2, generator |
-| `ack-relay-delta-relayed` is GONE — nothing declines for that reason any more. `ack-relay-delta-rebased` names what a move re-based | §13.2's flag table, `case.annotations.flags` |
-
 **2026-08-26 — `auto` is a composition marker, not a storage policy.** Ruling
 of the design record. The
 closed field list on an auto step was the ONE departure from the three-tier
@@ -143,8 +130,8 @@ offer's ANSWER with no home: measured over 400 captures / 8910 steps, scripted
 steps dropped 0 headers and 0 bodies while auto steps dropped 993 and 99. The
 justification written for the list — "a scripted copy emits a second automatic"
 — was false in this interpreter, which emits only from `emit(&step)`. Every
-`§13.2 ack-relay-delta-delayed-offer` flag in the corpus therefore asserted a
-preservation the document did not perform.
+delayed-offer ACK in the corpus therefore asserted a preservation the document
+did not perform.
 
 | change | where |
 |---|---|
@@ -1135,9 +1122,9 @@ pointing at it (§11).
 own transaction drew**, not a paced ladder: an ACK rides no retransmission
 timer, and the UAC core owes one ACK per 2xx it RECEIVES (RFC 3261 §13.2.2.4),
 so the count is drawn by the wire and measured against the repeats of that one
-final. Copies of the final that arrive while the ACK is held are still owed one
-each, and go out with it when the hold ends — except where the ACK owes a
-delayed offer's answer, and "Composed on arrival" below states that one. `cseq`
+final. Which copies draw one turns on WHOSE ACK answers the final, and the two
+paragraphs below state that: the ACK to a 2xx is the acknowledging peer's own,
+the ACK to a non-2xx final the client transaction's. `cseq`
 is the MARKER that a step
 carries one transaction to draw against — a count on an ACK that is not an
 automatic, or on one stating no `cseq`, is refused.
@@ -1165,37 +1152,33 @@ the final's own ladder, and the ladder is the only thing that puts an ACK on the
 leg: a B2BUA owes one ACK per final it RECEIVES here, so N ACKs arriving from
 the far leg draw none of their own.
 
-**Composed on arrival.** "One per copy" holds wherever the stack can form the
-ACK the moment the final lands — the ACK that carries NO BODY, in-dialog or
-not, which it composes from the dialog alone. The one exception is the ACK
-owing the ANSWER to a delayed offer (§13.2.1): it does not exist until the far
-leg's ACK supplies that answer, so a copy inside the wait is answered by the
-single ACK that follows it and only a copy landing once the ACK exists draws one
-of its own. The wait is read off the two `observed` coordinates, and the rungs
-off the final's measured `retransmit_intervals_ms` where it states them, §6.9's
-class ladder where it does not.
-
-What separates the two is the body the ACK owes, never whether it CONFIRMS the
-dialog, and the discriminator is our own stack's: taking a 2xx mints the ACK's
-client transaction — on the initial answer and on a re-INVITE's alike — and
-every copy re-sends it, but only where the ACK owes no answer body
-(`acked_invite_carries_offer`). All three shapes are pinned in
-`crates/b2bua-harness/tests/reack_2xx_before_caller_ack.rs`.
+**Relayed from the far leg.** The ACK to a 2xx is the ACKNOWLEDGING PEER's own,
+relayed: §13.2.2.4 gives the UAC core ONE ACK per 2xx and re-passes THAT ACK to
+the transport for every copy, so on a relayed INVITE the ACK this leg owes goes
+out when the far leg's arrives — initial INVITE or re-INVITE, offer in the
+INVITE or delayed offer (§13.2.1), body or none. A copy inside the wait is
+answered by the single ACK that follows it and draws none of its own; a copy
+landing once the ACK exists draws a re-send of that datagram, body included.
+The wait is read off the two `observed` coordinates, and the rungs off the
+final's measured `retransmit_intervals_ms` where it states them, §6.9's class
+ladder where it does not.
 
 **Displaced by the next INVITE.** The leg holds exactly ONE such ACK — the
-client transaction the 2xx minted — and a new INVITE transaction on the leg
-resets it, so a copy of a superseded final draws nothing and the count drops by
-one per copy landing past that reset. Which copies those are is read off the
-document's own DELAY GRAPH, each step's `delay.from` walked back to the anchor
-it names, not off the `observed` coordinates: ACKing on receipt where the source
-platform relayed the caller's ACK pulls the re-INVITE chain forward, so a repeat
-the capture placed before the next INVITE lands after it in the run.
+datagram the relay retained — and a new INVITE transaction on the leg resets it,
+so a copy of a superseded final draws nothing and the count drops by one per
+copy landing past that reset. Which copies those are is read off the document's
+own DELAY GRAPH, each step's `delay.from` walked back to the anchor it names,
+not off the `observed` coordinates: when the SUT opens that later transaction is
+what the document's own delays say, not an instant the source platform measured.
+Only the band between the ACK and the reset draws.
 
-Issue 103 also counted a RELAYED half — "the platform passes on every ACK it
-takes off the far leg" — and took the larger of the two. That described a defect
-(issues 145/147): a B2BUA relays no ACK it does not owe, and the accuracy figure
-the pair was measured on was taken against the unfixed SUT. The half is gone and
-the number is the composed one.
+**Composed on arrival.** An ACK to a NON-2xx final is the client transaction's
+own (§17.1.1.3): composed from the final itself, hop by hop on every platform,
+so every copy of that final draws one back. The FINAL's status decides which of
+the two paragraphs applies — never the body the ACK carries, and never whether
+it CONFIRMS the dialog. Both shapes are pinned in
+`crates/b2bua-harness/tests/repeated_2xx_before_caller_ack.rs` and
+`crates/b2bua-harness/tests/it/ack_body_relayed.rs`.
 
 An auto PRACK acknowledges the reliable provisionals outstanding on its leg
 OLDEST FIRST: N provisionals are acknowledged by N PRACKs, in arrival order.
@@ -1582,7 +1565,7 @@ the RFC states an interval for them". A document that states one has answered
 that, so `retransmit_intervals_ms` paces a class that has no ladder of its own.
 The generator still does not COLLAPSE an unreliable provisional (§13.2) — that
 is a separate ruling about steps, not about pacing. Two classes ride no timer, and each does something else instead: the
-ACK's count §6.3 DRAWS from the wire, one copy per repeat of the final its
+ACK's count §6.3 DRAWS from the wire, off the repeats of the final its
 transaction names; the unreliable provisional — a 1xx carrying no `RSeq`, re-sent
 at the transaction user's discretion, where RFC 3262 §3 paces only the reliable
 one — is not collapsed at all.
@@ -2441,7 +2424,7 @@ and a member arrives with the derivation that decides it.
 
 | failure | what the run must produce |
 |---|---|
-| `unexpected-ack` | an ACK this platform sends to the dialog-creating 2xx the anchor step EMITS, which no step states because the source never carried one. The platform's UAC core ACKs a 2xx on receipt (RFC 3261 §13.2.2.4) whatever the caller did, so every such 2xx draws one — except on a delayed-offer INVITE, whose ACK carries the answer only the caller's own ACK supplies. The derivation today still narrows this by a local-ACK mechanism and by the source's relay-paired second view (a caller that withheld its ACK too charges the same withholding at two vantages); §13.2's own gate is gone, and this one is tracked by the FIXME at the head of the generator's `mechanism` reading |
+| `unexpected-ack` | an ACK this platform sends to the dialog-creating 2xx the anchor step EMITS, which no step states because the source never carried one. The ACK to a 2xx is the acknowledging peer's own, relayed (RFC 3261 §13.2.2.4), so where the caller never ACKs the platform's own §13.3.1.4 give-up composes one before its teardown BYE — on an offer-carrying INVITE, whose ACK owes no answer body; a delayed-offer dialog gets the BYE alone and draws no such datagram. The derivation today still narrows this by the source's relay-paired second view (a caller that withheld its ACK too charges the same withholding at two vantages) |
 | `unexpected-prack` | a PRACK this platform sends to the reliable provisional the anchor step EMITS (RFC 3262 §4). The source never PRACKed it, so no step states one, and this platform's own answer arrives where nothing expects it |
 | `unexpected-cancel` | a CANCEL this platform sends while the INVITE transaction is still in flight (RFC 3261 §9.1), where the source sent its CANCEL only after that transaction had taken — and ACKed — the final the anchor step EMITS. The capture places its CANCEL BEHIND that final, so the document's CANCEL step sits behind it too and this platform's arrives ahead of it, on a leg where nothing yet expects one. The anchor is the final rather than the CANCEL because a declaration's anchor must be a `send`: the transaction end is what the divergence turns on, and the emission is what supplies the dialog |
 
@@ -2622,63 +2605,21 @@ The gate runs the other way too. Required on `origin: capture`: `case.source`,
 capture showed** — but only where a difference between the source platform and
 this one is a RULE rather than a judgement. §9.1 handles the differences that
 are vocabulary (a fact stays, named, and the run decides what it costs). This
-section handles the two differences that are BEHAVIOUR, where leaving the
-capture untransformed would encode a ladder no lane can run.
+section handles the differences that are BEHAVIOUR, where leaving the capture
+untransformed would encode a ladder no lane can run.
 
 This is generator behaviour. It adds no field: what the generator changed rides
 `case.annotations.flags`, whose `kind` is an open token.
 
-**The ACK-relay delta.** The source platform relays an ACK to a 2xx end to end,
-always: the b-leg ACK goes out when the a-leg ACK arrives. **This platform does
-not** — its UAC core ACKs a 2xx on receipt (RFC 3261 §13.2.2.4), initial INVITE
-and re-INVITE alike — so on every answered call the captured causality states a
-fact the replay will not reproduce, and the difference is a deliberate one the
-emulation adapts to rather than a defect to fix.
-
-One exception narrows it back: the DELAYED OFFER. Where the INVITE the platform
-sent carried no SDP offer, the answer rides the caller's ACK (RFC 3261 §13.2.1,
-RFC 3264 §4), so that ACK alone must reach the far end.
-
-**The offer decides it and nothing else.** Every `auto` ACK `expect` on a
-platform-facing leg whose captured causality is the relay is transformed — an
-ordinary answered call as much as one that ran a mechanism of its own, because
-the platform ACKs on receipt whatever the call did: re-anchored on the 2xx it
-answers, on its own leg, with a dwell of zero, and MOVED to sit directly behind
-that 2xx — same-leg order is list order (§6), so an ACK left where the relay put
-it would have the run wait for whatever the peer said in between. A step is only
-ever moved EARLIER, so every anchor still points backwards.
-
-**Moving the ACK is half the transform.** A step the capture anchored ON that
-ACK — a peer's own next action, which the source performed once the caller's ACK
-had crossed the box — would ride the move forward and land where the capture
-never put it, closing windows the document still declares on the other leg
-(issue 189: a callee's BYE rode 718 ms early and demolished the a-leg 2xx ladder
-`retransmits` asked for). So a dependent is RE-BASED onto what the ACK itself
-was anchored on, carrying the ACK's own dwell: it keeps the instant the capture
-gave it, expressed against a step that did not move. A dependent that is itself
-a moved ACK is left alone — it holds its own new anchor.
-
-Five flags, one per decision the generator took, each naming the steps it
-covers by id:
-
-| flag | what it says |
-|---|---|
-| `ack-relay-delta-applied` | this call ran a mechanism on which the platform ACKs locally; the source showed the end-to-end shape and these steps now state the local one |
-| `ack-relay-delta-rebased` | a step the capture anchored on a moved ACK was re-based onto that ACK's own captured anchor, keeping its captured instant. Names each step, the ACK it hung off, and the anchor and dwell it now carries |
-| `ack-relay-delta-delayed-offer` | the exception applies — the INVITE carried no offer, and the capture is left exactly as it is. The ANSWER riding that ACK is stored on the step like any other body (§6.3), which is what makes "exactly as it is" true on the wire |
-| `ack-relay-delta-undetermined` | the vantage cannot say whether the exception applies, so NOTHING was transformed |
-| `ack-relay-delta-race-repaired` | a declared race the ACK-relay move left behind: the stamp rode to the later of the pair, or went where the re-anchor left the two measured from different anchors |
-
-**Undetermined is a decision, not a failure.** The INVITE the offer would be
-read from may not be at this vantage, or its body may be a multipart the
-extractor did not decompose. Either way the generator transforms nothing and
-says which step and why: a silent guess about a delayed offer would move an ACK
-that has to relay.
-
-Two things the delta does NOT touch. A `retransmits` count on an auto ACK is
-drawn from the wire as "one per repeat of the final my CSeq names" (§6.3), so it
-re-derives on the lane. And an ACK to a NON-2xx final is a transaction-layer ACK
-(RFC 3261 §17.1.1.3), hop-by-hop on every platform and never a delta.
+**The ACK to a 2xx is no adaptation.** The source platform relays an ACK to a
+2xx end to end — the b-leg ACK goes out when the a-leg ACK arrives — and so
+does this one (§6.3): §13.2.2.4 gives the UAC core one ACK per 2xx and
+re-passes THAT ACK for every copy, so the captured causality is the causality
+the replay reproduces and there is nothing here to transform. The two things
+that could have been adapted are stated where they belong: a `retransmits`
+count on an auto ACK is drawn from the wire as the band the relayed ACK draws
+(§6.3), and an ACK to a NON-2xx final is a transaction-layer ACK (RFC 3261
+§17.1.1.3), hop-by-hop on every platform.
 
 **The unreliable-provisional deficit.** A 1xx above 100 carrying no `RSeq`
 rides no retransmission timer, so it does not repeat at all (§6.9): each
@@ -2712,9 +2653,9 @@ interval, and lint accepts it. The carve-out above is `send`-blind and takes the
 100's repeats as steps regardless; the two readings do not conflict, because a
 step per emission states everything a count would and the interval besides.
 
-Both transformations are reversible at regeneration: the synthesis pass still
-builds the capture unchanged and each adaptation runs against it, so removing an
-adaptation restores the captured ladder exactly.
+Every adaptation is reversible at regeneration: the synthesis pass still builds
+the capture unchanged and each adaptation runs against it, so removing one
+restores the captured ladder exactly.
 
 **The detector roster.** A generated document also states what it LOOKED FOR.
 §2.2 reads absence as "none" and nothing else, so a document carrying no
@@ -2731,11 +2672,10 @@ them, on the same `case.annotations.flags`:
 | `detected-none:<detector>` | the detector ran over this capture and asserts the shape is absent |
 | `detection-unavailable:<detector>` | the vantage lacks the messages the detector reads, so it decided nothing |
 
-**`detection-unavailable` is a decision, not a failure** — the same claim
-`ack-relay-delta-undetermined` makes about a transformation. "The shape is
-absent" and "the messages that would settle it are not at this vantage" are
-different statements, and a roster that collapsed them would be the silence it
-exists to remove.
+**`detection-unavailable` is a decision, not a failure.** "The shape is absent"
+and "the messages that would settle it are not at this vantage" are different
+statements, and a roster that collapsed them would be the silence it exists to
+remove.
 
 Every rostered detector states exactly one of the three on every generated
 document, so the flag list is a complete account of what the extractor

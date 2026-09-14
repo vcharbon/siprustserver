@@ -352,7 +352,7 @@ export const synthesize = (
         `rather than the ACKs the capture held (§6.3): ` +
         drawn
           .map((d) =>
-            `${d.step} (leg ${d.leg}, ${d.drawn} composed against ${d.final}, ` +
+            `${d.step} (leg ${d.leg}, ${d.drawn} drawn against ${d.final}, ` +
             `capture held ${d.captured})`
           )
           .join("; ")

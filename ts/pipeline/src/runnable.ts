@@ -13,8 +13,8 @@
  * - {@link unackedFinals} — the final is there and the ACK is not. The SUT sent
  *   the INVITE and took a 2xx, so the SUT owes the ACK; the capture holds none.
  * - {@link unackedTakenFinals} — the same hole on the other side of the arrow.
- *   The ACTOR sent an offer-less INVITE and took a 2xx, and the leg goes on to
- *   carry a new in-dialog transaction, which only a CONFIRMED dialog carries.
+ *   The ACTOR sent the INVITE and took a 2xx, and the leg goes on to carry a new
+ *   in-dialog transaction, which only a CONFIRMED dialog carries.
  * - {@link orphanResponses} — the response is there and the request is not, with
  *   the method left open. A response belongs to a transaction, so a leg holding
  *   one and not the request that opened it lost that request to the trace,
@@ -31,10 +31,12 @@
  * ACK carries its own stored content and states its own coordinates, so it is
  * emittable whatever the flow holds around it.
  *
- * The two ACK rules are predictions about the RUN, so both read the OFFER MODEL
- * the exchange was dialled with ({@link offeredIngress}): an offer-carrying
- * INVITE draws its ACK out of the UAC that sent it, an offer-less one leaves
- * that ACK to travel end to end (RFC 3264 §4).
+ * The two ACK rules are predictions about the RUN, and the prediction is that an
+ * ACK to a 2xx travels END TO END: the stack relays the acknowledging party's
+ * own (RFC 3261 §13.2.2.4), so a leg whose ACK the trace lost holds a step
+ * nothing satisfies. Where that ACK never comes, the §13.3.1.4 give-up composes
+ * only the one owing no answer body ({@link offeredIngress}, RFC 3264 §4), and
+ * {@link unackedFinals} charges on that.
  */
 import { Body, Flow } from "@sip/contracts"
 
@@ -83,13 +85,15 @@ const repeats = (step: Flow.Step): boolean => (step.retransmits ?? 0) > 0
 
 /**
  * Whether the INVITE that opened this exchange carried an OFFER, which is what
- * decides who owes the ACK to its 2xx.
+ * decides whether this stack can compose the ACK to its 2xx ALONE.
  *
- * A UAC that offered ACKs the 2xx on receipt, because the answer came back in
- * the response (RFC 3261 §13.2.2.4). A UAC that did NOT offer takes the offer
- * IN the 2xx and owes the answer in its ACK (RFC 3264 §4), and a B2BUA holding
- * that leg has no answer of its own — it waits for the ACK arriving on the leg
- * the offer-less INVITE came from, and relays it.
+ * A UAC that offered has its answer in the response (RFC 3261 §13.2.2.4), so
+ * that ACK owes no body and the stack can form it from dialog state. A UAC that
+ * did NOT offer takes the offer IN the 2xx and owes the answer in its ACK
+ * (RFC 3264 §4), which only the far party supplies. Either one is the far
+ * party's own, relayed; what the offer decides is what the stack can put on the
+ * leg when that ACK never comes — the §13.3.1.4 give-up acknowledges the first
+ * before its BYE and leaves the second to the BYE alone.
  *
  * Read at the INGRESS, never on the SUT's own INVITE, because what the SUT
  * emits is what the document CAPTURED and a platform is free to re-offer where
@@ -200,13 +204,14 @@ const isAckArrival = (step: Flow.Step): boolean => step.op === "expect" && isAck
  * lacks it lost it, and a conformant SUT replaying the document sends it and is
  * charged an unexpected datagram.
  *
- * What makes the hole cost anything is that the RUN puts an ACK there, and
- * which ACK that is turns on the offer model ({@link offeredIngress}). Where the
- * exchange was dialled WITH an offer the SUT ACKs the 2xx on receipt and the
- * charge is unconditional. Where it was dialled without one the SUT's ACK
- * carries an answer only the ingress leg's own ACK supplies, so it goes out
- * exactly when that ACK arrives — and where the document holds none after this
- * 2xx, nothing lands, the case replays as written, and the coverage is kept.
+ * What makes the hole cost anything is that the RUN still puts an ACK there, and
+ * whether it can turns on the offer model ({@link offeredIngress}). Where the
+ * exchange was dialled WITH an offer the stack can compose that ACK alone, so
+ * the §13.3.1.4 give-up puts one on the leg ahead of its BYE and the charge is
+ * unconditional. Where it was dialled without one the ACK owes an answer only
+ * the ingress leg's own ACK supplies, so it goes out exactly when that ACK
+ * arrives — and where the document holds none after this 2xx, nothing lands,
+ * the case replays as written, and the coverage is kept.
  *
  * TWO SHAPES ARE NOT THIS HOLE, and each is read off the document itself:
  *
@@ -343,11 +348,10 @@ const isContinuation = (step: Flow.Step): boolean =>
  * §13.2.2.4). The cost is worse than a stray datagram — the peer leg's ACK step
  * is gated on a message that never comes, taking the run down at that step.
  *
- * DELAYED-OFFER only, because that is the only dial the peer leg's ACK waits
- * for. An actor that offered draws an offer-carrying INVITE out of the SUT, and
- * the SUT ACKs the peer's 2xx on receipt whatever this leg does; an actor that
- * did not leaves the SUT owing an answer it can only take from this leg's ACK
- * (RFC 3264 §4), so withholding it strands the peer's ACK step.
+ * EVERY dial, offer or none, because the ACK the SUT owes the peer leg IS this
+ * one, relayed (§13.2.2.4): an actor that took the 2xx and never ACKed leaves
+ * that peer step waiting on a datagram the document never scripts, whatever the
+ * offer model was.
  *
  * The continuation is the second discriminator, because an actor that truly
  * never ACKs is a corner case worth REPLAYING — our own reaper answers it — and
@@ -384,7 +388,7 @@ export const unackedTakenFinals = (
   steps.forEach((step, at) => {
     if (isInvite(step)) {
       settle(step.leg)
-      if (step.op === "send" && !carriesBody(step)) opened.set(step.leg, step)
+      if (step.op === "send") opened.set(step.leg, step)
       else opened.delete(step.leg)
     } else if (step.op === "expect" && isInviteSuccess(step)) {
       const invite = opened.get(step.leg)

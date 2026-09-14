@@ -35,9 +35,10 @@ const step = (
 ): Flow.Step => ({ id, leg, op, msg, delay: DELAY, ...(auto ? { auto: true } : {}) })
 
 /**
- * An INVITE carries an offer unless the shape under test is the delayed one:
- * the offer model decides who owes the ACK to the 2xx, so the two ACK rules read
- * it and a fixture that left it out would be testing neither arm.
+ * An INVITE carries an offer unless the shape under test is the delayed one: the
+ * offer model decides which ACK the §13.3.1.4 give-up can compose, so
+ * {@link unackedFinals} reads it and a fixture that left it out would be
+ * testing neither arm.
  */
 const invite = (id: string, leg: string, op: "send" | "expect" = "send") =>
   step(id, leg, op, { method: "INVITE", body: { ref: "resources/uac_0_0.sdp" } })
@@ -122,9 +123,10 @@ describe("a 2xx whose ACK the leg never captured", () => {
     expect(charged).toEqual([{ final: "s3", invite: "s1", leg: "A" }])
   })
 
-  it("charges an OFFERED dial though no leg captured an ACK — the SUT ACKs on receipt", () => {
-    // capture_16d84555 case1: the caller BYEs instead of ACKing. The hole looks
-    // symmetric and is not — the SUT owes leg B its ACK whatever leg A does.
+  it("charges an OFFERED dial though no leg captured an ACK — the give-up ACKs it", () => {
+    // The caller BYEs instead of ACKing. The hole looks symmetric and is not:
+    // the ACK leg B owes needs no answer body, so the §13.3.1.4 give-up puts
+    // one there ahead of its BYE whatever leg A does.
     expect(
       unackedFinals([
         invite("s1", "A", "send"),
@@ -136,10 +138,10 @@ describe("a 2xx whose ACK the leg never captured", () => {
     ).toEqual(["s4"])
   })
 
-  it("stays silent on a DELAYED-OFFER dial no ACK follows — the SUT has none to send", () => {
-    // capture_c564f38e case2: the caller re-INVITEs with no offer and never
-    // ACKs the answer, so the SUT's own ACK never composes and the 2xx simply
-    // retransmits, exactly as the document states it.
+  it("stays silent on a DELAYED-OFFER dial no ACK follows — the give-up BYEs it alone", () => {
+    // The caller re-INVITEs with no offer and never ACKs the answer, so no ACK
+    // this stack can compose exists and the 2xx simply retransmits, exactly as
+    // the document states it.
     expect(
       unackedFinals([
         invite("s1", "A", "send"),
@@ -357,7 +359,7 @@ describe("a response whose request the leg never captured", () => {
 })
 
 describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
-  /** A re-INVITE with no offer, which is the dial this rule is about. */
+  /** A re-INVITE, the in-dialog transaction that proves the ACK crossed. */
   const reinvite = (id: string, leg: string, op: "send" | "expect" = "send") =>
     offerless(id, leg, op)
 
@@ -374,9 +376,9 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
     ])
   })
 
-  it("leaves an OFFERED dial alone — the SUT ACKs the peer's 2xx whatever this leg does", () => {
-    // capture_dac7ab59: the actor offers, never ACKs the answer, and re-INVITEs
-    // anyway. The peer leg's ACK step is the SUT's own and fires regardless.
+  it("charges an OFFERED dial too — the peer leg's ACK is this one, relayed", () => {
+    // The actor offers, never ACKs the answer, and re-INVITEs anyway. The peer
+    // leg's ACK step waits on the ACK this leg withheld, offer or none.
     expect(
       unackedTakenFinals([
         invite("s1", "A"),
@@ -384,8 +386,8 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
         reinvite("s3", "A"),
         final("s4", "A", 200, "expect"),
         ack("s5", "A")
-      ])
-    ).toEqual([])
+      ]).map((c) => [c.final, c.invite, c.continuation])
+    ).toEqual([["s2", "s1", "s3"]])
   })
 
   it("takes an in-dialog request the SUT sends INTO the leg as the same proof", () => {

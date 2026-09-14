@@ -209,14 +209,14 @@ export interface CasePolicy {
     actors: ReadonlyArray<ActorObs>
   ) => JoinsReading
   /**
-   * The one behavioural delta between the source platform and the replaying
-   * one, applied to the synthesized flow. A pure rewrite: what it changes it
-   * flags.
+   * Any behavioural delta between the source platform and the replaying one,
+   * applied to the synthesized flow. A pure rewrite: what it changes it flags,
+   * and a deployment whose two platforms behave alike supplies the identity.
    *
-   * The layout rides along because the delta is MECHANISM-CONDITIONAL: which
-   * ACK a platform mints itself rather than relaying is decided by the call's
-   * shape (a chain, a transfer, a joined resource), which the flow alone does
-   * not carry.
+   * The layout rides along because such a delta can be MECHANISM-CONDITIONAL:
+   * what a platform composes itself rather than relaying may be decided by the
+   * call's shape (a chain, a transfer, a joined resource), which the flow alone
+   * does not carry.
    */
   readonly adaptFlow: (flows: Flows.FlowsDoc, flow: FlowOut, layout: Layout) => FlowOut
   /**
