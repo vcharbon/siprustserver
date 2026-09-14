@@ -1008,6 +1008,64 @@ async fn an_unscripted_cancel_is_refused_and_answered_200_then_487() {
     scene.finish().await;
 }
 
+/// The act RFC 3262 §3 makes the endpoint's own: a PRACK no step scripts is
+/// answered `200` when its RAck names the reliable provisional this leg sent,
+/// while the arrival stays the refusal it is. The document declares it — the
+/// source never PRACKed its callee's reliable 180, and this platform relays the
+/// caller's PRACK end to end — so the callee's `200` is what lets the relayed
+/// `200 PRACK` reach the caller and the flow walk on to the 2xx, the ACK the
+/// document also declares, and the scripted teardown.
+#[tokio::test(start_paused = true)]
+async fn an_unscripted_prack_is_refused_and_answered_200_so_the_relay_walks_on() {
+    let scene = api_scene("pivot-unscripted-prack").await;
+    let (outcome, _dir) = replay(&scene, "unscripted-prack-negative.v3.json").await;
+
+    assert_eq!(
+        outcome.verdict.status,
+        VerdictStatus::OkNegative,
+        "failures: {:#?}\nrecording: {:#?}",
+        outcome.verdict.failures,
+        outcome.recording.legs()
+    );
+    assert!(outcome.verdict.failures.is_empty(), "{:#?}", outcome.verdict.failures);
+
+    // Both declarations were produced, the PRACK first: the refusal STANDS,
+    // raised with its site, and the verdict inverts on it.
+    let declared: Vec<DeclaredFailure> =
+        outcome.verdict.must_fail.iter().map(|note| note.failure).collect();
+    assert_eq!(declared, [DeclaredFailure::UnexpectedPrack, DeclaredFailure::UnexpectedAck]);
+    for note in &outcome.verdict.must_fail {
+        let observed = note.observed.as_ref().unwrap_or_else(|| panic!("{note:#?}"));
+        assert_eq!(arrival_of(observed).0, "B", "the anchor's own leg: {note:#?}");
+    }
+
+    // And the endpoint answered the PRACK all the same, out of leg B's own
+    // stack, right behind the arrival it refused.
+    let legs = outcome.recording.legs();
+    let prack = legs["B"]
+        .iter()
+        .position(|m| m.dir == Dir::In && m.raw.starts_with("PRACK "))
+        .unwrap_or_else(|| panic!("no PRACK on leg B: {:#?}", legs["B"]));
+    assert_eq!(legs["B"][prack].step, None, "no step claimed it — that is the failure");
+    let answer = &legs["B"][prack + 1];
+    assert!(
+        answer.dir == Dir::Out
+            && answer.raw.starts_with("SIP/2.0 200")
+            && answer.raw.contains("CSeq: 2 PRACK")
+            && answer.note.as_deref().is_some_and(is_unscripted_answer),
+        "{answer:#?}"
+    );
+    assert_eq!(answer.step, None, "an answer owns no step");
+
+    // The caller's own `200 PRACK` expect was satisfied by the relay, so the
+    // script ran to its end and nothing was abandoned.
+    assert!(outcome.verdict.abandoned.is_none(), "{:#?}", outcome.verdict.abandoned);
+    assert_eq!(outcome.verdict.completed_steps.len(), 14, "{:?}", outcome.verdict.completed_steps);
+
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
 /// The other act the RFC makes the endpoint's own (§17.1.1.3): a non-2xx final
 /// no step scripts is ACKed on the INVITE's own branch, where the arrival is
 /// refused — not left for the generic close to discover.

@@ -1378,7 +1378,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     }
 
     /// Discharge the transaction-layer obligation a REFUSED datagram leaves on
-    /// its leg (RFC 3261 §9.2, §17.1.1.3).
+    /// its leg (RFC 3261 §9.2, §17.1.1.3; RFC 3262 §3).
     ///
     /// The refusal STANDS and the flow is untouched: like a `background` answer
     /// this moves no cursor and satisfies no `expect`. What is owed is
