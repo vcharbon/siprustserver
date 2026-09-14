@@ -294,8 +294,8 @@ struct SimShared {
     /// `PullRequest`.
     stream_owner: Mutex<HashMap<SocketAddr, SocketAddr>>,
     /// Directed faults between two declared endpoints, keyed by the owner pair;
-    /// read through `owner` by every wire actor, so they reach streams that run
-    /// between an ephemeral local and a listener.
+    /// read by every wire through its [`WireView`], so they reach streams that
+    /// run between an ephemeral local and a listener.
     node_faults: Mutex<HashMap<Pair, NodeFault>>,
     /// Live in-flight frame count (across all delivery actors) — harness
     /// introspection, mirrors sip-net's `in_flight`.
@@ -321,12 +321,12 @@ impl SimShared {
         self.stream_owner.lock().unwrap().get(&addr).copied().unwrap_or(addr)
     }
 
-    /// Attribute the stream opened from `client` to the node `caller` names.
-    fn attribute(&self, client: SocketAddr, caller: &str) {
-        let Some(owner) = self.endpoints.lock().unwrap().get(caller).copied() else {
-            return;
-        };
+    /// Attribute the stream opened from `client` to the node `caller` names,
+    /// returning that node's address when `caller` is declared.
+    fn attribute(&self, client: SocketAddr, caller: &str) -> Option<SocketAddr> {
+        let owner = self.endpoints.lock().unwrap().get(caller).copied()?;
         self.stream_owner.lock().unwrap().insert(client, owner);
+        Some(owner)
     }
 
     /// Forget a closed stream's attribution. [`synth_local`] draws its ephemeral
@@ -344,12 +344,7 @@ impl SimShared {
         self.endpoints.lock().unwrap().values().any(|a| *a == addr)
     }
 
-    /// The node fault on `src → dst`, reading each end as its owning node.
-    fn node_fault(&self, src: SocketAddr, dst: SocketAddr) -> NodeFault {
-        self.node_fault_on((self.owner(src), self.owner(dst)))
-    }
-
-    /// The node fault on an already-resolved owner pair.
+    /// The node fault on a resolved owner pair ([`WireView::owners`]).
     fn node_fault_on(&self, owners: Pair) -> NodeFault {
         self.node_faults.lock().unwrap().get(&owners).copied().unwrap_or_default()
     }
@@ -631,8 +626,10 @@ impl SimulatedReplicationNetwork {
             shared: self.shared.clone(),
             out: c2s.staging_tx,
             out_dir: c2s.dir.clone(),
+            out_view: c2s.view.clone(),
             inbound: tokio::sync::Mutex::new(s2c.inbound_rx),
             in_dir: s2c.dir.clone(),
+            in_view: s2c.view.clone(),
         };
         let server = SimConnection {
             local: dst,
@@ -640,8 +637,10 @@ impl SimulatedReplicationNetwork {
             shared: self.shared.clone(),
             out: s2c.staging_tx,
             out_dir: s2c.dir,
+            out_view: s2c.view,
             inbound: tokio::sync::Mutex::new(c2s.inbound_rx),
             in_dir: c2s.dir,
+            in_view: c2s.view,
         };
 
         // Hand the server end to the listener's accept queue. If the receiver
@@ -705,20 +704,38 @@ fn synth_local(dst: SocketAddr) -> SocketAddr {
     }
 }
 
-/// A wire actor's view of the owner pair it is judged on. Each end resolves
-/// to its owning node once — the first time the fabric knows it — and the
+/// One wire's view of the owner pair it is judged on, shared by its delivery
+/// actor and the connection handle that sends on it, so the send-side and
+/// the delivery-side verdicts read one pair. Each end resolves to its owning
+/// node once — at spawn when the fabric already knows it (a node handle's
+/// connect), or when the opening `PullRequest` names it ([`learn`]) — and the
 /// snapshot then outlives the stream's attribution: a handle dropped mid-hold
 /// (a crash) forgets its ephemeral local without releasing the frames the wire
 /// still holds for it.
-struct WireView<'a> {
-    shared: &'a SimShared,
+///
+/// [`learn`]: WireView::learn
+struct WireView {
+    shared: Arc<SimShared>,
     wire: Pair,
     owners: Mutex<Pair>,
 }
 
-impl<'a> WireView<'a> {
-    fn new(shared: &'a SimShared, src: SocketAddr, dst: SocketAddr) -> Self {
-        Self { shared, wire: (src, dst), owners: Mutex::new((src, dst)) }
+impl WireView {
+    fn new(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Self {
+        let owners = (shared.owner(src), shared.owner(dst));
+        Self { shared, wire: (src, dst), owners: Mutex::new(owners) }
+    }
+
+    /// The end `addr` of this wire belongs to `owner`: set it if that end still
+    /// stands for itself.
+    fn learn(&self, addr: SocketAddr, owner: SocketAddr) {
+        let mut owners = self.owners.lock().unwrap();
+        if self.wire.0 == addr && owners.0 == addr {
+            owners.0 = owner;
+        }
+        if self.wire.1 == addr && owners.1 == addr {
+            owners.1 = owner;
+        }
     }
 
     /// The owner pair, re-reading an end only while it still stands for itself.
@@ -751,16 +768,20 @@ struct Wire {
     inbound_rx: mpsc::Receiver<Vec<u8>>,
     /// Live fault state for this direction.
     dir: Arc<DirState>,
+    /// The owner pair the direction is judged on.
+    view: Arc<WireView>,
 }
 
 /// Spawn the per-direction delivery actor for `src → dst` and return its
 /// staging sender + inbound receiver + shared fault state.
 fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire {
     let dir = shared.dir(src, dst);
+    let view = Arc::new(WireView::new(shared.clone(), src, dst));
     let (staging_tx, mut staging_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (inbound_tx, inbound_rx) = mpsc::channel::<Vec<u8>>(shared.buffer_cap);
 
     let dir_actor = dir.clone();
+    let view_actor = view.clone();
     let shared_actor = shared.clone();
     tokio::spawn(async move {
         // One delivery actor per direction. Each staged item is assigned a
@@ -773,14 +794,15 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
         // never `recv`s must still yield once after the advance so the woken
         // actor is scheduled; `recv` itself provides that yield.)
         //
-        // Items carry their deadline; a `Delay` fault changes the delay for
-        // *subsequently* stamped items (deadline is computed at staging time).
-        // The delay, the hold and the death are each read fresh at their site —
-        // the wire's own state and the node fault on its owner pair — so a
-        // fault applied between a `send` and this poll governs that frame.
+        // Items carry their deadline, stamped at the poll that takes them off
+        // the staging queue; a `Delay` fault governs the items stamped after
+        // it. The delay, the hold and the death are each read at their site —
+        // the wire's own state and the node fault on the pair the view
+        // resolved once — so a fault applied between a `send` and this poll
+        // governs that frame.
         let mut pending: VecDeque<(tokio::time::Instant, Vec<u8>)> = VecDeque::new();
         let mut last_deadline = tokio::time::Instant::now();
-        let view = WireView::new(&shared_actor, src, dst);
+        let view = view_actor;
         let delay_now = || {
             let wire = dir_actor.delay_ms.load(Ordering::SeqCst);
             let node = view.node_fault().delay_ms.unwrap_or(0);
@@ -920,7 +942,7 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
         }
     });
 
-    Wire { staging_tx, inbound_rx, dir }
+    Wire { staging_tx, inbound_rx, dir, view }
 }
 
 struct SimListener {
@@ -955,29 +977,36 @@ struct SimConnection {
     out: mpsc::UnboundedSender<Vec<u8>>,
     /// Outbound direction state — `send` fails fast once it is cut.
     out_dir: Arc<DirState>,
+    /// The outbound wire's owner pair — `send` fails fast once it is cut.
+    out_view: Arc<WireView>,
     /// Inbound decoded-frame source.
     inbound: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
     /// Inbound direction state — `recv` releases its flow-control window slot
     /// (waking a `block`ed writer) on this direction.
     in_dir: Arc<DirState>,
+    /// The inbound wire's owner pair, taught this end's owner with `out_view`.
+    in_view: Arc<WireView>,
 }
 
 #[async_trait]
 impl ReplicationConnection for SimConnection {
     async fn send(&self, frame: Frame) -> Result<(), SendError> {
-        // A puller names itself on every `PullRequest`: that is what ties this
-        // stream's ephemeral local to the node that owns it, for the partition.
+        // A puller names itself on its opening `PullRequest`: that is what ties
+        // this stream's ephemeral local to the node that owns it — on the
+        // fabric's map and on both of the stream's wires, before either actor
+        // judges a frame on it.
         if let Frame::PullRequest { caller, .. } = &frame {
-            self.shared.attribute(self.local, caller);
+            if let Some(owner) = self.shared.attribute(self.local, caller) {
+                self.out_view.learn(self.local, owner);
+                self.in_view.learn(self.local, owner);
+            }
         }
         // A simulated network error wins over a clean cut; a cut on the wire
         // and a cut on the owner pair fail the send alike.
         if self.out_dir.errored.load(Ordering::SeqCst) {
             return Err(SendError::Io("simulated network error".into()));
         }
-        if self.out_dir.cut.load(Ordering::SeqCst)
-            || self.shared.node_fault(self.local, self.peer).cut
-        {
+        if self.out_dir.cut.load(Ordering::SeqCst) || self.out_view.node_fault().cut {
             return Err(SendError::Closed);
         }
 
@@ -1593,6 +1622,34 @@ mod tests {
         assert_eq!(has_frame(&*client).await, None, "attributed at connect: the frame waits");
         advance_in_100ms_chunks(Duration::from_millis(20)).await;
         assert_eq!(client.recv().await, Some(noop(1)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_handle_dropped_before_the_actor_polls_leaves_its_frame_held() {
+        let net = SimulatedReplicationNetwork::with_delay(1);
+        let (a, b) = (addr(3107), addr(3207));
+        net.declare_endpoint("A", a);
+        net.declare_endpoint("B", b);
+        let listener = net.listen(b).await.unwrap();
+        net.apply_fault(Fault::Stall { src: a, dst: b });
+
+        // Bare fabric: the stream is attributed by its `PullRequest`, and the
+        // handle goes away before the wire actor ever polled — no await between
+        // the send and the drop.
+        let client = net.connect(b).await.unwrap();
+        let server = listener.accept().await.unwrap();
+        client.send(pull_request("A")).await.unwrap();
+        drop(client);
+        // The actor's first poll — and the frame's stamping — happen here, with
+        // the handle already gone; then the transit elapses.
+        sip_clock::testkit::settle().await;
+        advance_in_100ms_chunks(Duration::from_millis(50)).await;
+        assert_eq!(
+            has_frame(&*server).await,
+            None,
+            "a frame on a stall named on the listen pair was delivered: the wire lost its \
+             owner when the handle dropped before the actor's first poll"
+        );
     }
 
     #[tokio::test(start_paused = true)]
