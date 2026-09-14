@@ -189,10 +189,23 @@ impl Dialog {
     /// (mirrors the loadgen mux's `(Call-ID, CSeq)` re-ACK contract). Carries an
     /// optional SDP answer (the delayed-offer case, RFC 3264 §4).
     pub async fn ack_for(&mut self, invite_cseq: u32, sdp: Option<&str>) {
+        let body = sdp.map(|s| ("application/sdp", s.as_bytes().to_vec()));
+        self.ack_for_with_body(invite_cseq, body).await;
+    }
+
+    /// [`ack_for`](Dialog::ack_for) with an explicit media type, for a body this
+    /// ACK carries that is not a session description — an ISUP payload
+    /// (RFC 3372/3204) or a `multipart/mixed` of both. `None` sends a bare ACK.
+    pub async fn ack_for_with_body(&mut self, invite_cseq: u32, body: Option<(&str, Vec<u8>)>) {
+        let (content_type, bytes) = match body {
+            Some((ct, bytes)) => (Some(media_type(ct)), bytes),
+            None => (None, Vec::new()),
+        };
         let opts = GenerateAckFor2xxOpts {
             via: Some(self.agent.via()),
             cseq: Some(invite_cseq),
-            body: sdp.map(str::as_bytes).map(<[u8]>::to_vec).unwrap_or_default(),
+            body: bytes,
+            content_type,
             ..Default::default()
         };
         let ack = generate_ack_for_2xx(None, &self.dialog, &opts);
