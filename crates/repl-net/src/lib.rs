@@ -9,9 +9,10 @@
 //! reliable, ordered, message-granular framed stream (Decision X2).
 //!
 //! ## What is here
-//! - [`Frame`] — the four positional-msgpack replication messages
+//! - [`Frame`] — the five positional-msgpack replication messages
 //!   ([`Frame::PullRequest`], [`Frame::Data`], [`Frame::Noop`],
-//!   [`Frame::ResetToBootstrap`]) plus the [`Op`] / [`Partition`] value enums and
+//!   [`Frame::ResetToBootstrap`], [`Frame::Position`]) plus the [`Op`] /
+//!   [`Partition`] value enums and
 //!   the [`Watermark`] ordering. The two flows (**Reclaim** = `partition=Pri`,
 //!   **Backup** = `partition=Bak`) run on two single-flow sockets and share this
 //!   one frame set (ADR-0014 §Stream topology).

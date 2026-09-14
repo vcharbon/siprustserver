@@ -18,6 +18,25 @@ fi
 rm -rf "$out_dir"
 mkdir -p "$out_dir"
 
+# The lane-compiled configuration every bundle carries; a case about the media
+# plane names the plane its stub ran on, the rest run the default.
+case "$case_path" in
+  *expects-sdp*)
+    media=',
+  "media": "verbatim"'
+    ;;
+  *)
+    media=''
+    ;;
+esac
+cat > "$out_dir/run-config.json" <<JSON
+{
+  "lane": "stub-lane",
+  "clock": "virtual",
+  "route_target": "127.0.0.1:5060"$media
+}
+JSON
+
 case "$case_path" in
   *no-bundle*)
     printf 'refused before any bundle\n' >&2
@@ -51,6 +70,25 @@ JSON
   "status": "ok"
 }
 JSON
-    exit 0
     ;;
 esac
+
+# A case expecting a body leaves the reception the confrontation reads it off:
+# one in-dialog INFO on leg B, attributed to step s9, carrying another document
+# than the one the case stores — or, for a session description, another codec
+# on its one media line.
+case "$case_path" in
+  *expects-body*)
+    mkdir -p "$out_dir/recording"
+    cat > "$out_dir/recording/B.jsonl" <<'JSONL'
+{"seq":1,"dir":"in","at_us":1200,"step":"s9","raw":"INFO sip:uas1@127.0.0.1 SIP/2.0\r\nTo: <sip:+331@h.fr>;tag=b\r\nCSeq: 2 INFO\r\nContent-Type: application/example+xml\r\nContent-Length: 8\r\n\r\n<other/>"}
+JSONL
+    ;;
+  *expects-sdp*)
+    mkdir -p "$out_dir/recording"
+    cat > "$out_dir/recording/B.jsonl" <<'JSONL'
+{"seq":1,"dir":"in","at_us":1200,"step":"s9","raw":"INFO sip:uas1@127.0.0.1 SIP/2.0\r\nTo: <sip:+331@h.fr>;tag=b\r\nCSeq: 2 INFO\r\nContent-Type: application/sdp\r\nContent-Length: 131\r\n\r\nv=0\r\no=- 7 8 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=ptime:20\r\na=sendrecv\r\n"}
+JSONL
+    ;;
+esac
+exit 0

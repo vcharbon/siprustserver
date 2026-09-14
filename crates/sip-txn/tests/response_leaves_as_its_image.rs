@@ -1,4 +1,4 @@
-//! ADR-0029 X3 — a response leaves the transaction layer as its own image,
+//! ADR-0032 X3 — a response leaves the transaction layer as its own image,
 //! byte for byte. A TU that retains `image()` for a §13.3.1.4 or RFC 3262 §3
 //! repeat therefore retains what went on the wire, by construction: there is
 //! one rendering (at parse or at freeze) and two holders of it, never a

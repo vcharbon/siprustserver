@@ -15,7 +15,7 @@
 //! appends a token), so a datagram the scenario never pulls is not in the trace —
 //! the comparison is of logical observations, not raw wire.
 //!
-//! **The retransmission fold (ADR-0029 X3, X5).** A rung of a retransmission
+//! **The retransmission fold (ADR-0032 X3, X5).** A rung of a retransmission
 //! ladder is THE datagram it repeats, byte for byte — so a datagram byte-identical
 //! to the one a UA observed last from the same emitter is a rung, and folds into
 //! the token that datagram already produced. How many rungs a window held open

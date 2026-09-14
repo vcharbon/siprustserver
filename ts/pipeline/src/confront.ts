@@ -3,7 +3,7 @@
  * document and states every difference between what the capture shows and what
  * the run recorded, as pure {@link Probe} values.
  *
- * Three halves, matching what a run leaves behind:
+ * Four parts, matching what a run leaves behind:
  *
  * - **headers** — each recorded reception the interpreter attributed to an
  *   `expect` step is paired, through the step's `observed` coordinate, with the
@@ -13,6 +13,13 @@
  *   `unreferenced` — never an empty difference list. Each probe also carries
  *   the relay input the run drove for that message, so a rule can tell a header
  *   the system dropped from one it was never handed.
+ * - **bodies** — each such reception whose `expect` states a text resource is
+ *   held against that resource's text, both sides folded under the
+ *   expectation's `compare` mode; the expected texts come from the caller,
+ *   keyed by ref, and a ref the caller did not supply is the caller's error.
+ *   Under `sdp` the fold masks the lane-owned fields the expect's `rewrite`
+ *   names only where the run's media mode says the lane rebooked them, and
+ *   on a verbatim run holds the two texts to the same bytes.
  * - **shape** — the verdict's structural failures, restated in the delta-record
  *   vocabulary (a final answered with another status, a datagram nothing
  *   expected — serviced by the leg or not — an expectation nothing satisfied).
@@ -23,13 +30,23 @@
  * seam, and the driver writes the classified rows.
  */
 import type { Bundle, Deviation, Flow } from "@sip/contracts"
-import { Confrontation, Flows, Pivot } from "@sip/contracts"
+import { Body, Confrontation, Flows, Pivot } from "@sip/contracts"
+import { mimeKey } from "./bodies.js"
+import { bodiesEqual } from "./bodyfold.js"
+import { diffSdp, maskOf } from "./sdpfold.js"
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
-import type { HeaderProbe, MsgScope, Probe } from "./probe.js"
+import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
 import { probeSetDelta, scopeText, shapeSides, signature } from "./probe.js"
 import type { WireHeader } from "./wire.js"
-import { canonicalName, headersInOrder, headersInOrderRaw, headerValuesOf, startLineOf } from "./wire.js"
+import {
+  bodyOfRaw,
+  canonicalName,
+  headersInOrder,
+  headersInOrderRaw,
+  headerValuesOf,
+  startLineOf
+} from "./wire.js"
 
 export interface ConfrontInput {
   readonly pivot: Pivot.PivotV3
@@ -38,6 +55,10 @@ export interface ConfrontInput {
   readonly recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
   /** The capture-side flows document; absent for an authored case. */
   readonly flows?: Flows.FlowsDoc
+  /** Resource ref → its text, for every resource body an `expect` step states. */
+  readonly resources?: ReadonlyMap<string, string>
+  /** What the run's media plane did to its session descriptions; absent reads as `rebooked`. */
+  readonly media?: Bundle.MediaMode
 }
 
 /** One probe, at the flow step it was observed at (empty when unattributed). */
@@ -63,7 +84,7 @@ export const confront = (input: ConfrontInput): Confronted => {
   const probes = [
     ...shape,
     ...retransmissionProbes(input.pivot.deviations ?? [], input.recordings),
-    ...suppressCrossFinalHeaders(shape, headers.probes)
+    ...suppressCrossFinal(shape, [...headers.probes, ...bodyProbes(input, steps)])
   ]
   return {
     probes,
@@ -169,9 +190,7 @@ export const recordOf = (
 ): Confrontation.ConfrontationRecord => {
   const delta = probeSetDelta(at.probe)
   const [captured, replayed] =
-    at.probe.kind === "header"
-      ? [at.probe.captured, at.probe.replayed]
-      : shapeSides(at.probe.shapeKind)
+    at.probe.kind === "shape" ? shapeSides(at.probe.shapeKind) : [at.probe.captured, at.probe.replayed]
   return {
     lane: meta.lane,
     capture: meta.capture,
@@ -180,13 +199,8 @@ export const recordOf = (
     step: at.step,
     kind: at.probe.kind,
     signature: signature(at.probe),
-    name: at.probe.kind === "header" ? at.probe.name : "",
-    scope:
-      at.probe.kind === "header"
-        ? scopeText(at.probe.scope)
-        : at.probe.scope === undefined
-          ? ""
-          : scopeText(at.probe.scope),
+    name: at.probe.kind === "header" ? at.probe.name : at.probe.kind === "body" ? at.probe.mediaType : "",
+    scope: at.probe.scope === undefined ? "" : scopeText(at.probe.scope),
     captured,
     replayed,
     inbound: at.probe.kind === "header" && at.probe.inbound,
@@ -255,6 +269,87 @@ const headerProbes = (
     }
   }
   return { probes, compared, unreferenced }
+}
+
+/**
+ * One probe per recorded reception whose `expect` asserts a text resource body
+ * the reception does not carry under the expectation's `compare` mode — one
+ * per differing line key under `sdp`, each side one element per line the
+ * way a header probe carries one per value. A resource body is text unless its
+ * `mode` is `frozen-binary`. A reception with no body at all is confronted
+ * too, as `""`: the assertion stands whether or not anything arrived. A binary
+ * resource asserts presence only, which the interpreter gates, and is not read
+ * here.
+ */
+export const bodyProbes = (
+  input: ConfrontInput,
+  steps: ReadonlyMap<string, Flow.Step>
+): ReadonlyArray<ProbeAt> => {
+  const out: Array<ProbeAt> = []
+  for (const recording of input.recordings.values()) {
+    for (const message of recording) {
+      if (message.dir !== "in" || message.repeat_of !== undefined) continue
+      const step = message.step === undefined ? undefined : steps.get(message.step)
+      if (step === undefined || step.op !== "expect") continue
+      const body = step.msg.body
+      if (body === undefined || !Body.isResourceBody(body) || body.mode === "frozen-binary") continue
+      const scope = scopeOfRaw(message.raw)
+      if (scope === undefined) continue
+      for (const probe of bodyProbe(
+        step.id,
+        body,
+        mediaTypeOf(body, message.raw),
+        scope,
+        expectedText(input.resources, body.ref),
+        bodyOfRaw(message.raw),
+        input.media ?? "rebooked"
+      )) {
+        out.push({ step: step.id, probe })
+      }
+    }
+  }
+  return out
+}
+
+/** The text a resource ref names; a ref the caller did not supply is the caller's error. */
+const expectedText = (resources: ReadonlyMap<string, string> | undefined, ref: string): string => {
+  const text = resources?.get(ref)
+  if (text === undefined) throw new Error(`the document expects body resource ${ref}, which the driver did not supply`)
+  return text
+}
+
+/**
+ * The bare `type/subtype` a body record is keyed by: the expectation's
+ * `content-type`, or the reception's own `Content-Type` where the expectation
+ * states none.
+ */
+const mediaTypeOf = (body: Body.ResourceBody, raw: string): string =>
+  mimeKey(body["content-type"] ?? headerValuesOf(headersInOrderRaw(raw), "Content-Type")[0] ?? "")
+
+const bodyProbe = (
+  step: string,
+  body: Body.ResourceBody,
+  mediaType: string,
+  scope: MsgScope,
+  captured: string,
+  replayed: string,
+  media: Bundle.MediaMode
+): ReadonlyArray<BodyProbe> => {
+  const compare = body.compare ?? "exact"
+  if (compare === "sdp") {
+    return diffSdp(maskOf(body.rewrite, media), captured, replayed).map((d) => ({
+      kind: "body",
+      step,
+      mediaType,
+      scope,
+      compare,
+      captured: d.captured,
+      replayed: d.replayed,
+      sdp: { section: d.section, line: d.line }
+    }))
+  }
+  if (bodiesEqual(compare, captured, replayed)) return []
+  return [{ kind: "body", step, mediaType, scope, compare, captured: [captured], replayed: [replayed] }]
 }
 
 /** One datagram the run put on the wire toward the system, in run order. */
@@ -558,12 +653,12 @@ const arrivedToken = (arrived: Bundle.Arrived): string =>
 
 /**
  * A step that carries a status substitution keeps the substitution as the ONE
- * record of that message: its response-scoped header probes hold two different
- * messages side by side and are dropped.
+ * record of that message: its response-scoped header and body probes hold two
+ * different messages side by side and are dropped.
  */
-const suppressCrossFinalHeaders = (
+const suppressCrossFinal = (
   shape: ReadonlyArray<ProbeAt>,
-  headers: ReadonlyArray<ProbeAt>
+  compared: ReadonlyArray<ProbeAt>
 ): ReadonlyArray<ProbeAt> => {
   const substituted = new Set(
     shape
@@ -575,10 +670,10 @@ const suppressCrossFinalHeaders = (
       )
       .map((p) => p.step)
   )
-  if (substituted.size === 0) return headers
-  return headers.filter(
+  if (substituted.size === 0) return compared
+  return compared.filter(
     (p) =>
-      !(substituted.has(p.step) && p.probe.kind === "header" && p.probe.scope.kind === "response")
+      !(substituted.has(p.step) && p.probe.kind !== "shape" && p.probe.scope.kind === "response")
   )
 }
 
@@ -633,19 +728,19 @@ const observedRepasses = (
       if (message.dir === "in" && start.kind === "response") {
         if (start.status < 200 || start.status >= 300 || cseqMethod.toUpperCase() !== "INVITE") continue
         const toTag = /;\s*tag\s*=\s*([^;]+)/i.exec(headerValuesOf(headers, "To")[0] ?? "")?.[1] ?? ""
-        const key = `${callId} ${cseqNumber} ${toTag.trim()}`
+        const key = `${callId}\0${cseqNumber}\0${toTag.trim()}`
         const list = finals.get(key) ?? []
         list.push(message.at_us)
         finals.set(key, list)
       }
       if (message.dir === "out" && start.kind === "request" && start.method === "ACK") {
-        const key = `${callId} ${cseqNumber}`
+        const key = `${callId}\0${cseqNumber}`
         if (!acks.has(key)) acks.set(key, message.at_us)
       }
     }
     for (const [key, times] of finals) {
-      const [callId = "", cseqNumber = ""] = key.split(" ")
-      const ackAt = acks.get(`${callId} ${cseqNumber}`)
+      const [callId = "", cseqNumber = ""] = key.split("\0")
+      const ackAt = acks.get(`${callId}\0${cseqNumber}`)
       count += times.slice(1).filter((at) => ackAt === undefined || at < ackAt).length
     }
   }

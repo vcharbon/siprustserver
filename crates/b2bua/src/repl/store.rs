@@ -63,6 +63,15 @@ struct CallMeta {
     /// on a locally-originated write (no cross-node skew to correct). The offset
     /// includes one transit latency — acceptable at in-cluster ms scale.
     skew_offset_ms: Option<i64>,
+    /// Whether a forward flush has ever shown this Element an ANSWERED call —
+    /// the authority's own view of it, taken or refused. Set by the forward
+    /// apply path alone; every other write (an acting backup's own mutation, an
+    /// adoption flush) carries it over, so it keeps naming what the AUTHORITY
+    /// published and not what this node did afterwards. Monotone, like the fact
+    /// it records: an answered call never un-answers. The `Delete` guard reads
+    /// it — an authority that never published the answer is ending a call it does
+    /// not know happened (ADR-0031 D3).
+    authority_answered: bool,
 }
 
 /// A [`CallStore`] that replicates mutations through an in-memory backing store
@@ -261,6 +270,27 @@ impl ReplicatingCallStore {
         }
     }
 
+    /// Record that a forward flush has shown this Element the authority's own
+    /// ANSWERED view of the call. Latches: the answer is durable on the body, so
+    /// once the authority has published it, it has it. No-op for a ref we hold no
+    /// meta for.
+    pub fn note_authority_answer(&self, call_ref: &str) {
+        if let Some(m) = self.meta.lock().unwrap().get_mut(call_ref) {
+            m.authority_answered = true;
+        }
+    }
+
+    /// Has the authority ever published an answered view of `call_ref`
+    /// ([`note_authority_answer`])? `false` for an Element no forward flush has
+    /// carried an answer to — including one no forward flush has reached at all.
+    /// The `Delete` guard protects exactly that case: a call answered on this
+    /// Element by somebody else (ADR-0031 D3).
+    ///
+    /// [`note_authority_answer`]: Self::note_authority_answer
+    pub fn authority_answered(&self, call_ref: &str) -> bool {
+        self.meta.lock().unwrap().get(call_ref).is_some_and(|m| m.authority_answered)
+    }
+
     /// Is this call's body past its TTL? (lazy-eviction gate; pure read.)
     fn is_expired(&self, call_ref: &str) -> bool {
         let now = self.clock.now_ms();
@@ -270,19 +300,33 @@ impl ReplicatingCallStore {
 
     /// Lazily evict an expired body + meta on access; returns `true` if evicted.
     ///
+    /// The body is deleted at the `(role, primary)` the META records, never the
+    /// caller's: the meta is keyed by callRef alone, so a read at the other role
+    /// would drop the meta and leave the body behind for ever — unreachable by
+    /// every later expiry check and immortal.
+    ///
     /// The meta's captured `indexes` ride the delete: an expired ghost must free
     /// its `idx:*` entries too (all per-call state released, CLAUDE.md) — the
     /// meta is removed in the same step, so this is the LAST moment the index
     /// keys are recoverable. Leaving them stranded both leaked the index map and
     /// let `resolve_from_replica_index` resolve a takeover to a dead callRef.
-    async fn evict_if_expired(&self, role: PartitionRole, primary: &str, call_ref: &str) -> bool {
+    async fn evict_if_expired(&self, call_ref: &str) -> bool {
         if !self.is_expired(call_ref) {
             return false;
         }
-        let indexes =
-            self.meta.lock().unwrap().remove(call_ref).map(|m| m.meta.indexes).unwrap_or_default();
-        let _ =
-            self.inner.delete_call(role, primary, call_ref, &indexes, &PutOpts::default()).await;
+        let Some(gone) = self.meta.lock().unwrap().remove(call_ref) else {
+            return false;
+        };
+        let _ = self
+            .inner
+            .delete_call(
+                gone.role,
+                &gone.primary,
+                call_ref,
+                &gone.meta.indexes,
+                &PutOpts::default(),
+            )
+            .await;
         true
     }
 
@@ -329,7 +373,7 @@ impl CallStore for ReplicatingCallStore {
         primary: &str,
         call_ref: &str,
     ) -> Result<Option<Arc<[u8]>>, StoreError> {
-        if self.evict_if_expired(role, primary, call_ref).await {
+        if self.evict_if_expired(call_ref).await {
             return Ok(None);
         }
         self.inner.get_call(role, primary, call_ref).await
@@ -353,6 +397,8 @@ impl CallStore for ReplicatingCallStore {
         // just-discharged call (which would trigger a SECOND discharge). A
         // tombstoned ref names a dead call (callRefs are unique), so no legitimate
         // Put is lost.
+        // FIXME(repl): the tombstone refuses a deferred terminal for a ref this node
+        // already discharged, losing the record; yield to a terminal it never saw.
         {
             let now = self.clock.now_ms();
             if let Some(&deleted_at) = self.tombstones.lock().unwrap().get(call_ref) {
@@ -376,35 +422,50 @@ impl CallStore for ReplicatingCallStore {
         // absolute timer deadlines. `None` on a locally-originated write.
         let skew_offset_ms = opts.origin_now_ms.map(|origin| now - origin);
 
-        // Update per-ref metadata atomically (single critical section).
+        // Update per-ref metadata atomically (single critical section). A write
+        // CARRIES OVER every field it does not itself carry: the backup ordinal,
+        // the skew offset and the authority's view of the answer are facts about
+        // the ref that only their own writer may change, and rebuilding the entry
+        // from this write alone would silently clear each of them.
         {
             let mut meta = self.meta.lock().unwrap();
-            // Capture/preserve the backup ordinal: a Forward flush carries it as
-            // `opts.peer`; any other write keeps whatever we already knew.
-            let backup = match (opts.direction, &opts.peer) {
+            let ref_meta =
+                RefMeta { call_gen, call_bgen, body_ttl_ms: ttl_ms, indexes: indexes.to_vec() };
+            // A Forward flush carries the backup ordinal as `opts.peer`.
+            let flushed_backup = match (opts.direction, &opts.peer) {
                 (Some(PropagateDirection::Forward), Some(p)) => Some(p.clone()),
-                _ => meta.get(call_ref).and_then(|m| m.backup.clone()),
+                _ => None,
             };
-            // Preserve a prior skew offset when this write carries none (e.g. a
-            // local refresh of a replica that first arrived with an offset).
-            let skew_offset_ms =
-                skew_offset_ms.or_else(|| meta.get(call_ref).and_then(|m| m.skew_offset_ms));
-            meta.insert(
-                call_ref.to_string(),
-                CallMeta {
-                    meta: RefMeta {
-                        call_gen,
-                        call_bgen,
-                        body_ttl_ms: ttl_ms,
-                        indexes: indexes.to_vec(),
-                    },
-                    role,
-                    primary: primary.to_string(),
-                    backup,
-                    expiry_at_ms,
-                    skew_offset_ms,
-                },
-            );
+            match meta.get_mut(call_ref) {
+                Some(m) => {
+                    m.meta = ref_meta;
+                    m.role = role;
+                    m.primary = primary.to_string();
+                    m.expiry_at_ms = expiry_at_ms;
+                    if flushed_backup.is_some() {
+                        m.backup = flushed_backup;
+                    }
+                    if skew_offset_ms.is_some() {
+                        m.skew_offset_ms = skew_offset_ms;
+                    }
+                }
+                None => {
+                    meta.insert(
+                        call_ref.to_string(),
+                        CallMeta {
+                            meta: ref_meta,
+                            role,
+                            primary: primary.to_string(),
+                            backup: flushed_backup,
+                            expiry_at_ms,
+                            skew_offset_ms,
+                            // Until a forward flush shows one, no answer of the
+                            // authority's own stands on this Element.
+                            authority_answered: false,
+                        },
+                    );
+                }
+            }
         }
 
         // HA path only: non-blocking changelog bump for the pulling peer.

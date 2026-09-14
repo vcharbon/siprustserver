@@ -149,9 +149,10 @@ export const synthesize = (
   const flags: Array<Case.Flag> = []
   /**
    * Resource names are step-index-free: actor plus an ordinal over the messages
-   * that actor SENDS, so renumbering the flow never renames a file on disk.
+   * that actor sends, or over those it expects, so renumbering the flow never
+   * renames a file on disk.
    */
-  const sendOrdinal = new Map<string, number>()
+  const ordinals = new Map<string, number>()
   /** Captured coordinate -> the step index it became, for `repeat_of`. */
   const stepOfMsg = new Map<string, number>()
   /** Step index -> capture time of the LAST copy on its ladder, for the gaps. */
@@ -216,7 +217,7 @@ export const synthesize = (
       o.actor,
       msg,
       emits,
-      slug(o.actor, emits, sendOrdinal),
+      slug(o.actor, emits, ordinals),
       resources,
       flags,
       parts,
@@ -445,15 +446,17 @@ const anchorId = (from: string): Tokens.Anchor => {
 
 /**
  * A message's resource slug: the actor plus an ordinal over the scripted
- * messages it sends. Every send takes an ordinal, whether or not it turns out to
- * carry a body — the counter is the message's identity, not its payload's, so
- * adding a body to a message never renumbers its neighbours' files.
+ * messages it sends (`uas1_3`) or, in its own counter, over the messages it
+ * expects (`uas1_r3`, §8.4). Every message takes an ordinal, whether or not it
+ * turns out to carry a body — the counter is the message's identity, not its
+ * payload's, so adding a body to a message never renumbers its neighbours'
+ * files, and the two counters never name one file.
  */
 const slug = (actor: ActorObs, emits: boolean, ordinals: Map<string, number>): string => {
-  if (!emits) return actor.actorId
-  const n = ordinals.get(actor.actorId) ?? 0
-  ordinals.set(actor.actorId, n + 1)
-  return `${actor.actorId}_${n}`
+  const key = emits ? actor.actorId : `${actor.actorId} expects`
+  const n = ordinals.get(key) ?? 0
+  ordinals.set(key, n + 1)
+  return emits ? `${actor.actorId}_${n}` : `${actor.actorId}_r${n}`
 }
 
 /**

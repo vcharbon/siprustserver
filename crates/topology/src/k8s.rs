@@ -6,13 +6,17 @@
 //! ADR-0011 X7: the k8s watcher is written **once**, here, and consumed by both
 //! the proxy and the b2bua replication engine — neither re-implements discovery.
 //! It watches the EndpointSlices of one headless Service (the worker pool) and
-//! translates *ready* endpoints into the same [`Peer`]/[`MemberDelta`] stream
-//! the [`SimulatedMembership`](crate::SimulatedMembership) and
-//! [`StaticMembership`](crate::StaticMembership) produce, so every consumer is
-//! transport-source agnostic.
+//! translates **every** endpoint in them into the same [`Peer`]/[`MemberDelta`]
+//! stream the [`SimulatedMembership`](crate::SimulatedMembership) and
+//! [`StaticMembership`](crate::StaticMembership) produce, each `Peer` carrying
+//! the endpoint's `ready` and `terminating` conditions. Each consumer applies its
+//! own predicate (ADR-0031 D1): the proxy routes to `ready` members, the
+//! replication supervisor pulls every member present. A condition flip is a
+//! `ConditionsChanged` delta, never a departure or a host move.
 //!
 //! ## Why EndpointSlices (not Pods)
-//! EndpointSlices already encode *readiness* (`conditions.ready`) and a stable
+//! EndpointSlices already encode the endpoint *conditions* (`ready`, `serving`,
+//! `terminating`; the last two need Kubernetes ≥ 1.26) and a stable
 //! `targetRef` back to the owning Pod, and they are the canonical, watch-cheap
 //! source the kube-proxy itself consumes. The `ordinal` we expose is the Pod
 //! name (`targetRef.name`) — which for a StatefulSet is the stable replica
@@ -121,30 +125,44 @@ impl Membership for K8sMembership {
     fn synced(&self) -> bool {
         self.synced.load(std::sync::atomic::Ordering::SeqCst)
     }
+    /// The slice set of the pool holds the watching worker's own endpoint.
+    fn observes_self(&self) -> bool {
+        true
+    }
 }
 
 /// Translate a set of EndpointSlices into the desired [`Peer`] set: one peer per
-/// **ready** endpoint, identified by its Pod (`targetRef.name`, falling back to
-/// `hostname`) at its first address. Endpoints with no ready condition, no
-/// address, or no identity are skipped. Pure — the testable heart of the
-/// informer (a synthetic slice in, the expected peers out; no cluster needed).
+/// Pod **present** in any slice, whatever its conditions, identified by
+/// `targetRef.name` (falling back to `hostname`) at its first address.
+/// `ready` is the explicit `conditions.ready` (absent reads as not ready);
+/// `terminating` is `conditions.terminating` (absent reads as false). `serving`
+/// is not carried: pullable is keyed on presence, routable on `ready`
+/// (ADR-0031 D1). A Pod listed in two slices (a slice rebalance in flight) is one
+/// peer: the conditions are OR-ed across its copies and the first host seen
+/// wins, so a worker that is ready in either slice is ready — slice order is
+/// arbitrary. Endpoints with no address or no identity are skipped. Pure — the
+/// testable heart of the informer (a synthetic slice in, the expected peers out;
+/// no cluster needed).
 fn peers_from_slices<'a>(slices: impl IntoIterator<Item = &'a EndpointSlice>) -> Vec<Peer> {
-    let mut out = Vec::new();
+    let mut out: Vec<Peer> = Vec::new();
     for slice in slices {
         for ep in &slice.endpoints {
-            // Treat only an explicit `ready=true` as ready; `None`/`false` are
-            // terminating/not-yet-ready pods we must not route replication to.
             let ready = ep.conditions.as_ref().and_then(|c| c.ready).unwrap_or(false);
-            if !ready {
-                continue;
-            }
+            let terminating = ep.conditions.as_ref().and_then(|c| c.terminating).unwrap_or(false);
             let Some(host) = ep.addresses.first().cloned() else {
                 continue;
             };
             let ordinal =
                 ep.target_ref.as_ref().and_then(|r| r.name.clone()).or_else(|| ep.hostname.clone());
-            if let Some(ordinal) = ordinal {
-                out.push(Peer::new(ordinal, host));
+            let Some(ordinal) = ordinal else {
+                continue;
+            };
+            match out.iter_mut().find(|p| p.ordinal == ordinal) {
+                Some(seen) => {
+                    seen.ready |= ready;
+                    seen.terminating |= terminating;
+                }
+                None => out.push(Peer::with_conditions(ordinal, host, ready, terminating)),
             }
         }
     }
@@ -158,9 +176,18 @@ mod tests {
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
 
     fn endpoint(pod: &str, ip: &str, ready: Option<bool>) -> Endpoint {
+        endpoint_with(pod, ip, ready, None)
+    }
+
+    fn endpoint_with(
+        pod: &str,
+        ip: &str,
+        ready: Option<bool>,
+        terminating: Option<bool>,
+    ) -> Endpoint {
         Endpoint {
             addresses: vec![ip.to_string()],
-            conditions: Some(EndpointConditions { ready, ..Default::default() }),
+            conditions: Some(EndpointConditions { ready, terminating, ..Default::default() }),
             target_ref: Some(ObjectReference {
                 name: Some(pod.to_string()),
                 kind: Some("Pod".to_string()),
@@ -188,13 +215,40 @@ mod tests {
     }
 
     #[test]
-    fn not_ready_and_unknown_ready_endpoints_are_skipped() {
+    fn not_ready_and_unknown_ready_endpoints_are_emitted_as_not_ready() {
         let s = slice(vec![
             endpoint("b2bua-worker-0", "10.0.0.1", Some(true)),
-            endpoint("b2bua-worker-1", "10.0.0.2", Some(false)), // terminating
-            endpoint("b2bua-worker-2", "10.0.0.3", None),        // unknown
+            endpoint("b2bua-worker-1", "10.0.0.2", Some(false)),
+            endpoint("b2bua-worker-2", "10.0.0.3", None),
         ]);
-        assert_eq!(peers_from_slices([&s]), vec![Peer::new("b2bua-worker-0", "10.0.0.1")]);
+        assert_eq!(
+            peers_from_slices([&s]),
+            vec![
+                Peer::new("b2bua-worker-0", "10.0.0.1"),
+                Peer::new("b2bua-worker-1", "10.0.0.2").not_ready(),
+                Peer::new("b2bua-worker-2", "10.0.0.3").not_ready(),
+            ],
+            "every member present is a peer; only a ready one is routable"
+        );
+    }
+
+    #[test]
+    fn a_terminating_endpoint_stays_a_peer_with_the_flag() {
+        let s = slice(vec![endpoint_with("b2bua-worker-1", "10.0.0.2", Some(false), Some(true))]);
+        assert_eq!(
+            peers_from_slices([&s]),
+            vec![Peer::with_conditions("b2bua-worker-1", "10.0.0.2", false, true)]
+        );
+        // An absent `terminating` condition reads as false.
+        let s = slice(vec![endpoint_with("b2bua-worker-1", "10.0.0.2", Some(true), None)]);
+        assert!(!peers_from_slices([&s])[0].terminating);
+    }
+
+    #[test]
+    fn an_endpoint_without_an_address_is_skipped() {
+        let mut ep = endpoint("b2bua-worker-3", "10.0.0.4", Some(true));
+        ep.addresses.clear();
+        assert!(peers_from_slices([&slice(vec![ep])]).is_empty());
     }
 
     #[test]
@@ -206,6 +260,18 @@ mod tests {
             peers,
             vec![Peer::new("b2bua-worker-0", "10.0.0.1"), Peer::new("b2bua-worker-1", "10.0.0.2"),]
         );
+    }
+
+    #[test]
+    fn a_pod_listed_in_two_slices_is_ready_if_either_copy_is() {
+        // A slice rebalance lists the same Pod twice for a moment; the informer's
+        // cache iterates slices in arbitrary order, so both orders must agree.
+        let ready = slice(vec![endpoint("b2bua-worker-0", "10.0.0.1", Some(true))]);
+        let stale =
+            slice(vec![endpoint_with("b2bua-worker-0", "10.0.0.1", Some(false), Some(true))]);
+        let expected = vec![Peer::with_conditions("b2bua-worker-0", "10.0.0.1", true, true)];
+        assert_eq!(peers_from_slices([&ready, &stale]), expected, "ready copy first");
+        assert_eq!(peers_from_slices([&stale, &ready]), expected, "stale copy first");
     }
 
     #[test]

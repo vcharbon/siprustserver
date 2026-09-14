@@ -98,6 +98,10 @@ fixed mapping, so tiers 1–2 (ADR-0011 X10) are untouched.
 
 ## Decision D4 — the proxy joins the same informer (ADR-0011 X7, finally realized); it still reaches workers by direct Pod IP
 
+> Amended by ADR-0031 D1: a *terminating* member stays a replication peer and
+> stops being a routing target — membership deletion no longer means "gone" for
+> both consumers at once.
+
 The proxy replaces its baked-IP `StaticWorkerRegistry` with a
 `ComposedWorkerRegistry` (membership ⊕ health projection) that wraps the **same**
 `topology::K8sMembership` informer the repl path runs, mapping each ready

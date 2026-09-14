@@ -76,7 +76,7 @@ pub struct StackDialog {
 /// the ACK is matched on what the 2xx said, not on what the dialog records.
 /// While set, the dialog's INVITE server transaction is in the RFC 6026
 /// *Accepted* state, so a new INVITE on either face is glare (§14.1) and gets
-/// 491. The ladder is always armed (ADR-0029 X5), so the marker lives exactly
+/// 491. The ladder is always armed (ADR-0032 X5), so the marker lives exactly
 /// as long as its give-up: the discharging ACK, the give-up, or the call's end
 /// clears it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

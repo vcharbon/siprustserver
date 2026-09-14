@@ -47,7 +47,8 @@ primary+backup mutations (a latent equal-`gen` divergence).
    Apply rules (direction resolved by the partition):
    - **Delete** → apply unconditionally (delete-wins, both directions).
    - **Forward** (primary → backup) Create/Update → apply **always** (follower
-     defers to authority), except a `call_ref` the backup locally deleted.
+     defers to authority), except a `call_ref` the backup locally deleted and,
+     since ADR-0031 D3, a backup regression (refused, lifecycle progress folded).
    - **Reverse** (backup → primary) Create/Update → apply iff `p_in == p_cur && b_in > b_cur`
      (untouched-by-primary since the backup branched, and a genuinely newer backup
      mutation); else keep our own. No local copy → accept.
@@ -157,8 +158,9 @@ watermark collision that capped re-hydration at ~203/3000 — and conflated the
     | **Data** | S→C | `at, op, partition, call_ref, p, b, body_ttl_ms, indexes, body?` | One mutation. `op∈{Put,Delete}` — **Create and Update are merged into one idempotent `Put`** (carries a body); `Delete` carries none (delete-wins). |
     | **Noop** | S→C | `at` | Catch-up edge (first ⇒ ready) + 20s idle keepalive. |
     | **ResetToBootstrap** | S→C | `reason` | `since` fell below the compacted tail → re-bootstrap from `(0,0)`. |
+    | **Position** | C→S | `at` | "I have applied everything up to `at`" — the drain's exit signal only (ADR-0031 D2), never a retention or readiness input. |
 
-    **Removed:** `Ack` (was a no-op retention hint — retention now bounded by
+    **Removed:** `Ack` (ADR-0031 D2 adds a puller position frame for the drain's exit only, never a retention or readiness input) (was a no-op retention hint — retention now bounded by
     time/size, a too-slow puller re-bootstraps via `ResetToBootstrap`); the
     `PullMode` enum + the `Bootstrap`/`Replog` two-request handshake (collapsed into
     the `since==(0,0)` rule); `Deactivate`/tag 5 (already retired — ensure no
@@ -427,6 +429,10 @@ live timer service follow the folded ledger: entries the folded body no longer
 carries are cancelled, the ones it carries are armed through the restore
 hygiene seam. The `(p,b)` vector stays the only gate at the store, and the
 only rule for everything that is not lifecycle progress.
+
+The fold rule is sharpened by [ADR-0031](0031-a-workers-three-ways-out.md)'s "Amendment —
+progress is a chain": the four-step order below is two monotone axes a body must not regress
+on, and the fold adopts both counters.
 
 Not closed here: an answer version that died with the primary before any copy
 held it. No record can carry that fact; closing it needs the answer durable at

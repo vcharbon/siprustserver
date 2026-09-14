@@ -786,7 +786,7 @@ impl Owner {
     /// timer — §17.1.1.2 scopes Timer B to Calling, so an INVITE drawing no
     /// response of any kind is an unanswered hop, not a responding peer, and
     /// gives up at 64·T1 — or, for an initial INVITE, at the owner's tighter
-    /// `invite_first_response_timeout_ms` (default Timer B; ADR-0029 X1). The
+    /// `invite_first_response_timeout_ms` (default Timer B; ADR-0032 X1). The
     /// window `invite_initial_timeout_ms` owns opens at an INVITE's first
     /// provisional, where [`Owner::rearm_invite_bound`] arms it — initial and
     /// in-dialog alike, since a peer that answered 1xx has left Calling; a

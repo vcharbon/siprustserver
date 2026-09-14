@@ -1,4 +1,4 @@
-import type { Bundle, Flow, Flows, Pivot } from "@sip/contracts"
+import type { Body, Bundle, Flow, Flows, Pivot } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
 import { confront, diffHeaders, recordOf, retransmissionProbes, scopeOfRaw, shapeProbes } from "../src/confront.js"
 import type { MsgScope } from "../src/probe.js"
@@ -411,7 +411,279 @@ describe("retransmissionProbes", () => {
   })
 })
 
+describe("an expected body held against the one received", () => {
+  const XML = '<?xml version="1.0" encoding="utf-8"?>\r\n<request><play><prompt><audio url="a.wav"/></prompt></play></request>'
+  const REF = "resources/uas1_r0_0.xml"
+
+  const info = (body: string | undefined): string =>
+    crlf([
+      "INFO sip:callee@127.0.0.1 SIP/2.0",
+      "To: <sip:+331@h.fr>;tag=b",
+      "CSeq: 2 INFO",
+      ...(body === undefined ? [] : ["Content-Type: application/example+xml;charset=utf-8"]),
+      `Content-Length: ${body?.length ?? 0}`
+    ]) + (body ?? "")
+
+  const expecting = (body: Body.Body, op: Flow.Step["op"] = "expect"): Pivot.PivotV3 => ({
+    pivot_version: 3,
+    case: { id: "c", title: "t", family: "f", variant: "repro", origin: "capture", lanes: {} },
+    identities: [],
+    calls: [],
+    endpoints: [],
+    actors: [],
+    legs: [],
+    flow: [step("s9", { leg: "B", op, in_dialog: true, check: "record", msg: { method: "INFO", body } })],
+    timing: { expect_budget_ms: 1000, settle_budget_ms: 1000 }
+  })
+
+  const resource = (compare?: Body.BodyCompare): Body.ResourceBody => ({
+    ref: REF,
+    mode: "frozen",
+    "content-type": "application/example+xml;charset=utf-8",
+    ...(compare === undefined ? {} : { compare })
+  })
+
+  const run = (body: Body.Body, received: string | undefined, resources = new Map([[REF, XML]])) =>
+    confront({
+      pivot: expecting(body),
+      verdict: verdictWith([]),
+      recordings: new Map([
+        ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: info(received) }] as Array<Bundle.RecordedMessage>]
+      ]),
+      resources
+    }).probes.filter((p) => p.probe.kind === "body")
+
+  it("a body that differs is one probe carrying both texts, under the media type and scope", () => {
+    const wrapped = XML.replace("<request>", "<request><wrapper>").replace("</request>", "</wrapper></request>")
+    const probes = run(resource(), wrapped)
+    expect(probes).toHaveLength(1)
+    const probe = probes[0]!.probe
+    expect(probe.kind === "body" && probe).toMatchObject({
+      step: "s9",
+      mediaType: "application/example+xml",
+      compare: "exact",
+      captured: [XML],
+      replayed: [wrapped]
+    })
+    expect(signature(probe)).toBe("body:application/example+xml:request:INFO:in-dialog")
+  })
+
+  it("an equal body produces nothing", () => {
+    expect(run(resource(), XML)).toEqual([])
+  })
+
+  it("`xml` tolerates a declaration and whitespace between tags, and nothing else", () => {
+    const reflowed = "<request>\r\n  <play>\r\n    <prompt><audio url=\"a.wav\"/></prompt>\r\n  </play>\r\n</request>\r\n"
+    expect(run(resource("xml"), reflowed)).toEqual([])
+    expect(run(resource(), reflowed)).toHaveLength(1)
+    const retargeted = reflowed.replace("a.wav", "b.wav")
+    const probes = run(resource("xml"), retargeted)
+    expect(probes).toHaveLength(1)
+    // The record keeps both sides as the wire carried them: the fold decides, it does not edit.
+    expect(probes[0]!.probe.kind === "body" && probes[0]!.probe.replayed).toEqual([retargeted])
+  })
+
+  it("a reception with no body at all is confronted, as the empty text", () => {
+    const probes = run(resource(), undefined)
+    expect(probes).toHaveLength(1)
+    expect(probes[0]!.probe.kind === "body" && probes[0]!.probe.replayed).toEqual([""])
+  })
+
+  it("a resource with no `mode` is text, and is held against the file", () => {
+    const { mode: _, ...modeless } = resource()
+    expect(run(modeless, XML)).toEqual([])
+    const probes = run(modeless, XML.replace("a.wav", "b.wav"))
+    expect(probes).toHaveLength(1)
+    expect(probes[0]!.probe.kind === "body" && probes[0]!.probe.compare).toBe("exact")
+  })
+
+  it("an expectation stating no content type is keyed by the reception's own", () => {
+    const { "content-type": _, ...untyped } = resource()
+    const probes = run(untyped, XML.replace("a.wav", "b.wav"))
+    expect(probes).toHaveLength(1)
+    expect(signature(probes[0]!.probe)).toBe("body:application/example+xml:request:INFO:in-dialog")
+  })
+
+  it("a shape, a binary resource, or a send is not read here", () => {
+    expect(run({ mode: "absent" }, XML)).toEqual([])
+    expect(run({ ...resource(), mode: "frozen-binary" }, "not the file", new Map())).toEqual([])
+    const sent = confront({
+      pivot: expecting(resource(), "send"),
+      verdict: verdictWith([]),
+      recordings: new Map([
+        ["B", [{ seq: 1, dir: "out", at_us: 1200, step: "s9", raw: info("not the file") }] as Array<Bundle.RecordedMessage>]
+      ]),
+      resources: new Map()
+    })
+    expect(sent.probes.filter((p) => p.probe.kind === "body")).toEqual([])
+  })
+
+  describe("compared as a session description", () => {
+    const SDP_REF = "resources/uas1_r0_0.sdp"
+    const OFFER =
+      "v=0\r\no=- 1 2 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\n" +
+      "m=audio 6000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=ptime:20\r\na=sendrecv\r\n"
+    const described: Body.ResourceBody = { ref: SDP_REF, rewrite: ["c=addr", "m=port"], compare: "sdp" }
+    const sdpInfo = (body: string | undefined): string =>
+      crlf([
+        "INFO sip:callee@127.0.0.1 SIP/2.0",
+        "To: <sip:+331@h.fr>;tag=b",
+        "CSeq: 2 INFO",
+        ...(body === undefined ? [] : ["Content-Type: application/sdp"]),
+        `Content-Length: ${body?.length ?? 0}`
+      ]) + (body ?? "")
+    const runSdp = (received: string | undefined, media?: Bundle.MediaMode) =>
+      confront({
+        pivot: expecting(described),
+        verdict: verdictWith([]),
+        recordings: new Map([
+          ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: sdpInfo(received) }] as Array<Bundle.RecordedMessage>]
+        ]),
+        resources: new Map([[SDP_REF, OFFER]]),
+        ...(media === undefined ? {} : { media })
+      }).probes.filter((p) => p.probe.kind === "body")
+
+    it("one probe per differing line key, signed by section and key, the media type kept as the name", () => {
+      const probes = runSdp(OFFER.replace("a=ptime:20", "a=ptime:30"))
+      expect(probes).toHaveLength(1)
+      const probe = probes[0]!.probe
+      expect(probe.kind === "body" && probe).toMatchObject({
+        step: "s9",
+        mediaType: "application/sdp",
+        compare: "sdp",
+        captured: ["a=ptime:20"],
+        replayed: ["a=ptime:30"],
+        sdp: { section: "m0", line: "a=ptime" }
+      })
+      expect(signature(probe)).toBe("body:sdp:m0:a=ptime:request:INFO:in-dialog")
+    })
+
+    it("carries one element per verbatim line of the key, the way a header record carries one per value", () => {
+      const probes = runSdp(OFFER.replace("a=rtpmap:8 PCMA/8000", "a=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000"))
+      expect(probes).toHaveLength(1)
+      const at = probes[0]!
+      expect(at.probe.kind === "body" && at.probe).toMatchObject({
+        captured: ["a=rtpmap:8 PCMA/8000"],
+        replayed: ["a=rtpmap:8 PCMA/8000", "a=rtpmap:101 telephone-event/8000"]
+      })
+      const record = recordOf({ lane: "l", capture: "c", case: "k", run: 0 }, at, { class: "unlisted", rule: "", ticket: "" })
+      expect(record.captured).toEqual(["a=rtpmap:8 PCMA/8000"])
+      expect(record.replayed).toEqual(["a=rtpmap:8 PCMA/8000", "a=rtpmap:101 telephone-event/8000"])
+    })
+
+    it("equal under the mask produces nothing; the mask reads the tokens only where the run rebooked", () => {
+      const rebooked = OFFER.replace("c=IN IP4 192.0.2.10", "c=IN IP4 127.0.0.2").replace("m=audio 6000", "m=audio 40000")
+      expect(runSdp(OFFER.replace("o=- 1 2", "o=- 9 9"))).toEqual([])
+      expect(runSdp(rebooked)).toEqual([])
+      expect(runSdp(rebooked, "rebooked")).toEqual([])
+      expect(runSdp(rebooked, "verbatim").map((p) => signature(p.probe))).toEqual([
+        "body:sdp:session:c=:request:INFO:in-dialog",
+        "body:sdp:m0:m=:request:INFO:in-dialog"
+      ])
+    })
+
+    it("on a verbatim run the same structure in other bytes is one `document:bytes` row", () => {
+      const bareLf = OFFER.replace(/\r\n/g, "\n")
+      expect(runSdp(bareLf, "rebooked")).toEqual([])
+      const probes = runSdp(bareLf, "verbatim")
+      expect(probes.map((p) => signature(p.probe))).toEqual(["body:sdp:document:bytes:request:INFO:in-dialog"])
+      expect(probes[0]!.probe.kind === "body" && probes[0]!.probe).toMatchObject({ captured: [OFFER], replayed: [bareLf] })
+    })
+
+    it("a body the system dropped whole is one `document` row, the captured text against the empty one", () => {
+      const probes = runSdp(undefined)
+      expect(probes.map((p) => signature(p.probe))).toEqual(["body:sdp:document:sdp:request:INFO:in-dialog"])
+      expect(probes[0]!.probe.kind === "body" && probes[0]!.probe).toMatchObject({ captured: [OFFER], replayed: [""] })
+    })
+  })
+
+  it("a status-substituted step keeps the substitution alone: its body probe is dropped with its header probes", () => {
+    const answer = (status: number, body: string): string =>
+      crlf([
+        `SIP/2.0 ${status} Reply`,
+        "From: <sip:+332@h.fr>;tag=a",
+        "To: <sip:+331@h.fr>;tag=b",
+        "Call-ID: cid-1",
+        "CSeq: 2 INFO",
+        "Content-Type: application/example+xml",
+        `Content-Length: ${body.length}`
+      ]) + body
+    const flow = [
+      step("s9", {
+        leg: "B",
+        in_dialog: true,
+        check: "record",
+        observed: { leg: 0, msg: 0, at_us: 0 },
+        msg: { "cseq-method": "INFO", status: 200, body: resource() }
+      })
+    ]
+    const confronted = confront({
+      pivot: { ...expecting(resource()), flow },
+      verdict: verdictWith([
+        {
+          failure: "unmatched-datagram",
+          step: "s9",
+          leg: "B",
+          gated_on: { kind: "response", status: 200, cseq_method: "INFO" },
+          reason: "gated on response 200; 481 arrived",
+          arrived: { kind: "response", status: 481, reason: "Reply", cseq_method: "INFO", cseq: 2 }
+        }
+      ]),
+      recordings: new Map([
+        ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: answer(481, "<other/>") }] as Array<Bundle.RecordedMessage>]
+      ]),
+      flows: { schema: 5, legs: [{ msgs: [{ raw: answer(200, XML) }] }] } as unknown as Flows.FlowsDoc,
+      resources: new Map([[REF, XML]])
+    })
+    expect(confronted.probes.map((p) => signature(p.probe))).toEqual([
+      "shape:status-substitution:200->481:response:481:INFO"
+    ])
+  })
+
+  it("a resource the driver did not supply is the driver's error, named by ref", () => {
+    expect(() => run(resource(), XML, new Map())).toThrow(REF)
+  })
+})
+
 describe("recordOf", () => {
+  it("a body probe lands its media type as the name and one text a side", () => {
+    const record = recordOf(
+      { lane: "fake", capture: "cap.pcap.gz", case: "cap-case1", run: 0 },
+      {
+        step: "s9",
+        probe: {
+          kind: "body",
+          step: "s9",
+          mediaType: "application/example+xml",
+          scope: { kind: "request", method: "INFO", inDialog: true },
+          compare: "exact",
+          captured: ["<a/>"],
+          replayed: ["<b><a/></b>"]
+        }
+      },
+      { class: "unlisted", rule: "", ticket: "" }
+    )
+    expect(record).toEqual({
+      lane: "fake",
+      capture: "cap.pcap.gz",
+      case: "cap-case1",
+      run: 0,
+      step: "s9",
+      kind: "body",
+      signature: "body:application/example+xml:request:INFO:in-dialog",
+      name: "application/example+xml",
+      scope: "request:INFO:in-dialog",
+      captured: ["<a/>"],
+      replayed: ["<b><a/></b>"],
+      inbound: false,
+      added: [],
+      removed: [],
+      class: "unlisted",
+      rule: "",
+      ticket: ""
+    })
+  })
+
   it("fills every key of the flat record", () => {
     const record = recordOf(
       { lane: "fake", capture: "cap.pcap.gz", case: "cap-case1", run: 0 },

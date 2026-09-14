@@ -2,7 +2,7 @@
  * A whole campaign, end to end against stub binaries: both cell shapes into one
  * run dir, one `campaign.json`, and an exit code that is the verdict.
  */
-import { Campaign, CellHits, E2e } from "@sip/contracts"
+import { Campaign, CellHits, Confrontation, E2e } from "@sip/contracts"
 import { Reclassifier } from "@sip/pipeline"
 import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
@@ -10,9 +10,19 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { exitCodeOf, runCampaign, summarize, type CampaignRun } from "../src/campaign.js"
-import { CAMPAIGN_INDEX, ERROR_FILE, RULE_HITS_FILE, SKIP_FILE, SPECS_DIR } from "../src/layout.js"
+import { CAMPAIGN_INDEX, CONFRONTATION_FILE, ERROR_FILE, RULE_HITS_FILE, SKIP_FILE, SPECS_DIR } from "../src/layout.js"
 import { LanePresets, LaneUnknown } from "../src/lanes.js"
-import { caseNamed, caseWithLanes, pivotDocument, rig, runDir, stubTests, type RigOptions } from "./harness.js"
+import {
+  caseExpectingBody,
+  caseExpectingSdp,
+  caseNamed,
+  caseWithLanes,
+  pivotDocument,
+  rig,
+  runDir,
+  stubTests,
+  type RigOptions
+} from "./harness.js"
 
 const CASE = pivotDocument("transparent-defect.v3.json")
 
@@ -117,6 +127,51 @@ describe("a red cell", () => {
     expect(run.index.cells[0]!.error).toBeUndefined()
     expect(exitCodeOf(run)).toBe(1)
     expect(summarize(run)).toContain("FAILED")
+  })
+})
+
+describe("an expected body", () => {
+  it("is read from the case directory and confronted with the reception", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const stored = "<request><play/></request>"
+    const run = await campaign([replayCell({ case: caseExpectingBody(cases, stored) })])
+    const cell = run.index.cells[0]!
+    expect(cell.error).toBeUndefined()
+    const records = Confrontation.parseConfrontationLines(
+      fs.readFileSync(path.join(run.dir, cell.dir, CONFRONTATION_FILE), "utf8")
+    )
+    expect(records.filter((r) => r.kind === "body")).toMatchObject([
+      {
+        step: "s9",
+        signature: "body:application/example+xml:request:INFO:in-dialog",
+        name: "application/example+xml",
+        captured: [stored],
+        replayed: ["<other/>"]
+      }
+    ])
+  })
+
+  it("compared as a session description names the differing media line, lane-owned fields aside", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const stored =
+      "v=0\r\no=- 1 2 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\n" +
+      "m=audio 6000 RTP/AVP 8\r\na=sendrecv\r\na=rtpmap:8 PCMA/8000\r\na=ptime:20\r\n"
+    const run = await campaign([replayCell({ case: caseExpectingSdp(cases, stored) })])
+    const cell = run.index.cells[0]!
+    expect(cell.error).toBeUndefined()
+    const records = Confrontation.parseConfrontationLines(
+      fs.readFileSync(path.join(run.dir, cell.dir, CONFRONTATION_FILE), "utf8")
+    )
+    // The stub ran verbatim, so the `c=` address it changed is a row beside
+    // the codec; `o=` and the attribute order are not.
+    expect(records.filter((r) => r.kind === "body").map((r) => [r.signature, r.captured, r.replayed])).toEqual([
+      ["body:sdp:session:c=:request:INFO:in-dialog", ["c=IN IP4 192.0.2.10"], ["c=IN IP4 10.0.0.1"]],
+      ["body:sdp:m0:m=:request:INFO:in-dialog", ["m=audio 6000 RTP/AVP 8"], ["m=audio 4000 RTP/AVP 0"]],
+      ["body:sdp:m0:a=rtpmap:request:INFO:in-dialog", ["a=rtpmap:8 PCMA/8000"], ["a=rtpmap:0 PCMU/8000"]]
+    ])
+    expect(records.filter((r) => r.kind === "body").every((r) => r.name === "application/sdp")).toBe(true)
   })
 })
 

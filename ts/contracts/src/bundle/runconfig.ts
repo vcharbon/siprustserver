@@ -24,6 +24,18 @@ export type ClockMode = typeof ClockMode.Type
 /** Whether this clock may compress a `compressible` dwell. */
 export const clockCompresses = (clock: ClockMode): boolean => clock === "virtual"
 
+/**
+ * What the run's media plane did to the session descriptions it sent (§8.3):
+ * `rebooked` wrote the lane's address and ports into every body stating the
+ * tokens; `verbatim` left every session description as stored. Absent reads as
+ * `rebooked`, which is what a bundle predating the field ran.
+ */
+export const MediaMode = Schema.Literals(["rebooked", "verbatim"])
+export type MediaMode = typeof MediaMode.Type
+
+/** The media mode a run configuration states, the absent one read as `rebooked`. */
+export const mediaModeOf = (config: RunConfig): MediaMode => config.media ?? "rebooked"
+
 /** What a check class costs on one run (`PCAP2TEST_PIVOT_V3.md` §9.1). */
 export const CheckDisposition = Schema.Literals(["gating", "informative"])
 export type CheckDisposition = typeof CheckDisposition.Type
@@ -45,7 +57,9 @@ export const RunConfig = Schema.Struct({
   endpoint_addresses: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   check_scoping: Schema.optionalKey(Schema.Record(CheckClass, CheckDisposition)),
   /** Defects this lane's SUT is known to produce; the gate each names stands down. */
-  known_bugs: Schema.optionalKey(Schema.Array(KnownBug))
+  known_bugs: Schema.optionalKey(Schema.Array(KnownBug)),
+  /** What the media plane did to this run's session descriptions; the interpreter states it from the lane's booking. */
+  media: Schema.optionalKey(MediaMode)
 })
 export interface RunConfig extends Schema.Schema.Type<typeof RunConfig> {}
 

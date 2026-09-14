@@ -95,7 +95,7 @@ const composesOnArrival = (ack: StepDraft): boolean => {
  * The wait before each of `final`'s `rungs` repeats, rung 1 first: the gaps
  * the document states where the capture measured them (§6.9), otherwise the
  * RFC's schedule for the final's class — the one table `sip-retransmit` walks
- * (ADR-0029 X1), read as data rather than walked again here. A count longer
+ * (ADR-0032 X1), read as data rather than walked again here. A count longer
  * than either list repeats the last gap, as `Schedule::exact` does past its
  * list: steady pacing rather than a class the step never chose.
  */

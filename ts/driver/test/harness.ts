@@ -64,6 +64,64 @@ export const caseWithLanes = (
   return target
 }
 
+/**
+ * A case DIRECTORY whose document expects an in-dialog INFO on leg B carrying
+ * the stored `resources/uas1_r0_0.xml` by content — the one shape a resource
+ * ref on an expect takes — beside the file it references. The stub interpreter
+ * leaves the reception the confrontation reads that expectation off.
+ */
+export const caseExpectingBody = (dir: string, text: string): string => {
+  const caseDir = path.join(dir, "expects-body")
+  fs.mkdirSync(path.join(caseDir, "resources"), { recursive: true })
+  const document = JSON.parse(fs.readFileSync(pivotDocument("transparent-defect.v3.json"), "utf8")) as {
+    flow: Array<unknown>
+  }
+  document.flow.push({
+    id: "s9",
+    leg: "B",
+    op: "expect",
+    check: "record",
+    in_dialog: true,
+    msg: {
+      method: "INFO",
+      body: { ref: "resources/uas1_r0_0.xml", mode: "frozen", "content-type": "application/example+xml" }
+    },
+    delay: { ms: 0, from: "step:s8", compressible: true, timer_linked: false }
+  })
+  fs.writeFileSync(path.join(caseDir, "scenario.json"), JSON.stringify(document))
+  fs.writeFileSync(path.join(caseDir, "resources", "uas1_r0_0.xml"), text)
+  return caseDir
+}
+
+/**
+ * A case DIRECTORY whose document expects an in-dialog INFO on leg B carrying
+ * the stored `resources/uas1_r0_0.sdp` compared as a session description,
+ * beside the file. The stub interpreter leaves a reception whose one media
+ * line carries another codec, on a verbatim media plane.
+ */
+export const caseExpectingSdp = (dir: string, text: string): string => {
+  const caseDir = path.join(dir, "expects-sdp")
+  fs.mkdirSync(path.join(caseDir, "resources"), { recursive: true })
+  const document = JSON.parse(fs.readFileSync(pivotDocument("transparent-defect.v3.json"), "utf8")) as {
+    flow: Array<unknown>
+  }
+  document.flow.push({
+    id: "s9",
+    leg: "B",
+    op: "expect",
+    check: "record",
+    in_dialog: true,
+    msg: {
+      method: "INFO",
+      body: { ref: "resources/uas1_r0_0.sdp", rewrite: ["c=addr", "m=port"], compare: "sdp" }
+    },
+    delay: { ms: 0, from: "step:s8", compressible: true, timer_linked: false }
+  })
+  fs.writeFileSync(path.join(caseDir, "scenario.json"), JSON.stringify(document))
+  fs.writeFileSync(path.join(caseDir, "resources", "uas1_r0_0.sdp"), text)
+  return caseDir
+}
+
 /** The stub lane every replay cell in these tests runs on. */
 export const STUB_LANE: LaneBlock = { kind: "stub", egress_endpoint: "e1" }
 

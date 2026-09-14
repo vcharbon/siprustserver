@@ -223,7 +223,7 @@ impl TransactionLayer {
     /// return the datagram that left. The bytes are `msg.image()` verbatim
     /// unless the To-tag had to be bound to the transaction's (`bind_to_tag`),
     /// so a TU that retains an image for a repeat retains what is returned
-    /// here (ADR-0029 X3).
+    /// here (ADR-0032 X3).
     pub async fn send_response(
         &self,
         msg: SipResponse,

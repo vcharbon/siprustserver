@@ -1786,11 +1786,11 @@ fn callee_ruri(dialled: &str, bob_port: u16) -> String {
 /// It skips loudly when no case library is configured.
 #[tokio::test(start_paused = true)]
 async fn rung_three_a_forked_reliable_provisional_draft_prack_s_each_early_dialog() {
-    let Some(case) = case_dir("san-01-prack-managed-by-as-forking") else {
+    let Some(case) = case_dir("forked-100rel-prack-per-early-dialog") else {
         eprintln!("SKIPPED: set PIVOT_CASE_DIRS to an authored case library");
         return;
     };
-    let scene = reliable_provisional_scene("pivot-san-01").await;
+    let scene = reliable_provisional_scene("pivot-forked-100rel").await;
     let (outcome, dir) = replay_case(&scene, case, BTreeMap::new()).await;
     assert_bundle_is_complete(&outcome, &dir);
     for step in (1..=18).map(|n| format!("s{n}")) {

@@ -13,6 +13,17 @@
 //! - `Removed` → `Parked`: interrupt both flows, **retain W forever** keyed by
 //!   `(ordinal, flow)`.
 //! - `AddressChanged` → reconnect both flows to the new addr from the retained W.
+//! - `ConditionsChanged` → nothing moves: a member is **pulled while it is in the
+//!   snapshot at all**, ready or not, terminating or not (ADR-0031 D1). Only
+//!   leaving the snapshot parks it. A peer pulled while not ready is logged once
+//!   and counted on the `b2bua_repl_peers_pulled_not_ready` gauge.
+//!
+//! Every snapshot is also read for this node's **own** endpoint before self is
+//! filtered out of the desired set: once seen routable, its disappearance is the
+//! node's withdrawal from routing (ADR-0031 D6, [`SelfEndpoint`]), exposed as
+//! [`is_withdrawn`](ReplicationSupervisor::is_withdrawn) and on a watch the core
+//! turns into the `Draining` latch. Only a source that shows a member itself
+//! ([`Membership::observes_self`]) is read this way.
 //!
 //! ## Boot order: Reclaim first, Backup deferred
 //! A rebooting node prioritises reclaiming **its own** partition over taking on
@@ -49,6 +60,7 @@ use tokio::sync::{mpsc, watch};
 use topology::{Membership, Peer};
 
 use super::puller::{Puller, PullerConfig, PullerStatus};
+use super::self_endpoint::{SelfEndpoint, SelfObserver};
 use super::ReplicatingCallStore;
 
 /// Default cadence of the supervisor's belt-and-suspenders snapshot reconcile
@@ -177,11 +189,15 @@ struct PeerEntry {
     /// whose host moved (or whose flows are not running) is (re)spawned. `None`
     /// until a puller has been spawned for this ordinal.
     host: Option<String>,
+    /// The peer's `ready` condition as last reconciled. Not a drift signal — a
+    /// condition flip never respawns a flow — only what [`PeerLink::Kept`], the
+    /// transition log and the pulled-not-ready gauge read.
+    ready: bool,
 }
 
 impl PeerEntry {
     fn cold() -> Self {
-        Self { reclaim: FlowState::cold(), backup: FlowState::cold(), host: None }
+        Self { reclaim: FlowState::cold(), backup: FlowState::cold(), host: None, ready: true }
     }
 
     fn flow(&self, partition: Partition) -> &FlowState {
@@ -204,6 +220,22 @@ impl PeerEntry {
     }
 }
 
+/// This node's link state toward one peer, as the supervisor holds it —
+/// read-only introspection ([`peer_link`](ReplicationSupervisor::peer_link)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerLink {
+    /// The ordinal was never in this node's membership view.
+    Absent,
+    /// The peer left the membership set: both flows are interrupted, the
+    /// retained watermarks survive for a warm resume.
+    Parked,
+    /// The Reclaim flow's puller is running toward a ready peer.
+    Active,
+    /// The Reclaim flow's puller is running toward a member that is present in
+    /// the snapshot but not `ready` — pulled on presence alone (ADR-0031 D1).
+    Kept,
+}
+
 /// Ties pullers to topology; owns the per-`(ordinal, flow)` retained watermarks.
 #[derive(Clone)]
 pub struct ReplicationSupervisor {
@@ -212,6 +244,8 @@ pub struct ReplicationSupervisor {
 
 struct SupervisorInner {
     self_ordinal: String,
+    /// This node's own endpoint as the membership shows it (ADR-0031 D6).
+    self_endpoint: SelfObserver,
     network: Arc<dyn ReplicationNetwork>,
     store: ReplicatingCallStore,
     resolve: AddrResolver,
@@ -290,8 +324,10 @@ impl ReplicationSupervisor {
         config: PullerConfig,
         metrics: crate::metrics::B2buaMetrics,
     ) -> Self {
+        let self_ordinal = self_ordinal.into();
         Self {
             inner: Arc::new(SupervisorInner {
+                self_endpoint: SelfObserver::new(self_ordinal.clone()),
                 self_ordinal: self_ordinal.into(),
                 network,
                 store,
@@ -328,6 +364,9 @@ impl ReplicationSupervisor {
     /// handling (ADR-0012 D1/D2).
     pub fn start(&self, membership: Arc<dyn Membership>) {
         *self.inner.membership.lock().unwrap() = Some(membership.clone());
+        if membership.observes_self() {
+            self.inner.self_endpoint.enable();
+        }
         let this = self.clone();
         let period = self.inner.reconcile_period;
         let handle =
@@ -372,10 +411,13 @@ impl ReplicationSupervisor {
                 return;
             }
             self.sync();
+            // Only a ready member gates the latch (`desired_ordinals`): a member
+            // that is present but not ready is pulled, never waited on.
             let (ready, receivers) = {
                 let peers = self.inner.peers.lock().unwrap();
                 let ready = desired
                     .iter()
+                    .filter(|p| p.ready)
                     .all(|p| peers.get(&p.ordinal).is_some_and(|e| e.reclaim.ready()));
                 let receivers: Vec<watch::Receiver<PullerStatus>> = desired
                     .iter()
@@ -399,13 +441,16 @@ impl ReplicationSupervisor {
     /// running** or whose **host moved** is (re)spawned; once `backup_enabled` is
     /// latched the Backup flow is spawned/maintained the same way. A running
     /// puller whose ordinal is no longer desired is parked (both flows). An
-    /// unchanged set produces no work.
+    /// unchanged set produces no work. Every member of the snapshot is desired,
+    /// whatever its `ready` / `terminating` conditions (ADR-0031 D1): a condition
+    /// flip is not drift, and only leaving the snapshot parks a peer.
     ///
     /// The whole reconcile holds the `peers` lock — including the `tokio::spawn`
     /// of each puller (no await points) — so a concurrent caller (the periodic
     /// loop vs. the backup gate) cannot interleave check-then-spawn and
     /// double-spawn a flow.
     fn reconcile_from_snapshot(&self, snapshot: Vec<Peer>) {
+        self.observe_self(&snapshot);
         let desired: Vec<Peer> =
             snapshot.into_iter().filter(|p| p.ordinal != self.inner.self_ordinal).collect();
         let backup_enabled = self.inner.backup_enabled.load(Ordering::SeqCst);
@@ -416,6 +461,25 @@ impl ReplicationSupervisor {
             let entry = peers.entry(peer.ordinal.clone()).or_insert_with(PeerEntry::cold);
             let drift = entry.host.as_deref() != Some(peer.host.as_str());
             entry.host = Some(peer.host.clone());
+            if entry.ready != peer.ready {
+                entry.ready = peer.ready;
+                if peer.ready {
+                    tracing::info!(
+                        node = observe::node(),
+                        peer = %peer.ordinal,
+                        host = %peer.host,
+                        "replication peer ready again"
+                    );
+                } else {
+                    tracing::info!(
+                        node = observe::node(),
+                        peer = %peer.ordinal,
+                        host = %peer.host,
+                        terminating = peer.terminating,
+                        "replication peer kept on presence alone (not ready)"
+                    );
+                }
+            }
 
             // Reclaim always; Backup only once the gate has latched.
             if entry.reclaim.status_rx.is_none() || drift {
@@ -464,6 +528,33 @@ impl ReplicationSupervisor {
                 entry.park();
             }
         }
+
+        let pulled_not_ready =
+            desired.iter().filter(|p| !p.ready).count().try_into().unwrap_or(u64::MAX);
+        self.inner.metrics.set_repl_peers_pulled_not_ready(pulled_not_ready);
+    }
+
+    /// Read this node's own endpoint out of `snapshot` (ADR-0031 D6). A
+    /// withdrawal raises the `b2bua_withdrawn_running` gauge; the readiness
+    /// latch follows through [`self_endpoint`](Self::self_endpoint).
+    fn observe_self(&self, snapshot: &[Peer]) {
+        let synced = self.membership_synced();
+        if let Some(SelfEndpoint::Withdrawn(_)) = self.inner.self_endpoint.observe(snapshot, synced)
+        {
+            self.inner.metrics.set_withdrawn_running(true);
+        }
+    }
+
+    /// Whether this node has observed its own endpoint withdrawn from routing
+    /// (ADR-0031 D6): nothing new is routed here. Sticky. Always `false` on a
+    /// membership that does not show the node itself (static list).
+    pub fn is_withdrawn(&self) -> bool {
+        self.inner.self_endpoint.is_withdrawn()
+    }
+
+    /// The node's own endpoint state, as a watch that wakes on each transition.
+    pub fn self_endpoint(&self) -> watch::Receiver<SelfEndpoint> {
+        self.inner.self_endpoint.subscribe()
     }
 
     /// (Re)spawn one flow's puller into `flow`, seeded from its retained W. Cancels
@@ -542,37 +633,41 @@ impl ReplicationSupervisor {
         self.inner.peers.lock().unwrap().get(peer).map(|e| e.reclaim.current).unwrap_or(false)
     }
 
-    /// The set of peer ordinals this node is currently responsible for (the
-    /// desired membership snapshot minus self). `None` until membership is wired
-    /// by [`start`](Self::start) — pre-start no pullers are spawned, so the
-    /// retained map is empty and the gates' `None`-means-no-filter is harmless.
+    /// The peer ordinals whose Reclaim flow gates this node's readiness: the
+    /// **ready** members of the membership snapshot, minus self. `None` until
+    /// membership is wired by [`start`](Self::start) — pre-start no pullers are
+    /// spawned, so the retained map is empty and the gates' `None`-means-no-filter
+    /// is harmless.
     ///
     /// The readiness gates ([`all_current`](Self::all_current) /
     /// [`all_bootstrapped`](Self::all_bootstrapped)) filter the retained `peers`
-    /// map through this so a peer that has **left** the desired membership cannot
-    /// pin readiness NotReady. The departed entry is **retained** (its watermark
-    /// survives for a warm resume if the ordinal returns, X5) but it is no longer
-    /// our responsibility — exactly as the backup-deferral gate already treats
-    /// `desired` (`run_backup_gate`). Without this filter a cold double-restart
-    /// that briefly sees a peer at a **stale** IP then loses it (both NotReady →
-    /// `publishNotReadyAddresses:false` empties the EndpointSlice) parks that
-    /// entry `{current:false, bootstrap_complete:false, ever_connected:false}`
-    /// forever and wedges the node NotReady — no puller is left to fire the
-    /// bootstrap hard timer that would otherwise mark it complete (ADR-0012 D2).
+    /// map through this, exactly as the backup-deferral gate treats its
+    /// `desired` (`run_backup_gate`):
+    /// - a peer that has **left** membership is parked and retained (its
+    ///   watermark survives for a warm resume, X5) but cannot pin readiness — a
+    ///   cold double-restart that sees a peer once at a stale IP and then loses
+    ///   it would otherwise wedge NotReady with no puller left to fire the
+    ///   bootstrap hard timer (ADR-0012 D2);
+    /// - a member that is present but **not ready** is still pulled (ADR-0031
+    ///   D1) but cannot pin readiness either: the orchestrator states it is not
+    ///   serving, and a terminating pod can linger in the slice indefinitely, so
+    ///   a Reclaim flow that reached it and then lost it (`ever_connected`,
+    ///   `current=false`) must not hold a rebooting node NotReady for that long.
     fn desired_ordinals(&self) -> Option<std::collections::HashSet<String>> {
         self.inner.membership.lock().unwrap().as_ref().map(|m| {
             m.snapshot()
                 .into_iter()
-                .filter(|p| p.ordinal != self.inner.self_ordinal)
+                .filter(|p| p.ready && p.ordinal != self.inner.self_ordinal)
                 .map(|p| p.ordinal)
                 .collect()
         })
     }
 
     /// Are ALL **desired** peers' **Reclaim** flows current — or unreachable? (S7
-    /// readiness gate.) Empty set → `true`. Peers that have left the desired
-    /// membership are excluded ([`desired_ordinals`](Self::desired_ordinals)) so a
-    /// parked, departed entry cannot pin readiness. A peer that is bootstrap-
+    /// readiness gate.) Empty set → `true`. Peers that have left membership or
+    /// are present but not ready are excluded
+    /// ([`desired_ordinals`](Self::desired_ordinals)) so neither a parked entry
+    /// nor a pulled-not-ready one can pin readiness. A peer that is bootstrap-
     /// complete only via the hard timer and was **never reached** does NOT block
     /// readiness (per Decision 4 a node must boot and serve even when peers are
     /// unreachable). A reachable-then-blipped peer **still desired** keeps the
@@ -614,9 +709,10 @@ impl ReplicationSupervisor {
     }
 
     /// Are ALL **desired** peers' **Reclaim** flows bootstrap-complete? (S7
-    /// readiness gate.) Empty set → `true`. Peers that have left the desired
-    /// membership are excluded ([`desired_ordinals`](Self::desired_ordinals)) so a
-    /// parked, departed entry cannot pin readiness.
+    /// readiness gate.) Empty set → `true`. Peers that have left membership or
+    /// are present but not ready are excluded
+    /// ([`desired_ordinals`](Self::desired_ordinals)) so neither a parked entry
+    /// nor a pulled-not-ready one can pin readiness.
     pub fn all_bootstrapped(&self) -> bool {
         self.sync();
         let desired = self.desired_ordinals();
@@ -645,6 +741,26 @@ impl ReplicationSupervisor {
             .get(peer)
             .map(|e| e.flow(partition).watermark)
             .unwrap_or_else(|| Watermark::new(0, 0))
+    }
+
+    /// This node's link state toward `peer` ([`PeerLink`]): `Active` while its
+    /// Reclaim puller runs toward a ready member, `Kept` while it runs toward a
+    /// member that is present but not ready, `Parked` once it left the
+    /// membership set (the entry and its watermarks are retained), `Absent` when
+    /// the ordinal was never seen. Pure read — it folds no puller status and
+    /// spawns nothing.
+    pub fn peer_link(&self, peer: &str) -> PeerLink {
+        match self.inner.peers.lock().unwrap().get(peer) {
+            None => PeerLink::Absent,
+            Some(e) if e.reclaim.status_rx.is_some() && e.ready => PeerLink::Active,
+            Some(e) if e.reclaim.status_rx.is_some() => PeerLink::Kept,
+            Some(_) => PeerLink::Parked,
+        }
+    }
+
+    /// The metrics handle this supervisor and its pullers write.
+    pub fn metrics(&self) -> &crate::metrics::B2buaMetrics {
+        &self.inner.metrics
     }
 
     /// Whether the **Reclaim** puller is currently running (not Parked) for `peer`.

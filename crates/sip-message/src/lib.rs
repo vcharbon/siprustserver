@@ -9,6 +9,7 @@
 //! construction: [`draft`] and [`generators`].
 
 mod access;
+pub mod capture;
 pub mod draft;
 pub mod error;
 pub mod header;
@@ -61,7 +62,7 @@ pub use sdp_diff::sdp_media_equivalent;
 /// The session description read as a document — the only home for SDP grammar.
 pub use sdp_doc::{
     canonical_rtpmap, extract_direction, extract_format_list, extract_rtpmaps, parse_origin,
-    parse_sdp_body, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
+    parse_sdp_body, reoffer_continuing, MediaLine, SdpDirection, SdpDoc, SdpOrigin,
 };
 pub use serializer::{message_summary, serialize, sip_summary};
 pub use sip_str::{SharedText, SipStr};

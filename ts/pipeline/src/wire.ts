@@ -86,6 +86,9 @@ export const headersInOrder = (m: Msg): ReadonlyArray<WireHeader> => headersOfHe
 export const headersInOrderRaw = (raw: string): ReadonlyArray<WireHeader> =>
   headersOfHead(splitHeadBody(raw)[0])
 
+/** The body of a verbatim datagram string: everything past the first blank line, `""` where none. */
+export const bodyOfRaw = (raw: string): string => splitHeadBody(raw)[1]
+
 const headersOfHead = (head: string): ReadonlyArray<WireHeader> => {
   const lines = head.split(/\r?\n/).slice(1)
   const out: Array<WireHeader> = []

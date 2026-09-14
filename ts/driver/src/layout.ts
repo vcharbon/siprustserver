@@ -41,6 +41,9 @@ export const SKIP_FILE = "skipped.json"
 /** The run verdict the interpreter writes at the cell root. */
 export const VERDICT_FILE = "verdict.json"
 
+/** The lane-compiled run configuration the interpreter writes at the cell root. */
+export const RUN_CONFIG_FILE = "run-config.json"
+
 /** The post-run RFC audit the replay lane writes beside the verdict. */
 export const RFC_FILE = "rfc.json"
 

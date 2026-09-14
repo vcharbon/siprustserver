@@ -28,8 +28,29 @@
     ]]>
   </send>
   <!-- 5s simulated ring time between 180 Ringing and 200 OK so the
-       B2BUA observes realistic alert-to-answer latency on every call. -->
-  <pause milliseconds="5000"/>
+       B2BUA observes realistic alert-to-answer latency on every call.
+       The ring is a recv, not a bare pause: an INVITE retransmission landing
+       here is answered with the 180 again (RFC 3261 §17.2.1: a server
+       transaction in Proceeding re-sends its last provisional) and the ring
+       restarts; `ontimeout` answers when none arrives, so a call without a
+       retransmission rings exactly as before. -->
+  <label id="ring"/>
+  <recv request="INVITE" crlf="true" timeout="5000" ontimeout="answer"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:];tag=[pid]SIPpTag01[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="ring"/>
+  <label id="answer"/>
   <send retrans="500">
     <![CDATA[
       SIP/2.0 200 OK

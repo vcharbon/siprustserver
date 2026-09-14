@@ -199,6 +199,7 @@ mod tests {
             kind: None,
             adopted: None,
             invite_final_sent: None,
+            messages: Default::default(),
         }
     }
 

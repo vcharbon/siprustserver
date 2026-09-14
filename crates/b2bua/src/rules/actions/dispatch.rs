@@ -4,12 +4,12 @@
 //! respond / dialog_track / teardown).
 
 use call::helpers::{
-    add_cdr_event, add_tag_mapping, deactivate_rule, merge_leg, remove_pending_request,
-    set_leg_disposition, set_leg_state, split_leg,
+    add_cdr_event, add_tag_mapping, deactivate_rule, mark_decision, merge_leg,
+    remove_pending_request, set_leg_disposition, set_leg_state, split_leg,
 };
 use call::{Call, CdrEvent, TagMapping};
 
-use crate::effects::{CriticalStateEffect, HandlerEffects};
+use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance};
 use crate::rules::model::{MessageTransform, RuleAction, RuleContext};
 use crate::rules::relay;
 
@@ -50,7 +50,7 @@ impl ActionExecutor<'_> {
                         .and_then(relay::media_type)
                         .or_else(|| Some(relay::sdp()))
                 };
-                self.ack_leg(call, fx, leg_id, body.clone(), ct);
+                self.ack_leg(call, fx, leg_id, body.clone(), ct, Provenance::Authored);
             }
             RuleAction::ConfirmDialog { leg_id } => {
                 self.confirm_dialog(call, ctx, leg_id);
@@ -134,11 +134,11 @@ impl ActionExecutor<'_> {
                 call.timers.clear();
                 fx.critical.push(CriticalStateEffect::CancelAllTimers);
             }
-            RuleAction::TerminateCall => {
-                terminate_all(call);
+            RuleAction::TerminateCall { cause, by_leg } => {
+                terminate_all(call, self.now_ms, *cause, by_leg.clone());
             }
-            RuleAction::BeginTermination { reason } => {
-                self.begin_termination(call, fx, ctx, reason.as_deref());
+            RuleAction::BeginTermination { reason, cause, by_leg } => {
+                self.begin_termination(call, fx, ctx, reason.as_deref(), (*cause, by_leg.clone()));
             }
             RuleAction::TerminateLeg { leg_id, bye_disposition } => {
                 self.terminate_leg(call, fx, leg_id, *bye_disposition);
@@ -152,8 +152,13 @@ impl ActionExecutor<'_> {
                         leg_id: leg_id.clone(),
                         status_code: *status_code,
                         reason: reason.clone(),
+                        decision_ordinal: 0,
                     },
                 );
+            }
+            RuleAction::MarkDecision { kind, leg_id, label } => {
+                *call =
+                    mark_decision(call.clone(), self.now_ms, *kind, leg_id.clone(), label.clone());
             }
             RuleAction::DeactivateRule { rule_id } => {
                 *call = deactivate_rule(call.clone(), rule_id);

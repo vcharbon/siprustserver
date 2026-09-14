@@ -73,7 +73,9 @@ fn frame_strat() -> impl Strategy<Value = Frame> {
 
     let reset = ".*".prop_map(|reason| Frame::ResetToBootstrap { reason });
 
-    prop_oneof![pull, data, noop, reset]
+    let position = watermark_strat().prop_map(|at| Frame::Position { at });
+
+    prop_oneof![pull, data, noop, reset, position]
 }
 
 proptest! {

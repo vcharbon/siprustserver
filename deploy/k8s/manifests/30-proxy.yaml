@@ -149,7 +149,19 @@ spec:
               echo 2 > /proc/sys/net/ipv4/conf/all/arp_announce
               echo 1 > /proc/sys/net/ipv4/conf/lo/arp_ignore
               echo 2 > /proc/sys/net/ipv4/conf/lo/arp_announce
-              echo "vip-loopback: ${PROXY_VIP}/32 + ${SIPEXT_VIP}/32 + strict-ARP ready"
+              # A next hop the kernel cannot resolve holds every datagram sent to
+              # it on the neighbour's unresolved queue, still charged to the
+              # sending socket, for the whole ARP cycle (ADR-0033). The queue's
+              # default (212992 B) equals a default socket send buffer, so one
+              # dead peer pins a whole socket. Bound it to 16 KiB per neighbour;
+              # PROXY_UDP_SNDBUF sizes the socket far above that. The neighbour
+              # knobs are this network namespace's own (hostNetwork: the node's);
+              # net.core.wmem_max is the host's and is read-only here — the host
+              # preflight (REQUIRED_SYSCTLS) raises it.
+              for f in /proc/sys/net/ipv4/neigh/*/unres_qlen_bytes; do
+                echo 16384 > "$f" || echo "vip-loopback: WARN could not set $f"
+              done
+              echo "vip-loopback: ${PROXY_VIP}/32 + ${SIPEXT_VIP}/32 + strict-ARP + neigh unres_qlen_bytes=16384 ready"
           securityContext:
             privileged: true
             capabilities: { add: ["NET_ADMIN"] }
@@ -178,6 +190,10 @@ spec:
             - { name: PROXY_ADVERTISE_EXT,   value: "${SIPEXT_VIP}:${SIP_PORT}" }
             - { name: PROXY_FACE_INT_CIDRS,  value: "${PROXY_FACE_INT_CIDRS}" }
             - { name: PROXY_METRICS,   value: "0.0.0.0:9090" }
+            # SO_SNDBUF on every signalling socket (ADR-0033): far above what
+            # one unresolved neighbour can pin (16 KiB, set by vip-loopback).
+            # The kernel clamps at the host's net.core.wmem_max (host preflight).
+            - { name: PROXY_UDP_SNDBUF, value: "4194304" }
             # Worker pool discovered from k8s (ADR-0012 D4). PROXY_WORKERS UNSET →
             # EndpointSlice informer over the headless worker Service.
             - { name: PROXY_WORKER_SERVICE, value: "b2bua-worker" }

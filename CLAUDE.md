@@ -9,7 +9,7 @@ To show a html file or a URL to the user, `xdg-open ./path/to/file/index.html` /
 Doc comments state present-tense contracts and invariants. History (dates, commit hashes, ticket IDs, "previously/replaces/no longer") lives in git and ADRs — a comment may cite ADR-00xx in one line, never retell it. If a comment needs more than ~5 lines to justify a behavior rather than describe it, either the behavior is wrong — write FIXME(scope): <one-line defect + one-line fix direction> — or the rationale is architectural and belongs in an ADR with a one-line pointer. By default however do not write FIXME, implement correct behavior unless specifically asked to delay specific corner cases.
 Each file must have it own concern. No not mix concerns.
 Never implement SIP header or message extraction in crates other than sip-message.
-Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only, shared byte-for-byte with newkahsip). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it.
+Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it.
 
 
 ## Where the details live (progressive disclosure)
@@ -105,7 +105,11 @@ at its source (see the clock guide, rule 5).
 fast signal (no codegen), `just test [filter]` / `just test-slow`, `just lint`,
 `just image` for the k8s image, `just doctor` when a machine looks broken,
 `just disk` / `just clean-incremental` under disk pressure. Every recipe is a
-plain cargo call, so a hand-typed `cargo test` behaves identically.
+plain cargo call, so a hand-typed `cargo test` behaves identically — including
+the parallelism cap: `.cargo/config.toml` sets `[build] jobs = 4`, because this
+workspace links ~250 test binaries and the concurrent mold links at one job per
+core exhaust a 32 GB host (ADR-0029 X5). `--jobs N` overrides it per call:
+lower on a shared host, never higher for a whole-workspace run.
 
 Prerequisites: mold and gcc >= 12. Do not:
 
@@ -133,9 +137,10 @@ folded in, it does not fail the suite, it wedges it.
 
 **Never run more than ONE agent (subagent / workflow stage) at a time that
 compiles or runs tests.** Builds serialise on the target directory and a build
-racing a running SUT or loadgen skews what the run measures. On a host short on
-memory, cap a heavy command in a scope:
-`systemd-run --user --scope -q -p MemoryMax=12G cargo build … --jobs 6`; a
+racing a running SUT or loadgen skews what the run measures. The jobs cap in
+`.cargo/config.toml` is sized for a quiet host; beside other builds lower it
+(`cargo test --workspace --jobs 2`) and, on a host short on memory, cap the
+command in a scope: `systemd-run --user --scope -q -p MemoryMax=12G cargo …`; a
 long-lived test process (SUT, loadgen, e2e-web) then gets its own small scope.
 
 ## HA / chaos — summary ([acceptance guide](docs/testing/ha-acceptance.md))

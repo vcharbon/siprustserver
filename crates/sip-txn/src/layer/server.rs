@@ -67,7 +67,7 @@ impl Owner {
     }
 
     /// Send a TU response through its server transaction and return the
-    /// datagram that left: the response's own image (ADR-0025, ADR-0029 X3),
+    /// datagram that left: the response's own image (ADR-0025, ADR-0032 X3),
     /// re-rendered only where `bind_to_tag` held it to the bound To-tag.
     pub(super) async fn do_send_response(
         &mut self,
@@ -390,20 +390,21 @@ impl Owner {
         true
     }
 
-    /// The To-tag the server INVITE txn on `branch` has bound — its final's,
-    /// else its newest early dialog's, else the one pinned on its first
-    /// response (RFC 3261 §9.2, §17.2.1) — pinned now where none was yet.
+    /// The To-tag the server INVITE txn on `branch` has bound
+    /// (`Transaction::bound_to_tag`), pinned now where none was yet: a request
+    /// that named the dialog is answered under its own To-tag (RFC 3261
+    /// §8.2.6.2), any other under a fresh one.
     fn uas_to_tag_of(&mut self, branch: &str) -> Option<String> {
-        let known = self.txns.get(branch).and_then(|t| {
-            t.final_to_tag
-                .clone()
-                .or_else(|| t.early_tags.last().cloned())
-                .or_else(|| t.uas_to_tag.clone())
-        });
+        let known = self.txns.get(branch).and_then(|t| t.bound_to_tag().map(str::to_string));
         if known.is_some() {
             return known;
         }
-        let pinned = self.id_gen.new_tag();
+        let requested = self
+            .txns
+            .get(branch)
+            .and_then(|t| t.original_request.as_ref())
+            .and_then(|r| r.to().tag().map(str::to_string));
+        let pinned = requested.unwrap_or_else(|| self.id_gen.new_tag());
         if let Some(txn) = self.txns.get_mut(branch) {
             txn.uas_to_tag = Some(pinned.clone());
         }
@@ -515,7 +516,8 @@ impl Owner {
             .map(|r| (Some(r.cseq().seq()), r.to().tag().is_some()))
             .unwrap_or((None, false));
 
-        // Resolve (and lazily pin) the UAS To-tag on the matched INVITE.
+        // Resolve (and lazily pin) the UAS To-tag on the matched INVITE: the
+        // tag both answers carry, reported upstream with the event.
         let uas_to_tag = self.uas_to_tag_of(&branch);
 
         // 200 OK to the CANCEL itself.
@@ -534,21 +536,20 @@ impl Owner {
                 &original,
                 487,
                 "Request Terminated",
-                &GenerateResponseOpts { to_tag: uas_to_tag, ..Default::default() },
+                &GenerateResponseOpts { to_tag: uas_to_tag.clone(), ..Default::default() },
             );
             let terminated_buf = terminated.image().clone();
             self.send_buffer(endpoint, &terminated_buf, src).await;
+            self.record_uas_tag(&branch, &terminated);
             if let Some(txn) = self.txns.get_mut(branch.as_str()) {
                 txn.state = TxnState::Completed;
                 txn.last_response = Some(terminated_buf);
                 txn.last_response_status = Some(487);
                 txn.original_request = None;
             }
-            // Timer-H-487 cleanup if the ACK for 487 never arrives.
-            let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(TIMER_H));
-            if let Some(txn) = self.txns.get_mut(branch.as_str()) {
-                txn.cleanup_key = Some(key);
-            }
+            // The layer's own final holds the transaction like a TU's: Timer G
+            // repeats the 487 until the ACK, Timer H bounds it (§17.2.1).
+            self.arm_final_hold(&branch, TxnKind::Invite, 487, src);
         }
 
         // Critical: we already answered 200 + 487 on the wire; a dropped Cancelled
@@ -559,6 +560,7 @@ impl Owner {
             invite_cseq,
             in_dialog,
             headers: req.headers().to_vec(),
+            to_tag: uas_to_tag,
         });
         true
     }

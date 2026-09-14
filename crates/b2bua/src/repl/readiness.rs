@@ -18,7 +18,9 @@
 //! (`ready_latched`): a transient peer blip that flips `all_current` back to
 //! false must NOT flap a serving node to `NotReady` (X6 — current is itself
 //! sticky; readiness shouldn't oscillate). `Draining` is terminal and always
-//! wins over a latched `Ready` (SIGTERM → drain, never un-drain).
+//! wins over a latched `Ready` (SIGTERM → drain, never un-drain). The latch has
+//! two sources: SIGTERM, and the worker observing its own endpoint withdrawn
+//! from routing (ADR-0031 D6) — whichever comes first.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -83,7 +85,8 @@ impl ReadinessSource for AlwaysReadySource {
 
 struct ReadinessInner {
     source: Arc<dyn ReadinessSource>,
-    /// SIGTERM latch — once set, [`Readiness::state`] is terminally `Draining`.
+    /// Drain latch (SIGTERM or self-observed withdrawal) — once set,
+    /// [`Readiness::state`] is terminally `Draining`.
     draining: AtomicBool,
     /// Sticky readiness — once the gate opens it stays open (X6 anti-flap).
     ready_latched: AtomicBool,
@@ -122,14 +125,31 @@ impl Readiness {
 
     /// Mark the node Draining (SIGTERM). Terminal — never reverts.
     pub fn set_draining(&self) {
+        self.latch_draining("shutdown requested");
+    }
+
+    /// Mark the node Draining because it observed its own endpoint withdrawn
+    /// from routing (ADR-0031 D6). Terminal; a no-op after SIGTERM already did.
+    pub fn set_withdrawn(&self) {
+        self.latch_draining("withdrawn from routing");
+    }
+
+    fn latch_draining(&self, reason: &'static str) {
         if !self.inner.draining.swap(true, Ordering::SeqCst) {
             tracing::info!(
                 node = observe::node(),
                 state = "Draining",
-                reason = "shutdown requested",
+                reason,
                 "readiness transition"
             );
         }
+    }
+
+    /// Whether the drain latch is set — the raw SIGTERM flag, read WITHOUT
+    /// evaluating (or latching) the readiness gates. Introspection only;
+    /// [`state`](Self::state) remains the state machine.
+    pub fn is_draining(&self) -> bool {
+        self.inner.draining.load(Ordering::SeqCst)
     }
 
     /// The current readiness state (Draining wins; else latched/gated Ready;

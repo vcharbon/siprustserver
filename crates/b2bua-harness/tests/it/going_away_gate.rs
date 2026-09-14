@@ -49,7 +49,11 @@ mod lategate {
                 header_updates: vec![],
                 contacts: vec![],
             },
-            RuleAction::BeginTermination { reason: Some("lategate".into()) },
+            RuleAction::BeginTermination {
+                reason: Some("lategate".into()),
+                cause: call::TerminationCause::Timeout(call::TimeoutKind::Setup),
+                by_leg: None,
+            },
         ]))
     }
 

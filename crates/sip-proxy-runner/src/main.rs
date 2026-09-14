@@ -40,6 +40,13 @@
 //!   PROXY_NAMESPACE  namespace for k8s discovery            (default $POD_NAMESPACE / sip-test)
 //!   PROXY_METRICS    Prometheus HTTP listen addr           (default 0.0.0.0:9090)
 //!   PROXY_QUEUE      inbound UDP queue depth (packets)      (default 8192)
+//!   PROXY_UDP_SNDBUF SO_SNDBUF requested on every signalling socket, bytes
+//!                    (default empty = kernel wmem_default; the kernel clamps
+//!                    at wmem_max). Size it well above the neighbour
+//!                    unresolved queue (unres_qlen_bytes) — ADR-0033
+//!   PROXY_SHARD_STALL_MS  a recv shard still on one packet past this is
+//!                    stalled: /readyz NotReady, gauge
+//!                    sip_proxy_recv_shards_stalled       (default 2000)
 //!   PROXY_RECV_SHARDS  N reuse-port recv sockets/cores      (default 1; >1 shards
 //!                    the serial recv loop — the ~550 OPTIONS/s burst ceiling —
 //!                    across N sockets; kernel flow-hashing keeps each UAC
@@ -575,6 +582,12 @@ async fn main() {
     let workers = env_or("PROXY_WORKERS", "");
     let metrics_addr = env_or("PROXY_METRICS", "0.0.0.0:9090");
     let queue_max: usize = env_or("PROXY_QUEUE", "8192").parse().expect("PROXY_QUEUE");
+    let udp_sndbuf: Option<usize> = match env_or("PROXY_UDP_SNDBUF", "") {
+        s if s.is_empty() => None,
+        s => Some(s.parse().expect("PROXY_UDP_SNDBUF")),
+    };
+    let shard_stall_ms: u64 =
+        env_or("PROXY_SHARD_STALL_MS", "2000").parse().expect("PROXY_SHARD_STALL_MS");
     let hmac_kid = env_or("PROXY_HMAC_KID", "k0");
     let hmac_key = env_or("PROXY_HMAC_KEY", "dev-stickiness-key-not-for-prod-0123456789");
 
@@ -700,6 +713,10 @@ async fn main() {
     // packets against it, so the self-gate's intake age is a difference of two
     // readings of a SINGLE monotonic-anchored timeline.
     let clock = Clock::system();
+    let with_sndbuf = |opts: BindUdpOpts| match udp_sndbuf {
+        Some(bytes) => opts.with_send_buffer(bytes),
+        None => opts,
+    };
     let mut endpoints = Vec::with_capacity(recv_shards);
     for _ in 0..recv_shards {
         let ep = bind_with_retry(
@@ -709,10 +726,12 @@ async fn main() {
             bind_deadline,
             is_udp_in_use,
             || {
-                let opts = BindUdpOpts::new(listen_sa, queue_max)
-                    .with_reuse_port(recv_shards > 1)
-                    .with_pre_ingress(intake_shed.clone())
-                    .with_clock(clock.clone());
+                let opts = with_sndbuf(
+                    BindUdpOpts::new(listen_sa, queue_max)
+                        .with_reuse_port(recv_shards > 1)
+                        .with_pre_ingress(intake_shed.clone())
+                        .with_clock(clock.clone()),
+                );
                 async move { net.bind_udp(opts).await }
             },
         )
@@ -735,10 +754,12 @@ async fn main() {
                 bind_deadline,
                 is_udp_in_use,
                 || {
-                    let opts = BindUdpOpts::new(*ext_sa, queue_max)
-                        .with_reuse_port(recv_shards > 1)
-                        .with_pre_ingress(intake_shed.clone())
-                        .with_clock(clock.clone());
+                    let opts = with_sndbuf(
+                        BindUdpOpts::new(*ext_sa, queue_max)
+                            .with_reuse_port(recv_shards > 1)
+                            .with_pre_ingress(intake_shed.clone())
+                            .with_clock(clock.clone()),
+                    );
                     async move { net.bind_udp(opts).await }
                 },
             )
@@ -759,7 +780,7 @@ async fn main() {
         bind_deadline,
         is_udp_in_use,
         || {
-            let opts = BindUdpOpts::new(probe_sa, 1024).with_clock(clock.clone());
+            let opts = with_sndbuf(BindUdpOpts::new(probe_sa, 1024).with_clock(clock.clone()));
             async move { net.bind_udp(opts).await }
         },
     )
@@ -783,6 +804,8 @@ async fn main() {
     // `EluCpsGate` once so the sampler task + the /metrics exposition can read
     // it; hand each core an `Arc<dyn ProxySelfGate>` view of the same gate.
     let intake_age = IntakeAgeRecorder::default();
+    // ONE liveness pulse across every recv shard: the readiness gate reads it.
+    let pulse = Arc::new(sip_proxy::liveness::ShardPulse::new(recv_shards));
     let self_gate: Option<EluCpsGate> = if parse_bool("PROXY_SELF_GATE", true) {
         Some(EluCpsGate::intake(
             intake_age.clone(),
@@ -887,6 +910,7 @@ async fn main() {
                 .intake_age(intake_age.clone())
                 .resolver_config(resolver_cfg)
                 .traces(traces.clone())
+                .pulse(pulse.clone())
                 .shard(shard);
         if let Some((_, ext_adv, cidrs)) = &ext_face {
             builder = builder.external_face(ExternalFaceParts {
@@ -930,6 +954,8 @@ async fn main() {
             .join(","),
         queue = queue_max,
         recv_shards,
+        udp_sndbuf = ?udp_sndbuf,
+        shard_stall_ms,
         "listening"
     );
 
@@ -943,12 +969,19 @@ async fn main() {
     // SIGTERM latches this; `/readyz` then reports Draining so k8s unpublishes
     // the proxy from its Service and stops routing new datagrams here.
     let draining = Arc::new(AtomicBool::new(false));
+    // A stalled recv shard (parked on one packet past PROXY_SHARD_STALL_MS —
+    // see `sip_proxy::liveness`) is a proxy that black-holes a share of its
+    // flows while every activity meter reads idle: NotReady, and the gauge.
     let ready: probe_http::ReadyFn = {
         let reg = registry.clone();
         let draining = draining.clone();
+        let pulse = pulse.clone();
+        let clk = clock.clone();
         Arc::new(move || {
             if draining.load(Ordering::Relaxed) {
                 probe_http::ProbeState::Draining
+            } else if !pulse.stalled(clk.now_ms().max(0) as u64, shard_stall_ms).is_empty() {
+                probe_http::ProbeState::NotReady
             } else if reg.snapshot().iter().any(|w| w.health == WorkerHealth::Alive) {
                 probe_http::ProbeState::Ready
             } else {
@@ -963,10 +996,27 @@ async fn main() {
     {
         let reg = registry.clone();
         let m = metrics.clone();
+        let pulse = pulse.clone();
+        let clk = clock.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(2));
+            let mut stalled_before: Vec<usize> = Vec::new();
             loop {
                 ticker.tick().await;
+                let stalled = pulse.stalled(clk.now_ms().max(0) as u64, shard_stall_ms);
+                m.set_recv_shards_stalled(stalled.len() as u64);
+                if stalled != stalled_before {
+                    if stalled.is_empty() {
+                        tracing::info!(shards = ?stalled_before, "recv shards turning again");
+                    } else {
+                        tracing::error!(
+                            shards = ?stalled,
+                            threshold_ms = shard_stall_ms,
+                            "recv shard(s) stalled on one packet — /readyz NotReady"
+                        );
+                    }
+                    stalled_before = stalled;
+                }
                 let (mut alive, mut draining, mut not_ready, mut unknown, mut dead) =
                     (0, 0, 0, 0, 0);
                 for w in reg.snapshot() {

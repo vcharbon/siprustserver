@@ -153,6 +153,7 @@ pub fn representative_call() -> Call {
         kind: None,
         adopted: None,
         invite_final_sent: Some(200),
+        messages: Default::default(),
     };
     a_leg.dialogs[0].ext.answered_2xx = Some(Unacked2xx {
         dialog_tag: "b2bua-to-tag-aleg-9876".into(),
@@ -187,6 +188,7 @@ pub fn representative_call() -> Call {
         kind: None,
         adopted: None,
         invite_final_sent: None,
+        messages: Default::default(),
     };
     b_leg.dialogs[0].ext.emitted_ack = Some(RetainedEmission::on_trigger(
         EMITTED_ACK.to_vec(),
@@ -246,6 +248,7 @@ pub fn representative_call() -> Call {
                 leg_id: "a".into(),
                 status_code: None,
                 reason: None,
+                decision_ordinal: 0,
             },
             CdrEvent {
                 event_type: CdrEventType::Answer,
@@ -253,6 +256,7 @@ pub fn representative_call() -> Call {
                 leg_id: "b-1".into(),
                 status_code: Some(200),
                 reason: None,
+                decision_ordinal: 1,
             },
         ],
         state: CallModelState::Active,
@@ -278,6 +282,7 @@ pub fn representative_call() -> Call {
         features: Some(FeatureActivations {
             platform: PlatformActivations {
                 max_duration_sec: 3600,
+                max_duration_anchor: Default::default(),
                 keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
             refer: None,
@@ -312,7 +317,22 @@ pub fn representative_call() -> Call {
         }),
         reliable_provisionals: Vec::new(),
         pracked_provisionals: Vec::new(),
+        message_seq: 0,
+        decision_log: vec![representative_mark()],
+        decision_ordinal: 1,
+        termination: None,
         sm_cursors: BTreeMap::new(),
+    }
+}
+
+/// The one decision the representative call was routed under.
+fn representative_mark() -> DecisionMark {
+    DecisionMark {
+        ordinal: 1,
+        at_ms: 1_779_440_042_010,
+        kind: DecisionKind::Route,
+        leg_id: Some("a".into()),
+        label: Some("plan-7".into()),
     }
 }
 
@@ -628,6 +648,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
             proptest::option::of(any::<bool>()),
             proptest::option::of(200u16..700),
         ),
+        arb_message_ring(),
     )
         .prop_map(
             |(
@@ -641,6 +662,7 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
                 (no_answer_timeout_sec, bye_disposition),
                 (local_uri, remote_uri, invite_request_uri),
                 (pending_invite_txn, ext, kind, adopted, invite_final_sent),
+                messages,
             )| Leg {
                 leg_id,
                 call_id,
@@ -659,8 +681,134 @@ fn arb_leg() -> impl Strategy<Value = Leg> {
                 kind,
                 adopted,
                 invite_final_sent,
+                messages,
             },
         )
+}
+
+fn arb_message_direction() -> impl Strategy<Value = MessageDirection> {
+    prop_oneof![
+        Just(MessageDirection::Received),
+        Just(MessageDirection::Relayed),
+        Just(MessageDirection::Authored),
+    ]
+}
+
+fn arb_message_entry() -> impl Strategy<Value = MessageEntry> {
+    (
+        any::<u32>(),
+        any::<i64>(),
+        arb_message_direction(),
+        "(INVITE|ACK|BYE|PRACK|OPTIONS)",
+        any::<u32>(),
+        proptest::option::of(100u16..700),
+        proptest::option::of(arb_tag()),
+        any::<u32>(),
+        proptest::collection::vec(("(Allow|Accept|Privacy)", "[a-zA-Z0-9, ]{0,24}"), 0..3),
+    )
+        .prop_map(
+            |(seq, at_ms, direction, method, cseq, code, to_tag, decision_ordinal, headers)| {
+                MessageEntry {
+                    seq,
+                    at_ms,
+                    direction,
+                    method,
+                    cseq,
+                    code,
+                    to_tag,
+                    decision_ordinal,
+                    headers,
+                }
+            },
+        )
+}
+
+fn arb_decision_kind() -> impl Strategy<Value = DecisionKind> {
+    prop_oneof![
+        Just(DecisionKind::Route),
+        Just(DecisionKind::Reject),
+        Just(DecisionKind::Redirect),
+        Just(DecisionKind::Relay),
+        Just(DecisionKind::FailoverRoute),
+        Just(DecisionKind::FailoverReject),
+        Just(DecisionKind::FailoverRedirect),
+        Just(DecisionKind::FailoverTerminate),
+        Just(DecisionKind::Release),
+        Just(DecisionKind::ReleaseRoute),
+        Just(DecisionKind::TransferAllow),
+        Just(DecisionKind::TransferReject),
+    ]
+}
+
+/// Varied decision logs: empty (no decision yet) through a few marks, each
+/// numbered by its position, with and without a label.
+fn arb_decision_log() -> impl Strategy<Value = Vec<DecisionMark>> {
+    proptest::collection::vec(
+        (
+            any::<i64>(),
+            arb_decision_kind(),
+            proptest::option::of(arb_tag()),
+            proptest::option::of("[ -~]{0,24}"),
+        ),
+        0..4,
+    )
+    .prop_map(|marks| {
+        marks
+            .into_iter()
+            .enumerate()
+            .map(|(i, (at_ms, kind, leg_id, label))| DecisionMark {
+                ordinal: i as u32 + 1,
+                at_ms,
+                kind,
+                leg_id,
+                label,
+            })
+            .collect()
+    })
+}
+
+fn arb_termination_cause() -> impl Strategy<Value = TerminationCause> {
+    let timeout = prop_oneof![
+        Just(TimeoutKind::Setup),
+        Just(TimeoutKind::NoAnswer),
+        Just(TimeoutKind::Prack),
+        Just(TimeoutKind::Ack),
+        Just(TimeoutKind::Keepalive),
+        Just(TimeoutKind::Transaction),
+    ];
+    prop_oneof![
+        Just(TerminationCause::RemoteBye),
+        Just(TerminationCause::RemoteCancel),
+        Just(TerminationCause::RemoteFinal),
+        Just(TerminationCause::DecisionReject),
+        Just(TerminationCause::DecisionRelease),
+        Just(TerminationCause::MaxDuration),
+        timeout.prop_map(TerminationCause::Timeout),
+        Just(TerminationCause::Admission),
+        Just(TerminationCause::MessageCap),
+        Just(TerminationCause::Supervisor),
+    ]
+}
+
+/// Varied termination records: none (a live call) through every cause, with
+/// and without a leg, cut or not yet.
+fn arb_termination() -> impl Strategy<Value = Option<Termination>> {
+    proptest::option::of(
+        (any::<i64>(), arb_termination_cause(), proptest::option::of(arb_tag()), any::<u32>())
+            .prop_map(|(at_ms, cause, by_leg, last_seq)| Termination {
+                at_ms,
+                cause,
+                by_leg,
+                last_seq,
+            }),
+    )
+}
+
+/// Varied message rings: empty (the ring off) through a few entries with an
+/// eviction count.
+fn arb_message_ring() -> impl Strategy<Value = MessageRing> {
+    (proptest::collection::vec(arb_message_entry(), 0..4), 0u32..5)
+        .prop_map(|(entries, dropped)| MessageRing { entries, dropped })
 }
 
 fn arb_timer() -> impl Strategy<Value = TimerEntry> {
@@ -675,13 +823,10 @@ fn arb_cdr() -> impl Strategy<Value = CdrEvent> {
         arb_tag(),
         proptest::option::of(100i64..700),
         proptest::option::of("[a-z ]{0,20}"),
+        any::<u32>(),
     )
-        .prop_map(|(event_type, timestamp, leg_id, status_code, reason)| CdrEvent {
-            event_type,
-            timestamp,
-            leg_id,
-            status_code,
-            reason,
+        .prop_map(|(event_type, timestamp, leg_id, status_code, reason, decision_ordinal)| {
+            CdrEvent { event_type, timestamp, leg_id, status_code, reason, decision_ordinal }
         })
 }
 fn arb_limiter() -> impl Strategy<Value = CallLimiterState> {
@@ -708,6 +853,7 @@ fn arb_features() -> impl Strategy<Value = FeatureActivations> {
     let platform = (any::<i64>(), any::<i64>(), any::<i64>()).prop_map(
         |(max_duration_sec, interval_sec, max_missed)| PlatformActivations {
             max_duration_sec,
+            max_duration_anchor: Default::default(),
             keepalive: KeepaliveActivation { interval_sec, max_missed },
         },
     );
@@ -819,11 +965,14 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         proptest::option::of(any::<i64>()),
         proptest::option::of(proptest::collection::vec(arb_tag(), 0..3)),
         arb_sm_cursors(),
+        any::<u32>(),
     );
     // Release-event subscriptions + the in-flight reroute slice
     // ride the replicated body like `features`/`transfer` do.
     let release = (
         proptest::collection::vec(arb_reliable_provisional(), 0..3),
+        arb_decision_log(),
+        arb_termination(),
         proptest::collection::vec(Just(ReleaseEventKind::MaxCallDuration), 0..2),
         proptest::option::of(
             (arb_tag(), proptest::option::of(arb_tag()), any::<i64>(), any::<bool>()).prop_map(
@@ -857,8 +1006,9 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
                 message_count,
                 terminating_refresh_legs,
                 sm_cursors,
+                message_seq,
             ),
-            (reliable_provisionals, subscriptions, reroute),
+            (reliable_provisionals, decision_log, termination, subscriptions, reroute),
         )| Call {
             call_ref,
             a_leg,
@@ -895,6 +1045,10 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             reroute,
             reliable_provisionals,
             pracked_provisionals: Vec::new(),
+            message_seq,
+            decision_ordinal: decision_log.len() as u32,
+            decision_log,
+            termination,
             sm_cursors,
         },
     )

@@ -1,4 +1,4 @@
-//! The replication frame model — four positional-msgpack messages plus the
+//! The replication frame model — five positional-msgpack messages plus the
 //! small value enums and the [`Watermark`] ordering they ride on.
 //!
 //! Field ORDER on the wire is the contract (ADR-0008 positional-msgpack ethos):
@@ -206,6 +206,16 @@ pub enum Frame {
         /// Human-readable cause (for logs/recording).
         reason: String,
     },
+    /// `[4, gen, counter]`
+    ///
+    /// Client → server: "I have applied every frame up to and including `at`".
+    /// The **drain's own signal** (ADR-0031 D2) — a departing worker exits once
+    /// each of its live calls' backup flows reports its changelog head. Never a
+    /// takeover gate and never a readiness gate: no apply decision reads it.
+    Position {
+        /// The highest position this client has applied on this flow.
+        at: Watermark,
+    },
 }
 
 /// Integer tags, element 0 of each frame array. Kept in one place so the
@@ -218,4 +228,5 @@ pub(crate) mod tag {
     pub const DATA: u64 = 1;
     pub const NOOP: u64 = 2;
     pub const RESET_TO_BOOTSTRAP: u64 = 3;
+    pub const POSITION: u64 = 4;
 }

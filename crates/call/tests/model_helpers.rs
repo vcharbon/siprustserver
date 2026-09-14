@@ -528,7 +528,7 @@ fn an_a_facing_sequence_number_is_never_below_one() {
     assert_eq!(a_rseq, 1, "RFC 3262 §3: zero is not a sequence number");
 }
 
-// ── Retained-emission ladders (ADR-0029 X3/X5) ───────────────────────────────
+// ── Retained-emission ladders (ADR-0032 X3/X5) ───────────────────────────────
 
 /// Every rung a `Final2xx` emission owes under `deadline`, walked from its
 /// first rung the way the executor walks it.
@@ -601,4 +601,98 @@ fn the_provisionals_scope_leaves_every_unacked_2xx_alone() {
         "the a-leg answer, the b-leg re-INVITE 2xx and the provisional"
     );
     assert!(everything.iter().filter(|o| matches!(o, Obligation::AckOf2xx { .. })).count() == 2);
+}
+
+/// Every mark bumps the ordinal and carries it; the ring append and the CDR
+/// append stamp whatever count stands at that instant, so an entry written
+/// between two decisions keeps the first one's ordinal after the second lands.
+#[test]
+fn marks_number_the_decisions_and_stamp_what_follows() {
+    let mut call = representative_call();
+    call.decision_log.clear();
+    call.decision_ordinal = 0;
+    call.b_legs[0].messages = MessageRing::default();
+    let entry = || MessageEntry {
+        seq: 0,
+        at_ms: 5,
+        direction: MessageDirection::Relayed,
+        method: "INVITE".into(),
+        cseq: 1,
+        code: None,
+        to_tag: None,
+        decision_ordinal: 99,
+        headers: Vec::new(),
+    };
+    let cdr = || CdrEvent {
+        event_type: CdrEventType::InviteSent,
+        timestamp: 5,
+        leg_id: "b-1".into(),
+        status_code: None,
+        reason: None,
+        decision_ordinal: 99,
+    };
+
+    let call = record_message(call, "b-1", 8, entry());
+    let call = add_cdr_event(call, cdr());
+    let call = mark_decision(call, 10, DecisionKind::Route, Some("a".into()), Some("first".into()));
+    let call = record_message(call, "b-1", 8, entry());
+    let call = add_cdr_event(call, cdr());
+    let call = mark_decision(call, 20, DecisionKind::FailoverRoute, Some("b-1".into()), None);
+    let call = record_message(call, "b-1", 8, entry());
+    let call = add_cdr_event(call, cdr());
+
+    assert_eq!(call.decision_ordinal, 2);
+    assert_eq!(
+        call.decision_log,
+        vec![
+            DecisionMark {
+                ordinal: 1,
+                at_ms: 10,
+                kind: DecisionKind::Route,
+                leg_id: Some("a".into()),
+                label: Some("first".into()),
+            },
+            DecisionMark {
+                ordinal: 2,
+                at_ms: 20,
+                kind: DecisionKind::FailoverRoute,
+                leg_id: Some("b-1".into()),
+                label: None,
+            },
+        ]
+    );
+    let ring: Vec<u32> =
+        call.b_legs[0].messages.entries.iter().map(|e| e.decision_ordinal).collect();
+    assert_eq!(ring, vec![0, 1, 2]);
+    let events: Vec<u32> =
+        call.cdr_events.iter().rev().take(3).rev().map(|e| e.decision_ordinal).collect();
+    assert_eq!(events, vec![0, 1, 2]);
+}
+
+/// The first termination's record stands: a second write under another
+/// cause changes nothing, and the cut is taken once — the ring's last seq at
+/// the seal, never moved by a later seal.
+#[test]
+fn the_first_termination_is_recorded_once_and_cut_once() {
+    let mut call = representative_call();
+    call.termination = None;
+    call.message_seq = 4;
+    assert_eq!(seal_termination_seq(call.clone()).termination, None, "nothing to cut");
+
+    let call = record_termination(call, 10, TerminationCause::RemoteCancel, Some("a".into()));
+    let call = record_termination(call, 20, TerminationCause::Supervisor, None);
+    assert_eq!(
+        call.termination,
+        Some(Termination {
+            at_ms: 10,
+            cause: TerminationCause::RemoteCancel,
+            by_leg: Some("a".into()),
+            last_seq: 0,
+        })
+    );
+    let mut call = seal_termination_seq(call);
+    assert_eq!(call.termination.as_ref().unwrap().last_seq, 4, "cut at the seal");
+    call.message_seq = 7;
+    let call = seal_termination_seq(call);
+    assert_eq!(call.termination.as_ref().unwrap().last_seq, 4, "a later seal moves nothing");
 }

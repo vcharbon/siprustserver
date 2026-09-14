@@ -40,11 +40,15 @@ pub use model::{
     B2buaDialogExt, ByeDisposition, Dialog, Direction, HostPort, InviteTxnHandle, LegDisposition,
     LegKind, LegState, PendingRequest, RemoteInfo, StackDialog, Unacked2xx,
 };
-// The retained emission every dialog-level retransmission repeats (ADR-0029 X3)
+// The retained emission every dialog-level retransmission repeats (ADR-0032 X3)
 // and the obligation that discharges its ladder (X4).
 pub use model::{Obligation, Repeat, Repeated, RetainedEmission};
-// Timers + CDR events on the replicated body.
-pub use model::{CdrEvent, CdrEventType, TimerEntry, TimerType};
+// Timers, CDR events, the message ring, the decision log and the termination
+// record on the replicated body.
+pub use model::{
+    CdrEvent, CdrEventType, DecisionKind, DecisionMark, MessageDirection, MessageEntry,
+    MessageRing, Termination, TerminationCause, TimeoutKind, TimerEntry, TimerType,
+};
 // Per-service slices + state-machine identifiers (ADR-0016).
 pub use model::{
     ExtMap, MachineId, PromotePemState, RelayFirst18xState, ReleaseEventKind, ReroutePhase,

@@ -9,7 +9,7 @@
 use call::helpers::is_fully_resolved;
 use call::{Call, CallModelState, CdrEvent, CdrEventType, LegState, MachineId, StateLabel};
 
-use crate::effects::{CriticalStateEffect, HandlerResult};
+use crate::effects::{BufferedObservabilityEffect, CriticalStateEffect, HandlerResult};
 use crate::obligations::ObligationSet;
 
 /// The always-on global call machine (ADR-0016 X2). Its cursor is a uniform,
@@ -71,6 +71,18 @@ pub fn enforce(
         && result.call.state == CallModelState::Terminated;
     if !became_terminated {
         return result;
+    }
+    // Every path to terminal names its cause: the record is the CDR's
+    // statement of who ended the call, and a terminal without one is a
+    // writer this funnel does not know.
+    debug_assert!(
+        result.call.termination.is_some(),
+        "{}: terminated without a termination record",
+        result.call.call_ref
+    );
+    if result.call.termination.is_none() {
+        tracing::error!(call_ref = %result.call.call_ref, "terminated without a termination record");
+        result.effects.buffered.push(BufferedObservabilityEffect::TerminationUnrecorded);
     }
     if answer_unanswered_a_leg {
         answer_a_leg_if_unanswered(before, &mut result, now_ms);
@@ -144,6 +156,7 @@ fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms:
         None,
         None,
         vec![],
+        crate::effects::Provenance::Authored,
     ) else {
         return;
     };
@@ -156,5 +169,6 @@ fn answer_a_leg_if_unanswered(before: &Call, result: &mut HandlerResult, now_ms:
         leg_id: a_leg_id.to_string(),
         status_code: Some(503),
         reason: Some("unanswered_at_termination".to_string()),
+        decision_ordinal: result.call.decision_ordinal,
     });
 }

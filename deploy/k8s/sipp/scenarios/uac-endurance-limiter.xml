@@ -48,6 +48,13 @@
 
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
+  <!-- An admission rejection of the initial INVITE (503 overload shed, 480/486
+       admission control) ends the call cleanly at `rejected`: sipp auto-ACKs the
+       final, and the SUT's shed counters carry the decision, not this stream's
+       unexpected_msg. -->
+  <recv response="503" optional="true" next="rejected"/>
+  <recv response="480" optional="true" next="rejected"/>
+  <recv response="486" optional="true" next="rejected"/>
   <recv response="200" rtd="true" rrs="true"/>
 
   <send>
@@ -83,6 +90,11 @@
   </send>
 
   <recv response="200" crlf="true"/>
+
+  <!-- Terminal join point: the admitted path falls through after its BYE/200, a
+       rejected initial INVITE jumps straight here. Either way the call ends
+       Successful. -->
+  <label id="rejected"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="100, 1000, 10000, 15000"/>

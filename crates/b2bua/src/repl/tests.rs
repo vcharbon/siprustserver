@@ -432,7 +432,7 @@ async fn served_peer_log_survives_reap_until_guard_dropped() {
     let cl = Changelog::new(1, clock.clone()).with_ttls(1_000, 2_000); // dead-peer TTL 2s
     let _store = ReplicatingCallStore::with_changelog(cl.clone(), clock.clone());
 
-    let guard = cl.serving("A");
+    let guard = cl.serving("A", Partition::Bak);
     assert!(cl.has_peer("A"));
 
     // Idle well past the dead-peer TTL, then reap: the served log survives.

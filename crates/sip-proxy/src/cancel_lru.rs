@@ -1,9 +1,11 @@
 //! [`CancelBranchLru`] — proxy-local `(Call-ID, From-tag, CSeq number) →
-//! {target, branch}` cache with per-entry TTL (port of `CancelBranchLru.ts`).
+//! {target, branches, cookie}` cache with per-entry TTL (port of
+//! `CancelBranchLru.ts`).
 //!
-//! RFC 3261 §16.10 / §17.2.3: a stateless proxy must forward a CANCEL to the
-//! same downstream the matching INVITE went to, **and** reuse the INVITE's
-//! outbound top-Via branch so the downstream transaction layer correlates them.
+//! RFC 3261 §16.10 / §17.2.3: a stateless proxy forwards a CANCEL to the same
+//! downstream the matching INVITE went to. The outbound branch the downstream
+//! transaction layer correlates them by is a function of the message (§16.11,
+//! `crate::branch`), so what this cache carries is the TARGET.
 //! Keying on `(Call-ID, From-tag, CSeq number)` (RFC 3261 §9.1) is the
 //! canonical correlator — it works at any hop regardless of whether the
 //! upstream rewrote the branch, and (unlike keying on the proxy's outbound
@@ -12,14 +14,12 @@
 //! are remembered here and share the Call-ID with *independent* CSeq spaces
 //! (§12.2.1.1): without it, a UAC re-INVITE and a worker-outbound re-INVITE
 //! that happen to land on the same CSeq number within one TTL overwrite each
-//! other's entry, and the later CANCEL/ACK is forwarded to the wrong party
-//! with the wrong branch.
+//! other's entry, and the later CANCEL/ACK is forwarded to the wrong party.
 //!
 //! The same cache also drives the non-2xx ACK hop decision (`ackhop|` keys —
-//! relay the upstream's §17.1.1.3 ACK to the node the final arrived from, on
-//! the INVITE's outbound branch, or absorb it when the proxy itself generated
-//! the final; see `core/request`
-//! and `core/response.rs`) and the retransmission branch memo (`rtx|`-prefixed
+//! relay the upstream's §17.1.1.3 ACK to the node the final arrived from, or
+//! absorb it when the proxy itself generated the final; see `core/request`
+//! and `core/response.rs`) and the retransmission target memo (`rtx|`-prefixed
 //! keys, see `core/request`).
 //!
 //! Reads are O(1) and lock-only (never block on I/O). Eviction is lazy on
@@ -42,16 +42,15 @@ use crate::strategy::RouteParams;
 /// B2BUA answers or gives up within `sip-txn`'s `INVITE_INITIAL_TIMEOUT`
 /// (158 s, which wraps its 150 s `SetupTimeout` ledger), plus the
 /// final-response retransmit tail (Timer H). Imported from `sip-txn` so the
-/// proxy's memory and the B2BUA's transaction timers cannot drift apart. The
-/// old 32 s TTL made a CANCEL after half a minute of (perfectly legal) ringing
-/// miss the entry and go downstream with a FRESH branch → 481 Transaction Does
-/// Not Exist, while the callee kept ringing.
+/// proxy's memory and the B2BUA's transaction timers cannot drift apart: a TTL
+/// under the ringing window loses the CANCEL's target and the non-2xx ACK's
+/// hop while the callee is still legally ringing.
 /// Covers the DEFAULT b2bua bound; a deployment raising
 /// `B2BUA_INVITE_TXN_TIMEOUT_SEC` beyond this TTL degrades late-CANCEL /
 /// non-2xx-ACK hop memory.
 pub const INVITE_ENTRY_TTL_MS: u64 = INVITE_INITIAL_TIMEOUT + TIMER_H;
 
-/// TTL for retransmission branch memos (`rtx|` keys): upstream retransmits
+/// TTL for retransmission target memos (`rtx|` keys): upstream retransmits
 /// stop at Timer B/F (64×T1 = 32 s), so these need live no longer. They are
 /// written for EVERY forwarded request — including each keepalive OPTIONS — so
 /// keeping them short keeps the map at ≈ one transaction window of traffic.
@@ -75,9 +74,8 @@ pub fn call_id_cseq_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) ->
 /// Namespaced key for the non-2xx ACK hop memo, consulted on the request path
 /// when the upstream's §17.1.1.3 ACK arrives. Written in two flavours:
 ///  • RESPONSE path, on relaying a non-2xx INVITE final upstream — carries
-///    the node the final came from + the INVITE's outbound branch so the ACK
-///    is RELAYED to the transaction that sent the final (it matches the ACK
-///    and stops retransmitting);
+///    the node the final came from, so the ACK is RELAYED to the transaction
+///    that sent the final (it matches the ACK and stops retransmitting);
 ///  • request path `reply()`, on a final the proxy generated ITSELF — empty
 ///    `branch`, so the ACK is ABSORBED here (the proxy is the UAS; no
 ///    downstream exists).
@@ -87,9 +85,11 @@ pub fn ack_hop_key(call_id: &str, from_tag: Option<&str>, cseq_num: u32) -> Stri
     format!("ackhop|{}", call_id_cseq_key(call_id, from_tag, cseq_num))
 }
 
-/// What we cache per remembered INVITE: the downstream target + the branch we
-/// stamped on our outgoing Via (reused on the matching CANCEL) + the branch
-/// the UPSTREAM stamped on the top Via of the request as it arrived.
+/// What we cache per remembered INVITE: the downstream target, the branch we
+/// stamped on our outgoing Via (§16.11's function of the message — empty marks
+/// a final the proxy generated itself, whose ACK has no downstream to reach),
+/// and the branch the UPSTREAM stamped on the top Via of the request as it
+/// arrived.
 ///
 /// `upstream_branch` is the §17.1.1.3 discriminator for the non-2xx ACK hop
 /// decision (consulted via the [`ack_hop_key`] memo): an ACK for a NON-2xx
@@ -175,7 +175,7 @@ impl CancelBranchLru {
 
     /// Remember the downstream target + outbound branch used on a forward.
     /// TTL is per entry: [`INVITE_ENTRY_TTL_MS`] for CANCEL/ACK correlation,
-    /// [`RTX_ENTRY_TTL_MS`] for retransmission branch memos.
+    /// [`RTX_ENTRY_TTL_MS`] for retransmission target memos.
     pub fn remember(&self, key: &str, entry: CancelEntry, ttl_ms: u64) {
         let expires_at_ms = self.now_ms() + ttl_ms;
         self.table.lock().unwrap().insert(

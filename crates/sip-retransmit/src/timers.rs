@@ -1,5 +1,5 @@
 //! RFC 3261 §17 transaction timer constants — the one home for them, paced
-//! against by transaction and dialog-level ladders alike (ADR-0029).
+//! against by transaction and dialog-level ladders alike (ADR-0032).
 //! Behaviour rides `tokio::time` (via the [`tokio_util::time::DelayQueue`]
 //! driver in `sip-txn`), so a single `tokio::time::advance` moves all of these
 //! together in tests.

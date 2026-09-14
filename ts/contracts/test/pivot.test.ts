@@ -7,6 +7,8 @@
  * formatter round trip, which is the whole point of §2.1.
  */
 import { describe, expect, it } from "vitest"
+import * as Body from "../src/body.js"
+import type * as Flow from "../src/flow.js"
 import { flowNodeSteps, isAltNode, isInjectNode, isStepNode, mapFlowNodeSteps } from "../src/flow.js"
 import { decodePivotSync, emitPivot, PIVOT_VERSION, pivotSteps, versionMatches } from "../src/pivot.js"
 import { PIVOT_FIXTURES, pivotDocuments, read } from "./fixtures.js"
@@ -135,6 +137,23 @@ describe("the untagged shapes", () => {
     ).not.toThrow()
     expect(() => decodePivotSync(withMsg({ body: { mode: "frozen" } }))).toThrow()
     expect(() => decodePivotSync(withMsg({ body: { ref: "r.sdp", mode: "sdp-present" } }))).toThrow()
+  })
+
+  it("a compare mode rides a resource body and nothing else", () => {
+    const compared = decodePivotSync(
+      withMsg({ body: { ref: "r.xml", mode: "frozen", "content-type": "application/example+xml", compare: "xml" } })
+    )
+    const body = (compared.flow[0] as Flow.Step).msg.body
+    expect(body !== undefined && Body.isResourceBody(body) && body.compare).toBe("xml")
+    expect(() => decodePivotSync(withMsg({ body: { ref: "r.xml", compare: "exact" } }))).not.toThrow()
+    const described = decodePivotSync(
+      withMsg({ body: { ref: "r.sdp", rewrite: ["c=addr", "m=port"], compare: "sdp" } })
+    )
+    const sdp = (described.flow[0] as Flow.Step).msg.body
+    expect(sdp !== undefined && Body.isResourceBody(sdp) && sdp.compare).toBe("sdp")
+    expect(() => decodePivotSync(withMsg({ body: { mode: "frozen", compare: "exact" } }))).toThrow()
+    expect(() => decodePivotSync(withMsg({ body: { mode: "absent", compare: "exact" } }))).toThrow()
+    expect(() => decodePivotSync(withMsg({ body: { ref: "r.xml", compare: "loose" } }))).toThrow()
   })
 })
 

@@ -127,6 +127,15 @@ impl ClientInvite {
         AckCtx { agent: &self.agent, invite: &self.original_invite, wire_dst: self.wire_dst }
     }
 
+    /// Hop-ACK a non-2xx final to THIS INVITE (RFC 3261 §17.1.1.3). A no-op for
+    /// a non-matching response. The blocking `try_expect` family ACKs on its
+    /// own; a body that took the final off the queue itself (`take_queued`,
+    /// observing a window rather than expecting a message) still owes the peer's
+    /// server transaction this hop ACK, and this is how it pays it.
+    pub async fn ack_non_2xx(&self, resp: &SipResponse) -> Result<(), StepError> {
+        self.ack_ctx().ack_non_2xx(resp).await
+    }
+
     /// SIPp-`optional` semantics for the load lane: wait for the FINAL
     /// response `status`, absorbing — and collecting — any interleaved
     /// provisional (1xx), instead of erroring on it the way

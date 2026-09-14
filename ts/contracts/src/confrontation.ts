@@ -38,10 +38,10 @@ export const ConfrontationRecord = Schema.Struct({
   run: Schema.Int,
   /** The flow step the difference was observed at; empty when unattributed. */
   step: Schema.String,
-  kind: Schema.Literals(["header", "shape"]),
+  kind: Schema.Literals(["header", "shape", "body"]),
   /** Stable grouping key, e.g. `header:contact:response:200:INVITE`. */
   signature: Schema.String,
-  /** Header name for a header record, empty for a shape record. */
+  /** Header name for a header record, the media type for a body record, empty for a shape record. */
   name: Schema.String,
   /** The message scope, e.g. `initial-invite`; empty when unpinned. */
   scope: Schema.String,

@@ -305,6 +305,27 @@ impl CallState {
         inner.calls.insert(call.call_ref.clone(), call);
     }
 
+    /// Raise the resident copy's `(p,b)` to at least `(gen, bak_gen)` and return
+    /// it, or `None` when nothing changed (not resident, not replicable, or
+    /// already at or past both counters).
+    ///
+    /// **Not a mutation.** Adopting a version another owner published is a read
+    /// this node records, so it carries none of [`update`](Self::update)'s
+    /// authoritative bump: bumping our own axis for it would make two live
+    /// owners raise each other in turn, one flush per round, and the two views
+    /// would never come level (ADR-0031 D3).
+    pub fn adopt_version(&self, call_ref: &str, gen: i64, bak_gen: i64) -> Option<Call> {
+        let mut inner = self.inner.lock().unwrap();
+        let call = inner.calls.get_mut(call_ref)?;
+        let t = call.topology.as_mut()?;
+        if t.gen >= gen && t.bak_gen >= bak_gen {
+            return None;
+        }
+        t.gen = t.gen.max(gen);
+        t.bak_gen = t.bak_gen.max(bak_gen);
+        Some(call.clone())
+    }
+
     /// The backup peer for a call from its `CallTopology.bak`, or `None` when no
     /// replicating store is wired / the call has no topology / `bak` is empty.
     /// This is the resolver the S8 write-side policy ([`ReplicationPlan`]) needs:

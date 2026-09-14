@@ -268,7 +268,7 @@ impl InfraShape for FakeLsbcB2bua {
                     r.new_ruri = Some(format!("sip:{}:{}", b2.ip(), b2.port()));
                     CallTreatment::Route(r)
                 }
-                _ => CallTreatment::Relay,
+                _ => CallTreatment::Relay { label: None },
             })
             // REFER blind-transfer authorization (the `transfer-refer-media`
             // shape): the scripted `/call/refer` backend keyed on the REFER's

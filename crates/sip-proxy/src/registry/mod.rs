@@ -14,6 +14,7 @@ pub mod control;
 pub mod projection;
 pub mod simulated;
 pub mod static_reg;
+pub mod tombstone;
 
 /// Worker identity (the source's branded `WorkerId`; a plain `String` here —
 /// the registry impls reject empty/malformed ids at build time).

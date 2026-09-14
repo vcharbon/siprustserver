@@ -10,11 +10,14 @@
 //!   Membership is about identity + reachability address; *which* port carries
 //!   SIP vs. the replication stream is a consumer concern layered on top.
 //! - **No health.** [`MemberDelta`] is membership-only — `Added | Removed |
-//!   AddressChanged`, with **no** health transition. Health is a proxy-layer
-//!   classification (OPTIONS-probe-driven) that the proxy composes *over*
-//!   membership (its `WorkerSet` annotation overlay); modelling it here would leak
-//!   that concern into the b2bua replication path that has no notion of OPTIONS
-//!   health.
+//!   AddressChanged | ConditionsChanged`, with **no** health transition. Health is
+//!   a proxy-layer classification (OPTIONS-probe-driven) that the proxy composes
+//!   *over* membership (its `WorkerSet` annotation overlay); modelling it here
+//!   would leak that concern into the b2bua replication path that has no notion
+//!   of OPTIONS health. A `Peer`'s `ready` / `terminating` are the
+//!   **orchestrator's endpoint conditions** (what the EndpointSlice says), not a
+//!   probe verdict: one snapshot, two predicates — *pullable* is "present",
+//!   *routable* is `ready` (ADR-0031 D1).
 //!
 //! The backing [`MembershipState`] is the proxy's worker-set source of truth (the
 //! proxy's `WorkerSet` composes a `WorkerEntry` view as membership ⊕ health): an
@@ -45,19 +48,60 @@ pub use k8s::K8sMembership;
 /// empty/malformed ordinals at build time.
 pub type Ordinal = String;
 
-/// A cluster member: identity ordinal + reachability host. **Port-agnostic** —
-/// membership carries no transport port (that is a consumer concern). Cf. the
-/// proxy's `WorkerEntry`, minus `address.port`, `health`, and the LB timing
-/// stamps.
+/// A cluster member: identity ordinal + reachability host + the orchestrator's
+/// endpoint conditions. **Port-agnostic** — membership carries no transport port
+/// (that is a consumer concern). Cf. the proxy's `WorkerEntry`, minus
+/// `address.port`, `health`, and the LB timing stamps.
+///
+/// A member is **pullable** while it is in the snapshot at all, whatever its
+/// conditions; it is **routable** only while `ready` (ADR-0031 D1). A condition
+/// flip is a [`MemberDelta::ConditionsChanged`], never a departure or a host
+/// move, so a consumer keyed on presence (the replication supervisor) keeps its
+/// pullers and their watermarks across it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Peer {
     pub ordinal: Ordinal,
     pub host: String,
+    /// The endpoint's `ready` condition: the member serves new traffic. An
+    /// absent condition reads as not ready.
+    pub ready: bool,
+    /// The endpoint's `terminating` condition: the orchestrator has begun
+    /// removing the member; it is still a replication peer until it leaves.
+    pub terminating: bool,
 }
 
 impl Peer {
+    /// A ready, non-terminating member — the steady-state shape.
     pub fn new(ordinal: impl Into<Ordinal>, host: impl Into<String>) -> Self {
-        Self { ordinal: ordinal.into(), host: host.into() }
+        Self { ordinal: ordinal.into(), host: host.into(), ready: true, terminating: false }
+    }
+
+    /// A member with explicit endpoint conditions.
+    pub fn with_conditions(
+        ordinal: impl Into<Ordinal>,
+        host: impl Into<String>,
+        ready: bool,
+        terminating: bool,
+    ) -> Self {
+        Self { ordinal: ordinal.into(), host: host.into(), ready, terminating }
+    }
+
+    /// The same member with `ready = false`.
+    pub fn not_ready(mut self) -> Self {
+        self.ready = false;
+        self
+    }
+
+    /// The same member with `terminating = true`.
+    pub fn terminating(mut self) -> Self {
+        self.terminating = true;
+        self
+    }
+
+    /// Whether `other` is the same member at the same host with different
+    /// conditions.
+    fn conditions_differ(&self, other: &Peer) -> bool {
+        self.ready != other.ready || self.terminating != other.terminating
     }
 }
 
@@ -71,6 +115,10 @@ pub enum MemberDelta {
     Removed(Ordinal),
     /// An existing peer's host changed (same ordinal, new host).
     AddressChanged(Peer),
+    /// An existing peer's endpoint conditions changed (same ordinal, same host,
+    /// `ready` and/or `terminating` flipped). Presence is unchanged: the member
+    /// stays a replication peer; only its routability moved (ADR-0031 D1).
+    ConditionsChanged(Peer),
 }
 
 /// The read seam consumers (proxy LB, b2bua replication engine) depend on.
@@ -91,6 +139,13 @@ pub trait Membership: Send + Sync {
     /// let a rebooting node latch Ready before a single reclaim puller existed.
     fn synced(&self) -> bool {
         true
+    }
+    /// Whether this source shows a member **its own** endpoint, so a worker can
+    /// observe its own withdrawal from routing (ADR-0031 D6). True for an
+    /// informer over the pool the worker belongs to (and its simulation); false
+    /// for a static list, which is fixed by hand and withdraws nobody.
+    fn observes_self(&self) -> bool {
+        false
     }
 }
 
@@ -173,7 +228,8 @@ impl MembershipState {
 
     /// Change an existing peer's host, emitting [`MemberDelta::AddressChanged`]
     /// (no-op if the ordinal is unknown or the host is unchanged). `peer.host`
-    /// is the new host; `peer.ordinal` selects the target.
+    /// is the new host; `peer.ordinal` selects the target. The peer's conditions
+    /// are taken from `peer` too: a host move is a fresh endpoint, described whole.
     pub fn set_address(&self, peer: Peer) {
         let Some(cur) = self.resolve(&peer.ordinal) else {
             return;
@@ -185,7 +241,30 @@ impl MembershipState {
         self.mutate(
             |peers| {
                 if let Some(p) = peers.iter_mut().find(|p| p.ordinal == peer.ordinal) {
-                    p.host = peer.host;
+                    *p = peer;
+                }
+            },
+            delta,
+        );
+    }
+
+    /// Change an existing peer's endpoint conditions, emitting
+    /// [`MemberDelta::ConditionsChanged`] (no-op if the ordinal is unknown, the
+    /// host differs, or the conditions are unchanged). `peer.ordinal` selects the
+    /// target; `peer.ready` / `peer.terminating` are the new conditions.
+    pub fn set_conditions(&self, peer: Peer) {
+        let Some(cur) = self.resolve(&peer.ordinal) else {
+            return;
+        };
+        if cur.host != peer.host || !cur.conditions_differ(&peer) {
+            return;
+        }
+        let delta = MemberDelta::ConditionsChanged(peer.clone());
+        self.mutate(
+            |peers| {
+                if let Some(p) = peers.iter_mut().find(|p| p.ordinal == peer.ordinal) {
+                    p.ready = peer.ready;
+                    p.terminating = peer.terminating;
                 }
             },
             delta,
@@ -203,14 +282,17 @@ fn sort_by_ordinal(peers: &mut [Peer]) {
 /// observed), emitting exactly the deltas that close the gap:
 /// [`MemberDelta::Removed`] for ordinals that left, [`MemberDelta::Added`] for
 /// new ordinals, [`MemberDelta::AddressChanged`] for an existing ordinal whose
-/// host moved, and **nothing** for an unchanged peer. This is the pure heart of
-/// every snapshot-driven membership source (the k8s informer feeds it the set
-/// it derived from EndpointSlices) — testable with no cluster, just a
-/// [`MembershipState`] and its `changes()` receiver.
+/// host moved, [`MemberDelta::ConditionsChanged`] for an existing ordinal at the
+/// same host whose `ready` / `terminating` flags flipped, and **nothing** for an
+/// unchanged peer. This is the pure heart of every snapshot-driven membership
+/// source (the k8s informer feeds it the set it derived from EndpointSlices) —
+/// testable with no cluster, just a [`MembershipState`] and its `changes()`
+/// receiver.
 ///
-/// `desired` may arrive in any order and may contain duplicate ordinals (two
-/// EndpointSlices listing the same pod); the first occurrence of each ordinal
-/// wins and the rest are ignored, mirroring the snapshot's de-dup.
+/// `desired` may arrive in any order. A duplicate ordinal is pure de-dup — the
+/// first occurrence wins, the rest are ignored — so a source that can list one
+/// member twice with different conditions must merge them before calling
+/// (`peers_from_slices` does).
 pub fn reconcile_to_desired(state: &MembershipState, desired: Vec<Peer>) {
     // De-dup desired by ordinal (first wins), preserving a stable target set.
     let mut seen = std::collections::HashSet::new();
@@ -225,12 +307,13 @@ pub fn reconcile_to_desired(state: &MembershipState, desired: Vec<Peer>) {
             state.remove(&cur.ordinal);
         }
     }
-    // Adds + address changes (each mutator is a no-op when nothing changed, so
-    // an unchanged peer emits no delta).
+    // Adds, address changes, condition flips (each mutator is a no-op when
+    // nothing changed, so an unchanged peer emits no delta).
     for d in desired {
         match state.resolve(&d.ordinal) {
             None => state.add(d),
             Some(cur) if cur.host != d.host => state.set_address(d),
+            Some(cur) if cur.conditions_differ(&d) => state.set_conditions(d),
             Some(_) => {}
         }
     }
@@ -398,6 +481,17 @@ impl SimulatedMembership {
         self.state.set_address(peer);
     }
 
+    /// Set an existing peer's endpoint conditions, emitting
+    /// [`MemberDelta::ConditionsChanged`] (no-op if unknown or unchanged). The
+    /// peer stays in the snapshot: it is still pulled, and routable iff `ready`
+    /// (ADR-0031 D1).
+    pub fn set_conditions(&self, ordinal: &str, ready: bool, terminating: bool) {
+        let Some(cur) = self.state.resolve(ordinal) else {
+            return;
+        };
+        self.state.set_conditions(Peer::with_conditions(ordinal, cur.host, ready, terminating));
+    }
+
     /// Resolve a peer by ordinal (test introspection).
     pub fn resolve(&self, ordinal: &str) -> Option<Peer> {
         self.state.resolve(ordinal)
@@ -410,6 +504,11 @@ impl Membership for SimulatedMembership {
     }
     fn changes(&self) -> broadcast::Receiver<MemberDelta> {
         self.state.changes()
+    }
+    /// The simulation stands in for the informer: a node's own ordinal is in
+    /// its snapshot while the orchestrator publishes it.
+    fn observes_self(&self) -> bool {
+        true
     }
 }
 
@@ -495,6 +594,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_condition_flip_is_a_delta_of_its_own_and_keeps_the_peer() {
+        let m = SimulatedMembership::with_clock(vec![Peer::new("w0", "h0")], Clock::test_at(0));
+        let mut rx = m.changes();
+
+        m.set_conditions("w0", false, true);
+        let expected = Peer::with_conditions("w0", "h0", false, true);
+        assert_eq!(rx.try_recv().unwrap(), MemberDelta::ConditionsChanged(expected.clone()));
+        assert_eq!(m.snapshot(), vec![expected], "still a member, at the same host");
+
+        // Same conditions again → nothing; unknown ordinal → nothing.
+        m.set_conditions("w0", false, true);
+        m.set_conditions("ghost", false, false);
+        assert!(rx.try_recv().is_err());
+
+        // Back to ready: a delta, never a Removed/Added pair.
+        m.set_conditions("w0", true, false);
+        assert_eq!(rx.try_recv().unwrap(), MemberDelta::ConditionsChanged(Peer::new("w0", "h0")));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn static_membership_carries_explicit_conditions() {
+        let m = StaticMembership::from_peers(vec![
+            Peer::new("w0", "h0"),
+            Peer::with_conditions("w1", "h1", false, true),
+        ]);
+        let snap = m.snapshot();
+        assert!(snap[0].ready && !snap[0].terminating);
+        assert!(!snap[1].ready && snap[1].terminating);
+    }
+
+    #[tokio::test]
     async fn readd_existing_ordinal_replaces_not_duplicates() {
         let m = SimulatedMembership::with_clock(vec![Peer::new("w0", "h0")], Clock::test_at(0));
         m.add(Peer::new("w0", "h0-v2"));
@@ -542,6 +673,33 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), MemberDelta::AddressChanged(Peer::new("w1", "h1-new")));
         assert_eq!(rx.try_recv().unwrap(), MemberDelta::Added(Peer::new("w2", "h2")));
         assert!(rx.try_recv().is_err(), "w0 unchanged emits nothing");
+    }
+
+    #[tokio::test]
+    async fn reconcile_emits_conditions_changed_for_a_same_host_flag_flip() {
+        let state = MembershipState::new(vec![Peer::new("w0", "h0"), Peer::new("w1", "h1")]);
+        let mut rx = state.changes();
+        // w0 withdrawn from routing but still in the slice; w1 unchanged.
+        reconcile_to_desired(
+            &state,
+            vec![Peer::with_conditions("w0", "h0", false, true), Peer::new("w1", "h1")],
+        );
+        assert_eq!(ordinals(&state.snapshot()), vec!["w0", "w1"], "nobody left");
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            MemberDelta::ConditionsChanged(Peer::with_conditions("w0", "h0", false, true))
+        );
+        assert!(rx.try_recv().is_err(), "w1 unchanged emits nothing");
+        assert!(!state.resolve("w0").unwrap().ready);
+
+        // A host move carries the new conditions whole: one AddressChanged.
+        reconcile_to_desired(
+            &state,
+            vec![Peer::with_conditions("w0", "h0-new", true, false), Peer::new("w1", "h1")],
+        );
+        assert_eq!(rx.try_recv().unwrap(), MemberDelta::AddressChanged(Peer::new("w0", "h0-new")));
+        assert!(rx.try_recv().is_err());
+        assert!(state.resolve("w0").unwrap().ready);
     }
 
     #[tokio::test]

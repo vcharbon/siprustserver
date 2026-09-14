@@ -35,6 +35,9 @@ pub struct SimulatedWorkerRegistry {
     /// When set, stamp `first_seen_at_ms` from the clock on every `add` whose
     /// entry doesn't already carry one (the source's `autoStampFirstSeenAtMs`).
     auto_first_seen: bool,
+    /// Each worker's per-worker port, kept across a not-ready window so
+    /// [`set_ready`](Self::set_ready) can re-seed it on the return.
+    ports: Arc<std::sync::Mutex<std::collections::HashMap<String, u16>>>,
 }
 
 impl SimulatedWorkerRegistry {
@@ -54,6 +57,7 @@ impl SimulatedWorkerRegistry {
         let membership = SimulatedMembership::with_clock(peers, clock.clone());
         let set =
             Arc::new(WorkerSet::new(Arc::new(membership.clone()), DEFAULT_PORT, clock.clone()));
+        let ports = initial.iter().map(|e| (e.id.clone(), e.address.port)).collect();
         for e in &initial {
             set.preset(
                 &e.id,
@@ -65,7 +69,13 @@ impl SimulatedWorkerRegistry {
             );
         }
         set.recompose();
-        Self { set, membership, clock, auto_first_seen }
+        Self {
+            set,
+            membership,
+            clock,
+            auto_first_seen,
+            ports: Arc::new(std::sync::Mutex::new(ports)),
+        }
     }
 
     /// Stamp `first_seen_at_ms` from the clock on every `add` (fresh-pod guard).
@@ -93,6 +103,7 @@ impl SimulatedWorkerRegistry {
             entry.draining_since,
             entry.first_seen_at_ms,
         );
+        self.ports.lock().unwrap().insert(entry.id.clone(), entry.address.port);
         self.membership.add(Peer::new(entry.id.clone(), entry.address.host.clone()));
         self.set.recompose();
     }
@@ -103,7 +114,35 @@ impl SimulatedWorkerRegistry {
         if self.set.resolve(id).is_none() {
             return;
         }
+        self.ports.lock().unwrap().remove(id);
         self.membership.remove(id);
+        self.set.recompose();
+    }
+
+    /// Set a worker's endpoint `ready` condition (no-op if unknown). The worker
+    /// stays a member; a `ready=false` one leaves the projection and its address
+    /// is tombstoned, a `ready=true` one joins as a fresh `Unknown` endpoint
+    /// (ADR-0031 D1). The orchestrator's condition, never the probe's health.
+    pub fn set_ready(&self, id: &str, ready: bool) {
+        let Some(cur) = self.membership.resolve(id) else {
+            return;
+        };
+        if ready && !cur.ready {
+            // The per-worker port is a proxy annotation, dropped with the
+            // departure; re-seed it so the returning endpoint keeps its bind.
+            // Everything else is what a fresh join gets.
+            if let Some(port) = self.ports.lock().unwrap().get(id).copied() {
+                self.set.preset(
+                    id,
+                    cur.host.clone(),
+                    port,
+                    WorkerHealth::Unknown,
+                    None,
+                    Some(self.now_ms()),
+                );
+            }
+        }
+        self.membership.set_conditions(id, ready, cur.terminating);
         self.set.recompose();
     }
 
@@ -114,9 +153,10 @@ impl SimulatedWorkerRegistry {
         self.set.set_health(id, health);
     }
 
-    /// Change a worker's address (no-op if unknown or unchanged). The host is
-    /// membership identity (driven through topology, preserving health); the port
-    /// is the proxy's per-worker annotation.
+    /// Change a worker's address (no-op if unknown, unchanged, or not ready — it
+    /// resolves through the projection, which holds ready members only). The host
+    /// is membership identity (driven through topology, preserving health); the
+    /// port is the proxy's per-worker annotation.
     pub fn set_address(&self, id: &str, address: ProxyAddr) {
         let Some(cur) = self.set.resolve(id) else {
             return;
@@ -124,6 +164,7 @@ impl SimulatedWorkerRegistry {
         if cur.address == address {
             return;
         }
+        self.ports.lock().unwrap().insert(id.to_string(), address.port);
         if cur.address.host != address.host {
             // Host change is membership identity. Re-seed the annotation at the new
             // host (carrying the current health/timing + new port) so the recompose
@@ -195,6 +236,24 @@ mod tests {
 
         reg.remove("b2b-1");
         assert!(reg.snapshot().is_empty());
+    }
+
+    #[test]
+    fn set_ready_false_departs_the_worker_and_true_readmits_it_unknown() {
+        let reg = SimulatedWorkerRegistry::with_clock(vec![], Clock::test_at(0));
+        reg.add(WorkerEntry::alive("w", ProxyAddr::new("10.0.0.1", 5070)));
+        let addr = ProxyAddr::new("10.0.0.1", 5070);
+
+        reg.set_ready("w", false);
+        assert!(reg.resolve("w").is_none(), "unroutable while not ready");
+        assert_eq!(reg.lookup_by_address(&addr).unwrap().health, WorkerHealth::Dead);
+        assert!(reg.membership().resolve("w").is_some(), "still a member");
+
+        reg.set_ready("w", true);
+        assert_eq!(reg.resolve("w").unwrap().health, WorkerHealth::Unknown);
+        assert_eq!(reg.resolve("w").unwrap().address, addr, "the per-worker port survives");
+        // Unknown ordinal: nothing.
+        reg.set_ready("ghost", false);
     }
 
     #[tokio::test(start_paused = true)]

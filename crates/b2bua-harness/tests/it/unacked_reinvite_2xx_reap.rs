@@ -100,7 +100,7 @@ async fn unacked_reinvite_2xx_is_retransmitted_then_byes_both_legs() {
 /// The happy path: the a-leg ACK **does** arrive, so the re-INVITE 2xx's
 /// `AckOf2xx` obligation is discharged (matched on the ACK's To-tag and CSeq)
 /// and its ladder NEVER fires — no spurious retransmit, no give-up teardown.
-/// Guards the engine's discharge seam (ADR-0029 X4).
+/// Guards the engine's discharge seam (ADR-0032 X4).
 #[tokio::test(start_paused = true)]
 async fn reinvite_ack_discharges_the_2xx_obligation() {
     let h = Harness::new("b2bua-reinvite-ack-discharges-2xx");

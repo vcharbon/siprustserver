@@ -14,7 +14,7 @@ use b2bua::rules::{
 };
 use call::{
     B2buaDialogExt, CallModelState, Dialog, Direction, Leg, LegDisposition, LegKind, LegState,
-    MachineId, RemoteInfo, StackDialog, StateLabel, TimerType,
+    MachineId, RemoteInfo, StackDialog, StateLabel, TerminationCause, TimerType,
 };
 use sip_message::generators::{
     generate_out_of_dialog_request, CapabilitySet, GenerateOutOfDialogRequestOpts,
@@ -94,6 +94,22 @@ fn timer_global_duration_selects_max_duration() {
     assert_eq!(ranked.first().map(|r| r.id), Some("max-duration"));
 }
 
+/// A rule reads the decision ordinal current at its turn: `0` on a call no
+/// decision touched, then the count of applied decisions.
+#[test]
+fn rule_call_reads_the_current_decision_ordinal() {
+    let call = test_call();
+    assert_eq!(RuleCall::new(&call).decision_ordinal(), 0, "no decision yet");
+    let call = call::helpers::mark_decision(
+        call,
+        1_000,
+        call::DecisionKind::Route,
+        Some("a".to_string()),
+        Some("first".to_string()),
+    );
+    assert_eq!(RuleCall::new(&call).decision_ordinal(), 1, "one decision applied");
+}
+
 /// The `no-answer` rule's output for a fire naming `fired_leg_id` on `call`.
 fn no_answer_result(call: &call::Call, fired_leg_id: &str) -> Vec<RuleAction> {
     let event = CallEvent::Timer {
@@ -171,15 +187,12 @@ fn no_answer_fire_on_own_pending_leg_fires_despite_other_leg_confirmed() {
     pending.state = LegState::Trying;
     call = call::helpers::add_b_leg(call, pending);
     let actions = no_answer_result(&call, "b-2");
+    // No consult here: the caller's 480 and the teardown follow the destroy.
     match actions.as_slice() {
-        [RuleAction::AddCdrEvent { leg_id, reason, .. }, RuleAction::DestroyLeg { leg_id: destroyed }, tail]
+        [RuleAction::AddCdrEvent { leg_id, reason, .. }, RuleAction::DestroyLeg { leg_id: destroyed }, RuleAction::RespondToALeg { status: 480, .. }, RuleAction::BeginTermination { .. }]
             if leg_id == "b-2"
                 && reason.as_deref() == Some("no_answer_timeout")
-                && destroyed == "b-2"
-                && matches!(
-                    tail,
-                    RuleAction::BeginTermination { .. } | RuleAction::FailureAsyncHttp { .. }
-                ) => {}
+                && destroyed == "b-2" => {}
         other => panic!("genuine fire runs the normal no-answer body, got {other:?}"),
     }
 }
@@ -560,6 +573,7 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         invite_cseq: None,
         in_dialog: false,
         headers: vec![],
+        to_tag: None,
     };
     let config = B2buaConfig::default();
     let ctx = RuleContext {
@@ -580,7 +594,11 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
         wire_faults: &b2bua::wire_faults::WireFaults::none(),
     };
     let result = exec.execute(
-        &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }],
+        &[RuleAction::BeginTermination {
+            reason: Some("CANCEL".into()),
+            cause: TerminationCause::RemoteCancel,
+            by_leg: Some("a".into()),
+        }],
         &call,
         &ctx,
     );
@@ -668,6 +686,8 @@ fn invariants_append_cleanup_on_terminated() {
     let mut call = test_call();
     let before = call.clone();
     call.state = CallModelState::Terminated;
+    // A synthetic terminal states its cause as every live path does.
+    call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
     call.a_leg.state = LegState::Terminated;
     let result = invariants::enforce(
         &b2bua::obligations::ObligationSet::core(),
@@ -715,6 +735,8 @@ fn no_synthesized_final_when_the_turn_already_answered() {
     let mut call = test_call();
     let before = call.clone();
     call.state = CallModelState::Terminated;
+    // A synthetic terminal states its cause as every live path does.
+    call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
     call.a_leg.state = LegState::Terminated;
     let a_invite = b2bua::rules::relay::rebuild_a_leg_invite(&call.a_leg_invite);
     let mut result = HandlerResult::new(call);
@@ -730,6 +752,7 @@ fn no_synthesized_final_when_the_turn_already_answered() {
         None,
         None,
         vec![],
+        b2bua::effects::Provenance::Authored,
     )
     .expect("the transaction's first final is admitted");
     result.effects.outbound.push(effect);
@@ -757,6 +780,8 @@ fn no_synthesized_final_when_the_txn_layer_answered_the_cancel() {
     let mut call = test_call();
     let before = call.clone();
     call.state = CallModelState::Terminated;
+    // A synthetic terminal states its cause as every live path does.
+    call = call::helpers::record_termination(call, 0, TerminationCause::Supervisor, None);
     call = call::helpers::record_invite_final(call, "a", 487);
     let result = invariants::enforce(
         &b2bua::obligations::ObligationSet::core(),
@@ -789,6 +814,7 @@ fn execute_on(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
         invite_cseq: None,
         in_dialog: false,
         headers: vec![],
+        to_tag: None,
     };
     let config = B2buaConfig::default();
     let ctx = RuleContext {
@@ -924,8 +950,14 @@ fn begin_termination_resolves_an_a_leg_whose_invite_carries_its_final() {
     let mut call = test_call();
     call.a_leg.state = LegState::Early;
     let call = call::helpers::record_invite_final(call, "a", 487);
-    let result =
-        execute_on(&call, &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }]);
+    let result = execute_on(
+        &call,
+        &[RuleAction::BeginTermination {
+            reason: Some("CANCEL".into()),
+            cause: TerminationCause::RemoteCancel,
+            by_leg: Some("a".into()),
+        }],
+    );
     assert_eq!(result.call.a_leg.state, LegState::Terminated);
     assert_eq!(result.call.a_leg.bye_disposition, Some(call::ByeDisposition::None));
 
@@ -933,7 +965,14 @@ fn begin_termination_resolves_an_a_leg_whose_invite_carries_its_final() {
     // that caller its 503 at `→ terminated`.
     let mut call = test_call();
     call.a_leg.state = LegState::Early;
-    let result = execute_on(&call, &[RuleAction::BeginTermination { reason: Some("BYE".into()) }]);
+    let result = execute_on(
+        &call,
+        &[RuleAction::BeginTermination {
+            reason: Some("BYE".into()),
+            cause: TerminationCause::RemoteBye,
+            by_leg: Some("a".into()),
+        }],
+    );
     assert_eq!(result.call.a_leg.state, LegState::Early);
 }
 
@@ -1310,6 +1349,7 @@ fn b_leg_pending() -> Leg {
         kind: Some(LegKind::Destination),
         adopted: None,
         invite_final_sent: None,
+        messages: Default::default(),
     }
 }
 
@@ -1532,7 +1572,8 @@ fn cancel_follows_invite_route_set_and_next_hop_through_the_outbound_proxy() {
         &[],
         &CapabilitySet::default(),
         None, // no charging vector
-        &[],  // no withheld option tags
+        &[],
+        &[], // no withheld option tags
         None,
     )
     .expect("no identity rewrites, so nothing to refuse");
@@ -3220,6 +3261,15 @@ mod enforce_equivalence {
 
             let mut after = test_call();
             after.state = after_state;
+            if after_state != CallModelState::Active {
+                // A synthetic terminal states its cause as every live path does.
+                after = call::helpers::record_termination(
+                    after,
+                    0,
+                    TerminationCause::Supervisor,
+                    None,
+                );
+            }
             after.limiter_entries = entries;
             after.timers = (0..timer_count)
                 .map(|i| TimerEntry {
@@ -3444,7 +3494,8 @@ fn a_declared_capability_set_reaches_the_originated_leg_wire_header() {
         &[],
         &b2bua::rules::capabilities::for_leg(&call, "b-1"),
         None, // no charging vector
-        &[],  // no withheld option tags
+        &[],
+        &[], // no withheld option tags
         None,
     )
     .expect("no identity rewrites, so nothing to refuse");
@@ -3829,7 +3880,7 @@ fn relay_ack_pushes_no_ladder_plumbing() {
     );
 }
 
-// ADR-0029 X5 — a ladder give-up's settlement after the rules (`settle_give_up`,
+// ADR-0032 X5 — a ladder give-up's settlement after the rules (`settle_give_up`,
 // the router's step after the rule chain on every `RepeatGiveUp`): an un-ACKed
 // 2xx ends the session whatever a service rule made of the give-up, and a
 // reliable provisional's give-up is left to the rules' own RFC 3262 §3 policy.
@@ -4137,7 +4188,11 @@ mod going_away_gate {
                 header_updates: vec![],
                 contacts: vec![],
             },
-            RuleAction::BeginTermination { reason: Some("deadline".into()) },
+            RuleAction::BeginTermination {
+                reason: Some("deadline".into()),
+                cause: TerminationCause::Timeout(call::TimeoutKind::Setup),
+                by_leg: None,
+            },
             RuleAction::ClearState { machine: SVC },
         ]))
     }
@@ -4301,6 +4356,7 @@ mod going_away_gate {
             invite_cseq: None,
             in_dialog: false,
             headers: vec![],
+            to_tag: None,
         };
         let config = B2buaConfig::default();
         let ctx = ctx_for(&call, &event, &config);
@@ -4312,7 +4368,11 @@ mod going_away_gate {
             wire_faults: &b2bua::wire_faults::WireFaults::none(),
         };
         let result = exec.execute(
-            &[RuleAction::BeginTermination { reason: Some("CANCEL".into()) }],
+            &[RuleAction::BeginTermination {
+                reason: Some("CANCEL".into()),
+                cause: TerminationCause::RemoteCancel,
+                by_leg: Some("a".into()),
+            }],
             &call,
             &ctx,
         );

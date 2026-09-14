@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::dialog::Dialog;
 use super::invite_txn::InviteTxnHandle;
+use super::message_ring::MessageRing;
 use super::services::ExtMap;
 
 /// Remote peer endpoint.
@@ -115,4 +116,9 @@ pub struct Leg {
     /// final (RFC 3261 §17.2.1). Trailing under the positional codec.
     #[serde(default)]
     pub invite_final_sent: Option<u16>,
+    /// The leg's distinct SIP messages, received and sent, under the
+    /// configured cap; empty while the ring is off. Written only by
+    /// [`crate::helpers::record_message`].
+    #[serde(default)]
+    pub messages: MessageRing,
 }

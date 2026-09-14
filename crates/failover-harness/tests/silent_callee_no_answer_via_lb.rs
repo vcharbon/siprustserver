@@ -142,11 +142,11 @@ async fn silent_callee_no_answer_via_lb__reject__reaps_crossing_200() {
     let mut bye = bob.receive_absorbing("BYE", &["INVITE"]).await;
     bye.respond(200, "OK").await;
 
-    // The caller still gets its final reject (ADR-0022 unanswered-a-leg synthesis,
-    // once the abandoned callee has quiesced) — NOT dropped on a removed call.
-    let failed = call.expect(503).await;
-    assert_eq!(failed.status(), 503, "caller's INVITE resolves with a final failure");
-    // Flush alice's §17.1.1.3 ACK for the 503 (sent by the receive above) the
+    // The caller holds its final reject (the no-answer rule's own 480, authored
+    // in the terminating turn) — NOT dropped on a removed call.
+    let failed = call.expect(480).await;
+    assert_eq!(failed.status(), 480, "caller's INVITE resolves with a final failure");
+    // Flush alice's §17.1.1.3 ACK for the 480 (sent by the receive above) the
     // one hop to the proxy before the Drop-time RFC gate snapshots the trace.
     fh.advance(Duration::from_millis(10)).await;
 
@@ -219,13 +219,13 @@ async fn silent_callee_no_answer_via_lb__reject__delayed_crossing_200_still_reap
     let mut bye = bob.receive_absorbing("BYE", &["INVITE"]).await;
     bye.respond(200, "OK").await;
 
-    let failed = call.expect(503).await;
+    let failed = call.expect(480).await;
     assert_eq!(
         failed.status(),
-        503,
+        480,
         "caller's INVITE resolves with a final failure after a late reap"
     );
-    // Flush alice's §17.1.1.3 ACK for the 503 the one hop to the proxy before
+    // Flush alice's §17.1.1.3 ACK for the 480 the one hop to the proxy before
     // the Drop-time RFC gate snapshots the trace.
     fh.advance(Duration::from_millis(10)).await;
 

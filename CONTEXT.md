@@ -99,7 +99,7 @@ The whole sequence of scheduled re-sends of one message, and the schedule that
 paces it. A ladder belongs either to a **transaction** (Timer A/E/G, the CANCEL
 sub-ladder — the transaction layer drives them and its consumers never see
 them) or to a **dialog-level obligation** (RFC 3261 §13.3.1.4, RFC 3262 §3 —
-replicated with the call, visible to rules only as its give-up). See ADR-0029.
+replicated with the call, visible to rules only as its give-up). See ADR-0032.
 _Avoid_: "retry", "attempt" (they carry HTTP retry semantics elsewhere in the
 workspace), "cadence" for the schedule as a whole.
 
@@ -111,7 +111,7 @@ the whole of a ladder's state — no epoch anchor, so it survives takeover.
 **Retained emission**:
 The exact serialized datagram of a message that owes repeats, kept opaque and
 replicated with the call. A rung re-sends these bytes; it never re-composes an
-equivalent message (ADR-0029 X3).
+equivalent message (ADR-0032 X3).
 
 **Obligation**:
 What discharges a dialog-level ladder, as a key the framework matches on:
@@ -120,6 +120,79 @@ or PRACK arrives; a rule sees only the give-up. A transaction ladder needs no
 obligation — the transaction layer owns its own.
 _Avoid_: "watchdog" (the old name for the 2xx pair — it named the timer, not
 the thing owed).
+
+**Message ring**:
+The capped per-leg history of the distinct SIP messages a leg received or sent,
+in handling order, replicated with the call (`Leg.messages`, off by default —
+`cdr.message_ring`). One entry per message: its direction (**received**,
+**relayed** — a peer leg's message forwarded — or **authored** — minted by this
+stack), method, CSeq, status, To-tag, the values of the configured header names
+(`cdr.captured_headers`) and a call-wide `seq`. A rung, a re-ACK or a layer
+replay records nothing: a repeat is the message it repeats; a UAS's periodic
+re-sends of an unreliable 1xx are each recorded. The keepalive probe this
+stack originates and its answer are not dialog history and are not recorded.
+The transaction layer's own answers to a message the call does see — the 100
+to an INVITE, a CANCEL's 200 and 487, the hop ACK of a non-2xx INVITE final —
+are recorded as authored, as are the router's 481s to a stray request; a 100
+the layer absorbs on a client transaction is not a message of the call's.
+_Avoid_: "history" alone (the CDR vocabulary of a consumer), "log" (the
+decision log is a different record).
+
+**Decision log**:
+The record of every decision the decision layer returned AND this stack
+applied to a call, in application order, replicated with the call
+(`Call.decision_log`). One **mark** per decision: its 1-based **ordinal**, the
+turn's clock, its **kind** — the decision point crossed with the treatment
+(route, reject, redirect, relay; failover route / reject / redirect /
+terminate; release, release route; transfer allow / reject) — the leg whose
+event it answers, and the **label**: an opaque string the decision layer may
+attach to any decision, recorded and read by nothing here. The count of marks
+is the **decision ordinal**; every message-ring entry and every CDR event is
+stamped with the ordinal standing when it was written, so the decision a
+message was handled under is read from the log whatever a later decision
+replaced on the call (a failover's `service_ext` is latest-wins); a late
+message of an earlier leg is stamped with the decision current at handling.
+`0` = before any decision (the caller's INVITE and its 100). A route the
+limiter, the hop budget or the target admission refused, an unanswered
+consult (engine error, deadline), a limiter-refused reroute and every final
+the stack authors on its own mark nothing. The async folds are marked once,
+where the fold lands, before any rule reads it.
+_Avoid_: "routing key" or any decision-layer meaning for the label (opaque
+here); "decision count" for the ordinal (it is the stamp, not a statistic).
+
+**Termination record**:
+Who ended the call and why, replicated with the call (`Call.termination`),
+written once by the first termination the call enters — a later termination
+of a terminating call (the safety timer, a reaper verdict) leaves it. The
+**cause** is a closed set: the peer's own BYE, CANCEL or final (**remote
+bye**, **remote cancel**, **remote final** — a callee failure let stand, a
+481 denying the dialog); the decision layer's refusal of the call (**decision
+reject**: a reject, a redirect, a relayed failure it authored, on the initial
+path or on a failover) or its treatment's end of the call (**decision
+release**: a release result, a route it answered that could not complete, a
+media program run to its end); the duration cap (**max duration**); a
+deadline by kind (**timeout**: a call-level completion deadline — the setup
+deadline or a transfer's overall guard —, no answer, PRACK, ACK, keepalive —
+the probe unanswered or denied with a 481 —, transaction); the stack's own
+refusal (**admission**: a limiter, the target
+admission, a spent hop budget, a malformed INVITE, an unreadable or unanswered
+decision); the per-call message cap; the **supervisor** (a reaper strike, a
+forced terminal). The record names the leg whose message or timer caused it
+(**by leg**: the caller for its BYE or CANCEL, the callee for its BYE, final
+or unanswered probe; none for a decision, the stack or its supervisor), the
+turn's clock, and the **cut** (`last_seq`): the `seq` of the last message-ring
+entry the terminating turn recorded, so every entry at or under it was
+received or sent as part of beginning the termination (the peer's BYE and its
+200, the BYE or CANCEL relayed to the other leg, the 487, the caller's final
+where a deadline ends an unanswered call) and every entry above it came after
+(the other leg's 200 to that BYE, the ACK to the 487); `0` while the ring is
+off. Every action that begins a termination states its cause
+(`BeginTermination`, `TerminateCall`), as does every direct path to terminal
+(a decision reject, an admission refusal, the reaper's discharge); a terminal
+reached without one is counted (`termination_unrecorded`).
+_Avoid_: "reason" for the cause (the free-text `reason` is a label the rules
+pass, an RFC 3326 value at most — the cause is typed); "snapshot" for the cut
+(the ring is whole; the cut is a `seq`).
 
 ## HA replication glossary
 
@@ -221,7 +294,7 @@ storage-only step).
 **Seed**: a transaction the materialisation rebuilds from the record: a
 Proceeding client INVITE from an INVITE handle, a Proceeding server INVITE
 from the a-leg snapshot or a pending relayed re-INVITE. Never a 2xx, PRACK or
-re-ACK: those are ADR-0029 obligations replicated with the call.
+re-ACK: those are ADR-0032 obligations replicated with the call.
 
 **Self-release** (acting-backup takeover-copy lifecycle) — replaces Activate/Deactivate (ADR-0014):
 A backup holds a **takeover copy** only *while actively serving* the rerouted
@@ -238,14 +311,25 @@ _Avoid_: "Deactivate"/"handback" (the removed watermark handshake); "ghost backu
 Each call carries `(p, b)` = `(primary_counter, backup_counter)` =
 `CallTopology.{gen, bak_gen}`. **Each node bumps only its own** counter on a local
 mutation, so the *other* counter on a propagated update is the **branch point**.
-Merge is direction-aware: **Forward** (primary→backup) and **Bootstrap** apply
-unless the stored vector dominates (follower defers to authority); **Reverse**
-(backup→primary) applies iff `p_in == p_cur && b_in > b_cur` (untouched-by-primary
-since the backup branched, genuinely newer backup mutation); **deletes** apply
-unconditionally both ways. Closes the latent equal-`gen` divergence the single
-counter suffered.
-_Avoid_: "call_gen LWW"/"highest gen wins" (the reverse path is now the meaningful
-guard; forward is monotone-authority).
+Merge is direction-aware: **Bootstrap** (a node recovering its own partition)
+applies unless the stored vector dominates; **Forward** (primary→backup) applies
+on that same rule *and* never behind the Element's own `b` (ADR-0031 D3 — an
+Element an acting backup authored holds a version the authority never saw);
+**Reverse** (backup→primary) applies iff `p_in == p_cur && b_in > b_cur`
+(untouched-by-primary since the backup branched, genuinely newer backup
+mutation). A Forward `Put` whose BODY stands behind the Element on the call's
+lifecycle is a **branch** of the call and is refused; **deletes** apply
+unconditionally except Forward, which yields for the **answer** alone — an
+`Active` Element whose caller was answered and to which no forward flush, taken
+or refused, has ever carried the authority's own answer. A refused flush is folded into a live copy
+when it carries lifecycle progress the vector cannot see. A **fold** adopts
+`max` of both counters before the store's own bump, so the split heals; a
+**refusal** adopts only the axis the other owner bumps — `b` at a primary, `p`
+at a backup — and without that bump, because recording a version somebody else
+published is a read, not a mutation. Closes the latent equal-`gen` divergence
+the single counter suffered.
+_Avoid_: "call_gen LWW"/"highest gen wins" (both propagating directions guard:
+reverse on the branch point, forward on the backup's own progress).
 
 **Informal aliases** (do not use in code or test names):
 Conversational shorthands map onto the canonical terms above — "switch to backup"
@@ -291,6 +375,16 @@ position — never read from or written to a call's `(p,b)` version vector (the
 two-generations trap). Retained per `(ordinal, flow)` across disconnects so a
 returning peer resumes rather than re-bootstraps.
 
+**Position frame** (the drain's own signal, ADR-0031 D2):
+The one client→server frame past the opening `PullRequest`: a puller answers each
+post-bootstrap `Data` and every `Noop` with "I have applied everything up to
+`at`". The serving node records it per `(peer, flow)` and reads it in ONE place —
+whether a draining worker's live calls are held by the peers that back them up.
+Never an apply gate, a retention hint or a readiness input (the roles ADR-0014
+§12 retired `Ack` from).
+_Avoid_: "Ack" (the removed retention frame); calling it a handshake — nothing
+waits for it.
+
 **Current flag** (`everCaughtUp`):
 Set the instant the **first `Noop`** arrives on a stream — the server emits it on
 the **catch-up edge** (backlog drained below one batch / to head), so it means "I
@@ -304,7 +398,14 @@ k8s, via the `/ready` HTTP probe. **Ready** = every **Reclaim** stream to a
 *reachable* peer has hit its first `Noop` (best-effort, hard-timer bounded so a
 dead/slow peer cannot hang readiness). **Backup** streams are opened only *after*
 `Ready` and **never gate it** (fire-and-forget; observable via the store + metrics,
-not a readiness sub-state). **Draining** = latched on SIGTERM; terminal.
+not a readiness sub-state). **Draining** = latched on SIGTERM, or on the worker's own observation that its
+endpoint is withdrawn; terminal. The drain exits on the first of: live calls
+cleared (`quiescent`), every live call's backup holding its changelog head once
+the floor `B2BUA_DRAIN_MIN_MS` has passed, for a worker that has observed its own
+withdrawal (`caught_up`), or the grace `B2BUA_DRAIN_GRACE_MS` — as `grace` for a
+worker that is not withdrawn (quiescence-or-grace) and as `grace_peers_behind`
+for one that is, which means a flush window was lost (ADR-0031 D2, D6). The four
+reasons are the `reason` label of `b2bua_drain_exits_total`.
 
 ## HTTP call-decision adaptation
 
@@ -445,15 +546,41 @@ _Avoid_: "clear state" in prose for the *concept* (say a machine **deactivates**
 
 **K8sMembership**:
 The real `topology::Membership` source (S11): a kube EndpointSlice informer over
-the headless worker Service. *Ready* endpoints → `Peer{ordinal = pod name, host
-= pod IP}`; written once, consumed by both proxy and b2bua (ADR-0011 X7 / ADR-0012
-D4). Its delta consumers **self-heal**: a `Lagged` broadcast re-reconciles from
+the headless worker Service. Every endpoint in the slice → `Peer{ordinal = pod
+name, host = pod IP, ready, terminating}`; written once, consumed by both proxy
+and b2bua (ADR-0011 X7 / ADR-0012 D4), each with its own predicate: the proxy
+routes to *ready* peers, the b2bua pulls every peer (ADR-0031 D1). Its delta consumers **self-heal**: a `Lagged` broadcast re-reconciles from
 `snapshot()` (never `return`s) and a periodic snapshot reconcile makes a missed
 delta non-fatal (ADR-0012 D1/D2). The repl puller additionally resolves a
 **stable per-pod DNS name fresh per connect** as defense-in-depth (ADR-0012 D3);
 the proxy reaches workers by the informer-fed Pod IP (ADR-0012 D4). Consistency
 is enforced on *identity + membership source*, not *address representation*
 (ADR-0012 D5).
+
+**Withdrawal**:
+The instant a worker's endpoint leaves the routable set — `ready=false` in its
+EndpointSlice, or the endpoint gone. The proxy drops the ordinal and tombstones
+its address; the process is untouched but **observes** it: the informer shows a
+worker its own endpoint, and once it has seen itself routable, a `terminating` or
+absent own endpoint (never a readiness flap: `Draining` is terminal) latches
+`Draining` whether or not SIGTERM has come (ADR-0031 D6; `is_withdrawn`
+on the supervisor, the `b2bua_withdrawn_running` gauge). A static membership
+never shows a worker itself. Four ways out — graceful, abrupt, vanished, restarted in
+place — in ADR-0031.
+
+**Terminating member**:
+A worker the orchestrator has begun to remove and that still runs. Still a
+**replication peer** (pulled until it is gone from membership), no longer a
+**routing target** (ADR-0031 D1: one membership snapshot, two predicates —
+*pullable* is "still a member", *routable* is "ready").
+_Avoid_: "withdrawn" for the replication event — **withdrawal** is routing-only;
+the replication event is the peer **departing** (parked).
+
+**Departed-address tombstone**:
+The proxy registry's memory of an address that left the set: resolvable by
+`lookup_by_address` as its last ordinal with health `Dead` for Timer H, keyed by
+address, so a response still arriving from it reverse-fails to the cookie's
+backup; a join at the address clears it. Never affects ordinal resolution.
 
 ## Call reaper vocabulary
 

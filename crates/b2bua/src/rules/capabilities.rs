@@ -11,7 +11,14 @@
 //! and where nothing was declared and nothing was received the face states
 //! NO line. An advertisement is a claim about the party that makes it: a
 //! back-to-back UA relays the peer's verbatim and never widens, narrows or
-//! invents one, and what a peer left unsaid stays unsaid. The stack's own set
+//! invents one, and what a peer left unsaid stays unsaid. The one claim the
+//! stack states on its own behalf is an extension it exercises itself: an
+//! INVITE it originates under the `fake-prack` strategy offers `100rel`,
+//! because the stack — not the originator — acknowledges the reliable
+//! provisionals that offer solicits ([`offered_option_tags`]); and the one
+//! narrowing it makes on its own behalf is the twin of that offer: a strategy
+//! that acknowledges none withholds `100rel` from every leg it originates
+//! ([`withheld_by_strategy_in`]). The stack's own set
 //! ([`CapabilitySet::default`]) is for the messages the stack answers on its
 //! own behalf — the out-of-dialog OPTIONS — and for nothing it relays. A
 //! relayed value is not an explicit update and never outranks a declaration:
@@ -27,8 +34,8 @@
 //! line is not: it states its own bytes verbatim, and the decision layer owns
 //! their well-formedness.
 
-use call::features::{AdvertisedCapabilities, FeatureActivations};
-use call::Call;
+use call::features::{AdvertisedCapabilities, FeatureActivations, RelayFirst18xStrategy};
+use call::{Call, LegKind};
 use sip_message::generators::CapabilitySet;
 use sip_message::header::{Allow, HeaderName, Supported};
 use sip_message::SipHeader;
@@ -160,6 +167,86 @@ pub fn relaying_for_leg(call: &Call, leg_id: &str, received: &[SipHeader]) -> Ca
     relaying(call, Face::of_leg(leg_id), received)
 }
 
+/// The option tags the stack offers ON ITS OWN BEHALF on an INVITE it
+/// originates toward a leg of `kind` (`None` reads as a destination leg):
+/// under the `fake-prack` strategy the stack acknowledges a destination leg's
+/// reliable provisionals itself, so that INVITE offers `100rel` (RFC 3262 §3)
+/// whatever the originator advertised — an offer the originator never made is
+/// not relayed back to it, and the strategy's own relay keeps its provisionals
+/// unreliable. A media leg's provisionals belong to the service that dialled
+/// it and take no offer; every other strategy offers nothing. The mint states
+/// these after every advertisement and before the call-scoped withhold, so a
+/// withheld tag still never rides.
+pub fn offered_option_tags_in(
+    features: Option<&FeatureActivations>,
+    kind: Option<LegKind>,
+) -> Vec<String> {
+    let destination = kind.unwrap_or(LegKind::Destination) == LegKind::Destination;
+    let acknowledges_itself = features
+        .and_then(|f| f.relay_first_18x_to_180.as_ref())
+        .is_some_and(|f| f.strategy == RelayFirst18xStrategy::FakePrack);
+    if destination && acknowledges_itself {
+        vec!["100rel".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// [`offered_option_tags_in`] for the strategy `call` arms.
+pub fn offered_option_tags(call: &Call, kind: Option<LegKind>) -> Vec<String> {
+    offered_option_tags_in(call.features.as_ref(), kind)
+}
+
+/// The option tags the armed strategy WITHHOLDS from an INVITE the stack
+/// originates toward a leg of `kind` (`None` reads as a destination leg),
+/// `offers_sdp` being whether that INVITE carries an offer: a strategy that
+/// keeps the originator's provisionals unreliable (`drop-sdp`, `keep-sdp`)
+/// never relays a PRACK, so it solicits no reliable provisional (RFC 3262 §3)
+/// from a destination leg — `100rel` is withheld whoever stated it, the
+/// originator's relayed line or a declared set — and `fake-prack` withholds
+/// it where the INVITE carries no offer, since the answer a reliable
+/// provisional would then carry is one this stack cannot acknowledge. The
+/// twin of [`offered_option_tags_in`]: the withhold outranks the offer, and
+/// it applies on EVERY mint of the call — the initial route and each leg a
+/// rule creates — so the call solicits the same reliability from each callee.
+/// A media leg's provisionals belong to the service that dialled it: nothing
+/// is withheld there.
+pub fn withheld_by_strategy_in(
+    features: Option<&FeatureActivations>,
+    kind: Option<LegKind>,
+    offers_sdp: bool,
+) -> Vec<String> {
+    let destination = kind.unwrap_or(LegKind::Destination) == LegKind::Destination;
+    let keeps_unreliable = match features.and_then(|f| f.relay_first_18x_to_180.as_ref()) {
+        Some(f) => match f.strategy {
+            RelayFirst18xStrategy::DropSdp | RelayFirst18xStrategy::KeepSdp => true,
+            RelayFirst18xStrategy::FakePrack => !offers_sdp,
+            RelayFirst18xStrategy::PromotePemTo200 => false,
+        },
+        None => false,
+    };
+    if destination && keeps_unreliable {
+        vec!["100rel".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Every option tag withheld from an INVITE `call` originates toward a leg of
+/// `kind`: the call-scoped declaration (`features.withhold_option_tags`) and
+/// the armed strategy's own ([`withheld_by_strategy_in`]), as one set — what
+/// `build_b_leg` narrows the assembled `Supported`/`Require` lines by.
+pub fn withheld_option_tags(call: &Call, kind: Option<LegKind>, offers_sdp: bool) -> Vec<String> {
+    let mut withheld: Vec<String> =
+        call.features.as_ref().and_then(|f| f.withhold_option_tags.clone()).unwrap_or_default();
+    for tag in withheld_by_strategy_in(call.features.as_ref(), kind, offers_sdp) {
+        if !withheld.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+            withheld.push(tag);
+        }
+    }
+    withheld
+}
+
 /// Read the replicated token lists into the typed value the SIP layer stamps.
 /// A half the declaration omits is unstated; a half it states EMPTY advertises
 /// the empty set. Tokens that are not RFC 3261 §25.1 `token`s are dropped by
@@ -177,13 +264,17 @@ fn typed(declared: &AdvertisedCapabilities) -> CapabilitySet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use call::features::{AdvertiseCapabilitiesFeature, KeepaliveActivation, PlatformActivations};
+    use call::features::{
+        AdvertiseCapabilitiesFeature, KeepaliveActivation, PlatformActivations, Relay18xMessages,
+        RelayFirst18xTo180Feature,
+    };
 
     /// Feature activations declaring `caps` toward the originated face only.
     fn declaring(caps: AdvertisedCapabilities) -> FeatureActivations {
         FeatureActivations {
             platform: PlatformActivations {
                 max_duration_sec: 3_600,
+                max_duration_anchor: Default::default(),
                 keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
             refer: None,
@@ -297,5 +388,83 @@ mod tests {
         assert_eq!(caps.allow_text().as_deref(), Some("INVITE, ACK, BYE"));
         assert_eq!(caps.supported_text().as_deref(), Some("timer"));
         assert_eq!(caps.accept(), None);
+    }
+
+    /// Feature activations arming `strategy` and declaring nothing.
+    fn arming(strategy: RelayFirst18xStrategy) -> FeatureActivations {
+        FeatureActivations {
+            advertise_capabilities: None,
+            relay_first_18x_to_180: Some(RelayFirst18xTo180Feature {
+                strategy,
+                messages: Relay18xMessages::First,
+            }),
+            ..declaring(AdvertisedCapabilities { allow: None, supported: None })
+        }
+    }
+
+    /// Under `fake-prack` a destination leg — stated or defaulted — is offered
+    /// `100rel` on the stack's own behalf; a media leg is offered nothing.
+    #[test]
+    fn fake_prack_offers_100rel_to_a_destination_leg_and_nothing_to_a_media_leg() {
+        let features = arming(RelayFirst18xStrategy::FakePrack);
+        assert_eq!(offered_option_tags_in(Some(&features), None), ["100rel"]);
+        assert_eq!(offered_option_tags_in(Some(&features), Some(LegKind::Destination)), ["100rel"]);
+        assert!(offered_option_tags_in(Some(&features), Some(LegKind::Media)).is_empty());
+    }
+
+    /// Any other strategy, and no strategy, offer nothing: the stack
+    /// acknowledges no provisional itself, so it solicits none.
+    #[test]
+    fn other_strategies_offer_nothing() {
+        for features in [
+            None,
+            Some(arming(RelayFirst18xStrategy::DropSdp)),
+            Some(arming(RelayFirst18xStrategy::KeepSdp)),
+            Some(arming(RelayFirst18xStrategy::PromotePemTo200)),
+        ] {
+            assert!(offered_option_tags_in(features.as_ref(), None).is_empty());
+        }
+    }
+
+    /// A strategy that keeps the originator unreliable withholds `100rel`
+    /// from a destination leg whether or not the INVITE carries an offer, and
+    /// from a media leg never.
+    #[test]
+    fn an_unreliable_relay_withholds_100rel_from_a_destination_leg() {
+        for strategy in [RelayFirst18xStrategy::DropSdp, RelayFirst18xStrategy::KeepSdp] {
+            let features = arming(strategy);
+            for offers_sdp in [true, false] {
+                assert_eq!(withheld_by_strategy_in(Some(&features), None, offers_sdp), ["100rel"]);
+                assert_eq!(
+                    withheld_by_strategy_in(
+                        Some(&features),
+                        Some(LegKind::Destination),
+                        offers_sdp
+                    ),
+                    ["100rel"]
+                );
+                assert!(withheld_by_strategy_in(Some(&features), Some(LegKind::Media), offers_sdp)
+                    .is_empty());
+            }
+        }
+    }
+
+    /// `fake-prack` withholds `100rel` only where the INVITE carries no offer:
+    /// with one the stack acknowledges the reliable provisional itself.
+    #[test]
+    fn fake_prack_withholds_100rel_only_without_an_offer() {
+        let features = arming(RelayFirst18xStrategy::FakePrack);
+        assert!(withheld_by_strategy_in(Some(&features), None, true).is_empty());
+        assert_eq!(withheld_by_strategy_in(Some(&features), None, false), ["100rel"]);
+    }
+
+    /// The PEM promotion and no strategy at all withhold nothing.
+    #[test]
+    fn other_strategies_withhold_nothing() {
+        for features in [None, Some(arming(RelayFirst18xStrategy::PromotePemTo200))] {
+            for offers_sdp in [true, false] {
+                assert!(withheld_by_strategy_in(features.as_ref(), None, offers_sdp).is_empty());
+            }
+        }
     }
 }

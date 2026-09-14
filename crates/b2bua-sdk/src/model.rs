@@ -10,7 +10,7 @@ use call::helpers::RAckTokens;
 use call::{
     ALegInviteSnapshot, ActivePeer, Call, CallModelState, CdrEvent, CdrEventType, Dialog,
     Direction, ExtMap, Leg, LegDisposition, LegKind, LegState, MachineId, Obligation,
-    PromotePemState, StateLabel, TagMapping, TimerType, TransferState,
+    PromotePemState, StateLabel, TagMapping, TerminationCause, TimerType, TransferState,
 };
 use sip_message::draft::Entry;
 use sip_message::header::HeaderName;
@@ -651,9 +651,23 @@ pub enum RuleAction {
         id: String,
     },
     CancelAllTimers,
-    TerminateCall,
+    /// Hard-terminate every leg and the call, no wire traffic: the firing
+    /// rule owns any final or BYE already sent. `cause` and `by_leg` are the
+    /// call's termination record (`Call::termination`, written once by the
+    /// first termination).
+    TerminateCall {
+        cause: TerminationCause,
+        by_leg: Option<String>,
+    },
+    /// Graceful teardown of every unresolved leg, then `Terminating`.
+    /// `reason` is a label — an RFC 3326 `SIP;cause=…` value rides the minted
+    /// BYEs, anything else is not emitted; `cause` and `by_leg` are the
+    /// call's termination record (`Call::termination`, written once by the
+    /// first termination: who ended the call and why).
     BeginTermination {
         reason: Option<String>,
+        cause: TerminationCause,
+        by_leg: Option<String>,
     },
     TerminateLeg {
         leg_id: String,
@@ -861,6 +875,18 @@ pub enum RuleAction {
     SetSubscriptions {
         events: Vec<call::ReleaseEventKind>,
     },
+    /// Record a decision a service's own rule applies on the call's decision
+    /// log (`call::helpers::mark_decision`), ahead of the actions that carry
+    /// it out, so every message and event they emit is stamped with its
+    /// ordinal. The engine's own decisions never need it: the initial route
+    /// and reject mark directly, and an async fold is marked where it lands,
+    /// before any rule reads it.
+    MarkDecision {
+        kind: call::DecisionKind,
+        /// The leg whose event the decision answers; see `DecisionMark`.
+        leg_id: Option<String>,
+        label: Option<String>,
+    },
     /// Overwrite the per-call established-call **reroute** runtime slice
     /// (`None` clears it — completion / rollback; mirrors [`Self::SetTransfer`]).
     SetReroute {
@@ -991,7 +1017,7 @@ impl RuleAction {
             | RuleAction::SendNotify { .. } => EffectKind::LegMessage,
             // Call-lifecycle commands — the one service → global hop (X3).
             RuleAction::BeginTermination { .. }
-            | RuleAction::TerminateCall
+            | RuleAction::TerminateCall { .. }
             | RuleAction::Merge { .. }
             | RuleAction::Split { .. } => EffectKind::CallLifecycleCommand,
             // Guard timers.
@@ -1015,6 +1041,7 @@ impl RuleAction {
             | RuleAction::FailureAsyncHttp { .. }
             | RuleAction::ReleaseAsyncHttp { .. }
             | RuleAction::SetSubscriptions { .. }
+            | RuleAction::MarkDecision { .. }
             | RuleAction::SetReroute { .. }
             | RuleAction::SetFeatures { .. }
             | RuleAction::MergeCallExt { .. }
@@ -1105,7 +1132,7 @@ impl<'a> RuleCall<'a> {
     /// answering either give-up may re-author the teardown — its cause, its
     /// CDR, the order the legs go — but not decline it: a call left Active
     /// after an `AckOf2xx` give-up is torn down by the framework with the CORE
-    /// verdict (ADR-0029 X5). A `PrackOf` give-up carries no such floor.
+    /// verdict (ADR-0032 X5). A `PrackOf` give-up carries no such floor.
     pub fn answers_initial_invite(&self, obligation: &Obligation) -> bool {
         call::helpers::answers_initial_invite(self.0, obligation)
     }
@@ -1225,6 +1252,12 @@ impl<'a> RuleCall<'a> {
     pub fn cdr_events(&self) -> &'a [CdrEvent] {
         &self.0.cdr_events
     }
+    /// The count of decisions applied to the call so far — the ordinal every
+    /// message and event written now is stamped with; `0` before the first
+    /// decision. A service records its own marks under the same ordinal.
+    pub fn decision_ordinal(&self) -> u32 {
+        self.0.decision_ordinal
+    }
 }
 
 /// The resolved context a rule sees. Built by the executor/router from the
@@ -1240,7 +1273,7 @@ pub struct RuleContext<'a> {
     pub now_ms: i64,
     pub config: &'a B2buaConfig,
     /// The dialog-level ladder this event's ACK or PRACK discharged before the
-    /// rules ran (ADR-0029 X4) — the engine already retired its timers and
+    /// rules ran (ADR-0032 X4) — the engine already retired its timers and
     /// retained emission; a rule reads the fact and owns none of the plumbing.
     /// `None` for every other event, and for an ACK or PRACK that named no
     /// live ladder (a retransmitted ACK, a repeat PRACK).

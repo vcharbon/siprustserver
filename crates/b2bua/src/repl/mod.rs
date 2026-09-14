@@ -20,6 +20,7 @@ mod changelog;
 mod puller;
 mod readiness;
 mod replication;
+mod self_endpoint;
 mod server;
 mod store;
 mod supervisor;
@@ -30,9 +31,10 @@ pub use changelog::{
 pub use puller::{Puller, PullerConfig, PullerStatus};
 pub use readiness::{Readiness, ReadinessSource, ReadinessState};
 pub use replication::{flush_replicated, replication_target, ReplicationPlan};
+pub use self_endpoint::{SelfEndpoint, WithdrawalCondition};
 pub use server::ReplServer;
 pub use store::ReplicatingCallStore;
-pub use supervisor::{AddrResolver, FnPeerResolver, PeerResolver, ReplicationSupervisor};
+pub use supervisor::{AddrResolver, FnPeerResolver, PeerLink, PeerResolver, ReplicationSupervisor};
 
 #[cfg(test)]
 mod tests;
@@ -57,6 +59,9 @@ mod s10_tests;
 
 #[cfg(test)]
 mod s11_tests;
+
+#[cfg(test)]
+mod s12_tests;
 
 #[cfg(test)]
 mod real_transport_tests;

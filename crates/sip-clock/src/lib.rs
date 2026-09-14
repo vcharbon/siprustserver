@@ -220,15 +220,26 @@ pub mod testkit {
     /// Note the trailing chunk: `pump(d)` advances `ceil(d/100ms) + 1` chunks of
     /// virtual time — behaviour preserved verbatim from the helpers it replaces.
     pub async fn pump(total: Duration) {
+        pump_sampled(total, || {}).await;
+    }
+
+    /// [`pump`] with `on_chunk` run after every settled advance chunk — the
+    /// sampling seam for a harness that observes component state as time moves
+    /// (it sees the pipeline at 100 ms granularity, never between two chunks).
+    /// Timing is identical to [`pump`]; `on_chunk` is synchronous so it cannot
+    /// perturb the pipeline it observes.
+    pub async fn pump_sampled(total: Duration, mut on_chunk: impl FnMut()) {
         let chunks = (total.as_millis() as u64).div_ceil(100).max(1);
         for _ in 0..chunks {
             settle().await;
             tokio::time::advance(Duration::from_millis(100)).await;
             settle().await;
+            on_chunk();
         }
         // Trailing pass so frames produced during the last settle also land.
         tokio::time::advance(Duration::from_millis(100)).await;
         settle().await;
+        on_chunk();
     }
 }
 

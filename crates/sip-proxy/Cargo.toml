@@ -15,7 +15,7 @@ bytes.workspace = true
 sip-message = { path = "../sip-message" }
 sip-net = { path = "../sip-net" }
 sip-clock = { path = "../sip-clock" }
-sip-txn = { path = "../sip-txn" } # IdGen (Via branch generation) only — the proxy is stateless
+sip-txn = { path = "../sip-txn" } # IdGen (To-tags), timer constants, and the health prober's client transactions
 topology = { path = "../topology" } # cluster-membership identity substrate (ADR-0002: proxy → topology)
 tokio = { workspace = true }
 tokio-util = { workspace = true }

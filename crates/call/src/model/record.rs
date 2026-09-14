@@ -7,12 +7,14 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::cdr::CdrEvent;
+use super::decision_log::DecisionMark;
 use super::emission::RetainedEmission;
 use super::leg::Leg;
 use super::services::{
     ExtMap, PromotePemState, RelayFirst18xState, ReleaseEventKind, RerouteState, TransferState,
 };
 use super::sm::{MachineId, StateLabel};
+use super::termination::Termination;
 use super::timer::TimerEntry;
 
 /// Maps a B-leg's real tag to the B2BUA-generated tag shown to Alice.
@@ -291,6 +293,25 @@ pub struct Call {
     /// responder's retransmission of one recognisable as such.
     #[serde(default)]
     pub pracked_provisionals: Vec<PrackedProvisional>,
+    /// The `seq` of the last message recorded on any leg's ring — the
+    /// call-wide sequence [`crate::helpers::record_message`] draws from; `0`
+    /// while nothing is recorded.
+    #[serde(default)]
+    pub message_seq: u32,
+    /// The decisions applied to the call, in order
+    /// ([`crate::helpers::mark_decision`] is the one writer); empty until the
+    /// first decision.
+    #[serde(default)]
+    pub decision_log: Vec<DecisionMark>,
+    /// The count of applied decisions — `decision_log.len()`, kept as a field
+    /// so a stamp reads it without a length; `0` before the first decision.
+    #[serde(default)]
+    pub decision_ordinal: u32,
+    /// Who ended the call and why ([`crate::helpers::record_termination`] is
+    /// the one writer, the first termination's record stands); `None` while
+    /// the call is live.
+    #[serde(default)]
+    pub termination: Option<Termination>,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate

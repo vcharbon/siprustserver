@@ -14,7 +14,7 @@ use topology::{Membership, Peer, SimulatedMembership};
 
 use super::test_support::{cref, fwd, supervisor_for, tick, Node};
 use super::{
-    Changelog, FnPeerResolver, PullerConfig, ReplServer, ReplicatingCallStore,
+    Changelog, FnPeerResolver, PeerLink, PullerConfig, ReplServer, ReplicatingCallStore,
     ReplicationSupervisor,
 };
 use crate::store::{CallStore, PartitionRole};
@@ -289,6 +289,62 @@ async fn topology_add_remove_readd() {
         Some(&b"x2"[..]),
         "B re-acquires the new delta after re-add"
     );
+}
+
+// ---------------------------------------------------------------------------
+// topology conditions (ADR-0031 D1): a member flipped to not-ready stays pulled
+// on presence alone — no park, no respawn, the watermark keeps advancing; only
+// leaving the snapshot parks it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn not_ready_member_stays_pulled_until_it_leaves() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let a = Node::spawn("A", addr(61), 1, &net, &clock).await;
+    let b = Node::spawn("B", addr(62), 1, &net, &clock).await;
+
+    let membership = SimulatedMembership::with_clock(vec![Peer::new("A", "A")], clock.clone());
+    let sup =
+        supervisor_for("B", &b.store, &net, &clock, vec![("A".into(), a.addr)], fast_backoff());
+    sup.start(Arc::new(membership.clone()));
+    tick(50).await;
+    let c1 = cref("A", "1");
+    a.store.put_call(PRI, "A", &c1, b"x1".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
+    tick(50).await;
+    assert_eq!(sup.peer_link("A"), PeerLink::Active);
+    assert_eq!(sup.metrics().repl_peers_pulled_not_ready(), 0);
+    let w_ready = sup.flow_watermark("A", Partition::Bak);
+    assert_eq!(w_ready, Watermark::new(1, 1));
+
+    // A is withdrawn from routing (terminating) but still in the snapshot.
+    membership.set_conditions("A", false, true);
+    tick(50).await;
+    assert!(sup.is_running("A"), "a not-ready member is still pulled");
+    assert_eq!(sup.peer_link("A"), PeerLink::Kept, "pulled on presence alone");
+    assert_eq!(sup.metrics().repl_peers_pulled_not_ready(), 1);
+
+    // What A authors while not ready still reaches B, on the same stream.
+    let c2 = cref("A", "2");
+    a.store.put_call(PRI, "A", &c2, b"x2".to_vec(), &[], 0, 1, 0, &fwd("B")).await.unwrap();
+    tick(50).await;
+    assert_eq!(b.store.get_call(BAK, "A", &c2).await.unwrap().as_deref(), Some(&b"x2"[..]));
+    let w_kept = sup.flow_watermark("A", Partition::Bak);
+    assert!(w_kept > w_ready, "the watermark advances across the flip: {w_kept:?}");
+
+    // Ready again: the link reads Active, nothing respawned (W continuous).
+    membership.set_conditions("A", true, false);
+    tick(50).await;
+    assert_eq!(sup.peer_link("A"), PeerLink::Active);
+    assert_eq!(sup.metrics().repl_peers_pulled_not_ready(), 0);
+    assert_eq!(sup.flow_watermark("A", Partition::Bak), w_kept);
+
+    // Leaving the snapshot is what parks it.
+    membership.remove("A");
+    tick(50).await;
+    assert_eq!(sup.peer_link("A"), PeerLink::Parked);
+    assert!(!sup.is_running("A"));
+    assert_eq!(sup.metrics().repl_peers_pulled_not_ready(), 0);
 }
 
 // ---------------------------------------------------------------------------

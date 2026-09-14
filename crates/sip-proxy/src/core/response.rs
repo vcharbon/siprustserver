@@ -1,9 +1,15 @@
 //! Response path, single-endpoint: validate ≥2 Via and that the top is us;
-//! route to the next Via (received/rport precedence); reverse-path failover
-//! to the cookie's `w_bak` when the destination worker is confirmed Dead; pop
-//! the top Via entry (comma-aware); forward; remember the ACK-relay hop for a
-//! non-2xx INVITE final — the final's sender + the INVITE's outbound branch
+//! route to the next Via (received/rport precedence); reverse-path failover of
+//! an INVITE response to the cookie's `w_bak` when the destination worker is
+//! confirmed Dead; pop the top Via entry (comma-aware); forward; remember the
+//! ACK-relay hop for a non-2xx INVITE final — the node the final arrived from
 //! (the ACK itself travels end-to-end — see `core/request`).
+//!
+//! An address that LEFT the worker set counts as `Dead` here for Timer H
+//! (`registry::tombstone`): a node whose endpoint is withdrawn while its process
+//! still serves must not take an INVITE response back, so that response follows
+//! the cookie's backup. A non-INVITE response answers a client transaction only
+//! its sender holds (§17.1.2) and follows the Via whatever the sender's health.
 
 use sip_message::header::Via;
 use sip_message::types::SipResponse;
@@ -79,19 +85,18 @@ impl ProxyCore {
         let mut host = next_host.to_string();
         let mut port = next_port;
 
-        // ── Reverse-path failover ───────────────────────────────────────────
-        // A response is the reply to an in-flight transaction the next-Via worker
-        // is *waiting on* (e.g. the 200 to its own in-dialog keepalive OPTIONS).
-        // Only reverse-fail it over to the cookie's `w_bak` when that worker is
-        // **confirmed Dead** — NOT when it is merely `Unknown` (a freshly-rebooted
-        // pod the health probe has not re-confirmed yet), `NotReady`, or `Draining`:
-        // those are still up and own the transaction, so their response must reach
-        // them. Failing a booting worker's keepalive-200 over to `w_bak` (which holds
-        // no matching `KeepaliveTimeout`) let the worker's 5 s timeout fire and BYE
-        // every call it had just reclaimed — the long-call-on-reboot teardown. A
-        // draining worker also legitimately finishes in-flight calls, so it keeps its
-        // responses too. (Request-path routing-around a non-Alive worker is separate;
-        // that lives in the strategy's `decode_stickiness`.)
+        // ── Reverse-path failover: INVITE responses only ────────────────────
+        // An INVITE response from a **confirmed Dead** next-Via worker answers a
+        // setup the cookie's `w_bak` materialises, so it goes there. A non-INVITE
+        // response answers a client transaction only its sender holds (§17.1.2):
+        // no other node can consume it, so it follows the Via (§16.7 step 6) and
+        // is lost with its sender rather than dropped here.
+        //
+        // A worker that is merely `Unknown` (a freshly-rebooted pod the health
+        // probe has not re-confirmed yet), `NotReady` or `Draining` is still up and
+        // owns its transactions, so its responses reach it. (Request-path
+        // routing-around a non-Alive worker is separate; that lives in the
+        // strategy's `decode_stickiness`.)
         //
         // The worker is IDENTIFIED by its Via **sent-by** — its advertised
         // registry address, SNAT-immune (the same signal the request path keys
@@ -101,31 +106,34 @@ impl ProxyCore {
         // node IP + an ephemeral port, which matches no registry entry — that
         // made this whole Dead branch unreachable in production, so a dead
         // worker's in-flight responses were blackholed at its stale SNAT
-        // address instead of failing over to `w_bak`.
+        // address instead of failing over to `w_bak`. A departed address answers
+        // `Dead` from the registry's tombstone, so this branch covers it too.
         let (sent_by_host, sent_by_port) = next.sent_by().pair();
         let sent_by = ProxyAddr::new(sent_by_host, sent_by_port);
-        if let Some(dest) = self.registry.lookup_by_address(&sent_by) {
-            if dest.health == WorkerHealth::Dead {
-                match self.find_own_record_route_params(&resp) {
-                    Some(params) => match self
-                        .strategy
-                        .decode_stickiness(&params, &SipMessage::Response(resp.clone()))
-                        .await
-                    {
-                        DecodeResult::ForwardBackup { target, .. } => {
-                            host = target.host;
-                            port = target.port;
-                        }
-                        _ => {
-                            self.metrics
-                                .record_message(Direction::Outbound, MessageResult::Dropped);
-                            return;
-                        }
-                    },
-                    None => {
+        let reverse_fails = cseq.method() == Method::Invite
+            && self
+                .registry
+                .lookup_by_address(&sent_by)
+                .is_some_and(|dest| dest.health == WorkerHealth::Dead);
+        if reverse_fails {
+            match self.find_own_record_route_params(&resp) {
+                Some(params) => match self
+                    .strategy
+                    .decode_stickiness(&params, &SipMessage::Response(resp.clone()))
+                    .await
+                {
+                    DecodeResult::ForwardBackup { target, .. } => {
+                        host = target.host;
+                        port = target.port;
+                    }
+                    _ => {
                         self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
                         return;
                     }
+                },
+                None => {
+                    self.metrics.record_message(Direction::Outbound, MessageResult::Dropped);
+                    return;
                 }
             }
         }
@@ -169,13 +177,13 @@ impl ProxyCore {
         // memo written here.
         //
         // The memo carries the hop to repeat: the node the final ARRIVED from
-        // — after a failover that is the survivor, not the INVITE's target —
-        // and the INVITE's outbound branch, which the sender's server
-        // transaction is keyed on. Gating the relay on the memo (not the
-        // INVITE entry alone) keeps a takeover worker's 2xx ACK safe when its
-        // reset `IdGen` re-mints a branch aliasing the dead primary's INVITE
-        // (see `core/request`). Short TTL: the upstream ACKs within its
-        // final-retransmit window (a re-sent final refreshes the memo).
+        // — after a failover that is the survivor, not the INVITE's target.
+        // The branch the sender's server transaction is keyed on is §16.11's
+        // function of the ACK itself (`crate::branch`). Gating the relay on
+        // the memo (not the INVITE entry alone) keeps a takeover worker's 2xx
+        // ACK safe when its reset `IdGen` re-mints a branch aliasing the dead
+        // primary's INVITE (see `core/request`). Short TTL: the upstream ACKs
+        // within its final-retransmit window (a re-sent final refreshes it).
         if (300..700).contains(&resp.status()) && cseq.method() == Method::Invite {
             // The response echoes the request's From (tag included), so this
             // re-builds exactly the key the INVITE was remembered under.
@@ -230,7 +238,9 @@ mod reverse_failover_tests {
 
     use crate::addr::ProxyAddr;
     use crate::core::{ProxyCore, ProxyCoreBuilder};
+    use crate::registry::simulated::SimulatedWorkerRegistry;
     use crate::registry::static_reg::StaticWorkerRegistry;
+    use crate::registry::tombstone::DEPARTED_ADDRESS_TTL_MS;
     use crate::registry::{WorkerEntry, WorkerHealth, WorkerRegistry};
     use crate::strategy::{DecodeResult, RouteParams, RoutingStrategy, SelectError, SelectOpts};
 
@@ -302,8 +312,46 @@ mod reverse_failover_tests {
         }
     }
 
-    fn core_with(w1_health: WorkerHealth) -> (ProxyCore, Arc<CapturingEndpoint>) {
+    /// A strategy double whose cookie decode finds no usable backup.
+    struct NoBackupStrategy;
+
+    #[async_trait]
+    impl RoutingStrategy for NoBackupStrategy {
+        fn name(&self) -> &str {
+            "NoBackup"
+        }
+        async fn select_for_new_dialog(
+            &self,
+            _msg: &SipMessage,
+            _opts: SelectOpts,
+        ) -> Result<ProxyAddr, SelectError> {
+            Err(SelectError::NoTarget { reason: "unused".into() })
+        }
+        async fn decode_stickiness(
+            &self,
+            _params: &RouteParams,
+            _msg: &SipMessage,
+        ) -> DecodeResult {
+            DecodeResult::Unknown { is_emergency: false }
+        }
+        fn encode_stickiness(&self, _target: &ProxyAddr, _msg: &SipMessage) -> Option<RouteParams> {
+            None
+        }
+    }
+
+    fn core_over(
+        reg: Arc<dyn WorkerRegistry>,
+        strategy: Arc<dyn RoutingStrategy>,
+        clock: Clock,
+    ) -> (ProxyCore, Arc<CapturingEndpoint>) {
         let ep = Arc::new(CapturingEndpoint::default());
+        let core = ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), strategy, reg)
+            .clock(clock)
+            .build(Box::new(CapturingEndpointHandle(ep.clone())));
+        (core, ep)
+    }
+
+    fn core_with(w1_health: WorkerHealth) -> (ProxyCore, Arc<CapturingEndpoint>) {
         let reg: Arc<dyn WorkerRegistry> = Arc::new(StaticWorkerRegistry::from_entries(vec![
             WorkerEntry {
                 id: "w1".into(),
@@ -314,11 +362,21 @@ mod reverse_failover_tests {
             },
             WorkerEntry::alive("w2", ProxyAddr::new(W2_POD, 5060)),
         ]));
-        let core =
-            ProxyCoreBuilder::new(ProxyAddr::new(PROXY_VIP, 5060), Arc::new(BackupStrategy), reg)
-                .clock(Clock::test_at(0))
-                .build(Box::new(CapturingEndpointHandle(ep.clone())));
-        (core, ep)
+        core_over(reg, Arc::new(BackupStrategy), Clock::test_at(0))
+    }
+
+    /// A pool `w1` has left: the address it was last known at is tombstoned, so
+    /// the response path reads a response from it as a departed worker's.
+    fn registry_without_w1(clock: Clock) -> Arc<dyn WorkerRegistry> {
+        let reg = SimulatedWorkerRegistry::with_clock(
+            vec![
+                WorkerEntry::alive("w1", ProxyAddr::new(W1_POD, 5060)),
+                WorkerEntry::alive("w2", ProxyAddr::new(W2_POD, 5060)),
+            ],
+            clock,
+        );
+        reg.remove("w1");
+        Arc::new(reg)
     }
 
     /// Box-able forwarding wrapper (the builder takes `Box<dyn UdpEndpoint>`;
@@ -350,26 +408,69 @@ mod reverse_failover_tests {
         }
     }
 
-    /// A keepalive 200 heading back to the worker: top Via = the proxy, next
-    /// Via = the worker's sent-by, SNAT'd received/rport stamped by the request
-    /// path, the proxy's own cookie Record-Route echoed by the UAS.
-    fn keepalive_200() -> sip_message::types::SipResponse {
+    /// A 200 heading back to the worker that sent the request: top Via = the
+    /// proxy, next Via = the worker's sent-by, SNAT'd received/rport stamped by
+    /// the request path, `record_route` as the UAS echoes it back (empty for a
+    /// request that copies none).
+    fn worker_bound_200_routed(
+        cseq: &str,
+        record_route: &str,
+        extra_headers: &str,
+    ) -> sip_message::types::SipResponse {
         let raw = format!(
             "SIP/2.0 200 OK\r\n\
 Via: SIP/2.0/UDP {PROXY_VIP}:5060;branch=z9hG4bKout;rport\r\n\
 Via: SIP/2.0/UDP {W1_POD}:5060;branch=z9hG4bKka;received={SNAT_NODE};rport=63522\r\n\
-Record-Route: <sip:{PROXY_VIP}:5060;w_pri=w1;w_bak=w2;lr>\r\n\
-From: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
+{record_route}From: <sip:service@{PROXY_VIP}:5060>;tag=svc\r\n\
 To: <sip:sipp@{UAC}:5060>;tag=uactag\r\n\
-Call-ID: ka-1@{UAC}\r\n\
-CSeq: 2 OPTIONS\r\n\
-Content-Length: 0\r\n\r\n"
+Call-ID: dlg-1@{UAC}\r\n\
+CSeq: {cseq}\r\n\
+{extra_headers}Content-Length: 0\r\n\r\n"
         );
         let SipMessage::Response(resp) = CustomParser::default().parse(raw.as_bytes()).unwrap()
         else {
             unreachable!()
         };
         resp
+    }
+
+    /// The same 200 carrying the proxy's own cookie Record-Route, echoed by the
+    /// UAS — the shape a response to a Record-Routed request has.
+    fn worker_bound_200(cseq: &str, extra_headers: &str) -> sip_message::types::SipResponse {
+        worker_bound_200_routed(
+            cseq,
+            &format!("Record-Route: <sip:{PROXY_VIP}:5060;w_pri=w1;w_bak=w2;lr>\r\n"),
+            extra_headers,
+        )
+    }
+
+    /// The 2xx answering a worker-originated INVITE — the response class
+    /// reverse-path failover serves.
+    fn invite_200() -> sip_message::types::SipResponse {
+        worker_bound_200("1 INVITE", &format!("Contact: <sip:sipp@{UAC}:5060>\r\n"))
+    }
+
+    /// The 200 to a worker's in-dialog keepalive OPTIONS.
+    fn keepalive_200() -> sip_message::types::SipResponse {
+        worker_bound_200("2 OPTIONS", "")
+    }
+
+    /// The 200 the callee sends for a worker's CANCEL (§9.2) — a client
+    /// transaction only the worker that sent the CANCEL holds.
+    fn cancel_200() -> sip_message::types::SipResponse {
+        worker_bound_200("1 CANCEL", "")
+    }
+
+    /// The 200 to a worker's in-dialog BYE.
+    fn bye_200() -> sip_message::types::SipResponse {
+        worker_bound_200("3 BYE", "")
+    }
+
+    /// The CANCEL's 200 as it arrives on the wire: a CANCEL copies no
+    /// Record-Route (§9.1), so nothing echoes the proxy's cookie back and the
+    /// response path finds no route params to decode.
+    fn cancel_200_without_record_route() -> sip_message::types::SipResponse {
+        worker_bound_200_routed("1 CANCEL", "", "")
     }
 
     // Regression: the Dead-worker lookup was keyed on the received/rport-derived
@@ -380,7 +481,7 @@ Content-Length: 0\r\n\r\n"
     #[tokio::test]
     async fn response_to_a_dead_worker_fails_over_to_the_backup() {
         let (core, ep) = core_with(WorkerHealth::Dead);
-        core.handle_response(keepalive_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+        core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
         let sent = ep.sent.lock().unwrap();
         assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
@@ -392,7 +493,126 @@ Content-Length: 0\r\n\r\n"
     #[tokio::test]
     async fn response_to_an_alive_worker_keeps_the_received_rport_target() {
         let (core, ep) = core_with(WorkerHealth::Alive);
-        core.handle_response(keepalive_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+        core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+
+        let sent = ep.sent.lock().unwrap();
+        assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
+    }
+
+    // A worker that left the pool can still be bound and still answering. Its
+    // address stays resolvable as `Dead` for Timer H, so its response follows the
+    // cookie's backup instead of returning to a node the pool no longer routes to.
+    #[tokio::test(start_paused = true)]
+    async fn response_from_a_departed_address_fails_over_to_the_backup() {
+        let (core, ep) = core_over(
+            registry_without_w1(Clock::test_at(0)),
+            Arc::new(BackupStrategy),
+            Clock::test_at(0),
+        );
+        core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+
+        let sent = ep.sent.lock().unwrap();
+        assert_eq!(sent.as_slice(), &[format!("{W2_POD}:5060").parse::<SocketAddr>().unwrap()]);
+    }
+
+    // Past Timer H the departed address is a stranger again — no transaction there
+    // can still be answering — and the response goes where the Via says.
+    #[tokio::test(start_paused = true)]
+    async fn response_from_an_expired_departed_address_follows_the_via() {
+        let (core, ep) = core_over(
+            registry_without_w1(Clock::test_at(0)),
+            Arc::new(BackupStrategy),
+            Clock::test_at(0),
+        );
+        tokio::time::advance(std::time::Duration::from_millis(DEPARTED_ADDRESS_TTL_MS)).await;
+        core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+
+        let sent = ep.sent.lock().unwrap();
+        assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
+    }
+
+    // An address the pool never knew is not a worker at all (Alice, Bob, an
+    // external SBC): its response is relayed by the Via, unconditionally.
+    #[tokio::test]
+    async fn response_from_an_address_the_pool_never_knew_follows_the_via() {
+        let reg: Arc<dyn WorkerRegistry> =
+            Arc::new(StaticWorkerRegistry::from_entries(vec![WorkerEntry::alive(
+                "w2",
+                ProxyAddr::new(W2_POD, 5060),
+            )]));
+        let (core, ep) = core_over(reg, Arc::new(BackupStrategy), Clock::test_at(0));
+        core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+
+        let sent = ep.sent.lock().unwrap();
+        assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);
+    }
+
+    // A departed sender whose cookie names no usable backup: the response is
+    // dropped rather than delivered to the node that left — the same outcome a
+    // confirmed-`Dead` sender has.
+    #[tokio::test(start_paused = true)]
+    async fn a_departed_sender_with_no_usable_backup_drops_the_response() {
+        let (core, ep) = core_over(
+            registry_without_w1(Clock::test_at(0)),
+            Arc::new(NoBackupStrategy),
+            Clock::test_at(0),
+        );
+        core.handle_response(invite_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
+
+        assert!(ep.sent.lock().unwrap().is_empty());
+    }
+
+    // §17.1.2: a non-INVITE response answers a client transaction only its
+    // sender holds — no other node can consume it — so it follows the Via to
+    // the received/rport target even when the sender's address has departed,
+    // cookie echoed back or not (a CANCEL copies no Record-Route, §9.1).
+    #[tokio::test(start_paused = true)]
+    async fn a_non_invite_response_from_a_departed_address_follows_the_via() {
+        for resp in [cancel_200(), cancel_200_without_record_route(), keepalive_200(), bye_200()] {
+            let (core, ep) = core_over(
+                registry_without_w1(Clock::test_at(0)),
+                Arc::new(BackupStrategy),
+                Clock::test_at(0),
+            );
+            core.handle_response(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
+
+            let sent = ep.sent.lock().unwrap();
+            assert_eq!(
+                sent.as_slice(),
+                &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()],
+                "neither the backup nor a drop"
+            );
+        }
+    }
+
+    // The same for a worker the health probe confirmed Dead: its own CANCEL's
+    // 200 reaches it, so its client transaction completes instead of
+    // retransmitting the CANCEL to Timer F.
+    #[tokio::test]
+    async fn a_non_invite_response_to_a_dead_worker_follows_the_via() {
+        for resp in [cancel_200(), keepalive_200(), bye_200()] {
+            let (core, ep) = core_with(WorkerHealth::Dead);
+            core.handle_response(resp, format!("{W1_POD}:5060").parse().unwrap()).await;
+
+            let sent = ep.sent.lock().unwrap();
+            assert_eq!(
+                sent.as_slice(),
+                &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()],
+                "neither the backup nor a drop"
+            );
+        }
+    }
+
+    // A departed sender whose cookie names no usable backup: a non-INVITE
+    // response still follows the Via — the cookie decides nothing for it.
+    #[tokio::test(start_paused = true)]
+    async fn a_non_invite_response_needs_no_usable_backup() {
+        let (core, ep) = core_over(
+            registry_without_w1(Clock::test_at(0)),
+            Arc::new(NoBackupStrategy),
+            Clock::test_at(0),
+        );
+        core.handle_response(cancel_200(), format!("{W1_POD}:5060").parse().unwrap()).await;
 
         let sent = ep.sent.lock().unwrap();
         assert_eq!(sent.as_slice(), &[format!("{SNAT_NODE}:63522").parse::<SocketAddr>().unwrap()]);

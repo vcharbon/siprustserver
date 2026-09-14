@@ -32,7 +32,7 @@ use b2bua::decision::{
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
-use call::ReleaseEventKind;
+use call::{DecisionKind, ReleaseEventKind};
 use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
@@ -117,7 +117,7 @@ async fn unsubscribed_max_duration_keeps_local_teardown_without_consult() {
             .fallback(move |_req| NewCallResponse::Route(route_with_cap(5070, false)))
             .on_release(move |_req| {
                 c.fetch_add(1, Ordering::SeqCst);
-                ReleaseOutcome::Respond(CallReleaseResponse::Release)
+                ReleaseOutcome::Respond(CallReleaseResponse::Release { label: None })
             })
             .build(),
     );
@@ -150,10 +150,15 @@ async fn unsubscribed_max_duration_keeps_local_teardown_without_consult() {
         "unsubscribed expiry must NOT consult call_release"
     );
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
-    assert!(
-        b2bua.cdr_records()[0].events.iter().any(|e| e.reason.as_deref() == Some("max_duration")),
-        "CDR carries the max_duration reason",
-    );
+    let cdr = &b2bua.cdr_records()[0];
+    let max_duration = cdr.events.iter().find(|e| e.reason.as_deref() == Some("max_duration"));
+    assert!(max_duration.is_some(), "CDR carries the max_duration reason");
+    // No consult, no decision: the log holds the route alone and the local
+    // teardown's event is stamped under it.
+    let marks: Vec<(DecisionKind, Option<&str>)> =
+        cdr.decision_log.iter().map(|m| (m.kind, m.label.as_deref())).collect();
+    assert_eq!(marks, vec![(DecisionKind::Route, None)]);
+    assert_eq!(max_duration.unwrap().decision_ordinal, 1);
 
     let _ = h.finish().await;
 }
@@ -173,7 +178,9 @@ async fn subscribed_release_consults_engine_then_tears_down() {
             .fallback(move |_req| NewCallResponse::Route(route_with_cap(5071, true)))
             .on_release(move |req| {
                 cap.lock().unwrap().push(req.clone());
-                ReleaseOutcome::Respond(CallReleaseResponse::Release)
+                ReleaseOutcome::Respond(CallReleaseResponse::Release {
+                    label: Some("hangup".into()),
+                })
             })
             .build(),
     );
@@ -216,10 +223,15 @@ async fn subscribed_release_consults_engine_then_tears_down() {
     drop(reqs);
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
-    assert!(
-        b2bua.cdr_records()[0].events.iter().any(|e| e.reason.as_deref() == Some("max_duration")),
-        "CDR carries the max_duration reason",
-    );
+    let cdr = &b2bua.cdr_records()[0];
+    let max_duration = cdr.events.iter().find(|e| e.reason.as_deref() == Some("max_duration"));
+    assert!(max_duration.is_some(), "CDR carries the max_duration reason");
+    // The release decision is marked with its label, the teardown's event
+    // stamped under it.
+    let marks: Vec<(DecisionKind, Option<&str>)> =
+        cdr.decision_log.iter().map(|m| (m.kind, m.label.as_deref())).collect();
+    assert_eq!(marks, vec![(DecisionKind::Route, None), (DecisionKind::Release, Some("hangup"))]);
+    assert_eq!(max_duration.unwrap().decision_ordinal, 2);
 
     let _ = h.finish().await;
 }
@@ -248,6 +260,7 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
                 // its own limiter hold (output parity: admitted + released).
                 let mut r = route_to("127.0.0.1", 5092);
                 r.call_limiter = vec![CallLimiterEntry { id: "announce-cap".into(), limit: 10 }];
+                r.label = Some("announce".into());
                 ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
             })
             .build(),
@@ -321,6 +334,20 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
         "CDR records the completed reroute: {:?}",
         cdrs[0].events,
     );
+    // The decision log: the initial route, then the release consult's
+    // reroute with its label; the completion event is stamped under it.
+    let marks: Vec<(DecisionKind, Option<&str>)> =
+        cdrs[0].decision_log.iter().map(|m| (m.kind, m.label.as_deref())).collect();
+    assert_eq!(
+        marks,
+        vec![(DecisionKind::Route, None), (DecisionKind::ReleaseRoute, Some("announce"))]
+    );
+    let completed = cdrs[0]
+        .events
+        .iter()
+        .find(|e| e.reason.as_deref() == Some("release-reroute-completed"))
+        .unwrap();
+    assert_eq!(completed.decision_ordinal, 2);
 
     let _ = h.finish().await;
 }

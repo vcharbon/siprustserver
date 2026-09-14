@@ -1,6 +1,21 @@
 # Build wiring: what compiles the workspace, and with what.
 # (Profile *shape* — debuginfo, opt-level — lives in the root `Cargo.toml`.)
 
+# ── parallelism ────────────────────────────────────────────────────────
+#
+# Peak build memory scales with the jobs in flight, and this workspace links
+# ~250 test binaries: at cargo's default (one job per core) the concurrent mold
+# links exhaust a 32 GB host mid-link — mold dies with "failed to write to an
+# output file. Disk full?" (a SIGBUS in its mmap'd output, not a full disk) and
+# dumps core in the crate root. 4 is verified clean for a cold
+# `cargo test --workspace` (ADR-0029 X5). `--jobs N` on the command line
+# overrides it either way; on a host shared with other builds go lower
+# (`--jobs 2`), never higher.
+#
+# `--thread-count=4` bounds each mold: it defaults to one thread per host core,
+# so several links in flight would otherwise run jobs * ncpu linker threads
+# contending for the same cores and page cache.
+
 # ── rustflags ──────────────────────────────────────────────────────────
 #
 # `tokio_unstable`: the worker-side faithful ELU signal
@@ -22,6 +37,7 @@
 # GOTCHA: `[build] rustflags` here is IGNORED wholesale if a `RUSTFLAGS` env var
 # is set — it replaces this list, it does not append. Nothing in this repo sets
 # it (justfile, Dockerfile, and the worker manifests all use a bare
-# `cargo build`/`cargo test`); anything that does must re-state BOTH flags.
+# `cargo build`/`cargo test`); anything that does must re-state ALL THREE flags.
 [build]
-rustflags = ["--cfg", "tokio_unstable", "-Clink-arg=-fuse-ld=mold"]
+jobs = 4
+rustflags = ["--cfg", "tokio_unstable", "-Clink-arg=-fuse-ld=mold", "-Clink-arg=-Wl,--thread-count=4"]

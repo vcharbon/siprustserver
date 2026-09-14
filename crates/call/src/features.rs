@@ -21,12 +21,40 @@ pub struct KeepaliveActivation {
     pub max_missed: i64,
 }
 
+/// Where the overall call ceiling is anchored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MaxDurationAnchor {
+    /// The cap bounds the whole call from its creation: armed at route time, it
+    /// reaps a setup that never completes as well as the established call.
+    #[default]
+    Creation,
+    /// The cap bounds the established call: it runs from the answer the caller
+    /// receives. The setup is bounded by its own deadline (`SetupTimeout`); where
+    /// none is configured the cap is armed at creation as under `Creation`, so
+    /// no call is ever without a reaper.
+    Answer,
+}
+
 /// Platform-mandatory cap + keepalive.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformActivations {
     /// Overall call ceiling (seconds). Adapter supplies; platform caps it.
     pub max_duration_sec: i64,
+    #[serde(default)]
+    pub max_duration_anchor: MaxDurationAnchor,
     pub keepalive: KeepaliveActivation,
+}
+
+impl PlatformActivations {
+    /// Whether the cap is armed at route time, given the configured setup
+    /// deadline (`setup_timeout_sec`, `<= 0` disabled).
+    pub fn arms_cap_at_creation(&self, setup_timeout_sec: i64) -> bool {
+        match self.max_duration_anchor {
+            MaxDurationAnchor::Creation => true,
+            MaxDurationAnchor::Answer => setup_timeout_sec <= 0,
+        }
+    }
 }
 
 /// Optional REFER feature arm. Its **presence** is the decision layer's
@@ -163,10 +191,11 @@ pub struct FeatureActivations {
     pub charging_vector: Option<ChargingVectorFeature>,
     /// Option tags the B2BUA WITHHOLDS from every leg it originates: whatever
     /// `Supported` set would ride the originated INVITE is narrowed by these
-    /// tags (an emptied set stays as the value-less line) and a relayed
-    /// `Require` naming one is narrowed or dropped. Independent of the
-    /// 18x-downgrade strategies — a declaration that never offers `100rel`
-    /// leaves 18x relay untouched. The declaration is a call-lifetime LATCH:
+    /// tags (an emptied set drops its line) and a relayed `Require` naming
+    /// one is narrowed or dropped. Independent of the 18x-downgrade
+    /// strategies, which withhold on their own beside it — a declaration that
+    /// never offers `100rel` leaves 18x relay untouched. The declaration is a
+    /// call-lifetime LATCH:
     /// every applied route's list unions into the standing one
     /// ([`FeatureActivations::latch_withheld_option_tags`], run by
     /// `apply_route` and `SetFeatures`), so a failover route whose decision
@@ -203,6 +232,7 @@ mod tests {
         FeatureActivations {
             platform: PlatformActivations {
                 max_duration_sec: 3_600,
+                max_duration_anchor: Default::default(),
                 keepalive: KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
             refer: None,

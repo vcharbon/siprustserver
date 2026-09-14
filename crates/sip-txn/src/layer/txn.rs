@@ -147,7 +147,6 @@ impl Transaction {
             destination: head.destination,
             created_at: tokio::time::Instant::now(),
             uas_to_tag: None,
-            early_tags: Vec::new(),
             final_to_tag: None,
             retransmit_key: None,
             timeout_key: None,
@@ -159,6 +158,14 @@ impl Transaction {
             ladder: None,
             timeout_kind: TimeoutKind::Response,
         }
+    }
+
+    /// The To-tag this server INVITE transaction has bound: its final's, else
+    /// the one pinned on its first >100 response (RFC 3261 §8.2.6.2, §9.2,
+    /// §12.1.1). A later early dialog mirrored from a forking downstream does
+    /// not move it.
+    pub(super) fn bound_to_tag(&self) -> Option<&str> {
+        self.final_to_tag.as_deref().or(self.uas_to_tag.as_deref())
     }
 }
 
@@ -183,12 +190,10 @@ pub(super) struct Transaction {
     pub(super) state: TxnState,
     pub(super) destination: Option<SocketAddr>,
     pub(super) created_at: tokio::time::Instant,
-    /// UAS To-tag pinned on the first >100 response (RFC 3261 §17.2.1).
+    /// UAS To-tag pinned on the first >100 response (RFC 3261 §17.2.1): the
+    /// tag a CANCEL answer and the layer's 487 carry while no final has bound
+    /// one (§8.2.6.2, §9.2).
     pub(super) uas_to_tag: Option<String>,
-    /// Every To-tag a provisional to this INVITE carried, in order — one
-    /// early dialog each (RFC 3261 §12.1.1); the last is the tag a CANCEL
-    /// answer takes while no final has been sent.
-    pub(super) early_tags: Vec<String>,
     /// The To-tag the final to this INVITE carried: the dialog's local tag,
     /// fixed from then on — every later response for this transaction or its
     /// CANCEL carries it (§9.2, §12.1.1).

@@ -37,7 +37,8 @@
 
 use std::collections::HashMap;
 
-use crate::{format_relative, Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow};
+use crate::views::{disagreements, views_table, ViewChange};
+use crate::{format_relative, Anomaly, Item, Lane, LaneKind, RowKind, SeqDoc};
 
 // SVG layout constants.
 const LANE_GAP: i64 = 150;
@@ -52,6 +53,9 @@ const BAND_COLOR: &str = "#b91c1c"; // red
 const LOST_COLOR: &str = "#dc2626"; // red — the "✗ lost in transit" cross
 const GATING_COLOR: &str = "#dc2626"; // red — gating-anomaly badge
 const ADVISORY_COLOR: &str = "#d97706"; // amber — advisory-anomaly badge
+const VIEW_COLOR: &str = "#4338ca"; // indigo — a belief change on the views plane
+const VIEW_FILL: &str = "#eef2ff"; // indigo tint — the belief-change chip
+const DISPUTE_FILL: &str = "#fef3c7"; // amber tint — observers disagree here
 
 /// Categorical palette for per-socket coloring of replication arrows. Each
 /// distinct connection (ephemeral socket) gets a stable hue so two flows to the
@@ -108,13 +112,16 @@ struct AnomalyView<'a> {
     ords: Vec<usize>,
 }
 
-fn anomaly_views<'a>(doc: &'a SeqDoc, rows: &[&SeqRow]) -> Vec<AnomalyView<'a>> {
+fn anomaly_views<'a>(doc: &'a SeqDoc, items: &[Item<'_>]) -> Vec<AnomalyView<'a>> {
     // Message rows only: a lifecycle band may BORROW a frame's seq (the chaos
-    // overlay does) and is not clickable, so it never resolves a link.
+    // overlay does) and is not clickable, so it never resolves a link; nor is a
+    // view chip.
     let mut ord_of: HashMap<u64, usize> = HashMap::new();
-    for (ord, row) in rows.iter().enumerate() {
-        if matches!(row.kind, RowKind::Sip { .. } | RowKind::Repl { .. }) {
-            ord_of.entry(row.seq).or_insert(ord);
+    for (ord, item) in items.iter().enumerate() {
+        if let Item::Row(row) = item {
+            if matches!(row.kind, RowKind::Sip { .. } | RowKind::Repl { .. }) {
+                ord_of.entry(row.seq).or_insert(ord);
+            }
         }
     }
     let mut views: Vec<AnomalyView<'a>> = doc
@@ -155,16 +162,17 @@ fn severity_class(a: &Anomaly) -> &'static str {
 
 /// Render the whole [`SeqDoc`] as one HTML document string.
 pub fn render_html(doc: &SeqDoc) -> String {
-    let rows = doc.sorted_rows();
+    let items = doc.sorted_items();
     let base = doc.base_ms();
     let lane_idx: std::collections::HashMap<&str, usize> =
         doc.lanes.iter().enumerate().map(|(i, l)| (l.id.as_str(), i)).collect();
 
-    let views = anomaly_views(doc, &rows);
+    let views = anomaly_views(doc, &items);
     let anoms_of_row = row_anomaly_map(&views);
-    let svg = svg_markup(doc, &rows, base, &lane_idx, &anoms_of_row, &views);
-    let payloads = render_payloads(doc, &rows, base, &anoms_of_row, &views);
-    let anomalies = render_anomalies(doc, &rows, base, &views);
+    let svg = svg_markup(doc, &items, base, &lane_idx, &anoms_of_row, &views);
+    let payloads = render_payloads(doc, &items, base, &anoms_of_row, &views);
+    let anomalies = render_anomalies(doc, &items, base, &views);
+    let views_sections = render_views_sections(doc, base);
 
     let status = if doc.passed { "PASS" } else { "FAIL" };
     let status_color = if doc.passed { "#059669" } else { "#dc2626" };
@@ -192,7 +200,8 @@ pub fn render_html(doc: &SeqDoc) -> String {
     // arrow hue → dialog without opening payloads. First-seen order.
     let mut flow_chips = String::new();
     let mut seen_conns: Vec<&str> = Vec::new();
-    for row in &rows {
+    for item in &items {
+        let Item::Row(row) = item else { continue };
         let (RowKind::Sip { .. }, Some(conn)) = (&row.kind, row.conn.as_deref()) else {
             continue;
         };
@@ -290,6 +299,18 @@ pub fn render_html(doc: &SeqDoc) -> String {
   .jump {{ color: #2563eb; font-family: monospace; font-size: 11px; margin-left: 6px;
           white-space: nowrap; }}
   /* Anomaly context shown with a message's payload in the detail panel. */
+  /* Views plane: the belief table + the disagreements list under the diagram. */
+  .views {{ padding: 12px 20px; border-top: 1px solid #e5e7eb; }}
+  .views table {{ border-collapse: collapse; font-size: 0.85rem; }}
+  .views th, .views td {{ border: 1px solid #e5e7eb; padding: 3px 8px; text-align: left;
+                         white-space: nowrap; }}
+  .views th {{ background: #f3f4f6; }}
+  .views td.disputed {{ background: {DISPUTE_FILL}; }}
+  .views td.moved {{ font-weight: 600; color: {VIEW_COLOR}; }}
+  .views .sig {{ color: #6b7280; font-size: 0.75rem; }}
+  .views ul {{ list-style: none; padding-left: 0; }}
+  .views li {{ margin: 3px 0; padding: 4px 8px; border-left: 3px solid {VIEW_COLOR};
+              background: {VIEW_FILL}; border-radius: 4px; font-size: 0.9rem; }}
   .payload-anoms .pa {{ border-left: 3px solid; padding: 4px 8px; margin: 6px 0;
                        border-radius: 4px; font-size: 12px; }}
   .pa.gating {{ border-color: {GATING_COLOR}; background: #fef2f2; }}
@@ -305,12 +326,13 @@ pub fn render_html(doc: &SeqDoc) -> String {
       <span><i class="swatch" style="border-top-color:{SIP_COLOR}"></i>SIP</span>
       <span><i class="swatch" style="border-top-color:{REPL_COLOR};border-top-style:dashed"></i>Replication (dashed; hue = per-socket connection)</span>
       <span><i class="swatch" style="border-top-color:{BAND_COLOR}"></i>Lifecycle (crash / reboot / failover / partition)</span>
+      <span><i class="swatch" style="border-top-color:{VIEW_COLOR}"></i>View (what an observer believes about a node)</span>
       <span style="color:{LOST_COLOR}">✗ lost — frame emitted into a dead / superseded socket; the stub stops short of the lane (never reached the live node)</span>
       {flow_chips}
     </div>
   </header>
   <div class="main">
-    <div class="diagram-panel">{svg}{anomalies}</div>
+    <div class="diagram-panel">{svg}{anomalies}{views_sections}</div>
     <div class="detail-panel">
       <div class="detail-header">Message Detail</div>
       <div class="detail-body">
@@ -359,12 +381,12 @@ pub fn render_html(doc: &SeqDoc) -> String {
 /// embeds in its diagram panel. For callers that persist/serve the diagram
 /// standalone (the E2E `result.json` sibling artifacts, ADR-0018 Phase F).
 pub fn render_svg(doc: &SeqDoc) -> String {
-    let rows = doc.sorted_rows();
+    let items = doc.sorted_items();
     let base = doc.base_ms();
     let lane_idx: std::collections::HashMap<&str, usize> =
         doc.lanes.iter().enumerate().map(|(i, l)| (l.id.as_str(), i)).collect();
-    let views = anomaly_views(doc, &rows);
-    svg_markup(doc, &rows, base, &lane_idx, &row_anomaly_map(&views), &views)
+    let views = anomaly_views(doc, &items);
+    svg_markup(doc, &items, base, &lane_idx, &row_anomaly_map(&views), &views)
 }
 
 /// Render the diagram as a SELF-CONTAINED, EMBEDDABLE fragment for a host page
@@ -377,14 +399,14 @@ pub fn render_svg(doc: &SeqDoc) -> String {
 /// to actually reveal their payload on click. The script scopes its lookups to
 /// the embed root, so multiple embeds (or other page content) never interfere.
 pub fn render_embed(doc: &SeqDoc) -> String {
-    let rows = doc.sorted_rows();
+    let items = doc.sorted_items();
     let base = doc.base_ms();
     let lane_idx: std::collections::HashMap<&str, usize> =
         doc.lanes.iter().enumerate().map(|(i, l)| (l.id.as_str(), i)).collect();
-    let views = anomaly_views(doc, &rows);
+    let views = anomaly_views(doc, &items);
     let anoms_of_row = row_anomaly_map(&views);
-    let svg = svg_markup(doc, &rows, base, &lane_idx, &anoms_of_row, &views);
-    let payloads = render_payloads(doc, &rows, base, &anoms_of_row, &views);
+    let svg = svg_markup(doc, &items, base, &lane_idx, &anoms_of_row, &views);
+    let payloads = render_payloads(doc, &items, base, &anoms_of_row, &views);
 
     format!(
         r#"<div class="seq-embed">
@@ -459,7 +481,7 @@ fn ts_label(doc: &SeqDoc, at_ms: i64, base: i64) -> String {
 
 fn svg_markup(
     doc: &SeqDoc,
-    rows: &[&SeqRow],
+    items: &[Item<'_>],
     base: i64,
     lane_idx: &std::collections::HashMap<&str, usize>,
     anoms_of_row: &HashMap<usize, Vec<usize>>,
@@ -467,7 +489,7 @@ fn svg_markup(
 ) -> String {
     let n_lanes = doc.lanes.len().max(1);
     let width = LEFT_PAD + (n_lanes as i64) * LANE_GAP;
-    let height = TOP_PAD + (rows.len() as i64) * ROW_GAP + BOTTOM_PAD;
+    let height = TOP_PAD + (items.len() as i64) * ROW_GAP + BOTTOM_PAD;
 
     let mut s = String::new();
     s.push_str(&format!(
@@ -531,9 +553,16 @@ fn svg_markup(
     // Rows. `ord` here MUST match the payload-block ordinal in `render_payloads`
     // — both iterate the same sorted `rows` slice in lockstep, so index equality
     // ties a diagram `.seq-msg` to its `#evt-{ord}` payload.
-    for (ord, row) in rows.iter().enumerate() {
+    for (ord, item) in items.iter().enumerate() {
         let y = TOP_PAD + (ord as i64) * ROW_GAP + ROW_GAP / 2;
-        let ts = ts_label(doc, row.at_ms, base);
+        let ts = ts_label(doc, item.at_ms(), base);
+        let row = match item {
+            Item::View(v) => {
+                view_chip(&mut s, v, y, lane_idx, &ts);
+                continue;
+            }
+            Item::Row(row) => row,
+        };
         match row.kind {
             RowKind::Lifecycle => {
                 // Full-width band — not clickable, carries no payload.
@@ -679,13 +708,14 @@ fn svg_markup(
 /// payload block (they are not clickable `.seq-msg` groups).
 fn render_payloads(
     doc: &SeqDoc,
-    rows: &[&SeqRow],
+    items: &[Item<'_>],
     base: i64,
     anoms_of_row: &HashMap<usize, Vec<usize>>,
     views: &[AnomalyView<'_>],
 ) -> String {
     let mut out = String::new();
-    for (ord, row) in rows.iter().enumerate() {
+    for (ord, item) in items.iter().enumerate() {
+        let Item::Row(row) = item else { continue };
         let ts = ts_label(doc, row.at_ms, base);
         match row.kind {
             RowKind::Lifecycle => {}
@@ -761,7 +791,7 @@ fn render_payloads(
 /// affordance; the click handler highlights the rows and opens the first one.
 fn render_anomalies(
     doc: &SeqDoc,
-    rows: &[&SeqRow],
+    items: &[Item<'_>],
     base: i64,
     views: &[AnomalyView<'_>],
 ) -> String {
@@ -776,7 +806,7 @@ fn render_anomalies(
         let (link_class, data_rows, jump) = if v.ords.is_empty() {
             (String::new(), String::new(), String::new())
         } else {
-            let first = rows[v.ords[0]];
+            let first = &items[v.ords[0]];
             let more = match v.ords.len() {
                 1 => String::new(),
                 n => format!(" (+{} more)", n - 1),
@@ -789,8 +819,8 @@ fn render_anomalies(
                 ),
                 format!(
                     "<span class=\"jump\">→ {} @ {}{more}</span>",
-                    escape(&first.label),
-                    escape(&ts_label(doc, first.at_ms, base)),
+                    escape(&first.label()),
+                    escape(&ts_label(doc, first.at_ms(), base)),
                 ),
             )
         };
@@ -811,4 +841,110 @@ fn lane_caption(doc: &SeqDoc, id: &str) -> String {
         .find(|l: &&Lane| l.id == id)
         .map(|l| escape(&l.label))
         .unwrap_or_else(|| escape(id))
+}
+
+/// A belief change on the timeline: a small tinted chip anchored on the
+/// OBSERVER's own column (never a full-width band — a view is one actor's, not
+/// the cluster's). Not clickable: it carries no payload.
+fn view_chip(
+    s: &mut String,
+    v: &ViewChange,
+    y: i64,
+    lane_idx: &std::collections::HashMap<&str, usize>,
+    ts: &str,
+) {
+    let x = lane_x(lane_idx.get(v.lane.as_str()).copied().unwrap_or(0));
+    let text = format!("{}: {} = {} ({})", v.observer, v.subject, v.belief, v.signal);
+    let w = 8 + 6 * text.chars().count() as i64;
+    s.push_str(&format!(
+        "<rect x=\"{}\" y=\"{}\" width=\"{w}\" height=\"18\" rx=\"4\" fill=\"{VIEW_FILL}\" stroke=\"{VIEW_COLOR}\" stroke-width=\"0.8\"/>\n",
+        x - 4,
+        y - 13,
+    ));
+    s.push_str(&format!(
+        "<text x=\"{}\" y=\"{}\" fill=\"{VIEW_COLOR}\" font-size=\"11\">{}</text>\n",
+        x + 2,
+        y,
+        escape(&text),
+    ));
+    s.push_str(&format!(
+        "<text x=\"6\" y=\"{}\" fill=\"#6b7280\" font-family=\"monospace\" font-size=\"10\">{}</text>\n",
+        y + 3,
+        escape(ts),
+    ));
+}
+
+/// The views table (one row per change instant, one column per observer, cells
+/// tinted where the observers disagree) and the disagreements list under it.
+/// Empty string when the doc records no beliefs.
+fn render_views_sections(doc: &SeqDoc, base: i64) -> String {
+    if doc.views.is_empty() {
+        return String::new();
+    }
+    let table = views_table(&doc.views);
+    let mut out = String::from(
+        "<div class=\"views\"><h2>Views — what each observer believed</h2>\n<table>\n<tr><th>time</th><th>subject</th>",
+    );
+    for o in &table.observers {
+        out.push_str(&format!("<th>{}</th>", escape(o)));
+    }
+    out.push_str("</tr>\n");
+    for row in &table.rows {
+        out.push_str(&format!(
+            "<tr><td><span class=\"ts\">{}</span></td><td><code>{}</code></td>",
+            escape(&format_relative(row.at_ms - base)),
+            escape(&row.subject),
+        ));
+        for cell in &row.cells {
+            let class = match (row.disputed, cell.as_ref().is_some_and(|c| c.changed)) {
+                (true, true) => " class=\"disputed moved\"",
+                (true, false) => " class=\"disputed\"",
+                (false, true) => " class=\"moved\"",
+                (false, false) => "",
+            };
+            match cell {
+                Some(c) => out.push_str(&format!(
+                    "<td{class}>{} <span class=\"sig\">{}</span></td>",
+                    escape(&c.belief),
+                    escape(&c.signal),
+                )),
+                None => out.push_str(&format!("<td{class}>—</td>")),
+            }
+        }
+        out.push_str("</tr>\n");
+    }
+    out.push_str("</table>\n");
+
+    let conflicts = disagreements(&doc.views);
+    out.push_str(&format!("<h2>Disagreements ({})</h2>\n<ul>\n", conflicts.len()));
+    if conflicts.is_empty() {
+        out.push_str("<li>every observer agreed about every subject</li>\n");
+    }
+    for d in &conflicts {
+        let until = match d.to_ms {
+            Some(t) => format_relative(t - base),
+            None => "end of run".to_string(),
+        };
+        let holders = d
+            .holders
+            .iter()
+            .map(|(observer, belief, signal)| {
+                format!(
+                    "<b>{}</b> believes {} <span class=\"sig\">({})</span>",
+                    escape(observer),
+                    escape(belief),
+                    escape(signal),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        out.push_str(&format!(
+            "<li><span class=\"ts\">{} .. {}</span> about <code>{}</code>: {holders}</li>\n",
+            escape(&format_relative(d.from_ms - base)),
+            escape(&until),
+            escape(&d.subject),
+        ));
+    }
+    out.push_str("</ul></div>\n");
+    out
 }

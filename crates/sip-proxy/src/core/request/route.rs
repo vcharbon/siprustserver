@@ -1,7 +1,7 @@
 //! The §16 routing ladder for one inbound request: preflight checks, the
 //! non-2xx ACK hop decision, Route preprocessing + worker-outbound
-//! classification, self-gate admission, target selection, retransmission
-//! branch reuse, Via push, LRU memos, freeze + forward.
+//! classification, self-gate admission, target selection, Via push, LRU memos,
+//! freeze + forward. The pushed branch is `crate::branch`'s.
 //! Record-Route insertion lives in [`record_route`](super::record_route);
 //! self-generated finals in [`reply`](super::reply).
 
@@ -14,6 +14,7 @@ use sip_message::header::{
 use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
+use crate::branch::stateless_branch;
 use crate::cancel_lru::{call_id_cseq_key, CancelEntry};
 use crate::headers::{cookie_params, route_target};
 use crate::observability::metrics::{Direction, MessageResult, RoutingDecisionKind};
@@ -30,16 +31,15 @@ use super::{top_via_branch, RouteOutcome};
 /// count neither exhausts the loop bound nor lets a request ride forever.
 const DEFAULT_MAX_FORWARDS: u32 = 70;
 
-/// Namespaced key for the retransmission branch memo (reuses the `CancelBranchLru`
+/// Namespaced key for the retransmission target memo (reuses the `CancelBranchLru`
 /// store). A genuine retransmission repeats the *same* request: identical Call-ID,
 /// upstream branch, method AND CSeq number (RFC 3261 §17.2.3 keys a server
 /// transaction on branch + sent-by + method; the CSeq number pins it further).
-/// All four are required because the simulated fabric's per-worker `IdGen` resets
-/// on a failover restart, so a *different* request relayed by the backup can reuse
-/// a branch token the crashed primary already spent — keying on the branch alone
-/// would then mis-merge two distinct transactions onto one downstream branch (and
-/// the on-wire CSeq audit would skip the second as a phantom retransmit). The
-/// `rtx|` prefix keeps it disjoint from `call_id_cseq_key` (`{call_id}|{cseq}`).
+/// All four are required because a UA's per-process `IdGen` resets on a restart,
+/// so a *different* request can reuse a branch token the previous incarnation
+/// already spent — keying on the branch alone would then repeat the earlier
+/// forward's TARGET for an unrelated transaction. The `rtx|` prefix keeps it
+/// disjoint from `call_id_cseq_key` (`{call_id}|{cseq}`).
 fn retransmit_key(call_id: &str, incoming_branch: &str, method: &str, cseq: u32) -> String {
     format!("rtx|{call_id}|{incoming_branch}|{method}|{cseq}")
 }
@@ -140,18 +140,17 @@ impl ProxyCore {
         // its non-2xx ACK copy that Route verbatim, so a route-presence
         // heuristic misroutes exactly that ACK.
         // Gating on the memo (rather than merely branch-matching the
-        // remembered INVITE) also keeps a takeover worker's 2xx ACK safe: the
-        // simulated fabric's per-worker `IdGen` resets on failover, so its
-        // fresh ACK branch can ALIAS the dead primary's INVITE branch — but no
-        // non-2xx final was ever relayed for a confirmed call, so no memo
-        // exists and the ACK flows.
+        // remembered INVITE) also keeps a takeover UA's 2xx ACK safe: a
+        // restarted `IdGen` can make its fresh ACK branch ALIAS the dead
+        // incarnation's INVITE branch — but no non-2xx final was ever relayed
+        // for a confirmed call, so no memo exists and the ACK flows.
         //
         // What a match means depends on who generated the final:
-        //  • relayed final (memo names the node the final arrived from and the
-        //    INVITE's outbound branch) — RELAY the ACK there on that branch, so
-        //    the downstream server transaction (§17.2.3) matches it and stops
-        //    retransmitting the final (Timer G). This transaction-less proxy
-        //    never synthesizes the hop ACK itself (ADR-0022 X4; see
+        //  • relayed final (memo names the node the final arrived from) —
+        //    RELAY the ACK there, where §16.11 puts it on the INVITE's outbound
+        //    branch so the downstream server transaction (§17.2.3) matches it
+        //    and stops retransmitting the final (Timer G). This transaction-less
+        //    proxy never synthesizes the hop ACK itself (ADR-0022 X4; see
         //    `core/response.rs`) — the upstream's ACK is the only quench,
         //    end-to-end, which is what keeps a lossy caller hop recoverable.
         //  • the proxy's OWN final (memo written by `reply()`, empty `branch`:
@@ -180,19 +179,18 @@ impl ProxyCore {
 
         // ── §16.6 / §17.2.3 retransmission memo (looked up FIRST) ───────────
         // A retransmission repeats an already-forwarded request, so it must
-        // repeat the original forward exactly: same outbound top-Via branch
-        // (else the downstream transaction layer sees a fresh transaction at
-        // the same CSeq and the on-wire §12.2.2 CSeq audit rejects it) and the
-        // SAME downstream target (re-running the strategy under a changed
-        // candidate set would send the same branch to a DIFFERENT worker — one
-        // INVITE transaction split across two B2BUAs, a doubled call). It must
-        // also not be re-counted as a new call nor re-gated: a 503 to a
-        // retransmit of an admitted INVITE tears down a setup the first copy
-        // already started. Keyed on the full (Call-ID, upstream branch,
-        // method, CSeq) so a genuine retransmit matches but a different
-        // request that merely collides on the branch (a backup's reset `IdGen`
-        // after failover) does not. CANCEL is excluded — it resolves target +
-        // branch from the INVITE's own entry below.
+        // repeat the original forward exactly. The outbound branch it repeats
+        // is §16.11's function of the message; what this memo adds is the SAME
+        // downstream target (re-running the strategy under a changed candidate
+        // set would send the same branch to a DIFFERENT worker — one INVITE
+        // transaction split across two B2BUAs, a doubled call). It must also
+        // not be re-counted as a new call nor re-gated: a 503 to a retransmit
+        // of an admitted INVITE tears down a setup the first copy already
+        // started. Keyed on the full (Call-ID, upstream branch, method, CSeq)
+        // so a genuine retransmit matches but a different request that merely
+        // collides on the branch (a restarted UA's reset `IdGen`) does not.
+        // CANCEL is excluded — it resolves its target from the INVITE's own
+        // entry below.
         let incoming_branch = top_via_branch(req);
         let rtx_key = incoming_branch
             .as_ref()
@@ -332,7 +330,6 @@ impl ProxyCore {
         // Every branch below assigns both (or returns early).
         let decision;
         let target: Option<ProxyAddr>;
-        let mut reuse_branch: Option<String> = None;
         // What the cookie said, for the traced routing fact — set only by the
         // branch that consulted one.
         let mut stickiness: Option<&'static str> = None;
@@ -340,15 +337,15 @@ impl ProxyCore {
         if method == Method::Cancel {
             let key = call_id_cseq_key(call_id.as_str(), from.tag(), cseq.seq());
             if let Some(found) = self.cancel_lru.lookup(&key) {
-                // RFC 3261 §9.1 puts the CANCEL where the INVITE went, on the
-                // INVITE's branch. Behind this proxy the workers are ONE logical
-                // UAS, so a CANCEL toward a worker follows the INVITE's own
-                // stickiness cookie through the ladder every in-dialog request
-                // takes — the alive primary, else the backup holding the call's
-                // replica (ADR-0014) — while the branch is kept: the survivor's
-                // rebuilt INVITE transaction is keyed by it. A cookie the
-                // strategy cannot place (no usable backup) and a downstream
-                // target (a worker's own b-leg CANCEL) go where the INVITE went.
+                // RFC 3261 §9.1 puts the CANCEL where the INVITE went; §16.11
+                // puts it on the INVITE's branch, which the survivor's rebuilt
+                // INVITE transaction is keyed by. Behind this proxy the workers
+                // are ONE logical UAS, so a CANCEL toward a worker follows the
+                // INVITE's own stickiness cookie through the ladder every
+                // in-dialog request takes — the alive primary, else the backup
+                // holding the call's replica (ADR-0014). A cookie the strategy
+                // cannot place (no usable backup) and a downstream target (a
+                // worker's own b-leg CANCEL) go where the INVITE went.
                 let mut cancel_target = found.target;
                 if let Some(cookie) = &found.stickiness {
                     match self.strategy.decode_stickiness(cookie, msg).await {
@@ -358,23 +355,43 @@ impl ProxyCore {
                     }
                 }
                 target = Some(cancel_target);
-                reuse_branch = Some(found.branch);
                 decision = RoutingDecisionKind::Cancel;
                 self.metrics.record_cancel_lookup("hit");
             } else {
                 self.metrics.record_cancel_lookup("miss");
                 decision = RoutingDecisionKind::Cancel;
-                match self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await {
-                    Ok(t) => target = Some(t),
-                    Err(e) => return self.reply_select_failure(req, src, e).await,
+                if is_worker_outbound {
+                    // §9.1: a CANCEL goes where its INVITE went. A worker's own
+                    // b-leg INVITE went to the R-URI, memo or no memo — a
+                    // fresh selection would hand a worker's CANCEL to a worker
+                    // that never saw the INVITE.
+                    match req.request_uri() {
+                        uri if !uri.is_opaque() => {
+                            let (host, port) = uri.host_port();
+                            target = Some(ProxyAddr::new(host, port));
+                        }
+                        _ => {
+                            self.reply(req, src, 400, "Bad Request", &[]).await;
+                            self.metrics.record_reject("malformed_request_uri");
+                            return RouteOutcome {
+                                decision: RoutingDecisionKind::Reject,
+                                target: None,
+                            };
+                        }
+                    }
+                } else {
+                    match self.strategy.select_for_new_dialog(msg, SelectOpts::default()).await {
+                        Ok(t) => target = Some(t),
+                        Err(e) => return self.reply_select_failure(req, src, e).await,
+                    }
                 }
             }
         } else if let Some(found) = ack_hop {
             // The §17.1.1.3 ACK for a relayed non-2xx final: to the node the
-            // final arrived from, on the INVITE's outbound branch (see the
-            // hop-decision block above).
+            // final arrived from (see the hop-decision block above). It shares
+            // the INVITE's Call-ID, From tag, CSeq number and received branch,
+            // so §16.11 already puts it on the INVITE's outbound branch.
             target = Some(found.target);
-            reuse_branch = Some(found.branch);
             decision = RoutingDecisionKind::AckHop;
         } else if let Some(next) = loose_route_next_hop {
             target = Some(next);
@@ -434,7 +451,7 @@ impl ProxyCore {
             // Retransmitted out-of-dialog request: repeat the original
             // selection. Re-running the strategy under a changed candidate set
             // (an ELU band flip, a worker join/leave) would forward the SAME
-            // reused branch to a DIFFERENT worker — one INVITE transaction
+            // §16.11 branch to a DIFFERENT worker — one INVITE transaction
             // split across two B2BUAs (double call), with the CANCEL entry
             // then overwritten to point at the second one.
             target = Some(found.target.clone());
@@ -472,20 +489,12 @@ impl ProxyCore {
         );
         draft = routed;
 
-        // ── §16.6 / §17.2.3 retransmission branch reuse ─────────────────────
-        // A retransmission carries the SAME outbound top-Via branch the
-        // original forward used (looked up at the top of this fn); CANCEL
-        // already resolved its branch from the INVITE entry above. Without
-        // this, a keepalive OPTIONS that retransmits before its 200 lands
-        // reaches the callee as several distinct CSeq-N transactions and the
-        // on-wire §12.2.2 audit (correctly) rejects the 2nd as a CSeq reuse.
-        if reuse_branch.is_none() {
-            if let Some(found) = &rtx_hit {
-                reuse_branch = Some(found.branch.clone());
-            }
-        }
-
-        let our_branch = reuse_branch.unwrap_or_else(|| self.id_gen.new_branch());
+        // ── §16.11: the pushed branch is a function of the message ──────────
+        // A retransmission of this request, and its CANCEL and non-2xx ACK,
+        // compute the same value, so the downstream server transaction
+        // (§17.2.3) matches them to this forward at any proxy instance and
+        // whatever any memo above did or did not hold.
+        let our_branch = stateless_branch(req);
         // Stamp the EGRESS face's advertise on the pushed Via (§18.1.1: the
         // sent-by must be an address the next hop can return the response to —
         // in dual-face mode that is the face the request leaves on, so the
@@ -497,8 +506,8 @@ impl ProxyCore {
                 .requesting_rport(),
         );
 
-        // Remember the outbound (target, branch) so a retransmit of THIS
-        // request repeats the forward. Short TTL: retransmits stop at Timer B/F.
+        // Remember the target so a retransmit of THIS request repeats the
+        // forward. Short TTL: retransmits stop at Timer B/F.
         if method != Method::Cancel {
             if let Some(k) = &rtx_key {
                 self.cancel_lru.remember(

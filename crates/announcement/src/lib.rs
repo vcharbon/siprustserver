@@ -38,7 +38,7 @@ use b2bua_sdk::rules::{
     Effect, Match, Method, RuleAction, RuleCall, RuleContext, RuleHandleResult, Terminal,
 };
 use b2bua_sdk::{define_service, sm_rule};
-use call::{CdrEventType, Direction, LegState};
+use call::{CdrEventType, Direction, LegState, TerminationCause};
 use serde::Deserialize;
 
 pub mod mscml;
@@ -199,7 +199,11 @@ fn on_mscml_failed(ctx: &RuleContext) -> Option<RuleHandleResult> {
         RuleAction::RelayFailureToALeg { status, reason: reason.to_string() },
         // Terminate: the confirmed media leg is BYE'd, the Early a-leg is resolved
         // by its just-sent 4xx (no BYE). No a-leg un-confirm workaround here.
-        RuleAction::BeginTermination { reason: Some("announcement-clip-failed".to_string()) },
+        RuleAction::BeginTermination {
+            reason: Some("announcement-clip-failed".to_string()),
+            cause: TerminationCause::DecisionRelease,
+            by_leg: None,
+        },
     ])
 }
 
@@ -225,14 +229,18 @@ fn on_media_failure(ctx: &RuleContext) -> Option<RuleHandleResult> {
         // (per `leg_is_resolved`) holding the call open for a 487 that will never
         // come.
         RuleAction::TerminateLeg {
-            leg_id: media,
+            leg_id: media.clone(),
             bye_disposition: Some(call::ByeDisposition::Rejected),
         },
         // The caller's INVITE is still unanswered (early media only) — answer it
         // with the MRF's failure before tearing the call down (begin-termination
         // assumes the firing rule already replied to a Trying/Early a-leg).
         RuleAction::RelayFailureToALeg { status, reason: reason.to_string() },
-        RuleAction::BeginTermination { reason: Some("announcement-mrf-failure".to_string()) },
+        RuleAction::BeginTermination {
+            reason: Some("announcement-mrf-failure".to_string()),
+            cause: TerminationCause::RemoteFinal,
+            by_leg: Some(media),
+        },
     ])
 }
 

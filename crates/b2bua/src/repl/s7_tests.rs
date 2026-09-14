@@ -27,7 +27,7 @@ use sip_message::SipRequest;
 use sip_message::SipStr;
 use sip_txn::IdGen;
 
-use super::{Readiness, ReadinessSource};
+use super::{PeerLink, Readiness, ReadinessSource};
 use crate::overload::OverloadSignal;
 use crate::router::build_options_health_response;
 
@@ -277,7 +277,10 @@ use sip_clock::Clock;
 use topology::{Peer, SimulatedMembership};
 
 use super::test_support::{cref, fast_config, fwd, tick};
-use super::{Changelog, FnPeerResolver, ReplServer, ReplicatingCallStore, ReplicationSupervisor};
+use super::{
+    Changelog, FnPeerResolver, ReplServer, ReplicatingCallStore, ReplicationSupervisor,
+    SelfEndpoint, WithdrawalCondition,
+};
 use crate::store::{CallStore, PartitionRole};
 
 const PRI: PartitionRole = PartitionRole::Primary;
@@ -357,6 +360,93 @@ async fn supervisor_readiness_flips_not_ready_to_ready_to_draining() {
     assert_eq!(resp.status(), 503);
     assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
     assert_eq!(resp.raw(HeaderName::RetryAfter).next(), Some("0"));
+}
+
+/// A worker whose own endpoint leaves the membership it pulls from observes its
+/// withdrawal from routing (ADR-0031 D6): the supervisor latches `is_withdrawn`,
+/// wakes its watch, raises the `withdrawn_running` gauge, and the readiness
+/// latch it feeds answers OPTIONS `503 draining` without any SIGTERM. Boot-time
+/// absence is not a withdrawal: the latch waits for the first routable sighting.
+#[tokio::test(start_paused = true)]
+async fn own_endpoint_withdrawn_latches_without_sigterm() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let a_store = ReplicatingCallStore::new(1, clock.clone());
+    let resolve = Arc::new(FnPeerResolver(|_: &Peer| addr(9)));
+    let a_sup = ReplicationSupervisor::with_config(
+        "A",
+        net.clone(),
+        a_store.clone(),
+        resolve,
+        fast_config(),
+    );
+    let readiness = Readiness::new(Arc::new(a_sup.clone()));
+    let mut own = a_sup.self_endpoint();
+
+    // Not yet published: the informer shows the pool without this worker.
+    let membership = SimulatedMembership::with_clock(vec![], clock.clone());
+    a_sup.start(Arc::new(membership.clone()));
+    tick(100).await;
+    assert!(!a_sup.is_withdrawn(), "absent before publication is not a withdrawal");
+    assert_eq!(*own.borrow_and_update(), SelfEndpoint::Unobserved);
+
+    // Published: seen routable once.
+    membership.add(Peer::new("A", "A"));
+    tick(100).await;
+    assert!(!a_sup.is_withdrawn());
+    assert_eq!(*own.borrow_and_update(), SelfEndpoint::Routable);
+    assert!(!a_sup.metrics().withdrawn_running());
+
+    // Withdrawn from routing, no SIGTERM anywhere.
+    membership.remove("A");
+    tick(100).await;
+    assert!(a_sup.is_withdrawn(), "the worker observed its own withdrawal");
+    assert_eq!(*own.borrow_and_update(), SelfEndpoint::Withdrawn(WithdrawalCondition::Absent));
+    assert!(a_sup.metrics().withdrawn_running(), "the withdrawn-but-running gauge is raised");
+
+    // The core turns the watch into the drain latch; the responder then reports
+    // draining, as it does after SIGTERM.
+    readiness.set_withdrawn();
+    assert!(readiness.is_draining());
+    let resp = build_options_health_response(
+        &readiness,
+        &ov(),
+        &IdGen::seeded(1),
+        &options_probe(),
+        &CapabilitySet::default(),
+    );
+    assert_eq!(resp.status(), 503);
+    assert!(reason_of(&resp).unwrap().to_ascii_lowercase().contains("draining"));
+
+    // Sticky: a re-publication does not un-withdraw.
+    membership.add(Peer::new("A", "A"));
+    tick(100).await;
+    assert!(a_sup.is_withdrawn());
+}
+
+/// A static membership never shows a worker its own endpoint, so a worker on
+/// one never observes a withdrawal, whether or not the list names it.
+#[tokio::test(start_paused = true)]
+async fn static_membership_never_withdraws_the_worker() {
+    let clock = Clock::test_at(0);
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    for peers in [vec![Peer::new("B", "B")], vec![Peer::new("A", "A"), Peer::new("B", "B")]] {
+        let a_store = ReplicatingCallStore::new(1, clock.clone());
+        let resolve = Arc::new(FnPeerResolver(|_: &Peer| addr(9)));
+        let a_sup = ReplicationSupervisor::with_config(
+            "A",
+            net.clone(),
+            a_store.clone(),
+            resolve,
+            fast_config(),
+        );
+        a_sup.start(Arc::new(topology::StaticMembership::from_peers(peers)));
+        tick(200).await;
+        assert!(!a_sup.is_withdrawn());
+        assert_eq!(*a_sup.self_endpoint().borrow(), SelfEndpoint::Unobserved);
+        assert!(!a_sup.metrics().withdrawn_running());
+        a_sup.shutdown();
+    }
 }
 
 /// Cold double-restart readiness deadlock regression (handoff
@@ -465,4 +555,49 @@ fn options_200_advertises_the_node_capability_set() {
         Some("INVITE, ACK, CANCEL, BYE, OPTIONS")
     );
     assert_eq!(value(&resp, HeaderName::Supported).as_deref(), Some("timer"));
+}
+
+/// A member that is present but **not ready** is pulled and never waited on
+/// (ADR-0031 D1): its Reclaim flow may be unreachable, mid-bootstrap or lost,
+/// and the endpoint may linger in the slice indefinitely (a pod stuck
+/// `Terminating`), so the readiness gates exclude it while the puller keeps
+/// running toward it.
+#[tokio::test(start_paused = true)]
+async fn a_not_ready_member_is_pulled_but_does_not_gate_readiness() {
+    let clock = Clock::test_at(0);
+    // No B server is ever spawned: B's Reclaim flow never connects and, before
+    // the hard timer, is neither current nor bootstrap-complete.
+    let net = Arc::new(SimulatedReplicationNetwork::with_delay(1));
+    let b_addr = addr(4);
+    let resolve = Arc::new(FnPeerResolver(move |peer: &Peer| {
+        assert_eq!(peer.ordinal, "B");
+        b_addr
+    }));
+    let a_store = ReplicatingCallStore::new(2, clock.clone());
+    let a_sup = ReplicationSupervisor::with_config(
+        "A",
+        net.clone(),
+        a_store.clone(),
+        resolve,
+        fast_config(),
+    );
+    let membership =
+        Arc::new(SimulatedMembership::with_clock(vec![Peer::new("B", "B")], clock.clone()));
+    a_sup.start(membership.clone());
+    tick(100).await;
+    assert!(!a_sup.all_current(), "a ready peer still pending gates readiness (sanity)");
+    assert!(!a_sup.all_bootstrapped());
+
+    // B's endpoint flips not ready and stays in the slice.
+    membership.set_conditions("B", false, true);
+    tick(100).await;
+    assert!(a_sup.is_running("B"), "a not-ready member is still pulled");
+    assert_eq!(a_sup.peer_link("B"), PeerLink::Kept);
+    assert!(a_sup.all_bootstrapped(), "a pulled-not-ready member does not gate bootstrap");
+    assert!(a_sup.all_current(), "a pulled-not-ready member does not gate readiness");
+
+    // Ready again before its hard timer: it gates once more.
+    membership.set_conditions("B", true, false);
+    tick(100).await;
+    assert!(!a_sup.all_current(), "a ready peer that is still pending gates readiness again");
 }

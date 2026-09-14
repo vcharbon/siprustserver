@@ -304,6 +304,23 @@ impl B2buaCore {
                 // what it has pulled and keeps pulling.
 
                 let readiness = Readiness::new(Arc::new(supervisor.clone()));
+                // The worker's own withdrawal from routing latches Draining
+                // whether or not SIGTERM has arrived (ADR-0031 D6). A watch, not
+                // a handle held by the supervisor: readiness already owns the
+                // supervisor, and a cycle would outlive `abort`.
+                let mut self_endpoint = supervisor.self_endpoint();
+                let latch = readiness.clone();
+                tasks.push(tokio::spawn(async move {
+                    loop {
+                        if self_endpoint.borrow_and_update().is_withdrawn() {
+                            latch.set_withdrawn();
+                            return;
+                        }
+                        if self_endpoint.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                }));
                 (readiness, Some(supervisor))
             }
             // Legacy/default path: always-200 OPTIONS, no replication.
@@ -516,6 +533,13 @@ impl B2buaCore {
         self.supervisor.as_ref()
     }
 
+    /// This core's readiness handle (clone-cheap, shares the latches). Exposed
+    /// so a harness can observe the node's own drain/readiness state after the
+    /// core itself is no longer reachable.
+    pub fn readiness(&self) -> crate::repl::Readiness {
+        self.readiness.clone()
+    }
+
     /// The worker-side overload signal. Callers advance the `adm`
     /// counter on a non-emergency new-dialog admit
     /// ([`OverloadSignal::increment_non_emergency_admitted`]) and read the
@@ -574,6 +598,13 @@ impl B2buaCore {
         }
     }
 
+    /// Whether this worker has observed its own endpoint withdrawn from routing
+    /// (ADR-0031 D6): the proxy routes nothing new here. `false` without
+    /// replication or on a membership that does not show the worker itself.
+    pub fn is_withdrawn(&self) -> bool {
+        self.supervisor.as_ref().is_some_and(|s| s.is_withdrawn())
+    }
+
     /// Latch this worker into the `Draining` readiness state (SIGTERM → drain).
     /// OPTIONS then self-reports `503 draining` so the front proxy steers new
     /// calls away while in-flight calls finish. Terminal — never un-drains.
@@ -585,17 +616,56 @@ impl B2buaCore {
         self.readiness.set_draining();
     }
 
+    /// Whether every live call this worker serves is held by a peer that has
+    /// applied this worker's changelog head (ADR-0031 D2). The other copy's
+    /// holder is `topology.bak` for a call this worker is primary for (the peer
+    /// pulls the Backup flow) and `topology.pri` for a takeover copy it serves
+    /// as backup (the peer pulls the Reclaim flow). An empty holder ordinal, a
+    /// disconnected flow, a flow behind the head, or replication being off ⇒
+    /// `false`: nothing proves the call survives this worker's exit.
+    pub fn backups_caught_up(&self) -> bool {
+        let Some(repl) = &self.repl_store else {
+            return false;
+        };
+        backups_caught_up_in(&self.ctx, repl.changelog())
+    }
+
+    /// The three probes the drain reads, OWNED — so a caller can run the drain
+    /// without borrowing this core (the harness drives it across a paused
+    /// timeline). Read-only.
+    pub fn drain_probe(&self) -> crate::drain::DrainInputs {
+        let ctx = self.ctx.clone();
+        let changelog = self.repl_store.as_ref().map(|r| r.changelog().clone());
+        let supervisor = self.supervisor.clone();
+        crate::drain::DrainInputs {
+            active: self.active_calls_probe(),
+            backups_caught_up: Arc::new(move || match &changelog {
+                Some(cl) => backups_caught_up_in(&ctx, cl),
+                None => false,
+            }),
+            withdrawn: Arc::new(move || supervisor.as_ref().is_some_and(|s| s.is_withdrawn())),
+        }
+    }
+
     /// Graceful shutdown: latch `Draining` (so the proxy steers new calls away
-    /// via the OPTIONS / `/ready` self-report) and then **wait for the live call
-    /// map to clear**, bounded by `grace`. Returns the residual active-call
-    /// count — `0` ⇒ fully quiesced, `>0` ⇒ the grace elapsed with calls still
-    /// live. Replaces the runner's blind fixed-duration drain sleep: a node with
-    /// no calls exits at once, a busy node is capped at `grace`, and the cut is
-    /// never silent (the caller logs the residual). `Draining` is the single
-    /// home for the drain state — there is no second flag to keep in sync.
-    pub async fn drain(&self, grace: std::time::Duration) -> usize {
+    /// via the OPTIONS / `/ready` self-report) and then wait for the first of:
+    /// the live call map clearing, a withdrawn worker's backups holding every
+    /// live call past the floor (ADR-0031 D2), or the grace. Returns the named
+    /// exit, the residual active-call count and how long it waited; the cut is
+    /// never silent. `Draining` is the single home for the drain state — there
+    /// is no second flag to keep in sync.
+    pub async fn drain(&self, bounds: crate::drain::DrainBounds) -> crate::drain::DrainOutcome {
         self.begin_draining();
-        crate::drain::drain_until_quiescent(|| self.active_calls(), grace).await
+        let outcome = crate::drain::drain_until_quiescent(self.drain_probe(), bounds).await;
+        self.metrics.record_drain_exit(outcome.exit.label(), outcome.elapsed);
+        tracing::info!(
+            reason = outcome.exit.label(),
+            residual = outcome.residual,
+            elapsed_ms = outcome.elapsed.as_millis() as u64,
+            withdrawn = self.is_withdrawn(),
+            "drain returned"
+        );
+        outcome
     }
 
     pub fn metrics(&self) -> &B2buaMetrics {
@@ -618,6 +688,14 @@ impl B2buaCore {
     /// Active call count (test/observability).
     pub fn active_calls(&self) -> usize {
         self.ctx.state.active_count()
+    }
+
+    /// [`active_calls`](Self::active_calls) as an OWNED probe — the live-call
+    /// input of [`drain_probe`](Self::drain_probe), handed out on its own for a
+    /// caller that watches quiescence alone. Read-only.
+    pub fn active_calls_probe(&self) -> Arc<dyn Fn() -> usize + Send + Sync> {
+        let ctx = self.ctx.clone();
+        Arc::new(move || ctx.state.active_count())
     }
 
     /// Does this worker currently **serve** `call_ref` (hold it live in its call
@@ -680,4 +758,31 @@ impl B2buaCore {
             self.metrics.set_repl_store_gauges(meta_total, meta_backup, cl_entries, cl_peers);
         }
     }
+}
+
+/// The [`B2buaCore::backups_caught_up`] predicate over a context + changelog, so
+/// both the borrowing accessor and the owned [`B2buaCore::drain_probe`] closure
+/// read one implementation.
+fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> bool {
+    use repl_net::frame::Partition;
+    let me = &ctx.config.self_ordinal;
+    for call_ref in ctx.state.live_call_refs() {
+        // Released between the listing and the read: it holds nothing now.
+        let Some(live) = ctx.state.peek(&call_ref) else {
+            continue;
+        };
+        // No topology at all names no holder: nothing can be holding the call.
+        let Some(topology) = live.topology else {
+            return false;
+        };
+        let (holder, partition) = if topology.pri == *me {
+            (topology.bak, Partition::Bak)
+        } else {
+            (topology.pri, Partition::Pri)
+        };
+        if holder.is_empty() || !changelog.flow_caught_up(&holder, partition) {
+            return false;
+        }
+    }
+    true
 }

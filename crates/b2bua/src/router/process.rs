@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::helpers::cap_keepalive_fire_at;
-use call::{Call, CallModelState, LegState, TimerEntry, TimerType};
+use call::{Call, CallModelState, LegState, TerminationCause, TimerEntry, TimerType};
 use sip_message::emergency::is_emergency_request;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::{Method, SipMessage};
@@ -104,7 +104,8 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
         }
         // A request in a dialog this call does not hold is refused before any
         // of the machinery below reads it (RFC 3261 §12.2.2).
-        if refuse_foreign_dialog(ctx, &call, &event, &res).await {
+        if let Some(refusal) = refuse_foreign_dialog(ctx, &call, &event, &res).await {
+            record_refusal(ctx, call, &res.source_leg_id, &event, refusal.as_ref(), now_ms);
             return;
         }
         // The layer emitted this datagram with no transaction to match it; a
@@ -119,7 +120,8 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
         // Otherwise RFC 3261 §9.2: 481, and no effect on the call. The rules
         // never see a CANCEL request.
         let own_tag = call::helpers::b2bua_tag(&call, &res.source_leg_id);
-        if reject_stray_cancel(ctx, own_tag.as_deref(), &event).await {
+        if let Some(answer) = reject_stray_cancel(ctx, own_tag.as_deref(), &event).await {
+            record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
             return;
         }
         // The limiter-refresh timer is async (an HTTP call to migrate holds), so
@@ -291,7 +293,11 @@ async fn initial_invite_turn(
         ctx.overload.increment_non_emergency_admitted();
     }
 
-    let call = build_initial_call(req, src, &ctx.config, now_ms);
+    let mut call = build_initial_call(req, src, &ctx.config, now_ms);
+    if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
+        let a_leg = call.a_leg.leg_id.clone();
+        call = ring.invite_received(call, &a_leg, req, now_ms);
+    }
     ctx.state.create(call.clone());
     // RFC 3261 §8.1.1.3: a dialog-forming INVITE MUST carry a From tag. The
     // caller's From tag IS the a-leg dialog's remote tag, so admitting a
@@ -312,6 +318,7 @@ async fn initial_invite_turn(
             &[],
             &ctx.id_gen,
             now_ms,
+            TerminationCause::Admission,
         )
     } else {
         // `req.image()` is the datagram this INVITE arrived as — the only place
@@ -464,44 +471,64 @@ async fn resident_or_materialised(ctx: &Arc<RouterCtx>, call_ref: &str) -> Optio
 /// no dialog this stack holds on the leg it arrived on draws 481 and touches
 /// nothing. An ACK draws no response at all (§17.1.1.3) and is dropped, so the
 /// §13.3.1.4 ladder keeps repeating the 2xx it failed to acknowledge. A CANCEL
-/// is matched by transaction (§9.1) and never read here. `true` when refused.
+/// is matched by transaction (§9.1) and never read here. `Some` when refused,
+/// holding the 481 sent, if any.
 async fn refuse_foreign_dialog(
     ctx: &RouterCtx,
     call: &Call,
     event: &CallEvent,
     res: &Resolution,
-) -> bool {
-    let CallEvent::Sip { message, src, .. } = event else { return false };
-    let SipMessage::Request(req) = message.as_ref() else { return false };
+) -> Option<Option<sip_message::SipResponse>> {
+    let CallEvent::Sip { message, src, .. } = event else { return None };
+    let SipMessage::Request(req) = message.as_ref() else { return None };
     if req.method() == Method::Cancel {
-        return false;
+        return None;
     }
-    let Some(tag) = req.to().tag() else { return false };
+    let tag = req.to().tag()?;
     if call::helpers::holds_local_tag(call, &res.source_leg_id, tag) != Some(false) {
-        return false;
+        return None;
     }
-    if req.method() != Method::Ack {
-        let _ = ctx.txn.send_response(build_481(req, None), *src).await;
+    if req.method() == Method::Ack {
+        return Some(None);
     }
-    true
+    let refusal = build_481(req, None);
+    let _ = ctx.txn.send_response(refusal.clone(), *src).await;
+    Some(Some(refusal))
 }
 
 /// RFC 3261 §9.2 for a CANCEL that matched no INVITE transaction in the layer
 /// and none a call here could rebuild: 481 under `to_tag`, the tag the call's
 /// final to the INVITE carried where a call resolves, and no effect on any
-/// call. `true` when `event` was such a CANCEL and has been answered.
+/// call. The 481 sent when `event` was such a CANCEL.
 pub(super) async fn reject_stray_cancel(
     ctx: &RouterCtx,
     to_tag: Option<&str>,
     event: &CallEvent,
-) -> bool {
-    let CallEvent::Sip { message, src, .. } = event else { return false };
-    let SipMessage::Request(req) = message.as_ref() else { return false };
+) -> Option<sip_message::SipResponse> {
+    let CallEvent::Sip { message, src, .. } = event else { return None };
+    let SipMessage::Request(req) = message.as_ref() else { return None };
     if req.method() != Method::Cancel {
-        return false;
+        return None;
     }
-    let _ = ctx.txn.send_response(build_481(req, to_tag), *src).await;
-    true
+    let refusal = build_481(req, to_tag);
+    let _ = ctx.txn.send_response(refusal.clone(), *src).await;
+    Some(refusal)
+}
+
+/// A request refused on a live call's behalf is still a message of the
+/// call's: the ring records it and the answer, and the record lands.
+fn record_refusal(
+    ctx: &RouterCtx,
+    call: Call,
+    leg_id: &str,
+    event: &CallEvent,
+    answer: Option<&sip_message::SipResponse>,
+    now_ms: i64,
+) {
+    let Some(ring) = crate::message_ring::Ring::of(&ctx.config) else { return };
+    let CallEvent::Sip { message, .. } = event else { return };
+    let SipMessage::Request(req) = message.as_ref() else { return };
+    ctx.state.update(ring.refused(call, leg_id, req, answer, now_ms));
 }
 
 /// Run the synchronous rule chain for one in-dialog event, with the
@@ -547,7 +574,7 @@ fn rule_chain_turn(
         now_ms,
         wire_faults: &ctx.wire_faults,
     };
-    // The dialog-level ladders are the framework's (ADR-0029 X4): a rung is
+    // The dialog-level ladders are the framework's (ADR-0032 X4): a rung is
     // repeated here and never reaches a rule; the discharging ACK or PRACK
     // retires its ladder before the rules run and they read the fact; a
     // give-up's timers are scrubbed before the CORE give-up rule decides, and
@@ -593,6 +620,14 @@ fn rule_chain_turn(
         ctx.metrics.record_repeat_give_up(obligation.kind());
         exec.give_up(&mut call, &mut ladder_fx, obligation);
     }
+    // The record names the message before the rules read it, so what the
+    // turn sends follows what it received.
+    if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
+        call = ring.received(call, &res.source_leg_id, event, discharged.as_ref(), now_ms);
+    }
+    // A decision folding back is marked before the rules apply it, whichever
+    // rule claims the fold.
+    call = crate::decision_log::fold_decided(call, event, now_ms);
     let rule_ctx = RuleContext {
         call: RuleCall::new(&call),
         call_ref,
@@ -659,6 +694,8 @@ fn rule_chain_turn(
         }
         cap_actions.push(RuleAction::BeginTermination {
             reason: Some("SIP;cause=503;text=\"message-cap-exceeded\"".into()),
+            cause: TerminationCause::MessageCap,
+            by_leg: None,
         });
         let before = result.call.clone();
         let cap = exec.execute(&cap_actions, &result.call, &cap_ctx);

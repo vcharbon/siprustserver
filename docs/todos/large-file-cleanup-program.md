@@ -29,7 +29,7 @@ commit.
    the crate `lib.rs` index.
 5. **Verify.** `cargo check` then the default test lane, capped and ONE
    compile at a time per CLAUDE.md:
-   `systemd-run --user --scope -q -p MemoryMax=12G -p CPUQuota=1200% nice -n 10 cargo test --workspace --jobs 6`.
+   `systemd-run --user --scope -q -p MemoryMax=12G -p CPUQuota=1200% nice -n 10 cargo test --workspace`.
 6. **Commit** (`refactor(<crate>): split <file> into modules; comment scrub`),
    tick the checklist here, append any raised suspicions to the log at the
    bottom.

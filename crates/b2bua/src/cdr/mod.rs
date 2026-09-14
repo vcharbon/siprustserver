@@ -12,7 +12,7 @@ pub use memory::InMemoryCdrWriter;
 use async_trait::async_trait;
 use serde::Serialize;
 
-use call::{Call, CdrEvent, LegDisposition, LegState};
+use call::{Call, CdrEvent, DecisionMark, LegDisposition, LegState, Termination};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CdrLeg {
@@ -48,6 +48,13 @@ pub struct CdrRecord {
     pub a_leg: CdrLeg,
     pub b_legs: Vec<CdrBLeg>,
     pub events: Vec<CdrEvent>,
+    /// The decisions applied to the call, in order; each event's
+    /// `decision_ordinal` indexes it (1-based, `0` = before any decision).
+    pub decision_log: Vec<DecisionMark>,
+    /// Who ended the call and why, and the message-ring cut
+    /// (`Call::termination`); `None` on a record of a call that reached
+    /// terminal without a termination — none does on this stack.
+    pub termination: Option<Termination>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billing_context: Option<String>,
 }
@@ -85,6 +92,8 @@ pub fn build_record(call: &Call, terminated_at: i64) -> CdrRecord {
             })
             .collect(),
         events: call.cdr_events.clone(),
+        decision_log: call.decision_log.clone(),
+        termination: call.termination.clone(),
         billing_context: call.billing_context.clone(),
     }
 }

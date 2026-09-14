@@ -18,9 +18,8 @@ v0.1 interpreter's keepalive elision: callflow knowledge inside an interpreter
 is a design failure of the format, and `background` (§5.1) is where that
 particular knowledge now lives — as document data.
 
-Rationale and the design record live in `.scratch/replay-refine/scenario-v3.md`
-and in the `## Comments` log of `.scratch/replay-refine/issues/16-scenario-v3-schema.md`.
-This file states the contract and nothing else.
+Rationale and the design record live with the consumer that authored the
+format. This file states the contract and nothing else.
 
 > **AMENDED 2026-08-22.** Lane-scoped assert classes (§9.1), `rfc_violations`
 > (§11.1), the in-dialog final marker and the `cause` citation rule (§4.1,
@@ -71,6 +70,40 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-09-14 — an expected session description is asserted by CONTENT, the
+lane-owned fields masked where the run rebooked them.** An expected SDP was a
+declared shape (`sdp-present`) and nothing read its lines, so a description the
+system altered — a payload dropped from the `m=` list, an `a=fmtp` lost, a
+direction changed, an answer dropped from an ACK — replayed as transparent. The
+generator now stores every expected SDP as a resource compared as a session
+description; the shape stays for an authored document that asserts presence
+only.
+
+| change | where |
+|---|---|
+| `BodyCompare` gains `sdp`: session section then media sections by position, lines per section as a multiset (attribute order erased), `o=` sess-id and sess-version masked always, and every field the expect's own `rewrite` tokens name — exactly what the render writes: `c=addr` the address of a `c=IN IP4` line, `m=port` the non-zero port of an `m=` line with its `/count` kept, `a=rtcp` never — masked where the run's media plane REBOOKED it; on a verbatim run the tokens mask nothing and two descriptions the structure cannot tell apart must be the same bytes (one `document:bytes` record otherwise). Refused on a body whose stated content type is not `application/sdp` by `body/compare-sdp-type` | §8.3, `pivot-schema`, `@sip/contracts` |
+| the generator stores an expected SDP as `{ ref, rewrite, compare: "sdp" }` plus its resource file, under the expect-side name `resources/<actor>_r<n>_0.sdp`; multipart stays a shape | §8.3, generator |
+| the interpreter gates a `compare: sdp` resource on presence AND media type, exactly as the `sdp-present` shape gates; the content is the confrontation's | §6.3, §8.3, `pivot-interpreter` |
+| the confrontation states one `body` record per differing line key, `body:sdp:<section>:<line>:<scope>` (sections `session`, `m<i>`), a side that is no session description as one `body:sdp:document:sdp:<scope>` record, a media section on one side only as one `body:sdp:m<i>:section:<scope>` record, two descriptions a verbatim run carried as different bytes with the structure equal as one `body:sdp:document:bytes:<scope>` record — every line verbatim, each side one element per line as a header record carries one per value; the driver reads the run's media mode off the bundle and hands it to the confrontation | the pipeline's `confront`, `sdpfold`, the driver |
+
+**2026-09-13 — an expected body is asserted by CONTENT, and the confrontation
+states the difference.** A single body on an expect was a declared shape and
+nothing else, so a frozen text body the capture carried — a control document,
+a sipfrag — was not stored on the expect side and a replay that received any
+document at all read as transparent: the confrontation diffed headers and
+never read a body. The registry now decides the expect side as it decides the
+send side. SDP and multipart stay shapes, absence stays its own claim, a
+binary payload stays undeclared, and every other frozen text body is stored as
+a resource beside the send-side files and held against the received body
+after the run.
+
+| change | where |
+|---|---|
+| `ResourceBody` gains `compare` (`exact`, the meaning of absence, or `xml`: declaration dropped, whitespace-only text between tags removed, ends trimmed, nothing else). Refused on a send by `body/compare-on-send` | §8.3, `pivot-schema`, `@sip/contracts` |
+| the generator stores a frozen TEXT body on an expect as `{ ref, mode: "frozen", content-type }` plus its resource file, under the expect-side name `resources/<actor>_r<n>_<part>.<ext>` — its own counter, so nothing a send stored is renamed | §8.3, §8.4, generator |
+| the interpreter keeps gating PRESENCE for a resource body on an expect, under `check: assert` alone; the content is the confrontation's, read off the recording, and on a `check: record` step its record is the only statement of the body. `auto/body-not-composable` reads sends only: an expect composes nothing on any class | §6.3, §8.3, `pivot-schema`, `pivot-interpreter` |
+| the confrontation gains `body` records: `body:<type/subtype>:<scope>`, the expected and received texts one a side, both verbatim; a reception carrying no body confronts as the empty text; the driver supplies every expect-side resource from the case directory and a ref it did not supply is a driver error | `ConfrontationRecord.kind`, the pipeline's `confront`, the driver |
+
 **2026-08-30 — an expect-side ladder states its FACTS and the interpreter
 excuses nothing.** Ticket 211. §6.9 splits a ladder — the count is the
 document's, the pacing is RFC 3261's per message class — and on a `send` step
@@ -103,8 +136,7 @@ riding the move forward.
 | `ack-relay-delta-relayed` is GONE — nothing declines for that reason any more. `ack-relay-delta-rebased` names what a move re-based | §13.2's flag table, `case.annotations.flags` |
 
 **2026-08-26 — `auto` is a composition marker, not a storage policy.** Ruling
-of issue 76
-(`.scratch/replay-refine/issues/76-delayed-offer-answer-has-no-home.md`). The
+of the design record. The
 closed field list on an auto step was the ONE departure from the three-tier
 model in the pipeline, and it left an ACK's frozen headers and the delayed
 offer's ANSWER with no home: measured over 400 captures / 8910 steps, scripted
@@ -130,8 +162,7 @@ response to negotiate in), so the delta registry accepts it there and NOWHERE
 else; the charging and network context on the same message stays a finding.
 
 **2026-08-26 — an auto ACK's transaction is LEG STATE's, not the token's.**
-Ruling of issue 72
-(`.scratch/replay-refine/issues/72-auto-ack-resolved-by-document-cseq.md`). No
+Ruling of the design record. No
 field shape changes; the CONTRACT does. The interpreter honoured §8's "`cseq` is
 a pairing identity token, NEVER replayed" on the auto EXPECT path and broke it on
 the auto SEND path, resolving an auto ACK's target INVITE by the captured number.
@@ -160,8 +191,8 @@ completed transaction, which is the very violation the source's 481 records.
 | `no-cancel-after-final` joins the SUT-invalid rules, deferred like the other two: withdrawn where the case declares every charged coordinate | generator |
 
 **2026-08-25 — SUT-invalid captures are NEGATIVE cases; `unexpected-prack`
-joins the vocabulary; every cannot-go-on abort closes.** Ruling of issue 42
-(`.scratch/replay-refine/issues/42-interpreter-remainder.md`). This RETIRES the
+joins the vocabulary; every cannot-go-on abort closes.** Ruling of the design
+record. This RETIRES the
 2026-08-23 SUT-invalid EXCLUSION: a call group whose own system under test the
 census charges is no longer refused — the generator derives the `must_fail`
 that predicts the replay's divergence and writes the case as a NEGATIVE one,
@@ -180,8 +211,7 @@ survives solely as a DEFERRED guard on the residue no declaration can anchor.
 | every abort site where the run truly cannot go on arms the generic close (`Abandoned.leg` now optional for the legless sites); a gating inline check no longer aborts at all — the finding fails the verdict and the flow keeps walking | interpreter (Q53) |
 
 **2026-08-23 — `must_fail`: a document declares the failure its run MUST
-produce.** Ruling of the third evidence round, recorded in
-`.scratch/replay-refine/issues/23-negative-cases-must-fail.md`. A source whose
+produce.** Ruling of the third evidence round. A source whose
 peer withheld an ACK recorded a ladder this platform does not run, and the goal
 is to replay reality rather than something like it: the run fails, and the
 document states in advance exactly how. A new top-level field is a format
@@ -213,8 +243,7 @@ read by the run that carries it. No field changes; the run bundle gains a
 | the run keeps replaying past a declared datagram, so a negative case still tears its call down, settles and evaluates its postconditions. The gate, the lint rules and the recording are untouched | §10, §11.2 |
 
 **2026-08-23 — `must_fail`: the declaration INCLUDES, and the derivation goes
-first.** Ruling Q47 (b) of the collision round, recorded in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`. The two entries
+first.** Ruling Q47 (b) of the collision round. The two entries
 above read "the declared failure and nothing else", which no corpus negative can
 meet: replaying a capture the replay is known to diverge from makes the tail
 diverge too. No field changes; the run bundle gains a `tolerated` list, and the
@@ -227,8 +256,7 @@ generator stops refusing a case it can declare.
 | where the census charges the capture's own SUT with the withheld ACK, the DERIVATION decides first: the case is generated as a negative one wherever it anchors a declaration for every charged hit, and refused by category only where it cannot. The unPRACKed-provisional rule still refuses outright | §11.2, §0.1 (2026-08-23) |
 
 **2026-08-24 — what ends a script is being unable to GO ON, on every
-document.** Ruling Q52, recorded in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`, correcting the
+document.** Ruling Q52, correcting the
 trigger the entry below states. Ending early has nothing to do with whether a
 document is positive or negative: it is about whether the run can compose its
 next message. No field changes; what moves is where the rule is written, since it
@@ -241,8 +269,7 @@ is run semantics and not a property of a declaration.
 | the rule and the generic close are POLARITY-FREE and move to §14, where run semantics live. A positive run that cannot go on is abandoned, closed and settled exactly like a negative one — and still fails. §11.2 keeps only what a declaration adds | §10, §11.2, §14 |
 
 **2026-08-23 — `must_fail`: the first delta ends the SCRIPT, and the call is
-closed generically.** Ruling Q50, recorded in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`. The two entries
+closed generically.** Ruling Q50. The two entries
 above have a negative run keep replaying past its divergence, which scripts a
 conversation neither party is having; and the tail's own aborting deltas were
 piling a settle failure on top of the declaration anyway. No field changes; the
@@ -257,8 +284,7 @@ observed.
 | a declaration that arrived after the script ended is observed by the RECORDING, listed as `recorded` beside the `observed` a gate's failure fills. The CDR expectation still gates: the call is billed like any other | §10, §11.2 |
 
 **2026-08-23 — `flow[].confirms_dialog` names the ACK that completes the
-handshake.** Ruling of the third evidence round in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`. `in_dialog` says an
+handshake.** Ruling of the third evidence round. `in_dialog` says an
 ACK runs inside an established dialog; it does not say whether that ACK is the
 one that established it. A new field is a format change, so it lands here.
 
@@ -270,8 +296,8 @@ one that established it. A new field is a format change, so it lands here.
 | the generator stamps it in the pass that stamps `in_dialog`, so its own output passes that lint | generator |
 
 **2026-08-23 — a `content-type` is stored VERBATIM, and the boundary is the ONLY
-thing emission regenerates.** Ruling 4 of the second evidence round in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`: the payload is
+thing emission regenerates.** Ruling 4 of the second evidence round: the
+payload is
 properly managed, binary-identical outside the SDP rewrite. No field is added or
 removed; what changes is what a stored `content-type` MEANS and, on one arm,
 when it is written — which is exactly what this index is for.
@@ -284,8 +310,7 @@ when it is written — which is exactly what this index is for.
 | the generator stored a part's bare media type and dropped its parameters; it stores the wire value | generator |
 
 **2026-08-23 — `no-ack-to-dialog-creating-2xx` joins the closed vocabulary.**
-Headline ruling of the second evidence round in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`. A closed enum
+Headline ruling of the second evidence round. A closed enum
 growing IS a format change, so it lands here. (The SUT-side EXCLUSION this
 batch also introduced is RETIRED by the 2026-08-25 entry above.)
 
@@ -293,8 +318,7 @@ batch also introduced is RETIRED by the 2026-08-25 entry above.)
 |---|---|
 | `rfc_violations[].rule` gains `no-ack-to-dialog-creating-2xx` (RFC 3261 §13.2.2.4), with its detector in `crates/sip-pcap/src/rfc/ack.rs` and the report field it carries | §11.1 |
 
-**2026-08-23 — `flow[].in_dialog` is TOTAL.** Ruling Q31 in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`. No field shape
+**2026-08-23 — `flow[].in_dialog` is TOTAL.** Ruling Q31. No field shape
 changes; the CONTRACT does, which is what this index is for — a document that
 marked only the finals §4.1 reads is now a lint error, so the batch lands across
 this document, `pivot-schema`'s lint and the generator exactly as an amendment
@@ -307,7 +331,7 @@ does.
 | the generator stamps it mechanically, so its own output passes that lint | generator |
 
 **2026-08-22 — lane scoping, RFC violations, in-dialog finals, optional
-release.** Rulings recorded in `.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+release.** Rulings of the design record.
 
 | change | where |
 |---|---|
@@ -322,7 +346,7 @@ an `allowed` flag on a violation, generator auto-plumbing of `rfc_violations`,
 any flows-schema change, and any auto-exclusion rule keyed on a violation.
 
 **2026-08-22 — removals: `setup_deadline_ms` and REFER with `Replaces`.**
-Rulings recorded in `.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+Rulings of the design record.
 
 | change | where |
 |---|---|
@@ -344,20 +368,18 @@ examples, drafts and staged fixtures now; the bulk corpus picks it up at
 regeneration (issue 07).
 
 **2026-08-22 — forked early dialogs: an accessor namespace, and UPDATE inside
-one.** Rulings Q29 and Q38 in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+one.** Rulings Q29 and Q38.
 
 | change | where |
 |---|---|
 | `${early:<id>.tag}` and `${early:<id>.rseq}`: a fourth accessor namespace reading ONE fork of a forking leg, named by the `early` id its steps carry. A leg ringing two forks has two To-tags and two RSeq spaces (RFC 3261 §12.1.1, RFC 3262 §3), which a single-valued leg accessor cannot state; `${leg:<id>.rseq}` keeps its last-sighted reading unchanged. Lint refuses an id no step declares, and an id two legs declare | §6.1, §8.1 |
 | an UPDATE runs inside an EARLY dialog (RFC 3311 §5.1), reversing the rung-2 refuse-until-confirmed reading. `early` on an UPDATE or a PRACK `send` names the fork the request RIDES; an UPDATE naming no fork on a leg ringing exactly one rides that one; several forks and no name is a refusal | §6.1 |
 
-The authored `san-01-prack-managed-by-as-forking` draft is the exercise: its
+The authored `forked-100rel-prack-per-early-dialog` draft is the exercise: its
 "each PRACK rides its own fork" assertion was an `RAck` regex proxy and now
 reads the two forks' own tags and RSeqs.
 
-**2026-08-22 — verbatim body fidelity: a part's own entity block.** Ruling Q35
-in `.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+**2026-08-22 — verbatim body fidelity: a part's own entity block.** Ruling Q35.
 
 | change | where |
 |---|---|
@@ -371,8 +393,7 @@ emitted shape. A flows document produced before this batch states no part
 headers because its producer read none — the corpus picks them up at
 regeneration (issue 07).
 
-**2026-08-22 — the ACK ladder: drawn, and collapsed once.** Ruling Q34 in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+**2026-08-22 — the ACK ladder: drawn, and collapsed once.** Ruling Q34.
 
 | change | where |
 |---|---|
@@ -384,8 +405,7 @@ The drawn shape is exercised end to end by the authored
 the bulk corpus still show the pre-collapse encoding; they pick it up at
 regeneration (issue 07).
 
-**2026-08-22 — ratified working readings.** Ruling Q38 in
-`.scratch/replay-refine/issues/04-upstream-interpreter.md` accepted these as
+**2026-08-22 — ratified working readings.** Ruling Q38 accepted these as
 readings of the format, amendable like anything else here. Each is now stated
 where its section already discusses the matter.
 
@@ -404,7 +424,7 @@ enforced by the interpreter's plan, is now mirrored in lint as
 `deviation/verbatim-emission-auto`, so a generator learns it at lint time.
 
 **2026-08-23 — the `rfc_violations` rule vocabulary grows a second member.**
-Ruling Q30, recorded in `.scratch/replay-refine/issues/04-upstream-interpreter.md`.
+Ruling Q30.
 
 | change | where |
 |---|---|
@@ -716,7 +736,7 @@ the platform accepted, the request that inserted the resource).
 
 **`joined_by` and `cause` are orthogonal.** One says how a leg ENTERED the call,
 the other why the platform LEFT it, and a leg that joined fails like any other.
-Two corners the format must state, and does: a SAN reroute-fail, where the
+Two corners the format must state, and does: a reroute after a join, where the
 joined leg is dialed, fails and the hunt goes on; and an automatic transfer
 whose target is busy, where the platform reroutes INTERNALLY and never notifies
 the transferor — one attempt carrying `joined_by` AND `cause: busy`, followed by
@@ -1083,10 +1103,10 @@ ANSWER rides (RFC 3261 §13.2.1), and **PRACK with its 2xx** (RFC 3262 §5). Two
 do not, and a body stored on them would be emitted by nobody, so lint refuses it
 (`auto/body-not-composable`): a **100 Trying**, which negotiates nothing, and
 the **ACK to a non-2xx**, absorbed by the INVITE transaction (RFC 3261
-§17.1.1.3) and reaching no TU that could read one. A declared SHAPE
-(`body.mode`) is not a stored body — it asserts what arrived and composes
-nothing — so an expect may declare one on any class, and the relayed ACK's
-`sdp-present` is what lets the confrontation see a dropped answer at all.
+§17.1.1.3) and reaching no TU that could read one. An EXPECT composes
+nothing — its body, a shape or a resource, asserts what arrived (§8.3) — so an
+expect may state one on any class, and the relayed ACK's SDP resource is what
+lets the confrontation see a dropped answer at all.
 
 `cseq` is the CSeq NUMBER the CAPTURE carried, and it is a PAIRING TOKEN: it
 names which transaction the captured automatic belonged to, for confrontation,
@@ -1848,6 +1868,14 @@ what rides beside the ref: `rewrite` tokens where the body is rewritten
 (`frozen` / `frozen-binary`) plus the captured `content-type` where it replays
 byte-exact.
 
+**The tokens name what the LANE may rewrite, not what it must.** They are
+applied through the lane's media booking, and a lane that exercises no media
+runs a VERBATIM booking: every session description then rides byte for byte as
+stored, `c=` address and `m=` port included, and the tokens still label the
+body `application/sdp`. Which plane a run took is stated in its run
+configuration (`"media": "verbatim"`; absent reads as `rebooked`), so a reader
+of the bundle knows whether a relayed description can be held to the capture.
+
 **A `content-type` is stored VERBATIM, its MIME parameters included**, because
 emission writes the stored value back as the message's own `Content-Type`
 (`message/sipfrag;version=2.0` replays under its version, not without it). The
@@ -1855,8 +1883,76 @@ ONE value left unstated is bare `application/sdp` on a rewritten body, which
 render derives exactly, so the stored and derived values cannot drift; an SDP
 body whose captured type carried parameters states them and replays under them.
 
-A single body on an EXPECT is a declared shape and nothing else:
-`{ "mode": "sdp-present" | "absent" | "multipart-present" }`.
+A single body on an EXPECT is asserted by SHAPE or by CONTENT, and the
+registry decides which. Multipart is a shape — `{ "mode": "multipart-present" }`
+— because it is reframed at replay; a message that carried no body states
+`{ "mode": "absent" }`, and that IS the assertion. Every TEXT body the registry
+freezes is stored as a resource and asserted by content, in the same form the
+send side stores it, and so is every SDP:
+
+```json
+"body": { "ref": "resources/uas1_r3_0.xml", "mode": "frozen",
+          "content-type": "application/example+xml", "compare": "xml" }
+"body": { "ref": "resources/uas1_r0_0.sdp", "rewrite": ["c=addr", "m=port"],
+          "compare": "sdp" }
+```
+
+`compare` says how the received body is held against the file — `exact`, byte
+for byte, which is what an absent `compare` means; `xml`: both sides as XML
+text after ONE normalisation (the XML declaration dropped, whitespace-only text
+between two tags removed wherever it sits, mixed content included, leading and
+trailing whitespace trimmed) and nothing else — no attribute reordering, no
+entity work; or `sdp`: both sides as a session description — the session
+section then the media sections by position; within a section lines compare
+as a multiset (attribute order erased); `o=` sess-id and sess-version are
+masked always, and every field a `rewrite` token of the expect names is
+masked where the run's media plane rebooked it. The mask states exactly what
+the render writes: `c=addr` masks the address of a `c=IN IP4` line and no
+IP6 line; `m=port` masks the port of an `m=` line where it is non-zero, its
+`/count` kept, and no port-0 stream; `a=rtcp` is never written and never
+masked. Nothing else. **The tokens name WHICH fields are lane-owned; the
+run's media mode says whether they were applied**: on a `verbatim` run the
+tokens mask nothing, so a `c=` or an `m=` the system alters is a difference,
+and the system relays the description byte for byte, so two descriptions the
+structure cannot tell apart — an attribute reordered inside a section, a
+bare-LF line ending, trailing whitespace, an inner blank line — must be the
+same bytes; on a `rebooked` run those are erased, because the render
+re-assembles the line endings there. The generator stores every expected SDP
+this way and leaves `compare` unstated on every other body; `xml` is authored,
+where a document has to say that a re-serialised body is the same body, and
+`{ "mode": "sdp-present" }` stays an authored shape for a document that
+asserts presence alone. `compare` on a SEND describes a check nobody runs and
+lint refuses it (`body/compare-on-send`); `sdp` on a body whose stated content
+type is not `application/sdp` names a fold that cannot read the file
+(`body/compare-sdp-type`).
+
+The two halves of the assertion run at two times, and only one of them
+depends on `check`. The interpreter gates on PRESENCE alone, and only under
+`check: assert` — a body must have arrived, whatever it holds — so a differing
+body never abandons the call: the message is answered, the dialog walks to its
+captured teardown, and the post-run confrontation states the difference as a
+`body` record (`body:<type/subtype>:<scope>`, the expected text and the
+received text side by side, both verbatim), which a lane's rule lists then
+classify. Under `sdp` there is one record per differing line key,
+`body:sdp:<section>:<line>:<scope>` — `<section>` is `session` or `m<i>`
+(0-based, wire order), `<line>` is `<type>=` for a session line or `a=<name>`
+for an attribute, the four direction attributes under one key `a=direction` —
+each side carrying that section's verbatim lines of that key in wire order,
+one element per line the way a header record carries one per value; a side
+that is empty or no session description is one `document:sdp` record with
+both texts whole; a media section on one side only is one `m<i>:section`
+record with that side's lines; two descriptions a verbatim run carried as
+different bytes with the structure equal are one `document:bytes` record
+with both texts whole. A reception carrying NO body where content is asserted is confronted
+as the empty text; under `check: assert` the interpreter also refuses it, and
+under `check: record` — every generated expect — the confrontation's record is
+the only statement of it.
+
+A resource body on an expect is TEXT unless its `mode` is `frozen-binary`; a
+`mode` left unstated is text. The ONE exception is that binary payload: the
+recording the confrontation reads is text, so a binary body on an expect is
+not stored at all — the expectation states nothing about it — and were one
+authored it would assert presence only.
 
 Multipart bodies reference DECOMPOSED parts:
 
@@ -1903,7 +1999,9 @@ kind, a `<port>/<count>` pair count, the transport, the format list — byte-exa
 (RFC 4566 §5.14). A port-0 stream is one the capture rejected or disabled
 (RFC 3264 §5.1): it keeps its zero, books nothing and takes no index. A booking
 is held per `(leg, stream)` for the whole run, so a re-offer and a retransmission
-carry the port their first emission did.
+carry the port their first emission did. A lane without media runs a verbatim
+booking that answers neither token (§8.3): the same document then emits every
+session description as stored, and the run configuration says so.
 
 What the document does not store is regenerated rather than replayed, and the
 list is ONE item long: the container's `boundary`. The container type is held
@@ -1932,10 +2030,14 @@ silent freeze.
 
 ### 8.4 Resource naming
 
-A resource ref is `resources/<actor>_<n>_<part>.<ext>`: the actor, its ordinal
-over the case's emitted messages, and the part index within that message. The
-name is **step-index-free** (v2 friction H1) — renumbering the flow, inserting a
-step, splitting a deviation, none of it renames a file on disk.
+A resource ref is `resources/<actor>_<n>_<part>.<ext>` on a send — the actor,
+its ordinal over the messages it emits, and the part index within that message
+— and `resources/<actor>_r<n>_<part>.<ext>` on an expect, the ordinal counted
+over the messages the actor expects. Every message takes an ordinal whether or
+not it carries a body, and the two counters are separate, so a send and an
+expect of one actor never name one file. The name is **step-index-free** (v2
+friction H1) — renumbering the flow, inserting a step, splitting a deviation,
+none of it renames a file on disk.
 
 ### 8.5 The identity registry
 
@@ -2464,6 +2566,7 @@ Lint's rule groups:
 | `attempt/*`, `call/*` | `(branch, position)` unique, non-terminal attempts carry a cause, `no_answer_ms` inside the armable band, a `joined_by` leg joins at an unconditional step of its own call that precedes the leg's first message |
 | `claim/*`, `lanes/*` | a lane verdict matches what the document asks the lane to do |
 | `auto/*`, `check/*`, `optional/*`, `delay/*` | what a step may state given its `op` and its `auto` |
+| `body/*` | `compare` rides an expect's resource body and no send's; `sdp` rides an `application/sdp` body (§8.3) |
 | `alt/*` | discriminability: two branches minimum, unique names, none empty, none opening on a `send` or an `optional`, no first message two branches both match |
 | `unordered/*`, `inject/*` | an order-free group holds two or more expects; an injection names an action |
 | `background/*` | a settle-time counter states a bound, and the bounds agree |

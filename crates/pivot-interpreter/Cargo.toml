@@ -14,7 +14,7 @@ pivot-schema = { path = "../pivot-schema" }
 # The wire layer: message rendering, parsing and header identity live in
 # `sip-message` and nowhere else.
 sip-message = { path = "../sip-message" }
-# The one schedule every ladder rides (ADR-0029): the audit paces a scripted
+# The one schedule every ladder rides (ADR-0032): the audit paces a scripted
 # peer's ladder and counts the SUT's on it. `authored` admits the capture's own
 # measured gaps and the no-rung schedule — forms the SUT crates never enable.
 sip-retransmit = { path = "../sip-retransmit", features = ["authored"] }

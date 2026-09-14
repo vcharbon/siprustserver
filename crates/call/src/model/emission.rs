@@ -1,4 +1,4 @@
-//! The one retained emission a retransmission repeats (ADR-0029 X3): the
+//! The one retained emission a retransmission repeats (ADR-0032 X3): the
 //! datagram exactly as it left the socket, where it went, and how it is
 //! repeated. Every dialog-level repeat — the un-ACKed 2xx (RFC 3261
 //! §13.3.1.4), the re-ACK of a repeated 2xx (§13.2.2.4), the un-PRACKed
@@ -13,7 +13,7 @@ use sip_retransmit::{Class, Ladder, Schedule};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Repeat {
     /// On the ladder `class` paces. `rung` is the rung currently armed and is
-    /// the whole of the ladder's state (ADR-0029 X2): no epoch anchor rides in
+    /// the whole of the ladder's state (ADR-0032 X2): no epoch anchor rides in
     /// the replicated body, so a takeover resumes the ladder where it stood.
     Paced { class: Class, rung: u32 },
     /// Only when the peer provokes it — the §13.2.2.4 re-ACK of a repeated

@@ -19,7 +19,7 @@
   },
   "capture_02ce811e-8bdb-48a4-8ea8-ccdd0549fde6.pcap.gz": {
     "verdict": "bug",
-    "ticket": ".scratch/replay-refine/issues/90-bye-race-drops-200.md",
+    "ticket": "issues/90-bye-race-drops-200",
     "decided_on": "2026-08-25",
     "evidence": {
       "bundle": "corpus-work/triage/capture_02ce811e-8bdb-48a4-8ea8-ccdd0549fde6/run2",
@@ -29,7 +29,7 @@
   },
   "capture_02eda876-d65f-4f4f-9773-33b55238d131.pcap.gz": {
     "verdict": "cut",
-    "ticket": ".scratch/replay-refine/issues/91-hairpin-halves-misjoined.md",
+    "ticket": "issues/91-hairpin-halves-misjoined",
     "cases": ["capture_02eda876-d65f-4f4f-9773-33b55238d131.pcap.gz-cut2"],
     "decided_on": "2026-08-25",
     "evidence": {

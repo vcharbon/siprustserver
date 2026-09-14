@@ -14,7 +14,11 @@
 //!   bits, base64url) into `{w_pri,w_bak,e,v,kid,sig}`.
 //! - `decode_stickiness`: verify the MAC, then route over the live registry per
 //!   the matrix below (alive / ACK-CANCEL exemption / fresh-pod guard / draining
-//!   grace / dead-or-not-ready → backup).
+//!   grace / dead-or-not-ready → backup). It resolves the primary by ORDINAL, so
+//!   a departed-address tombstone (address-keyed, always `Dead` — see
+//!   `registry::tombstone`) never reaches it: an ordinal that left membership
+//!   resolves to nothing and takes the backup, and the ACK/CANCEL exemption,
+//!   which only spares an `Alive` primary, cannot apply to either.
 
 use std::sync::Arc;
 

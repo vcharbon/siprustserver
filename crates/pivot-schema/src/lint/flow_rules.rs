@@ -264,12 +264,13 @@ fn dialog_of<'a, 'd>(
 /// negotiates nothing, and an ACK to a non-2xx final is absorbed by the INVITE
 /// transaction (RFC 3261 §17.1.1.3) and never reaches a TU that could read one.
 ///
-/// A SHAPE is not a stored body — it asserts what arrived and composes nothing —
-/// so an expect may declare `body.mode` on any class.
+/// An EXPECT composes nothing — its body, a shape or a resource, asserts what
+/// arrived (§8.3) — so an expect may state one on any class.
 fn automatic_body_placement(index: &Index<'_>, report: &mut Report) {
     let all: Vec<(Place, &Step)> = index.all_steps().collect();
     for (place, step) in &all {
         if !step.auto
+            || step.op != Op::Send
             || !matches!(step.msg.body, Some(Body::Resource(_)) | Some(Body::Multipart(_)))
         {
             continue;

@@ -1,4 +1,4 @@
-//! The dialog-level retransmission ladders the framework owns (ADR-0029 X4):
+//! The dialog-level retransmission ladders the framework owns (ADR-0032 X4):
 //! the un-ACKed 2xx (RFC 3261 §13.3.1.4, initial INVITE and re-INVITE alike)
 //! and the un-PRACKed reliable provisional (RFC 3262 §3). A ladder is armed
 //! under the [`Obligation`] that discharges it, paced by `sip_retransmit`'s
@@ -19,7 +19,7 @@ use sip_message::{Method, SipMessage, SipResponse};
 use sip_retransmit::{Class, Schedule};
 
 use crate::effects::{
-    HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode,
+    HandlerEffects, HandlerResult, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
 };
 use crate::event::CallEvent;
 use crate::rules::defaults::unacked_2xx_give_up_actions;
@@ -82,7 +82,7 @@ impl ActionExecutor<'_> {
     }
 
     /// Arm a 2xx ladder: the first rung at `first`, the give-up at the
-    /// deployment's deadline (`ack_give_up_deadline`). Unconditional (ADR-0029
+    /// deployment's deadline (`ack_give_up_deadline`). Unconditional (ADR-0032
     /// X5): no configuration reaches the rungs or the give-up — a 2xx that
     /// leaves un-ACKed is repeated, and the deadline that ends its session is
     /// in the ledger for as long as the retained marker is.
@@ -412,7 +412,7 @@ fn ladder_of(timer_type: &TimerType) -> Option<&Obligation> {
 /// the To-tag and CSeq the response itself states — and the wait before the
 /// first rung. `leg` is the face the 2xx leaves on. The retained bytes are
 /// `resp.image()`: the datagram `send_response` puts on the wire, not a
-/// rendering of the response (ADR-0029 X3).
+/// rendering of the response (ADR-0032 X3).
 fn unacked_2xx_of(
     resp: &SipResponse,
     dest: (String, u16),
@@ -446,5 +446,6 @@ pub(super) fn repeat_of(
         destination: (host.to_string(), port),
         label,
         leg_id: Some(leg_id.to_string()),
+        provenance: Provenance::Authored,
     }
 }

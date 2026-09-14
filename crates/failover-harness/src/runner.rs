@@ -208,7 +208,7 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
             // The window stayed open past the 200's first rungs (RFC 3261
             // §13.3.1.4) — past more of them in the variant, whose injection
             // advances the clock — so alice's socket holds the 200 again. Each
-            // copy is observed: byte-identical (ADR-0029 X3) it folds into the
+            // copy is observed: byte-identical (ADR-0032 X3) it folds into the
             // 200's token; re-composed it is a token of its own and fails the
             // cell. Nothing else is due to alice before her ACK.
             while let Some(msg) = alice.take_queued().await {

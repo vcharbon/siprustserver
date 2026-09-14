@@ -28,7 +28,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use call::{ByeDisposition, Call, CallModelState, CdrEvent, CdrEventType, LegState};
+use call::helpers::record_termination;
+use call::{
+    ByeDisposition, Call, CallModelState, CdrEvent, CdrEventType, LegState, TerminationCause,
+};
 use tokio::sync::mpsc;
 
 use crate::dispatch::{HandlerFailure, PerCallDispatcher};
@@ -220,7 +223,8 @@ pub fn verdict_confirmed(outcome: &str, watermark: Option<i64>, current: Option<
 
 /// The strike-2 **discharge** (ADR-0020 X6): force the last persisted snapshot
 /// terminal — every unresolved leg gets `ByeDisposition::ByeTimeout`, one
-/// reason-carrying `CdrEvent` is appended, `state = Terminated` — and return
+/// reason-carrying `CdrEvent` is appended, the termination record names the
+/// supervisor where nothing ended the call before, `state = Terminated` — and return
 /// it with EMPTY effects: the caller runs the ordinary
 /// `finalize → enforce → process_result`, so the CDR write, the limiter
 /// decrements (derived from `limiter_entries` by the `ObligationSet`), and the
@@ -238,13 +242,18 @@ pub fn discharge_result(mut call: Call, now_ms: i64) -> HandlerResult {
             leg.bye_disposition = Some(ByeDisposition::ByeTimeout);
         }
     }
-    call.cdr_events.push(CdrEvent {
-        event_type: CdrEventType::Bye,
-        timestamp: now_ms,
-        leg_id: a_leg_id,
-        status_code: None,
-        reason: Some("reaper-discharge".to_string()),
-    });
+    let call = call::helpers::add_cdr_event(
+        call,
+        CdrEvent {
+            event_type: CdrEventType::Bye,
+            timestamp: now_ms,
+            leg_id: a_leg_id,
+            status_code: None,
+            reason: Some("reaper-discharge".to_string()),
+            decision_ordinal: 0,
+        },
+    );
+    let mut call = record_termination(call, now_ms, TerminationCause::Supervisor, None);
     call.state = CallModelState::Terminated;
     HandlerResult::new(call)
 }

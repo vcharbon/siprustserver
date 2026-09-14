@@ -143,6 +143,10 @@ pub fn normalize(doc: &SeqDoc, role_map: &HashMap<String, String>) -> SeqDoc {
         lanes,
         rows,
         anomalies,
+        // Beliefs are run-local provenance (observer identities carry the
+        // incarnation, signals carry the sampling) — dropped like the lifecycle
+        // bands: the normalized doc is the plan two lanes must agree on.
+        views: Vec::new(),
         // Wall/virtual timing is excluded — the normalized axis is the ordinal.
         epoch_base_ms: None,
     }
@@ -250,6 +254,7 @@ mod tests {
                     rule_sourced: false,
                 },
             ],
+            views: Vec::new(),
             epoch_base_ms: Some(1_782_802_100_000),
         }
     }

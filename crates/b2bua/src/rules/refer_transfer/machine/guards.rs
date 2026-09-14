@@ -5,7 +5,7 @@
 //! (rollback).
 
 use b2bua_sdk::sm_rule;
-use call::{CdrEventType, Direction};
+use call::{CdrEventType, Direction, TerminationCause, TimeoutKind};
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
 use crate::rules::model::{Effect, Match, RuleAction, RuleDefinition};
@@ -122,7 +122,11 @@ pub(super) fn overall_timeout() -> RuleDefinition {
                 status_code: None,
                 reason: Some("transfer-overall-timeout".to_string()),
             });
-            actions.push(RuleAction::BeginTermination { reason: None });
+            actions.push(RuleAction::BeginTermination {
+                reason: None,
+                cause: TerminationCause::Timeout(TimeoutKind::Setup),
+                by_leg: None,
+            });
             ok(actions)
         },
     }

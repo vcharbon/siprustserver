@@ -120,7 +120,8 @@ CSeq: 314 INVITE\r\n"
             header_updates,
             capabilities,
             None, // no charging vector
-            &[],  // no withheld option tags
+            &[],
+            &[], // no withheld option tags
             None,
         )
         .expect("no identity rewrites, so nothing to refuse");
@@ -362,6 +363,7 @@ Content-Length: 0\r\n\r\n";
             &caps,
             None,
             &[],
+            &[],
             None,
         )
         .expect("nothing to refuse");
@@ -392,6 +394,7 @@ Content-Length: 0\r\n\r\n";
             &[],
             &caps,
             None,
+            &[],
             &[],
             None,
         )
@@ -439,6 +442,7 @@ Content-Length: 0\r\n\r\n";
         call::features::FeatureActivations {
             platform: call::features::PlatformActivations {
                 max_duration_sec: 3_600,
+                max_duration_anchor: Default::default(),
                 keepalive: call::features::KeepaliveActivation { interval_sec: 30, max_missed: 2 },
             },
             refer: None,

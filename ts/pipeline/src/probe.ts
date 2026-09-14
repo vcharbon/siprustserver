@@ -1,11 +1,13 @@
 /**
  * One confronted difference before classification: a header whose two sides
- * disagree under its fold, or a shape the run produced that the capture does
- * not hold. A probe is a pure value — a rule that classifies one is a function
+ * disagree under its fold, a body that differs from the one the expectation
+ * states under its compare mode, or a shape the run produced that the capture
+ * does not hold. A probe is a pure value — a rule that classifies one is a function
  * of the probe (plus the case-wide context), never of which capture produced
  * it — and `signature` is the stable grouping key triage collapses on:
  * independent of the capture, the values and the header casing.
  */
+import type { Body } from "@sip/contracts"
 import { setDelta } from "./fold.js"
 import { canonicalName } from "./wire.js"
 
@@ -45,7 +47,6 @@ export type ShapeKind =
       readonly captured: number
       readonly replayed: number
     }
-  | { readonly shape: "body-expect"; readonly expected: string; readonly observed: string }
 
 const shapeText = (kind: ShapeKind): string => {
   switch (kind.shape) {
@@ -63,8 +64,6 @@ const shapeText = (kind: ShapeKind): string => {
       return `alignment-lost:${kind.method}`
     case "retransmission":
       return `retransmission:${kind.cseqMethod}:2xx`
-    case "body-expect":
-      return `body-expect:${kind.expected}->${kind.observed}`
   }
 }
 
@@ -120,11 +119,40 @@ export interface ShapeProbe extends ProbeSite {
   readonly scope: MsgScope | undefined
 }
 
-export type Probe = HeaderProbe | ShapeProbe
+/**
+ * A received body that differs from the one the expectation states, both
+ * sides as the wire carried them — the fold under `compare` decided there IS
+ * a difference and erased nothing from the record of it. Each side is a list
+ * the way a header probe's is: under `exact` and `xml` one element, the whole
+ * text; under `sdp` there is one probe per differing line key,
+ * {@link BodyProbe.sdp} naming the section and the key, and each side is that
+ * key's verbatim lines in wire order, one element per line (a `document` row
+ * carries the whole text as its one element).
+ */
+export interface BodyProbe extends ProbeSite {
+  readonly kind: "body"
+  /** The expectation's bare `type/subtype`, lowercased, parameters stripped. */
+  readonly mediaType: string
+  readonly scope: MsgScope
+  readonly compare: Body.BodyCompare
+  /** What the expectation states: the whole text, or the key's lines under `sdp`. */
+  readonly captured: ReadonlyArray<string>
+  /** What the run received: the whole text (`""` where the message carried no body), or the key's lines under `sdp`. */
+  readonly replayed: ReadonlyArray<string>
+  /** Where in the session description the difference sits; set under `sdp` only. */
+  readonly sdp?: { readonly section: string; readonly line: string }
+}
 
-/** The stable grouping key, e.g. `header:contact:response:200:INVITE`. */
+export type Probe = HeaderProbe | ShapeProbe | BodyProbe
+
+/** The stable grouping key, e.g. `header:contact:response:200:INVITE`, `body:sdp:m0:a=rtpmap:response:200:INVITE`. */
 export const signature = (probe: Probe): string => {
   if (probe.kind === "header") return `header:${canonicalName(probe.name)}:${scopeText(probe.scope)}`
+  if (probe.kind === "body") {
+    return probe.sdp === undefined
+      ? `body:${probe.mediaType}:${scopeText(probe.scope)}`
+      : `body:sdp:${probe.sdp.section}:${probe.sdp.line}:${scopeText(probe.scope)}`
+  }
   const base = `shape:${shapeText(probe.shapeKind)}`
   return probe.scope === undefined ? base : `${base}:${scopeText(probe.scope)}`
 }

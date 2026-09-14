@@ -17,7 +17,7 @@
 //! by a background policy, or a FAILURE — it is never quietly tolerated and
 //! never silently dropped. There is no absorb-set and no window construct.
 
-use pivot_schema::body::{Body, BodyShape};
+use pivot_schema::body::{Body, BodyCompare, BodyShape};
 use pivot_schema::bundle::{Arrived, Failure};
 use pivot_schema::known_bug::KnownBug;
 use pivot_schema::msg::{Header, MsgSpec};
@@ -538,8 +538,9 @@ fn frozen_value(want: &Header, resolver: &Resolver<'_>) -> Result<String, String
 
 /// A declared body SHAPE on an expect, and the lane-declarable known bug that
 /// names the miss where one does. A resource or multipart body on an expect
-/// states what the capture held rather than a shape, so it asserts presence
-/// only — the confrontation pass compares the bytes.
+/// gates on PRESENCE only: the content assertion a text resource carries is the
+/// post-run confrontation's, read off the recording (§8.3), and a binary
+/// resource is presence-only everywhere.
 ///
 /// The one nameable miss is a body on a PROVISIONAL the document expects
 /// stripped: that is a SUT that did not apply the 18x rewrite its routing
@@ -575,6 +576,18 @@ fn body_holds(spec: &MsgSpec, inbound: &Inbound) -> Option<(String, Option<Known
         },
         Body::Resource(_) | Body::Multipart(_) if inbound.body.is_empty() => {
             Some(("body must be present; none arrived".into(), None))
+        }
+        // A resource compared as a session description keeps the media-type
+        // gate the `sdp-present` shape carries: what arrived must be SDP for
+        // the confrontation to read it as one.
+        Body::Resource(resource) if resource.compare == Some(BodyCompare::Sdp) && !is_sdp => {
+            Some((
+                format!(
+                    "body must be SDP; content type is {:?}",
+                    inbound.content_type.as_deref().unwrap_or("absent")
+                ),
+                None,
+            ))
         }
         Body::Resource(_) | Body::Multipart(_) => None,
     }
@@ -910,6 +923,41 @@ mod tests {
         );
         invite.content_type = Some("application/sdp".into());
         assert!(content_holds(&sdp, &invite, &scope, &plain()).matches());
+
+        // A resource compared as a session description gates the media type
+        // exactly as the shape does; its content is the confrontation's.
+        let described = step(
+            MsgSpec {
+                method: Some("INVITE".into()),
+                body: Some(Body::Resource(pivot_schema::body::ResourceBody {
+                    reference: "resources/uas1_r0_0.sdp".into(),
+                    rewrite: vec!["c=addr".into(), "m=port".into()],
+                    mode: None,
+                    content_type: None,
+                    compare: Some(BodyCompare::Sdp),
+                })),
+                ..MsgSpec::default()
+            },
+            CheckMode::Assert,
+        );
+        let mut offer = inbound_request("INVITE");
+        assert!(
+            !content_holds(&described, &offer, &scope, &plain()).matches(),
+            "a body owed and missing is refused"
+        );
+        offer.body = b"v=0".to_vec();
+        offer.content_type = Some("application/example+xml".into());
+        assert!(
+            !content_holds(&described, &offer, &scope, &plain()).matches(),
+            "another type is not a session description"
+        );
+        offer.content_type = Some("application/sdp".into());
+        assert!(content_holds(&described, &offer, &scope, &plain()).matches());
+        offer.body = b"v=0\r\ns=other".to_vec();
+        assert!(
+            content_holds(&described, &offer, &scope, &plain()).matches(),
+            "the content is the confrontation's, never the gate's"
+        );
     }
 
     /// A lane that declares the known bug keeps taking the datagram, so the run

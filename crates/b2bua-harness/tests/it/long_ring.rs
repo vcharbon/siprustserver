@@ -115,7 +115,7 @@ async fn answer_after_158s_establishes_end_to_end() {
 /// A route-supplied `NoAnswer` at/above the configured bound (250 vs 200) is
 /// clamped at arming to `bound − NO_ANSWER_CANCEL_MARGIN_SEC` = 192 s: still
 /// ringing just before 192 s, clean CANCEL→487→ACK just past it, one final to
-/// alice (the no-answer reject branch's ADR-0022 synthesis), fully reaped.
+/// alice (the no-answer reject branch's own 480), fully reaped.
 #[tokio::test(start_paused = true)]
 async fn no_answer_at_or_above_the_bound_is_clamped_to_the_margin() {
     let s = B2buaScene::with_b2bua("long-ring-clamp", |bob_port| {
@@ -162,12 +162,12 @@ async fn no_answer_at_or_above_the_bound_is_clamped_to_the_margin() {
     cancel.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
     s.bob.receive("ACK").await;
-    // The reject branch holds the caller's final until the CANCELed b-leg
-    // quiesces (487 above) — then the ADR-0022 synthesis answers the a-leg.
-    let final_resp = call.expect(503).await;
+    // The reject branch answers the caller 480 in the turn the deadline
+    // fires, with the CANCEL toward the b-leg.
+    let final_resp = call.expect(480).await;
     assert_eq!(
         final_resp.status(),
-        503,
+        480,
         "caller's INVITE resolves at the clamped no-answer deadline",
     );
 
@@ -179,7 +179,7 @@ async fn no_answer_at_or_above_the_bound_is_clamped_to_the_margin() {
     let report = s.finish().await;
     assert_eq!(
         invite_final_statuses(&report, alice_addr),
-        vec![503],
+        vec![480],
         "exactly ONE final on alice's initial INVITE",
     );
 }

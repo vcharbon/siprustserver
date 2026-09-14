@@ -120,7 +120,8 @@ Content-Length: 0\r\n\r\n";
             &[],
             &CapabilitySet::default(),
             None, // no charging vector
-            &[],  // no withheld option tags
+            &[],
+            &[], // no withheld option tags
             None,
         )
     }

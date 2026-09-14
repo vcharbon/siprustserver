@@ -8,23 +8,50 @@
 #
 # Tiers: edge = front proxy, app = b2bua workers (two app nodes so a primary and
 # its backup land on different nodes for real failover), load = sipp UAC/UAS.
+#
+# `kernel.core_pattern` is not namespaced: the Debian node image ships
+# `10-coredump-debian.conf` (`kernel.core_pattern=core`) and the privileged
+# nodes' systemd-sysctl would write it into the HOST kernel on every up, undoing
+# the host's systemd-coredump pipe so a crash on the host dumps `core` into its
+# cwd. Each node masks that file with /dev/null (repeated per node: kind has no
+# cluster-wide extraMounts).
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: sip-e2e
 nodes:
   - role: control-plane
+    extraMounts:
+      - hostPath: /dev/null
+        containerPath: /usr/lib/sysctl.d/10-coredump-debian.conf
+        readOnly: true
   - role: worker
     labels:
       tier: edge
+    extraMounts:
+      - hostPath: /dev/null
+        containerPath: /usr/lib/sysctl.d/10-coredump-debian.conf
+        readOnly: true
   - role: worker
     labels:
       tier: edge
+    extraMounts:
+      - hostPath: /dev/null
+        containerPath: /usr/lib/sysctl.d/10-coredump-debian.conf
+        readOnly: true
   - role: worker
     labels:
       tier: app
+    extraMounts:
+      - hostPath: /dev/null
+        containerPath: /usr/lib/sysctl.d/10-coredump-debian.conf
+        readOnly: true
   - role: worker
     labels:
       tier: app
+    extraMounts:
+      - hostPath: /dev/null
+        containerPath: /usr/lib/sysctl.d/10-coredump-debian.conf
+        readOnly: true
   # tier=load nodes REMOVED (sipext dual-plane layout): all load generators
   # (loadgen, sipp UAC/UAS, dnsmasq) run as plain docker containers on the
   # external `sipext` bridge, outside k8s, with their own --memory/--cpus caps

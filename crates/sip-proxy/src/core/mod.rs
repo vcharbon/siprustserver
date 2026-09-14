@@ -4,8 +4,9 @@
 //! It binds one UDP endpoint, runs a recv loop, parses each datagram, and
 //! dispatches to [`request`](self) / [`response`](self) handling. It owns the
 //! routing-policy seam ([`RoutingStrategy`]), the worker registry, the
-//! `(Call-ID|CSeq#)` LRU, an [`IdGen`] for Via branches, a [`Clock`], metrics,
-//! a logger, and the self-gate (ELU/CPS admission). A hop thaws the received
+//! `(Call-ID|CSeq#)` LRU, an [`IdGen`] for the To-tags of the finals it
+//! generates itself, a [`Clock`], metrics, a logger, and the self-gate
+//! (ELU/CPS admission). A hop thaws the received
 //! message into a draft, touches only the routing headers, and freezes it to
 //! the wire bytes it forwards — every untouched line is memcpy'd, never
 //! re-parsed (ADR-0025).
@@ -28,6 +29,7 @@ use sip_txn::IdGen;
 use crate::addr::ProxyAddr;
 use crate::cancel_lru::CancelBranchLru;
 use crate::face::FaceCidrs;
+use crate::liveness::ShardPulse;
 use crate::observability::metrics::Face;
 use crate::observability::ProxyMetrics;
 use crate::registry::WorkerRegistry;
@@ -109,6 +111,8 @@ pub(crate) struct ProxyCoreParts {
     /// The per-call trace tier (ADR-0026). ONE registry across every recv
     /// shard, so the active-trace cap bounds the process rather than a socket.
     pub traces: Arc<ProxyTraces>,
+    /// Liveness stamps, one cell per shard; this core owns cell `shard`.
+    pub pulse: Arc<ShardPulse>,
 }
 
 /// The stateless proxy.
@@ -132,6 +136,7 @@ pub struct ProxyCore {
     named: NamedForwarder,
     shard: usize,
     pub(super) traces: Arc<ProxyTraces>,
+    pulse: Arc<ShardPulse>,
 }
 
 impl ProxyCore {
@@ -176,6 +181,7 @@ impl ProxyCore {
             parser: CustomParser::default(),
             named,
             shard: parts.shard,
+            pulse: parts.pulse,
             traces: parts.traces,
         }
     }
@@ -367,8 +373,11 @@ impl ProxyCore {
                     // Intake-shed drops are counted on BOTH faces — in
                     // dual-face mode callers arrive on the external socket, so
                     // its pre-ingress drops must not be invisible.
-                    let ext_shed =
-                        ext_endpoint.as_ref().map_or(0, |e| e.counters().pre_ingress_dropped);
+                    let ext = ext_endpoint.as_ref().map(|e| e.counters());
+                    let ext_shed = ext.map_or(0, |c| c.pre_ingress_dropped);
+                    // Refused sends are counted on BOTH faces too: the
+                    // external face is the one toward peers that vanish.
+                    let ext_would_block = ext.map_or(0, |c| c.send_would_block);
                     metrics.set_udp_endpoint_stats(
                         shard,
                         endpoint.queue_depth() as u64,
@@ -376,6 +385,7 @@ impl ProxyCore {
                         c.enqueued,
                         c.tail_dropped,
                         c.pre_ingress_dropped + ext_shed,
+                        c.send_would_block + ext_would_block,
                     );
                 }
             })
@@ -396,24 +406,28 @@ impl ProxyCore {
                 None => (self.endpoint.recv().await, Face::Internal),
             };
             let Some(pkt) = pkt else { break };
+            let now_ms = self.now_ms();
+            self.pulse.took_packet(self.shard, now_ms);
             // Intake-saturation signal: the packet's age at dequeue (arrival →
             // now) feeds the self-gate's ELU arm through the shared recorder.
             // Both readings sit on THIS core's `Clock` — the endpoint stamps
             // arrivals on it (`BindUdpOpts::clock`) — so the age is a duration
             // on one timeline and carries no wall-vs-monotonic drift.
-            self.intake_age.record(self.now_ms().saturating_sub(pkt.arrival_ms));
+            self.intake_age.record(now_ms.saturating_sub(pkt.arrival_ms));
             self.metrics.record_face_ingress(face);
             let src = pkt.src;
             // Hand the receive buffer to the parser instead of lending it: the
             // message's `raw`/`body` then share it and no packet byte is copied.
             let Ok(msg) = self.parser.parse_shared(bytes::Bytes::from(pkt.raw)) else {
                 // Malformed datagram — drop silently.
+                self.pulse.waiting(self.shard);
                 continue;
             };
             match msg {
                 SipMessage::Request(_) => self.handle_request(msg, src).await,
                 SipMessage::Response(resp) => self.handle_response(resp, src).await,
             }
+            self.pulse.waiting(self.shard);
         }
     }
 }
@@ -484,6 +498,7 @@ pub struct ProxyCoreBuilder {
     resolver_cfg: Option<ResolverConfig>,
     shard: usize,
     traces: Option<Arc<ProxyTraces>>,
+    pulse: Option<Arc<ShardPulse>>,
 }
 
 impl ProxyCoreBuilder {
@@ -507,6 +522,7 @@ impl ProxyCoreBuilder {
             resolver_cfg: None,
             shard: 0,
             traces: None,
+            pulse: None,
         }
     }
 
@@ -570,6 +586,13 @@ impl ProxyCoreBuilder {
         self.traces = Some(traces);
         self
     }
+    /// The liveness stamps ([`ShardPulse`]) — ONE across every recv shard,
+    /// sized to the shard count, read by the runner's readiness gate. The
+    /// default is a private one nobody reads.
+    pub fn pulse(mut self, pulse: Arc<ShardPulse>) -> Self {
+        self.pulse = Some(pulse);
+        self
+    }
 
     /// Finish into a [`ProxyCore`] bound on `endpoint`.
     pub fn build(self, endpoint: Box<dyn UdpEndpoint>) -> ProxyCore {
@@ -593,6 +616,7 @@ impl ProxyCoreBuilder {
             resolver_cfg: self.resolver_cfg.unwrap_or_default(),
             shard: self.shard,
             traces,
+            pulse: self.pulse.unwrap_or_else(|| Arc::new(ShardPulse::new(self.shard + 1))),
         })
     }
 }

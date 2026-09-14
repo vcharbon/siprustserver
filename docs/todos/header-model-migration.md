@@ -26,7 +26,7 @@ teardown phase is green.
 ## Hard rules for every step (workflow agents: these are not optional)
 
 - ONE compile/test process at a time, capped (CLAUDE.md):
-  `systemd-run --user --scope -q -p MemoryMax=12G -p CPUQuota=1200% nice -n 10 cargo test --workspace --jobs 6`
+  `systemd-run --user --scope -q -p MemoryMax=12G -p CPUQuota=1200% nice -n 10 cargo test --workspace`
 - One phase (or one crate) per commit:
   `refactor(sip-message): ADR-0025 <phase> — <one-line>` /
   `refactor(<crate>): port to ADR-0025 header model`.

@@ -32,6 +32,7 @@ mod failure_ext;
 mod identity;
 mod originate;
 mod passthrough;
+mod repeat;
 
 #[cfg(test)]
 mod originate_tests;
@@ -42,6 +43,7 @@ pub use ack::ack_b_leg;
 pub(crate) use ack::{ack_on_answer, acked_invite_carries_offer, acked_invite_cseq};
 pub(crate) use originate::clamp_no_answer;
 pub use originate::{build_b_leg, rebuild_a_leg_invite};
+pub(crate) use repeat::{repeated_reliable_provisional, retransmitted_2xx};
 
 // Wire routing for what those emit.
 pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};
@@ -55,7 +57,7 @@ pub use passthrough::{
 
 // Reading text back into typed values (decision fields, dialog state, bodies).
 pub use address::{redirect_contact, UnreadableAddress};
-pub use body::{media_type, sdp};
+pub use body::{carries_sdp, media_type, sdp};
 pub use dialog::{target_dest, to_gen_dialog};
 
 // The relayed-failure-headers Call.ext slot.

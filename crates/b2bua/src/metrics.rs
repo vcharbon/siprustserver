@@ -8,6 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::tier1_brake::Tier1BrakeCounters;
 
+/// Upper bounds (seconds) of the `b2bua_drain_seconds` buckets, ascending; the
+/// implicit `+Inf` bucket is the observation count.
+const DRAIN_BUCKETS: [f64; 8] = [0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0];
+
 /// The `b2bua_retransmits_total` row key: method uppercased, the code's
 /// digits or nothing for a request.
 fn retransmit_key(ladder: &str, method: &str, code: Option<u16>) -> String {
@@ -40,6 +44,16 @@ struct Inner {
     // all the peer's reclaimable/backed-up calls. A flatlined series names a stuck
     // serve loop / dead subscriber the body-count gauges can't see.
     repl_noops_sent: Mutex<BTreeMap<String, u64>>,
+    // Why each drain returned, keyed by reason label (`quiescent`, `caught_up`,
+    // `grace`, `grace_peers_behind` — ADR-0031 D2). `grace_peers_behind` means a
+    // departing worker abandoned live calls no peer reported holding: a lost
+    // flush window, the one reason that must never be read as a clean drain.
+    drain_exits: Mutex<BTreeMap<String, u64>>,
+    // Time-in-drain: fixed-bucket cumulative counts (`le` in seconds), the sum in
+    // milliseconds and the observation count.
+    drain_seconds_buckets: [AtomicU64; DRAIN_BUCKETS.len()],
+    drain_seconds_sum_ms: AtomicU64,
+    drain_seconds_count: AtomicU64,
     // dispatcher
     queue_drops: AtomicU64,
     cap_drops: AtomicU64,
@@ -86,6 +100,8 @@ struct Inner {
     // progress on a call already answered or going away; expected 0 in any
     // healthy run.
     second_final_refused: AtomicU64,
+    // Calls reaching Terminated with no termination record (expected 0).
+    termination_unrecorded: AtomicU64,
     // Going-away gate: an asynchronous trigger (timer fire, transaction
     // timeout, internal-event fold) that landed on a Terminating/Terminated
     // call and matched a rule that is not a teardown rule — absorbed before
@@ -145,6 +161,10 @@ struct Inner {
     repl_takeover_refused_terminated: AtomicU64,
     // Reverse flushes a live primary refused to fold; the gate is `router::reclaim`.
     repl_reverse_flush_refused: AtomicU64,
+    // Forward flushes a backup refused because they would regress the progress an
+    // acting backup already authored on the Element (ADR-0031 D3), keyed by the
+    // operation refused (`put`, `delete`). The gate is `repl::puller`.
+    repl_forward_flush_refused: Mutex<BTreeMap<String, u64>>,
     // Fail-back (ADR-0011 X11 / ADR-0014): `reclaimed` = calls a rebooted primary
     // re-materialised into its live map (active reclaim); `self_release` = acting-
     // backup takeover copies the backup *self-released* once the transaction(s) it
@@ -218,6 +238,15 @@ struct Inner {
     store_tombstones: AtomicU64,
     repl_changelog_entries: AtomicU64,
     repl_changelog_peers: AtomicU64,
+    // 1 while this worker has observed its own endpoint withdrawn from routing
+    // and the process still runs (ADR-0031 D6): the drain that SIGTERM has not
+    // (yet) ended. Sticky for the life of the process.
+    withdrawn_running: AtomicU64,
+    // Replication peers pulled while their endpoint is not `ready` (present in
+    // membership only — a terminating or flapping member, ADR-0031 D1). Sampled
+    // at every supervisor reconcile. Non-zero for longer than a drain grace names
+    // a member stuck `Terminating` or a readiness probe that will not recover.
+    repl_peers_pulled_not_ready: AtomicU64,
     // State-machine cursor census (ADR-0016 slice 9), keyed "machine|state": the
     // number of LIVE calls resting at each machine cursor, sampled from the call
     // map alongside the store gauges (not on the hot path). Renders as
@@ -292,6 +321,7 @@ impl B2buaMetrics {
     );
     // Second-final refusal (RFC 3261 §17.2.1) and the going-away gate.
     counter!(bump_second_final_refused, second_final_refused_total, second_final_refused);
+    counter!(bump_termination_unrecorded, termination_unrecorded_total, termination_unrecorded);
     counter!(bump_going_away_absorbed, going_away_absorbed_total, going_away_absorbed);
     // Injectable store-fault seam (ADR-0023).
     counter!(bump_store_fault_rejected, store_fault_rejected_total, store_fault_rejected);
@@ -314,6 +344,46 @@ impl B2buaMetrics {
     pub fn record_repl_noop_sent(&self, flow: &str, peer: &str) {
         *self.inner.repl_noops_sent.lock().unwrap().entry(format!("{flow}|{peer}")).or_insert(0) +=
             1;
+    }
+
+    /// Record one completed drain: its reason label into
+    /// `b2bua_drain_exits_total{reason}` and its duration into the
+    /// `b2bua_drain_seconds` histogram (ADR-0031 D2).
+    pub fn record_drain_exit(&self, reason: &str, elapsed: std::time::Duration) {
+        *self.inner.drain_exits.lock().unwrap().entry(reason.to_string()).or_insert(0) += 1;
+        let secs = elapsed.as_secs_f64();
+        for (i, le) in DRAIN_BUCKETS.iter().enumerate() {
+            if secs <= *le {
+                self.inner.drain_seconds_buckets[i].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.inner.drain_seconds_sum_ms.fetch_add(elapsed.as_millis() as u64, Ordering::Relaxed);
+        self.inner.drain_seconds_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Drains that returned for `reason` (test/observability).
+    pub fn drain_exits(&self, reason: &str) -> u64 {
+        self.inner.drain_exits.lock().unwrap().get(reason).copied().unwrap_or(0)
+    }
+
+    /// Count one forward flush the Backup flow refused because it would regress
+    /// the backup's own progress (ADR-0031 D3). `op` is the refused operation:
+    /// `put` (a body that branches off the Element, or a `b'` behind the
+    /// Element's `b`) or `delete` (an `Active` Element whose caller was answered
+    /// and whose answer the authority never took).
+    pub fn record_repl_forward_flush_refused(&self, op: &str) {
+        *self
+            .inner
+            .repl_forward_flush_refused
+            .lock()
+            .unwrap()
+            .entry(op.to_string())
+            .or_insert(0) += 1;
+    }
+
+    /// Forward flushes refused for `op` (test/observability).
+    pub fn repl_forward_flush_refused(&self, op: &str) -> u64 {
+        self.inner.repl_forward_flush_refused.lock().unwrap().get(op).copied().unwrap_or(0)
     }
 
     /// Count one inbound request by SIP method, for `b2bua_requests_total{method}`.
@@ -554,6 +624,25 @@ impl B2buaMetrics {
         self.inner.repl_changelog_peers.store(changelog_peers, Ordering::Relaxed);
     }
 
+    /// Set whether this worker is withdrawn from routing while still running
+    /// (ADR-0031 D6). Written by the replication supervisor on the observation.
+    pub fn set_withdrawn_running(&self, withdrawn: bool) {
+        self.inner.withdrawn_running.store(u64::from(withdrawn), Ordering::Relaxed);
+    }
+    pub fn withdrawn_running(&self) -> bool {
+        self.inner.withdrawn_running.load(Ordering::Relaxed) == 1
+    }
+
+    /// Set the number of replication peers currently pulled while not `ready`
+    /// (present in membership only, ADR-0031 D1). Written by the supervisor at
+    /// every reconcile.
+    pub fn set_repl_peers_pulled_not_ready(&self, n: u64) {
+        self.inner.repl_peers_pulled_not_ready.store(n, Ordering::Relaxed);
+    }
+    pub fn repl_peers_pulled_not_ready(&self) -> u64 {
+        self.inner.repl_peers_pulled_not_ready.load(Ordering::Relaxed)
+    }
+
     /// Replace the state-machine cursor census (ADR-0016 slice 9) wholesale —
     /// `census` maps `(machine, state)` to the count of live calls resting there,
     /// sampled from the call map under the store lock on the slow gauge cadence.
@@ -628,6 +717,7 @@ impl B2buaMetrics {
         // ── decision-application drop guard (069) ──
         counter("b2bua_decision_dropped_cancelled_total", "decision results (route/reject) dropped whole because the caller CANCELed the initial INVITE while the decision was in flight (the 487 is the transaction's one final; no b-leg is launched)", self.decision_dropped_cancelled_total());
         // ── a call already going away authors no further progress ──
+        counter("b2bua_termination_unrecorded_total", "calls that reached Terminated with no termination record (a path to terminal states no cause) — expected 0", self.termination_unrecorded_total());
         counter("b2bua_second_final_refused_total", "finals toward the a-leg's initial INVITE refused because that transaction already carries one (RFC 3261 §17.2.1); a rule made progress on an answered or going-away call — expected 0", self.second_final_refused_total());
         counter("b2bua_going_away_absorbed_total", "asynchronous triggers (timer fire / transaction timeout / internal-event fold) absorbed on a Terminating or Terminated call because the rule they matched is not a teardown rule; the race between a call's own clocks and its teardown, not a fault", self.going_away_absorbed_total());
         // ── injectable store-fault seam (ADR-0023) ──
@@ -726,6 +816,26 @@ impl B2buaMetrics {
             ));
         }
 
+        s.push_str("# HELP b2bua_repl_forward_flush_refused_total forward flushes (primary\u{2192}backup) a backup refused (ADR-0031 D3): op=put, a body behind the Element on a lifecycle axis or behind its b; op=delete, a teardown of an answered Active Element by an authority that never published the answer. A rising count means a primary is flushing a branch of a call one of its backups took over — expected across a partition heal or a drain, sustained means the two views never converge\n# TYPE b2bua_repl_forward_flush_refused_total counter\n");
+        for (op, v) in self.inner.repl_forward_flush_refused.lock().unwrap().iter() {
+            s.push_str(&format!("b2bua_repl_forward_flush_refused_total{{op=\"{op}\"}} {v}\n"));
+        }
+
+        s.push_str("# HELP b2bua_drain_exits_total drains by why they returned (reason=quiescent|caught_up|grace|grace_peers_behind, ADR-0031 D2); grace_peers_behind means a departing worker abandoned live calls no peer reported holding — a lost flush window, never a clean drain\n# TYPE b2bua_drain_exits_total counter\n");
+        for (reason, v) in self.inner.drain_exits.lock().unwrap().iter() {
+            s.push_str(&format!("b2bua_drain_exits_total{{reason=\"{reason}\"}} {v}\n"));
+        }
+        let drain_count = self.inner.drain_seconds_count.load(Ordering::Relaxed);
+        let drain_sum_s = self.inner.drain_seconds_sum_ms.load(Ordering::Relaxed) as f64 / 1_000.0;
+        s.push_str("# HELP b2bua_drain_seconds time a graceful drain spent waiting before it returned (ADR-0031 D2)\n# TYPE b2bua_drain_seconds histogram\n");
+        for (i, le) in DRAIN_BUCKETS.iter().enumerate() {
+            let n = self.inner.drain_seconds_buckets[i].load(Ordering::Relaxed);
+            s.push_str(&format!("b2bua_drain_seconds_bucket{{le=\"{le}\"}} {n}\n"));
+        }
+        s.push_str(&format!("b2bua_drain_seconds_bucket{{le=\"+Inf\"}} {drain_count}\n"));
+        s.push_str(&format!("b2bua_drain_seconds_sum {drain_sum_s}\n"));
+        s.push_str(&format!("b2bua_drain_seconds_count {drain_count}\n"));
+
         // Gauges last (direct writes — they end the `counter` closure's borrow).
         s.push_str("# HELP b2bua_active_calls live calls this worker is serving (creations - removals; now a true gauge since the two are paired)\n# TYPE b2bua_active_calls gauge\n");
         s.push_str(&format!("b2bua_active_calls {active}\n"));
@@ -814,6 +924,18 @@ impl B2buaMetrics {
             "b2bua_repl_changelog_peers",
             "peer logs currently held in the changelog",
             self.inner.repl_changelog_peers.load(Ordering::Relaxed),
+        );
+        g(
+            &mut s,
+            "b2bua_withdrawn_running",
+            "1 while this worker has observed its own endpoint withdrawn from routing and still runs (ADR-0031 D6)",
+            self.inner.withdrawn_running.load(Ordering::Relaxed),
+        );
+        g(
+            &mut s,
+            "b2bua_repl_peers_pulled_not_ready",
+            "replication peers pulled while their endpoint is not ready (present in membership only; ADR-0031 D1)",
+            self.repl_peers_pulled_not_ready(),
         );
         g(&mut s, "b2bua_repl_bootstrap_last_applied", "bodies the most recent bootstrap pass imported (re-stalling at the same value across passes ⇒ the stream is truncating, not the materialisation)", self.repl_bootstrap_last_applied());
         g(&mut s, "b2bua_repl_reclaim_scanned", "bodies the most recent bulk reclaim pass found in pri:{self} (denominator: everything bootstrap import made reclaimable; ≪ peer repl_meta_backup ⇒ a bootstrap-import/forward-replication gap)", self.repl_reclaim_scanned());
@@ -1004,6 +1126,9 @@ pub struct UdpTransportMetrics {
     queue_depth: LiveGauge,
     queue_max: usize,
     drops_tail_drop: LiveGauge,
+    /// Outbound datagrams the socket refused because its send buffer was
+    /// full (ADR-0033): a live getter over the bound endpoint.
+    send_would_block: LiveGauge,
     brake: Tier1BrakeCounters,
     buffered_send: BufferedSendCounters,
     buffered_send_peer_count: LiveGauge,
@@ -1017,6 +1142,7 @@ impl std::fmt::Debug for UdpTransportMetrics {
             .field("queue_max", &self.queue_max)
             .field("drops_tier1_brake", &self.drops_tier1_brake())
             .field("drops_tail_drop", &self.drops_tail_drop())
+            .field("send_would_block", &self.send_would_block())
             .field("tier1_reject_sent", &self.tier1_reject_sent())
             .field("buffered_send", &self.buffered_send)
             .field("buffered_send_peer_count", &self.buffered_send_peer_count())
@@ -1043,11 +1169,13 @@ impl UdpTransportMetrics {
         brake: Tier1BrakeCounters,
         queue_depth: LiveGauge,
         drops_tail_drop: LiveGauge,
+        send_would_block: LiveGauge,
     ) -> Self {
         Self {
             queue_depth,
             queue_max,
             drops_tail_drop,
+            send_would_block,
             brake,
             buffered_send: BufferedSendCounters::new(),
             buffered_send_peer_count: Arc::new(|| 0),
@@ -1084,6 +1212,11 @@ impl UdpTransportMetrics {
     /// `endpoint.counters.tailDropped`).
     pub fn drops_tail_drop(&self) -> u64 {
         (self.drops_tail_drop)()
+    }
+    /// Outbound datagrams refused by a full send buffer (never a suspended
+    /// send — ADR-0033).
+    pub fn send_would_block(&self) -> u64 {
+        (self.send_would_block)()
     }
     /// Stateless 503s the brake emitted (`tier1RejectSent`).
     pub fn tier1_reject_sent(&self) -> u64 {
@@ -1166,6 +1299,12 @@ impl UdpTransportMetrics {
             "Datagrams tail-dropped by the full inbound queue (port of UdpTransportMetrics.dropsTailDrop).",
             self.drops_tail_drop(),
         );
+        counter(
+            &mut s,
+            "b2bua_udp_send_would_block_total",
+            "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the transaction owner; ADR-0033).",
+            self.send_would_block(),
+        );
 
         // ── Buffered (non-blocking) outbound send (port of
         //    UdpTransportMetrics.bufferedSend / bufferedSendPeerCount). Zero
@@ -1219,6 +1358,26 @@ mod tests {
         assert!(txt.contains("b2bua_requests_total{method=\"BYE\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"INVITE\",code=\"200\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"BYE\",code=\"200\"} 1"));
+    }
+
+    #[test]
+    fn drain_exits_and_duration_render() {
+        let m = B2buaMetrics::new();
+        m.record_drain_exit("caught_up", std::time::Duration::from_millis(1_200));
+        m.record_drain_exit("grace_peers_behind", std::time::Duration::from_secs(5));
+        assert_eq!(m.drain_exits("caught_up"), 1);
+        assert_eq!(m.drain_exits("grace_peers_behind"), 1);
+        assert_eq!(m.drain_exits("quiescent"), 0);
+        let txt = m.prometheus_text();
+        assert!(txt.contains("b2bua_drain_exits_total{reason=\"caught_up\"} 1"));
+        assert!(txt.contains("b2bua_drain_exits_total{reason=\"grace_peers_behind\"} 1"));
+        // 1.2 s falls in every bucket from 2 up; 5 s in the 5 and 10 buckets.
+        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"1\"} 0"));
+        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"2\"} 1"));
+        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"5\"} 2"));
+        assert!(txt.contains("b2bua_drain_seconds_bucket{le=\"+Inf\"} 2"));
+        assert!(txt.contains("b2bua_drain_seconds_sum 6.2"));
+        assert!(txt.contains("b2bua_drain_seconds_count 2"));
     }
 
     #[test]
@@ -1291,6 +1450,15 @@ mod tests {
         assert!(txt.contains("b2bua_repl_meta_backup 22"));
         assert!(txt.contains("b2bua_repl_changelog_entries 64"));
         assert!(txt.contains("b2bua_repl_changelog_peers 4"));
+        assert!(txt.contains("b2bua_withdrawn_running 0"));
+        m.set_withdrawn_running(true);
+        let txt = m.prometheus_text();
+        assert!(txt.contains("b2bua_withdrawn_running 1"));
+        assert!(txt.contains("# TYPE b2bua_withdrawn_running gauge"));
+        m.set_repl_peers_pulled_not_ready(1);
+        let txt = m.prometheus_text();
+        assert!(txt.contains("b2bua_repl_peers_pulled_not_ready 1"));
+        assert!(txt.contains("# TYPE b2bua_repl_peers_pulled_not_ready gauge"));
         // Each gauge series must carry its TYPE line (Prometheus exposition).
         assert!(txt.contains("# TYPE b2bua_store_calls gauge"));
         assert!(txt.contains("# TYPE b2bua_repl_meta_backup gauge"));
@@ -1342,6 +1510,7 @@ mod tests {
             brake.clone(),
             Arc::new(move || d.load(Ordering::Relaxed)),
             Arc::new(move || t.load(Ordering::Relaxed)),
+            Arc::new(|| 0),
         );
         (m, brake, depth, tail)
     }

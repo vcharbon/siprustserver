@@ -106,7 +106,9 @@ pub fn is_fully_resolved(call: &Call) -> bool {
     std::iter::once(&call.a_leg).chain(call.b_legs.iter()).all(leg_is_resolved)
 }
 
-/// Add a new b-leg.
+/// Attach a b-leg without recording anything: the event-less attach for
+/// fixtures and replica images. A leg this element originates goes through
+/// [`super::add_originated_b_leg`], which records its INVITE.
 pub fn add_b_leg(mut call: Call, leg: Leg) -> Call {
     call.b_legs.push(leg);
     call
@@ -169,4 +171,15 @@ pub fn remote_tag(call: &Call, leg_id: &str) -> Option<String> {
     }
     let b = find_b_leg(call, leg_id)?;
     b.dialogs.first().map(|d| d.sip.remote_tag.clone())
+}
+
+/// Whether this stack answered the caller — a **durable** fact of the record,
+/// true from the 2xx onward and still true once the leg is `Terminated`. It
+/// reads the final the a-leg's initial INVITE server transaction took
+/// (`invite_final_sent`, written at the one a-facing final seam), not
+/// `LegState::Confirmed`, which the teardown clears. Replication reconciliation
+/// compares two copies of a call on this fact, so it must not read differently
+/// before and after the call ends.
+pub fn caller_answered(call: &Call) -> bool {
+    matches!(call.a_leg.invite_final_sent, Some(status) if (200..300).contains(&status))
 }

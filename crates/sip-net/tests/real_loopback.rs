@@ -135,11 +135,32 @@ fn every_bound_socket_pins_fragmentation_on_both_families() {
     use sip_net::real::build_bound_socket;
 
     for (addr, ipv4) in [("127.0.0.1:0", true), ("[::1]:0", false)] {
-        let socket = build_bound_socket(addr.parse().unwrap(), false).expect("bound socket");
+        let socket = build_bound_socket(addr.parse().unwrap(), false, None).expect("bound socket");
         let mode = mtu_discover_mode(socket.as_raw_fd(), ipv4).expect("readable MTU-discover mode");
         assert_eq!(mode, PMTUDISC_DONT, "{addr} must be pinned to fragment");
         assert_ne!(mode, PMTUDISC_DO, "{addr} must never refuse an oversize datagram");
     }
+}
+
+/// A requested `SO_SNDBUF` reaches the socket. The kernel reports at least
+/// the request back (it doubles for its own overhead and clamps only at
+/// `net.core.wmem_max`, which no host sets below this request).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_requested_send_buffer_is_applied_to_the_socket() {
+    use sip_net::real::build_bound_socket;
+
+    let requested = 131_072;
+    let socket = build_bound_socket("127.0.0.1:0".parse().unwrap(), false, Some(requested))
+        .expect("bound socket");
+    let effective = socket.send_buffer_size().expect("readable SO_SNDBUF");
+    assert!(effective >= requested, "SO_SNDBUF {effective} < requested {requested}");
+
+    let default = build_bound_socket("127.0.0.1:0".parse().unwrap(), false, None)
+        .expect("bound socket")
+        .send_buffer_size()
+        .expect("readable SO_SNDBUF");
+    assert!(default > 0, "the kernel default is still what an unstated bind gets");
 }
 
 /// A loopback address on this host whose path carries `len` bytes in ONE
@@ -374,6 +395,74 @@ fn a_dropped_non_first_fragment_loses_the_whole_message() {
     assert!(ok, "a lost non-first fragment must lose the whole message");
 }
 
+/// A next hop the kernel cannot resolve holds every datagram sent to it on
+/// the neighbour's unresolved queue, still charged to the sending socket,
+/// for the whole ARP solicit cycle (seconds). The send buffer fills and a
+/// blocking send would suspend until the cycle ends. The endpoint's contract
+/// is that it never suspends: the send fails `WouldBlock` at once, is
+/// counted, and the caller keeps its loop.
+#[test]
+#[ignore = "real-clock UDP in an unshare netns — slow lane (just test-slow); needs unshare"]
+fn a_send_toward_an_unresolvable_next_hop_never_suspends() {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        return; // the child runs `unresolved_next_hop_probe`
+    }
+    // A veth pair with nobody at the far address: ARP for 10.99.0.2 goes out
+    // and is never answered, so the neighbour entry stays INCOMPLETE.
+    let extra = "ip link add v0 type veth peer name v1\n\
+                 ip addr add 10.99.0.1/24 dev v0\n\
+                 ip link set v0 up\n\
+                 ip link set v1 up\n";
+    let Some(ok) = run_in_1500_mtu_netns("unresolved_next_hop_probe", extra) else {
+        return;
+    };
+    assert!(ok, "a send toward an unresolvable next hop must fail fast, never suspend");
+}
+
+/// The child of [`a_send_toward_an_unresolvable_next_hop_never_suspends`].
+#[tokio::test]
+#[ignore = "child probe — runs only inside the slow lane's namespace"]
+async fn unresolved_next_hop_probe() {
+    use std::time::Instant;
+
+    use sip_net::types::SendErrorKind;
+
+    if std::env::var_os(CHILD_ENV).is_none() {
+        return;
+    }
+    // The smallest send buffer the kernel grants (it clamps the request up to
+    // its floor): two or three SIP-sized datagrams fill it.
+    let opts = BindUdpOpts::new("10.99.0.1:0".parse().unwrap(), 64).with_send_buffer(1);
+    let net = RealSignalingNetwork::new();
+    let a = net.bind_udp(opts).await.unwrap();
+    let dead: std::net::SocketAddr = "10.99.0.2:5060".parse().unwrap();
+    let datagram = vec![b'z'; 1_400];
+
+    let started = Instant::now();
+    let mut would_block = 0u32;
+    for _ in 0..64 {
+        match a.send_to(&datagram, dead).await {
+            Ok(()) => {}
+            Err(e) if e.kind == SendErrorKind::WouldBlock => would_block += 1,
+            Err(e) => panic!("unexpected send failure: {e:?}"),
+        }
+    }
+    let elapsed = started.elapsed();
+    // One ARP cycle is 3 × 1 s of solicits: a suspended send shows as seconds,
+    // a refused one as microseconds.
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "64 sends toward the unresolved next hop took {elapsed:?}: the send suspended"
+    );
+    assert!(would_block > 0, "the pinned send buffer must refuse a send, not absorb 64 of them");
+    assert_eq!(
+        a.counters().send_would_block,
+        u64::from(would_block),
+        "every refused send is counted on the endpoint"
+    );
+    println!("{PROBE_RAN}: {would_block} of 64 sends refused in {elapsed:?}");
+}
+
 /// The child of [`an_oversize_datagram_crosses_a_1500_mtu_link`].
 #[tokio::test]
 #[ignore = "child probe — runs only inside the slow lane's namespace"]
@@ -388,7 +477,7 @@ async fn fragmentation_probe() {
         use sip_net::fragmentation::{mtu_discover_mode, PMTUDISC_DO};
         use sip_net::real::build_bound_socket;
 
-        let probe = build_bound_socket("127.0.0.1:0".parse().unwrap(), false).unwrap();
+        let probe = build_bound_socket("127.0.0.1:0".parse().unwrap(), false, None).unwrap();
         let mode = mtu_discover_mode(probe.as_raw_fd(), true).unwrap();
         assert_ne!(
             mode, PMTUDISC_DO,

@@ -206,7 +206,7 @@ async fn put_with_origin(
         .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
     // Receiver clock anchored at 100_000; origin stamped 70_000 → the origin is
     // 30 s BEHIND us, so a timer it minted must be pushed +30 s into our frame.

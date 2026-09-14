@@ -1028,7 +1028,7 @@ async fn matrix_crash_mid_invite() {
 /// primary's server transaction absorbs the a-leg copy, the callee absorbs the
 /// b-leg copy, the call completes on the survivor, and the recorded trace is
 /// clean under `rung-byte-identical`: the proxy's own cookie row is the one
-/// row the auditor leaves to the emitter (ADR-0029 X3).
+/// row the auditor leaves to the emitter (ADR-0032 X3).
 #[tokio::test(start_paused = true)]
 async fn matrix_backup_crash_between_timer_a_copies_of_one_invite() {
     let mut fh = FailoverHarness::new("s10b-backup-crash-between-timer-a-copies", &["b1", "b2"]);
@@ -1176,10 +1176,11 @@ async fn matrix_crash_during_rehydration() {
 /// Matrix: partition during failover — cut the repl link between B1 and B2 at the
 /// failover moment, then heal. The acting-backup b2 still serves the in-dialog
 /// request (its reverse-propagation to the down/cut primary is best-effort), and
-/// after heal + B1 reboot the cluster re-converges (B1 reaches ready). Because
-/// the S9 fabric cannot tear an established ephemeral-addr stream by ordinal,
-/// we crash-to-close B1 for the failover and use the partition to BLOCK B1's
-/// reconnect-on-reboot until heal — a faithful "partition during failover".
+/// after heal + B1 reboot the cluster re-converges (B1 reaches ready). The
+/// partition holds every stream between the pair — the ones already open, which
+/// the fabric attributes to their owning node, and any opened while the cut
+/// lasts; B1 is crashed to make the failover happen, and the cut then keeps its
+/// reconnect-on-reboot from landing until heal.
 #[tokio::test(start_paused = true)]
 async fn matrix_partition_during_failover() {
     let mut fh = FailoverHarness::new("s10b-partition-during-failover", &["b1", "b2"]);

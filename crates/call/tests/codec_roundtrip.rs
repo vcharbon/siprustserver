@@ -95,6 +95,89 @@ fn release_subscriptions_and_reroute_round_trip() {
     assert_eq!(decoded, call, "mid-reroute shape");
 }
 
+/// The decision log and the ordinal stamped on events and ring entries are
+/// replicated state — a takeover node's record names the decision every
+/// message was handled under — so they survive the codec in every shape: no
+/// decision yet, one labelled mark, a second mark without a label.
+#[test]
+fn the_decision_log_round_trips() {
+    use call::helpers::{add_cdr_event, mark_decision};
+    use call::{CdrEvent, CdrEventType, DecisionKind};
+
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+
+    call.decision_log = Vec::new();
+    call.decision_ordinal = 0;
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "no decision yet");
+
+    let call =
+        mark_decision(call, 1_000, DecisionKind::Route, Some("a".into()), Some("first".into()));
+    let call = mark_decision(call, 2_000, DecisionKind::FailoverRoute, Some("b-1".into()), None);
+    let call = add_cdr_event(
+        call,
+        CdrEvent {
+            event_type: CdrEventType::InviteSent,
+            timestamp: 2_000,
+            leg_id: "b-2".into(),
+            status_code: None,
+            reason: None,
+            decision_ordinal: 0,
+        },
+    );
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "two marks");
+    assert_eq!(decoded.decision_ordinal, 2);
+    let labels: Vec<Option<&str>> =
+        decoded.decision_log.iter().map(|m| m.label.as_deref()).collect();
+    assert_eq!(labels, vec![Some("first"), None]);
+    assert_eq!(decoded.decision_log[1].ordinal, 2);
+    assert_eq!(decoded.cdr_events.last().unwrap().decision_ordinal, 2);
+}
+
+/// The termination record is replicated state — the node that discharges a
+/// call a peer began terminating writes the record the peer wrote — so it
+/// survives the codec in every shape: none, a leg-caused one not yet cut, a
+/// deadline cut at a seq.
+#[test]
+fn the_termination_record_round_trips() {
+    use call::helpers::{record_termination, seal_termination_seq};
+    use call::{TerminationCause, TimeoutKind};
+
+    let codec = MsgpackCodec::new();
+    let mut call = representative_call();
+
+    call.termination = None;
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "a live call");
+
+    let call = record_termination(call, 3_000, TerminationCause::RemoteBye, Some("b-1".into()));
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "the callee's BYE, not yet cut");
+    let t = decoded.termination.as_ref().unwrap();
+    assert_eq!(
+        (t.at_ms, t.cause, t.by_leg.as_deref(), t.last_seq),
+        (3_000, TerminationCause::RemoteBye, Some("b-1"), 0)
+    );
+
+    let mut call = call;
+    call.termination = None;
+    call.message_seq = 9;
+    let call = record_termination(
+        call,
+        4_000,
+        TerminationCause::Timeout(TimeoutKind::Keepalive),
+        Some("a".into()),
+    );
+    let call = seal_termination_seq(call);
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call, "a deadline, cut");
+    let t = decoded.termination.as_ref().unwrap();
+    assert_eq!(t.cause, TerminationCause::Timeout(TimeoutKind::Keepalive));
+    assert_eq!(t.last_seq, 9);
+}
+
 /// The final a leg's initial INVITE carries is replicated state — a takeover
 /// node must refuse a second final on that transaction exactly as the node
 /// that sent the first would — so it survives the replication codec in both

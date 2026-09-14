@@ -4,6 +4,7 @@
 //! `handle_initial_invite` (the response→call-state translation) live in
 //! [`apply_route`] / [`crate::initial_invite`].
 
+pub(crate) mod apply_reject;
 pub mod apply_route;
 mod schemas;
 pub mod test_adapter;
@@ -48,7 +49,7 @@ pub trait CallDecisionEngine: Send + Sync {
         &self,
         _req: CallReleaseRequest,
     ) -> Result<CallReleaseResponse, CallDecisionError> {
-        Ok(CallReleaseResponse::Release)
+        Ok(CallReleaseResponse::Release { label: None })
     }
 }
 

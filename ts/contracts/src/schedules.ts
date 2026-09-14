@@ -3,7 +3,7 @@
  * `pivot_schema::schedules`'s `ScheduleTable` / `ClassSchedule` — and the
  * table itself, checked in, for a reader with no binary in reach.
  *
- * One schedule, two readers (ADR-0029 X1). `sip-retransmit` owns the RFC 3261
+ * One schedule, two readers (ADR-0032 X1). `sip-retransmit` owns the RFC 3261
  * §17 / §13.3.1.4 / RFC 3262 §3 ladders; the interpreter paces and counts on
  * it; the cut reads THIS table where it projects a ladder onto a timeline.
  * Nothing here walks T1/T2: {@link SCHEDULES} is data the binary printed, and

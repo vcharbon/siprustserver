@@ -11,7 +11,7 @@
 //!   NOTIFY, PRACK, in-dialog probes)
 //! - [`respond`] — response synthesis toward a leg (finals, provisionals)
 //! - [`ladder`] — the dialog-level retransmission ladders the framework owns
-//!   (ADR-0029 X4): arm / repeat / discharge / retire, keyed by obligation
+//!   (ADR-0032 X4): arm / repeat / discharge / retire, keyed by obligation
 //! - [`teardown`] — termination policy + BYE/CANCEL builders
 //! - [`select`] — shared leg/dialog selection views
 

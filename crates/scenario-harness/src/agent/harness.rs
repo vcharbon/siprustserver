@@ -108,9 +108,25 @@ impl Harness {
     /// fired). A non-zero delay makes each `recv` park auto-advance
     /// deterministically. See [`sip_net::SimulatedSignalingNetwork::new`].
     pub fn with_transit_delay(scenario_name: impl Into<String>, transit_delay_ms: u64) -> Self {
-        let transit_delay_ms = transit_delay_ms.max(1);
-        let sim: Arc<dyn SignalingNetwork> =
-            Arc::new(sip_net::SimulatedSignalingNetwork::new(transit_delay_ms));
+        Self::with_transit_delay_and_send_fault(scenario_name, transit_delay_ms, None)
+    }
+
+    /// Like [`with_transit_delay`](Harness::with_transit_delay), plus an optional
+    /// per-pair send-fault injector on the simulated fabric: a `fault(src, dst)`
+    /// that answers `Some(reason)` fails that send, so the datagram never leaves
+    /// its endpoint. The seam a scenario uses to cut a node off the signalling
+    /// plane while its process keeps running and keeps firing its own timers.
+    pub fn with_transit_delay_and_send_fault(
+        scenario_name: impl Into<String>,
+        transit_delay_ms: u64,
+        fault: Option<sip_net::SendFault>,
+    ) -> Self {
+        let net = sip_net::SimulatedSignalingNetwork::new(transit_delay_ms.max(1));
+        let net = match fault {
+            Some(fault) => net.with_send_fault(fault),
+            None => net,
+        };
+        let sim: Arc<dyn SignalingNetwork> = Arc::new(net);
         Self::build(scenario_name.into(), sim, Clock::test_at(0), TransportKind::Fake, RECV_TIMEOUT)
     }
 

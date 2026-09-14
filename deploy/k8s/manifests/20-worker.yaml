@@ -39,6 +39,8 @@ spec:
       nodeSelector: { tier: app }
       # Drain grace: SIGTERM latches Draining (OPTIONS 503 + /ready NotReady),
       # the runner waits B2BUA_DRAIN_GRACE_MS, then exits. Keep this > grace.
+      # A withdrawn worker exits earlier, once past B2BUA_DRAIN_MIN_MS every live
+      # call's backup has applied its changelog head (ADR-0031 D2).
       terminationGracePeriodSeconds: 30
       containers:
         - name: b2bua-worker
@@ -105,6 +107,9 @@ spec:
             # directly would bypass the LB and leak internal addressing.
             - { name: B2BUA_REQUIRE_OUTBOUND_PROXY, value: "1" }
             - { name: B2BUA_METRICS, value: "0.0.0.0:9091" }
+            # SO_SNDBUF on the signalling socket (ADR-0033); clamped at the
+            # host's net.core.wmem_max.
+            - { name: B2BUA_UDP_SNDBUF, value: "4194304" }
             # --- CDR sink: publish one JSON CDR per terminated call to RabbitMQ
             # (55-rabbitmq). Sits behind the in-process BufferedCdrWriter
             # (B2BUA_CDR_QUEUE drop-on-overload, unchanged); the broker queue is
@@ -157,6 +162,7 @@ spec:
             - { name: B2BUA_REPL_PORT,      value: "${REPL_PORT}" }
             - { name: B2BUA_REPL_SERVICE,   value: "b2bua-worker" }
             - { name: B2BUA_DRAIN_GRACE_MS, value: "5000" }
+            - { name: B2BUA_DRAIN_MIN_MS,   value: "1000" }
             # The binary uses jemalloc (#[global_allocator], see b2bua-runner
             # src/main.rs). The 2026-06-14 probe proved the RSS climb is a REAL
             # APP LEAK — jemalloc_allocated (live heap) grows ~176 MB/h at flat

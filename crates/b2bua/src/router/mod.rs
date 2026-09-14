@@ -24,6 +24,8 @@ mod release;
 mod resolve;
 mod responses;
 mod restore_hygiene;
+#[cfg(test)]
+mod test_support;
 
 pub(crate) use reclaim::reap_expired_replicas;
 // Consumed by the S7 readiness tests (`repl::s7_tests`) only.
@@ -144,9 +146,16 @@ pub enum ReplCommand {
     ReclaimCall(String),
     /// A backup's reverse flush the store's `(p,b)` gate refused: the body is
     /// handed up so the call model can fold lifecycle progress the vector
-    /// cannot see (`reclaim::fold_refused_reverse_flush`). `origin_now_ms` is
+    /// cannot see (`reclaim::fold_refused_flush`). `origin_now_ms` is
     /// the flushing node's wall clock, for timer re-anchoring.
     ReverseFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
+    /// A primary's forward flush this backup refused (ADR-0031 D3): the body is
+    /// handed up on the same terms as the reverse case, and folds only where a
+    /// live takeover copy of the call exists — an Element alone is kept as it
+    /// is, its merge deferred to the next materialisation. Only the steady tail
+    /// sends it: a bulk re-seed's refusals are the state of the two views, not
+    /// events, and are counted alone.
+    ForwardFlushRefused { call_ref: String, body: Arc<[u8]>, origin_now_ms: i64 },
 }
 
 /// Run the router loop over the txn-event + timer-fire channels until both close.
@@ -190,7 +199,12 @@ async fn on_repl_command(ctx: &Arc<RouterCtx>, cmd: ReplCommand) {
             reclaim::reconcile_reverse_flush(ctx, &call_ref).await
         }
         ReplCommand::ReverseFlushRefused { call_ref, body, origin_now_ms } => {
-            reclaim::fold_refused_reverse_flush(ctx, &call_ref, &body, origin_now_ms).await
+            let dir = reclaim::FlushDirection::Reverse;
+            reclaim::fold_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
+        }
+        ReplCommand::ForwardFlushRefused { call_ref, body, origin_now_ms } => {
+            let dir = reclaim::FlushDirection::Forward;
+            reclaim::fold_refused_flush(ctx, dir, &call_ref, &body, origin_now_ms).await
         }
     }
 }

@@ -124,7 +124,11 @@ mod ringwatch {
                         header_updates: vec![],
                         contacts: vec![],
                     },
-                    RuleAction::BeginTermination { reason: Some("ringwatch-18x".into()) },
+                    RuleAction::BeginTermination {
+                        reason: Some("ringwatch-18x".into()),
+                        cause: call::TerminationCause::Timeout(call::TimeoutKind::NoAnswer),
+                        by_leg: None,
+                    },
                     RuleAction::ClearState { machine: RINGWATCH },
                 ]))
             },
@@ -204,7 +208,11 @@ mod dualkeys {
                             status_code: None,
                             reason: Some("dual_slow".into()),
                         },
-                        RuleAction::BeginTermination { reason: Some("dualkeys-slow".into()) },
+                        RuleAction::BeginTermination {
+                            reason: Some("dualkeys-slow".into()),
+                            cause: call::TerminationCause::Timeout(call::TimeoutKind::Setup),
+                            by_leg: None,
+                        },
                         RuleAction::ClearState { machine: DUALKEYS },
                     ])),
                     other => panic!("unexpected service timer key: {other}"),

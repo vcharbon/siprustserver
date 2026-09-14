@@ -6,6 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use call::helpers::seal_termination_seq;
 use call::CallModelState;
 use sip_message::Method;
 use sip_txn::TxnKind;
@@ -25,6 +26,19 @@ pub(super) async fn process_result(
     result: HandlerResult,
     now_ms: i64,
 ) {
+    // What the turn sends is on the record before the record lands, and a
+    // termination this turn began is cut after it: every ring entry with
+    // `seq <= termination.last_seq` was received or sent as part of
+    // beginning the termination, every later one came after (the peer's 200
+    // to the relayed BYE, the ACK to a 487). With the ring off the cut stays
+    // `0`.
+    let result = match crate::message_ring::Ring::of(&ctx.config) {
+        Some(ring) => HandlerResult {
+            call: seal_termination_seq(ring.sent(result.call, &result.effects.outbound, now_ms)),
+            effects: result.effects,
+        },
+        None => result,
+    };
     // Persist first (state lands before effects run).
     ctx.state.update(result.call.clone());
 
@@ -130,6 +144,9 @@ pub(super) async fn process_result(
             }
             BufferedObservabilityEffect::GoingAwayAbsorbed { .. } => {
                 ctx.metrics.bump_going_away_absorbed()
+            }
+            BufferedObservabilityEffect::TerminationUnrecorded => {
+                ctx.metrics.bump_termination_unrecorded()
             }
         }
     }
@@ -237,7 +254,7 @@ async fn emit_outbound(ctx: &Arc<RouterCtx>, call_ref: &str, result: &HandlerRes
             }
             // A response goes through its server transaction, whatever the mode
             // says: `Raw` is for requests, and the only raw path for response
-            // bytes is a retained `Datagram` (ADR-0029 X3). The layer sends the
+            // bytes is a retained `Datagram` (ADR-0032 X3). The layer sends the
             // response's image verbatim, so what a rule retained from that
             // same image is what leaves here.
             (OutboundBody::Response(resp), mode) => {

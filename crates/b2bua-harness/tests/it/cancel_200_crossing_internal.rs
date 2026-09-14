@@ -122,7 +122,8 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
 /// The **reject / no-failover sibling** — the case the call-liveness ordering fix
 /// exists for. The same no-answer timer fires on a ringing b-leg, but the route
 /// carries NO callback context, so `/call/failure` is never consulted: the
-/// `no-answer` rule takes its `None` branch (`DestroyLeg` + `BeginTermination`).
+/// `no-answer` rule takes its `None` branch (`DestroyLeg` + the caller's 480 +
+/// `BeginTermination`).
 ///
 /// Pre-fix, that teardown promoted `Terminating → Terminated → RemoveCall` in the
 /// SAME turn as the CANCEL (the CANCELled b-leg's interim `Cancelled` bye
@@ -193,11 +194,11 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     let mut bye = carol.receive("BYE").await;
     bye.respond(200, "OK").await;
 
-    // The caller still gets its final reject — synthesized once the abandoned
-    // callee has quiesced (ADR-0022; the no-answer/None path answers via the
-    // →Terminated funnel), NOT dropped on the removed call.
-    let failed = call.expect(503).await;
-    assert_eq!(failed.status(), 503, "caller's INVITE resolves with a final failure");
+    // The caller holds its final reject — the no-answer rule's own 480,
+    // authored in the turn that began the termination — NOT dropped on the
+    // removed call.
+    let failed = call.expect(480).await;
+    assert_eq!(failed.status(), 480, "caller's INVITE resolves with a final failure");
 
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();

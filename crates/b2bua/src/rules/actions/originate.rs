@@ -3,14 +3,16 @@
 //! the generic in-dialog request (`SendRequestToLeg`). Relaying an *inbound*
 //! request does NOT live here — see [`super::relay_request`].
 
-use call::helpers::{add_b_leg, add_cdr_event, bump_local_cseq};
-use call::{Call, CdrEvent, LegKind, TimerType};
+use call::helpers::{add_cdr_event, add_originated_b_leg, bump_local_cseq};
+use call::{Call, CdrEvent, LegKind, TerminationCause, TimerType};
 use sip_message::generators::{self, GenerateInDialogRequestOpts, InDialogMethod};
 use sip_message::header::{Event, HeaderValue, RAck, SubscriptionState};
 use sip_message::{Method, SipStr};
 use sip_txn::TxnKind;
 
-use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{
+    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+};
 use crate::rules::capabilities;
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
@@ -26,7 +28,8 @@ impl ActionExecutor<'_> {
     /// suffix allow-list is a config bug; surface it as a terminate so the call
     /// doesn't hang waiting for an answer that will never come. No leg /
     /// outbound is built; the call is torn down and a `Reject` CDR records the
-    /// cause.
+    /// cause. An admitted leg is recorded with its `InviteSent` as its INVITE
+    /// leaves, under the decision current at this turn.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn create_leg(
         &self,
@@ -56,9 +59,10 @@ impl ActionExecutor<'_> {
                     leg_id: ctx.source_leg_id.to_string(),
                     status_code: Some(503),
                     reason: Some(format!("admission_reject host={}", destination.0)),
+                    decision_ordinal: 0,
                 },
             );
-            terminate_all(call);
+            terminate_all(call, self.now_ms, TerminationCause::Admission, None);
             return;
         }
         let n = call.b_legs.len() + 1;
@@ -71,6 +75,12 @@ impl ActionExecutor<'_> {
         let no_answer_timeout_sec = no_answer_timeout_sec
             .map(|secs| relay::clamp_no_answer(self.config, &call.call_ref, secs));
         let a_invite = relay::rebuild_a_leg_invite(&call.a_leg_invite);
+        // Whether the INVITE this leg is minted with carries an offer: the
+        // override's body where one is given (empty = none), else the a-leg's.
+        let offers_sdp = match body_override {
+            Some(body) => !body.is_empty(),
+            None => relay::carries_sdp(&a_invite),
+        };
         // Same refusal as the admission reject above, for the other way a
         // decision can name no destination: an address field that does not read
         // (055). The leg is not created and no INVITE goes out — originating on
@@ -91,7 +101,8 @@ impl ActionExecutor<'_> {
             header_updates,
             &capabilities::relaying_for_leg(call, &leg_id, a_invite.headers()),
             call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
-            call.features.as_ref().and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]),
+            &capabilities::withheld_option_tags(call, kind, offers_sdp),
+            &capabilities::offered_option_tags(call, kind),
             kind,
         ) {
             Ok(built) => built,
@@ -110,16 +121,17 @@ impl ActionExecutor<'_> {
                         leg_id: ctx.source_leg_id.to_string(),
                         status_code: Some(500),
                         reason: Some(format!("unreadable_address field={}", err.field)),
+                        decision_ordinal: 0,
                     },
                 );
-                terminate_all(call);
+                terminate_all(call, self.now_ms, TerminationCause::Admission, None);
                 return;
             }
         };
         if let Some(ctx_str) = callback_context {
             call.callback_context = Some(ctx_str.to_string());
         }
-        *call = add_b_leg(call.clone(), leg);
+        *call = add_originated_b_leg(call.clone(), leg, self.now_ms);
         fx.outbound.push(effect);
         if let Some(secs) = no_answer_timeout_sec {
             self.schedule(call, fx, TimerType::NoAnswer, secs * 1000, Some(leg_id));
@@ -201,6 +213,7 @@ impl ActionExecutor<'_> {
             destination: dest,
             label: format!("NOTIFY → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance: Provenance::Authored,
         });
     }
 
@@ -294,6 +307,7 @@ impl ActionExecutor<'_> {
             destination: dest,
             label: format!("resync re-INVITE → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance: Provenance::Authored,
         });
     }
 
@@ -418,12 +432,16 @@ impl ActionExecutor<'_> {
             dest,
         );
         let kind = if m == InDialogMethod::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
+        // The one in-dialog OPTIONS this stack originates is the keepalive.
+        let provenance =
+            if m == InDialogMethod::Options { Provenance::Probe } else { Provenance::Authored };
         fx.outbound.push(OutboundSipEffect {
             body: OutboundBody::Request(out_req),
             mode: OutboundTxnMode::NewClient(kind),
             destination: dest,
             label: format!("{method} → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance,
         });
     }
 
@@ -520,6 +538,7 @@ impl ActionExecutor<'_> {
             destination: dest,
             label: format!("PRACK → {leg_id}"),
             leg_id: Some(leg_id.to_string()),
+            provenance: Provenance::Authored,
         });
     }
 }

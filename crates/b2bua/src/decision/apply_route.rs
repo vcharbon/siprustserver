@@ -2,11 +2,9 @@
 //! b-leg INVITE. Port of `decision/apply/applyRoute.ts` (the load-bearing path:
 //! attach features, seed service ext, run the limiter, create the b-leg).
 
-use call::helpers::set_call_ext;
-use call::{Call, CallLimiterState, CdrEvent, CdrEventType, TimerEntry, TimerType};
+use call::helpers::{add_originated_b_leg, mark_decision, set_call_ext};
+use call::{Call, CallLimiterState, DecisionKind, TerminationCause, TimerEntry, TimerType};
 use sip_clock::Clock;
-use sip_message::draft::RequestDraft;
-use sip_message::header::{HeaderName, MediaType, Supported};
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
@@ -61,6 +59,7 @@ pub async fn apply_route(
             &[],
             id_gen,
             now_ms,
+            TerminationCause::Admission,
         );
     }
 
@@ -120,6 +119,7 @@ pub async fn apply_route(
             &[],
             id_gen,
             now_ms,
+            TerminationCause::Admission,
         );
     }
 
@@ -182,14 +182,30 @@ pub async fn apply_route(
         }
     }
 
+    // The route is admitted: it is what the call is handled under from here
+    // on, and the leg it dials, or the service that dials for it, is stamped
+    // under this mark. A route the hop budget, the target admission or the
+    // limiter refused was never applied and is no mark; a limiter failover's
+    // route answers no failed leg.
+    let kind = if depth == 0 { DecisionKind::Route } else { DecisionKind::FailoverRoute };
+    let leg_id = (depth == 0).then(|| "a".to_string());
+    call = mark_decision(call, now_ms, kind, leg_id, route.label.clone());
+
     // Announcement / deferred-routing services (ADR-0016 slice 8): when the
     // decision attaches a `service_ext` slice that defers routing (it set
     // `call.ext[<id>].defer_routing == true`), the normal destination leg is NOT
     // created here — the service's `init` owns leg creation (e.g. an unadopted
     // media leg toward an MRF, dialing the real destination later). The
-    // GlobalDuration backstop below still arms for the call.
+    // GlobalDuration backstop below still arms for the call under its anchor.
     if defers_routing(&call) {
-        arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+        if route.features.platform.arms_cap_at_creation(config.setup_timeout_sec) {
+            arm_global_duration(
+                &mut call,
+                &mut fx,
+                route.features.platform.max_duration_sec,
+                now_ms,
+            );
+        }
         arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_sec, now_ms);
         return HandlerResult { call, effects: fx };
     }
@@ -218,6 +234,15 @@ pub async fn apply_route(
         .as_ref()
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
+    // Whether the INVITE this route mints carries an offer: the relayed
+    // a-leg body under `Keep`, none under `Drop`, the substitute under
+    // `Replace`. The strategy's withhold and the `fake-prack` delayed-offer
+    // fallback both read it.
+    let offers_sdp = match &route.update_body {
+        BodyUpdate::Keep => relay::carries_sdp(a_invite),
+        BodyUpdate::Drop => false,
+        BodyUpdate::Replace(body) => !body.is_empty(),
+    };
     // A decision field that does not read has no destination behind it: refuse
     // the route rather than originate toward a fabricated address (055). The
     // caller gets a final (ADR-0022's guarantee holds) and the CDR names the
@@ -238,7 +263,8 @@ pub async fn apply_route(
         &header_updates,
         &capabilities::relaying_for_leg(&call, leg_id, a_invite.headers()),
         call.features.as_ref().and_then(|f| f.charging_vector.as_ref()),
-        call.features.as_ref().and_then(|f| f.withhold_option_tags.as_deref()).unwrap_or(&[]),
+        &capabilities::withheld_option_tags(&call, None, offers_sdp),
+        &capabilities::offered_option_tags(&call, None),
         None,
     ) {
         Ok(built) => built,
@@ -257,13 +283,18 @@ pub async fn apply_route(
                 &[],
                 id_gen,
                 now_ms,
+                TerminationCause::Admission,
             );
         }
     };
 
-    // Body substitution on the b-leg INVITE (route.update_body), then the
-    // relayFirst18xTo180 Supported rewrite — one thaw/freeze, so the INVITE the
-    // wire sees and the image it carries stay the same message.
+    // After the mint read the armed strategy's withhold: the fallback the
+    // INVITE was minted under is the one the call now runs.
+    disable_fake_prack_on_a_delayed_offer(&mut call, offers_sdp);
+
+    // Body substitution on the b-leg INVITE (route.update_body) — one
+    // thaw/freeze, so the INVITE the wire sees and the image it carries stay
+    // the same message.
     if let crate::effects::OutboundBody::Request(req) = &mut effect.body {
         let mut draft = req.thaw();
         match &route.update_body {
@@ -274,27 +305,17 @@ pub async fn apply_route(
                     d.ext.cached_sdp = None;
                 }
             }
-            BodyUpdate::Replace(s) => draft = draft.with_body(s.clone().into_bytes().into()),
+            BodyUpdate::Replace(s) => {
+                draft = draft.with_body(s.clone().into_bytes().into());
+                effect.provenance = crate::effects::Provenance::Authored;
+            }
         }
-        // ── relayFirst18xTo180 → strategy-aware Supported: 100rel + self-disable ─
-        //
-        // The B2BUA forwards alice's `Supported` to bob; the 18x-management policy
-        // then strips `100rel` (and self-disables) depending on the strategy and
-        // whether alice offered SDP. Port of `applyRoute.ts`'s Supported handling.
-        draft = apply_supported_for_18x(draft, a_invite, &mut call);
         if let Ok(edited) = draft.freeze() {
             *req = edited;
         }
     }
 
-    call.b_legs.push(leg);
-    call.cdr_events.push(CdrEvent {
-        event_type: CdrEventType::InviteSent,
-        timestamp: now_ms,
-        leg_id: leg_id.to_string(),
-        status_code: None,
-        reason: None,
-    });
+    call = add_originated_b_leg(call, leg, now_ms);
     fx.outbound.push(effect);
 
     // No-answer ring timer (cancelled by confirm-dialog).
@@ -328,7 +349,14 @@ pub async fn apply_route(
     // answered call is unaffected (the re-arm supersedes via the driver's epoch
     // bump and `replace_timer_by_id`'s id-dedup); a stuck-in-setup call is now
     // reaped at the cap by the existing `max-duration` rule.
-    arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+    //
+    // Under the `Answer` anchor (`MaxDurationAnchor`) the cap bounds the
+    // established call only, so it is armed at the answer alone whenever the
+    // `SetupTimeout` deadline bounds the setup; with that deadline disabled the
+    // creation-time backstop arms as above.
+    if route.features.platform.arms_cap_at_creation(config.setup_timeout_sec) {
+        arm_global_duration(&mut call, &mut fx, route.features.platform.max_duration_sec, now_ms);
+    }
     arm_setup_timeout(&mut call, &mut fx, config.setup_timeout_sec, now_ms);
 
     HandlerResult { call, effects: fx }
@@ -363,6 +391,7 @@ async fn limiter_reject_failover(
             &[],
             id_gen,
             now_ms,
+            TerminationCause::Admission,
         );
     }
     let req = limiter_failure_request(&call, &limiter_id);
@@ -401,38 +430,47 @@ async fn limiter_reject_failover(
             ))
             .await
         }
-        Ok(CallTreatment::Reject(rj)) => crate::initial_invite::reject_call(
+        // A limiter refusal names no failed leg: these marks carry none.
+        Ok(CallTreatment::Reject(rj)) => super::apply_reject::apply_reject(
             call,
-            a_invite,
-            rj.reject_code,
-            rj.reject_reason,
-            rj.update_headers.as_ref(),
-            &[],
-            id_gen,
-            now_ms,
-        ),
-        Ok(CallTreatment::Redirect(rd)) => crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            rd.code,
-            rd.reason,
-            rd.update_headers.as_ref(),
-            &rd.contacts,
-            id_gen,
-            now_ms,
-        ),
-        // Relay with no captured failure (a limiter reject is pre-leg) → 480
-        // fallback (ADR-0017 X5); a backend error → 486 Busy Here.
-        Ok(CallTreatment::Relay) => crate::initial_invite::reject_call(
-            call,
-            a_invite,
-            480,
-            Some("Temporarily Unavailable".into()),
+            rj,
+            DecisionKind::FailoverReject,
             None,
-            &[],
+            a_invite,
             id_gen,
             now_ms,
         ),
+        Ok(CallTreatment::Redirect(rd)) => {
+            let call = mark_decision(call, now_ms, DecisionKind::FailoverRedirect, None, rd.label);
+            crate::initial_invite::reject_call(
+                call,
+                a_invite,
+                rd.code,
+                rd.reason,
+                rd.update_headers.as_ref(),
+                &rd.contacts,
+                id_gen,
+                now_ms,
+                TerminationCause::DecisionReject,
+            )
+        }
+        // Relay with no captured failure (a limiter reject is pre-leg) → 480
+        // fallback (ADR-0017 X5); a backend error → 486 Busy Here, the
+        // stack's own final, no decision behind it and no mark.
+        Ok(CallTreatment::Relay { label }) => {
+            let call = mark_decision(call, now_ms, DecisionKind::FailoverTerminate, None, label);
+            crate::initial_invite::reject_call(
+                call,
+                a_invite,
+                480,
+                Some("Temporarily Unavailable".into()),
+                None,
+                &[],
+                id_gen,
+                now_ms,
+                TerminationCause::DecisionReject,
+            )
+        }
         Err(_) => crate::initial_invite::reject_call(
             call,
             a_invite,
@@ -442,6 +480,7 @@ async fn limiter_reject_failover(
             &[],
             id_gen,
             now_ms,
+            TerminationCause::Admission,
         ),
     }
 }
@@ -484,7 +523,7 @@ fn record_failure_round_trip(
                 CallTreatment::Route(_) => "route",
                 CallTreatment::Redirect(_) => "redirect",
                 CallTreatment::Reject(_) => "reject",
-                CallTreatment::Relay => "relay",
+                CallTreatment::Relay { .. } => "relay",
             },
             crate::trace::intake::json_body(treatment),
         ),
@@ -561,63 +600,23 @@ fn defers_routing(call: &Call) -> bool {
     })
 }
 
-/// Forward alice's `Supported` onto the b-leg INVITE with strategy-aware
-/// `100rel` handling, and self-disable the policy on the delayed-offer fallback.
-/// Port of the `relayFirst18xTo180` block in `applyRoute.ts`:
-///   - `drop-sdp`/`keep-sdp`: strip `100rel` (we never relay PRACK, alice was
-///     not told to expect reliable provisional).
-///   - `fake-prack` with alice SDP: keep `100rel` (bob goes reliable so we can
-///     originate PRACK + cache his SDP).
-///   - `fake-prack` with NO alice SDP (delayed offer): strip `100rel` AND
-///     disable the policy (fall back to plain relay; no half-active state).
-///
-/// `promote-pem-to-200` is owned by the PEM service (Slice 4) and is left alone.
-fn apply_supported_for_18x(
-    draft: RequestDraft,
-    a_invite: &SipRequest,
-    call: &mut Call,
-) -> RequestDraft {
+/// The `fake-prack` delayed-offer fallback: an INVITE with no offer leaves
+/// the stack nothing to acknowledge a reliable provisional's answer with, so
+/// the strategy disables itself and the call falls back to plain relay — no
+/// half-active state. The INVITE's `Supported` is the mint's
+/// (`capabilities::withheld_option_tags` keeps `100rel` off it); nothing is
+/// rewritten here. Every other strategy stands. The initial route alone
+/// falls back: a leg minted later without an offer is kept unreliable by the
+/// same withhold, and the mask stays up — the caller was shown one early
+/// dialog and the 2xx owes it that To-tag (`relay_first_18x`).
+fn disable_fake_prack_on_a_delayed_offer(call: &mut Call, offers_sdp: bool) {
     use call::features::RelayFirst18xStrategy;
-    let strategy = match call::helpers::relay_first_18x_strategy(call) {
-        Some(s) => s,
-        None => return draft,
-    };
-    if strategy == RelayFirst18xStrategy::PromotePemTo200 {
-        return draft; // PEM service owns this.
+    if offers_sdp
+        || call::helpers::relay_first_18x_strategy(call) != Some(RelayFirst18xStrategy::FakePrack)
+    {
+        return;
     }
-
-    let alice_supported = a_invite.header::<Supported>().and_then(Result::ok);
-    let alice_has_sdp = !a_invite.body().is_empty()
-        && a_invite
-            .header::<MediaType>()
-            .and_then(Result::ok)
-            .is_some_and(|ct| ct.is("application/sdp"));
-
-    let keep_100rel = strategy == RelayFirst18xStrategy::FakePrack && alice_has_sdp;
-    let withheld =
-        call.features.as_ref().and_then(|f| f.withhold_option_tags.clone()).unwrap_or_default();
-
-    // Self-disable on the fake-prack delayed-offer fallback.
-    if strategy == RelayFirst18xStrategy::FakePrack && !alice_has_sdp {
-        if let Some(f) = call.features.as_mut() {
-            f.relay_first_18x_to_180 = None;
-        }
-    }
-
-    // Compute the Supported value to forward to bob. The call-scoped withhold
-    // (`features.withhold_option_tags`) outranks the strategy's own keep: a
-    // withheld tag never rides, whichever machine states the line.
-    let supported_out = alice_supported.and_then(|offered| {
-        let kept = if keep_100rel { offered } else { offered.without("100rel") };
-        let kept = withheld.iter().fold(kept, |set, tag| set.without(tag));
-        (!kept.is_empty()).then_some(kept)
-    });
-
-    // This strategy path owns `Supported` on the b-leg INVITE: whatever
-    // build_b_leg stated is replaced by alice's value (or dropped entirely).
-    let draft = draft.remove(&HeaderName::Supported);
-    match supported_out {
-        Some(val) => draft.push(val),
-        None => draft,
+    if let Some(f) = call.features.as_mut() {
+        f.relay_first_18x_to_180 = None;
     }
 }

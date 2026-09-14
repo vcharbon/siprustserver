@@ -124,6 +124,11 @@ pub struct UdpEndpointCounters {
     pub pre_ingress_replies: u64,
     /// Pre-ingress replies the socket refused to send (see [`SendErrorKind`]).
     pub pre_ingress_reply_failures: u64,
+    /// Datagrams dropped because the socket could not take them without
+    /// suspending the sender ([`SendErrorKind::WouldBlock`]): the send buffer
+    /// was full. Non-zero means egress was throttled by the kernel; the
+    /// datagrams are lost and SIP retransmission covers them.
+    pub send_would_block: u64,
 }
 
 /// SIP role(s) a bind serves (port of `UaRole`). The audit framework's
@@ -177,6 +182,13 @@ pub struct BindUdpOpts {
     /// own ladder column instead of all legs collapsing onto the socket.
     /// Ignored by the transports; recording-only.
     pub lane_label: Option<String>,
+    /// `SO_SNDBUF` to request on the socket, in bytes. `None` leaves the
+    /// kernel default (`net.core.wmem_default`). The kernel clamps the request
+    /// to `net.core.wmem_max` and doubles it for its own overhead. A sender
+    /// whose datagrams the kernel may hold for a while (an unresolved next
+    /// hop, a stalled interface) wants this well above what one such hold can
+    /// pin — see `docs/adr/0031`. Honored by the real impl only.
+    pub send_buffer_bytes: Option<usize>,
     /// Timeline this endpoint stamps [`UdpPacket::arrival_ms`] on. Share the
     /// process `Clock` with whoever ages those packets: two `Clock`s differ by
     /// a constant, a raw wall reading diverges from one without bound.
@@ -194,8 +206,15 @@ impl BindUdpOpts {
             reuse_port: false,
             roles: None,
             lane_label: None,
+            send_buffer_bytes: None,
             clock: Clock::system(),
         }
+    }
+
+    /// Request `SO_SNDBUF` of `bytes` (see the `send_buffer_bytes` field).
+    pub fn with_send_buffer(mut self, bytes: usize) -> Self {
+        self.send_buffer_bytes = Some(bytes);
+        self
     }
 
     /// Stamp arrivals on `clock` (see the `clock` field) — the bind seam a
@@ -310,6 +329,10 @@ pub enum SendErrorKind {
     /// `ENETUNREACH` / `EHOSTUNREACH` / `ECONNREFUSED`: no route to the peer,
     /// or the peer's port answered with an ICMP rejection.
     Unreachable,
+    /// `EAGAIN`: the socket's send buffer is full, so taking the datagram
+    /// would have suspended the sender. The datagram is dropped instead — an
+    /// endpoint never waits on the transport (see `docs/adr/0031`).
+    WouldBlock,
     /// Everything else — buffer exhaustion, a filter's `EPERM`, a closed fd.
     #[default]
     Other,
@@ -317,13 +340,18 @@ pub enum SendErrorKind {
 
 impl SendErrorKind {
     /// Classify an OS send failure by its errno. An error carrying no errno
-    /// (a simulated fabric's refusal) is [`Self::Other`].
+    /// (a simulated fabric's refusal) is [`Self::Other`], unless it states
+    /// `WouldBlock` itself.
     pub fn of(err: &std::io::Error) -> Self {
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            return SendErrorKind::WouldBlock;
+        }
         match err.raw_os_error() {
             Some(libc::EMSGSIZE) => SendErrorKind::MessageTooLong,
             Some(libc::ENETUNREACH | libc::EHOSTUNREACH | libc::ECONNREFUSED) => {
                 SendErrorKind::Unreachable
             }
+            Some(libc::EAGAIN) => SendErrorKind::WouldBlock,
             _ => SendErrorKind::Other,
         }
     }
@@ -333,6 +361,7 @@ impl SendErrorKind {
         match self {
             SendErrorKind::MessageTooLong => "message_too_long",
             SendErrorKind::Unreachable => "unreachable",
+            SendErrorKind::WouldBlock => "would_block",
             SendErrorKind::Other => "other",
         }
     }
@@ -378,6 +407,11 @@ mod send_error_tests {
         assert_eq!(os(libc::EHOSTUNREACH).kind, SendErrorKind::Unreachable);
         assert_eq!(os(libc::ENETUNREACH).kind, SendErrorKind::Unreachable);
         assert_eq!(os(libc::ECONNREFUSED).kind, SendErrorKind::Unreachable);
+        assert_eq!(os(libc::EAGAIN).kind, SendErrorKind::WouldBlock);
+        assert_eq!(
+            SendError::from(std::io::Error::from(std::io::ErrorKind::WouldBlock)).kind,
+            SendErrorKind::WouldBlock
+        );
         assert_eq!(os(libc::ENOBUFS).kind, SendErrorKind::Other);
     }
 

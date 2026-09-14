@@ -250,6 +250,19 @@ fn parse_update_headers(v: Option<&serde_json::Value>) -> Option<SipHeaderUpdate
     })
 }
 
+/// The optional `label` of a plan object: absent (or not a string) = none.
+fn parse_label(obj: &serde_json::Value) -> Option<String> {
+    obj.get("label").and_then(|v| v.as_str()).map(str::to_string)
+}
+
+/// A plan object's `service_ext` map: absent = empty.
+fn parse_service_ext(obj: &serde_json::Value) -> BTreeMap<String, serde_json::Value> {
+    obj.get("service_ext")
+        .and_then(|v| v.as_object())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default()
+}
+
 /// `[{uri, q?}]` → ordered redirect Contact list.
 fn parse_contacts(v: Option<&serde_json::Value>) -> Vec<RedirectContact> {
     v.and_then(|x| x.as_array())
@@ -293,6 +306,7 @@ fn route_from_obj(obj: &serde_json::Value) -> Option<RouteDecision> {
     // could never reach it: this is the only JSON → `RouteDecision` decoder, so
     // dropping the field makes `"trace": true` in an `X-Api-Call` plan a no-op.
     r.trace = obj.get("trace").and_then(|v| v.as_bool()).unwrap_or(false);
+    r.label = parse_label(obj);
     if let Some(arr) = obj.get("call_limiter").and_then(|v| v.as_array()) {
         for e in arr {
             if let (Some(id), Some(limit)) =
@@ -313,14 +327,17 @@ fn treatment_from_obj(obj: &serde_json::Value) -> Option<CallTreatment> {
             reject_code: obj.get("code").and_then(|v| v.as_u64()).unwrap_or(603) as u16,
             reject_reason: obj.get("reason").and_then(|v| v.as_str()).map(str::to_string),
             update_headers: parse_update_headers(obj.get("update_headers")),
+            service_ext: parse_service_ext(obj),
+            label: parse_label(obj),
         })),
         "redirect" => Some(CallTreatment::Redirect(RedirectDecision {
             code: obj.get("code").and_then(|v| v.as_u64()).unwrap_or(302) as u16,
             reason: obj.get("reason").and_then(|v| v.as_str()).map(str::to_string),
             contacts: parse_contacts(obj.get("contacts")),
             update_headers: parse_update_headers(obj.get("update_headers")),
+            label: parse_label(obj),
         })),
-        "relay" => Some(CallTreatment::Relay),
+        "relay" => Some(CallTreatment::Relay { label: parse_label(obj) }),
         _ => route_from_obj(obj).map(CallTreatment::Route),
     }
 }
@@ -379,7 +396,7 @@ fn failure_from_context(req: &CallFailureRequest) -> CallFailureResponse {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
     {
         Some(v) => v,
-        None => return CallTreatment::Relay,
+        None => return CallTreatment::Relay { label: None },
     };
     let routes = ctx.get("routes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let on_exhausted = ctx
@@ -392,7 +409,7 @@ fn failure_from_context(req: &CallFailureRequest) -> CallFailureResponse {
             return CallTreatment::Route(r);
         }
     }
-    treatment_from_obj(&on_exhausted).unwrap_or(CallTreatment::Relay)
+    treatment_from_obj(&on_exhausted).unwrap_or(CallTreatment::Relay { label: None })
 }
 
 /// Default scripted `/call/refer` behavior, keyed on the REFER's `X-Api-Call`
@@ -409,6 +426,7 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
             return ReferOutcome::Allow(CallReferResponse::Reject {
                 code: 603,
                 reason: Some("Declined".into()),
+                label: None,
             })
         }
     };
@@ -418,6 +436,7 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
             return ReferOutcome::Allow(CallReferResponse::Reject {
                 code: 603,
                 reason: Some("Declined".into()),
+                label: None,
             })
         }
     };
@@ -436,6 +455,7 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
                     .unwrap_or("Forbidden")
                     .to_string(),
             ),
+            label: parse_label(&instruction),
         }),
         "refer-http-500" => ReferOutcome::Error,
         "refer-http-timeout" => ReferOutcome::Hang,
@@ -471,11 +491,13 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
                 update_headers,
                 no_answer_timeout_sec,
                 callback_context,
+                label: parse_label(&instruction),
             })
         }
         _ => ReferOutcome::Allow(CallReferResponse::Reject {
             code: 603,
             reason: Some("Declined".into()),
+            label: None,
         }),
     }
 }
@@ -616,6 +638,7 @@ pub fn route_to(host: &str, port: u16) -> RouteDecision {
         service_ext: Default::default(),
         subscriptions: Vec::new(),
         trace: false,
+        label: None,
     }
 }
 
@@ -659,6 +682,8 @@ pub fn reject(code: u16, reason: impl Into<String>) -> NewCallResponse {
         reject_code: code,
         reject_reason: Some(reason.into()),
         update_headers: None,
+        service_ext: Default::default(),
+        label: None,
     })
 }
 
@@ -723,7 +748,9 @@ impl ScriptedBuilder {
         ScriptedDecisionEngine {
             rules: self.rules,
             fallback: self.fallback.unwrap_or_else(|| Box::new(|_| reject(404, "Not Found"))),
-            failure: self.failure.unwrap_or_else(|| Box::new(|_| CallTreatment::Relay)),
+            failure: self
+                .failure
+                .unwrap_or_else(|| Box::new(|_| CallTreatment::Relay { label: None })),
             release: self.release,
             refer: self.refer.unwrap_or_else(|| {
                 // Default: transfer is dormant — reject 501 (the pre-slice stub).
@@ -731,6 +758,7 @@ impl ScriptedBuilder {
                     ReferOutcome::Allow(CallReferResponse::Reject {
                         code: 501,
                         reason: Some("Not Implemented".into()),
+                        label: None,
                     })
                 })
             }),
@@ -778,7 +806,7 @@ impl CallDecisionEngine for ScriptedDecisionEngine {
     ) -> Result<CallReleaseResponse, CallDecisionError> {
         match &self.release {
             // Unscripted: the trait's back-compat default (local teardown).
-            None => Ok(CallReleaseResponse::Release),
+            None => Ok(CallReleaseResponse::Release { label: None }),
             Some(f) => match f(&req) {
                 ReleaseOutcome::Respond(resp) => Ok(resp),
                 ReleaseOutcome::Error => {
@@ -1206,10 +1234,13 @@ mod tests {
         // Only one route → next failure exhausts → Relay.
         assert!(matches!(
             eng.call_failure(failure_req(Some(&ctx))).await.unwrap(),
-            CallTreatment::Relay
+            CallTreatment::Relay { .. }
         ));
         // No context at all → Relay too.
-        assert!(matches!(eng.call_failure(failure_req(None)).await.unwrap(), CallTreatment::Relay));
+        assert!(matches!(
+            eng.call_failure(failure_req(None)).await.unwrap(),
+            CallTreatment::Relay { .. }
+        ));
     }
 
     #[tokio::test]

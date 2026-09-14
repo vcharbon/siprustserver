@@ -1,7 +1,9 @@
-# Every recipe is a plain cargo call: the toolchain, linker and profile shape
-# come from `rust-toolchain.toml`, `.cargo/config.toml` and `Cargo.toml`, so a
-# hand-typed `cargo test` behaves identically to `just test`. Nothing here sets
-# RUSTFLAGS — that would silently drop the workspace flags (see ADR-0029).
+# Every recipe is a plain cargo call: the toolchain, linker, jobs cap and
+# profile shape come from `rust-toolchain.toml`, `.cargo/config.toml` and
+# `Cargo.toml`, so a hand-typed `cargo test` behaves identically to `just test`
+# — bounded to 4 jobs, which is what keeps a whole-workspace link from
+# exhausting memory (ADR-0029 X5). Nothing here sets RUSTFLAGS or --jobs: the
+# first would silently drop the workspace flags, the second raise the cap.
 #
 # Test lanes follow CLAUDE.md "Test-runtime policy": the default lane is every
 # test on the fake clock (paused tokio) or fast on the real clock; anything

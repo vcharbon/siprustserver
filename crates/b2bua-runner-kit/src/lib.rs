@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use b2bua::cdr::{BufferedCdrWriter, CdrRecord, CdrWriter};
-use b2bua::config::B2buaConfig;
+use b2bua::config::{B2buaConfig, CdrConfig};
 use b2bua::decision::CallDecisionEngine;
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::limiter_http::HttpCallLimiter;
@@ -208,6 +208,10 @@ pub struct RunnerEnv {
     pub metrics_addr: String,
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
     pub queue_max: usize,
+    /// `B2BUA_UDP_SNDBUF` — `SO_SNDBUF` requested on the signalling socket,
+    /// bytes (default empty = the kernel's `wmem_default`; clamped at
+    /// `wmem_max`). See ADR-0033.
+    pub udp_sndbuf: Option<usize>,
     /// `B2BUA_CDR_QUEUE` — buffered-CDR submit queue depth (default 1024).
     pub cdr_queue: usize,
     /// `B2BUA_ORDINAL` — worker ordinal stamped in callRef (default `w0`).
@@ -259,7 +263,7 @@ pub struct RunnerEnv {
     pub call_control_timeout_ms: i64,
     /// `B2BUA_ACK_TIMEOUT_SEC` — un-ACKed 2xx give-up deadline (RFC 3261
     /// §13.3.1.4, 64·T1 = 32 s; <= 0 tears nothing down — the ladder itself
-    /// always runs, ADR-0029 X5).
+    /// always runs, ADR-0032 X5).
     pub ack_timeout_sec: i64,
     /// `B2BUA_CPS_BUCKET_SIZE` — Tier-3 admission gate bucket size (default 1000).
     pub cps_bucket_size: u32,
@@ -285,6 +289,12 @@ pub struct RunnerEnv {
     /// names copied from the a-leg INVITE onto every originated b-leg INVITE
     /// (default empty = no relay; structural headers never relayable).
     pub relay_headers: Vec<String>,
+    /// `B2BUA_CDR_MESSAGE_RING` — the per-leg message-ring cap on the call
+    /// record (default 0 = off).
+    pub cdr_message_ring: usize,
+    /// `B2BUA_CDR_CAPTURED_HEADERS` — the header names every ring entry
+    /// captures the values of, comma-separated (default empty).
+    pub cdr_captured_headers: Vec<String>,
     /// `LIMITER_URL` — shared limiter base URL; empty → `NoopLimiter` (fail-open).
     pub limiter_url: String,
     /// `LIMITER_TIMEOUT_MS` — per-request fail-open budget (default 150).
@@ -294,6 +304,10 @@ pub struct RunnerEnv {
     pub limiter_refresh_sec: i64,
     /// `B2BUA_DRAIN_GRACE_MS` — SIGTERM drain grace before exit (default 5000).
     pub drain_grace_ms: u64,
+    /// `B2BUA_DRAIN_MIN_MS` — floor a withdrawn worker's caught-up drain exit
+    /// waits out, so a request routed before the withdrawal reached the proxy is
+    /// still served (default 1000; ADR-0031 D2).
+    pub drain_min_ms: u64,
 }
 
 impl RunnerEnv {
@@ -321,6 +335,10 @@ impl RunnerEnv {
                 .unwrap_or(false),
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
             queue_max: env_or("B2BUA_QUEUE", "8192").parse().expect("B2BUA_QUEUE"),
+            udp_sndbuf: match env_or("B2BUA_UDP_SNDBUF", "") {
+                s if s.is_empty() => None,
+                s => Some(s.parse().expect("B2BUA_UDP_SNDBUF")),
+            },
             cdr_queue: env_or("B2BUA_CDR_QUEUE", "1024").parse().expect("B2BUA_CDR_QUEUE"),
             ordinal: env_or("B2BUA_ORDINAL", "w0"),
             // Dispatch throttle ceilings — deliberately high so they never cap
@@ -382,10 +400,15 @@ impl RunnerEnv {
                 .parse()
                 .expect("B2BUA_RETRY_AFTER_JITTER_SEC"),
             relay_headers: split_csv(&env_or("B2BUA_RELAY_HEADERS", "")),
+            cdr_message_ring: env_or("B2BUA_CDR_MESSAGE_RING", "0")
+                .parse()
+                .expect("B2BUA_CDR_MESSAGE_RING"),
+            cdr_captured_headers: split_csv(&env_or("B2BUA_CDR_CAPTURED_HEADERS", "")),
             limiter_url: env_or("LIMITER_URL", ""),
             limiter_timeout_ms: env_or("LIMITER_TIMEOUT_MS", "150").parse().unwrap_or(150),
             limiter_refresh_sec: env_or("LIMITER_WINDOW_SECONDS", "300").parse().unwrap_or(300),
             drain_grace_ms: env_or("B2BUA_DRAIN_GRACE_MS", "5000").parse().unwrap_or(5000),
+            drain_min_ms: env_or("B2BUA_DRAIN_MIN_MS", "1000").parse().unwrap_or(1000),
         }
     }
 
@@ -441,25 +464,33 @@ impl RunnerEnv {
         // boxed clone (it drives the recv loop), while a second clone backs the
         // `UdpTransportMetrics` live `queueDepth`/`dropsTailDrop` getters.
         let net = RealSignalingNetwork::new();
+        let mut bind_opts =
+            BindUdpOpts::new(listen_sa, self.queue_max).with_pre_ingress(brake_hook);
+        if let Some(bytes) = self.udp_sndbuf {
+            bind_opts = bind_opts.with_send_buffer(bytes);
+        }
         let endpoint: Arc<dyn UdpEndpoint> = net
-            .bind_udp(BindUdpOpts::new(listen_sa, self.queue_max).with_pre_ingress(brake_hook))
+            .bind_udp(bind_opts)
             .await
             .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"))
             .into();
         let local = endpoint.local_addr();
 
         // The `UdpTransport` facade's Prometheus-visible shape: the brake
-        // counters + live queue depth / queue_max / tail-drop proxied off the
-        // bound endpoint. The buffered-send facets are permanently zero
-        // (`BufferedUdpEndpoint` was a Node-era guard with no tokio analogue).
+        // counters + live queue depth / queue_max / tail-drop / refused sends
+        // proxied off the bound endpoint. The buffered-send facets are
+        // permanently zero (`BufferedUdpEndpoint` was a Node-era guard with no
+        // tokio analogue).
         let udp_metrics = {
             let ep_depth = endpoint.clone();
             let ep_tail = endpoint.clone();
+            let ep_would_block = endpoint.clone();
             UdpTransportMetrics::new(
                 self.queue_max,
                 brake_counters.clone(),
                 Arc::new(move || ep_depth.queue_depth() as u64),
                 Arc::new(move || ep_tail.counters().tail_dropped),
+                Arc::new(move || ep_would_block.counters().send_would_block),
             )
         };
         tracing::info!(
@@ -553,6 +584,10 @@ impl RunnerEnv {
             retry_after_base_sec: self.retry_after_base_sec,
             worker_allowed_target_suffixes: self.worker_allowed_target_suffixes.clone(),
             relay_headers: self.relay_headers.clone(),
+            cdr: CdrConfig {
+                message_ring: self.cdr_message_ring,
+                captured_headers: self.cdr_captured_headers.clone(),
+            },
             ..Default::default()
         };
         // Forbid booting with a config that would silently break HA (too-short a
@@ -789,12 +824,14 @@ impl RunnerBase {
 
     /// Graceful shutdown: SIGTERM (k8s pod termination) latches Draining —
     /// OPTIONS self-reports 503 and the readiness probe flips NotReady so the
-    /// proxy steers new calls away — then waits up to the drain grace
-    /// (`B2BUA_DRAIN_GRACE_MS`) for in-flight calls to finish. Ctrl-C
+    /// proxy steers new calls away — then waits for the first of: the in-flight
+    /// calls finishing, a withdrawn worker's backups holding them past
+    /// `B2BUA_DRAIN_MIN_MS` (ADR-0031 D2), or `B2BUA_DRAIN_GRACE_MS`. Ctrl-C
     /// (interactive) exits immediately. Returns when the process should exit.
     pub async fn run_until_shutdown(&self, core: &Arc<B2buaCore>) {
         let name = &self.name;
         let drain_grace_ms = self.env.drain_grace_ms;
+        let drain_min_ms = self.env.drain_min_ms;
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!(service = name, signal = "SIGINT", "shutting down");
@@ -804,20 +841,34 @@ impl RunnerBase {
                     service = name,
                     signal = "SIGTERM",
                     drain_grace_ms,
+                    drain_min_ms,
                     "begin draining"
                 );
-                // Latch Draining, then wait for the live call map to clear —
-                // capped at the grace. A node with no calls exits at once; a
-                // busy node is bounded; a residual is logged, never silently cut.
-                let residual = core.drain(std::time::Duration::from_millis(drain_grace_ms)).await;
-                if residual == 0 {
-                    tracing::info!(service = name, residual = 0, "drained cleanly — exiting");
-                } else {
-                    tracing::warn!(
-                        service = name,
-                        residual,
-                        "drain grace elapsed with calls still active — exiting"
-                    );
+                // Latch Draining, then wait. A node with no calls exits at once;
+                // a withdrawn node whose backups hold its calls exits past the
+                // floor; anything else is bounded by the grace. The exit reason
+                // and the residual are logged, never silently cut.
+                let out = core
+                    .drain(b2bua::drain::DrainBounds {
+                        grace: std::time::Duration::from_millis(drain_grace_ms),
+                        floor: std::time::Duration::from_millis(drain_min_ms),
+                    })
+                    .await;
+                let reason = out.exit.label();
+                let residual = out.residual;
+                match out.exit {
+                    b2bua::drain::DrainExit::Quiescent | b2bua::drain::DrainExit::CaughtUp => {
+                        tracing::info!(service = name, reason, residual, "drained — exiting");
+                    }
+                    b2bua::drain::DrainExit::Grace
+                    | b2bua::drain::DrainExit::GracePeersBehind => {
+                        tracing::warn!(
+                            service = name,
+                            reason,
+                            residual,
+                            "drain grace elapsed with calls still active — exiting"
+                        );
+                    }
                 }
             }
         }

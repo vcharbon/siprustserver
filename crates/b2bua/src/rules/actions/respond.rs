@@ -6,13 +6,15 @@
 //! [`super::ladder`].
 
 use call::helpers::{set_leg_state, Scope};
-use call::{Call, LegState};
+use call::{Call, LegState, TimerType};
 use sip_message::draft::Entry;
 use sip_message::generators::{self, GenerateResponseOpts};
 use sip_message::header::{HeaderClass, HeaderName};
 use sip_message::{SipHeader, SipStr};
 
-use crate::effects::{HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{
+    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+};
 use crate::rules::capabilities::{self, Face};
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
@@ -79,6 +81,7 @@ impl ActionExecutor<'_> {
                 destination: dest,
                 label: format!("{status} (respond)"),
                 leg_id: Some(ctx.source_leg_id.to_string()),
+                provenance: Provenance::Authored,
             });
         }
     }
@@ -124,6 +127,7 @@ impl ActionExecutor<'_> {
             None,
             None,
             extra,
+            Provenance::Relayed,
         ) {
             fx.outbound.push(effect);
         }
@@ -192,6 +196,7 @@ impl ActionExecutor<'_> {
             None,
             None,
             extra,
+            Provenance::Authored,
         ) {
             fx.outbound.push(effect);
         }
@@ -288,6 +293,7 @@ impl ActionExecutor<'_> {
             content_type,
             None,
             extra_headers,
+            Provenance::Authored,
         ) {
             fx.outbound.push(effect);
         }
@@ -320,8 +326,8 @@ impl ActionExecutor<'_> {
     ///
     /// The sip-txn layer only *stores* `uas_to_tag` from the first >100 response
     /// (the 183's A1) and never rewrites a later final's `to.tag`, so the `200`
-    /// leaves under A2 verbatim; a late CANCEL's autonomous 487 still carries the
-    /// pinned A1, which harmlessly matches the caller's abandoned early dialog.
+    /// leaves under A2 verbatim. A CANCEL before the 2xx is answered 200 + 487
+    /// under A1 by the layer; after it, 200 under A2 and no 487 (RFC 3261 §9.2).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn answer_a_leg_new_dialog(
         &self,
@@ -398,6 +404,7 @@ impl ActionExecutor<'_> {
             content_type,
             None,
             extra_headers,
+            Provenance::Authored,
         ) else {
             return;
         };
@@ -418,6 +425,21 @@ impl ActionExecutor<'_> {
         self.send_a_leg_answer(call, fx, effect);
         // The caller now holds a confirmed dialog under A2 — confirm the a-leg.
         *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
+        // An answer the B2BUA authors on its own behalf is an answer the caller
+        // receives: under the `Answer` anchor the overall call ceiling runs from
+        // it (`MaxDurationAnchor`), as `confirm-dialog` anchors it at a 2xx it
+        // relays. Under `Creation` the creation-time arm stands.
+        if let Some(platform) = call.features.as_ref().map(|f| f.platform.clone()) {
+            if platform.max_duration_anchor == call::features::MaxDurationAnchor::Answer {
+                self.schedule(
+                    call,
+                    fx,
+                    TimerType::GlobalDuration,
+                    platform.max_duration_sec * 1000,
+                    None,
+                );
+            }
+        }
     }
 }
 

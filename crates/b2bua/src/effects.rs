@@ -23,7 +23,7 @@ pub enum OutboundTxnMode {
     /// until the branch's first provisional, dropped if the txn dies first).
     /// Requests only: a response never bypasses its server transaction as a
     /// `Response` — the one raw path for response bytes is a retained
-    /// [`OutboundBody::Datagram`] (ADR-0029 X3).
+    /// [`OutboundBody::Datagram`] (ADR-0032 X3).
     Raw,
 }
 
@@ -32,13 +32,31 @@ pub enum OutboundTxnMode {
 pub enum OutboundBody {
     Request(SipRequest),
     Response(SipResponse),
-    /// A retained emission repeated as the bytes it left as (ADR-0029 X3):
+    /// A retained emission repeated as the bytes it left as (ADR-0032 X3):
     /// they reach the socket with no parse and no serialize, so a repeat
     /// cannot differ from the message it repeats. Always raw, whatever the
     /// mode says — the transaction that emitted the original is `Completed`
     /// or never existed. The emission's own label says what is repeated and
     /// what paced it; the datagram is never read for either.
     Datagram(RetainedEmission),
+}
+
+/// Whose message an outbound emission carries, as the message ring records
+/// it. A retained datagram's repeat carries the value of the message it
+/// repeats and is never recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    /// A peer leg's message forwarded (the RFC 3261 §16 half of a B2BUA), or
+    /// sent in reaction to one — a masked or promoted provisional, a failure
+    /// restated from the callee's final.
+    Relayed,
+    /// This stack's own: a UAS/UAC-authored final, an ACK or PRACK it owes, a
+    /// teardown, a decision's reject.
+    Authored,
+    /// A liveness probe this stack originates — the in-dialog OPTIONS
+    /// keepalive. Its own, and not dialog history: the ring records neither
+    /// it nor its answer.
+    Probe,
 }
 
 /// One SIP message to emit.
@@ -49,6 +67,7 @@ pub struct OutboundSipEffect {
     pub destination: (String, u16),
     pub label: String,
     pub leg_id: Option<String>,
+    pub provenance: Provenance,
 }
 
 /// Critical state effects — run first, under an uninterruptible wrap; state is
@@ -91,6 +110,10 @@ pub enum BufferedObservabilityEffect {
         event: &'static str,
         rule: &'static str,
     },
+    /// A call reached `Terminated` carrying no termination record: a path to
+    /// terminal states no cause. The router counts it as
+    /// `termination_unrecorded`.
+    TerminationUnrecorded,
 }
 
 /// Fire-and-forget effects — detached work / re-entrant events.

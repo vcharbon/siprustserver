@@ -1,10 +1,11 @@
 //! Message bodies (`PCAP2TEST_PIVOT_V3.md` §8.3).
 //!
-//! Three shapes, and a body is exactly one of them: a resource the send emits,
-//! a declared shape the expect checks, or a decomposed multipart. **Splitting a
-//! multipart body is EXTRACTION's job** — the flows emitter writes each part out
-//! with its content-type, its entity headers and its payload, so no consumer
-//! here owns MIME and the pivot only references files that already exist.
+//! Three shapes, and a body is exactly one of them: a resource the send emits
+//! (or the expect asserts by content), a declared shape the expect checks, or a
+//! decomposed multipart. **Splitting a multipart body is EXTRACTION's job** —
+//! the flows emitter writes each part out with its content-type, its entity
+//! headers and its payload, so no consumer here owns MIME and the pivot only
+//! references files that already exist.
 //!
 //! A body is emitted as the document holds it: every part's payload byte-exact,
 //! its `Content-ID` and its entity headers verbatim (RFC 2045 §3). SDP is the
@@ -35,7 +36,10 @@ pub struct ResourceBody {
     #[serde(rename = "ref")]
     pub reference: String,
     /// Rewrite tokens the lane applies before emission (e.g. `c=addr`,
-    /// `m=port` on SDP). Omitted where the body replays byte-exact.
+    /// `m=port` on SDP). Omitted where the body replays byte-exact. On an
+    /// expect the tokens name the lane-owned fields the `sdp` compare masks
+    /// where the run rebooked media: `c=addr` the address of a `c=IN IP4`
+    /// line, `m=port` the non-zero port of an `m=` line, its `/count` kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rewrite: Vec<String>,
     /// Handling mode, on a body the registry freezes.
@@ -47,6 +51,34 @@ pub struct ResourceBody {
     /// `application/sdp` — so the stored and derived values cannot drift.
     #[serde(rename = "content-type", default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    /// How an EXPECT's received body is held against the resource; absent
+    /// means `exact`. Meaningless on a send, where lint refuses it
+    /// (`body/compare-on-send`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare: Option<BodyCompare>,
+}
+
+/// How a received body is compared with the resource an expect states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum BodyCompare {
+    /// Byte for byte.
+    Exact,
+    /// As XML text after normalisation on both sides: the XML declaration
+    /// dropped, whitespace-only text between tags removed, leading and
+    /// trailing whitespace trimmed. Nothing else — no attribute reordering, no
+    /// entity work.
+    Xml,
+    /// As an SDP session description: session section then media sections by
+    /// position; within a section lines compare as a multiset (attribute order
+    /// erased); `o=` sess-id and sess-version are masked always, and every
+    /// field a `rewrite` token of the expect names — exactly what the render
+    /// writes: `c=addr` the address of a `c=IN IP4` line, `m=port` the non-zero
+    /// port of an `m=` line with its `/count` kept; `a=rtcp` never — is masked
+    /// where the run's media plane rebooked it. On a verbatim run the tokens
+    /// mask nothing and two descriptions the structure cannot tell apart must
+    /// be the same bytes. Nothing else.
+    Sdp,
 }
 
 /// A body asserted by SHAPE rather than content.
@@ -184,6 +216,35 @@ mod tests {
         assert!(serde_json::from_str::<Body>(r#"{"mode":"frozen"}"#).is_err());
         // `sdp-present` is a shape, so it cannot ride on a resource body.
         assert!(serde_json::from_str::<Body>(r#"{"ref":"r.sdp","mode":"sdp-present"}"#).is_err());
+    }
+
+    /// `compare` rides a resource body and nothing else: a shape has no
+    /// resource to compare against, and a `frozen` mode without a ref is still
+    /// no resource whatever it compares under.
+    #[test]
+    fn a_compare_mode_round_trips_on_a_resource_body_only() {
+        let text = r#"{"ref":"resources/uas1_r0_0.xml","mode":"frozen","content-type":"application/example+xml","compare":"xml"}"#;
+        let Body::Resource(resource) = parse(text) else {
+            panic!("a ref with a compare mode is a resource body")
+        };
+        assert_eq!(resource.compare, Some(BodyCompare::Xml));
+        assert_eq!(serde_json::to_string(&resource).unwrap(), text);
+        let Body::Resource(exact) = parse(r#"{"ref":"r.xml","mode":"frozen","compare":"exact"}"#)
+        else {
+            panic!("a resource body")
+        };
+        assert_eq!(exact.compare, Some(BodyCompare::Exact));
+        let sdp =
+            r#"{"ref":"resources/uas1_r0_0.sdp","rewrite":["c=addr","m=port"],"compare":"sdp"}"#;
+        let Body::Resource(described) = parse(sdp) else { panic!("a resource body") };
+        assert_eq!(described.compare, Some(BodyCompare::Sdp));
+        assert_eq!(described.rewrite, ["c=addr", "m=port"]);
+        assert_eq!(serde_json::to_string(&described).unwrap(), sdp);
+        // The shape stays for an authored document that asserts presence only.
+        assert!(matches!(parse(r#"{"mode":"sdp-present"}"#), Body::Shape(_)));
+        assert!(serde_json::from_str::<Body>(r#"{"mode":"absent","compare":"exact"}"#).is_err());
+        assert!(serde_json::from_str::<Body>(r#"{"mode":"frozen","compare":"exact"}"#).is_err());
+        assert!(serde_json::from_str::<Body>(r#"{"ref":"r.xml","compare":"loose"}"#).is_err());
     }
 
     #[test]

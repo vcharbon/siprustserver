@@ -18,7 +18,7 @@ use sip_message::{hops, Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
 
 use crate::config::B2buaConfig;
-use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode};
+use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
 
 use super::address::{address, UnreadableAddress};
 use super::body::{media_type, sdp};
@@ -68,6 +68,31 @@ fn relay_scope(body_override: Option<&[u8]>) -> RelayScope {
 /// carry-through both honour so a withheld name has one meaning on every path.
 fn removed(header_updates: &[(String, Option<String>)], header: &HeaderName) -> bool {
     header_updates.iter().any(|(name, value)| value.is_none() && header.matches(name))
+}
+
+/// The call's own offer on an originated leg's assembled headers: the
+/// `Supported` set states every tag in `offered`, once — an absent line comes
+/// into being for them, a line already naming them all is left byte-identical.
+fn apply_offered_option_tags(extra_headers: &mut Vec<MsgHeader>, offered: &[String]) {
+    if offered.is_empty() {
+        return;
+    }
+    let name = <header::kind::Supported as header::kind::HeaderKind>::name();
+    let lines: Vec<TokenListHeader<header::kind::Supported>> = extra_headers
+        .iter()
+        .filter(|h| name.matches(&h.name))
+        .filter_map(|h| TokenListHeader::parse(&h.value).ok())
+        .collect();
+    let stated = TokenListHeader::combine(lines).unwrap_or_else(TokenListHeader::empty);
+    if offered.iter().all(|tag| stated.contains(tag)) {
+        return;
+    }
+    let widened = offered.iter().fold(stated, |s, tag| s.with(tag.as_str()));
+    extra_headers.retain(|h| !name.matches(&h.name));
+    extra_headers.push(MsgHeader {
+        name: SipStr::owned(name.as_wire_str()),
+        value: SipStr::owned(&widened.to_wire()),
+    });
 }
 
 /// The call-scoped withhold on an originated leg's assembled headers: the
@@ -175,12 +200,18 @@ pub fn build_b_leg(
     // sent is relayed either way and never re-minted — re-minting it breaks the
     // correlation between the two operators' records.
     charging: Option<&call::features::ChargingVectorFeature>,
-    // The call-scoped withhold (`features.withhold_option_tags`, latched across
-    // reroutes): option tags this call never offers a leg it originates. The
+    // The option tags this call never offers a leg it originates
+    // (`rules::capabilities::withheld_option_tags`): the call-scoped
+    // declaration, latched across reroutes, and the armed strategy's own. The
     // assembled `Supported`/`Require` lines are narrowed by them, whatever
-    // source stated them — the withhold is the call's declared incapability
-    // and outranks every advertisement.
+    // source stated them — the withhold is the call's incapability and
+    // outranks every advertisement.
     withheld_option_tags: &[String],
+    // The tags the call offers this leg on the stack's own behalf
+    // (`rules::capabilities::offered_option_tags`): stated on the assembled
+    // `Supported` line whatever source stated it, before the withhold, which
+    // outranks it.
+    offered_option_tags: &[String],
     // Leg role (ADR-0014/0016). `None` ⇒ [`LegKind::Destination`]. `adopted` is
     // left `None` so it derives from the kind (`is_adopted`): a `media` leg is
     // unadopted and thus gated out of the generic relay-to-peer fallback.
@@ -231,11 +262,9 @@ pub fn build_b_leg(
         .collect();
     // Advertise this face's capability set on the originated b-leg INVITE (RFC
     // 3261 §20.5/§20.37/§20.1) — the originator's own, relayed, unless the
-    // call declares one; a half nobody stated carries no line. When a
-    // `relayFirst18x` strategy is active, `apply_supported_for_18x` runs after
-    // this and rewrites `Supported` from alice's value (stripping `100rel` as
-    // the strategy dictates). Neither clobbers a caller-supplied value from
-    // `header_updates`.
+    // call declares one; a half nobody stated carries no line. The offer and
+    // the withhold narrow the assembled sets after this. Neither clobbers a
+    // caller-supplied value from `header_updates`.
     for (name, value) in capabilities.lines() {
         if !extra_headers.iter().any(|h| name.matches(&h.name)) {
             extra_headers.push(MsgHeader {
@@ -279,9 +308,11 @@ pub fn build_b_leg(
         }
     }
 
-    // The call-scoped withhold: narrow the assembled option-tag sets by the
-    // tags the call never offers an originated leg — after every source has
-    // stated its lines, so no later mint of the same names can resurface one.
+    // The call's own offer, then its withhold, on the assembled option-tag
+    // sets — after every source has stated its lines, so no later mint of the
+    // same names can resurface a withheld tag or lose an offered one; the
+    // withhold runs last and outranks the offer.
+    apply_offered_option_tags(&mut extra_headers, offered_option_tags);
     apply_withheld_option_tags(&mut extra_headers, withheld_option_tags);
 
     // RFC 7315 §5.6: the element that STARTS a leg generates the identifier its
@@ -386,6 +417,7 @@ pub fn build_b_leg(
         // Media ⇒ unadopted. See `call::helpers::is_adopted`.
         adopted: None,
         invite_final_sent: None,
+        messages: Default::default(),
     };
 
     let effect = OutboundSipEffect {
@@ -394,6 +426,12 @@ pub fn build_b_leg(
         destination: wire_dest,
         label: format!("b-leg INVITE ({leg_id})"),
         leg_id: Some(leg_id.to_string()),
+        // The originator's INVITE forwarded, unless the decision put its own
+        // body on it — then the offer, and the message, are this stack's.
+        provenance: match body_override {
+            Some(_) => Provenance::Authored,
+            None => Provenance::Relayed,
+        },
     };
     Ok((leg, effect))
 }

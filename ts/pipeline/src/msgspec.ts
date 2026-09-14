@@ -110,8 +110,8 @@ export interface BuiltMsg {
  * `bodyStorable` is false on the automatic classes whose body the stack has
  * nowhere to put (§6.3) — a 100 Trying, an ACK to a non-2xx. The captured
  * payload is then DROPPED with a flag rather than stored where nothing would
- * emit it; the expect side still declares the shape, which asserts and composes
- * nothing.
+ * emit it; the expect side still states its body, which asserts what arrived
+ * and composes nothing.
  */
 export const buildMsg = (
   flows: Flows.FlowsDoc,
@@ -190,8 +190,10 @@ export const buildMsg = (
     if (STACK_OWNED_EXPECT_HEADERS.some((n) => hasHeader(msg, n))) present.push("rseq")
     if (STACK_DERIVED_HEADERS.some((n) => hasHeader(msg, n))) present.push("rack")
     if (present.length > 0) spec["headers-present"] = present
-    const b = expectBody(msg)
-    if (b) spec.body = b
+    const expected = expectBody(msg, slugText)
+    if (expected.body !== undefined) spec.body = expected.body
+    resources.push(...expected.resources)
+    flags.push(...expected.flags)
   }
 
   return { spec, resources, flags }

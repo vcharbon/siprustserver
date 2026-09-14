@@ -4382,7 +4382,7 @@ impl CrossMessageAuditRule for C0PortNonZeroRule {
 
 /// RFC 3261 §17 / §13.3.1.4, RFC 3262 §3 live: the merged `rung-byte-identical`
 /// rule (`rfc_rules::rules::retransmit`) at this bind's vantage — a
-/// retransmission is the same message, byte for byte (ADR-0029 X3).
+/// retransmission is the same message, byte for byte (ADR-0032 X3).
 ///
 /// The live policy this bind adds to the rule body: none, and it GATES. The
 /// rule judges what a lane put on the wire TWICE, and a relay's rung is its own
