@@ -98,6 +98,12 @@ impl RecordingReplicationNetwork {
         Self { inner, clock, sink: Arc::new(Mutex::new(Vec::new())), seq: Some(seq) }
     }
 
+    /// This recording — sink, clock and sequence source — over another inner
+    /// network, so per-node handles on one fabric tee into one capture.
+    pub fn over(&self, inner: Arc<dyn ReplicationNetwork>) -> Self {
+        Self { inner, clock: self.clock.clone(), sink: self.sink.clone(), seq: self.seq.clone() }
+    }
+
     /// Snapshot of every captured frame so far (in append order).
     pub fn captured(&self) -> Vec<CapturedFrame> {
         self.sink.lock().unwrap().clone()

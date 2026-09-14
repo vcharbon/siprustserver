@@ -50,6 +50,27 @@
 //! - **error after a delay** ([`Fault::ErrorAfter`]) — after `ms`, `send`
 //!   returns [`SendError::Io`], `recv`→`None`, and a fresh `connect_from` is
 //!   rejected with [`ConnectError::Io`] (a reset some time into the connection).
+//!
+//! ## Node faults: a directed fault named on two declared endpoints
+//! A puller opens its stream from an ephemeral local, so the live wires of a
+//! connection run between that local and a listener, never between two listen
+//! addresses. The harness therefore declares each node's listen address
+//! ([`SimulatedReplicationNetwork::declare_endpoint`]); the server end reads
+//! the `caller` of the opening `PullRequest` and attributes the client local to
+//! the node that owns it (`owner`). A `Delay`/`Stall`/`Resume`/`Cut` whose `src`
+//! and `dst` are both declared lands in a **node-fault overlay** keyed by the
+//! directed owner pair, which every wire actor reads through `owner` at the
+//! three sites it decides at (staging delay, hold, death): a stream opened
+//! after the fault, or attributed after it, inherits it by construction.
+//! `Partition`/`Heal` work the same way (owner compare at delivery + connect).
+//! A pair with an undeclared end keeps the per-direction semantics above.
+//!
+//! A node connects through its own handle ([`NodeReplicationNetwork`], from
+//! [`SimulatedReplicationNetwork::as_node`]) whenever the harness can hand it
+//! one: the stream is then attributed at `connect`, so a partition refuses
+//! the connect outright — the puller never reads a peer it cannot reach as
+//! reached. The `PullRequest` attribution covers a stream opened through the
+//! bare fabric.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -71,13 +92,21 @@ use super::{
 /// A directed connection fault, keyed by `(src, dst)` direction or by endpoint.
 ///
 /// Set on the [`SimulatedReplicationNetwork`] builder before the fabric is
-/// shared. `delay`/`stall`/`cut` are **directed** (apply to `src → dst`);
-/// `partition`/`heal` are **bidirectional** (both directions between two
-/// endpoints). `reconnect` is not a fault — it is just a fresh `connect`
-/// succeeding once any `cut`/partition on the pair is cleared.
+/// shared, or applied to a live fabric. `delay`/`stall`/`cut` are **directed**
+/// (apply to `src → dst`); `partition`/`heal` are **bidirectional** (both
+/// directions between two endpoints). `reconnect` is not a fault — it is just
+/// a fresh `connect` succeeding once any `cut`/partition on the pair is cleared.
+///
+/// A directed fault whose `src` and `dst` are both **declared endpoints**
+/// ([`declare_endpoint`](SimulatedReplicationNetwork::declare_endpoint)) is a
+/// node fault: it applies to every stream between the two nodes, present and
+/// future, in that direction — the streams either node's puller opened from an
+/// ephemeral local included. Any other pair is one wire direction, literally.
 #[derive(Clone, Debug)]
 pub enum Fault {
-    /// Raise the per-direction transit delay (coerced to `>= 1 ms`).
+    /// Raise the transit delay `src → dst` (coerced to `>= 1 ms`). A frame
+    /// staged after the fault waits the new delay; one already stamped keeps
+    /// its deadline.
     Delay {
         /// Source endpoint of the directed connection.
         src: SocketAddr,
@@ -102,7 +131,9 @@ pub enum Fault {
         dst: SocketAddr,
     },
     /// Cut `src → dst` now: in-flight + future sends on live connections of
-    /// that direction fail; their `recv` yields `None`.
+    /// that direction fail; their `recv` yields `None`. Between declared
+    /// endpoints the cut outlives the streams it closes — a stream reopened
+    /// under it dies as soon as it is attributed — until a [`Fault::Heal`].
     Cut {
         /// Source endpoint.
         src: SocketAddr,
@@ -117,7 +148,8 @@ pub enum Fault {
         /// The other endpoint.
         b: SocketAddr,
     },
-    /// Heal a partition: clear the block so a fresh `connect` succeeds.
+    /// Heal a partition: clear the block so a fresh `connect` succeeds, and
+    /// clear every node fault between the two endpoints, both directions.
     Heal {
         /// One endpoint.
         a: SocketAddr,
@@ -221,6 +253,18 @@ impl DirState {
     }
 }
 
+/// A node fault between two declared endpoints, read by every wire actor whose
+/// owner pair matches. `delay_ms` combines with the wire's own delay by `max`.
+#[derive(Clone, Copy, Debug, Default)]
+struct NodeFault {
+    /// Transit delay in ms (`>= 1`) when set.
+    delay_ms: Option<u64>,
+    /// Delivery held; buffered in order until a `Resume` or `Heal`.
+    stalled: bool,
+    /// Every wire in the direction dies; a reopened one dies once attributed.
+    cut: bool,
+}
+
 struct ListenerHandle {
     /// Queue of accepted server-end connections awaiting `accept()`.
     incoming_tx: mpsc::UnboundedSender<Box<dyn ReplicationConnection>>,
@@ -248,6 +292,10 @@ struct SimShared {
     /// puller opened the stream, learned from the `caller` on its first
     /// `PullRequest`.
     stream_owner: Mutex<HashMap<SocketAddr, SocketAddr>>,
+    /// Directed faults between two declared endpoints, keyed by the owner pair;
+    /// read through `owner` by every wire actor, so they reach streams that run
+    /// between an ephemeral local and a listener.
+    node_faults: Mutex<HashMap<Pair, NodeFault>>,
     /// Live in-flight frame count (across all delivery actors) — harness
     /// introspection, mirrors sip-net's `in_flight`.
     in_flight: AtomicI64,
@@ -289,6 +337,24 @@ impl SimShared {
         self.stream_owner.lock().unwrap().remove(&client);
     }
 
+    /// Is `addr` a declared listen address — one a node fault can be named on?
+    fn is_declared(&self, addr: SocketAddr) -> bool {
+        self.endpoints.lock().unwrap().values().any(|a| *a == addr)
+    }
+
+    /// The node fault on `src → dst`, reading each end as its owning node.
+    fn node_fault(&self, src: SocketAddr, dst: SocketAddr) -> NodeFault {
+        let key = (self.owner(src), self.owner(dst));
+        self.node_faults.lock().unwrap().get(&key).copied().unwrap_or_default()
+    }
+
+    /// Edit the node fault on the owner pair `(src, dst)` and wake every wire,
+    /// so an actor parked on a stale read re-reads at once.
+    fn edit_node_fault(&self, src: SocketAddr, dst: SocketAddr, f: impl FnOnce(&mut NodeFault)) {
+        f(self.node_faults.lock().unwrap().entry((src, dst)).or_default());
+        self.wake_all();
+    }
+
     /// Is `src → dst` partitioned, reading each end as its owning node?
     fn partitioned(&self, src: SocketAddr, dst: SocketAddr) -> bool {
         let (so, du) = (self.owner(src), self.owner(dst));
@@ -328,6 +394,7 @@ impl SimulatedReplicationNetwork {
                 partitions: Mutex::new(HashSet::new()),
                 endpoints: Mutex::new(HashMap::new()),
                 stream_owner: Mutex::new(HashMap::new()),
+                node_faults: Mutex::new(HashMap::new()),
                 in_flight: AtomicI64::new(0),
             }),
         }
@@ -338,74 +405,95 @@ impl SimulatedReplicationNetwork {
         Self::new(transit_delay_ms, 8)
     }
 
-    /// Install one fault. Directed faults that name a not-yet-connected
-    /// direction pre-seed its state so the next `connect` inherits it.
+    /// Install one fault. A directed fault between two declared endpoints
+    /// lands in the node-fault overlay (see the module docs); any other
+    /// directed fault edits its wire direction, pre-seeding the state of a
+    /// not-yet-connected one so the next `connect` inherits it.
     ///
     /// May be called before or after the fabric is shared — all state is behind
     /// interior mutability, so a fault flips the **live** actor's flags.
     pub fn apply_fault(&self, fault: Fault) {
+        let sh = &self.shared;
+        let node_pair = |src, dst| sh.is_declared(src) && sh.is_declared(dst);
         match fault {
+            Fault::Delay { src, dst, ms } if node_pair(src, dst) => {
+                sh.edit_node_fault(src, dst, |n| n.delay_ms = Some(ms.max(1)));
+            }
             Fault::Delay { src, dst, ms } => {
-                self.shared.dir(src, dst).delay_ms.store(ms.max(1), Ordering::SeqCst);
+                sh.dir(src, dst).delay_ms.store(ms.max(1), Ordering::SeqCst);
+            }
+            Fault::Stall { src, dst } if node_pair(src, dst) => {
+                sh.edit_node_fault(src, dst, |n| n.stalled = true);
             }
             Fault::Stall { src, dst } => {
-                self.shared.dir(src, dst).stalled.store(true, Ordering::SeqCst);
+                sh.dir(src, dst).stalled.store(true, Ordering::SeqCst);
             }
             Fault::Resume { src, dst } => {
                 // Resume clears any pause on this direction: a `Stall` (delivery
-                // hold) and a `Block` (writer backpressure black-hole) alike.
-                let d = self.shared.dir(src, dst);
+                // hold, node or wire) and a `Block` (writer backpressure
+                // black-hole, wire only) alike.
+                if node_pair(src, dst) {
+                    sh.edit_node_fault(src, dst, |n| n.stalled = false);
+                }
+                let d = sh.dir(src, dst);
                 d.stalled.store(false, Ordering::SeqCst);
                 d.block.store(false, Ordering::SeqCst);
                 d.wake.notify_waiters();
             }
+            Fault::Cut { src, dst } if node_pair(src, dst) => {
+                sh.edit_node_fault(src, dst, |n| n.cut = true);
+            }
             Fault::Cut { src, dst } => {
-                let d = self.shared.dir(src, dst);
+                let d = sh.dir(src, dst);
                 d.cut.store(true, Ordering::SeqCst);
                 d.wake.notify_waiters();
             }
             Fault::Partition { a, b } => {
                 {
-                    let mut p = self.shared.partitions.lock().unwrap();
+                    let mut p = sh.partitions.lock().unwrap();
                     p.insert((a, b));
                     p.insert((b, a));
                 }
                 for (s, d) in [(a, b), (b, a)] {
-                    let st = self.shared.dir(s, d);
+                    let st = sh.dir(s, d);
                     st.cut.store(true, Ordering::SeqCst);
                     st.wake.notify_waiters();
                 }
                 // Streams the two nodes' pullers already opened run between
                 // ephemeral locals, not the listen pair: they are held at
                 // delivery on the owner compare, so wake them to re-read it.
-                self.shared.wake_all();
+                sh.wake_all();
             }
             Fault::Heal { a, b } => {
                 {
-                    let mut p = self.shared.partitions.lock().unwrap();
+                    let mut p = sh.partitions.lock().unwrap();
                     p.remove(&(a, b));
                     p.remove(&(b, a));
                     // The cut DirStates stay cut (existing conns are dead); a fresh
                     // connect creates new DirStates. Drop the stale ones so the new
                     // direction starts clean.
-                    let mut ds = self.shared.dir_state.lock().unwrap();
+                    let mut ds = sh.dir_state.lock().unwrap();
                     ds.remove(&(a, b));
                     ds.remove(&(b, a));
+                    // Every node fault between the two, both directions.
+                    let mut nf = sh.node_faults.lock().unwrap();
+                    nf.remove(&(a, b));
+                    nf.remove(&(b, a));
                 }
                 // Held streams between the two nodes flush now, in order.
-                self.shared.wake_all();
+                sh.wake_all();
             }
             Fault::DropOnOverflow { src, dst } => {
-                self.shared.drop_on_overflow_pairs.lock().unwrap().insert((src, dst));
-                self.shared.dir(src, dst).drop_on_overflow.store(true, Ordering::SeqCst);
+                sh.drop_on_overflow_pairs.lock().unwrap().insert((src, dst));
+                sh.dir(src, dst).drop_on_overflow.store(true, Ordering::SeqCst);
             }
             Fault::Block { src, dst } => {
                 // Arm the flow-control black-hole. No wake needed: arming only
                 // makes a *future* send park once the window fills.
-                self.shared.dir(src, dst).block.store(true, Ordering::SeqCst);
+                sh.dir(src, dst).block.store(true, Ordering::SeqCst);
             }
             Fault::ErrorAfter { src, dst, ms } => {
-                let d = self.shared.dir(src, dst);
+                let d = sh.dir(src, dst);
                 let at = tokio::time::Instant::now() + Duration::from_millis(ms);
                 *d.error_at.lock().unwrap() = Some(at);
                 // Drive the error on the live (established) connection: after the
@@ -427,11 +515,20 @@ impl SimulatedReplicationNetwork {
         self
     }
 
+    /// `ordinal`'s own handle on this fabric: every stream it opens is
+    /// attributed to it at `connect` (see [`NodeReplicationNetwork`]).
+    pub fn as_node(&self, ordinal: &str) -> NodeReplicationNetwork {
+        NodeReplicationNetwork { shared: self.shared.clone(), ordinal: ordinal.to_string() }
+    }
+
     /// Declare `ordinal`'s replication listen address, so a stream its puller
     /// opens from an ephemeral local is attributed to it (the `caller` on the
-    /// opening `PullRequest` names the ordinal). Without a declaration a stream
-    /// stands for its own address and a [`Fault::Partition`] between two listen
-    /// addresses reaches only fresh `connect`s.
+    /// opening `PullRequest` names the ordinal) and a directed fault named on
+    /// two declared addresses is a node fault (see [`Fault`]). Without a
+    /// declaration a stream stands for its own address and a fault between two
+    /// listen addresses reaches only the wires that literally run on the pair.
+    /// Declaring an ordinal again re-points it: later attributions and faults
+    /// read the new address.
     pub fn declare_endpoint(&self, ordinal: &str, listen: SocketAddr) {
         self.shared.endpoints.lock().unwrap().insert(ordinal.to_string(), listen);
     }
@@ -546,6 +643,43 @@ impl SimulatedReplicationNetwork {
     }
 }
 
+/// One node's handle on a [`SimulatedReplicationNetwork`]: `connect` draws the
+/// ephemeral local and attributes it to the node's declared listen address
+/// before the fabric decides, so a [`Fault::Partition`] on the node refuses the
+/// connect with [`ConnectError::Blocked`] — a peer behind a partition is never
+/// reached — and a node [`Fault::Cut`] closes the stream at once. An ordinal
+/// with no declaration connects as the bare fabric does. `listen` is the
+/// fabric's own.
+#[derive(Clone)]
+pub struct NodeReplicationNetwork {
+    shared: Arc<SimShared>,
+    ordinal: String,
+}
+
+#[async_trait]
+impl ReplicationNetwork for NodeReplicationNetwork {
+    async fn connect(
+        &self,
+        dst: SocketAddr,
+    ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
+        let local = synth_local(dst);
+        let owner = self.shared.endpoints.lock().unwrap().get(&self.ordinal).copied();
+        if let Some(owner) = owner {
+            self.shared.stream_owner.lock().unwrap().insert(local, owner);
+        }
+        let fabric = SimulatedReplicationNetwork { shared: self.shared.clone() };
+        let conn = fabric.connect_from(local, dst).await;
+        if conn.is_err() {
+            self.shared.forget_stream(local);
+        }
+        conn
+    }
+
+    async fn listen(&self, local: SocketAddr) -> Result<Box<dyn ReplicationListener>, ListenError> {
+        SimulatedReplicationNetwork { shared: self.shared.clone() }.listen(local).await
+    }
+}
+
 /// Synthesise a unique client-side local address in the same ip family as
 /// `dst`. The port carries a process-global counter so distinct `connect`s get
 /// distinct pair keys.
@@ -592,11 +726,27 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
         //
         // Items carry their deadline; a `Delay` fault changes the delay for
         // *subsequently* staged items (deadline is computed at staging time).
+        // The delay, the hold and the death are each read fresh at their site —
+        // the wire's own state and the node fault on its owner pair — so a
+        // fault applied between a `send` and this poll governs that frame.
         let mut pending: VecDeque<(tokio::time::Instant, Vec<u8>)> = VecDeque::new();
         let mut last_deadline = tokio::time::Instant::now();
+        let delay_now = || {
+            let wire = dir_actor.delay_ms.load(Ordering::SeqCst);
+            let node = shared_actor.node_fault(src, dst).delay_ms.unwrap_or(0);
+            Duration::from_millis(wire.max(node).max(1))
+        };
+        let dead = || dir_actor.is_dead() || shared_actor.node_fault(src, dst).cut;
+        let held = || {
+            dir_actor.stalled.load(Ordering::SeqCst)
+                || shared_actor.node_fault(src, dst).stalled
+                || shared_actor.partitioned(src, dst)
+        };
 
         loop {
-            if dir_actor.is_dead() {
+            if dead() {
+                // Everything still pending is no longer in flight.
+                shared_actor.in_flight.fetch_sub(pending.len() as i64, Ordering::Relaxed);
                 drop(inbound_tx); // peer recv → None (cut or simulated error)
                 return;
             }
@@ -607,10 +757,8 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                 match staging_rx.try_recv() {
                     Ok(bytes) => {
                         let now = tokio::time::Instant::now();
-                        let delay =
-                            Duration::from_millis(dir_actor.delay_ms.load(Ordering::SeqCst).max(1));
                         let base = last_deadline.max(now);
-                        let deadline = base + delay;
+                        let deadline = base + delay_now();
                         last_deadline = deadline;
                         pending.push_back((deadline, bytes));
                         shared_actor.in_flight.fetch_add(1, Ordering::Relaxed);
@@ -634,8 +782,7 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                     next = staging_rx.recv() => match next {
                         Some(bytes) => {
                             let now = tokio::time::Instant::now();
-                            let delay = Duration::from_millis(dir_actor.delay_ms.load(Ordering::SeqCst).max(1));
-                            let deadline = last_deadline.max(now) + delay;
+                            let deadline = last_deadline.max(now) + delay_now();
                             last_deadline = deadline;
                             pending.push_back((deadline, bytes));
                             shared_actor.in_flight.fetch_add(1, Ordering::Relaxed);
@@ -646,9 +793,10 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                 }
             }
 
-            // Stalled, or partitioned by owner: hold everything until resumed /
-            // healed / cut. A held direction buffers in order and flushes whole.
-            if dir_actor.stalled.load(Ordering::SeqCst) || shared_actor.partitioned(src, dst) {
+            // Stalled (wire or node), or partitioned by owner: hold everything
+            // until resumed / healed / cut. A held direction buffers in order
+            // and flushes whole.
+            if held() {
                 dir_actor.wake.notified().await;
                 continue;
             }
@@ -662,13 +810,13 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                 _ = tokio::time::sleep_until(head_deadline) => {}
             }
 
-            if dir_actor.is_dead() {
+            if dead() {
                 // Account for everything still pending as no-longer-in-flight.
                 shared_actor.in_flight.fetch_sub(pending.len() as i64, Ordering::Relaxed);
                 drop(inbound_tx);
                 return;
             }
-            if dir_actor.stalled.load(Ordering::SeqCst) || shared_actor.partitioned(src, dst) {
+            if held() {
                 continue;
             }
 
@@ -712,7 +860,7 @@ fn spawn_wire(shared: Arc<SimShared>, src: SocketAddr, dst: SocketAddr) -> Wire 
                     }
                     shared_actor.in_flight.fetch_sub(1, Ordering::Relaxed);
                     // A fault may have flipped while we awaited buffer space.
-                    if dir_actor.is_dead() {
+                    if dead() {
                         shared_actor.in_flight.fetch_sub(pending.len() as i64, Ordering::Relaxed);
                         drop(inbound_tx);
                         return;
@@ -1328,6 +1476,37 @@ mod tests {
             "a stream opened after the fault did not inherit the delay named on the listen \
              pair: the frame landed before 50 ms"
         );
+        advance_in_100ms_chunks(Duration::from_millis(20)).await;
+        assert_eq!(client.recv().await, Some(noop(1)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_node_handle_is_refused_a_connect_under_a_partition() {
+        let net = SimulatedReplicationNetwork::with_delay(1);
+        let (a, b, c) = (addr(3105), addr(3205), addr(3305));
+        net.declare_endpoint("A", a);
+        net.declare_endpoint("B", b);
+        net.declare_endpoint("C", c);
+        let listener = net.listen(b).await.unwrap();
+
+        net.apply_fault(Fault::Partition { a, b });
+        assert!(
+            matches!(net.as_node("A").connect(b).await, Err(ConnectError::Blocked { .. })),
+            "a node behind a partition is refused the connect, not held after it"
+        );
+        let _other = net.as_node("C").connect(b).await.expect("an unpartitioned node connects");
+        let _other_server = listener.accept().await.unwrap();
+
+        // Healed: the connect succeeds and the stream is attributed at once — a
+        // delay named on the listen pair governs its first frame, before any
+        // `PullRequest` names the caller.
+        net.apply_fault(Fault::Heal { a, b });
+        let client = net.as_node("A").connect(b).await.unwrap();
+        let server = listener.accept().await.unwrap();
+        net.apply_fault(Fault::Delay { src: b, dst: a, ms: 50 });
+        send_now(&*server, noop(1)).await.unwrap();
+        advance_in_100ms_chunks(Duration::from_millis(40)).await;
+        assert_eq!(has_frame(&*client).await, None, "attributed at connect: the frame waits");
         advance_in_100ms_chunks(Duration::from_millis(20)).await;
         assert_eq!(client.recv().await, Some(noop(1)));
     }
