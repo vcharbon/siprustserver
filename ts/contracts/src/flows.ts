@@ -58,7 +58,11 @@ export const FlowStats = Schema.Struct({
   capture_dups: Schema.Int,
   parse_failed: Schema.Int,
   non_sip: Schema.Int,
-  /** Absent when no probe moved — a single-probe capture, or probes the window already reads as one. */
+  /**
+   * Every stretch of every rebased probe, a zero one (the clock back inside the
+   * window after a step) included. Absent when no probe moved — a single-probe
+   * capture, or probes the window already reads as one.
+   */
   aligned_probes: Schema.optionalKey(Schema.Array(AlignedProbe))
 })
 export interface FlowStats extends Schema.Schema.Type<typeof FlowStats> {}

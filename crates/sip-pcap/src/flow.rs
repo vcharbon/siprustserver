@@ -348,9 +348,9 @@ pub struct FlowStats {
     pub parse_failed: u64,
     /// Datagrams that did not look like SIP (RTP/STUN/DNS on captured ports).
     pub non_sip: u64,
-    /// Probes rebased onto another probe's clock before the dedup
-    /// ([`crate::align`]): a merged capture whose probes' clocks disagree by
-    /// more than the window, with the copies now counted in `capture_dups`.
+    /// Every stretch of every probe rebased onto another probe's clock before
+    /// the dedup ([`crate::align`]), a zero stretch included, with the copies
+    /// now counted in `capture_dups`.
     pub aligned_probes: Vec<ProbeOffset>,
 }
 
@@ -973,8 +973,8 @@ mod tests {
             (1_010_000, false, &trying),
             (1_100_000, false, &ringing),
             (1_500_000, false, &ok),
-            (1_520_000, true, &ack),
             (2_000_000, false, &ok), // the UAS's own T1 repeat of its 2xx (RFC 3261 §13.3.1.4)
+            (2_020_000, true, &ack), // the slow ACK that stops the ladder
             (3_000_000, true, &bye),
             (3_010_000, false, &ok_bye),
         ];
@@ -1016,8 +1016,8 @@ mod tests {
                 "100 INVITE",
                 "180 INVITE",
                 "200 INVITE",
-                "ACK",
                 "200 INVITE",
+                "ACK",
                 "BYE",
                 "200 BYE"
             ],
@@ -1026,7 +1026,7 @@ mod tests {
         assert_eq!(leg.msgs.len(), messages);
         assert_eq!(
             leg.msgs.iter().map(|m| m.retx).collect::<Vec<_>>(),
-            vec![false, false, false, false, false, true, false, false],
+            vec![false, false, false, false, true, false, false, false],
             "only the UAS's T1 repeat of its 2xx is a retransmission"
         );
         assert_eq!(flows.stats.capture_dups as usize, messages);

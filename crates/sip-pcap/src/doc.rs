@@ -61,9 +61,10 @@ pub struct FlowStatsJson {
     pub capture_dups: u64,
     pub parse_failed: u64,
     pub non_sip: u64,
-    /// Probes rebased onto another probe's clock before the dedup: a merged
-    /// capture whose probes' clocks disagreed by more than the window, the
-    /// copies then counted in `capture_dups`. Absent when no probe moved.
+    /// Every stretch of every probe rebased onto another probe's clock before
+    /// the dedup (a zero stretch included: the clock back inside the window
+    /// after a step), the copies then counted in `capture_dups`. Absent when
+    /// no probe moved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aligned_probes: Vec<AlignedProbeJson>,
 }

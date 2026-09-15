@@ -1,47 +1,19 @@
 //! Probe clock alignment: the offset between the clocks of two probes that
 //! wrote the same datagrams, and the rebase that puts every probe of a
-//! capture on one clock.
+//! capture on one clock before the capture dedup
+//! ([`crate::flow::FlowConfig::dedup_window_us`]).
 //!
-//! A `mergecap` of several probes writes one packet once per probe that saw
-//! it, and the copies are stamped by clocks that disagree by an arbitrary
-//! offset. The capture-dedup window ([`crate::flow::FlowConfig::dedup_window_us`])
-//! collapses a copy only when the offset is inside it; past it, every copy
-//! survives as a wire event and reads as a retransmission — of messages that
-//! never retransmit (an ACK, RFC 3261 §17.1.1.3; a 2xx to a non-INVITE,
-//! §17.2.2) as readily as of those that do. No window can tell such a copy
-//! from a T1 rung, because a clock offset lands anywhere in the ladder's own
-//! range; the probe id can, because a probe never writes one packet twice.
-//!
-//! So the offset is MEASURED, per probe pair, from the datagrams both probes
-//! wrote — identical in `(src, dst, payload)`, paired rung by rung so a
-//! ladder both saw yields the clock's offset and never the ladder's gap — and
-//! the later clock is rebased by it. The window then collapses the copies
-//! untouched, and the messages only the rebased probe saw land on the
-//! reference clock, ordered against everything else.
-//!
-//! Rank pairing is not proof on its own: two probes can each write a
-//! DIFFERENT copy of one retransmitting request — one the first emission,
-//! the other the T1 rung — and three such requests state a "clock offset" of
-//! exactly T1. So an offset stands only when at least one agreeing shared
-//! datagram belongs to a class that [`rides_no_timer`]: an ACK or a response
-//! to a non-INVITE written by both probes at the same offset is one packet
-//! seen twice and nothing else.
-//!
-//! A clock also STEPS: a probe adjusted mid-capture reads one offset before
-//! the step and another after it. The shared datagrams are therefore read in
-//! time order and cut into stretches of agreeing deltas, each stretch its own
-//! estimate applying from the first datagram it covers to the next stretch's
-//! first (the first stretch from the start), so a pair that agreed to the
-//! transit for an hour and then drifted by half a second is aligned on both
-//! sides of the step.
-//!
-//! What is left alone: a stretch of fewer than [`MIN_SHARED_DATAGRAMS`]
-//! agreeing datagrams (no estimate to trust), one whose offset the window
-//! already absorbs (the copies collapse as they are; the residual is the
-//! transit between the vantages, not a clock), one whose shared datagrams all
-//! ride a timer, and a shared datagram whose own delta disagrees with its
-//! stretch by the window or more (a copy the rebase does not explain stays a
-//! wire event).
+//! Measured per probe pair on the datagrams both probes wrote (identical
+//! `(src, dst, payload)`, the k-th copy on one probe against the k-th on the
+//! other), read in time order and cut into stretches of deltas agreeing
+//! within the window. A stretch states a clock on at least
+//! [`MIN_SHARED_DATAGRAMS`] agreeing deltas, one of them of a class that
+//! [`rides_no_timer`]: its median, or zero where the window absorbs it. A
+//! run that states no clock is folded into the stretch before it — the offset
+//! in force stays, its own copies stay wire events — and dropped when nothing
+//! precedes it. Probes hang under the earliest clock of their connected
+//! component. Why a window cannot do this, why rank pairing needs the
+//! no-timer class and why a clock steps is `docs/sipflow.md`'s.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -54,7 +26,9 @@ use crate::Datagram;
 /// a clock.
 pub const MIN_SHARED_DATAGRAMS: usize = 3;
 
-/// One stretch of one probe's clock, rebased onto another's.
+/// One stretch of one probe's clock read against another's — every stretch
+/// of an aligned probe, a zero one (the clock back inside the window)
+/// included, so the reader sees where the steps were.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeOffset {
     /// The probe whose timestamps were moved.
@@ -76,9 +50,11 @@ pub struct ProbeOffset {
 
 /// Whether a message belongs to a class RFC 3261 gives no retransmission
 /// timer of its own: an ACK (§17.1.1.3), or a response to a non-INVITE
-/// request (§17.2.2). Two copies of one of these on two probes are one
-/// packet seen twice. The repeat relation's own view of the classes —
-/// which of them can be a REPEAT — is `callfacts`' and wider.
+/// request (§17.2.2). The class still echoes a repeated request — a 200 to a
+/// retransmitted BYE, the ACK to each 2xx retransmission (§13.2.2.4) — so two
+/// copies on two probes are one packet seen twice unless the request they
+/// echo was itself split between the probes. The repeat relation's own view
+/// of the classes — which of them can be a REPEAT — is `callfacts`' and wider.
 pub fn rides_no_timer(msg: &SipMessage) -> bool {
     match msg {
         SipMessage::Request(r) => r.method() == Method::Ack,
@@ -147,12 +123,18 @@ fn pair_offsets(
     window_us: u64,
     anchor: impl Fn(usize) -> bool,
 ) -> Vec<Edge> {
-    // Per datagram identity, per probe, the datagrams in capture order.
+    // Per datagram identity, per probe, the datagrams in capture order — a
+    // probe's own stack copy inside the window (`-i any`: veth and bridge)
+    // ranks once, as the dedup will read it.
     let mut copies: HashMap<u64, BTreeMap<u32, Vec<usize>>> = HashMap::new();
     let mut order: Vec<usize> = (0..datagrams.len()).filter(|&i| keys[i].is_some()).collect();
-    order.sort_by_key(|&i| datagrams[i].ts_us);
+    order.sort_by_key(|&i| (datagrams[i].ts_us, i));
     for i in order {
-        copies.entry(keys[i].unwrap()).or_default().entry(datagrams[i].probe).or_default().push(i);
+        let ranked =
+            copies.entry(keys[i].unwrap()).or_default().entry(datagrams[i].probe).or_default();
+        if ranked.last().is_none_or(|&j| datagrams[i].ts_us - datagrams[j].ts_us >= window_us) {
+            ranked.push(i);
+        }
     }
     // Per probe pair (low, high), every shared datagram: the k-th copy on one
     // probe against the k-th on the other.
@@ -178,12 +160,8 @@ fn pair_offsets(
     }
     let mut edges = Vec::new();
     for ((low, high), mut all) in shared {
-        all.sort_by_key(|s| s.ts_low);
-        let stretches: Vec<Stretch> = runs(&all, window_us)
-            .iter()
-            .enumerate()
-            .map(|(n, run)| stretch(run, window_us, n == 0))
-            .collect();
+        all.sort_by_key(|s| (s.ts_low, s.ts_high));
+        let stretches = stretches(&runs(&all, window_us), window_us);
         if stretches.iter().any(|s| s.offset_us != 0) {
             edges.push(Edge { low, high, stretches });
         }
@@ -192,8 +170,8 @@ fn pair_offsets(
 }
 
 /// The shared datagrams cut into runs of agreeing deltas, in time order. A
-/// delta that disagrees with the run so far is an outlier when the next one
-/// agrees again, and the start of a new run — a clock step — otherwise.
+/// delta that disagrees with the run so far is left out when the next one
+/// agrees again, and starts a new run otherwise.
 fn runs(shared: &[Shared], window_us: u64) -> Vec<Vec<Shared>> {
     let agrees = |run: &[Shared], s: &Shared| (s.delta() - median(run)).abs() < window_us as i64;
     let mut runs: Vec<Vec<Shared>> = Vec::new();
@@ -218,23 +196,32 @@ fn median(run: &[Shared]) -> i64 {
     ds[ds.len() / 2]
 }
 
-/// One run read as a stretch: its median is the clock's offset when enough
-/// datagrams agree with it, one of them rides no timer, and the window does
-/// not absorb it already; `0` otherwise. The first run covers the capture
-/// from its start.
-fn stretch(run: &[Shared], window_us: u64, first: bool) -> Stretch {
-    let median = median(run);
+/// The runs read as stretches. A run states a clock — its median, or zero
+/// where the window absorbs it — on [`MIN_SHARED_DATAGRAMS`] agreeing deltas
+/// at least, one of them riding no timer; a run stating none is folded into
+/// the stretch before it and dropped when nothing precedes it. A run stating
+/// the clock already in force extends that stretch. The first stretch covers
+/// the capture from its start.
+fn stretches(runs: &[Vec<Shared>], window_us: u64) -> Vec<Stretch> {
     let window = window_us as i64;
-    let agreeing: Vec<&Shared> =
-        run.iter().filter(|s| (s.delta() - median).abs() < window).collect();
-    let states_a_clock = agreeing.len() >= MIN_SHARED_DATAGRAMS
-        && agreeing.iter().any(|s| s.anchored)
-        && median.abs() >= window;
-    Stretch {
-        from: if first { (0, 0) } else { (run[0].ts_low, run[0].ts_high) },
-        offset_us: if states_a_clock { median } else { 0 },
-        pairs: agreeing.len(),
+    let mut out: Vec<Stretch> = Vec::new();
+    for run in runs {
+        let median = median(run);
+        let agreeing = run.iter().filter(|s| (s.delta() - median).abs() < window);
+        let (pairs, anchored) = agreeing.fold((0, false), |(n, a), s| (n + 1, a || s.anchored));
+        if pairs < MIN_SHARED_DATAGRAMS || !anchored {
+            continue;
+        }
+        let offset_us = if median.abs() < window { 0 } else { median };
+        match out.last_mut() {
+            Some(last) if (last.offset_us - offset_us).abs() < window => last.pairs += pairs,
+            Some(_) => {
+                out.push(Stretch { from: (run[0].ts_low, run[0].ts_high), offset_us, pairs })
+            }
+            None => out.push(Stretch { from: (0, 0), offset_us, pairs }),
+        }
     }
+    out
 }
 
 /// One stretch as a probe reads it against its parent in the spanning tree:
@@ -491,6 +478,150 @@ mod tests {
         assert_eq!(ts[1], 1_005_000, "the first stretch is left on its clock");
         assert_eq!(ts[7], 4_000_000);
         assert_eq!(ts[12], 6_495_000, "the probe's own datagram after the step moves with it");
+    }
+
+    /// A disagreeing delta at the END of the pair is an outlier like any other:
+    /// the stretch before it stays in force and the probe's own datagrams after
+    /// it stay on the reference clock.
+    #[test]
+    fn a_trailing_outlier_does_not_end_the_stretch() {
+        let datagrams = vec![
+            dg(1_000_000, 0, b"a"),
+            dg(1_300_000, 1, b"a"),
+            dg(2_000_000, 0, b"b"),
+            dg(2_300_000, 1, b"b"),
+            dg(3_000_000, 0, b"c"),
+            dg(3_300_000, 1, b"c"),
+            dg(4_000_000, 0, b"d"),
+            dg(4_800_000, 1, b"d"),
+            dg(4_900_000, 1, b"e"),
+        ];
+        let (ts, applied) =
+            align_probes(&datagrams, &keys(&datagrams), 200_000, anchored(&datagrams));
+        assert_eq!(applied, vec![offset(1, 0, 0, 300_000, 3)]);
+        assert_eq!(ts[8], 4_600_000);
+    }
+
+    /// Two disagreeing deltas back to back (one probe missed the first copy of
+    /// a repeated request) neither state a clock nor drop the one in force;
+    /// the agreeing datagrams after them extend the stretch.
+    #[test]
+    fn a_rank_shift_does_not_open_a_zero_stretch() {
+        let datagrams = vec![
+            dg(1_000_000, 0, b"a"),
+            dg(1_300_000, 1, b"a"),
+            dg(2_000_000, 0, b"b"),
+            dg(2_300_000, 1, b"b"),
+            dg(3_000_000, 0, b"c"),
+            dg(3_300_000, 1, b"c"),
+            dg(4_000_000, 0, b"d"),
+            dg(4_500_000, 0, b"d"),
+            dg(5_500_000, 0, b"d"),
+            dg(4_800_000, 1, b"d"),
+            dg(5_800_000, 1, b"d"),
+            dg(6_000_000, 1, b"e"),
+            dg(7_000_000, 0, b"a"),
+            dg(7_300_000, 1, b"a"),
+            dg(8_000_000, 0, b"b"),
+            dg(8_300_000, 1, b"b"),
+            dg(9_000_000, 0, b"c"),
+            dg(9_300_000, 1, b"c"),
+        ];
+        let (ts, applied) =
+            align_probes(&datagrams, &keys(&datagrams), 200_000, anchored(&datagrams));
+        assert_eq!(applied, vec![offset(1, 0, 0, 300_000, 6)]);
+        assert_eq!(ts[11], 5_700_000);
+    }
+
+    /// A leading outlier does not delay the first stretch: it applies from the
+    /// start.
+    #[test]
+    fn a_leading_outlier_does_not_delay_the_stretch() {
+        let datagrams = vec![
+            dg(500_000, 0, b"d"),
+            dg(1_300_000, 1, b"d"),
+            dg(600_000, 1, b"e"),
+            dg(1_000_000, 0, b"a"),
+            dg(1_300_000, 1, b"a"),
+            dg(2_000_000, 0, b"b"),
+            dg(2_300_000, 1, b"b"),
+            dg(3_000_000, 0, b"c"),
+            dg(3_300_000, 1, b"c"),
+        ];
+        let (ts, applied) =
+            align_probes(&datagrams, &keys(&datagrams), 200_000, anchored(&datagrams));
+        assert_eq!(applied, vec![offset(1, 0, 0, 300_000, 3)]);
+        assert_eq!(ts[2], 300_000);
+    }
+
+    /// A step back INTO the window is a genuine zero: three agreeing deltas
+    /// with an anchor state it.
+    #[test]
+    fn a_step_back_inside_the_window_states_zero() {
+        let datagrams = vec![
+            dg(1_000_000, 0, b"a"),
+            dg(1_300_000, 1, b"a"),
+            dg(2_000_000, 0, b"b"),
+            dg(2_300_000, 1, b"b"),
+            dg(3_000_000, 0, b"c"),
+            dg(3_300_000, 1, b"c"),
+            dg(4_000_000, 0, b"a"),
+            dg(4_005_000, 1, b"a"),
+            dg(5_000_000, 0, b"b"),
+            dg(5_005_000, 1, b"b"),
+            dg(6_000_000, 0, b"c"),
+            dg(6_005_000, 1, b"c"),
+        ];
+        let (_, applied) =
+            align_probes(&datagrams, &keys(&datagrams), 200_000, anchored(&datagrams));
+        assert_eq!(applied, vec![offset(1, 0, 0, 300_000, 3), offset(1, 0, 4_005_000, 0, 3)]);
+    }
+
+    /// A step whose second run cannot state a clock leaves the offset in
+    /// force where it is.
+    #[test]
+    fn a_step_too_thin_to_read_keeps_the_offset_in_force() {
+        let datagrams = vec![
+            dg(1_000_000, 0, b"a"),
+            dg(1_300_000, 1, b"a"),
+            dg(2_000_000, 0, b"b"),
+            dg(2_300_000, 1, b"b"),
+            dg(3_000_000, 0, b"c"),
+            dg(3_300_000, 1, b"c"),
+            dg(4_000_000, 0, b"a"),
+            dg(4_700_000, 1, b"a"),
+            dg(5_000_000, 0, b"b"),
+            dg(5_700_000, 1, b"b"),
+            dg(6_000_000, 1, b"e"),
+        ];
+        let (ts, applied) =
+            align_probes(&datagrams, &keys(&datagrams), 200_000, anchored(&datagrams));
+        assert_eq!(applied, vec![offset(1, 0, 0, 300_000, 3)]);
+        assert_eq!(ts[10], 5_700_000);
+    }
+
+    /// A probe writing one packet twice inside the window (`-i any`: veth and
+    /// bridge) ranks it once, so its second stack copy never pairs with the
+    /// other probe's T1 rung.
+    #[test]
+    fn same_probe_stack_copies_rank_once() {
+        let datagrams = vec![
+            dg(1_000_000, 0, b"a"),
+            dg(1_000_050, 0, b"a"),
+            dg(1_300_000, 1, b"a"),
+            dg(2_000_000, 0, b"b"),
+            dg(2_000_050, 0, b"b"),
+            dg(2_300_000, 1, b"b"),
+            dg(2_500_000, 0, b"b"),
+            dg(2_500_050, 0, b"b"),
+            dg(2_800_000, 1, b"b"),
+            dg(3_000_000, 0, b"c"),
+            dg(3_000_050, 0, b"c"),
+            dg(3_300_000, 1, b"c"),
+        ];
+        let (_, applied) =
+            align_probes(&datagrams, &keys(&datagrams), 200_000, anchored(&datagrams));
+        assert_eq!(applied, vec![offset(1, 0, 0, 300_000, 4)]);
     }
 
     /// Datagrams without a key take no part.
