@@ -589,9 +589,8 @@ fn rule_chain_turn(
     let mut ladder_fx = HandlerEffects::new();
     if let CallEvent::Timer { timer_type: TimerType::Rung { obligation }, .. } = event {
         let before = call.clone();
-        if exec.repeat(&mut call, &mut ladder_fx, obligation) {
-            ladder_fx.quiet = Some(QuietTurn::OwnRung);
-        }
+        exec.repeat(&mut call, &mut ladder_fx, obligation);
+        ladder_fx.quiet = Some(QuietTurn::OwnRung);
         let repeated = HandlerResult { call, effects: ladder_fx };
         return crate::rules::invariants::enforce(
             &ctx.obligations,
@@ -647,6 +646,11 @@ fn rule_chain_turn(
         discharged: discharged.as_ref(),
     };
     let mut result = execute_rules(&ctx.rules, &call, &rule_ctx, &exec, &ctx.obligations);
+    // A re-ACK leaves the body as the rules read it; a rule that also wrote
+    // into it (a CDR event, a disposition) made the turn a write.
+    if result.effects.quiet == Some(QuietTurn::ReAck) && result.call != call {
+        result.effects.quiet = None;
+    }
     // The ladder's own effects (its cancels) precede the rule's.
     ladder_fx.extend(std::mem::take(&mut result.effects));
     result.effects = ladder_fx;
@@ -713,7 +717,6 @@ fn rule_chain_turn(
         result.effects.soft.extend(cap.effects.soft);
         result.effects.buffered.extend(cap.effects.buffered);
         result.effects.fire_and_forget.extend(cap.effects.fire_and_forget);
-        result.effects.quiet = None;
         ctx.metrics.bump_message_cap_terminated();
         result = crate::rules::invariants::enforce(
             &ctx.obligations,

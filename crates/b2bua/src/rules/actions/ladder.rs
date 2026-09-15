@@ -170,25 +170,18 @@ impl ActionExecutor<'_> {
     /// discharged, the call is no longer active, or the reliable provisional's
     /// raising fork is torn down (a reclaim can restore a ladder whose cancel
     /// died with the crashed node) — sends nothing and retires the obligation
-    /// so a later reclaim cannot re-fire it.
-    ///
-    /// Returns `true` when a copy left and the next rung is armed: the body
-    /// then differs from before by the rung index and the rung timer's due
-    /// instant only, the shape [`QuietTurn::OwnRung`] names. A cease or a
-    /// spent fire removes a ledger entry and returns `false`.
-    pub fn repeat(
-        &self,
-        call: &mut Call,
-        fx: &mut HandlerEffects,
-        obligation: &Obligation,
-    ) -> bool {
+    /// so a later reclaim cannot re-fire it. A rung that arms the next one
+    /// leaves the repeat and its re-arm as the turn's whole effect set
+    /// ([`QuietTurn::OwnRung`]); a cease or a spent fire cancels a ledger
+    /// entry, and the router reads that as the write it is.
+    pub fn repeat(&self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
         let rung = TimerType::Rung { obligation: obligation.clone() };
         let effect = (call.state == CallModelState::Active)
             .then(|| repeat_toward(call, obligation))
             .flatten();
         let Some(effect) = effect else {
             self.retire(call, fx, Scope::Obligation(obligation.clone()));
-            return false;
+            return;
         };
         fx.outbound.push(effect);
         let give_up = match obligation {
@@ -198,10 +191,7 @@ impl ActionExecutor<'_> {
         let (updated, next) = call::helpers::advance_ladder(call.clone(), obligation, give_up);
         *call = updated;
         match next {
-            Some(next) => {
-                self.schedule(call, fx, rung, next.as_millis() as i64, None);
-                true
-            }
+            Some(next) => self.schedule(call, fx, rung, next.as_millis() as i64, None),
             None => {
                 // The last rung inside the bound has been sent: re-asking stops
                 // here, but the give-up stands — the peer's silence is answered
@@ -212,7 +202,6 @@ impl ActionExecutor<'_> {
                 if let Obligation::PrackOf { .. } = obligation {
                     *call = call::helpers::clear_retained(call.clone(), obligation);
                 }
-                false
             }
         }
     }

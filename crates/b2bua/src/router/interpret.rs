@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use call::helpers::seal_termination_seq;
-use call::CallModelState;
+use call::{CallModelState, TimerType};
 use sip_message::Method;
 use sip_txn::TxnKind;
 
@@ -19,25 +19,33 @@ use crate::effects::{
     OutboundBody, OutboundTxnMode, QuietTurn, SoftBoundedEffect,
 };
 
-/// The quiet class the turn is persisted under, or `None` for a write. A
-/// class an author set is refused — the turn is a write — when the turn also
-/// carries what only a write may: a `Flush`, a `RemoveCall`, or a terminal
-/// body. A rule never runs on a rung and the re-ACK rule emits the re-ACK
-/// alone, so the refusal is a guard on the two authors, not a path.
+/// The quiet class the turn is persisted under, or `None` for a write. An
+/// author's class is a candidate; the turn's effect set decides. A quiet turn
+/// is exactly: an `Active` call, one outbound effect and it the retained
+/// datagram's repeat, no soft, buffered or fire-and-forget effect, and no
+/// critical effect but the rung's own re-arm for [`QuietTurn::OwnRung`]. A
+/// rule that reaches the re-ACK beside anything else — a BYE, a CDR event, a
+/// timer — is a write, as is a re-ACK on a terminating call, whose flush the
+/// teardown needs.
 fn quiet_class(result: &HandlerResult) -> Option<QuietTurn> {
     let kind = result.effects.quiet?;
-    let carries_a_write = result
-        .effects
-        .critical
-        .iter()
-        .any(|e| matches!(e, CriticalStateEffect::Flush | CriticalStateEffect::RemoveCall))
-        || result.call.state == CallModelState::Terminated;
-    debug_assert!(
-        !carries_a_write,
-        "a quiet turn ({kind:?}) carries a write: {:?}",
-        result.effects.critical
-    );
-    (!carries_a_write).then_some(kind)
+    let fx = &result.effects;
+    let one_repeat =
+        matches!(fx.outbound.as_slice(), [eff] if matches!(eff.body, OutboundBody::Datagram(_)));
+    let critical_is_own = match (kind, fx.critical.as_slice()) {
+        (QuietTurn::ReAck, []) => true,
+        (QuietTurn::OwnRung, [CriticalStateEffect::ScheduleTimer(entry)]) => {
+            matches!(entry.timer_type, TimerType::Rung { .. })
+        }
+        _ => false,
+    };
+    let quiet = result.call.state == CallModelState::Active
+        && one_repeat
+        && critical_is_own
+        && fx.soft.is_empty()
+        && fx.buffered.is_empty()
+        && fx.fire_and_forget.is_empty();
+    quiet.then_some(kind)
 }
 
 /// Interpret a handler result: persist → critical → outbound → soft → buffered.

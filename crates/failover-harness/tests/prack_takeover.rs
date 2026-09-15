@@ -197,6 +197,10 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
     let rung = call.expect(183).await;
     assert_eq!(rseq_of(&rung), a_rseq, "the §3 ladder repeats the SAME number it showed");
 
+    // In-order draining: this cell does not depend on it. The PRACK hydrates
+    // the call with its past-due rung; whether that rung fires before or after
+    // the PRACK's discharge, a fire after it is spent and sends nothing.
+
     // ── STEP 4: alice PRACKs the number she was shown, carrying the ANSWER ───
     let mut prack = call
         .send_request(InDialogMethod::Prack)
@@ -351,6 +355,9 @@ async fn prack_naming_an_unshown_rseq_after_takeover_draws_481() {
     // would fire). Absorb it before the good PRACK's own transaction.
     let rung = call.expect(183).await;
     assert_eq!(rseq_of(&rung), a_rseq, "the re-armed ladder repeats the SAME number");
+    // In-order draining: the bound below holds under any order, the restored
+    // entry being past due at hydrate — it fires on the next poll whichever
+    // frame that poll follows.
     let rung_at = fh.now_ms();
     assert!(
         rung_at < shown_at + 1_500,

@@ -173,7 +173,7 @@ pub enum QuietTurn {
     /// rung: the un-ACKed 2xx ladder (RFC 3261 §13.3.1.4) or the un-PRACKed
     /// reliable-provisional ladder (RFC 3262 §3). The turn's body delta is the
     /// rung index and the rung timer's next due instant; a rung that ceases
-    /// the ladder or fires spent is a write.
+    /// the ladder or fires spent cancels a ledger entry and is a write.
     OwnRung,
     /// The re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4): the retained
     /// ACK's bytes leave again and the body records nothing but the in-dialog
@@ -199,8 +199,9 @@ pub struct HandlerEffects {
     pub soft: Vec<SoftBoundedEffect>,
     pub buffered: Vec<BufferedObservabilityEffect>,
     pub fire_and_forget: Vec<FireAndForgetEffect>,
-    /// `Some` when the turn is one of the closed [`QuietTurn`] list; set by
-    /// exactly two authors, the framework's rung turn and the bodyless re-ACK.
+    /// The [`QuietTurn`] candidate, set by exactly two authors — the
+    /// framework's rung turn and the bodyless re-ACK; the router persists the
+    /// turn quietly only when its whole effect set is that repeat.
     pub quiet: Option<QuietTurn>,
 }
 
@@ -209,26 +210,11 @@ impl HandlerEffects {
         Self::default()
     }
 
-    /// No effect of any category.
-    pub fn is_empty(&self) -> bool {
-        self.critical.is_empty()
-            && self.outbound.is_empty()
-            && self.soft.is_empty()
-            && self.buffered.is_empty()
-            && self.fire_and_forget.is_empty()
-    }
-
     /// Append another effect set (used to merge composed-rule / framework
-    /// effects into the rule's own). The merged turn keeps a quiet class only
-    /// when the half that carries it is the whole turn: a quiet half beside a
-    /// half with effects of its own is a write.
+    /// effects into the rule's own). A quiet candidate carries over; the
+    /// merged effect set is what the router classifies.
     pub fn extend(&mut self, other: HandlerEffects) {
-        self.quiet = match (self.quiet, other.quiet) {
-            (Some(a), Some(b)) if a == b => Some(a),
-            (Some(a), None) if other.is_empty() => Some(a),
-            (None, Some(b)) if self.is_empty() => Some(b),
-            _ => None,
-        };
+        self.quiet = self.quiet.or(other.quiet);
         self.critical.extend(other.critical);
         self.outbound.extend(other.outbound);
         self.soft.extend(other.soft);

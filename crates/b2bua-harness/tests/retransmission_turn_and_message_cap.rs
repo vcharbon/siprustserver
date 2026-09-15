@@ -50,7 +50,9 @@ const RUNGS_PROVISIONAL: u64 = 5;
 
 /// The cap for the provisional scenario: the INVITE and the 183 stand at 2,
 /// the rungs would take it to 7; the PRACK, its 200, the 200, the ACK and the
-/// BYE take the count to 7 — at the cap, never past it.
+/// BYE take the count to 7 — at the cap, never past it — and the callee's 200
+/// to the relayed BYE lands on a `Terminating` call, where the cap no longer
+/// reads.
 const CAP_PROVISIONAL: u64 = RUNGS_PROVISIONAL + 2;
 
 /// A B2BUA routing every call to `dest_port`, with `max_messages_per_call`
@@ -122,6 +124,11 @@ async fn a_2xx_ladder_rung_does_not_count_toward_the_message_cap() {
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(counted(), RUNGS_2XX, "the ACK stopped the ladder: nothing more was counted");
+    assert_eq!(
+        b2bua.metrics().repl_quiet_turns_total("own-rung"),
+        RUNGS_2XX,
+        "every rung was persisted as a quiet turn",
+    );
     assert_eq!(b2bua.metrics().repeat_give_ups_total("ack-of-2xx"), 0, "no give-up");
 
     let records = b2bua.cdr_records();
@@ -202,6 +209,11 @@ async fn a_reliable_provisional_rung_does_not_count_toward_the_message_cap() {
         counted(),
         RUNGS_PROVISIONAL,
         "the PRACK stopped the ladder: nothing more was counted"
+    );
+    assert_eq!(
+        b2bua.metrics().repl_quiet_turns_total("own-rung"),
+        RUNGS_PROVISIONAL,
+        "every rung was persisted as a quiet turn",
     );
     assert_eq!(b2bua.metrics().repeat_give_ups_total("prack-of"), 0, "no give-up");
 

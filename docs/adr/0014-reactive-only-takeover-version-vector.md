@@ -456,8 +456,12 @@ no axis moves, nothing flushes. The quiet list is closed
 
 A rung is quiet only while the ladder goes on: a copy left and the next rung
 is armed, so the body differs from the last write by the rung index and the
-rung timer's due instant. The rung that ceases the ladder, a spent fire, a
-give-up, a keepalive OPTIONS turn, a request refused into the message ring and
+rung timer's due instant. The class is decided from the turn's effect set,
+not from the action that repeated: a quiet turn is one outbound repeat of the
+retained datagram on an `Active` call, and for a rung its own re-arm, and
+nothing else. The rung that ceases the ladder, a spent fire, a give-up, a
+keepalive OPTIONS turn, a request refused into the message ring, a re-ACK a
+rule emits beside a BYE or a CDR event, a re-ACK on a terminating call and
 every other turn is a write and bumps. A transaction-level retransmission
 never reaches the call model. A turn that trips the per-call message cap is
 the teardown, never quiet.
@@ -485,7 +489,11 @@ rung entry fired at once, then the schedule from that rung, bounded by the
 give-up deadline the replicated timer ledger carries. The caller sees a few
 tag-identical duplicates, within the retransmission schedule, sooner than the
 schedule would have paced them; the give-up fires at the deadline the ledger
-carried, not later.
+carried, not later. The message count a quiet re-ACK advanced is never
+replicated, so a node restoring the call reads the last written count — a
+fresh budget for a runaway callee, bounded by the keepalive reset. An alive
+primary that folds a dominating reverse flush restarts its ladder from the
+folded write, bounded by the same deadline.
 
 **Dry-run.** Per rule, the scenario that exercises the ordinary path and the
 cell that pins the rule:

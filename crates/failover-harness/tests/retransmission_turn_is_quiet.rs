@@ -37,6 +37,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use call::TerminationCause;
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -63,7 +64,7 @@ const B2: &str = "127.0.0.1:5092";
 const ACK_TIMEOUT_SEC: i64 = 60;
 
 /// When each rung of the 2xx ladder is due after the original: T1, doubling,
-/// capped at T2 (RFC 3261 §17.1.1.2).
+/// capped at T2 (RFC 3261 §13.3.1.4).
 const RUNG_DUE_MS: [u64; 3] = [500, 1_500, 3_500];
 
 /// The gaps after the first copy of a ladder restarted from the answer's own
@@ -390,6 +391,215 @@ async fn a_reclaim_after_one_rung_restarts_the_2xx_ladder_from_the_answer() {
 #[tokio::test(start_paused = true)]
 async fn a_reclaim_after_three_rungs_restarts_the_2xx_ladder_from_the_answer() {
     own_2xx_ladder_across_a_kill("quiet-rung-reclaim-k3", 3).await;
+}
+
+/// The rungs of the 2xx ladder inside Timer L (64·T1 = 32 s, RFC 3261
+/// §13.3.1.4): T1 doubling to T2 — 0.5, 1.5, 3.5, 7.5, 11.5, 15.5, 19.5, 23.5
+/// and 27.5 s after the original arm the next rung; the tenth, at 31.5 s,
+/// would arm one at 35.5 s, past the bound, and ceases the ladder instead.
+const RUNGS_BEFORE_CEASE: u64 = 9;
+const CEASING_RUNG_DUE_MS: u64 = 31_500;
+
+/// The rung that ceases the ladder is a write: it removes the rung entry from
+/// the replicated ledger, which a node restoring the call would otherwise
+/// re-fire. Every rung before it is quiet; the ceasing one bumps `p` and
+/// flushes once. The caller's late ACK then discharges the still-retained 2xx
+/// and the call ends properly.
+#[tokio::test(start_paused = true)]
+async fn the_rung_that_ceases_the_2xx_ladder_is_a_write() {
+    let Cluster { fh, alice, bob, proxy, w_b1, w_b2 } = spawn_cluster("quiet-rung-cease").await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let (pri_ord, _bak_ord) = worker_ordinals(uas.request());
+    let (primary, survivor): (&ReplicatedB2buaSut, &ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&w_b1, &w_b2) } else { (&w_b2, &w_b1) };
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+
+    // ── the answer's write reaches the backup ────────────────────────────────
+    fh.advance(Duration::from_millis(300)).await;
+    let call_ref = find_backed_up_ref(survivor, &pri_ord).await;
+    let answered_p = primary
+        .call_gen(PartitionRole::Primary, &pri_ord, &call_ref)
+        .expect("the primary stores its own answered call");
+    let puts_at_answer = puts_sent_by(&fh, &pri_ord, &call_ref);
+    let rungs = || primary.metrics().retransmits_total("final-2xx", "INVITE", Some(200));
+
+    // ── every rung that arms another is quiet ────────────────────────────────
+    // Up to one hop past the ninth rung, short of the tenth.
+    fh.advance(Duration::from_millis(CEASING_RUNG_DUE_MS - 500 - 300)).await;
+    alice.drain().await;
+    assert_eq!(rungs(), RUNGS_BEFORE_CEASE, "the rungs that arm another have all left");
+    assert_eq!(
+        primary.call_gen(PartitionRole::Primary, &pri_ord, &call_ref),
+        Some(answered_p),
+        "no rung that armed another moved (p,b)",
+    );
+    assert_eq!(
+        puts_sent_by(&fh, &pri_ord, &call_ref) - puts_at_answer,
+        0,
+        "no rung that armed another flushed",
+    );
+    assert_eq!(
+        primary.metrics().repl_quiet_turns_total("own-rung"),
+        RUNGS_BEFORE_CEASE,
+        "each of them persisted quietly",
+    );
+
+    // ── the ceasing rung leaves, and writes ──────────────────────────────────
+    fh.advance(Duration::from_millis(1_000)).await;
+    alice.drain().await;
+    assert_eq!(rungs(), RUNGS_BEFORE_CEASE + 1, "the tenth rung left at Timer L's edge");
+    assert_eq!(
+        primary.metrics().repl_quiet_turns_total("own-rung"),
+        RUNGS_BEFORE_CEASE,
+        "the ceasing rung was not persisted quietly",
+    );
+    assert_eq!(
+        primary.call_gen(PartitionRole::Primary, &pri_ord, &call_ref),
+        Some(answered_p + 1),
+        "the rung that ceases the ladder scrubs the rung entry from the ledger: a write, one bump",
+    );
+    assert_eq!(
+        puts_sent_by(&fh, &pri_ord, &call_ref) - puts_at_answer,
+        1,
+        "the ceasing rung flushed once",
+    );
+    assert_eq!(
+        survivor.call_gen(PartitionRole::Backup, &pri_ord, &call_ref),
+        Some(answered_p + 1),
+        "the backup holds the ceased ladder's write",
+    );
+
+    // ── alice's late ACK discharges the retained 2xx; the call ends ─────────
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(300)).await;
+    assert_eq!(primary.metrics().repeat_give_ups_total("ack-of-2xx"), 0, "no give-up");
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    let _ = fh
+        .settle_terminal(async || {
+            w_b1.memory_clean()
+                && w_b2.memory_clean()
+                && !w_b1.holds_any_trace(&call_ref).await
+                && !w_b2.holds_any_trace(&call_ref).await
+        })
+        .await;
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert_eq!(total_cdrs_for(&[&w_b1, &w_b2], &call_ref), 1, "exactly one CDR");
+    assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
+    drop(proxy);
+}
+
+/// `max_messages_per_call` for the cap cell: the INVITE, the 180, the 200 and
+/// the relayed ACK stand at 4; two repeated 2xx reach the cap, the third
+/// crosses it.
+const CAP: u64 = 6;
+
+/// The repeated inbound 2xx that trips the per-call message cap is the
+/// teardown, never quiet: the repeats under the cap draw their re-ACK and
+/// move nothing; the one that crosses it begins the termination — a bump and
+/// a flush on that turn — and the call ends under `MessageCap` with one CDR.
+#[tokio::test(start_paused = true)]
+async fn the_repeated_2xx_that_trips_the_cap_is_a_write() {
+    let mut fh = FailoverHarness::new("quiet-re-ack-cap", &["b1", "b2"]).with_worker_tune(|c| {
+        c.ack_timeout_sec = ACK_TIMEOUT_SEC;
+        c.max_messages_per_call = CAP;
+    });
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let proxy =
+        fh.spawn_proxy(PROXY, &[("b1", B1.parse().unwrap()), ("b2", B2.parse().unwrap())]).await;
+    let w_b1 =
+        fh.spawn_worker("b1", "b1", B1, &["b2"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    let w_b2 =
+        fh.spawn_worker("b2", "b2", B2, &["b1"], ("127.0.0.1", 5070), ("127.0.0.1", 5080)).await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(w_b1.is_ready() && w_b2.is_ready(), "both workers ready at steady state");
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let (pri_ord, _bak_ord) = worker_ordinals(uas.request());
+    let (primary, survivor): (&ReplicatedB2buaSut, &ReplicatedB2buaSut) =
+        if pri_ord == "b1" { (&w_b1, &w_b2) } else { (&w_b2, &w_b1) };
+    uas.respond(180, "Ringing").await;
+    call.expect(180).await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    fh.advance(Duration::from_millis(500)).await;
+    let call_ref = find_backed_up_ref(survivor, &pri_ord).await;
+    let confirmed_p = primary
+        .call_gen(PartitionRole::Primary, &pri_ord, &call_ref)
+        .expect("the primary stores its own confirmed call");
+    let puts_at_confirm = puts_sent_by(&fh, &pri_ord, &call_ref);
+
+    // ── two repeats under the cap: re-ACKed, nothing moves ───────────────────
+    for _ in 0..2 {
+        uas.respond(200, "OK").with_sdp(ANSWER).await;
+        for _ in 0..8 {
+            fh.advance(STEP).await;
+        }
+    }
+    assert_eq!(bob.drain().await, 2, "two re-ACKs reached bob");
+    assert_eq!(
+        primary.call_gen(PartitionRole::Primary, &pri_ord, &call_ref),
+        Some(confirmed_p),
+        "the repeats under the cap moved nothing",
+    );
+    assert_eq!(puts_sent_by(&fh, &pri_ord, &call_ref) - puts_at_confirm, 0, "and flushed nothing");
+    assert_eq!(primary.metrics().repl_quiet_turns_total("re-ack"), 2, "two quiet re-ACKs");
+    assert_eq!(primary.metrics().message_cap_terminated_total(), 0, "under the cap");
+
+    // ── the third crosses the cap: the turn is the teardown ──────────────────
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    for _ in 0..8 {
+        fh.advance(STEP).await;
+    }
+    assert_eq!(primary.metrics().message_cap_terminated_total(), 1, "the cap tripped");
+    assert_eq!(
+        primary.metrics().repl_quiet_turns_total("re-ack"),
+        2,
+        "the tripping turn was not quiet"
+    );
+    assert_eq!(
+        primary.call_gen(PartitionRole::Primary, &pri_ord, &call_ref),
+        Some(confirmed_p + 1),
+        "the turn that trips the cap begins the termination: a write, one bump",
+    );
+    assert_eq!(
+        puts_sent_by(&fh, &pri_ord, &call_ref) - puts_at_confirm,
+        1,
+        "the tripping turn flushed the terminating body once",
+    );
+
+    // ── the teardown is a proper one: BYE both ways, answered ────────────────
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive_tolerating("BYE", &["ACK"]).await.respond(200, "OK").await;
+    drop(dialog);
+    let _ = fh
+        .settle_terminal(async || {
+            w_b1.memory_clean()
+                && w_b2.memory_clean()
+                && !w_b1.holds_any_trace(&call_ref).await
+                && !w_b2.holds_any_trace(&call_ref).await
+        })
+        .await;
+    fh.linger_peers(&[&alice, &bob], Duration::from_secs(3)).await;
+    assert_eq!(total_cdrs_for(&[&w_b1, &w_b2], &call_ref), 1, "exactly one CDR");
+    let cause = [&w_b1, &w_b2]
+        .iter()
+        .flat_map(|n| n.cdr_records())
+        .find(|r| r.call_ref == call_ref)
+        .and_then(|r| r.termination.map(|t| t.cause));
+    assert_eq!(cause, Some(TerminationCause::MessageCap), "the CDR names the cap as the cause");
+    assert_call_fully_released(&[&w_b1, &w_b2], &call_ref).await;
+    drop(proxy);
 }
 
 /// The re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4) re-sends the
