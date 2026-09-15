@@ -1134,6 +1134,103 @@ async fn an_unscripted_non_2xx_final_is_refused_and_acked_on_the_invite_s_branch
     scene.finish().await;
 }
 
+/// RFC 3261 §15.1.2 makes the answer to a BYE the endpoint's own whether or
+/// not its flow is still running. The callee's script ends at the ACK, the
+/// caller's BYE is the flow's last step, and the system relays that BYE onto
+/// leg B once the flow has completed: the arrival is the late datagram it is —
+/// the finding stands, the verdict is what it was — AND leg B answers it `200`
+/// out of its own stack, so the system's BYE transaction ends there instead of
+/// retransmitting to Timer F and the run settles as soon as the call is gone.
+#[tokio::test(start_paused = true)]
+async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_arrival() {
+    let scene = api_scene("pivot-late-bye").await;
+    let mut case = fixture("linear-attempt.v3.json");
+    case.document.case.id = "linear-attempt-late-bye".to_string();
+    case.document.flow.retain(|node| {
+        !matches!(node, pivot_schema::flow::FlowNode::Message(step)
+            if ["s11", "s12", "s13"].contains(&step.id.as_str()))
+    });
+    let (outcome, _dir) = replay_case(&scene, case, BTreeMap::new()).await;
+
+    // The finding stands, and it is the only one: the flow completed and a BYE
+    // arrived on a leg that scripted nothing for it.
+    assert_eq!(outcome.verdict.completed_steps.len(), 10, "{:?}", outcome.verdict.completed_steps);
+    assert!(outcome.verdict.abandoned.is_none(), "{:#?}", outcome.verdict.abandoned);
+    let late: Vec<&Failure> = outcome
+        .verdict
+        .failures
+        .iter()
+        .filter(|f| matches!(f, Failure::DatagramAfterFlow { .. }))
+        .collect();
+    assert!(
+        matches!(
+            late.as_slice(),
+            [Failure::DatagramAfterFlow { leg, arrived: Arrived::Request { method, .. } }]
+                if leg == "B" && method == "BYE"
+        ),
+        "{:#?}",
+        outcome.verdict.failures
+    );
+    assert_eq!(outcome.verdict.failures.len(), 1, "{:#?}", outcome.verdict.failures);
+
+    // The endpoint answered it all the same, out of leg B's own stack, right
+    // behind the arrival it recorded as late.
+    let legs = outcome.recording.legs();
+    let bye = legs["B"]
+        .iter()
+        .position(|m| m.dir == Dir::In && m.raw.starts_with("BYE "))
+        .unwrap_or_else(|| panic!("no BYE on leg B: {:#?}", legs["B"]));
+    let taken = &legs["B"][bye];
+    assert!(
+        taken.note.as_deref().is_some_and(|note| note.contains("after the flow completed")),
+        "{taken:#?}"
+    );
+    let cseq = taken
+        .raw
+        .lines()
+        .find_map(|line| line.strip_prefix("CSeq: "))
+        .expect("the BYE carries a CSeq");
+    let answer =
+        legs["B"].get(bye + 1).unwrap_or_else(|| panic!("nothing answered the BYE: {taken:#?}"));
+    assert!(
+        answer.dir == Dir::Out
+            && answer.raw.starts_with("SIP/2.0 200")
+            && answer.raw.contains(&format!("\r\nCSeq: {cseq}\r\n"))
+            && answer.note.as_deref().is_some_and(is_unscripted_answer),
+        "{answer:#?}"
+    );
+    assert_eq!(answer.step, None, "an answer owns no step");
+    assert_eq!(via_branch(&answer.raw), via_branch(&taken.raw), "§17.2.2: the BYE's own branch");
+
+    // Answered once, the system's transaction never retransmitted, and the run
+    // settled as soon as the call was gone — well inside the first rung of the
+    // Timer E ladder a silent leg would have drawn.
+    assert!(
+        legs["B"]
+            .iter()
+            .all(|m| !(m.dir == Dir::In && m.raw.starts_with("BYE ") && m.repeat_of.is_some())),
+        "the BYE retransmitted: {:#?}",
+        legs["B"]
+    );
+    let settled = outcome.timing.settled_at_ms.expect("the run settled");
+    let taken_ms = taken.at_us / 1000;
+    assert!(
+        settled < taken_ms + 500,
+        "settled at {settled} ms, the BYE arrived at {taken_ms} ms: the settle waited on a ladder"
+    );
+    // And the caller's own BYE drew the final §15.1.2 owes it, which the
+    // document never scripted either.
+    assert!(
+        legs["A"].iter().any(|m| m.dir == Dir::In
+            && m.raw.starts_with("SIP/2.0 200")
+            && m.note.as_deref().is_some_and(|note| note.contains("15.1.2"))),
+        "{:#?}",
+        legs["A"]
+    );
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
 /// The recording note an emission no step scripts carries.
 fn is_unscripted_answer(note: &str) -> bool {
     note.starts_with("the transaction the flow never scripted")

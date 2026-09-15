@@ -119,6 +119,19 @@ struct LegView {
     /// Whether a BYE crossed this leg in either direction: the dialog is over,
     /// or is being ended by the side that sent it.
     bye_seen: bool,
+    /// The tag this leg holds its ESTABLISHED dialog under — the To-tag the
+    /// peer's in-dialog requests carry (RFC 3261 §12.2.2) — while the dialog
+    /// is up: the tag of the 2xx this leg sent to the INVITE it took, or the
+    /// From-tag of the INVITE it sent once a 2xx answered it. The last
+    /// confirmed dialog, one per leg, as the stack holds it. Cleared by the
+    /// 2xx this leg sends to a taken BYE; a BYE this leg SENDS ends the dialog
+    /// only with its final (§15.1.1), so it clears nothing here.
+    held_dialog: Option<String>,
+    /// The From-tag of the INVITE this leg sent, before anything answers it.
+    own_tag: Option<String>,
+    /// The tags of the provisionals this leg SENT and has not ended with a
+    /// final: each an early dialog the peer may still address (§12.1.1).
+    rang: BTreeSet<String>,
     /// Whether this leg TOOK an INVITE, and the final it answered it with.
     took_invite: bool,
     answered_invite: Option<u16>,
@@ -242,20 +255,40 @@ impl LegView {
     }
 }
 
-/// What one leg owes for a datagram the flow scripts NO step for.
+/// What one leg owes for a datagram the flow scripts NO step for, whether the
+/// flow is still running or has completed.
 ///
 /// The refusal stands: this names only the transaction-layer acts the RFCs make
 /// the endpoint's own whatever a document scripts — the `200` a CANCEL is
 /// answered with and the `487` the INVITE it names ends with (RFC 3261 §9.2),
-/// the ACK a non-2xx INVITE final is owed on its own branch (§17.1.1.3), and
-/// the final a PRACK draws (RFC 3262 §3). Anything else owes nothing: answering
-/// it would put a message on the wire nothing asked for.
+/// the ACK a non-2xx INVITE final is owed on its own branch (§17.1.1.3), the
+/// final a PRACK draws (RFC 3262 §3), and the final a BYE draws — `200` on
+/// the dialog this leg holds, `481` on none (§15.1.2). Anything else owes
+/// nothing: answering it would put a message on the wire nothing asked for.
 ///
 /// One act per call, off the same ladder the generic close reads — so the
 /// CANCEL pair is two calls, the second made once the first is on the recording.
 pub fn unscripted(messages: &[RecordedMessage], trigger: &SipMessage) -> Option<Owed> {
     let view = view(messages);
     match trigger {
+        // RFC 3261 §15.1.2: a BYE on the dialog this leg holds is answered
+        // 200; one matching no dialog of this leg's — another tag, no tag, a
+        // dialog an answered BYE already ended — the 481 the same section
+        // states, composed from the request (§8.2.6).
+        // FIXME(close): a BYE under a tag this leg rang under and never
+        // confirmed names an early dialog (§15) and is owed a 200 plus the
+        // 487 its pending INVITE draws; it is answered by nobody here yet.
+        SipMessage::Request(request) if *request.method() == Method::Bye => {
+            let transaction = transaction_of(request);
+            let open = view.unanswered.iter().find(|open| open.transaction == transaction)?;
+            let held = view.held_dialog.is_some() && view.held_dialog == transaction.1;
+            let rang = transaction.1.as_ref().is_some_and(|tag| view.rang.contains(tag));
+            match (held, rang) {
+                (true, _) => Some(open.answer(200)),
+                (false, true) => None,
+                (false, false) => Some(open.answer(481)),
+            }
+        }
         SipMessage::Request(request) if *request.method() == Method::Cancel => {
             // Only the pair §9.2 makes this CANCEL's own: the CANCEL itself, and
             // then the INVITE it names — whatever else the leg holds open.
@@ -315,7 +348,10 @@ fn view(messages: &[RecordedMessage]) -> LegView {
             (Dir::Out, SipMessage::Request(request)) => {
                 let cseq = request.cseq().seq();
                 match request.method() {
-                    Method::Invite => view.sent_invite = Some(cseq),
+                    Method::Invite => {
+                        view.sent_invite = Some(cseq);
+                        view.own_tag = request.from().tag().map(str::to_string);
+                    }
                     Method::Ack => {
                         view.acked.insert(cseq);
                     }
@@ -345,9 +381,14 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                 let cseq = response.cseq();
                 let to_tag = response.to().tag().map(str::to_string);
                 if response.status() < 200 {
-                    if cseq.method() == Method::Invite && stack::reliably(&response) {
-                        if let Some(rseq) = stack::rseq_of(&response) {
-                            view.sent_reliable.insert((to_tag, rseq, cseq.seq()));
+                    if cseq.method() == Method::Invite {
+                        if let Some(tag) = &to_tag {
+                            view.rang.insert(tag.clone());
+                        }
+                        if stack::reliably(&response) {
+                            if let Some(rseq) = stack::rseq_of(&response) {
+                                view.sent_reliable.insert((to_tag, rseq, cseq.seq()));
+                            }
                         }
                     }
                     continue;
@@ -371,8 +412,22 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                     }
                 }
                 view.unanswered.retain(|open| !ended(open));
-                if cseq.method() == Method::Invite {
-                    view.answered_invite = Some(response.status());
+                match cseq.method() {
+                    Method::Invite => {
+                        view.answered_invite = Some(response.status());
+                        if let Some(tag) = &to_tag {
+                            view.rang.remove(tag);
+                        }
+                        if (200..300).contains(&response.status()) {
+                            view.held_dialog = to_tag;
+                        }
+                    }
+                    // The 2xx to a taken BYE ends the dialog on this side too:
+                    // a later BYE names a dialog this leg no longer holds.
+                    Method::Bye if (200..300).contains(&response.status()) => {
+                        view.held_dialog = None;
+                    }
+                    _ => {}
                 }
             }
             (Dir::In, SipMessage::Response(response)) => {
@@ -382,6 +437,9 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                 }
                 view.heard_response = true;
                 if response.status() >= 200 {
+                    if (200..300).contains(&response.status()) {
+                        view.held_dialog = view.own_tag.clone();
+                    }
                     view.took_final = Some(response);
                 }
             }
@@ -827,13 +885,13 @@ mod tests {
     }
 
     /// Every other unscripted arrival is refused and answered by nobody: no
-    /// rule makes an INFO, an OPTIONS or a BYE the transaction layer's own.
+    /// rule makes an INFO or an OPTIONS the transaction layer's own.
     #[test]
     fn an_unscripted_arrival_of_any_other_method_draws_no_invented_answer() {
         let invite = (Dir::In, INVITE.to_string());
         let ok = (Dir::Out, response(200, "1 INVITE"));
-        for method in ["OPTIONS", "INFO", "BYE"] {
-            let raw = taken(method, &format!("9 {method}"), None, "");
+        for (method, tag) in [("OPTIONS", None), ("INFO", Some("b1"))] {
+            let raw = taken(method, &format!("9 {method}"), tag, "");
             let arrival = (Dir::In, raw.clone());
             assert_eq!(
                 unscripted(&ladder(&[invite.clone(), ok.clone(), arrival]), &message(&raw)),
@@ -841,6 +899,88 @@ mod tests {
                 "{method} is nobody's transaction obligation"
             );
         }
+    }
+
+    /// RFC 3261 §15.1.2: a BYE on the dialog this leg holds is answered `200`,
+    /// once, from whichever side of the dialog this leg is on — and while this
+    /// leg's own BYE still awaits its final (§15.1.1). A BYE matching no
+    /// dialog of this leg's — another tag, no tag, one an answered BYE already
+    /// ended — draws the `481` the same section states. A BYE under a tag this
+    /// leg RANG under and never confirmed names an early dialog, which is
+    /// answered by nobody here.
+    #[test]
+    fn an_unscripted_bye_draws_200_on_the_held_dialog_481_on_none_and_nothing_on_an_early_one() {
+        // The side that ANSWERED the dialog holds it under the tag its 2xx minted.
+        let invite = (Dir::In, INVITE.to_string());
+        let ok = (Dir::Out, response(200, "1 INVITE"));
+        let ack = (Dir::In, taken("ACK", "1 ACK", Some("b1"), ""));
+        let bye_raw = taken("BYE", "2 BYE", Some("b1"), "");
+        let bye = (Dir::In, bye_raw.clone());
+        let held = ladder(&[invite.clone(), ok.clone(), ack.clone(), bye.clone()]);
+        assert_eq!(unscripted(&held, &message(&bye_raw)), Some(answer("BYE", 2, Some("b1"), 200)));
+        let answered = (Dir::Out, response(200, "2 BYE"));
+        let done = ladder(&[invite.clone(), ok.clone(), ack.clone(), bye, answered.clone()]);
+        assert_eq!(unscripted(&done, &message(&bye_raw)), None, "one final per transaction");
+
+        let other_raw = taken("BYE", "2 BYE", Some("b2"), "");
+        let other =
+            ladder(&[invite.clone(), ok.clone(), ack.clone(), (Dir::In, other_raw.clone())]);
+        assert_eq!(
+            unscripted(&other, &message(&other_raw)),
+            Some(answer("BYE", 2, Some("b2"), 481)),
+            "another tag is no dialog of ours"
+        );
+
+        let bare_raw = taken("BYE", "2 BYE", None, "");
+        let bare = ladder(&[invite.clone(), ok.clone(), ack.clone(), (Dir::In, bare_raw.clone())]);
+        assert_eq!(
+            unscripted(&bare, &message(&bare_raw)),
+            Some(answer("BYE", 2, None, 481)),
+            "no tag names no dialog"
+        );
+
+        let ringing = (Dir::Out, response(180, "1 INVITE"));
+        let early = ladder(&[invite.clone(), ringing.clone(), (Dir::In, bye_raw.clone())]);
+        assert_eq!(unscripted(&early, &message(&bye_raw)), None, "an early dialog, not ours here");
+
+        let again_raw = taken("BYE", "3 BYE", Some("b1"), "");
+        let again = ladder(&[
+            invite,
+            ringing,
+            ok,
+            ack,
+            (Dir::In, bye_raw),
+            answered,
+            (Dir::In, again_raw.clone()),
+        ]);
+        assert_eq!(
+            unscripted(&again, &message(&again_raw)),
+            Some(answer("BYE", 3, Some("b1"), 481)),
+            "the dialog it rang and confirmed under is over"
+        );
+
+        // The side that OPENED the dialog holds it under its INVITE's From-tag.
+        let sent = (Dir::Out, INVITE.to_string());
+        let took = (Dir::In, response(200, "1 INVITE"));
+        let acked = (Dir::Out, request("ACK", "1 ACK"));
+        let peer_raw = request("BYE", "2 BYE");
+        let peer = (Dir::In, peer_raw.clone());
+        let opened = ladder(&[sent.clone(), took.clone(), acked.clone(), peer.clone()]);
+        assert_eq!(
+            unscripted(&opened, &message(&peer_raw)),
+            Some(answer("BYE", 2, Some("a1"), 200))
+        );
+
+        // A BYE crossing ours: the dialog ends on OUR BYE's final (§15.1.1),
+        // and until then the peer's names it.
+        let ours = (Dir::Out, request("BYE", "2 BYE"));
+        let crossed_raw = request("BYE", "3 BYE");
+        let crossed = ladder(&[sent, took, acked, ours, (Dir::In, crossed_raw.clone())]);
+        assert_eq!(
+            unscripted(&crossed, &message(&crossed_raw)),
+            Some(answer("BYE", 3, Some("a1"), 200)),
+            "our BYE has no final yet"
+        );
     }
 
     /// A leg holding an unanswered request that is NOT the cancelled INVITE

@@ -1190,7 +1190,12 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// Absorption and `background` behave exactly as they do mid-flow — a
     /// provable repeat is absorbed and noted, a policy's traffic is answered —
     /// and everything else is RECORDED. It is a failure only when the flow had
-    /// succeeded: then nothing was left to arrive, and something did.
+    /// succeeded: then nothing was left to arrive, and something did. The
+    /// finding does not silence the endpoint: an act the RFC makes its own
+    /// whatever the document scripts — the `200` to a BYE on the dialog it
+    /// holds (RFC 3261 §15.1.2), the final a PRACK draws (RFC 3262 §3) — is
+    /// answered here as it is mid-flow, so the peer's transaction ends instead
+    /// of retransmitting to its timer while the run waits on the call to end.
     async fn record_during_settle(&mut self, actor: &str, message: SipMessage, flow_ok: bool) {
         let inbound = Inbound::of(&message);
         let bytes: Vec<u8> = match &message {
@@ -1249,22 +1254,20 @@ impl<'a, 'p> Runner<'a, 'p> {
                 return;
             }
         }
-        // A leg whose script ENDED still has a UA behind it, and the generic
-        // close answers out of the same dialog state the flow used. So the stack
-        // learns what its leg takes here too — a request it never took is one it
-        // cannot answer (§11.2). A run still following its flow learns nothing
-        // after the flow: nothing composes another message on it.
-        if self.abandoned.is_some() {
-            if let Some(stack) = self.stacks.get_mut(&leg) {
-                match &message {
-                    SipMessage::Request(r) => stack.learn_request(r),
-                    SipMessage::Response(r) => stack.learn_response(r),
-                }
-            }
-        }
         if self.owed_bye_final(&leg, &inbound) {
             self.record_arrival(&leg, raw, None, Some(OWED_BYE_FINAL), repeat);
             return;
+        }
+        // A leg whose script ENDED still has a UA behind it, answering out of
+        // the same dialog state the flow used. So the stack learns what its leg
+        // takes here too, past the same absorbed final `deliver` never learns
+        // — a request it never took is one it cannot answer (§11.2), whether
+        // the generic close or this window answers it.
+        if let Some(stack) = self.stacks.get_mut(&leg) {
+            match &message {
+                SipMessage::Request(r) => stack.learn_request(r),
+                SipMessage::Response(r) => stack.learn_response(r),
+            }
         }
         self.record_arrival(
             &leg,
@@ -1283,7 +1286,15 @@ impl<'a, 'p> Runner<'a, 'p> {
         // completed flow can send several, and they are all the same finding.
         if flow_ok && !self.late_datagram_reported {
             self.late_datagram_reported = true;
-            self.instance.fail(Failure::DatagramAfterFlow { leg, arrived: inbound.arrived() });
+            self.instance
+                .fail(Failure::DatagramAfterFlow { leg: leg.clone(), arrived: inbound.arrived() });
+        }
+        // The transaction obligation the arrival leaves is discharged where it
+        // is mid-flow; an abandoned script's is the generic close's next turn,
+        // which keeps its own order across everything the leg holds open —
+        // CANCEL first, then PRACK, then the oldest.
+        if self.abandoned.is_none() {
+            self.answer_unscripted(&leg, &message).await;
         }
     }
 
@@ -1377,8 +1388,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
     }
 
-    /// Discharge the transaction-layer obligation a REFUSED datagram leaves on
-    /// its leg (RFC 3261 §9.2, §17.1.1.3; RFC 3262 §3).
+    /// Discharge the transaction-layer obligation a REFUSED datagram, or one
+    /// arriving after the flow, leaves on its leg (RFC 3261 §9.2, §15.1.2,
+    /// §17.1.1.3; RFC 3262 §3).
     ///
     /// The refusal STANDS and the flow is untouched: like a `background` answer
     /// this moves no cursor and satisfies no `expect`. What is owed is
