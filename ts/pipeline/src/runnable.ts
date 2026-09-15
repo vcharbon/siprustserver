@@ -15,7 +15,8 @@
  * - {@link unackedTakenFinals} — the same hole on the other side of the arrow.
  *   The ACTOR sent the INVITE and took a 2xx, and either the leg goes on to
  *   carry a new in-dialog transaction, which only a CONFIRMED dialog carries, or
- *   the 2xx never repeated and the far leg expects the ACK relayed.
+ *   the 2xx's ladder stopped short of its schedule and the far leg expects the
+ *   ACK relayed.
  * - {@link orphanResponses} — the response is there and the request is not, with
  *   the method left open. A response belongs to a transaction, so a leg holding
  *   one and not the request that opened it lost that request to the trace,
@@ -311,10 +312,20 @@ export const ACTOR_ACK_NOT_CAPTURED = "source-actor-ack-not-captured"
 
 /**
  * What proves the actor's missing ACK crossed the wire: a later in-dialog
- * request on the leg (`continuation`), or a 2xx that never repeated while the
- * far leg expects its ACK relayed (`relayed-ack`).
+ * request on the leg (`continuation`), or a 2xx whose ladder stopped short of
+ * its schedule while the far leg expects its ACK relayed (`relayed-ack`).
  */
 export type LostAckGroundKind = "continuation" | "relayed-ack"
+
+/** Where a 2xx's declared ladder stopped, in ms from the 2xx. */
+export interface LadderEnd {
+  /** How many rungs the document declares. */
+  readonly rungs: number
+  /** The instant of the last declared rung. */
+  readonly lastRungMs: number
+  /** The instant the next rung of the schedule was due. */
+  readonly dueMs: number
+}
 
 /** One dialog-creating 2xx the ACTOR owed an ACK for, and the step that proves it sent one. */
 interface UnackedTaken {
@@ -348,8 +359,10 @@ export type UnackedTakenFinal =
       readonly ground: "relayed-ack"
       /** The far leg whose ACK step is the actor's ACK relayed. */
       readonly groundLeg: string
-      /** How long the leg stayed silent after the 2xx, in ms: past the first rung. */
+      /** How long the leg stayed silent after the 2xx, in ms: past the rung that was due. */
       readonly silenceMs: number
+      /** The ladder the 2xx ran before it stopped; absent where it declares none. */
+      readonly ladder?: LadderEnd
     }
   )
 
@@ -445,8 +458,38 @@ const continuationAfter = (
   return undefined
 }
 
-/** The wait before the first repeat of a 2xx, T1 (RFC 3261 §13.3.1.4). */
-const FIRST_2XX_RUNG_MS = Schedules.rungIntervalsMs("final-2xx")[0]!
+/** The wait before each rung of a 2xx's ladder, T1 first, to its give-up (RFC 3261 §13.3.1.4). */
+const FINAL_2XX_RUNGS_MS = Schedules.rungIntervalsMs("final-2xx")
+
+/**
+ * Where the declared ladder of the 2xx stopped: its rung count, the instant of
+ * its last rung — the gaps the document states summed, the schedule's where it
+ * states none ({@link Schedules.rungGapsMs}) — and the instant the schedule's
+ * next rung was due. A 2xx declaring no rung is a ladder that stopped at its
+ * head, the first rung due at T1. Undefined where the ladder ran to the
+ * schedule's end: no rung was due after it.
+ */
+const ladderEnd = (step: Flow.Step): LadderEnd | undefined => {
+  const rungs = step.retransmits ?? 0
+  const next = FINAL_2XX_RUNGS_MS[rungs]
+  if (next === undefined) return undefined
+  const lastRungMs = Schedules.rungGapsMs("final-2xx", rungs, step.retransmit_intervals_ms)
+    .reduce((sum, gap) => sum + gap, 0)
+  return { rungs, lastRungMs, dueMs: lastRungMs + next }
+}
+
+/**
+ * Whether the far leg's ACK step sits AFTER the ladder's last rung, by the two
+ * `observed` instants. Vacuous where the ladder declares no rung; false where
+ * either coordinate is unstated, since nothing then sets the ACK against the
+ * rung.
+ */
+const ackAfterLastRung = (twoxx: Flow.Step, ack: Flow.Step, ladder: LadderEnd): boolean => {
+  if (ladder.rungs === 0) return true
+  const from = twoxx.observed?.at_us
+  const to = ack.observed?.at_us
+  return from !== undefined && to !== undefined && to > from + ladder.lastRungMs * 1000
+}
 
 /** Whether the step ends the dialog it sits in, whichever side sends it. */
 const endsDialog = (step: Flow.Step): boolean =>
@@ -531,7 +574,12 @@ const relayedAckAfter = (
 /** What proves the missing ACK was lost, as {@link lostAckGround} finds it. */
 type LostAckGround =
   | { readonly kind: "continuation"; readonly step: Flow.Step }
-  | { readonly kind: "relayed-ack"; readonly step: Flow.Step; readonly silenceMs: number }
+  | {
+    readonly kind: "relayed-ack"
+    readonly step: Flow.Step
+    readonly silenceMs: number
+    readonly ladder: LadderEnd
+  }
 
 /**
  * What proves the ACK to an unsettled 2xx CROSSED THE WIRE and the trace lost
@@ -539,14 +587,18 @@ type LostAckGround =
  *
  * - a continuation on the leg ({@link continuationAfter});
  * - the far leg expects that ACK relayed ({@link relayedAckAfter}) and the
- *   platform's 2xx toward the actor never repeated: a UAS repeats a 2xx from
- *   T1 on until the ACK arrives (§13.3.1.4), so a 2xx the document declares
- *   un-repeated across a silence the capture measured past the first rung
- *   ({@link silenceAfter}) is one the ACK reached. A silence of T1 or less
- *   gave the ladder no instant to fire, and a 2xx declared REPEATED is the
- *   ladder stating the opposite, so both keep the abandoned-dialog reading.
- *   The far leg's ACK is read as the actor's relayed, which a platform that
- *   ACKs the far leg on its own would falsify.
+ *   platform's 2xx ladder toward the actor STOPPED SHORT of its schedule: a
+ *   UAS repeats a 2xx from T1 on, rung after rung to the give-up, until the
+ *   ACK arrives (§13.3.1.4), so a ladder the document declares ended
+ *   ({@link ladderEnd}) before the silence the capture measured
+ *   ({@link silenceAfter}) would have carried the next scheduled rung is one
+ *   the ACK reached — after its last rung, where the far leg's ACK step then
+ *   sits ({@link ackAfterLastRung}). A silence that ends before the next rung
+ *   was due gave the ladder no instant to fire, a ladder run to the schedule's
+ *   end is the platform stating no ACK came, and a rung fired past the far
+ *   leg's ACK reads nothing off its end, so all three keep the
+ *   abandoned-dialog reading. The far leg's ACK is read as the actor's relayed,
+ *   which a platform that ACKs the far leg on its own would falsify.
  *
  * Undefined where neither holds, and the abandoned-dialog reading stands.
  */
@@ -557,12 +609,14 @@ const lostAckGround = (
 ): LostAckGround | undefined => {
   const continuation = continuationAfter(steps, at, leg)
   if (continuation !== undefined) return { kind: "continuation", step: continuation }
-  if (repeats(steps[at]!)) return undefined
+  const twoxx = steps[at]!
+  const ladder = ladderEnd(twoxx)
+  if (ladder === undefined) return undefined
   const silenceMs = silenceAfter(steps, at, leg)
-  if (silenceMs === undefined || silenceMs <= FIRST_2XX_RUNG_MS) return undefined
+  if (silenceMs === undefined || silenceMs <= ladder.dueMs) return undefined
   const relayed = relayedAckAfter(steps, at, leg)
-  if (relayed === undefined) return undefined
-  return { kind: "relayed-ack", step: relayed, silenceMs }
+  if (relayed === undefined || !ackAfterLastRung(twoxx, relayed, ladder)) return undefined
+  return { kind: "relayed-ack", step: relayed, silenceMs, ladder }
 }
 
 /**
@@ -611,7 +665,13 @@ export const unackedTakenFinals = (
     return [
       ground.kind === "continuation"
         ? { ...stated, ground: ground.kind, method: method(proof) }
-        : { ...stated, ground: ground.kind, groundLeg: proof.leg, silenceMs: ground.silenceMs }
+        : {
+          ...stated,
+          ground: ground.kind,
+          groundLeg: proof.leg,
+          silenceMs: ground.silenceMs,
+          ...(ground.ladder.rungs === 0 ? {} : { ladder: ground.ladder })
+        }
     ]
   })
 }
@@ -622,8 +682,13 @@ const unackedTakenClause = (c: UnackedTakenFinal): string => {
     o === undefined ? "" : ` (capture leg ${o.leg} msg ${o.msg})`
   const proof = c.ground === "continuation"
     ? `goes on to carry the ${c.method} at ${c.proof}${where(c.proofObserved)}`
-    : `the 2xx never repeated over the ${c.silenceMs} ms the leg stayed silent and leg ` +
+    : c.ladder === undefined
+    ? `the 2xx never repeated over the ${c.silenceMs} ms the leg stayed silent and leg ` +
       `${c.groundLeg} step ${c.proof}${where(c.proofObserved)} expects that ACK relayed`
+    : `the 2xx's ladder stopped after ${c.ladder.rungs} rung${c.ladder.rungs === 1 ? "" : "s"} ` +
+      `at +${c.ladder.lastRungMs} ms where the next was due at +${c.ladder.dueMs} ms, over the ` +
+      `${c.silenceMs} ms the leg stayed silent, and leg ${c.groundLeg} step ${c.proof}` +
+      `${where(c.proofObserved)} expects that ACK relayed after that rung`
   return `leg ${c.leg} step ${c.final}${where(c.observed)} answers the actor's INVITE at ` +
     `${c.invite}${where(c.inviteObserved)} and the leg captured no ACK for it, yet ${proof}`
 }

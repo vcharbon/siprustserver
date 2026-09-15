@@ -2,7 +2,7 @@
  * The pipeline's own document-level refusals: a vantage that captured only part
  * of an exchange, and the shapes that only look like one.
  */
-import { Tokens, type Flow } from "@sip/contracts"
+import { Schedules, Tokens, type Flow } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
 import {
   ACK_NOT_CAPTURED,
@@ -575,8 +575,107 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
     )
   })
 
-  it("keeps a 2xx the document declares REPEATED — the ladder is the proof no ACK reached it", () => {
+  it("keeps a 2xx repeated AFTER the far leg's ACK step — a rung past the ACK is no ladder that stopped", () => {
+    // One rung at T1 (1510) and the far leg's ACK at 1056, before it: the ladder
+    // fired past the ACK, so its end proves nothing about when the ACK reached.
     expect(unackedTakenFinals(relayedShape({ retransmits: 1 }, 26_010))).toEqual([])
+    // At the rung's own instant is not after it.
+    expect(unackedTakenFinals(laddered([500], 1_510, 26_010))).toEqual([])
+  })
+
+  /** The schedule's own rungs, T1 first, to the give-up. */
+  const SCHEDULE = Schedules.rungIntervalsMs("final-2xx")
+
+  /**
+   * {@link relayedShape} with the actor's 2xx declaring a ladder of the given
+   * gaps and the far leg's ACK step at `ackAtMs`: the ladder ran `rungs` rungs
+   * from the 2xx at 1010 (the last at 1010 + their sum) and stopped.
+   */
+  const laddered = (
+    rungs: ReadonlyArray<number>,
+    ackAtMs: number,
+    byeAtMs: number,
+    twoxx: Partial<Flow.Step> = {}
+  ): ReadonlyArray<Flow.Step> => [
+    ...relayedShape({ retransmits: rungs.length, retransmit_intervals_ms: rungs, ...twoxx }, 0).slice(0, 4),
+    at(ack("s5", "B", "expect"), ackAtMs, 6),
+    at(bye("s6", "A"), byeAtMs, 4)
+  ]
+
+  it("charges a 2xx whose ladder STOPPED short of its schedule with the far leg's ACK after the last rung", () => {
+    // One rung at T1, then 25 s of silence where §13.3.1.4 would have run the
+    // ladder on to its give-up; the far leg's ACK step 60 ms past that rung.
+    const charged = unackedTakenFinals(laddered([500], 1_570, 26_010))
+    expect(charged).toEqual([
+      {
+        final: "s4",
+        invite: "s1",
+        leg: "A",
+        ground: "relayed-ack",
+        proof: "s5",
+        groundLeg: "B",
+        silenceMs: 25_000,
+        ladder: { rungs: 1, lastRungMs: 500, dueMs: 1_500 },
+        observed: { leg: 1, msg: 3, at_us: 1_010_000 },
+        inviteObserved: { leg: 1, msg: 0, at_us: 0 },
+        proofObserved: { leg: 2, msg: 6, at_us: 1_570_000 }
+      }
+    ])
+    expect(unackedTakenLine("capture.pcap.gz", "auto", charged)).toBe(
+      `capture.pcap.gz: case 'auto' EXCLUDED ${ACTOR_ACK_NOT_CAPTURED} — leg A step s4 ` +
+        "(capture leg 1 msg 3) answers the actor's INVITE at s1 (capture leg 1 msg 0) and " +
+        "the leg captured no ACK for it, yet the 2xx's ladder stopped after 1 rung at +500 ms " +
+        "where the next was due at +1500 ms, over the 25000 ms the leg stayed silent, and leg B " +
+        "step s5 (capture leg 2 msg 6) expects that ACK relayed after that rung"
+    )
+    // The far leg's ACK a millisecond past the rung is after it.
+    expect(unackedTakenFinals(laddered([500], 1_511, 26_010)).map((c) => c.proof)).toEqual(["s5"])
+  })
+
+  it("keeps a stopped ladder the leg went quiet behind before the next rung was due", () => {
+    // One rung at T1; the next was due at T1 + 2·T1 = 1500 ms after the 2xx.
+    expect(unackedTakenFinals(laddered([500], 1_570, 1_910))).toEqual([])
+    // The boundary: a silence ending AT the due instant gave it no instant to fire.
+    expect(unackedTakenFinals(laddered([500], 1_570, 2_510))).toEqual([])
+    expect(unackedTakenFinals(laddered([500], 1_570, 2_511)).map((c) => c.ground === "relayed-ack" && c.silenceMs))
+      .toEqual([1_501])
+    // Two rungs at their measured pace: the third was due 2000 ms after the second.
+    expect(unackedTakenFinals(laddered([499, 1_000], 2_600, 4_509))).toEqual([])
+    expect(unackedTakenFinals(laddered([499, 1_000], 2_600, 4_510)).map((c) => c.ground === "relayed-ack" && c.ladder))
+      .toEqual([{ rungs: 2, lastRungMs: 1_499, dueMs: 3_499 }])
+  })
+
+  it("keeps a ladder run to the schedule's end — the platform's own statement that no ACK came", () => {
+    const sum = SCHEDULE.reduce((a, g) => a + g, 0)
+    expect(unackedTakenFinals(laddered(SCHEDULE, 1_010 + sum + 60, 90_000))).toEqual([])
+    // A count past the schedule is a ladder the RFC has already given up on.
+    expect(unackedTakenFinals(laddered([...SCHEDULE, 4_000], 1_010 + sum + 4_060, 90_000))).toEqual([])
+  })
+
+  it("paces a ladder the document states no gaps for on the schedule", () => {
+    // Two rungs, no measured intervals: the schedule puts them at 500 and 1500
+    // ms and the third due at 3500 ms.
+    const unpaced = (ackAtMs: number, byeAtMs: number): ReadonlyArray<Flow.Step> => [
+      ...relayedShape({ retransmits: 2 }, 0).slice(0, 4),
+      at(ack("s5", "B", "expect"), ackAtMs, 6),
+      at(bye("s6", "A"), byeAtMs, 4)
+    ]
+    expect(unackedTakenFinals(unpaced(2_560, 4_510))).toEqual([])
+    expect(unackedTakenFinals(unpaced(2_510, 26_010))).toEqual([])
+    expect(unackedTakenFinals(unpaced(2_560, 4_511)).map((c) => c.ground === "relayed-ack" && c.ladder))
+      .toEqual([{ rungs: 2, lastRungMs: 1_500, dueMs: 3_500 }])
+  })
+
+  it("keeps a stopped ladder whose far-leg ACK states no coordinate to set against the rung", () => {
+    expect(
+      unackedTakenFinals(
+        laddered([500], 1_570, 26_010).map((s) => {
+          if (s.id !== "s5") return s
+          const { observed: _, ...rest } = s
+          return rest
+        })
+      )
+    ).toEqual([])
   })
 
   it("keeps a 2xx the leg is silent behind for the first rung or less — the ladder had no instant to fire", () => {

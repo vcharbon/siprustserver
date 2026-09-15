@@ -30,8 +30,7 @@
  * caller that holds its ACK, or answers three copies with one, is modelling a
  * peer, and a peer's non-compliance is the document's to state.
  */
-import { Flows, Tokens } from "@sip/contracts"
-import { type ClassName, rungIntervalsMs } from "@sip/contracts/schedules"
+import { Flows, Schedules, Tokens } from "@sip/contracts"
 import type { StepDraft } from "./draft.js"
 import type { StepSource } from "./flowsteps.js"
 
@@ -126,15 +125,10 @@ const drawingCopies = (
  * The wait before each of `final`'s `rungs` repeats, rung 1 first: the gaps
  * the document states where the capture measured them (§6.9), otherwise the
  * RFC's schedule for the final's class — the one table `sip-retransmit` walks
- * (ADR-0032 X1), read as data rather than walked again here. A count longer
- * than either list repeats the last gap, as `Schedule::exact` does past its
- * list: steady pacing rather than a class the step never chose.
+ * (ADR-0032 X1), read as data rather than walked again here.
  */
-const rungGapsMs = (final: StepDraft, rungs: number): ReadonlyArray<number> => {
-  const stated = final.retransmit_intervals_ms
-  const gaps = stated !== undefined && stated.length > 0 ? stated : rungIntervalsMs(classOf(final))
-  return Array.from({ length: rungs }, (_, r) => gaps[Math.min(r, gaps.length - 1)]!)
-}
+const rungGapsMs = (final: StepDraft, rungs: number): ReadonlyArray<number> =>
+  Schedules.rungGapsMs(classOf(final), rungs, final.retransmit_intervals_ms)
 
 /**
  * The retransmission class the RFC puts on the final's emitter, read the way
@@ -145,7 +139,7 @@ const rungGapsMs = (final: StepDraft, rungs: number): ReadonlyArray<number> => {
  * states no status is read as the non-2xx one: the two pace identically, and
  * a final with no status is a document lint has already refused.
  */
-const classOf = (final: StepDraft): ClassName =>
+const classOf = (final: StepDraft): Schedules.ClassName =>
   isSuccess(final) ? "final-2xx" : "invite-server-final"
 
 /**
