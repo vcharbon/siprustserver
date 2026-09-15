@@ -269,6 +269,73 @@ async fn recorder_captures_request_headers_and_response_headers() {
     }
 }
 
+/// A request the caller stopped waiting for is still an exchange the client
+/// MADE: the recorder must hold its row, saying no answer came, instead of the
+/// gap a record cannot explain.
+#[tokio::test(start_paused = true)]
+async fn recorder_keeps_the_row_of_a_request_the_caller_abandoned() {
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let rec = RecordingHttpNetwork::new(sim.clone(), Clock::test_at(0));
+    let (svc, _calls) = echo();
+    let dst = addr("10.0.0.1:8080");
+    let _server = rec.serve(dst, svc).await.unwrap();
+    sim.apply_fault(Fault::Stall { dst });
+
+    let h = tokio::spawn({
+        let rec = rec.clone();
+        async move {
+            tokio::time::timeout(
+                Duration::from_millis(150),
+                rec.request(dst, HttpRequest::post("/calls", b"asked".to_vec())),
+            )
+            .await
+        }
+    });
+    advance_in_100ms_chunks(Duration::from_millis(200)).await;
+    assert!(h.await.unwrap().is_err(), "the caller's budget fires under stall");
+
+    let cap = rec.captured();
+    assert_eq!(cap.len(), 1, "the abandoned request is recorded, not dropped");
+    assert_eq!(cap[0].path, "/calls");
+    assert_eq!(cap[0].req_body, b"asked");
+    match &cap[0].outcome {
+        ExchangeOutcome::Error(detail) => {
+            assert!(detail.starts_with("timed out"), "got {detail:?}");
+        }
+        other => panic!("expected no answer, got {other:?}"),
+    }
+}
+
+/// The stamp is the instant the request WENT OUT, which is where a ladder puts
+/// it — not the instant an answer came back.
+#[tokio::test(start_paused = true)]
+async fn recorder_stamps_an_exchange_when_the_request_went_out() {
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let clock = Clock::test_at(0);
+    let rec = RecordingHttpNetwork::new(sim.clone(), clock.clone());
+    let (svc, _calls) = echo();
+    let dst = addr("10.0.0.1:8080");
+    let _server = rec.serve(dst, svc).await.unwrap();
+    // Half a second between the request going out and the answer coming back.
+    sim.apply_fault(Fault::Delay { dst, ms: 500 });
+
+    let sent_at = clock.now_ms();
+    let h = tokio::spawn({
+        let rec = rec.clone();
+        async move { rec.request(dst, HttpRequest::get("/x")).await }
+    });
+    advance_in_100ms_chunks(Duration::from_millis(2000)).await;
+    h.await.unwrap().unwrap();
+
+    let cap = rec.captured();
+    assert_eq!(cap.len(), 1);
+    assert!(
+        cap[0].at_ms - sent_at < 500,
+        "stamped at the request, not the answer: {} vs {sent_at}",
+        cap[0].at_ms,
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn recorder_captures_response_and_error() {
     let sim = Arc::new(SimulatedHttpNetwork::new());

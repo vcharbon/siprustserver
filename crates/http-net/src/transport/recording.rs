@@ -6,6 +6,12 @@
 //! and what came back (response status/body or transport error). This is the
 //! raw feed test assertions read via [`captured`](RecordingHttpNetwork::captured).
 //!
+//! The row is opened BEFORE the inner request is awaited and settled when it
+//! answers, so a caller that stops waiting — a `timeout` around the call drops
+//! the future at that await — leaves the exchange it made rather than a gap the
+//! record cannot explain. The stamp is therefore the instant the request went
+//! out, which is where a ladder puts it.
+//!
 //! Mirrors `repl-net`'s recording decorator: minimal — capture only, no audit
 //! rules / severity ledger.
 
@@ -45,10 +51,13 @@ pub enum ExchangeOutcome {
     Error(String),
 }
 
+/// What an exchange says of itself when the caller stopped waiting for it.
+const ABANDONED: &str = "timed out: the caller dropped the request before an answer";
+
 /// One captured request/response exchange with endpoint + timestamp.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedExchange {
-    /// Recording timestamp (ms) from the injected `Clock`.
+    /// When the request WENT OUT (ms), from the injected `Clock`.
     pub at_ms: i64,
     /// The destination the request went to.
     pub dst: SocketAddr,
@@ -65,6 +74,47 @@ pub struct CapturedExchange {
 }
 
 type Sink = Arc<Mutex<Vec<CapturedExchange>>>;
+
+/// A row already in the sink, waiting for its outcome.
+///
+/// Settled by [`settle`](OpenRow::settle) when the inner request answers, and
+/// by its own `Drop` when the caller gave up first: either way the row states
+/// how the exchange ended.
+struct OpenRow {
+    sink: Sink,
+    index: usize,
+    settled: bool,
+}
+
+impl OpenRow {
+    /// Open a row for `exchange`, whose outcome is not known yet.
+    fn open(sink: &Sink, exchange: CapturedExchange) -> Self {
+        let mut rows = sink.lock().unwrap();
+        rows.push(exchange);
+        OpenRow { sink: Arc::clone(sink), index: rows.len() - 1, settled: false }
+    }
+
+    fn write(&self, outcome: ExchangeOutcome) {
+        if let Some(row) = self.sink.lock().unwrap().get_mut(self.index) {
+            row.outcome = outcome;
+        }
+    }
+
+    /// State how the exchange ended. The row is then done with.
+    fn settle(mut self, outcome: ExchangeOutcome) {
+        self.settled = true;
+        self.write(outcome);
+    }
+}
+
+impl Drop for OpenRow {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        self.write(ExchangeOutcome::Error(ABANDONED.to_string()));
+    }
+}
 
 /// Records every client exchange that flows through the wrapped transport.
 /// Clone shares the same capture sink, so a clone kept for `captured()` sees
@@ -99,27 +149,26 @@ impl HttpTransport for RecordingHttpNetwork {
     }
 
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        let method = req.method.clone();
-        let path = req.path.clone();
-        let req_headers = req.headers.clone();
-        let req_body = req.body.clone();
+        let row = OpenRow::open(
+            &self.sink,
+            CapturedExchange {
+                at_ms: self.clock.now_ms(),
+                dst,
+                method: req.method.clone(),
+                path: req.path.clone(),
+                req_headers: req.headers.clone(),
+                req_body: req.body.clone(),
+                outcome: ExchangeOutcome::Error(ABANDONED.to_string()),
+            },
+        );
         let result = self.inner.request(dst, req).await;
-        let outcome = match &result {
+        row.settle(match &result {
             Ok(resp) => ExchangeOutcome::Response {
                 status: resp.status,
                 headers: resp.headers.clone(),
                 body: resp.body.clone(),
             },
             Err(e) => ExchangeOutcome::Error(e.to_string()),
-        };
-        self.sink.lock().unwrap().push(CapturedExchange {
-            at_ms: self.clock.now_ms(),
-            dst,
-            method,
-            path,
-            req_headers,
-            req_body,
-            outcome,
         });
         result
     }
