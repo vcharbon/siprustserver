@@ -535,10 +535,10 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
    * The actor dials, the far party answers, the SUT relays the 2xx (the
    * actor's 2xx anchored on the far leg's send, as the cut stamps a relay) and
    * the far leg expects the ACK the SUT relays back; the actor's leg then
-   * carries only a BYE. Both proofs of a lost ACK sit in the 2xx itself:
-   * `retransmits` (a repeated 2xx is one no ACK reached, §13.3.1.4) and
-   * `observed.at_us` (the silence the leg measured after it, which is proof
-   * only past the first rung).
+   * carries only a BYE. Both gates of the proof sit in the 2xx itself:
+   * `retransmits` / `retransmit_intervals_ms` (where the ladder stopped, and
+   * the rung the far leg's ACK must follow) and `observed.at_us` (the silence
+   * the leg measured after it, read only past the rung that was due).
    */
   const relayedShape = (twoxx: Partial<Flow.Step>, byeAtMs: number): ReadonlyArray<Flow.Step> => [
     at(offerless("s1", "A"), 0),
@@ -650,6 +650,14 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
     expect(unackedTakenFinals(laddered(SCHEDULE, 1_010 + sum + 60, 90_000))).toEqual([])
     // A count past the schedule is a ladder the RFC has already given up on.
     expect(unackedTakenFinals(laddered([...SCHEDULE, 4_000], 1_010 + sum + 4_060, 90_000))).toEqual([])
+    // One rung short of the end is a ladder that stopped: the last rung was
+    // still due, and the far leg's ACK follows the ninth.
+    const short = SCHEDULE.slice(0, -1)
+    const shortSum = short.reduce((a, g) => a + g, 0)
+    expect(
+      unackedTakenFinals(laddered(short, 1_010 + shortSum + 60, 90_000))
+        .map((c) => c.ground === "relayed-ack" && c.ladder)
+    ).toEqual([{ rungs: 9, lastRungMs: shortSum, dueMs: sum }])
   })
 
   it("paces a ladder the document states no gaps for on the schedule", () => {

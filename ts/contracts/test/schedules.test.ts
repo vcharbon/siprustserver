@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { format } from "../src/canonical.js"
-import { ClassName, decodeScheduleTableSync, rungIntervalsMs, SCHEDULES } from "../src/schedules.js"
+import { ClassName, decodeScheduleTableSync, rungGapsMs, rungIntervalsMs, SCHEDULES } from "../src/schedules.js"
 
 describe("the schedule table", () => {
   const table = decodeScheduleTableSync(SCHEDULES)
@@ -26,6 +26,18 @@ describe("the schedule table", () => {
   it("answers a class's rungs by name", () => {
     expect(rungIntervalsMs("final-2xx").slice(0, 4)).toEqual([500, 1000, 2000, 4000])
     expect(rungIntervalsMs("invite-client")).toEqual([500, 1000, 2000, 4000, 8000, 16000])
+  })
+
+  it("paces a message's rungs on its stated gaps, else on the class schedule", () => {
+    expect(rungGapsMs("final-2xx", 2, [469, 998])).toEqual([469, 998])
+    expect(rungGapsMs("final-2xx", 2, [])).toEqual([500, 1000])
+    expect(rungGapsMs("final-2xx", 3)).toEqual([500, 1000, 2000])
+    expect(rungGapsMs("final-2xx", 0, [469])).toEqual([])
+    // A count past either list repeats the last gap.
+    expect(rungGapsMs("final-2xx", 3, [469])).toEqual([469, 469, 469])
+    expect(rungGapsMs("invite-client", 8)).toEqual([500, 1000, 2000, 4000, 8000, 16000, 16000, 16000])
+    // The schedule itself lists no rung at or past the give-up.
+    expect(rungIntervalsMs("final-2xx")[10]).toBeUndefined()
   })
 
   it("round-trips through the canonical bytes the binary writes", () => {

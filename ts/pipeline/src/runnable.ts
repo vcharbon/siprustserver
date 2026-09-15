@@ -465,9 +465,11 @@ const FINAL_2XX_RUNGS_MS = Schedules.rungIntervalsMs("final-2xx")
  * Where the declared ladder of the 2xx stopped: its rung count, the instant of
  * its last rung — the gaps the document states summed, the schedule's where it
  * states none ({@link Schedules.rungGapsMs}) — and the instant the schedule's
- * next rung was due. A 2xx declaring no rung is a ladder that stopped at its
- * head, the first rung due at T1. Undefined where the ladder ran to the
- * schedule's end: no rung was due after it.
+ * next rung was due. The next rung is the schedule's gap, not the stated pace
+ * extrapolated: a platform whose T1 is not the RFC's is measured against the
+ * RFC's ladder. A 2xx declaring no rung is a ladder that stopped at its head,
+ * the first rung due at T1. Undefined where the ladder ran to the schedule's
+ * end: no rung was due after it.
  */
 const ladderEnd = (step: Flow.Step): LadderEnd | undefined => {
   const rungs = step.retransmits ?? 0
@@ -586,19 +588,14 @@ type LostAckGround =
  * it. Two proofs, the first that holds:
  *
  * - a continuation on the leg ({@link continuationAfter});
- * - the far leg expects that ACK relayed ({@link relayedAckAfter}) and the
- *   platform's 2xx ladder toward the actor STOPPED SHORT of its schedule: a
- *   UAS repeats a 2xx from T1 on, rung after rung to the give-up, until the
- *   ACK arrives (§13.3.1.4), so a ladder the document declares ended
- *   ({@link ladderEnd}) before the silence the capture measured
- *   ({@link silenceAfter}) would have carried the next scheduled rung is one
- *   the ACK reached — after its last rung, where the far leg's ACK step then
- *   sits ({@link ackAfterLastRung}). A silence that ends before the next rung
- *   was due gave the ladder no instant to fire, a ladder run to the schedule's
- *   end is the platform stating no ACK came, and a rung fired past the far
- *   leg's ACK reads nothing off its end, so all three keep the
- *   abandoned-dialog reading. The far leg's ACK is read as the actor's relayed,
- *   which a platform that ACKs the far leg on its own would falsify.
+ * - the far leg expects that ACK relayed AFTER the last rung of the
+ *   platform's 2xx ladder toward the actor ({@link relayedAckAfter},
+ *   {@link ackAfterLastRung}) — that step is the proof. It is read only where
+ *   the ladder stopped short of its schedule ({@link ladderEnd}) and the leg's
+ *   silence ({@link silenceAfter}) ran past the rung that was due: a UAS
+ *   repeats a 2xx rung after rung until the ACK arrives (§13.3.1.4), so only
+ *   then may the ACK have reached. The far leg's ACK is read as the actor's
+ *   relayed, which a platform that ACKs the far leg on its own falsifies.
  *
  * Undefined where neither holds, and the abandoned-dialog reading stands.
  */
