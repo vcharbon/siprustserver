@@ -489,9 +489,11 @@ rung entry fired at once, then the schedule from that rung, bounded by the
 give-up deadline the replicated timer ledger carries. The caller sees a few
 tag-identical duplicates, within the retransmission schedule, sooner than the
 schedule would have paced them; the give-up fires at the deadline the ledger
-carried, not later. The message count a quiet re-ACK advanced is never
-replicated, so a node restoring the call reads the last written count — a
-fresh budget for a runaway callee, bounded by the keepalive reset. An alive
+carried, not later. The message count a quiet re-ACK advanced is not
+replicated by that turn; it rides the next write, so a node restoring the
+call reads the last written count, not zero — a runaway callee's repeats
+since that write are counted again from it, bounded by the keepalive reset.
+An alive
 primary that folds a dominating reverse flush restarts its ladder from the
 folded write, bounded by the same deadline.
 
