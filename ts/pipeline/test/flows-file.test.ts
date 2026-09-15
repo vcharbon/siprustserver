@@ -100,6 +100,35 @@ describe("FlowsSegments.segments", () => {
     }
   })
 
+  it("names each leg's own text inside its segment, on a document with no indentation", () => {
+    // Nothing promises a pretty-printed emitter, and a separator of one byte is
+    // where a `json` length read off the wrong end stops working.
+    const file = path.join(scratch, "compact.flows.json")
+    const legs = [legOf(0), legOf(1), legOf(2)]
+    fs.writeFileSync(file, JSON.stringify({ schema: 5, legs, groups: [] }))
+    const read: Array<unknown> = []
+    for (const segment of FlowsSegments.segments(file)) {
+      if (segment.kind !== "leg") continue
+      expect(segment.json).toBeGreaterThan(0)
+      expect(segment.json).toBeLessThanOrEqual(segment.bytes.length)
+      read.push(JSON.parse(Buffer.from(segment.bytes.subarray(0, segment.json)).toString("utf8")))
+    }
+    expect(read).toEqual(legs)
+  })
+
+  it("reads a legs array of bare values, the last one included", () => {
+    const file = path.join(scratch, "bare.flows.json")
+    fs.writeFileSync(file, `{"schema":5,"legs":["a",12,null],"groups":[]}`)
+    const parts = [...FlowsSegments.segments(file)]
+    expect(parts.map((segment) => segment.kind)).toEqual(["head", "leg", "leg", "leg", "tail"])
+    expect(
+      parts.filter((segment) => segment.kind === "leg")
+        .map((segment) => JSON.parse(Buffer.from(segment.bytes.subarray(0, segment.json)).toString("utf8")))
+    ).toEqual(["a", 12, null])
+    expect(Buffer.concat(parts.map((p) => Buffer.from(p.bytes))).equals(fs.readFileSync(file)))
+      .toBe(true)
+  })
+
   it("reads a document whose legs array is empty", () => {
     const file = documentOf("empty.flows.json", 0)
     const parts = [...FlowsSegments.segments(file)]
@@ -118,6 +147,13 @@ describe("FlowsSegments.segments", () => {
 describe("FlowsFile.readFlowsFile", () => {
   it("assembles the document JSON.parse would have made of the whole file", () => {
     expect(FlowsFile.readFlowsFile(big)).toEqual(JSON.parse(fs.readFileSync(big, "utf8")))
+  })
+
+  it("reads a document with no indentation", () => {
+    const file = path.join(scratch, "compact-read.flows.json")
+    const document = { schema: 5, legs: [legOf(0), legOf(1)], groups: [{ legs: [0, 1] }] }
+    fs.writeFileSync(file, JSON.stringify(document))
+    expect(FlowsFile.readFlowsFile(file)).toEqual(document)
   })
 
   it("never holds the document as one string", () => {

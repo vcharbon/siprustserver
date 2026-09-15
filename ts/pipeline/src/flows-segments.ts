@@ -1,11 +1,9 @@
 /**
- * A flows document's bytes, read as the segments it is made of: the envelope's
- * head, one segment per `legs` element, then the envelope's tail.
- *
- * Concatenated in order the segments ARE the file, byte for byte, so a store
- * that keeps them apart rebuilds the document exactly. Nothing is parsed here:
- * the scanner respects strings, escapes and nesting and reads no value, because
- * a capture of a few thousand calls is larger than V8 holds as one string.
+ * A flows document's bytes as the segments it is made of: the envelope's head,
+ * one per `legs` element, then the envelope's tail. Concatenated in order they
+ * ARE the file, byte for byte. Nothing is parsed: the scanner respects strings,
+ * escapes and nesting and reads no value, and it matches the `legs` key on the
+ * RAW bytes, so a key written with escapes is not the one it is looking for.
  */
 import { Buffer } from "node:buffer"
 import * as fs from "node:fs"
@@ -82,7 +80,7 @@ export function* segments(file: string): Generator<Segment> {
     let legs = 0
     let legEnd = 0
 
-    let chunk = Buffer.allocUnsafe(CHUNK)
+    const chunk = Buffer.allocUnsafe(CHUNK)
     let base = 0
 
     /** The current segment, closed just before `upto` in this chunk. */
@@ -99,10 +97,12 @@ export function* segments(file: string): Generator<Segment> {
     }
 
     /** The segment that ends where a leg begins: the head, or the leg before it. */
-    const closed = (upto: number): Segment =>
-      legs === 0
-        ? { kind: "head", bytes: take(upto) }
-        : { kind: "leg", index: legs - 1, bytes: take(upto), json: legEnd - segStartAt }
+    const closed = (upto: number): Segment => {
+      if (legs === 0) return { kind: "head", bytes: take(upto) }
+      // Read before `take`, which moves the start on to the next segment.
+      const json = legEnd - segStartAt
+      return { kind: "leg", index: legs - 1, bytes: take(upto), json }
+    }
 
     for (;;) {
       const read = fs.readSync(fd, chunk, 0, CHUNK, null)
@@ -116,7 +116,7 @@ export function* segments(file: string): Generator<Segment> {
           else if (byte === QUOTE) {
             inString = false
             if (readingKey) {
-              named = String.fromCharCode(...key)
+              named = Buffer.from(key).toString("latin1")
               readingKey = false
             }
           } else if (readingKey) key.push(byte)
@@ -154,6 +154,15 @@ export function* segments(file: string): Generator<Segment> {
             inString = true
             continue
           }
+          if (byte === CLOSE_BRACKET && depth === 2) {
+            // A bare-value leg the array closes right after: it ends, then so does `legs`.
+            elementOpen = false
+            legEnd = previous + 1
+            yield closed(i)
+            phase = "after"
+            depth = 1
+            continue
+          }
           if (byte === OPEN_BRACE || byte === OPEN_BRACKET) depth++
           else if (byte === CLOSE_BRACE || byte === CLOSE_BRACKET) {
             depth--
@@ -162,7 +171,7 @@ export function* segments(file: string): Generator<Segment> {
               legEnd = at + 1
             }
           } else if (byte === COMMA && depth === 2) {
-            // A leg that is a bare value: its text ends where the separator starts.
+            // A bare-value leg: its text ends where the separator starts.
             elementOpen = false
             legEnd = previous + 1
           }
@@ -200,7 +209,6 @@ export function* segments(file: string): Generator<Segment> {
       }
       base += read
       segStart = 0
-      chunk = Buffer.allocUnsafe(CHUNK)
     }
     if (phase !== "after") {
       throw new Error(`${file}: no top-level "legs" array — not a flows document`)
