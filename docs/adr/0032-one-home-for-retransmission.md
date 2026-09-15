@@ -99,7 +99,9 @@ derive from the class, so a rung index is the whole of a ladder's state, and
 `Ladder::at_rung` rebuilds one whole from it. This replaces three different
 field sets and keeps the property the §3 ladder reasoned for in a comment: no
 epoch anchor rides in a replicated body, so a takeover resumes the ladder
-exactly where it stood.
+from the last replicated write, bounded by the deadline in the ledger. A rung
+is a quiet turn and rides only in the next write (ADR-0014, "a counter counts
+writes that change the call, not progress").
 
 The `Ladder` cursor carries the elapsed total beside the rung, because a
 retargeted ladder's elapsed time is no longer a function of its rung alone.
@@ -210,8 +212,10 @@ one token — which makes the oracle itself an assertion of the X3 invariant.
 - ADR-0007 (transaction layer shape) and ADR-0010 (B2BUA rules shape) keep
   their decisions; this ADR moves the dialog-level retransmission obligation
   from the rule layer to the framework and gives both layers one schedule.
-- ADR-0014's reactive-only takeover is unaffected: a rung index and an opaque
-  datagram replicate exactly as the interval fields they replace did.
+- ADR-0014's reactive-only takeover is unaffected: an opaque datagram
+  replicates with the write that retains it; the rung index rides only in the
+  next write that changes the call, so a node restoring the call holds the
+  rung the last write held.
 - The B2BUA data model loses four retained structs and three interval fields;
   the SDK loses two `RuleAction` variants and gains none.
 

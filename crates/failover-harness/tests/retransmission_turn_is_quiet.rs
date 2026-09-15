@@ -280,6 +280,11 @@ async fn own_2xx_ladder_across_a_kill(name: &str, k: usize) {
         "a rung is not a write: the primary flushed nothing for the call after the answer",
     );
     assert_eq!(
+        primary.metrics().repl_quiet_turns_total("own-rung"),
+        k as u64,
+        "each rung was persisted as a quiet turn: {k} rungs against 0 flushes",
+    );
+    assert_eq!(
         survivor.call_gen(PartitionRole::Backup, &pri_ord, &call_ref),
         Some(answered_p),
         "the backup still holds the answer's version",
@@ -442,6 +447,11 @@ async fn a_re_ack_of_a_repeated_2xx_replicates_nothing() {
         puts_sent_by(&fh, &pri_ord, &call_ref) - puts_at_confirm,
         0,
         "a re-ACK is not a write: the primary flushed nothing for the call after the ACK",
+    );
+    assert_eq!(
+        primary.metrics().repl_quiet_turns_total("re-ack"),
+        REPEATS as u64,
+        "each re-ACK was persisted as a quiet turn: {REPEATS} re-ACKs against 0 flushes",
     );
 
     // ── the call ends properly on the live primary ───────────────────────────

@@ -147,6 +147,10 @@ struct Inner {
     // breakdown, the latter double-counted (inc/dec only on apply, never on TTL
     // eviction) and is replaced by `repl_meta_backup`.
     repl_flush_propagated: AtomicU64,
+    // Quiet turns persisted without a bump or a flush, per `QuietTurn` kind
+    // (own-rung | re-ack): paired with `retransmits_total`, N rungs against 0
+    // flushes is the rule holding; a flush per rung is the rule broken.
+    repl_quiet_turns: Mutex<BTreeMap<String, u64>>,
     // Inbound replication ops applied, per `(flow, peer, op)` (keyed
     // "flow|peer|op"): `flow` = recovery (Pri/reclaim — our own calls pulled back
     // from a peer's backup) | backup (Bak — a peer's calls we hold as backup);
@@ -447,6 +451,16 @@ impl B2buaMetrics {
 
     // --- replication ---
     counter!(bump_repl_flush_propagated, repl_flush_propagated_total, repl_flush_propagated);
+
+    /// Count one quiet turn of `kind`, for `b2bua_repl_quiet_turns_total{kind}`.
+    pub fn record_quiet_turn(&self, kind: &str) {
+        *self.inner.repl_quiet_turns.lock().unwrap().entry(kind.to_string()).or_insert(0) += 1;
+    }
+
+    /// The quiet turns of one kind.
+    pub fn repl_quiet_turns_total(&self, kind: &str) -> u64 {
+        self.inner.repl_quiet_turns.lock().unwrap().get(kind).copied().unwrap_or(0)
+    }
     counter!(bump_repl_takeover_resolved, repl_takeover_resolved_total, repl_takeover_resolved);
     counter!(bump_repl_takeover_hydrated, repl_takeover_hydrated_total, repl_takeover_hydrated);
     counter!(
@@ -797,6 +811,10 @@ impl B2buaMetrics {
             s.push_str(&format!(
                 "b2bua_repeat_give_ups_total{{obligation=\"{obligation}\"}} {v}\n"
             ));
+        }
+        s.push_str("# HELP b2bua_repl_quiet_turns_total dialog-level retransmission turns persisted with no version bump and no flush (own-rung: a rung of this node's own 2xx or reliable-provisional ladder; re-ack: the re-ACK of a repeated inbound 2xx); paired with b2bua_retransmits_total, N rungs against 0 flushes is the rule holding\n# TYPE b2bua_repl_quiet_turns_total counter\n");
+        for (kind, v) in self.inner.repl_quiet_turns.lock().unwrap().iter() {
+            s.push_str(&format!("b2bua_repl_quiet_turns_total{{kind=\"{kind}\"}} {v}\n"));
         }
         s.push_str("# HELP b2bua_repl_applied_total inbound replication ops applied per stream+endpoint+op (flow=recovery|backup, peer=endpoint, op=create|update|delete); a reboot's bulk reclaim shows as a recovery/create step\n# TYPE b2bua_repl_applied_total counter\n");
         for (k, v) in self.inner.repl_applied.lock().unwrap().iter() {
@@ -1388,6 +1406,10 @@ mod tests {
         m.record_retransmit("reliable-provisional", "INVITE", Some(183));
         m.record_retransmit("trigger", "ACK", None);
         m.record_repeat_give_up("ack-of-2xx");
+        m.record_quiet_turn("own-rung");
+        m.record_quiet_turn("own-rung");
+        assert_eq!(m.repl_quiet_turns_total("own-rung"), 2);
+        assert_eq!(m.repl_quiet_turns_total("re-ack"), 0);
         assert_eq!(m.retransmits_total("final-2xx", "INVITE", Some(200)), 2);
         assert_eq!(m.retransmits_total("trigger", "ACK", None), 1);
         assert_eq!(
@@ -1410,6 +1432,7 @@ mod tests {
             "no code label on a request: {txt}"
         );
         assert!(txt.contains("b2bua_repeat_give_ups_total{obligation=\"ack-of-2xx\"} 1"));
+        assert!(txt.contains("b2bua_repl_quiet_turns_total{kind=\"own-rung\"} 2"), "{txt}");
     }
 
     #[test]

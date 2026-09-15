@@ -23,7 +23,7 @@ use super::release::{release_call, ReleaseKind};
 use super::resolve::Resolution;
 use super::responses::{build_481, build_store_fault_500};
 use super::RouterCtx;
-use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
+use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult, QuietTurn};
 use crate::event::CallEvent;
 use crate::initial_invite::{build_initial_call, handle_initial_invite};
 use crate::rules::model::RuleAction;
@@ -534,18 +534,21 @@ fn record_refusal(
 /// Run the synchronous rule chain for one in-dialog event, with the
 /// MAX_MESSAGES_PER_CALL cap-defense wrapped around it.
 ///
-/// EVERY in-dialog rule-chain event bumps the counter; if the bump crosses
-/// `max_messages_per_call` and the handler did not itself terminate the call,
-/// append a begin-termination so a runaway dialog (re-INVITE/OPTIONS storm,
-/// glare loop, a peer that never stops) is torn down instead of processing
-/// unbounded in-dialog events forever — each of which allocates a txn
-/// (`set_txn`), a working `Call` clone, and a store body. Initial-INVITE and
-/// the async limiter-refresh do NOT count. The bump rides the existing
-/// per-event flush — `message_count` adds no extra replication traffic (it
-/// mutates with the CSeq/state the event already changes). Order: bump +
+/// The count opens at 1 on the initial INVITE (`initial_invite`) and every
+/// in-dialog rule-chain event adds one, except a rung of this node's own
+/// ladder: a rung repeats retained bytes on this node's clock and is no
+/// message of the peer's, so a deaf peer under a lossy path is not a runaway
+/// dialog. A repeated inbound 2xx is the peer's message and counts. If the
+/// bump crosses `max_messages_per_call` and the handler did not itself
+/// terminate the call, append a begin-termination so a runaway dialog
+/// (re-INVITE/OPTIONS storm, glare loop, a peer that never stops) is torn down
+/// instead of processing unbounded in-dialog events forever — each of which
+/// allocates a txn (`set_txn`), a working `Call` clone, and a store body. The
+/// async limiter-refresh does not count. The bump rides the turn's own write;
+/// on a quiet turn (`QuietTurn`) it rides the next write. Order: bump +
 /// capture `cap_exceeded` BEFORE the handler runs, terminate AFTER, so the
 /// in-flight event (e.g. relaying this re-INVITE's response) is still serviced
-/// before teardown.
+/// before teardown; a turn that trips the cap is the teardown, never quiet.
 fn rule_chain_turn(
     ctx: &Arc<RouterCtx>,
     mut call: Call,
@@ -563,6 +566,9 @@ fn rule_chain_turn(
     // call around message 200, BYEing a healthy dialog mid-call.
     let bumped = match event {
         CallEvent::Timer { timer_type: TimerType::Keepalive, .. } => 0,
+        CallEvent::Timer { timer_type: TimerType::Rung { .. }, .. } => {
+            call.message_count.unwrap_or(0)
+        }
         _ => call.message_count.unwrap_or(0) + 1,
     };
     call.message_count = Some(bumped);
@@ -583,7 +589,9 @@ fn rule_chain_turn(
     let mut ladder_fx = HandlerEffects::new();
     if let CallEvent::Timer { timer_type: TimerType::Rung { obligation }, .. } = event {
         let before = call.clone();
-        exec.repeat(&mut call, &mut ladder_fx, obligation);
+        if exec.repeat(&mut call, &mut ladder_fx, obligation) {
+            ladder_fx.quiet = Some(QuietTurn::OwnRung);
+        }
         let repeated = HandlerResult { call, effects: ladder_fx };
         return crate::rules::invariants::enforce(
             &ctx.obligations,
@@ -705,6 +713,7 @@ fn rule_chain_turn(
         result.effects.soft.extend(cap.effects.soft);
         result.effects.buffered.extend(cap.effects.buffered);
         result.effects.fire_and_forget.extend(cap.effects.fire_and_forget);
+        result.effects.quiet = None;
         ctx.metrics.bump_message_cap_terminated();
         result = crate::rules::invariants::enforce(
             &ctx.obligations,

@@ -441,3 +441,63 @@ the ring deadline. Pinned ignored in
 `failover-harness/tests/answer_lost_with_primary_no_answer.rs`; the folds are
 pinned live in the same file.
 
+## Amendment — a counter counts writes that change the call, not progress
+
+Each owner bumps its own axis of `(p,b)` once per handler turn that changes
+the replicated call state, and flushes that turn. A dialog-level
+retransmission turn changes no fact a CDR, a peer or a node restoring the call
+needs: it is **quiet** — the live copy is replaced (the armed rung advances),
+no axis moves, nothing flushes. The quiet list is closed
+(`b2bua::effects::QuietTurn`); a third member is a line here first:
+
+1. a rung of this node's own un-ACKed 2xx ladder (RFC 3261 §13.3.1.4),
+2. a rung of this node's own reliable-provisional ladder (RFC 3262 §3),
+3. the re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4).
+
+A rung is quiet only while the ladder goes on: a copy left and the next rung
+is armed, so the body differs from the last write by the rung index and the
+rung timer's due instant. The rung that ceases the ladder, a spent fire, a
+give-up, a keepalive OPTIONS turn, a request refused into the message ring and
+every other turn is a write and bumps. A transaction-level retransmission
+never reaches the call model. A turn that trips the per-call message cap is
+the teardown, never quiet.
+
+**What the vector answers.** Two questions only: equality on the reader's own
+axis — has the other owner written since I branched — and strict greater on
+the writer's axis — is this a newer write of yours; that is the Reverse rule
+as it stands (`p_in == p_cur && b_in > b_cur`). It never orders two owners'
+progress; the body does (the lifecycle chain, the answer latch, ADR-0031's
+amendment).
+
+**One increment means** one turn on that owner changed the replicated call
+state, and the flush carrying that body is on the wire. **It does not mean** a
+message was received or sent, that a rung was walked, that the call is further
+along than a copy with a lower count on the other axis, or that the cap
+counter moved: a rung of this node's own ladder never counts toward
+`max_messages_per_call`; a repeated inbound 2xx does, and its count rides in
+the next write.
+
+**Accepted degradation.** A node restoring the call — the reclaiming primary,
+since a survivor's takeover copy is reactive and sheds when its last
+transaction clears — hydrates the body of the last replicated write and
+restarts the ladder from there: the rung index that write held, its past-due
+rung entry fired at once, then the schedule from that rung, bounded by the
+give-up deadline the replicated timer ledger carries. The caller sees a few
+tag-identical duplicates, within the retransmission schedule, sooner than the
+schedule would have paced them; the give-up fires at the deadline the ledger
+carried, not later.
+
+**Dry-run.** Per rule, the scenario that exercises the ordinary path and the
+cell that pins the rule:
+
+| Rule | Ordinary path | Pinned by |
+| --- | --- | --- |
+| Own 2xx rung is quiet, does not count toward the cap | `b2bua-harness/tests/unacked_2xx_reap.rs`, `unacked_reinvite_2xx_reap.rs`, `failover-harness/tests/inflight_resend.rs` | `b2bua-harness/tests/retransmission_turn_and_message_cap.rs` (`a_2xx_ladder_rung_does_not_count_toward_the_message_cap`), `failover-harness/tests/retransmission_turn_is_quiet.rs` (`a_reclaim_after_one_rung_…`, `…three_rungs_…`) |
+| Own §3 rung is quiet, does not count toward the cap | `b2bua-harness/tests/prack_reliable_ladder.rs` | `retransmission_turn_and_message_cap.rs` (`a_reliable_provisional_rung_does_not_count_toward_the_message_cap`), `failover-harness/tests/prack_takeover.rs` |
+| Re-ACK is quiet, the repeated 2xx counts | `b2bua-harness/tests/it/reack_retransmitted_2xx.rs` | `retransmission_turn_is_quiet.rs` (`a_re_ack_of_a_repeated_2xx_replicates_nothing`), `retransmission_turn_and_message_cap.rs` (`a_repeated_inbound_2xx_counts_toward_the_message_cap`) |
+| The vector answers equality and strict-greater only | `failover-harness/tests/forward_flush_never_regresses_backup_progress.rs` (both `HealAt` cells), `answer_lost_with_primary_no_answer.rs`, `b2bua/src/repl/s12_tests.rs` | the same cells, unchanged |
+| A restored ladder restarts from the last write, bounded by the deadline | — (a residual, not a rule) | `retransmission_turn_is_quiet.rs` (`a_reclaim_after_three_rungs_restarts_the_2xx_ladder_from_the_answer`) |
+
+`b2bua_repl_quiet_turns_total{kind}` counts the turns persisted this way, so
+N rungs in `b2bua_retransmits_total` against 0 in `b2bua_repl_flush_propagated_total`
+is the rule holding. ADR-0032 X2 states the ladder side.

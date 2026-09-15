@@ -171,14 +171,24 @@ impl ActionExecutor<'_> {
     /// raising fork is torn down (a reclaim can restore a ladder whose cancel
     /// died with the crashed node) — sends nothing and retires the obligation
     /// so a later reclaim cannot re-fire it.
-    pub fn repeat(&self, call: &mut Call, fx: &mut HandlerEffects, obligation: &Obligation) {
+    ///
+    /// Returns `true` when a copy left and the next rung is armed: the body
+    /// then differs from before by the rung index and the rung timer's due
+    /// instant only, the shape [`QuietTurn::OwnRung`] names. A cease or a
+    /// spent fire removes a ledger entry and returns `false`.
+    pub fn repeat(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        obligation: &Obligation,
+    ) -> bool {
         let rung = TimerType::Rung { obligation: obligation.clone() };
         let effect = (call.state == CallModelState::Active)
             .then(|| repeat_toward(call, obligation))
             .flatten();
         let Some(effect) = effect else {
             self.retire(call, fx, Scope::Obligation(obligation.clone()));
-            return;
+            return false;
         };
         fx.outbound.push(effect);
         let give_up = match obligation {
@@ -188,7 +198,10 @@ impl ActionExecutor<'_> {
         let (updated, next) = call::helpers::advance_ladder(call.clone(), obligation, give_up);
         *call = updated;
         match next {
-            Some(next) => self.schedule(call, fx, rung, next.as_millis() as i64, None),
+            Some(next) => {
+                self.schedule(call, fx, rung, next.as_millis() as i64, None);
+                true
+            }
             None => {
                 // The last rung inside the bound has been sent: re-asking stops
                 // here, but the give-up stands — the peer's silence is answered
@@ -199,6 +212,7 @@ impl ActionExecutor<'_> {
                 if let Obligation::PrackOf { .. } = obligation {
                     *call = call::helpers::clear_retained(call.clone(), obligation);
                 }
+                false
             }
         }
     }

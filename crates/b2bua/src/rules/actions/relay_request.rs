@@ -11,7 +11,7 @@ use sip_message::{hops, Method};
 use sip_txn::TxnKind;
 
 use crate::effects::{
-    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance,
+    HandlerEffects, OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance, QuietTurn,
 };
 use crate::rules::capabilities;
 use crate::rules::model::RuleContext;
@@ -56,6 +56,7 @@ impl ActionExecutor<'_> {
                     format!("ACK (re-ACK, 2xx retransmit) → {leg_id}"),
                     leg_id,
                 ));
+                fx.quiet = Some(QuietTurn::ReAck);
                 return;
             }
         }

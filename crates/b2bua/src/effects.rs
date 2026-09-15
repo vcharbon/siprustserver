@@ -160,7 +160,38 @@ pub enum FireAndForgetEffect {
     Reenter(Box<CallEvent>),
 }
 
-/// The five categories of effect a handler emits.
+/// A dialog-level retransmission turn that changes no replicated fact — the
+/// closed list of turns the store replaces without a version bump and the
+/// router persists without a flush (ADR-0014, "a counter counts writes that
+/// change the call, not progress"). A third member is an ADR line first.
+///
+/// A transaction-level retransmission never reaches the call model; every
+/// other turn is a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuietTurn {
+    /// A rung of this node's own ladder that left a copy and armed the next
+    /// rung: the un-ACKed 2xx ladder (RFC 3261 §13.3.1.4) or the un-PRACKed
+    /// reliable-provisional ladder (RFC 3262 §3). The turn's body delta is the
+    /// rung index and the rung timer's next due instant; a rung that ceases
+    /// the ladder or fires spent is a write.
+    OwnRung,
+    /// The re-ACK of a repeated inbound 2xx (RFC 3261 §13.2.2.4): the retained
+    /// ACK's bytes leave again and the body records nothing but the in-dialog
+    /// message count.
+    ReAck,
+}
+
+impl QuietTurn {
+    /// The `kind` label of `b2bua_repl_quiet_turns_total`.
+    pub fn kind(self) -> &'static str {
+        match self {
+            QuietTurn::OwnRung => "own-rung",
+            QuietTurn::ReAck => "re-ack",
+        }
+    }
+}
+
+/// The five categories of effect a handler emits, and the turn's class.
 #[derive(Debug, Clone, Default)]
 pub struct HandlerEffects {
     pub critical: Vec<CriticalStateEffect>,
@@ -168,6 +199,9 @@ pub struct HandlerEffects {
     pub soft: Vec<SoftBoundedEffect>,
     pub buffered: Vec<BufferedObservabilityEffect>,
     pub fire_and_forget: Vec<FireAndForgetEffect>,
+    /// `Some` when the turn is one of the closed [`QuietTurn`] list; set by
+    /// exactly two authors, the framework's rung turn and the bodyless re-ACK.
+    pub quiet: Option<QuietTurn>,
 }
 
 impl HandlerEffects {
@@ -175,9 +209,26 @@ impl HandlerEffects {
         Self::default()
     }
 
+    /// No effect of any category.
+    pub fn is_empty(&self) -> bool {
+        self.critical.is_empty()
+            && self.outbound.is_empty()
+            && self.soft.is_empty()
+            && self.buffered.is_empty()
+            && self.fire_and_forget.is_empty()
+    }
+
     /// Append another effect set (used to merge composed-rule / framework
-    /// effects into the rule's own).
+    /// effects into the rule's own). The merged turn keeps a quiet class only
+    /// when the half that carries it is the whole turn: a quiet half beside a
+    /// half with effects of its own is a write.
     pub fn extend(&mut self, other: HandlerEffects) {
+        self.quiet = match (self.quiet, other.quiet) {
+            (Some(a), Some(b)) if a == b => Some(a),
+            (Some(a), None) if other.is_empty() => Some(a),
+            (None, Some(b)) if self.is_empty() => Some(b),
+            _ => None,
+        };
         self.critical.extend(other.critical);
         self.outbound.extend(other.outbound);
         self.soft.extend(other.soft);

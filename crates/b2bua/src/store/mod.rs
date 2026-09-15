@@ -290,6 +290,10 @@ impl CallState {
     /// X11 double-serve class. The dropped mutation is safe: the call is gone on
     /// this node by an authoritative teardown, and any later event re-enters via
     /// a fresh hydrate.
+    ///
+    /// A bump counts a write that changes the call; a quiet turn (a rung of this
+    /// node's own ladder, a re-ACK — [`crate::effects::QuietTurn`]) goes through
+    /// [`update_quiet`](Self::update_quiet) and moves no axis.
     pub fn update(&self, mut call: Call) {
         if let Some(t) = call.topology.as_mut() {
             match role_of(&self.self_ordinal, &call.call_ref) {
@@ -297,6 +301,18 @@ impl CallState {
                 PartitionRole::Backup => t.bak_gen += 1,
             }
         }
+        self.replace(call);
+    }
+
+    /// Replace the in-memory call for a quiet turn: the same replace-only rule
+    /// as [`update`](Self::update) with no counter moved — the `(p,b)` the
+    /// resident copy carries is the last write's, and so is what the next
+    /// flush publishes.
+    pub fn update_quiet(&self, call: Call) {
+        self.replace(call);
+    }
+
+    fn replace(&self, call: Call) {
         let mut inner = self.inner.lock().unwrap();
         if !inner.calls.contains_key(&call.call_ref) {
             return;

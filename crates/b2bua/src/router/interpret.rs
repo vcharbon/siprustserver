@@ -16,8 +16,29 @@ use super::release::{release_call, ReleaseKind};
 use super::RouterCtx;
 use crate::effects::{
     BufferedObservabilityEffect, CriticalStateEffect, FireAndForgetEffect, HandlerResult,
-    OutboundBody, OutboundTxnMode, SoftBoundedEffect,
+    OutboundBody, OutboundTxnMode, QuietTurn, SoftBoundedEffect,
 };
+
+/// The quiet class the turn is persisted under, or `None` for a write. A
+/// class an author set is refused — the turn is a write — when the turn also
+/// carries what only a write may: a `Flush`, a `RemoveCall`, or a terminal
+/// body. A rule never runs on a rung and the re-ACK rule emits the re-ACK
+/// alone, so the refusal is a guard on the two authors, not a path.
+fn quiet_class(result: &HandlerResult) -> Option<QuietTurn> {
+    let kind = result.effects.quiet?;
+    let carries_a_write = result
+        .effects
+        .critical
+        .iter()
+        .any(|e| matches!(e, CriticalStateEffect::Flush | CriticalStateEffect::RemoveCall))
+        || result.call.state == CallModelState::Terminated;
+    debug_assert!(
+        !carries_a_write,
+        "a quiet turn ({kind:?}) carries a write: {:?}",
+        result.effects.critical
+    );
+    (!carries_a_write).then_some(kind)
+}
 
 /// Interpret a handler result: persist → critical → outbound → soft → buffered.
 pub(super) async fn process_result(
@@ -39,8 +60,17 @@ pub(super) async fn process_result(
         },
         None => result,
     };
-    // Persist first (state lands before effects run).
-    ctx.state.update(result.call.clone());
+    // Persist first (state lands before effects run). A quiet turn replaces
+    // the live copy without a bump and skips the flush gate below: the armed
+    // rung advances, the backup keeps the last write that changed the call.
+    let quiet = quiet_class(&result);
+    match quiet {
+        Some(kind) => {
+            ctx.state.update_quiet(result.call.clone());
+            ctx.metrics.record_quiet_turn(kind.kind());
+        }
+        None => ctx.state.update(result.call.clone()),
+    }
 
     // Model Y (ADR-0020 X3 amended): an acting-backup **takeover copy** that
     // reaches Terminated DEFERS the discharge to the live primary. It reverse-
@@ -84,7 +114,8 @@ pub(super) async fn process_result(
     // termination, and re-sends the BYE at the *reused* CSeq a real UAS drops
     // (matrix cells C7/RFC). Only `Terminated` is excluded — it takes the
     // `RemoveCall` delete path below instead.
-    if matches!(result.call.state, CallModelState::Active | CallModelState::Terminating)
+    if quiet.is_none()
+        && matches!(result.call.state, CallModelState::Active | CallModelState::Terminating)
         && result.call.topology.as_ref().is_some_and(|t| !t.bak.is_empty())
     {
         ctx.state.flush(&result.call);
