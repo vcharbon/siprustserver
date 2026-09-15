@@ -70,6 +70,20 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-09-15 — the settle waits on the scripted legs' own INVITE server
+transactions.** A non-2xx final a scripted leg sent to an INVITE holds a server
+transaction in Completed until the ACK the system owes on the INVITE's branch
+or Timer H (RFC 3261 §17.1.1.3, §17.2.1). The settle read the flow and the
+system's call count only, so a run closed in the instant such a final went
+out and the ACK landed after the recording; a system that never ACKed passed
+identically. No document field changes; the verdict gains one failure.
+
+| change | where |
+|---|---|
+| the settle floor: an un-ACKed non-2xx INVITE final a scripted leg sent keeps the run open, bounded by Timer H from the final's first emission, whoever composed the final — a step, the unscripted answer, the generic close. A budget that runs out names it (`leg B: 487 to INVITE CSeq 2 awaits its ACK`) | §10, `pivot-interpreter` |
+| past Timer H the transaction is gone and the ACK never came: the run settles and states `final-unacknowledged` (`leg`, `status`, `cseq`), a structural failure a declared divergence never carries | §10, `pivot-schema` verdict |
+| the ACK that ends the wait is recorded as the transaction's own closer (`absorbed: the §17.1.1.3 ACK …`), never as `datagram-after-flow` | §10, `pivot-interpreter` |
+
 **2026-09-14 — an expected session description is asserted by CONTENT, the
 lane-owned fields masked where the run rebooked them.** An expected SDP was a
 declared shape (`sdp-present`) and nothing read its lines, so a description the
@@ -2245,6 +2259,14 @@ the document measured proves a different thing than the document does.
 **After the last flow node the runner ALWAYS runs a settle phase.** It waits
 until every scripted dialog is terminal AND the system reports no active call
 AND the CDR expectation is met, bounded by `timing.settle_budget_ms`.
+
+A scripted dialog is terminal only once the transactions it holds are. A
+non-2xx final a scripted leg sent to an INVITE keeps the run open until the
+ACK the system owes it on the INVITE's branch (RFC 3261 §17.1.1.3) or Timer H
+from the final's first emission (§17.2.1), whichever comes first; that ACK is
+recorded as the transaction's own closer, never as a datagram after the flow.
+Past Timer H the transaction is gone and the missing ACK is the system's
+failure, `final-unacknowledged`: the run settles and states it.
 
 **Failing to settle is always test failure. There is no soft mode.**
 

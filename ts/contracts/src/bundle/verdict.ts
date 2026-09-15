@@ -83,6 +83,12 @@ export const DatagramAfterFlow = failure("datagram-after-flow", {
   leg: Schema.String,
   arrived: Arrived
 })
+/** A non-2xx final a scripted leg sent to an INVITE drew no ACK inside Timer H (RFC 3261 §17.2.1). */
+export const FinalUnacknowledged = failure("final-unacknowledged", {
+  leg: Schema.String,
+  status: Schema.Int,
+  cseq: Schema.Int
+})
 /** An inline or postcondition check did not hold. */
 export const CheckFailed = failure("check-failed", {
   site: Schema.String,
@@ -222,6 +228,7 @@ export const Failure = Schema.Union([
   UnmatchedDatagram,
   UnexpectedDatagram,
   DatagramAfterFlow,
+  FinalUnacknowledged,
   CheckFailed,
   AccessorUnresolved,
   SendFailed,

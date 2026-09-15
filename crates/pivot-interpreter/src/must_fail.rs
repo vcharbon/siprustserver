@@ -140,10 +140,12 @@ fn class(failure: &Failure) -> Class {
         | Failure::RetransmitCountMismatch { .. }
         | Failure::TimingOutOfTolerance { .. } => Class::Wire,
 
-        // The call did not end, was not billed, or did not settle. This project
-        // never deactivates CDR and post-call cleanup verification, and a
-        // negative case owes its call a teardown exactly like any other run.
+        // The call did not end, was not billed, or did not settle — or a
+        // transaction of it never completed. This project never deactivates
+        // CDR and post-call cleanup verification, and a negative case owes its
+        // call a teardown exactly like any other run.
         Failure::SettleTimedOut { .. }
+        | Failure::FinalUnacknowledged { .. }
         | Failure::BackgroundCount { .. }
         | Failure::CdrMismatch { .. }
         | Failure::FlowIncomplete { .. } => Class::Structural,

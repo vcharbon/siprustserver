@@ -1241,12 +1241,10 @@ async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_a
 /// draws its 200 — and the re-INVITE its 487, out of leg B's own stack, so the
 /// system's INVITE client transaction ends on a final instead of Timer B.
 ///
-/// The ACK that 487 is owed (§17.1.1.3) is not asserted: the settle reads the
-/// flow and the system's call count, not the leg's own Completed server
-/// transaction (§17.2.1), so the run closes on the BYE's 200 in the instant
-/// the 487 goes out and the ACK lands after the recording. A settle floor
-/// holding an un-ACKed non-2xx INVITE final open, bounded by Timer H, is what
-/// would let this rung assert it.
+/// The 487 holds leg B's server transaction in Completed until the ACK the
+/// system owes it on the INVITE's branch (§17.1.1.3, §17.2.1), so the settle
+/// waits for that ACK — it is milliseconds behind — and records it as the
+/// transaction's own closer, not as a datagram nothing scripted.
 #[tokio::test(start_paused = true)]
 async fn a_re_invite_pending_when_the_bye_is_answered_draws_487_behind_the_200() {
     let scene = api_scene("pivot-reinvite-under-bye").await;
@@ -1329,14 +1327,43 @@ async fn a_re_invite_pending_when_the_bye_is_answered_draws_487_behind_the_200()
         via_branch(&b[reinvite_at].raw),
         "§17.2.3: the INVITE's own branch"
     );
-    // Both answered in the instant the BYE landed, and the run settled on the
-    // teardown at once: the pending INVITE held nothing open past it.
+    // Both answered in the instant the BYE landed.
     assert_eq!(ok.at_us, b[bye_at].at_us, "{ok:#?}");
     assert_eq!(terminated.at_us, b[bye_at].at_us, "{terminated:#?}");
+    // The system ACKed the 487 on the INVITE's own branch (§17.1.1.3), the
+    // recording holds that ACK behind the 487 — past the INVITE repeat its
+    // Timer A had already put on the wire — and it is the closer the settle
+    // waited for: no late-arrival finding names it.
+    let ack = b[bye_at + 3..]
+        .iter()
+        .find(|m| m.dir == Dir::In && m.raw.starts_with("ACK "))
+        .unwrap_or_else(|| panic!("no ACK followed the 487 on leg B: {b:#?}"));
+    assert!(
+        ack.raw.contains("\r\nCSeq: 2 ACK\r\n")
+            && ack.note.as_deref().is_some_and(|note| note.contains("17.1.1.3")),
+        "{ack:#?}"
+    );
+    assert_eq!(via_branch(&ack.raw), via_branch(&terminated.raw), "§17.1.1.3: the INVITE's branch");
+    assert!(
+        !outcome.verdict.failures.iter().any(|f| matches!(
+            f,
+            Failure::DatagramAfterFlow { leg, arrived: Arrived::Request { method, .. } }
+                if leg == "B" && method == "ACK"
+        )),
+        "the ACK the settle waited for was reported as a late arrival: {:#?}",
+        outcome.verdict.failures
+    );
+    // And the run settled on the teardown at once: the ACK is milliseconds
+    // behind the 487, and nothing else held the run open past it.
     let settled = outcome.timing.settled_at_ms.expect("the run settled");
     assert!(
         settled < b[bye_at].at_us / 1000 + 500,
         "settled at {settled} ms: the settle waited on a ladder"
+    );
+    assert!(
+        settled >= ack.at_us / 1000,
+        "settled at {settled} ms, before the ACK at {} us",
+        ack.at_us
     );
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;

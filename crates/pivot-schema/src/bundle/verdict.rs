@@ -118,6 +118,10 @@ pub enum Failure {
     /// A datagram arrived during the settle window of a flow that had COMPLETED:
     /// the document scripted nothing more, and something came anyway.
     DatagramAfterFlow { leg: String, arrived: Arrived },
+    /// A non-2xx final a scripted leg sent to an INVITE drew no ACK inside
+    /// Timer H (RFC 3261 §17.2.1): the system owed one on the INVITE's branch
+    /// (§17.1.1.3) and its transaction never completed.
+    FinalUnacknowledged { leg: String, status: u16, cseq: u32 },
     /// An inline or postcondition check did not hold.
     CheckFailed { site: String, field: String, op: String, expected: String, observed: String },
     /// A `${…}` could not be resolved at the moment it was read.
@@ -240,6 +244,10 @@ impl std::fmt::Display for Failure {
             Failure::DatagramAfterFlow { leg, arrived } => {
                 write!(f, "leg {leg}: {arrived} arrived after the flow completed")
             }
+            Failure::FinalUnacknowledged { leg, status, cseq } => write!(
+                f,
+                "leg {leg}: the {status} to INVITE CSeq {cseq} drew no ACK inside Timer H"
+            ),
             Failure::CheckFailed { site, field, op, expected, observed } => write!(
                 f,
                 "{site}: check {field} {op} {expected:?} — observed {observed:?}"

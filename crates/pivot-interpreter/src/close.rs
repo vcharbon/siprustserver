@@ -111,6 +111,30 @@ pub fn obligations(recording: &Recording) -> BTreeMap<String, Owed> {
     recording.legs().iter().map(|(leg, messages)| (leg.clone(), owed(messages))).collect()
 }
 
+/// A non-2xx final this leg SENT to an INVITE it took and the peer has not
+/// acknowledged: the server transaction is Completed (RFC 3261 §17.2.1) until
+/// the ACK the peer owes on the INVITE's branch (§17.1.1.3) or Timer H, which
+/// runs from `sent_at_us`, the final's first emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnackedFinal {
+    pub cseq: u32,
+    pub status: u16,
+    pub sent_at_us: u64,
+}
+
+/// The non-2xx INVITE finals one leg sent and is still owed an ACK for, in
+/// the order it sent them, read off its recorded ladder. A 2xx is not here:
+/// its ACK is the peer's own request (§13.2.2.4), not the transaction's
+/// closer. Nothing else the leg answers is owed an ACK, so a non-INVITE final
+/// never appears.
+pub fn unacked_finals(messages: &[RecordedMessage]) -> Vec<UnackedFinal> {
+    view(messages)
+        .sent_finals
+        .into_iter()
+        .map(|(cseq, (status, sent_at_us))| UnackedFinal { cseq, status, sent_at_us })
+        .collect()
+}
+
 /// One leg's dialog and transaction state, as its own ladder states it.
 #[derive(Default)]
 struct LegView {
@@ -156,6 +180,11 @@ struct LegView {
     /// Whether this leg TOOK an INVITE, and the final it answered it with.
     took_invite: bool,
     answered_invite: Option<u16>,
+    /// The non-2xx finals this leg SENT to INVITEs it took and the peer has
+    /// not ACKed, by CSeq: the status and the instant of the first emission.
+    /// Each holds a server transaction in Completed (RFC 3261 §17.2.1); the
+    /// peer's ACK on that CSeq ends it (§17.1.1.3).
+    sent_finals: BTreeMap<u32, (u16, u64)>,
     /// Whether a CANCEL arrived for the INVITE this leg took.
     took_cancel: bool,
     /// Requests taken and not answered with a final, oldest first.
@@ -438,6 +467,9 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                     Method::Prack => {
                         view.took_prack.insert(transaction.clone(), rack_of(&request));
                     }
+                    Method::Ack => {
+                        view.sent_finals.remove(&request.cseq().seq());
+                    }
                     _ => {}
                 }
                 // An ACK answers no transaction of its own, so it is never owed
@@ -480,11 +512,14 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                         view.acknowledged.insert(named);
                     }
                 }
+                let ends_open = view.unanswered.iter().any(&ended);
                 view.unanswered.retain(|open| !ended(open));
                 match cseq.method() {
                     // A 2xx confirms the fork it rode; a non-2xx ends the
                     // INVITE transaction and every early dialog it opened
-                    // (§12.3).
+                    // (§12.3), and is owed the peer's ACK — a later final on
+                    // a transaction already ended answers nothing and is
+                    // owed nothing.
                     Method::Invite => {
                         view.answered_invite = Some(response.status());
                         if (200..300).contains(&response.status()) {
@@ -494,6 +529,10 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                             view.held_dialog = to_tag;
                         } else {
                             view.rang.retain(|_, invite| *invite != cseq.seq());
+                            if ends_open {
+                                view.sent_finals
+                                    .insert(cseq.seq(), (response.status(), recorded.at_us));
+                            }
                         }
                     }
                     // The 2xx to a taken BYE ends the dialog it names on this
@@ -1362,6 +1401,64 @@ mod tests {
         // another dialog and is not this BYE's to answer.
         let other = ladder(&[invite, ok, ack, stray_reinvite, bye, answered]);
         assert_eq!(unscripted(&other, &trigger), None, "a pending INVITE on another dialog");
+    }
+
+    /// A non-2xx final this leg sent to an INVITE holds its server transaction
+    /// in Completed until the peer's ACK (RFC 3261 §17.2.1, §17.1.1.3): it is
+    /// listed from its first emission — a retransmission of it re-opens no
+    /// clock — and leaves on the ACK naming its CSeq. A 2xx is the peer's own
+    /// request to acknowledge (§13.2.2.4) and a non-INVITE final is never
+    /// ACKed, so neither is ever listed.
+    #[test]
+    fn a_non_2xx_invite_final_this_leg_sent_awaits_the_peer_s_ack() {
+        let invite = (Dir::In, INVITE.to_string(), false);
+        let ok = (Dir::Out, response(200, "1 INVITE"), false);
+        let ack = (Dir::In, taken("ACK", "1 ACK", Some("b1"), ""), false);
+        let reinvite = (Dir::In, taken("INVITE", "2 INVITE", Some("b1"), ""), false);
+        let bye = (Dir::In, taken("BYE", "3 BYE", Some("b2"), ""), false);
+        let refused = (Dir::Out, response(481, "3 BYE").replace("tag=b1", "tag=b2"), false);
+        let terminated = (Dir::Out, response(487, "2 INVITE"), false);
+        let again = (Dir::Out, response(487, "2 INVITE"), true);
+        let ladder = |entries: &[(Dir, String, bool)]| {
+            unacked_finals(&record(entries).legs().remove("A").expect("the leg was recorded"))
+        };
+
+        assert_eq!(ladder(&[invite.clone(), ok.clone(), ack.clone()]), [], "a 2xx owes nothing");
+        assert_eq!(
+            ladder(&[invite.clone(), ok.clone(), ack.clone(), bye.clone(), refused.clone()]),
+            [],
+            "a non-INVITE final owes nothing"
+        );
+        let sent = ladder(&[
+            invite.clone(),
+            ok.clone(),
+            ack.clone(),
+            reinvite.clone(),
+            bye.clone(),
+            refused.clone(),
+            terminated.clone(),
+            again.clone(),
+        ]);
+        assert_eq!(sent, [UnackedFinal { cseq: 2, status: 487, sent_at_us: 6 }]);
+        let acked = (Dir::In, taken("ACK", "2 ACK", Some("b1"), ""), false);
+        let discharged = ladder(&[
+            invite.clone(),
+            ok.clone(),
+            ack.clone(),
+            reinvite.clone(),
+            bye.clone(),
+            refused.clone(),
+            terminated.clone(),
+            again.clone(),
+            acked.clone(),
+        ]);
+        assert_eq!(discharged, [], "the peer's ACK ended the transaction");
+        // A second final on the transaction the 487 already ended answers
+        // nothing the peer holds open, so nothing is owed for it.
+        let late = (Dir::Out, response(408, "2 INVITE"), false);
+        let twice =
+            ladder(&[invite, ok, ack, reinvite, bye, refused, terminated, again, acked, late]);
+        assert_eq!(twice, [], "a final on an ended transaction is owed no ACK");
     }
 
     /// A leg holding an unanswered request that is NOT the cancelled INVITE

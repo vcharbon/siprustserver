@@ -69,6 +69,10 @@ const UNSCRIPTED: &str = "(unscripted)";
 const OWED_BYE_FINAL: &str =
     "absorbed: the §15.1.2 final owed to the BYE this leg sent, which no expect scripts";
 
+/// The recording note for the RFC 3261 §17.1.1.3 ACK the settle waited for.
+const OWED_FINAL_ACK: &str =
+    "absorbed: the §17.1.1.3 ACK owed to the non-2xx final this leg sent, which the settle awaited";
+
 /// Whether the step is the document's own answer to a BYE — a final gated on a
 /// BYE transaction, whatever status it names.
 fn scripts_a_bye_final(step: &CompiledStep) -> bool {
@@ -206,6 +210,9 @@ struct Runner<'a, 'p> {
     /// `(leg, CSeq)` of every BYE the script SENT: RFC 3261 §15.1.2 owes each
     /// one a final response, whatever the document scripts for it.
     byes_sent: std::collections::BTreeSet<(String, u32)>,
+    /// `(leg, CSeq)` of every non-2xx INVITE final whose Timer H the settle has
+    /// already reported expired: the failure is stated once, not once per turn.
+    timer_h_reported: std::collections::BTreeSet<(String, u32)>,
     /// The ladder rungs still owed, each with the instant it is due. A ladder
     /// is a peer's own transaction timer and gates nothing: it waits BESIDE the
     /// loop, never inside it, so every other leg keeps its own clock while a
@@ -301,6 +308,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             abandoned: None,
             close_refused: std::collections::BTreeSet::new(),
             byes_sent: std::collections::BTreeSet::new(),
+            timer_h_reported: std::collections::BTreeSet::new(),
             pending_repeats: Vec::new(),
             held: None,
             started,
@@ -1133,6 +1141,18 @@ impl<'a, 'p> Runner<'a, 'p> {
         })
     }
 
+    /// Whether `inbound` is the ACK a non-2xx INVITE final this leg SENT is
+    /// owed (RFC 3261 §17.1.1.3): the closer of the server transaction the
+    /// settle floor holds the run open for, so it is the settle's own arrival
+    /// and never the late datagram a completed flow reports.
+    fn owed_final_ack(&self, leg: &str, inbound: &Inbound) -> bool {
+        if !inbound.method.as_deref().is_some_and(|method| method.eq_ignore_ascii_case("ACK")) {
+            return false;
+        }
+        let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
+        close::unacked_finals(&ladder).iter().any(|owed| owed.cseq == inbound.cseq)
+    }
+
     /// Answer a background policy's message. It is answered and recorded; the
     /// flow never sees it.
     async fn answer_background(
@@ -1196,6 +1216,8 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// holds (RFC 3261 §15.1.2), the final a PRACK draws (RFC 3262 §3) — is
     /// answered here as it is mid-flow, so the peer's transaction ends instead
     /// of retransmitting to its timer while the run waits on the call to end.
+    /// The ACK a non-2xx final this leg sent is owed (§17.1.1.3) is what the
+    /// settle floor waits for: absorbed, never a late arrival.
     async fn record_during_settle(&mut self, actor: &str, message: SipMessage, flow_ok: bool) {
         let inbound = Inbound::of(&message);
         let bytes: Vec<u8> = match &message {
@@ -1256,6 +1278,10 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
         if self.owed_bye_final(&leg, &inbound) {
             self.record_arrival(&leg, raw, None, Some(OWED_BYE_FINAL), repeat);
+            return;
+        }
+        if self.owed_final_ack(&leg, &inbound) {
+            self.record_arrival(&leg, raw, None, Some(OWED_FINAL_ACK), repeat);
             return;
         }
         // A leg whose script ENDED still has a UA behind it, answering out of
@@ -2250,6 +2276,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 let done = self.instance.cursor().is_done() || self.abandoned.is_some();
                 let mut open = settle::open_reasons(done, sut, post.as_ref());
                 open.extend(close_reasons(&self.close_obligations()));
+                open.extend(settle::floor(&self.instance.recording(), self.now_us()).reasons());
                 open
             }) {
                 self.instance.fail(failure);
@@ -2259,11 +2286,25 @@ impl<'a, 'p> Runner<'a, 'p> {
             // ruling (§11.2), and what is still open on it is the close's.
             let flow_done = self.instance.cursor().is_done() || self.abandoned.is_some();
             let owed = self.close_obligations();
+            // A non-2xx INVITE final a leg sent is a server transaction the
+            // system's ACK ends (RFC 3261 §17.2.1); past Timer H it is gone
+            // and the ACK never came, which is the system's failure to state.
+            let floor = settle::floor(&self.instance.recording(), self.now_us());
+            for expired in &floor.expired {
+                if self.timer_h_reported.insert((expired.leg.clone(), expired.cseq)) {
+                    self.instance.fail(Failure::FinalUnacknowledged {
+                        leg: expired.leg.clone(),
+                        status: expired.status,
+                        cseq: expired.cseq,
+                    });
+                }
+            }
             // A rung still owed keeps the run open: the flow ending does not
             // end a transaction's own timer, and `drive` counts the ladders
             // only after settle for exactly that reason.
             if owed.is_empty()
                 && self.pending_repeats.is_empty()
+                && floor.held.is_empty()
                 && settle::is_settled(flow_done, sut, post.as_ref())
             {
                 break;
@@ -2271,6 +2312,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             if Instant::now() >= deadline {
                 let mut open = settle::open_reasons(flow_done, sut, post.as_ref());
                 open.extend(close_reasons(&owed));
+                open.extend(floor.reasons());
                 self.instance.fail(Failure::SettleTimedOut { budget_ms, open });
                 timed_out = true;
                 break;
