@@ -190,7 +190,8 @@ const DERIVED_PROVISIONAL_FLAG: &str = "relayed-provisional-expect-derived";
 
 /// The flag the far-side pass is obliged to write beside what it transcribed
 /// onto a leg the vantage lost past its 2xx: the other leg's in-dialog INVITE,
-/// its 2xx and its ACK, each naming the message it copies (§6.9).
+/// its 2xx and its ACK, whichever party sent the INVITE, each naming the
+/// message it copies (§6.9).
 const FAR_SIDE_REINVITE_FLAG: &str = "far-side-reinvite-derived";
 
 /// Whether a step has the shape both provisional exemptions are bounded to: an
@@ -204,7 +205,8 @@ fn provisional_expect_shape(step: &crate::flow::Step) -> bool {
 /// Whether a step has one of the three message shapes the far-side pass pairs
 /// across the legs, and no other: an in-dialog INVITE request, an in-dialog
 /// 2xx to INVITE, or an in-dialog automatic ACK. Either half of a pair may be
-/// the one listed second; the gate reads the pair's legs and ops itself.
+/// the one listed second, and both halves have the shape; the gate reads the
+/// pair's legs and ops itself.
 fn far_side_shape(step: &crate::flow::Step) -> bool {
     if !step.in_dialog {
         return false;
@@ -256,12 +258,16 @@ fn capture_evidence(index: &Index<'_>, report: &mut Report) {
     };
     let derived = flagged(DERIVED_PROVISIONAL_FLAG);
     let far_side = flagged(FAR_SIDE_REINVITE_FLAG);
-    let mut seen: BTreeMap<(usize, usize), (&str, crate::flow::Op)> = BTreeMap::new();
+    let mut seen: BTreeMap<(usize, usize), &crate::flow::Step> = BTreeMap::new();
     for (_, step) in index.all_steps() {
         if let Some(observed) = &step.observed {
             let coordinate = (observed.leg, observed.msg);
-            let mirrored = |holder: &(&str, crate::flow::Op)| {
-                far_side && far_side_shape(step) && holder.0 != step.leg && holder.1 != step.op
+            let mirrored = |holder: &crate::flow::Step| {
+                far_side
+                    && far_side_shape(step)
+                    && far_side_shape(holder)
+                    && holder.leg != step.leg
+                    && holder.op != step.op
             };
             if let Some(holder) = seen.get(&coordinate) {
                 if !(derived && provisional_expect_shape(step)) && !mirrored(holder) {
@@ -273,7 +279,7 @@ fn capture_evidence(index: &Index<'_>, report: &mut Report) {
                     );
                 }
             } else {
-                seen.insert(coordinate, (step.leg.as_str(), step.op));
+                seen.insert(coordinate, step);
             }
         }
         if step.observed.is_none() {

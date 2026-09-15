@@ -464,6 +464,20 @@ describe("a dialog-creating 2xx the ACTOR took and never ACKed", () => {
     expect(unackedTakenFinals([offerless("s1", "A"), final("s2", "A", 200, "expect")])).toEqual([])
   })
 
+  it("keeps a re-INVITE the actor sends on a leg it answered, ACKed by its own step", () => {
+    // The answering side re-INVITEs: the 2xx it takes is settled by the ACK it
+    // sends, and the 2xx it SENT is not this rule's (the peer owes that ACK).
+    expect(
+      unackedTakenFinals([
+        offerless("s1", "B", "expect"),
+        final("s2", "B", 200),
+        reinvite("s3", "B"),
+        final("s4", "B", 200, "expect"),
+        ack("s5", "B")
+      ])
+    ).toEqual([])
+  })
+
   it("keeps it though the platform reaps: a BYE is what an un-ACKed 2xx draws", () => {
     expect(
       unackedTakenFinals([

@@ -115,8 +115,9 @@ export const synthesize = (
   /**
    * Whether the replaying platform relays an in-dialog INVITE end to end, so a
    * leg the vantage lost past its 2xx is owed the far side of the exchange the
-   * other leg holds (`far-side-reinvite.ts`). A platform that answers one
-   * itself derives nothing, and the run shows what it did.
+   * other leg holds, whichever party sent the INVITE (`far-side-reinvite.ts`).
+   * A platform that answers one itself derives nothing, and the run shows
+   * what it did.
    */
   relaysReinvite = false
 ): FlowOut => {
@@ -323,12 +324,12 @@ export const synthesize = (
         farSide.derived
           .map(
             (d) =>
-              `leg ${d.farLeg} (record ends at ${d.ended.id}): ${d.invite.id} expect INVITE ` +
-              `mirrors ${d.nearInvite.id}, ${d.answer.id} send ${d.answer.msg.status} mirrors ` +
-              `${d.nearAnswer.id}` +
+              `leg ${d.farLeg} (record ends at ${d.ended.id}): ${d.invite.id} ${d.invite.op} ` +
+              `INVITE mirrors ${d.nearInvite.id}, ${d.answer.id} ${d.answer.op} ` +
+              `${d.answer.msg.status} mirrors ${d.nearAnswer.id}` +
               (d.ack === undefined || d.nearAck === undefined
                 ? ""
-                : `, ${d.ack.id} expect ACK mirrors ${d.nearAck.id}`)
+                : `, ${d.ack.id} ${d.ack.op} ACK mirrors ${d.nearAck.id}`)
           )
           .join("; ")
     })
