@@ -1231,6 +1231,110 @@ async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_a
     scene.finish().await;
 }
 
+/// RFC 3261 §15.1.2, last paragraph: a UAS that answered a BYE still responds
+/// to every request pending on that dialog, 487 recommended.
+///
+/// The caller re-INVITEs, then hangs up without waiting for the answer. The
+/// system relays both onto a callee that scripts neither: the re-INVITE is
+/// refused (nothing answers an unscripted INVITE — its answer is the
+/// document's call decision, §14.2), then the BYE lands on the held dialog and
+/// draws its 200 — and the re-INVITE its 487, out of leg B's own stack, so the
+/// system's INVITE client transaction ends on a final instead of Timer B.
+#[tokio::test(start_paused = true)]
+async fn a_re_invite_pending_when_the_bye_is_answered_draws_487_behind_the_200() {
+    let scene = api_scene("pivot-reinvite-under-bye").await;
+    let mut case = fixture("linear-attempt.v3.json");
+    case.document.case.id = "linear-attempt-reinvite-under-bye".to_string();
+    // The callee's BYE steps go: leg B scripts nothing past the confirming ACK.
+    case.document.flow.retain(|node| {
+        !matches!(node, pivot_schema::flow::FlowNode::Message(step)
+            if ["s11", "s12"].contains(&step.id.as_str()))
+    });
+    // The re-INVITE (the caller's offer again) and its 100, 50 ms after the ACK.
+    let mut reinvite = step_of(&mut case, "s1").clone();
+    reinvite.id = "s101".into();
+    reinvite.in_dialog = true;
+    reinvite.msg.ruri = None;
+    reinvite.msg.from = None;
+    reinvite.msg.to = None;
+    reinvite.msg.headers.clear();
+    reinvite.delay.from = "step:s9".parse().expect("s9 is a step id");
+    reinvite.delay.ms = 50;
+    let mut trying = step_of(&mut case, "s2").clone();
+    trying.id = "s102".into();
+    trying.in_dialog = true;
+    trying.msg.cseq = Some(2);
+    trying.delay.from = "step:s101".parse().expect("s101 is a step id");
+    // The hang-up follows the 100 by 100 ms, well ahead of any answer.
+    let bye = step_of(&mut case, "s10");
+    bye.delay.from = "step:s102".parse().expect("s102 is a step id");
+    bye.delay.ms = 100;
+    step_of(&mut case, "s13").delay.from = "step:s10".parse().expect("s10 is a step id");
+    let at = case
+        .document
+        .flow
+        .iter()
+        .position(|node| matches!(node, pivot_schema::flow::FlowNode::Message(s) if s.id == "s10"))
+        .expect("the teardown is a message node");
+    for (offset, step) in [reinvite, trying].into_iter().enumerate() {
+        case.document
+            .flow
+            .insert(at + offset, pivot_schema::flow::FlowNode::Message(Box::new(step)));
+    }
+    let (outcome, _dir) = replay_case(&scene, case, BTreeMap::new()).await;
+
+    let legs = outcome.recording.legs();
+    let b = &legs["B"];
+    let position =
+        |predicate: &dyn Fn(&pivot_schema::bundle::recording::RecordedMessage) -> bool| {
+            b.iter().position(predicate).unwrap_or_else(|| panic!("not on leg B: {b:#?}"))
+        };
+    let reinvite_at = position(&|m| {
+        m.dir == Dir::In && m.raw.starts_with("INVITE ") && m.raw.contains("\r\nCSeq: 2 INVITE\r\n")
+    });
+    let bye_at = position(&|m| m.dir == Dir::In && m.raw.starts_with("BYE "));
+    assert!(reinvite_at < bye_at, "the re-INVITE landed before the BYE: {b:#?}");
+    let bye_cseq = b[bye_at]
+        .raw
+        .lines()
+        .find_map(|line| line.strip_prefix("CSeq: "))
+        .expect("the BYE carries a CSeq");
+    // The 200 to the BYE, then the 487 to the pending INVITE, both the leg's own.
+    let ok = b.get(bye_at + 1).unwrap_or_else(|| panic!("nothing answered the BYE: {b:#?}"));
+    assert!(
+        ok.dir == Dir::Out
+            && ok.raw.starts_with("SIP/2.0 200")
+            && ok.raw.contains(&format!("\r\nCSeq: {bye_cseq}\r\n"))
+            && ok.note.as_deref().is_some_and(is_unscripted_answer),
+        "{ok:#?}"
+    );
+    let terminated =
+        b.get(bye_at + 2).unwrap_or_else(|| panic!("nothing answered the re-INVITE: {b:#?}"));
+    assert!(
+        terminated.dir == Dir::Out
+            && terminated.raw.starts_with("SIP/2.0 487")
+            && terminated.raw.contains("\r\nCSeq: 2 INVITE\r\n")
+            && terminated.note.as_deref().is_some_and(is_unscripted_answer),
+        "{terminated:#?}"
+    );
+    assert_eq!(
+        via_branch(&terminated.raw),
+        via_branch(&b[reinvite_at].raw),
+        "§17.2.3: the INVITE's own branch"
+    );
+    // Both answered in the instant the BYE landed, and the run settled on the
+    // teardown at once: the pending INVITE held nothing open past it.
+    assert_eq!(ok.at_us, b[bye_at].at_us, "{ok:#?}");
+    assert_eq!(terminated.at_us, b[bye_at].at_us, "{terminated:#?}");
+    let settled = outcome.timing.settled_at_ms.expect("the run settled");
+    assert!(
+        settled < b[bye_at].at_us / 1000 + 500,
+        "settled at {settled} ms: the settle waited on a ladder"
+    );
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
 /// The recording note an emission no step scripts carries.
 fn is_unscripted_answer(note: &str) -> bool {
     note.starts_with("the transaction the flow never scripted")
