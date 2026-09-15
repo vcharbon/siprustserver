@@ -1016,9 +1016,11 @@ message after the leg's first dialog-creating final belongs to a FURTHER dialog
 on the leg: a later fork's own 2xx to the forked INVITE — a second dialog, which
 the UAC ACKs like the first (RFC 3261 §13.2.2.4) — and the ACK the leg expects
 for it, where `early` gates the To-tag and `in_dialog` states that a dialog is
-up. The ACK to the fork that answered first rides the dialog `in_dialog` states
-and names none; an ACK the leg sends names none either, since a request send
-names a fork only where it rides one.
+up. The cut leaves the ACK to the fork that answered first unnamed — it rides
+the dialog `in_dialog` states — and lint pairs it by the 2xx it discharges; an
+ACK that does name its fork pairs by the tag either way. An ACK the leg sends
+names none, since a request send names a fork only where it rides one, and no
+request send inside a confirmed dialog does.
 
 What consumes the marker is §4.1's citation rule, and `pivot-schema lint` is
 what enforces the totality (`in-dialog/missing`, `in-dialog/outside-dialog`).

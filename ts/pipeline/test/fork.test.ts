@@ -188,13 +188,50 @@ describe("early dialogs", () => {
     expect(flag?.detail).toContain(RELAY_B)
   })
 
+  // A forked leg answered under ONE fork, then a session-refresh UPDATE the
+  // actor sends inside the confirmed dialog: the UPDATE rides the dialog
+  // `in_dialog` states and names no fork, even though the method rides an
+  // early dialog where one is still unconfirmed (RFC 3311 §5.1).
+  it("names no request the leg sends inside a confirmed dialog", () => {
+    const { caller, sut } = SOCKETS
+    const flows = doc(
+      [
+        leg(CALLER_CALL_ID, oneHop(caller, sut), [
+          request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: caller, dst: sut, ts_ms: 0 }),
+          response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 200, toTag: RELAY_A }),
+          response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 400, toTag: RELAY_B }),
+          response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 1_000, toTag: RELAY_A }),
+          request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: caller, dst: sut, ts_ms: 1_010, toTag: RELAY_A, branch: "z9hG4bK-ack-a" }),
+          request({ callId: CALLER_CALL_ID, seq: 2, method: "UPDATE", src: caller, dst: sut, ts_ms: 5_000, toTag: RELAY_A }),
+          response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "UPDATE", src: sut, dst: caller, ts_ms: 5_010, toTag: RELAY_A }),
+          request({ callId: CALLER_CALL_ID, seq: 3, method: "BYE", src: caller, dst: sut, ts_ms: 9_000, toTag: RELAY_A }),
+          response({ callId: CALLER_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: sut, dst: caller, ts_ms: 9_005, toTag: RELAY_A })
+        ])
+      ],
+      [{ legs: [0] }]
+    )
+    const flow = synthesize(flows, build(flows, [{ leg: 0, hop: 0 }], sutSet(), plan(), derivesOnePrefix), plan())
+    const update = flow.steps.find((s) => s.msg.method === "UPDATE")!
+    expect(update.op).toBe("send")
+    expect(update.in_dialog).toBe(true)
+    expect(update.early, "an UPDATE inside the confirmed dialog").toBeUndefined()
+    // The answered fork's steps are exactly its two responses.
+    const ring = flow.steps.find((s) => s.msg.status === 180)!
+    const answer = flow.steps.find((s) => s.msg.status === 200 && s.msg["cseq-method"] === "INVITE")!
+    const rode = flow.steps.filter((s) => s.early === ring.early).map((s) => s.id)
+    expect(rode).toEqual([ring.id, answer.id])
+    const flag = flow.flags.find((f) => f.kind === "early-dialogs-named")!
+    expect(flag.detail).toContain(`${ring.early} (leg A, captured tag ${RELAY_A}, ${rode.join("/")})`)
+  })
+
   // One INVITE answered 2xx under two To-tags is two dialogs, each ACKed
   // (RFC 3261 §13.2.2.4): the second fork's 2xx creates a FURTHER dialog past
   // the leg's first one, so it is named even though it sits inside a confirmed
   // dialog, and so is the ACK the leg EXPECTS for it. The first fork's ACK
   // rides the dialog `in_dialog` states and needs no name; an ACK the leg
   // SENDS names none — a request send names a fork only where it rides one —
-  // and nothing inside the dialogs (the re-INVITE round, the BYE) is named.
+  // and nothing inside the dialogs (the BYE of either, the re-INVITE round) is
+  // named.
   describe("a leg answered 2xx under two To-tags", () => {
     const flow = flowOf(twoForksAnsweredFlows())
     const on = (l: string) => flow.steps.filter((s) => s.leg === l)
@@ -228,10 +265,11 @@ describe("early dialogs", () => {
       }
     })
 
-    it("names nothing else inside the dialogs", () => {
+    it("names nothing else inside the dialogs, the BYE of either dialog included", () => {
       for (const l of ["A", "B"]) {
         const inside = on(l).filter((s) => s.msg.method === "BYE" || s.msg["cseq-method"] === "BYE")
-        expect(inside).toHaveLength(2)
+        // Each dialog is torn down by its own BYE and answer.
+        expect(inside).toHaveLength(4)
         for (const s of inside) expect(s.early, `${s.id}`).toBeUndefined()
       }
     })

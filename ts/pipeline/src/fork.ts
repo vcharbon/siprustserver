@@ -101,20 +101,21 @@ const transactionOf = (step: StepDraft, msg: Flows.Msg): string => {
  * Whether a step may name the fork its captured message rode.
  *
  * A request the leg SENDS names one only where the method rides an early
- * dialog: a plan refuses `early` on any other request send, because such a
- * send consumes a fork's tag without a dialog to consume it from. A step
- * already inside a confirmed dialog names none, but for the two that open and
- * confirm a FURTHER dialog on the leg: a 2xx to the forked INVITE under a tag
- * other than the first 2xx's — a later fork answering, its own dialog
- * (RFC 3261 §13.2.2.4) — and the ACK the leg expects for it, which the To-tag
- * pairs with its dialog. `furtherDialog` says whether the message is one of
- * those: of the forked INVITE transaction, under a tag the leg was not first
- * answered under.
+ * dialog and the leg's is not yet confirmed: a plan refuses `early` on any
+ * other request send, because such a send consumes a fork's tag without a
+ * dialog to consume it from, and a session-refresh UPDATE inside the confirmed
+ * dialog rides that dialog. Any other step inside a confirmed dialog names
+ * none, but for the two that open and confirm a FURTHER dialog on the leg: a
+ * 2xx to the forked INVITE under a tag other than the first 2xx's — a later
+ * fork answering, its own dialog (RFC 3261 §13.2.2.4) — and the ACK the leg
+ * expects for it, which the To-tag pairs with its dialog. `furtherDialog` says
+ * whether the message is one of those: of the forked INVITE transaction, under
+ * a tag the leg was not first answered under.
  */
 const nameable = (step: StepDraft, msg: Flows.Msg, furtherDialog: boolean): boolean => {
   if (msg.summary.kind === "request") {
     const method = msg.summary.method.toUpperCase()
-    if (step.op === "send") return RIDES_EARLY.has(method)
+    if (step.op === "send") return step.in_dialog !== true && RIDES_EARLY.has(method)
     return step.in_dialog !== true || (method === "ACK" && furtherDialog)
   }
   return step.in_dialog !== true || (createsDialog(msg) && furtherDialog)

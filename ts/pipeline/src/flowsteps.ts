@@ -464,7 +464,8 @@ const capturedToTag = (flows: Flows.FlowsDoc, src: StepSource): string | undefin
  * its 2xx carries (RFC 3261 §12.1.1): an INVITE answered 2xx under two tags is
  * two dialogs, each ACKed (§13.2.2.4), so the ACK discharging the second
  * fork's 2xx confirms too. `tags` is parallel to `steps`, the captured To-tag
- * of each; a flow stating none is read as one dialog per leg.
+ * of each; a 2xx stating no tag keys as the leg alone, so a flow stating none
+ * is read as one dialog per leg.
  *
  * A generated flow is FLAT — `alt` is authored-only — so document order is run
  * order and one forward pass states the whole rule. A lane delta may reorder

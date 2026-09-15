@@ -542,7 +542,7 @@ describe("dialog markers", () => {
     for (const legId of ["A", "B"]) {
       const onLeg = flow.steps.filter((s) => s.leg === legId)
       const acks = onLeg.filter((s) => (s.msg.method ?? "").toUpperCase() === "ACK")
-      expect(acks.map((s) => s.msg.cseq)).toEqual([1, 1, 2])
+      expect(acks.map((s) => s.msg.cseq)).toEqual([1, 1, 3])
       const [toFirst, toSecond, toReInvite] = acks
       expect(toFirst!.confirms_dialog, `${legId}: the ACK to the first fork's 2xx`).toBe(true)
       expect(toSecond!.confirms_dialog, `${legId}: the ACK to the second fork's 2xx`).toBe(true)

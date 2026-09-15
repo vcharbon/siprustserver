@@ -45,7 +45,7 @@ fn fixtures() -> Vec<(String, String)> {
         })
         .collect();
     out.sort();
-    assert_eq!(out.len(), 14, "the fixture set changed size");
+    assert_eq!(out.len(), 15, "the fixture set changed size");
     out
 }
 
