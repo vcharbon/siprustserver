@@ -57,7 +57,8 @@ pub struct Datagram {
     pub dst: SocketAddr,
     pub payload: Vec<u8>,
     /// WHICH PROBE WROTE THIS COPY, numbered across the whole read: one id per
-    /// classic-pcap file, one per pcapng interface per section. A `mergecap` of
+    /// classic-pcap file, one per pcapng interface per section — or, in a
+    /// consecutive set ([`read_capture_set`]), per file from zero. A `mergecap` of
     /// several probes writes one packet once per probe that saw it, and the two
     /// copies are then told apart by this and nothing else — their bytes are
     /// identical and their timestamps differ by the probes' clock offset, which
@@ -139,9 +140,10 @@ impl From<std::io::Error> for PcapError {
     }
 }
 
-/// Hands out the next free probe id. One counter for the whole read: a
-/// container that declares several observation points (pcapng interfaces) takes
-/// several, a classic-pcap file takes one.
+/// Hands out the next free probe id. One counter for the whole read (restarted
+/// per file of a consecutive set): a container that declares several
+/// observation points (pcapng interfaces) takes several, a classic-pcap file
+/// takes one.
 #[derive(Debug, Default)]
 pub struct Probes(u32);
 
@@ -225,7 +227,7 @@ pub fn read_capture_set<P: AsRef<Path>>(
             if first + BOUNDARY_SLACK_US < prev_last {
                 return Err(refuse(format!("they overlap by {}", apart(prev_last - first))));
             }
-            if first > prev_last + max_gap_us {
+            if first > prev_last.saturating_add(max_gap_us) {
                 return Err(refuse(format!(
                     "a gap of {} lies between them, more than the {} allowed",
                     apart(first - prev_last),

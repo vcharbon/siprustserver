@@ -336,7 +336,7 @@ fn main() {
     }
 
     let read = match args.contiguous {
-        Some(max_gap_ms) => sip_pcap::read_capture_set(&files, max_gap_ms * 1_000),
+        Some(max_gap_ms) => sip_pcap::read_capture_set(&files, max_gap_ms.saturating_mul(1_000)),
         None => sip_pcap::read_capture_files(&files),
     };
     let (datagrams, stats) = match read {
