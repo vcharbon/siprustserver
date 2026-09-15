@@ -742,6 +742,51 @@ fn a_body_is_refused_where_the_stack_could_not_place_it() {
     };
     assert_clean("auto/body-not-composable", ack_after(200));
     assert_fires("auto/body-not-composable", ack_after(488));
+    // Which final an ACK answers is the leg's state, not the nearest final:
+    // after a re-INVITE refused 491 (RFC 3261 §14.1), the ACK to the still
+    // un-ACKed 2xx carries the delayed offer's answer, and the 491's own ACK
+    // carries nothing.
+    let after_491_round = |on_2xx_ack: bool| {
+        move |d: &mut Value| {
+            let body = json!({ "ref": "resources/a_0.sdp" });
+            for step in [
+                json!({
+                    "id": "s3", "leg": "A", "op": "expect", "check": "assert",
+                    "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s1", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s4", "leg": "A", "op": "send", "in_dialog": true,
+                    "msg": { "method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s3", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s5", "leg": "A", "op": "expect", "check": "assert", "in_dialog": true,
+                    "msg": { "status": 491, "reason": "Request Pending", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s4", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s6", "leg": "A", "op": "send", "auto": true, "in_dialog": true,
+                    "msg": { "method": "ACK", "cseq": 2, "body": if on_2xx_ack { Value::Null } else { body.clone() } },
+                    "delay": { "ms": 0, "from": "step:s5", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s7", "leg": "A", "op": "send", "auto": true, "in_dialog": true,
+                    "confirms_dialog": true,
+                    "msg": { "method": "ACK", "cseq": 1, "body": if on_2xx_ack { body.clone() } else { Value::Null } },
+                    "delay": { "ms": 0, "from": "step:s6", "compressible": true, "timer_linked": false }
+                }),
+            ] {
+                let mut step = step;
+                if step["msg"]["body"].is_null() {
+                    step["msg"].as_object_mut().expect("a msg").remove("body");
+                }
+                flow(d).push(step);
+            }
+        }
+    };
+    assert_clean("auto/body-not-composable", after_491_round(true));
+    assert_fires("auto/body-not-composable", after_491_round(false));
     assert_fires("auto/body-not-composable", |d| {
         flow(d)[1] = json!({
             "id": "s2", "leg": "A", "op": "send", "auto": true,
@@ -1937,6 +1982,64 @@ fn the_ack_to_the_2xx_confirms_the_dialog_not_a_491_rounds_ack_before_it() {
     }
 }
 
+/// The pairing is by position on the leg, with no CSeq to read: a 2xx
+/// re-emitted AFTER a later INVITE of its direction was answered lands on that
+/// INVITE, so an authored document states the repeat as the folded step's
+/// `retransmits` (§6.9) — as the cut does — and not as a step of its own.
+#[test]
+fn a_re_emitted_2xx_is_folded_onto_the_step_it_repeats_not_stated_after_a_newer_invite() {
+    let round_491 = |d: &mut Value| {
+        for step in [
+            json!({
+                "id": "s3", "leg": "B", "op": "send",
+                "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                "delay": { "ms": 0, "from": "step:s2", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s4", "leg": "B", "op": "expect", "check": "assert", "in_dialog": true,
+                "msg": { "method": "INVITE" },
+                "delay": { "ms": 0, "from": "step:s3", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s5", "leg": "B", "op": "send", "in_dialog": true,
+                "msg": { "status": 491, "reason": "Request Pending", "cseq-method": "INVITE" },
+                "delay": { "ms": 0, "from": "step:s4", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s6", "leg": "B", "op": "expect", "check": "record", "auto": true, "in_dialog": true,
+                "msg": { "method": "ACK", "cseq": 2 },
+                "delay": { "ms": 0, "from": "step:s5", "compressible": true, "timer_linked": false }
+            }),
+        ] {
+            flow(d).push(step);
+        }
+    };
+    let confirming = |d: &mut Value, from: &str| {
+        flow(d).push(json!({
+            "id": "s8", "leg": "B", "op": "expect", "check": "record", "auto": true,
+            "in_dialog": true, "confirms_dialog": true,
+            "msg": { "method": "ACK", "cseq": 1 },
+            "delay": { "ms": 0, "from": from, "compressible": true, "timer_linked": false }
+        }));
+    };
+    let report = broken(|d| {
+        round_491(d);
+        flow(d)[2]["retransmits"] = json!(1);
+        flow(d)[2]["retransmit_intervals_ms"] = json!([500]);
+        confirming(d, "step:s6");
+    });
+    assert!(!report.has_errors(), "{}", report.render());
+    assert_fires("in-dialog/confirm-not-the-answer", |d| {
+        round_491(d);
+        flow(d).push(json!({
+            "id": "s7", "leg": "B", "op": "send", "in_dialog": true,
+            "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+            "delay": { "ms": 0, "from": "step:s6", "compressible": true, "timer_linked": false }
+        }));
+        confirming(d, "step:s7");
+    });
+}
+
 /// Under forking each answered fork mints its own dialog on the one leg, and
 /// each is confirmed by the ACK that names it. The fork tag is what pairs the
 /// two: `early` and `confirms_dialog` ride the same ACK, saying different
@@ -1976,6 +2079,47 @@ fn each_answered_fork_carries_its_own_confirming_ack() {
     let report = broken(forked(true));
     assert!(!report.has_errors(), "{}", report.render());
     assert_fires("in-dialog/confirm-missing", forked(false));
+}
+
+/// Two forks answered before either ACK arrives: the fork tag, not the order
+/// of the ACKs, pairs each ACK with the 2xx it answers, in either order.
+#[test]
+fn two_forks_answered_at_once_are_each_confirmed_by_the_ack_naming_them() {
+    let interleaved = |first: &'static str, second: &'static str, second_marked: bool| {
+        move |d: &mut Value| {
+            for step in [
+                json!({
+                    "id": "s3", "leg": "B", "op": "send", "early": "f1",
+                    "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s2", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s4", "leg": "B", "op": "send", "early": "f2", "in_dialog": true,
+                    "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s3", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s5", "leg": "B", "op": "expect", "check": "record", "auto": true,
+                    "in_dialog": true, "confirms_dialog": true, "early": first,
+                    "msg": { "method": "ACK", "cseq": 1 },
+                    "delay": { "ms": 0, "from": "step:s4", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s6", "leg": "B", "op": "expect", "check": "record", "auto": true,
+                    "in_dialog": true, "confirms_dialog": second_marked, "early": second,
+                    "msg": { "method": "ACK", "cseq": 1 },
+                    "delay": { "ms": 0, "from": "step:s5", "compressible": true, "timer_linked": false }
+                }),
+            ] {
+                flow(d).push(step);
+            }
+        }
+    };
+    for (first, second) in [("f1", "f2"), ("f2", "f1")] {
+        let report = broken(interleaved(first, second, true));
+        assert!(!report.has_errors(), "{first} then {second}:\n{}", report.render());
+        assert_fires("in-dialog/confirm-missing", interleaved(first, second, false));
+    }
 }
 
 /// The closer a `closed:bye` cites is a datagram of the flow, not a reading.

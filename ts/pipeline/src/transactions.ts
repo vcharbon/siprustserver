@@ -7,17 +7,22 @@
  * a response travels opposite to its request, and a leg runs one CSeq space
  * per direction (RFC 3261 §12.2) — and REPLACES the final it held: a second
  * final on one INVITE (a fork's 2xx, a re-emission) is its own final owed its
- * own ACK (§13.2.2.4), while a repeat the document folded is no step. A final
- * arriving before any INVITE of its direction opens the transaction itself: the
- * INVITE ran before the flow starts.
+ * own ACK (§13.2.2.4), while a repeat the document folded is no step. The
+ * newest transaction takes it whatever it holds, so a 2xx re-emitted after a
+ * newer INVITE of its direction was answered reads as that INVITE's: an
+ * authored shape, since the cut folds a repeat onto the step it repeats. A
+ * final arriving before any INVITE of its direction opens the transaction
+ * itself: the INVITE ran before the flow starts.
  *
  * An ACK discharges the newest transaction running its own way that holds a
  * final and no ACK yet. A non-2xx final consumes an ACK the same way
  * (§17.1.1.3), so an ACK sent while an older 2xx still waits — the 491 round of
  * a re-INVITE sent over an un-ACKed 2xx (§14.1) — discharges the newer
- * transaction and leaves the older one owed. The captured `cseq` is never read:
- * this is how the interpreter resolves an automatic ACK, and the document
- * states what it resolves.
+ * transaction and leaves the older one owed. The reading is by position: the
+ * captured `cseq` is never read, and a leg whose ACKs run in the other order is
+ * read the other way round. A fork's tag (`early`) is not read either — the
+ * cut stamps before it names forks — so two forks' 2xx outstanding at once
+ * share the one slot; the lint pairs a forked dialog's ACK by its tag instead.
  */
 import { Flow } from "@sip/contracts"
 

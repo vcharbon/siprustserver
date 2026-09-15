@@ -395,14 +395,13 @@ const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
  *
  * The ACK that ANSWERS the dialog-creating final takes `confirms_dialog` beside
  * its `in_dialog`: the ACK that DISCHARGES that final as the leg's state holds
- * it ({@link inviteTransactions}), never the first ACK the leg carries after
- * it. A re-INVITE sent over the un-ACKed 2xx is answered 491 (RFC 3261 §14.1)
- * and its ACK is that transaction's own (§17.1.1.3): it runs first and confirms
- * nothing, and the 2xx's ACK behind it is the confirming one. Every other ACK
- * on the leg — a re-INVITE's, one to a non-2xx final — stays plain `in_dialog`
- * or takes neither marker. One dialog is confirmed once: a later ACK that
- * discharges another 2xx on the same INVITE (a fork answering under a second
- * tag) is in-dialog and confirms nothing more.
+ * it ({@link inviteTransactions}). A re-INVITE sent over the un-ACKed 2xx is
+ * answered 491 (RFC 3261 §14.1) and its ACK is that transaction's own
+ * (§17.1.1.3): it runs first and confirms nothing, and the 2xx's ACK behind it
+ * is the confirming one. A re-INVITE's ACK stays plain `in_dialog`; an ACK to
+ * a non-2xx final takes neither marker.
+ * FIXME(fork): the spec wants one confirming ACK per answered fork; the cut
+ * names no fork on an in-dialog step, so it stamps once per leg.
  *
  * A generated flow is FLAT — `alt` is authored-only — so document order is run
  * order and one forward pass states the whole rule. A lane delta may reorder

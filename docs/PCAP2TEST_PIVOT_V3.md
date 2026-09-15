@@ -1024,13 +1024,15 @@ the final it answers.
 Two ACKs never carry it. An ACK to a re-INVITE's 2xx, which renegotiates a
 dialog that is already up. And an ACK to a NON-2xx final, which is §17.1.1.3's
 transaction-owned ACK, on a leg that may hold no dialog at all. Which ACK
-answers the final is read the way the interpreter resolves an automatic ACK —
-by LEG STATE, each ACK discharging the newest INVITE transaction in its
-direction that holds a final and no ACK yet — and never as the first ACK the
-leg carries after the final: a re-INVITE sent over the un-ACKed 2xx (§14.1) is
-answered 491, its ACK runs first and discharges the re-INVITE, and the 2xx's
-own ACK behind it is the one that confirms. The cut stamps by that reading and
-lint checks it by the same one.
+answers the final is read by LEG STATE — each ACK discharging the newest INVITE
+transaction in its direction that holds a final and no ACK yet — and never as
+the first ACK the leg carries after the final: a re-INVITE sent over the
+un-ACKed 2xx (§14.1) is answered 491, its ACK runs first and discharges the
+re-INVITE, and the 2xx's own ACK behind it is the one that confirms. The
+reading is by position, with no CSeq consulted, so a leg whose ACKs run in the
+other order (the 2xx's ACK before the 491's) is read the other way round. The
+cut stamps by that reading and lint checks it by the same one; under forking
+lint pairs by the fork tag instead.
 
 The marking is REQUIRED the way `in_dialog` is: a confirmed dialog whose
 answering ACK states no marker is an error. Requiredness is about the MARKER and
