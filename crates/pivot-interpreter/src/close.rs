@@ -45,8 +45,16 @@ pub enum Owed {
     /// and this end answers whatever teardown arrives.
     AwaitTeardown,
     /// A request this leg took and never answered with a final: the
-    /// transaction it names (CSeq and the dialog's To-tag), and the status.
-    Answer { cseq_method: String, cseq: u32, to_tag: Option<String>, status: u16 },
+    /// transaction it names (CSeq and the dialog's To-tag), the status, and
+    /// — for a request that named no dialog — the tag of the early dialog the
+    /// answer rides (RFC 3261 §8.2.6.2), where one is ending it.
+    Answer {
+        cseq_method: String,
+        cseq: u32,
+        to_tag: Option<String>,
+        status: u16,
+        early_tag: Option<String>,
+    },
     /// A final this leg took and never acknowledged (RFC 3261 §13.2.2.4 for a
     /// 2xx, §17.1.1.3 for anything else).
     Ack(Box<SipResponse>),
@@ -132,9 +140,18 @@ struct LegView {
     ended: BTreeSet<Option<String>>,
     /// The From-tag of the INVITE this leg sent, before anything answers it.
     own_tag: Option<String>,
-    /// The tags of the provisionals this leg SENT and has not ended with a
-    /// final: each an early dialog the peer may still address (§12.1.1).
-    rang: BTreeSet<String>,
+    /// The early dialogs this leg is ringing (§12.1.1): the tag of each
+    /// provisional it SENT, to the CSeq of the INVITE it answers, until a
+    /// final to that INVITE or the 200 this leg sends to a BYE on it.
+    rang: BTreeMap<String, u32>,
+    /// The early dialogs a BYE this leg answered 200 ended, by tag, to the
+    /// CSeq of the INVITE each still rides: that INVITE is owed its 487
+    /// (§15.1.2, last paragraph), under the tag the dialog rang with.
+    ended_early: BTreeMap<String, u32>,
+    /// The early dialogs the peer is ringing for the INVITE this leg sent
+    /// (§12.1.2): the tag of each tagged provisional it took, until a final
+    /// under that tag or the 200 this leg sends to a BYE on it.
+    peer_rang: BTreeSet<String>,
     /// Whether this leg TOOK an INVITE, and the final it answered it with.
     took_invite: bool,
     answered_invite: Option<u16>,
@@ -172,8 +189,8 @@ fn owed(messages: &[RecordedMessage]) -> Owed {
 
     // A request the peer is still waiting on comes first: an unanswered server
     // transaction retransmits, and every other obligation is behind it.
-    if let Some((open, status)) = view.to_answer() {
-        return open.answer(status);
+    if let Some(answer) = view.to_answer() {
+        return answer;
     }
     // The dialog this leg OPENED.
     if view.sent_invite.is_some() {
@@ -205,34 +222,85 @@ fn owed(messages: &[RecordedMessage]) -> Owed {
 
 impl Open {
     fn answer(&self, status: u16) -> Owed {
+        self.answer_under(status, None)
+    }
+
+    /// [`answer`](Self::answer) riding the early dialog `early_tag` names.
+    fn answer_under(&self, status: u16, early_tag: Option<String>) -> Owed {
         Owed::Answer {
             cseq_method: self.method.as_str().to_string(),
             cseq: self.transaction.0,
             to_tag: self.transaction.1.clone(),
             status,
+            early_tag,
         }
     }
 }
 
 impl LegView {
-    /// The request this leg answers first, and the status it is answered with.
+    /// The request this leg answers first, and the answer it is owed.
     ///
     /// A CANCEL jumps the queue (RFC 3261 §9.2 answers it at once and the INVITE
     /// it names becomes a 487), then a PRACK: its client transaction is the one
     /// running a timer (§17.1.2), and a non-2xx INVITE final first would end
     /// the early dialog its answer rides (§12.3). Otherwise the oldest
     /// unanswered request goes first, because that is the one the peer has
-    /// been retransmitting longest.
-    fn to_answer(&self) -> Option<(Open, u16)> {
+    /// been retransmitting longest. An INVITE pending on a dialog a BYE this
+    /// leg answered ended is answered as a cancelled one (§15.1.2, last
+    /// paragraph), under the tag of the early dialog it rode.
+    fn to_answer(&self) -> Option<Owed> {
         let first_of = |method: Method| self.unanswered.iter().find(|open| open.method == method);
         let first = first_of(Method::Cancel).or_else(|| first_of(Method::Prack)).or_else(|| {
             self.unanswered.iter().find(|open| answer_status(&open.method, false).is_some())
         })?;
+        let ended = self.bye_ended(first);
         let status = match first.method {
             Method::Prack => self.prack_status(&first.transaction),
-            _ => answer_status(&first.method, self.took_cancel)?,
+            _ => answer_status(&first.method, self.took_cancel || ended.is_some())?,
         };
-        Some((first.clone(), status))
+        Some(first.answer_under(status, ended.flatten()))
+    }
+
+    /// Whether the BYE named by `to_tag` is on a dialog this leg holds: the
+    /// established one, or an early one — rung by this leg under that tag, or
+    /// by the peer under `from_tag` for the INVITE this leg sent.
+    fn holds(&self, to_tag: &Option<String>, from_tag: Option<&str>) -> bool {
+        let established = self.held_dialog.is_some() && &self.held_dialog == to_tag;
+        let rang = to_tag.as_ref().is_some_and(|tag| self.rang.contains_key(tag));
+        let peer_rang = self.own_tag.is_some()
+            && &self.own_tag == to_tag
+            && from_tag.is_some_and(|tag| self.peer_rang.contains(tag));
+        established || rang || peer_rang
+    }
+
+    /// Where a BYE this leg answered 200 ended the dialog the INVITE `open`
+    /// is pending on (§15.1.2, last paragraph): the tag its answer rides where
+    /// it named no dialog — the early dialog that rang for it (§8.2.6.2) —
+    /// and `None` inside for one that named its dialog itself.
+    fn bye_ended(&self, open: &Open) -> Option<Option<String>> {
+        if open.method != Method::Invite {
+            return None;
+        }
+        match &open.transaction.1 {
+            Some(_) => self.ended.contains(&open.transaction.1).then_some(None),
+            None => self
+                .ended_early
+                .iter()
+                .find(|(_, cseq)| **cseq == open.transaction.0)
+                .map(|(tag, _)| Some(tag.clone())),
+        }
+    }
+
+    /// The INVITE still pending on the dialog `to_tag` names once a BYE this
+    /// leg answered 200 ended it, owed its 487 (§15.1.2, last paragraph).
+    /// Nothing on a dialog no answered BYE ended, and nothing for another
+    /// dialog's INVITE.
+    fn pending_on_ended(&self, to_tag: &Option<String>) -> Option<Owed> {
+        self.unanswered.iter().find_map(|open| {
+            let early = self.bye_ended(open)?;
+            let dialog = early.as_ref().or(open.transaction.1.as_ref());
+            (dialog == to_tag.as_ref()).then(|| open.answer_under(487, early.clone()))
+        })
     }
 
     /// The final a PRACK this leg took is answered with (RFC 3262 §3): 2xx when
@@ -266,10 +334,10 @@ impl LegView {
 /// answered with and the `487` the INVITE it names ends with (RFC 3261 §9.2),
 /// the ACK a non-2xx INVITE final is owed on its own branch (§17.1.1.3), the
 /// final a PRACK draws (RFC 3262 §3), and the final a BYE draws — `200` on
-/// the dialog this leg holds, `481` on none (§15.1.2), then the `487` a
-/// request still pending on the dialog that 200 ended is owed (§15.1.2, last
-/// paragraph). Anything else owes nothing: answering it would put a message
-/// on the wire nothing asked for.
+/// a dialog this leg holds, established or early (§15), `481` on none
+/// (§15.1.2), then the `487` a request still pending on the dialog that 200
+/// ended is owed (§15.1.2, last paragraph). Anything else owes nothing:
+/// answering it would put a message on the wire nothing asked for.
 ///
 /// One act per call, off the same ladder the generic close reads — so the
 /// CANCEL pair and the BYE pair are two calls each, the second made once the
@@ -277,36 +345,20 @@ impl LegView {
 pub fn unscripted(messages: &[RecordedMessage], trigger: &SipMessage) -> Option<Owed> {
     let view = view(messages);
     match trigger {
-        // RFC 3261 §15.1.2: a BYE on the dialog this leg holds is answered
-        // 200; one matching no dialog of this leg's — another tag, no tag, a
-        // dialog an answered BYE already ended — the 481 the same section
-        // states, composed from the request (§8.2.6). Once the 200 is out,
-        // the dialog is over and a request still pending on it draws 487.
-        // FIXME(close): a BYE under a tag this leg rang under and never
-        // confirmed names an early dialog (§15) and is owed a 200 plus the
-        // 487 its pending INVITE draws; it is answered by nobody here yet.
+        // RFC 3261 §15.1.2: a BYE on a dialog this leg holds — established,
+        // or early (§15 lets a BYE end one) — is answered 200; one matching
+        // no dialog of this leg's — another tag, no tag, a dialog a final or
+        // an answered BYE already ended — the 481 the same section states,
+        // composed from the request (§8.2.6). Once the 200 is out, the dialog
+        // is over and a request still pending on it draws 487.
         SipMessage::Request(request) if *request.method() == Method::Bye => {
             let transaction = transaction_of(request);
             let Some(open) = view.unanswered.iter().find(|open| open.transaction == transaction)
             else {
-                if !view.ended.contains(&transaction.1) {
-                    return None;
-                }
-                return view
-                    .unanswered
-                    .iter()
-                    .find(|open| {
-                        open.method == Method::Invite && open.transaction.1 == transaction.1
-                    })
-                    .map(|invite| invite.answer(487));
+                return view.pending_on_ended(&transaction.1);
             };
-            let held = view.held_dialog.is_some() && view.held_dialog == transaction.1;
-            let rang = transaction.1.as_ref().is_some_and(|tag| view.rang.contains(tag));
-            match (held, rang) {
-                (true, _) => Some(open.answer(200)),
-                (false, true) => None,
-                (false, false) => Some(open.answer(481)),
-            }
+            let status = if view.holds(&transaction.1, request.from().tag()) { 200 } else { 481 };
+            Some(open.answer(status))
         }
         SipMessage::Request(request) if *request.method() == Method::Cancel => {
             // Only the pair §9.2 makes this CANCEL's own: the CANCEL itself, and
@@ -402,7 +454,7 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                 if response.status() < 200 {
                     if cseq.method() == Method::Invite {
                         if let Some(tag) = &to_tag {
-                            view.rang.insert(tag.clone());
+                            view.rang.insert(tag.clone(), cseq.seq());
                         }
                         if stack::reliably(&response) {
                             if let Some(rseq) = stack::rseq_of(&response) {
@@ -441,13 +493,25 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                             view.held_dialog = to_tag;
                         }
                     }
-                    // The 2xx to a taken BYE ends the dialog on this side too:
-                    // a later BYE names a dialog this leg no longer holds, and
-                    // a request still pending under it is owed its 487. A BYE
-                    // answered 481 named a dialog already gone: nothing pending
-                    // under that tag is this leg's to end any more.
+                    // The 2xx to a taken BYE ends the dialog on this side too —
+                    // the established one, or the early one this leg or the
+                    // peer rang: a later BYE names a dialog this leg no longer
+                    // holds, and a request still pending under it is owed its
+                    // 487. A BYE answered 481 named a dialog already gone:
+                    // nothing pending under that tag is this leg's to end any
+                    // more.
                     Method::Bye if (200..300).contains(&response.status()) => {
-                        view.held_dialog = None;
+                        if view.held_dialog == to_tag {
+                            view.held_dialog = None;
+                        }
+                        if let Some((tag, invite)) =
+                            to_tag.as_ref().and_then(|tag| view.rang.remove_entry(tag))
+                        {
+                            view.ended_early.insert(tag, invite);
+                        }
+                        if let Some(peer) = response.from().tag() {
+                            view.peer_rang.remove(peer);
+                        }
                         view.ended.insert(to_tag);
                     }
                     Method::Bye => {
@@ -462,12 +526,20 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                     continue;
                 }
                 view.heard_response = true;
-                if response.status() >= 200 {
-                    if (200..300).contains(&response.status()) {
-                        view.held_dialog = view.own_tag.clone();
+                let peer_tag = response.to().tag();
+                if response.status() < 200 {
+                    if let Some(tag) = peer_tag {
+                        view.peer_rang.insert(tag.to_string());
                     }
-                    view.took_final = Some(response);
+                    continue;
                 }
+                if let Some(tag) = peer_tag {
+                    view.peer_rang.remove(tag);
+                }
+                if (200..300).contains(&response.status()) {
+                    view.held_dialog = view.own_tag.clone();
+                }
+                view.took_final = Some(response);
             }
         }
     }
@@ -527,6 +599,20 @@ mod tests {
         )
     }
 
+    /// The response this leg sends to a [`request`] the peer sent it: the
+    /// request's own From and To (RFC 3261 §8.2.6.2).
+    fn reply(status: u16, cseq: &str) -> String {
+        format!(
+            "SIP/2.0 {status} Whatever\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-x\r\n\
+             From: <sip:bob@example.test>;tag=b1\r\n\
+             To: <sip:alice@example.test>;tag=a1\r\n\
+             Call-ID: call-a\r\n\
+             CSeq: {cseq}\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+    }
+
     /// A request this leg TOOK, on the dialog `to_tag` names, with `extra`
     /// headers ahead of the CSeq.
     fn taken(method: &str, cseq: &str, to_tag: Option<&str>, extra: &str) -> String {
@@ -556,6 +642,24 @@ mod tests {
             cseq,
             to_tag: to_tag.map(str::to_string),
             status,
+            early_tag: None,
+        }
+    }
+
+    /// [`answer`] riding the early dialog `early_tag` names.
+    fn answer_under(
+        cseq_method: &str,
+        cseq: u32,
+        to_tag: Option<&str>,
+        status: u16,
+        early_tag: &str,
+    ) -> Owed {
+        Owed::Answer {
+            cseq_method: cseq_method.into(),
+            cseq,
+            to_tag: to_tag.map(str::to_string),
+            status,
+            early_tag: Some(early_tag.to_string()),
         }
     }
 
@@ -931,11 +1035,9 @@ mod tests {
     /// once, from whichever side of the dialog this leg is on — and while this
     /// leg's own BYE still awaits its final (§15.1.1). A BYE matching no
     /// dialog of this leg's — another tag, no tag, one an answered BYE already
-    /// ended — draws the `481` the same section states. A BYE under a tag this
-    /// leg RANG under and never confirmed names an early dialog, which is
-    /// answered by nobody here.
+    /// ended — draws the `481` the same section states.
     #[test]
-    fn an_unscripted_bye_draws_200_on_the_held_dialog_481_on_none_and_nothing_on_an_early_one() {
+    fn an_unscripted_bye_draws_200_on_the_held_dialog_and_481_on_none() {
         // The side that ANSWERED the dialog holds it under the tag its 2xx minted.
         let invite = (Dir::In, INVITE.to_string());
         let ok = (Dir::Out, response(200, "1 INVITE"));
@@ -966,9 +1068,6 @@ mod tests {
         );
 
         let ringing = (Dir::Out, response(180, "1 INVITE"));
-        let early = ladder(&[invite.clone(), ringing.clone(), (Dir::In, bye_raw.clone())]);
-        assert_eq!(unscripted(&early, &message(&bye_raw)), None, "an early dialog, not ours here");
-
         let again_raw = taken("BYE", "3 BYE", Some("b1"), "");
         let again = ladder(&[
             invite,
@@ -1009,6 +1108,98 @@ mod tests {
         );
     }
 
+    /// RFC 3261 §15: a BYE may end an EARLY dialog — one a tagged provisional
+    /// opened (§12.1.1) and no final has confirmed or ended — and §15.1.2
+    /// answers it like any dialog's: `200`, then the `487` the INVITE that
+    /// dialog rides is still owed, under the tag the dialog rang with
+    /// (§8.2.6.2). A tag that rang and then took a 2xx is the held dialog;
+    /// one that rang and then took a non-2xx is gone (§12.3), so its BYE
+    /// draws `481`. On the side that OPENED the dialog the early dialog is
+    /// the peer's tagged provisional, and the BYE it sends on it draws the
+    /// `200` too — the INVITE stays the peer's to answer, so no second act.
+    #[test]
+    fn an_unscripted_bye_on_an_early_dialog_draws_200_then_487s_the_invite_it_rides() {
+        // The side that ANSWERED: ringing under b1, no final yet.
+        let invite = (Dir::In, INVITE.to_string());
+        let ringing = (Dir::Out, response(180, "1 INVITE"));
+        let bye_raw = taken("BYE", "2 BYE", Some("b1"), "");
+        let bye = (Dir::In, bye_raw.clone());
+        let trigger = message(&bye_raw);
+        let early = ladder(&[invite.clone(), ringing.clone(), bye.clone()]);
+        assert_eq!(unscripted(&early, &trigger), Some(answer("BYE", 2, Some("b1"), 200)));
+
+        let answered = (Dir::Out, response(200, "2 BYE"));
+        let ended = ladder(&[invite.clone(), ringing.clone(), bye.clone(), answered.clone()]);
+        let terminated = answer_under("INVITE", 1, None, 487, "b1");
+        assert_eq!(
+            unscripted(&ended, &trigger),
+            Some(terminated.clone()),
+            "the INVITE the early dialog rides, under the tag it rang with"
+        );
+        // The generic close reads the same fact: the pending INVITE owes the
+        // 487 the ended dialog recommends, not the 480 of a script that stopped.
+        assert_eq!(
+            leg(&[invite.clone(), ringing.clone(), bye.clone(), answered.clone()]),
+            terminated
+        );
+
+        let final_out = (Dir::Out, response(487, "1 INVITE"));
+        let done = ladder(&[invite.clone(), ringing.clone(), bye, answered, final_out]);
+        assert_eq!(unscripted(&done, &trigger), None, "the pair is discharged");
+
+        // Rang and then refused: the early dialog ended with the non-2xx.
+        let refused = (Dir::Out, response(486, "1 INVITE"));
+        let gone = ladder(&[invite.clone(), ringing.clone(), refused, (Dir::In, bye_raw.clone())]);
+        assert_eq!(
+            unscripted(&gone, &trigger),
+            Some(answer("BYE", 2, Some("b1"), 481)),
+            "the dialog it rang under is over"
+        );
+
+        // Rang and then confirmed: the held dialog, under the same tag.
+        let ok = (Dir::Out, response(200, "1 INVITE"));
+        let ack = (Dir::In, taken("ACK", "1 ACK", Some("b1"), ""));
+        let held = ladder(&[invite, ringing, ok, ack, (Dir::In, bye_raw)]);
+        assert_eq!(unscripted(&held, &trigger), Some(answer("BYE", 2, Some("b1"), 200)));
+
+        // The side that OPENED: the peer rang under b1, and BYEs that dialog.
+        let sent = (Dir::Out, INVITE.to_string());
+        let took = (Dir::In, response(180, "1 INVITE"));
+        let peer_raw = request("BYE", "2 BYE");
+        let peer = (Dir::In, peer_raw.clone());
+        let opened = ladder(&[sent.clone(), took.clone(), peer.clone()]);
+        assert_eq!(
+            unscripted(&opened, &message(&peer_raw)),
+            Some(answer("BYE", 2, Some("a1"), 200))
+        );
+        let peer_answered = (Dir::Out, reply(200, "2 BYE"));
+        let peer_ended = ladder(&[sent.clone(), took.clone(), peer, peer_answered]);
+        assert_eq!(
+            unscripted(&peer_ended, &message(&peer_raw)),
+            None,
+            "the INVITE this leg sent is the peer's to answer"
+        );
+
+        // A BYE from a tag the peer never rang under names no early dialog.
+        let stranger_raw = peer_raw.replace("tag=b1", "tag=b2");
+        let stranger = ladder(&[sent.clone(), took.clone(), (Dir::In, stranger_raw.clone())]);
+        assert_eq!(
+            unscripted(&stranger, &message(&stranger_raw)),
+            Some(answer("BYE", 2, Some("a1"), 481)),
+            "no early dialog under that tag"
+        );
+
+        // The peer's non-2xx ended its early dialog before the BYE.
+        let peer_refused = (Dir::In, response(486, "1 INVITE"));
+        let acked = (Dir::Out, request("ACK", "1 ACK"));
+        let peer_gone = ladder(&[sent, took, peer_refused, acked, (Dir::In, peer_raw.clone())]);
+        assert_eq!(
+            unscripted(&peer_gone, &message(&peer_raw)),
+            Some(answer("BYE", 2, Some("a1"), 481)),
+            "the early dialog ended with the 486"
+        );
+    }
+
     /// RFC 3261 §15.1.2, last paragraph: the UAS that answered a BYE still
     /// responds to every request pending on that dialog, 487 recommended. A
     /// re-INVITE the flow scripted nothing for is open on the leg when the
@@ -1042,6 +1233,18 @@ mod tests {
             unscripted(&second, &trigger),
             Some(answer("INVITE", 2, Some("b1"), 487)),
             "the re-INVITE pending on the ended dialog"
+        );
+        assert_eq!(
+            leg(&[
+                invite.clone(),
+                ok.clone(),
+                ack.clone(),
+                reinvite.clone(),
+                bye.clone(),
+                answered.clone()
+            ]),
+            answer("INVITE", 2, Some("b1"), 487),
+            "the generic close reads the ended dialog too"
         );
 
         let terminated = (Dir::Out, response(487, "2 INVITE"));

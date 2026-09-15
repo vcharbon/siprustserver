@@ -1451,12 +1451,12 @@ impl<'a, 'p> Runner<'a, 'p> {
         let route_target = self.lane.route_target;
         let stack = self.stacks.get_mut(leg).ok_or_else(|| fail("the leg has no stack".into()))?;
         let (message, dst) = match owed {
-            Owed::Answer { cseq_method, cseq, to_tag, status } => {
+            Owed::Answer { cseq_method, cseq, to_tag, status, early_tag } => {
                 let answer = crate::stack::Answer {
                     status: *status,
                     reason: reason_for(*status),
                     cseq_method: Some(cseq_method),
-                    early_tag: None,
+                    early_tag: early_tag.as_deref(),
                 };
                 let response = stack
                     .respond_to(*cseq, to_tag.as_deref(), &answer, &[], Vec::new(), None)
