@@ -1,11 +1,10 @@
 /**
- * A flows document read off a file, leg by leg.
+ * A flows document read off a file, leg by leg — lenient, or decoded against
+ * the `Flows` contract.
  *
- * The envelope — the document with its `legs` emptied — is parsed as one small
+ * The envelope — the document with its `legs` emptied — is taken as one small
  * value and each leg apart, then the two are put back together, so a capture of
  * thousands of calls is never held as one string: V8 refuses one above 512 MiB.
- * Lenient like the contract it builds (`Flows`): nothing re-emits a flows
- * document, so an emitter that added a field must not break this reader.
  */
 import { Flows } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -23,23 +22,42 @@ export class FlowsLegRefused extends Schema.TaggedError<FlowsLegRefused>()(
   }
 }
 
+/** One part of the document as its own text: an envelope half, or one leg. */
+type Part =
+  | { readonly kind: "head" | "tail"; readonly text: string }
+  | { readonly kind: "leg"; readonly index: number; readonly text: string }
+
 /**
- * The flows document at `file`. The envelope's two halves meet around an empty
- * `legs` array — the head ends on its `[` and the tail opens on its `]` — which
- * is why they parse as one value with the legs taken out.
+ * The document's parts, in order. A leg's text is its own JSON, the separator
+ * behind it left out, so it parses alone; the head ends on the `[` of `legs` and
+ * the tail opens on its `]`, which is why head + tail parse as one value with
+ * the legs taken out.
+ */
+function* parts(file: string): Generator<Part> {
+  for (const segment of segments(file)) {
+    if (segment.kind === "leg") {
+      yield {
+        kind: "leg",
+        index: segment.index,
+        text: Buffer.from(segment.bytes.subarray(0, segment.json)).toString("utf8")
+      }
+    } else yield { kind: segment.kind, text: Buffer.from(segment.bytes).toString("utf8") }
+  }
+}
+
+/**
+ * The flows document at `file`, as lenient as the contract it builds: nothing
+ * re-emits a flows document, so an emitter that added a field must not break
+ * this reader.
  */
 export const readFlowsFile = (file: string): Flows.FlowsDoc => {
   const legs: Array<Flows.Leg> = []
   let head = ""
   let tail = ""
-  for (const segment of segments(file)) {
-    if (segment.kind === "head") head = Buffer.from(segment.bytes).toString("utf8")
-    else if (segment.kind === "tail") tail = Buffer.from(segment.bytes).toString("utf8")
-    else {
-      legs.push(
-        JSON.parse(Buffer.from(segment.bytes.subarray(0, segment.json)).toString("utf8")) as Flows.Leg
-      )
-    }
+  for (const part of parts(file)) {
+    if (part.kind === "leg") legs.push(JSON.parse(part.text) as Flows.Leg)
+    else if (part.kind === "head") head = part.text
+    else tail = part.text
   }
   return { ...(JSON.parse(head + tail) as Flows.FlowsDoc), legs }
 }
@@ -59,23 +77,18 @@ export const readFlowsFileDecoded = Effect.fn("FlowsFile.readFlowsFileDecoded")(
   const legs: Array<Flows.Leg> = []
   let head = ""
   let tail = ""
-  for (const segment of segments(file)) {
-    if (segment.kind === "head") head = Buffer.from(segment.bytes).toString("utf8")
-    else if (segment.kind === "tail") tail = Buffer.from(segment.bytes).toString("utf8")
-    else {
-      const text = Buffer.from(segment.bytes.subarray(0, segment.json)).toString("utf8")
+  for (const part of parts(file)) {
+    if (part.kind === "leg") {
       legs.push(
-        yield* decodeLeg(JSON.parse(text) as unknown).pipe(
+        yield* decodeLeg(JSON.parse(part.text) as unknown).pipe(
           Effect.mapError((cause) =>
-            new FlowsLegRefused({ file, index: segment.index, reason: cause.message })
+            new FlowsLegRefused({ file, index: part.index, reason: cause.message })
           )
         )
       )
-    }
+    } else if (part.kind === "head") head = part.text
+    else tail = part.text
   }
-  const envelope = yield* Flows.decodeFlows({
-    ...(JSON.parse(head + tail) as object),
-    legs: []
-  })
+  const envelope = yield* Flows.decodeFlows({ ...(JSON.parse(head + tail) as object), legs: [] })
   return { ...envelope, legs } satisfies Flows.FlowsDoc
 })
