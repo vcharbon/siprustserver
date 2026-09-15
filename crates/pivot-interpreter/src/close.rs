@@ -122,11 +122,10 @@ pub struct UnackedFinal {
     pub sent_at_us: u64,
 }
 
-/// The non-2xx INVITE finals one leg sent and is still owed an ACK for, in
-/// the order it sent them, read off its recorded ladder. A 2xx is not here:
-/// its ACK is the peer's own request (§13.2.2.4), not the transaction's
-/// closer. Nothing else the leg answers is owed an ACK, so a non-INVITE final
-/// never appears.
+/// The non-2xx INVITE finals one leg sent and is still owed an ACK for, by
+/// CSeq, read off its recorded ladder. A 2xx is not here: its ACK is the
+/// peer's own request (§13.2.2.4), not the transaction's closer. Nothing else
+/// the leg answers is owed an ACK, so a non-INVITE final never appears.
 pub fn unacked_finals(messages: &[RecordedMessage]) -> Vec<UnackedFinal> {
     view(messages)
         .sent_finals
@@ -1404,11 +1403,10 @@ mod tests {
     }
 
     /// A non-2xx final this leg sent to an INVITE holds its server transaction
-    /// in Completed until the peer's ACK (RFC 3261 §17.2.1, §17.1.1.3): it is
-    /// listed from its first emission — a retransmission of it re-opens no
-    /// clock — and leaves on the ACK naming its CSeq. A 2xx is the peer's own
-    /// request to acknowledge (§13.2.2.4) and a non-INVITE final is never
-    /// ACKed, so neither is ever listed.
+    /// in Completed until the peer's ACK (RFC 3261 §17.2.1, §17.1.1.3): listed
+    /// from its first emission — a retransmission re-opens no clock — until
+    /// the ACK naming its CSeq. A 2xx is the peer's own request to acknowledge
+    /// (§13.2.2.4) and a non-INVITE final is never ACKed: neither is listed.
     #[test]
     fn a_non_2xx_invite_final_this_leg_sent_awaits_the_peer_s_ack() {
         let invite = (Dir::In, INVITE.to_string(), false);
@@ -1454,11 +1452,37 @@ mod tests {
         ]);
         assert_eq!(discharged, [], "the peer's ACK ended the transaction");
         // A second final on the transaction the 487 already ended answers
-        // nothing the peer holds open, so nothing is owed for it.
+        // nothing the peer holds open: it neither re-opens the CSeq nor moves
+        // the first final's clock, before the ACK or after it.
         let late = (Dir::Out, response(408, "2 INVITE"), false);
-        let twice =
+        let before_ack = ladder(&[
+            invite.clone(),
+            ok.clone(),
+            ack.clone(),
+            reinvite.clone(),
+            bye.clone(),
+            refused.clone(),
+            terminated.clone(),
+            again.clone(),
+            late.clone(),
+        ]);
+        assert_eq!(before_ack, [UnackedFinal { cseq: 2, status: 487, sent_at_us: 6 }]);
+        let then_acked = ladder(&[
+            invite.clone(),
+            ok.clone(),
+            ack.clone(),
+            reinvite.clone(),
+            bye.clone(),
+            refused.clone(),
+            terminated.clone(),
+            again.clone(),
+            late.clone(),
+            acked.clone(),
+        ]);
+        assert_eq!(then_acked, [], "the ACK still discharges the 487");
+        let after_ack =
             ladder(&[invite, ok, ack, reinvite, bye, refused, terminated, again, acked, late]);
-        assert_eq!(twice, [], "a final on an ended transaction is owed no ACK");
+        assert_eq!(after_ack, [], "a final on an ended transaction is owed no ACK");
     }
 
     /// A leg holding an unanswered request that is NOT the cancelled INVITE

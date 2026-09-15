@@ -91,30 +91,25 @@ pub fn is_settled(flow_done: bool, sut: &dyn Sut, postconditions: Option<&Postco
 }
 
 /// A non-2xx INVITE final a scripted leg sent and the system has not
-/// acknowledged, by leg.
+/// acknowledged: the leg, and the transaction as its ladder states it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwaitedAck {
     pub leg: String,
-    pub cseq: u32,
-    pub status: u16,
-    pub sent_at_us: u64,
+    pub owed: UnackedFinal,
 }
 
 impl std::fmt::Display for AwaitedAck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "leg {}: {} to INVITE CSeq {} awaits its ACK", self.leg, self.status, self.cseq)
+        let UnackedFinal { cseq, status, .. } = self.owed;
+        write!(f, "leg {}: {status} to INVITE CSeq {cseq} awaits its ACK", self.leg)
     }
 }
 
-/// The settle floor the scripted legs' own server transactions hold.
-///
-/// A non-2xx final a leg sent to an INVITE keeps that leg's transaction in
-/// Completed until the ACK the peer owes on the INVITE's branch (RFC 3261
-/// §17.1.1.3, §17.2.1): `held` are the finals still inside Timer H (64·T1
-/// from the final's emission), and each keeps the run open. `expired` are
-/// past it: the transaction is gone and the ACK never came — a failure of the
-/// system, which §17.2.1 reports to the transaction user, and which holds
-/// nothing open any longer.
+/// The settle floor the scripted legs' own server transactions hold (RFC 3261
+/// §17.1.1.3, §17.2.1). `held` are inside Timer H (64·T1 from the final's
+/// first emission) and keep the run open; `expired` are past it, the
+/// transaction gone and the ACK never come — the system's failure, holding
+/// nothing further.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Floor {
     pub held: Vec<AwaitedAck>,
@@ -135,8 +130,9 @@ pub fn floor(recording: &Recording, now_us: u64) -> Floor {
     let timer_h_us = TIMER_H * 1000;
     let mut floor = Floor::default();
     for (leg, messages) in recording.legs() {
-        for UnackedFinal { cseq, status, sent_at_us } in close::unacked_finals(&messages) {
-            let awaited = AwaitedAck { leg: leg.clone(), cseq, status, sent_at_us };
+        for owed in close::unacked_finals(&messages) {
+            let sent_at_us = owed.sent_at_us;
+            let awaited = AwaitedAck { leg: leg.clone(), owed };
             if now_us.saturating_sub(sent_at_us) < timer_h_us {
                 floor.held.push(awaited);
             } else {
@@ -309,7 +305,10 @@ mod tests {
         recording.declare("B");
         recording.push("B", Dir::In, 1_000_000, INVITE, None, None);
         recording.push("B", Dir::Out, 1_400_000, TERMINATED, None, None);
-        let awaited = AwaitedAck { leg: "B".into(), cseq: 2, status: 487, sent_at_us: 1_400_000 };
+        let awaited = AwaitedAck {
+            leg: "B".into(),
+            owed: UnackedFinal { cseq: 2, status: 487, sent_at_us: 1_400_000 },
+        };
 
         let held = floor(&recording, 1_400_000 + TIMER_H * 1000 - 1);
         assert_eq!(held, Floor { held: vec![awaited.clone()], expired: vec![] });

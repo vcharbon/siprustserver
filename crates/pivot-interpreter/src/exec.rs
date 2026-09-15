@@ -2291,11 +2291,11 @@ impl<'a, 'p> Runner<'a, 'p> {
             // and the ACK never came, which is the system's failure to state.
             let floor = settle::floor(&self.instance.recording(), self.now_us());
             for expired in &floor.expired {
-                if self.timer_h_reported.insert((expired.leg.clone(), expired.cseq)) {
+                if self.timer_h_reported.insert((expired.leg.clone(), expired.owed.cseq)) {
                     self.instance.fail(Failure::FinalUnacknowledged {
                         leg: expired.leg.clone(),
-                        status: expired.status,
-                        cseq: expired.cseq,
+                        status: expired.owed.status,
+                        cseq: expired.owed.cseq,
                     });
                 }
             }
