@@ -175,7 +175,7 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
   const index = captureIndex(input.flows, input.policy.derives, input.plan)
   for (const spec of input.specs) {
     const legs = spec.cutLegs ?? [spec.uac.leg, ...spec.uas.map((u) => u.leg)]
-    const callIds = caseCallIds(input.flows, input.sut, legs, index.families)
+    const callIds = caseCallIds(input.flows, input.sut, legs, index.correlation)
     // The capture tier first, because it needs strictly less: a rule that
     // decides on the family alone never sees the vantages the cut produced.
     const captured = {

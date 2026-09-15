@@ -15,6 +15,19 @@ import { doc, leg, oneHop, plan, request, response, SOCKETS, sutSet } from "./fi
 /** The shortest base a suffix match is evidence rather than coincidence. */
 const MIN_BASE = 8
 
+/** The decoys of {@link manyLegsFlows}: a suffix of every Call-ID, each under the base minimum. */
+const DECOYS = ["example", "xample", "e"] as const
+
+/** The longest derivation chain {@link manyLegsFlows} mints: `2-1-<base>` off `1-<base>` off `<base>`. */
+const MAX_DEPTH = 2
+
+/**
+ * The candidate bases one leg can have in {@link manyLegsFlows}: every decoy
+ * plus one per link of the chain below it — the most the predicate is asked
+ * about it.
+ */
+const CANDIDATES_PER_LEG = DECOYS.length + MAX_DEPTH
+
 /** A prefix-minting convention: the derived Call-ID ENDS WITH its base. */
 const suffixDerives: CallIdDerivation = (base, derived) =>
   base.length >= MIN_BASE && derived.length > base.length && derived.endsWith(base)
@@ -43,8 +56,8 @@ const shuffled = <T>(items: ReadonlyArray<T>): Array<T> => {
 
 /**
  * Thousands of legs, message-free: base Call-IDs, `1-` and `2-1-` derivations
- * of them, bases nothing derives from, derivations whose base is absent, and
- * short decoys that are a suffix of every Call-ID but under the base minimum.
+ * of them, bases nothing derives from, derivations whose base is absent, one
+ * Call-ID two legs share, and the {@link DECOYS}.
  */
 const manyLegsFlows = (n: number): Flows.FlowsDoc => {
   const ids: Array<string> = []
@@ -57,8 +70,9 @@ const manyLegsFlows = (n: number): Flows.FlowsDoc => {
     ids.push(base)
     if (i % 5 !== 0) ids.push(`1-${base}`)
     if (i % 7 === 0) ids.push(`2-1-${base}`)
+    if (i % 13 === 0) ids.push(base)
   }
-  ids.push("example", "xample", "e")
+  ids.push(...DECOYS)
   return doc(
     shuffled(ids).map((id) => leg(id, oneHop(SOCKETS.caller, SOCKETS.sut), [])),
     []
@@ -137,10 +151,10 @@ describe("call families over thousands of legs", () => {
   it("ask the derivation about candidate bases only, linearly in the legs", () => {
     const counted = counting(suffixDerives)
     callFamilies(flows, counted.derives)
-    // Every leg has a handful of candidate bases in the document — its own
-    // suffixes that are another leg's Call-ID — and the predicate is asked
-    // about those alone, never about every other leg.
-    expect(counted.count()).toBeLessThanOrEqual(8 * flows.legs.length)
+    // A leg's candidate bases are its own suffixes that are another leg's
+    // Call-ID, and the predicate is asked about those alone, never about every
+    // other leg.
+    expect(counted.count()).toBeLessThanOrEqual(CANDIDATES_PER_LEG * flows.legs.length)
   })
 })
 
@@ -169,6 +183,8 @@ describe("deciding every case of a capture", () => {
     })
     expect(decided.outcomes.every((o) => o.built !== undefined && o.error === undefined)).toBe(true)
     expect(decided.refused).toEqual([])
-    expect(counted.count()).toBeLessThanOrEqual(8 * flows.legs.length)
+    // One probe per derived leg, its base being its only suffix that is a
+    // Call-ID of the document; a base leg has no suffix as long as the shortest.
+    expect(counted.count()).toBe(flows.legs.length / 2)
   })
 })

@@ -168,7 +168,7 @@ export const assemble = (input: AssembleInput): Assembled => {
   // What the allowed-errors registry already knows about this capture's calls.
   // A warning is a document annotation AND a caller-visible line: an entry that
   // matched but could not be anchored must not read as an absent violation.
-  const callIds = caseCallIds(flows, sut, legs, index.families)
+  const callIds = caseCallIds(flows, sut, legs, index.correlation)
   const stamped = stampRfcViolations({
     registry: input.allowed,
     capture,

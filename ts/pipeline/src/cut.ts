@@ -110,14 +110,12 @@ export const boundaryHops = (leg: Flows.Leg, sut: SutSet): ReadonlyArray<number>
     .filter((i) => i >= 0)
 
 /**
- * The correlation of one capture, built ONCE and read by every consumer: the
- * families, and the derivation edges they were closed over.
- *
- * Built once because the cut is otherwise cubic in calls — a capture of
- * thousands of concurrent dialogs yields hundreds of cases, and a consumer that
- * re-correlated the document per case would spend cases × legs² on it.
+ * The correlation of one capture: the families and the derivation edges they
+ * are closed over. Built ONCE per capture and read by every consumer — a
+ * capture of thousands of dialogs yields hundreds of cases, and correlating
+ * per case is cases × legs².
  */
-export interface Families {
+export interface Correlation {
   /** Every family, ascending by first leg, each ascending. */
   readonly families: ReadonlyArray<ReadonlyArray<number>>
   /** The family `leg` belongs to. */
@@ -142,7 +140,7 @@ export interface Families {
  * so the bases a leg can have are its Call-ID's proper suffixes, looked up in an
  * index of every Call-ID, and the predicate is asked about those alone.
  */
-export const correlate = (flows: Flows.FlowsDoc, derives: CallIdDerivation): Families => {
+export const correlate = (flows: Flows.FlowsDoc, derives: CallIdDerivation): Correlation => {
   const byCallId = new Map<string, Array<number>>()
   let shortest = Number.MAX_SAFE_INTEGER
   flows.legs.forEach((leg, i) => {
@@ -330,10 +328,10 @@ export const caseCallIds = (
   flows: Flows.FlowsDoc,
   sut: SutSet,
   legs: ReadonlyArray<number>,
-  families: Families
+  correlation: Correlation
 ): ReadonlyArray<string> => {
   const out = new Set<string>()
-  const wanted = [...new Set(legs.map((leg) => families.familyOf(leg)))].sort(
+  const wanted = [...new Set(legs.map((leg) => correlation.familyOf(leg)))].sort(
     (a, b) => a[0]! - b[0]!
   )
   for (const family of wanted) {

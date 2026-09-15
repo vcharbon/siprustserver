@@ -8,8 +8,8 @@ import { headText, uriUser } from "./wire.js"
 
 /**
  * Keyed by the number's class key. Built ONCE per capture: every message of the
- * document is harvested to fill it and a case's parties are looked up in it —
- * the per-identity walk it replaces made the cut quadratic in calls.
+ * document is harvested to fill it and a case's parties are looked up in it; a
+ * per-identity walk over the document is quadratic in calls.
  */
 export type FormsTable = ReadonlyMap<string, ReadonlyArray<string>>
 

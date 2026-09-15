@@ -11,7 +11,7 @@
 import { Flows, type Call, type Case, type Placement, type Tokens } from "@sip/contracts"
 import { captureIndex, type CaptureIndex } from "./capture-index.js"
 import type { CallIdDerivation } from "./derivation.js"
-import { vantageMsgIdxs, type Families } from "./cut.js"
+import { vantageMsgIdxs, type Correlation } from "./cut.js"
 import type { FormsTable } from "./forms.js"
 import { canonical, classKey, type Plan } from "./plan.js"
 import type { SutSet } from "./sut.js"
@@ -140,20 +140,14 @@ export const peerSide = (a: ActorObs, sock: string): boolean => !a.sutSet.has(so
 
 /**
  * Two calls one application server minted from a common base call: one derives
- * from the other, or a third leg's Call-ID derives both.
+ * from the other, or a third leg's Call-ID derives both. Read off the
+ * correlation's edges alone, so the index is the one seam to the derivation.
  */
-export const relatedByDerivation = (
-  flows: Flows.FlowsDoc,
-  a: number,
-  b: number,
-  derives: CallIdDerivation,
-  families: Families
-): boolean => {
-  const ca = flows.legs[a]!.call_id
-  const cb = flows.legs[b]!.call_id
-  if (derives(ca, cb) || derives(cb, ca)) return true
-  const basesOfB = new Set(families.basesOf(b))
-  return families.basesOf(a).some((i) => i !== a && i !== b && basesOfB.has(i))
+export const relatedByDerivation = (a: number, b: number, correlation: Correlation): boolean => {
+  const basesOfA = new Set(correlation.basesOf(a))
+  const basesOfB = new Set(correlation.basesOf(b))
+  if (basesOfA.has(b) || basesOfB.has(a)) return true
+  return [...basesOfA].some((i) => i !== a && i !== b && basesOfB.has(i))
 }
 
 export const build = (
@@ -255,7 +249,7 @@ export const build = (
     }
   })
 
-  const grouping = calledBranches(flows, raw, derives, index.families, chainHints)
+  const grouping = calledBranches(flows, raw, index.correlation, chainHints)
   const joined = joins(flows, raw)
   for (const [i, join] of joined) {
     raw[i]!.joinedBy = join
@@ -422,8 +416,7 @@ interface Branches {
 const calledBranches = (
   flows: Flows.FlowsDoc,
   raw: ReadonlyArray<ActorObs>,
-  derives: CallIdDerivation,
-  families: Families,
+  correlation: Correlation,
   chainHints: ReadonlyArray<readonly [number, number]>
 ): Branches => {
   const established = callerAnsweredTs(flows, raw)
@@ -445,7 +438,7 @@ const calledBranches = (
       const answerIntervened =
         established !== undefined && established >= prevStart && established < start
       if (failedAt > start || answerIntervened) return
-      const ev = chainEvidence(flows, prev, a, derives, families, chainHints)
+      const ev = chainEvidence(flows, prev, a, correlation, chainHints)
       if (!ev) return
       if (!best || failedAt > best.failedAt || (failedAt === best.failedAt && b < best.b)) {
         best = { failedAt, b, ev }
@@ -465,15 +458,14 @@ const chainEvidence = (
   flows: Flows.FlowsDoc,
   prev: ActorObs,
   next: ActorObs,
-  derives: CallIdDerivation,
-  families: Families,
+  correlation: Correlation,
   chainHints: ReadonlyArray<readonly [number, number]>
 ): string | undefined => {
   const prevGroups = new Set(Flows.groupsForLegs(flows, [prev.origLeg]))
   if (Flows.groupsForLegs(flows, [next.origLeg]).some((g) => prevGroups.has(g))) {
     return "both attempts sit in one upstream call group"
   }
-  if (relatedByDerivation(flows, prev.origLeg, next.origLeg, derives, families)) {
+  if (relatedByDerivation(prev.origLeg, next.origLeg, correlation)) {
     return "the attempts' Call-IDs are application-server derivations of one base call"
   }
   const hinted = chainHints.some(
