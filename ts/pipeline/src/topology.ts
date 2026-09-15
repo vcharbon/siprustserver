@@ -469,9 +469,8 @@ const chainEvidence = (
   families: Families,
   chainHints: ReadonlyArray<readonly [number, number]>
 ): string | undefined => {
-  if (
-    flows.groups.some((g) => g.legs.includes(prev.origLeg) && g.legs.includes(next.origLeg))
-  ) {
+  const prevGroups = new Set(Flows.groupsForLegs(flows, [prev.origLeg]))
+  if (Flows.groupsForLegs(flows, [next.origLeg]).some((g) => prevGroups.has(g))) {
     return "both attempts sit in one upstream call group"
   }
   if (relatedByDerivation(flows, prev.origLeg, next.origLeg, derives, families)) {

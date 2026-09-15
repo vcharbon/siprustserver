@@ -403,8 +403,34 @@ export const requireHeaders = (doc: FlowsDoc, wanted: ReadonlyArray<string>): vo
  * from those vantage legs is a case OF. One query, so what a case declares in
  * `case.source.call_groups` and what an exclusion rule reads are the same set.
  */
-export const groupsForLegs = (doc: FlowsDoc, legs: ReadonlyArray<number>): Array<number> =>
-  doc.groups.flatMap((group, index) => (group.legs.some((leg) => legs.includes(leg)) ? [index] : []))
+export const groupsForLegs = (doc: FlowsDoc, legs: ReadonlyArray<number>): Array<number> => {
+  const byLeg = groupsByLeg(doc)
+  const out = new Set<number>()
+  for (const leg of legs) for (const group of byLeg.get(leg) ?? []) out.add(group)
+  return [...out].sort((a, b) => a - b)
+}
+
+/**
+ * Leg → the indices of the groups holding it, ascending, built once per
+ * document: every case of a capture asks, and a scan of every group per case
+ * is quadratic in calls.
+ */
+const groupsByLeg = (doc: FlowsDoc): ReadonlyMap<number, ReadonlyArray<number>> => {
+  const known = groupsByLegOf.get(doc)
+  if (known !== undefined) return known
+  const byLeg = new Map<number, Array<number>>()
+  doc.groups.forEach((group, index) => {
+    for (const leg of group.legs) {
+      const groups = byLeg.get(leg)
+      if (groups === undefined) byLeg.set(leg, [index])
+      else groups.push(index)
+    }
+  })
+  groupsByLegOf.set(doc, byLeg)
+  return byLeg
+}
+
+const groupsByLegOf = new WeakMap<FlowsDoc, ReadonlyMap<number, ReadonlyArray<number>>>()
 
 export const isMethod = (msg: Msg, method: string): boolean =>
   msg.summary.kind === "request" && msg.summary.method.toUpperCase() === method.toUpperCase()

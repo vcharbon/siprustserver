@@ -637,9 +637,18 @@ const unpaced = (msg: Flows.Msg): boolean =>
  * producer that did not compute it. Absence is not "no repeats": it is a reason
  * to keep the old collapse and warn.
  */
-const carriesRepeatOf = (flows: Flows.FlowsDoc): boolean =>
-  flows.schema >= Flows.EMIT_SCHEMA_VERSION &&
-  flows.legs.every((l) => l.msgs.every((m) => !m.retx || m.repeat_of !== undefined))
+const carriesRepeatOf = (flows: Flows.FlowsDoc): boolean => {
+  const known = repeatOfCarriage.get(flows)
+  if (known !== undefined) return known
+  const carries =
+    flows.schema >= Flows.EMIT_SCHEMA_VERSION &&
+    flows.legs.every((l) => l.msgs.every((m) => !m.retx || m.repeat_of !== undefined))
+  repeatOfCarriage.set(flows, carries)
+  return carries
+}
+
+/** Answered once per document: the question walks every message, and every case of it asks. */
+const repeatOfCarriage = new WeakMap<Flows.FlowsDoc, boolean>()
 
 /**
  * The step a retransmission repeats: same leg, direction, message type AND
