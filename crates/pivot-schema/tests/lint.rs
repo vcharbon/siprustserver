@@ -1261,6 +1261,93 @@ fn a_captured_document_may_derive_a_second_step_on_one_coordinate() {
     assert_fires("capture/observed-duplicated", twice);
 }
 
+/// The far side of a relayed in-dialog INVITE exchange the capture holds on one
+/// leg only (§6.9): the callee leg's record ends at its 2xx, and the caller's
+/// re-INVITE, its 2xx and its ACK are transcribed onto it, each naming the
+/// caller-leg message it copies. Both halves gate here too: the flag, and the
+/// three shapes the pass derives and no other.
+#[test]
+fn a_captured_document_may_transcribe_a_relayed_re_invite_onto_the_leg_the_vantage_lost() {
+    let far_side = |d: &mut Value| {
+        captured_base(d);
+        unacked(d);
+        flow(d)[2]["observed"] = json!({ "leg": 1, "msg": 2, "at_us": 990_000 });
+        for step in [
+            json!({
+                "id": "s4", "leg": "A", "op": "expect", "check": "assert",
+                "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                "observed": { "leg": 0, "msg": 2, "at_us": 1_000_000 },
+                "delay": { "ms": 0, "from": "step:s3", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s5", "leg": "A", "op": "send", "auto": true, "in_dialog": true,
+                "confirms_dialog": true,
+                "msg": { "method": "ACK", "cseq": 1 },
+                "observed": { "leg": 0, "msg": 3, "at_us": 1_005_000 },
+                "delay": { "ms": 5, "from": "step:s4", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s6", "leg": "A", "op": "send", "in_dialog": true,
+                "msg": { "method": "INVITE" },
+                "observed": { "leg": 0, "msg": 4, "at_us": 5_000_000 },
+                "delay": { "ms": 3995, "from": "step:s5", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s7", "leg": "B", "op": "expect", "check": "record", "in_dialog": true,
+                "msg": { "method": "INVITE" },
+                "observed": { "leg": 0, "msg": 4, "at_us": 5_000_000 },
+                "delay": { "ms": 0, "from": "step:s6", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s8", "leg": "B", "op": "send", "in_dialog": true,
+                "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                "observed": { "leg": 0, "msg": 6, "at_us": 5_090_000 },
+                "delay": { "ms": 80, "from": "step:s7", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s9", "leg": "A", "op": "expect", "check": "assert", "in_dialog": true,
+                "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                "observed": { "leg": 0, "msg": 6, "at_us": 5_090_000 },
+                "delay": { "ms": 0, "from": "step:s8", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s10", "leg": "A", "op": "send", "auto": true, "in_dialog": true,
+                "msg": { "method": "ACK", "cseq": 2 },
+                "observed": { "leg": 0, "msg": 7, "at_us": 5_095_000 },
+                "delay": { "ms": 0, "from": "step:s9", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s11", "leg": "B", "op": "expect", "check": "record", "auto": true,
+                "in_dialog": true,
+                "msg": { "method": "ACK", "cseq": 2 },
+                "observed": { "leg": 0, "msg": 7, "at_us": 5_095_000 },
+                "delay": { "ms": 0, "from": "step:s10", "compressible": true, "timer_linked": false }
+            }),
+        ] {
+            flow(d).push(step);
+        }
+    };
+    let declares = |d: &mut Value| {
+        d["case"]["annotations"] = json!({ "flags": [{
+            "kind": "far-side-reinvite-derived",
+            "detail": "leg B (record ends at s3): s7 expect INVITE mirrors s6, s8 send 200 mirrors s9, s11 expect ACK mirrors s10"
+        }]});
+    };
+    let report = broken(|d| {
+        far_side(d);
+        declares(d);
+    });
+    assert!(!report.has_errors(), "{}", report.render());
+    // Declared, but a shape the pass never derives: the exemption does not travel.
+    assert_fires("capture/observed-duplicated", |d| {
+        far_side(d);
+        declares(d);
+        flow(d)[6]["msg"] = json!({ "method": "INFO" });
+    });
+    // The right shapes, silently: an inference the page does not carry.
+    assert_fires("capture/observed-duplicated", far_side);
+}
+
 /// A capture shows what DID happen once. It never shows that an absence was
 /// tolerable or that a value should be read from a dialog at run time.
 #[test]
@@ -2259,6 +2346,38 @@ fn unexpected_ack_is_declared_on_the_2xx_the_peer_sends() {
 fn a_2xx_the_flow_already_acks_declares_no_unexpected_ack() {
     assert_fires("must-fail/anchor-already-acked", |d| {
         answered(d);
+        d["must_fail"] = declares("s3");
+    });
+}
+
+/// The ACK that answers the declaration is the one DISCHARGING the anchor's
+/// transaction (RFC 3261 §13.2.2.4): an ACK the leg expects for a LATER INVITE
+/// transaction it takes — a re-INVITE's — leaves the anchor's 2xx exactly as
+/// un-ACKed as the capture had it, so the declaration stands beside it.
+#[test]
+fn an_ack_expected_for_a_later_re_invite_leaves_the_anchor_unacked() {
+    assert_clean("must-fail/anchor-already-acked", |d| {
+        unacked(d);
+        for step in [
+            json!({
+                "id": "s4", "leg": "B", "op": "expect", "check": "record", "in_dialog": true,
+                "msg": { "method": "INVITE" },
+                "delay": { "ms": 0, "from": "step:s3", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s5", "leg": "B", "op": "send", "in_dialog": true,
+                "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                "delay": { "ms": 0, "from": "step:s4", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s6", "leg": "B", "op": "expect", "check": "record", "auto": true,
+                "in_dialog": true,
+                "msg": { "method": "ACK", "cseq": 2 },
+                "delay": { "ms": 0, "from": "step:s5", "compressible": true, "timer_linked": false }
+            }),
+        ] {
+            flow(d).push(step);
+        }
         d["must_fail"] = declares("s3");
     });
 }

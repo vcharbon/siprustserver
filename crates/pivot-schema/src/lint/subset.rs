@@ -188,12 +188,37 @@ const SURPLUS_PROVISIONAL_FLAG: &str = "provisional-expect-surplus-tolerated";
 /// so a second step on one capture coordinate is never silent (§6.9).
 const DERIVED_PROVISIONAL_FLAG: &str = "relayed-provisional-expect-derived";
 
+/// The flag the far-side pass is obliged to write beside what it transcribed
+/// onto a leg the vantage lost past its 2xx: the other leg's in-dialog INVITE,
+/// its 2xx and its ACK, each naming the message it copies (§6.9).
+const FAR_SIDE_REINVITE_FLAG: &str = "far-side-reinvite-derived";
+
 /// Whether a step has the shape both provisional exemptions are bounded to: an
 /// `expect` of a provisional response. 100 is the stack's own and never
 /// relayed, so it is outside the rules exactly as it is outside their passes.
 fn provisional_expect_shape(step: &crate::flow::Step) -> bool {
     matches!(step.op, crate::flow::Op::Expect)
         && step.msg.status.is_some_and(|status| status > 100 && status < 200)
+}
+
+/// Whether a step has one of the three message shapes the far-side pass pairs
+/// across the legs, and no other: an in-dialog INVITE request, an in-dialog
+/// 2xx to INVITE, or an in-dialog automatic ACK. Either half of a pair may be
+/// the one listed second, so the op is not read.
+fn far_side_shape(step: &crate::flow::Step) -> bool {
+    if !step.in_dialog {
+        return false;
+    }
+    let method = step.msg.method.as_deref().map(str::to_ascii_uppercase);
+    match (method.as_deref(), step.msg.status) {
+        (Some("INVITE"), None) => true,
+        (Some("ACK"), None) => step.auto,
+        (None, Some(status)) => {
+            (200..300).contains(&status)
+                && step.msg.cseq_method.as_deref().is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
+        }
+        _ => false,
+    }
 }
 
 fn capture_evidence(index: &Index<'_>, report: &mut Report) {
@@ -218,17 +243,22 @@ fn capture_evidence(index: &Index<'_>, report: &mut Report) {
     // SUT emits it twice, which is what a DERIVED provisional expectation does.
     // Both halves gate, as they do for `optional`: the flag alone would exempt
     // every duplicate in the file, the shape alone a silent inference.
-    let derived = index
-        .pivot
-        .case
-        .annotations
-        .as_ref()
-        .is_some_and(|a| a.flags.iter().any(|f| f.kind == DERIVED_PROVISIONAL_FLAG));
+    let flagged = |kind: &str| {
+        index
+            .pivot
+            .case
+            .annotations
+            .as_ref()
+            .is_some_and(|a| a.flags.iter().any(|f| f.kind == kind))
+    };
+    let derived = flagged(DERIVED_PROVISIONAL_FLAG);
+    let far_side = flagged(FAR_SIDE_REINVITE_FLAG);
     let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (_, step) in index.all_steps() {
         if let Some(observed) = &step.observed {
             if !seen.insert((observed.leg, observed.msg))
                 && !(derived && provisional_expect_shape(step))
+                && !(far_side && far_side_shape(step))
             {
                 report.error(
                     "capture/observed-duplicated",

@@ -1642,6 +1642,32 @@ derivation the arithmetic would otherwise state:
   is relayed by nobody. A callee still ringing while its INVITE is cancelled is
   the case the corpus holds.
 
+**And the far side of a relayed in-dialog INVITE the capture holds on one leg
+only is DERIVED, where the policy states the replaying platform relays it.** A
+leg whose captured record ENDS at the 2xx its peer sent — no ACK, nothing at
+all behind it — states nothing about the dialog past that instant: the vantage
+stopped seeing it. The near leg goes on: its peer sends an in-dialog INVITE and
+takes a 2xx nothing on the far leg relays, which synthesis would read as minted
+by the platform. A platform that relays such an INVITE end to end puts it on
+the far leg, where a document scripting nothing for it can neither answer nor
+go on: the near leg's expect waits for a 2xx nobody composes, and the run ends
+at its budget. So the exchange is transcribed onto the far leg from the halves
+the capture holds — an `expect INVITE` mirroring the near leg's send, its body
+compared by content where it carried one; a `send` of the 2xx the near leg
+received, headers and body as captured, since a relayed answer is the far
+party's own; an auto `expect ACK` mirroring the near leg's — each copying the
+near-leg message's `observed` coordinate (§6.10), since the platform relays
+that message and it is what the far-leg datagram is compared against. The
+near leg's 2xx is then a relay of the derived send, anchored on it and asserted
+like any relayed content (§6.4). It rides `far-side-reinvite-derived` (§13.2),
+and it is bounded three ways: the far leg's record must end at its 2xx — a leg
+the vantage kept watching that shows no INVITE says the platform did NOT
+relay, which a replay must surface; the near-leg answer must be a 2xx — a
+refusal the platform composed is its own, and `far-side-reinvite-not-derived`
+names the exchange left alone; and the near-leg 2xx must have no relay origin
+— an answer the far leg's record does hold is already a step. A policy that
+states nothing derives nothing.
+
 A platform running a non-transparency MODE is outside all of it. Such a platform
 emits one 18x by design, the replaying SUT is driven the same way, and its legs
 are not one for one because nothing is missing. What states such a mode is a
@@ -1668,7 +1694,8 @@ Informative; the interpreter never reads it. It exists because the post-run
 confrontation has to pair a run step with the message it is compared against.
 The pairing is a LOOKUP, not a consumption, so two steps may name one captured
 message where the SUT emits it twice — which is what a derived provisional
-expectation does (§6.9).
+expectation does, and what the far side of a relayed re-INVITE derived onto
+the leg the vantage lost does on the other leg (§6.9).
 Required on a captured document, absent on an authored one.
 
 ## 7. timing
@@ -2655,6 +2682,8 @@ flag rides a repeated **100 Trying**, or a document some other producer marked.
 | `ack-count-drawn-from-final` | these ACK expectations carry the count they draw, naming each with the final it read, the number it composed against that final, and what the capture held (§6.3) |
 | `provisional-expect-surplus-tolerated` | these caller-facing provisional expectations were stamped `optional`: the leg holds more relayed provisionals than peer emissions anchoring them, naming each with its leg, status and run (§6.9). The subset gate accepts no `optional` in a captured document without it |
 | `relayed-provisional-expect-derived` | these caller-facing provisional expectations were derived from the emission that causes them: the leg holds fewer relayed provisionals than peer emissions, and each derived step copies a captured arrival, coordinate included, naming its leg, status, the emission it relays and the arrival it copies (§6.9) |
+| `far-side-reinvite-derived` | these in-dialog INVITE exchanges the capture holds on one leg only were transcribed onto the far leg, whose record ends at the 2xx its peer sent: the relaying platform puts the INVITE there, and each derived step — the expect INVITE, the send of the 2xx the near leg took, the expect ACK — copies the near-leg message it mirrors, coordinate included, naming the leg, the step its record ends at, and every pair (§6.9). The subset gate accepts no second step on one coordinate of those three shapes without it |
+| `far-side-reinvite-not-derived` | these in-dialog INVITE exchanges onto a leg whose record ends at its 2xx were NOT transcribed — the platform answered them itself with a refusal, which is its own — and the far leg scripts nothing for the relayed INVITE (§6.9) |
 
 A count on an `expect` of a class something else DRAWS — the 100 Trying an
 INVITE ladder pulls, one per copy (§17.2.1) — asks no lane to invent an

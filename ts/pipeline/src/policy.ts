@@ -200,6 +200,14 @@ export interface CasePolicy {
   /** The provisional-handling profile the captured platform ran. */
   readonly relay18x: (flows: Flows.FlowsDoc, layout: Layout) => Call.Relay18x | undefined
   /**
+   * Whether the REPLAYING platform relays an in-dialog INVITE end to end. Where
+   * it does, a leg the vantage lost past the 2xx its peer sent is owed the far
+   * side of every such exchange the other leg holds, and synthesis transcribes
+   * it there (`far-side-reinvite.ts`). Neutral: states nothing, so nothing is
+   * derived and the run shows what the platform does with the INVITE.
+   */
+  readonly relaysReinvite: (flows: Flows.FlowsDoc, layout: Layout) => boolean
+  /**
    * Which called legs are resources the platform JOINED to the call rather than
    * destinations it hunted — read off the raw observations, since a media
    * resource is told apart by what its dialog carries, not by its position.
@@ -276,6 +284,7 @@ export const neutralPolicy: CasePolicy = {
   derives: neverDerives,
   chain: () => ({ causes: [], flags: [] }),
   relay18x: () => undefined,
+  relaysReinvite: () => false,
   joins: () => new Map(),
   adaptFlow: (_flows, flow) => flow,
   headerClass: NO_HEADER_CLASS,

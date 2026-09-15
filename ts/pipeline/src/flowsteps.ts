@@ -43,6 +43,7 @@ import type { ResourceFile } from "./bodies.js"
 import { classify as classifyDelays, type DelayCausality, type StepTiming } from "./delay.js"
 import type { MsgSpecDraft, StepDraft } from "./draft.js"
 import { stampDrawnAckCounts } from "./drawn-ack.js"
+import { deriveFarSideReinvites } from "./far-side-reinvite.js"
 import { stampEarlyDialogs } from "./fork.js"
 import { mirrorRelayedProvisionals } from "./mirrored-provisional.js"
 import { stampSpareProvisionals } from "./spare-provisional.js"
@@ -74,6 +75,13 @@ export interface StepSource {
   readonly msgIdx: number
   readonly emits: boolean
   readonly auto: boolean
+  /**
+   * The step was derived on ANOTHER leg from the message this coordinate names
+   * (`far-side-reinvite.ts`): the coordinate is what the step is compared
+   * against, never whose message it was, so a reader attributing a captured
+   * message to a party reads past it.
+   */
+  readonly mirrored?: true
 }
 
 export interface FlowOut {
@@ -104,7 +112,14 @@ export const synthesize = (
    * platform running a rewrite mode emits one 18x by design, so its legs are
    * not one for one and the capture is missing nothing (§6.9).
    */
-  transparent18x = true
+  transparent18x = true,
+  /**
+   * Whether the replaying platform relays an in-dialog INVITE end to end, so a
+   * leg the vantage lost past its 2xx is owed the far side of the exchange the
+   * other leg holds (`far-side-reinvite.ts`). A platform that answers one
+   * itself derives nothing, and the run shows what it did.
+   */
+  relaysReinvite = false
 ): FlowOut => {
   interface Obs {
     actor: ActorObs
@@ -269,6 +284,14 @@ export const synthesize = (
     })
   }
 
+  // Before the delays, so a derived step is classified like any other — the
+  // relay it is, the answer it emits (§6.9). Every array below indexes the
+  // others, and the records hold step OBJECTS: the provisional pass renumbers
+  // behind this one, and the flag is written once every id has settled.
+  const farSide = relaysReinvite
+    ? deriveFarSideReinvites({ steps, timings, sources })
+    : { derived: [], left: [] }
+
   // Before the delays, so a derived arrival is classified like any other: the
   // relay it is (§6.9, issue 116). Every array below indexes the others.
   const derived = transparent18x
@@ -286,6 +309,38 @@ export const synthesize = (
         derived
           .map((d) => `${d.step} (leg ${d.leg}, ${d.status}, relays ${d.relays}, copies ${d.copies})`)
           .join("; ")
+    })
+  }
+
+  if (farSide.derived.length > 0) {
+    flags.push({
+      kind: "far-side-reinvite-derived",
+      detail:
+        `${farSide.derived.length} in-dialog INVITE exchange(s) the capture holds on one leg only ` +
+        `transcribed onto the far leg: that leg's record ends at the 2xx its peer sent, so the ` +
+        `exchange the near leg carries has no counterpart there, and the replaying platform ` +
+        `relays it (§6.9). Each derived step copies the near-leg message it mirrors, coordinate ` +
+        `included: ` +
+        farSide.derived
+          .map(
+            (d) =>
+              `leg ${d.farLeg} (record ends at ${d.ended.id}): ${d.invite.id} expect INVITE ` +
+              `mirrors ${d.nearInvite.id}, ${d.answer.id} send ${d.answer.msg.status} mirrors ` +
+              `${d.nearAnswer.id}` +
+              (d.ack === undefined || d.nearAck === undefined
+                ? ""
+                : `, ${d.ack.id} expect ACK mirrors ${d.nearAck.id}`)
+          )
+          .join("; ")
+    })
+  }
+  if (farSide.left.length > 0) {
+    flags.push({
+      kind: "far-side-reinvite-not-derived",
+      detail:
+        `${farSide.left.length} in-dialog INVITE exchange(s) onto a leg whose record ends at its ` +
+        `2xx were NOT transcribed, and the far leg scripts nothing for the relayed INVITE: ` +
+        farSide.left.map((l) => `${l.nearInvite.id} onto leg ${l.farLeg} (${l.detail})`).join("; ")
     })
   }
 
