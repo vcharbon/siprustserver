@@ -30,22 +30,37 @@ const { caller, callee, sut } = SOCKETS
 
 const OFFER = { contentType: "application/sdp", text: ANSWER_SDP }
 
+interface CallerShape {
+  readonly answer?: { readonly status: number; readonly reason: string }
+  /** The re-INVITE carries no offer: the 2xx offers and the ACK answers (RFC 3261 §13.2.1). */
+  readonly delayedOffer?: boolean
+  /** A second re-INVITE, CSeq 3, two seconds behind the first. */
+  readonly twice?: boolean
+  /** When the re-INVITE goes out, in ms. */
+  readonly at?: number
+}
+
 /** The caller's leg: answered, ACKed, then a re-INVITE the platform answers with a 2xx of the callee's. */
-const callerLeg = (
-  answer: { readonly status: number; readonly reason: string } = { status: 200, reason: "OK" }
-): Flows.Leg =>
-  leg(CALLER_CALL_ID, oneHop(caller, sut), [
+const callerLeg = (shape: CallerShape = {}): Flows.Leg => {
+  const answer = shape.answer ?? { status: 200, reason: "OK" }
+  const at = shape.at ?? 5_000
+  const reInvite = (seq: number, at: number): ReadonlyArray<Flows.Msg> => [
+    request({ callId: CALLER_CALL_ID, seq, method: "INVITE", src: caller, dst: sut, ts_ms: at, toTag: "sut-tag", ...(shape.delayedOffer ? {} : { body: OFFER }) }),
+    response({ callId: CALLER_CALL_ID, seq, status: 100, reason: "Trying", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: at + 30 }),
+    response({ callId: CALLER_CALL_ID, seq, ...answer, cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: at + 90, toTag: "sut-tag", headers: ["Server: far-party/1.0"], sdp: MOVED_SDP }),
+    request({ callId: CALLER_CALL_ID, seq, method: "ACK", src: caller, dst: sut, ts_ms: at + 95, toTag: "sut-tag", ...(shape.delayedOffer ? { body: OFFER } : {}) })
+  ]
+  return leg(CALLER_CALL_ID, oneHop(caller, sut), [
     request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: caller, dst: sut, ts_ms: 0, body: OFFER }),
     response({ callId: CALLER_CALL_ID, seq: 1, status: 100, reason: "Trying", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 5 }),
     response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 1_000, toTag: "sut-tag", sdp: ANSWER_SDP }),
     request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: caller, dst: sut, ts_ms: 1_005, toTag: "sut-tag" }),
-    request({ callId: CALLER_CALL_ID, seq: 2, method: "INVITE", src: caller, dst: sut, ts_ms: 5_000, toTag: "sut-tag", body: OFFER }),
-    response({ callId: CALLER_CALL_ID, seq: 2, status: 100, reason: "Trying", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 5_030 }),
-    response({ callId: CALLER_CALL_ID, seq: 2, ...answer, cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 5_090, toTag: "sut-tag", headers: ["Server: far-party/1.0"], sdp: MOVED_SDP }),
-    request({ callId: CALLER_CALL_ID, seq: 2, method: "ACK", src: caller, dst: sut, ts_ms: 5_095, toTag: "sut-tag" }),
-    request({ callId: CALLER_CALL_ID, seq: 3, method: "BYE", src: caller, dst: sut, ts_ms: 9_000, toTag: "sut-tag" }),
-    response({ callId: CALLER_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: sut, dst: caller, ts_ms: 9_005, toTag: "sut-tag" })
+    ...reInvite(2, at),
+    ...(shape.twice ? reInvite(3, at + 2_000) : []),
+    request({ callId: CALLER_CALL_ID, seq: 4, method: "BYE", src: caller, dst: sut, ts_ms: 9_000, toTag: "sut-tag" }),
+    response({ callId: CALLER_CALL_ID, seq: 4, status: 200, reason: "OK", cseqMethod: "BYE", src: sut, dst: caller, ts_ms: 9_005, toTag: "sut-tag" })
   ])
+}
 
 /** The callee's leg as the vantage kept it: up to the callee's 2xx and not one datagram more. */
 const blindCalleeLeg = (tail: ReadonlyArray<Flows.Msg> = []): Flows.Leg =>
@@ -204,9 +219,63 @@ describe("the far side of a relayed re-INVITE (§6.9)", () => {
     expect(flow.flags.some((f) => f.kind === "far-side-reinvite-derived")).toBe(false)
   })
 
+  it("derives the second exchange on the same far leg, each ACK pairing with its own 2xx", () => {
+    const flow = flowOf(flowsOf(callerLeg({ twice: true }), blindCalleeLeg()), true)
+    const b = onLeg(flow, "B")
+    expect(b.map((s) => `${s.op} ${s.msg.method ?? s.msg.status}`)).toEqual([
+      "expect INVITE",
+      "send 100",
+      "send 200",
+      "expect INVITE",
+      "send 200",
+      "expect ACK",
+      "expect INVITE",
+      "send 200",
+      "expect ACK"
+    ])
+    const acks = b.filter((s) => s.msg.method === "ACK")
+    expect(acks.map((s) => s.msg.cseq)).toEqual([2, 3])
+    expect(b.some((s) => s.confirms_dialog === true)).toBe(false)
+    // The first pair is closed before the second re-INVITE goes out.
+    const ids = flow.steps.map((s) => `${s.leg}:${s.op}:${s.msg.method ?? s.msg.status}:${s.msg.cseq ?? ""}`)
+    const firstAck = ids.indexOf("B:expect:ACK:2")
+    const secondInvite = flow.steps.findIndex((s) => s.leg === "A" && s.msg.method === "INVITE" && s.observed?.msg === 8)
+    expect(firstAck).toBeGreaterThan(0)
+    expect(firstAck).toBeLessThan(secondInvite)
+    const flag = flow.flags.find((f) => f.kind === "far-side-reinvite-derived")
+    expect(flag!.detail).toMatch(/^2 in-dialog INVITE exchange/)
+  })
+
+  it("mirrors a delayed offer: the INVITE expects no body, the ACK is compared as the answer it carries", () => {
+    const flow = flowOf(flowsOf(callerLeg({ delayedOffer: true }), blindCalleeLeg()), true)
+    const b = onLeg(flow, "B")
+    const [, , , invite, answer, ack] = b
+    expect(invite!.msg.body).toEqual({ mode: "absent" })
+    expect(answer!.msg.body).toEqual({ ref: expect.stringMatching(/\.sdp$/), rewrite: ["c=addr", "m=port"] })
+    expect(ack!.msg.body).toEqual({ ref: expect.stringMatching(/\.sdp$/), rewrite: ["c=addr", "m=port"], compare: "sdp" })
+  })
+
+  it("derives nothing for an answer that already has a relay origin", () => {
+    // The re-INVITE's 2xx lands inside the relay window of the far leg's own
+    // 2xx, so the classifier reads it as that relay: an answer the far leg's
+    // record already holds is a step, and nothing is transcribed for it.
+    const flow = flowOf(flowsOf(callerLeg({ at: 1_500 }), blindCalleeLeg()), true)
+    expect(onLeg(flow, "B")).toHaveLength(3)
+    expect(flow.flags.some((f) => f.kind.startsWith("far-side-reinvite"))).toBe(false)
+  })
+
+  it("leaves a 491 alone and unflagged: glare the replaying platform answers itself (RFC 3261 §14.1)", () => {
+    const flow = flowOf(
+      flowsOf(callerLeg({ answer: { status: 491, reason: "Request Pending" } }), blindCalleeLeg()),
+      true
+    )
+    expect(onLeg(flow, "B")).toHaveLength(3)
+    expect(flow.flags.some((f) => f.kind.startsWith("far-side-reinvite"))).toBe(false)
+  })
+
   it("derives nothing for a re-INVITE the platform refused, and says so", () => {
     const flow = flowOf(
-      flowsOf(callerLeg({ status: 488, reason: "Not Acceptable Here" }), blindCalleeLeg()),
+      flowsOf(callerLeg({ answer: { status: 488, reason: "Not Acceptable Here" } }), blindCalleeLeg()),
       true
     )
     expect(onLeg(flow, "B")).toHaveLength(3)

@@ -22,7 +22,7 @@
 //! capture DOES justify — its provenance, its coordinates, its span — so a
 //! document that lost them is caught here rather than at confrontation.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use crate::accessor::Accessor;
 use crate::flow::FlowNode;
@@ -204,7 +204,7 @@ fn provisional_expect_shape(step: &crate::flow::Step) -> bool {
 /// Whether a step has one of the three message shapes the far-side pass pairs
 /// across the legs, and no other: an in-dialog INVITE request, an in-dialog
 /// 2xx to INVITE, or an in-dialog automatic ACK. Either half of a pair may be
-/// the one listed second, so the op is not read.
+/// the one listed second; the gate reads the pair's legs and ops itself.
 fn far_side_shape(step: &crate::flow::Step) -> bool {
     if !step.in_dialog {
         return false;
@@ -240,9 +240,12 @@ fn capture_evidence(index: &Index<'_>, report: &mut Report) {
     }
     // A capture coordinate pairs a step with the message it is compared against,
     // and the pairing is a lookup — so two steps may name one message where the
-    // SUT emits it twice, which is what a DERIVED provisional expectation does.
-    // Both halves gate, as they do for `optional`: the flag alone would exempt
-    // every duplicate in the file, the shape alone a silent inference.
+    // SUT emits it twice, which is what a DERIVED provisional expectation does,
+    // and where the far side of a relayed re-INVITE was transcribed onto the
+    // other leg: that pair is one message on TWO legs in OPPOSITE ops, and
+    // nothing else. Both halves gate, as they do for `optional`: the flag
+    // alone would exempt every duplicate in the file, the shape alone a
+    // silent inference.
     let flagged = |kind: &str| {
         index
             .pivot
@@ -253,19 +256,24 @@ fn capture_evidence(index: &Index<'_>, report: &mut Report) {
     };
     let derived = flagged(DERIVED_PROVISIONAL_FLAG);
     let far_side = flagged(FAR_SIDE_REINVITE_FLAG);
-    let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut seen: BTreeMap<(usize, usize), (&str, crate::flow::Op)> = BTreeMap::new();
     for (_, step) in index.all_steps() {
         if let Some(observed) = &step.observed {
-            if !seen.insert((observed.leg, observed.msg))
-                && !(derived && provisional_expect_shape(step))
-                && !(far_side && far_side_shape(step))
-            {
-                report.error(
-                    "capture/observed-duplicated",
-                    at("flow", &step.id),
-                    "two captured steps name one captured message",
-                    "give the step its own `observed`, or state the pass that derived it",
-                );
+            let coordinate = (observed.leg, observed.msg);
+            let mirrored = |holder: &(&str, crate::flow::Op)| {
+                far_side && far_side_shape(step) && holder.0 != step.leg && holder.1 != step.op
+            };
+            if let Some(holder) = seen.get(&coordinate) {
+                if !(derived && provisional_expect_shape(step)) && !mirrored(holder) {
+                    report.error(
+                        "capture/observed-duplicated",
+                        at("flow", &step.id),
+                        "two captured steps name one captured message",
+                        "give the step its own `observed`, or state the pass that derived it",
+                    );
+                }
+            } else {
+                seen.insert(coordinate, (step.leg.as_str(), step.op));
             }
         }
         if step.observed.is_none() {

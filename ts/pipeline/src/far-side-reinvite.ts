@@ -19,17 +19,18 @@
  * party's own; and an auto `expect ACK` mirroring the near leg's, where the
  * capture holds one. Each derived step keeps the `observed` coordinate of the
  * near-leg message it copies — the platform relays that message, so it is what
- * the far-leg datagram is compared against — and its source is marked
- * `mirrored`, so a reader attributing a coordinate to a party reads past it.
- * `far-side-reinvite-derived` names every one.
+ * the far-leg datagram is compared against — and its source states the fact
+ * (`mirrored`: the message is another leg's). `far-side-reinvite-derived`
+ * names every one.
  *
  * Bounded three ways, each ruling out a shape the capture does state. The far
  * leg's record must end at its 2xx: a leg the vantage kept watching that shows
  * no INVITE says the platform did NOT relay, which a replay must surface. The
  * near-leg answer must be a 2xx: a refusal the platform composed is its own,
- * and `far-side-reinvite-not-derived` says which exchange was left. And the
- * near-leg 2xx must have no relay origin: an answer the far leg's record does
- * hold is already a step.
+ * and `far-side-reinvite-not-derived` says which exchange was left — except a
+ * 491, glare the replaying platform answers itself (RFC 3261 §14.1), which
+ * owes the far leg nothing. And the near-leg 2xx must have no relay origin:
+ * an answer the far leg's record does hold is already a step.
  */
 import { Body, Tokens } from "@sip/contracts"
 import { relayOriginOf, type StepTiming } from "./delay.js"
@@ -136,6 +137,10 @@ export const deriveFarSideReinvites = (input: FarSideInput): FarSideOut => {
       )
       if (answer < 0) continue
       if (relayOriginOf(timings, answer) >= 0) continue
+      // A 491 is glare (RFC 3261 §14.1): the platform's own answer to an
+      // INVITE crossing one it still holds open, which the replaying platform
+      // composes itself. Nothing is owed on the far leg, and nothing is left.
+      if (steps[answer]!.msg.status === 491) continue
       if (!isSuccessToInvite(steps[answer]!)) {
         left.push({
           farLeg,
@@ -313,7 +318,9 @@ const deriveInvite = (farLeg: string, near: StepDraft): StepDraft => ({
 /**
  * The far leg's `send` of the 2xx the near leg took: status, reason, headers
  * and body exactly as the caller received them, since a relayed answer is the
- * far party's own; the comparison the expect stated is dropped, a send emits.
+ * far party's own; the comparison the expect stated is dropped, a send emits,
+ * and so is its `retransmits` — a send's count is a ladder the peer is told to
+ * run, and the near leg's count is the platform's.
  */
 const deriveAnswer = (farLeg: string, near: StepDraft): StepDraft => {
   const msg: MsgSpecDraft = {
@@ -337,9 +344,13 @@ const deriveAnswer = (farLeg: string, near: StepDraft): StepDraft => {
 }
 
 /**
- * The far leg's auto `expect ACK`, mirroring the near leg's: the same captured
- * CSeq pairs it, and a body it carried — a delayed offer's answer — is compared
- * by content, since the platform relays it end to end.
+ * The far leg's auto `expect ACK`, mirroring the near leg's: the near leg's
+ * captured CSeq is its label (the transaction that obliged it is the other
+ * leg's; nothing resolves the number), and a body it carried — a delayed
+ * offer's answer — is compared by content, since the platform relays it end
+ * to end. No `retransmits`: a count on the far leg is drawn from its own
+ * final's ladder (§6.3), and the near leg's send count is an instruction to
+ * the peer.
  */
 const deriveAck = (farLeg: string, near: StepDraft): StepDraft => ({
   id: UNNUMBERED,

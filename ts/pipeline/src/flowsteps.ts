@@ -78,8 +78,7 @@ export interface StepSource {
   /**
    * The step was derived on ANOTHER leg from the message this coordinate names
    * (`far-side-reinvite.ts`): the coordinate is what the step is compared
-   * against, never whose message it was, so a reader attributing a captured
-   * message to a party reads past it.
+   * against, and the message it names was captured on the other leg.
    */
   readonly mirrored?: true
 }

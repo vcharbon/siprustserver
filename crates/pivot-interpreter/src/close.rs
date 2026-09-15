@@ -443,10 +443,15 @@ fn view(messages: &[RecordedMessage]) -> LegView {
                     }
                     // The 2xx to a taken BYE ends the dialog on this side too:
                     // a later BYE names a dialog this leg no longer holds, and
-                    // a request still pending under it is owed its 487.
+                    // a request still pending under it is owed its 487. A BYE
+                    // answered 481 named a dialog already gone: nothing pending
+                    // under that tag is this leg's to end any more.
                     Method::Bye if (200..300).contains(&response.status()) => {
                         view.held_dialog = None;
                         view.ended.insert(to_tag);
+                    }
+                    Method::Bye => {
+                        view.ended.remove(&to_tag);
                     }
                     _ => {}
                 }
@@ -1040,17 +1045,35 @@ mod tests {
         );
 
         let terminated = (Dir::Out, response(487, "2 INVITE"));
-        let third =
-            ladder(&[invite.clone(), ok.clone(), ack.clone(), reinvite, bye, answered, terminated]);
+        let third = ladder(&[
+            invite.clone(),
+            ok.clone(),
+            ack.clone(),
+            reinvite,
+            bye.clone(),
+            answered.clone(),
+            terminated,
+        ]);
         assert_eq!(unscripted(&third, &trigger), None, "the pair is discharged");
 
         // A BYE on no dialog of ours ends nothing: its 481 leaves the INVITE alone.
         let stray_raw = taken("BYE", "3 BYE", Some("b2"), "");
         let stray_reinvite = (Dir::In, taken("INVITE", "2 INVITE", Some("b2"), ""));
         let refused = (Dir::Out, response(481, "3 BYE").replace("tag=b1", "tag=b2"));
-        let stray =
-            ladder(&[invite, ok, ack, stray_reinvite, (Dir::In, stray_raw.clone()), refused]);
+        let stray = ladder(&[
+            invite.clone(),
+            ok.clone(),
+            ack.clone(),
+            stray_reinvite.clone(),
+            (Dir::In, stray_raw.clone()),
+            refused,
+        ]);
         assert_eq!(unscripted(&stray, &message(&stray_raw)), None, "no dialog of ours ended");
+
+        // The 200 ended OUR dialog; an INVITE pending under another tag is on
+        // another dialog and is not this BYE's to answer.
+        let other = ladder(&[invite, ok, ack, stray_reinvite, bye, answered]);
+        assert_eq!(unscripted(&other, &trigger), None, "a pending INVITE on another dialog");
     }
 
     /// A leg holding an unanswered request that is NOT the cancelled INVITE

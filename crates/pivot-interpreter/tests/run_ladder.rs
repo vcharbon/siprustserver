@@ -1240,6 +1240,13 @@ async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_a
 /// document's call decision, §14.2), then the BYE lands on the held dialog and
 /// draws its 200 — and the re-INVITE its 487, out of leg B's own stack, so the
 /// system's INVITE client transaction ends on a final instead of Timer B.
+///
+/// The ACK that 487 is owed (§17.1.1.3) is not asserted: the settle reads the
+/// flow and the system's call count, not the leg's own Completed server
+/// transaction (§17.2.1), so the run closes on the BYE's 200 in the instant
+/// the 487 goes out and the ACK lands after the recording. A settle floor
+/// holding an un-ACKed non-2xx INVITE final open, bounded by Timer H, is what
+/// would let this rung assert it.
 #[tokio::test(start_paused = true)]
 async fn a_re_invite_pending_when_the_bye_is_answered_draws_487_behind_the_200() {
     let scene = api_scene("pivot-reinvite-under-bye").await;

@@ -1398,8 +1398,9 @@ impl<'a, 'p> Runner<'a, 'p> {
     /// answered here, and the emission is the leg's own stack — the same
     /// compliant SIP the generic close puts on the wire.
     async fn answer_unscripted(&mut self, leg: &str, message: &SipMessage) {
-        // The CANCEL pair is two acts, and the second is read off the recording
-        // once the first is on it — the turn the generic close takes, taken here.
+        // The CANCEL pair and the BYE pair are two acts each, and the second is
+        // read off the recording once the first is on it — the turn the generic
+        // close takes, taken here.
         for _ in 0..2 {
             let ladder = self.instance.recording().legs().remove(leg).unwrap_or_default();
             let Some(owed) = close::unscripted(&ladder, message) else { return };

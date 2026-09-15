@@ -1344,6 +1344,14 @@ fn a_captured_document_may_transcribe_a_relayed_re_invite_onto_the_leg_the_vanta
         declares(d);
         flow(d)[6]["msg"] = json!({ "method": "INFO" });
     });
+    // Declared and the right shape, but on the near leg itself: the pass pairs
+    // one message across the two legs, never twice on one, so a cut that
+    // duplicated a step is still the defect the rule is for.
+    assert_fires("capture/observed-duplicated", |d| {
+        far_side(d);
+        declares(d);
+        flow(d)[6]["leg"] = json!("A");
+    });
     // The right shapes, silently: an inference the page does not carry.
     assert_fires("capture/observed-duplicated", far_side);
 }
