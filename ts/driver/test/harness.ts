@@ -131,17 +131,21 @@ export interface RigOptions {
   readonly lanes?: Layer.Layer<LanePresets.Service>
   readonly reclassifier?: Layer.Layer<Reclassifier.Service>
   readonly classifier?: Layer.Layer<Classifier.Service>
-  /** Collects every path a cell reads as ONE string, for a test about how a file is read. */
+  /** Collects every path a cell reads WHOLE, for a test about how a file is read. */
   readonly reads?: Array<string>
 }
 
-/** The platform file system, telling `reads` every whole-string read that goes through it. */
+/** The platform file system, telling `reads` every whole-file read that goes through it. */
 const watching = (reads: Array<string>): Layer.Layer<FileSystem.FileSystem> =>
   Layer.effect(
     FileSystem.FileSystem,
     Effect.map(FileSystem.FileSystem, (base) =>
       FileSystem.FileSystem.of({
         ...base,
+        readFile: (path: string) => {
+          reads.push(path)
+          return base.readFile(path)
+        },
         readFileString: (path: string, encoding?: string) => {
           reads.push(path)
           return base.readFileString(path, encoding)

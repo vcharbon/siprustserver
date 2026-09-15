@@ -5,6 +5,8 @@
  * The envelope — the document with its `legs` emptied — is taken as one small
  * value and each leg apart, then the two are put back together, so a capture of
  * thousands of calls is never held as one string: V8 refuses one above 512 MiB.
+ * The file is read SYNCHRONOUSLY, so a reader holds the loop for the whole read
+ * — about six seconds per 600 MiB.
  */
 import { Flows } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -18,7 +20,7 @@ export class FlowsLegRefused extends Schema.TaggedError<FlowsLegRefused>()(
   { file: Schema.String, index: Schema.Int, reason: Schema.String }
 ) {
   override get message(): string {
-    return `${this.file}: legs[${this.index}] is not a leg this contract models: ${this.reason}`
+    return `legs[${this.index}] is not a leg this contract models: ${this.reason}`
   }
 }
 
