@@ -6,7 +6,11 @@
  * so the claim under test is a MEMORY claim as much as a parsing one: the file
  * is never read whole, and the largest piece any reader sees is one leg.
  */
+import { Flows } from "@sip/contracts"
 import { FlowsFile, FlowsSegments } from "@sip/pipeline"
+import * as Cause from "effect/Cause"
+import * as Effect from "effect/Effect"
+import * as Exit from "effect/Exit"
 import { Buffer } from "node:buffer"
 import * as fs from "node:fs"
 import * as os from "node:os"
@@ -30,41 +34,54 @@ const legOf = (index: number) => ({
     src: "10.0.0.1:5060",
     dst: "10.0.0.2:5060",
     hop: 0,
+    retx: false,
+    summary: {
+      kind: "request",
+      method: "INVITE",
+      uri: `sip:${index}@10.0.0.2`,
+      cseq: { seq: 1, method: "INVITE" },
+      from: { uri: `sip:caller-${index}@10.0.0.1`, tag: "f1" },
+      to: { uri: `sip:${index}@10.0.0.2`, tag: null }
+    },
     // Wide enough that a document of a few thousand legs is megabytes, and
     // carrying the characters a scanner must not read as structure.
     raw: `INVITE sip:${index} SIP/2.0\r\nSubject: {"[,]"} \\ ${"x".repeat(2000)}\r\n\r\n`
   }]
 })
 
-/** A document of `legs` legs, written to a file the way `sipflow --enrich` writes one. */
-const documentOf = (name: string, legs: number): string => {
+/** A document of `legs` legs, indented the way `sipflow --enrich` writes one. */
+const documentOf = (name: string, legs: number, indent = 2): string => {
   const file = path.join(scratch, name)
-  const document = {
-    schema: 5,
-    emit_headers: [],
-    decode_stats: {
-      records: legs,
-      non_ip: 0,
-      non_udp: 0,
-      snap_truncated: 0,
-      datagrams: legs,
-      fragments: 0,
-      reassembled: 0,
-      frag_dropped: 0,
-      tail_truncated: 0
-    },
-    flow_stats: { sip_messages: legs, capture_dups: 0, parse_failed: 0, non_sip: 0 },
-    legs: Array.from({ length: legs }, (_, index) => legOf(index)),
-    groups: Array.from({ length: legs }, (_, index) => ({
-      legs: [index],
-      t0_us: 1_000_000 + index,
-      initial_invite: { leg: index, msg: 0 },
-      methods: { INVITE: { requests: 1, content_types: [] } }
-    }))
-  }
-  fs.writeFileSync(file, JSON.stringify(document, null, 2))
+  const document = documentValue(legs)
+  fs.writeFileSync(file, JSON.stringify(document, null, indent))
   return file
 }
+
+/** The value `documentOf` writes: a whole flows document the contract decodes. */
+const documentValue = (legs: number) => ({
+  schema: 5,
+  emit_headers: [],
+  decode_stats: {
+    records: legs,
+    non_ip: 0,
+    non_udp: 0,
+    snap_truncated: 0,
+    datagrams: legs,
+    fragments: 0,
+    reassembled: 0,
+    frag_dropped: 0,
+    tail_truncated: 0
+  },
+  flow_stats: { sip_messages: legs, capture_dups: 0, parse_failed: 0, non_sip: 0 },
+  legs: Array.from({ length: legs }, (_, index) => legOf(index)),
+  groups: Array.from({ length: legs }, (_, index) => ({
+    legs: [index],
+    evidence: [],
+    t0_us: 1_000_000 + index,
+    initial_invite: { leg: index, msg: 0 },
+    methods: { INVITE: { requests: 1, content_types: [] } }
+  }))
+})
 
 const LEGS = 3_000
 const big = documentOf("big.flows.json", LEGS)
@@ -161,6 +178,73 @@ describe("FlowsFile.readFlowsFile", () => {
     const parse = vi.spyOn(JSON, "parse")
     try {
       FlowsFile.readFlowsFile(big)
+      const widest = Math.max(
+        ...parse.mock.calls.map(([text]) => (typeof text === "string" ? text.length : 0))
+      )
+      expect(widest).toBeLessThan(size / 2)
+    } finally {
+      parse.mockRestore()
+    }
+  })
+})
+
+describe("FlowsFile.readFlowsFileDecoded", () => {
+  const read = (file: string) => Effect.runSyncExit(FlowsFile.readFlowsFileDecoded(file))
+
+  const decoded = (file: string): Flows.FlowsDoc => {
+    const exit = read(file)
+    if (Exit.isFailure(exit)) throw new Error(Cause.pretty(exit.cause))
+    return exit.value
+  }
+
+  it("decodes the document decoding the whole file would have decoded", () => {
+    expect(decoded(big)).toEqual(Flows.decodeFlowsSync(JSON.parse(fs.readFileSync(big, "utf8"))))
+  })
+
+  it("decodes a document with no indentation", () => {
+    const file = documentOf("compact-decoded.flows.json", 4, 0)
+    expect(decoded(file)).toEqual(Flows.decodeFlowsSync(JSON.parse(fs.readFileSync(file, "utf8"))))
+  })
+
+  it("applies the contract's defaults to a leg as the whole-document decode does", () => {
+    // `probe` and `identities` are defaulted fields of a message: a leg decoded
+    // apart carries them exactly as one decoded inside the document does.
+    const msg = decoded(big).legs[7]!.msgs[0]!
+    expect(msg.probe).toBe(0)
+    expect(msg.identities).toEqual({ from: { uri: "", user: null, digits: null }, to: { uri: "", user: null, digits: null } })
+  })
+
+  it("names the index of the leg the contract refuses", () => {
+    const file = path.join(scratch, "bad-leg.flows.json")
+    const document = documentValue(3) as { legs: Array<unknown> }
+    document.legs[1] = { ...legOf(1), final_status: "200" }
+    fs.writeFileSync(file, JSON.stringify(document, null, 2))
+    const exit = read(file)
+    expect(Exit.isFailure(exit)).toBe(true)
+    if (Exit.isFailure(exit)) {
+      const error = Cause.squash(exit.cause)
+      expect(error).toBeInstanceOf(FlowsFile.FlowsLegRefused)
+      expect((error as FlowsFile.FlowsLegRefused).index).toBe(1)
+      expect((error as FlowsFile.FlowsLegRefused).file).toBe(file)
+    }
+  })
+
+  it("refuses an envelope the contract refuses, naming no leg", () => {
+    const file = path.join(scratch, "bad-envelope.flows.json")
+    const { decode_stats: _dropped, ...document } = documentValue(2)
+    fs.writeFileSync(file, JSON.stringify(document, null, 2))
+    const exit = read(file)
+    expect(Exit.isFailure(exit)).toBe(true)
+    if (Exit.isFailure(exit)) {
+      expect(Cause.squash(exit.cause)).not.toBeInstanceOf(FlowsFile.FlowsLegRefused)
+    }
+  })
+
+  it("never holds the document as one string", () => {
+    const size = fs.statSync(big).size
+    const parse = vi.spyOn(JSON, "parse")
+    try {
+      decoded(big)
       const widest = Math.max(
         ...parse.mock.calls.map(([text]) => (typeof text === "string" ? text.length : 0))
       )

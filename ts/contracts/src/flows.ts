@@ -362,14 +362,16 @@ export interface FlowsDoc extends Schema.Schema.Type<typeof FlowsDoc> {}
 export const decodeFlows = Schema.decodeUnknownEffect(FlowsDoc)
 export const decodeFlowsSync = Schema.decodeUnknownSync(FlowsDoc)
 
+/** Refuse a document of a schema version this contract does not model. */
+export const requireSchemaVersion = (doc: FlowsDoc): Effect.Effect<void> =>
+  doc.schema === EMIT_SCHEMA_VERSION
+    ? Effect.void
+    : Effect.die(new Error(`flows schema ${doc.schema}, expected ${EMIT_SCHEMA_VERSION}`))
+
 /** Parse a flows document from its text, refusing a schema version this contract does not model. */
 export const parseFlows = (text: string) =>
   Effect.suspend(() => decodeFlows(JSON.parse(text) as unknown)).pipe(
-    Effect.tap((doc) =>
-      doc.schema === EMIT_SCHEMA_VERSION
-        ? Effect.void
-        : Effect.die(new Error(`flows schema ${doc.schema}, expected ${EMIT_SCHEMA_VERSION}`))
-    )
+    Effect.tap(requireSchemaVersion)
   )
 
 // --- Reading helpers ---------------------------------------------------------
