@@ -12,7 +12,16 @@ $SF capture.pcap --list                       # one line per call
 $SF capture.pcap --call-id 7f3a --full        # ladders with raw messages
 $SF /var/capture-ring/ --final-status none    # a directory of ring files
 $SF capture.pcap --json > capture.flows.json  # the whole model, schema 5
+$SF ring0.pcap ring1.pcap --contiguous 60000 --json   # one capture in two files
 ```
+
+Several inputs read as one datagram stream in the given order (a directory's
+ring files oldest first by mtime), so a fragment can straddle a file boundary.
+`--contiguous <max-gap-ms>` states that the inputs ARE one capture — the
+consecutive files of one tap — and refuses them (exit 2, both files named)
+when one overlaps the one before it, starts more than the gap after it, or
+was given out of time order. Without it nothing is checked: a directory of
+unrelated captures is a valid corpus.
 
 ## Review mode: the RFC rules on the selected calls
 

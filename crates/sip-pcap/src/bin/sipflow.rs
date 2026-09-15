@@ -74,6 +74,14 @@ struct Args {
     /// no capture.
     inputs: Vec<PathBuf>,
 
+    /// Read the inputs as ONE consecutive capture — ring files of one tap,
+    /// oldest first — and refuse them (exit 2) unless each file starts where
+    /// the previous one ended: no overlap, and no gap wider than this many
+    /// milliseconds. Without it, several inputs are read as whatever they
+    /// are, a corpus of unrelated captures included.
+    #[arg(long, value_name = "MAX_GAP_MS")]
+    contiguous: Option<u64>,
+
     /// Select call groups containing a leg whose Call-ID contains this substring.
     #[arg(long)]
     call_id: Option<String>,
@@ -327,7 +335,11 @@ fn main() {
         std::process::exit(2);
     }
 
-    let (datagrams, stats) = match sip_pcap::read_capture_files(&files) {
+    let read = match args.contiguous {
+        Some(max_gap_ms) => sip_pcap::read_capture_set(&files, max_gap_ms * 1_000),
+        None => sip_pcap::read_capture_files(&files),
+    };
+    let (datagrams, stats) = match read {
         Ok(v) => v,
         Err(e) => {
             eprintln!("capture read failed: {e}");

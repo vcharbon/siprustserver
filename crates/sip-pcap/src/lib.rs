@@ -116,6 +116,9 @@ pub enum PcapError {
     /// Not a capture we can walk, or corrupt past the point of resync.
     /// Carries the path and a human-facing reason.
     Format(String),
+    /// Files read as one consecutive capture ([`read_capture_set`]) that are
+    /// not: the two files and the time between or across them.
+    Set(String),
 }
 
 impl fmt::Display for PcapError {
@@ -123,6 +126,7 @@ impl fmt::Display for PcapError {
         match self {
             PcapError::Io(e) => write!(f, "io: {e}"),
             PcapError::Format(m) => write!(f, "{m}"),
+            PcapError::Set(m) => write!(f, "{m}"),
         }
     }
 }
@@ -147,6 +151,13 @@ impl Probes {
         self.0 += 1;
         id
     }
+
+    /// Number the next file's observation points from zero again: the files
+    /// of one consecutive capture are slices of one tap, so the k-th
+    /// interface of each is one probe, not one per file.
+    fn restart(&mut self) {
+        self.0 = 0;
+    }
 }
 
 /// Stamp `probe` on everything appended to `out` since `from`.
@@ -168,19 +179,98 @@ pub(crate) fn stamp_probe(out: &mut [Datagram], from: usize, probe: u32) {
 pub fn read_capture_files<P: AsRef<Path>>(
     paths: &[P],
 ) -> Result<(Vec<Datagram>, DecodeStats), PcapError> {
+    let (out, stats, _) = read_files(paths, false)?;
+    Ok((out, stats))
+}
+
+/// How far the first datagram of a ring file may be stamped BEFORE the last
+/// datagram of the file before it and still be the same tap: a writer
+/// rotating files stamps packets in arrival order on one clock, so anything
+/// past a reorder's worth is two captures of one wire, not one capture.
+pub const BOUNDARY_SLACK_US: u64 = 100_000;
+
+/// Read several files as ONE capture: consecutive slices of one tap, given
+/// oldest first. Read as [`read_capture_files`] reads them, except that every
+/// file numbers its probes from zero — the same tap, so the same observation
+/// points — then refused as [`PcapError::Set`] unless every file that holds
+/// a datagram starts after the previous such file's last datagram — within
+/// [`BOUNDARY_SLACK_US`] before it at most — and no more than `max_gap_us`
+/// after it. A file with no datagram says nothing about time. The refusal
+/// names both files and the gap or overlap, so the caller can say which file
+/// is missing, doubled, or out of order.
+pub fn read_capture_set<P: AsRef<Path>>(
+    paths: &[P],
+    max_gap_us: u64,
+) -> Result<(Vec<Datagram>, DecodeStats), PcapError> {
+    let (out, stats, spans) = read_files(paths, true)?;
+    let mut spans = spans.iter().zip(paths).filter_map(|(span, p)| span.map(|s| (s, p.as_ref())));
+    if let Some(mut prev) = spans.next() {
+        for next in spans {
+            let ((first, _), path) = next;
+            let ((prev_first, prev_last), prev_path) = prev;
+            let apart = |us: u64| format!("{}.{:06} s", us / 1_000_000, us % 1_000_000);
+            let refuse = |m: String| {
+                PcapError::Set(format!(
+                    "not one consecutive capture: {} and {}: {m}",
+                    prev_path.display(),
+                    path.display()
+                ))
+            };
+            if first < prev_first {
+                return Err(refuse(format!(
+                    "the second starts {} before the first; pass the files oldest first",
+                    apart(prev_first - first)
+                )));
+            }
+            if first + BOUNDARY_SLACK_US < prev_last {
+                return Err(refuse(format!("they overlap by {}", apart(prev_last - first))));
+            }
+            if first > prev_last + max_gap_us {
+                return Err(refuse(format!(
+                    "a gap of {} lies between them, more than the {} allowed",
+                    apart(first - prev_last),
+                    apart(max_gap_us)
+                )));
+            }
+            prev = next;
+        }
+    }
+    Ok((out, stats))
+}
+
+/// The first and last datagram timestamp of a file, `None` for a file that
+/// yielded no datagram.
+type Span = Option<(u64, u64)>;
+
+/// The read behind [`read_capture_files`] and [`read_capture_set`]: every
+/// file in the given order through one reassembler, and each file's span.
+/// `one_tap` numbers every file's probes from zero (a set); otherwise
+/// vantages are numbered across the WHOLE read, so two files' interface 0
+/// are two probes and never one.
+fn read_files<P: AsRef<Path>>(
+    paths: &[P],
+    one_tap: bool,
+) -> Result<(Vec<Datagram>, DecodeStats, Vec<Span>), PcapError> {
     let mut out = Vec::new();
     let mut stats = DecodeStats::default();
     let mut reasm = Reassembler::new();
-    // Vantages are numbered across the WHOLE read, so two files' interface 0
-    // are two probes and never one.
     let mut probes = Probes::default();
+    let mut spans = Vec::with_capacity(paths.len());
     for p in paths {
         let bytes = source::load(p.as_ref())?;
+        let from = out.len();
+        if one_tap {
+            probes.restart();
+        }
         read_one(&bytes, &mut out, &mut stats, &mut reasm, &mut probes)
             .map_err(|m| PcapError::Format(format!("{}: {m}", p.as_ref().display())))?;
+        spans.push(out[from..].iter().map(|d| d.ts_us).fold(None, |span: Span, ts| match span {
+            None => Some((ts, ts)),
+            Some((first, last)) => Some((first.min(ts), last.max(ts))),
+        }));
     }
     stats.frag_dropped += reasm.pending_len() as u64; // still-incomplete at EOF
-    Ok((out, stats))
+    Ok((out, stats, spans))
 }
 
 /// Dispatch on the container magic: pcapng's Section Header Block type is
@@ -494,6 +584,87 @@ mod tests {
         assert_eq!(stats.records, 2);
         assert_eq!(dgs[0].ts_us, 1_000_000);
         assert_eq!(dgs[1].ts_us, 2_000_000);
+    }
+
+    /// One capture split across ring files: each file begins where the last
+    /// ended, so the set reads as one stream from one observation point, and
+    /// a file with no datagram says nothing about time.
+    #[test]
+    fn a_consecutive_set_reads_as_one_capture() {
+        let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+        let ip = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
+        let a =
+            write_tmp("seta", &pcap_raw_ip(&[(1_000_000, ip.clone()), (2_000_000, ip.clone())]));
+        let empty = write_tmp("setempty", &pcap_raw_ip(&[]));
+        let b = write_tmp("setb", &pcap_raw_ip(&[(2_500_000, ip.clone()), (3_000_000, ip)]));
+        let read = read_capture_set(&[&a, &empty, &b], 1_000_000);
+        for f in [&a, &empty, &b] {
+            std::fs::remove_file(f).ok();
+        }
+        let (dgs, stats) = read.unwrap();
+        assert_eq!(stats.records, 4);
+        assert_eq!(
+            dgs.iter().map(|d| d.ts_us).collect::<Vec<_>>(),
+            [1_000_000, 2_000_000, 2_500_000, 3_000_000]
+        );
+        // One tap: the second file's observation point is the first file's.
+        assert!(dgs.iter().all(|d| d.probe == 0), "{dgs:?}");
+    }
+
+    /// A fragment split across two ring files is still reassembled: the set is
+    /// read with one reassembler, in the given order.
+    #[test]
+    fn a_consecutive_set_reassembles_across_the_boundary() {
+        let payload = vec![b'A'; 1_000];
+        let udp = udp_packet(&payload, 5060, 5080);
+        let first = ipv4(&udp[..512], 7, 0, true);
+        let second = ipv4(&udp[512..], 7, 512, false);
+        let a = write_tmp("fraga", &pcap_raw_ip(&[(1_000_000, first)]));
+        let b = write_tmp("fragb", &pcap_raw_ip(&[(1_000_100, second)]));
+        let read = read_capture_set(&[&a, &b], 1_000_000);
+        std::fs::remove_file(&a).ok();
+        std::fs::remove_file(&b).ok();
+        let (dgs, stats) = read.unwrap();
+        assert_eq!(stats.reassembled, 1, "stats: {stats}");
+        assert_eq!(dgs.len(), 1);
+        assert_eq!(dgs[0].payload, payload);
+    }
+
+    /// Files that are not consecutive slices of one tap are refused, naming
+    /// the two files and what lies between them: a gap wider than the
+    /// tolerance, an overlap, or a later file given first. An overlap inside
+    /// the boundary slack is a writer's reorder at the rotation, not two
+    /// captures of one wire.
+    #[test]
+    fn a_set_that_is_not_consecutive_is_refused() {
+        let msg = b"OPTIONS sip:x SIP/2.0\r\n\r\n";
+        let ip = ipv4(&udp_packet(msg, 5060, 5080), 1, 0, false);
+        let at = |name: &str, ts: &[u64]| {
+            write_tmp(name, &pcap_raw_ip(&ts.iter().map(|&t| (t, ip.clone())).collect::<Vec<_>>()))
+        };
+        let a = at("nca", &[1_000_000, 2_000_000]);
+        let far = at("ncfar", &[5_000_000]);
+        let over = at("ncover", &[1_500_000, 2_500_000]);
+        let slack = at("ncslack", &[2_000_000 - BOUNDARY_SLACK_US, 2_500_000]);
+        let earlier = at("ncearlier", &[500_000]);
+
+        let gap = read_capture_set(&[&a, &far], 1_000_000).unwrap_err().to_string();
+        assert!(gap.contains("gap") && gap.contains("3.000000 s"), "{gap}");
+        assert!(gap.contains("nca") && gap.contains("ncfar"), "{gap}");
+        // The same gap inside a wider tolerance is consecutive.
+        assert!(read_capture_set(&[&a, &far], 3_000_000).is_ok());
+
+        let overlap = read_capture_set(&[&a, &over], 1_000_000).unwrap_err().to_string();
+        assert!(overlap.contains("overlap") && overlap.contains("0.500000 s"), "{overlap}");
+
+        assert!(read_capture_set(&[&a, &slack], 1_000_000).is_ok());
+
+        let order = read_capture_set(&[&a, &earlier], 1_000_000).unwrap_err().to_string();
+        assert!(order.contains("oldest first"), "{order}");
+
+        for f in [&a, &far, &over, &slack, &earlier] {
+            std::fs::remove_file(f).ok();
+        }
     }
 
     /// A `mergecap` of two probes: the SAME packet, written once per probe, is
