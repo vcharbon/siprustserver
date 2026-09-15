@@ -1877,6 +1877,66 @@ fn only_an_ack_inside_a_confirmed_dialog_may_confirm_it() {
     });
 }
 
+/// A re-INVITE sent over the un-ACKed dialog-creating 2xx is answered 491
+/// (RFC 3261 §14.1) and its ACK is that transaction's own (§17.1.1.3): the ACK
+/// confirming the dialog is the one answering the 2xx (§13.2.2.4), which here
+/// is the SECOND ACK the leg carries after it. Pinned from both sides of the
+/// leg: the actor that took the INVITE and sent the finals (`B`), and the one
+/// that sent the INVITE and took them (`A`).
+#[test]
+fn the_ack_to_the_2xx_confirms_the_dialog_not_a_491_rounds_ack_before_it() {
+    let over_unacked = |leg: &'static str, on_491_ack: bool, on_2xx_ack: bool| {
+        // `A` sends the INVITEs and ACKs and takes the finals; `B` the reverse.
+        let (req, resp) = if leg == "A" { ("send", "expect") } else { ("expect", "send") };
+        let check = |op: &str| if op == "expect" { json!("assert") } else { Value::Null };
+        let record = |op: &str| if op == "expect" { json!("record") } else { Value::Null };
+        move |d: &mut Value| {
+            for step in [
+                json!({
+                    "id": "s3", "leg": leg, "op": resp, "check": check(resp),
+                    "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s2", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s4", "leg": leg, "op": req, "check": check(req), "in_dialog": true,
+                    "msg": { "method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s3", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s5", "leg": leg, "op": resp, "check": check(resp), "in_dialog": true,
+                    "msg": { "status": 491, "reason": "Request Pending", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s4", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s6", "leg": leg, "op": req, "check": record(req), "auto": true,
+                    "in_dialog": true, "confirms_dialog": on_491_ack,
+                    "msg": { "method": "ACK", "cseq": 2 },
+                    "delay": { "ms": 0, "from": "step:s5", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s7", "leg": leg, "op": req, "check": record(req), "auto": true,
+                    "in_dialog": true, "confirms_dialog": on_2xx_ack,
+                    "msg": { "method": "ACK", "cseq": 1 },
+                    "delay": { "ms": 0, "from": "step:s6", "compressible": true, "timer_linked": false }
+                }),
+            ] {
+                let mut step = step;
+                if step["check"].is_null() {
+                    step.as_object_mut().expect("a step").remove("check");
+                }
+                flow(d).push(step);
+            }
+        }
+    };
+    for leg in ["A", "B"] {
+        let report = broken(over_unacked(leg, false, true));
+        assert!(!report.has_errors(), "leg {leg}:\n{}", report.render());
+        assert_fires("in-dialog/confirm-not-the-answer", over_unacked(leg, true, false));
+        assert_fires("in-dialog/confirm-missing", over_unacked(leg, true, false));
+        assert_fires("in-dialog/confirm-missing", over_unacked(leg, false, false));
+    }
+}
+
 /// Under forking each answered fork mints its own dialog on the one leg, and
 /// each is confirmed by the ACK that names it. The fork tag is what pairs the
 /// two: `early` and `confirms_dialog` ride the same ACK, saying different

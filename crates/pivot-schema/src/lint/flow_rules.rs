@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 
 use crate::body::Body;
 use crate::flow::{CheckMode, FlowNode, Op, Step};
+use crate::lint::transactions::{discharged_by, landing_of};
 use crate::lint::{at, reach, Index, Place, Reach, Report};
 
 pub(super) fn check(index: &Index<'_>, report: &mut Report) {
@@ -186,7 +187,7 @@ struct Dialog<'a> {
     /// Whether the leg carries another dialog on the same run, which is what
     /// makes the fork tag load-bearing for pairing.
     forked: bool,
-    /// The first ACK the run reaches after the final, where there is one.
+    /// The ACK that answers the final, where the run carries one.
     confirming: Option<&'a Step>,
 }
 
@@ -195,6 +196,12 @@ struct Dialog<'a> {
 /// answered fork mints its own dialog on the one leg, so the fork tag is part of
 /// the identity; a re-INVITE's `2xx` names the fork its dialog rings on and so
 /// opens nothing.
+///
+/// The ACK answering the final is the one that DISCHARGES its transaction as
+/// the leg's state holds it (`lint::transactions`), never the first ACK the
+/// run carries after it: a re-INVITE sent over the un-ACKed 2xx is answered
+/// 491 (RFC 3261 §14.1) and its ACK is that transaction's own (§17.1.1.3), so
+/// it runs first and confirms nothing.
 fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
     let creating: Vec<(Place, &'a Step)> =
         all.iter().filter(|(_, step)| is_dialog_creating(step)).copied().collect();
@@ -221,6 +228,7 @@ fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
                         || reach(*place, *other_place) == Reach::Ok)
             });
             let fork = step.early.as_deref();
+            let transaction = landing_of(all, step, *place);
             let confirming = all
                 .iter()
                 .find(|(ack_place, ack)| {
@@ -228,6 +236,10 @@ fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
                         && ack.leg == step.leg
                         && reach(*place, *ack_place) == Reach::Ok
                         && (!forked || ack.early.as_deref() == fork)
+                        && discharged_by(all, ack, *ack_place).is_some_and(|discharge| {
+                            discharge.transaction == transaction
+                                && is_dialog_creating(discharge.final_)
+                        })
                 })
                 .map(|(_, ack)| *ack);
             Dialog {

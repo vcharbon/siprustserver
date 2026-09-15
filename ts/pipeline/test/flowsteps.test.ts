@@ -20,6 +20,7 @@ import {
   plan,
   reAckedFinalFlows,
   reInviteFlows,
+  reInviteOverUnackedFinalFlows,
   request,
   response,
   SOCKETS,
@@ -504,5 +505,30 @@ describe("dialog markers", () => {
     const reAck = flow.steps.find((s) => s.id === "s8")!
     expect(reAck.in_dialog).toBe(true)
     expect(reAck.confirms_dialog).toBeUndefined()
+  })
+
+  // The ACK that confirms the dialog is the one answering the dialog-creating
+  // 2xx (RFC 3261 §13.2.2.4), not the first ACK the leg carries after it: a
+  // re-INVITE sent over the un-ACKed 2xx is answered 491 (§14.1) and its ACK is
+  // that transaction's own (§17.1.1.3). Pinned on the leg where the actor is
+  // the UAC (A: send INVITE, expect finals, send ACKs) and on the one where it
+  // is the UAS (B: expect INVITE, send finals, expect ACKs).
+  it("confirms the dialog on the ACK to the 2xx, not on a 491 round's ACK sent before it", () => {
+    const flow = flowOf(reInviteOverUnackedFinalFlows(), BOTH_VANTAGES)
+    for (const legId of ["A", "B"]) {
+      const onLeg = flow.steps.filter((s) => s.leg === legId)
+      const acks = onLeg.filter((s) => (s.msg.method ?? "").toUpperCase() === "ACK")
+      expect(acks.map((s) => s.msg.cseq)).toEqual([2, 1])
+      const [to491, to200] = acks
+      expect(to491!.confirms_dialog, `${legId}: the ACK to the 491`).toBeUndefined()
+      expect(to200!.confirms_dialog, `${legId}: the ACK to the 200`).toBe(true)
+      // Both ACKs run after the dialog-creating final, so both are in-dialog;
+      // the 491 and its re-INVITE are too.
+      const [invite, final] = onLeg
+      expect(invite!.in_dialog).toBeUndefined()
+      expect(final!.in_dialog).toBeUndefined()
+      expect(onLeg.slice(2).every((s) => s.in_dialog === true)).toBe(true)
+      expect(onLeg.filter((s) => s.confirms_dialog === true)).toHaveLength(1)
+    }
   })
 })

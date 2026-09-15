@@ -51,6 +51,7 @@ import type { PartsIndex } from "./parts.js"
 import { stampOverlaps } from "./race.js"
 import type { Plan } from "./plan.js"
 import { peerSide, type ActorObs, type Layout } from "./topology.js"
+import { inviteTransactions, type InviteTransaction } from "./transactions.js"
 import { hasHeader } from "./wire.js"
 
 /** The step id a generated step takes: dense, 1-based, `s<n>`. */
@@ -393,10 +394,15 @@ const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
  * a renegotiation.
  *
  * The ACK that ANSWERS the dialog-creating final takes `confirms_dialog` beside
- * its `in_dialog` — the leg's FIRST ACK after that final, since a leg confirms
- * its dialog before it renegotiates one. Every later ACK on the leg is a
- * re-INVITE's and stays plain `in_dialog`; an ACK to a non-2xx final belongs to
- * the INVITE transaction (RFC 3261 §17.1.1.3) and takes neither marker.
+ * its `in_dialog`: the ACK that DISCHARGES that final as the leg's state holds
+ * it ({@link inviteTransactions}), never the first ACK the leg carries after
+ * it. A re-INVITE sent over the un-ACKed 2xx is answered 491 (RFC 3261 §14.1)
+ * and its ACK is that transaction's own (§17.1.1.3): it runs first and confirms
+ * nothing, and the 2xx's ACK behind it is the confirming one. Every other ACK
+ * on the leg — a re-INVITE's, one to a non-2xx final — stays plain `in_dialog`
+ * or takes neither marker. One dialog is confirmed once: a later ACK that
+ * discharges another 2xx on the same INVITE (a fork answering under a second
+ * tag) is in-dialog and confirms nothing more.
  *
  * A generated flow is FLAT — `alt` is authored-only — so document order is run
  * order and one forward pass states the whole rule. A lane delta may reorder
@@ -405,15 +411,25 @@ const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
  * moves the step OBJECT, so both markers ride along.
  */
 export const stampInDialog = (steps: Array<StepDraft>): void => {
-  const answered = new Set<string>()
+  const { landings, discharges } = inviteTransactions(steps)
+  /** Per leg, the transaction whose 2xx created the dialog. */
+  const creating = new Map<string, InviteTransaction<StepDraft>>()
   const confirmed = new Set<string>()
   for (const step of steps) {
-    if (!cancelScoped(step) && answered.has(step.leg)) step.in_dialog = true
-    if (answered.has(step.leg) && !confirmed.has(step.leg) && isAck(step)) {
+    if (!cancelScoped(step) && creating.has(step.leg)) step.in_dialog = true
+    const discharged = discharges.get(step.id)
+    if (
+      discharged !== undefined &&
+      discharged.transaction === creating.get(step.leg) &&
+      isDialogCreatingFinal(discharged.final) &&
+      !confirmed.has(step.leg)
+    ) {
       step.confirms_dialog = true
       confirmed.add(step.leg)
     }
-    if (isDialogCreatingFinal(step)) answered.add(step.leg)
+    if (isDialogCreatingFinal(step) && !creating.has(step.leg)) {
+      creating.set(step.leg, landings.get(step.id)!)
+    }
   }
 }
 
@@ -422,9 +438,6 @@ const isDialogCreatingFinal = (step: StepDraft): boolean =>
   step.msg.status >= 200 &&
   step.msg.status < 300 &&
   (step.msg["cseq-method"] ?? "").toUpperCase() === "INVITE"
-
-const isAck = (step: StepDraft): boolean =>
-  step.msg.status === undefined && (step.msg.method ?? "").toUpperCase() === "ACK"
 
 /** Whether the message belongs to a CANCEL transaction rather than to a dialog. */
 const cancelScoped = (step: StepDraft): boolean => {

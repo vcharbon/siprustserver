@@ -41,6 +41,7 @@
  */
 import { Body, Flow, Schedules, Tokens } from "@sip/contracts"
 import { PROXIMITY_US } from "./delay.js"
+import { inviteTransactions } from "./transactions.js"
 
 /** The reason token a document ACKing an unfinalled transaction is refused by. */
 export const FINAL_NOT_CAPTURED = "source-final-not-captured"
@@ -363,69 +364,48 @@ export type UnackedTakenFinal =
 const isContinuation = (step: Flow.Step): boolean =>
   isRequest(step) && !["ACK", "BYE", "CANCEL"].includes(method(step))
 
-/** One INVITE transaction the actor opened on a leg, as the leg's state holds it. */
-interface TakenTransaction {
-  readonly invite: Flow.Step
-  /** The final the leg last took for it, and where; absent while it is still open. */
-  final?: { readonly step: Flow.Step; readonly at: number }
-  /** Whether an ACK the actor sent on the leg discharged that final. */
-  acked: boolean
-}
-
 /**
  * Every 2xx the actor takes on a leg and no ACK on that leg ever settles, each
  * at its position in the step list, in document order — the SETTLE predicate,
  * apart from what proves the missing ACK was lost.
  *
  * Leg state names the transaction an ACK settles, never the step's captured
- * `cseq`, as the interpreter's `final_for` resolves an auto ACK: the newest
- * INVITE the leg sent that holds a final and no ACK yet, each ACK its own. A
- * non-2xx final consumes an ACK the same way (§17.1.1.3) and is never owed. A
- * second final on the same INVITE — a fork's 2xx, a re-emission — is its own
- * step owed its own ACK (§13.2.2.4); a repeat the document folds is no step.
+ * `cseq` ({@link inviteTransactions}): the newest INVITE the actor sent that
+ * holds a final and no ACK yet, each ACK its own. A non-2xx final consumes an
+ * ACK the same way (§17.1.1.3) and is never owed. A second final on the same
+ * INVITE — a fork's 2xx, a re-emission — is its own step owed its own ACK
+ * (§13.2.2.4); a repeat the document folds is no step. A 2xx the actor takes
+ * on a leg it never sent an INVITE on is nobody's to settle here.
  */
 const unsettledTakenFinals = (
   steps: ReadonlyArray<Flow.Step>
-): ReadonlyArray<{ readonly at: number; readonly final: UnackedTaken }> => {
-  const legs = new Map<string, Array<TakenTransaction>>()
-  const on = (leg: string): Array<TakenTransaction> => {
-    const held = legs.get(leg)
-    if (held !== undefined) return held
-    const fresh: Array<TakenTransaction> = []
-    legs.set(leg, fresh)
-    return fresh
-  }
-  steps.forEach((step, at) => {
-    if (step.op === "send" && isInvite(step)) on(step.leg).push({ invite: step, acked: false })
-    else if (step.op === "expect" && isInviteFinal(step)) {
-      const newest = on(step.leg).at(-1)
-      if (newest !== undefined) {
-        newest.final = { step, at }
-        newest.acked = false
-      }
-    } else if (step.op === "send" && isAck(step)) {
-      const awaiting = on(step.leg).findLast((t) => t.final !== undefined && !t.acked)
-      if (awaiting !== undefined) awaiting.acked = true
-    }
-  })
-  return [...legs.values()]
+): ReadonlyArray<{ readonly at: number; readonly final: UnackedTaken }> =>
+  [...inviteTransactions(steps).byLeg.values()]
     .flat()
     .flatMap((t) => {
-      if (t.acked || t.final === undefined || !isInviteSuccess(t.final.step)) return []
+      if (
+        t.op !== "send" ||
+        t.invite === undefined ||
+        t.acked ||
+        t.final === undefined ||
+        !isInviteSuccess(t.final.step)
+      ) {
+        return []
+      }
       const final = t.final.step
+      const invite = t.invite
       return [{
         at: t.final.at,
         final: {
           final: final.id,
-          invite: t.invite.id,
+          invite: invite.id,
           leg: final.leg,
           ...(final.observed === undefined ? {} : { observed: final.observed }),
-          ...(t.invite.observed === undefined ? {} : { inviteObserved: t.invite.observed })
+          ...(invite.observed === undefined ? {} : { inviteObserved: invite.observed })
         }
       }]
     })
     .sort((a, b) => a.at - b.at)
-}
 
 /**
  * Whether the request at `at` is an INVITE the leg's next INVITE final travelling

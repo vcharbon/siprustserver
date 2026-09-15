@@ -357,6 +357,42 @@ export const reInviteFlows = (): Flows.FlowsDoc =>
   )
 
 /**
+ * A re-INVITE sent OVER an un-ACKed 2xx, on both legs of a relayed call. The
+ * caller re-INVITEs (seq 2) before ACKing the dialog-creating 200 (seq 1); the
+ * platform answers 491 (RFC 3261 §14.1), the caller ACKs the 491 — that ACK is
+ * the re-INVITE transaction's (§17.1.1.3) — and only then ACKs the 200, which
+ * is the ACK that confirms the dialog (§13.2.2.4). The callee leg carries the
+ * same shape from the answering side: the platform re-INVITEs before its own
+ * ACK, the callee answers 491, and the 200's ACK is the last of the two.
+ */
+export const reInviteOverUnackedFinalFlows = (): Flows.FlowsDoc =>
+  doc(
+    [
+      leg(CALLER_CALL_ID, oneHop(CALLER, SUT), [
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0 }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_000, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 1_020, toTag: "sut-tag" }),
+        response({ callId: CALLER_CALL_ID, seq: 2, status: 491, reason: "Request Pending", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_030, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_035, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_200, toTag: "sut-tag" }),
+        request({ callId: CALLER_CALL_ID, seq: 3, method: "BYE", src: CALLER, dst: SUT, ts_ms: 9_000, toTag: "sut-tag" }),
+        response({ callId: CALLER_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: 9_005, toTag: "sut-tag" })
+      ]),
+      leg(CALLEE_CALL_ID, oneHop(SUT, CALLEE), [
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 10 }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 990, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 1_025, toTag: "callee-tag" }),
+        response({ callId: CALLEE_CALL_ID, seq: 2, status: 491, reason: "Request Pending", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 1_028, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_040, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_210, toTag: "callee-tag" }),
+        request({ callId: CALLEE_CALL_ID, seq: 3, method: "BYE", src: SUT, dst: CALLEE, ts_ms: 9_010, toTag: "callee-tag" }),
+        response({ callId: CALLEE_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: CALLEE, dst: SUT, ts_ms: 9_015, toTag: "callee-tag" })
+      ])
+    ],
+    [{ legs: [0, 1] }]
+  )
+
+/**
  * The delayed offer, and the two ACK classes beside it. The re-INVITE at seq 2
  * carries NO offer, so the answer rides the ACK that confirms its 200 (RFC 3261
  * §13.2.1); the re-INVITE at seq 3 is refused 488, and its ACK belongs to that
