@@ -1674,10 +1674,14 @@ the near leg's send, its body compared by content where it carried one; a
 `send` of the 2xx the near leg received, headers and body as captured, since a
 relayed answer is the far party's own; an auto `expect ACK` mirroring the near
 leg's. For the far party's re-INVITE: a `send INVITE` carrying the offer and
-the frozen headers the near leg's expect took, since a relayed request is the
-far party's own; an `expect` of the 2xx the near peer sent, its body stated as
-the session description the near leg emitted; an auto `send ACK` carrying what
-the near leg's expect took. Each derived step copies the near-leg message's
+the frozen headers the near leg's expect took — a send needs content and the
+capture holds no other; the set is §8's tier 3 as the expect holds it, the
+hop-by-hop dialog and transaction headers already dropped, so what lands is
+end to end except the session-timer pair (RFC 4028 §7.4, §8), which the
+platform mints per hop, rides along, and is judged by the confrontation's
+withheld-interval rule; an `expect` of the 2xx the near peer sent, its body
+stated as the session description the near leg emitted; an auto `send ACK`
+carrying what the near leg's expect took. Each derived step copies the near-leg message's
 `observed` coordinate (§6.10), since the platform relays that message and it
 is what the far-leg datagram is compared against, and each is listed as the
 relay runs: a far-leg send before the near-leg arrival it relays into, a
@@ -1689,9 +1693,12 @@ vantage kept watching that shows no INVITE says the platform did NOT relay,
 which a replay must surface; the near-leg answer must be a 2xx, whoever sent
 it — a refusal the platform composed is its own, except a 491, which is glare
 the replaying platform answers itself (RFC 3261 §14.1) and owes the far leg
-nothing, and a refusal the near peer sent is ACKed hop by hop (§17.1.1.3) by a
-far-leg transaction no captured message stands for; `far-side-reinvite-not-derived`
-names the exchange left alone either way; and the near-leg half must have no
+nothing; a refusal the near peer sent is relayed like its 2xx would be, but the
+far leg's ACK to it is the INVITE client transaction's (§17.1.1.3), a step no
+captured message gives a coordinate to, and a 491 there is the near half of a
+crossing pair (§14.1) whose other half is the platform's 491 the near-peer
+side leaves, so the pair is stated whole or not at all;
+`far-side-reinvite-not-derived` names the exchange left alone either way; and the near-leg half must have no
 relay origin — a message the far leg's record does hold is already a step. A
 far party's offer or answer the near leg holds by shape only (a multipart, an
 undeclared binary) is left the same way: no send emits a shape. The first bound
@@ -2722,7 +2729,7 @@ flag rides a repeated **100 Trying**, or a document some other producer marked.
 | `provisional-expect-surplus-tolerated` | these caller-facing provisional expectations were stamped `optional`: the leg holds more relayed provisionals than peer emissions anchoring them, naming each with its leg, status and run (§6.9). The subset gate accepts no `optional` in a captured document without it |
 | `relayed-provisional-expect-derived` | these caller-facing provisional expectations were derived from the emission that causes them: the leg holds fewer relayed provisionals than peer emissions, and each derived step copies a captured arrival, coordinate included, naming its leg, status, the emission it relays and the arrival it copies (§6.9) |
 | `far-side-reinvite-derived` | these in-dialog INVITE exchanges the capture holds on one leg only were transcribed onto the far leg, whose record ends at the 2xx its peer sent: the relaying platform has the far leg on the other end, and each derived step — the INVITE, the 2xx, the ACK, each in the op that mirrors the near leg's — copies the near-leg message it mirrors, coordinate included, naming the leg, the step its record ends at, and every pair with its op (§6.9). The subset gate accepts no second step on one coordinate of those three shapes without it |
-| `far-side-reinvite-not-derived` | these in-dialog INVITE exchanges onto a leg whose record ends at its 2xx were NOT transcribed — the platform answered the near peer's with a refusal other than 491 glare, which is its own; the near peer refused the far party's, whose ACK is hop by hop and stands for no captured message; or the far party's offer or answer is held by shape only — and the far leg scripts nothing for the relayed INVITE (§6.9) |
+| `far-side-reinvite-not-derived` | these in-dialog INVITE exchanges onto a leg whose record ends at its 2xx were NOT transcribed — the platform answered the near peer's with a refusal other than 491 glare, which is its own; the near peer refused the far party's, a refusal relayed like a 2xx whose hop-by-hop ACK (§17.1.1.3) has no captured coordinate, or answered it 491, the near half of a crossing pair (§14.1) stated whole or not at all; or the far party's offer or answer is held by shape only — and the far leg scripts nothing for the relayed INVITE (§6.9) |
 
 A count on an `expect` of a class something else DRAWS — the 100 Trying an
 INVITE ladder pulls, one per copy (§17.2.1) — asks no lane to invent an

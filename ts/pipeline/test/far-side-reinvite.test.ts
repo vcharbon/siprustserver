@@ -294,8 +294,8 @@ interface MirrorShape {
   readonly delayedOffer?: boolean
   /** When the platform's re-INVITE reaches the caller, in ms. */
   readonly at?: number
-  /** The caller's own re-INVITE, CSeq 2, two seconds behind the platform's. */
-  readonly callerToo?: boolean
+  /** The caller's own re-INVITE, CSeq 2, two seconds behind the platform's — or two seconds ahead. */
+  readonly callerToo?: "after" | "before"
 }
 
 /**
@@ -318,10 +318,11 @@ const relayedReinviteCallerLeg = (shape: MirrorShape = {}): Flows.Leg => {
     response({ callId: CALLER_CALL_ID, seq: 1, status: 100, reason: "Trying", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 5 }),
     response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 1_000, toTag: "sut-tag", sdp: ANSWER_SDP }),
     request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: caller, dst: sut, ts_ms: 1_005, toTag: "sut-tag" }),
+    ...(shape.callerToo === "before" ? callerReInvite(2, at - 2_000) : []),
     request({ callId: CALLER_CALL_ID, seq: 41, method: "INVITE", src: sut, dst: caller, ts_ms: at, ruri: CALLER_URI, ...inDialog, headers: ["Supported: timer"], ...(shape.delayedOffer ? {} : { body: MOVED_OFFER }) }),
     response({ callId: CALLER_CALL_ID, seq: 41, ...answer, cseqMethod: "INVITE", src: caller, dst: sut, ts_ms: at + 30, toUri: CALLER_URI, ...inDialog, headers: ["Session-Expires: 1800;refresher=uas"], sdp: ANSWER_SDP }),
     request({ callId: CALLER_CALL_ID, seq: 41, method: "ACK", src: sut, dst: caller, ts_ms: at + 60, ruri: CALLER_URI, ...inDialog, ...(shape.delayedOffer ? { body: MOVED_OFFER } : {}) }),
-    ...(shape.callerToo ? callerReInvite(2, at + 2_000) : []),
+    ...(shape.callerToo === "after" ? callerReInvite(2, at + 2_000) : []),
     request({ callId: CALLER_CALL_ID, seq: 3, method: "BYE", src: caller, dst: sut, ts_ms: 9_000, toTag: "sut-tag" }),
     response({ callId: CALLER_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: sut, dst: caller, ts_ms: 9_005, toTag: "sut-tag" })
   ])
@@ -476,6 +477,9 @@ describe("the far side of a relayed re-INVITE the far party sent (§6.9)", () =>
     const flow = flowOf(flowsOf(relayedReinviteCallerLeg({ delayedOffer: true }), blindCalleeLeg()), true)
     const [, , , invite, answer, ack] = onLeg(flow, "B")
     expect(invite!.msg.body).toBeUndefined()
+    expect(invite!.msg.headers).toEqual([{ name: "Supported", value: "timer" }])
+    expect(answer!.msg.headers).toBeUndefined()
+    expect(ack!.msg.headers).toBeUndefined()
     expect(answer!.msg.body).toEqual({ ref: expect.stringMatching(/\.sdp$/), rewrite: ["c=addr", "m=port"], compare: "sdp" })
     expect(ack!.msg.body).toEqual({ ref: expect.stringMatching(/\.sdp$/), rewrite: ["c=addr", "m=port"] })
   })
@@ -489,11 +493,22 @@ describe("the far side of a relayed re-INVITE the far party sent (§6.9)", () =>
     const flag = flow.flags.find((f) => f.kind === "far-side-reinvite-not-derived")
     expect(flag).toBeDefined()
     expect(flag!.detail).toContain("488")
+    expect(flag!.detail).toContain("relayed like a 2xx")
     expect(flow.flags.some((f) => f.kind === "far-side-reinvite-derived")).toBe(false)
   })
 
+  it("leaves a crossing pair whole: the far party's INVITE the caller answered 491 names the pair", () => {
+    const flow = flowOf(
+      flowsOf(relayedReinviteCallerLeg({ answer: { status: 491, reason: "Request Pending" } }), blindCalleeLeg()),
+      true
+    )
+    expect(onLeg(flow, "B")).toHaveLength(3)
+    const flag = flow.flags.find((f) => f.kind === "far-side-reinvite-not-derived")
+    expect(flag!.detail).toContain("crossing pair (RFC 3261 §14.1)")
+  })
+
   it("derives both directions on one document, each exchange closed before the next opens", () => {
-    const flow = flowOf(flowsOf(relayedReinviteCallerLeg({ callerToo: true }), blindCalleeLeg()), true)
+    const flow = flowOf(flowsOf(relayedReinviteCallerLeg({ callerToo: "after" }), blindCalleeLeg()), true)
     const b = onLeg(flow, "B")
     expect(b.map(shape)).toEqual([
       "expect INVITE",
@@ -515,5 +530,28 @@ describe("the far side of a relayed re-INVITE the far party sent (§6.9)", () =>
     expect(flag!.detail).toContain("send INVITE mirrors")
     expect(flag!.detail).toContain("expect INVITE mirrors")
     expect(flow.flags.some((f) => f.kind === "far-side-reinvite-not-derived")).toBe(false)
+  })
+
+  it("derives both directions in the other order too: the caller's re-INVITE first, then the far party's", () => {
+    const flow = flowOf(flowsOf(relayedReinviteCallerLeg({ callerToo: "before" }), blindCalleeLeg()), true)
+    const b = onLeg(flow, "B")
+    expect(b.map(shape)).toEqual([
+      "expect INVITE",
+      "send 100",
+      "send 200",
+      "expect INVITE",
+      "send 200",
+      "expect ACK",
+      "send INVITE",
+      "expect 200",
+      "send ACK"
+    ])
+    expect(b.filter((s) => s.msg.method === "ACK").map((s) => s.msg.cseq)).toEqual([2, 41])
+    const ids = flow.steps.map((s) => `${s.leg}:${s.op}:${s.msg.method ?? s.msg.status}`)
+    expect(ids.indexOf("B:expect:ACK")).toBeLessThan(ids.indexOf("B:send:INVITE"))
+    expect(ids.indexOf("B:send:INVITE")).toBeLessThan(ids.indexOf("A:expect:INVITE"))
+    expect(flow.steps.map((s) => s.id)).toEqual(flow.steps.map((_, i) => `s${i + 1}`))
+    const flag = flow.flags.find((f) => f.kind === "far-side-reinvite-derived")
+    expect(flag!.detail).toMatch(/^2 in-dialog INVITE exchange/)
   })
 })

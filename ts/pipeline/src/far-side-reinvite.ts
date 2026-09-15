@@ -1,53 +1,24 @@
 /**
  * The far side of an in-dialog INVITE exchange the capture holds on ONE leg
- * only, because the vantage lost the other leg past the answer it sent (§6.9).
+ * only, because the vantage lost the other leg past the 2xx it sent (§6.9).
  *
- * A leg whose captured record ENDS at a 2xx to INVITE its peer sends — no ACK,
- * not one datagram behind it — states nothing about the dialog past that
- * instant: not that it went quiet, only that the vantage stopped seeing it.
- * The near leg goes on, in either direction. Its peer sends an in-dialog
- * INVITE and takes a 2xx nothing on the far leg relays, so synthesis reads
- * that answer as minted by the platform; or the platform sends an in-dialog
- * INVITE down the near leg that nothing on the far leg relays into, and its
- * peer answers it. A platform that RELAYS such an INVITE end to end (the
- * policy's reading, `CasePolicy.relaysReinvite`) has the far leg on the other
- * end of both, where a document scripting nothing for it can neither answer
- * nor send: the near leg's expect waits for a message nobody composes, and
- * the run ends at its budget.
+ * Where the policy states the platform relays an in-dialog INVITE end to end
+ * (`CasePolicy.relaysReinvite`), every exchange the near leg carries and the
+ * far leg's record cannot hold is transcribed onto the far leg from the near
+ * leg's half, in the direction it ran:
  *
- * So each such exchange is transcribed onto the far leg from the halves the
- * capture does hold, in the direction it ran:
+ * - the near peer's re-INVITE: far `expect INVITE` / `send 2xx` / auto
+ *   `expect ACK`;
+ * - the far party's re-INVITE the platform relayed onto the near leg: far
+ *   `send INVITE` / `expect 2xx` / auto `send ACK`.
  *
- * - the near peer's re-INVITE: an `expect INVITE` mirroring the near leg's
- *   send, its body compared by content where it carried one; a `send` of the
- *   2xx the near leg received, headers and body as captured, since a relayed
- *   answer is the far party's own; and an auto `expect ACK` mirroring the near
- *   leg's, where the capture holds one;
- * - the far party's re-INVITE: a `send INVITE` carrying the offer and the
- *   frozen headers the near leg's expect took, since a relayed request is the
- *   far party's own; an `expect` of the 2xx the near peer sent, its body
- *   compared as the session description the near leg emitted; and an auto
- *   `send ACK` carrying what the near leg's expect took, the answer where the
- *   offer was delayed.
- *
- * Each derived step keeps the `observed` coordinate of the near-leg message it
- * copies — the platform relays that message, so it is what the far-leg
- * datagram is compared against — and its source states the fact (`mirrored`:
- * the message is another leg's). Listed as the relay runs — a far-leg send
- * before the near-leg arrival it relays into, a far-leg arrival after the
- * near-leg send that relays into it — so the classifier reads the near leg's
- * half as the relay it is (§6.9). `far-side-reinvite-derived` names every one.
- *
- * Bounded three ways, each ruling out a shape the capture does state. The far
- * leg's record must end at its 2xx: a leg the vantage kept watching that shows
- * no INVITE says the platform did NOT relay, which a replay must surface. The
- * near-leg answer must be a 2xx, whoever sent it: a refusal the platform
- * composed is its own — except a 491, glare the replaying platform answers
- * itself (RFC 3261 §14.1), which owes the far leg nothing — and a refusal the
- * near peer sent is ACKed hop by hop (§17.1.1.3), by a far-leg transaction no
- * captured message stands for; `far-side-reinvite-not-derived` says which
- * exchange was left. And the near-leg half must have no relay origin: a
- * message the far leg's record does hold is already a step.
+ * Each derived step copies the near-leg message's `observed` coordinate and
+ * its source says so (`StepSource.mirrored`); the steps are listed as the
+ * relay runs, so the near leg's half classifies as the relay it is. Three
+ * bounds: the far leg's record ends at its 2xx; the near-leg answer is a 2xx
+ * (a refusal is left under `far-side-reinvite-not-derived`, a 491 the near
+ * peer took is glare the replaying platform composes itself); the near-leg
+ * half has no relay origin. §6.9 states the rationale of each.
  */
 import { Body, Tokens } from "@sip/contracts"
 import { relayOriginOf, type StepTiming } from "./delay.js"
@@ -149,7 +120,9 @@ export const deriveFarSideReinvites = (input: FarSideInput): FarSideOut => {
       const s = steps[i]!
       if (s.leg !== nearLeg || !isRequest(s, "INVITE")) continue
       const origin: ReinviteOrigin = s.op === "send" ? "near-peer" : "far-party"
-      // A relayed request the far leg's record holds is already a step.
+      // A request another leg's record holds as a send is already a step. The
+      // far leg's record ends at its 2xx, so only a THIRD leg's send can be
+      // that origin: a two-leg document never reaches this line.
       if (origin === "far-party" && relayOriginOf(timings, i) >= 0) continue
       const cseq = timings[i]!.cseq
       const answerOp = s.op === "send" ? "expect" : "send"
@@ -169,17 +142,7 @@ export const deriveFarSideReinvites = (input: FarSideInput): FarSideOut => {
         // replaying platform composes itself. Nothing is owed on the far leg,
         // and nothing is left.
         if (origin === "near-peer" && steps[answer]!.msg.status === 491) continue
-        left.push({
-          farLeg,
-          nearInvite: s,
-          detail:
-            origin === "near-peer"
-              ? `the platform answered it ${steps[answer]!.msg.status} itself, which is its own ` +
-                `refusal and no far party's`
-              : `the near peer refused it ${steps[answer]!.msg.status}, and the far leg ACKs a ` +
-                `refusal hop by hop (RFC 3261 §17.1.1.3), a transaction no captured message ` +
-                `stands for`
-        })
+        left.push({ farLeg, nearInvite: s, detail: refusalLeft(origin, steps[answer]!.msg.status!) })
         continue
       }
       const ack = steps.findIndex(
@@ -243,86 +206,11 @@ export const deriveFarSideReinvites = (input: FarSideInput): FarSideOut => {
           : deriveSentAck(p.farLeg, steps[p.ack]!)
   }))
 
-  /** One insertion: the step, where it goes, and the near-leg index it mirrors. */
-  interface Insertion {
-    readonly before: number
-    readonly step: StepDraft
-    readonly mirrors: number
-    readonly emits: boolean
-    readonly auto: boolean
-    readonly ts_us: number
-  }
-  const insertions: Array<Insertion> = []
-  for (const r of resolved) {
-    if (r.origin === "near-peer") {
-      // The relayed INVITE lands where a relay of this emission would; the
-      // answer goes out at the instant the caller took it.
-      const relay = relayLatency(steps, timings, r.farLeg, steps[r.at.invite]!.leg, r.at.invite)
-      insertions.push({
-        before: r.at.answer,
-        step: r.invite,
-        mirrors: r.at.invite,
-        emits: false,
-        auto: false,
-        ts_us: Math.min(timings[r.at.invite]!.ts_us + relay, timings[r.at.answer]!.ts_us)
-      })
-      insertions.push({
-        before: r.at.answer,
-        step: r.answer,
-        mirrors: r.at.answer,
-        emits: true,
-        auto: false,
-        ts_us: timings[r.at.answer]!.ts_us
-      })
-      if (r.ack !== undefined && r.at.ack !== undefined) {
-        insertions.push({
-          before: r.at.ack + 1,
-          step: r.ack,
-          mirrors: r.at.ack,
-          emits: false,
-          auto: true,
-          ts_us: timings[r.at.ack]!.ts_us + relay
-        })
-      }
-      continue
-    }
-    // The far party's INVITE goes out one relay hop before the near leg took
-    // it, never before the step listed ahead of it; the 2xx lands one hop after
-    // the near peer sent it; the ACK goes out one hop before the near leg took
-    // it, never before the 2xx it acknowledges.
-    const nearLeg = steps[r.at.invite]!.leg
-    const relay = relayLatency(steps, timings, nearLeg, r.farLeg, r.at.invite)
-    const answerAt = timings[r.at.answer]!.ts_us + relay
-    insertions.push({
-      before: r.at.invite,
-      step: r.invite,
-      mirrors: r.at.invite,
-      emits: true,
-      auto: false,
-      ts_us: Math.max(
-        timings[r.at.invite]!.ts_us - relay,
-        r.at.invite === 0 ? 0 : timings[r.at.invite - 1]!.ts_us
-      )
-    })
-    insertions.push({
-      before: r.at.answer + 1,
-      step: r.answer,
-      mirrors: r.at.answer,
-      emits: false,
-      auto: false,
-      ts_us: answerAt
-    })
-    if (r.ack !== undefined && r.at.ack !== undefined) {
-      insertions.push({
-        before: r.at.ack,
-        step: r.ack,
-        mirrors: r.at.ack,
-        emits: true,
-        auto: true,
-        ts_us: Math.max(timings[r.at.ack]!.ts_us - relay, answerAt)
-      })
-    }
-  }
+  const insertions = resolved.flatMap((r) =>
+    r.origin === "near-peer"
+      ? nearPeerInsertions(steps, timings, r)
+      : farPartyInsertions(steps, timings, r)
+  )
   // Back to front, so every index is the pre-insertion one; equal positions
   // keep their listed order.
   insertions
@@ -373,6 +261,133 @@ export const deriveFarSideReinvites = (input: FarSideInput): FarSideOut => {
   return { derived, left }
 }
 
+/** One insertion: the step, where it goes, and the near-leg index it mirrors. */
+interface Insertion {
+  readonly before: number
+  readonly step: StepDraft
+  readonly mirrors: number
+  readonly emits: boolean
+  readonly auto: boolean
+  readonly ts_us: number
+}
+
+/** One exchange resolved to step objects, with the near-leg indices it reads. */
+interface Resolved {
+  readonly farLeg: string
+  readonly at: { readonly invite: number; readonly answer: number; readonly ack: number | undefined }
+  readonly invite: StepDraft
+  readonly answer: StepDraft
+  readonly ack: StepDraft | undefined
+}
+
+/**
+ * The near peer's re-INVITE: the relayed INVITE lands where a relay of this
+ * emission would, the answer goes out at the instant the near leg took it,
+ * the ACK lands one hop after the near leg sent it.
+ */
+const nearPeerInsertions = (
+  steps: ReadonlyArray<StepDraft>,
+  timings: ReadonlyArray<StepTiming>,
+  r: Resolved
+): Array<Insertion> => {
+  const relay = relayLatency(steps, timings, r.farLeg, steps[r.at.invite]!.leg, r.at.invite)
+  const out: Array<Insertion> = [
+    {
+      before: r.at.answer,
+      step: r.invite,
+      mirrors: r.at.invite,
+      emits: false,
+      auto: false,
+      ts_us: Math.min(timings[r.at.invite]!.ts_us + relay, timings[r.at.answer]!.ts_us)
+    },
+    {
+      before: r.at.answer,
+      step: r.answer,
+      mirrors: r.at.answer,
+      emits: true,
+      auto: false,
+      ts_us: timings[r.at.answer]!.ts_us
+    }
+  ]
+  if (r.ack !== undefined && r.at.ack !== undefined) {
+    out.push({
+      before: r.at.ack + 1,
+      step: r.ack,
+      mirrors: r.at.ack,
+      emits: false,
+      auto: true,
+      ts_us: timings[r.at.ack]!.ts_us + relay
+    })
+  }
+  return out
+}
+
+/**
+ * The far party's re-INVITE: the INVITE goes out one relay hop before the
+ * near leg took it, never before the step listed ahead of it; the 2xx lands
+ * one hop after the near peer sent it; the ACK goes out one hop before the
+ * near leg took it, never before the 2xx it acknowledges.
+ */
+const farPartyInsertions = (
+  steps: ReadonlyArray<StepDraft>,
+  timings: ReadonlyArray<StepTiming>,
+  r: Resolved
+): Array<Insertion> => {
+  const relay = relayLatency(steps, timings, steps[r.at.invite]!.leg, r.farLeg, r.at.invite)
+  const answerAt = timings[r.at.answer]!.ts_us + relay
+  const out: Array<Insertion> = [
+    {
+      before: r.at.invite,
+      step: r.invite,
+      mirrors: r.at.invite,
+      emits: true,
+      auto: false,
+      ts_us: Math.max(
+        timings[r.at.invite]!.ts_us - relay,
+        r.at.invite === 0 ? 0 : timings[r.at.invite - 1]!.ts_us
+      )
+    },
+    {
+      before: r.at.answer + 1,
+      step: r.answer,
+      mirrors: r.at.answer,
+      emits: false,
+      auto: false,
+      ts_us: answerAt
+    }
+  ]
+  if (r.ack !== undefined && r.at.ack !== undefined) {
+    out.push({
+      before: r.at.ack,
+      step: r.ack,
+      mirrors: r.at.ack,
+      emits: true,
+      auto: true,
+      ts_us: Math.max(timings[r.at.ack]!.ts_us - relay, answerAt)
+    })
+  }
+  return out
+}
+
+/**
+ * Why a refused exchange is left. The platform's own refusal to the near peer
+ * is nobody else's. A refusal the near peer sent the far party is relayed
+ * like its 2xx would be, and the far leg's ACK to it is the INVITE client
+ * transaction's (RFC 3261 §17.1.1.3) — a step no captured message gives a
+ * coordinate to; a 491 there is the near half of a crossing pair (§14.1)
+ * whose other half, the platform's 491 to the near peer's own INVITE, is the
+ * one this pass leaves on the near-peer side, so the pair is stated whole or
+ * not at all.
+ */
+const refusalLeft = (origin: ReinviteOrigin, status: number): string =>
+  origin === "near-peer"
+    ? `the platform answered it ${status} itself, which is its own refusal and no far party's`
+    : status === 491
+      ? `the near peer answered it 491: a crossing pair (RFC 3261 §14.1) the far leg must state ` +
+        `whole, with the near peer's own INVITE the platform refused 491`
+      : `the near peer refused it ${status}; a refusal is relayed like a 2xx, and the far leg's ` +
+        `hop-by-hop ACK to it (RFC 3261 §17.1.1.3) has no captured coordinate`
+
 /**
  * The relay latency the capture measured on `arrivalLeg` for the other leg's
  * own emissions — the first arrival there, ahead of `before`, that relays an
@@ -410,8 +425,9 @@ const placeholderDelay = (): StepDraft["delay"] => ({
 /**
  * The far leg's `expect INVITE`: the near leg's request, compared by body
  * content where it carried one — the platform relays the offer — and by shape
- * where the document states the body as one. No frozen headers: the relaying
- * platform mints the request it puts on the far leg.
+ * where the document states the body as one. No frozen headers: the far leg
+ * is one the platform initiated, so its arrivals record (§6.4) and a frozen
+ * set would assert nothing.
  */
 const deriveInvite = (farLeg: string, near: StepDraft): StepDraft => ({
   id: UNNUMBERED,
@@ -478,10 +494,14 @@ const deriveAck = (farLeg: string, near: StepDraft): StepDraft => ({
 
 /**
  * The far leg's `send INVITE` of the far party's re-INVITE: the offer and the
- * frozen headers as the near leg's expect took them, since a relayed request
- * is the far party's own. The dialog headers are the far leg's stack's, as on
- * every send. No `retransmits`: a send's count is a ladder the stack runs, and
- * the near leg's count is the platform's.
+ * frozen headers as the near leg's expect took them — a send needs content and
+ * the capture holds no other. The frozen set is §8's tier 3 as the near expect
+ * holds it: `msgspec.ts` already dropped the hop-by-hop dialog and transaction
+ * headers (`OMIT_HEADERS`, the stack-owned set), so what lands is end to end,
+ * except the session-timer pair (`Session-Expires`, `Min-SE`; RFC 4028 §7.4,
+ * §8), which the platform mints per hop and which rides along, judged by the
+ * confrontation's withheld-interval rule. No `retransmits`: a send's count is
+ * a ladder the stack runs, and the near leg's count is the platform's.
  */
 const deriveSentInvite = (farLeg: string, near: StepDraft): StepDraft => ({
   id: UNNUMBERED,
