@@ -11,6 +11,7 @@ import { Classifier, Reclassifier } from "@sip/pipeline"
 import { ReplayCli } from "@sip/toolchain"
 import * as ConfigProvider from "effect/ConfigProvider"
 import * as Effect from "effect/Effect"
+import * as FileSystem from "effect/FileSystem"
 import * as Layer from "effect/Layer"
 import * as fs from "node:fs"
 import * as os from "node:os"
@@ -130,7 +131,23 @@ export interface RigOptions {
   readonly lanes?: Layer.Layer<LanePresets.Service>
   readonly reclassifier?: Layer.Layer<Reclassifier.Service>
   readonly classifier?: Layer.Layer<Classifier.Service>
+  /** Collects every path a cell reads as ONE string, for a test about how a file is read. */
+  readonly reads?: Array<string>
 }
+
+/** The platform file system, telling `reads` every whole-string read that goes through it. */
+const watching = (reads: Array<string>): Layer.Layer<FileSystem.FileSystem> =>
+  Layer.effect(
+    FileSystem.FileSystem,
+    Effect.map(FileSystem.FileSystem, (base) =>
+      FileSystem.FileSystem.of({
+        ...base,
+        readFileString: (path: string, encoding?: string) => {
+          reads.push(path)
+          return base.readFileString(path, encoding)
+        }
+      }))
+  ).pipe(Layer.provide(NodeServices.layer))
 
 /** Every service a campaign needs, on the Node platform and the stub binaries. */
 export const rig = (options: RigOptions = {}) =>
@@ -141,7 +158,11 @@ export const rig = (options: RigOptions = {}) =>
     options.lanes ?? LanePresets.layerWith(() => Effect.succeed(STUB_LANE)),
     RoutingCompiler.layer
   ).pipe(
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(
+      options.reads === undefined
+        ? NodeServices.layer
+        : Layer.mergeAll(NodeServices.layer, watching(options.reads))
+    ),
     Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ REPLAY_BIN: fixture("stub-replay.sh") })))
   )
 

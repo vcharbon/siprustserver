@@ -17,7 +17,7 @@
  * leaves a `skipped.json` and never reaches the interpreter.
  */
 import { Body, Bundle, Campaign, CellHits, Confrontation, E2e, Flows, Pivot, Tokens } from "@sip/contracts"
-import { Classifier, Confront, Reclassifier } from "@sip/pipeline"
+import { Classifier, Confront, FlowsFile, Reclassifier } from "@sip/pipeline"
 import { ReplayCli, runner as toolchainRunner } from "@sip/toolchain"
 import * as Cause from "effect/Cause"
 import * as Effect from "effect/Effect"
@@ -305,10 +305,10 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
   const classifier = yield* Classifier.Service
 
   const recordings = yield* readRecordings(absolute)
-  const flows =
-    cell.flows === undefined
-      ? undefined
-      : yield* Flows.parseFlows(yield* fs.readFileString(cell.flows))
+  // Per leg, never as one string: the document of a capture of thousands of
+  // calls is larger than V8 will hold (`FlowsFile`).
+  const flows = cell.flows === undefined ? undefined : yield* FlowsFile.readFlowsFileDecoded(cell.flows)
+  if (flows !== undefined) yield* Flows.requireSchemaVersion(flows)
   const resources = yield* readExpectedBodies(path.dirname(yield* documentPath(cell.case)), pivot)
   // The run configuration states what the media plane did to the session
   // descriptions the run sent, which decides what an expected SDP is held to.
