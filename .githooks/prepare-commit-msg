@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Refuses an amend on `develop`, the integration branch: its history is what
+# every other checkout and worktree of this repository builds on, and an amend
+# rewrites it in place. Inert on every other branch and with HEAD detached,
+# so a worktree on its own topic branch amends freely. prepare-commit-msg is
+# the hook `--no-verify` does not skip. Installed by `just hooks`.
+set -euo pipefail
+[ "$(git symbolic-ref --short -q HEAD || true)" = develop ] || exit 0
+
+# `--amend`, `-c` and `-C` arrive as source `commit`; `--amend -m` and
+# `--amend -F` arrive as source `message`, so the invoking command line is
+# read as well (the hook's parent is the git process), any unique prefix of
+# `--amend` included.
+amend=0
+[ "${2:-}" = commit ] && amend=1
+grep -qzxE -- '--am(e(nd?)?)?' "/proc/$PPID/cmdline" 2>/dev/null && amend=1
+[ "$amend" -eq 1 ] || exit 0
+echo "prepare-commit-msg: refused, an amend on develop rewrites the integration branch." >&2
+echo "Commit on a topic branch instead. One-off bypass: git -c core.hooksPath=/dev/null commit …" >&2
+exit 1
