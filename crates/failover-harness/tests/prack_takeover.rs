@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use call::{CallBodyCodec, MsgpackCodec, ReliableProvisional};
+use call::{CallBodyCodec, MsgpackCodec, ReliableProvisional, Repeat};
 use failover_harness::{
     assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, PartitionRole,
     ProxySut, ReplicatedB2buaSut, WorkerHealth,
@@ -142,8 +142,10 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
 
     // ── STEP 2: the books are REPLICATED before the kill ─────────────────────
     // The cell must test the reachable case: an entry that never replicated
-    // leaves the survivor nothing to translate, and that case has no fix.
-    fh.advance(Duration::from_millis(500)).await;
+    // leaves the survivor nothing to translate, and that case has no fix. The
+    // window also lets the primary's first rung (T1, 500 ms) fire and be
+    // pulled, so what the backup holds after a rung is readable below.
+    fh.advance(Duration::from_millis(800)).await;
     let call_ref = survivor
         .scan_one_backed_up(&pri_ord)
         .await
@@ -163,6 +165,21 @@ async fn prack_after_takeover_translates_the_rack_and_relays_the_answer() {
         entry.a_cseq,
         Some(a_cseq as i64),
         "the replicated entry carries the a-facing INVITE CSeq the RAck names",
+    );
+    // The write the backup holds is the provisional's own — its ladder armed
+    // at the first rung — whatever rungs the primary has walked since: a rung
+    // repeats retained bytes and changes no replicated fact (ADR-0014), so it
+    // is not a write. A body carrying rung 2 here is a rung that wrote.
+    let emission = entry.emission.as_ref().expect("the replicated entry retains the provisional");
+    assert_eq!(emission.repeat().ladder(), "reliable-provisional", "paced by the §3 ladder");
+    let armed_rung = match emission.repeat() {
+        Repeat::Paced { rung, .. } => rung,
+        Repeat::OnTrigger => panic!("a reliable provisional is paced, not triggered"),
+    };
+    assert_eq!(
+        armed_rung, 1,
+        "the backup holds the last write that changed the call — the provisional's own arm, \
+         rung 1 — not the rung the primary walked since",
     );
 
     // ── STEP 3: kill the primary ─────────────────────────────────────────────
@@ -286,6 +303,7 @@ async fn prack_naming_an_unshown_rseq_after_takeover_draws_481() {
         .with_sdp(OFFER)
         .await;
     let p183 = call.expect(183).await;
+    let shown_at = fh.now_ms();
     let a_rseq = rseq_of(&p183);
     let a_cseq = p183.cseq().seq();
     let a_tag = p183.to().tag().expect("the a-facing early dialog tag").to_string();
@@ -326,10 +344,20 @@ async fn prack_naming_an_unshown_rseq_after_takeover_draws_481() {
     // The refusal costs the call nothing: alice PRACKs the number she WAS shown,
     // it translates on the same hydrated books, and only then may bob answer —
     // RFC 3262 §3 forbids a 2xx while a reliable 1xx carrying SDP is unacked.
-    // Hydrating re-armed the §3 ladder on the survivor, so one more rung is in
-    // flight behind the 481; absorb it before the good PRACK's own transaction.
+    // Hydrating restored the §3 ladder from the last replicated write — the
+    // provisional's own, its first rung long past due — so the survivor repeats
+    // at once, behind the 481, and not at the schedule's second rung (T1 + 2·T1
+    // after the provisional, where a ladder resumed where the primary left it
+    // would fire). Absorb it before the good PRACK's own transaction.
     let rung = call.expect(183).await;
     assert_eq!(rseq_of(&rung), a_rseq, "the re-armed ladder repeats the SAME number");
+    let rung_at = fh.now_ms();
+    assert!(
+        rung_at < shown_at + 1_500,
+        "a restored ladder restarts from the last replicated write: the survivor's copy lands \
+         {} ms after the provisional, before the schedule's second rung at 1500 ms",
+        rung_at - shown_at,
+    );
 
     let mut good = call
         .send_request(InDialogMethod::Prack)
