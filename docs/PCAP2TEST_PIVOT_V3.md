@@ -1011,10 +1011,14 @@ the document.
 above is what keeps them from overlapping: `in_dialog` means CONFIRMED, so every
 early-dialog message — a reliable provisional, the PRACK that rides it, an
 UPDATE before the final — sits at or before the dialog-creating final and takes
-no marker, and `early` alone says which fork it rides. The two co-occur on
-exactly one shape: a message after the confirming final that still needs the
-fork named, such as the ACK to a forked 2xx, where `early` gates the To-tag and
-`in_dialog` states that the dialog is up.
+no marker, and `early` alone says which fork it rides. The two co-occur where a
+message after the leg's first dialog-creating final belongs to a FURTHER dialog
+on the leg: a later fork's own 2xx to the forked INVITE — a second dialog, which
+the UAC ACKs like the first (RFC 3261 §13.2.2.4) — and the ACK the leg expects
+for it, where `early` gates the To-tag and `in_dialog` states that a dialog is
+up. The ACK to the fork that answered first rides the dialog `in_dialog` states
+and names none; an ACK the leg sends names none either, since a request send
+names a fork only where it rides one.
 
 What consumes the marker is §4.1's citation rule, and `pivot-schema lint` is
 what enforces the totality (`in-dialog/missing`, `in-dialog/outside-dialog`).
@@ -1032,8 +1036,9 @@ The marker rides BESIDE `in_dialog`, never instead of it: that ACK sits strictly
 after the final, so it carries both. It rides beside `early` too, where the ACK
 names the fork it answers. Under forking each answered fork mints its own dialog
 on the one leg and each is confirmed by its own ACK, so the marker is stated once
-per DIALOG rather than once per leg, and the fork tag is what pairs an ACK with
-the final it answers.
+per DIALOG rather than once per leg: a leg answered 2xx under two To-tags carries
+it twice. An ACK that names its fork pairs with the final by the tag; one naming
+none pairs with the fork's 2xx it discharges.
 
 Two ACKs never carry it. An ACK to a re-INVITE's 2xx, which renegotiates a
 dialog that is already up. And an ACK to a NON-2xx final, which is §17.1.1.3's
@@ -1045,8 +1050,8 @@ un-ACKed 2xx (§14.1) is answered 491, its ACK runs first and discharges the
 re-INVITE, and the 2xx's own ACK behind it is the one that confirms. The
 reading is by position, with no CSeq consulted, so a leg whose ACKs run in the
 other order (the 2xx's ACK before the 491's) is read the other way round. The
-cut stamps by that reading and lint checks it by the same one; under forking
-lint pairs by the fork tag instead.
+cut stamps by that reading and lint checks it by the same one; under forking an
+ACK naming its fork pairs by the tag instead.
 
 The marking is REQUIRED the way `in_dialog` is: a confirmed dialog whose
 answering ACK states no marker is an error. Requiredness is about the MARKER and

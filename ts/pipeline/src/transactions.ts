@@ -22,7 +22,8 @@
  * captured `cseq` is never read, and a leg whose ACKs run in the other order is
  * read the other way round. A fork's tag (`early`) is not read either — the
  * cut stamps before it names forks — so two forks' 2xx outstanding at once
- * share the one slot; the lint pairs a forked dialog's ACK by its tag instead.
+ * share the one slot: the walk pairs each ACK with the fork's 2xx it follows,
+ * and the lint pairs an ACK that names its fork by the tag instead.
  */
 import { Flow } from "@sip/contracts"
 

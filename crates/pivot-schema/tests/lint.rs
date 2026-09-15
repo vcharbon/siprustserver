@@ -2264,6 +2264,141 @@ fn each_answered_fork_carries_its_own_confirming_ack() {
     assert_fires("in-dialog/confirm-missing", forked(false));
 }
 
+/// The document the cut writes for a leg it ANSWERS under two forks: the ACK
+/// confirming the dialog the leg is in names no fork and pairs by the 2xx it
+/// discharges; the further fork's 2xx and the ACK expected for it name theirs
+/// and pair by the tag; a re-INVITE answered inside the second dialog opens no
+/// third one, so a marker on its ACK is a duplicate.
+#[test]
+fn the_first_forks_ack_names_no_fork_and_a_re_invite_inside_opens_no_third_dialog() {
+    let answered_twice = |first_marked: bool, second_marked: bool| {
+        move |d: &mut Value| {
+            for step in [
+                json!({
+                    "id": "s3", "leg": "B", "op": "send", "early": "f1",
+                    "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s2", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s4", "leg": "B", "op": "expect", "check": "record", "auto": true,
+                    "in_dialog": true, "confirms_dialog": first_marked,
+                    "msg": { "method": "ACK", "cseq": 1 },
+                    "delay": { "ms": 0, "from": "step:s3", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s5", "leg": "B", "op": "send", "early": "f2", "in_dialog": true,
+                    "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s4", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s6", "leg": "B", "op": "expect", "check": "record", "auto": true,
+                    "in_dialog": true, "confirms_dialog": second_marked, "early": "f2",
+                    "msg": { "method": "ACK", "cseq": 1 },
+                    "delay": { "ms": 0, "from": "step:s5", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s7", "leg": "B", "op": "expect", "check": "assert", "in_dialog": true,
+                    "msg": { "method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s6", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s8", "leg": "B", "op": "send", "in_dialog": true,
+                    "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s7", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s9", "leg": "B", "op": "expect", "check": "record", "auto": true, "in_dialog": true,
+                    "msg": { "method": "ACK", "cseq": 2 },
+                    "delay": { "ms": 0, "from": "step:s8", "compressible": true, "timer_linked": false }
+                }),
+            ] {
+                flow(d).push(step);
+            }
+        }
+    };
+    let report = broken(answered_twice(true, true));
+    assert!(!report.has_errors(), "{}", report.render());
+    assert_fires("in-dialog/confirm-missing", answered_twice(false, true));
+    assert_fires("in-dialog/confirm-missing", answered_twice(true, false));
+    assert_fires("in-dialog/confirm-duplicate", |d| {
+        answered_twice(true, true)(d);
+        flow(d)[8]["confirms_dialog"] = json!(true);
+    });
+}
+
+/// The same two dialogs seen from the leg that RECEIVES the forks: the 2xx
+/// expects name the observed forks, and the ACKs the leg sends name none — a
+/// request send names a fork only where it rides one (§6.1) — so each ACK
+/// pairs with its dialog by the 2xx it discharges as leg state holds it
+/// (RFC 3261 §13.2.2.4), and each carries the marker.
+#[test]
+fn each_observed_fork_is_confirmed_by_the_unnamed_ack_that_discharges_its_2xx() {
+    let forked = |first_marked: bool, second_marked: bool| {
+        move |d: &mut Value| {
+            for step in [
+                json!({
+                    "id": "s3", "leg": "A", "op": "expect", "check": "assert", "early": "f1",
+                    "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s2", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s4", "leg": "A", "op": "send", "auto": true,
+                    "in_dialog": true, "confirms_dialog": first_marked,
+                    "msg": { "method": "ACK", "cseq": 1 },
+                    "delay": { "ms": 0, "from": "step:s3", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s5", "leg": "A", "op": "expect", "check": "assert", "early": "f2", "in_dialog": true,
+                    "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                    "delay": { "ms": 0, "from": "step:s4", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s6", "leg": "A", "op": "send", "auto": true,
+                    "in_dialog": true, "confirms_dialog": second_marked,
+                    "msg": { "method": "ACK", "cseq": 1 },
+                    "delay": { "ms": 0, "from": "step:s5", "compressible": true, "timer_linked": false }
+                }),
+                json!({
+                    "id": "s7", "leg": "A", "op": "send", "in_dialog": true,
+                    "msg": { "method": "BYE" },
+                    "delay": { "ms": 0, "from": "step:s6", "compressible": true, "timer_linked": false }
+                }),
+            ] {
+                flow(d).push(step);
+            }
+        }
+    };
+    let report = broken(forked(true, true));
+    assert!(!report.has_errors(), "{}", report.render());
+    assert_fires("in-dialog/confirm-missing", forked(true, false));
+    assert_fires("in-dialog/confirm-missing", forked(false, true));
+    // A re-INVITE's 2xx inside the second dialog opens no third dialog, so
+    // its ACK marked is a second marker on the second dialog.
+    assert_fires("in-dialog/confirm-duplicate", |d| {
+        forked(true, true)(d);
+        for step in [
+            json!({
+                "id": "s8", "leg": "A", "op": "send", "in_dialog": true,
+                "msg": { "method": "INVITE" },
+                "delay": { "ms": 0, "from": "step:s7", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s9", "leg": "A", "op": "expect", "check": "assert", "in_dialog": true,
+                "msg": { "status": 200, "reason": "OK", "cseq-method": "INVITE" },
+                "delay": { "ms": 0, "from": "step:s8", "compressible": true, "timer_linked": false }
+            }),
+            json!({
+                "id": "s10", "leg": "A", "op": "send", "auto": true,
+                "in_dialog": true, "confirms_dialog": true,
+                "msg": { "method": "ACK", "cseq": 2 },
+                "delay": { "ms": 0, "from": "step:s9", "compressible": true, "timer_linked": false }
+            }),
+        ] {
+            flow(d).push(step);
+        }
+    });
+}
+
 /// Two forks answered before either ACK arrives: the fork tag, not the order
 /// of the ACKs, pairs each ACK with the 2xx it answers, in either order.
 #[test]

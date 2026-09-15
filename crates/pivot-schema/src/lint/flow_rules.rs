@@ -139,7 +139,7 @@ fn confirms_dialog_marking(index: &Index<'_>, report: &mut Report) {
             );
             continue;
         }
-        let Some(dialog) = dialog_of(&dialogs, step, *place) else {
+        let Some(dialog) = dialog_of(&all, &dialogs, step, *place) else {
             report.error(
                 "in-dialog/confirm-outside-dialog",
                 &path,
@@ -194,16 +194,17 @@ struct Dialog<'a> {
 /// Every dialog the document opens: a `2xx` to an INVITE that no earlier `2xx`
 /// to an INVITE on the same leg AND the same fork precedes. Under forking each
 /// answered fork mints its own dialog on the one leg, so the fork tag is part of
-/// the identity; a re-INVITE's `2xx` names the fork its dialog rings on and so
-/// opens nothing.
+/// the identity; a re-INVITE's `2xx` names the fork its dialog rings on, or
+/// names none inside a dialog already up, and either way opens nothing.
 ///
 /// The ACK answering the final is the one that DISCHARGES its transaction as
 /// the leg's state holds it (`lint::transactions`): a re-INVITE sent over the
 /// un-ACKed 2xx is answered 491 (RFC 3261 §14.1) and its ACK is that
 /// transaction's own (§17.1.1.3), so it runs first and confirms nothing. Under
-/// forking the fork tag pairs instead: each answered fork's 2xx is its own
-/// final owed its own ACK (§13.2.2.4), and the ACK naming the fork is the one
-/// that answers it, whatever order the ACKs run in.
+/// forking each answered fork's 2xx is its own final owed its own ACK
+/// (§13.2.2.4), and an ACK that names a fork pairs by the tag, whatever order
+/// the ACKs run in; an ACK naming none — one the leg sends, which names no
+/// fork (§6.1) — pairs with the fork's 2xx it discharges.
 fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
     let creating: Vec<(Place, &'a Step)> =
         all.iter().filter(|(_, step)| is_dialog_creating(step)).copied().collect();
@@ -213,7 +214,7 @@ fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
             !creating.iter().any(|(other_place, other)| {
                 other.id != step.id
                     && other.leg == step.leg
-                    && other.early.as_deref() == step.early.as_deref()
+                    && (step.early.is_none() || other.early == step.early)
                     && reach(*other_place, *place) == Reach::Ok
             })
         })
@@ -231,14 +232,13 @@ fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
             });
             let fork = step.early.as_deref();
             let transaction = landing_of(all, step, *place);
-            let answers = |ack: &Step, ack_place: Place| {
-                if forked {
-                    ack.early.as_deref() == fork
-                } else {
-                    discharged_by(all, ack, ack_place).is_some_and(|discharge| {
-                        discharge.transaction == transaction && is_dialog_creating(discharge.final_)
-                    })
-                }
+            let answers = |ack: &Step, ack_place: Place| match (forked, ack.early.as_deref()) {
+                (true, Some(named)) => Some(named) == fork,
+                (true, None) => discharged_by(all, ack, ack_place)
+                    .is_some_and(|discharge| discharge.final_.id == step.id),
+                (false, _) => discharged_by(all, ack, ack_place).is_some_and(|discharge| {
+                    discharge.transaction == transaction && is_dialog_creating(discharge.final_)
+                }),
             };
             let confirming = all
                 .iter()
@@ -262,17 +262,31 @@ fn dialogs<'a>(all: &[(Place, &'a Step)]) -> Vec<Dialog<'a>> {
 }
 
 /// The dialog a marked ACK belongs to: the latest one its own run opened on its
-/// leg, and under forking the one it names.
+/// leg, and under forking the one it names — or, naming none, the one whose
+/// 2xx it discharges, else the latest as on an unforked leg.
 fn dialog_of<'a, 'd>(
+    all: &[(Place, &'a Step)],
     dialogs: &'d [Dialog<'a>],
     step: &Step,
     place: Place,
 ) -> Option<&'d Dialog<'a>> {
-    dialogs.iter().rfind(|dialog| {
-        dialog.leg == step.leg
-            && reach(dialog.place, place) == Reach::Ok
-            && (!dialog.forked || dialog.fork == step.early.as_deref())
-    })
+    let on_leg =
+        |dialog: &&Dialog<'a>| dialog.leg == step.leg && reach(dialog.place, place) == Reach::Ok;
+    match step.early.as_deref() {
+        Some(named) => dialogs
+            .iter()
+            .rfind(|dialog| on_leg(dialog) && (!dialog.forked || dialog.fork == Some(named))),
+        None => {
+            let discharged =
+                discharged_by(all, step, place).map(|discharge| discharge.final_.id.as_str());
+            dialogs
+                .iter()
+                .rfind(|dialog| {
+                    on_leg(dialog) && (!dialog.forked || Some(dialog.final_id) == discharged)
+                })
+                .or_else(|| dialogs.iter().rfind(on_leg))
+        }
+    }
 }
 
 /// Where a transaction-derived message may carry a STORED body (§6.3).

@@ -379,7 +379,7 @@ export const synthesize = (
       }
     }
   })
-  stampInDialog(steps)
+  stampInDialog(steps, sources.map((src) => capturedToTag(flows, src)))
   stampOverlaps(steps, delays.map((d) => d.derived))
 
   // After `in_dialog`, which is what says where an early dialog stops.
@@ -435,6 +435,10 @@ export const synthesize = (
 
 const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
 
+/** The To-tag the captured message behind a step carries, where it carries one. */
+const capturedToTag = (flows: Flows.FlowsDoc, src: StepSource): string | undefined =>
+  flows.legs[src.origLeg]?.msgs[src.msgIdx]?.summary.to.tag ?? undefined
+
 /**
  * Mark every step that runs after its leg's DIALOG-CREATING FINAL — the first
  * 2xx to an INVITE on that leg (§6.1). Strictly after: the dialog exists once
@@ -448,15 +452,19 @@ const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
  * dialog (§12.2), so a 200 to a CANCEL that crossed the answer is a race and not
  * a renegotiation.
  *
- * The ACK that ANSWERS the dialog-creating final takes `confirms_dialog` beside
+ * The ACK that ANSWERS a dialog-creating final takes `confirms_dialog` beside
  * its `in_dialog`: the ACK that DISCHARGES that final as the leg's state holds
  * it ({@link inviteTransactions}). A re-INVITE sent over the un-ACKed 2xx is
  * answered 491 (RFC 3261 §14.1) and its ACK is that transaction's own
  * (§17.1.1.3): it runs first and confirms nothing, and the 2xx's ACK behind it
  * is the confirming one. A re-INVITE's ACK stays plain `in_dialog`; an ACK to
  * a non-2xx final takes neither marker.
- * FIXME(fork): the spec wants one confirming ACK per answered fork; the cut
- * names no fork on an in-dialog step, so it stamps once per leg.
+ *
+ * The marker is stated once per DIALOG, and a dialog is the leg and the To-tag
+ * its 2xx carries (RFC 3261 §12.1.1): an INVITE answered 2xx under two tags is
+ * two dialogs, each ACKed (§13.2.2.4), so the ACK discharging the second
+ * fork's 2xx confirms too. `tags` is parallel to `steps`, the captured To-tag
+ * of each; a flow stating none is read as one dialog per leg.
  *
  * A generated flow is FLAT — `alt` is authored-only — so document order is run
  * order and one forward pass states the whole rule. A lane delta may reorder
@@ -464,8 +472,13 @@ const TRIGGER = Tokens.anchorToken({ _tag: "trigger" })
  * it answers, which is at or after its own leg's dialog-creating final, and it
  * moves the step OBJECT, so both markers ride along.
  */
-export const stampInDialog = (steps: Array<StepDraft>): void => {
+export const stampInDialog = (
+  steps: Array<StepDraft>,
+  tags: ReadonlyArray<string | undefined> = []
+): void => {
   const { landings, discharges } = inviteTransactions(steps)
+  /** By step id, the dialog its captured message rides: the leg and the To-tag. */
+  const dialogOf = new Map(steps.map((step, i) => [step.id, `${step.leg} ${tags[i] ?? ""}`]))
   /** Per leg, the transaction whose 2xx created the dialog. */
   const creating = new Map<string, InviteTransaction<StepDraft>>()
   const confirmed = new Set<string>()
@@ -475,11 +488,13 @@ export const stampInDialog = (steps: Array<StepDraft>): void => {
     if (
       discharged !== undefined &&
       discharged.transaction === creating.get(step.leg) &&
-      isDialogCreatingFinal(discharged.final) &&
-      !confirmed.has(step.leg)
+      isDialogCreatingFinal(discharged.final)
     ) {
-      step.confirms_dialog = true
-      confirmed.add(step.leg)
+      const dialog = dialogOf.get(discharged.final.id)!
+      if (!confirmed.has(dialog)) {
+        step.confirms_dialog = true
+        confirmed.add(dialog)
+      }
     }
     if (isDialogCreatingFinal(step) && !creating.has(step.leg)) {
       creating.set(step.leg, landings.get(step.id)!)

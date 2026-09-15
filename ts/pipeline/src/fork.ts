@@ -29,9 +29,14 @@
  * are separate ORIGINAL legs and a pivot leg is one of them.
  *
  * **A confirmed dialog is not an early one.** Stamping stops at the leg's
- * dialog-creating final: past it the leg has adopted the fork's tag as its own
- * (RFC 3261 §12.2.1.1) and `in_dialog` is what says so. The 2xx itself is the
- * fork answering and carries the name.
+ * dialog-creating final: past it `in_dialog` says the step rides the dialog
+ * the leg confirmed, and the fork that answered needs no name. Two steps past
+ * it still name theirs, because they open and confirm a FURTHER dialog on the
+ * leg: a later fork's own 2xx to the forked INVITE — every 2xx to an INVITE
+ * is a dialog of its own that the UAC ACKs (RFC 3261 §13.2.2.4) — and the ACK
+ * the leg EXPECTS for it, whose To-tag says which dialog it answers. An ACK
+ * the leg SENDS is composed from the final it discharges and names none, like
+ * every other request send that rides no early dialog.
  */
 import { Flows } from "@sip/contracts"
 import type { StepDraft } from "./draft.js"
@@ -75,18 +80,44 @@ const toTag = (msg: Flows.Msg | undefined): string | undefined => msg?.summary.t
 /** Whether the captured message answers an INVITE transaction. */
 const answersInvite = (msg: Flows.Msg): boolean => Flows.isResponseTo(msg, "INVITE")
 
+/** Whether the captured message is a 2xx to an INVITE: a dialog-creating final. */
+const createsDialog = (msg: Flows.Msg): boolean =>
+  msg.summary.kind === "response" &&
+  answersInvite(msg) &&
+  msg.summary.status >= 200 &&
+  msg.summary.status < 300
+
+/**
+ * The INVITE transaction of the leg a message belongs to, as {@link txnKey}
+ * names it: a response travels opposite to the INVITE it answers, an ACK
+ * travels with it.
+ */
+const transactionOf = (step: StepDraft, msg: Flows.Msg): string => {
+  const sentByAgent = msg.summary.kind === "response" ? step.op === "expect" : step.op === "send"
+  return txnKey(msg.summary.cseq.seq, sentByAgent)
+}
+
 /**
  * Whether a step may name the fork its captured message rode.
  *
- * A step already inside a confirmed dialog names none, and a request the leg
- * SENDS names one only where the method rides an early dialog: a plan refuses
- * `early` on any other request send, because such a send consumes a fork's tag
- * without a dialog to consume it from.
+ * A request the leg SENDS names one only where the method rides an early
+ * dialog: a plan refuses `early` on any other request send, because such a
+ * send consumes a fork's tag without a dialog to consume it from. A step
+ * already inside a confirmed dialog names none, but for the two that open and
+ * confirm a FURTHER dialog on the leg: a 2xx to the forked INVITE under a tag
+ * other than the first 2xx's — a later fork answering, its own dialog
+ * (RFC 3261 §13.2.2.4) — and the ACK the leg expects for it, which the To-tag
+ * pairs with its dialog. `furtherDialog` says whether the message is one of
+ * those: of the forked INVITE transaction, under a tag the leg was not first
+ * answered under.
  */
-const nameable = (step: StepDraft, msg: Flows.Msg): boolean => {
-  if (step.in_dialog === true) return false
-  if (msg.summary.kind !== "request") return true
-  return step.op !== "send" || RIDES_EARLY.has(msg.summary.method.toUpperCase())
+const nameable = (step: StepDraft, msg: Flows.Msg, furtherDialog: boolean): boolean => {
+  if (msg.summary.kind === "request") {
+    const method = msg.summary.method.toUpperCase()
+    if (step.op === "send") return RIDES_EARLY.has(method)
+    return step.in_dialog !== true || (method === "ACK" && furtherDialog)
+  }
+  return step.in_dialog !== true || (createsDialog(msg) && furtherDialog)
 }
 
 /**
@@ -119,12 +150,15 @@ export const stampEarlyDialogs = (
 
   /** `<leg> <tag>` -> the id it took, for every tag of a FORKED transaction. */
   const named = new Map<string, string>()
+  /** `<leg> <transaction>` of every FORKED transaction. */
+  const forked = new Set<string>()
   const forks: Array<Fork> = []
   for (const [leg, perTransaction] of rang) {
     const ordered = [...perTransaction.values()]
       .sort((a, b) => a.seq - b.seq || Number(a.sentByAgent) - Number(b.sentByAgent))
-    for (const { tags } of ordered) {
+    for (const { seq, sentByAgent, tags } of ordered) {
       if (tags.length < 2) continue
+      forked.add(`${leg} ${txnKey(seq, sentByAgent)}`)
       for (const tag of tags) {
         const early = `f${forks.length + 1}`
         named.set(`${leg} ${tag}`, early)
@@ -135,12 +169,18 @@ export const stampEarlyDialogs = (
   if (forks.length === 0) return []
 
   const rode = new Map(forks.map((f) => [f.early, [] as Array<string>]))
+  /** Per leg, the tag its first dialog-creating 2xx answered under. */
+  const answered = new Map<string, string>()
   for (const [i, step] of steps.entries()) {
     const msg = msgOf(flows, sources[i])
     const tag = toTag(msg)
     if (msg === undefined || tag === undefined) continue
+    if (createsDialog(msg) && !answered.has(step.leg)) answered.set(step.leg, tag)
     const early = named.get(`${step.leg} ${tag}`)
-    if (early === undefined || !nameable(step, msg)) continue
+    if (early === undefined) continue
+    const furtherDialog =
+      forked.has(`${step.leg} ${transactionOf(step, msg)}`) && answered.get(step.leg) !== tag
+    if (!nameable(step, msg, furtherDialog)) continue
     step.early = early
     rode.get(early)!.push(step.id)
   }

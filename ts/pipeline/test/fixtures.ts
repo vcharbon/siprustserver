@@ -356,6 +356,58 @@ export const reInviteFlows = (): Flows.FlowsDoc =>
     [{ legs: [0] }]
   )
 
+/** The two dialogs each leg of {@link twoForksAnsweredFlows} is answered under. */
+export const FORK_TAGS = {
+  caller: { first: "sut-fork-a", second: "sut-fork-b" },
+  callee: { first: "callee-fork-a", second: "callee-fork-b" }
+} as const
+
+/**
+ * One INVITE answered 2xx under TWO To-tags, on both legs of a relayed call:
+ * two forks ring, then each answers. RFC 3261 §13.2.2.4 makes every 2xx to the
+ * INVITE a dialog of its own that the UAC ACKs, so each leg carries two
+ * dialog-creating finals and two confirming ACKs; the caller then re-INVITEs
+ * the second dialog (seq 2), whose 200 and ACK sit inside a dialog already up,
+ * and BYEs it. The callee leg carries the same shape from the answering side.
+ */
+export const twoForksAnsweredFlows = (): Flows.FlowsDoc => {
+  const a = FORK_TAGS.caller
+  const b = FORK_TAGS.callee
+  return doc(
+    [
+      leg(CALLER_CALL_ID, oneHop(CALLER, SUT), [
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 0 }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 200, toTag: a.first }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 400, toTag: a.second }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_000, toTag: a.first }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_010, toTag: a.first, branch: "z9hG4bK-ack-a-first" }),
+        response({ callId: CALLER_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 1_200, toTag: a.second }),
+        request({ callId: CALLER_CALL_ID, seq: 1, method: "ACK", src: CALLER, dst: SUT, ts_ms: 1_210, toTag: a.second, branch: "z9hG4bK-ack-a-second" }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "INVITE", src: CALLER, dst: SUT, ts_ms: 3_000, toTag: a.second }),
+        response({ callId: CALLER_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "INVITE", src: SUT, dst: CALLER, ts_ms: 3_010, toTag: a.second }),
+        request({ callId: CALLER_CALL_ID, seq: 2, method: "ACK", src: CALLER, dst: SUT, ts_ms: 3_015, toTag: a.second, branch: "z9hG4bK-ack-a-reinvite" }),
+        request({ callId: CALLER_CALL_ID, seq: 3, method: "BYE", src: CALLER, dst: SUT, ts_ms: 9_000, toTag: a.second }),
+        response({ callId: CALLER_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: SUT, dst: CALLER, ts_ms: 9_005, toTag: a.second })
+      ]),
+      leg(CALLEE_CALL_ID, oneHop(SUT, CALLEE), [
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 10 }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 190, toTag: b.first }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 390, toTag: b.second }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 990, toTag: b.first }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_020, toTag: b.first, branch: "z9hG4bK-ack-b-first" }),
+        response({ callId: CALLEE_CALL_ID, seq: 1, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 1_190, toTag: b.second }),
+        request({ callId: CALLEE_CALL_ID, seq: 1, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 1_220, toTag: b.second, branch: "z9hG4bK-ack-b-second" }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "INVITE", src: SUT, dst: CALLEE, ts_ms: 3_005, toTag: b.second }),
+        response({ callId: CALLEE_CALL_ID, seq: 2, status: 200, reason: "OK", cseqMethod: "INVITE", src: CALLEE, dst: SUT, ts_ms: 3_008, toTag: b.second }),
+        request({ callId: CALLEE_CALL_ID, seq: 2, method: "ACK", src: SUT, dst: CALLEE, ts_ms: 3_020, toTag: b.second, branch: "z9hG4bK-ack-b-reinvite" }),
+        request({ callId: CALLEE_CALL_ID, seq: 3, method: "BYE", src: SUT, dst: CALLEE, ts_ms: 9_010, toTag: b.second }),
+        response({ callId: CALLEE_CALL_ID, seq: 3, status: 200, reason: "OK", cseqMethod: "BYE", src: CALLEE, dst: SUT, ts_ms: 9_015, toTag: b.second })
+      ])
+    ],
+    [{ legs: [0, 1] }]
+  )
+}
+
 /**
  * A re-INVITE sent OVER an un-ACKed 2xx, on both legs of a relayed call. The
  * caller re-INVITEs (seq 2) before ACKing the dialog-creating 200 (seq 1); the

@@ -15,13 +15,15 @@ import {
   CALLER_URI,
   derivesOnePrefix,
   doc,
+  FORK_TAGS,
   leg,
   oneHop,
   plan,
   request,
   response,
   SOCKETS,
-  sutSet
+  sutSet,
+  twoForksAnsweredFlows
 } from "./fixtures.js"
 
 const BOTH_VANTAGES: ReadonlyArray<Vantage> = [
@@ -184,6 +186,62 @@ describe("early dialogs", () => {
     const flag = flow.flags.find((f) => f.kind === "early-dialogs-named")
     expect(flag?.detail).toContain(FORK_A)
     expect(flag?.detail).toContain(RELAY_B)
+  })
+
+  // One INVITE answered 2xx under two To-tags is two dialogs, each ACKed
+  // (RFC 3261 §13.2.2.4): the second fork's 2xx creates a FURTHER dialog past
+  // the leg's first one, so it is named even though it sits inside a confirmed
+  // dialog, and so is the ACK the leg EXPECTS for it. The first fork's ACK
+  // rides the dialog `in_dialog` states and needs no name; an ACK the leg
+  // SENDS names none — a request send names a fork only where it rides one —
+  // and nothing inside the dialogs (the re-INVITE round, the BYE) is named.
+  describe("a leg answered 2xx under two To-tags", () => {
+    const flow = flowOf(twoForksAnsweredFlows())
+    const on = (l: string) => flow.steps.filter((s) => s.leg === l)
+    const finals = (l: string) =>
+      on(l).filter((s) => s.msg.status === 200 && s.msg["cseq-method"] === "INVITE")
+    const acks = (l: string) => on(l).filter((s) => s.msg.method === "ACK")
+
+    it("names each fork's 2xx, the second one inside the confirmed dialog", () => {
+      for (const l of ["A", "B"]) {
+        const [first, second, reInvite] = finals(l)
+        expect(first!.early, `${l}: the first fork's 2xx`).toBeDefined()
+        expect(first!.early).toBe(on(l).find((s) => s.msg.status === 180)!.early)
+        expect(second!.early, `${l}: the second fork's 2xx`).toBeDefined()
+        expect(second!.early).toBe(on(l).filter((s) => s.msg.status === 180)[1]!.early)
+        expect(second!.in_dialog, `${l}: after the leg's first dialog-creating final`).toBe(true)
+        expect(reInvite!.early, `${l}: a re-INVITE's 2xx rides the dialog it is in`).toBeUndefined()
+      }
+    })
+
+    it("names the ACK the leg expects for the second fork, and no ACK it sends", () => {
+      // The callee leg is where the actor expects the ACKs.
+      const [toFirst, toSecond, toReInvite] = acks("B")
+      const [, second] = finals("B")
+      expect(toFirst!.op).toBe("expect")
+      expect(toFirst!.early, "the ACK confirming the dialog the leg is in").toBeUndefined()
+      expect(toSecond!.early, "the ACK confirming the second fork").toBe(second!.early)
+      expect(toReInvite!.early, "a re-INVITE's ACK").toBeUndefined()
+      for (const ack of acks("A")) {
+        expect(ack.op).toBe("send")
+        expect(ack.early, `${ack.id}: an ACK the leg sends`).toBeUndefined()
+      }
+    })
+
+    it("names nothing else inside the dialogs", () => {
+      for (const l of ["A", "B"]) {
+        const inside = on(l).filter((s) => s.msg.method === "BYE" || s.msg["cseq-method"] === "BYE")
+        expect(inside).toHaveLength(2)
+        for (const s of inside) expect(s.early, `${s.id}`).toBeUndefined()
+      }
+    })
+
+    it("reports both dialogs of each leg with the tags the capture answered under", () => {
+      const flag = flow.flags.find((f) => f.kind === "early-dialogs-named")
+      for (const tag of [...Object.values(FORK_TAGS.caller), ...Object.values(FORK_TAGS.callee)]) {
+        expect(flag?.detail).toContain(tag)
+      }
+    })
   })
 
   it("names nothing where a leg's two CSeq spaces collide on one number", () => {

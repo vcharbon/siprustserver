@@ -25,6 +25,7 @@ import {
   response,
   SOCKETS,
   sutSet,
+  twoForksAnsweredFlows,
   withoutRepeatOf
 } from "./fixtures.js"
 
@@ -529,6 +530,27 @@ describe("dialog markers", () => {
       expect(final!.in_dialog).toBeUndefined()
       expect(onLeg.slice(2).every((s) => s.in_dialog === true)).toBe(true)
       expect(onLeg.filter((s) => s.confirms_dialog === true)).toHaveLength(1)
+    }
+  })
+
+  // A 2xx under a second To-tag to the same INVITE is a second dialog, and the
+  // UAC ACKs it too (RFC 3261 §13.2.2.4): the marker is stated once per
+  // DIALOG, so a leg answered under two tags carries it twice — on the ACK to
+  // each fork's 2xx — and not on the re-INVITE's ACK inside the second one.
+  it("confirms each fork's dialog on the ACK to its own 2xx", () => {
+    const flow = flowOf(twoForksAnsweredFlows(), BOTH_VANTAGES)
+    for (const legId of ["A", "B"]) {
+      const onLeg = flow.steps.filter((s) => s.leg === legId)
+      const acks = onLeg.filter((s) => (s.msg.method ?? "").toUpperCase() === "ACK")
+      expect(acks.map((s) => s.msg.cseq)).toEqual([1, 1, 2])
+      const [toFirst, toSecond, toReInvite] = acks
+      expect(toFirst!.confirms_dialog, `${legId}: the ACK to the first fork's 2xx`).toBe(true)
+      expect(toSecond!.confirms_dialog, `${legId}: the ACK to the second fork's 2xx`).toBe(true)
+      expect(toReInvite!.confirms_dialog, `${legId}: the re-INVITE's ACK`).toBeUndefined()
+      // The second fork's 2xx runs after the leg's first dialog-creating
+      // final, so it is in-dialog like everything behind it.
+      const secondFinal = onLeg.filter((s) => s.msg.status === 200 && s.msg["cseq-method"] === "INVITE")[1]!
+      expect(secondFinal.in_dialog).toBe(true)
     }
   })
 })
