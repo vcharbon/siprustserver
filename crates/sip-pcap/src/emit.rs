@@ -8,8 +8,8 @@
 use sip_message::SipMessage;
 
 use crate::doc::{
-    CSeqJson, DecodeStatsJson, Evidence, FlowStatsJson, FlowsDoc, GroupJson, HopJson, InviteJson,
-    LegJson, MsgJson, Party, Payload, Summary,
+    AlignedProbeJson, CSeqJson, DecodeStatsJson, Evidence, FlowStatsJson, FlowsDoc, GroupJson,
+    HopJson, InviteJson, LegJson, MsgJson, Party, Payload, Summary,
 };
 use crate::enrich::{enrich, EnrichOptions};
 use crate::flow::{CallGroup, FlowLeg, FlowMsg, Flows, MatchEvidence};
@@ -68,6 +68,18 @@ pub fn flows_to_doc_selected(
             capture_dups: flows.stats.capture_dups,
             parse_failed: flows.stats.parse_failed,
             non_sip: flows.stats.non_sip,
+            aligned_probes: flows
+                .stats
+                .aligned_probes
+                .iter()
+                .map(|a| AlignedProbeJson {
+                    probe: a.probe,
+                    reference: a.reference,
+                    from_us: a.from_us,
+                    offset_us: a.offset_us,
+                    pairs: a.pairs as u64,
+                })
+                .collect(),
         },
         legs: keep.iter().map(|&l| leg_json(&flows.legs[l])).collect(),
         groups: groups

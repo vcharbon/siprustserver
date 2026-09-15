@@ -207,6 +207,20 @@ describe("hops", () => {
   })
 })
 
+describe("flow stats", () => {
+  it("reads the probes the extractor rebased, and their absence as none", () => {
+    const doc = wrap({ ...base, raw: "X" }) as { flow_stats: Record<string, unknown> }
+    expect(decodeFlowsSync(doc).flow_stats.aligned_probes).toBeUndefined()
+    doc.flow_stats = {
+      ...doc.flow_stats,
+      aligned_probes: [{ probe: 1, reference: 2, from_us: 0, offset_us: 248_000, pairs: 12 }]
+    }
+    expect(decodeFlowsSync(doc).flow_stats.aligned_probes).toEqual([
+      { probe: 1, reference: 2, from_us: 0, offset_us: 248_000, pairs: 12 }
+    ])
+  })
+})
+
 describe("a leniently decoded document", () => {
   it("carries an unknown field through rather than refusing it", () => {
     const grown: Record<string, unknown> = { ...(wrap({ ...base, raw: "X" }) as object) }

@@ -61,6 +61,29 @@ pub struct FlowStatsJson {
     pub capture_dups: u64,
     pub parse_failed: u64,
     pub non_sip: u64,
+    /// Probes rebased onto another probe's clock before the dedup: a merged
+    /// capture whose probes' clocks disagreed by more than the window, the
+    /// copies then counted in `capture_dups`. Absent when no probe moved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aligned_probes: Vec<AlignedProbeJson>,
+}
+
+/// One stretch of one probe's clock put on another's
+/// ([`crate::align::ProbeOffset`]).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlignedProbeJson {
+    /// The probe whose timestamps were moved.
+    pub probe: u32,
+    /// The probe whose clock it now shares.
+    pub reference: u32,
+    /// The timestamp `probe` wrote from which this offset applies, on its own
+    /// clock (`0`: from the start), until the probe's next entry.
+    pub from_us: u64,
+    /// Microseconds subtracted from every timestamp `probe` wrote in the
+    /// stretch; negative where its clock ran behind the reference's.
+    pub offset_us: i64,
+    /// Shared datagrams whose delta agreed with the offset.
+    pub pairs: u64,
 }
 
 /// All messages sharing one Call-ID, split by observation hop.

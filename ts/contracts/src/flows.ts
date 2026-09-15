@@ -37,12 +37,29 @@ export const DecodeStats = Schema.Struct({
 })
 export interface DecodeStats extends Schema.Schema.Type<typeof DecodeStats> {}
 
+/**
+ * One stretch of one probe of a merged capture put on another probe's clock
+ * before the dedup: from `from_us` on the probe's own clock (`0`: the start)
+ * until its next entry, `offset_us` was subtracted from every timestamp `probe`
+ * wrote, on the evidence of `pairs` datagrams both probes wrote at that offset.
+ */
+export const AlignedProbe = Schema.Struct({
+  probe: Schema.Int,
+  reference: Schema.Int,
+  from_us: Schema.Int,
+  offset_us: Schema.Int,
+  pairs: Schema.Int
+})
+export interface AlignedProbe extends Schema.Schema.Type<typeof AlignedProbe> {}
+
 /** SIP-classification counters over the decoded datagrams. */
 export const FlowStats = Schema.Struct({
   sip_messages: Schema.Int,
   capture_dups: Schema.Int,
   parse_failed: Schema.Int,
-  non_sip: Schema.Int
+  non_sip: Schema.Int,
+  /** Absent when no probe moved — a single-probe capture, or probes the window already reads as one. */
+  aligned_probes: Schema.optionalKey(Schema.Array(AlignedProbe))
 })
 export interface FlowStats extends Schema.Schema.Type<typeof FlowStats> {}
 

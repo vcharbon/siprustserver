@@ -404,6 +404,16 @@ fn main() {
         flows.groups.len(),
         selected.len(),
     );
+    for a in &flows.stats.aligned_probes {
+        eprintln!(
+            "# aligned-probe={} reference={} from-us={} offset-ms={:.3} pairs={}",
+            a.probe,
+            a.reference,
+            a.from_us,
+            a.offset_us as f64 / 1000.0,
+            a.pairs
+        );
+    }
 
     // The review is over EVERY selected group, whatever `--limit` prints: the
     // limit bounds the reader's screen, not the question.

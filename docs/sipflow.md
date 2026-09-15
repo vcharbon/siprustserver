@@ -49,7 +49,15 @@ The review runs over every selected group whatever `--limit` prints.
 
 Capture-stack duplicates (same bytes within 200 ms) are collapsed at ingest and
 counted as `capture-dups`; a transaction's own retransmissions are marked and
-skipped by the rules. Neither is a flag.
+skipped by the rules. Neither is a flag. A merged capture whose probes' clocks
+disagree by more than that is aligned first: the offset between two probes is
+measured on the datagrams both wrote (three at least, paired rung by rung, one
+of them an ACK or a response to a non-INVITE — a class that never retransmits,
+so its two copies are one packet and not a ladder split between the probes),
+the later clock is rebased by it, and the copies collapse as capture-stack
+duplicates. A clock that steps mid-capture is measured stretch by stretch. Each
+stretch is one `# aligned-probe=… reference=… from-us=… offset-ms=… pairs=…`
+line and a `flow_stats.aligned_probes` entry of the document.
 
 ## A document back into a capture
 

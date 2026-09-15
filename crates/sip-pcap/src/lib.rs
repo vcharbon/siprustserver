@@ -16,11 +16,13 @@
 //! or odd capture must be visible rather than silently thinning the callflow.
 //!
 //! Container and frame decoding are this module tree's whole concern. On top
-//! of it sit three separable phases: [`flow`] correlates legs into calls,
+//! of it sit three separable phases: [`flow`] correlates legs into calls
+//! (after [`align`] has put a merged capture's probes on one clock),
 //! [`query`] selects and projects the calls answering a question (over the
 //! transaction view in [`txn`]), and [`emit`] serializes the model. The
 //! `sipflow` bin is a presenter over all four.
 
+pub mod align;
 mod bytes;
 mod callfacts;
 mod classic;
