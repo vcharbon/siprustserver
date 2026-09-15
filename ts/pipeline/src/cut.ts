@@ -110,6 +110,23 @@ export const boundaryHops = (leg: Flows.Leg, sut: SutSet): ReadonlyArray<number>
     .filter((i) => i >= 0)
 
 /**
+ * The correlation of one capture, built ONCE and read by every consumer: the
+ * families, and the derivation edges they were closed over.
+ *
+ * Built once because the cut is otherwise cubic in calls — a capture of
+ * thousands of concurrent dialogs yields hundreds of cases, and a consumer that
+ * re-correlated the document per case would spend cases × legs² on it.
+ */
+export interface Families {
+  /** Every family, ascending by first leg, each ascending. */
+  readonly families: ReadonlyArray<ReadonlyArray<number>>
+  /** The family `leg` belongs to. */
+  readonly familyOf: (leg: number) => ReadonlyArray<number>
+  /** Every leg whose Call-ID the derivation says `leg`'s was minted off. */
+  readonly basesOf: (leg: number) => ReadonlyArray<number>
+}
+
+/**
  * Correlation over every leg of the document: the transitive closure of the
  * derivation relation, and nothing else.
  *
@@ -120,11 +137,20 @@ export const boundaryHops = (leg: Flows.Leg, sut: SutSet): ReadonlyArray<number>
  * b-leg therefore leaves that b-leg on its own, and where the SUT only ever sent
  * it outward the cut reads it as `MISSING_UPSTREAM_LEG` — which is what the wire
  * shows from here.
+ *
+ * Linear in the legs: a derived Call-ID ENDS WITH its base (`./derivation.ts`),
+ * so the bases a leg can have are its Call-ID's proper suffixes, looked up in an
+ * index of every Call-ID, and the predicate is asked about those alone.
  */
-export const callFamilies = (
-  flows: Flows.FlowsDoc,
-  derives: CallIdDerivation
-): ReadonlyArray<ReadonlyArray<number>> => {
+export const correlate = (flows: Flows.FlowsDoc, derives: CallIdDerivation): Families => {
+  const byCallId = new Map<string, Array<number>>()
+  let shortest = Number.MAX_SAFE_INTEGER
+  flows.legs.forEach((leg, i) => {
+    const legs = byCallId.get(leg.call_id)
+    if (legs === undefined) byCallId.set(leg.call_id, [i])
+    else legs.push(i)
+    shortest = Math.min(shortest, leg.call_id.length)
+  })
   const parent = flows.legs.map((_, i) => i)
   const find = (i: number): number => {
     let r = i
@@ -136,22 +162,39 @@ export const callFamilies = (
     const rb = find(b)
     if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb)
   }
-  for (let i = 0; i < flows.legs.length; i++) {
-    for (let j = i + 1; j < flows.legs.length; j++) {
-      const ci = flows.legs[i]!.call_id
-      const cj = flows.legs[j]!.call_id
-      if (derives(ci, cj) || derives(cj, ci)) union(i, j)
+  const bases: Array<Array<number>> = flows.legs.map(() => [])
+  flows.legs.forEach((leg, i) => {
+    const id = leg.call_id
+    for (let cut = 1; id.length - cut >= shortest; cut++) {
+      const candidates = byCallId.get(id.slice(cut))
+      if (candidates === undefined || !derives(id.slice(cut), id)) continue
+      for (const base of candidates) {
+        bases[i]!.push(base)
+        union(base, i)
+      }
     }
-  }
+  })
   const by = new Map<number, Array<number>>()
+  const familyOf: Array<ReadonlyArray<number>> = []
   flows.legs.forEach((_, i) => {
     const r = find(i)
     const set = by.get(r) ?? []
     set.push(i)
     by.set(r, set)
+    familyOf[i] = set
   })
-  return [...by.values()].sort((a, b) => a[0]! - b[0]!)
+  return {
+    families: [...by.values()].sort((a, b) => a[0]! - b[0]!),
+    familyOf: (leg) => familyOf[leg] ?? [],
+    basesOf: (leg) => bases[leg] ?? []
+  }
 }
+
+/** The families alone, for a reader that needs nothing else of the correlation. */
+export const callFamilies = (
+  flows: Flows.FlowsDoc,
+  derives: CallIdDerivation
+): ReadonlyArray<ReadonlyArray<number>> => correlate(flows, derives).families
 
 interface Anchor {
   readonly leg: number
@@ -287,12 +330,13 @@ export const caseCallIds = (
   flows: Flows.FlowsDoc,
   sut: SutSet,
   legs: ReadonlyArray<number>,
-  derives: CallIdDerivation
+  families: Families
 ): ReadonlyArray<string> => {
-  const wanted = new Set(legs)
   const out = new Set<string>()
-  for (const family of callFamilies(flows, derives)) {
-    if (!family.some((i) => wanted.has(i))) continue
+  const wanted = [...new Set(legs.map((leg) => families.familyOf(leg)))].sort(
+    (a, b) => a[0]! - b[0]!
+  )
+  for (const family of wanted) {
     for (const i of family) {
       if (boundaryHops(flows.legs[i]!, sut).length > 0) out.add(flows.legs[i]!.call_id)
     }
@@ -469,7 +513,7 @@ export const cutCalls = (
   if (sut.size === 0) return { calls, refused, notCalls, notes }
 
   let minted = 0
-  for (const family of callFamilies(flows, derives)) {
+  for (const family of correlate(flows, derives).families) {
     const selected = family.filter((i) => boundaryHops(flows.legs[i]!, sut).length > 0)
     if (selected.length === 0) continue
     const anchors = selected.flatMap((i) => anchorsOf(flows, i, sut))

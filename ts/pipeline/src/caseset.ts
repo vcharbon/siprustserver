@@ -33,6 +33,7 @@
  */
 import type { AllowedErrors, Flows } from "@sip/contracts"
 import { assemble, type Assembled } from "./assemble.js"
+import { captureIndex, type CaptureIndex } from "./capture-index.js"
 import type { CaseSpec } from "./case-spec.js"
 import { caseCallIds } from "./cut.js"
 import type { PartsIndex } from "./parts.js"
@@ -87,6 +88,7 @@ export interface CaseSetInput {
 /** One spec assembled, or the reason it threw. Never both, never neither. */
 const build = (
   input: CaseSetInput,
+  index: CaptureIndex,
   spec: CaseSpec
 ): { readonly built: Assembled } | { readonly error: string } => {
   try {
@@ -98,6 +100,7 @@ const build = (
         sut: input.sut,
         plan: input.plan,
         policy: input.policy,
+        index,
         ...(input.parts === undefined ? {} : { parts: input.parts }),
         ...(input.allowed === undefined ? {} : { allowed: input.allowed })
       })
@@ -113,12 +116,13 @@ const build = (
  */
 const quarantineOf = (
   input: CaseSetInput,
+  index: CaptureIndex,
   spec: CaseSpec,
   already?: Assembled
 ): Pick<CaseOutcome, "quarantined" | "quarantineError"> => {
   if (input.quarantine !== true) return {}
   if (already !== undefined) return { quarantined: already }
-  const attempt = build(input, spec)
+  const attempt = build(input, index, spec)
   return "built" in attempt ? { quarantined: attempt.built } : { quarantineError: attempt.error }
 }
 
@@ -166,9 +170,12 @@ const onDocument = (
 
 export const decideCases = (input: CaseSetInput): CaptureCases => {
   const outcomes: Array<CaseOutcome> = []
+  // Once per capture, whatever the number of cases: the correlation and the
+  // forms table are each a pass over the whole document.
+  const index = captureIndex(input.flows, input.policy.derives, input.plan)
   for (const spec of input.specs) {
     const legs = spec.cutLegs ?? [spec.uac.leg, ...spec.uas.map((u) => u.leg)]
-    const callIds = caseCallIds(input.flows, input.sut, legs, input.policy.derives)
+    const callIds = caseCallIds(input.flows, input.sut, legs, index.families)
     // The capture tier first, because it needs strictly less: a rule that
     // decides on the family alone never sees the vantages the cut produced.
     const captured = {
@@ -188,10 +195,10 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     // A case refused on a rule no declaration can answer is never assembled, so
     // its deferred refusals stand with it: there is no document to declare in.
     if (refusals.some((r) => r.disposition !== "defers")) {
-      outcomes.push({ spec, callIds, refused: refusals, ...quarantineOf(input, spec) })
+      outcomes.push({ spec, callIds, refused: refusals, ...quarantineOf(input, index, spec) })
       continue
     }
-    const attempt = build(input, spec)
+    const attempt = build(input, index, spec)
     if ("error" in attempt) {
       // No document, so nothing is declared and every deferred refusal stands.
       outcomes.push({
@@ -217,7 +224,7 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     ]
     outcomes.push(
       standing.length > 0
-        ? { spec, callIds, refused: standing, ...quarantineOf(input, spec, built) }
+        ? { spec, callIds, refused: standing, ...quarantineOf(input, index, spec, built) }
         : { spec, callIds, built, refused: [] }
     )
   }

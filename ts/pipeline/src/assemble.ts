@@ -22,6 +22,7 @@ import {
 import type { ResourceFile } from "./bodies.js"
 import type { CaseSpec } from "./case-spec.js"
 import { buildCalls, CALLER_IDENTITY } from "./calls.js"
+import { captureIndex, type CaptureIndex } from "./capture-index.js"
 import { caseCallIds } from "./cut.js"
 import { synthesize, type StepSource } from "./flowsteps.js"
 import type { PartsIndex } from "./parts.js"
@@ -89,12 +90,24 @@ export interface AssembleInput {
   readonly policy: CasePolicy
   readonly parts?: PartsIndex
   readonly allowed?: AllowedErrors.AllowedErrors
+  /** The capture's once-built index; a caller assembling many cases passes one. */
+  readonly index?: CaptureIndex
 }
 
 export const assemble = (input: AssembleInput): Assembled => {
   const { capture, flows, plan, policy, spec, sut } = input
+  const index = input.index ?? captureIndex(flows, policy.derives, plan)
   const vantages = [spec.uac, ...spec.uas]
-  const layout = build(flows, vantages, sut, plan, policy.derives, spec.chainHints, policy.joins)
+  const layout = build(
+    flows,
+    vantages,
+    sut,
+    plan,
+    policy.derives,
+    spec.chainHints,
+    policy.joins,
+    index
+  )
   const flags: Array<Case.Flag> = [...layout.flags]
 
   // The capture first, then the lane it will be replayed on: synthesis states
@@ -155,7 +168,7 @@ export const assemble = (input: AssembleInput): Assembled => {
   // What the allowed-errors registry already knows about this capture's calls.
   // A warning is a document annotation AND a caller-visible line: an entry that
   // matched but could not be anchored must not read as an absent violation.
-  const callIds = caseCallIds(flows, sut, legs, policy.derives)
+  const callIds = caseCallIds(flows, sut, legs, index.families)
   const stamped = stampRfcViolations({
     registry: input.allowed,
     capture,
