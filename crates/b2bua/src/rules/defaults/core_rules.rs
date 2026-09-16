@@ -882,20 +882,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
-        // A `481` denies what the request it answers named. For a re-INVITE,
-        // UPDATE, INFO, MESSAGE, REFER or the keepalive OPTIONS that is the
-        // DIALOG — the peer has forgotten the call (RFC 3261 §12.2.1.2: "the
-        // UAC SHOULD terminate the dialog") — so the call is torn down. For a
-        // PRACK it is one TRANSACTION (RFC 3262 §3: the ordinary answer to a
-        // PRACK matching no unacknowledged reliable provisional), for a CANCEL
-        // one transaction too (§9.2: it lost the race with the final), and for
-        // a NOTIFY one SUBSCRIPTION (RFC 6665 §4.4.1: the implicit REFER
-        // subscription is gone); the dialog those ride in stands, and this
-        // rule declines them. A BYE's 481 denies nothing the BYE has not
-        // already ended (§15.1.2): its leg resolves on `resolve-bye-response`
-        // or is ended already, so this rule declines it too.
-        // `relay-non-invite-failure` outranks it for a relayed transaction;
-        // `absorb-own-request-failure` takes the rest.
+        // A 481 to a re-INVITE, UPDATE, INFO, MESSAGE, REFER or keepalive OPTIONS
+        // denies the dialog (RFC 3261 §12.2.1.2) and ends the call. It declines a
+        // PRACK's (one transaction, RFC 3262 §3), a CANCEL's (§9.2), a NOTIFY's (one
+        // subscription, RFC 6665 §4.4.1) and a BYE's (§15.1.2: `resolve-bye-response`
+        // or an already ended leg). `relay-non-invite-failure` outranks it for a
+        // relayed transaction; `absorb-own-request-failure` takes the rest.
         rule(
             "handle-481",
             &[],
