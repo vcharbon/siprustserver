@@ -12,7 +12,7 @@
 //!   same parts frames identically, so a replay is reproducible; a delimiter
 //!   that would appear inside a payload is extended until it cannot.
 
-use crate::header::{HeaderValue, MediaType};
+use crate::header::{HeaderValue, MediaType, ParamValue};
 use crate::sip_str::SipStr;
 
 /// One entity part: its media type, any further entity headers it states, and
@@ -229,6 +229,30 @@ pub fn decompose(body: &[u8], boundary: &str) -> Vec<LocatedPart> {
     out
 }
 
+/// The session description a body carries under `content_type`, as the range
+/// of `body` holding it: the whole body under `application/sdp`, the first
+/// `application/sdp` part of a `multipart/…` body (RFC 5621 §3.1 — a body that
+/// frames a description carries it as an offer or answer like a bare one),
+/// none where the type names neither or the body is empty.
+pub fn sdp_range(content_type: &MediaType, body: &[u8]) -> Option<std::ops::Range<usize>> {
+    if body.is_empty() {
+        return None;
+    }
+    if content_type.is_sdp() {
+        return Some(0..body.len());
+    }
+    if !content_type.is_multipart() {
+        return None;
+    }
+    let boundary = content_type.param("boundary").and_then(ParamValue::as_str)?;
+    decompose(body, boundary)
+        .into_iter()
+        .find(|part| {
+            MediaType::parse(&SipStr::owned(&part.content_type)).is_ok_and(|ct| ct.is_sdp())
+        })
+        .map(|part| part.offset..part.offset + part.len)
+}
+
 /// Every entity header of a part's header block except the ones already held in
 /// their own field, in wire order and with the part's own spelling.
 fn part_headers_beyond(head: &[u8], own_fields: &[&str]) -> Vec<(String, String)> {
@@ -282,6 +306,30 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn media(raw: &str) -> MediaType {
+        MediaType::parse(&SipStr::owned(raw)).unwrap()
+    }
+
+    /// RFC 5621 §3.1: a description framed inside a multipart body is the
+    /// message's offer or answer, wherever the part sits; a body typed
+    /// `application/sdp` is the description whole.
+    #[test]
+    fn the_sdp_range_reads_a_bare_body_and_a_framed_part_alike() {
+        let bare = sdp().payload;
+        assert_eq!(sdp_range(&media("application/sdp"), &bare), Some(0..bare.len()));
+        assert_eq!(sdp_range(&media("application/sdp"), b""), None);
+
+        let composed = compose("multipart/mixed", &[indata(), sdp()]).unwrap();
+        let range = sdp_range(&media(&composed.content_type), &composed.body)
+            .expect("the framed description is located");
+        assert_eq!(&composed.body[range], sdp().payload.as_slice());
+
+        let none = compose("multipart/mixed", &[indata()]).unwrap();
+        assert_eq!(sdp_range(&media(&none.content_type), &none.body), None);
+        assert_eq!(sdp_range(&media("multipart/mixed"), &composed.body), None, "no boundary");
+        assert_eq!(sdp_range(&media("text/plain"), b"v=0\r\n"), None);
+    }
 
     fn sdp() -> MultipartPart {
         MultipartPart::new("application/sdp", b"v=0\r\nc=IN IP4 1.2.3.4\r\n".to_vec())

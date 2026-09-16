@@ -21,10 +21,60 @@ pub fn sdp() -> MediaType {
     MediaType::new(SipStr::from_static("application/sdp"))
 }
 
-/// True iff `req` carries an SDP body: a non-empty body whose `Content-Type`
-/// names `application/sdp`. What the offer/answer paths read to tell an offer
-/// from a delayed-offer INVITE.
+/// True iff `req` carries a session description: a body typed
+/// `application/sdp`, or a `multipart/…` body framing one (RFC 5621 §3.1).
+/// What the offer/answer paths read to tell an offer from a delayed-offer
+/// INVITE.
 pub fn carries_sdp(req: &SipRequest) -> bool {
-    !req.body().is_empty()
-        && req.header::<MediaType>().and_then(Result::ok).is_some_and(|ct| ct.is("application/sdp"))
+    req.header::<MediaType>()
+        .and_then(Result::ok)
+        .is_some_and(|ct| sip_message::sdp_range(&ct, req.body()).is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::carries_sdp;
+    use sip_message::{compose_multipart, MultipartPart, SipMessage, SipParser, SipRequest};
+
+    fn invite(content_type: &str, body: &[u8]) -> SipRequest {
+        let head = format!(
+            "INVITE sip:bob@10.0.0.2 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.1;branch=z9hG4bK1\r\n\
+             From: <sip:alice@10.0.0.1>;tag=a\r\nTo: <sip:bob@10.0.0.2>\r\n\
+             Call-ID: c\r\nCSeq: 1 INVITE\r\nMax-Forwards: 70\r\n\
+             Content-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let raw = [head.as_bytes(), body].concat();
+        match sip_message::parser::custom::CustomParser::new().parse(&raw).unwrap() {
+            SipMessage::Request(r) => r,
+            _ => panic!("expected request"),
+        }
+    }
+
+    /// RFC 5621 §3.1: an INVITE whose multipart body frames a description
+    /// makes an offer like one typed `application/sdp`; one framing none, or
+    /// carrying no body, is a delayed offer.
+    #[test]
+    fn a_description_framed_in_a_multipart_body_is_an_offer() {
+        let sdp = b"v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n\
+                    m=audio 4000 RTP/AVP 8\r\n";
+        assert!(carries_sdp(&invite("application/sdp", sdp)));
+        let framed = compose_multipart(
+            "multipart/mixed",
+            &[
+                MultipartPart::new("application/sdp", sdp.to_vec()),
+                MultipartPart::new("application/vnd.example.indata", vec![0x77, 0x15]),
+            ],
+        )
+        .unwrap();
+        assert!(carries_sdp(&invite(&framed.content_type, &framed.body)));
+        let unframed = compose_multipart(
+            "multipart/mixed",
+            &[MultipartPart::new("application/vnd.example.indata", vec![0x77, 0x15])],
+        )
+        .unwrap();
+        assert!(!carries_sdp(&invite(&unframed.content_type, &unframed.body)));
+        assert!(!carries_sdp(&invite("application/sdp", b"")));
+    }
 }
