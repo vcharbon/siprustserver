@@ -81,6 +81,9 @@ export const JOIN_PROTOCOL_FLAG = "join-protocol:"
  */
 export type JoinsReading = ReadonlyMap<number, JoinReading>
 
+/** The SIP role a joined leg plays: a resource for an `mrf` join, a callee for a `refer` one. */
+export const joinedActorKind = (join: JoinReading): ActorKind => (join.kind === "mrf" ? "mrf" : "uas")
+
 /** One simulated socket, before a `side`/`binding` is decided for it. */
 export interface LayoutEndpoint {
   readonly id: string
@@ -279,10 +282,12 @@ export const build = (
     if (a.kind === "uac") {
       actors.push({ id: a.actorId, type: "uac", endpoint: a.endpointId })
     } else if (a.joinedBy) {
-      // A media resource is dialled by whatever joined it, never claimed by
-      // R-URI position — so it takes no claim, and two callees sharing a number
-      // stay the only thing `claim/same-number-ambiguous` can mean.
-      actors.push({ id: a.actorId, type: "mrf", endpoint: a.endpointId })
+      // A joined leg is dialled by whatever joined it, never claimed by R-URI
+      // position — so it takes no claim, and two callees sharing a number stay
+      // the only thing `claim/same-number-ambiguous` can mean. What it IS on the
+      // wire is the join's: a media resource, or a transferee answering like
+      // any callee.
+      actors.push({ id: a.actorId, type: joinedActorKind(a.joinedBy), endpoint: a.endpointId })
     } else {
       actors.push({
         id: a.actorId,

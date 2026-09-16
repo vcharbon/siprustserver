@@ -213,8 +213,13 @@ const joinStep = (
 ): string => {
   const first = steps.findIndex((step) => step.leg === actor.pivotLeg)
   const before = first < 0 ? steps : steps.slice(0, first)
+  // A transfer is joined by the REFER that asked for it (RFC 3515), on
+  // whichever leg sent it; anything else is joined by the caller's own last
+  // request, the one the platform was serving when it added the leg.
   const request = [...before].reverse().find((step) =>
-    step.leg === callerLeg && step.msg.method !== undefined
+    actor.joinedBy?.kind === "refer"
+      ? (step.msg.method ?? "").toUpperCase() === "REFER"
+      : step.leg === callerLeg && step.msg.method !== undefined
   )
   return request?.id ?? before[0]?.id ?? steps[0]?.id ?? ""
 }
