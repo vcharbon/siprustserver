@@ -643,6 +643,46 @@ fn in_dialog_bye_selects_relay_bye() {
     assert_eq!(ranked.first().map(|r| r.id), Some("relay-bye"));
 }
 
+/// A BYE from a leg this stack already ended (Terminated, its own BYE sent)
+/// on a call that stays Active selects `resolve-ended-leg-bye`, never
+/// `relay-bye`: the leg is no longer a party of the session, so its crossing
+/// BYE (RFC 3261 §15.1.2) ends that dialog alone and tears nothing down.
+#[test]
+fn bye_from_an_ended_leg_selects_resolve_ended_leg_bye_without_termination() {
+    let mut call = test_call();
+    call.a_leg.state = LegState::Confirmed;
+    let mut ended = b_leg_pending();
+    ended.state = LegState::Terminated;
+    ended.bye_disposition = Some(call::ByeDisposition::ByeSent);
+    call = call::helpers::add_b_leg(call, ended);
+    assert_eq!(call.state, CallModelState::Active, "only one leg was released");
+
+    let bye = in_dialog_request(sip_message::Method::Bye);
+    let event = CallEvent::Sip {
+        message: Box::new(SipMessage::Request(bye)),
+        src: "10.0.0.2:5070".parse().unwrap(),
+        matched_client_txn: false,
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+        discharged: None,
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, &call, &ctx);
+    assert_eq!(ranked.first().map(|r| r.id), Some("resolve-ended-leg-bye"));
+    let actions = (ranked[0].handle)(&ctx).expect("the rule handles the BYE").actions;
+    assert!(
+        !actions.iter().any(|a| matches!(a, RuleAction::BeginTermination { .. })),
+        "an ended leg's BYE tears nothing down, got {actions:?}",
+    );
+}
+
 /// An in-dialog request on a call whose BYE is in flight selects `post-bye-481`
 /// (the session is terminated, §15.1.2 — never `relay-reinvite`), while ACK
 /// still selects `relay-ack` and an OPTIONS liveness probe keeps

@@ -352,6 +352,83 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     let _ = h.finish().await;
 }
 
+// ── 3b. the displaced callee's BYE crosses ours: the rerouted call survives ──
+
+/// A dialog this stack already ended is not a party of the session any more.
+/// When the displaced b-leg's own BYE crosses ours and it answers ours `481`
+/// (RFC 3261 §15.1.2), that BYE ends its dialog alone: the a-leg and the
+/// replacement leg stay connected and the call ends on the a-leg's own hangup.
+#[tokio::test(start_paused = true)]
+async fn rerouted_call_survives_displaced_callee_bye_crossing_ours() {
+    let h = Harness::new("release-reroute-displaced-bye-cross");
+    let alice = h.agent("alice", "127.0.0.1:5066").await;
+    let bob = h.agent("bob", "127.0.0.1:5076").await;
+    let mrf = h.agent("mrf", "127.0.0.1:5096").await;
+
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(move |_req| NewCallResponse::Route(route_with_cap(5076, true)))
+            .on_release(move |_req| {
+                let mut r = route_to("127.0.0.1", 5096);
+                r.label = Some("announce".into());
+                ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5086")
+        .await;
+
+    // ── establish A↔B ───────────────────────────────────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut alice_dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bob_dialog = uas.dialog();
+
+    // ── the cap expires; the engine converts release → reroute ─────────────
+    h.advance(Duration::from_secs(61)).await;
+    let mut mrf_uas = mrf.receive("INVITE").await;
+    mrf_uas.respond(200, "OK").with_sdp(MRF_ANSWER).await;
+    absorb_invite_retransmit(&mrf, &mrf_uas, MRF_ANSWER).await;
+    mrf.receive("ACK").await;
+    let mut a_realign = alice.receive("INVITE").await;
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN).await;
+    alice.receive("ACK").await;
+
+    // ── the displaced b-leg is BYEd; bob hangs up at the same instant ──────
+    let mut our_bye = bob.receive("BYE").await;
+    let mut bob_bye = bob_dialog.bye().await;
+    our_bye.respond(481, "Call/Transaction Does Not Exist").await;
+    bob_bye.expect(200).await;
+
+    // THE assertion: bob's BYE ended his dialog alone. A paused clock, so 50 ms
+    // is exact: a wrongly-sent BYE lands within one transit hop.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(alice.drain().await, 0, "the a-leg receives nothing (RFC 3261 §15.1.2)");
+    assert_eq!(mrf.drain().await, 0, "the replacement leg receives nothing (RFC 3261 §15.1.2)");
+    assert_eq!(b2bua.active_calls(), 1, "the rerouted call stays up");
+
+    // ── the rerouted call continues; a normal hangup works ────────────────
+    h.advance(Duration::from_secs(5)).await;
+    let mut alice_bye = alice_dialog.bye().await;
+    mrf.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
+
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "one CDR for the rerouted call");
+
+    let _ = h.finish().await;
+}
+
 // ── 4. the reroute route owns the follow-up policy (features + subscriptions) ─
 
 #[tokio::test(start_paused = true)]
