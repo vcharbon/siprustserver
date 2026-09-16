@@ -891,14 +891,20 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // one transaction too (§9.2: it lost the race with the final), and for
         // a NOTIFY one SUBSCRIPTION (RFC 6665 §4.4.1: the implicit REFER
         // subscription is gone); the dialog those ride in stands, and this
-        // rule declines them. `relay-non-invite-failure` outranks it for a
-        // relayed transaction; `absorb-own-request-failure` takes the rest.
+        // rule declines them. A BYE's 481 denies nothing the BYE has not
+        // already ended (§15.1.2): its leg resolves on `resolve-bye-response`
+        // or is ended already, so this rule declines it too.
+        // `relay-non-invite-failure` outranks it for a relayed transaction;
+        // `absorb-own-request-failure` takes the rest.
         rule(
             "handle-481",
             &[],
             Match::response().status_code(481).call_state(CallModelState::Active).filter(|ctx| {
                 ctx.response().is_some_and(|r| {
-                    !matches!(r.cseq().method(), Method::Prack | Method::Cancel | Method::Notify)
+                    !matches!(
+                        r.cseq().method(),
+                        Method::Prack | Method::Cancel | Method::Notify | Method::Bye
+                    )
                 })
             }),
             |ctx| {
@@ -1063,6 +1069,35 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         rule("relay-ack", &[], Match::request().method("ACK"), |_ctx| {
             ok(vec![RuleAction::RelayToPeer { transform: no_transform() }])
         }),
+        // A BYE on a leg this stack already ended (Terminated, or a BYE
+        // disposition set) ends that dialog alone: the leg is no longer a party
+        // of the session, so its BYE crossing ours (RFC 3261 §15.1.2) is
+        // answered 200 and resolved on the leg while the call stays up.
+        rule(
+            "resolve-ended-leg-bye",
+            &["relay-bye"],
+            Match::request().method("BYE").filter(|ctx| {
+                ctx.source_leg()
+                    .map(|l| l.state == LegState::Terminated || l.bye_disposition.is_some())
+                    .unwrap_or(false)
+            }),
+            |ctx| {
+                ok(vec![
+                    RuleAction::Respond {
+                        status: 200,
+                        reason: "OK".into(),
+                        body: vec![],
+                        content_type: None,
+                    },
+                    RuleAction::TerminateLeg {
+                        leg_id: ctx.source_leg_id.to_string(),
+                        bye_disposition: Some(ByeDisposition::ByeReceived),
+                    },
+                ])
+            },
+        ),
+        // A BYE from a live party of an Active call ends the session; a BYE on a
+        // leg this stack already ended is `resolve-ended-leg-bye`'s.
         rule(
             "relay-bye",
             &[],

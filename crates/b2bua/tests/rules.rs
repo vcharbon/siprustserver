@@ -683,6 +683,65 @@ fn bye_from_an_ended_leg_selects_resolve_ended_leg_bye_without_termination() {
     );
 }
 
+/// A 481 to this stack's own BYE on a leg already resolved by the peer's
+/// crossing BYE (`ByeReceived`) selects no rule on an Active call: the BYE
+/// final denies nothing the BYE has not already ended (RFC 3261 §15.1.2), so
+/// `handle-481` declines it and the session stays up.
+#[test]
+fn bye_481_on_a_bye_received_leg_selects_no_teardown() {
+    let mut call = test_call();
+    call.a_leg.state = LegState::Confirmed;
+    let mut ended = b_leg_pending();
+    ended.state = LegState::Terminated;
+    ended.bye_disposition = Some(call::ByeDisposition::ByeReceived);
+    call = call::helpers::add_b_leg(call, ended);
+    assert_eq!(call.state, CallModelState::Active, "only one leg was released");
+
+    let raw = "SIP/2.0 481 Call/Transaction Does Not Exist\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKb\r\n\
+From: <sip:svc@10.0.0.9:5060>;tag=svc\r\n\
+To: <sip:bob@10.0.0.2:5070>;tag=bobtag\r\n\
+Call-ID: bcid@x\r\n\
+CSeq: 2 BYE\r\n\
+Content-Length: 0\r\n\r\n";
+    let resp = match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+        SipMessage::Response(r) => r,
+        _ => panic!("expected a response"),
+    };
+    let event = CallEvent::Sip {
+        message: Box::new(SipMessage::Response(resp)),
+        src: "10.0.0.2:5070".parse().unwrap(),
+        matched_client_txn: true,
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+        discharged: None,
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, &call, &ctx);
+    assert!(
+        !ranked.iter().any(|r| r.id == "handle-481"),
+        "a BYE's 481 is never the peer denying the dialog, got {:?}",
+        ranked.iter().map(|r| r.id).collect::<Vec<_>>(),
+    );
+    for rule in &ranked {
+        if let Some(outcome) = (rule.handle)(&ctx) {
+            assert!(
+                !outcome.actions.iter().any(|a| matches!(a, RuleAction::BeginTermination { .. })),
+                "{} tears the session down on a BYE's 481: {:?}",
+                rule.id,
+                outcome.actions,
+            );
+        }
+    }
+}
+
 /// An in-dialog request on a call whose BYE is in flight selects `post-bye-481`
 /// (the session is terminated, §15.1.2 — never `relay-reinvite`), while ACK
 /// still selects `relay-ack` and an OPTIONS liveness probe keeps
