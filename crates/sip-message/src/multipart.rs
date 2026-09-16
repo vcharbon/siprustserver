@@ -248,7 +248,8 @@ pub fn sdp_range(content_type: &MediaType, body: &[u8]) -> Option<std::ops::Rang
     decompose(body, boundary)
         .into_iter()
         .find(|part| {
-            MediaType::parse(&SipStr::owned(&part.content_type)).is_ok_and(|ct| ct.is_sdp())
+            part.len > 0
+                && MediaType::parse(&SipStr::owned(&part.content_type)).is_ok_and(|ct| ct.is_sdp())
         })
         .map(|part| part.offset..part.offset + part.len)
 }
@@ -327,6 +328,12 @@ mod tests {
 
         let none = compose("multipart/mixed", &[indata()]).unwrap();
         assert_eq!(sdp_range(&media(&none.content_type), &none.body), None);
+        let empty = compose(
+            "multipart/mixed",
+            &[MultipartPart::new("application/sdp", Vec::new()), indata()],
+        )
+        .unwrap();
+        assert_eq!(sdp_range(&media(&empty.content_type), &empty.body), None, "an empty part");
         assert_eq!(sdp_range(&media("multipart/mixed"), &composed.body), None, "no boundary");
         assert_eq!(sdp_range(&media("text/plain"), b"v=0\r\n"), None);
     }

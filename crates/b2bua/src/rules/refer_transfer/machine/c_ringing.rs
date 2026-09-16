@@ -77,10 +77,11 @@ pub(super) fn c_200_initial() -> RuleDefinition {
             let c_leg_id = st.c_leg_id.clone()?;
 
             // Capture C's 200 SDP (drives the a-realign re-INVITE).
-            let c_initial_sdp = (!resp.body().is_empty()).then(|| resp.body().to_vec());
-            // A's SDP for the c-realign re-INVITE-C offer.
+            let c_initial_sdp = resp.sdp().map(<[u8]>::to_vec);
+            // A's SDP for the c-realign re-INVITE-C offer; none where A's
+            // INVITE framed no description.
             let a_leg = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
-            let a_sdp = a_leg.body();
+            let a_sdp = a_leg.sdp().unwrap_or_default();
 
             let mut new_state = st.clone();
             new_state.phase = TransferPhase::CRealigning;

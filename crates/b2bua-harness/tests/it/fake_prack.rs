@@ -401,6 +401,113 @@ async fn update_happy() {
     let _ = h.finish().await;
 }
 
+/// A `multipart/mixed` body framing `sdp` beside a binary part whose payload
+/// carries a line an SDP line-scanner would take for its own (RFC 5621 §3.1:
+/// the description is the SDP part, the rest of the body is not).
+fn framed(sdp: &str) -> sip_message::Composed {
+    use sip_message::{compose_multipart, MultipartPart};
+    let decoy = b"\x77\x15\r\nc=IN IP4 9.9.9.9\r\nm=audio 1 RTP/AVP 0\r\n\x00".to_vec();
+    compose_multipart(
+        "multipart/mixed",
+        &[
+            MultipartPart::new("application/sdp", sdp.as_bytes().to_vec()),
+            MultipartPart::new("application/vnd.example.indata", decoy),
+        ],
+    )
+    .expect("two parts frame")
+}
+
+/// Alice's offer rides inside a multipart body. The B2BUA reads it as the
+/// offer it is (fake-prack stays armed, `100rel` offered to bob) and answers
+/// bob's early UPDATE from the SDP PART alone: nothing of the sibling part's
+/// bytes reaches the local answer.
+#[tokio::test]
+async fn update_answer_reads_the_offer_framed_in_a_multipart_invite() {
+    let h = Harness::with_transit_delay("fake-prack-update-multipart-offer", 0);
+    let alice = h.agent("alice", "127.0.0.1:5741").await;
+    let bob = h.agent("bob", "127.0.0.1:5742").await;
+    let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5743", 5742).await;
+
+    let offer = framed(OFFER);
+    let mut call = alice
+        .invite(&bob)
+        .with_body(&offer.content_type, offer.body.clone())
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    assert!(
+        has_token(uas.request().header::<Supported>(), "100rel"),
+        "a framed offer is an offer: fake-prack stays armed and solicits 100rel"
+    );
+    assert_eq!(uas.request().body().as_ref(), offer.body.as_slice(), "the body rides verbatim");
+
+    uas.respond(183, "Session Progress")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "1")
+        .with_sdp(ANSWER)
+        .await;
+    call.expect(180).await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+
+    let mut bob_dialog = uas.dialog();
+    let mut update = bob_dialog.request(InDialogMethod::Update, Some(ANSWER)).await;
+    let upd_resp = update.expect(200).await;
+    let answer = String::from_utf8_lossy(upd_resp.body()).into_owned();
+    assert!(is_sdp(upd_resp.header::<MediaType>()), "application/sdp on the local answer");
+    assert!(answer.starts_with("v=0"), "the answer is a session description: {answer:?}");
+    assert!(!answer.contains("9.9.9.9"), "the sibling part's bytes stay out: {answer:?}");
+    assert_eq!(answer.matches("\nm=").count(), 1, "one media section: {answer:?}");
+
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    assert!(!ok.body().is_empty(), "alice 200 carries cached SDP");
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _ = h.finish().await;
+}
+
+/// Bob's reliable provisional frames its answer in a multipart body. What the
+/// B2BUA caches and later stages into alice's 200 is the SDP PART under
+/// `application/sdp`, never the multipart bytes under that label.
+#[tokio::test]
+async fn a_callee_answer_framed_in_a_multipart_provisional_is_staged_as_sdp() {
+    let h = Harness::with_transit_delay("fake-prack-multipart-183", 0);
+    let alice = h.agent("alice", "127.0.0.1:5744").await;
+    let bob = h.agent("bob", "127.0.0.1:5745").await;
+    let b2bua = b2bua_fake_prack(&h, "b2bua", "127.0.0.1:5746", 5745).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    let answer = framed(ANSWER);
+    uas.respond(183, "Session Progress")
+        .with_header("Require", "100rel")
+        .with_header("RSeq", "1")
+        .with_body(&answer.content_type, answer.body.clone())
+        .await;
+    call.expect(180).await;
+    bob.receive("PRACK").await.respond(200, "OK").await;
+
+    uas.respond(200, "OK").await;
+    let ok = call.expect(200).await;
+    assert!(is_sdp(ok.header::<MediaType>()), "the staged answer is labelled application/sdp");
+    assert_eq!(ok.body().as_ref(), ANSWER.as_bytes(), "and it is the SDP part alone");
+
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _ = h.finish().await;
+}
+
 /// Shared body for the two failover-on-503 cases (TS `forking` / `failover`):
 /// bob1 goes reliable (183/100rel → bare 180 + B2BUA PRACK + cached SDP) then
 /// 503s; the B2BUA fails over to bob2 (unreliable). bob1's cache dies with its

@@ -8,14 +8,14 @@ use std::net::SocketAddr;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, StackDialog,
 };
-use sip_message::header::HeaderName;
+use sip_message::header::{HeaderName, MediaType};
 use sip_message::{
     apply_name_forms, apply_remote_target_emits, emitted_wire, DelayedAutomatic, EmitOpts,
     MessageTemplate, SipHeader, SipMessage,
 };
 
 use super::client_invite::ClientInvite;
-use super::ua::{from_of, to_of, uri_of};
+use super::ua::{from_of, media_type, to_of, uri_of};
 use super::Agent;
 
 /// Builder for an outgoing INVITE (lets the SDP offer be attached fluently).
@@ -27,6 +27,8 @@ pub struct Invite<'a> {
     /// captured payload emitted verbatim, its Content-Type carried as a frozen
     /// header rather than stamped by the generator.
     template_body: Option<Vec<u8>>,
+    /// The media type [`with_body`](Self::with_body) states for its bytes.
+    content_type: Option<MediaType>,
     /// A template body carried NO Content-Type: suppress the generator's default
     /// `application/sdp` stamp so a captured bodyless-typed / non-SDP payload
     /// replays with the Content-Type the capture actually had (none).
@@ -62,6 +64,7 @@ impl<'a> Invite<'a> {
             caller,
             peer,
             sdp: None,
+            content_type: None,
             template_body: None,
             suppress_default_ct: false,
             name_forms: vec![],
@@ -79,6 +82,14 @@ impl<'a> Invite<'a> {
     /// Attach an SDP offer body.
     pub fn with_sdp(mut self, sdp: &str) -> Self {
         self.sdp = Some(sdp.to_string());
+        self
+    }
+
+    /// Attach a body of any media type, byte-exact — a `multipart/mixed`
+    /// offer framing SDP beside another part, a non-SDP payload.
+    pub fn with_body(mut self, content_type: &str, bytes: Vec<u8>) -> Self {
+        self.template_body = Some(bytes);
+        self.content_type = Some(media_type(content_type));
         self
     }
 
@@ -203,7 +214,7 @@ impl<'a> Invite<'a> {
                 .clone()
                 .or_else(|| self.sdp.as_deref().map(str::as_bytes).map(<[u8]>::to_vec))
                 .unwrap_or_default(),
-            content_type: None,
+            content_type: self.content_type.clone(),
             extra_headers: self.extra_headers.clone(),
         };
         let mut invite = generate_out_of_dialog_request(OutOfDialogMethod::Invite, &opts);

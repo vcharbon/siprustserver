@@ -26,9 +26,7 @@ pub fn sdp() -> MediaType {
 /// What the offer/answer paths read to tell an offer from a delayed-offer
 /// INVITE.
 pub fn carries_sdp(req: &SipRequest) -> bool {
-    req.header::<MediaType>()
-        .and_then(Result::ok)
-        .is_some_and(|ct| sip_message::sdp_range(&ct, req.body()).is_some())
+    req.sdp().is_some()
 }
 
 #[cfg(test)]

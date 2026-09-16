@@ -161,15 +161,17 @@ define_service! {
                     invite_cseq,
                     b_tag: b_tag.to_string(),
                 });
-                // fake-prack: cache bob's SDP per dialog when 100rel is in play.
-                let cache_action = if fake_prack && rseq.is_some() && !resp.body().is_empty() {
-                    Some(RuleAction::CacheSdpOnLegDialog {
-                        leg_id: leg.clone(),
-                        b_tag: b_tag.to_string(),
-                        body: resp.body().to_vec(),
-                    })
-                } else {
-                    None
+                // fake-prack: cache bob's SDP per dialog when 100rel is in play —
+                // the description alone, wherever the body framed it.
+                let cache_action = match resp.sdp() {
+                    Some(sdp) if fake_prack && rseq.is_some() => {
+                        Some(RuleAction::CacheSdpOnLegDialog {
+                            leg_id: leg.clone(),
+                            b_tag: b_tag.to_string(),
+                            body: sdp.to_vec(),
+                        })
+                    }
+                    _ => None,
                 };
 
                 if ctx.call.relay_first_18x_first_relayed() {
@@ -365,21 +367,22 @@ define_service! {
                 let b_tag = req.from().tag().map(str::to_owned).unwrap_or_default();
                 let leg = ctx.source_leg_id.to_string();
 
-                if req.body().is_empty() {
+                // An UPDATE carrying no description offers nothing to answer.
+                let Some(offer) = req.sdp() else {
                     return ok(vec![RuleAction::Respond {
                         status: 200,
                         reason: "OK".to_string(),
                         body: vec![],
                         content_type: None,
                     }]);
-                }
+                };
 
-                let alice_body = &ctx.call.a_leg_invite().body;
+                let a_invite = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
                 let options = BuildAnswerOptions {
                     local_ip: ctx.config.sip_local_ip.clone(),
                     now_ms: ctx.now_ms,
                 };
-                match build_answer_from_offer(req.body(), Some(alice_body), &options) {
+                match build_answer_from_offer(offer, a_invite.sdp(), &options) {
                     SdpBuildResult::Ok(body) => ok(vec![
                         RuleAction::Respond {
                             status: 200,
@@ -390,7 +393,7 @@ define_service! {
                         RuleAction::CacheSdpOnLegDialog {
                             leg_id: leg,
                             b_tag: b_tag.to_string(),
-                            body: req.body().to_vec(),
+                            body: offer.to_vec(),
                         },
                     ]),
                     _ => ok(vec![RuleAction::Respond {

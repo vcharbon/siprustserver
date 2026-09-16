@@ -150,9 +150,12 @@ async fn a_reinvite_ack_body_reaches_the_callee_verbatim() {
 
 /// (c) A body this stack does not interpret at all — not SDP, not text, with
 /// bytes outside ASCII. It is relayed whole, under the type its sender stated.
+/// The second round's multipart body frames a description (RFC 5621 §3.1) on
+/// an ACK whose round is closed — the same deliberate stray body as (b).
 #[tokio::test(start_paused = true)]
 async fn a_non_sdp_ack_body_is_relayed_under_its_own_media_type() {
     let h = Harness::new("b2bua-ack-body-custom");
+    waive_stray_ack_body(&h, "alice");
     let alice = h.agent("alice", "127.0.0.1:5343").await;
     let bob = h.agent("bob", "127.0.0.1:5353").await;
     let b2bua =

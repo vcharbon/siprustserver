@@ -94,6 +94,18 @@ impl Msg {
             Kind::Request { .. } => None,
         }
     }
+
+    /// The session description this message DECLARED it carried: the body under
+    /// `application/sdp`, the SDP part of a `multipart/…` body (RFC 5621 §3.1),
+    /// `None` where the head or body is unreadable, empty, or names neither.
+    pub fn sdp(&self) -> Option<&[u8]> {
+        let head = self.head.as_deref()?;
+        let body = self.body.as_deref()?;
+        use sip_message::header::{HeaderValue, MediaType};
+        let ct = sip_message::sniff::header_value(head, "Content-Type")?;
+        let ct = MediaType::parse(&sip_message::SipStr::owned(&ct)).ok()?;
+        sip_message::sdp_range(&ct, body).map(|r| &body[r])
+    }
 }
 
 /// How long the OBSERVATION ran, and whether its end is the end of evidence.
