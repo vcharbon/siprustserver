@@ -69,7 +69,9 @@ struct Doc {
 
 impl Doc {
     /// The description a message carried, or `None` where the vantage carried
-    /// no body bytes or the message declared no session description.
+    /// no body bytes or the message declared no session description. A body
+    /// with no `Content-Type` declares none (RFC 3261 §20.15): `wellformed`
+    /// charges that once, and this family reads the round as it was declared.
     fn of(msg: &Msg) -> Option<Doc> {
         let body = msg.sdp()?;
         let doc = sdp_doc::parse_sdp_body(body)?;

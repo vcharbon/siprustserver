@@ -78,8 +78,10 @@ pub(super) fn c_200_initial() -> RuleDefinition {
 
             // Capture C's 200 SDP (drives the a-realign re-INVITE).
             let c_initial_sdp = resp.sdp().map(<[u8]>::to_vec);
-            // A's SDP for the c-realign re-INVITE-C offer; none where A's
-            // INVITE framed no description.
+            // A's SDP for the c-realign re-INVITE-C offer.
+            // FIXME(refer): a delayed-offer a-INVITE leaves this empty, so the
+            // re-INVITE to C makes a delayed offer its ACK never answers; source
+            // A's current description (her ACK answer) instead.
             let a_leg = relay::rebuild_a_leg_invite(ctx.call.a_leg_invite());
             let a_sdp = a_leg.sdp().unwrap_or_default();
 
