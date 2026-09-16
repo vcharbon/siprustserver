@@ -884,10 +884,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         ),
         // A 481 to a re-INVITE, UPDATE, INFO, MESSAGE, REFER or keepalive OPTIONS
         // denies the dialog (RFC 3261 §12.2.1.2) and ends the call. It declines a
-        // PRACK's (one transaction, RFC 3262 §3), a CANCEL's (§9.2), a NOTIFY's (one
-        // subscription, RFC 6665 §4.4.1) and a BYE's (§15.1.2: `resolve-bye-response`
-        // or an already ended leg). `relay-non-invite-failure` outranks it for a
-        // relayed transaction; `absorb-own-request-failure` takes the rest.
+        // PRACK's (RFC 3262 §3), CANCEL's (RFC 3261 §9.2), NOTIFY's (RFC 6665 §4.4.1)
+        // and BYE's (RFC 3261 §15.1.1: the dialog ends either way); a relayed one is
+        // `relay-non-invite-failure`'s and the rest `absorb-own-request-failure`'s.
         rule(
             "handle-481",
             &[],
