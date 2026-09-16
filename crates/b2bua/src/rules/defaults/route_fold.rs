@@ -7,6 +7,7 @@
 
 use call::{CallModelState, TimerType};
 
+use crate::decision::{header_lines, SipHeaderUpdates};
 use crate::rules::model::{RuleAction, RuleContext, TimerDelay};
 
 /// Whether a decision fold has landed on a call already going away — the
@@ -22,12 +23,14 @@ pub(crate) fn fold_lands_on_going_away_call(ctx: &RuleContext) -> bool {
 }
 
 /// Parse a `call-failure-result` payload's `update_headers` object into the
-/// `(name, set-or-remove)` pairs the response/leg builders consume.
-pub(super) fn parse_header_updates(payload: &serde_json::Value) -> Vec<(String, Option<String>)> {
+/// `(name, line-or-removal)` pairs the response/leg builders consume — one pair
+/// per stated line, in the stated order.
+pub(crate) fn parse_header_updates(payload: &serde_json::Value) -> Vec<(String, Option<String>)> {
     payload
         .get("update_headers")
-        .and_then(|v| v.as_object())
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string))).collect())
+        .filter(|v| v.is_object())
+        .and_then(|v| serde_json::from_value::<SipHeaderUpdates>(v.clone()).ok())
+        .map(|m| header_lines(&m))
         .unwrap_or_default()
 }
 
@@ -77,11 +80,7 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
             .get("callback_context")
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        header_updates: payload
-            .get("update_headers")
-            .and_then(|v| v.as_object())
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string))).collect())
-            .unwrap_or_default(),
+        header_updates: parse_header_updates(payload),
         features: payload.get("features").and_then(|v| serde_json::from_value(v.clone()).ok()),
         service_ext: parse_service_ext(payload),
         subscriptions: payload

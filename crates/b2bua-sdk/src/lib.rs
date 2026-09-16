@@ -24,6 +24,7 @@
 
 pub mod config;
 pub mod event;
+pub mod header_update;
 pub mod model;
 pub mod relayed_final;
 pub mod service;

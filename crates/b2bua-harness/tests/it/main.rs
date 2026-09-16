@@ -31,6 +31,7 @@ mod failure_header_relay;
 mod fake_prack;
 mod foreign_dialog_tag;
 mod going_away_gate;
+mod header_lines;
 mod info_body_relay;
 mod invite_sent;
 mod keepalive;

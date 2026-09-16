@@ -506,8 +506,8 @@ fn default_reason(status: u16) -> String {
 }
 
 /// Build the extra response headers for a reject/redirect: the non-structural
-/// `update_headers` *sets* (e.g. `Reason:`) plus one `Contact: <uri>;q=…` per
-/// redirect target. Removals and stack-owned keys are dropped — the response
+/// `update_headers` *sets* (e.g. `Reason:`), one line per stated line, plus one
+/// `Contact: <uri>;q=…` per redirect target. Removals and stack-owned keys are dropped — the response
 /// generator owns the structural set (ADR-0017 X2), including the Contact a
 /// redirect authors from its typed target list.
 /// Errs when a redirect target does not read — the whole redirect is refused,
@@ -521,7 +521,10 @@ fn build_reject_headers(
     if let Some(map) = update_headers {
         for (name, val) in map {
             let named = HeaderName::from(name.as_str());
-            if let (Some(v), HeaderClass::EndToEnd) = (val, named.class()) {
+            if named.class() != HeaderClass::EndToEnd {
+                continue;
+            }
+            for v in val.lines() {
                 out.push(SipHeader { name: SipStr::owned(name), value: SipStr::owned(v) });
             }
         }

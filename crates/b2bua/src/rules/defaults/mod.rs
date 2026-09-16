@@ -20,5 +20,6 @@ mod route_fold;
 pub use compose::{default_rules, default_rules_with, ComposeOptions};
 pub(crate) use core_rules::unacked_2xx_give_up_actions;
 pub(crate) use route_fold::{
-    fold_lands_on_going_away_call, parse_label, parse_route_fold, route_fold_parity_actions,
+    fold_lands_on_going_away_call, parse_header_updates, parse_label, parse_route_fold,
+    route_fold_parity_actions,
 };

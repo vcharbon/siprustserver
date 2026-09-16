@@ -7,6 +7,7 @@ use sip_message::header::{HeaderValue, ReferTo};
 use sip_message::{Method, SipStr};
 
 use super::{state, timer_id, Phase, TRANSFER_MACHINE};
+use crate::rules::defaults::parse_header_updates;
 use crate::rules::model::{
     Effect, Match, RuleAction, RuleContext, RuleDefinition, RuleDiagnostic, RuleHandleResult,
 };
@@ -154,15 +155,7 @@ pub(super) fn http_allow() -> RuleDefinition {
             let no_answer = payload.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
             let callback_context = payload.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
             let new_refer_to = payload.get("new_refer_to").and_then(|v| v.as_str()).map(str::to_string);
-            let header_updates: Vec<(String, Option<String>)> = payload
-                .get("update_headers")
-                .and_then(|v| v.as_object())
-                .map(|m| {
-                    m.iter()
-                        .map(|(k, v)| (k.clone(), v.as_str().map(str::to_string)))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let header_updates = parse_header_updates(payload);
 
             // Held SDP from A's INVITE snapshot (preserves codecs, port 0,
             // a=inactive). No profile → drop the body.

@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 
 pub use call::features::FeatureActivations;
 
-/// Header name → value, or `None` to delete the header.
-pub type SipHeaderUpdates = BTreeMap<String, Option<String>>;
+use b2bua_sdk::header_update::SipHeaderUpdates;
 
 /// The decision request sent on a new INVITE (the call context the backend
 /// keys decisions off — R-URI, From/To, all non-structural `X-*` headers, body).

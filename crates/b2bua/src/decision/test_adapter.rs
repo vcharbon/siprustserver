@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 use super::schemas::{
     default_platform_features, BodyUpdate, CallLimiterEntry, CallTreatment, NewCallRequest,
     NewCallResponse, RedirectContact, RedirectDecision, RejectDecision, RouteDecision,
-    SipDestination, SipHeaderUpdates,
+    SipDestination,
 };
+use super::SipHeaderUpdates;
 use super::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
@@ -239,15 +240,10 @@ fn api_call_has_routes(req: &NewCallRequest) -> bool {
     parse_api_call_plan(req).and_then(|v| v.get("routes").map(|r| r.is_array())).unwrap_or(false)
 }
 
-/// `{name: value | null}` → [`SipHeaderUpdates`] (`null` = remove).
+/// `{name: line | [lines] | null}` → [`SipHeaderUpdates`] (`null` = remove);
+/// absent or not an object = no statement.
 fn parse_update_headers(v: Option<&serde_json::Value>) -> Option<SipHeaderUpdates> {
-    v.and_then(|x| x.as_object()).map(|m| {
-        let mut out = SipHeaderUpdates::new();
-        for (k, val) in m {
-            out.insert(k.clone(), val.as_str().map(str::to_string));
-        }
-        out
-    })
+    v.filter(|x| x.is_object()).and_then(|x| serde_json::from_value(x.clone()).ok())
 }
 
 /// The optional `label` of a plan object: absent (or not a string) = none.
@@ -477,14 +473,7 @@ pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
                 instruction.get("no_answer_timeout_sec").and_then(|v| v.as_i64());
             let callback_context =
                 instruction.get("callback_context").and_then(|v| v.as_str()).map(str::to_string);
-            let update_headers =
-                instruction.get("update_headers").and_then(|v| v.as_object()).map(|m| {
-                    let mut out: super::schemas::SipHeaderUpdates = BTreeMap::new();
-                    for (k, val) in m {
-                        out.insert(k.clone(), val.as_str().map(str::to_string));
-                    }
-                    out
-                });
+            let update_headers = parse_update_headers(instruction.get("update_headers"));
             ReferOutcome::Allow(CallReferResponse::Allow {
                 destination: SipDestination::new(host, port),
                 new_refer_to,
@@ -1093,11 +1082,11 @@ mod tests {
                 assert_eq!(r.new_to.as_deref(), Some("sip:+19005678@dest"));
                 let h = r.update_headers.unwrap();
                 assert_eq!(
-                    h.get("P-Asserted-Identity").unwrap().as_deref(),
+                    h.get("P-Asserted-Identity").unwrap().single(),
                     Some("sip:+15551000@me")
                 );
                 assert_eq!(
-                    h.get("P-Access-Network-Info").unwrap().as_deref(),
+                    h.get("P-Access-Network-Info").unwrap().single(),
                     Some("3GPP-E-UTRAN-FDD")
                 );
                 // No reroute / on_exhausted ⇒ no carried context.
@@ -1185,7 +1174,7 @@ mod tests {
                 assert_eq!(rj.reject_code, 603);
                 assert_eq!(rj.reject_reason.as_deref(), Some("Declined"));
                 assert_eq!(
-                    rj.update_headers.unwrap().get("Reason").unwrap().as_deref(),
+                    rj.update_headers.unwrap().get("Reason").unwrap().single(),
                     Some("Q.850;cause=21")
                 );
             }

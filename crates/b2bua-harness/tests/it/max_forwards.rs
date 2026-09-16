@@ -18,7 +18,7 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use b2bua::decision::test_adapter::{reject, route_to};
-use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine, SipHeaderUpdates};
+use b2bua::decision::{HeaderUpdate, NewCallResponse, ScriptedDecisionEngine, SipHeaderUpdates};
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -99,8 +99,8 @@ async fn a_decision_cannot_restate_the_hop_count() {
                 let mut updates = SipHeaderUpdates::new();
                 // A backend trying to refill the budget, and one trying to
                 // withhold the header entirely.
-                updates.insert("Max-Forwards".into(), Some("70".into()));
-                updates.insert("Content-Length".into(), None);
+                updates.insert("Max-Forwards".into(), HeaderUpdate::line("70"));
+                updates.insert("Content-Length".into(), HeaderUpdate::Remove);
                 r.update_headers = Some(updates);
                 NewCallResponse::Route(r)
             })

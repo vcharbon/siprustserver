@@ -9,7 +9,9 @@ use sip_message::SipRequest;
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
-use crate::decision::{CallDecisionEngine, CallFailureRequest, CallTreatment, FailureInfo};
+use crate::decision::{
+    header_lines, CallDecisionEngine, CallFailureRequest, CallTreatment, FailureInfo,
+};
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
 use crate::rules::capabilities;
@@ -229,11 +231,8 @@ pub async fn apply_route(
         .map(|secs| relay::clamp_no_answer(config, &call.call_ref, secs));
     // Additive header rewrites (PAI, PANI, any X-*). Structural From/To/R-URI go
     // through the typed fields below, never this map (ADR-0017 X2).
-    let header_updates: Vec<(String, Option<String>)> = route
-        .update_headers
-        .as_ref()
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default();
+    let header_updates: Vec<(String, Option<String>)> =
+        route.update_headers.as_ref().map(header_lines).unwrap_or_default();
     // Whether the INVITE this route mints carries an offer: the relayed
     // a-leg body under `Keep`, none under `Drop`, the substitute under
     // `Replace`. The strategy's withhold and the `fake-prack` delayed-offer

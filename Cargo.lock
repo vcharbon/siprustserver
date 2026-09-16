@@ -587,6 +587,7 @@ name = "b2bua-sdk"
 version = "0.1.0"
 dependencies = [
  "call",
+ "serde",
  "serde_json",
  "sip-message",
  "sip-txn",
