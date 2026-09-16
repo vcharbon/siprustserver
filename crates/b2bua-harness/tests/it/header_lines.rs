@@ -82,6 +82,48 @@ async fn a_route_states_a_multi_instance_header_as_ordered_lines() {
     let _report = s.finish().await;
 }
 
+/// A capability half the decision removes stays off the originated INVITE:
+/// the face's advertisement (the originator's relayed `Allow` / `Accept`) is
+/// a statement the removal outranks, like every other relayed line.
+#[tokio::test(start_paused = true)]
+async fn a_removed_capability_half_is_not_re_advertised() {
+    let s = plan_scene("hdr-lines-cap-removed").await;
+    let plan = serde_json::json!({
+        "action": "route",
+        "destination": {"host": "127.0.0.1", "port": BOB_PORT},
+        "update_headers": {"Allow": null, "Accept": ["application/sdp, text/plain"]}
+    })
+    .to_string();
+
+    let mut call = s
+        .alice
+        .invite(&s.bob)
+        .with_sdp(OFFER)
+        .with_header("X-Api-Call", &plan)
+        .with_header("Allow", "INVITE, ACK, BYE")
+        .with_header("Accept", "application/sdp")
+        .through(s.b2bua.addr)
+        .send()
+        .await;
+
+    let mut uas = s.bob.receive("INVITE").await;
+    let req = uas.request();
+    assert_eq!(lines(req, "Allow"), Vec::<String>::new(), "the removed half is not re-advertised");
+    assert_eq!(lines(req, "Accept"), ["application/sdp, text/plain"], "the stated half stands");
+
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    s.bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    s.bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    settle_until(|| s.b2bua.active_calls() == 0).await;
+    s.b2bua.assert_fully_reaped();
+    let _report = s.finish().await;
+}
+
 /// A reject the decision authors carries every stated line of a name: two
 /// `Reason` lines (RFC 3326 allows several) in the stated order.
 #[tokio::test(start_paused = true)]

@@ -9,7 +9,7 @@ pub mod apply_route;
 mod schemas;
 pub mod test_adapter;
 
-pub use b2bua_sdk::header_update::{header_lines, HeaderUpdate, SipHeaderUpdates};
+pub use b2bua_sdk::header_update::{header_lines, payload_lines, HeaderUpdate, SipHeaderUpdates};
 pub use schemas::{
     default_platform_features, read_stated_port, BodyUpdate, CallFailureRequest,
     CallFailureResponse, CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest,

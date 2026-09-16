@@ -264,9 +264,10 @@ pub fn build_b_leg(
     // 3261 §20.5/§20.37/§20.1) — the originator's own, relayed, unless the
     // call declares one; a half nobody stated carries no line. The offer and
     // the withhold narrow the assembled sets after this. Neither clobbers a
-    // caller-supplied value from `header_updates`.
+    // caller-supplied value from `header_updates`, and a half the caller
+    // removed stays off (see [`removed`]).
     for (name, value) in capabilities.lines() {
-        if !extra_headers.iter().any(|h| name.matches(&h.name)) {
+        if !extra_headers.iter().any(|h| name.matches(&h.name)) && !removed(header_updates, &name) {
             extra_headers.push(MsgHeader {
                 name: SipStr::owned(name.as_wire_str()),
                 value: SipStr::owned(&value),

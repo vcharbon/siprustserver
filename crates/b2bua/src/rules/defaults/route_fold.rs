@@ -7,8 +7,8 @@
 
 use call::{CallModelState, TimerType};
 
-use crate::decision::{header_lines, SipHeaderUpdates};
 use crate::rules::model::{RuleAction, RuleContext, TimerDelay};
+use b2bua_sdk::header_update::payload_lines;
 
 /// Whether a decision fold has landed on a call already going away — the
 /// call-scoped clause of [`call::helpers::leg_is_going_away`]. A `/calls`
@@ -26,12 +26,7 @@ pub(crate) fn fold_lands_on_going_away_call(ctx: &RuleContext) -> bool {
 /// `(name, line-or-removal)` pairs the response/leg builders consume — one pair
 /// per stated line, in the stated order.
 pub(crate) fn parse_header_updates(payload: &serde_json::Value) -> Vec<(String, Option<String>)> {
-    payload
-        .get("update_headers")
-        .filter(|v| v.is_object())
-        .and_then(|v| serde_json::from_value::<SipHeaderUpdates>(v.clone()).ok())
-        .map(|m| header_lines(&m))
-        .unwrap_or_default()
+    payload_lines(payload.get("update_headers"))
 }
 
 /// The decoded fields of a route-shaped payload.

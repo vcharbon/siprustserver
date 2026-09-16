@@ -229,8 +229,9 @@ pub async fn apply_route(
         .no_answer_timeout_sec
         .or(route.features.no_answer_timeout_sec)
         .map(|secs| relay::clamp_no_answer(config, &call.call_ref, secs));
-    // Additive header rewrites (PAI, PANI, any X-*). Structural From/To/R-URI go
-    // through the typed fields below, never this map (ADR-0017 X2).
+    // The decision's header statements (sets of one or more lines, removals).
+    // Structural From/To/R-URI go through the typed fields below, never this
+    // map (ADR-0017 X2).
     let header_updates: Vec<(String, Option<String>)> =
         route.update_headers.as_ref().map(header_lines).unwrap_or_default();
     // Whether the INVITE this route mints carries an offer: the relayed

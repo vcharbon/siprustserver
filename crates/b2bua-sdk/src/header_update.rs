@@ -73,6 +73,17 @@ pub fn header_lines(updates: &SipHeaderUpdates) -> Vec<(String, Option<String>)>
         .collect()
 }
 
+/// The `(name, line-or-removal)` pairs of a payload's `update_headers` object
+/// ([`header_lines`] of it), or none when the payload carries no readable
+/// object — the form a rule reads a fold's decision back in.
+pub fn payload_lines(update_headers: Option<&serde_json::Value>) -> Vec<(String, Option<String>)> {
+    update_headers
+        .filter(|v| v.is_object())
+        .and_then(|v| serde_json::from_value::<SipHeaderUpdates>(v.clone()).ok())
+        .map(|m| header_lines(&m))
+        .unwrap_or_default()
+}
+
 /// `Remove` is `null`; `Set` is the array of lines.
 impl Serialize for HeaderUpdate {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
