@@ -476,7 +476,7 @@ async fn a_callee_final_with_no_reroute_is_recorded_by_the_callee() {
 }
 
 /// A leg that answers no liveness probe ends the call under a keepalive
-/// deadline, by that leg; the BYE to the healthy peer is under the cut.
+/// deadline, by that leg; the BYEs to both peers are under the cut.
 #[tokio::test(start_paused = true)]
 async fn a_keepalive_timeout_is_recorded_by_the_silent_leg() {
     let h = Harness::new("termination-keepalive");
@@ -498,16 +498,21 @@ async fn a_keepalive_timeout_is_recorded_by_the_silent_leg() {
     let _silent = bob.receive("OPTIONS").await;
     h.advance(Duration::from_secs(5)).await;
     let mut alice_bye = alice.receive("BYE").await;
+    let mut bob_bye = bob.receive_tolerating("BYE", &["OPTIONS"]).await;
     h.advance(Duration::from_secs(1)).await;
     alice_bye.respond(200, "OK").await;
+    bob_bye.respond(200, "OK").await;
 
     let (done, cdr) = sut.assert_reaped().await;
     let t = record(&done, &cdr);
     assert_eq!(t.cause, TerminationCause::Timeout(TimeoutKind::Keepalive));
     assert_eq!(t.by_leg.as_deref(), Some("b-1"));
     let a = &done.a_leg.messages.entries;
-    assert_eq!(t.last_seq, entry(a, Authored, "BYE", None).seq, "cut at the BYE to the caller");
+    let b = &done.b_legs[0].messages.entries;
+    assert_eq!(t.last_seq, entry(b, Authored, "BYE", None).seq, "cut at the BYE to the callee");
+    assert!(entry(a, Authored, "BYE", None).seq < t.last_seq, "the BYE to the caller is in");
     assert!(entry(a, Received, "BYE", Some(200)).seq > t.last_seq);
+    assert!(entry(b, Received, "BYE", Some(200)).seq > t.last_seq);
     let json = serde_json::to_value(&cdr).unwrap();
     assert_eq!(json["termination"]["cause"], serde_json::json!({"timeout": "keepalive"}));
 

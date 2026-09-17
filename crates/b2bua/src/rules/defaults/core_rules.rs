@@ -887,6 +887,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // PRACK's (RFC 3262 §3), CANCEL's (RFC 3261 §9.2), NOTIFY's (RFC 6665 §4.4.1)
         // and BYE's (RFC 3261 §15.1.1: the dialog ends either way); a relayed one is
         // `relay-non-invite-failure`'s and the rest `absorb-own-request-failure`'s.
+        //
+        // The 481 leg is BYEd like its peer: §12.2.1.2 ends an INVITE dialog
+        // by sending a BYE, whatever the peer answered. Its final to that BYE,
+        // a 481 as likely as a 200, resolves the leg (`resolve-bye-response`).
         rule(
             "handle-481",
             &[],
@@ -911,10 +915,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     TerminationCause::RemoteFinal
                 };
                 ok(vec![
-                    RuleAction::TerminateLeg {
-                        leg_id: src.clone(),
-                        bye_disposition: Some(ByeDisposition::ByeTimeout),
-                    },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Bye,
                         leg_id: src.clone(),
@@ -1287,8 +1287,18 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 if call::helpers::leg_is_going_away(ctx.call.state(), leg) {
                     // What the leg was awaiting names the disposition: an
                     // unanswered BYE times out, everything else ends cancelled.
+                    // A leg awaiting its BYE's answer is resolved by that
+                    // BYE's own timeout only: an earlier request's dead
+                    // transaction (the liveness OPTIONS that opened the
+                    // teardown, Timer F still running) says nothing about
+                    // the BYE, which may yet be answered.
+                    let timed_out_bye =
+                        ctx.timeout_method().is_some_and(|m| m.eq_ignore_ascii_case("BYE"));
                     let bye_disposition = match leg.bye_disposition {
-                        Some(ByeDisposition::ByeSent) => ByeDisposition::ByeTimeout,
+                        Some(ByeDisposition::ByeSent) if timed_out_bye => {
+                            ByeDisposition::ByeTimeout
+                        }
+                        Some(ByeDisposition::ByeSent) => return ok(vec![]),
                         _ => ByeDisposition::Cancelled,
                     };
                     return ok(vec![RuleAction::TerminateLeg {
@@ -1559,6 +1569,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(actions)
             },
         ),
+        // The liveness probe drew no answer within its deadline: the call ends,
+        // and the silent leg is BYEd like its peer (RFC 3261 §12.2.1.2: no
+        // response to an in-dialog request ends an INVITE dialog by a BYE —
+        // the probe may be what was lost, not the peer). A leg silent on its
+        // BYE too resolves by that BYE's transaction timeout (`handle-timeout`).
         rule(
             "keepalive-timeout",
             &[],
@@ -1567,10 +1582,6 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .call_state(CallModelState::Active),
             |ctx| {
                 ok(vec![
-                    RuleAction::TerminateLeg {
-                        leg_id: ctx.source_leg_id.to_string(),
-                        bye_disposition: Some(ByeDisposition::ByeTimeout),
-                    },
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Bye,
                         leg_id: ctx.source_leg_id.to_string(),

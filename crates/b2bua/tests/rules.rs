@@ -287,6 +287,62 @@ fn invite_timeout_on_a_cancelling_leg_resolves_locally_without_consult() {
     );
 }
 
+/// The `handle-timeout` rule's output for a transaction timeout of `method`
+/// on the a-leg of `call`.
+fn a_leg_timeout_result(call: &call::Call, method: &str) -> Vec<RuleAction> {
+    let event = CallEvent::Timeout {
+        branch: "z9hG4bKa1".into(),
+        call_ref: Some(call.call_ref.clone()),
+        leg_id: Some("a".into()),
+        method: Some(method.into()),
+        destination: None,
+        timeout_kind: sip_txn::TimeoutKind::Transaction,
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+        discharged: None,
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, call, &ctx);
+    let handle_timeout =
+        ranked.iter().find(|r| r.id == "handle-timeout").expect("handle-timeout is a candidate");
+    (handle_timeout.handle)(&ctx).expect("handle-timeout handles the timeout").actions
+}
+
+/// A terminating call's leg awaiting the answer to its BYE (`ByeSent`) is
+/// resolved by the BYE's own transaction timeout, and by nothing else: the
+/// liveness OPTIONS whose silence opened the teardown times out later (Timer
+/// F) while the BYE may still be answered.
+#[test]
+fn only_the_bye_timeout_resolves_a_bye_sent_leg() {
+    let mut call = test_call();
+    call.state = CallModelState::Terminating;
+    call.a_leg.state = LegState::Confirmed;
+    call.a_leg.bye_disposition = Some(call::ByeDisposition::ByeSent);
+
+    let actions = a_leg_timeout_result(&call, "OPTIONS");
+    assert!(
+        actions.is_empty(),
+        "an OPTIONS timeout resolves nothing on a BYE-sent leg, got {actions:?}"
+    );
+
+    let actions = a_leg_timeout_result(&call, "BYE");
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [RuleAction::TerminateLeg { leg_id, bye_disposition: Some(call::ByeDisposition::ByeTimeout) }]
+                if leg_id == "a"
+        ),
+        "the BYE's timeout resolves the leg as a BYE timeout, got {actions:?}",
+    );
+}
+
 #[test]
 fn invite_timeout_on_a_live_pending_leg_still_consults() {
     // The going-away guard is narrow: a live pending b-leg's transaction
