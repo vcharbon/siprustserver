@@ -736,9 +736,10 @@ fn rule_chain_turn(
 /// BYEs BOTH legs. So we MUST NOT attribute to an outbound BYE's destination
 /// (the first is the a-leg's hop, often the healthy one, and mis-classifies
 /// internal/external). Attribute to the FAILED leg L's OWN egress-aware next
-/// hop — the exact hop the unanswered OPTIONS went to. If L or its dialog can't be resolved we record nothing (no
-/// fabricated address). Distinct from the reclaim-time stale drop
-/// (`restore_hygiene`), which never reaches this event path.
+/// hop — the exact hop the unanswered OPTIONS went to. If L or its dialog
+/// can't be resolved we record nothing (no fabricated address). Distinct from
+/// the reclaim-time stale drop (`restore_hygiene`), which never reaches this
+/// event path.
 fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call) {
     if let CallEvent::Timer { timer_type: TimerType::KeepaliveTimeout, leg_id, .. } = event {
         if let Some((host, port)) = keepalive_timeout_peer(&ctx.config, call, leg_id.as_deref()) {
