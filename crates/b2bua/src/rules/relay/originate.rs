@@ -12,7 +12,8 @@ use sip_message::generators::{
     self, CapabilitySet, GenerateOutOfDialogRequestOpts, OutOfDialogMethod, RelayScope,
 };
 use sip_message::header::{
-    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, MaxForwards, TokenListHeader, Uri,
+    self, ChargingVector, HeaderClass, HeaderName, HeaderValue, MaxForwards, NameAddr,
+    TokenListHeader, Uri,
 };
 use sip_message::{hops, Method, SipHeader as MsgHeader, SipRequest, SipStr};
 use sip_txn::{IdGen, TxnKind};
@@ -20,7 +21,7 @@ use sip_txn::{IdGen, TxnKind};
 use crate::config::B2buaConfig;
 use crate::effects::{OutboundBody, OutboundSipEffect, OutboundTxnMode, Provenance};
 
-use super::address::{address, UnreadableAddress};
+use super::address::{address, identity, UnreadableAddress};
 use super::body::{media_type, sdp};
 use super::egress::apply_b_leg_egress;
 use super::identity::{leg_contact, leg_via};
@@ -176,10 +177,9 @@ pub fn build_b_leg(
     a_leg_invite: &SipRequest,
     dest: (String, u16),
     new_ruri: Option<&str>,
-    // Identity rewrites (ADR-0017): override the b-leg From/To **URI** (the
-    // from/to numbers). The B2BUA always owns the tags, so only the URI is
-    // settable here; `None` keeps the relayed a-leg URI. The basic path passes
-    // `(None, None)`.
+    // Identity rewrites (ADR-0017): the b-leg From / To as a name-addr or a bare
+    // addr-spec. The B2BUA owns the tags: a `tag` stated on either is dropped.
+    // `None` keeps the relayed a-leg URI. The basic path passes `(None, None)`.
     new_from: Option<&str>,
     new_to: Option<&str>,
     no_answer_timeout_sec: Option<i64>,
@@ -226,14 +226,16 @@ pub fn build_b_leg(
         Some(text) => address("new_ruri", text)?,
         None => a_leg_invite.request_uri().clone(),
     };
-    let from_uri = match new_from {
-        Some(text) => address("new_from", text)?,
-        None => a_leg_invite.from().uri().clone(),
+    let from_addr = match new_from {
+        Some(text) => identity("new_from", text)?,
+        None => NameAddr::new(a_leg_invite.from().uri().clone()),
     };
-    let to_uri = match new_to {
-        Some(text) => address("new_to", text)?,
-        None => a_leg_invite.to().uri().clone(),
+    let to_addr = match new_to {
+        Some(text) => identity("new_to", text)?,
+        None => NameAddr::new(a_leg_invite.to().uri().clone()),
     };
+    let from_uri = from_addr.uri().clone();
+    let to_uri = to_addr.uri().clone();
     let body = match body_override {
         Some(b) => b.to_vec(),
         None => a_leg_invite.body().to_vec(),
@@ -335,8 +337,8 @@ pub fn build_b_leg(
     let opts = GenerateOutOfDialogRequestOpts {
         request_uri: Some(request_uri.clone()),
         call_id: b_call_id.clone(),
-        from: Some(header::From::from_uri(from_uri.clone()).with_tag(SipStr::owned(&from_tag))),
-        to: Some(header::To::from_uri(to_uri.clone())),
+        from: Some(header::From::new(from_addr).with_tag(SipStr::owned(&from_tag))),
+        to: Some(header::To::new(to_addr)),
         cseq: 1,
         via: Some(leg_via(config, call_ref, leg_id, is_emergency, branch.clone())),
         contact: Some(leg_contact(config, call_ref, leg_id, is_emergency)),

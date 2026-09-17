@@ -101,6 +101,19 @@ impl NameAddr {
         Ok(Self { display, uri, params })
     }
 
+    /// Read an identity a caller states as text: bracketed, the name-addr [`parse`]
+    /// reads; bare, an addr-spec whose every `;`-parameter is a URI parameter, the
+    /// way a Request-URI reads. The two readings differ only on a bare value's tail.
+    ///
+    /// [`parse`]: Self::parse
+    pub fn parse_identity(raw: &SipStr) -> Result<Self, SipParseError> {
+        if raw.as_str().contains('<') {
+            Self::parse(raw)
+        } else {
+            Uri::parse(&raw.trimmed()).map(Self::new)
+        }
+    }
+
     /// Render as `["display" ]<uri>*(";" param)`. The angle brackets are
     /// unconditional: they are always legal, and they keep a URI parameter from
     /// being read back as a header parameter.
@@ -162,6 +175,23 @@ mod tests {
     #[test]
     fn an_unquoted_display_name_is_kept() {
         assert_eq!(parse("Bob <sip:bob@biloxi.com>").display(), Some("Bob"));
+    }
+
+    /// `parse_identity` keeps a bare value's tail on the URI; bracketed text reads
+    /// as `parse` does.
+    #[test]
+    fn an_identity_reads_a_bare_tail_as_uri_parameters() {
+        let bare =
+            NameAddr::parse_identity(&SipStr::from_static("sip:a@h;user=phone;tag=x")).unwrap();
+        assert_eq!(bare.uri().params().value("user"), Some("phone"));
+        assert_eq!(bare.uri().params().value("tag"), Some("x"));
+        assert!(bare.params().is_empty());
+        let bracketed =
+            NameAddr::parse_identity(&SipStr::from_static("\"B\" <sip:a@h;user=phone>;tag=x"))
+                .unwrap();
+        assert_eq!(bracketed.display(), Some("B"));
+        assert_eq!(bracketed.uri().params().value("user"), Some("phone"));
+        assert_eq!(bracketed.params().value("tag"), Some("x"));
     }
 
     #[test]
