@@ -425,13 +425,10 @@ impl Owner {
     pub(super) async fn fire_timeout(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
         let (call_ref, leg_id, method, destination, timeout_kind) = match self.txns.get(branch) {
             Some(t) if t.state.is_active() => {
-                let method =
-                    t.original_request.as_ref().map(|r| r.method().to_string()).or_else(|| match t
-                        .kind
-                    {
-                        TxnKind::Invite => Some("INVITE".to_string()),
-                        TxnKind::NonInvite => None,
-                    });
+                // Every transaction names its method (RFC 3261 §17.1: the TU
+                // is told which request drew no answer), the non-INVITE ones
+                // included — a BYE's Timer F is not an OPTIONS's.
+                let method = Some(t.method.to_string());
                 // The kind was stored explicitly at arming (`client_timeout` →
                 // `start_client_retransmit`): `Transaction` for the long
                 // out-of-dialog INVITE bound, `Response` for Timer B/F.

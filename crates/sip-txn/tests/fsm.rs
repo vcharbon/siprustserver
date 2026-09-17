@@ -611,6 +611,41 @@ async fn tightened_first_response_bound_leaves_in_dialog_and_non_invite_on_64_t1
     assert_eq!(active(&stack), 0);
 }
 
+/// A non-INVITE client transaction's Timer F names the request that drew no
+/// answer, like an INVITE's Timer B does: the TU tells a BYE's silence apart
+/// from an OPTIONS's on the same leg (RFC 3261 §17.1.2.2).
+#[tokio::test(start_paused = true)]
+async fn a_non_invite_timeout_names_its_method() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    stack
+        .txn
+        .send_request(outbound_request("OPTIONS", "z9hG4bK-ni-opt"), addr(PEER), TxnKind::NonInvite)
+        .await
+        .unwrap();
+    stack
+        .txn
+        .send_request(outbound_request("BYE", "z9hG4bK-ni-bye"), addr(PEER), TxnKind::NonInvite)
+        .await
+        .unwrap();
+
+    elapse_ms(33_000).await;
+    let mut methods: Vec<Option<String>> = stack
+        .drain_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            TransactionEvent::Timeout { method, .. } => Some(method),
+            _ => None,
+        })
+        .collect();
+    methods.sort();
+    assert_eq!(
+        methods,
+        vec![Some("BYE".to_string()), Some("OPTIONS".to_string())],
+        "each Timer F names its own request"
+    );
+    assert_eq!(active(&stack), 0);
+}
+
 /// A ringing callee is unaffected by the tightened first-response bound: the
 /// FIRST provisional swaps in the long INVITE bound
 /// (`invite_initial_timeout_ms`, default 158 s), so an initial INVITE that

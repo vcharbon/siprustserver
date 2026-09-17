@@ -732,12 +732,11 @@ fn rule_chain_turn(
 /// Per-peer keepalive-timeout attribution (observability only;
 /// `b2bua_peer_failures_total{...,kind="keepalive_timeout"}`). The genuine
 /// no-200 keepalive timeout is the `KeepaliveTimeout` timer firing for a
-/// specific leg L (`leg_id`): the `keepalive-timeout` rule tears L down (no BYE
-/// to L — it is unresponsive) and BYEs the SURVIVING leg. So we MUST NOT
-/// attribute to the outbound BYE's destination (that is the surviving, often
-/// healthy, leg's hop and mis-classifies internal/external). Attribute to the
-/// FAILED leg L's OWN egress-aware next hop — the exact hop the unanswered
-/// OPTIONS went to. If L or its dialog can't be resolved we record nothing (no
+/// specific leg L (`leg_id`): the `keepalive-timeout` rule ends the call and
+/// BYEs BOTH legs. So we MUST NOT attribute to an outbound BYE's destination
+/// (the first is the a-leg's hop, often the healthy one, and mis-classifies
+/// internal/external). Attribute to the FAILED leg L's OWN egress-aware next
+/// hop — the exact hop the unanswered OPTIONS went to. If L or its dialog can't be resolved we record nothing (no
 /// fabricated address). Distinct from the reclaim-time stale drop
 /// (`restore_hygiene`), which never reaches this event path.
 fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call) {

@@ -67,3 +67,43 @@ async fn unanswered_keepalive_byes_both_peers_and_reaps() {
 
     let _report = h.finish().await;
 }
+
+/// A leg silent on its probe, then on its BYE for a while, is still owed the
+/// BYE's own deadline: the probe's Timer F (32 s after the OPTIONS, 5 s before
+/// the BYE's) resolves nothing on a leg awaiting its BYE answer, so a 200 that
+/// arrives in between confirms the BYE and the call ends on that answer.
+#[tokio::test(start_paused = true)]
+async fn a_silent_leg_answering_its_bye_after_the_probes_timer_f_is_confirmed() {
+    let h = Harness::new("b2bua-keepalive-timeout-late-bye-200");
+    let alice = h.agent("alice", "127.0.0.1:5165").await;
+    let bob = h.agent("bob", "127.0.0.1:5175").await;
+    let b2bua =
+        B2buaSut::route_all_to("127.0.0.1", 5175).start(&h, "b2bua", "127.0.0.1:5185").await;
+    let _dialog = establish(&alice, &bob, b2bua.addr).await;
+
+    // t = 30 s: the probe. Alice silent, bob healthy.
+    h.advance(KEEPALIVE_INTERVAL).await;
+    let _silent = alice.receive("OPTIONS").await;
+    bob.receive("OPTIONS").await.respond(200, "OK").await;
+
+    // t = 35 s: the cutoff, a BYE to each leg. Bob answers; alice holds hers.
+    h.advance(KEEPALIVE_TIMEOUT).await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    let mut alice_bye = alice.receive_tolerating("BYE", &["OPTIONS"]).await;
+
+    // t = 63 s: the probe's Timer F (t = 62 s) has fired; alice's leg still
+    // awaits its BYE answer, so the call is still there.
+    h.advance(Duration::from_secs(28)).await;
+    settle_until(|| false).await;
+    assert_eq!(b2bua.active_calls(), 1, "the probe's timeout does not resolve the BYE-sent leg");
+
+    // Alice answers her BYE before its own Timer F (t = 67 s): the call ends
+    // on that answer.
+    alice_bye.respond(200, "OK").await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+    let cdrs = b2bua.cdr_records();
+    assert_eq!(cdrs.len(), 1, "one CDR for the call");
+
+    let _report = h.finish().await;
+}

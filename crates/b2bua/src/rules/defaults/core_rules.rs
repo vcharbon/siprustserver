@@ -406,9 +406,12 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // entry on the final response. Outranks `relay-provisional`,
         // `confirm-dialog` and `route-failure`, which would otherwise claim an
         // INVITE response.
+        // Also outranks `handle-481`: a relayed re-INVITE's 481 is the far
+        // end's answer to relay (RFC 3261 §14.1, the session unchanged), not
+        // a denial of the dialog we hold.
         rule(
             "relay-reinvite-response",
-            &["relay-provisional", "confirm-dialog", "route-failure"],
+            &["relay-provisional", "confirm-dialog", "route-failure", "handle-481"],
             Match::response().method("INVITE").filter(|ctx| {
                 let cseq = match ctx.response() {
                     Some(r) => r.cseq().seq() as i64,
