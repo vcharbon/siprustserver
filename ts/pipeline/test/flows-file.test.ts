@@ -315,14 +315,30 @@ describe("FlowsFile.readFlowsLegsDecoded", () => {
     expect(read.envelope).toEqual({ ...whole, legs: [] })
   })
 
-  it("parses the named leg and the envelope, nothing else of the document", () => {
+  it("parses the named leg and at most the envelope, nothing else of the document", () => {
     const size = fs.statSync(big).size
     const parse = vi.spyOn(JSON, "parse")
     try {
       excerpt(big, [42])
       const widths = parse.mock.calls.map(([text]) => (typeof text === "string" ? text.length : 0))
-      expect(widths).toHaveLength(2)
+      expect(widths.length).toBeLessThanOrEqual(2)
       expect(Math.max(...widths)).toBeLessThan(size / 2)
+    } finally {
+      parse.mockRestore()
+    }
+  })
+
+  it("decodes the envelope once per file, however many leg sets are read", () => {
+    const parse = vi.spyOn(JSON, "parse")
+    try {
+      excerpt(big, [1])
+      excerpt(big, [2, 3])
+      // The envelope's parse, if any, is the widest by far; three leg parses
+      // and at most one envelope parse across both reads.
+      const widths = parse.mock.calls.map(([text]) => (typeof text === "string" ? text.length : 0))
+      const legWidth = JSON.stringify(legOf(0), null, 2).length
+      expect(widths.filter((width) => width > 2 * legWidth).length).toBeLessThanOrEqual(1)
+      expect(widths.filter((width) => width <= 2 * legWidth)).toHaveLength(3)
     } finally {
       parse.mockRestore()
     }

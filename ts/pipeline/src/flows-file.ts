@@ -12,7 +12,7 @@ import { Flows } from "@sip/contracts"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import { Buffer } from "node:buffer"
-import { indexOf, legTexts } from "./flows-index.js"
+import { type FlowsIndex, indexOf, legTexts } from "./flows-index.js"
 import { segments } from "./flows-segments.js"
 
 /** A leg the `Flows` contract refuses, named by the index the document uses for it. */
@@ -105,10 +105,26 @@ export const readFlowsFileDecoded = Effect.fn("FlowsFile.readFlowsFileDecoded")(
 })
 
 /**
+ * A file's envelope decoded once: it is the document minus its legs, which for
+ * a capture of thousands of calls is megabytes of groups, and it is the same
+ * for every leg set read off one index.
+ */
+const envelopes = new WeakMap<FlowsIndex, Flows.FlowsDoc>()
+
+const envelopeOf = (index: FlowsIndex): Effect.Effect<Flows.FlowsDoc, Schema.SchemaError> => {
+  const known = envelopes.get(index)
+  if (known !== undefined) return Effect.succeed(known)
+  return Flows.decodeFlows({ ...(JSON.parse(index.head + index.tail) as object), legs: [] }).pipe(
+    Effect.tap((envelope) => Effect.sync(() => void envelopes.set(index, envelope)))
+  )
+}
+
+/**
  * The document's envelope and the named legs, DECODED, off the file's leg
- * index (`flows-index.ts`): one scan of the file the first time it is seen,
- * then a positioned read per named leg. A reader that cites a handful of legs
- * of a document of thousands pays for the handful — never for the document.
+ * index (`flows-index.ts`): one scan of the file and one envelope decode the
+ * first time it is seen, then a positioned read and a decode per named leg. A
+ * reader that cites a handful of legs of a document of thousands pays for the
+ * handful — never for the document.
  */
 export const readFlowsLegsDecoded = Effect.fn("FlowsFile.readFlowsLegsDecoded")(function* (
   file: string,
@@ -125,9 +141,6 @@ export const readFlowsLegsDecoded = Effect.fn("FlowsFile.readFlowsLegsDecoded")(
       )
     )
   }
-  const envelope = yield* Flows.decodeFlows({
-    ...(JSON.parse(index.head + index.tail) as object),
-    legs: []
-  })
+  const envelope = yield* envelopeOf(index)
   return { envelope, legs } satisfies FlowsExcerpt
 })
