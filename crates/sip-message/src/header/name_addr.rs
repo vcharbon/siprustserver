@@ -114,6 +114,26 @@ impl NameAddr {
         }
     }
 
+    /// The display name a value states EXACTLY as it is written: a quoted string
+    /// keeps its quotes and its escapes, a bare one its own bytes. `None` where
+    /// the value states none. [`display`](Self::display) is the unescaped reading;
+    /// this is the spelling, for a projection that must reproduce what arrived.
+    pub fn display_as_written(raw: &SipStr) -> Option<SipStr> {
+        let value = raw.trimmed();
+        let bytes = value.as_bytes();
+        let start = skip_ws(bytes, 0);
+        if start >= bytes.len() {
+            return None;
+        }
+        if bytes[start] == b'"' {
+            let (_, after) = read_quoted(&value, start);
+            return Some(value.subspan(start, after - start));
+        }
+        let open = index_of(bytes, b'<', start)?;
+        let before = sub_trimmed(&value, start, open);
+        (!before.as_str().is_empty()).then_some(before)
+    }
+
     /// Render as `["display" ]<uri>*(";" param)`. The angle brackets are
     /// unconditional: they are always legal, and they keep a URI parameter from
     /// being read back as a header parameter.
@@ -170,6 +190,24 @@ mod tests {
             rendered(r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#),
             r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#
         );
+    }
+
+    /// The written form keeps the quotes and the escapes the value carried; an
+    /// unquoted name is its own bytes, and a bare addr-spec states none.
+    #[test]
+    fn the_display_name_as_written_keeps_its_quoting() {
+        let written = |s: &str| {
+            NameAddr::display_as_written(&SipStr::owned(s)).map(|d| d.as_str().to_owned())
+        };
+        assert_eq!(
+            written(r#""Alice \"A\"" <sip:alice@atlanta.com>;tag=1928"#).as_deref(),
+            Some(r#""Alice \"A\"""#)
+        );
+        assert_eq!(written("Bob <sip:bob@biloxi.com>").as_deref(), Some("Bob"));
+        assert_eq!(written("  Bob  <sip:bob@biloxi.com>").as_deref(), Some("Bob"));
+        assert_eq!(written("<sip:bob@biloxi.com>"), None);
+        assert_eq!(written("sip:bob@biloxi.com;tag=9"), None);
+        assert_eq!(written(""), None);
     }
 
     #[test]
