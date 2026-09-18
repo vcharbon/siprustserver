@@ -206,7 +206,12 @@ pub(crate) struct MetricsInner {
     pub outbound_messages_total: AtomicU64,
     /// Per-reason drop counters, indexed by [`EventQueueDropReason::index`].
     pub event_queue_drops: [AtomicU64; 6],
-    pub txn_cancelled_on_call_evict: AtomicU64,
+    /// Client transactions still open when their call was released — orphaned
+    /// (see `Transaction::orphaned`), never cut short (counter).
+    pub txn_orphaned_on_call_evict: AtomicU64,
+    /// Orphaned transactions resident right now, each closing its own
+    /// obligations until its timer purges it (gauge).
+    pub orphaned_transactions: AtomicUsize,
     /// CANCELs held back because their INVITE client txn had no response yet
     /// (RFC 3261 §9.1 — the CANCEL waits for the first provisional).
     pub cancels_held: AtomicU64,
@@ -280,7 +285,8 @@ impl MetricsInner {
             outbound_message_bytes_total: AtomicU64::new(0),
             outbound_messages_total: AtomicU64::new(0),
             event_queue_drops: Default::default(),
-            txn_cancelled_on_call_evict: AtomicU64::new(0),
+            txn_orphaned_on_call_evict: AtomicU64::new(0),
+            orphaned_transactions: AtomicUsize::new(0),
             cancels_held: AtomicU64::new(0),
             held_cancels_flushed: AtomicU64::new(0),
             held_cancels_flushed_pre1xx: AtomicU64::new(0),
@@ -364,9 +370,16 @@ impl TransactionMetrics {
         EventQueueDropReason::ALL.iter().map(|r| self.event_queue_drops(*r)).sum()
     }
 
-    /// Client transactions torn down because their owning call was evicted.
-    pub fn txn_cancelled_on_call_evict(&self) -> u64 {
-        self.inner.txn_cancelled_on_call_evict.load(Ordering::Relaxed)
+    /// Client transactions orphaned — left to close their own obligations —
+    /// because their owning call was released while they were open.
+    pub fn txn_orphaned_on_call_evict(&self) -> u64 {
+        self.inner.txn_orphaned_on_call_evict.load(Ordering::Relaxed)
+    }
+
+    /// Orphaned transactions still resident: what a released call has left in
+    /// the layer, gone once each has been purged by its own timer.
+    pub fn orphaned_transactions(&self) -> usize {
+        self.inner.orphaned_transactions.load(Ordering::Relaxed)
     }
 
     /// CANCELs held back awaiting their INVITE's first provisional (§9.1).

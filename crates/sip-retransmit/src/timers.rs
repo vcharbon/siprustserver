@@ -68,6 +68,12 @@ pub const TIMER_D: u64 = 64 * T1;
 /// [`crate::Class::Final2xx`].
 pub const TIMER_L: u64 = 64 * T1;
 
+/// INVITE *client* txn hold in Accepted after a 2xx the layer ACKed on the
+/// transaction's own behalf (Timer M, RFC 6026 §7.2): the §13.3.1.4 window in
+/// which the answerer may still repeat the 2xx, each repeat re-drawing the ACK
+/// (RFC 3261 §13.2.2.4). Equal to that retransmission bound.
+pub const TIMER_M: u64 = 64 * T1;
+
 /// DEFAULT for the held-CANCEL grace window
 /// (`sip_txn::TransactionConfig::cancel_hold_grace_ms`) — how long a CANCEL for
 /// a response-less INVITE client txn waits for the branch's first provisional

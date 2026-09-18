@@ -294,11 +294,14 @@ async fn held_cancel_is_flushed_when_its_call_is_evicted_inside_the_grace_window
     );
     assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 1);
     assert_eq!(stack.txn.metrics().held_cancels_dropped(), 0);
-    assert_eq!(stack.txn.metrics().active_transactions(), 0);
+    assert_eq!(stack.txn.metrics().orphaned_transactions(), 1, "the INVITE lives on, orphaned");
 
-    // The grace deadline crossing later is a no-op (txn gone).
+    // The grace deadline crossing later is a no-op; the on-wire CANCEL rides
+    // its Timer E ladder on the orphan (§17.1.2.2), one rung inside the window.
     elapse_ms(CANCEL_HOLD_GRACE + 100).await;
-    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0);
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1);
+    assert_eq!(stack.txn.metrics().cancel_retransmits(), 1);
+    assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 1, "no second grace send");
 }
 
 #[tokio::test(start_paused = true)]
@@ -467,7 +470,7 @@ async fn strict_policy_still_flushes_on_the_first_provisional() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn strict_policy_drops_the_held_cancel_on_call_evict() {
+async fn strict_policy_keeps_the_held_cancel_on_the_orphan_until_its_provisional() {
     let stack = strict_stack().await;
     let branch = "z9hG4bK-strict-evict";
     let (cr, call_id, lg) = ("call-strict-evict", "strict-evict-id", "leg-b");
@@ -485,14 +488,21 @@ async fn strict_policy_drops_the_held_cancel_on_call_evict() {
     elapse_ms(20).await;
     stack.drain_peer();
 
-    // Under the strict policy eviction keeps the old semantics: the held
-    // CANCEL dies with the transaction, unsent.
+    // Under the strict policy the eviction sends nothing: the CANCEL stays
+    // parked on the orphaned INVITE, which still waits for the branch's first
+    // provisional (§9.1) exactly as it would for a live call.
     stack.txn.cancel_txns_for_call(cr).await.unwrap();
     elapse_ms(20).await;
     assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 0);
-    assert_eq!(stack.txn.metrics().held_cancels_dropped(), 1);
+    assert_eq!(stack.txn.metrics().held_cancels_dropped(), 0);
     assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 0);
-    assert_eq!(stack.txn.metrics().active_transactions(), 0);
+    assert_eq!(stack.txn.metrics().orphaned_transactions(), 1);
+
+    // The provisional releases it, on the orphan as on a live transaction.
+    stack.inject(&response_bytes(180, "Ringing", "INVITE", branch, call_id, true)).await;
+    elapse_ms(20).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1);
+    assert_eq!(stack.txn.metrics().held_cancels_flushed(), 1);
 }
 
 #[tokio::test(start_paused = true)]

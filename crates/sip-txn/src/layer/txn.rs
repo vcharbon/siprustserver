@@ -33,6 +33,10 @@ pub(super) enum TxnState {
     /// held for Timer I, absorbing ACK retransmissions and any further final
     /// the TU offers on the branch. Nothing retransmits or times out here.
     Confirmed,
+    /// Orphaned INVITE client txn whose 2xx the layer ACKed itself (RFC 6026
+    /// §7.2): held for Timer M, re-passing that ACK to every repeat of the 2xx
+    /// (RFC 3261 §13.2.2.4). Nothing retransmits or times out here.
+    Accepted,
 }
 
 impl TxnState {
@@ -157,6 +161,7 @@ impl Transaction {
             retransmit_buf: None,
             ladder: None,
             timeout_kind: TimeoutKind::Response,
+            orphaned: false,
         }
     }
 
@@ -220,7 +225,8 @@ pub(super) struct Transaction {
     pub(super) cancel_retransmit_key: Option<Key>,
     // Retransmit progression.
     /// The request datagram Timer A/E re-sends — refcounted for the same reason
-    /// as [`last_response`](Self::last_response).
+    /// as [`last_response`](Self::last_response). In `Accepted` it is the ACK
+    /// re-passed to every repeat of the 2xx.
     pub(super) retransmit_buf: Option<Bytes>,
     /// The Timer A/E ladder for [`retransmit_buf`](Self::retransmit_buf).
     /// `None` until this txn starts retransmitting, and on a server txn until
@@ -232,6 +238,12 @@ pub(super) struct Transaction {
     /// INVITE bound) so the discrimination never compares the armed window
     /// against a magic duration.
     pub(super) timeout_kind: TimeoutKind,
+    /// The call this transaction served has been released while it was still
+    /// open (`cancel_txns_for_call`). The layer then closes the transaction's
+    /// own obligations — the hop ACK of a non-2xx and Timer D, the bare ACK of a
+    /// 2xx and Timer M, the held CANCEL, Timer B — and surfaces nothing to the
+    /// consumer, which holds no state for it any more.
+    pub(super) orphaned: bool,
 }
 
 /// Per-txn safety-net age for the sweep. A still-ringing INVITE (no final

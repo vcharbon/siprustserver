@@ -57,17 +57,18 @@ matches a Client/Invite txn:
 - whose txn **dies holding it**:
   - **call evict** (`cancel_txns_for_call`) and **client timeout** (Timer B /
     the transaction bound) — a never-sent held CANCEL is flushed to the wire
-    *before* the txn is deleted: neither teardown path may swallow a CANCEL
-    still inside its grace window (a tight custom config can let the bound
-    outrun the grace).
+    *first*: neither path may swallow a CANCEL still inside its grace window
+    (a tight custom config can let the bound outrun the grace). The evict
+    orphans the txn rather than deleting it (ADR-0034), so the flushed CANCEL
+    rides its Timer-E ladder from there.
   - **final** — cleared unsent; the callee answered, cancellation is moot
     (§9.2, and the crossing-2xx reap owns the late answer).
   - Residual unsent-death paths, all pathological and counted in
     `held_cancels_dropped`: a same-branch txn displacement and the safety-net
-    sweep (both indicate a bug elsewhere). And the evict/timeout death send is
-    a single raw datagram (the txn is deleted in the same turn, so no ladder
-    can ride it): if that one datagram is lost, the callee still rides the
-    terminating backstop.
+    sweep (both indicate a bug elsewhere). The timeout death send is a single
+    raw datagram (the txn is deleted in the same turn, so no ladder can ride
+    it): if that one datagram is lost, the callee still rides the terminating
+    backstop.
 
 A CANCEL matching **no txn** is still sent raw: an absent txn is not proof the
 INVITE ended — a takeover-restored call (ADR-0014) CANCELs a b-leg whose

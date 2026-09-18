@@ -5,14 +5,16 @@
 //! wire retransmits on its own Timer-E ladder as a sub-state of the INVITE
 //! txn, §17.1.2.2; an ACK goes raw and rides no timer, §13.2.2.4),
 //! Timer A/E retransmission, Timer B/F timeout, inbound-response matching
-//! (including the non-2xx auto-ACK + Timer D hold), and per-call eviction. The
+//! (including the non-2xx auto-ACK + Timer D hold), and the orphaning of a
+//! released call's transactions, which then close their own obligations
+//! (ADR-0034: the 2xx ACK + Timer M hold among them). The
 //! server (UAS) side does NOT live here — see `layer::server`; a client INVITE
 //! rebuilt from a record is `layer::seed`'s.
 
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use sip_message::generators::generate_ack_for_non_2xx;
+use sip_message::generators::{generate_ack_for_2xx_from_invite, generate_ack_for_non_2xx};
 use sip_message::header::ParamValue;
 use sip_message::param_codec::decode_param;
 use sip_message::{serialize, Method, SipMessage, SipRequest, SipResponse};
@@ -20,7 +22,7 @@ use sip_net::UdpEndpoint;
 
 use crate::event::{ClientTransactionHandle, TimeoutKind, TransactionEvent, TxnKind};
 use crate::metrics::method_slot;
-use crate::timers::{ms, TIMER_B, TIMER_D, TIMER_F};
+use crate::timers::{ms, TIMER_B, TIMER_D, TIMER_F, TIMER_M};
 use sip_retransmit::{Class, Ladder, Schedule};
 
 use super::owner::Owner;
@@ -476,6 +478,98 @@ impl Owner {
         }
     }
 
+    /// Move the client INVITE txn at `branch` to Completed on its first
+    /// non-2xx final: every timer it was running stops, a CANCEL still parked
+    /// on it is moot (the UAS answered — §9.2; counted dropped only if it
+    /// never reached the wire), and Timer D holds it to re-ACK repeats.
+    fn complete_non_2xx(&mut self, branch: &str) {
+        let (r, t, g, cr) = match self.txns.get_mut(branch) {
+            Some(txn) => {
+                txn.state = TxnState::Completed;
+                if txn.held_cancel.take().is_some_and(|h| h.wire == CancelWire::Held) {
+                    self.metrics
+                        .held_cancels_dropped
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                (
+                    txn.retransmit_key.take(),
+                    txn.timeout_key.take(),
+                    txn.cancel_grace_key.take(),
+                    txn.cancel_retransmit_key.take(),
+                )
+            }
+            None => (None, None, None, None),
+        };
+        self.cancel_timer(r);
+        self.cancel_timer(t);
+        self.cancel_timer(g);
+        self.cancel_timer(cr);
+        self.hold_for_timer_d(branch);
+    }
+
+    /// ACK the 2xx an orphaned INVITE client txn drew (RFC 3261 §13.2.2.4 —
+    /// the layer stands in for the UAC core the release removed) and hold the
+    /// txn in Accepted for Timer M (RFC 6026 §7.2), the ACK retained for the
+    /// 2xx's repeats. Without the original request (a seeded txn) there is
+    /// nothing to build the ACK from: the txn is deleted instead.
+    async fn accept_orphaned_2xx(
+        &mut self,
+        endpoint: &dyn UdpEndpoint,
+        branch: &str,
+        resp: &SipResponse,
+    ) {
+        let built = self.txns.get(branch).and_then(|t| {
+            let orig = t.original_request.as_ref()?;
+            let dest = t.destination?;
+            let ack = generate_ack_for_2xx_from_invite(orig, resp, &self.id_gen.new_branch());
+            Some((ack.image().clone(), dest))
+        });
+        let Some((ack, dest)) = built else {
+            self.delete_txn(branch);
+            return;
+        };
+        self.send_buffer(endpoint, &ack, dest).await;
+        let keys = match self.txns.get_mut(branch) {
+            Some(txn) => {
+                txn.state = TxnState::Accepted;
+                txn.held_cancel = None;
+                txn.retransmit_buf = Some(ack);
+                txn.ladder = None;
+                (
+                    txn.retransmit_key.take(),
+                    txn.timeout_key.take(),
+                    txn.cancel_grace_key.take(),
+                    txn.cancel_retransmit_key.take(),
+                )
+            }
+            None => (None, None, None, None),
+        };
+        self.cancel_timer(keys.0);
+        self.cancel_timer(keys.1);
+        self.cancel_timer(keys.2);
+        self.cancel_timer(keys.3);
+        let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(TIMER_M));
+        if let Some(txn) = self.txns.get_mut(branch) {
+            txn.cleanup_key = Some(key);
+        }
+    }
+
+    /// Re-pass the retained ACK of an Accepted txn to a repeat of its 2xx
+    /// (RFC 3261 §13.2.2.4: the same ACK, every time).
+    async fn re_ack_accepted(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
+        let Some((ack, dest)) =
+            self.txns.get(branch).and_then(|t| Some((t.retransmit_buf.clone()?, t.destination?)))
+        else {
+            return;
+        };
+        self.send_buffer(endpoint, &ack, dest).await;
+    }
+
+    /// Release every client transaction of `call_ref` from the call (ADR-0034).
+    /// Each is orphaned, never deleted: it keeps its timers and closes its own
+    /// obligations — the ACK a final still draws (RFC 3261 §17.1.1.3, §13.2.2.4),
+    /// the Timer D / Timer M re-ACK hold, Timer E to its final or Timer F — and
+    /// is purged by its own timer. Server transactions keep their §17.2 holds.
     pub(super) async fn do_cancel_txns_for_call(
         &mut self,
         endpoint: &dyn UdpEndpoint,
@@ -483,70 +577,15 @@ impl Owner {
     ) {
         // O(k-branches) over just this call's live branches (the lockstep index),
         // not an O(total_txns) scan of the whole map.
-        //
-        // CLIENT transactions only. The eviction's job is to stop Timer B/F firing
-        // against a vanished call — both are client timers. A SERVER txn must be
-        // left to its own Timer H/J: cancelling a Completed BYE/INVITE server txn
-        // here would drop its retransmit-absorption window (RFC 3261 §17.2.1/§17.2.2),
-        // so a retransmitted request after teardown builds a fresh txn and 481s
-        // upstream instead of replaying the cached final.
-        //
-        // The SAME retransmit-absorption argument exempts a client INVITE txn in
-        // **Completed** (a non-2xx final, ACKed, holding Timer D — §17.1.1.2): its
-        // Timer B/F are already cancelled, and deleting it would drop the re-ACK
-        // window, so a rejected leg abandoned by a reroute (or a call torn down
-        // before the reject's hop-ACK recovered) strands the UAS retransmitting
-        // its final to Timer H, never re-ACKed. Such a txn is DETACHED instead:
-        // its call attribution is dropped (so `has_txns_for` / `ActiveTxnCount` /
-        // the ADR-0014 CallQuiesced timing are exactly as if it were cancelled)
-        // while the txn itself lives on to re-ACK + absorb until its own Timer D
-        // cleanup deletes it.
-        //
-        // The SAME detach — for the SAME "finish your in-flight protocol
-        // obligation off the vanished call's books" reason — extends to an ACTIVE
-        // (Trying/Proceeding, still awaiting its final) non-INVITE CLIENT txn
-        // (NOTIFY / BYE / INFO / MESSAGE …). Deleting it here cancels its Timer E
-        // retransmit + Timer F before the first 500 ms retransmit can fire, so a
-        // datagram lost right as the call is torn down is NEVER re-sent — in a
-        // REFER transfer a dropped progress NOTIFY, whose BYE lands within a few
-        // ms, leaves a permanent hole in that leg's in-dialog CSeq stream. Detach
-        // instead: Timer E keeps re-sending (500 ms → ×2 capped at T2) until the
-        // final arrives (the inbound-final path `delete_txn`s it — call_ref no
-        // longer needed) or Timer F (64·T1 = 32 s) self-reaps it (`fire_timeout` →
-        // `delete_txn`). Bounded — a permanently-lost final still reaps at Timer F,
-        // never an infinite retransmit or a leak, and the detach drops the call
-        // attribution so it is not counted as a live txn for the gone call.
-        //
-        // An ACTIVE client INVITE is deliberately still DELETED (its Timer B is the
-        // call's own failure-detection deadline — teardown means give up now).
         let branches: Vec<String> = match self.txn_index.get(call_ref) {
             Some(set) => set.iter().cloned().collect(),
             None => return,
         };
         for branch in branches {
-            let (is_client, is_completed, is_non_invite) =
-                self.txns.get(branch.as_str()).map_or((false, false, false), |t| {
-                    (
-                        t.role == TxnRole::Client,
-                        t.state == TxnState::Completed,
-                        t.kind == TxnKind::NonInvite,
-                    )
-                });
-            if !is_client {
-                continue;
-            }
-            if is_completed || is_non_invite {
-                let cr = self.txns.get_mut(branch.as_str()).and_then(|t| t.call_ref.take());
-                self.untrack_call_ref(&cr, &branch);
-            } else {
-                // An active client INVITE dying with a never-sent held CANCEL:
-                // under the bounded policy, put it on the wire first (ADR-0028
-                // — every emitted CANCEL reaches the callee; eviction must not
-                // swallow one still inside its grace window). Marked sent so
-                // `delete_txn` does not double-count it as dropped. Strict
-                // §9.1 policy keeps the old drop.
-                let flush =
-                    match self.txns.get_mut(branch.as_str()).and_then(|t| t.held_cancel.as_mut()) {
+            let flush = match self.txns.get_mut(branch.as_str()) {
+                Some(t) if t.role == TxnRole::Client => {
+                    t.orphaned = true;
+                    match t.held_cancel.as_mut() {
                         Some(h)
                             if h.wire == CancelWire::Held
                                 && self.cancel_hold_grace_ms.is_some() =>
@@ -555,18 +594,21 @@ impl Owner {
                             Some((h.buf.clone(), h.dest))
                         }
                         _ => None,
-                    };
-                if let Some((buf, dest)) = flush {
-                    self.send_buffer(endpoint, &buf, dest).await;
-                    self.metrics
-                        .held_cancels_flushed_pre1xx
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
-                if self.delete_txn(&branch) {
-                    self.metrics
-                        .txn_cancelled_on_call_evict
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
+                _ => continue,
+            };
+            self.detach_from_call(&branch);
+            self.metrics
+                .txn_orphaned_on_call_evict
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.metrics.orphaned_transactions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some((buf, dest)) = flush {
+                self.send_buffer(endpoint, &buf, dest).await;
+                self.metrics
+                    .held_cancels_flushed_pre1xx
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.arm_cancel_retransmit(&branch);
             }
         }
     }
@@ -603,11 +645,10 @@ impl Owner {
             let mut matched = false;
             if !branch.is_empty() {
                 // Like the 1xx>100 path: a late 100 must not downgrade a txn
-                // that already took its final (Completed holds for Timer D).
+                // that already took its final (Completed holds for Timer D,
+                // Accepted for Timer M).
                 let (key, grace_key, flush) = match self.txns.get_mut(branch) {
-                    Some(txn)
-                        if txn.role == TxnRole::Client && txn.state != TxnState::Completed =>
-                    {
+                    Some(txn) if txn.role == TxnRole::Client && txn.state.is_active() => {
                         txn.state = TxnState::Proceeding;
                         (
                             (txn.kind == TxnKind::Invite)
@@ -664,20 +705,29 @@ impl Owner {
             }
 
             // Snapshot what we need before mutating.
-            let client_match = self
-                .txns
-                .get(branch)
-                .filter(|t| t.role == TxnRole::Client)
-                .map(|t| (t.kind, t.state, t.original_request.clone(), t.destination));
+            let client_match =
+                self.txns.get(branch).filter(|t| t.role == TxnRole::Client).map(|t| {
+                    (t.kind, t.state, t.original_request.clone(), t.destination, t.orphaned)
+                });
             matched_client_txn = client_match.is_some();
 
-            if let Some((kind, state, original_request, destination)) = client_match {
+            if let Some((kind, state, original_request, destination, orphaned)) = client_match {
+                if state == TxnState::Accepted {
+                    // RFC 6026 §7.2 + RFC 3261 §13.2.2.4: a repeat of the 2xx
+                    // re-draws the ACK already sent; anything else on the
+                    // branch is absorbed until Timer M.
+                    if (200..300).contains(&resp.status()) {
+                        self.re_ack_accepted(endpoint, branch).await;
+                    }
+                    return true;
+                }
                 if resp.status() < 200 {
-                    // Provisional 1xx>100 — Proceeding. Ignore once Completed (a
-                    // late provisional must not downgrade a txn that already took its
-                    // final). INVITE stops retransmitting (§17.1.1.2); non-INVITE
-                    // continues at T2 (§17.1.2.2), so only cancel retransmit for INVITE.
-                    if state != TxnState::Completed {
+                    // Provisional 1xx>100 — Proceeding. Ignore once Completed or
+                    // Accepted (a late provisional must not downgrade a txn that
+                    // already took its final). INVITE stops retransmitting
+                    // (§17.1.1.2); non-INVITE continues at T2 (§17.1.2.2), so only
+                    // cancel retransmit for INVITE.
+                    if state.is_active() {
                         let (key, grace_key) = match self.txns.get_mut(branch) {
                             Some(txn) => {
                                 txn.state = TxnState::Proceeding;
@@ -708,39 +758,20 @@ impl Owner {
                         // just re-ACKed it above; absorb without re-notifying.
                         return true;
                     }
+                    if orphaned {
+                        // No consumer holds this transaction's call: the hop
+                        // ACK above and the Timer D hold below are the whole
+                        // of what the final draws.
+                        self.complete_non_2xx(branch);
+                        return true;
+                    }
                     // FIRST non-2xx final: hold the txn in Completed for Timer D so
                     // retransmitted finals are re-ACKed + absorbed, not re-surfaced.
                     // The auto-ACK silenced the UAS's retransmission *trigger*, so
                     // without Timer D a lost ACK would have the UAS resend the final
                     // unanswered until its own Timer H, each resend re-emitting
                     // upstream as a duplicate.
-                    let (r, t, g, cr) = match self.txns.get_mut(branch) {
-                        Some(txn) => {
-                            txn.state = TxnState::Completed;
-                            // A final ends the txn — a still-held CANCEL is moot
-                            // (the UAS already rejected) and an on-wire one stops
-                            // retransmitting. Cleared; counted as dropped only if
-                            // it never made the wire (a grace-sent copy is
-                            // already accounted pre-1xx).
-                            if txn.held_cancel.take().is_some_and(|h| h.wire == CancelWire::Held) {
-                                self.metrics
-                                    .held_cancels_dropped
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            (
-                                txn.retransmit_key.take(),
-                                txn.timeout_key.take(),
-                                txn.cancel_grace_key.take(),
-                                txn.cancel_retransmit_key.take(),
-                            )
-                        }
-                        None => (None, None, None, None),
-                    };
-                    self.cancel_timer(r);
-                    self.cancel_timer(t);
-                    self.cancel_timer(g);
-                    self.cancel_timer(cr);
-                    self.hold_for_timer_d(branch);
+                    self.complete_non_2xx(branch);
                     // Critical: we auto-ACKed (silenced the UAS's resend), so this is
                     // the app's only delivery of the final.
                     self.emit_critical(TransactionEvent::Message {
@@ -748,6 +779,14 @@ impl Owner {
                         src,
                         matched_client_txn: true,
                     });
+                    return true;
+                } else if kind == TxnKind::Invite && orphaned {
+                    // A 2xx to an orphaned INVITE: the UAC core that owed its ACK
+                    // (§13.2.2.4) is gone, so the layer sends the bare ACK on a
+                    // fresh branch itself and holds the transaction in Accepted
+                    // for Timer M. A seeded transaction retains no request to
+                    // build it from and is deleted here, ACK-less.
+                    self.accept_orphaned_2xx(endpoint, branch, &resp).await;
                     return true;
                 } else {
                     // 2xx INVITE (the TU ACKs end-to-end) or any non-INVITE final:
@@ -765,8 +804,10 @@ impl Owner {
         }
 
         // Provisionals and unmatched responses are protocol-redelivered → lossy.
-        // A re-offered miss stays with the consumer that holds it.
-        if matched_client_txn || !reoffer {
+        // A re-offered miss stays with the consumer that holds it; an orphaned
+        // transaction's provisional has no consumer at all.
+        let orphaned = self.txns.get(branch).is_some_and(|t| t.orphaned);
+        if (matched_client_txn && !orphaned) || !reoffer {
             self.emit(TransactionEvent::Message {
                 message: Box::new(SipMessage::Response(resp)),
                 src,

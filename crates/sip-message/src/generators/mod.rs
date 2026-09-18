@@ -41,7 +41,10 @@ pub mod relay;
 pub mod response;
 pub mod spec;
 
-pub use ack::{generate_ack_for_2xx, generate_ack_for_non_2xx, GenerateAckFor2xxOpts};
+pub use ack::{
+    generate_ack_for_2xx, generate_ack_for_2xx_from_invite, generate_ack_for_non_2xx,
+    GenerateAckFor2xxOpts,
+};
 pub use cancel::generate_cancel;
 pub use capabilities::{CapabilitySet, B2BUA_ACCEPT, B2BUA_ALLOW, B2BUA_SUPPORTED};
 pub use contact_policy::{request_states_contact, response_states_contact};

@@ -262,6 +262,11 @@ impl Owner {
                 self.cancel_timer(t.cancel_retransmit_key);
                 self.untrack_call_ref(&t.call_ref, branch);
                 self.sync_active();
+                if t.orphaned {
+                    self.metrics
+                        .orphaned_transactions
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 // A txn dying holding a never-sent CANCEL: under the bounded
                 // policy only the crossing-2xx final (cancellation moot), a
                 // same-branch displacement, and the safety-net sweep reach
