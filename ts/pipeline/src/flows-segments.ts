@@ -11,6 +11,8 @@ import * as fs from "node:fs"
 /** Everything before the first leg — the `legs` key and its `[` included. */
 export interface Head {
   readonly kind: "head"
+  /** Offset of the segment's first byte in the file. */
+  readonly at: number
   readonly bytes: Uint8Array
 }
 
@@ -19,6 +21,8 @@ export interface LegSegment {
   readonly kind: "leg"
   /** Position in `legs`, which is the leg id every reference in the document uses. */
   readonly index: number
+  /** Offset of the leg's first byte in the file. */
+  readonly at: number
   /** This leg's first byte up to the next leg's, or up to the array's `]`. */
   readonly bytes: Uint8Array
   /** How many of `bytes` are the leg's own JSON text; the rest is the separator. */
@@ -28,6 +32,8 @@ export interface LegSegment {
 /** The `]` closing `legs`, and everything after it. */
 export interface Tail {
   readonly kind: "tail"
+  /** Offset of the segment's first byte in the file. */
+  readonly at: number
   readonly bytes: Uint8Array
 }
 
@@ -98,10 +104,11 @@ export function* segments(file: string): Generator<Segment> {
 
     /** The segment that ends where a leg begins: the head, or the leg before it. */
     const closed = (upto: number): Segment => {
-      if (legs === 0) return { kind: "head", bytes: take(upto) }
       // Read before `take`, which moves the start on to the next segment.
-      const json = legEnd - segStartAt
-      return { kind: "leg", index: legs - 1, bytes: take(upto), json }
+      const at = segStartAt
+      if (legs === 0) return { kind: "head", at, bytes: take(upto) }
+      const json = legEnd - at
+      return { kind: "leg", index: legs - 1, at, bytes: take(upto), json }
     }
 
     for (;;) {
@@ -213,7 +220,7 @@ export function* segments(file: string): Generator<Segment> {
     if (phase !== "after") {
       throw new Error(`${file}: no top-level "legs" array — not a flows document`)
     }
-    yield { kind: "tail", bytes: take(0) }
+    yield { kind: "tail", at: segStartAt, bytes: take(0) }
   } finally {
     fs.closeSync(fd)
   }

@@ -305,10 +305,12 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
   const classifier = yield* Classifier.Service
 
   const recordings = yield* readRecordings(absolute)
-  // Per leg, never as one string: the document of a capture of thousands of
-  // calls is larger than V8 will hold (`FlowsFile`).
-  const flows = cell.flows === undefined ? undefined : yield* FlowsFile.readFlowsFileDecoded(cell.flows)
-  if (flows !== undefined) yield* Flows.requireSchemaVersion(flows)
+  // The legs this case cites, never the capture: a document of thousands of
+  // calls is read once for its leg index, then a few legs per cell (`FlowsFile`).
+  const captured = cell.flows === undefined
+    ? undefined
+    : yield* FlowsFile.readFlowsLegsDecoded(cell.flows, observedLegs(pivot))
+  if (captured !== undefined) yield* Flows.requireSchemaVersion(captured.envelope)
   const resources = yield* readExpectedBodies(path.dirname(yield* documentPath(cell.case)), pivot)
   // The run configuration states what the media plane did to the session
   // descriptions the run sent, which decides what an expected SDP is held to.
@@ -321,7 +323,7 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
     recordings,
     resources,
     media: Bundle.mediaModeOf(config),
-    ...(flows === undefined ? {} : { flows })
+    ...(captured === undefined ? {} : { captured: captured.legs })
   })
 
   const meta = {
@@ -358,6 +360,14 @@ const confrontCell = Effect.fn("Driver.confrontCell")(function* (
   )
   return summary
 })
+
+/** The flows legs the document's `expect` steps cite through their `observed` coordinate. */
+const observedLegs = (pivot: Pivot.PivotV3): ReadonlySet<number> =>
+  new Set(
+    Pivot.pivotSteps(pivot).flatMap((step) =>
+      step.op === "expect" && step.observed !== undefined ? [step.observed.leg] : []
+    )
+  )
 
 /**
  * Every resource an `expect` step's body references, read from the case

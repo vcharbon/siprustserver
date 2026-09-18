@@ -1,6 +1,6 @@
 import type { Body, Bundle, Flow, Flows, Pivot } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
-import { confront, diffHeaders, recordOf, retransmissionProbes, scopeOfRaw, shapeProbes } from "../src/confront.js"
+import { capturedOf, confront, diffHeaders, recordOf, retransmissionProbes, scopeOfRaw, shapeProbes } from "../src/confront.js"
 import type { MsgScope } from "../src/probe.js"
 import { signature } from "../src/probe.js"
 import { headersInOrderRaw } from "../src/wire.js"
@@ -154,7 +154,7 @@ describe("the relay input a reception was driven from", () => {
   const run = (sent: string) => {
     const doc = pivot()
     const flow = [{ ...(doc.flow[0] as Flow.Step), observed }]
-    return confront({ pivot: { ...doc, flow }, verdict: verdictWith([]), recordings: recordings(sent), flows: flows() })
+    return confront({ pivot: { ...doc, flow }, verdict: verdictWith([]), recordings: recordings(sent), captured: capturedOf(flows()) })
   }
 
   it("a bare input leaves the captured header undriven", () => {
@@ -173,7 +173,7 @@ describe("the relay input a reception was driven from", () => {
     const minted = new Map([
       ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s2", raw: bare }] as Array<Bundle.RecordedMessage>]
     ])
-    const confronted = confront({ pivot: { ...doc, flow }, verdict: verdictWith([]), recordings: minted, flows: flows() })
+    const confronted = confront({ pivot: { ...doc, flow }, verdict: verdictWith([]), recordings: minted, captured: capturedOf(flows()) })
     const probe = confronted.probes.find((p) => p.probe.kind === "header" && p.probe.name === "P-Orig")
     expect(probe?.probe.kind === "header" && probe.probe.driven).toBeUndefined()
   })
@@ -632,7 +632,7 @@ describe("an expected body held against the one received", () => {
       recordings: new Map([
         ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: answer(481, "<other/>") }] as Array<Bundle.RecordedMessage>]
       ]),
-      flows: { schema: 5, legs: [{ msgs: [{ raw: answer(200, XML) }] }] } as unknown as Flows.FlowsDoc,
+      captured: capturedOf({ schema: 5, legs: [{ msgs: [{ raw: answer(200, XML) }] }] } as unknown as Flows.FlowsDoc),
       resources: new Map([[REF, XML]])
     })
     expect(confronted.probes.map((p) => signature(p.probe))).toEqual([

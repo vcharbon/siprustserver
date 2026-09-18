@@ -7,9 +7,9 @@
  *
  * - **headers** — each recorded reception the interpreter attributed to an
  *   `expect` step is paired, through the step's `observed` coordinate, with the
- *   captured message in the flows document, and both verbatim datagrams are
+ *   captured message in the capture's legs, and both verbatim datagrams are
  *   diffed per header name under that name's fold. A reception with no
- *   coordinate (or no flows document supplied) compared NOTHING and is counted
+ *   coordinate (or no captured leg supplied) compared NOTHING and is counted
  *   `unreferenced` — never an empty difference list. Each probe also carries
  *   the relay input the run drove for that message, so a rule can tell a header
  *   the system dropped from one it was never handed.
@@ -48,13 +48,24 @@ import {
   startLineOf
 } from "./wire.js"
 
+/** Leg index in the flows document → the leg. */
+export type CapturedLegs = ReadonlyMap<number, Flows.Leg>
+
+/** Every leg of a whole document, for a caller that holds one. */
+export const capturedOf = (flows: Flows.FlowsDoc): CapturedLegs =>
+  new Map(flows.legs.map((leg, index) => [index, leg]))
+
 export interface ConfrontInput {
   readonly pivot: Pivot.PivotV3
   readonly verdict: Bundle.RunVerdict
   /** Leg name → the leg's recording, in wire order. */
   readonly recordings: ReadonlyMap<string, ReadonlyArray<Bundle.RecordedMessage>>
-  /** The capture-side flows document; absent for an authored case. */
-  readonly flows?: Flows.FlowsDoc
+  /**
+   * The captured legs the case's `observed` coordinates name, by the index the
+   * flows document gives them — the few this case cites, never the capture.
+   * Absent for an authored case.
+   */
+  readonly captured?: CapturedLegs
   /** Resource ref → its text, for every resource body an `expect` step states. */
   readonly resources?: ReadonlyMap<string, string>
   /** What the run's media plane did to its session descriptions; absent reads as `rebooked`. */
@@ -71,7 +82,7 @@ export interface Confronted {
   readonly probes: ReadonlyArray<ProbeAt>
   /** Receptions whose captured reference was found and compared. */
   readonly compared: number
-  /** Receptions that compared nothing — no coordinate, or no flows document. */
+  /** Receptions that compared nothing — no coordinate, or no captured leg. */
   readonly unreferenced: number
   readonly context: CaseContext
 }
@@ -245,7 +256,7 @@ const headerProbes = (
       if (message.dir !== "in" || message.repeat_of !== undefined) continue
       const step = message.step === undefined ? undefined : steps.get(message.step)
       if (step === undefined || step.op !== "expect") continue
-      const reference = capturedMessage(input.flows, step.observed)
+      const reference = capturedMessage(input.captured, step.observed)
       if (reference === undefined) {
         unreferenced += 1
         continue
@@ -418,11 +429,11 @@ const sameScope = (a: MsgScope, b: MsgScope): boolean => {
 }
 
 const capturedMessage = (
-  flows: Flows.FlowsDoc | undefined,
+  captured: CapturedLegs | undefined,
   observed: Flow.Observed | undefined
 ): Flows.Msg | undefined => {
-  if (flows === undefined || observed === undefined) return undefined
-  return flows.legs[observed.leg]?.msgs[observed.msg]
+  if (captured === undefined || observed === undefined) return undefined
+  return captured.get(observed.leg)?.msgs[observed.msg]
 }
 
 /** The scope of a recorded reception, read off its own start line and To tag. */

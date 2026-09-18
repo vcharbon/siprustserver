@@ -12,6 +12,7 @@ import { Flows } from "@sip/contracts"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import { Buffer } from "node:buffer"
+import { indexOf, legTexts } from "./flows-index.js"
 import { segments } from "./flows-segments.js"
 
 /** A leg the `Flows` contract refuses, named by the index the document uses for it. */
@@ -22,6 +23,14 @@ export class FlowsLegRefused extends Schema.TaggedError<FlowsLegRefused>()(
   override get message(): string {
     return `legs[${this.index}] is not a leg this contract models: ${this.reason}`
   }
+}
+
+/** A document read for a FEW legs: its envelope, and the named legs alone. */
+export interface FlowsExcerpt {
+  /** The document with `legs` empty. */
+  readonly envelope: Flows.FlowsDoc
+  /** The named legs, by the index the document gives them. */
+  readonly legs: ReadonlyMap<number, Flows.Leg>
 }
 
 /** One part of the document as its own text: an envelope half, or one leg. */
@@ -93,4 +102,32 @@ export const readFlowsFileDecoded = Effect.fn("FlowsFile.readFlowsFileDecoded")(
   }
   const envelope = yield* Flows.decodeFlows({ ...(JSON.parse(head + tail) as object), legs: [] })
   return { ...envelope, legs } satisfies Flows.FlowsDoc
+})
+
+/**
+ * The document's envelope and the named legs, DECODED, off the file's leg
+ * index (`flows-index.ts`): one scan of the file the first time it is seen,
+ * then a positioned read per named leg. A reader that cites a handful of legs
+ * of a document of thousands pays for the handful — never for the document.
+ */
+export const readFlowsLegsDecoded = Effect.fn("FlowsFile.readFlowsLegsDecoded")(function* (
+  file: string,
+  wanted: Iterable<number>
+) {
+  const index = yield* Effect.sync(() => indexOf(file))
+  const texts = yield* Effect.sync(() => legTexts(index, wanted))
+  const legs = new Map<number, Flows.Leg>()
+  for (const [at, text] of texts) {
+    legs.set(
+      at,
+      yield* decodeLeg(JSON.parse(text) as unknown).pipe(
+        Effect.mapError((cause) => new FlowsLegRefused({ file, index: at, reason: cause.message }))
+      )
+    )
+  }
+  const envelope = yield* Flows.decodeFlows({
+    ...(JSON.parse(index.head + index.tail) as object),
+    legs: []
+  })
+  return { envelope, legs } satisfies FlowsExcerpt
 })

@@ -1,9 +1,11 @@
 /**
  * The capture-side flows document a replay cell confronts against.
  *
- * It is read per leg and decoded against the contract: the document of a
- * capture of thousands of calls is larger than V8 will hold as one string, so
- * the claim under test is that no whole-string read of it is ever made.
+ * Only the legs the case cites are read and decoded against the contract: the
+ * document of a capture of thousands of calls is larger than V8 will hold as
+ * one string, and a cell that decoded it whole would cost the capture per
+ * cell. The claims under test are that no whole-string read of it is ever
+ * made, and that a leg the case never cites is never decoded.
  */
 import type { Campaign } from "@sip/contracts"
 import * as Effect from "effect/Effect"
@@ -96,9 +98,12 @@ const confront = async (legs: Array<unknown>) => {
   return { run, flows, reads, cellDir }
 }
 
+/** Legs 0..6: the fixture cites legs 5 and 6. */
+const LEGS = Array.from({ length: 7 }, (_, index) => legOf(index))
+
 describe("a replay cell's flows document", () => {
   it("is confronted against without ever being read as one string", async () => {
-    const { cellDir, flows, reads, run } = await confront([legOf(0), legOf(1), legOf(2)])
+    const { cellDir, flows, reads, run } = await confront(LEGS)
     expect(run.index.cells[0]!.passed).toBe(true)
     expect(fs.existsSync(path.join(cellDir, CONFRONTATION_FILE))).toBe(true)
     // The pivot document beside it IS read whole, which is what says the watch
@@ -107,12 +112,25 @@ describe("a replay cell's flows document", () => {
     expect(reads).not.toContain(flows)
   })
 
-  it("fails the cell on a leg the contract refuses, naming that leg", async () => {
-    const legs = [legOf(0), { ...legOf(1), final_status: "200" }, legOf(2)]
+  it("fails the cell on a cited leg the contract refuses, naming that leg", async () => {
+    const legs = LEGS.map((leg, index) => (index === 5 ? { ...leg, final_status: "200" } : leg))
     const { cellDir, run } = await confront(legs)
     expect(run.index.cells[0]!.passed).toBe(false)
     const error = fs.readFileSync(path.join(cellDir, ERROR_FILE), "utf8")
     expect(error).toContain("FlowsLegRefused")
-    expect(error).toContain("legs[1]")
+    expect(error).toContain("legs[5]")
+  })
+
+  it("never decodes a leg the case does not cite", async () => {
+    const legs = LEGS.map((leg, index) => (index === 1 ? { ...leg, final_status: "200" } : leg))
+    const { cellDir, run } = await confront(legs)
+    expect(run.index.cells[0]!.passed).toBe(true)
+    expect(fs.existsSync(path.join(cellDir, CONFRONTATION_FILE))).toBe(true)
+  })
+
+  it("compares nothing for a coordinate past the document, and still runs the cell", async () => {
+    const { cellDir, run } = await confront([legOf(0), legOf(1), legOf(2)])
+    expect(run.index.cells[0]!.passed).toBe(true)
+    expect(fs.existsSync(path.join(cellDir, CONFRONTATION_FILE))).toBe(true)
   })
 })
