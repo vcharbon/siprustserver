@@ -53,7 +53,7 @@ import { stampOverlaps } from "./race.js"
 import type { Plan } from "./plan.js"
 import { peerSide, type ActorObs, type Layout } from "./topology.js"
 import { inviteTransactions, type InviteTransaction } from "./transactions.js"
-import { hasHeader } from "./wire.js"
+import { canonicalName, hasHeader } from "./wire.js"
 
 /** The step id a generated step takes: dense, 1-based, `s<n>`. */
 export const stepId = (n: number): string => `s${n}`
@@ -66,6 +66,25 @@ export const stepId = (n: number): string => `s${n}`
 export type HeaderClassifier = (name: string) => Check.CheckClass | undefined
 
 export const NO_HEADER_CLASS: HeaderClassifier = () => undefined
+
+/**
+ * Every header value a capture-side `send` step carries, keyed canonically:
+ * the evidence that a value REACHED the system under test. Case-wide and
+ * direction-blind, the reading the confrontation makes of the same document.
+ */
+const inboundValues = (steps: ReadonlyArray<StepDraft>): ReadonlyMap<string, ReadonlySet<string>> => {
+  const out = new Map<string, Set<string>>()
+  for (const step of steps) {
+    if (step.op !== "send") continue
+    for (const h of step.msg.headers ?? []) {
+      const key = canonicalName(h.name)
+      const set = out.get(key) ?? new Set<string>()
+      set.add(h.value.trim())
+      out.set(key, set)
+    }
+  }
+  return out
+}
 
 /** Provenance of one step, back to the captured message. */
 export interface StepSource {
@@ -350,6 +369,13 @@ export const synthesize = (
   const mintedLegs = new Set(
     layout.actorsObs.filter((a) => a.kind === "uas").map((a) => a.pivotLeg)
   )
+  const inbound = inboundValues(steps)
+  // §6.4 at header granularity: a value the capture never shows reaching the
+  // SUT was minted by the origin platform, so it is its own vocabulary (§9.1)
+  // whatever the header's name. The deployment's name classifier speaks first.
+  const classOf = (h: { name: string; value: string }): Check.CheckClass | undefined =>
+    headerClass(h.name) ??
+    (inbound.get(canonicalName(h.name))?.has(h.value.trim()) ? undefined : "origin-platform-header")
   steps.forEach((step, i) => {
     const d = delays[i]!
     step.delay = {
@@ -372,7 +398,7 @@ export const synthesize = (
         step.msg = {
           ...step.msg,
           headers: step.msg.headers.map((h) => {
-            const cls = headerClass(h.name)
+            const cls = classOf(h)
             return cls === undefined ? h : { ...h, class: cls }
           })
         }

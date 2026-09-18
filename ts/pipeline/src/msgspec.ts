@@ -68,6 +68,22 @@ export const STACK_DERIVED_HEADERS = ["RAck"]
 export const SENDER_CLOCK_HEADERS = ["Date", "Timestamp"]
 
 /**
+ * Headers that describe the message BODY (RFC 3261 §20.11 Content-Disposition,
+ * §20.12 Content-Encoding, §20.13 Content-Language, §20.24 MIME-Version): they
+ * state properties of octets, so on a message that carries none they describe
+ * nothing. An expect on a bodyless message freezes none of them — a relay that
+ * drops a body drops what described it, and the origin platform leaving one
+ * behind is its own spelling, not a fact about the message. A send keeps the
+ * captured bytes.
+ */
+export const BODY_DESCRIPTOR_HEADERS = [
+  "Content-Disposition",
+  "Content-Encoding",
+  "Content-Language",
+  "MIME-Version"
+]
+
+/**
  * A TRANSACTION-DERIVED message: 100 Trying, ACK, and PRACK with its 2xx. The
  * stack derives its R-URI, Route set, Via and CSeq from the TRANSACTION that
  * obliged it rather than from dialog state — an ACK to a non-2xx reuses the
@@ -149,6 +165,7 @@ export const buildMsg = (
     if (STACK_DERIVED_HEADERS.some((o) => sameHeader(o, h.name))) continue
     if (!emits && STACK_OWNED_EXPECT_HEADERS.some((o) => sameHeader(o, h.name))) continue
     if (!emits && SENDER_CLOCK_HEADERS.some((o) => sameHeader(o, h.name))) continue
+    if (!emits && !carriesBody(msg) && BODY_DESCRIPTOR_HEADERS.some((o) => sameHeader(o, h.name))) continue
     const value = NUMBER_BEARING_HEADERS.some((n) => sameHeader(n, h.name))
       ? composeNumbers(layout, plan, h.value)
       : h.value

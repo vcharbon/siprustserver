@@ -359,6 +359,44 @@ describe("header classes and identity composition (§9.1, §8.1)", () => {
     expect(a180.msg.headers?.find((h) => h.name === "P-Asserted-Identity")?.class).toBeUndefined()
   })
 
+  // §6.4 at header granularity: a value the capture never shows reaching the
+  // SUT is the origin platform's own emission, whatever its name.
+  it("stamps origin-platform-header on an asserted value no capture-side send carries", () => {
+    const minted = "User-to-User: 1111;encoding=hex;purpose=isdn-interwork;content=isdn-uui"
+    const base = relayedB2bFlows()
+    const { caller, sut } = SOCKETS
+    // The SUT's 180 to the caller carries the UUI; the callee's 180 (the
+    // capture-side send) does not, and neither does the caller's INVITE.
+    const flows: Flows.FlowsDoc = {
+      ...base,
+      legs: base.legs.map((l, i) =>
+        i === 0
+          ? {
+            ...l,
+            msgs: l.msgs.map((m) =>
+              m.summary.kind === "response" && m.summary.status === 180
+                ? response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 200, toTag: "sut-tag", headers: ["P-Charging-Vector: icid-value=abc123", "P-Asserted-Identity: <sip:+33600000004@10.0.0.1>", minted] })
+                : m
+            )
+          }
+          : l
+      )
+    }
+    const flow = flowOf(flows, BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.check).toBe("assert")
+    expect(a180.msg.headers?.find((h) => h.name === "User-to-User")?.class).toBe("origin-platform-header")
+    // The relayed value the callee's 180 carries is protocol and still gates.
+    expect(a180.msg.headers?.find((h) => h.name === "P-Asserted-Identity")?.class).toBeUndefined()
+  })
+
+  it("leaves a relayed value unclassified when the same header reaches the SUT with it", () => {
+    const relayed = "User-to-User: 00;encoding=hex;purpose=isdn-uui;content=isdn-uui"
+    const flow = flowOf(relayedB2bFlows([relayed]), BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.msg.headers?.find((h) => h.name === "User-to-User")?.class).toBeUndefined()
+  })
+
   it("composes a plan-recognized number in a number-bearing header as a ${num:…} accessor", () => {
     const flow = flowOf(relayedB2bFlows(), BOTH_VANTAGES)
     const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
@@ -369,6 +407,58 @@ describe("header classes and identity composition (§9.1, §8.1)", () => {
     expect(a180.msg.headers?.find((h) => h.name === "P-Charging-Vector")?.value).toBe(
       "icid-value=abc123"
     )
+  })
+})
+
+describe("body descriptors (RFC 3261 §20.11–§20.13, §20.24)", () => {
+  const SDP = "v=0\r\no=- 1 1 IN IP4 10.0.0.2\r\ns=-\r\nc=IN IP4 10.0.0.2\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n"
+  const descriptors = [
+    "P-Charging-Vector: icid-value=abc123",
+    "Content-Disposition: session; handling=required",
+    "Content-Encoding: identity",
+    "Content-Language: en",
+    "MIME-Version: 1.0"
+  ]
+  /** The callee rings with an SDP and its descriptors; the SUT's 180 to the caller carries `callerSdp`. */
+  const strippedFlows = (callerSdp: string | undefined): Flows.FlowsDoc => {
+    const base = relayedB2bFlows()
+    const { caller, callee, sut } = SOCKETS
+    return {
+      ...base,
+      legs: base.legs.map((l, i) => ({
+        ...l,
+        msgs: l.msgs.map((m) =>
+          m.summary.kind === "response" && m.summary.status === 180
+            ? i === 0
+              ? response({ callId: CALLER_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: sut, dst: caller, ts_ms: 200, toTag: "sut-tag", headers: descriptors, sdp: callerSdp })
+              : response({ callId: CALLEE_CALL_ID, seq: 1, status: 180, reason: "Ringing", cseqMethod: "INVITE", src: callee, dst: sut, ts_ms: 190, toTag: "callee-tag", headers: descriptors, sdp: SDP })
+            : m
+        )
+      }))
+    }
+  }
+  const names = (s: { msg: { headers?: ReadonlyArray<{ name: string }> } }) => (s.msg.headers ?? []).map((h) => h.name)
+
+  it("freezes no descriptor on an expect whose captured message carries no body", () => {
+    const flow = flowOf(strippedFlows(undefined), BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.msg.body).toEqual({ mode: "absent" })
+    expect(names(a180)).not.toContain("Content-Disposition")
+    expect(names(a180)).not.toContain("Content-Encoding")
+    expect(names(a180)).not.toContain("Content-Language")
+    expect(names(a180)).not.toContain("MIME-Version")
+    expect(names(a180)).toContain("P-Charging-Vector")
+    // The send keeps the captured bytes, descriptors included.
+    const b180 = flow.steps.find((s) => s.leg === "B" && s.msg.status === 180)!
+    expect(b180.op).toBe("send")
+    expect(names(b180)).toContain("Content-Disposition")
+  })
+
+  it("freezes the descriptors on an expect whose captured message carries the body they describe", () => {
+    const flow = flowOf(strippedFlows(SDP), BOTH_VANTAGES)
+    const a180 = flow.steps.find((s) => s.leg === "A" && s.msg.status === 180)!
+    expect(a180.msg.body).toMatchObject({ compare: "sdp" })
+    expect(names(a180)).toEqual(expect.arrayContaining(["Content-Disposition", "Content-Encoding", "Content-Language", "MIME-Version"]))
   })
 })
 

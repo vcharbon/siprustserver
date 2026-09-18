@@ -2215,6 +2215,15 @@ Two sites carry one:
 An unclassified check gates on every lane. `headers-present` carries no class:
 existence is not a vocabulary.
 
+The generator states the class from two readings, and the interpreter infers
+none: the deployment's own header families, and — §6.4 at header granularity —
+an asserted value no capture-side `send` of the document carries. A value the
+capture never shows reaching the SUT was minted by the origin platform, so it is
+that platform's spelling whatever the header's name; the same header relayed
+byte-for-byte stays protocol and gates. A header describing a body (RFC 3261
+§20.11–§20.13, §20.24) is not frozen at all on an expect whose captured message
+carries none: it describes octets that are not there.
+
 **The rule a run applies, and it is the only one:**
 
 > when the run's lane is not `case.origin_lane`, a CLASSIFIED check is
