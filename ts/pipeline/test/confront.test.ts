@@ -90,6 +90,13 @@ describe("diffHeaders", () => {
     expect(probe?.inbound).toBe(true)
     expect(probe?.inboundValues).toEqual(["Q.850;cause=16"])
   })
+
+  it("states whether both sides' messages are bodiless, and does not by default", () => {
+    const captured = headersInOrderRaw(invite.replace("Allow: INVITE, ACK", "Content-Disposition: session"))
+    const replayed = headersInOrderRaw(invite)
+    expect(diffHeaders(captured, replayed, scope, none)[0]?.bodiless).toBe(false)
+    expect(diffHeaders(captured, replayed, scope, none, undefined, "s1", true)[0]?.bodiless).toBe(true)
+  })
 })
 
 const step = (id: string, over: Partial<Flow.Step> = {}): Flow.Step => ({
@@ -698,7 +705,8 @@ describe("recordOf", () => {
           replayed: ["INVITE, ACK, BYE"],
           inbound: true,
           inboundValues: ["INVITE, ACK"],
-          driven: true
+          driven: true,
+          bodiless: false
         }
       },
       { class: "accepted", rule: "capability-set-added-by-stack", ticket: "" }

@@ -31,7 +31,7 @@
  */
 import type { Bundle, Deviation, Flow } from "@sip/contracts"
 import { Body, Confrontation, Flows, Pivot } from "@sip/contracts"
-import { mimeKey } from "./bodies.js"
+import { carriesBody, mimeKey } from "./bodies.js"
 import { bodiesEqual } from "./bodyfold.js"
 import { diffSdp, maskOf } from "./sdpfold.js"
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
@@ -265,6 +265,7 @@ const headerProbes = (
       const scope = scopeOfRaw(message.raw)
       if (scope === undefined) continue
       const driven = drivenNames(driving, leg, message.at_us, scope)
+      const bodiless = !carriesBody(reference) && bodyOfRaw(message.raw).length === 0
       for (
         const probe of diffHeaders(
           headersInOrder(reference),
@@ -272,7 +273,8 @@ const headerProbes = (
           scope,
           inbound,
           driven,
-          step.id
+          step.id,
+          bodiless
         )
       ) {
         probes.push({ step: step.id, probe })
@@ -463,7 +465,8 @@ export const diffHeaders = (
   scope: MsgScope,
   inbound: ReadonlyMap<string, ReadonlyArray<string>>,
   driven?: ReadonlySet<string>,
-  step = ""
+  step = "",
+  bodiless = false
 ): ReadonlyArray<HeaderProbe> => {
   const order: Array<string> = []
   const names = new Map<string, { name: string; captured: Array<string>; replayed: Array<string> }>()
@@ -502,7 +505,8 @@ export const diffHeaders = (
       replayed: entry.replayed,
       inbound: inbound.has(key),
       inboundValues: inbound.get(key) ?? [],
-      driven: driven === undefined ? undefined : driven.has(key)
+      driven: driven === undefined ? undefined : driven.has(key),
+      bodiless
     })
   }
   return out

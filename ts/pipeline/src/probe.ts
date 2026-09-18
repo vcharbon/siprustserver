@@ -111,6 +111,11 @@ export interface HeaderProbe extends ProbeSite {
    * the header says nothing about what our system was handed.
    */
   readonly driven: boolean | undefined
+  /**
+   * Whether NEITHER side's message carries a body, so a header describing one
+   * (RFC 3261 §20.11–§20.13, §20.24) describes nothing on either side.
+   */
+  readonly bodiless: boolean
 }
 
 export interface ShapeProbe extends ProbeSite {

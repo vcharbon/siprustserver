@@ -18,7 +18,8 @@ const probe = (name: string): Probe => ({
   replayed: [],
   inbound: false,
   inboundValues: [],
-  driven: undefined
+  driven: undefined,
+  bodiless: false
 })
 
 describe("Classifier", () => {
