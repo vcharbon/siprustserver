@@ -355,14 +355,15 @@ describe("header classes and identity composition (§9.1, §8.1)", () => {
     const bInvite = flow.steps.find((s) => s.leg === "B" && s.op === "expect" && s.msg.method === "INVITE")!
     expect(bInvite.check).toBe("record")
     expect(bInvite.msg.headers?.find((h) => h.name === "P-Charging-Vector")?.class).toBeUndefined()
-    // A header the deployment does not own stays unclassified and gates.
+    // A header the deployment does not own, relayed byte-for-byte from the
+    // callee's 180, stays unclassified and gates.
     expect(a180.msg.headers?.find((h) => h.name === "P-Asserted-Identity")?.class).toBeUndefined()
   })
 
   // §6.4 at header granularity: a value the capture never shows reaching the
   // SUT is the origin platform's own emission, whatever its name.
   it("stamps origin-platform-header on an asserted value no capture-side send carries", () => {
-    const minted = "User-to-User: 1111;encoding=hex;purpose=isdn-interwork;content=isdn-uui"
+    const minted = "User-to-User: 56a5;encoding=hex;purpose=isdn-uui;content=isdn-uui"
     const base = relayedB2bFlows()
     const { caller, sut } = SOCKETS
     // The SUT's 180 to the caller carries the UUI; the callee's 180 (the

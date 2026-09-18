@@ -1796,6 +1796,12 @@ endpoint must put a concrete number on the wire for RAck translation), an
 stack-owned per leg (RFC 3262 §3) and the confrontation's `rseq-stack-owned`
 rule judges the number.
 
+The body descriptors split the same way (RFC 3261 §20.11 Content-Disposition,
+§20.12 Content-Encoding, §20.13 Content-Language, §20.24 MIME-Version): a
+**send** freezes them with the rest, an **expect** freezes none of them when
+its captured message carries no body — they describe octets that are not
+there.
+
 ```json
 "msg": {
   "method": "INVITE",
@@ -2200,7 +2206,7 @@ would have to drop the fact. So the fact stays, NAMED.
 
 | class | what it reads |
 |---|---|
-| `origin-platform-header` | a header only the origin platform emits (`P-Charging-Vector`, `P-Identifier`, `P-Orig`) |
+| `origin-platform-header` | a header value only the origin platform emits: a family of its own (`P-Charging-Vector`, `P-Identifier`, `P-Orig`), or a value the capture never shows reaching it |
 | `cdr-vocabulary` | the origin platform's CDR record vocabulary: event names, disposition words, field spellings |
 
 Two sites carry one:
@@ -2220,9 +2226,7 @@ none: the deployment's own header families, and — §6.4 at header granularity 
 an asserted value no capture-side `send` of the document carries. A value the
 capture never shows reaching the SUT was minted by the origin platform, so it is
 that platform's spelling whatever the header's name; the same header relayed
-byte-for-byte stays protocol and gates. A header describing a body (RFC 3261
-§20.11–§20.13, §20.24) is not frozen at all on an expect whose captured message
-carries none: it describes octets that are not there.
+byte-for-byte stays protocol and gates.
 
 **The rule a run applies, and it is the only one:**
 
