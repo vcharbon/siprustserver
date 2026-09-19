@@ -1935,8 +1935,9 @@ own overlay.
 A single body on a SEND references a resource file, and the registry decides
 what rides beside the ref: `rewrite` tokens where the body is rewritten
 (`{ "ref": "resources/…", "rewrite": ["c=addr", "m=port"] }`), or `mode`
-(`frozen` / `frozen-binary`) plus the captured `content-type` where it replays
-byte-exact.
+(`frozen`) plus the captured `content-type` where it replays byte-exact. A
+resource file holds BYTES; whether they are text is a fact of the bytes, never
+a declared mode, and no rule names a media type to say so (ADR-0035).
 
 **The tokens name what the LANE may rewrite, not what it must.** They are
 applied through the lane's media booking, and a lane that exercises no media
@@ -1954,11 +1955,10 @@ render derives exactly, so the stored and derived values cannot drift; an SDP
 body whose captured type carried parameters states them and replays under them.
 
 A single body on an EXPECT is asserted by SHAPE or by CONTENT, and the
-registry decides which. Multipart is a shape — `{ "mode": "multipart-present" }`
-— because it is reframed at replay; a message that carried no body states
-`{ "mode": "absent" }`, and that IS the assertion. Every TEXT body the registry
-freezes is stored as a resource and asserted by content, in the same form the
-send side stores it, and so is every SDP:
+registry decides which. A message that carried no body states
+`{ "mode": "absent" }`, and that IS the assertion. Every body the registry
+freezes is stored as a resource and asserted by content, whatever its bytes
+hold, in the same form the send side stores it, and so is every SDP:
 
 ```json
 "body": { "ref": "resources/uas1_r3_0.xml", "mode": "frozen",
@@ -2018,11 +2018,23 @@ as the empty text; under `check: assert` the interpreter also refuses it, and
 under `check: record` — every generated expect — the confrontation's record is
 the only statement of it.
 
-A resource body on an expect is TEXT unless its `mode` is `frozen-binary`; a
-`mode` left unstated is text. The ONE exception is that binary payload: the
-recording the confrontation reads is text, so a binary body on an expect is
-not stored at all — the expectation states nothing about it — and were one
-authored it would assert presence only.
+**A frozen body compares byte for byte.** The confrontation holds the received
+bytes — the recording keeps them as they crossed the socket (§14 item 12) —
+against the resource file's; `xml` and `sdp` decode both sides as UTF-8 first
+and apply their fold, and a side that is not UTF-8 under a text compare is a
+difference. A probe's sides are shown as the text they are where the bytes are
+UTF-8, standard base64 where they are not.
+
+A multipart body on an EXPECT is stated PART BY PART where extraction handed
+the parts over — the same `multipart` form the send side stores, every part a
+resource, an SDP part under its `rewrite` tokens with `compare: sdp`, any
+other part `frozen` — and the confrontation locates the received parts by the
+recording's own `body` layout and compares them to the expectation's by
+position: one record per differing part under that part's `compare`, one for
+a part-count mismatch. A part's entity headers are not compared. Where
+extraction handed no parts over, the expect falls back to the shape
+`{ "mode": "multipart-present" }`, and the interpreter gates the reception's
+container type either way.
 
 Multipart bodies reference DECOMPOSED parts:
 
@@ -2033,7 +2045,7 @@ Multipart bodies reference DECOMPOSED parts:
     "content-id": "<offer@example.invalid>",
     "headers": [{ "name": "Content-Disposition", "value": "session" }] },
   { "content-type": "application/EmergencyCallData.eCall.MSD",
-    "ref": "resources/uac1_0_1.bin", "mode": "frozen-binary",
+    "ref": "resources/uac1_0_1.bin", "mode": "frozen",
     "content-id": "<user1@ims.example.net>",
     "headers": [{ "name": "Content-Transfer-Encoding", "value": "binary" },
                 { "name": "Content-Disposition", "value": "By-Reference" }],
@@ -2045,6 +2057,9 @@ Multipart bodies reference DECOMPOSED parts:
 so no consumer owns MIME; the pivot references files that already exist.
 `cid-linked` is COMPUTED from the part's `Content-ID` plus the message's header
 list.
+
+A part on an expect may state `compare` with the meaning a single resource
+body gives it (`exact` when absent, `xml`, `sdp`); on a send it is ignored.
 
 A part states its own ENTITY BLOCK. `content-id` is its `Content-ID` value with
 the angle brackets the wire wrote (RFC 2045 §7), and `headers` is every other
@@ -2092,7 +2107,7 @@ never changes how a part is handled:
 | part content-type | handling |
 |---|---|
 | `application/sdp` | rewrite `c=` and `m=` |
-| known non-SDP | freeze (`frozen`, or `frozen-binary` for non-text) |
+| known non-SDP | freeze (`frozen`, text or bytes alike) |
 | unrecognized | freeze AND flag when the payload carries number-like digits |
 
 The unrecognized arm is the point: a missing handler is a decision owed, not a
@@ -2179,9 +2194,14 @@ One check vocabulary everywhere, borrowed from the upstream `e2e-model`:
 
 | field | required | meaning |
 |---|---|---|
-| `field` | yes | field selector. Open token: `from.userInfo`, `header(P-Asserted-Identity)`, `body`, or a deployment observable's name in a postcondition |
+| `field` | yes | field selector. Open token: `from.userInfo`, `header(P-Asserted-Identity)`, `body`, `body.b64`, or a deployment observable's name in a postcondition |
 | `op` | yes | `eq`, `regex`, `exists`, `absent` |
 | `value` | with `eq` / `regex` | a literal, a regex, or a string carrying `${…}` accessors |
+
+`body` observes the message body as text where its bytes are UTF-8 and as
+standard base64 where they are not, chosen by the bytes alone; `body.b64`
+observes it as base64 always — the byte-exact assertion an author writes for a
+body that is not text.
 
 `exists` and `absent` take no value, and `eq` / `regex` require one; lint refuses
 either mismatch.
@@ -2847,7 +2867,14 @@ Its whole job:
     observed inside the run's stated window (§9.2).
 12. **Record, always.** A verbatim per-leg recording of every message, in wire
     order, with arrival time, into the run bundle — in every mode, on every
-    lane, whether or not anything asserted.
+    lane, whether or not anything asserted. A recorded datagram is BYTES
+    (ADR-0035): the line writes them in exactly one of the extractor's three
+    arms, chosen by the bytes alone — `raw` when the whole datagram is UTF-8,
+    `head` + `body_b64` when only the body is not, `raw_b64` when not even
+    the head is — beside the body's `body` layout (media type, byte length,
+    MIME parts located by offset), so a reader finds a part without splitting
+    on a boundary. One decoder reads captures and recordings alike; text is a
+    rendering of the bytes, never the stored form.
 13. **Settle** (§10), then evaluate `postconditions`.
 
 **A failure does not end a run; being unable to GO ON does.** A run records every
