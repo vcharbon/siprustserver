@@ -1,5 +1,5 @@
 //! One line of the **verbatim per-leg recording** (`PCAP2TEST_PIVOT_V3.md` §14
-//! item 10): the record kind `recording/<leg>.jsonl` holds, one JSON object per
+//! item 12): the record kind `recording/<leg>.jsonl` holds, one JSON object per
 //! line, in wire order.
 //!
 //! A recorded datagram is BYTES (ADR-0035). In memory it is the datagram that
@@ -46,7 +46,10 @@ pub struct RecordedMessage {
     /// The datagram, byte for byte.
     wire: Vec<u8>,
     /// The body's layout, present iff the datagram carries a body: media type,
-    /// length and the MIME parts located by offset into the body bytes.
+    /// the parser's `Content-Length`-bounded length and the MIME parts located
+    /// by offset into the body bytes. The arm keeps the WHOLE wire, a tail
+    /// past the declared length included (RFC 3261 §18.3); the layout is the
+    /// one bound every comparison of the body uses.
     pub body: Option<BodyLayout>,
     /// The `seq` of the earliest datagram on this leg, in this direction, that
     /// this one repeats byte for byte (friction H8). Set by the caller that
@@ -157,7 +160,23 @@ impl TryFrom<RecordedLine> for RecordedMessage {
         };
         let wire = payload.bytes().map_err(|e| format!("recorded line {seq}: {e}"))?;
         // The layout is a pure function of the bytes: a line written without
-        // one gets it derived, a line written with one keeps the writer's.
+        // one gets it derived, a line written with one keeps the writer's —
+        // once it is checked against the bytes it claims to describe.
+        if let Some(layout) = &body {
+            let tail = sip_message::sniff::body(&wire).map_or(0, <[u8]>::len);
+            if layout.len > tail {
+                return Err(format!(
+                    "recorded line {seq}: the body layout states {} bytes, the datagram carries {tail} after its head",
+                    layout.len
+                ));
+            }
+            if let Some(part) = layout.parts.iter().find(|p| p.offset + p.len > layout.len) {
+                return Err(format!(
+                    "recorded line {seq}: a {} part at {}+{} reaches past the body's {} bytes",
+                    part.content_type, part.offset, part.len, layout.len
+                ));
+            }
+        }
         let body = body.or_else(|| RecordedMessage::layout_of(&wire));
         Ok(RecordedMessage { seq, dir, at_us, step, wire, body, repeat_of, note })
     }

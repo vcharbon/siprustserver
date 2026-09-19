@@ -33,10 +33,11 @@ import type { Bundle, Deviation, Flow } from "@sip/contracts"
 import { Body, Confrontation, Flows, Pivot, Wire } from "@sip/contracts"
 import { carriesBody, mimeKey } from "./bodies.js"
 import { bodiesEqual } from "./bodyfold.js"
-import { locate } from "./parts.js"
+import { layoutFault, locate } from "./parts.js"
 import { diffSdp, maskOf } from "./sdpfold.js"
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
+import type { LayoutFault } from "./parts.js"
 import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
 import { probeSetDelta, scopeText, shapeSides, signature } from "./probe.js"
 import type { WireHeader } from "./wire.js"
@@ -297,14 +298,27 @@ const headerProbes = (
  * all is confronted too, as the empty side: the assertion stands whether or
  * not anything arrived.
  *
- * A multipart reception's parts are located by the recording's own `body`
- * layout (never split here) and matched to the expectation's parts by
- * POSITION: one probe per differing part, one for a part-count mismatch. A
- * part's entity headers are not compared — the confrontation reads payloads,
- * and a header delta on a part is out of its scope.
+ * THE body is the recorded layout's: the arm keeps the whole datagram, bytes
+ * past the declared `Content-Length` included (RFC 3261 §18.3 discards them),
+ * and the layout's `len` bounds what every comparison reads, single and
+ * multipart, under every compare mode; only a line with no layout is read to
+ * the end of its tail. The interpreter writes a layout for every datagram that
+ * parses and carries a body, so a layout the bytes cannot honour — `len` past
+ * the tail, a part past `len` — is a writer's fault and is stated once as a
+ * probe, never thrown.
  *
- * A probe's sides stay strings: the text where the bytes are UTF-8, standard
- * base64 where they are not.
+ * A multipart reception's parts are located by that layout (never split here)
+ * and matched to the expectation's parts by POSITION: one probe for a
+ * part-count mismatch (the sides name each part's media type), one per part
+ * whose media type differs (the sides name the two types), one per part whose
+ * bytes differ under its `compare`. A part's entity headers are not compared —
+ * the confrontation reads payloads, and a header delta on a part is out of
+ * its scope. A multipart expect on a line that recorded no layout is one
+ * probe saying so.
+ *
+ * A probe's sides stay strings: the text where BOTH sides are text (UTF-8
+ * whose only controls are tab, CR and LF), standard base64 on both where
+ * either is not.
  */
 export const bodyProbes = (
   input: ConfrontInput,
@@ -322,17 +336,12 @@ export const bodyProbes = (
       const scope = scopeOf(message)
       if (scope === undefined) continue
       if (Body.isResourceBody(body)) {
-        for (const probe of bodyProbe(
-          step.id,
-          body,
-          mediaTypeOf(body["content-type"], message),
-          scope,
-          expectedBytes(input.resources, body.ref),
-          bodyBytesOf(message),
-          media
-        )) {
-          out.push({ step: step.id, probe })
-        }
+        const mediaType = mediaTypeOf(body["content-type"], message)
+        const received = recordedBody(message)
+        const probes = "fault" in received
+          ? [faultProbe(step.id, mediaType, scope, received.fault)]
+          : bodyProbe(step.id, body, mediaType, scope, expectedBytes(input.resources, body.ref), received.bytes, media)
+        for (const probe of probes) out.push({ step: step.id, probe })
       } else if (Body.isMultipartBody(body)) {
         for (const probe of multipartProbes(step.id, body.multipart, scope, input.resources, message, media)) {
           out.push({ step: step.id, probe })
@@ -358,8 +367,38 @@ const expectedBytes = (resources: ReadonlyMap<string, Uint8Array> | undefined, r
 const mediaTypeOf = (declared: string | undefined, message: Wire.Msg): string =>
   mimeKey(declared ?? headerValuesOf(headersInOrder(message), "Content-Type")[0] ?? "")
 
-/** A probe side: the text where the bytes are UTF-8, standard base64 otherwise. */
-const sideOf = (bytes: Uint8Array): string => Wire.utf8Of(bytes) ?? Wire.base64Of(bytes)
+/** The received body under the one bound: the layout's `len` where a layout is present, the whole tail otherwise. */
+const recordedBody = (message: Bundle.RecordedMessage): { readonly bytes: Uint8Array } | { readonly fault: LayoutFault } => {
+  const tail = bodyBytesOf(message)
+  if (message.body === undefined) return { bytes: tail }
+  const fault = layoutFault(tail, message.body)
+  return fault === undefined ? { bytes: tail.subarray(0, message.body.len) } : { fault }
+}
+
+const faultProbe = (step: string, mediaType: string, scope: MsgScope, fault: LayoutFault): BodyProbe => ({
+  kind: "body",
+  step,
+  mediaType,
+  scope,
+  compare: "exact",
+  captured: [fault.stated],
+  replayed: [fault.carried]
+})
+
+/** Text is UTF-8 whose only control characters are tab, CR and LF. */
+const textOf = (bytes: Uint8Array): string | undefined => {
+  for (const byte of bytes) {
+    if (byte === 0x7f || (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0d)) return undefined
+  }
+  return Wire.utf8Of(bytes)
+}
+
+/** Two probe sides, rendered alike: the texts where both are text, standard base64 on both where either is not. */
+const sidesOf = (captured: Uint8Array, replayed: Uint8Array): readonly [string, string] => {
+  const a = textOf(captured)
+  const b = textOf(replayed)
+  return a !== undefined && b !== undefined ? [a, b] : [Wire.base64Of(captured), Wire.base64Of(replayed)]
+}
 
 /** What a resource body or a part states about its comparison. */
 interface Compared {
@@ -379,14 +418,16 @@ const bodyProbe = (
   const compare = body.compare ?? "exact"
   if (compare === "exact") {
     if (bytesEqual(captured, replayed)) return []
-    return [{ kind: "body", step, mediaType, scope, compare, captured: [sideOf(captured)], replayed: [sideOf(replayed)] }]
+    const [a, b] = sidesOf(captured, replayed)
+    return [{ kind: "body", step, mediaType, scope, compare, captured: [a], replayed: [b] }]
   }
   // A text compare reads both sides as UTF-8; a side that is none differs
-  // from anything, and is shown as the bytes it is.
+  // from anything, and both are shown as the bytes they are.
   const capturedText = Wire.utf8Of(captured)
   const replayedText = Wire.utf8Of(replayed)
   if (capturedText === undefined || replayedText === undefined) {
-    return [{ kind: "body", step, mediaType, scope, compare, captured: [sideOf(captured)], replayed: [sideOf(replayed)] }]
+    const [a, b] = sidesOf(captured, replayed)
+    return [{ kind: "body", step, mediaType, scope, compare, captured: [a], replayed: [b] }]
   }
   if (compare === "sdp") {
     return diffSdp(maskOf(body.rewrite, media), capturedText, replayedText).map((d) => ({
@@ -412,9 +453,10 @@ const bytesEqual = (a: Uint8Array, b: Uint8Array): boolean => {
 
 /**
  * The multipart confrontation: the received parts, located by the recording's
- * layout, against the expectation's, by position. A layout the recording does
- * not state (a reception that was not multipart, or carried no body) is zero
- * parts.
+ * layout, against the expectation's, by position. A line with no layout
+ * states no parts to locate: one probe says so, because the interpreter
+ * writes a layout for every parsable datagram that carries a body and its
+ * absence is a fact about the reception, not a count of zero.
  */
 const multipartProbes = (
   step: string,
@@ -424,8 +466,16 @@ const multipartProbes = (
   message: Bundle.RecordedMessage,
   media: Bundle.MediaMode
 ): ReadonlyArray<BodyProbe> => {
-  const received = message.body === undefined || message.body.parts === undefined ? [] : locate(message, message.body).parts
   const mediaType = mimeKey(expected["content-type"])
+  if (message.body === undefined) {
+    return [faultProbe(step, mediaType, scope, {
+      stated: `a ${mediaType} body of ${expected.parts.length} parts`,
+      carried: "the recorded line states no body layout to locate parts by"
+    })]
+  }
+  const fault = layoutFault(bodyBytesOf(message), message.body)
+  if (fault !== undefined) return [faultProbe(step, mediaType, scope, fault)]
+  const received = locate(message, message.body).parts
   if (received.length !== expected.parts.length) {
     return [{
       kind: "body",
@@ -437,17 +487,14 @@ const multipartProbes = (
       replayed: received.map((p) => mimeKey(p.contentType))
     }]
   }
-  return expected.parts.flatMap((part, n) =>
-    bodyProbe(
-      step,
-      part,
-      mimeKey(part["content-type"]),
-      scope,
-      expectedBytes(resources, part.ref),
-      received[n]!.bytes,
-      media
-    )
-  )
+  return expected.parts.flatMap((part, n) => {
+    const expectedType = mimeKey(part["content-type"])
+    const receivedType = mimeKey(received[n]!.contentType)
+    if (expectedType !== receivedType) {
+      return [{ kind: "body" as const, step, mediaType: expectedType, scope, compare: "exact" as const, captured: [expectedType], replayed: [receivedType] }]
+    }
+    return bodyProbe(step, part, expectedType, scope, expectedBytes(resources, part.ref), received[n]!.bytes, media)
+  })
 }
 
 /** One datagram the run put on the wire toward the system, in run order. */

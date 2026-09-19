@@ -1,4 +1,4 @@
-//! The **verbatim per-leg recording** (`PCAP2TEST_PIVOT_V3.md` §14 item 10):
+//! The **verbatim per-leg recording** (`PCAP2TEST_PIVOT_V3.md` §14 item 12):
 //! every message, in wire order, with its arrival time, in every mode, on every
 //! lane, whether or not anything asserted.
 //!

@@ -3,7 +3,7 @@
 //! alone. A line whose datagram carries a body also states the body's LAYOUT —
 //! the extractor's `body` enrichment, media type, length and the MIME parts
 //! located by offset — so a reader finds a part without splitting on a
-//! boundary (`PCAP2TEST_PIVOT_V3.md` §14 item 10).
+//! boundary (`PCAP2TEST_PIVOT_V3.md` §14 item 12).
 
 use base64::Engine as _;
 use pivot_schema::bundle::RecordedMessage;
@@ -189,5 +189,55 @@ fn the_layout_is_the_shared_wire_type() {
             })
             .unwrap(),
         "the line's arm is the payload's own serialization"
+    );
+}
+
+/// The datagram arm keeps the WHOLE wire, trailing bytes included; the layout
+/// is the parser's, bounded by `Content-Length` (RFC 3261 §18.3), and it is
+/// the one bound every comparison uses. Both facts are stated on the line.
+#[test]
+fn the_layout_is_content_length_bounded_while_the_arm_keeps_every_byte() {
+    let mut wire = datagram("application/vnd.example.blob", BLOB);
+    wire.extend_from_slice(b"\r\n");
+    let message = line_for(1, &wire);
+    assert_eq!(message.wire(), wire, "the arm keeps the trailing bytes");
+    assert_eq!(
+        message.body.as_ref().map(|b| b.len),
+        Some(BLOB.len()),
+        "the layout is the parser's"
+    );
+    assert_eq!(
+        message.payload().body().map(|b| b.len()),
+        Some(BLOB.len() + 2),
+        "the arm's tail is longer"
+    );
+}
+
+/// A writer's lie is refused, not stored: a layout whose parts reach past its
+/// own `len`, or whose `len` reaches past the datagram's tail, is no layout.
+#[test]
+fn a_layout_that_contradicts_itself_or_its_bytes_is_refused() {
+    let wire = datagram("application/vnd.example.blob", BLOB);
+    let arm = format!(
+        r#""head":{},"body_b64":"{}""#,
+        serde_json::to_string(std::str::from_utf8(&wire[..wire.len() - BLOB.len()]).unwrap())
+            .unwrap(),
+        b64(BLOB)
+    );
+    let past_len = format!(
+        r#"{{"seq":1,"dir":"in","at_us":0,{arm},"body":{{"content_type":"multipart/mixed","len":{},"parts":[{{"content_type":"text/plain","offset":5,"len":4}}]}}}}"#,
+        BLOB.len()
+    );
+    assert!(
+        serde_json::from_str::<RecordedMessage>(&past_len).is_err(),
+        "a part past `len`: {past_len}"
+    );
+    let past_tail = format!(
+        r#"{{"seq":1,"dir":"in","at_us":0,{arm},"body":{{"content_type":"application/vnd.example.blob","len":{}}}}}"#,
+        BLOB.len() + 1
+    );
+    assert!(
+        serde_json::from_str::<RecordedMessage>(&past_tail).is_err(),
+        "`len` past the tail: {past_tail}"
     );
 }

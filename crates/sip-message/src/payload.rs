@@ -30,27 +30,24 @@ pub enum Payload {
 
 impl Payload {
     /// The form these bytes take, chosen purely from the bytes: whole-UTF-8 ⇒
-    /// [`Payload::Text`]; else a UTF-8 head whose tail is exactly `body` ⇒
-    /// [`Payload::HeadBody`]; else [`Payload::Opaque`]. Deterministic, so a
-    /// document re-emitted after a transformation keeps the same encoding.
-    pub fn of(raw: &[u8], body: &[u8]) -> Self {
+    /// [`Payload::Text`]; else a UTF-8 head through the blank line that ends
+    /// it ([`crate::sniff::body`]) ⇒ [`Payload::HeadBody`] with everything
+    /// after that line as the body, a declared `Content-Length` notwithstanding;
+    /// else (the head is not UTF-8, or is unterminated) ⇒ [`Payload::Opaque`].
+    /// Deterministic, so a capture and a recording of the same bytes take the
+    /// same arm and a document re-emitted after a transformation keeps its
+    /// encoding.
+    pub fn of_datagram(raw: &[u8]) -> Self {
         if let Ok(s) = std::str::from_utf8(raw) {
             return Payload::Text { raw: s.to_string() };
         }
-        let head_len = raw.len().saturating_sub(body.len());
-        if !body.is_empty() && raw[head_len..] == *body {
+        if let Some(body) = crate::sniff::body(raw) {
+            let head_len = raw.len() - body.len();
             if let Ok(head) = std::str::from_utf8(&raw[..head_len]) {
                 return Payload::HeadBody { head: head.to_string(), body_b64: base64(body) };
             }
         }
         Payload::Opaque { raw_b64: base64(raw) }
-    }
-
-    /// [`Payload::of`] over a datagram alone: the body is what follows the
-    /// blank line that ends the head ([`crate::sniff::body`]), nothing when
-    /// the head is unterminated.
-    pub fn of_datagram(raw: &[u8]) -> Self {
-        Self::of(raw, crate::sniff::body(raw).unwrap_or_default())
     }
 
     /// The exact wire bytes, whichever form carries them.
@@ -203,6 +200,15 @@ mod tests {
         assert!(matches!(p, Payload::Opaque { .. }));
         assert_eq!(p.bytes().unwrap(), opaque);
         assert_eq!(p.body(), None);
+    }
+
+    #[test]
+    fn a_tail_longer_than_the_declared_length_still_splits() {
+        let mut raw = HEAD.as_bytes().to_vec();
+        raw.extend([0xff, 0x00, 0x80, 0x0d, 0x0a]);
+        let p = Payload::of_datagram(&raw);
+        assert_eq!(p, Payload::HeadBody { head: HEAD.into(), body_b64: "/wCADQo=".into() });
+        assert_eq!(p.bytes().unwrap(), raw);
     }
 
     #[test]

@@ -1499,7 +1499,7 @@ async fn a_run_whose_document_asserts_the_wrong_final_fails_by_name_and_keeps_it
     scene.finish().await;
 }
 
-/// §14 item 10 is unconditional: EVERY message, in wire order. A retransmission
+/// §14 item 12 is unconditional: EVERY message, in wire order. A retransmission
 /// the receive view absorbs is still a message the run saw, so it is in the
 /// bundle — noted as absorbed — and it still never reaches an expect.
 #[tokio::test(start_paused = true)]
@@ -4401,6 +4401,8 @@ fn assert_recorded_as_head_and_bytes(line: &serde_json::Value) -> Vec<u8> {
     );
     let head = line["head"].as_str().unwrap_or_else(|| panic!("head is a string: {line}"));
     assert!(head.ends_with("\r\n\r\n"), "the head runs through the blank line: {head:?}");
+    // A heuristic over THESE fixtures, which carry no legitimate U+FFFD: a
+    // replacement character on the line can only be a byte a lossy decode lost.
     let text = serde_json::to_string(line).unwrap();
     assert!(!text.contains('\u{FFFD}'), "no byte was replaced on the way to disk: {text}");
     recorded_wire(line)
@@ -4439,6 +4441,10 @@ async fn a_binary_body_is_recorded_byte_for_byte_on_both_legs() {
     let callee = recorded_lines(&dir, "B");
     let taken = assert_recorded_as_head_and_bytes(recorded_line(&callee, "in", b"INFO "));
     assert!(taken.ends_with(&body), "the callee's line ends with the body bytes: {taken:02x?}");
+    assert_eq!(
+        taken, arrived.raw,
+        "the callee's line IS the datagram its socket took, byte for byte"
+    );
     let caller = recorded_lines(&dir, "A");
     let sent = assert_recorded_as_head_and_bytes(recorded_line(&caller, "out", b"INFO "));
     assert!(sent.ends_with(&body), "the caller's line ends with the body bytes: {sent:02x?}");
@@ -4460,6 +4466,11 @@ async fn a_binary_body_check_reads_its_bytes_as_base64_and_the_run_is_green() {
     assert!(
         outcome.verdict.completed_steps.contains(&"s11".to_string()),
         "the callee's INFO expect completed with its body check: {:#?}",
+        outcome.verdict.failures
+    );
+    assert!(
+        outcome.verdict.failures.is_empty(),
+        "the run is green: {:#?}",
         outcome.verdict.failures
     );
     scene.finish().await;

@@ -91,7 +91,11 @@ export const bytesOfLatin1 = (text: string): Uint8Array => {
 /** Standard base64 (RFC 4648 §4, padded) of `bytes`. */
 export const base64Of = (bytes: Uint8Array): string => btoa(latin1Of(bytes))
 
-/** The bytes a standard base64 text encodes. */
+/**
+ * The bytes a standard base64 text encodes. The reader is tolerant where the
+ * Rust decoder is strict: an unpadded text decodes here and is refused there,
+ * and a writer emits padded text so the two never disagree on what they wrote.
+ */
 export const bytesOfBase64 = (text: string): Uint8Array => bytesOfLatin1(atob(text))
 
 /** The bytes of a UTF-8 string. */

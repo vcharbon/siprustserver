@@ -2019,7 +2019,8 @@ under `check: record` — every generated expect — the confrontation's record 
 the only statement of it.
 
 **A frozen body compares byte for byte.** The confrontation holds the received
-bytes — the recording keeps them as they crossed the socket (§14 item 12) —
+bytes — the recording keeps them as they crossed the socket (§14 item 12),
+read under the recorded layout's length, the parser's `Content-Length` bound —
 against the resource file's; `xml` and `sdp` decode both sides as UTF-8 first
 and apply their fold, and a side that is not UTF-8 under a text compare is a
 difference. A probe's sides are shown as the text they are where the bytes are
@@ -2030,8 +2031,10 @@ the parts over — the same `multipart` form the send side stores, every part a
 resource, an SDP part under its `rewrite` tokens with `compare: sdp`, any
 other part `frozen` — and the confrontation locates the received parts by the
 recording's own `body` layout and compares them to the expectation's by
-position: one record per differing part under that part's `compare`, one for
-a part-count mismatch. A part's entity headers are not compared. Where
+position: one record for a part-count mismatch, one per part whose media type
+differs, one per differing part under that part's `compare`; a line that
+recorded no layout, or a layout its bytes cannot honour, is one record saying
+so. A part's entity headers are not compared. Where
 extraction handed no parts over, the expect falls back to the shape
 `{ "mode": "multipart-present" }`, and the interpreter gates the reception's
 container type either way.
@@ -2871,10 +2874,13 @@ Its whole job:
     (ADR-0035): the line writes them in exactly one of the extractor's three
     arms, chosen by the bytes alone — `raw` when the whole datagram is UTF-8,
     `head` + `body_b64` when only the body is not, `raw_b64` when not even
-    the head is — beside the body's `body` layout (media type, byte length,
-    MIME parts located by offset), so a reader finds a part without splitting
-    on a boundary. One decoder reads captures and recordings alike; text is a
-    rendering of the bytes, never the stored form.
+    the head is — the WHOLE datagram, a tail past the declared
+    `Content-Length` included (RFC 3261 §18.3) — beside the body's `body`
+    layout (media type, the parser's `Content-Length`-bounded length, MIME
+    parts located by offset), so a reader finds a part without splitting on a
+    boundary and every comparison reads the body under that one bound. A
+    layout its bytes cannot honour is refused. One decoder reads captures and
+    recordings alike; text is a rendering of the bytes, never the stored form.
 13. **Settle** (§10), then evaluate `postconditions`.
 
 **A failure does not end a run; being unable to GO ON does.** A run records every

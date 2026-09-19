@@ -2,7 +2,7 @@
 //! a datagram is written in exactly one of the extractor's three arms — `raw`
 //! when the whole datagram is UTF-8, `head` + `body_b64` when only the body is
 //! not, `raw_b64` when not even the head is — and every reader decodes the same
-//! three (`PCAP2TEST_PIVOT_V3.md` §14 item 10).
+//! three (`PCAP2TEST_PIVOT_V3.md` §14 item 12).
 
 use pivot_schema::bundle::RecordedMessage;
 

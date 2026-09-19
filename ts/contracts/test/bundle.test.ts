@@ -209,7 +209,7 @@ describe("a recorded message", () => {
         dir: "in",
         at_us: 200_000,
         step: "s3",
-        head: "INVITE sip:b@h SIP/2.0\r\nContent-Type: multipart/mixed;boundary=b1\r\nContent-Length: 10\r\n\r\n",
+        head: "INVITE sip:b@h SIP/2.0\r\nContent-Type: multipart/mixed;boundary=b1\r\nContent-Length: 20\r\n\r\n",
         body_b64: "LS1iMQ0K//6AAA0KLS1iMS0tDQo=",
         body: {
           content_type: "multipart/mixed",

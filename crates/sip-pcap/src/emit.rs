@@ -111,16 +111,12 @@ fn leg_json(leg: &FlowLeg) -> LegJson {
 }
 
 fn msg_json(m: &FlowMsg) -> MsgJson {
-    let body = match &m.parsed {
-        SipMessage::Request(r) => r.body().clone(),
-        SipMessage::Response(r) => r.body().clone(),
-    };
     let mut json = MsgJson::new(
         m.ts_us,
         m.src.to_string(),
         m.dst.to_string(),
         m.hop,
-        Payload::of(m.raw(), &body),
+        Payload::of_datagram(m.raw()),
         summary_json(&m.parsed),
     );
     json.probe = m.probe;
@@ -350,6 +346,47 @@ mod tests {
         assert_eq!(reassembled, inv);
         assert!(m.get("raw").is_none());
         assert!(m.get("raw_b64").is_none());
+    }
+
+    /// The arm is chosen by the bytes alone, the way a run's recording chooses
+    /// it: a datagram whose tail is longer than its `Content-Length` (RFC 3261
+    /// §18.3 discards the excess), or whose declared length is zero over a
+    /// tail that is not UTF-8, still splits into `head` + `body_b64`.
+    #[test]
+    fn a_tail_past_the_content_length_still_splits_the_arm_by_the_bytes() {
+        let head = |len: usize| {
+            format!(
+                "INVITE sip:bob@10.0.0.9 SIP/2.0\r\n\
+                 Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKtail\r\n\
+                 Max-Forwards: 70\r\n\
+                 From: <sip:alice@10.0.0.1>;tag=f1\r\n\
+                 To: <sip:bob@10.0.0.9>\r\n\
+                 Call-ID: emit-tail\r\n\
+                 CSeq: 1 INVITE\r\n\
+                 Content-Type: application/octet-stream\r\n\
+                 Content-Length: {len}\r\n\r\n"
+            )
+            .into_bytes()
+        };
+        let tail: &[u8] = &[0x30, 0x82, 0xff, 0x00, 0x9c, 0x01];
+        for declared in [3usize, 0] {
+            let mut inv = head(declared);
+            inv.extend_from_slice(tail);
+            let datagrams = vec![dg(1_000, "10.0.0.1:5060", "10.0.0.2:5060", &inv)];
+            let flows = build_flows(&datagrams, &FlowConfig::default());
+            assert_eq!(flows.stats.sip_messages, 1, "Content-Length {declared}: the INVITE parses");
+            let v = json(&flows, &DecodeStats::default());
+            let m = &v["legs"][0]["msgs"][0];
+            assert!(
+                m.get("head").is_some() && m.get("body_b64").is_some(),
+                "Content-Length {declared}: {m}"
+            );
+            assert!(m.get("raw_b64").is_none(), "Content-Length {declared}: not opaque: {m}");
+            let expected =
+                serde_json::to_value(sip_message::payload::Payload::of_datagram(&inv)).unwrap();
+            assert_eq!(m["head"], expected["head"], "the recorder's arm");
+            assert_eq!(m["body_b64"], expected["body_b64"], "the recorder's arm");
+        }
     }
 
     /// All three evidence variants serialize with their discriminating

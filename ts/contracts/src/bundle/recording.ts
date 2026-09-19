@@ -1,6 +1,6 @@
 /**
  * One line of the **verbatim per-leg recording** (`PCAP2TEST_PIVOT_V3.md` §14
- * item 10), mirroring `pivot_schema::bundle::recording`: the record kind
+ * item 12), mirroring `pivot_schema::bundle::recording`: the record kind
  * `recording/<leg>.jsonl` holds, one JSON object per line, in wire order.
  *
  * A recorded datagram is BYTES (ADR-0035), written in exactly one of the

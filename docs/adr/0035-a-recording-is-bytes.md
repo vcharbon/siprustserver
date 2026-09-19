@@ -23,16 +23,22 @@ Four invariants, held in Rust, the TypeScript contracts and the pipeline alike.
 2. **One on-disk encoding, the extractor's.** A recorded line carries its
    datagram in exactly one of three arms, chosen by the bytes alone: `raw` when
    the whole datagram is UTF-8, `head` + `body_b64` when only the body is not,
-   `raw_b64` when not even the head is. The line also states the body's layout
-   (media type, byte length, MIME parts located by offset), so a reader never
-   splits on a boundary. `sip_message::payload` owns the encoding and the
-   layout; `@sip/contracts` `Wire` is the one decoder for captures and
-   recordings on the TypeScript side.
-3. **Comparison is byte-equal.** A frozen body or part compares bytes. The
-   `sdp` and `xml` compares decode both sides as UTF-8 first and apply their
-   fold; a side that is not UTF-8 under a text compare is a difference. A
-   multipart expectation compares part by part, each part under its own
-   `compare`, located by the recording's layout.
+   `raw_b64` when not even the head is. The arm keeps the WHOLE datagram, a
+   tail past the declared `Content-Length` included (RFC 3261 §18.3 discards
+   it, the wire carried it). The line also states the body's layout — media
+   type, the parser's `Content-Length`-bounded length, MIME parts located by
+   offset — so a reader never splits on a boundary. `sip_message::payload`
+   owns the encoding and the layout; `@sip/contracts` `Wire` is the one
+   decoder for captures and recordings on the TypeScript side.
+3. **Comparison is byte-equal, under one bound.** The layout's length is THE
+   body every comparison reads — single and multipart, every compare mode;
+   only a line with no layout is read to the end of its tail. A frozen body
+   or part compares bytes. The `sdp` and `xml` compares decode both sides as
+   UTF-8 first and apply their fold; a side that is not UTF-8 under a text
+   compare is a difference. A multipart expectation compares part by part —
+   media type, then bytes under the part's own `compare` — located by the
+   recording's layout. A layout its bytes cannot honour is refused on decode
+   in Rust and stated as one probe in the confronter, never thrown.
 4. **Nothing names a content type for binary versus text.** There is one frozen
    mode. Whether a payload is text is a fact of its bytes, read at emission,
    at recording and at comparison; no registry rule says so for a media type.
