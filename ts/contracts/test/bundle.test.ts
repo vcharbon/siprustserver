@@ -181,6 +181,59 @@ describe("a recorded message", () => {
     const line = emitRecordedMessage(decodeRecordedMessageSync({ seq: 1, dir: "out", at_us: 0, raw: "X" }))
     expect(line).toBe('{"at_us":0,"dir":"out","raw":"X","seq":1}')
   })
+
+  /**
+   * A recorded datagram rides in exactly one of the extractor's three arms
+   * (`raw` | `head` + `body_b64` | `raw_b64`), the same shape a capture's
+   * message carries, and a line whose body is bytes states the body's layout.
+   */
+  describe("carries its datagram in one of three arms", () => {
+    const HEAD = "INFO sip:b@h SIP/2.0\r\nCSeq: 2 INFO\r\nContent-Type: application/vnd.example.blob\r\nContent-Length: 7\r\n\r\n"
+    const BLOB_B64 = "AAEC//6AAA=="
+
+    it("decodes and re-emits a `head` + `body_b64` line", () => {
+      const line = { seq: 5, dir: "in", at_us: 1_100_000, step: "s11", head: HEAD, body_b64: BLOB_B64 }
+      const decoded = decodeRecordedMessageSync(line)
+      expect(decoded).toMatchObject({ seq: 5, step: "s11", head: HEAD, body_b64: BLOB_B64 })
+      expect(JSON.parse(emitRecordedMessage(decoded))).toEqual(line)
+    })
+
+    it("decodes and re-emits a `raw_b64` line", () => {
+      const line = { seq: 6, dir: "in", at_us: 1_200_000, raw_b64: "//5JTkZPIHNpcDpiQGggU0lQLzIuMA0KDQo=" }
+      expect(JSON.parse(emitRecordedMessage(decodeRecordedMessageSync(line)))).toEqual(line)
+    })
+
+    it("carries the body's layout beside the arm, parts located by offset", () => {
+      const line = {
+        seq: 3,
+        dir: "in",
+        at_us: 200_000,
+        step: "s3",
+        head: "INVITE sip:b@h SIP/2.0\r\nContent-Type: multipart/mixed;boundary=b1\r\nContent-Length: 10\r\n\r\n",
+        body_b64: "LS1iMQ0K//6AAA0KLS1iMS0tDQo=",
+        body: {
+          content_type: "multipart/mixed",
+          len: 20,
+          parts: [{ content_type: "application/vnd.example.blob", offset: 6, len: 4 }]
+        }
+      }
+      const decoded = decodeRecordedMessageSync(line)
+      expect(decoded.body?.parts?.[0]?.offset).toBe(6)
+      expect(JSON.parse(emitRecordedMessage(decoded))).toEqual(line)
+    })
+
+    it("refuses a line stating two arms, or none", () => {
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0, raw: "X", head: HEAD, body_b64: BLOB_B64 })).toThrow()
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0, raw: "X", raw_b64: "WA==" })).toThrow()
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0, head: HEAD })).toThrow()
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0 })).toThrow()
+    })
+
+    it("still refuses an unknown field on every arm", () => {
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0, head: HEAD, body_b64: BLOB_B64, leg: "A" })).toThrow()
+      expect(() => decodeRecordedMessageSync({ seq: 1, dir: "in", at_us: 0, raw_b64: "WA==", leg: "A" })).toThrow()
+    })
+  })
 })
 
 describe("a run that never settled", () => {

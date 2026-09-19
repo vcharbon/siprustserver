@@ -5,6 +5,8 @@ import type { MsgScope } from "../src/probe.js"
 import { signature } from "../src/probe.js"
 import { headersInOrderRaw } from "../src/wire.js"
 
+const utf8 = new TextEncoder()
+
 const crlf = (lines: ReadonlyArray<string>): string => `${lines.join("\r\n")}\r\n\r\n`
 
 const invite = crlf([
@@ -450,7 +452,7 @@ describe("an expected body held against the one received", () => {
     ...(compare === undefined ? {} : { compare })
   })
 
-  const run = (body: Body.Body, received: string | undefined, resources = new Map([[REF, XML]])) =>
+  const run = (body: Body.Body, received: string | undefined, resources = new Map([[REF, utf8.encode(XML)]])) =>
     confront({
       pivot: expecting(body),
       verdict: verdictWith([]),
@@ -511,9 +513,8 @@ describe("an expected body held against the one received", () => {
     expect(signature(probes[0]!.probe)).toBe("body:application/example+xml:request:INFO:in-dialog")
   })
 
-  it("a shape, a binary resource, or a send is not read here", () => {
+  it("a shape or a send is not read here", () => {
     expect(run({ mode: "absent" }, XML)).toEqual([])
-    expect(run({ ...resource(), mode: "frozen-binary" }, "not the file", new Map())).toEqual([])
     const sent = confront({
       pivot: expecting(resource(), "send"),
       verdict: verdictWith([]),
@@ -546,7 +547,7 @@ describe("an expected body held against the one received", () => {
         recordings: new Map([
           ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: sdpInfo(received) }] as Array<Bundle.RecordedMessage>]
         ]),
-        resources: new Map([[SDP_REF, OFFER]]),
+        resources: new Map([[SDP_REF, utf8.encode(OFFER)]]),
         ...(media === undefined ? {} : { media })
       }).probes.filter((p) => p.probe.kind === "body")
 
@@ -640,7 +641,7 @@ describe("an expected body held against the one received", () => {
         ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: answer(481, "<other/>") }] as Array<Bundle.RecordedMessage>]
       ]),
       captured: capturedOf({ schema: 5, legs: [{ msgs: [{ raw: answer(200, XML) }] }] } as unknown as Flows.FlowsDoc),
-      resources: new Map([[REF, XML]])
+      resources: new Map([[REF, utf8.encode(XML)]])
     })
     expect(confronted.probes.map((p) => signature(p.probe))).toEqual([
       "shape:status-substitution:200->481:response:481:INFO"

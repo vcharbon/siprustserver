@@ -18,6 +18,7 @@
  */
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
+import * as Wire from "./wire.js"
 import { defaulted, nullable } from "./serde.js"
 
 /** Value of the top-level `schema` field. Consumers reject versions they do not know. */
@@ -222,36 +223,29 @@ const msgFields = {
 } as const
 
 /** Whole payload is valid UTF-8 — the common, diff-readable case. */
-export const TextMsg = Schema.Struct({ ...msgFields, raw: Schema.String })
+export const TextMsg = Schema.Struct({ ...msgFields, ...Wire.textArm })
 export interface TextMsg extends Schema.Schema.Type<typeof TextMsg> {}
 
 /** Start line + headers + blank line as UTF-8, then a binary body as standard base64. */
-export const HeadBodyMsg = Schema.Struct({ ...msgFields, head: Schema.String, body_b64: Schema.String })
+export const HeadBodyMsg = Schema.Struct({ ...msgFields, ...Wire.headBodyArm })
 export interface HeadBodyMsg extends Schema.Schema.Type<typeof HeadBodyMsg> {}
 
 /** Even the head is not UTF-8 — opaque, standard base64. */
-export const OpaqueMsg = Schema.Struct({ ...msgFields, raw_b64: Schema.String })
+export const OpaqueMsg = Schema.Struct({ ...msgFields, ...Wire.opaqueArm })
 export interface OpaqueMsg extends Schema.Schema.Type<typeof OpaqueMsg> {}
 
 /**
  * One captured SIP message. The exact wire bytes ride in EXACTLY ONE of three
- * forms, as SIBLING keys of `ts_us`, chosen purely from the bytes so re-emitting
- * a transformed model is deterministic.
+ * forms (`Wire`), as SIBLING keys of `ts_us`, chosen purely from the bytes so
+ * re-emitting a transformed model is deterministic.
  */
 export const Msg = Schema.Union([TextMsg, HeadBodyMsg, OpaqueMsg])
 export type Msg = typeof Msg.Type
 
 /** The payload arm a decoded message carries, as a tagged value. */
-export type Payload =
-  | { readonly _tag: "text"; readonly raw: string }
-  | { readonly _tag: "head-body"; readonly head: string; readonly body_b64: string }
-  | { readonly _tag: "opaque"; readonly raw_b64: string }
+export type Payload = Wire.Payload
 
-export const payloadOf = (msg: Msg): Payload => {
-  if ("raw" in msg) return { _tag: "text", raw: msg.raw }
-  if ("head" in msg) return { _tag: "head-body", head: msg.head, body_b64: msg.body_b64 }
-  return { _tag: "opaque", raw_b64: msg.raw_b64 }
-}
+export const payloadOf: (msg: Msg) => Payload = Wire.payloadOf
 
 /** All messages sharing one Call-ID, split by observation hop. */
 export const Leg = Schema.Struct({

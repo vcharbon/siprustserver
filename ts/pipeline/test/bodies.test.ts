@@ -7,8 +7,9 @@
  */
 import type { Flows } from "@sip/contracts"
 import { describe, expect, it } from "vitest"
-import { expectBody } from "../src/bodies.js"
+import { decompose, expectBody } from "../src/bodies.js"
 import { synthesize } from "../src/flowsteps.js"
+import { index } from "../src/parts.js"
 import type { Vantage } from "../src/selection.js"
 import { build } from "../src/topology.js"
 import {
@@ -49,7 +50,7 @@ describe("expectBody", () => {
       mode: "frozen",
       "content-type": "application/example+xml"
     })
-    expect(stored.resources).toEqual([{ relPath: "resources/uac1_r3_0.xml", text: XML }])
+    expect(stored.resources).toEqual([{ relPath: "resources/uac1_r3_0.xml", bytes: new TextEncoder().encode(XML) }])
     expect(stored.flags).toEqual([])
   })
 
@@ -71,7 +72,7 @@ describe("expectBody", () => {
     })
     expect(expectBody(sdp, "uac1_r0")).toEqual({
       body: { ref: "resources/uac1_r0_0.sdp", rewrite: ["c=addr", "m=port"], compare: "sdp" },
-      resources: [{ relPath: "resources/uac1_r0_0.sdp", text: "v=0\r\n" }],
+      resources: [{ relPath: "resources/uac1_r0_0.sdp", bytes: new TextEncoder().encode("v=0\r\n") }],
       flags: []
     })
     // A parameterised type is stated, as on the send side; bare `application/sdp` is derived.
@@ -97,14 +98,10 @@ describe("expectBody", () => {
     } as Flows.Msg
   }
 
-  it("leaves a binary payload undeclared, whatever its type", () => {
-    expect(expectBody(asBinary(info()), "uac1_r0")).toEqual({ body: undefined, resources: [], flags: [] })
-  })
-
-  it("stores a binary SDP as a resource written back as the bytes it came as, as the send side does", () => {
+  it("stores an SDP handed over split as a resource carrying the bytes it came as, as the send side does", () => {
     const stored = expectBody(asBinary(info({ contentType: "application/sdp", text: "v=0\r\n" })), "uac1_r0")
     expect(stored.body).toMatchObject({ ref: "resources/uac1_r0_0.sdp", compare: "sdp" })
-    expect(stored.resources).toEqual([{ relPath: "resources/uac1_r0_0.sdp", text: "v=0\r\n", binary: true }])
+    expect(stored.resources).toEqual([{ relPath: "resources/uac1_r0_0.sdp", bytes: new TextEncoder().encode("v=0\r\n") }])
   })
 })
 
@@ -151,7 +148,7 @@ describe("an expected body in a synthesized flow", () => {
     expect(refOf(expected)).toMatch(/^resources\/[a-z0-9]+_r\d+_0\.xml$/)
     expect(expected.msg.body).toEqual({ ref: refOf(expected), mode: "frozen", "content-type": "application/example+xml" })
     expect(refOf(sent)).not.toBe(refOf(expected))
-    const byPath = new Map(flow.resources.map((r) => [r.relPath, r.text]))
+    const byPath = new Map(flow.resources.map((r) => [r.relPath, new TextDecoder().decode(r.bytes)]))
     expect(byPath.get(refOf(sent))).toBe(XML)
     expect(byPath.get(refOf(expected))).toBe(XML)
     expect(flow.resources.map((r) => r.relPath)).toHaveLength(new Set(flow.resources.map((r) => r.relPath)).size)
@@ -188,8 +185,132 @@ describe("an expected body in a synthesized flow", () => {
     expect(expected.msg.body).toEqual({ ref: refOf(expected), rewrite: ["c=addr", "m=port"], compare: "sdp" })
     expect(refOf(expected)).toMatch(/^resources\/[a-z0-9]+_r\d+_0\.sdp$/)
     expect(refOf(sent)).not.toBe(refOf(expected))
-    const byPath = new Map(flow.resources.map((r) => [r.relPath, r.text]))
+    const byPath = new Map(flow.resources.map((r) => [r.relPath, new TextDecoder().decode(r.bytes)]))
     expect(byPath.get(refOf(sent))).toBe(offer)
     expect(byPath.get(refOf(expected))).toBe(offer)
+  })
+})
+
+/**
+ * Bytes are the truth of a body. An expect states a single body as a frozen
+ * resource whatever its bytes hold — text or not — and a multipart reception
+ * part by part, each part a resource compared under its own mode; the resource
+ * files carry bytes. No content type says binary: only the bytes do.
+ */
+describe("expectBody over bytes", () => {
+  const BLOB = Uint8Array.from([0x00, 0x01, 0x02, 0xff, 0xfe, 0x80, 0x00])
+  const BLOB_LATIN1 = String.fromCharCode(...BLOB)
+  const BLOB_TYPE = "application/vnd.example.blob"
+  const SDP = "v=0\r\no=- 1 2 IN IP4 192.0.2.10\r\ns=-\r\nc=IN IP4 192.0.2.10\r\nt=0 0\r\nm=audio 6000 RTP/AVP 8\r\n"
+  const utf8 = new TextEncoder()
+
+  /** The message as extraction hands a payload that is not UTF-8 over: `head` + `body_b64`, the body's bytes latin1 in `text`. */
+  const asBinary = (m: Flows.Msg): Flows.Msg => {
+    const { raw, ...rest } = m as Flows.Msg & { raw: string }
+    const cut = raw.indexOf("\r\n\r\n")
+    return {
+      ...rest,
+      head: raw.slice(0, cut + 4),
+      body_b64: Buffer.from(raw.slice(cut + 4), "latin1").toString("base64")
+    } as Flows.Msg
+  }
+
+  it("states a single binary body as a frozen resource carrying its bytes", () => {
+    const stored = expectBody(asBinary(info({ contentType: BLOB_TYPE, text: BLOB_LATIN1 })), "uac1_r0")
+    expect(stored.body).toEqual({ ref: "resources/uac1_r0_0.bin", mode: "frozen", "content-type": BLOB_TYPE })
+    expect(stored.resources).toHaveLength(1)
+    expect(stored.resources[0]?.relPath).toBe("resources/uac1_r0_0.bin")
+    expect(stored.resources[0]?.bytes).toEqual(BLOB)
+    expect(stored.flags).toEqual([])
+  })
+
+  it("states a text body's resource as bytes too: one resource shape", () => {
+    const stored = expectBody(info(), "uac1_r3")
+    expect(stored.body).toEqual({ ref: "resources/uac1_r3_0.xml", mode: "frozen", "content-type": "application/example+xml" })
+    expect(stored.resources[0]?.bytes).toEqual(utf8.encode(XML))
+    expect(stored.resources[0]).not.toHaveProperty("text")
+    expect(stored.resources[0]).not.toHaveProperty("binary")
+  })
+
+  it("handles an emergency-call-data member type like the rest of its family: frozen, no binary mode", () => {
+    // RFC 8147's `application/EmergencyCallData.eCall.MSD` is one member of the
+    // RFC 7852 family; the registry freezes the family by prefix, and the
+    // bytes alone say whether the payload is text.
+    const binary = asBinary(info({ contentType: "application/EmergencyCallData.eCall.MSD", text: BLOB_LATIN1 }))
+    const stored = expectBody(binary, "uac1_r0")
+    expect(stored.body).toEqual({
+      ref: "resources/uac1_r0_0.bin",
+      mode: "frozen",
+      "content-type": "application/EmergencyCallData.eCall.MSD"
+    })
+    expect(stored.resources[0]?.bytes).toEqual(BLOB)
+    const sent = decompose(binary, "uac1_0")
+    expect(sent.body).toMatchObject({ mode: "frozen" })
+    expect(JSON.stringify(sent.body)).not.toContain("frozen-binary")
+  })
+
+  describe("a multipart reception", () => {
+    const framing1 = "--b1\r\nContent-Type: application/sdp\r\nContent-ID: <offer@example.invalid>\r\n\r\n"
+    const framing2 = "\r\n--b1\r\nContent-Type: application/vnd.example.blob\r\nContent-Transfer-Encoding: binary\r\n\r\n"
+    const closing = "\r\n--b1--\r\n"
+    const body = framing1 + SDP + framing2 + BLOB_LATIN1 + closing
+    const sdpAt = framing1.length
+    const blobAt = framing1.length + SDP.length + framing2.length
+
+    const mixed = (): Flows.Msg => {
+      const m = asBinary(info({ contentType: "multipart/mixed;boundary=b1", text: body }))
+      return {
+        ...m,
+        body: {
+          content_type: "multipart/mixed",
+          len: body.length,
+          parts: [
+            { content_type: "application/sdp", content_id: "<offer@example.invalid>", offset: sdpAt, len: SDP.length },
+            {
+              content_type: "application/vnd.example.blob",
+              headers: [{ name: "Content-Transfer-Encoding", value: "binary" }],
+              offset: blobAt,
+              len: BLOB.length
+            }
+          ]
+        }
+      } as Flows.Msg
+    }
+
+    it("is stated part by part: the SDP part compared as a session description, the binary part frozen", () => {
+      const flows = doc([leg(CALLER_CALL_ID, oneHop(caller, sut), [mixed()])], [{ legs: [0] }])
+      const m = flows.legs[0]!.msgs[0]!
+      const parts = index(flows).get(m)
+      expect(parts?.parts).toHaveLength(2)
+      const stored = expectBody(m, "uac1_r0", parts)
+      expect(stored.body).toEqual({
+        multipart: {
+          "content-type": "multipart/mixed",
+          parts: [
+            {
+              "content-type": "application/sdp",
+              ref: "resources/uac1_r0_0.sdp",
+              rewrite: ["c=addr", "m=port"],
+              compare: "sdp",
+              "content-id": "<offer@example.invalid>"
+            },
+            {
+              "content-type": "application/vnd.example.blob",
+              ref: "resources/uac1_r0_1.bin",
+              mode: "frozen",
+              headers: [{ name: "Content-Transfer-Encoding", value: "binary" }]
+            }
+          ]
+        }
+      })
+      expect(stored.resources.map((r) => r.relPath)).toEqual(["resources/uac1_r0_0.sdp", "resources/uac1_r0_1.bin"])
+      expect(stored.resources[0]?.bytes).toEqual(utf8.encode(SDP))
+      expect(stored.resources[1]?.bytes).toEqual(BLOB)
+      expect(stored.flags).toEqual([])
+    })
+
+    it("falls back to the shape where extraction handed no parts over", () => {
+      expect(expectBody(mixed(), "uac1_r0")).toMatchObject({ body: { mode: "multipart-present" }, resources: [] })
+    })
   })
 })

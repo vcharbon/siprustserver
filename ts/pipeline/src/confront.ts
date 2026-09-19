@@ -30,9 +30,10 @@
  * seam, and the driver writes the classified rows.
  */
 import type { Bundle, Deviation, Flow } from "@sip/contracts"
-import { Body, Confrontation, Flows, Pivot } from "@sip/contracts"
+import { Body, Confrontation, Flows, Pivot, Wire } from "@sip/contracts"
 import { carriesBody, mimeKey } from "./bodies.js"
 import { bodiesEqual } from "./bodyfold.js"
+import { locate } from "./parts.js"
 import { diffSdp, maskOf } from "./sdpfold.js"
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
@@ -40,11 +41,12 @@ import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
 import { probeSetDelta, scopeText, shapeSides, signature } from "./probe.js"
 import type { WireHeader } from "./wire.js"
 import {
-  bodyOfRaw,
+  bodyBytesOf,
   canonicalName,
   headersInOrder,
   headersInOrderRaw,
   headerValuesOf,
+  headText,
   startLineOf
 } from "./wire.js"
 
@@ -66,8 +68,8 @@ export interface ConfrontInput {
    * Absent for an authored case.
    */
   readonly captured?: CapturedLegs
-  /** Resource ref → its text, for every resource body an `expect` step states. */
-  readonly resources?: ReadonlyMap<string, string>
+  /** Resource ref → its bytes, for every resource body or part an `expect` step states. */
+  readonly resources?: ReadonlyMap<string, Uint8Array>
   /** What the run's media plane did to its session descriptions; absent reads as `rebooked`. */
   readonly media?: Bundle.MediaMode
 }
@@ -166,7 +168,7 @@ const documentStep = (step: Flow.Step): DocumentStep => {
 
 /** Whether a recorded datagram is a BYE request. */
 const isBye = (message: Bundle.RecordedMessage): boolean => {
-  const line = startLineOf(message.raw)
+  const line = startLineOf(headText(message))
   return line !== undefined && line.kind === "request" && line.method === "BYE"
 }
 
@@ -262,14 +264,14 @@ const headerProbes = (
         continue
       }
       compared += 1
-      const scope = scopeOfRaw(message.raw)
+      const scope = scopeOf(message)
       if (scope === undefined) continue
       const driven = drivenNames(driving, leg, message.at_us, scope)
-      const bodiless = !carriesBody(reference) && bodyOfRaw(message.raw).length === 0
+      const bodiless = !carriesBody(reference) && bodyBytesOf(message).length === 0
       for (
         const probe of diffHeaders(
           headersInOrder(reference),
-          headersInOrderRaw(message.raw),
+          headersInOrder(message),
           scope,
           inbound,
           driven,
@@ -285,50 +287,67 @@ const headerProbes = (
 }
 
 /**
- * One probe per recorded reception whose `expect` asserts a text resource body
- * the reception does not carry under the expectation's `compare` mode — one
- * per differing line key under `sdp`, each side one element per line the
- * way a header probe carries one per value. A resource body is text unless its
- * `mode` is `frozen-binary`. A reception with no body at all is confronted
- * too, as `""`: the assertion stands whether or not anything arrived. A binary
- * resource asserts presence only, which the interpreter gates, and is not read
- * here.
+ * One probe per recorded reception whose `expect` asserts a body the reception
+ * does not carry: a resource body under the expectation's `compare` mode, a
+ * multipart body part by part. A frozen body compares byte for byte, whatever
+ * its bytes hold; `sdp` and `xml` fold both sides after a strict UTF-8 decode,
+ * and a side that is not UTF-8 under a text compare is a probe. Under `sdp`
+ * there is one probe per differing line key, each side one element per line
+ * the way a header probe carries one per value. A reception with no body at
+ * all is confronted too, as the empty side: the assertion stands whether or
+ * not anything arrived.
+ *
+ * A multipart reception's parts are located by the recording's own `body`
+ * layout (never split here) and matched to the expectation's parts by
+ * POSITION: one probe per differing part, one for a part-count mismatch. A
+ * part's entity headers are not compared — the confrontation reads payloads,
+ * and a header delta on a part is out of its scope.
+ *
+ * A probe's sides stay strings: the text where the bytes are UTF-8, standard
+ * base64 where they are not.
  */
 export const bodyProbes = (
   input: ConfrontInput,
   steps: ReadonlyMap<string, Flow.Step>
 ): ReadonlyArray<ProbeAt> => {
   const out: Array<ProbeAt> = []
+  const media = input.media ?? "rebooked"
   for (const recording of input.recordings.values()) {
     for (const message of recording) {
       if (message.dir !== "in" || message.repeat_of !== undefined) continue
       const step = message.step === undefined ? undefined : steps.get(message.step)
       if (step === undefined || step.op !== "expect") continue
       const body = step.msg.body
-      if (body === undefined || !Body.isResourceBody(body) || body.mode === "frozen-binary") continue
-      const scope = scopeOfRaw(message.raw)
+      if (body === undefined) continue
+      const scope = scopeOf(message)
       if (scope === undefined) continue
-      for (const probe of bodyProbe(
-        step.id,
-        body,
-        mediaTypeOf(body, message.raw),
-        scope,
-        expectedText(input.resources, body.ref),
-        bodyOfRaw(message.raw),
-        input.media ?? "rebooked"
-      )) {
-        out.push({ step: step.id, probe })
+      if (Body.isResourceBody(body)) {
+        for (const probe of bodyProbe(
+          step.id,
+          body,
+          mediaTypeOf(body["content-type"], message),
+          scope,
+          expectedBytes(input.resources, body.ref),
+          bodyBytesOf(message),
+          media
+        )) {
+          out.push({ step: step.id, probe })
+        }
+      } else if (Body.isMultipartBody(body)) {
+        for (const probe of multipartProbes(step.id, body.multipart, scope, input.resources, message, media)) {
+          out.push({ step: step.id, probe })
+        }
       }
     }
   }
   return out
 }
 
-/** The text a resource ref names; a ref the caller did not supply is the caller's error. */
-const expectedText = (resources: ReadonlyMap<string, string> | undefined, ref: string): string => {
-  const text = resources?.get(ref)
-  if (text === undefined) throw new Error(`the document expects body resource ${ref}, which the driver did not supply`)
-  return text
+/** The bytes a resource ref names; a ref the caller did not supply is the caller's error. */
+const expectedBytes = (resources: ReadonlyMap<string, Uint8Array> | undefined, ref: string): Uint8Array => {
+  const bytes = resources?.get(ref)
+  if (bytes === undefined) throw new Error(`the document expects body resource ${ref}, which the driver did not supply`)
+  return bytes
 }
 
 /**
@@ -336,21 +355,41 @@ const expectedText = (resources: ReadonlyMap<string, string> | undefined, ref: s
  * `content-type`, or the reception's own `Content-Type` where the expectation
  * states none.
  */
-const mediaTypeOf = (body: Body.ResourceBody, raw: string): string =>
-  mimeKey(body["content-type"] ?? headerValuesOf(headersInOrderRaw(raw), "Content-Type")[0] ?? "")
+const mediaTypeOf = (declared: string | undefined, message: Wire.Msg): string =>
+  mimeKey(declared ?? headerValuesOf(headersInOrder(message), "Content-Type")[0] ?? "")
+
+/** A probe side: the text where the bytes are UTF-8, standard base64 otherwise. */
+const sideOf = (bytes: Uint8Array): string => Wire.utf8Of(bytes) ?? Wire.base64Of(bytes)
+
+/** What a resource body or a part states about its comparison. */
+interface Compared {
+  readonly compare?: Body.BodyCompare
+  readonly rewrite?: ReadonlyArray<string>
+}
 
 const bodyProbe = (
   step: string,
-  body: Body.ResourceBody,
+  body: Compared,
   mediaType: string,
   scope: MsgScope,
-  captured: string,
-  replayed: string,
+  captured: Uint8Array,
+  replayed: Uint8Array,
   media: Bundle.MediaMode
 ): ReadonlyArray<BodyProbe> => {
   const compare = body.compare ?? "exact"
+  if (compare === "exact") {
+    if (bytesEqual(captured, replayed)) return []
+    return [{ kind: "body", step, mediaType, scope, compare, captured: [sideOf(captured)], replayed: [sideOf(replayed)] }]
+  }
+  // A text compare reads both sides as UTF-8; a side that is none differs
+  // from anything, and is shown as the bytes it is.
+  const capturedText = Wire.utf8Of(captured)
+  const replayedText = Wire.utf8Of(replayed)
+  if (capturedText === undefined || replayedText === undefined) {
+    return [{ kind: "body", step, mediaType, scope, compare, captured: [sideOf(captured)], replayed: [sideOf(replayed)] }]
+  }
   if (compare === "sdp") {
-    return diffSdp(maskOf(body.rewrite, media), captured, replayed).map((d) => ({
+    return diffSdp(maskOf(body.rewrite, media), capturedText, replayedText).map((d) => ({
       kind: "body",
       step,
       mediaType,
@@ -361,8 +400,54 @@ const bodyProbe = (
       sdp: { section: d.section, line: d.line }
     }))
   }
-  if (bodiesEqual(compare, captured, replayed)) return []
-  return [{ kind: "body", step, mediaType, scope, compare, captured: [captured], replayed: [replayed] }]
+  if (bodiesEqual(compare, capturedText, replayedText)) return []
+  return [{ kind: "body", step, mediaType, scope, compare, captured: [capturedText], replayed: [replayedText] }]
+}
+
+const bytesEqual = (a: Uint8Array, b: Uint8Array): boolean => {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+/**
+ * The multipart confrontation: the received parts, located by the recording's
+ * layout, against the expectation's, by position. A layout the recording does
+ * not state (a reception that was not multipart, or carried no body) is zero
+ * parts.
+ */
+const multipartProbes = (
+  step: string,
+  expected: Body.Multipart,
+  scope: MsgScope,
+  resources: ReadonlyMap<string, Uint8Array> | undefined,
+  message: Bundle.RecordedMessage,
+  media: Bundle.MediaMode
+): ReadonlyArray<BodyProbe> => {
+  const received = message.body === undefined || message.body.parts === undefined ? [] : locate(message, message.body).parts
+  const mediaType = mimeKey(expected["content-type"])
+  if (received.length !== expected.parts.length) {
+    return [{
+      kind: "body",
+      step,
+      mediaType,
+      scope,
+      compare: "exact",
+      captured: expected.parts.map((p) => mimeKey(p["content-type"])),
+      replayed: received.map((p) => mimeKey(p.contentType))
+    }]
+  }
+  return expected.parts.flatMap((part, n) =>
+    bodyProbe(
+      step,
+      part,
+      mimeKey(part["content-type"]),
+      scope,
+      expectedBytes(resources, part.ref),
+      received[n]!.bytes,
+      media
+    )
+  )
 }
 
 /** One datagram the run put on the wire toward the system, in run order. */
@@ -384,8 +469,8 @@ const drivenIndex = (
       out.push({
         leg,
         at_us: message.at_us,
-        scope: scopeOfRaw(message.raw),
-        names: new Set(headersInOrderRaw(message.raw).map((h) => canonicalName(h.name)))
+        scope: scopeOf(message),
+        names: new Set(headersInOrder(message).map((h) => canonicalName(h.name)))
       })
     }
   }
@@ -438,7 +523,10 @@ const capturedMessage = (
   return captured.get(observed.leg)?.msgs[observed.msg]
 }
 
-/** The scope of a recorded reception, read off its own start line and To tag. */
+/** The scope of a recorded datagram, read off its own start line and To tag. */
+export const scopeOf = (message: Wire.Msg): MsgScope | undefined => scopeOfRaw(headText(message))
+
+/** {@link scopeOf} over a head rendered as text. */
 export const scopeOfRaw = (raw: string): MsgScope | undefined => {
   const start = startLineOf(raw)
   if (start === undefined) return undefined
@@ -606,9 +694,9 @@ const answeredTransactions = (
     const answered = new Set<string>()
     for (const message of recording) {
       if (message.dir !== "out") continue
-      const start = startLineOf(message.raw)
+      const start = startLineOf(headText(message))
       if (start === undefined || start.kind !== "response") continue
-      const cseq = (headerValuesOf(headersInOrderRaw(message.raw), "CSeq")[0] ?? "").trim()
+      const cseq = (headerValuesOf(headersInOrder(message), "CSeq")[0] ?? "").trim()
       const [number = "", method = ""] = cseq.split(/\s+/)
       answered.add(`${number} ${method.toUpperCase()}`)
     }
@@ -734,9 +822,9 @@ const observedRepasses = (
     const finals = new Map<string, Array<number>>()
     const acks = new Map<string, number>()
     for (const message of recording) {
-      const start = startLineOf(message.raw)
+      const start = startLineOf(headText(message))
       if (start === undefined) continue
-      const headers = headersInOrderRaw(message.raw)
+      const headers = headersInOrder(message)
       const callId = headerValuesOf(headers, "Call-ID")[0] ?? ""
       const cseq = (headerValuesOf(headers, "CSeq")[0] ?? "").trim()
       const [cseqNumber = "", cseqMethod = ""] = cseq.split(/\s+/)

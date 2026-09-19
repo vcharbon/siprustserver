@@ -1,6 +1,7 @@
 /**
- * Header list and body access over the verbatim datagram carried in the flows
- * document.
+ * Header list and body access over the datagram a flows message or a recorded
+ * line carries, decoded through `Contracts.Wire`: the head is read as text,
+ * the body is handed over as bytes.
  *
  * STOPGAP. Pivot emission needs EVERY header in wire order with casing and
  * duplicates preserved (the tier-3 freeze surface), which is a full header-list
@@ -8,9 +9,7 @@
  * the package for exactly that reason: nothing outside it may grow a dependency
  * on a SIP parse living here.
  */
-import { Flows } from "@sip/contracts"
-
-type Msg = Flows.Msg
+import { Wire } from "@sip/contracts"
 
 /** RFC 3261 compact forms of the header names the tier model names. */
 const COMPACT: Record<string, string> = {
@@ -42,34 +41,26 @@ const canon = (name: string): string => {
 }
 
 /**
- * The datagram's head and body. A body that is not valid UTF-8 arrives
- * base64-encoded beside a separate head; it is decoded to a latin1 string so
- * every byte survives, and `binary` tells a writer to re-encode it that way.
+ * The datagram's head as text and its body as bytes, through the one decoder
+ * (`Contracts.Wire`). An opaque datagram states no head at all: there is
+ * nothing to read there, and pretending otherwise would invent headers the
+ * capture never carried.
  */
-const headBody = (m: Msg): readonly [string, string, boolean] => {
-  const payload = Flows.payloadOf(m)
-  if (payload._tag === "text") {
-    const [head, body] = splitHeadBody(payload.raw)
-    return [head, body, false]
-  }
-  if (payload._tag === "head-body") {
-    return [payload.head, Buffer.from(payload.body_b64, "base64").toString("latin1"), true]
-  }
-  // An opaque datagram states no head at all: there is nothing to read here,
-  // and pretending otherwise would invent headers the capture never carried.
-  return ["", "", true]
+const headBody = (m: Wire.Msg): readonly [string, Uint8Array] => {
+  const split = Wire.headBodyOf(m)
+  return split === undefined ? ["", new Uint8Array(0)] : [split.head, split.body]
 }
 
-const splitHeadBody = (raw: string): readonly [string, string] => {
+const splitHead = (raw: string): string => {
   const i = raw.indexOf("\r\n\r\n")
-  if (i >= 0) return [raw.slice(0, i), raw.slice(i + 4)]
+  if (i >= 0) return raw.slice(0, i)
   const j = raw.indexOf("\n\n")
-  if (j >= 0) return [raw.slice(0, j), raw.slice(j + 2)]
-  return [raw, ""]
+  if (j >= 0) return raw.slice(0, j)
+  return raw
 }
 
 /** The datagram's head as text: the start line and the header block, unparsed. */
-export const headText = (m: Msg): string => headBody(m)[0]
+export const headText = (m: Wire.Msg): string => headBody(m)[0]
 
 export interface WireHeader {
   readonly name: string
@@ -80,14 +71,13 @@ export interface WireHeader {
  * Every header as `(name, value)` in wire order, casing and duplicates
  * preserved, continuation lines unfolded to one space.
  */
-export const headersInOrder = (m: Msg): ReadonlyArray<WireHeader> => headersOfHead(headBody(m)[0])
+export const headersInOrder = (m: Wire.Msg): ReadonlyArray<WireHeader> => headersOfHead(headBody(m)[0])
 
-/** {@link headersInOrder} over a verbatim datagram string (a recording's `raw`). */
-export const headersInOrderRaw = (raw: string): ReadonlyArray<WireHeader> =>
-  headersOfHead(splitHeadBody(raw)[0])
+/** {@link headersInOrder} over a head rendered as text (a body after the blank line is ignored). */
+export const headersInOrderRaw = (raw: string): ReadonlyArray<WireHeader> => headersOfHead(splitHead(raw))
 
-/** The body of a verbatim datagram string: everything past the first blank line, `""` where none. */
-export const bodyOfRaw = (raw: string): string => splitHeadBody(raw)[1]
+/** The body bytes a datagram carries: everything past the blank line, empty where none. */
+export const bodyBytesOf = (m: Wire.Msg): Uint8Array => headBody(m)[1]
 
 const headersOfHead = (head: string): ReadonlyArray<WireHeader> => {
   const lines = head.split(/\r?\n/).slice(1)
@@ -110,7 +100,7 @@ export type StartLine =
   | { readonly kind: "request"; readonly method: string; readonly uri: string }
   | { readonly kind: "response"; readonly status: number; readonly reason: string }
 
-/** The start line of a verbatim datagram, or `undefined` when it is neither shape. */
+/** The start line of a head rendered as text, or `undefined` when it is neither shape. */
 export const startLineOf = (raw: string): StartLine | undefined => {
   const line = (raw.split(/\r?\n/)[0] ?? "").trim()
   const response = /^SIP\/2\.0\s+(\d{3})\s*(.*)$/.exec(line)
@@ -126,10 +116,10 @@ export const headerValuesOf = (
   name: string
 ): ReadonlyArray<string> => headers.filter((h) => sameHeader(h.name, name)).map((h) => h.value)
 
-export const hasHeader = (m: Msg, name: string): boolean =>
+export const hasHeader = (m: Wire.Msg, name: string): boolean =>
   headersInOrder(m).some((h) => sameHeader(h.name, name))
 
-export const headerValue = (m: Msg, name: string): string | undefined =>
+export const headerValue = (m: Wire.Msg, name: string): string | undefined =>
   headersInOrder(m).find((h) => sameHeader(h.name, name))?.value
 
 export interface BodyPayload {
@@ -148,14 +138,13 @@ export interface BodyPayload {
    * parameter of the container type rides through.
    */
   readonly containerType?: string
-  /** Payload bytes; latin1-encoded when `binary`, so every byte survives. */
-  readonly text: string
-  readonly binary: boolean
+  /** The payload, byte for byte. */
+  readonly bytes: Uint8Array
 }
 
 /** The datagram's body plus its media type, or `undefined` when there is none. */
-export const body = (m: Msg): BodyPayload | undefined => {
-  const [, payload, binary] = headBody(m)
+export const body = (m: Wire.Msg): BodyPayload | undefined => {
+  const [, payload] = headBody(m)
   if (payload.length === 0) return undefined
   const contentType = (headerValue(m, "Content-Type") ?? "").trim()
   const [head = "", ...params] = mimeParams(contentType)
@@ -168,8 +157,7 @@ export const body = (m: Msg): BodyPayload | undefined => {
     mediaType: head.trim(),
     boundary,
     ...(boundary === undefined ? {} : { containerType: [head, ...kept].join(";") }),
-    text: payload,
-    binary
+    bytes: payload
   }
 }
 

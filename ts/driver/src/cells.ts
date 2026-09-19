@@ -370,9 +370,9 @@ const observedLegs = (pivot: Pivot.PivotV3): ReadonlySet<number> =>
   )
 
 /**
- * Every resource an `expect` step's body references, read from the case
- * directory and keyed by its ref — the texts the confrontation holds the
- * received bodies against.
+ * Every resource an `expect` step's body or part references, read from the
+ * case directory as bytes and keyed by its ref — what the confrontation holds
+ * the received bodies against.
  */
 const readExpectedBodies = Effect.fn("Driver.readExpectedBodies")(function* (
   caseDir: string,
@@ -380,12 +380,19 @@ const readExpectedBodies = Effect.fn("Driver.readExpectedBodies")(function* (
 ) {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
-  const out = new Map<string, string>()
+  const out = new Map<string, Uint8Array>()
   for (const step of Pivot.pivotSteps(pivot)) {
     const body = step.msg.body
-    if (step.op !== "expect" || body === undefined || !Body.isResourceBody(body)) continue
-    if (out.has(body.ref)) continue
-    out.set(body.ref, yield* fs.readFileString(path.join(caseDir, body.ref)))
+    if (step.op !== "expect" || body === undefined) continue
+    const refs = Body.isResourceBody(body)
+      ? [body.ref]
+      : Body.isMultipartBody(body)
+        ? body.multipart.parts.map((part) => part.ref)
+        : []
+    for (const ref of refs) {
+      if (out.has(ref)) continue
+      out.set(ref, yield* fs.readFile(path.join(caseDir, ref)))
+    }
   }
   return out
 })

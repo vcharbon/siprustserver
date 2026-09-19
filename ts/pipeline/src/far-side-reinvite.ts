@@ -592,8 +592,8 @@ const bodyEmitted = (body: Body.Body): Body.Body => {
 
 /**
  * Whether a far-leg send can emit the body a near-leg expect took: none, or a
- * stored resource. A body the expect holds by shape only — a multipart, an
- * undeclared binary — has no bytes to emit.
+ * stored single resource. A body the expect holds by shape only has no bytes
+ * to emit, and a multipart one is not derived onto a send here.
  */
 const emittable = (body: Body.Body | undefined): boolean =>
   body === undefined || Body.isResourceBody(body) || (Body.isShapeBody(body) && body.mode === "absent")

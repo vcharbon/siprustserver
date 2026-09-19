@@ -13,8 +13,12 @@
  */
 import * as Schema from "effect/Schema"
 
-/** How the registry handles a stored body or part. */
-export const BodyMode = Schema.Literals(["frozen", "frozen-binary"])
+/**
+ * How the registry handles a stored body or part: `frozen` replays and
+ * compares byte-exact whatever the payload holds. Whether the payload is text
+ * or bytes is a fact of the bytes, never a declared mode (ADR-0035).
+ */
+export const BodyMode = Schema.Literals(["frozen"])
 export type BodyMode = typeof BodyMode.Type
 
 /**
@@ -48,6 +52,8 @@ export const Part = Schema.Struct({
   ref: Schema.String,
   rewrite: Schema.optionalKey(Schema.Array(Schema.String)),
   mode: Schema.optionalKey(BodyMode),
+  /** How an EXPECT's received part is held against the resource; absent means `exact`. Ignored on a send. */
+  compare: Schema.optionalKey(BodyCompare),
   "content-id": Schema.optionalKey(Schema.String),
   headers: Schema.optionalKey(Schema.Array(EntityHeader)),
   "cid-linked": Schema.optionalKey(Schema.Array(Schema.String))

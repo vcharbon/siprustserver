@@ -207,7 +207,7 @@ export const buildMsg = (
     if (STACK_OWNED_EXPECT_HEADERS.some((n) => hasHeader(msg, n))) present.push("rseq")
     if (STACK_DERIVED_HEADERS.some((n) => hasHeader(msg, n))) present.push("rack")
     if (present.length > 0) spec["headers-present"] = present
-    const expected = expectBody(msg, slugText)
+    const expected = expectBody(msg, slugText, parts.get(msg))
     if (expected.body !== undefined) spec.body = expected.body
     resources.push(...expected.resources)
     flags.push(...expected.flags)
