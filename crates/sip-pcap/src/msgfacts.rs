@@ -5,14 +5,13 @@
 //! Every read goes through `sip-message`; this module never looks at header or
 //! body bytes itself — the RFC 2046 boundary walk lives beside its compose
 //! mirror in `sip_message::multipart`, and this module keeps only the
-//! projection into [`PartJson`].
+//! projection into the document.
 
-use sip_message::header::{HeaderName, HeaderValue, MediaType, ParamValue, Uri, Wire};
+use sip_message::header::{HeaderName, HeaderValue, ParamValue, Uri, Wire};
 use sip_message::{header, SipMessage, SipStr};
 
 use crate::doc::{
-    BodyJson, DialogRef, HeaderJson, Identities, Identity, MsgJson, PartHeaderJson, PartJson,
-    ReferToJson, ViaJson,
+    BodyJson, DialogRef, HeaderJson, Identities, Identity, MsgJson, ReferToJson, ViaJson,
 };
 
 /// Compute every enrichment field of `msg` and write it onto `out`.
@@ -23,7 +22,7 @@ pub fn apply(msg: &SipMessage, allow: &[HeaderName], out: &mut MsgJson) {
     out.rseq = msg.raw(HeaderName::RSeq).next().map(|v| v.trim().to_string());
     out.replaces = replaces_of(msg);
     out.refer_to = refer_to_of(msg);
-    out.body = body_layout(msg);
+    out.body = BodyJson::of(msg);
 }
 
 fn via_chain(msg: &SipMessage) -> Vec<ViaJson> {
@@ -101,44 +100,6 @@ fn dialog_ref(r: header::Replaces) -> DialogRef {
         call_id: r.token().to_string(),
         to_tag: r.param("to-tag").and_then(ParamValue::as_str).map(str::to_string),
         from_tag: r.param("from-tag").and_then(ParamValue::as_str).map(str::to_string),
-    }
-}
-
-fn body_layout(msg: &SipMessage) -> Option<BodyJson> {
-    let body = msg.body();
-    if body.is_empty() {
-        return None;
-    }
-    let content_type = msg.header::<MediaType>().and_then(Result::ok);
-    let media_type = content_type.as_ref().map(|ct| ct.token().to_string()).unwrap_or_default();
-    let boundary = content_type
-        .as_ref()
-        .and_then(|ct| ct.param("boundary"))
-        .and_then(ParamValue::as_str)
-        .map(str::to_string);
-    Some(BodyJson {
-        content_type: media_type,
-        len: body.len(),
-        parts: boundary
-            .map(|b| {
-                sip_message::decompose_multipart(body, &b).into_iter().map(part_json).collect()
-            })
-            .unwrap_or_default(),
-    })
-}
-
-/// One located part, projected into the document schema.
-fn part_json(part: sip_message::LocatedPart) -> PartJson {
-    PartJson {
-        content_type: part.content_type,
-        content_id: part.content_id,
-        headers: part
-            .headers
-            .into_iter()
-            .map(|(name, value)| PartHeaderJson { name, value })
-            .collect(),
-        offset: part.offset,
-        len: part.len,
     }
 }
 
@@ -312,7 +273,7 @@ Content-Length: {}\r\n\r\n{body}",
         assert_eq!(b.content_type, "multipart/mixed");
         assert_eq!(b.len, body.len());
         assert_eq!(b.parts.len(), 2);
-        let slice = |p: &PartJson| &body.as_bytes()[p.offset..p.offset + p.len];
+        let slice = |p: &crate::doc::PartJson| &body.as_bytes()[p.offset..p.offset + p.len];
         assert_eq!(b.parts[0].content_type, "application/sdp");
         assert_eq!(b.parts[0].content_id, None);
         assert!(b.parts[0].headers.is_empty());

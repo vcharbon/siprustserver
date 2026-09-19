@@ -109,7 +109,7 @@
                     "value": "By-Reference;handling=optional"
                   }
                 ],
-                "mode": "frozen-binary",
+                "mode": "frozen",
                 "ref": "resources/uac1_0_1.bin"
               }
             ]

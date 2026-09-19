@@ -181,75 +181,12 @@ pub struct MsgJson {
     pub body: Option<BodyJson>,
 }
 
-/// Exact wire bytes, in EXACTLY ONE of three forms chosen purely from the
-/// bytes so re-emitting a transformed model is deterministic. Reassembly:
-/// `raw` as UTF-8 | `head` as UTF-8 ++ decode(`body_b64`) | decode(`raw_b64`).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum Payload {
-    /// Whole payload is valid UTF-8 — the common, diff-readable case.
-    Text { raw: String },
-    /// Start line + headers + blank line as UTF-8, then a binary body as
-    /// standard base64. A binary MIME part is what produces this form.
-    HeadBody { head: String, body_b64: String },
-    /// Even the head is not UTF-8 — opaque, standard base64.
-    Opaque { raw_b64: String },
-}
-
-impl Payload {
-    /// The form these bytes take, chosen purely from the bytes: whole-UTF-8 ⇒
-    /// [`Payload::Text`]; else a UTF-8 head whose tail is exactly `body` ⇒
-    /// [`Payload::HeadBody`]; else [`Payload::Opaque`]. Deterministic, so a
-    /// document re-emitted after a transformation keeps the same encoding.
-    pub fn of(raw: &[u8], body: &[u8]) -> Self {
-        if let Ok(s) = std::str::from_utf8(raw) {
-            return Payload::Text { raw: s.to_string() };
-        }
-        let head_len = raw.len().saturating_sub(body.len());
-        if !body.is_empty() && raw[head_len..] == *body {
-            if let Ok(head) = std::str::from_utf8(&raw[..head_len]) {
-                return Payload::HeadBody { head: head.to_string(), body_b64: base64(body) };
-            }
-        }
-        Payload::Opaque { raw_b64: base64(raw) }
-    }
-
-    /// The exact wire bytes, whichever form carries them.
-    pub fn bytes(&self) -> Result<Vec<u8>, String> {
-        match self {
-            Payload::Text { raw } => Ok(raw.clone().into_bytes()),
-            Payload::HeadBody { head, body_b64 } => {
-                let mut out = head.clone().into_bytes();
-                out.extend(unbase64(body_b64)?);
-                Ok(out)
-            }
-            Payload::Opaque { raw_b64 } => unbase64(raw_b64),
-        }
-    }
-
-    /// The BODY bytes alone, or `None` where this form does not carry them.
-    /// A whole-UTF-8 payload states them after the blank line that ends the
-    /// head, a split payload states them base64, and an opaque one states
-    /// nothing readable. A terminated head with nothing after it carries an
-    /// EMPTY body — a fact, not an absence.
-    pub fn body(&self) -> Option<Vec<u8>> {
-        match self {
-            Payload::Text { raw } => sip_message::sniff::body(raw.as_bytes()).map(<[u8]>::to_vec),
-            Payload::HeadBody { body_b64, .. } => unbase64(body_b64).ok(),
-            Payload::Opaque { .. } => None,
-        }
-    }
-}
-
-fn base64(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-fn unbase64(text: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.decode(text).map_err(|e| e.to_string())
-}
+/// The datagram's lossless three-arm form and its body layout are the shared
+/// wire types of [`sip_message::payload`]; the names below are this document's
+/// spelling of them.
+pub use sip_message::payload::{
+    BodyLayout as BodyJson, PartHeader as PartHeaderJson, PartLayout as PartJson, Payload,
+};
 
 /// Probe 0 is the only observation point most captures declare, so writing it
 /// on every message would double the size of every document for nothing.
@@ -378,50 +315,6 @@ pub struct ReferToJson {
     /// The escaped `?Replaces=` an attended transfer carries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<DialogRef>,
-}
-
-/// The message body's layout. A multipart body arrives ALREADY SPLIT: no
-/// consumer downstream owns MIME.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct BodyJson {
-    /// Media type, parameters dropped. Empty when the message declares none.
-    pub content_type: String,
-    /// Body length in bytes.
-    pub len: usize,
-    /// MIME parts in body order; empty for a single-part body.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parts: Vec<PartJson>,
-}
-
-/// One MIME part, located rather than copied: `offset`/`len` index the body
-/// bytes the message already carries, so the document holds each byte once and
-/// a transformed body cannot disagree with its parts.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct PartJson {
-    /// The part's own `Content-Type`, parameters included; `text/plain` when
-    /// the part declares none (RFC 2045 §5.2).
-    pub content_type: String,
-    /// The part's `Content-ID`, angle brackets as written.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_id: Option<String>,
-    /// The part's remaining entity headers in wire order, name and value as
-    /// written (RFC 2045 §3) — `Content-Transfer-Encoding`,
-    /// `Content-Disposition`, and any other the part states. `Content-Type` and
-    /// `Content-ID` have their own fields and are not repeated here.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub headers: Vec<PartHeaderJson>,
-    /// Offset of the part's CONTENT (after its blank line) into the body.
-    pub offset: usize,
-    pub len: usize,
-}
-
-/// One entity header of a MIME part, as the part wrote it. Unlike a message
-/// header it is not canonicalized: a part replays under the spelling it came in
-/// with.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct PartHeaderJson {
-    pub name: String,
-    pub value: String,
 }
 
 /// Correlated legs of one call, plus the per-call facts every consumer would

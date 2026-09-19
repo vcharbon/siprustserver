@@ -2981,6 +2981,7 @@ version = "0.1.0"
 dependencies = [
  "b2bua",
  "b2bua-harness",
+ "base64 0.22.1",
  "call",
  "call-limiter",
  "futures",
@@ -3000,6 +3001,7 @@ dependencies = [
 name = "pivot-schema"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "rfc-rules",
  "schemars",
@@ -4077,10 +4079,12 @@ name = "sip-message"
 version = "0.1.0"
 dependencies = [
  "alloc-counter",
+ "base64 0.22.1",
  "bytes",
  "criterion",
  "proptest",
  "rvoip-sip-core",
+ "schemars",
  "serde",
  "serde_json",
  "smallvec",

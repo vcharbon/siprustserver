@@ -24,6 +24,11 @@ serde = { workspace = true, features = ["derive"] }
 # parse (and a forwarding-hop clone) copies no packet bytes. See `sip_str`.
 bytes.workspace = true
 smallvec.workspace = true
+# `payload`: the lossless JSON form of one datagram (three arms, standard
+# base64) and its body layout, with the schema every wire-carrying document
+# exports.
+base64.workspace = true
+schemars.workspace = true
 
 [dev-dependencies]
 bytes.workspace = true

@@ -24,6 +24,7 @@ pub mod generators;
 pub mod hops;
 pub mod multipart;
 pub mod param_codec;
+pub mod payload;
 pub mod preparse;
 pub mod projection;
 pub mod remote_target;

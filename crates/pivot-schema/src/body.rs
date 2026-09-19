@@ -102,14 +102,13 @@ pub enum BodyShape {
     MultipartPresent,
 }
 
-/// How the registry handles a stored body or part.
+/// How the registry handles a stored body or part: `frozen` replays and
+/// compares byte-exact whatever the payload holds. Whether the payload is text
+/// or bytes is a fact of the bytes, never a declared mode (ADR-0035).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum BodyMode {
-    /// Replayed byte-exact; the payload is text.
     Frozen,
-    /// Replayed byte-exact; the payload is binary.
-    FrozenBinary,
 }
 
 /// A multipart body, referencing its already-decomposed parts.
@@ -151,6 +150,11 @@ pub struct Part {
     /// Handling mode, on a part the registry freezes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<BodyMode>,
+    /// How an EXPECT's received part is held against the resource; absent
+    /// means `exact`. Ignored on a send, where the part is emitted and
+    /// compared with nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare: Option<BodyCompare>,
     /// The part's OWN `Content-ID` value, angle brackets as the wire wrote them
     /// (RFC 2045 §7). It is what a `cid:` reference resolves against (RFC 5621
     /// §3), so a part any header points at replays under the same id.
@@ -249,11 +253,52 @@ mod tests {
 
     #[test]
     fn a_part_round_trips_with_its_cid_links() {
-        let text = r#"{"content-type":"application/EmergencyCallData.eCall.MSD","ref":"resources/s01_uac1_1.bin","mode":"frozen-binary","cid-linked":["call-info"]}"#;
+        let text = r#"{"content-type":"application/EmergencyCallData.eCall.MSD","ref":"resources/s01_uac1_1.bin","mode":"frozen","cid-linked":["call-info"]}"#;
         let part: Part = serde_json::from_str(text).unwrap();
-        assert_eq!(part.mode, Some(BodyMode::FrozenBinary));
+        assert_eq!(part.mode, Some(BodyMode::Frozen));
         assert_eq!(part.cid_linked, ["call-info"]);
         assert_eq!(serde_json::to_string(&part).unwrap(), text);
+    }
+
+    /// A part compares under the same modes a single resource body does: an
+    /// SDP part under the fold its `rewrite` tokens mask, an XML one as XML,
+    /// anything else byte for byte. `compare` rides the part and round-trips.
+    #[test]
+    fn a_part_round_trips_with_its_compare_mode() {
+        let text = r#"{"content-type":"application/sdp","ref":"resources/uas1_r0_0.sdp","rewrite":["c=addr","m=port"],"compare":"sdp"}"#;
+        let part: Part =
+            serde_json::from_str(text).unwrap_or_else(|e| panic!("a part carries `compare`: {e}"));
+        assert_eq!(serde_json::to_string(&part).unwrap(), text);
+        let exact = r#"{"content-type":"application/vnd.example.blob","ref":"resources/uas1_r0_1.bin","mode":"frozen"}"#;
+        let part: Part = serde_json::from_str(exact).unwrap();
+        assert_eq!(serde_json::to_string(&part).unwrap(), exact, "absent means byte for byte");
+        assert!(serde_json::from_str::<Part>(
+            r#"{"content-type":"text/plain","ref":"r.txt","compare":"loose"}"#
+        )
+        .is_err());
+    }
+
+    /// Whether a payload is bytes or text is a fact of the bytes, never a
+    /// declared mode: the one handling mode is `frozen`, and a resource or a
+    /// part is emitted and compared byte-exact under it whatever it holds.
+    #[test]
+    fn a_body_mode_names_no_binary_variant() {
+        assert!(
+            serde_json::from_str::<Part>(
+                r#"{"content-type":"application/vnd.example.blob","ref":"resources/s01_uac1_1.bin","mode":"frozen-binary"}"#
+            )
+            .is_err(),
+            "a part's mode is `frozen` or nothing"
+        );
+        assert!(
+            serde_json::from_str::<Body>(
+                r#"{"ref":"resources/s01_uac1_0.bin","mode":"frozen-binary","content-type":"application/vnd.example.blob"}"#
+            )
+            .is_err(),
+            "a resource body's mode is `frozen` or nothing"
+        );
+        let schema = serde_json::to_value(schemars::schema_for!(BodyMode)).unwrap();
+        assert_eq!(schema["enum"], serde_json::json!(["frozen"]), "{schema}");
     }
 
     /// A content type is STORED, never parsed: emission writes the stored value
@@ -278,9 +323,9 @@ mod tests {
     /// both survive the round trip in the order the wire wrote them.
     #[test]
     fn a_part_round_trips_with_its_content_id_and_entity_headers() {
-        let text = r#"{"content-type":"application/vnd.example.indata","ref":"resources/s01_uac1_1.bin","mode":"frozen-binary","content-id":"<indata@example.invalid>","headers":[{"name":"Content-Transfer-Encoding","value":"binary"},{"name":"Content-Disposition","value":"signal;handling=optional"}]}"#;
+        let text = r#"{"content-type":"application/vnd.example.blob","ref":"resources/s01_uac1_1.bin","mode":"frozen","content-id":"<blob@example.invalid>","headers":[{"name":"Content-Transfer-Encoding","value":"binary"},{"name":"Content-Disposition","value":"signal;handling=optional"}]}"#;
         let part: Part = serde_json::from_str(text).unwrap();
-        assert_eq!(part.content_id.as_deref(), Some("<indata@example.invalid>"));
+        assert_eq!(part.content_id.as_deref(), Some("<blob@example.invalid>"));
         assert_eq!(
             part.headers.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
             ["Content-Transfer-Encoding", "Content-Disposition"]
