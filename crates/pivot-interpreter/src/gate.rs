@@ -589,6 +589,16 @@ fn body_holds(spec: &MsgSpec, inbound: &Inbound) -> Option<(String, Option<Known
                 None,
             ))
         }
+        // A multipart expect keeps the media-type gate the `multipart-present`
+        // shape carries: what arrived must be multipart for the confrontation
+        // to locate its parts. The parts' content stays the confrontation's.
+        Body::Multipart(_) if !is_multipart => Some((
+            format!(
+                "body must be multipart; content type is {:?}",
+                inbound.content_type.as_deref().unwrap_or("absent")
+            ),
+            None,
+        )),
         Body::Resource(_) | Body::Multipart(_) => None,
     }
 }
@@ -957,6 +967,55 @@ mod tests {
         assert!(
             content_holds(&described, &offer, &scope, &plain()).matches(),
             "the content is the confrontation's, never the gate's"
+        );
+    }
+
+    /// A `multipart` body on an expect gates the media type the way the
+    /// `multipart-present` shape does: what arrived must be `multipart/*` for
+    /// the confrontation to locate its parts. The parts' content stays the
+    /// confrontation's.
+    #[test]
+    fn a_multipart_body_on_an_expect_gates_the_container_type() {
+        let config = lane();
+        let scope = Scope::new(&config, None);
+        let described = step(
+            MsgSpec {
+                method: Some("INVITE".into()),
+                body: Some(Body::Multipart(pivot_schema::body::MultipartBody {
+                    multipart: pivot_schema::body::Multipart {
+                        content_type: "multipart/mixed".into(),
+                        parts: vec![pivot_schema::body::Part {
+                            content_type: "application/vnd.example.blob".into(),
+                            reference: "resources/uas1_r0_1.bin".into(),
+                            rewrite: vec![],
+                            mode: Some(pivot_schema::body::BodyMode::Frozen),
+                            compare: None,
+                            content_id: None,
+                            headers: vec![],
+                            cid_linked: vec![],
+                        }],
+                    },
+                })),
+                ..MsgSpec::default()
+            },
+            CheckMode::Assert,
+        );
+        let mut invite = inbound_request("INVITE");
+        assert!(
+            !content_holds(&described, &invite, &scope, &plain()).matches(),
+            "a body owed and missing is refused"
+        );
+        invite.body = b"v=0".to_vec();
+        invite.content_type = Some("application/sdp".into());
+        assert!(
+            !content_holds(&described, &invite, &scope, &plain()).matches(),
+            "a single body is not a multipart one"
+        );
+        invite.body = b"--b\r\n--b--\r\n".to_vec();
+        invite.content_type = Some("multipart/mixed;boundary=b".into());
+        assert!(
+            content_holds(&described, &invite, &scope, &plain()).matches(),
+            "the parts are the confrontation's, never the gate's"
         );
     }
 

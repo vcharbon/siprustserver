@@ -29,6 +29,8 @@ regex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# The ladder reads a recorded binary body back out of its base64 arm.
+base64 = { workspace = true }
 # The system under test the interpreter's integration ladder replays against.
 b2bua-harness = { path = "../b2bua-harness" }
 b2bua = { path = "../b2bua" }

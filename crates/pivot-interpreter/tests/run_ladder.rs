@@ -98,6 +98,12 @@ impl UriComposer for DemoComposer {
 /// the claim can never drift from the emission: a `trunk-composed` form dials a
 /// different userpart than the bare number, and binding the claim to the number
 /// would silently stop matching.
+/// A recorded datagram RENDERED as text, for assertions on its head: the
+/// recording holds bytes, and a head is ASCII whatever the body holds.
+fn text(m: &pivot_schema::bundle::RecordedMessage) -> String {
+    String::from_utf8_lossy(m.wire()).into_owned()
+}
+
 fn ruri_user(r: &pivot_schema::msg::Ref, composer: &DemoComposer) -> Option<String> {
     let uri = match r {
         pivot_schema::msg::Ref::Positional(p) => {
@@ -686,7 +692,7 @@ fn assert_bundle_is_complete(outcome: &Outcome, dir: &std::path::Path) {
     assert!(legs.contains_key("A") && legs.contains_key("B"), "both legs recorded: {legs:#?}");
     assert!(
         legs.values()
-            .all(|messages| messages.iter().all(|m| !m.raw.is_empty() || m.note.is_some())),
+            .all(|messages| messages.iter().all(|m| !text(m).is_empty() || m.note.is_some())),
         "every recorded datagram carries its bytes"
     );
     for file in ["pivot.json", "run-config.json", "verdict.json", "timing.json"] {
@@ -735,7 +741,7 @@ async fn the_final_owed_to_a_sent_bye_is_absorbed_where_no_expect_scripts_it() {
     assert_eq!(outcome.verdict.completed_steps.len(), 12, "every remaining step ran");
     let absorbed = outcome.recording.legs()["A"]
         .iter()
-        .find(|m| m.raw.starts_with("SIP/2.0 200") && m.raw.contains("\r\nCSeq: 2 BYE\r\n"))
+        .find(|m| text(m).starts_with("SIP/2.0 200") && text(m).contains("\r\nCSeq: 2 BYE\r\n"))
         .unwrap_or_else(|| panic!("the owed final was recorded: {:#?}", outcome.recording.legs()))
         .clone();
     assert!(absorbed.note.as_deref().is_some_and(|note| note.contains("15.1.2")), "{absorbed:#?}");
@@ -763,7 +769,7 @@ async fn a_final_the_document_scripts_is_not_absorbed_when_its_status_differs() 
     let (outcome, _dir) = replay_case(&scene, case, BTreeMap::new()).await;
     let surfaced = outcome.recording.legs()["A"]
         .iter()
-        .find(|m| m.raw.starts_with("SIP/2.0 200") && m.raw.contains("\r\nCSeq: 2 BYE\r\n"))
+        .find(|m| text(m).starts_with("SIP/2.0 200") && text(m).contains("\r\nCSeq: 2 BYE\r\n"))
         .unwrap_or_else(|| panic!("the final was recorded: {:#?}", outcome.recording.legs()))
         .clone();
     assert!(
@@ -809,17 +815,17 @@ async fn an_auto_ack_acks_the_leg_s_own_invite_whatever_cseq_the_capture_carried
     let legs = outcome.recording.legs();
     let acks: Vec<_> = legs["B"]
         .iter()
-        .filter(|m| m.raw.starts_with("ACK ") && m.step.as_deref() == Some("s15"))
+        .filter(|m| text(m).starts_with("ACK ") && m.step.as_deref() == Some("s15"))
         .collect();
     assert_eq!(acks.len(), 1, "the re-INVITE's ACK left leg B: {:#?}", legs["B"]);
-    assert!(acks[0].raw.contains("CSeq: 1 ACK"), "{}", acks[0].raw);
+    assert!(text(acks[0]).contains("CSeq: 1 ACK"), "{}", text(acks[0]));
 
     // And no captured token reached the wire at all, in either direction: §6.3
     // says `cseq` is never replayed, and this run has four chances to break it.
     for token in ["458007", "458009", "385579", "385581"] {
         for (leg, messages) in legs.iter() {
             assert!(
-                messages.iter().all(|m| !m.raw.contains(token)),
+                messages.iter().all(|m| !text(m).contains(token)),
                 "leg {leg} replayed the captured token {token}: {messages:#?}"
             );
         }
@@ -858,8 +864,8 @@ async fn a_pipelined_re_invite_does_not_take_the_earlier_transaction_s_ack() {
     let ack_of = |step: &str| -> String {
         legs["B"]
             .iter()
-            .filter(|m| m.raw.starts_with("ACK ") && m.step.as_deref() == Some(step))
-            .map(|m| m.raw.clone())
+            .filter(|m| text(m).starts_with("ACK ") && m.step.as_deref() == Some(step))
+            .map(|m| text(m).clone())
             .next()
             .unwrap_or_else(|| panic!("{step} put no ACK on leg B: {:#?}", legs["B"]))
     };
@@ -876,7 +882,7 @@ async fn a_pipelined_re_invite_does_not_take_the_earlier_transaction_s_ack() {
     let repeats = legs["B"]
         .iter()
         .filter(|m| m.dir == Dir::In)
-        .filter(|m| m.raw.starts_with("SIP/2.0 200 OK") && m.raw.contains("CSeq: 1 INVITE"))
+        .filter(|m| text(m).starts_with("SIP/2.0 200 OK") && text(m).contains("CSeq: 1 INVITE"))
         .count();
     assert_eq!(repeats, 1, "the answered re-INVITE was not laddered: {:#?}", legs["B"]);
 
@@ -908,7 +914,7 @@ async fn a_second_ack_for_one_2xx_still_finds_the_final_the_first_discharged() {
     // second transaction on the dialog, not a retransmission of the first.
     let legs = outcome.recording.legs();
     let acks: Vec<_> =
-        legs["A"].iter().filter(|m| m.dir == Dir::Out && m.raw.starts_with("ACK ")).collect();
+        legs["A"].iter().filter(|m| m.dir == Dir::Out && text(m).starts_with("ACK ")).collect();
     assert_eq!(acks.len(), 2, "both ACK steps reached the wire: {:#?}", legs["A"]);
     let branch = |raw: &str| {
         raw.lines()
@@ -917,13 +923,13 @@ async fn a_second_ack_for_one_2xx_still_finds_the_final_the_first_discharged() {
             .expect("every ACK carries a Via branch")
     };
     assert_ne!(
-        branch(&acks[0].raw),
-        branch(&acks[1].raw),
+        branch(&text(acks[0])),
+        branch(&text(acks[1])),
         "the re-ACK opens its own transaction: {:#?}",
         acks
     );
     for ack in &acks {
-        assert!(ack.raw.contains("CSeq: 1 ACK"), "both name the answered INVITE: {}", ack.raw);
+        assert!(text(ack).contains("CSeq: 1 ACK"), "both name the answered INVITE: {}", text(ack));
     }
 
     scene.finish().await;
@@ -974,14 +980,14 @@ async fn an_unscripted_cancel_is_refused_and_answered_200_then_487() {
         .collect();
     assert_eq!(answers.len(), 2, "the §9.2 pair: {:#?}", legs["B"]);
     assert!(
-        answers[0].raw.starts_with("SIP/2.0 200") && answers[0].raw.contains("CSeq: 1 CANCEL"),
+        text(answers[0]).starts_with("SIP/2.0 200") && text(answers[0]).contains("CSeq: 1 CANCEL"),
         "{}",
-        answers[0].raw
+        text(answers[0])
     );
     assert!(
-        answers[1].raw.starts_with("SIP/2.0 487") && answers[1].raw.contains("CSeq: 1 INVITE"),
+        text(answers[1]).starts_with("SIP/2.0 487") && text(answers[1]).contains("CSeq: 1 INVITE"),
         "{}",
-        answers[1].raw
+        text(answers[1])
     );
 
     // No cursor moved and no expect was satisfied: neither answer belongs to a
@@ -990,7 +996,7 @@ async fn an_unscripted_cancel_is_refused_and_answered_200_then_487() {
     assert!(
         legs["B"]
             .iter()
-            .all(|m| !(m.dir == Dir::In && m.raw.starts_with("CANCEL ") && m.step.is_some())),
+            .all(|m| !(m.dir == Dir::In && text(m).starts_with("CANCEL ") && m.step.is_some())),
         "the refused CANCEL satisfied an expect: {:#?}",
         legs["B"]
     );
@@ -1044,14 +1050,14 @@ async fn an_unscripted_prack_is_refused_and_answered_200_so_the_relay_walks_on()
     let legs = outcome.recording.legs();
     let prack = legs["B"]
         .iter()
-        .position(|m| m.dir == Dir::In && m.raw.starts_with("PRACK "))
+        .position(|m| m.dir == Dir::In && text(m).starts_with("PRACK "))
         .unwrap_or_else(|| panic!("no PRACK on leg B: {:#?}", legs["B"]));
     assert_eq!(legs["B"][prack].step, None, "no step claimed it — that is the failure");
     let answer = &legs["B"][prack + 1];
     assert!(
         answer.dir == Dir::Out
-            && answer.raw.starts_with("SIP/2.0 200")
-            && answer.raw.contains("CSeq: 2 PRACK")
+            && text(answer).starts_with("SIP/2.0 200")
+            && text(answer).contains("CSeq: 2 PRACK")
             && answer.note.as_deref().is_some_and(is_unscripted_answer),
         "{answer:#?}"
     );
@@ -1092,15 +1098,19 @@ async fn an_unscripted_non_2xx_final_is_refused_and_acked_on_the_invite_s_branch
     let out = |prefix: &str| {
         legs["A"]
             .iter()
-            .find(|m| m.dir == Dir::Out && m.raw.starts_with(prefix))
+            .find(|m| m.dir == Dir::Out && text(m).starts_with(prefix))
             .unwrap_or_else(|| panic!("no outbound {prefix} on leg A: {:#?}", legs["A"]))
             .clone()
     };
     let ack = out("ACK ");
     assert!(ack.note.as_deref().is_some_and(is_unscripted_answer), "{:?}", ack.note);
     assert!(ack.step.is_none(), "the ACK owns no step: {ack:#?}");
-    assert!(ack.raw.contains("CSeq: 1 ACK"), "{}", ack.raw);
-    assert_eq!(via_branch(&ack.raw), via_branch(&out("INVITE ").raw), "§17.1.1.3: same branch");
+    assert!(text(&ack).contains("CSeq: 1 ACK"), "{}", text(&ack));
+    assert_eq!(
+        via_branch(&text(&ack)),
+        via_branch(&text(&out("INVITE "))),
+        "§17.1.1.3: same branch"
+    );
 
     // And ONLY the act the RFC names: the ACK the system sends leg B for its own
     // 486 is unscripted too, and no rule makes it anyone's to answer — it is
@@ -1178,15 +1188,15 @@ async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_a
     let legs = outcome.recording.legs();
     let bye = legs["B"]
         .iter()
-        .position(|m| m.dir == Dir::In && m.raw.starts_with("BYE "))
+        .position(|m| m.dir == Dir::In && text(m).starts_with("BYE "))
         .unwrap_or_else(|| panic!("no BYE on leg B: {:#?}", legs["B"]));
     let taken = &legs["B"][bye];
     assert!(
         taken.note.as_deref().is_some_and(|note| note.contains("after the flow completed")),
         "{taken:#?}"
     );
-    let cseq = taken
-        .raw
+    let taken_text = text(taken);
+    let cseq = taken_text
         .lines()
         .find_map(|line| line.strip_prefix("CSeq: "))
         .expect("the BYE carries a CSeq");
@@ -1194,13 +1204,17 @@ async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_a
         legs["B"].get(bye + 1).unwrap_or_else(|| panic!("nothing answered the BYE: {taken:#?}"));
     assert!(
         answer.dir == Dir::Out
-            && answer.raw.starts_with("SIP/2.0 200")
-            && answer.raw.contains(&format!("\r\nCSeq: {cseq}\r\n"))
+            && text(answer).starts_with("SIP/2.0 200")
+            && text(answer).contains(&format!("\r\nCSeq: {cseq}\r\n"))
             && answer.note.as_deref().is_some_and(is_unscripted_answer),
         "{answer:#?}"
     );
     assert_eq!(answer.step, None, "an answer owns no step");
-    assert_eq!(via_branch(&answer.raw), via_branch(&taken.raw), "§17.2.2: the BYE's own branch");
+    assert_eq!(
+        via_branch(&text(answer)),
+        via_branch(&text(taken)),
+        "§17.2.2: the BYE's own branch"
+    );
 
     // Answered once, the system's transaction never retransmitted, and the run
     // settled as soon as the call was gone — well inside the first rung of the
@@ -1208,7 +1222,7 @@ async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_a
     assert!(
         legs["B"]
             .iter()
-            .all(|m| !(m.dir == Dir::In && m.raw.starts_with("BYE ") && m.repeat_of.is_some())),
+            .all(|m| !(m.dir == Dir::In && text(m).starts_with("BYE ") && m.repeat_of.is_some())),
         "the BYE retransmitted: {:#?}",
         legs["B"]
     );
@@ -1222,7 +1236,7 @@ async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_a
     // document never scripted either.
     assert!(
         legs["A"].iter().any(|m| m.dir == Dir::In
-            && m.raw.starts_with("SIP/2.0 200")
+            && text(m).starts_with("SIP/2.0 200")
             && m.note.as_deref().is_some_and(|note| note.contains("15.1.2"))),
         "{:#?}",
         legs["A"]
@@ -1295,12 +1309,14 @@ async fn a_re_invite_pending_when_the_bye_is_answered_draws_487_behind_the_200()
             b.iter().position(predicate).unwrap_or_else(|| panic!("not on leg B: {b:#?}"))
         };
     let reinvite_at = position(&|m| {
-        m.dir == Dir::In && m.raw.starts_with("INVITE ") && m.raw.contains("\r\nCSeq: 2 INVITE\r\n")
+        m.dir == Dir::In
+            && text(m).starts_with("INVITE ")
+            && text(m).contains("\r\nCSeq: 2 INVITE\r\n")
     });
-    let bye_at = position(&|m| m.dir == Dir::In && m.raw.starts_with("BYE "));
+    let bye_at = position(&|m| m.dir == Dir::In && text(m).starts_with("BYE "));
     assert!(reinvite_at < bye_at, "the re-INVITE landed before the BYE: {b:#?}");
-    let bye_cseq = b[bye_at]
-        .raw
+    let bye_text = text(&b[bye_at]);
+    let bye_cseq = bye_text
         .lines()
         .find_map(|line| line.strip_prefix("CSeq: "))
         .expect("the BYE carries a CSeq");
@@ -1308,8 +1324,8 @@ async fn a_re_invite_pending_when_the_bye_is_answered_draws_487_behind_the_200()
     let ok = b.get(bye_at + 1).unwrap_or_else(|| panic!("nothing answered the BYE: {b:#?}"));
     assert!(
         ok.dir == Dir::Out
-            && ok.raw.starts_with("SIP/2.0 200")
-            && ok.raw.contains(&format!("\r\nCSeq: {bye_cseq}\r\n"))
+            && text(ok).starts_with("SIP/2.0 200")
+            && text(ok).contains(&format!("\r\nCSeq: {bye_cseq}\r\n"))
             && ok.note.as_deref().is_some_and(is_unscripted_answer),
         "{ok:#?}"
     );
@@ -1317,14 +1333,14 @@ async fn a_re_invite_pending_when_the_bye_is_answered_draws_487_behind_the_200()
         b.get(bye_at + 2).unwrap_or_else(|| panic!("nothing answered the re-INVITE: {b:#?}"));
     assert!(
         terminated.dir == Dir::Out
-            && terminated.raw.starts_with("SIP/2.0 487")
-            && terminated.raw.contains("\r\nCSeq: 2 INVITE\r\n")
+            && text(terminated).starts_with("SIP/2.0 487")
+            && text(terminated).contains("\r\nCSeq: 2 INVITE\r\n")
             && terminated.note.as_deref().is_some_and(is_unscripted_answer),
         "{terminated:#?}"
     );
     assert_eq!(
-        via_branch(&terminated.raw),
-        via_branch(&b[reinvite_at].raw),
+        via_branch(&text(terminated)),
+        via_branch(&text(&b[reinvite_at])),
         "§17.2.3: the INVITE's own branch"
     );
     // Both answered in the instant the BYE landed.
@@ -1337,14 +1353,18 @@ async fn a_re_invite_pending_when_the_bye_is_answered_draws_487_behind_the_200()
     // raised before this ACK lands, so the note is what pins the absorption.
     let ack = b[bye_at + 3..]
         .iter()
-        .find(|m| m.dir == Dir::In && m.raw.starts_with("ACK "))
+        .find(|m| m.dir == Dir::In && text(m).starts_with("ACK "))
         .unwrap_or_else(|| panic!("no ACK followed the 487 on leg B: {b:#?}"));
     assert!(
-        ack.raw.contains("\r\nCSeq: 2 ACK\r\n")
+        text(ack).contains("\r\nCSeq: 2 ACK\r\n")
             && ack.note.as_deref().is_some_and(|note| note.contains("17.1.1.3")),
         "{ack:#?}"
     );
-    assert_eq!(via_branch(&ack.raw), via_branch(&terminated.raw), "§17.1.1.3: the INVITE's branch");
+    assert_eq!(
+        via_branch(&text(ack)),
+        via_branch(&text(terminated)),
+        "§17.1.1.3: the INVITE's branch"
+    );
     // And the run settled on the teardown at once: the ACK is milliseconds
     // behind the 487, and nothing else held the run open past it.
     let settled = outcome.timing.settled_at_ms.expect("the run settled");
@@ -1501,7 +1521,7 @@ async fn an_absorbed_retransmission_is_recorded_and_never_reaches_an_expect() {
     // It is a repeat of something already there, and it carries its bytes.
     for message in &absorbed {
         assert!(message.step.is_none(), "an absorbed repeat satisfies no step");
-        assert!(!message.raw.is_empty(), "an absorbed repeat is recorded verbatim");
+        assert!(!text(message).is_empty(), "an absorbed repeat is recorded verbatim");
     }
     // And the bundle on disk carries it, not just the in-memory handle.
     let written = std::fs::read_to_string(dir.join("recording/B.jsonl")).unwrap();
@@ -1566,9 +1586,9 @@ async fn a_declared_retransmit_ladder_is_emitted_paced_and_counted_in_both_views
     let legs = outcome.recording.legs();
     // The emitted ladder: three identical INVITEs, the repeats pointing at the
     // first and paced by Timer A — T1, then 2·T1.
-    let sent: Vec<_> = legs["A"].iter().filter(|m| m.raw.starts_with("INVITE ")).collect();
+    let sent: Vec<_> = legs["A"].iter().filter(|m| text(m).starts_with("INVITE ")).collect();
     assert_eq!(sent.len(), 3, "{:#?}", legs["A"]);
-    assert!(sent.iter().all(|m| m.raw == sent[0].raw), "byte-identical repeats");
+    assert!(sent.iter().all(|m| text(m) == text(sent[0])), "byte-identical repeats");
     assert_eq!((sent[1].repeat_of, sent[2].repeat_of), (Some(sent[0].seq), Some(sent[0].seq)));
     assert_eq!(
         (sent[1].at_us - sent[0].at_us, sent[2].at_us - sent[0].at_us),
@@ -1579,7 +1599,7 @@ async fn a_declared_retransmit_ladder_is_emitted_paced_and_counted_in_both_views
 
     // The platform's replay of its cached 100 (§17.2.1) reaches the transaction
     // user: three on the leg, one claimed by s2 and two counted against it.
-    let trying: Vec<_> = legs["A"].iter().filter(|m| m.raw.starts_with("SIP/2.0 100")).collect();
+    let trying: Vec<_> = legs["A"].iter().filter(|m| text(m).starts_with("SIP/2.0 100")).collect();
     assert_eq!(trying.len(), 3, "{:#?}", legs["A"]);
     assert_eq!(trying[0].step.as_deref(), Some("s2"));
     for repeat in &trying[1..] {
@@ -1590,7 +1610,7 @@ async fn a_declared_retransmit_ladder_is_emitted_paced_and_counted_in_both_views
 
     // The platform's own Timer-A ladder toward the callee is ABSORBED: one
     // INVITE at the transaction user, two more in the wire view.
-    let dialled: Vec<_> = legs["B"].iter().filter(|m| m.raw.starts_with("INVITE ")).collect();
+    let dialled: Vec<_> = legs["B"].iter().filter(|m| text(m).starts_with("INVITE ")).collect();
     assert_eq!(dialled.len(), 3, "{:#?}", legs["B"]);
     assert_eq!(dialled[0].step.as_deref(), Some("s3"));
     for repeat in &dialled[1..] {
@@ -1669,7 +1689,7 @@ async fn a_retransmitted_final_is_counted_and_each_2xx_draws_its_own_ack() {
     // The callee's own emitted ladder, paced by §13.3.1.4: T1, then 2·T1.
     let sent: Vec<_> = legs["B"]
         .iter()
-        .filter(|m| m.raw.starts_with("SIP/2.0 200") && m.step.as_deref() == Some("s6"))
+        .filter(|m| text(m).starts_with("SIP/2.0 200") && m.step.as_deref() == Some("s6"))
         .collect();
     assert_eq!(sent.len(), 3, "{:#?}", legs["B"]);
     assert_eq!(
@@ -1679,9 +1699,9 @@ async fn a_retransmitted_final_is_counted_and_each_2xx_draws_its_own_ack() {
     // One ACK per 2xx received (§13.2.2.4), each answering the copy above it and
     // all three the same bytes — one client transaction, so the callee's INVITE
     // server transaction quiesces on whichever arrives.
-    let acks: Vec<_> = legs["B"].iter().filter(|m| m.raw.starts_with("ACK ")).collect();
+    let acks: Vec<_> = legs["B"].iter().filter(|m| text(m).starts_with("ACK ")).collect();
     assert_eq!(acks.len(), 3, "{:#?}", legs["B"]);
-    assert!(acks.iter().all(|a| a.raw == acks[0].raw), "{:#?}", acks);
+    assert!(acks.iter().all(|a| text(a) == text(acks[0])), "{:#?}", acks);
     assert!(
         acks.iter().zip(&sent).all(|(a, s)| a.at_us > s.at_us),
         "each ACK follows the 2xx it answers"
@@ -1690,7 +1710,7 @@ async fn a_retransmitted_final_is_counted_and_each_2xx_draws_its_own_ack() {
     // The platform's own ladder toward the held caller, counted where it lands.
     let to_invite: Vec<_> = legs["A"]
         .iter()
-        .filter(|m| m.raw.starts_with("SIP/2.0 200 ") && m.raw.contains("CSeq: 1 INVITE"))
+        .filter(|m| text(m).starts_with("SIP/2.0 200 ") && text(m).contains("CSeq: 1 INVITE"))
         .collect();
     assert_eq!(to_invite.len(), 3, "{:#?}", legs["A"]);
     assert!(to_invite[1..].iter().all(|m| m.repeat_of == Some(to_invite[0].seq)));
@@ -1750,7 +1770,7 @@ async fn a_held_ack_s_count_is_drawn_by_the_repeats_of_the_final_its_transaction
     // The callee answered once: nothing on ITS leg repeats the final.
     let answered: Vec<_> = legs["B"]
         .iter()
-        .filter(|m| m.raw.starts_with("SIP/2.0 200 ") && m.raw.contains("CSeq: 1 INVITE"))
+        .filter(|m| text(m).starts_with("SIP/2.0 200 ") && text(m).contains("CSeq: 1 INVITE"))
         .collect();
     assert_eq!(answered.len(), 1, "{:#?}", legs["B"]);
 
@@ -1758,20 +1778,20 @@ async fn a_held_ack_s_count_is_drawn_by_the_repeats_of_the_final_its_transaction
     // AFTER the last of them: the hold is what makes the catch-up visible.
     let finals: Vec<_> = legs["A"]
         .iter()
-        .filter(|m| m.raw.starts_with("SIP/2.0 200 ") && m.raw.contains("CSeq: 1 INVITE"))
+        .filter(|m| text(m).starts_with("SIP/2.0 200 ") && text(m).contains("CSeq: 1 INVITE"))
         .collect();
     assert_eq!(finals.len(), 3, "{:#?}", legs["A"]);
     assert!(finals[1..].iter().all(|m| m.repeat_of == Some(finals[0].seq)));
-    let acks: Vec<_> = legs["A"].iter().filter(|m| m.raw.starts_with("ACK ")).collect();
+    let acks: Vec<_> = legs["A"].iter().filter(|m| text(m).starts_with("ACK ")).collect();
     assert_eq!(acks.len(), 3, "one ACK per 2xx received: {:#?}", legs["A"]);
     assert!(acks.iter().all(|a| a.step.as_deref() == Some("s8")), "{acks:#?}");
-    assert!(acks.iter().all(|a| a.raw == acks[0].raw), "one client transaction, one ACK");
+    assert!(acks.iter().all(|a| text(a) == text(acks[0])), "one client transaction, one ACK");
     assert!(acks[1..].iter().all(|a| a.repeat_of == Some(acks[0].seq)));
     assert!(acks[0].at_us > finals[2].at_us, "the ACK was held past the last copy");
 
     // The callee took ONE final, so it is owed ONE ACK: the caller's re-passes
     // discharge the caller dialog's obligation and never reach this leg.
-    let relayed: Vec<_> = legs["B"].iter().filter(|m| m.raw.starts_with("ACK ")).collect();
+    let relayed: Vec<_> = legs["B"].iter().filter(|m| text(m).starts_with("ACK ")).collect();
     assert_eq!(relayed.len(), 1, "one ACK per final received: {:#?}", legs["B"]);
     assert!(dir.join("verdict.json").is_file(), "the run keeps its bundle");
 
@@ -2092,16 +2112,14 @@ async fn rung_three_a_forked_reliable_provisional_draft_prack_s_each_early_dialo
     // the b-leg recording carries two reliable provisionals under two distinct
     // To-tags, and the two PRACKs that arrived acknowledge the RSeq each stated.
     let b_leg = &outcome.recording.legs()["B"];
-    let rseqs: Vec<&str> = b_leg
+    let rseqs: Vec<String> = b_leg
         .iter()
-        .filter_map(|m| m.raw.split("RSeq: ").nth(1))
-        .filter_map(|rest| rest.split("\r\n").next())
+        .filter_map(|m| Some(text(m).split("RSeq: ").nth(1)?.split("\r\n").next()?.to_string()))
         .collect();
     assert_eq!(rseqs, ["1", "7001"], "each fork rings under its own RSeq: {rseqs:?}");
-    let racks: Vec<&str> = b_leg
+    let racks: Vec<String> = b_leg
         .iter()
-        .filter_map(|m| m.raw.split("RAck: ").nth(1))
-        .filter_map(|rest| rest.split("\r\n").next())
+        .filter_map(|m| Some(text(m).split("RAck: ").nth(1)?.split("\r\n").next()?.to_string()))
         .collect();
     assert_eq!(racks.len(), 2, "one PRACK per fork: {racks:?}");
     assert!(racks[0].starts_with("1 "), "fork 1's PRACK acknowledges RSeq 1: {racks:?}");
@@ -2141,12 +2159,15 @@ async fn a_callee_side_fork_rings_twice_under_two_minted_tags() {
     // Two forks of one leg reached the wire as two To-tags, and the final rode
     // the first fork's.
     let b_leg = &outcome.recording.legs()["B"];
-    let to_tags: Vec<&str> = b_leg
+    let to_tags: Vec<String> = b_leg
         .iter()
-        .filter(|m| m.raw.starts_with("SIP/2.0 180") || m.raw.starts_with("SIP/2.0 486"))
-        .filter_map(|m| m.raw.lines().find(|line| line.starts_with("To:")))
-        .filter_map(|to| to.split("tag=").nth(1))
-        .map(|tag| tag.split(';').next().unwrap_or(tag).trim())
+        .map(text)
+        .filter(|m| m.starts_with("SIP/2.0 180") || m.starts_with("SIP/2.0 486"))
+        .filter_map(|m| {
+            let to = m.lines().find(|line| line.starts_with("To:"))?;
+            let tag = to.split("tag=").nth(1)?;
+            Some(tag.split(';').next().unwrap_or(tag).trim().to_string())
+        })
         .collect();
     assert_eq!(to_tags.len(), 3, "two rings and a final: {to_tags:?}");
     assert_ne!(to_tags[0], to_tags[1], "two forks are two dialogs: {to_tags:?}");
@@ -2196,8 +2217,8 @@ async fn an_interleaved_fork_s_prack_rides_its_own_early_dialog() {
     // To-tag and the RSeq the system minted toward the caller.
     let rings: Vec<(String, String)> = a_leg
         .iter()
-        .filter(|m| m.raw.starts_with("SIP/2.0 183") || m.raw.starts_with("SIP/2.0 180"))
-        .filter_map(|m| Some((to_tag(&m.raw)?, header(&m.raw, "RSeq")?)))
+        .filter(|m| text(m).starts_with("SIP/2.0 183") || text(m).starts_with("SIP/2.0 180"))
+        .filter_map(|m| Some((to_tag(&text(m))?, header(&text(m), "RSeq")?)))
         .collect();
     assert_eq!(rings.len(), 2, "two reliable forks rang: {rings:?}");
     assert_ne!(rings[0].0, rings[1].0, "two forks are two dialogs: {rings:?}");
@@ -2205,8 +2226,10 @@ async fn an_interleaved_fork_s_prack_rides_its_own_early_dialog() {
     // and each fork numbers from its own INVITE-seeded space.
     let pracks: Vec<(String, String, String)> = a_leg
         .iter()
-        .filter(|m| m.raw.starts_with("PRACK "))
-        .filter_map(|m| Some((to_tag(&m.raw)?, header(&m.raw, "RAck")?, header(&m.raw, "CSeq")?)))
+        .filter(|m| text(m).starts_with("PRACK "))
+        .filter_map(|m| {
+            Some((to_tag(&text(m))?, header(&text(m), "RAck")?, header(&text(m), "CSeq")?))
+        })
         .collect();
     assert_eq!(pracks.len(), 2, "one PRACK per fork: {pracks:?}");
     assert_eq!(pracks[0].0, rings[0].0, "fork 1's PRACK rides fork 1's dialog: {pracks:?}");
@@ -2307,19 +2330,19 @@ async fn rung_three_a_re_invite_draft_crosses_a_bye_and_takes_the_481_order_free
         .iter()
         .find(|m| m.step.as_deref() == Some("s10"))
         .expect("the callee's re-INVITE is recorded");
-    assert!(re_invite.raw.starts_with("INVITE sip:"), "{}", re_invite.raw);
-    assert!(re_invite.raw.contains("CSeq: 1 INVITE"), "{}", re_invite.raw);
+    assert!(text(re_invite).starts_with("INVITE sip:"), "{}", text(re_invite));
+    assert!(text(re_invite).contains("CSeq: 1 INVITE"), "{}", text(re_invite));
     let hop_ack = b_leg
         .iter()
         .find(|m| m.step.as_deref() == Some("s19"))
         .expect("the ACK to the 481 is recorded");
-    assert!(hop_ack.raw.contains("CSeq: 1 ACK"), "{}", hop_ack.raw);
+    assert!(text(hop_ack).contains("CSeq: 1 ACK"), "{}", text(hop_ack));
     let branch = |raw: &str| {
         raw.split("branch=").nth(1).and_then(|r| r.split(['\r', ';']).next()).map(str::to_string)
     };
     assert_eq!(
-        branch(&hop_ack.raw),
-        branch(&re_invite.raw),
+        branch(&text(hop_ack)),
+        branch(&text(re_invite)),
         "the ACK to a non-2xx rides its own INVITE's branch"
     );
 
@@ -2394,12 +2417,12 @@ async fn rung_three_an_info_intake_transfer_finds_no_intake_on_this_lane() {
             outcome.verdict.failures
         );
     }
-    let info = outcome.recording.legs()["B"]
-        .iter()
-        .find(|m| m.step.as_deref() == Some("s8"))
-        .expect("the transferor's INFO reached the wire")
-        .raw
-        .clone();
+    let info = text(
+        outcome.recording.legs()["B"]
+            .iter()
+            .find(|m| m.step.as_deref() == Some("s8"))
+            .expect("the transferor's INFO reached the wire"),
+    );
     assert!(info.starts_with("INFO sip:"), "{info}");
     assert!(info.contains(&format!("Content-Type: {content_type}")), "{info}");
 
@@ -2475,12 +2498,12 @@ async fn rung_three_an_accessor_composed_refer_to_is_refused_by_name() {
     // The composed header is on the wire, verbatim as the deviation states it:
     // the lane's number for an identity no call dials, inside an unclosed
     // name-addr no reader accepts.
-    let refer = outcome.recording.legs()["B"]
-        .iter()
-        .find(|m| m.step.as_deref() == Some("s8"))
-        .expect("the REFER reached the wire")
-        .raw
-        .clone();
+    let refer = text(
+        outcome.recording.legs()["B"]
+            .iter()
+            .find(|m| m.step.as_deref() == Some("s8"))
+            .expect("the REFER reached the wire"),
+    );
     let refer_to = refer
         .split("Refer-To: ")
         .nth(1)
@@ -2495,12 +2518,12 @@ async fn rung_three_an_accessor_composed_refer_to_is_refused_by_name() {
     // And the answer the draft states is the answer on the wire: 400, on the
     // transferor's own leg, at the step that asserts it.
     assert_bundle_is_complete(&outcome, &dir);
-    let refusal = outcome.recording.legs()["B"]
-        .iter()
-        .find(|m| m.step.as_deref() == Some("s9"))
-        .expect("the REFER was answered")
-        .raw
-        .clone();
+    let refusal = text(
+        outcome.recording.legs()["B"]
+            .iter()
+            .find(|m| m.step.as_deref() == Some("s9"))
+            .expect("the REFER was answered"),
+    );
     assert!(refusal.starts_with("SIP/2.0 400"), "{refusal}");
 
     // No transfer started: the transferee was never dialled and the transferor
@@ -2511,7 +2534,7 @@ async fn rung_three_an_accessor_composed_refer_to_is_refused_by_name() {
         assert!(legs.get(leg).is_none_or(|messages| messages.is_empty()), "{legs:#?}");
     }
     assert!(
-        !legs["B"].iter().any(|m| m.raw.starts_with("NOTIFY")),
+        !legs["B"].iter().any(|m| text(m).starts_with("NOTIFY")),
         "a refused REFER opens no subscription: {:#?}",
         legs["B"]
     );
@@ -2563,9 +2586,9 @@ async fn rung_three_a_reroute_draft_hunts_past_a_busy_destination() {
     let dialled = |leg: &str| {
         legs[leg]
             .iter()
-            .find(|m| m.raw.starts_with("INVITE sip:"))
-            .and_then(|m| m.raw.split_whitespace().nth(1))
-            .map(str::to_string)
+            .map(text)
+            .find(|m| m.starts_with("INVITE sip:"))
+            .and_then(|m| m.split_whitespace().nth(1).map(str::to_string))
             .unwrap_or_default()
     };
     assert_eq!(dialled("B"), "sip:+1999999bob5070@127.0.0.1:5070", "the dialled callee");
@@ -2621,7 +2644,7 @@ async fn rung_three_a_no_answer_draft_rings_out_and_hunts_on() {
     // answered.
     let b_leg = &outcome.recording.legs()["B"];
     let at = |predicate: &dyn Fn(&str) -> bool| {
-        b_leg.iter().find(|m| predicate(&m.raw)).map(|m| m.at_us).expect("recorded")
+        b_leg.iter().find(|m| predicate(&text(m))).map(|m| m.at_us).expect("recorded")
     };
     let invited = at(&|raw: &str| raw.starts_with("INVITE sip:+1999999bob5070"));
     let cancelled = at(&|raw: &str| raw.starts_with("CANCEL "));
@@ -2634,17 +2657,17 @@ async fn rung_three_a_no_answer_draft_rings_out_and_hunts_on() {
     // And the abandoned leg was closed the way RFC 3261 §17.1.1.3 owes it: the
     // 487 the CANCEL drew, ACKed on the INVITE's own branch.
     let ack =
-        b_leg.iter().find(|m| m.raw.starts_with("ACK sip:")).expect("the 487 draws its hop ACK");
+        b_leg.iter().find(|m| text(m).starts_with("ACK sip:")).expect("the 487 draws its hop ACK");
     let branch = |raw: &str| {
         raw.split("branch=").nth(1).and_then(|r| r.split(['\r', ';']).next()).map(str::to_string)
     };
     let first_invite = b_leg
         .iter()
-        .find(|m| m.raw.starts_with("INVITE sip:+1999999bob5070"))
+        .find(|m| text(m).starts_with("INVITE sip:+1999999bob5070"))
         .expect("the abandoned INVITE is recorded");
     assert_eq!(
-        branch(&ack.raw),
-        branch(&first_invite.raw),
+        branch(&text(ack)),
+        branch(&text(first_invite)),
         "the ACK to a non-2xx rides its own INVITE's branch"
     );
 
@@ -2729,7 +2752,7 @@ async fn a_ring_this_lane_cannot_arm_exactly_rides_the_run_s_stated_tolerance() 
     // 15.139 s — the tolerance absorbs a difference, it does not invent one.
     let b_leg = &outcome.recording.legs()["B"];
     let at = |predicate: &dyn Fn(&str) -> bool| {
-        b_leg.iter().find(|m| predicate(&m.raw)).map(|m| m.at_us).expect("recorded")
+        b_leg.iter().find(|m| predicate(&text(m))).map(|m| m.at_us).expect("recorded")
     };
     let invited = at(&|raw: &str| raw.starts_with("INVITE sip:+1999999bob5070"));
     let cancelled = at(&|raw: &str| raw.starts_with("CANCEL "));
@@ -2888,12 +2911,12 @@ async fn rung_five_a_preserved_block_and_a_jumped_cseq_reach_the_wire() {
     }
     let a_leg = &outcome.recording.legs()["A"];
     let sent = |step: &str| {
-        a_leg
-            .iter()
-            .find(|m| m.step.as_deref() == Some(step))
-            .unwrap_or_else(|| panic!("{step} is recorded"))
-            .raw
-            .clone()
+        text(
+            a_leg
+                .iter()
+                .find(|m| m.step.as_deref() == Some(step))
+                .unwrap_or_else(|| panic!("{step} is recorded")),
+        )
     };
 
     // The stored block, in the document's own order and casing.
@@ -3216,7 +3239,7 @@ async fn rung_six_a_limited_second_call_is_refused_before_any_b_leg() {
     // The refused caller got its final, and it is the document's own step.
     let refusal = legs["C"]
         .iter()
-        .find(|m| m.raw.starts_with("SIP/2.0 486"))
+        .find(|m| text(m).starts_with("SIP/2.0 486"))
         .expect("the second caller was answered");
     assert_eq!(refusal.step.as_deref(), Some("s12"));
     // And it was refused BEFORE any leg: the second call's callee heard nothing
@@ -3335,12 +3358,12 @@ async fn rung_seven_a_negative_case_passes_by_failing_exactly_as_it_declared() {
     let legs = outcome.recording.legs();
     let ack = legs["B"]
         .iter()
-        .find(|m| m.raw.starts_with("ACK "))
+        .find(|m| text(m).starts_with("ACK "))
         .unwrap_or_else(|| panic!("no ACK on leg B: {:#?}", legs["B"]));
     assert_eq!(ack.step, None, "no step claimed it — that is what made it a failure");
     let bye = legs["B"]
         .iter()
-        .find(|m| m.raw.starts_with("BYE "))
+        .find(|m| text(m).starts_with("BYE "))
         .unwrap_or_else(|| panic!("no BYE on leg B: {:#?}", legs["B"]));
     assert_eq!(bye.step.as_deref(), Some("s10"), "the expect the ACK was refused against");
 
@@ -3687,7 +3710,7 @@ async fn an_expect_gated_on_a_dwelling_send_does_not_spend_its_budget_waiting_fo
     // the answer, which is the fact the budget must not have been counting over.
     let a_leg = &outcome.recording.legs()["A"];
     let at = |predicate: &dyn Fn(&str) -> bool| {
-        a_leg.iter().find(|m| predicate(&m.raw)).map(|m| m.at_us).expect("recorded")
+        a_leg.iter().find(|m| predicate(&text(m))).map(|m| m.at_us).expect("recorded")
     };
     let acked = at(&|raw: &str| raw.starts_with("ACK "));
     let byed = at(&|raw: &str| raw.starts_with("BYE "));
@@ -3795,7 +3818,7 @@ async fn a_background_policy_does_not_absorb_the_arrival_an_open_expect_waits_fo
     let b_leg = &outcome.recording.legs()["B"];
     let options =
         |predicate: &dyn Fn(&pivot_schema::bundle::recording::RecordedMessage) -> bool| {
-            b_leg.iter().filter(|m| m.raw.starts_with("OPTIONS ") && predicate(m)).count()
+            b_leg.iter().filter(|m| text(m).starts_with("OPTIONS ") && predicate(m)).count()
         };
     assert_eq!(options(&|m| m.step.as_deref() == Some("s102")), 1, "the relay is the step's");
     assert!(
@@ -3878,7 +3901,7 @@ async fn an_open_expect_holds_out_for_the_relay_when_an_audit_lands_in_the_same_
     let b_leg = &outcome.recording.legs()["B"];
     let relay =
         b_leg.iter().find(|m| m.step.as_deref() == Some("s102")).expect("the relay is the step's");
-    assert!(relay.raw.contains(POLL_MARK), "the step took the poll, not an audit: {relay:#?}");
+    assert!(text(relay).contains(POLL_MARK), "the step took the poll, not an audit: {relay:#?}");
     // The collision is the test, not a bonus: an audit has to have landed on
     // this leg INSIDE the step's open window — after the poll that opened it,
     // before the relay it was competing with — and to have gone to the policy.
@@ -3888,8 +3911,8 @@ async fn an_open_expect_holds_out_for_the_relay_when_an_audit_lands_in_the_same_
         .expect("the caller polled")
         .at_us;
     let collided = b_leg.iter().any(|m| {
-        m.raw.starts_with("OPTIONS ")
-            && !m.raw.contains(POLL_MARK)
+        text(m).starts_with("OPTIONS ")
+            && !text(m).contains(POLL_MARK)
             && (polled_at..relay.at_us).contains(&m.at_us)
             && m.note.as_deref().is_some_and(|n| n.starts_with("background"))
     });
@@ -4013,7 +4036,7 @@ async fn a_positive_run_whose_answer_is_a_reject_ends_its_script_and_closes() {
     assert!(abandoned.closed.is_empty(), "{:#?}", abandoned.closed);
     let ack = outcome.recording.legs()["A"]
         .iter()
-        .find(|m| m.dir == Dir::Out && m.raw.starts_with("ACK "))
+        .find(|m| m.dir == Dir::Out && text(m).starts_with("ACK "))
         .cloned()
         .expect("the reject the flow never scripted was acknowledged");
     assert!(ack.note.as_deref().is_some_and(is_unscripted_answer), "{:?}", ack.note);
@@ -4121,8 +4144,8 @@ async fn a_header_the_answer_omits_names_itself_and_the_call_reaches_its_teardow
         .iter()
         .find(|m| m.step.as_deref() == Some("s7"))
         .unwrap_or_else(|| panic!("s7 took the answer: {leg_a:#?}"));
-    assert!(answer.raw.starts_with("SIP/2.0 200 "), "{answer:#?}");
-    assert!(!answer.raw.contains(OMITTED), "the answer really omits it: {answer:#?}");
+    assert!(text(answer).starts_with("SIP/2.0 200 "), "{answer:#?}");
+    assert!(!text(answer).contains(OMITTED), "the answer really omits it: {answer:#?}");
     // Answered means not retransmitted: no datagram on the leg repeats another.
     assert!(
         leg_a.iter().all(|m| m.repeat_of.is_none()),
@@ -4287,7 +4310,7 @@ async fn a_ladder_paces_its_own_leg_and_parks_no_other() {
 
     let legs = outcome.recording.legs();
     // The ladder still runs, and still on Timer E: two BYEs, T1 apart.
-    let byes: Vec<_> = legs["A"].iter().filter(|m| m.raw.starts_with("BYE ")).collect();
+    let byes: Vec<_> = legs["A"].iter().filter(|m| text(m).starts_with("BYE ")).collect();
     assert_eq!(byes.len(), 2, "{:#?}", legs["A"]);
     assert_eq!(byes[1].repeat_of, Some(byes[0].seq));
     assert_eq!(
@@ -4298,8 +4321,10 @@ async fn a_ladder_paces_its_own_leg_and_parks_no_other() {
 
     // And the teardown reached the callee — and was answered — WHILE the rung
     // was still owed, not queued behind it.
-    let taken =
-        legs["B"].iter().find(|m| m.raw.starts_with("BYE ")).expect("the callee took the teardown");
+    let taken = legs["B"]
+        .iter()
+        .find(|m| text(m).starts_with("BYE "))
+        .expect("the callee took the teardown");
     // Well inside the rung, not merely before it: a run parked by the ladder
     // relays the teardown only once the rung is out, so the midpoint separates
     // the two readings by more than this scene's own relay latency.
@@ -4312,5 +4337,174 @@ async fn a_ladder_paces_its_own_leg_and_parks_no_other() {
         byes[1].at_us
     );
 
+    scene.finish().await;
+}
+
+/// The recorded lines of one leg, read back off the bundle as raw JSON so the
+/// on-disk encoding itself is what the rung asserts, not a decoder's reading
+/// of it.
+fn recorded_lines(dir: &std::path::Path, leg: &str) -> Vec<serde_json::Value> {
+    let text = std::fs::read_to_string(dir.join(format!("recording/{leg}.jsonl")))
+        .unwrap_or_else(|e| panic!("recording/{leg}.jsonl: {e}"));
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}")))
+        .collect()
+}
+
+/// The datagram a recorded line carries, reassembled from whichever of the
+/// three arms the line wrote (`raw` | `head` + `body_b64` | `raw_b64`).
+fn recorded_wire(line: &serde_json::Value) -> Vec<u8> {
+    use base64::Engine as _;
+    let b64 = |key: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(line[key].as_str().unwrap_or_else(|| panic!("{key} is a string: {line}")))
+            .unwrap_or_else(|e| panic!("{key} decodes: {e}"))
+    };
+    if let Some(raw) = line["raw"].as_str() {
+        return raw.as_bytes().to_vec();
+    }
+    if let Some(head) = line["head"].as_str() {
+        let mut out = head.as_bytes().to_vec();
+        out.extend(b64("body_b64"));
+        return out;
+    }
+    b64("raw_b64")
+}
+
+/// The one recorded line on `leg`, in `dir`, whose datagram starts with `prefix`.
+fn recorded_line<'a>(
+    lines: &'a [serde_json::Value],
+    dir: &str,
+    prefix: &[u8],
+) -> &'a serde_json::Value {
+    lines
+        .iter()
+        .find(|line| line["dir"] == dir && recorded_wire(line).starts_with(prefix))
+        .unwrap_or_else(|| {
+            panic!("no {dir} line starting with {:?}: {lines:#?}", String::from_utf8_lossy(prefix))
+        })
+}
+
+/// A recorded datagram whose body is not UTF-8 is written in the extractor's
+/// `head` + `body_b64` form, and nowhere on the line is a replacement
+/// character: the bytes that crossed the wire are the bytes on disk. Hands
+/// back the reassembled datagram.
+fn assert_recorded_as_head_and_bytes(line: &serde_json::Value) -> Vec<u8> {
+    assert!(
+        line.get("raw").is_none(),
+        "a datagram that is not UTF-8 is never written as text: {line}"
+    );
+    assert!(
+        line.get("raw_b64").is_none(),
+        "a UTF-8 head is written as text, only the body as base64: {line}"
+    );
+    let head = line["head"].as_str().unwrap_or_else(|| panic!("head is a string: {line}"));
+    assert!(head.ends_with("\r\n\r\n"), "the head runs through the blank line: {head:?}");
+    let text = serde_json::to_string(line).unwrap();
+    assert!(!text.contains('\u{FFFD}'), "no byte was replaced on the way to disk: {text}");
+    recorded_wire(line)
+}
+
+/// The BINARY-BODY rung: a linear answered call carrying, mid-dialog, an INFO
+/// whose body is bytes that are not UTF-8, sent by the caller and expected by
+/// the callee under a `frozen` resource.
+///
+/// What the rung proves is that the recording keeps the datagram byte for
+/// byte on BOTH legs — the caller's `out` line and the callee's `in` line are
+/// written as a UTF-8 head plus the body's base64, never as text with the
+/// bytes that would not decode replaced.
+#[tokio::test(start_paused = true)]
+async fn a_binary_body_is_recorded_byte_for_byte_on_both_legs() {
+    let body = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/resources/binary-body_info.bin"),
+    )
+    .expect("the binary resource");
+    assert!(std::str::from_utf8(&body).is_err(), "the resource is not UTF-8 by construction");
+
+    let scene = api_scene("pivot-binary-body").await;
+    let (outcome, dir) = replay(&scene, "binary-body.v3.json").await;
+
+    // The bytes the CALLEE took off the wire are the resource's, so whatever
+    // the recording holds is measured against a datagram that was right.
+    let arrived = scene
+        .bob
+        .wire_view()
+        .into_iter()
+        .find(|entry| entry.raw.starts_with(b"INFO "))
+        .expect("the callee received the INFO");
+    assert!(arrived.raw.ends_with(&body), "the INFO reached the callee byte-exact");
+
+    let callee = recorded_lines(&dir, "B");
+    let taken = assert_recorded_as_head_and_bytes(recorded_line(&callee, "in", b"INFO "));
+    assert!(taken.ends_with(&body), "the callee's line ends with the body bytes: {taken:02x?}");
+    let caller = recorded_lines(&dir, "A");
+    let sent = assert_recorded_as_head_and_bytes(recorded_line(&caller, "out", b"INFO "));
+    assert!(sent.ends_with(&body), "the caller's line ends with the body bytes: {sent:02x?}");
+
+    assert_bundle_is_complete(&outcome, &dir);
+    assert_eq!(outcome.verdict.completed_steps.len(), 17, "every step ran");
+    scene.finish().await;
+}
+
+/// The same rung read from the CHECK side: the callee's expect asserts the
+/// body's bytes as `body.b64`, the base64 of the resource file, and the run is
+/// green — a binary body is confronted, not merely present.
+#[tokio::test(start_paused = true)]
+async fn a_binary_body_check_reads_its_bytes_as_base64_and_the_run_is_green() {
+    let scene = api_scene("pivot-binary-body-check").await;
+    let (outcome, dir) = replay(&scene, "binary-body.v3.json").await;
+    assert_bundle_is_complete(&outcome, &dir);
+    assert_eq!(outcome.verdict.completed_steps.len(), 17, "every step ran");
+    assert!(
+        outcome.verdict.completed_steps.contains(&"s11".to_string()),
+        "the callee's INFO expect completed with its body check: {:#?}",
+        outcome.verdict.failures
+    );
+    scene.finish().await;
+}
+
+/// The MULTIPART variant: the initial INVITE carries an SDP part beside a
+/// binary part, expected on the callee as a `multipart` body. The callee's
+/// recorded line carries the body's LAYOUT — the extractor's `body.parts`,
+/// offset and length per part — so a reader locates each part in the recorded
+/// bytes without splitting on a boundary, and the binary part's bytes are the
+/// resource's.
+#[tokio::test(start_paused = true)]
+async fn a_multipart_body_s_recording_locates_its_parts_and_keeps_the_binary_one() {
+    let resources = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/resources");
+    let blob =
+        std::fs::read(resources.join("binary-multipart_part1.bin")).expect("the binary part");
+    assert!(std::str::from_utf8(&blob).is_err(), "the part is not UTF-8 by construction");
+
+    let scene = api_scene("pivot-binary-multipart").await;
+    let (outcome, dir) = replay(&scene, "binary-multipart.v3.json").await;
+
+    let callee = recorded_lines(&dir, "B");
+    let line = recorded_line(&callee, "in", b"INVITE ");
+    let wire = assert_recorded_as_head_and_bytes(line);
+    let head_len = wire.len() - line["body"]["len"].as_u64().expect("body.len") as usize;
+    let body = &wire[head_len..];
+    assert!(
+        std::str::from_utf8(&wire[..head_len]).is_ok(),
+        "the head runs to the blank line and is text"
+    );
+    let layout = &line["body"];
+    assert_eq!(layout["content_type"], "multipart/mixed", "{layout}");
+    let parts = layout["parts"].as_array().unwrap_or_else(|| panic!("body.parts: {line}"));
+    assert_eq!(parts.len(), 2, "both parts located: {parts:#?}");
+    let part = |n: usize| {
+        let offset = parts[n]["offset"].as_u64().unwrap() as usize;
+        let len = parts[n]["len"].as_u64().unwrap() as usize;
+        &body[offset..offset + len]
+    };
+    assert_eq!(parts[0]["content_type"], "application/sdp");
+    assert!(part(0).starts_with(b"v=0\r\n"), "the SDP part is located: {:?}", part(0));
+    assert_eq!(parts[1]["content_type"], "application/vnd.example.blob");
+    assert_eq!(part(1), &blob[..], "the binary part is the resource byte for byte");
+
+    assert_bundle_is_complete(&outcome, &dir);
+    assert_eq!(outcome.verdict.completed_steps.len(), 13, "every step ran");
     scene.finish().await;
 }

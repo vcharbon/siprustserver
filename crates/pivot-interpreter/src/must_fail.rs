@@ -255,7 +255,7 @@ fn anchor_dialog(
         .into_iter()
         .flatten()
         .filter(|m| m.dir == Dir::Out && m.step.as_deref() == Some(declared.step.as_str()))
-        .find_map(|m| parse(&m.raw))
+        .find_map(|m| parse(m.wire()))
         .ok_or_else(|| {
             format!("step {:?} put no datagram on leg {:?} this run", declared.step, step.leg)
         })?;
@@ -287,7 +287,7 @@ fn predicted(plan: &Plan, recording: &Recording, declared: &MustFail) -> Result<
                 // Unclaimed and first of its kind: an ACK a step matched is one
                 // the flow expected, and a repeat is not a second failure.
                 .filter(|m| m.dir == Dir::In && m.step.is_none() && m.repeat_of.is_none())
-                .filter_map(|m| parse(&m.raw))
+                .filter_map(|m| parse(m.wire()))
                 .map(|message| Inbound::of(&message))
                 .find(|inbound| is_predicted_ack(&anchor, &anchor.leg, inbound))
                 .map(|inbound| Predicted { leg: anchor.leg.clone(), arrived: inbound.arrived() })
@@ -312,7 +312,7 @@ fn predicted(plan: &Plan, recording: &Recording, declared: &MustFail) -> Result<
                 .into_iter()
                 .flatten()
                 .filter(|m| m.dir == Dir::In && m.step.is_none() && m.repeat_of.is_none())
-                .filter_map(|m| parse(&m.raw))
+                .filter_map(|m| parse(m.wire()))
                 .find(|message| is_predicted_prack(&anchor, message))
                 .map(|message| Predicted {
                     leg: anchor.leg.clone(),
@@ -333,7 +333,7 @@ fn predicted(plan: &Plan, recording: &Recording, declared: &MustFail) -> Result<
                 .into_iter()
                 .flatten()
                 .filter(|m| m.dir == Dir::In && m.step.is_none() && m.repeat_of.is_none())
-                .filter_map(|m| parse(&m.raw))
+                .filter_map(|m| parse(m.wire()))
                 .map(|message| Inbound::of(&message))
                 .find(|inbound| is_predicted_cancel(&anchor, inbound))
                 .map(|inbound| Predicted { leg: anchor.leg.clone(), arrived: inbound.arrived() })
@@ -396,8 +396,8 @@ fn names(failure: &Failure, predicted: &Predicted) -> bool {
     *named.0 == predicted.leg && *named.1 == predicted.arrived
 }
 
-fn parse(raw: &str) -> Option<SipMessage> {
-    CustomParser::new().parse(raw.as_bytes()).ok()
+fn parse(wire: &[u8]) -> Option<SipMessage> {
+    CustomParser::new().parse(wire).ok()
 }
 
 #[cfg(test)]
@@ -525,7 +525,7 @@ mod tests {
     }
 
     fn refused(leg: &str, raw: &str) -> Failure {
-        let message = parse(raw).expect("the fixture parses");
+        let message = parse(raw.as_bytes()).expect("the fixture parses");
         Failure::UnexpectedDatagram {
             leg: leg.to_string(),
             arrived: Inbound::of(&message).arrived(),

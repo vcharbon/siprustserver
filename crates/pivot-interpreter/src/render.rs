@@ -572,7 +572,7 @@ mod tests {
         let typed = Body::Resource(pivot_schema::body::ResourceBody {
             reference: "part.bin".into(),
             rewrite: vec![],
-            mode: Some(pivot_schema::body::BodyMode::FrozenBinary),
+            mode: Some(pivot_schema::body::BodyMode::Frozen),
             content_type: Some("application/EmergencyCallData.eCall.MSD".into()),
             compare: None,
         });
@@ -595,8 +595,8 @@ mod tests {
             "v=0\r\nc=IN IP4 1.2.3.4\r\nm=audio 16804 RTP/AVP 8\r\n",
         )
         .unwrap();
-        let indata: &[u8] = &[0x77, 0x15, 0x47, 0x00, 0x83, 0x0a];
-        std::fs::write(dir.join("uac1_0_1.bin"), indata).unwrap();
+        let blob: &[u8] = &[0x77, 0x15, 0x47, 0x00, 0x83, 0x0a];
+        std::fs::write(dir.join("uac1_0_1.bin"), blob).unwrap();
         let body = Body::Multipart(pivot_schema::body::MultipartBody {
             multipart: pivot_schema::body::Multipart {
                 content_type: "multipart/mixed".into(),
@@ -606,16 +606,18 @@ mod tests {
                         reference: "uac1_0_0.sdp".into(),
                         rewrite: vec!["c=addr".into(), "m=port".into()],
                         mode: None,
+                        compare: None,
                         content_id: None,
                         headers: vec![],
                         cid_linked: vec![],
                     },
                     pivot_schema::body::Part {
-                        content_type: "application/vnd.example.indata".into(),
+                        content_type: "application/vnd.example.blob".into(),
                         reference: "uac1_0_1.bin".into(),
                         rewrite: vec![],
-                        mode: Some(pivot_schema::body::BodyMode::FrozenBinary),
-                        content_id: Some("<indata@example.invalid>".into()),
+                        mode: Some(pivot_schema::body::BodyMode::Frozen),
+                        compare: None,
+                        content_id: Some("<blob@example.invalid>".into()),
                         headers: vec![
                             pivot_schema::body::EntityHeader {
                                 name: "Content-Transfer-Encoding".into(),
@@ -644,21 +646,18 @@ mod tests {
             text.contains("m=audio 41000 RTP/AVP 8\r\n"),
             "the SDP part took the port the lane booked it:\n{text}"
         );
-        assert!(text.contains("Content-Type: application/vnd.example.indata\r\n"));
+        assert!(text.contains("Content-Type: application/vnd.example.blob\r\n"));
         // The stored entity block rides verbatim, `Content-ID` first.
         assert!(
             text.contains(
-                "Content-Type: application/vnd.example.indata\r\n\
-             Content-ID: <indata@example.invalid>\r\n\
+                "Content-Type: application/vnd.example.blob\r\n\
+             Content-ID: <blob@example.invalid>\r\n\
              Content-Transfer-Encoding: binary\r\n\
              Content-Disposition: signal;handling=optional\r\n\r\n"
             ),
             "{text}"
         );
-        assert!(
-            bytes.windows(indata.len()).any(|w| w == indata),
-            "the binary part rides byte-exact"
-        );
+        assert!(bytes.windows(blob.len()).any(|w| w == blob), "the binary part rides byte-exact");
         assert!(text.ends_with(&format!("--{boundary}--\r\n")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -675,7 +674,8 @@ mod tests {
                     content_type: "application/EmergencyCallData.eCall.MSD".into(),
                     reference: "resources/uac1_0_1.bin".into(),
                     rewrite: vec![],
-                    mode: Some(pivot_schema::body::BodyMode::FrozenBinary),
+                    mode: Some(pivot_schema::body::BodyMode::Frozen),
+                    compare: None,
                     content_id: None,
                     headers: vec![],
                     cid_linked: vec!["call-info".into()],
@@ -704,7 +704,8 @@ mod tests {
                     content_type: "application/EmergencyCallData.eCall.MSD".into(),
                     reference: "msd.bin".into(),
                     rewrite: vec![],
-                    mode: Some(pivot_schema::body::BodyMode::FrozenBinary),
+                    mode: Some(pivot_schema::body::BodyMode::Frozen),
+                    compare: None,
                     content_id: Some("<msd@example.invalid>".into()),
                     headers: vec![pivot_schema::body::EntityHeader {
                         name: "Content-Transfer-Encoding".into(),

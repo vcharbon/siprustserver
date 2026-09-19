@@ -59,7 +59,14 @@ impl Observables for MessageObservables<'_> {
             "to.tag" => m.to_tag.clone(),
             "from.userInfo" => m.from_user.clone(),
             "to.userInfo" => m.to_user.clone(),
-            "body" => Some(String::from_utf8_lossy(&m.body).into_owned()),
+            // The body is bytes: observed as text when the bytes are UTF-8,
+            // as standard base64 otherwise, chosen by the bytes alone.
+            "body" => Some(match std::str::from_utf8(&m.body) {
+                Ok(text) => text.to_string(),
+                Err(_) => sip_message::payload::base64(&m.body),
+            }),
+            // The byte-exact assertion an author writes for a binary body.
+            "body.b64" => Some(sip_message::payload::base64(&m.body)),
             other => return Err(format!("selector {other:?} is not a message field")),
         })
     }
@@ -305,6 +312,36 @@ mod tests {
         assert!(run(&eq("header(Allow)", "INVITE,ACK"), &m, &state, &bindings).is_some());
         // A status is not a header list: it compares as the string it is.
         assert!(run(&eq("status", " 200"), &m, &state, &bindings).is_some());
+    }
+
+    /// `body` observes the body as the text it is where the bytes are UTF-8 and
+    /// as standard base64 where they are not — chosen by the bytes alone, so a
+    /// byte the text form could not carry is never replaced on the way to a
+    /// comparison. `body.b64` observes the base64 always: the byte-exact
+    /// assertion an author writes for a binary body.
+    #[test]
+    fn a_body_is_observed_as_text_when_utf8_and_as_base64_otherwise() {
+        let state = RunState::new();
+        let bindings = IdentityBindings::new();
+        let eq = |field: &str, value: &str| check(field, CheckOp::Eq, Some(value));
+
+        let mut text = inbound();
+        text.body = b"hello\r\n".to_vec();
+        assert!(run(&eq("body", "hello\r\n"), &text, &state, &bindings).is_none());
+        assert!(run(&eq("body.b64", "aGVsbG8NCg=="), &text, &state, &bindings).is_none());
+
+        let mut binary = inbound();
+        binary.body = vec![0x00, 0x01, 0x02, 0xff, 0xfe, 0x80, 0x00];
+        assert!(run(&eq("body", "AAEC//6AAA=="), &binary, &state, &bindings).is_none());
+        assert!(run(&eq("body.b64", "AAEC//6AAA=="), &binary, &state, &bindings).is_none());
+        let failed = run(&eq("body", "AAEC//6AAQ=="), &binary, &state, &bindings);
+        assert!(
+            matches!(&failed, Some(Failure::CheckFailed { observed, .. }) if observed == "AAEC//6AAA=="),
+            "the observed side is the base64, never a lossy text: {failed:?}"
+        );
+        assert!(
+            run(&check("body.b64", CheckOp::Exists, None), &binary, &state, &bindings).is_none()
+        );
     }
 
     #[test]

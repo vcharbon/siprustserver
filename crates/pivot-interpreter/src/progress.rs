@@ -87,7 +87,7 @@ fn last_sent(leg: &[RecordedMessage], method: &str) -> Option<u32> {
     let want = Method::from_wire(method);
     leg.iter()
         .filter(|recorded| recorded.dir == Dir::Out)
-        .filter_map(|recorded| match CustomParser::new().parse(recorded.raw.as_bytes()).ok()? {
+        .filter_map(|recorded| match CustomParser::new().parse(recorded.wire()).ok()? {
             SipMessage::Request(request) if *request.method() == want => Some(request.cseq().seq()),
             _ => None,
         })

@@ -4,9 +4,10 @@
 //!
 //! The recording is the run's evidence, so it is held in memory as it is made
 //! and written by a handle that OUTLIVES the run: a panicking run still leaves
-//! its ladder on disk. Attribution is best-effort by design — a datagram no step
-//! claimed is recorded with no `step`, never dropped — but the datagram itself
-//! never is.
+//! its ladder on disk. A datagram is recorded as the BYTES that crossed the
+//! socket (ADR-0035); a repeat is recognised by those bytes. Attribution is
+//! best-effort by design — a datagram no step claimed is recorded with no
+//! `step`, never dropped — but the datagram itself never is.
 //!
 //! This is the MAKING of a recording; the line it writes is
 //! [`pivot_schema::bundle::RecordedMessage`].
@@ -21,7 +22,7 @@ use pivot_schema::bundle::{Dir, RecordedMessage};
 struct Entry<'a> {
     dir: Dir,
     at_us: u64,
-    raw: String,
+    wire: Vec<u8>,
     step: Option<&'a str>,
     note: Option<&'a str>,
     repeat_of: Option<u64>,
@@ -56,18 +57,18 @@ impl Recording {
         log.by_leg.entry(leg.to_string()).or_default();
     }
 
-    /// Record one datagram on `leg`. Always succeeds: a recording that could
-    /// refuse would be a recording a run could lose.
+    /// Record one datagram on `leg`, byte for byte. Always succeeds: a
+    /// recording that could refuse would be a recording a run could lose.
     pub fn push(
         &self,
         leg: &str,
         dir: Dir,
         at_us: u64,
-        raw: impl Into<String>,
+        wire: impl Into<Vec<u8>>,
         step: Option<&str>,
         note: Option<&str>,
     ) {
-        self.push_entry(leg, Entry { dir, at_us, raw: raw.into(), step, note, repeat_of: None });
+        self.push_entry(leg, Entry { dir, at_us, wire: wire.into(), step, note, repeat_of: None });
     }
 
     /// Record one datagram the caller knows REPEATS an earlier one, resolving
@@ -82,20 +83,20 @@ impl Recording {
         leg: &str,
         dir: Dir,
         at_us: u64,
-        raw: impl Into<String>,
+        wire: impl Into<Vec<u8>>,
         step: Option<&str>,
         note: Option<&str>,
     ) {
-        let raw = raw.into();
-        let repeat_of = self.first_seq_of(leg, dir, &raw);
-        self.push_entry(leg, Entry { dir, at_us, raw, step, note, repeat_of });
+        let wire = wire.into();
+        let repeat_of = self.first_seq_of(leg, dir, &wire);
+        self.push_entry(leg, Entry { dir, at_us, wire, step, note, repeat_of });
     }
 
     /// The `seq` of the earliest datagram on `leg` with these bytes, in this
     /// direction.
-    pub fn first_seq_of(&self, leg: &str, dir: Dir, raw: &str) -> Option<u64> {
+    pub fn first_seq_of(&self, leg: &str, dir: Dir, wire: &[u8]) -> Option<u64> {
         let log = self.log.lock().expect("the recording lock outlives its critical sections");
-        log.by_leg.get(leg)?.iter().find(|m| m.dir == dir && m.raw == raw).map(|m| m.seq)
+        log.by_leg.get(leg)?.iter().find(|m| m.dir == dir && m.wire() == wire).map(|m| m.seq)
     }
 
     fn push_entry(&self, leg: &str, entry: Entry<'_>) {
@@ -103,15 +104,18 @@ impl Recording {
             self.log.lock().expect("the recording lock is never poisoned by a panic while held");
         let entries = log.by_leg.entry(leg.to_string()).or_default();
         let seq = entries.len() as u64 + 1;
-        entries.push(RecordedMessage {
+        // The body layout is derived here, from the bytes, whether or not the
+        // recorder parsed the datagram: one derivation for every door.
+        let mut message = RecordedMessage::new(
             seq,
-            dir: entry.dir,
-            at_us: entry.at_us,
-            step: entry.step.map(str::to_string),
-            raw: entry.raw,
-            repeat_of: entry.repeat_of,
-            note: entry.note.map(str::to_string),
-        });
+            entry.dir,
+            entry.at_us,
+            entry.step.map(str::to_string),
+            entry.wire,
+        );
+        message.repeat_of = entry.repeat_of;
+        message.note = entry.note.map(str::to_string);
+        entries.push(message);
     }
 
     /// Attribute an already-recorded datagram to a step, where the step that

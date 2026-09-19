@@ -233,7 +233,6 @@ struct Held {
     step: String,
     inbound: Inbound,
     message: SipMessage,
-    raw: String,
     bytes: Vec<u8>,
     repeat: bool,
     /// Its sequence number in the recording, so releasing it re-notes the entry
@@ -657,7 +656,6 @@ impl<'a, 'p> Runner<'a, 'p> {
             SipMessage::Request(r) => r.image().to_vec(),
             SipMessage::Response(r) => r.image().to_vec(),
         };
-        let raw = String::from_utf8_lossy(&bytes).into_owned();
 
         // §17.2 FIRST, and before any claim: a retransmitted INVITE must not
         // consume a second claim on its way to being absorbed. The datagram is
@@ -671,7 +669,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.repeats.note(&leg, &bytes, self.now_us());
             self.record_arrival(
                 &leg,
-                raw,
+                bytes,
                 None,
                 Some("absorbed: byte-identical retransmission of a datagram already surfaced"),
                 repeat,
@@ -696,7 +694,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     &leg,
                     Dir::In,
                     self.now_us(),
-                    raw,
+                    bytes,
                     None,
                     Some(&note),
                 );
@@ -723,7 +721,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 .flatten()
             {
                 let leg = known_leg.clone().unwrap_or_else(|| policy.actor.clone());
-                self.record_arrival(&leg, raw, None, Some("background policy"), repeat);
+                self.record_arrival(&leg, bytes, None, Some("background policy"), repeat);
                 self.instance.note_background_answered(index);
                 if !self.answer_background(actor, &leg, &message, policy.status).await {
                     self.end_script(Some(&leg), None);
@@ -740,7 +738,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         // one that carries them, and gives up the moment nothing better lands.
         if let Some(step) = self.holds_out_for_better(known_leg.as_deref(), actor, &inbound) {
             let leg = known_leg.clone().unwrap_or_default();
-            self.record_arrival(&leg, raw.clone(), None, Some(HELD_NOTE), repeat);
+            self.record_arrival(&leg, bytes.clone(), None, Some(HELD_NOTE), repeat);
             let seq = self.instance.recording().last_seq(&leg);
             self.held = Some(Held {
                 actor: actor.to_string(),
@@ -748,7 +746,6 @@ impl<'a, 'p> Runner<'a, 'p> {
                 step,
                 inbound,
                 message,
-                raw,
                 bytes,
                 repeat,
                 seq,
@@ -757,7 +754,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             return true;
         }
 
-        self.deliver(actor, inbound, message, raw, bytes, repeat, None).await
+        self.deliver(actor, inbound, message, bytes, repeat, None).await
     }
 
     /// The fork gate for `step`, under whichever §6.1 reading the plan gave its
@@ -877,7 +874,6 @@ impl<'a, 'p> Runner<'a, 'p> {
             &held.actor.clone(),
             held.inbound,
             held.message,
-            held.raw,
             held.bytes,
             held.repeat,
             held.seq,
@@ -896,7 +892,6 @@ impl<'a, 'p> Runner<'a, 'p> {
         actor: &str,
         inbound: Inbound,
         message: SipMessage,
-        raw: String,
         bytes: Vec<u8>,
         repeat: bool,
         held_seq: Option<u64>,
@@ -904,7 +899,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         let leg = match self.leg_of(actor, &inbound) {
             Ok(leg) => leg,
             Err(detail) => {
-                self.record_arrival("unattributed", raw, None, Some(&detail), repeat);
+                self.record_arrival("unattributed", bytes, None, Some(&detail), repeat);
                 // A datagram belonging to no leg of this flow stops nothing: it
                 // is the failure it is, and every armed expect is as satisfiable
                 // as it was (§11.2).
@@ -917,7 +912,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             }
         };
         if self.owed_bye_final(&leg, &inbound) {
-            self.record_arrival(&leg, raw, None, Some(OWED_BYE_FINAL), repeat);
+            self.record_arrival(&leg, bytes, None, Some(OWED_BYE_FINAL), repeat);
             return true;
         }
         let seq = match held_seq {
@@ -926,7 +921,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 Some(seq)
             }
             None => {
-                self.record_arrival(&leg, raw, None, None, repeat);
+                self.record_arrival(&leg, bytes.clone(), None, None, repeat);
                 self.instance.recording().last_seq(&leg)
             }
         };
@@ -1188,7 +1183,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                     leg,
                     Dir::Out,
                     self.now_us(),
-                    String::from_utf8_lossy(&wire).into_owned(),
+                    wire,
                     None,
                     Some(note),
                 );
@@ -1224,7 +1219,6 @@ impl<'a, 'p> Runner<'a, 'p> {
             SipMessage::Request(r) => r.image().to_vec(),
             SipMessage::Response(r) => r.image().to_vec(),
         };
-        let raw = String::from_utf8_lossy(&bytes).into_owned();
         let leg =
             self.leg_by_call_id(&inbound.call_id).unwrap_or_else(|| "unattributed".to_string());
 
@@ -1234,7 +1228,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             self.repeats.note(&leg, &bytes, self.now_us());
             self.record_arrival(
                 &leg,
-                raw,
+                bytes,
                 None,
                 Some("absorbed during settle: byte-identical retransmission"),
                 repeat,
@@ -1251,7 +1245,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 &leg,
                 Dir::In,
                 self.now_us(),
-                raw,
+                bytes,
                 None,
                 Some(&note),
             );
@@ -1266,7 +1260,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             ) {
                 self.record_arrival(
                     &leg,
-                    raw,
+                    bytes,
                     None,
                     Some("background policy, during settle"),
                     repeat,
@@ -1277,11 +1271,11 @@ impl<'a, 'p> Runner<'a, 'p> {
             }
         }
         if self.owed_bye_final(&leg, &inbound) {
-            self.record_arrival(&leg, raw, None, Some(OWED_BYE_FINAL), repeat);
+            self.record_arrival(&leg, bytes, None, Some(OWED_BYE_FINAL), repeat);
             return;
         }
         if self.owed_final_ack(&leg, &inbound) {
-            self.record_arrival(&leg, raw, None, Some(OWED_FINAL_ACK), repeat);
+            self.record_arrival(&leg, bytes, None, Some(OWED_FINAL_ACK), repeat);
             return;
         }
         // A leg whose script ENDED still has a UA behind it, answering out of
@@ -1297,7 +1291,7 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
         self.record_arrival(
             &leg,
-            raw,
+            bytes,
             None,
             Some(if flow_ok {
                 "arrived after the flow completed"
@@ -1398,13 +1392,12 @@ impl<'a, 'p> Runner<'a, 'p> {
                 });
                 continue;
             }
-            let raw = String::from_utf8_lossy(&wire).into_owned();
-            let sent = raw.lines().next().unwrap_or_default().to_string();
+            let sent = sip_message::sniff::first_line(&wire);
             self.instance.recording().push(
                 &leg,
                 Dir::Out,
                 self.now_us(),
-                raw,
+                wire,
                 None,
                 Some(&format!("the generic close: this leg {owed}")),
             );
@@ -1450,7 +1443,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 leg,
                 Dir::Out,
                 self.now_us(),
-                String::from_utf8_lossy(&wire).into_owned(),
+                wire,
                 None,
                 Some(&format!("the transaction the flow never scripted: this leg {owed}")),
             );
@@ -1726,7 +1719,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 &step.leg,
                 Dir::Out,
                 self.now_us(),
-                String::new(),
+                Vec::new(),
                 Some(&step.id),
                 Some("withheld by a suppress-auto deviation"),
             );
@@ -1806,12 +1799,11 @@ impl<'a, 'p> Runner<'a, 'p> {
             });
             return false;
         }
-        let raw = String::from_utf8_lossy(&wire).into_owned();
         self.instance.recording().push(
             &step.leg,
             Dir::Out,
             self.now_us(),
-            raw,
+            wire.clone(),
             Some(&step.id),
             fallback.as_deref(),
         );
@@ -1887,7 +1879,7 @@ impl<'a, 'p> Runner<'a, 'p> {
             &ack.leg,
             Dir::Out,
             self.now_us(),
-            String::from_utf8_lossy(&ack.wire).into_owned(),
+            ack.wire.clone(),
             Some(&ack.step),
             Some("drawn by a repeat of the final it acknowledges"),
         );
@@ -1975,7 +1967,7 @@ impl<'a, 'p> Runner<'a, 'p> {
                 &due.leg,
                 Dir::Out,
                 self.now_us(),
-                String::from_utf8_lossy(&due.wire).into_owned(),
+                due.wire.clone(),
                 Some(&due.step),
                 Some(&format!("retransmission {} of {}", due.n, due.count)),
             );
@@ -1990,7 +1982,7 @@ impl<'a, 'p> Runner<'a, 'p> {
     fn record_arrival(
         &self,
         leg: &str,
-        raw: String,
+        wire: Vec<u8>,
         step: Option<&str>,
         note: Option<&str>,
         repeat: bool,
@@ -1998,9 +1990,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         let recording = self.instance.recording();
         let at_us = self.now_us();
         if repeat {
-            recording.push_repeat(leg, Dir::In, at_us, raw, step, note);
+            recording.push_repeat(leg, Dir::In, at_us, wire, step, note);
         } else {
-            recording.push(leg, Dir::In, at_us, raw, step, note);
+            recording.push(leg, Dir::In, at_us, wire, step, note);
         }
     }
 

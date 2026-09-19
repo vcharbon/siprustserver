@@ -440,7 +440,7 @@ fn view(messages: &[RecordedMessage]) -> LegView {
         if recorded.repeat_of.is_some() {
             continue;
         }
-        let Some(message) = parse(&recorded.raw) else { continue };
+        let Some(message) = parse(recorded.wire()) else { continue };
         match (recorded.dir, message) {
             (Dir::Out, SipMessage::Request(request)) => {
                 let cseq = request.cseq().seq();
@@ -590,8 +590,8 @@ fn view(messages: &[RecordedMessage]) -> LegView {
     view
 }
 
-fn parse(raw: &str) -> Option<SipMessage> {
-    CustomParser::new().parse(raw.as_bytes()).ok()
+fn parse(wire: &[u8]) -> Option<SipMessage> {
+    CustomParser::new().parse(wire).ok()
 }
 
 /// The server transaction a taken request opens, as the dialog names it.
@@ -735,7 +735,7 @@ mod tests {
     }
 
     fn message(raw: &str) -> SipMessage {
-        parse(raw).expect("the fixture parses")
+        parse(raw.as_bytes()).expect("the fixture parses")
     }
 
     #[test]
