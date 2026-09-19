@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { exitCodeOf, runCampaign, summarize, type CampaignRun } from "../src/campaign.js"
 import { CAMPAIGN_INDEX, CONFRONTATION_FILE, ERROR_FILE, RULE_HITS_FILE, SKIP_FILE, SPECS_DIR } from "../src/layout.js"
 import { LanePresets, LaneUnknown } from "../src/lanes.js"
+import { RoutingCompiler } from "../src/routing.js"
 import {
   caseExpectingBody,
   caseExpectingSdp,
@@ -273,7 +274,30 @@ describe("a cell that never produced a result", () => {
     expect(cell.error).toBeDefined()
     const written = fs.readFileSync(path.join(run.dir, cell.dir, ERROR_FILE), "utf8")
     expect(written).toContain("LaneUnknown")
+    expect(written).toContain("nobody-described-this")
     expect(new LaneUnknown({ lane: "x", detail: "y" })._tag).toBe("Driver.LaneUnknown")
+  })
+
+  /** A refusal's reason is its message: the error file carries it, not the tag alone. */
+  it("names the reason a deployment's routing compiler refused the cell", async () => {
+    const run = await campaign([replayCell()], {
+      rig: {
+        routing: RoutingCompiler.layerWith((cell, pivot) =>
+          Effect.fail(
+            new RoutingCompiler.RoutingRefused({
+              case: pivot.case.id,
+              lane: cell.lane,
+              detail: "attempt 1/0 dials a number whose route this compiler does not state"
+            })
+          )
+        )
+      }
+    })
+    const cell = run.index.cells[0]!
+    expect(cell.passed).toBe(false)
+    const written = fs.readFileSync(path.join(run.dir, cell.dir, ERROR_FILE), "utf8")
+    expect(written).toContain("RoutingRefused")
+    expect(written).toContain("stub-lane: attempt 1/0 dials a number whose route this compiler does not state")
   })
 })
 

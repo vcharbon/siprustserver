@@ -19,12 +19,16 @@ import * as Effect from "effect/Effect"
 import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
 
-/** The document's routing cannot be compiled for this lane. */
+/** The document's routing cannot be compiled for this lane; the message is the reason. */
 export class RoutingRefused extends Schema.TaggedError<RoutingRefused>()("Driver.RoutingRefused", {
   case: Schema.String,
   lane: Schema.String,
   detail: Schema.String
-}) {}
+}) {
+  override get message(): string {
+    return `${this.case} on ${this.lane}: ${this.detail}`
+  }
+}
 
 export interface Interface {
   /** The §4.3 overlay this cell runs with. */

@@ -131,6 +131,8 @@ export interface RigOptions {
   readonly lanes?: Layer.Layer<LanePresets.Service>
   readonly reclassifier?: Layer.Layer<Reclassifier.Service>
   readonly classifier?: Layer.Layer<Classifier.Service>
+  /** Substituted when a test is about what a deployment's routing compiler refuses. */
+  readonly routing?: Layer.Layer<RoutingCompiler.Service>
   /** Collects every path a cell reads WHOLE, for a test about how a file is read. */
   readonly reads?: Array<string>
 }
@@ -160,7 +162,7 @@ export const rig = (options: RigOptions = {}) =>
     options.reclassifier ?? Reclassifier.layer,
     options.classifier ?? Classifier.layer,
     options.lanes ?? LanePresets.layerWith(() => Effect.succeed(STUB_LANE)),
-    RoutingCompiler.layer
+    options.routing ?? RoutingCompiler.layer
   ).pipe(
     Layer.provideMerge(
       options.reads === undefined

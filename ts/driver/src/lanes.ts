@@ -17,11 +17,15 @@ import * as Layer from "effect/Layer"
 import * as Schema from "effect/Schema"
 import type { LaneBlock } from "./run-spec.js"
 
-/** The lane the campaign named is not one this composition can run. */
+/** The lane the campaign named is not one this composition can run; the message is the reason. */
 export class LaneUnknown extends Schema.TaggedError<LaneUnknown>()("Driver.LaneUnknown", {
   lane: Schema.String,
   detail: Schema.String
-}) {}
+}) {
+  override get message(): string {
+    return `lane '${this.lane}': ${this.detail}`
+  }
+}
 
 export interface Interface {
   /** The interpreter lane block this cell runs on. */
