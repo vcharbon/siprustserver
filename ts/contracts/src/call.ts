@@ -19,9 +19,11 @@ export interface Callee extends Schema.Schema.Type<typeof Callee> {}
 
 /**
  * The mechanisms that join a leg to a running call. Closed: each names a SIP
- * event the document itself carries as a step.
+ * event the document itself carries as a step — a REFER the platform accepted
+ * (RFC 3515), an INFO it accepted as a transfer order (RFC 6086), or the
+ * request that inserted a media resource.
  */
-export const JoinKind = Schema.Literals(["refer", "mrf"])
+export const JoinKind = Schema.Literals(["refer", "info", "mrf"])
 export type JoinKind = typeof JoinKind.Type
 
 /** What added a leg to a call that was already running. */

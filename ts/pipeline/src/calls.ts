@@ -206,6 +206,13 @@ const refusalOf = (
  * it, and lint requires a step of the same call that runs unconditionally and
  * precedes what it joined.
  */
+/** The request a transfer join names, per join kind; a media join names none. */
+const TRANSFER_REQUEST: Readonly<Record<Call.JoinKind, string | undefined>> = {
+  refer: "REFER",
+  info: "INFO",
+  mrf: undefined
+}
+
 const joinStep = (
   steps: ReadonlyArray<Flow.Step>,
   actor: ActorObs,
@@ -213,12 +220,14 @@ const joinStep = (
 ): string => {
   const first = steps.findIndex((step) => step.leg === actor.pivotLeg)
   const before = first < 0 ? steps : steps.slice(0, first)
-  // A transfer is joined by the REFER that asked for it (RFC 3515), on
-  // whichever leg sent it; anything else is joined by the caller's own last
-  // request, the one the platform was serving when it added the leg.
+  // A transfer is joined by the request that asked for it — the REFER (RFC
+  // 3515) or the INFO (RFC 6086) — on whichever leg sent it; anything else is
+  // joined by the caller's own last request, the one the platform was serving
+  // when it added the leg.
+  const asked = TRANSFER_REQUEST[actor.joinedBy?.kind ?? "mrf"]
   const request = [...before].reverse().find((step) =>
-    actor.joinedBy?.kind === "refer"
-      ? (step.msg.method ?? "").toUpperCase() === "REFER"
+    asked !== undefined
+      ? (step.msg.method ?? "").toUpperCase() === asked
       : step.leg === callerLeg && step.msg.method !== undefined
   )
   return request?.id ?? before[0]?.id ?? steps[0]?.id ?? ""
