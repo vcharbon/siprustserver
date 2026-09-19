@@ -48,6 +48,8 @@ import type { SutSet } from "./sut.js"
 /** One proposed case, decided. */
 export interface CaseOutcome {
   readonly spec: CaseSpec
+  /** The case's own legs: `cutLegs`, else the vantages' — what its refusals are recorded against. */
+  readonly legs: ReadonlyArray<number>
   /** The case's own correlated calls (`cut.ts::caseCallIds`). */
   readonly callIds: ReadonlyArray<string>
   /** The assembled document, where the case is generated. */
@@ -195,7 +197,7 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     // A case refused on a rule no declaration can answer is never assembled, so
     // its deferred refusals stand with it: there is no document to declare in.
     if (refusals.some((r) => r.disposition !== "defers")) {
-      outcomes.push({ spec, callIds, refused: refusals, ...quarantineOf(input, index, spec) })
+      outcomes.push({ spec, legs, callIds, refused: refusals, ...quarantineOf(input, index, spec) })
       continue
     }
     const attempt = build(input, index, spec)
@@ -203,6 +205,7 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
       // No document, so nothing is declared and every deferred refusal stands.
       outcomes.push({
         spec,
+        legs,
         callIds,
         refused: refusals,
         error: attempt.error,
@@ -224,8 +227,8 @@ export const decideCases = (input: CaseSetInput): CaptureCases => {
     ]
     outcomes.push(
       standing.length > 0
-        ? { spec, callIds, refused: standing, ...quarantineOf(input, index, spec, built) }
-        : { spec, callIds, built, refused: [] }
+        ? { spec, legs, callIds, refused: standing, ...quarantineOf(input, index, spec, built) }
+        : { spec, legs, callIds, built, refused: [] }
     )
   }
   return { outcomes, refused: outcomes.flatMap((o) => o.refused) }
