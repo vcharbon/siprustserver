@@ -314,3 +314,42 @@ describe("expectBody over bytes", () => {
     })
   })
 })
+
+/**
+ * THE body on the cut side is the one the confronter reads: the extractor's
+ * layout bounds it (the parser's `Content-Length`), and bytes the datagram
+ * carried past that length are on the wire, never in a resource.
+ */
+describe("the body the cut stores is layout-bounded", () => {
+  const BLOB = Uint8Array.from([0x00, 0x01, 0x02, 0xff, 0xfe, 0x80, 0x00])
+  const BLOB_TYPE = "application/vnd.example.blob"
+  const utf8 = new TextEncoder()
+
+  /** A head-body message whose tail runs `trailing` bytes past its declared length. */
+  const trailing = (body: Uint8Array, contentType: string, declared: number, layout: boolean, trailing: string): Flows.Msg => {
+    const m = info({ contentType, text: "" }) as Flows.Msg & { raw: string }
+    const { raw, body: _layout, ...rest } = m as Flows.Msg & { raw: string; body?: unknown }
+    const head = raw.replace(/Content-Length: \d+/, `Content-Length: ${declared}`)
+    const tail = new Uint8Array(body.length + trailing.length)
+    tail.set(body, 0)
+    tail.set(utf8.encode(trailing), body.length)
+    return {
+      ...rest,
+      head,
+      body_b64: Buffer.from(tail).toString("base64"),
+      ...(layout ? { body: { content_type: contentType, len: declared } } : {})
+    } as Flows.Msg
+  }
+
+  it("stores the declared bytes of a tail that runs past them, on the expect and the send side alike", () => {
+    const m = trailing(BLOB, BLOB_TYPE, BLOB.length, true, "\r\n")
+    expect(expectBody(m, "uac1_r0").resources[0]?.bytes).toEqual(BLOB)
+    expect(decompose(m, "uac1_0").resources[0]?.bytes).toEqual(BLOB)
+  })
+
+  it("stores no body where the head declares none, whatever the tail carries and with no layout stated", () => {
+    const m = trailing(BLOB, BLOB_TYPE, 0, false, "")
+    expect(expectBody(m, "uac1_r0")).toEqual({ body: { mode: "absent" }, resources: [], flags: [] })
+    expect(decompose(m, "uac1_0")).toEqual({ body: undefined, resources: [], flags: [], undecomposed: false })
+  })
+})

@@ -241,3 +241,30 @@ fn a_layout_that_contradicts_itself_or_its_bytes_is_refused() {
         "`len` past the tail: {past_tail}"
     );
 }
+
+/// A recording never refuses its own line: whatever line terminator the head
+/// used — CRLF, LF, a bare CR — the arm, the layout and the decode check read
+/// the head's end by the one rule the parser reads it by.
+#[test]
+fn a_head_ended_by_any_terminator_records_and_reads_back_alike() {
+    use pivot_schema::bundle::Dir;
+    let blob: &[u8] = &[0x00, 0xff, 0x80, 0x9f, 0xc0, 0x01];
+    for terminator in ["\n\r\n", "\r\r", "\n\n", "\r\n\r\n"] {
+        let mut wire = format!(
+            "INFO sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP a.invalid;branch=z9hG4bK1\r\nFrom: <sip:a@h>;tag=a1\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c1@a.invalid\r\nCSeq: 2 INFO\r\nMax-Forwards: 70\r\nContent-Type: application/vnd.example.blob\r\nContent-Length: 6{terminator}"
+        )
+        .into_bytes();
+        wire.extend_from_slice(blob);
+        let message = RecordedMessage::new(1, Dir::In, 0, None, wire.clone());
+        assert_eq!(message.body.as_ref().map(|b| b.len), Some(6), "{terminator:?}: the layout");
+        assert!(
+            matches!(message.payload(), sip_message::payload::Payload::HeadBody { .. }),
+            "{terminator:?}: the arm splits at the head's end"
+        );
+        let text = serde_json::to_string(&message).unwrap();
+        let back: RecordedMessage =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{terminator:?}: {text}: {e}"));
+        assert_eq!(back, message, "{terminator:?}");
+        assert_eq!(back.wire(), wire, "{terminator:?}");
+    }
+}

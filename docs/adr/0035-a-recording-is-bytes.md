@@ -29,7 +29,9 @@ Four invariants, held in Rust, the TypeScript contracts and the pipeline alike.
    type, the parser's `Content-Length`-bounded length, MIME parts located by
    offset — so a reader never splits on a boundary. `sip_message::payload`
    owns the encoding and the layout; `@sip/contracts` `Wire` is the one
-   decoder for captures and recordings on the TypeScript side.
+   decoder for captures and recordings on the TypeScript side. The head ends
+   by one rule, the parser's (an empty line terminated by CR, LF or CRLF),
+   wherever the arm, the layout or a reader measures it.
 3. **Comparison is byte-equal, under one bound.** The layout's length is THE
    body every comparison reads — single and multipart, every compare mode;
    only a line with no layout is read to the end of its tail. A frozen body
@@ -37,8 +39,11 @@ Four invariants, held in Rust, the TypeScript contracts and the pipeline alike.
    UTF-8 first and apply their fold; a side that is not UTF-8 under a text
    compare is a difference. A multipart expectation compares part by part —
    media type, then bytes under the part's own `compare` — located by the
-   recording's layout. A layout its bytes cannot honour is refused on decode
-   in Rust and stated as one probe in the confronter, never thrown.
+   recording's layout. The interpreter writes a layout for every parsable
+   datagram carrying a body, so a line with no layout reads as bodiless; a
+   layout its bytes cannot honour is refused on decode in Rust and stated as
+   one probe in the confronter, never thrown. The cut side stores the body
+   under the same bound, so a resource never holds a tail the layout excludes.
 4. **Nothing names a content type for binary versus text.** There is one frozen
    mode. Whether a payload is text is a fact of its bytes, read at emission,
    at recording and at comparison; no registry rule says so for a media type.
@@ -51,5 +56,6 @@ Four invariants, held in Rust, the TypeScript contracts and the pipeline alike.
   re-encodes from a string.
 - A viewer that reads bundles without the contracts package keeps its own
   three-arm reader. That is the one exception to "one decoder", accepted for a
-  browser core that validates nothing; it reads the same arms and the same
-  layout.
+  browser core that validates nothing; it reads the same arms, the same
+  layout and the same head-end rule, draws the layout-bounded body and shows
+  the excess as such.

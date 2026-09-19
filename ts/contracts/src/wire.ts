@@ -103,28 +103,22 @@ export const bytesOfUtf8 = (text: string): Uint8Array => utf8Encoder.encode(text
 
 /**
  * Where the head ends: the index just past the empty line that closes the
- * header block (RFC 3261 §7), CRLFCRLF or a bare LFLF; undefined where the
- * head is unterminated. Mirrors `sip_message::sniff::body`.
+ * header block (RFC 3261 §7); undefined where the head is unterminated. ONE
+ * rule, the parser's: a line ends at CR, LF or CRLF, and an empty line ends
+ * the head. Mirrors `sip_message::sniff::head_end`.
  */
-const headEndOf = (bytes: Uint8Array): number | undefined => {
-  let crlf: number | undefined
-  let lf: number | undefined
-  for (let i = 0; i + 1 < bytes.length; i++) {
-    if (lf === undefined && bytes[i] === 0x0a && bytes[i + 1] === 0x0a) lf = i + 2
-    if (
-      crlf === undefined &&
-      i + 3 < bytes.length &&
-      bytes[i] === 0x0d &&
-      bytes[i + 1] === 0x0a &&
-      bytes[i + 2] === 0x0d &&
-      bytes[i + 3] === 0x0a
-    ) {
-      crlf = i + 4
-    }
-    if (crlf !== undefined && lf !== undefined) break
+export const headEndOf = (bytes: Uint8Array): number | undefined => {
+  let i = 0
+  for (;;) {
+    if (i >= bytes.length) return undefined
+    const lineStart = i
+    while (i < bytes.length && bytes[i] !== 0x0d && bytes[i] !== 0x0a) i++
+    const empty = i === lineStart
+    if (i < bytes.length && bytes[i] === 0x0d) i++
+    if (i < bytes.length && bytes[i] === 0x0a) i++
+    if (empty) return i
+    if (i === lineStart) return undefined
   }
-  if (crlf !== undefined && lf !== undefined) return Math.min(crlf, lf)
-  return crlf ?? lf
 }
 
 /**

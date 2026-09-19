@@ -142,9 +142,29 @@ export interface BodyPayload {
   readonly bytes: Uint8Array
 }
 
+/** A message beside the body layout its document states, where it states one. */
+export type LaidOut = Wire.Msg & { readonly body?: { readonly len: number } | undefined }
+
+/**
+ * THE body of a message, under the one bound every reader uses: the layout's
+ * `len` where the document states one (the parser's `Content-Length`); else
+ * what the head declares, bounded by the tail; a head declaring `Content-Length:
+ * 0`, or declaring nothing over an empty tail, carries none. Bytes the
+ * datagram carried past the declared length (RFC 3261 §18.3) are on the wire,
+ * never in the body.
+ */
+export const boundedBody = (m: LaidOut): Uint8Array => {
+  const [, tail] = headBody(m)
+  const stated = m.body?.len
+  if (stated !== undefined) return tail.subarray(0, Math.min(stated, tail.length))
+  const declared = headerValue(m, "Content-Length")?.trim()
+  if (declared === undefined || !/^\d+$/.test(declared)) return tail
+  return tail.subarray(0, Math.min(Number(declared), tail.length))
+}
+
 /** The datagram's body plus its media type, or `undefined` when there is none. */
-export const body = (m: Wire.Msg): BodyPayload | undefined => {
-  const [, payload] = headBody(m)
+export const body = (m: LaidOut): BodyPayload | undefined => {
+  const payload = boundedBody(m)
   if (payload.length === 0) return undefined
   const contentType = (headerValue(m, "Content-Type") ?? "").trim()
   const [head = "", ...params] = mimeParams(contentType)

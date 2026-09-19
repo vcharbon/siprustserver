@@ -7,6 +7,10 @@ import { headersInOrderRaw } from "../src/wire.js"
 
 const utf8 = new TextEncoder()
 
+/** The layout the interpreter writes beside a recorded line that carries `body`, none where it carries none. */
+const laidOut = (contentType: string, body: string | undefined) =>
+  body === undefined || body.length === 0 ? {} : { body: { content_type: contentType, len: utf8.encode(body).length } }
+
 const crlf = (lines: ReadonlyArray<string>): string => `${lines.join("\r\n")}\r\n\r\n`
 
 const invite = crlf([
@@ -457,7 +461,7 @@ describe("an expected body held against the one received", () => {
       pivot: expecting(body),
       verdict: verdictWith([]),
       recordings: new Map([
-        ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: info(received) }] as Array<Bundle.RecordedMessage>]
+        ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: info(received), ...laidOut("application/example+xml", received) }] as Array<Bundle.RecordedMessage>]
       ]),
       resources
     }).probes.filter((p) => p.probe.kind === "body")
@@ -545,7 +549,7 @@ describe("an expected body held against the one received", () => {
         pivot: expecting(described),
         verdict: verdictWith([]),
         recordings: new Map([
-          ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: sdpInfo(received) }] as Array<Bundle.RecordedMessage>]
+          ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: sdpInfo(received), ...laidOut("application/sdp", received) }] as Array<Bundle.RecordedMessage>]
         ]),
         resources: new Map([[SDP_REF, utf8.encode(OFFER)]]),
         ...(media === undefined ? {} : { media })
@@ -638,7 +642,7 @@ describe("an expected body held against the one received", () => {
         }
       ]),
       recordings: new Map([
-        ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: answer(481, "<other/>") }] as Array<Bundle.RecordedMessage>]
+        ["B", [{ seq: 1, dir: "in", at_us: 1200, step: "s9", raw: answer(481, "<other/>"), ...laidOut("application/example+xml", "<other/>") }] as Array<Bundle.RecordedMessage>]
       ]),
       captured: capturedOf({ schema: 5, legs: [{ msgs: [{ raw: answer(200, XML) }] }] } as unknown as Flows.FlowsDoc),
       resources: new Map([[REF, utf8.encode(XML)]])

@@ -33,11 +33,10 @@ import type { Bundle, Deviation, Flow } from "@sip/contracts"
 import { Body, Confrontation, Flows, Pivot, Wire } from "@sip/contracts"
 import { carriesBody, mimeKey } from "./bodies.js"
 import { bodiesEqual } from "./bodyfold.js"
-import { layoutFault, locate } from "./parts.js"
+import { layoutFault, locate, type LayoutFault } from "./parts.js"
 import { diffSdp, maskOf } from "./sdpfold.js"
 import type { CaseContext, Classification, DocumentStep, UnackedFinal } from "./classifier.js"
 import { items, valuesEqual } from "./fold.js"
-import type { LayoutFault } from "./parts.js"
 import type { BodyProbe, HeaderProbe, MsgScope, Probe } from "./probe.js"
 import { probeSetDelta, scopeText, shapeSides, signature } from "./probe.js"
 import type { WireHeader } from "./wire.js"
@@ -268,7 +267,7 @@ const headerProbes = (
       const scope = scopeOf(message)
       if (scope === undefined) continue
       const driven = drivenNames(driving, leg, message.at_us, scope)
-      const bodiless = !carriesBody(reference) && bodyBytesOf(message).length === 0
+      const bodiless = !carriesBody(reference) && recordedBodiless(message)
       for (
         const probe of diffHeaders(
           headersInOrder(reference),
@@ -301,11 +300,12 @@ const headerProbes = (
  * THE body is the recorded layout's: the arm keeps the whole datagram, bytes
  * past the declared `Content-Length` included (RFC 3261 §18.3 discards them),
  * and the layout's `len` bounds what every comparison reads, single and
- * multipart, under every compare mode; only a line with no layout is read to
- * the end of its tail. The interpreter writes a layout for every datagram that
- * parses and carries a body, so a layout the bytes cannot honour — `len` past
- * the tail, a part past `len` — is a writer's fault and is stated once as a
- * probe, never thrown.
+ * multipart, under every compare mode. The interpreter writes a layout for
+ * every datagram that parses and carries a body, so a line with no layout
+ * reads as BODILESS (the tail it may hold is what §18.3 discards, and the gate
+ * read it so), and a layout the bytes cannot honour — `len` past the tail, a
+ * part past `len` — is a writer's fault and is stated once as a probe, never
+ * thrown.
  *
  * A multipart reception's parts are located by that layout (never split here)
  * and matched to the expectation's parts by POSITION: one probe for a
@@ -367,13 +367,21 @@ const expectedBytes = (resources: ReadonlyMap<string, Uint8Array> | undefined, r
 const mediaTypeOf = (declared: string | undefined, message: Wire.Msg): string =>
   mimeKey(declared ?? headerValuesOf(headersInOrder(message), "Content-Type")[0] ?? "")
 
-/** The received body under the one bound: the layout's `len` where a layout is present, the whole tail otherwise. */
+/**
+ * The received body under the one bound: the layout's `len`. A line that
+ * states no layout carries no body — the interpreter writes a layout for every
+ * parsable datagram that carries one, and the gate read that line as bodiless
+ * — whatever tail it holds (the bytes RFC 3261 §18.3 discards).
+ */
 const recordedBody = (message: Bundle.RecordedMessage): { readonly bytes: Uint8Array } | { readonly fault: LayoutFault } => {
+  if (message.body === undefined) return { bytes: new Uint8Array(0) }
   const tail = bodyBytesOf(message)
-  if (message.body === undefined) return { bytes: tail }
   const fault = layoutFault(tail, message.body)
   return fault === undefined ? { bytes: tail.subarray(0, message.body.len) } : { fault }
 }
+
+/** Whether a recorded line carries a body under the one bound. */
+const recordedBodiless = (message: Bundle.RecordedMessage): boolean => message.body === undefined || message.body.len === 0
 
 const faultProbe = (step: string, mediaType: string, scope: MsgScope, fault: LayoutFault): BodyProbe => ({
   kind: "body",

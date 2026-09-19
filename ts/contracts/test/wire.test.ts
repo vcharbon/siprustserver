@@ -43,6 +43,18 @@ describe("payloadOfBytes", () => {
   })
 })
 
+describe("the head's end", () => {
+  it("is the empty line, whichever terminator ends it — CRLF, LF or a bare CR — as the parser reads it", () => {
+    for (const terminator of ["\r\n\r\n", "\n\n", "\n\r\n", "\r\r", "\r\n\r"]) {
+      const head = `INFO sip:b@h SIP/2.0\r\nContent-Length: 7${terminator}`
+      const bytes = concat(utf8.encode(head), BLOB)
+      expect(Wire.payloadOfBytes(bytes), JSON.stringify(terminator)).toEqual({ _tag: "head-body", head, body_b64: BLOB_B64 })
+      expect(Wire.headBodyOf({ raw: `${head}hello` })?.body, JSON.stringify(terminator)).toEqual(utf8.encode("hello"))
+    }
+    expect(Wire.headBodyOf({ raw: "INFO sip:b@h SIP/2.0\rContent-Length: 0\r" })?.body).toEqual(new Uint8Array(0))
+  })
+})
+
 describe("datagramOf", () => {
   it("round-trips every arm to the same bytes", () => {
     for (const bytes of [

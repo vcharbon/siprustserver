@@ -74,15 +74,19 @@ const head = (contentType: string, len: number): string =>
 
 /**
  * A recorded reception in the arm its bytes call for, as the interpreter
- * writes it. `trailing` is what the datagram carried past its declared
- * `Content-Length`: on the wire, never in the layout.
+ * writes it, beside the layout it writes for a body it carries (`layout`
+ * overrides it; `null` states none). `trailing` is what the datagram carried
+ * past its declared `Content-Length`: on the wire, never in the layout.
  */
 const recorded = (
   contentType: string,
   body: Uint8Array,
-  layout?: Bundle.RecordedMessage["body"],
+  layout?: Bundle.RecordedMessage["body"] | null,
   trailing: Uint8Array = new Uint8Array(0)
 ): Bundle.RecordedMessage => {
+  const written = layout === null
+    ? undefined
+    : layout ?? (body.length === 0 ? undefined : { content_type: contentType.split(";")[0]!.trim(), len: body.length })
   const wire = concat(utf8.encode(head(contentType, body.length)), body, trailing)
   const text = (() => {
     try {
@@ -92,7 +96,7 @@ const recorded = (
     }
   })()
   const arm = text === undefined ? { head: head(contentType, body.length), body_b64: b64(concat(body, trailing)) } : { raw: text }
-  return { seq: 1, dir: "in", at_us: 1200, step: "s9", ...arm, ...(layout === undefined ? {} : { body: layout }) } as Bundle.RecordedMessage
+  return { seq: 1, dir: "in", at_us: 1200, step: "s9", ...arm, ...(written === undefined ? {} : { body: written }) } as Bundle.RecordedMessage
 }
 
 const run = (body: Body.Body, message: Bundle.RecordedMessage, resources: ReadonlyMap<string, Uint8Array>, media?: Bundle.MediaMode) =>
@@ -145,6 +149,16 @@ describe("a frozen binary body", () => {
     expect(probe.kind).toBe("body")
     expect(probe.kind === "body" && probe.captured.join(" ")).toContain(String(BLOB.length + 4))
     expect(probe.kind === "body" && probe.replayed.join(" ")).toContain(String(BLOB.length))
+  })
+
+  it("a line that recorded no layout reads as bodiless, as the gate read it", () => {
+    // The interpreter writes a layout for every parsable datagram that carries
+    // a body; a line without one carried none the parser could bound, and the
+    // tail it may hold is what RFC 3261 §18.3 discards.
+    const unlaid = recorded(BLOB_TYPE, BLOB, null)
+    const probes = run(frozen, unlaid, resources)
+    expect(probes).toHaveLength(1)
+    expect(probes[0]!.probe.kind === "body" && probes[0]!.probe).toMatchObject({ captured: [b64(BLOB)], replayed: [""] })
   })
 
   it("a reception with no body at all is confronted, as the empty side", () => {
@@ -211,9 +225,7 @@ describe("a multipart expectation, part by part", () => {
     }
     pieces.push(utf8.encode(closing))
     const body = concat(...pieces)
-    const layout = over.layout === false
-      ? undefined
-      : over.layout ?? ({ content_type: "multipart/mixed", len: body.length, parts } as Bundle.RecordedMessage["body"])
+    const layout = over.layout === false ? null : over.layout ?? ({ content_type: "multipart/mixed", len: body.length, parts } as Bundle.RecordedMessage["body"])
     return recorded("multipart/mixed;boundary=b1", body, layout, over.trailing)
   }
 
@@ -333,8 +345,7 @@ describe("a line the interpreter wrote", () => {
       ]
     }
   } as unknown as Body.Body
-  const step: Flow.Step = { ...expecting(expected).flow[0]!, msg: { method: "INVITE", body: expected }, in_dialog: false, id: "s3" }
-  const pivot: Pivot.PivotV3 = { ...expecting(expected), flow: [step] }
+  const pivot: Pivot.PivotV3 = { ...expecting(expected), flow: [step("s3", { msg: { method: "INVITE", body: expected }, in_dialog: false })] }
   const probesOf = (resources: ReadonlyMap<string, Uint8Array>) =>
     confront({ pivot, verdict, recordings: new Map([["B", [message]]]), resources }).probes.filter((p) => p.probe.kind === "body")
 

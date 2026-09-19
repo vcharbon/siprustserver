@@ -377,19 +377,42 @@ pub fn content_type_is(raw: &[u8], media_type: &str) -> bool {
 /// the header block (RFC 3261 §7). `None` where no such line is present — the
 /// head is unterminated and the datagram states nothing about a body.
 ///
-/// The empty line is CRLFCRLF on the wire; a bare LFLF is accepted the way the
-/// lenient parser accepts it, so a capture normalised to LF still reads. The
-/// declared `Content-Length` is NOT applied: this returns what the datagram
-/// carried, and a consumer that needs the declared length reads
-/// [`content_length`].
+/// ONE head-end rule, the parser's scanner's: a line ends at CR, LF or CRLF,
+/// and an empty line ends the head. The arm a document writes a datagram in,
+/// the body layout it states and the check that reads them back all measure
+/// the head here, so they cannot disagree. The declared `Content-Length` is
+/// NOT applied: this returns what the datagram carried, and a consumer that
+/// needs the declared length reads [`content_length`].
 pub fn body(raw: &[u8]) -> Option<&[u8]> {
-    let crlf = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
-    let lf = raw.windows(2).position(|w| w == b"\n\n").map(|i| i + 2);
-    let cut = match (crlf, lf) {
-        (Some(a), Some(b)) => a.min(b),
-        (a, b) => a.or(b)?,
-    };
-    Some(&raw[cut..])
+    head_end(raw).map(|end| &raw[end..])
+}
+
+/// The offset just past the empty line that ends the head, `None` where the
+/// datagram has none.
+pub fn head_end(raw: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    loop {
+        if i >= raw.len() {
+            return None;
+        }
+        let line_start = i;
+        while i < raw.len() && raw[i] != b'\r' && raw[i] != b'\n' {
+            i += 1;
+        }
+        let empty = i == line_start;
+        if i < raw.len() && raw[i] == b'\r' {
+            i += 1;
+        }
+        if i < raw.len() && raw[i] == b'\n' {
+            i += 1;
+        }
+        if empty {
+            return Some(i);
+        }
+        if i == line_start {
+            return None;
+        }
+    }
 }
 
 /// The option tags a set-like header lists (`Require`, `Supported`,
@@ -969,5 +992,27 @@ Content-Length: 0\r\n\r\n"
         );
         assert_eq!(body(b"INVITE sip:b SIP/2.0\nl: 3\n\nv=0"), Some(&b"v=0"[..]), "bare LF");
         assert_eq!(body(b"INVITE sip:b SIP/2.0\r\nCSeq: 1 INVITE\r\n"), None, "unterminated");
+    }
+
+    /// ONE head-end rule: an empty line terminated by CR, LF or CRLF ends the
+    /// head, exactly where the parser's scanner ends its header block, so the
+    /// arm choice, the layout and the decode check never disagree on where a
+    /// body starts.
+    #[test]
+    fn the_head_ends_where_the_parser_s_scanner_ends_it() {
+        use crate::parser::custom::scanner::header_block;
+        let head_end = |raw: &[u8]| raw.len() - body(raw).expect("terminated").len();
+        for raw in [
+            &b"INFO sip:b SIP/2.0\r\nContent-Length: 3\r\n\r\nv=0"[..],
+            b"INFO sip:b SIP/2.0\nContent-Length: 3\n\nv=0",
+            b"INFO sip:b SIP/2.0\nContent-Length: 3\n\r\nv=0",
+            b"INFO sip:b SIP/2.0\rContent-Length: 3\r\rv=0",
+            b"INFO sip:b SIP/2.0\r\nContent-Length: 3\r\n\rv=0",
+            b"INFO sip:b SIP/2.0\r\nContent-Length: 6\r\n\r\n\x00\xff\r\n\r\n",
+        ] {
+            assert_eq!(head_end(raw), header_block(raw).end, "{raw:?}");
+            assert_eq!(body(raw), Some(&raw[header_block(raw).end..]), "{raw:?}");
+        }
+        assert_eq!(body(b"INFO sip:b SIP/2.0\rContent-Length: 3\r"), None, "unterminated by CR");
     }
 }

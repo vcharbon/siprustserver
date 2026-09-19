@@ -2023,8 +2023,9 @@ bytes — the recording keeps them as they crossed the socket (§14 item 12),
 read under the recorded layout's length, the parser's `Content-Length` bound —
 against the resource file's; `xml` and `sdp` decode both sides as UTF-8 first
 and apply their fold, and a side that is not UTF-8 under a text compare is a
-difference. A probe's sides are shown as the text they are where the bytes are
-UTF-8, standard base64 where they are not.
+difference. A probe's two sides are rendered ALIKE: as the texts they are where
+both are text — UTF-8 whose only control bytes are tab, CR and LF — and as
+standard base64 on both where either is not.
 
 A multipart body on an EXPECT is stated PART BY PART where extraction handed
 the parts over — the same `multipart` form the send side stores, every part a
@@ -2202,9 +2203,11 @@ One check vocabulary everywhere, borrowed from the upstream `e2e-model`:
 | `value` | with `eq` / `regex` | a literal, a regex, or a string carrying `${…}` accessors |
 
 `body` observes the message body as text where its bytes are UTF-8 and as
-standard base64 where they are not, chosen by the bytes alone; `body.b64`
-observes it as base64 always — the byte-exact assertion an author writes for a
-body that is not text.
+standard base64 where they are not, chosen by the bytes alone — UTF-8 validity
+and nothing else, unlike the confrontation's probe rendering (§8.3), which
+also treats a control byte as non-text; `body.b64` observes it as base64
+always — the byte-exact assertion an author writes for a body that is not
+text.
 
 `exists` and `absent` take no value, and `eq` / `regex` require one; lint refuses
 either mismatch.
@@ -2878,9 +2881,14 @@ Its whole job:
     `Content-Length` included (RFC 3261 §18.3) — beside the body's `body`
     layout (media type, the parser's `Content-Length`-bounded length, MIME
     parts located by offset), so a reader finds a part without splitting on a
-    boundary and every comparison reads the body under that one bound. A
-    layout its bytes cannot honour is refused. One decoder reads captures and
-    recordings alike; text is a rendering of the bytes, never the stored form.
+    boundary and every comparison reads the body under that one bound. The
+    interpreter writes a layout for every parsable datagram that carries a
+    body, so a line with no layout is read as bodiless everywhere; a layout
+    its bytes cannot honour is refused. The head ends by ONE rule, the
+    parser's — an empty line terminated by CR, LF or CRLF — for the arm, the
+    layout and every reader. One decoder reads captures and recordings alike;
+    text is a rendering of the bytes, never the stored form, and a viewer
+    draws the layout-bounded body and shows the excess as such.
 13. **Settle** (§10), then evaluate `postconditions`.
 
 **A failure does not end a run; being unable to GO ON does.** A run records every

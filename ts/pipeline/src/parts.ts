@@ -63,14 +63,15 @@ export const layoutFault = (tail: Uint8Array, layout: Flows.MsgBody): LayoutFaul
   const past = (layout.parts ?? []).find((p) => p.offset + p.len > layout.len)
   if (past !== undefined) {
     return {
-      stated: `a ${p2(past.content_type)} part at ${past.offset}+${past.len} reaches past the body`,
+      stated: `a ${bareType(past.content_type)} part at ${past.offset}+${past.len} reaches past the body`,
       carried: `the layout states a body of ${layout.len} bytes`
     }
   }
   return undefined
 }
 
-const p2 = (contentType: string): string => contentType.split(";")[0]?.trim() ?? contentType
+/** `type/subtype`, parameters dropped. */
+const bareType = (contentType: string): string => contentType.split(";")[0]?.trim() ?? contentType
 
 /**
  * The parts a body's layout locates inside its bytes: one entry per part in
