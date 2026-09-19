@@ -102,10 +102,11 @@ export const bytesOfBase64 = (text: string): Uint8Array => bytesOfLatin1(atob(te
 export const bytesOfUtf8 = (text: string): Uint8Array => utf8Encoder.encode(text)
 
 /**
- * Where the head ends: the index just past the empty line that closes the
- * header block (RFC 3261 §7); undefined where the head is unterminated. ONE
- * rule, the parser's: a line ends at CR, LF or CRLF, and an empty line ends
- * the head. Mirrors `sip_message::sniff::head_end`.
+ * Where the head ends: the index just past the empty line that ends the
+ * header block (RFC 3261 §7); undefined where the head is unterminated. CRLF
+ * is the line terminator (§25.1); a bare CR or LF is accepted as the parser
+ * accepts it — a stated leniency, so the parser and this reader end the head
+ * at the same byte. Mirrors `sip_message::sniff::head_end`.
  */
 export const headEndOf = (bytes: Uint8Array): number | undefined => {
   let i = 0

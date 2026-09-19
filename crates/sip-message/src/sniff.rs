@@ -377,8 +377,7 @@ pub fn content_type_is(raw: &[u8], media_type: &str) -> bool {
 /// the header block (RFC 3261 §7). `None` where no such line is present — the
 /// head is unterminated and the datagram states nothing about a body.
 ///
-/// ONE head-end rule, the parser's scanner's: a line ends at CR, LF or CRLF,
-/// and an empty line ends the head. The arm a document writes a datagram in,
+/// ONE head-end rule ([`head_end`]): the arm a document writes a datagram in,
 /// the body layout it states and the check that reads them back all measure
 /// the head here, so they cannot disagree. The declared `Content-Length` is
 /// NOT applied: this returns what the datagram carried, and a consumer that
@@ -387,8 +386,11 @@ pub fn body(raw: &[u8]) -> Option<&[u8]> {
     head_end(raw).map(|end| &raw[end..])
 }
 
-/// The offset just past the empty line that ends the head, `None` where the
-/// datagram has none.
+/// The offset just past the empty line that ends the header block (RFC 3261
+/// §7), `None` where the datagram has none. CRLF is the line terminator
+/// (§25.1); a bare CR or LF is accepted as the parser accepts it — a stated
+/// leniency, so a capture normalised to LF still reads and the parser and
+/// this reader end the head at the same byte.
 pub fn head_end(raw: &[u8]) -> Option<usize> {
     let mut i = 0;
     loop {

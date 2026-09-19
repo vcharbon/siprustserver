@@ -2883,12 +2883,14 @@ Its whole job:
     parts located by offset), so a reader finds a part without splitting on a
     boundary and every comparison reads the body under that one bound. The
     interpreter writes a layout for every parsable datagram that carries a
-    body, so a line with no layout is read as bodiless everywhere; a layout
-    its bytes cannot honour is refused. The head ends by ONE rule, the
-    parser's — an empty line terminated by CR, LF or CRLF — for the arm, the
-    layout and every reader. One decoder reads captures and recordings alike;
-    text is a rendering of the bytes, never the stored form, and a viewer
-    draws the layout-bounded body and shows the excess as such.
+    body, so a line with no layout is bodiless in the confrontation and the
+    cut; the viewer draws what the wire carried, marking bytes past a stated
+    layout as excess. A layout its bytes cannot honour is refused. The head
+    ends by ONE rule for the arm, the layout and every reader: the empty line
+    that ends the header block (RFC 3261 §7), CRLF being the terminator
+    (§25.1), a bare CR or LF accepted as the parser accepts them. One decoder
+    reads captures and recordings alike; text is a rendering of the bytes,
+    never the stored form.
 13. **Settle** (§10), then evaluate `postconditions`.
 
 **A failure does not end a run; being unable to GO ON does.** A run records every

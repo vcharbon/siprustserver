@@ -347,6 +347,17 @@ describe("the body the cut stores is layout-bounded", () => {
     expect(decompose(m, "uac1_0").resources[0]?.bytes).toEqual(BLOB)
   })
 
+  it("stores no body where no layout is stated, whatever the head declares or the tail carries", () => {
+    // No Content-Length at all: the parser read no body, so it wrote no layout,
+    // and the layout is the one rule — not the header, not the tail.
+    const m = trailing(BLOB, BLOB_TYPE, 0, false, "")
+    const { head, ...rest } = m as Flows.Msg & { head: string }
+    const unlengthed = { ...rest, head: head.replace(/Content-Length: \d+\r\n/, "") } as Flows.Msg
+    expect(unlengthed).not.toHaveProperty("body")
+    expect(expectBody(unlengthed, "uac1_r0")).toEqual({ body: { mode: "absent" }, resources: [], flags: [] })
+    expect(decompose(unlengthed, "uac1_0")).toEqual({ body: undefined, resources: [], flags: [], undecomposed: false })
+  })
+
   it("stores no body where the head declares none, whatever the tail carries and with no layout stated", () => {
     const m = trailing(BLOB, BLOB_TYPE, 0, false, "")
     expect(expectBody(m, "uac1_r0")).toEqual({ body: { mode: "absent" }, resources: [], flags: [] })

@@ -147,19 +147,17 @@ export type LaidOut = Wire.Msg & { readonly body?: { readonly len: number } | un
 
 /**
  * THE body of a message, under the one bound every reader uses: the layout's
- * `len` where the document states one (the parser's `Content-Length`); else
- * what the head declares, bounded by the tail; a head declaring `Content-Length:
- * 0`, or declaring nothing over an empty tail, carries none. Bytes the
- * datagram carried past the declared length (RFC 3261 §18.3) are on the wire,
- * never in the body.
+ * `len` where the document states one — the parser's `Content-Length`-bounded
+ * body — and nothing where it states none, since the extractor writes a
+ * layout for every message whose parser read a body. Bytes the datagram
+ * carried past that length (RFC 3261 §18.3) are on the wire, never in the
+ * body. The confronter reads a recorded line by the same rule.
  */
 export const boundedBody = (m: LaidOut): Uint8Array => {
-  const [, tail] = headBody(m)
   const stated = m.body?.len
-  if (stated !== undefined) return tail.subarray(0, Math.min(stated, tail.length))
-  const declared = headerValue(m, "Content-Length")?.trim()
-  if (declared === undefined || !/^\d+$/.test(declared)) return tail
-  return tail.subarray(0, Math.min(Number(declared), tail.length))
+  if (stated === undefined) return new Uint8Array(0)
+  const [, tail] = headBody(m)
+  return tail.subarray(0, Math.min(stated, tail.length))
 }
 
 /** The datagram's body plus its media type, or `undefined` when there is none. */
