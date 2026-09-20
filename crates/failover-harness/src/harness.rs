@@ -1019,6 +1019,11 @@ struct WorkerSpec {
 /// [`FailoverHarness::accept_rfc_deviations_from_now`].
 pub const RULE_CSEQ_IN_DIALOG_ORDER: &str = "cseq-in-dialog-order";
 
+/// The no-CANCEL-after-final audit rule (`rfc_rules::rules::cancel`), named here
+/// for the same reason: a partitioned owner's CANCEL ladder outlives its copy
+/// (ADR-0034) and crosses a healed plane after the other owner answered.
+pub const RULE_NO_CANCEL_AFTER_FINAL: &str = "no-cancel-after-final";
+
 /// `127.0.0.1:9400+n` — a stable per-ordinal repl listen address.
 fn repl_addr_for(index: usize) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 9400 + index as u16))

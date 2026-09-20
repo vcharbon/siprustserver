@@ -21,6 +21,8 @@
 //!             Put cell:    a `Put (p+1, 0)` carrying its teardown
 //!             Delete cell: the `Delete` its discharge propagated
 //!   after     an in-dialog request re-takes the call over from the Element
+//!   BYE       the SIP plane heals; the primary's CANCEL ladder, which outlives
+//!             the copy it tore down (ADR-0034), reaches the callee: 481 (§9.2)
 //! ```
 //!
 //! Neither may land: the primary's teardown is a branch off a view the survivor
@@ -60,7 +62,7 @@ use b2bua::limiter::NoopLimiter;
 use call::{CallBodyCodec, CallModelState, CdrEventType, LegState, MsgpackCodec, TimerType};
 use failover_harness::{
     worker_ordinals, FailoverHarness, PartitionRole, ProxySut, ReplicatedB2buaSut, WorkerHealth,
-    RULE_CSEQ_IN_DIALOG_ORDER,
+    RULE_CSEQ_IN_DIALOG_ORDER, RULE_NO_CANCEL_AFTER_FINAL,
 };
 use repl_net::frame::{Frame, Op};
 use repl_net::transport::Direction;
@@ -91,6 +93,14 @@ const NO_ANSWER_SEC: i64 = 30;
 const CSEQ_OVERLAP: &str =
     "ADR-0014 accepted trade-off: dual-owner in-dialog CSeq overlap while a partitioned \
      primary and its backup both hold the call";
+
+/// Why `no-cancel-after-final` is accepted from the SIP heal onward: the
+/// partitioned primary's ring-deadline CANCEL outlives the copy it tore down
+/// (ADR-0034) and crosses once the plane heals, on the proxy lane that relayed
+/// the other owner's ACK — the dual-owner residual of ADR-0014, answered 481.
+const STALE_CANCEL: &str =
+    "ADR-0014 accepted trade-off: a partitioned owner's CANCEL ladder (ADR-0034) crosses the \
+     healed SIP plane after its backup answered the same leg";
 
 /// The deployed shape: a failover-capable route (callback context) arming the
 /// per-b-leg `NoAnswer`, whose `no_answer_timeout` failure consult answers with
@@ -274,23 +284,38 @@ async fn sweep(
     out
 }
 
+/// Answer what the peers take once the SIP plane is healed: a keepalive OPTIONS
+/// with 200, and a CANCEL with 481 — the callee's INVITE transaction took its
+/// 2xx long ago (RFC 3261 §9.2). The CANCEL is the partitioned primary's: the
+/// ring deadline's CANCEL client transaction outlives the copy it tore down and
+/// keeps its Timer E ladder to Timer F (ADR-0034), so a retransmission crosses
+/// as soon as the cut lifts. Returns how many CANCELs the callee answered.
+async fn answer_healed_peers(alice: &Agent, bob: &Agent) -> usize {
+    if let Some(mut t) = alice.try_receive_tolerating("OPTIONS", &[]).await {
+        t.respond(200, "OK").await;
+    }
+    let mut cancels = 0;
+    while let Some(mut cancel) = bob.try_receive_tolerating("CANCEL", &["OPTIONS"]).await {
+        cancels += 1;
+        cancel.respond(481, "Call/Transaction Does Not Exist").await;
+    }
+    cancels
+}
+
 /// Pump until no node holds a trace of `call_ref`, then assert the cluster-wide
-/// release. Answers keepalive OPTIONS along the way.
+/// release. Answers the healed peers along the way and returns the CANCELs the
+/// callee took.
 async fn settle_released(
     fh: &FailoverHarness,
     alice: &Agent,
     bob: &Agent,
     nodes: &[&ReplicatedB2buaSut],
     call_ref: &str,
-) {
+) -> usize {
+    let mut cancels = 0;
     let released = fh
         .pump_until(Duration::from_secs(1), Duration::from_secs(90), async || {
-            if let Some(mut t) = alice.try_receive_tolerating("OPTIONS", &[]).await {
-                t.respond(200, "OK").await;
-            }
-            if let Some(mut t) = bob.try_receive_tolerating("OPTIONS", &[]).await {
-                t.respond(200, "OK").await;
-            }
+            cancels += answer_healed_peers(alice, bob).await;
             let mut clean = true;
             for n in nodes {
                 if n.holds_any_trace(call_ref).await {
@@ -302,6 +327,7 @@ async fn settle_released(
         .await;
     assert!(released, "every node released {call_ref} within Timer H of the teardown");
     failover_harness::assert_call_fully_released(nodes, call_ref).await;
+    cancels
 }
 
 /// The CDRs `nodes` wrote for `call_ref` that record an `Answer` event — the
@@ -598,14 +624,25 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
     let mut bye = dialog.bye().await;
     bob.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
     bye.expect_tolerating(200, &["OPTIONS"]).await;
+    fh.accept_rfc_deviations_from_now(RULE_NO_CANCEL_AFTER_FINAL, STALE_CANCEL);
     fh.restore_signalling(&pri_ord, pri_sip);
     let nodes: [&ReplicatedB2buaSut; 2] = [&*primary, survivor];
     let lost_before = survivor.metrics().repl_terminal_lost_total();
     match pending {
         // The primary still held its own torn-down copy at the heal, so it
         // reclaims the terminal the survivor defers to it and discharges the
-        // call within Timer H of the teardown.
-        Pending::Put => settle_released(&fh, &alice, &bob, &nodes[..], &call_ref).await,
+        // call within Timer H of the teardown. Its CANCEL ladder outlives that
+        // discharge (ADR-0034); how many steps cross the healed plane is where
+        // the discharge falls on it, and each draws a 481 and nothing else.
+        Pending::Put => {
+            let stale_cancels = settle_released(&fh, &alice, &bob, &nodes[..], &call_ref).await;
+            fh.mark(
+                &pri_ord,
+                None,
+                "stale CANCEL",
+                &format!("{stale_cancels} retransmission(s) reached the callee, each answered 481"),
+            );
+        }
         // Nobody reclaims it: this primary discharged the call behind the cut,
         // and its resurrection tombstone refuses the terminal the survivor
         // defers to it. That Element leaves at the replica TTL instead — one
@@ -615,15 +652,10 @@ async fn run(name: &str, title: &str, pending: Pending, heal_at: HealAt) {
             // Wait on the LOSS COUNTER, not on the body: reading the body is
             // what evicts it, so a probe loop over the store would race the reap
             // and destroy the very measurement. One second at a time, answering
-            // the keepalive OPTIONS the workers send along the way.
+            // the healed peers along the way.
             let aged_out = fh
                 .pump_until(Duration::from_secs(1), REPLICA_TTL_WAIT, async || {
-                    if let Some(mut t) = alice.try_receive_tolerating("OPTIONS", &[]).await {
-                        t.respond(200, "OK").await;
-                    }
-                    if let Some(mut t) = bob.try_receive_tolerating("OPTIONS", &[]).await {
-                        t.respond(200, "OK").await;
-                    }
+                    answer_healed_peers(&alice, &bob).await;
                     survivor.metrics().repl_terminal_lost_total() > lost_before
                 })
                 .await;
