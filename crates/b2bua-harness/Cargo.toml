@@ -20,7 +20,8 @@ scenario-harness = { path = "../scenario-harness" }
 # `TransportKind::Live` for the `dev_sut` playground binary's real-loopback
 # `Harness::with_network_and_clock` (same wiring the loadgen smoke suite uses).
 layer-harness = { path = "../layer-harness" }
-tokio = { workspace = true }
+# `test-util`: the shared `advance` steps the paused test clock.
+tokio = { workspace = true, features = ["test-util"] }
 # The shared `spawn_proxy_core` LB-SUT primitive (in `src/lib.rs`) is reused by
 # both this crate's `tests/common/mod.rs` (single-worker `spawn_lb_proxy`) and
 # the `failover-harness` crate (multi-worker `spawn_proxy_inner`), so the

@@ -9,9 +9,8 @@
 //! RFC 3261 §14.1 leaves the dialog in its prior state — the call carries on.
 
 use std::net::SocketAddr;
-use std::time::Duration;
 
-use b2bua_harness::{settle_until, B2buaSut};
+use b2bua_harness::{advance, settle_until, B2buaSut};
 use scenario_harness::run::RunReport;
 use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
@@ -39,19 +38,6 @@ const BOB_RSEQ: u32 = 4711;
 
 /// RFC 3261 T1: §3's first ladder rung falls here, and the second one T1 later.
 const T1_MS: u64 = 500;
-const STEP_MS: u64 = 50;
-
-async fn advance(ms: u64) {
-    let mut left = ms;
-    while left > 0 {
-        let step = left.min(STEP_MS);
-        sip_clock::testkit::settle().await;
-        tokio::time::advance(Duration::from_millis(step)).await;
-        sip_clock::testkit::settle().await;
-        left -= step;
-    }
-}
-
 /// Every copy of `status` the SUT put on `to`'s wire.
 fn responses_to(
     entries: &[RecordedSipEntry],

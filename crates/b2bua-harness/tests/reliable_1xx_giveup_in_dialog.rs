@@ -17,9 +17,8 @@
 //! goes to the other one.
 
 use std::net::SocketAddr;
-use std::time::Duration;
 
-use b2bua_harness::{settle_until, B2buaSut};
+use b2bua_harness::{advance, settle_until, B2buaSut, ADVANCE_STEP_MS};
 use scenario_harness::run::RunReport;
 use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
@@ -50,20 +49,7 @@ const T1_MS: u64 = 500;
 const GIVE_UP_MS: u64 = 64 * T1_MS;
 
 /// The advance step: small enough that no deadline in play is crossed blind.
-const STEP_MS: u64 = 50;
-
-/// Advance virtual time by `ms`, letting the simulated pipeline run at each
-/// instant it crosses (see `prack_reliable_ladder.rs` for why the step is small).
-async fn advance(ms: u64) {
-    let mut left = ms;
-    while left > 0 {
-        let step = left.min(STEP_MS);
-        sip_clock::testkit::settle().await;
-        tokio::time::advance(Duration::from_millis(step)).await;
-        sip_clock::testkit::settle().await;
-        left -= step;
-    }
-}
+const STEP_MS: u64 = ADVANCE_STEP_MS;
 
 /// When each request of `method` went from `from` to `to`, in send order.
 fn requests_to(

@@ -7,14 +7,8 @@
 //! side unless these mint points carry it — and `Reason` is the Q.850 cause a
 //! PSTN gateway and both CDRs are built on.
 
-use b2bua_harness::{settle_until, B2buaScene};
+use b2bua_harness::{settle_until, stated, B2buaScene};
 use sip_message::generators::InDialogMethod;
-use sip_message::header::HeaderName;
-use sip_message::SipRequest;
-
-fn stated(req: &SipRequest, name: &str) -> Option<String> {
-    req.raw_text(HeaderName::from(name)).next().map(|v| v.as_str().to_string())
-}
 
 /// Alice releases with a cause, a charging correlation, a vendor annotation and
 /// end-to-end user data; the BYE the SUT mints toward bob restates all four.

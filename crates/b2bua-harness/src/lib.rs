@@ -318,6 +318,40 @@ pub async fn settle_until(cond: impl Fn() -> bool) {
     }
 }
 
+/// The step [`advance`] walks in: small enough that every deadline a
+/// retransmission ladder puts in play (a T1 rung, a callee's own repeat) is
+/// landed on exactly, and the slack a wire-timing assertion allows.
+pub const ADVANCE_STEP_MS: u64 = 50;
+
+/// Advance virtual time by `ms` in [`ADVANCE_STEP_MS`] steps, settling the
+/// simulated pipeline at each instant crossed, so a datagram lands at the
+/// instant it is due and a self-rearming timer measures from where it fired.
+/// `Harness::advance` yields once per 100 ms chunk, which lets a datagram
+/// land chunks after it was sent — too coarse for an assertion about WHEN a
+/// copy reaches the wire. Paused-runtime tests only.
+pub async fn advance(ms: u64) {
+    let mut left = ms;
+    while left > 0 {
+        let step = left.min(ADVANCE_STEP_MS);
+        sip_clock::testkit::settle().await;
+        tokio::time::advance(std::time::Duration::from_millis(step)).await;
+        sip_clock::testkit::settle().await;
+        left -= step;
+    }
+}
+
+/// The first value `req` states under header `name`, as written on the wire.
+pub fn stated(req: &sip_message::SipRequest, name: &str) -> Option<String> {
+    req.raw_text(sip_message::header::HeaderName::from(name)).next().map(|v| v.as_str().to_string())
+}
+
+/// The first value `resp` states under header `name`, as written on the wire.
+pub fn stated_by_response(resp: &sip_message::SipResponse, name: &str) -> Option<String> {
+    resp.raw_text(sip_message::header::HeaderName::from(name))
+        .next()
+        .map(|v| v.as_str().to_string())
+}
+
 /// The distinct final statuses delivered to `to` for its initial-INVITE
 /// transaction (CSeq method INVITE) — the RFC 3261 §17.2.1
 /// one-final-per-transaction oracle shared by the cancelled-call scenarios

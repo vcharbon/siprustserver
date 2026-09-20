@@ -18,11 +18,10 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallFailureResponse, NewCallResponse, ScriptedDecisionEngine};
-use b2bua_harness::{settle_until, B2buaSut};
+use b2bua_harness::{advance, settle_until, B2buaSut, ADVANCE_STEP_MS};
 use scenario_harness::{Harness, ServerTxn, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_net::RecordedSipEntry;
@@ -52,27 +51,7 @@ const GIVE_UP_MS: u64 = 64 * T1_MS;
 
 /// The advance step: small enough that every deadline in play here (a 500 ms
 /// rung, a 408 ms callee repeat) is landed on exactly.
-const STEP_MS: u64 = 50;
-
-/// Advance virtual time by `ms`, letting the whole simulated pipeline run at
-/// each instant it crosses.
-///
-/// [`Harness::advance`] yields ONCE per 100 ms chunk, and the sim pipeline is
-/// several task hops deep, so a datagram lands chunks after the instant it was
-/// sent — a drift these assertions cannot afford, since WHEN a copy reaches the
-/// wire is their whole subject. Small steps also keep a self-rearming ladder
-/// honest: one big jump fires every elapsed rung at once and the re-arm then
-/// measures from the far side of the jump.
-async fn advance(ms: u64) {
-    let mut left = ms;
-    while left > 0 {
-        let step = left.min(STEP_MS);
-        sip_clock::testkit::settle().await;
-        tokio::time::advance(Duration::from_millis(step)).await;
-        sip_clock::testkit::settle().await;
-        left -= step;
-    }
-}
+const STEP_MS: u64 = ADVANCE_STEP_MS;
 
 fn reliable_183(uas: &mut ServerTxn) -> scenario_harness::Respond<'_> {
     uas.respond(183, "Session Progress")

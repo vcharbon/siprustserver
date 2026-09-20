@@ -22,12 +22,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::decision::ScriptedDecisionEngine;
-use b2bua_harness::{settle_until, B2buaSut};
+use b2bua_harness::{
+    advance, invite_final_statuses, settle_until, stated, stated_by_response, B2buaSut,
+};
 use call::{CdrEventType, TerminationCause};
 use scenario_harness::{Agent, Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
-use sip_message::header::HeaderName;
-use sip_message::{SipRequest, SipResponse};
 use sip_net::RecordedSipEntry;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -36,17 +36,16 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 /// RFC 3261 T1; RFC 3262 §3's ladder starts here and gives up at 64·T1.
 const T1_MS: u64 = 500;
 
-fn stated(req: &SipRequest, name: &str) -> Option<String> {
-    req.raw_text(HeaderName::from(name)).next().map(|v| v.as_str().to_string())
-}
-
-fn stated_resp(resp: &SipResponse, name: &str) -> Option<String> {
-    resp.raw_text(HeaderName::from(name)).next().map(|v| v.as_str().to_string())
-}
-
 /// Start lines of every datagram `agent` received, in arrival order.
 fn start_lines(agent: &Agent) -> Vec<String> {
     agent.wire_view().iter().map(|e| e.start_line()).collect()
+}
+
+/// The method a raw message's `CSeq` names.
+fn cseq_method(raw: &str) -> Option<&str> {
+    raw.split("\r\n")
+        .find_map(|l| l.strip_prefix("CSeq:"))
+        .and_then(|v| v.split_whitespace().nth(1))
 }
 
 /// The datagrams `from` put on `to`'s wire whose start line opens with
@@ -64,26 +63,6 @@ fn sent(
         .collect();
     out.sort_by_key(|(ms, _)| *ms);
     out
-}
-
-/// Whether a raw message answers the INVITE transaction (its `CSeq` names
-/// INVITE).
-fn answers_invite(raw: &str) -> bool {
-    raw.split("\r\n").any(|l| l.starts_with("CSeq:") && l.ends_with("INVITE"))
-}
-
-/// Advance virtual time by `ms` in small steps, settling the simulated
-/// pipeline at each instant crossed, so a datagram lands at the instant it
-/// is due and not chunks later.
-async fn advance(ms: u64) {
-    let mut left = ms;
-    while left > 0 {
-        let step = left.min(50);
-        sip_clock::testkit::settle().await;
-        tokio::time::advance(Duration::from_millis(step)).await;
-        sip_clock::testkit::settle().await;
-        left -= step;
-    }
 }
 
 async fn reaped(b2bua: &B2buaSut) {
@@ -185,7 +164,7 @@ async fn caller_bye_crossing_the_callees_answer_confirms_and_releases_the_callee
         .wire_view()
         .iter()
         .map(|e| String::from_utf8_lossy(&e.raw).to_string())
-        .filter(|raw| raw.starts_with("SIP/2.0 200") && answers_invite(raw))
+        .filter(|raw| raw.starts_with("SIP/2.0 200") && cseq_method(raw) == Some("INVITE"))
         .count();
     assert_eq!(invite_2xx, 0, "the crossing 2xx never reaches a caller already rejected: {seen:?}");
     assert_eq!(
@@ -227,6 +206,11 @@ async fn caller_bye_crossing_the_callees_answer_confirms_and_releases_the_callee
 /// The callee's release answers the caller's INVITE in the same turn, so the
 /// caller's BYE always lands on a leg that already carries its final: the
 /// "terminating, INVITE still unanswered" shape is not reachable this way.
+///
+/// Ordering this test depends on: bob's BYE is sent first and the simulated
+/// network delivers same-instant datagrams in order, so his BYE is processed
+/// before alice's and the 503 precedes her BYE. Were alice's BYE processed
+/// first, the caller's early-dialog BYE would answer the INVITE 487 instead.
 #[tokio::test(start_paused = true)]
 async fn callee_early_bye_then_caller_bye_leaves_every_transaction_one_final() {
     let h = Harness::with_transit_delay("b2bua-early-dialog-bye-callee-first", 100);
@@ -265,25 +249,16 @@ async fn callee_early_bye_then_caller_bye_leaves_every_transaction_one_final() {
     h.advance(Duration::from_secs(2)).await;
     reaped(&b2bua).await;
     let report = h.finish().await;
-    let entries = report.entries();
-    let invite_finals: Vec<(u64, String)> = sent(&entries, b2bua.addr, alice_addr, "SIP/2.0 ")
-        .into_iter()
-        .filter(|(_, raw)| answers_invite(raw) && !raw.starts_with("SIP/2.0 1"))
-        .collect();
     assert_eq!(
-        invite_finals.len(),
-        1,
-        "exactly one INVITE final on alice's wire, got {:?}",
-        invite_finals
-            .iter()
-            .map(|(_, r)| r.lines().next().unwrap_or_default().to_string())
-            .collect::<Vec<_>>()
+        invite_final_statuses(&report, alice_addr),
+        [503],
+        "exactly one INVITE final on alice's wire: the callee's release, answered unanswered"
     );
-    let bye_finals: Vec<(u64, String)> = sent(&entries, b2bua.addr, alice_addr, "SIP/2.0 ")
+    let bye_finals = sent(&report.entries(), b2bua.addr, alice_addr, "SIP/2.0 ")
         .into_iter()
-        .filter(|(_, raw)| raw.split("\r\n").any(|l| l.starts_with("CSeq:") && l.ends_with("BYE")))
-        .collect();
-    assert_eq!(bye_finals.len(), 1, "alice's BYE gets exactly one final");
+        .filter(|(_, raw)| cseq_method(raw) == Some("BYE"))
+        .count();
+    assert_eq!(bye_finals, 1, "alice's BYE gets exactly one final");
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one record");
     let t = cdrs[0].termination.as_ref().expect("terminated");
@@ -301,13 +276,6 @@ async fn callee_early_bye_then_caller_bye_leaves_every_transaction_one_final() {
 #[tokio::test(start_paused = true)]
 async fn caller_bye_on_a_reliable_early_dialog_ends_the_provisional_ladder() {
     let h = Harness::with_transit_delay("b2bua-early-dialog-bye-100rel", 1);
-    h.waive(
-        WaiverScope::rule(
-            "unacked-reliable-provisional",
-            "alice BYEs instead of PRACKing — the subject is the ladder's end with the setup",
-        )
-        .conditional(),
-    );
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let bob = h.agent("bob", "127.0.0.1:5074").await;
     let b2bua =
@@ -329,7 +297,7 @@ async fn caller_bye_on_a_reliable_early_dialog_ends_the_provisional_ladder() {
         .await;
     let ringing = call.expect(180).await;
     assert!(
-        stated_resp(&ringing, "RSeq").is_some(),
+        stated_by_response(&ringing, "RSeq").is_some(),
         "the relayed 180 is reliable under this stack's own RSeq"
     );
 
@@ -373,6 +341,8 @@ async fn caller_bye_on_a_reliable_early_dialog_ends_the_provisional_ladder() {
 /// caller holds two early dialogs. Her BYE on one of them ends the setup:
 /// one CANCEL toward the callee (§9.1: CANCEL is per transaction), one 487
 /// on the INVITE, and §12.3 ends every early dialog with that non-2xx final.
+/// The 487 is matched by branch (§17.1.1) and no rule names its tag, so this
+/// stack sends it under the first a-facing tag whichever dialog the BYE named.
 #[tokio::test(start_paused = true)]
 async fn caller_bye_on_one_of_two_forked_early_dialogs_ends_the_whole_setup() {
     let h = Harness::with_transit_delay("b2bua-early-dialog-bye-forked", 1);
@@ -391,14 +361,14 @@ async fn caller_bye_on_one_of_two_forked_early_dialogs_ends_the_whole_setup() {
     let fork2_atag = p2.to().tag().expect("fork 2 a-facing tag").to_string();
     assert_ne!(fork1_atag, fork2_atag, "two early dialogs on the caller's face");
 
-    // ── alice BYEs fork 1's early dialog ──
-    let mut bye = call.send_request(InDialogMethod::Bye).with_to_tag(&fork1_atag).send().await;
+    // ── alice BYEs fork 2's early dialog ──
+    let mut bye = call.send_request(InDialogMethod::Bye).with_to_tag(&fork2_atag).send().await;
     bye.expect(200).await;
     let rejected = call.expect(487).await;
-    let rejected_tag = rejected.to().tag().expect("the 487 carries a tag").to_string();
-    assert!(
-        rejected_tag == fork1_atag || rejected_tag == fork2_atag,
-        "the 487 goes out under a tag alice holds ({fork1_atag} or {fork2_atag}), not {rejected_tag}"
+    assert_eq!(
+        rejected.to().tag(),
+        Some(fork1_atag.as_str()),
+        "the 487 goes out under the first a-facing tag, not the BYE'd dialog's"
     );
 
     // ── one CANCEL for the one INVITE transaction; the 487 comes from a fork ──
