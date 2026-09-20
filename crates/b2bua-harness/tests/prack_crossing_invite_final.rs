@@ -40,7 +40,7 @@ async fn reaped(b2bua: &B2buaSut) {
 /// ```text
 ///   INVITE(100rel) → 180(100rel, RSeq) → PRACK ⇒ PRACK
 ///   600 ⇐ 600 ; ACK ⇒ ACK           [the final crosses the PRACK's answer]
-///   200(PRACK) ⇐                     [this stack's, as the a-face UAS]
+///   200(PRACK) ⇐                     [this stack's, as the a-face UAS, behind the final]
 ///              ⇐ 481(PRACK)          [absorbed]
 /// ```
 #[tokio::test(start_paused = true)]
@@ -81,10 +81,10 @@ async fn the_callees_late_prack_answer_after_his_final_is_absorbed() {
     let mut prack = call.try_prack(&ringing).await.expect("alice PRACKs the reliable 180");
     let mut bob_prack = bob.receive("PRACK").await;
     uas.respond(600, "Busy Everywhere").await;
-    let answer = prack.expect(200).await;
-    assert_eq!(answer.cseq().method(), sip_message::Method::Prack);
     call.expect(600).await; // auto-ACKed on the INVITE's branch (§17.1.1.3)
     bob.receive("ACK").await;
+    let answer = prack.expect(200).await;
+    assert_eq!(answer.cseq().method(), sip_message::Method::Prack);
 
     // ── bob answers the PRACK only now: §3's 481, the provisional is gone ──
     bob_prack.respond(481, "Call/Transaction Does Not Exist").await;
@@ -120,11 +120,12 @@ async fn an_unanswered_relayed_prack_is_answered_by_the_stack_after_the_final() 
     let mut prack = call.try_prack(&ringing).await.expect("alice PRACKs the reliable 180");
     let _bob_prack = bob.receive("PRACK").await;
     uas.respond(600, "Busy Everywhere").await;
-    // Nothing from bob. The caller's PRACK still draws a final from this stack.
-    let answer = prack.expect(200).await;
-    assert_eq!(answer.cseq().method(), sip_message::Method::Prack);
     call.expect(600).await;
     bob.receive("ACK").await;
+    // Nothing from bob. The caller's PRACK still draws a final from this stack,
+    // behind the INVITE's own.
+    let answer = prack.expect(200).await;
+    assert_eq!(answer.cseq().method(), sip_message::Method::Prack);
 
     h.advance(Duration::from_secs(1)).await;
     reaped(&b2bua).await;

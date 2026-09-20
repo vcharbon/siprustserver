@@ -617,20 +617,16 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     .response()
                     .map(|r| (r.status() as i64, r.reason().to_string()))
                     .unwrap_or((500, "Server Error".into()));
-                // Tear the failed leg down + record the reject. The relay/terminate
-                // (or failover) is decided next.
-                let mut actions = vec![
-                    RuleAction::AddCdrEvent {
-                        event_type: CdrEventType::Reject,
-                        leg_id: b.clone(),
-                        status_code: Some(status),
-                        reason: Some(reason.to_string()),
-                    },
-                    RuleAction::TerminateLeg {
-                        leg_id: b.clone(),
-                        bye_disposition: Some(ByeDisposition::Rejected),
-                    },
-                ];
+                // Record the reject; the relay/terminate (or failover) is
+                // decided next, and the failed leg is torn down after it so
+                // the caller's final leaves before the answers the teardown
+                // owes her (a PRACK the final crossed, `reject_pending_non_invites`).
+                let mut actions = vec![RuleAction::AddCdrEvent {
+                    event_type: CdrEventType::Reject,
+                    leg_id: b.clone(),
+                    status_code: Some(status),
+                    reason: Some(reason.to_string()),
+                }];
                 match ctx.call.callback_context() {
                     // Failover-capable call → ask /call/failure (origin external).
                     // The result (call-failure-result internal event) drives either
@@ -667,6 +663,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                         actions.push(RuleAction::MergeCallExt {
                             ext: crate::rules::relay::failure_headers_ext(ctx.response()),
                         });
+                        actions.push(RuleAction::TerminateLeg {
+                            leg_id: b.clone(),
+                            bye_disposition: Some(ByeDisposition::Rejected),
+                        });
                         actions.push(RuleAction::FailureAsyncHttp {
                             request: serde_json::json!({
                                 "callback_context": cbctx,
@@ -682,6 +682,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     // tear the whole call down (the pre-failover behaviour).
                     None => {
                         actions.push(RuleAction::RelayToPeer { transform: no_transform() });
+                        actions.push(RuleAction::TerminateLeg {
+                            leg_id: b.clone(),
+                            bye_disposition: Some(ByeDisposition::Rejected),
+                        });
                         actions.push(RuleAction::TerminateCall {
                             cause: TerminationCause::RemoteFinal,
                             by_leg: Some(b.clone()),
