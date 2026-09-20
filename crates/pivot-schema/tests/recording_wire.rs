@@ -213,6 +213,21 @@ fn the_layout_is_content_length_bounded_while_the_arm_keeps_every_byte() {
     );
 }
 
+/// A datagram that states no `Content-Length` carries the remainder as its
+/// body (RFC 3261 §18.3): the line states a layout for it, bounded by the
+/// datagram's tail, the same bound the parser gives every reader.
+#[test]
+fn a_datagram_without_content_length_states_its_layout() {
+    let mut wire = b"INFO sip:b@h SIP/2.0\r\nVia: SIP/2.0/UDP a.invalid;branch=z9hG4bK1\r\nFrom: <sip:a@h>;tag=a1\r\nTo: <sip:b@h>;tag=b1\r\nCall-ID: c1@a.invalid\r\nCSeq: 2 INFO\r\nMax-Forwards: 70\r\nContent-Type: application/vnd.example.blob\r\n\r\n".to_vec();
+    wire.extend_from_slice(BLOB);
+    let message = line_for(1, &wire);
+    assert_eq!(message.wire(), wire);
+    let layout = message.body.as_ref().expect("the body is the remainder, so a layout is stated");
+    assert_eq!(layout.len, BLOB.len());
+    assert_eq!(layout.content_type, "application/vnd.example.blob");
+    assert_eq!(message.payload().body().as_deref(), Some(BLOB));
+}
+
 /// A writer's lie is refused, not stored: a layout whose parts reach past its
 /// own `len`, or whose `len` reaches past the datagram's tail, is no layout.
 #[test]
