@@ -15,6 +15,12 @@
  * the same line, so a reader never has to guess whether a cell failed or never
  * ran. A cell whose document declares its lane BLOCKED is not red either: it
  * leaves a `skipped.json` and never reaches the interpreter.
+ *
+ * A cell is INTERRUPTIBLE: an interruption reaches the interpreter's process
+ * (SIGTERM, then SIGKILL after the toolchain's grace), and the cell leaves
+ * `error.txt` saying `interrupted` where its bundle would have been. It
+ * answers nothing — its fiber is interrupted — so the caller counts it from
+ * what it admitted and what landed.
  */
 import { Body, Bundle, Campaign, CellHits, Confrontation, E2e, Flows, Pivot, Tokens } from "@sip/contracts"
 import { Classifier, Confront, FlowsFile, Reclassifier } from "@sip/pipeline"
@@ -94,6 +100,9 @@ export interface CellRun {
   readonly detail: string
 }
 
+/** What an interrupted cell leaves in its `error.txt`. */
+export const INTERRUPTED = "interrupted"
+
 export const runCell = Effect.fn("Driver.runCell")(function* (
   cell: Campaign.CampaignCell,
   context: CellContext
@@ -107,7 +116,16 @@ export const runCell = Effect.fn("Driver.runCell")(function* (
     cell.kind === "rust-test"
       ? runRustTest(cell, context, absolute)
       : runPivotReplay(cell, context, absolute)
-  const outcome = yield* guarded(body)
+  const outcome = yield* guarded(body).pipe(
+    Effect.onInterrupt(() =>
+      Effect.ignore(
+        Effect.andThen(
+          fs.makeDirectory(absolute, { recursive: true }),
+          fs.writeFileString(path.join(absolute, ERROR_FILE), `${INTERRUPTED}\n`)
+        )
+      )
+    )
+  )
 
   if (outcome.crashed) {
     yield* fs.makeDirectory(absolute, { recursive: true })

@@ -15,7 +15,13 @@
  * stdout and stderr are drained concurrently with the wait on the exit code: a
  * flows document is megabytes, and a pipe nobody reads is a process that never
  * exits.
+ *
+ * A run is INTERRUPTIBLE: the process lives in the run's scope, so a fiber
+ * interrupted mid-run sends it SIGTERM on the way out and, where the caller
+ * stated a `forceKillAfter`, SIGKILL once that grace is over. The exit code is
+ * awaited either way, so nothing outlives the run that started it.
  */
+import type * as Duration from "effect/Duration"
 import * as Effect from "effect/Effect"
 import * as Schema from "effect/Schema"
 import * as Stream from "effect/Stream"
@@ -40,6 +46,11 @@ export interface Output {
 export interface RunOptions {
   readonly cwd?: string
   readonly env?: Record<string, string>
+  /**
+   * How long a process interrupted mid-run has after SIGTERM before it is
+   * SIGKILLed. Absent, the run waits for SIGTERM to be honoured.
+   */
+  readonly forceKillAfter?: Duration.Input
 }
 
 /** The process could not be started, or its pipes failed under it. */
@@ -83,7 +94,9 @@ export const runner: Effect.Effect<Runner, never, ChildProcessSpawner.ChildProce
         const handle = yield* spawner.spawn(
           ChildProcess.make(binary, [...args], {
             ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
-            ...(options?.env === undefined ? {} : { env: options.env, extendEnv: true })
+            ...(options?.env === undefined ? {} : { env: options.env, extendEnv: true }),
+            killSignal: "SIGTERM",
+            ...(options?.forceKillAfter === undefined ? {} : { forceKillAfter: options.forceKillAfter })
           })
         )
         const [stdout, stderr, exitCode] = yield* Effect.all(

@@ -135,6 +135,8 @@ export interface RigOptions {
   readonly routing?: Layer.Layer<RoutingCompiler.Service>
   /** Collects every path a cell reads WHOLE, for a test about how a file is read. */
   readonly reads?: Array<string>
+  /** The interpreter stub, where a test wants another than the one that answers at once. */
+  readonly replay?: string
 }
 
 /** The platform file system, telling `reads` every whole-file read that goes through it. */
@@ -169,7 +171,9 @@ export const rig = (options: RigOptions = {}) =>
         ? NodeServices.layer
         : Layer.mergeAll(NodeServices.layer, watching(options.reads))
     ),
-    Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ REPLAY_BIN: fixture("stub-replay.sh") })))
+    Layer.provide(
+      ConfigProvider.layer(ConfigProvider.fromUnknown({ REPLAY_BIN: options.replay ?? fixture("stub-replay.sh") }))
+    )
   )
 
 /** The stub crate runner, taking its exit code and whether it reports from argv. */

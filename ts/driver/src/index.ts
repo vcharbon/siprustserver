@@ -36,7 +36,7 @@ export {
   type CampaignOptions,
   type CampaignRun
 } from "./campaign.js"
-export { cargoTest, runCell, type CellContext, type CellRun, type TestInvocation } from "./cells.js"
+export { cargoTest, INTERRUPTED, runCell, type CellContext, type CellRun, type TestInvocation } from "./cells.js"
 export { defaultTs, driver, run } from "./cli.js"
 export { LanePresets, LaneUnknown } from "./lanes.js"
 export * as Layout from "./layout.js"
