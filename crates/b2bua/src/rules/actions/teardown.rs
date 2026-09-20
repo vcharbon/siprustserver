@@ -25,7 +25,7 @@ use crate::rules::invariants::GLOBAL_CALL_MACHINE;
 use crate::rules::model::RuleContext;
 use crate::rules::relay;
 
-use super::select::find_pending_dialog;
+use super::select::{dialog_identity_tag, find_pending_dialog};
 use super::ActionExecutor;
 
 impl ActionExecutor<'_> {
@@ -152,6 +152,7 @@ impl ActionExecutor<'_> {
                         // Trying/Early — `answer_a_leg_if_unanswered` still
                         // owes that caller its 503.
                         if call.a_leg.invite_final_sent.is_some() {
+                            self.reject_pending_non_invites(call, fx, &id);
                             *call = set_leg_state(call.clone(), &id, LegState::Terminated);
                         }
                     } else {
@@ -165,6 +166,7 @@ impl ActionExecutor<'_> {
                         // `Cancelling` so a 200 racing the CANCEL is reaped by
                         // `cancel-200-crossing` rather than orphaning the callee.
                         *call = set_leg_disposition(call.clone(), &id, LegDisposition::Cancelling);
+                        self.reject_pending_non_invites(call, fx, &id);
                         *call = set_leg_state(call.clone(), &id, LegState::Terminated);
                     }
                 }
@@ -219,6 +221,7 @@ impl ActionExecutor<'_> {
             }
             _ => {}
         }
+        self.reject_pending_non_invites(call, fx, leg_id);
         *call = set_leg_state(call.clone(), leg_id, LegState::Terminated);
     }
 
@@ -249,8 +252,10 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         bye_disposition: Option<ByeDisposition>,
     ) {
-        // The terminal leg's ladders die with it (RFC 3262 §3).
+        // The terminal leg's ladders die with it (RFC 3262 §3), and the
+        // requests relayed toward it are answered by this stack (§8.2.6).
         self.retire(call, fx, Scope::Leg(leg_id));
+        self.reject_pending_non_invites(call, fx, leg_id);
         *call = set_leg_state(call.clone(), leg_id, LegState::Terminated);
         if let Some(bd) = bye_disposition {
             *call = set_bye_disposition(call.clone(), leg_id, bd);
@@ -411,6 +416,96 @@ impl ActionExecutor<'_> {
             outbound_cseq,
         );
         self.retire(call, fx, Scope::Transaction { leg_id, cseq: outbound_cseq });
+    }
+
+    /// Answers every relayed non-INVITE request still pending toward `leg_id`
+    /// where that leg goes `Terminated`: its target's answer relays no further,
+    /// and RFC 3261 §8.2.6 owes the originator a final. A PRACK draws 200 — it
+    /// named a provisional this stack showed under its own number (RFC 3262
+    /// §3); anything else 481. The snapshot is dropped so a late answer from
+    /// the target is never a second final (§17.2.1). A confirmed leg being
+    /// BYEd keeps its relays; a pending INVITE is [`Self::reject_pending_reinvite`]'s.
+    pub(super) fn reject_pending_non_invites(
+        &self,
+        call: &mut Call,
+        fx: &mut HandlerEffects,
+        leg_id: &str,
+    ) {
+        let leg = if call.a_leg.leg_id == leg_id {
+            Some(&call.a_leg)
+        } else {
+            call.b_legs.iter().find(|l| l.leg_id == leg_id)
+        };
+        let Some(leg) = leg else { return };
+        let pending: Vec<(String, call::PendingRequest)> = leg
+            .dialogs
+            .iter()
+            .flat_map(|d| {
+                let tag = dialog_identity_tag(leg_id, d);
+                d.ext
+                    .inbound_pending_requests
+                    .iter()
+                    .filter(|p| !p.method.eq_ignore_ascii_case("INVITE"))
+                    .map(move |p| (tag.clone(), p.clone()))
+            })
+            .collect();
+        let originator =
+            call::helpers::get_peer(call, leg_id).unwrap_or(call.a_leg.leg_id.as_str()).to_string();
+        for (identity_tag, p) in pending {
+            *call = call::helpers::remove_pending_request(
+                call.clone(),
+                leg_id,
+                &identity_tag,
+                p.outbound_cseq,
+            );
+            // §18.2.2: the final goes to the originator's top Via sent-by.
+            let Some(dest) =
+                p.source_vias.first().and_then(|v| super::relay_response::via_sent_by(v))
+            else {
+                tracing::warn!(
+                    call_ref = %call.call_ref,
+                    leg_id = %leg_id,
+                    method = %p.method,
+                    "pending relay left unanswered — the originator's top Via names no destination"
+                );
+                continue;
+            };
+            let method = p.method.to_ascii_uppercase();
+            let opts = super::relay_response::snapshot_response_opts(
+                &p,
+                &method,
+                Vec::new(),
+                None,
+                Vec::new(),
+                None,
+            );
+            let (status, reason) = if method == "PRACK" {
+                (200, "OK")
+            } else {
+                (481, "Call/Transaction Does Not Exist")
+            };
+            fx.outbound.push(OutboundSipEffect {
+                body: OutboundBody::Response(generators::generate_relayed_response(
+                    status, reason, &opts,
+                )),
+                mode: OutboundTxnMode::ServerResponse,
+                destination: dest,
+                label: format!("{status} {method} → {originator}"),
+                leg_id: Some(originator.clone()),
+                provenance: Provenance::Authored,
+            });
+        }
+    }
+
+    /// [`Self::reject_pending_non_invites`] over every leg, for a termination
+    /// that brings them all to `Terminated` at once (`TerminateCall`).
+    pub(super) fn reject_all_pending_non_invites(&self, call: &mut Call, fx: &mut HandlerEffects) {
+        let ids: Vec<String> = std::iter::once(call.a_leg.leg_id.clone())
+            .chain(call.b_legs.iter().map(|l| l.leg_id.clone()))
+            .collect();
+        for id in ids {
+            self.reject_pending_non_invites(call, fx, &id);
+        }
     }
 
     /// End the relayed re-INVITE still pending on `leg_id`'s dialog under

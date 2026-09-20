@@ -135,6 +135,7 @@ impl ActionExecutor<'_> {
                 fx.critical.push(CriticalStateEffect::CancelAllTimers);
             }
             RuleAction::TerminateCall { cause, by_leg } => {
+                self.reject_all_pending_non_invites(call, fx);
                 terminate_all(call, self.now_ms, *cause, by_leg.clone());
             }
             RuleAction::BeginTermination { reason, cause, by_leg } => {
