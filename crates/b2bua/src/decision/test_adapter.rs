@@ -416,7 +416,7 @@ fn failure_from_context(req: &CallFailureRequest) -> CallFailureResponse {
 ///   - `refer-allow-c`    → allow to `destination` (default 127.0.0.1:5667)
 ///   - default / missing  → reject 603/Declined
 pub fn default_call_refer(req: &CallReferRequest) -> ReferOutcome {
-    let raw = match req.sip_headers.get("X-Api-Call") {
+    let raw = match req.sip_header("X-Api-Call") {
         Some(v) => v,
         None => {
             return ReferOutcome::Allow(CallReferResponse::Reject {
@@ -836,7 +836,7 @@ mod tests {
 
     fn req_with_header(name: &str, value: &str) -> NewCallRequest {
         let mut r = req("bob");
-        r.sip_headers.insert(name.into(), vec![value.into()]);
+        r.sip_headers.push((name.into(), value.into()));
         r
     }
 

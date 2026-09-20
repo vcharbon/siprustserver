@@ -32,28 +32,45 @@ pub struct NewCallRequest {
     pub contact: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub content_type: Option<String>,
-    /// All headers not sent as a top-level field (this is where `X-*` land).
-    ///
-    /// Multi-valued: a header appearing on N separate lines keeps **all N**
-    /// values, in wire order, under its name. `History-Info`, `Diversion`, and
-    /// `P-Asserted-Identity` are multi-hop/multi-instance by nature — collapsing
-    /// them to the last line silently drops every earlier hop before the
-    /// decision engine sees them. Use [`NewCallRequest::sip_header`] for the
-    /// common single-value read.
+    /// Every header not sent as a top-level field (this is where `X-*` land), as
+    /// `(name, value)` lines in wire order, one entry per line, duplicates kept, the
+    /// name under its wire spelling. Order is the message's own: RFC 3261 §7.3.1
+    /// makes a header name case-insensitive and several lines of one name one
+    /// ordered set, so two spellings of one name (`History-Info`, `Diversion`,
+    /// `P-Asserted-Identity` hop chains split across elements) interleave exactly as
+    /// received. Read by name with [`NewCallRequest::sip_header`] and
+    /// [`NewCallRequest::sip_header_values`], which fold case.
     #[serde(default)]
-    pub sip_headers: BTreeMap<String, Vec<String>>,
+    pub sip_headers: Vec<(String, String)>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub sip_body: Option<String>,
 }
 
 impl NewCallRequest {
-    /// First value of a repeatable header, for the common case where a consumer
-    /// wants a single value (e.g. `X-Api-Call`). Returns `None` if the header is
-    /// absent or present with no value. For every instance, index `sip_headers`
-    /// directly.
+    /// First value of a repeatable header, name compared case-insensitively, for
+    /// the common case where a consumer wants a single value (e.g. `X-Api-Call`).
+    /// Returns `None` if the header is absent.
     pub fn sip_header(&self, name: &str) -> Option<&str> {
-        self.sip_headers.get(name).and_then(|v| v.first()).map(String::as_str)
+        first_header_value(&self.sip_headers, name)
     }
+
+    /// Every line of `name` in wire order, name compared case-insensitively.
+    pub fn sip_header_values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        header_values(&self.sip_headers, name)
+    }
+}
+
+/// The first value of `name` in `lines`, name compared case-insensitively.
+pub fn first_header_value<'a>(lines: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    lines.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+}
+
+/// Every value of `name` in `lines`, name compared case-insensitively, in order.
+pub fn header_values<'a, 'n: 'a>(
+    lines: &'a [(String, String)],
+    name: &'n str,
+) -> impl Iterator<Item = &'a str> + 'a {
+    lines.iter().filter(move |(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
 }
 
 /// A downstream SIP peer.
@@ -380,10 +397,19 @@ pub struct CallReferRequest {
     pub callback_context: Option<String>,
     pub refer_to: String,
     pub referred_by: Option<String>,
-    /// Non-structural REFER headers forwarded verbatim (incl. `X-Api-Call`).
-    pub sip_headers: BTreeMap<String, String>,
+    /// Non-structural REFER headers forwarded verbatim (incl. `X-Api-Call`), as
+    /// `(name, value)` lines in wire order, duplicates kept. Read by name with
+    /// [`CallReferRequest::sip_header`], which folds case.
+    pub sip_headers: Vec<(String, String)>,
     /// Call-scoped context, attached by the framework at dispatch time.
     pub snapshot: CallSnapshot,
+}
+
+impl CallReferRequest {
+    /// First value of `name`, compared case-insensitively.
+    pub fn sip_header(&self, name: &str) -> Option<&str> {
+        first_header_value(&self.sip_headers, name)
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -647,26 +647,32 @@ fn route_result_payload(
 
 // ── request parsers (seed-rule JSON → typed decision requests) ─────────────
 
+/// `[[name, value], …]` as emitted by a seed rule → header lines, wire order and
+/// duplicates preserved; absent or malformed → empty.
+fn parse_header_lines(v: Option<&serde_json::Value>) -> Vec<(String, String)> {
+    v.and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|pair| {
+                    let p = pair.as_array()?;
+                    Some((p.first()?.as_str()?.to_string(), p.get(1)?.as_str()?.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Rebuild a [`CallReferRequest`](crate::decision::CallReferRequest) from the
 /// JSON the seed rule emitted.
 fn parse_call_refer_request(v: &serde_json::Value) -> crate::decision::CallReferRequest {
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
-    let sip_headers = v
-        .get("sip_headers")
-        .and_then(|x| x.as_object())
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
     crate::decision::CallReferRequest {
         call_id: s("call_id").unwrap_or_default(),
         dialog_id: s("dialog_id").unwrap_or_default(),
         callback_context: s("callback_context"),
         refer_to: s("refer_to").unwrap_or_default(),
         referred_by: s("referred_by"),
-        sip_headers,
+        sip_headers: parse_header_lines(v.get("sip_headers")),
         snapshot: CallSnapshot::default(),
     }
 }
@@ -708,22 +714,7 @@ fn parse_call_failure_request(v: &serde_json::Value) -> CallFailureRequest {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
             timeout_kind: v.get("timeout_kind").and_then(|x| x.as_str()).map(str::to_string),
-            // `[[name, value], …]` — wire order and duplicates preserved.
-            sip_headers: v
-                .get("sip_headers")
-                .and_then(|x| x.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|pair| {
-                            let p = pair.as_array()?;
-                            Some((
-                                p.first()?.as_str()?.to_string(),
-                                p.get(1)?.as_str()?.to_string(),
-                            ))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+            sip_headers: parse_header_lines(v.get("sip_headers")),
         },
         snapshot: CallSnapshot::default(),
     }

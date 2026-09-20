@@ -51,12 +51,11 @@ fn refer_to_has_replaces(ctx: &RuleContext) -> bool {
         .is_some_and(|refer_to| refer_to.uri().escaped_header("Replaces").is_some())
 }
 
-/// Non-structural REFER headers forwarded verbatim to `/call/refer`. The
-/// transfer's own payload headers ride as typed request fields, so they are
-/// excluded alongside the stack-owned set.
-fn extract_sip_headers(
-    req: &sip_message::SipRequest,
-) -> serde_json::Map<String, serde_json::Value> {
+/// Non-structural REFER headers forwarded verbatim to `/call/refer` as
+/// `[[name, value], …]` in wire order, duplicates kept. The transfer's own payload
+/// headers ride as typed request fields, so they are excluded alongside the
+/// stack-owned set.
+fn extract_sip_headers(req: &sip_message::SipRequest) -> Vec<serde_json::Value> {
     const SKIP: &[HeaderName] = &[
         HeaderName::From,
         HeaderName::To,
@@ -70,14 +69,11 @@ fn extract_sip_headers(
         HeaderName::ReferTo,
         HeaderName::ReferredBy,
     ];
-    let mut out = serde_json::Map::new();
-    for h in req.headers() {
-        if SKIP.iter().any(|n| n.matches(&h.name)) {
-            continue;
-        }
-        out.insert(h.name.to_string(), serde_json::Value::String(h.value.to_string()));
-    }
-    out
+    req.headers()
+        .iter()
+        .filter(|h| !SKIP.iter().any(|n| n.matches(&h.name)))
+        .map(|h| serde_json::json!([h.name, h.value]))
+        .collect()
 }
 
 /// `Call-ID;to-tag=…;from-tag=…` from the referrer (B) leg's perspective.
@@ -198,7 +194,7 @@ pub fn transfer_seed_rules() -> Vec<RuleDefinition> {
                 }
                 request.insert(
                     "sip_headers".into(),
-                    serde_json::Value::Object(extract_sip_headers(req)),
+                    serde_json::Value::Array(extract_sip_headers(req)),
                 );
 
                 let first_notify = notify(&seed, SUB_STATE_ACTIVE_60, 100, "Trying");

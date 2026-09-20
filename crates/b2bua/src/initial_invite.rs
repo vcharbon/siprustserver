@@ -466,14 +466,15 @@ pub(crate) fn reject_call(
 }
 
 fn build_request(invite: &SipRequest) -> NewCallRequest {
-    let mut sip_headers: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for h in invite.headers() {
-        if STANDARD_HEADERS.iter().any(|n| n.matches(&h.name)) {
-            continue;
-        }
-        sip_headers.entry(h.name.to_string()).or_default().push(h.value.to_string());
-    }
+    // One `(name, value)` per wire line, in wire order: the order of a multi-line
+    // header is part of its meaning (RFC 7044 `History-Info` index chains), whatever
+    // spelling each line wears.
+    let sip_headers: Vec<(String, String)> = invite
+        .headers()
+        .iter()
+        .filter(|h| !STANDARD_HEADERS.iter().any(|n| n.matches(&h.name)))
+        .map(|h| (h.name.to_string(), h.value.to_string()))
+        .collect();
     NewCallRequest {
         call_id: invite.call_id().as_str().to_string(),
         ruri: invite.request_uri().to_string(),
@@ -795,19 +796,60 @@ mod multi_instance_header_tests {
 
         // Every hop of a multi-line header survives, in wire order.
         assert_eq!(
-            req.sip_headers.get("History-Info").map(Vec::as_slice),
-            Some(
-                &[
-                    "<sip:a@ex.com>;index=1".to_string(),
-                    "<sip:b@ex.com>;index=1.1".to_string(),
-                    "<sip:c@ex.com>;index=1.1.1".to_string(),
-                ][..]
-            ),
+            req.sip_header_values("History-Info").collect::<Vec<_>>(),
+            vec![
+                "<sip:a@ex.com>;index=1",
+                "<sip:b@ex.com>;index=1.1",
+                "<sip:c@ex.com>;index=1.1.1",
+            ],
         );
-        assert_eq!(req.sip_headers.get("Diversion").map(Vec::len), Some(2));
+        assert_eq!(req.sip_header_values("Diversion").count(), 2);
 
         // The single-value accessor returns the first instance for the common read.
         assert_eq!(req.sip_header("History-Info"), Some("<sip:a@ex.com>;index=1"));
         assert_eq!(req.sip_header("Absent"), None);
+    }
+
+    /// RFC 3261 §7.3.1: a header name is case-insensitive and its lines are one
+    /// ordered set, so a chain whose hops two elements spelled differently reaches
+    /// the decision engine in wire order, each line under the spelling it wore.
+    #[test]
+    fn build_request_keeps_wire_order_across_spellings() {
+        let invite = parse(
+            "INVITE sip:bob@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKx\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@example.com>;tag=1\r\n\
+             To: <sip:bob@example.com>\r\n\
+             Call-ID: multi-spelling\r\n\
+             CSeq: 1 INVITE\r\n\
+             History-Info: <sip:a@ex.com>;index=1\r\n\
+             X-Trunk: t1\r\n\
+             history-info: <sip:b@ex.com>;index=1.1\r\n\
+             HISTORY-INFO: <sip:c@ex.com>;index=1.1.1\r\n\
+             x-trunk: t2\r\n\
+             Content-Length: 0\r\n\r\n",
+        );
+        let req = build_request(&invite);
+        assert_eq!(
+            req.sip_headers,
+            vec![
+                ("Max-Forwards".to_string(), "70".to_string()),
+                ("History-Info".to_string(), "<sip:a@ex.com>;index=1".to_string()),
+                ("X-Trunk".to_string(), "t1".to_string()),
+                ("history-info".to_string(), "<sip:b@ex.com>;index=1.1".to_string()),
+                ("HISTORY-INFO".to_string(), "<sip:c@ex.com>;index=1.1.1".to_string()),
+                ("x-trunk".to_string(), "t2".to_string()),
+            ],
+        );
+        assert_eq!(
+            req.sip_header_values("History-Info").collect::<Vec<_>>(),
+            vec![
+                "<sip:a@ex.com>;index=1",
+                "<sip:b@ex.com>;index=1.1",
+                "<sip:c@ex.com>;index=1.1.1"
+            ],
+        );
+        assert_eq!(req.sip_header_values("x-TRUNK").collect::<Vec<_>>(), vec!["t1", "t2"]);
     }
 }

@@ -52,7 +52,7 @@ async fn a_spent_hop_count_reaches_the_decision_engine() {
     let decision = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(move |req| {
-                match req.sip_headers.get("Max-Forwards").and_then(|v| v.first()) {
+                match req.sip_header("Max-Forwards") {
                     Some(hops) if hops.trim() == "0" => reject(483, "Too Many Hops"),
                     // A backend that never sees the count could not tell these
                     // apart, so the ROUTE arm is what fails this test.
