@@ -1090,6 +1090,64 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ])
             },
         ),
+        // A caller's BYE on the early dialog its INVITE opened (RFC 3261 §15;
+        // the dialog is the local tag a relayed provisional stamped on the
+        // a-dialog, the a-leg itself reads Trying until answered) ends the
+        // setup: 200 to the BYE, 487 to the still-pending INVITE (§15.1.2
+        // recommends it), the ringing callee CANCELled by the termination, the
+        // record a caller release. A call already terminating keeps its
+        // teardown and only gets the two finals. Outranks `relay-bye`,
+        // `resolve-cross-bye` and `resolve-ended-leg-bye` (the termination
+        // stamps the early a-leg's BYE disposition), which answer the BYE
+        // alone and leave the INVITE transaction without its final.
+        rule(
+            "early-dialog-bye",
+            &["relay-bye", "resolve-cross-bye", "resolve-ended-leg-bye"],
+            Match::request()
+                .method("BYE")
+                .direction(Direction::FromA)
+                .leg_states(&[LegState::Trying, LegState::Early])
+                .filter(|ctx| {
+                    let a = ctx.call.a_leg();
+                    a.invite_final_sent.is_none()
+                        && a.dialogs.first().is_some_and(|d| !d.sip.local_tag.is_empty())
+                }),
+            |ctx| {
+                let a = ctx.source_leg_id.to_string();
+                let mut actions = vec![
+                    RuleAction::Respond {
+                        status: 200,
+                        reason: "OK".into(),
+                        body: vec![],
+                        content_type: None,
+                    },
+                    RuleAction::RespondToALeg {
+                        status: 487,
+                        reason: "Request Terminated".into(),
+                        header_updates: vec![],
+                        contacts: vec![],
+                    },
+                    RuleAction::TerminateLeg {
+                        leg_id: a.clone(),
+                        bye_disposition: Some(ByeDisposition::ByeReceived),
+                    },
+                ];
+                if ctx.call.state() == CallModelState::Active {
+                    actions.push(RuleAction::AddCdrEvent {
+                        event_type: CdrEventType::Bye,
+                        leg_id: a.clone(),
+                        status_code: None,
+                        reason: None,
+                    });
+                    actions.push(RuleAction::BeginTermination {
+                        reason: Some("BYE".into()),
+                        cause: TerminationCause::RemoteBye,
+                        by_leg: Some(a),
+                    });
+                }
+                ok(actions)
+            },
+        ),
         // A BYE from a live party of an Active call ends the session; a BYE on a
         // leg this stack already ended is `resolve-ended-leg-bye`'s.
         rule(

@@ -71,6 +71,36 @@ fn test_call() -> call::Call {
     build_initial_call(&invite(), src, &B2buaConfig::default(), 0)
 }
 
+/// A call whose a-leg already carries the early dialog `a1` (the tag a relayed
+/// or minted provisional pinned), the leg itself still Trying.
+fn call_with_early_a_dialog(a1: &str) -> call::Call {
+    let mut call = test_call();
+    call.a_leg.dialogs = vec![Dialog {
+        sip: StackDialog {
+            call_id: call.a_leg.call_id.clone(),
+            local_tag: a1.into(),
+            remote_tag: call.a_leg.from_tag.clone(),
+            local_uri: "sip:bob@host".into(),
+            remote_uri: "sip:alice@host".into(),
+            remote_target: "sip:alice@127.0.0.1:5060".into(),
+            local_cseq: 1,
+            route_set: vec![],
+        },
+        ext: B2buaDialogExt {
+            remote_cseq: Some(1),
+            inbound_pending_requests: vec![],
+            ack_branch: None,
+            pending_invite_txn: None,
+            cached_sdp: None,
+            pending_reinvite_2xx: None,
+            answered_2xx: None,
+            emitted_ack: None,
+            awaited_ack_cseq: None,
+        },
+    }];
+    call
+}
+
 #[test]
 fn timer_global_duration_selects_max_duration() {
     let call = test_call();
@@ -676,8 +706,9 @@ fn begin_termination_scrubs_per_leg_no_answer_entries() {
 
 #[test]
 fn in_dialog_bye_selects_relay_bye() {
-    let call = test_call();
-    // An in-dialog BYE (carries a To-tag) on the active call.
+    let mut call = test_call();
+    // An in-dialog BYE (carries a To-tag) on the established call.
+    call.a_leg.state = LegState::Confirmed;
     let bye = in_dialog_request(sip_message::Method::Bye);
     let event = CallEvent::Sip {
         message: Box::new(SipMessage::Request(bye)),
@@ -697,6 +728,98 @@ fn in_dialog_bye_selects_relay_bye() {
     let rules = default_rules();
     let ranked = pick_ranked(&rules, &call, &ctx);
     assert_eq!(ranked.first().map(|r| r.id), Some("relay-bye"));
+}
+
+/// A caller's BYE while its INVITE is still pending (RFC 3261 §15: the early
+/// dialog a tagged provisional opened, the local tag on the a-dialog; the
+/// a-leg itself reads Trying until its answer) selects `early-dialog-bye`, never
+/// `relay-bye`: the BYE is answered 200, the pending INVITE 487 (§15.1.2), and
+/// the call terminates as a caller release. An a-leg whose INVITE already
+/// carries a final is not this rule's.
+#[test]
+fn bye_on_the_early_a_dialog_selects_early_dialog_bye_with_487_and_termination() {
+    let call = call_with_early_a_dialog("early");
+    let bye = in_dialog_request(sip_message::Method::Bye);
+    let event = CallEvent::Sip {
+        message: Box::new(SipMessage::Request(bye)),
+        src: "127.0.0.1:5060".parse().unwrap(),
+        matched_client_txn: false,
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+        discharged: None,
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, &call, &ctx);
+    assert_eq!(ranked.first().map(|r| r.id), Some("early-dialog-bye"));
+    let actions = (ranked[0].handle)(&ctx).expect("the rule handles the BYE").actions;
+    let bye_ok = actions.iter().position(|a| matches!(a, RuleAction::Respond { status: 200, .. }));
+    let invite_487 =
+        actions.iter().position(|a| matches!(a, RuleAction::RespondToALeg { status: 487, .. }));
+    assert!(bye_ok < invite_487, "200 to the BYE, then 487 to the INVITE, got {actions:?}");
+
+    let mut answered = call.clone();
+    answered.a_leg.invite_final_sent = Some(487);
+    let ctx = RuleContext { call: RuleCall::new(&answered), ..ctx };
+    let ranked = pick_ranked(&rules, &answered, &ctx);
+    assert_ne!(
+        ranked.first().map(|r| r.id),
+        Some("early-dialog-bye"),
+        "an INVITE that carries its final draws no second one"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            RuleAction::BeginTermination { cause: TerminationCause::RemoteBye, by_leg: Some(l), .. } if l == "a"
+        )),
+        "a caller release, got {actions:?}",
+    );
+}
+
+/// The same BYE on a call already terminating (a b-leg's BYE ended it while
+/// the caller still rang, so the termination stamped the early a-leg's BYE
+/// disposition): still `early-dialog-bye`, never `resolve-ended-leg-bye`,
+/// which would answer the BYE alone; the two finals go out, and the
+/// teardown under way is not restarted.
+#[test]
+fn bye_on_the_early_a_dialog_of_a_terminating_call_still_answers_the_invite() {
+    let mut call = call_with_early_a_dialog("early");
+    call.a_leg.bye_disposition = Some(call::ByeDisposition::None);
+    call.state = CallModelState::Terminating;
+    let bye = in_dialog_request(sip_message::Method::Bye);
+    let event = CallEvent::Sip {
+        message: Box::new(SipMessage::Request(bye)),
+        src: "127.0.0.1:5060".parse().unwrap(),
+        matched_client_txn: false,
+    };
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "a",
+        direction: Direction::FromA,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+        discharged: None,
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, &call, &ctx);
+    assert_eq!(ranked.first().map(|r| r.id), Some("early-dialog-bye"));
+    let actions = (ranked[0].handle)(&ctx).expect("the rule handles the BYE").actions;
+    assert!(
+        actions.iter().any(|a| matches!(a, RuleAction::RespondToALeg { status: 487, .. })),
+        "the pending INVITE gets its 487, got {actions:?}",
+    );
+    assert!(
+        !actions.iter().any(|a| matches!(a, RuleAction::BeginTermination { .. })),
+        "a terminating call is not torn down twice, got {actions:?}",
+    );
 }
 
 /// A BYE from a leg this stack already ended (Terminated, its own BYE sent)
@@ -2161,36 +2284,6 @@ mod answer_a_leg_new_dialog {
     use b2bua::rules::RelayedFinal;
     use sip_message::generators::SourceBody;
     use sip_message::HeaderName;
-
-    /// A call whose a-leg already carries the MRF early-media dialog A1 (the tag
-    /// pinned by the media-leg `ConfirmDialog` / a prior 183).
-    fn call_with_early_a_dialog(a1: &str) -> call::Call {
-        let mut call = test_call();
-        call.a_leg.dialogs = vec![Dialog {
-            sip: StackDialog {
-                call_id: call.a_leg.call_id.clone(),
-                local_tag: a1.into(),
-                remote_tag: call.a_leg.from_tag.clone(),
-                local_uri: "sip:bob@host".into(),
-                remote_uri: "sip:alice@host".into(),
-                remote_target: "sip:alice@127.0.0.1:5060".into(),
-                local_cseq: 1,
-                route_set: vec![],
-            },
-            ext: B2buaDialogExt {
-                remote_cseq: Some(1),
-                inbound_pending_requests: vec![],
-                ack_branch: None,
-                pending_invite_txn: None,
-                cached_sdp: None,
-                pending_reinvite_2xx: None,
-                answered_2xx: None,
-                emitted_ack: None,
-                awaited_ack_cseq: None,
-            },
-        }];
-        call
-    }
 
     /// The action ignores the triggering event (it operates on the call), so any
     /// event drives it.
