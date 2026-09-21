@@ -415,12 +415,12 @@ impl ActionExecutor<'_> {
         };
         // Seed the a-dialog if absent (fresh minting adopts A2 directly); when it
         // already exists under the early-media A1, `ensure_a_dialog_with` returns
-        // A1 unchanged, so re-stamp local_tag to A2 explicitly — the early dialog
-        // is superseded, not kept. The answer SDP becomes the dialog's
-        // `cached_sdp`, as `confirm_dialog` keeps it.
+        // A1 unchanged, so `adopt_a_tag` re-identifies it under A2 and retires
+        // A1's mappings — the early dialog is superseded, not kept. The answer
+        // SDP becomes the dialog's `cached_sdp`, as `confirm_dialog` keeps it.
         self.ensure_a_dialog_with(call, Some(a2.clone()));
+        super::dialog_track::adopt_a_tag(call, &a2);
         if let Some(d) = call.a_leg.dialogs.first_mut() {
-            d.sip.local_tag = a2;
             if !body.is_empty() {
                 d.ext.cached_sdp = Some(body.to_vec());
             }

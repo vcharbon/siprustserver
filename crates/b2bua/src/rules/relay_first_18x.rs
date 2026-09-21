@@ -14,7 +14,9 @@
 //!     The 200 OK answers under the tag of the caller dialog its callee dialog
 //!     was shown as: the dialog behind a relayed 180 keeps that tag; a callee
 //!     dialog the caller was never shown (a suppressed fork, a rerouted leg)
-//!     opens a caller dialog of its own under a fresh tag (RFC 3261 §12.1.2).
+//!     opens a caller dialog of its own under a fresh tag (RFC 3261 §12.1.2) —
+//!     on the wire a second dialog; in the model the one a-dialog re-identified,
+//!     the abandoned tag's mappings retired (`adopt_a_tag`).
 //!
 //! Its cursor is a read-only **projection** (see [`project_cursor`], mirroring the
 //! `global-call` / `transfer` projections) of two authoritative facts that already
@@ -286,7 +288,11 @@ define_service! {
                 let leg = ctx.source_leg_id.to_string();
                 let mut actions = Vec::new();
 
-                let shown = ctx.call.find_by_b_tag(&leg, &b_tag).is_some();
+                // `first_relayed` scopes the fresh tag to a dialog pinned by
+                // THIS machine's bare 180: an a-dialog another service pinned
+                // (an MRF early-media 183) is that service's to re-identify.
+                // A tagless 2xx names no dialog (§12.1.2) and takes the primary.
+                let shown = b_tag.is_empty() || ctx.call.find_by_b_tag(&leg, &b_tag).is_some();
                 if !shown && ctx.call.relay_first_18x_first_relayed() {
                     actions.push(RuleAction::MapUnshownDialog {
                         b_leg_id: leg.clone(),

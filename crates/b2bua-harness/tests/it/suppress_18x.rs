@@ -128,7 +128,8 @@ async fn a_fork_the_caller_never_saw_answers_under_its_own_dialog() {
 
     // Fork 2 rings behind the mask (suppressed), then answers.
     uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
-    uas.respond(200, "OK").with_to_tag("bobfork2").with_sdp(ANSWER).await;
+    uas.adopt_to_tag("bobfork2");
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
     let answered_tag = ok.to().tag().expect("200 has a To-tag").to_string();
     assert_ne!(answered_tag, shown_tag, "the unshown fork's 200 opens a second caller dialog");
@@ -138,6 +139,17 @@ async fn a_fork_the_caller_never_saw_answers_under_its_own_dialog() {
     let dialog = call.ack().await;
     let ack = bob.receive("ACK").await;
     assert_eq!(ack.request().to().tag(), Some("bobfork2"), "the ACK rides fork 2's dialog");
+
+    // The dialog she rang on is abandoned: a request she sends under the 180's
+    // tag matches no dialog the B2BUA holds and draws 481 (RFC 3261 §12.2.2),
+    // never the answered session.
+    let mut stale = call
+        .send_request(InDialogMethod::Update)
+        .with_to_tag(&shown_tag)
+        .with_sdp(OFFER)
+        .send()
+        .await;
+    stale.expect(481).await;
 
     // Bob's BYE reaches the caller inside the confirmed dialog: the B2BUA's
     // From-tag toward her is the tag the 200 carried, not the 180's.
@@ -300,6 +312,47 @@ async fn failover_no_answer() {
 // distinct *upstream* status value). `expect` is strict (anything but the
 // expected status panics), so the `expect(200)` after the last expected 180
 // doubles as the "nothing extra was relayed" suppression assert.
+
+/// `messages = ALL`, a forked callee: every fork's 18x is relayed as a bare 180
+/// under the first 180's To-tag, so every fork was SHOWN — the fork that
+/// answers, first or not, answers under that one tag.
+#[tokio::test]
+async fn messages_all_a_relayed_fork_answers_under_the_180_s_tag() {
+    let h = Harness::with_transit_delay("suppress-18x-messages-all-fork", 0);
+    let alice = h.agent("alice", "127.0.0.1:5653").await;
+    let bob = h.agent("bob", "127.0.0.1:5663").await;
+    let b2bua = B2buaSut::route_all_to_with_18x_messages(
+        "127.0.0.1",
+        5663,
+        RelayFirst18xStrategy::DropSdp,
+        call::features::Relay18xMessages::All,
+    )
+    .start(&h, "b2bua", "127.0.0.1:5673")
+    .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    uas.respond(180, "Ringing").with_to_tag("bobfork1").await;
+    let a_tag = owned_180_tag(&mut call).await;
+    uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
+    let p2 = call.expect(180).await;
+    assert_eq!(p2.to().tag(), Some(a_tag.as_str()), "fork 2's 180 is shown under the same tag");
+
+    uas.adopt_to_tag("bobfork2");
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    assert_eq!(ok.to().tag(), Some(a_tag.as_str()), "a shown fork answers under the 180's tag");
+
+    let mut dialog = call.ack().await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().to().tag(), Some("bobfork2"), "the ACK rides fork 2's dialog");
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    let _ = h.finish().await;
+}
 
 /// `messages = ALL`: every 18x bob sends is relayed, each downgraded to a bare
 /// 180 under the first 180's To-tag.
@@ -552,8 +605,8 @@ async fn a_forked_rejection_rides_the_owned_180_s_tag() {
 
 /// The rejection arrives on the SECOND b-leg, after a `/call/failure` leg swap.
 /// The `relay_first_18x` slice is deliberately not cleared on failover, so the
-/// owned tag survives it on a final exactly as `failover_reject` shows it does
-/// on the 200.
+/// owned tag survives it on a final; the 200 of that leg is what opens a
+/// dialog of its own (`failover_reject`).
 #[tokio::test]
 async fn a_rejection_after_failover_rides_the_owned_180_s_tag() {
     let h = Harness::with_transit_delay("suppress-18x-failover-rejection-tag", 1);

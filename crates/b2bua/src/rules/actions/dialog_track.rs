@@ -210,12 +210,13 @@ impl ActionExecutor<'_> {
         let preferred = find_by_b_tag(call, leg_id, &remote_tag_clone).map(|m| m.a_tag.clone());
         self.ensure_a_dialog_with(call, preferred.clone());
         // When a *non-first* fork wins, the a-dialog was already created under
-        // the first fork's primary tag; adopt the winning fork's a-face tag so
-        // the confirmed a-dialog matches the To-tag the caller saw on the 2xx
-        // (and any B2BUA-originated a-facing in-dialog request uses it).
-        if let (Some(pref), Some(d)) = (preferred, call.a_leg.dialogs.first_mut()) {
-            if !pref.is_empty() {
-                d.sip.local_tag = pref;
+        // the first fork's primary tag; the confirmed a-dialog takes the winning
+        // fork's a-face tag, the one the caller saw on the 2xx. Only a live
+        // answer re-identifies her dialog: a 2xx learned for a reap on a call
+        // already ending leaves the tag she rang on.
+        if let Some(pref) = preferred.filter(|p| !p.is_empty()) {
+            if call.state == call::CallModelState::Active {
+                adopt_a_tag(call, &pref);
             }
         }
         // Keep the answer SDP relayed toward alice on the 2xx as the a-dialog's
@@ -265,9 +266,10 @@ impl ActionExecutor<'_> {
     /// a-facing To-tag ([`crate::rules::model::RuleAction::MapUnshownDialog`]):
     /// its 2xx then opens a caller dialog of its own (RFC 3261 §12.1.2) — the
     /// relay reads the tag off the map, `confirm_dialog` adopts it. A dialog
-    /// already mapped keeps the tag it was shown under.
+    /// already mapped keeps the tag it was shown under; a tagless one names no
+    /// dialog (§12.1.2 requires the tag) and is left to the primary.
     pub(super) fn map_unshown_dialog(&self, call: &mut Call, b_leg_id: &str, b_tag: &str) {
-        if find_by_b_tag(call, b_leg_id, b_tag).is_some() {
+        if b_tag.is_empty() || find_by_b_tag(call, b_leg_id, b_tag).is_some() {
             return;
         }
         *call = add_tag_mapping(
@@ -370,6 +372,22 @@ impl ActionExecutor<'_> {
                 fallback
             }
         }
+    }
+}
+
+/// Re-identify the caller's dialog under `tag`: the one a-dialog takes it as
+/// its local tag and every mapping of the tag it held before is retired, so a
+/// request the caller sends under the abandoned tag matches no dialog and
+/// draws `481` (RFC 3261 §12.2.2) instead of landing on the answered session.
+/// The wire shows a second dialog; the model holds one, re-tagged.
+pub(super) fn adopt_a_tag(call: &mut Call, tag: &str) {
+    let Some(d) = call.a_leg.dialogs.first_mut() else { return };
+    if d.sip.local_tag == tag {
+        return;
+    }
+    let old = std::mem::replace(&mut d.sip.local_tag, tag.to_string());
+    if !old.is_empty() {
+        call.tag_map.retain(|m| m.a_tag != old);
     }
 }
 
