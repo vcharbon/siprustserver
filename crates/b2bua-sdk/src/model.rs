@@ -758,6 +758,14 @@ pub enum RuleAction {
         b_tag: String,
         body: Vec<u8>,
     },
+    /// Register the early dialog the current event's provisional establishes
+    /// on `leg_id` under the callee tag `b_tag` (RFC 3261 §12.1.2: its
+    /// Contact and recorded route), when the provisional is relayed to no one.
+    /// Idempotent per tag; only the event's own response can seed it.
+    TrackEarlyDialog {
+        leg_id: String,
+        b_tag: String,
+    },
     /// Stage `body` into `call.policy_update_body` so the response relay path
     /// substitutes it into the next relayed body (`fake-prack` 200-OK SDP).
     SetPolicyUpdateBody {
@@ -1033,6 +1041,7 @@ impl RuleAction {
             | RuleAction::AddCdrEvent { .. }
             | RuleAction::DeactivateRule { .. }
             | RuleAction::CacheSdpOnLegDialog { .. }
+            | RuleAction::TrackEarlyDialog { .. }
             | RuleAction::SetPolicyUpdateBody { .. }
             | RuleAction::SetPromotePem { .. }
             | RuleAction::SetTransfer { .. }

@@ -216,6 +216,9 @@ impl ActionExecutor<'_> {
                 self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
                 self.send_prack_to_leg(call, fx, leg_id, *rseq, *invite_cseq, b_tag);
             }
+            RuleAction::TrackEarlyDialog { leg_id, b_tag } => {
+                self.ensure_b_early_dialog(call, ctx, leg_id, b_tag);
+            }
             RuleAction::CacheSdpOnLegDialog { leg_id, b_tag, body } => {
                 // Same suppressed-fork registration as SendPrackToLeg: the cache
                 // is keyed strictly on `(leg, b_tag)` — a fallback write would

@@ -350,15 +350,20 @@ impl ActionExecutor<'_> {
         }
 
         // A provisional to the originator's initial INVITE after its final:
-        // the ringing leg keeps the early dialog it is owed and the
-        // originator is shown nothing — the seam refuses it before any
-        // a-facing tag or RSeq is minted for it (RFC 3261 §17.2.1).
+        // the seam refuses it before any a-facing tag or RSeq is minted for
+        // it (RFC 3261 §17.2.1), and the ringing leg keeps what it is owed —
+        // its early dialog, and the acknowledgement of a reliable provisional
+        // no one else saw (RFC 3262 §4).
         if cseq_method == "INVITE"
             && status < 200
             && relay::provisional_after_final(call, fx, status)
         {
             if !to_tag.is_empty() && source_leg_id != "a" {
-                self.track_b_early_dialog(call, &source_leg_id, resp, &to_tag);
+                self.ensure_b_early_dialog(call, ctx, &source_leg_id, &to_tag);
+                if let Some(rseq) = relay::reliable_rseq(resp) {
+                    let invite_cseq = i64::from(resp.cseq().seq());
+                    self.send_prack_to_leg(call, fx, &source_leg_id, rseq, invite_cseq, &to_tag);
+                }
             }
             return;
         }
@@ -593,6 +598,11 @@ impl ActionExecutor<'_> {
         leg_id: &str,
         b_tag: &str,
     ) {
+        // The a-leg INVITE already sent its final: refused at the seam before
+        // the mask records anything (RFC 3261 §17.2.1).
+        if relay::provisional_after_final(call, fx, 180) {
+            return;
+        }
         let stored = call::helpers::relay_first_18x_stored_a_tag(call).map(str::to_string);
         let a_facing_tag = self.ensure_a_dialog_with(call, stored);
         *call = add_tag_mapping(

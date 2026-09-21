@@ -27,11 +27,12 @@ pub fn reliable_rseq(resp: &SipResponse) -> Option<i64> {
 }
 
 /// What the event's INVITE provisional is owed on the leg it came from when
-/// no one is shown it: the leg is `Early` (a later teardown CANCELs it), a
-/// reliable provisional is acknowledged by this stack — the leg's UAC, and
-/// the only party that saw it (RFC 3262 §4) — and the CDR carries it. The
-/// responder's retransmission of a provisional already acknowledged is owed
-/// nothing (§4). Empty for an event that is not a response.
+/// no one is shown it: the early dialog it establishes (RFC 3261 §12.1.2),
+/// the leg `Early` (a later teardown CANCELs it), a reliable provisional
+/// acknowledged by this stack — the leg's UAC, and the only party that saw
+/// it (RFC 3262 §4) — and the CDR carrying it. The responder's
+/// retransmission of a provisional already acknowledged is owed nothing
+/// (§4). Empty for an event that is not a response.
 pub fn absorbed_provisional_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     let Some(resp) = ctx.response() else { return Vec::new() };
     let leg = ctx.source_leg_id.to_string();
@@ -41,11 +42,15 @@ pub fn absorbed_provisional_actions(ctx: &RuleContext) -> Vec<RuleAction> {
     if rseq.is_some_and(|rseq| ctx.call.pracked_provisional(&leg, &b_tag, invite_cseq, rseq)) {
         return Vec::new();
     }
-    let mut actions = vec![RuleAction::UpdateLegState {
+    let mut actions = Vec::new();
+    if !b_tag.is_empty() {
+        actions.push(RuleAction::TrackEarlyDialog { leg_id: leg.clone(), b_tag: b_tag.clone() });
+    }
+    actions.push(RuleAction::UpdateLegState {
         leg_id: leg.clone(),
         state: LegState::Early,
         disposition: None,
-    }];
+    });
     if let Some(rseq) = rseq {
         actions.push(RuleAction::SendPrackToLeg { leg_id: leg.clone(), rseq, invite_cseq, b_tag });
     }

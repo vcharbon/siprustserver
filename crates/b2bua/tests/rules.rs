@@ -1288,17 +1288,25 @@ fn a_provisional_after_the_final_is_refused() {
     assert!(refusals(&result).is_empty(), "a provisional is not a second final");
 }
 
-/// A `180 Ringing` to the b-leg's initial INVITE, from callee tag `bobtag`;
-/// `reliable` states `Require: 100rel` + `RSeq: 1`.
+/// The callee's Contact on its provisional.
+const CALLEE_RINGING_CONTACT: &str = "sip:bob@10.0.0.2:5070;transport=udp";
+/// The proxy that recorded itself on the provisional (RFC 3261 §12.1.2).
+const CALLEE_RINGING_ROUTE: &str = "sip:10.0.0.7:5060;lr";
+
+/// A `180 Ringing` to the b-leg's initial INVITE, from callee tag `bobtag`,
+/// with the callee's Contact and a recorded route; `reliable` states
+/// `Require: 100rel` + `RSeq: 1`.
 fn b_leg_ringing_event(reliable: bool) -> CallEvent {
     let reliability = if reliable { "Require: 100rel\r\nRSeq: 1\r\n" } else { "" };
     let raw = format!(
         "SIP/2.0 180 Ringing\r\n\
 Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKb\r\n\
+Record-Route: <{CALLEE_RINGING_ROUTE}>\r\n\
 From: <sip:svc@10.0.0.9:5060>;tag=svc\r\n\
 To: <sip:bob@10.0.0.2:5070>;tag=bobtag\r\n\
 Call-ID: bcid@x\r\n\
 CSeq: 1 INVITE\r\n\
+Contact: <{CALLEE_RINGING_CONTACT}>\r\n\
 {reliability}Content-Length: 0\r\n\r\n"
     );
     let resp = match CustomParser::new().parse(raw.as_bytes()).unwrap() {
@@ -1312,13 +1320,13 @@ CSeq: 1 INVITE\r\n\
     }
 }
 
-/// The actions the first ranked default rule produces for `event` from `b-1`.
-fn handle_from_b1(call: &call::Call, event: &CallEvent) -> (&'static str, Vec<RuleAction>) {
+/// The actions the first ranked default rule produces for `event` from `leg`.
+fn handle_from(call: &call::Call, event: &CallEvent, leg: &str) -> (&'static str, Vec<RuleAction>) {
     let ctx = RuleContext {
         call: RuleCall::new(call),
         call_ref: &call.call_ref,
         event,
-        source_leg_id: "b-1",
+        source_leg_id: leg,
         direction: Direction::FromB,
         now_ms: 0,
         config: &B2buaConfig::default(),
@@ -1329,6 +1337,48 @@ fn handle_from_b1(call: &call::Call, event: &CallEvent) -> (&'static str, Vec<Ru
     let rule = ranked.first().expect("a rule claims the provisional");
     let out = (rule.handle)(&ctx).expect("the rule handles it");
     (rule.id, out.actions)
+}
+
+/// The actions the first ranked default rule produces for `event` from `b-1`.
+fn handle_from_b1(call: &call::Call, event: &CallEvent) -> (&'static str, Vec<RuleAction>) {
+    handle_from(call, event, "b-1")
+}
+
+/// One executor turn over `call` for `actions`, in the context of `event`
+/// arriving from `b-1`.
+fn execute_from_b1(call: &call::Call, event: &CallEvent, actions: &[RuleAction]) -> HandlerResult {
+    let config = B2buaConfig::default();
+    let ctx = RuleContext {
+        call: RuleCall::new(call),
+        call_ref: &call.call_ref,
+        event,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &config,
+        discharged: None,
+    };
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
+    exec.execute(actions, call, &ctx)
+}
+
+/// The requests `result` sent toward `leg` with `method`.
+fn requests_to(result: &HandlerResult, leg: &str, method: &str) -> usize {
+    result
+        .effects
+        .outbound
+        .iter()
+        .filter(|e| e.leg_id.as_deref() == Some(leg))
+        .filter(
+            |e| matches!(&e.body, b2bua::effects::OutboundBody::Request(r) if r.method() == method),
+        )
+        .count()
 }
 
 #[test]
@@ -1361,6 +1411,22 @@ fn a_provisional_under_an_answered_caller_is_absorbed_with_what_the_leg_is_owed(
         )),
         "the provisional is accounted: {actions:?}"
     );
+    // …and the early dialog the provisional establishes (RFC 3261 §12.1.2):
+    // the callee's tag, its Contact as the remote target, the recorded route.
+    let result = execute_from_b1(&call, &b_leg_ringing_event(false), &actions);
+    let dialog = &result.call.b_legs[0].dialogs[0].sip;
+    assert_eq!(dialog.remote_tag, "bobtag", "the early dialog carries the callee's tag");
+    assert!(
+        dialog.remote_target.contains(CALLEE_RINGING_CONTACT),
+        "the remote target is the provisional's Contact: {}",
+        dialog.remote_target
+    );
+    assert!(
+        dialog.route_set.iter().any(|r| r.contains(CALLEE_RINGING_ROUTE)),
+        "the route set is the provisional's recorded route: {:?}",
+        dialog.route_set
+    );
+    assert_eq!(result.call.b_legs[0].state, LegState::Early);
 }
 
 #[test]
@@ -1382,6 +1448,98 @@ fn a_reliable_provisional_under_an_answered_caller_is_acknowledged_by_the_stack(
             RuleAction::SendPrackToLeg { leg_id, rseq: 1, invite_cseq: 1, b_tag } if leg_id == "b-1" && b_tag == "bobtag"
         )),
         "the reliable provisional is PRACKed by the stack: {actions:?}"
+    );
+}
+
+#[test]
+fn a_relayed_reliable_provisional_after_the_final_is_refused_and_acknowledged() {
+    // A rule that still relays a reliable 1xx under an answered caller: the
+    // seam refuses it toward her, and the ringing leg — which saw no PRACK
+    // from anyone — is acknowledged by this stack (RFC 3262 §4), once.
+    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
+    call.a_leg.state = LegState::Confirmed;
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+    let event = b_leg_ringing_event(true);
+    let relay = [RuleAction::RelayToPeer { transform: Default::default() }];
+
+    let result = execute_from_b1(&call, &event, &relay);
+    assert!(
+        provisionals_to_a(&result).is_empty(),
+        "nothing provisional reaches the caller: {:?}",
+        result.effects.outbound
+    );
+    assert_eq!(late_provisional_refusals(&result), vec![(180, 200)]);
+    assert_eq!(requests_to(&result, "b-1", "PRACK"), 1, "the reliable 180 is PRACKed by the stack");
+
+    let repeat = execute_from_b1(&result.call, &event, &relay);
+    assert_eq!(requests_to(&repeat, "b-1", "PRACK"), 0, "its retransmission draws no second PRACK");
+}
+
+#[test]
+fn a_bare_180_after_the_final_mints_no_mask_state() {
+    // The bare-180 downgrade asked to ring an answered caller: refused at the
+    // seam before the mask's own bookkeeping — no a-facing tag mapping, the
+    // mask still unrelayed.
+    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
+    call.a_leg.state = LegState::Confirmed;
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+    let event = b_leg_ringing_event(false);
+
+    let result = execute_from_b1(
+        &call,
+        &event,
+        &[RuleAction::RelayFirstBare180 { leg_id: "b-1".into(), b_tag: "bobtag".into() }],
+    );
+    assert!(provisionals_to_a(&result).is_empty(), "no 180 leaves: {:?}", result.effects.outbound);
+    assert_eq!(late_provisional_refusals(&result), vec![(180, 200)]);
+    assert!(result.call.tag_map.is_empty(), "no a-facing tag is mapped: {:?}", result.call.tag_map);
+    assert!(
+        !call::helpers::relay_first_18x_first_relayed(&result.call),
+        "the mask has relayed nothing"
+    );
+}
+
+#[test]
+fn a_repeated_transfer_target_provisional_is_accounted_once() {
+    // The REFER machine's C leg repeats a 180 the referrer was already
+    // notified of: the NOTIFY is deduped and so is the CDR event — the leg's
+    // due (Early, a PRACK when reliable) still rides.
+    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
+    call.a_leg.state = LegState::Confirmed;
+    let mut referrer = b_leg_pending();
+    referrer.state = LegState::Confirmed;
+    referrer.dialogs[0].sip.remote_tag = "reftag".into();
+    call = call::helpers::add_b_leg(call, referrer);
+    let mut target = b_leg_pending();
+    target.leg_id = "b-2".into();
+    call = call::helpers::add_b_leg(call, target);
+    call.transfer = Some(call::TransferState {
+        phase: call::TransferPhase::CRinging,
+        referrer_leg_id: "b-1".into(),
+        refer_to_uri: "sip:carol@10.0.0.3".into(),
+        effective_refer_to_uri: None,
+        callback_context: None,
+        c_leg_id: Some("b-2".into()),
+        refer_cseq: Some(2),
+        started_at_ms: 0,
+        last_c_leg_notified_status: Some(180),
+        c_initial_sdp: None,
+        subscription_terminated: false,
+    });
+    b2bua::rules::refer_transfer::project_cursor(&mut call);
+
+    let (id, actions) = handle_from(&call, &b_leg_ringing_event(false), "b-2");
+    assert_eq!(id, "transfer-c-1xx-to-notify");
+    let accounted = actions
+        .iter()
+        .filter(|a| {
+            matches!(a, RuleAction::AddCdrEvent { event_type: call::CdrEventType::Provisional, .. })
+        })
+        .count();
+    assert_eq!(accounted, 0, "a repeat of a notified status is not accounted again: {actions:?}");
+    assert!(
+        !actions.iter().any(|a| matches!(a, RuleAction::SendNotify { .. })),
+        "the repeat draws no NOTIFY: {actions:?}"
     );
 }
 

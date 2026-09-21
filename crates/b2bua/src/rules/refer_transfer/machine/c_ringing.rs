@@ -40,8 +40,10 @@ pub(super) fn c_1xx_to_notify() -> RuleDefinition {
             let st = state(ctx)?.clone();
             let resp = ctx.response()?;
             let mut actions = absorbed_provisional_actions(ctx);
-            // Dedupe identical repeats against the *last* status only.
+            // Dedupe identical repeats against the *last* status only: the
+            // repeat draws no NOTIFY and is accounted no second time.
             if st.last_c_leg_notified_status == Some(resp.status()) {
+                actions.retain(|a| !matches!(a, RuleAction::AddCdrEvent { .. }));
                 return ok(actions);
             }
             let mut new_state = st.clone();

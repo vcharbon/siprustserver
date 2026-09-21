@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua::decision::test_adapter::{route_to, route_to_with_18x_messages};
+use b2bua::decision::test_adapter::{route_to, route_to_with_18x, route_to_with_18x_messages};
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
 use b2bua_harness::{settle_until, B2buaSut, B2buaSutBuilder};
 use call::features::{Relay18xMessages, RelayFirst18xStrategy};
@@ -116,6 +116,21 @@ fn masked(strategy: RelayFirst18xStrategy) -> B2buaSutBuilder {
     ))
 }
 
+/// Route every call to bob with the 183-with-early-media promotion armed.
+fn promoting() -> B2buaSutBuilder {
+    B2buaSut::builder(Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_req| {
+                NewCallResponse::Route(route_to_with_18x(
+                    "127.0.0.1",
+                    5070,
+                    RelayFirst18xStrategy::PromotePemTo200,
+                ))
+            })
+            .build(),
+    ))
+}
+
 /// The 1xx start-lines on `agent`'s wire after the first `200` it received.
 fn provisionals_after_first_answer(agent: &Agent) -> Vec<String> {
     let lines: Vec<String> = agent.wire_view().iter().map(|e| e.start_line()).collect();
@@ -150,11 +165,12 @@ async fn start(name: &str, builder: B2buaSutBuilder) -> Parties {
     Parties { h, alice, bob, carol, b2bua }
 }
 
-/// Alice ↔ bob answered with no ringing (`reliable`: alice offers `100rel`),
-/// then the consult deadline passes and carol is dialled. Returns alice's
-/// dialog and carol's INVITE.
+/// Alice ↔ bob answered (`bob_rings`: after a 180 alice is shown; `reliable`:
+/// alice offers `100rel`), then the consult deadline passes and carol is
+/// dialled. Returns alice's dialog and carol's INVITE.
 async fn answered_then_consult(
     p: &Parties,
+    bob_rings: bool,
     reliable: bool,
 ) -> (scenario_harness::agent::Dialog, scenario_harness::agent::ServerTxn) {
     let mut invite = p.alice.invite(&p.bob).with_sdp(OFFER).through(p.b2bua.addr);
@@ -163,6 +179,10 @@ async fn answered_then_consult(
     }
     let mut call = invite.send().await;
     let mut uas = p.bob.receive("INVITE").await;
+    if bob_rings {
+        uas.respond(180, "Ringing").await;
+        call.expect(180).await;
+    }
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let dialog = call.ack().await;
@@ -229,7 +249,7 @@ fn assert_caller_heard_no_ring(p: &Parties) {
 #[tokio::test(start_paused = true)]
 async fn a_ringing_consult_leg_reaches_the_answered_caller_as_nothing() {
     let p = start("provisional-after-answer", transparent()).await;
-    let (dialog, mut carol_uas) = answered_then_consult(&p, false).await;
+    let (dialog, mut carol_uas) = answered_then_consult(&p, false, false).await;
 
     carol_uas.respond(180, "Ringing").await;
 
@@ -246,7 +266,7 @@ async fn a_ringing_consult_leg_reaches_the_answered_caller_as_nothing() {
 #[tokio::test(start_paused = true)]
 async fn a_reliable_consult_provisional_is_acknowledged_by_the_stack() {
     let p = start("provisional-after-answer-reliable", transparent()).await;
-    let (dialog, mut carol_uas) = answered_then_consult(&p, true).await;
+    let (dialog, mut carol_uas) = answered_then_consult(&p, false, true).await;
     assert!(
         carol_uas
             .request()
@@ -274,7 +294,7 @@ async fn a_reliable_consult_provisional_is_acknowledged_by_the_stack() {
 #[tokio::test(start_paused = true)]
 async fn the_mask_shows_no_first_180_to_an_answered_caller() {
     let p = start("provisional-after-answer-masked", masked(RelayFirst18xStrategy::DropSdp)).await;
-    let (dialog, mut carol_uas) = answered_then_consult(&p, false).await;
+    let (dialog, mut carol_uas) = answered_then_consult(&p, false, false).await;
 
     carol_uas.respond(180, "Ringing").await;
 
@@ -291,7 +311,7 @@ async fn the_mask_shows_no_first_180_to_an_answered_caller() {
 async fn the_fake_prack_mask_acknowledges_a_consult_provisional_and_shows_nothing() {
     let p = start("provisional-after-answer-fake-prack", masked(RelayFirst18xStrategy::FakePrack))
         .await;
-    let (dialog, mut carol_uas) = answered_then_consult(&p, false).await;
+    let (dialog, mut carol_uas) = answered_then_consult(&p, false, false).await;
     assert!(
         carol_uas
             .request()
@@ -308,5 +328,52 @@ async fn the_fake_prack_mask_acknowledges_a_consult_provisional_and_shows_nothin
     let cdrs = hangup_while_ringing(&p, dialog, carol_uas).await;
     assert_caller_heard_no_ring(&p);
     assert_provisional_recorded(&cdrs, 183);
+    let _ = p.h.finish().await;
+}
+
+/// `drop-sdp` with every 18x relayed, and the mask already up: bob rang before
+/// answering, so a later 18x is one the policy relays again — not to an
+/// answered caller.
+#[tokio::test(start_paused = true)]
+async fn the_mask_relays_no_later_18x_to_an_answered_caller() {
+    let p = start("provisional-after-answer-masked-later", masked(RelayFirst18xStrategy::DropSdp))
+        .await;
+    let (dialog, mut carol_uas) = answered_then_consult(&p, true, false).await;
+
+    carol_uas.respond(180, "Ringing").await;
+
+    let cdrs = hangup_while_ringing(&p, dialog, carol_uas).await;
+    assert_caller_heard_no_ring(&p);
+    assert_provisional_recorded(&cdrs, 180);
+    let _ = p.h.finish().await;
+}
+
+// ── the 183-with-early-media promotion ───────────────────────────────────────
+
+/// `promote-pem-to-200`: bob answered without a 183, so nothing was promoted;
+/// the consult target's reliable 183 with early media would be the promotion's
+/// first — an answered caller takes no second answer, so the 183 is absorbed
+/// and PRACKed by this stack.
+#[tokio::test(start_paused = true)]
+async fn no_promotion_answers_an_answered_caller() {
+    let p = start("provisional-after-answer-promote", promoting()).await;
+    let (dialog, mut carol_uas) = answered_then_consult(&p, false, true).await;
+
+    carol_uas
+        .respond(183, "Session Progress")
+        .reliable(1)
+        .with_header("P-Early-Media", "sendrecv")
+        .with_sdp(CONSULT_ANSWER)
+        .await;
+    p.carol.receive("PRACK").await.respond(200, "OK").await;
+
+    let cdrs = hangup_while_ringing(&p, dialog, carol_uas).await;
+    assert_caller_heard_no_ring(&p);
+    assert_provisional_recorded(&cdrs, 183);
+    assert_eq!(
+        p.b2bua.metrics().second_final_refused_total(),
+        0,
+        "no promoted 200 reached the a-leg seam",
+    );
     let _ = p.h.finish().await;
 }
