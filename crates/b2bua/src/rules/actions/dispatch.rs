@@ -71,6 +71,9 @@ impl ActionExecutor<'_> {
                     },
                 );
             }
+            RuleAction::MapUnshownDialog { b_leg_id, b_tag } => {
+                self.map_unshown_dialog(call, b_leg_id, b_tag);
+            }
             RuleAction::Merge { leg_a, leg_b } => {
                 *call = merge_leg(call.clone(), leg_a.clone(), leg_b.clone());
             }

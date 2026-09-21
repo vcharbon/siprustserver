@@ -564,6 +564,14 @@ pub enum RuleAction {
         b_leg_id: String,
         b_tag: String,
     },
+    /// Map the callee early dialog `(b_leg_id, b_tag)`, one no provisional
+    /// showed the caller, to a FRESH a-facing To-tag, so its 2xx opens a caller
+    /// dialog of its own (RFC 3261 §12.1.2). A dialog already mapped keeps its
+    /// tag.
+    MapUnshownDialog {
+        b_leg_id: String,
+        b_tag: String,
+    },
     Merge {
         leg_a: String,
         leg_b: String,
@@ -1038,6 +1046,7 @@ impl RuleAction {
             RuleAction::ConfirmDialog { .. }
             | RuleAction::UpdateLegState { .. }
             | RuleAction::AddTagMapping { .. }
+            | RuleAction::MapUnshownDialog { .. }
             | RuleAction::AddCdrEvent { .. }
             | RuleAction::DeactivateRule { .. }
             | RuleAction::CacheSdpOnLegDialog { .. }

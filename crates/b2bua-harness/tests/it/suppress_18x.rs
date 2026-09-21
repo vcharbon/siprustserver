@@ -2,12 +2,16 @@
 //! `tests/scenarios/suppress-18x.ts`.
 //!
 //! The B2BUA rewrites the first 18x from any b-leg into a bare 180 (no SDP / no
-//! 100rel), suppresses later 18x, and reuses the first 180's To-tag on the 200
-//! OK. A reliable 1xx is PRACKed by the B2BUA itself (alice never sees it).
+//! 100rel) and suppresses later 18x. A reliable 1xx is PRACKed by the B2BUA
+//! itself (alice never sees it). The 200 OK answers under the tag of the caller
+//! dialog its callee dialog was shown as: the dialog behind the bare 180 keeps
+//! that 180's To-tag; a callee dialog the caller was never shown (a suppressed
+//! fork, a rerouted leg) opens a caller dialog of its own under a fresh To-tag
+//! (RFC 3261 §12.1.2, §13.2.2.4).
 //!
 //! Failover cases (`failoverNoAnswer`, `failoverReject`) ride the `/call/failure`
-//! b-leg failover path: the first 180's To-tag must survive the leg swap (the
-//! `relay_first_18x` slice is not cleared on failover), so bob2's 200 reuses it.
+//! b-leg failover path: bob2 rang behind the mask, so its 200 opens the second
+//! caller dialog; the non-2xx finals stay on the owned 180's tag (§17.2.1).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,9 +105,63 @@ async fn basic() {
     let _ = h.finish().await;
 }
 
+/// One callee, two early dialogs on the one INVITE (RFC 3261 §12.1 forking):
+/// fork 1 rings and is shown as the bare 180, fork 2 rings behind the mask and
+/// answers. The caller never saw fork 2, so its 200 opens a caller dialog of
+/// its own (§12.1.2) under a fresh To-tag, and that dialog carries her ACK,
+/// her BYE and the B2BUA's own in-dialog request toward her.
+#[tokio::test]
+async fn a_fork_the_caller_never_saw_answers_under_its_own_dialog() {
+    let h = Harness::with_transit_delay("suppress-18x-unshown-fork-answers", 0);
+    let alice = h.agent("alice", "127.0.0.1:5651").await;
+    let bob = h.agent("bob", "127.0.0.1:5661").await;
+    let b2bua = B2buaSut::route_all_to_with_18x("127.0.0.1", 5661, RelayFirst18xStrategy::DropSdp)
+        .start(&h, "b2bua", "127.0.0.1:5671")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+
+    // Fork 1 rings → the bare 180 the caller sees, under the owned tag.
+    uas.respond(180, "Ringing").with_to_tag("bobfork1").await;
+    let shown_tag = owned_180_tag(&mut call).await;
+
+    // Fork 2 rings behind the mask (suppressed), then answers.
+    uas.respond(180, "Ringing").with_to_tag("bobfork2").await;
+    uas.respond(200, "OK").with_to_tag("bobfork2").with_sdp(ANSWER).await;
+    let ok = call.expect(200).await;
+    let answered_tag = ok.to().tag().expect("200 has a To-tag").to_string();
+    assert_ne!(answered_tag, shown_tag, "the unshown fork's 200 opens a second caller dialog");
+    assert_eq!(ok.body(), ANSWER.as_bytes(), "the 200 carries the answering fork's SDP");
+
+    // The caller's ACK confirms the dialog the 200 opened and reaches fork 2.
+    let dialog = call.ack().await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().to().tag(), Some("bobfork2"), "the ACK rides fork 2's dialog");
+
+    // Bob's BYE reaches the caller inside the confirmed dialog: the B2BUA's
+    // From-tag toward her is the tag the 200 carried, not the 180's.
+    let mut bob_dialog = uas.dialog();
+    let mut bob_bye = bob_dialog.bye().await;
+    let mut bye_at_alice = alice.receive("BYE").await;
+    assert_eq!(
+        bye_at_alice.request().from().tag(),
+        Some(answered_tag.as_str()),
+        "the BYE toward the caller names the dialog the 200 opened",
+    );
+    bye_at_alice.respond(200, "OK").await;
+    bob_bye.expect(200).await;
+    drop(dialog);
+
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
 /// Failover on reject: bob1 sends 180 then 503; the B2BUA fails over via
 /// `/call/failure` to bob2 (new R-URI), which answers. Alice never sees the 503;
-/// her 200 OK reuses the first 180's To-tag (continuity across the leg swap).
+/// her 200 OK opens a second caller dialog (bob2 rang behind the mask) and the
+/// dialog it confirms carries her ACK and BYE.
 /// (TS `suppress18xFailoverReject`.)
 #[tokio::test]
 async fn failover_reject() {
@@ -145,14 +203,12 @@ async fn failover_reject() {
     uas2.respond(180, "Ringing").await;
     uas2.respond(180, "Ringing").await;
 
-    // Bob2 answers; alice's 200 reuses the first 180's To-tag (from bob1!).
+    // Bob2 answers; alice's 200 opens a caller dialog of its own — bob1's 180
+    // pinned the first tag, bob2 was never shown.
     uas2.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert_eq!(
-        ok.to().tag(),
-        Some(first_to_tag.as_str()),
-        "200 To-tag == first 180 To-tag across failover",
-    );
+    let answered_tag = ok.to().tag().expect("200 has a To-tag").to_string();
+    assert_ne!(answered_tag, first_to_tag, "the unshown bob2's 200 opens a second caller dialog");
 
     let mut dialog = call.ack().await;
     bob2.receive("ACK").await;
@@ -166,7 +222,8 @@ async fn failover_reject() {
 
 /// Failover on no-answer: delayed-offer INVITE; bob1 rings then times out; the
 /// B2BUA CANCELs bob1 and fails over via `/call/failure` to bob2 (new R-URI),
-/// which answers with the offer. Alice's 200 reuses the first 180's To-tag.
+/// which answers with the offer. Alice's 200 opens a second caller dialog (bob2
+/// rang behind the mask), and her ACK answers the offer inside it.
 /// (TS `suppress18xFailoverNoAnswer`.)
 #[tokio::test(start_paused = true)]
 async fn failover_no_answer() {
@@ -218,10 +275,10 @@ async fn failover_no_answer() {
     uas2.respond(200, "OK").with_sdp(OFFER).await;
 
     let ok = call.expect(200).await;
-    assert_eq!(
-        ok.to().tag(),
-        Some(first_to_tag.as_str()),
-        "200 To-tag == first 180 To-tag across failover",
+    assert_ne!(
+        ok.to().tag().expect("200 has a To-tag"),
+        first_to_tag,
+        "the unshown bob2's 200 opens a second caller dialog",
     );
 
     // Alice answers the delayed offer in the ACK (RFC 3264 §4).

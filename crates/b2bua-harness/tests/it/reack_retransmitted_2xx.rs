@@ -132,7 +132,7 @@ fn top_via_branch(raw: &[u8]) -> Option<String> {
 
 /// The same §13.2.2.4 obligation under an **18x-masking** strategy. The
 /// `relayFirst18x` machine stays armed for the life of the call, so its
-/// `force-tag-consistency` rule sees every b-leg INVITE 2xx — a retransmission
+/// `answering-dialog-identity` rule sees every b-leg INVITE 2xx — a retransmission
 /// included. It must leave the retransmission to CORE `re-ack-retransmitted-2xx`
 /// (which owns the confirmed leg) instead of re-running the answer path, or bob's
 /// ACK is never repaired and his 2xx ladder runs to Timer H on a bridged call.
@@ -210,7 +210,7 @@ async fn retransmitted_2xx_is_re_acked_under_18x_masking() {
     assert_eq!(finals, 1, "alice saw exactly one 200 OK for her INVITE (got {finals})");
 }
 
-/// The fake-prack arm of the same gate. `force-tag-consistency` declines at the
+/// The fake-prack arm of the same gate. `answering-dialog-identity` declines at the
 /// matcher, before its strategy branch, so a retransmitted 2xx never re-stages
 /// the cached SDP into a second relayed 200 — alice keeps the ONE answer she was
 /// given, body and all.

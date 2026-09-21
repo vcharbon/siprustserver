@@ -10,8 +10,11 @@
 //!     across every b-leg follow the `relay18x.messages` policy (default FIRST:
 //!     all suppressed; ALL: each relayed downgraded; ONE_PER_VALUE: one per
 //!     distinct upstream status value) — every relayed one reuses the first
-//!     180's To-tag, and so does the 200 OK, so the caller sees one stable
-//!     callee identity across forking/failover.
+//!     180's To-tag, so the caller holds one early dialog whichever fork rings.
+//!     The 200 OK answers under the tag of the caller dialog its callee dialog
+//!     was shown as: the dialog behind a relayed 180 keeps that tag; a callee
+//!     dialog the caller was never shown (a suppressed fork, a rerouted leg)
+//!     opens a caller dialog of its own under a fresh tag (RFC 3261 §12.1.2).
 //!
 //! Its cursor is a read-only **projection** (see [`project_cursor`], mirroring the
 //! `global-call` / `transfer` projections) of two authoritative facts that already
@@ -238,16 +241,20 @@ define_service! {
                 ok(actions)
             },
         },
-        // ── force-tag-consistency — reuse the stored To-tag on 200 OK ────────
+        // ── answering-dialog-identity — which caller dialog the 200 OK lands in ─
         //
-        // Composes with CORE `confirm-dialog`: pre-seed the tag map with the
-        // stored a-facing tag so the 200 OK To-tag matches the first 180, and
-        // (fake-prack) stage the winning dialog's cached SDP into the relayed 200.
-        // The engine is first-match-wins, so when this rule acts it must replay
+        // Composes with CORE `confirm-dialog`: the callee dialog the 2xx confirms
+        // decides the a-facing tag. Shown to the caller (a relayed 180 mapped
+        // it): nothing to add, the map already names that 180's tag. Never
+        // shown, while a bare 180 pinned another dialog: `MapUnshownDialog`
+        // mints a fresh tag first, so the 200 opens a second caller dialog (RFC
+        // 3261 §12.1.2) instead of re-tagging the one she rang on. (fake-prack)
+        // stage the winning dialog's cached SDP into the relayed 200. The engine
+        // is first-match-wins, so when this rule acts it must replay
         // `confirm-dialog`'s action sequence itself (see `confirm_dialog_actions`);
-        // when it has nothing to pre-seed it declines (`None`) and `confirm-dialog`
-        // (CORE, ranked just below) handles the 2xx. No cursor move — the call
-        // bridges via the `global-call` machine; the masking property persists.
+        // with nothing to add it declines (`None`) and `confirm-dialog` (CORE,
+        // ranked just below) handles the 2xx. No cursor move — the call bridges
+        // via the `global-call` machine; the masking property persists.
         // A 2xx on a leg being CANCELled is NOT matched (`source_leg_not_cancelling`):
         // it defers to CORE `cancel-200-crossing`, which reaps
         // the abandoned callee (ACK+BYE) instead of bridging it to a caller the
@@ -256,12 +263,12 @@ define_service! {
         // `re-ack-retransmitted-2xx` (RFC 3261 §13.2.2.4) and the answer path
         // never re-runs.
         sm_rule! {
-            id: "force-tag-consistency",
+            id: "answering-dialog-identity",
             machine: RELAY_FIRST_18X_MACHINE,
             active: [ Phase::Masking, Phase::Suppressing ],
             transitions: [],
             effects: [
-                Effect::Relay { label: "200 OK → A (reuse stored To-tag; fake-prack: inject cached SDP)" },
+                Effect::Relay { label: "200 OK → A (shown dialog: the 180's To-tag; unshown: a fresh one; fake-prack: inject cached SDP)" },
                 Effect::LifecycleCommand { label: "merge A↔B (bridge)" },
                 Effect::GuardTimer { timer: TimerType::NoAnswer, label: "cancel B no-answer" },
                 Effect::GuardTimer { timer: TimerType::GlobalDuration, label: "arm max-duration" },
@@ -279,9 +286,9 @@ define_service! {
                 let leg = ctx.source_leg_id.to_string();
                 let mut actions = Vec::new();
 
-                if let Some(stored) = ctx.call.relay_first_18x_stored_a_tag() {
-                    actions.push(RuleAction::AddTagMapping {
-                        a_tag: stored.to_string(),
+                let shown = ctx.call.find_by_b_tag(&leg, &b_tag).is_some();
+                if !shown && ctx.call.relay_first_18x_first_relayed() {
+                    actions.push(RuleAction::MapUnshownDialog {
                         b_leg_id: leg.clone(),
                         b_tag: b_tag.to_string(),
                     });
@@ -479,7 +486,7 @@ pub fn project_cursor(call: &mut Call) {
     }
 }
 
-/// Replay `confirm-dialog`'s action sequence (the `force-tag-consistency` rule
+/// Replay `confirm-dialog`'s action sequence (the `answering-dialog-identity` rule
 /// composes with it: it wins the 2xx match, so it must emit confirm-dialog's
 /// effects itself). Kept in sync with the CORE `confirm-dialog` rule
 /// (`defaults::core_rules`). The §13.3.1.4 un-ACKed-2xx ladder is no rule's

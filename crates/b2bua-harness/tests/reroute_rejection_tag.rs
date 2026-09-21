@@ -23,9 +23,9 @@
 //! one leg does. Its REJECTION does not: a non-2xx final ends the transaction
 //! and every early dialog it created, and `sip-txn` has already pinned that
 //! tag from the first >100 response, so both finals of one transaction agree.
-//! Under a masking arm the whole hunt still fuses onto one caller identity
-//! — `capture_196177` is such a call, which
-//! is why its divergence stays ruled rather than fixed.
+//! Under a masking arm the caller is shown one bare 180: the rerouted attempt
+//! rings behind the mask, so its `200` opens a second caller dialog while its
+//! non-2xx final still rides the tag the owned 180 pinned.
 
 use std::sync::Arc;
 

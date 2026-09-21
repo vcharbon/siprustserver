@@ -402,12 +402,15 @@ impl ActionExecutor<'_> {
                     // own `RSeq` space.
                     //
                     // MASKING (`drop-sdp` / `keep-sdp` / `fake-prack` /
-                    // `promote-pem-to-200`): the caller keeps ONE identity
-                    // across forking and failover — `relay_first_18x`'s stated
-                    // purpose — so only a second fork ON THIS LEG mints, and a
-                    // rerouted leg fuses back onto the primary. §3 cannot be
-                    // reached there: the caller is shown a bare 180, never a
-                    // reliable provisional.
+                    // `promote-pem-to-200`): the relayed provisionals hold one
+                    // early dialog toward the caller — `relayFirst18x` maps its
+                    // 180s before they reach here, and a 2xx of a dialog she was
+                    // never shown is mapped to a fresh tag by its own rule
+                    // (`answering-dialog-identity`). What reaches this seam
+                    // unmapped is the PEM machine's: a second fork ON THIS LEG
+                    // mints, a rerouted leg fuses onto the primary. §3 cannot be
+                    // reached under a mask: the caller is shown a bare 180,
+                    // never a reliable provisional.
                     let primary = self.ensure_a_dialog(call);
                     let mirrors_callee_dialogs =
                         call::helpers::relay_first_18x_strategy(call).is_none();
@@ -581,15 +584,16 @@ impl ActionExecutor<'_> {
 
     /// Bare-180 downgrade relay ([`crate::rules::model::RuleAction::RelayFirstBare180`]).
     /// The bare 180 ESTABLISHES the a-leg dialog it shows the caller, so that
-    /// dialog's local tag is the one source of the owned a-facing To-tag: every
-    /// later response to this INVITE — a relayed 18x, the 200, a relayed non-2xx
-    /// final, the transaction layer's own 487 — answers under it (RFC 3261
-    /// §8.2.6.2). A LATER 18x the `relay18x.messages` policy relays again (ALL /
+    /// dialog's local tag is the owned a-facing To-tag: every later relayed 18x,
+    /// every non-2xx final and the transaction layer's own 487 answer under it
+    /// (RFC 3261 §8.2.6.2, §17.2.1), and so does the 2xx of a callee dialog it
+    /// mapped. A LATER 18x the `relay18x.messages` policy relays again (ALL /
     /// ONE_PER_VALUE) reads back the same tag, so the caller holds ONE early
-    /// dialog regardless of which fork rings. Seed the tag map for this b-leg
-    /// dialog, record it (+ the upstream status value for ONE_PER_VALUE dedupe),
-    /// then relay the current 1xx as a bare 180. The relay path resolves the
-    /// a-facing tag from the map (`find_by_b_tag`).
+    /// dialog regardless of which fork rings; the 2xx of a dialog it never
+    /// showed her opens a second (`answering-dialog-identity`). Seed the tag map
+    /// for this b-leg dialog, record it (+ the upstream status value for
+    /// ONE_PER_VALUE dedupe), then relay the current 1xx as a bare 180. The
+    /// relay path resolves the a-facing tag from the map (`find_by_b_tag`).
     pub(super) fn relay_first_bare_180(
         &self,
         call: &mut Call,

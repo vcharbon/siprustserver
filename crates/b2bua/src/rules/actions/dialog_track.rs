@@ -3,8 +3,8 @@
 //! B2BUA-minted local tag. Relay itself does NOT live here — see
 //! [`super::relay_response`] / [`super::relay_request`].
 
-use call::helpers::{find_by_b_tag, set_leg_state};
-use call::{B2buaDialogExt, Call, Dialog, LegDisposition, LegState, StackDialog};
+use call::helpers::{add_tag_mapping, find_by_b_tag, set_leg_state};
+use call::{B2buaDialogExt, Call, Dialog, LegDisposition, LegState, StackDialog, TagMapping};
 use sip_message::header::{self, HeaderValue, RecordRouteEntry};
 use sip_message::SipParseError;
 
@@ -204,8 +204,9 @@ impl ActionExecutor<'_> {
                 d.ext.awaited_ack_cseq = Some(awaited_ack_cseq);
             }
         }
-        // Reuse the a-facing tag pre-seeded for this callee (relayFirst18x's
-        // `force-tag-consistency`) so the 200 OK To-tag matches the first 180.
+        // The a-facing tag this callee dialog is mapped to: the one its relayed
+        // provisional minted, or the fresh one `MapUnshownDialog` gave a dialog
+        // the caller was never shown.
         let preferred = find_by_b_tag(call, leg_id, &remote_tag_clone).map(|m| m.a_tag.clone());
         self.ensure_a_dialog_with(call, preferred.clone());
         // When a *non-first* fork wins, the a-dialog was already created under
@@ -258,6 +259,25 @@ impl ActionExecutor<'_> {
         if call.state == call::CallModelState::Active && confirmed_leg_adopted {
             *call = set_leg_state(call.clone(), &call.a_leg.leg_id.clone(), LegState::Confirmed);
         }
+    }
+
+    /// Map a callee early dialog no provisional showed the caller to a fresh
+    /// a-facing To-tag ([`crate::rules::model::RuleAction::MapUnshownDialog`]):
+    /// its 2xx then opens a caller dialog of its own (RFC 3261 §12.1.2) — the
+    /// relay reads the tag off the map, `confirm_dialog` adopts it. A dialog
+    /// already mapped keeps the tag it was shown under.
+    pub(super) fn map_unshown_dialog(&self, call: &mut Call, b_leg_id: &str, b_tag: &str) {
+        if find_by_b_tag(call, b_leg_id, b_tag).is_some() {
+            return;
+        }
+        *call = add_tag_mapping(
+            call.clone(),
+            TagMapping {
+                a_tag: self.id_gen.new_tag(),
+                b_leg_id: b_leg_id.to_string(),
+                b_tag: b_tag.to_string(),
+            },
+        );
     }
 
     /// Ensure the a-leg has a dialog with a stable B2BUA-minted local tag; return

@@ -587,9 +587,10 @@ async fn failover() {
 
 /// A failover route that drops the body mints bob2's INVITE without an offer:
 /// `100rel` is withheld from it — a reliable provisional would carry an answer
-/// this stack cannot acknowledge — while the mask stays up, so alice's 200
-/// keeps the first 180's To-tag and carries the session description bob2's
-/// 200 brought.
+/// this stack cannot acknowledge — while the mask stays up: bob2's 18x are
+/// suppressed, and its 200, from a dialog the caller was never shown, opens a
+/// second caller dialog under a fresh To-tag carrying the session description
+/// bob2's 200 brought.
 #[tokio::test]
 async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mask() {
     use b2bua::decision::test_adapter::route_to_with_18x;
@@ -649,7 +650,11 @@ async fn a_failover_leg_minted_without_an_offer_is_kept_unreliable_under_the_mas
     uas2.respond(200, "OK").with_sdp(ANSWER).await;
 
     let ok = call.expect(200).await;
-    assert_eq!(ok.to().tag(), Some(first_to_tag.as_str()), "the mask's To-tag rides the 200");
+    assert_ne!(
+        ok.to().tag().expect("200 has a To-tag"),
+        first_to_tag.as_str(),
+        "the unshown bob2's 200 opens a second caller dialog",
+    );
     assert!(is_sdp(ok.header::<MediaType>()), "alice's 200 carries bob2's session description");
 
     let mut dialog = call.ack().await;

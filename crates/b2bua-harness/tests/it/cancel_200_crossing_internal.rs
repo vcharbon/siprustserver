@@ -207,13 +207,12 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
 
 /// **Composition regression:** the same no-answer CANCEL /
 /// crossing-200 flow with the `relayFirst18xTo180` **drop-sdp** machine armed.
-/// Pre-fix, the SERVICE_LAYER 2xx rule (`force-tag-consistency`, active in
-/// `Masking`/`Suppressing`) out-ranked CORE `cancel-200-crossing` and
-/// relayed/merged the crossing 200 into the being-rejected a-leg — orphaning
-/// the late-answering callee exactly like 012/016, resurrected by the machine
-/// composition. Now the 2xx rule defers on a `Cancelling` source leg: the
-/// crossing 200 is reaped (ACK + BYE), and the masking property survives the
-/// reap — the reroute target's 200 still reuses the first bare 180's To-tag.
+/// The SERVICE_LAYER 2xx rule (`answering-dialog-identity`, active in
+/// `Masking`/`Suppressing`) defers on a `Cancelling` source leg, so CORE
+/// `cancel-200-crossing` reaps the crossing 200 (ACK + BYE) instead of merging
+/// it into the a-leg the teardown is rejecting. The mask survives the reap: the
+/// reroute target rang behind it, so its 200 opens a second caller dialog under
+/// a fresh To-tag (RFC 3261 §12.1.2).
 #[tokio::test(start_paused = true)]
 async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     let h = Harness::with_transit_delay("dropsdp-noanswer-cancel-200-crossing", 1);
@@ -278,9 +277,8 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     cancel.respond(200, "OK").await;
 
     // ── CROSSING: carol answers 200 OK, crossing the CANCEL on the wire ───────
-    // Pre-fix `force-tag-consistency` claimed this 2xx (the machine was in
-    // `Suppressing`) and bridged the CANCELled callee to alice. It must be
-    // reaped instead: ACK then immediate BYE.
+    // The 2xx rule declines on the `Cancelling` leg, so this 200 is not bridged
+    // to alice but reaped: ACK then immediate BYE.
     carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
     carol.receive("ACK").await;
     let mut bye = carol.receive("BYE").await;
@@ -291,10 +289,10 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     bob_uas.respond(180, "Ringing").await; // suppressed (mask already out)
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     let ok = call.expect(200).await;
-    assert_eq!(
-        ok.to().tag(),
-        Some(first_to_tag.as_str()),
-        "200 To-tag reuses the first bare 180's tag across the reap + leg swap",
+    assert_ne!(
+        ok.to().tag().expect("200 has a To-tag"),
+        first_to_tag.as_str(),
+        "the unshown reroute target's 200 opens a second caller dialog",
     );
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;

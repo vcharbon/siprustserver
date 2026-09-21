@@ -111,8 +111,9 @@ pub struct RerouteState {
 pub struct RelayFirst18xState {
     /// Whether the first 18x has been relayed as a bare 180 to the caller.
     pub first_relayed: bool,
-    /// The a-facing To-tag minted on the first 18x — reused on the 200 OK so the
-    /// caller sees one stable callee identity across forking/failover.
+    /// The a-facing To-tag minted on the first 18x — the one early dialog the
+    /// caller holds under the mask; every relayed 18x and non-2xx final rides
+    /// it, and so does the 2xx of the callee dialog it was minted for.
     pub stored_a_tag: Option<String>,
     /// Distinct *upstream* 18x status values already relayed (dedupe key for the
     /// `ONE_PER_VALUE` messages policy — the caller-facing wire form is always

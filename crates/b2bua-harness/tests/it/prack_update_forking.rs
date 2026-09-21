@@ -351,9 +351,10 @@ async fn fake_prack_forking_answer_on_first_fork_keeps_its_own_cache() {
     let _ = h.finish().await;
 }
 
-/// Fake-prack forked b-leg answered on **fork 2** (the suppressed fork): its
-/// own early dialog must exist with its own cached SDP (pre-fix fork 2 had no
-/// dialog at all — its state lived, wrongly, on fork 1's).
+/// Fake-prack forked b-leg answered on **fork 2** (the suppressed fork): it
+/// holds an early dialog of its own with its own cached SDP, and — never shown
+/// to the caller — its 200 opens a caller dialog of its own under a fresh
+/// To-tag (RFC 3261 §12.1.2).
 #[tokio::test]
 async fn fake_prack_forking_answer_on_second_fork_uses_its_own_cache() {
     let h = Harness::with_transit_delay("fake-prack-forking-second-fork", 1);
@@ -377,8 +378,8 @@ async fn fake_prack_forking_answer_on_second_fork_uses_its_own_cache() {
     let (mut uas, a_tag) = fake_prack_fork_prelude(&mut call, &bob).await;
 
     // Bob answers on fork 2 with NO body — alice's 200 carries **fork 2's**
-    // cached SDP, still under the first bare 180's To-tag (mask continuity even
-    // when a suppressed fork wins).
+    // cached SDP, under a To-tag of its own: the fork that won was suppressed,
+    // so the caller never rang on the dialog its 200 confirms.
     uas.respond(200, "OK").with_to_tag("bobfork2").await;
     let ok = call.expect(200).await;
     assert_eq!(
@@ -386,10 +387,10 @@ async fn fake_prack_forking_answer_on_second_fork_uses_its_own_cache() {
         ANSWER_F2,
         "alice's 200 carries fork 2's own cached SDP",
     );
-    assert_eq!(
-        ok.to().tag(),
-        Some(a_tag.as_str()),
-        "200 reuses the bare 180's To-tag even though the suppressed fork won",
+    assert_ne!(
+        ok.to().tag().expect("200 has a To-tag"),
+        a_tag.as_str(),
+        "the suppressed fork's 200 opens a second caller dialog",
     );
 
     let mut dialog = call.ack().await;

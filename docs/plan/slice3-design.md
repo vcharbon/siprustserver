@@ -35,10 +35,12 @@ the decision `relay_first_18x_to_180` feature). Strategy enum on the wire:
      (`cache-sdp-on-leg-dialog`), **after** the relay (so the early dialog
      exists).
 
-2. **`force-tag-consistency`** (composes with `confirm-dialog`) — response,
+2. **`answering-dialog-identity`** (composes with `confirm-dialog`) — response,
    INVITE, 2xx, from-b.
-   - Pre-seed the tag map with `storedATag` so `confirm-dialog` reuses it →
-     200 OK To-tag matches the first 180 (hides forking/failover from alice).
+   - The callee dialog the 2xx confirms decides the a-facing tag: one the caller
+     was shown answers under the tag of the 180 relayed for it; one she was never
+     shown (a suppressed fork, a rerouted leg) is mapped to a fresh tag
+     (`MapUnshownDialog`), so its 200 opens a caller dialog of its own.
    - `fake-prack`: stage the winning dialog's cached SDP into
      `policy_update_body` so the relay path substitutes it into the 200 toward
      alice.
