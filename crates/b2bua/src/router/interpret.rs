@@ -181,6 +181,9 @@ pub(super) async fn process_result(
             BufferedObservabilityEffect::SecondFinalRefused { .. } => {
                 ctx.metrics.bump_second_final_refused()
             }
+            BufferedObservabilityEffect::ProvisionalAfterFinalRefused { .. } => {
+                ctx.metrics.bump_provisional_after_final_refused()
+            }
             BufferedObservabilityEffect::GoingAwayAbsorbed { .. } => {
                 ctx.metrics.bump_going_away_absorbed()
             }

@@ -26,6 +26,7 @@ pub mod config;
 pub mod event;
 pub mod header_update;
 pub mod model;
+pub mod provisional;
 pub mod relayed_final;
 pub mod service;
 
@@ -36,6 +37,9 @@ pub mod rules {
     pub use crate::model::{
         Effect, EffectKind, Match, MatchKind, MessageTransform, RuleAction, RuleCall, RuleContext,
         RuleDefinition, RuleHandleResult, StatusMatch, TimerDelay, CORE_LAYER, SERVICE_LAYER,
+    };
+    pub use crate::provisional::{
+        absorbed_provisional_actions, originator_final_sent, reliable_rseq,
     };
     pub use crate::relayed_final::RelayedFinal;
     pub use crate::service::{ServiceDef, ServiceSeed, Terminal};

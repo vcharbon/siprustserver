@@ -38,6 +38,7 @@
 //! registry (`b2bua-runner::compose_services`) so `docs/sm/relayFirst18x.md` is
 //! generated from the same declared `active_states`/`transitions`/`effects`.
 
+use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent};
 use b2bua_sdk::{define_service, sm_rule};
 use call::features::RelayFirst18xStrategy;
 use call::{Call, CdrEventType, Direction, LegDisposition, LegState, TimerType};
@@ -124,7 +125,11 @@ define_service! {
         // by the B2BUA itself (alice never saw it), once per provisional — the
         // responder's §3 retransmission of one is discarded (RFC 3262 §4);
         // `fake-prack` caches bob's SDP per `(leg, To-tag)` dialog — strictly,
-        // one cache per fork.
+        // one cache per fork. Once alice's INVITE transaction sent its final
+        // no 18x is shown to her at all, first or later, whatever the
+        // policy (RFC 3261 §13.3.1.1 / §17.2.1): a leg ringing then is
+        // suppressed with what it is owed. A provisional on a leg that
+        // already took its final answers nothing and is no candidate here.
         sm_rule! {
             id: "suppress-18x",
             machine: RELAY_FIRST_18X_MACHINE,
@@ -137,6 +142,7 @@ define_service! {
             matcher: Match::response()
                 .method("INVITE")
                 .status_class(1)
+                .leg_states(&[LegState::Trying, LegState::Early])
                 .direction(Direction::FromB),
             handle: |ctx| {
                 let resp = ctx.response()?;
@@ -174,32 +180,29 @@ define_service! {
                     _ => None,
                 };
 
-                if ctx.call.relay_first_18x_first_relayed() {
+                let caller_answered = originator_final_sent(&ctx.call);
+                if ctx.call.relay_first_18x_first_relayed() || caller_answered {
                     // Subsequent 18x — the `relay18x.messages` policy decides
                     // whether it is relayed again (downgraded, under the stored
-                    // a-facing tag) or suppressed. Either way it is PRACKed +
-                    // cached (per-fork dialog state is policy-independent).
-                    let relay_again = match ctx.call.relay_first_18x_messages() {
-                        call::features::Relay18xMessages::All => true,
-                        call::features::Relay18xMessages::First => false,
-                        call::features::Relay18xMessages::OnePerValue => {
-                            !ctx.call.relay_first_18x_value_relayed(resp.status())
-                        }
-                    };
+                    // a-facing tag) or suppressed; an answered caller is shown
+                    // none. Either way it is PRACKed + cached (per-fork dialog
+                    // state is policy-independent).
+                    let relay_again = !caller_answered
+                        && match ctx.call.relay_first_18x_messages() {
+                            call::features::Relay18xMessages::All => true,
+                            call::features::Relay18xMessages::First => false,
+                            call::features::Relay18xMessages::OnePerValue => {
+                                !ctx.call.relay_first_18x_value_relayed(resp.status())
+                            }
+                        };
                     if !relay_again {
-                        let mut actions = Vec::new();
-                        if let Some(a) = prack_action {
-                            actions.push(a);
-                        }
+                        // The suppressed provisional's due — Early, PRACK,
+                        // CDR — plus the fake-prack cache, which keys on the
+                        // early dialog the PRACK registers.
+                        let mut actions = absorbed_provisional_actions(ctx);
                         if let Some(a) = cache_action {
                             actions.push(a);
                         }
-                        actions.push(RuleAction::AddCdrEvent {
-                            event_type: CdrEventType::Provisional,
-                            leg_id: leg,
-                            status_code: Some(resp.status() as i64),
-                            reason: None,
-                        });
                         return ok(actions);
                     }
                     // Relay-again falls through to the RelayFirstBare180 branch:

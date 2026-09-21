@@ -100,6 +100,12 @@ struct Inner {
     // progress on a call already answered or going away; expected 0 in any
     // healthy run.
     second_final_refused: AtomicU64,
+    // Late-provisional refusal (RFC 3261 §13.3.1.1 / §17.2.1): a provisional
+    // the call layer authored toward the a-leg's initial INVITE while that
+    // transaction already sent its final — refused at the a-leg response
+    // seam, never built. A rule showed a ringing leg to an answered caller;
+    // expected 0 in any healthy run.
+    provisional_after_final_refused: AtomicU64,
     // Calls reaching Terminated with no termination record (expected 0).
     termination_unrecorded: AtomicU64,
     // Going-away gate: an asynchronous trigger (timer fire, transaction
@@ -325,6 +331,11 @@ impl B2buaMetrics {
     );
     // Second-final refusal (RFC 3261 §17.2.1) and the going-away gate.
     counter!(bump_second_final_refused, second_final_refused_total, second_final_refused);
+    counter!(
+        bump_provisional_after_final_refused,
+        provisional_after_final_refused_total,
+        provisional_after_final_refused
+    );
     counter!(bump_termination_unrecorded, termination_unrecorded_total, termination_unrecorded);
     counter!(bump_going_away_absorbed, going_away_absorbed_total, going_away_absorbed);
     // Injectable store-fault seam (ADR-0023).
@@ -733,6 +744,7 @@ impl B2buaMetrics {
         // ── a call already going away authors no further progress ──
         counter("b2bua_termination_unrecorded_total", "calls that reached Terminated with no termination record (a path to terminal states no cause) — expected 0", self.termination_unrecorded_total());
         counter("b2bua_second_final_refused_total", "finals toward the a-leg's initial INVITE refused because that transaction already carries one (RFC 3261 §17.2.1); a rule made progress on an answered or going-away call — expected 0", self.second_final_refused_total());
+        counter("b2bua_provisional_after_final_refused_total", "provisionals toward the a-leg's initial INVITE refused because that transaction already sent its final (RFC 3261 §13.3.1.1 / §17.2.1); a rule showed a ringing leg to an answered caller — expected 0", self.provisional_after_final_refused_total());
         counter("b2bua_going_away_absorbed_total", "asynchronous triggers (timer fire / transaction timeout / internal-event fold) absorbed on a Terminating or Terminated call because the rule they matched is not a teardown rule; the race between a call's own clocks and its teardown, not a fault", self.going_away_absorbed_total());
         // ── injectable store-fault seam (ADR-0023) ──
         counter("b2bua_store_fault_rejected_total", "live store lookups that failed CLOSED (a 500 final to the initial INVITE or in-dialog request; a faulted ACK is dropped un-answered; 0 unless a fault is armed)", self.store_fault_rejected_total());

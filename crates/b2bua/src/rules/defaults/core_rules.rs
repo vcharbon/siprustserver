@@ -15,6 +15,8 @@ use sip_message::header::RAck;
 use sip_message::Method;
 use sip_txn::TimeoutKind as TxnTimeoutKind;
 
+use b2bua_sdk::provisional::{absorbed_provisional_actions, originator_final_sent};
+
 use crate::rules::model::{
     Match, MessageTransform, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
     TimerDelay, CORE_LAYER,
@@ -475,11 +477,25 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             },
         ),
         // ── dialog ──────────────────────────────────────────────────────────
+        // A callee's INVITE provisional, relayed toward the originator while
+        // her INVITE transaction is open. Once that transaction sent its
+        // final it emits no further provisional (RFC 3261 §13.3.1.1 /
+        // §17.2.1): a leg ringing then — dialled mid-call, or still ringing
+        // after her CANCEL — is absorbed with what it is owed
+        // (`absorbed_provisional_actions`). A provisional on a leg that
+        // already took its final answers nothing and is no candidate here.
         rule(
             "relay-provisional",
             &[],
-            Match::response().method("INVITE").status_class(1).direction(Direction::FromB),
+            Match::response()
+                .method("INVITE")
+                .status_class(1)
+                .leg_states(&[LegState::Trying, LegState::Early])
+                .direction(Direction::FromB),
             |ctx| {
+                if originator_final_sent(&ctx.call) {
+                    return ok(absorbed_provisional_actions(ctx));
+                }
                 let b = ctx.source_leg_id.to_string();
                 let status = ctx.response().map(|r| r.status() as i64);
                 ok(vec![

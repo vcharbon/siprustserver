@@ -23,6 +23,7 @@ use super::model::{
     SERVICE_LAYER,
 };
 use super::relay;
+use b2bua_sdk::provisional::originator_final_sent;
 
 fn rule(
     id: &'static str,
@@ -85,7 +86,11 @@ pub fn promote_pem_rules() -> Vec<RuleDefinition> {
             &[],
             Match::response().method("INVITE").status_code(183).direction(Direction::FromB).filter(
                 |ctx| {
-                    if !promote_pem_active(ctx) || promoted(ctx) {
+                    // A promotion answers the caller: none once her INVITE
+                    // transaction carries its final (RFC 3261 §17.2.1) — a
+                    // leg ringing then is the core's to absorb.
+                    if !promote_pem_active(ctx) || promoted(ctx) || originator_final_sent(&ctx.call)
+                    {
                         return false;
                     }
                     match ctx.response() {

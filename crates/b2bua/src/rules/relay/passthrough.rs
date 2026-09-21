@@ -29,16 +29,6 @@ pub fn relay_response_passthrough_headers(
     generators::relayable_headers(resp.headers(), RelayScope::response_carrying(body))
 }
 
-/// The `RSeq` a reliable provisional states (RFC 3262: `Require: 100rel` plus a
-/// numeric `RSeq`), or `None` when this response is not one.
-pub fn reliable_rseq(resp: &sip_message::SipResponse) -> Option<i64> {
-    let requires = resp.header::<header::Require>()?.ok()?;
-    if !requires.contains("100rel") {
-        return None;
-    }
-    Some(resp.header::<header::RSeq>()?.ok()?.value() as i64)
-}
-
 /// Restate a relayed reliable provisional's `RSeq` with the number this stack
 /// owns. The sender of a reliable provisional owns its sequence, exactly as it
 /// owns `CSeq`, so the caller is shown a ladder of this stack's own — one per

@@ -1218,6 +1218,200 @@ fn a_provisional_is_not_refused_by_the_final_guard() {
     assert_eq!(provisionals, 1, "the 183 leaves: {:?}", result.effects.outbound);
     assert_eq!(result.call.a_leg.invite_final_sent, None, "a provisional records no final");
     assert!(refusals(&result).is_empty());
+    assert!(late_provisional_refusals(&result).is_empty());
+}
+
+/// The `(status, carried)` pairs of the provisionals `result` refused after
+/// the a-leg's final.
+fn late_provisional_refusals(result: &HandlerResult) -> Vec<(u16, u16)> {
+    result
+        .effects
+        .buffered
+        .iter()
+        .filter_map(|e| match e {
+            BufferedObservabilityEffect::ProvisionalAfterFinalRefused { status, carried } => {
+                Some((*status, *carried))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The a-facing provisionals `result` emitted.
+fn provisionals_to_a(result: &HandlerResult) -> Vec<u16> {
+    result
+        .effects
+        .outbound
+        .iter()
+        .filter(|e| e.leg_id.as_deref() == Some("a"))
+        .filter_map(|e| match &e.body {
+            b2bua::effects::OutboundBody::Response(r) if r.status() < 200 => Some(r.status()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_provisional_after_the_final_is_refused() {
+    // The a-leg INVITE transaction sent its 200: a provisional a rule authors
+    // toward it afterwards is refused at the seam — never built, never on the
+    // wire (RFC 3261 §13.3.1.1 / §17.2.1) — and the answered dialog keeps its
+    // tag.
+    let call = call::helpers::record_invite_final(test_call(), "a", 200);
+    let result = execute_on(
+        &call,
+        &[RuleAction::SendProvisionalToLeg {
+            leg_id: "a".into(),
+            status: 183,
+            reason: "Session Progress".into(),
+            body: vec![],
+            content_type: None,
+            to_tag: Some("late-tag".into()),
+            p_early_media: None,
+        }],
+    );
+    assert!(
+        provisionals_to_a(&result).is_empty(),
+        "nothing provisional leaves after the final: {:?}",
+        result.effects.outbound
+    );
+    assert!(
+        result.call.a_leg.dialogs.iter().all(|d| d.sip.local_tag != "late-tag"),
+        "a refused provisional re-tags no dialog",
+    );
+    assert_eq!(result.call.a_leg.invite_final_sent, Some(200), "the 200 stands");
+    assert_eq!(
+        late_provisional_refusals(&result),
+        vec![(183, 200)],
+        "the refusal is reported against the final the transaction carries"
+    );
+    assert!(refusals(&result).is_empty(), "a provisional is not a second final");
+}
+
+/// A `180 Ringing` to the b-leg's initial INVITE, from callee tag `bobtag`;
+/// `reliable` states `Require: 100rel` + `RSeq: 1`.
+fn b_leg_ringing_event(reliable: bool) -> CallEvent {
+    let reliability = if reliable { "Require: 100rel\r\nRSeq: 1\r\n" } else { "" };
+    let raw = format!(
+        "SIP/2.0 180 Ringing\r\n\
+Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bKb\r\n\
+From: <sip:svc@10.0.0.9:5060>;tag=svc\r\n\
+To: <sip:bob@10.0.0.2:5070>;tag=bobtag\r\n\
+Call-ID: bcid@x\r\n\
+CSeq: 1 INVITE\r\n\
+{reliability}Content-Length: 0\r\n\r\n"
+    );
+    let resp = match CustomParser::new().parse(raw.as_bytes()).unwrap() {
+        SipMessage::Response(r) => r,
+        _ => panic!("expected a response"),
+    };
+    CallEvent::Sip {
+        message: Box::new(SipMessage::Response(resp)),
+        src: "10.0.0.2:5070".parse().unwrap(),
+        matched_client_txn: true,
+    }
+}
+
+/// The actions the first ranked default rule produces for `event` from `b-1`.
+fn handle_from_b1(call: &call::Call, event: &CallEvent) -> (&'static str, Vec<RuleAction>) {
+    let ctx = RuleContext {
+        call: RuleCall::new(call),
+        call_ref: &call.call_ref,
+        event,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+        discharged: None,
+    };
+    let rules = default_rules();
+    let ranked = pick_ranked(&rules, call, &ctx);
+    let rule = ranked.first().expect("a rule claims the provisional");
+    let out = (rule.handle)(&ctx).expect("the rule handles it");
+    (rule.id, out.actions)
+}
+
+#[test]
+fn a_provisional_under_an_answered_caller_is_absorbed_with_what_the_leg_is_owed() {
+    // The caller's INVITE carries its 200; a b-leg dialled later rings. The
+    // relay rule relays nothing toward her and still gives the ringing leg
+    // its due: `Early` (a teardown then CANCELs it) and the CDR event.
+    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
+    call.a_leg.state = LegState::Confirmed;
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+
+    let (id, actions) = handle_from_b1(&call, &b_leg_ringing_event(false));
+    assert_eq!(id, "relay-provisional");
+    assert!(
+        !actions.iter().any(|a| matches!(a, RuleAction::RelayToPeer { .. })),
+        "nothing is relayed toward the answered caller: {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            RuleAction::UpdateLegState { leg_id, state: LegState::Early, .. } if leg_id == "b-1"
+        )),
+        "the ringing leg goes Early: {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            RuleAction::AddCdrEvent { event_type: call::CdrEventType::Provisional, leg_id, status_code: Some(180), .. }
+                if leg_id == "b-1"
+        )),
+        "the provisional is accounted: {actions:?}"
+    );
+}
+
+#[test]
+fn a_reliable_provisional_under_an_answered_caller_is_acknowledged_by_the_stack() {
+    // The same, reliable: the caller never sees the provisional a PRACK would
+    // name, so this stack — the ringing leg's UAC — acknowledges it (RFC 3262 §4).
+    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
+    call.a_leg.state = LegState::Confirmed;
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+
+    let (_, actions) = handle_from_b1(&call, &b_leg_ringing_event(true));
+    assert!(
+        !actions.iter().any(|a| matches!(a, RuleAction::RelayToPeer { .. })),
+        "nothing is relayed toward the answered caller: {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            RuleAction::SendPrackToLeg { leg_id, rseq: 1, invite_cseq: 1, b_tag } if leg_id == "b-1" && b_tag == "bobtag"
+        )),
+        "the reliable provisional is PRACKed by the stack: {actions:?}"
+    );
+}
+
+#[test]
+fn a_provisional_on_a_confirmed_b_leg_selects_no_relay_rule() {
+    // A 1xx after the leg's own 2xx (a callee's late provisional, a fork the
+    // proxy failed to cancel, a retransmission) answers a transaction that
+    // took its final: no relay rule claims it, so nothing moves the leg back
+    // to Early or rings the caller.
+    let mut call = call::helpers::record_invite_final(test_call(), "a", 200);
+    call.a_leg.state = LegState::Confirmed;
+    let mut confirmed = b_leg_pending();
+    confirmed.state = LegState::Confirmed;
+    confirmed.dialogs[0].sip.remote_tag = "bobtag".into();
+    call = call::helpers::add_b_leg(call, confirmed);
+
+    let event = b_leg_ringing_event(false);
+    let ctx = RuleContext {
+        call: RuleCall::new(&call),
+        call_ref: &call.call_ref,
+        event: &event,
+        source_leg_id: "b-1",
+        direction: Direction::FromB,
+        now_ms: 0,
+        config: &B2buaConfig::default(),
+        discharged: None,
+    };
+    let rules = default_rules();
+    let ranked: Vec<&str> = pick_ranked(&rules, &call, &ctx).iter().map(|r| r.id).collect();
+    assert!(ranked.is_empty(), "a provisional on a confirmed leg selects no rule, got {ranked:?}");
 }
 
 #[test]

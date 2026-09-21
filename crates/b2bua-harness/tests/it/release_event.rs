@@ -288,13 +288,16 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     // ── the cap expires; the engine converts release → reroute ─────────────
     h.advance(Duration::from_secs(61)).await;
 
-    // Replacement b-leg toward the MRF carries A's original offer.
+    // Replacement b-leg toward the MRF carries A's original offer. It rings
+    // first: A's INVITE transaction answered a minute ago, so the ring reaches
+    // her as nothing and is accounted on the replacement leg.
     let mut mrf_uas = mrf.receive("INVITE").await;
     assert_eq!(
         String::from_utf8_lossy(mrf_uas.request().body()),
         OFFER,
         "replacement INVITE carries A's INVITE-snapshot offer",
     );
+    mrf_uas.respond(180, "Ringing").await;
     mrf_uas.respond(200, "OK").with_sdp(MRF_ANSWER).await;
     absorb_invite_retransmit(&mrf, &mrf_uas, MRF_ANSWER).await;
     mrf.receive("ACK").await;
@@ -333,6 +336,19 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
         cdrs[0].events.iter().any(|e| e.reason.as_deref() == Some("release-reroute-completed")),
         "CDR records the completed reroute: {:?}",
         cdrs[0].events,
+    );
+    assert!(
+        cdrs[0].events.iter().any(|e| e.event_type == call::CdrEventType::Provisional
+            && e.leg_id == "b-2"
+            && e.status_code == Some(180)),
+        "the replacement leg's ring is accounted on the CDR: {:?}",
+        cdrs[0].events,
+    );
+    let alice_lines: Vec<String> = alice.wire_view().iter().map(|e| e.start_line()).collect();
+    let answered_at = alice_lines.iter().position(|l| l.starts_with("SIP/2.0 200")).unwrap();
+    assert!(
+        !alice_lines[answered_at + 1..].iter().any(|l| l.starts_with("SIP/2.0 1")),
+        "the answered caller is shown no provisional: {alice_lines:?}",
     );
     // The decision log: the initial route, then the release consult's
     // reroute with its label; the completion event is stamped under it.

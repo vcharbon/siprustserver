@@ -349,6 +349,20 @@ impl ActionExecutor<'_> {
             }
         }
 
+        // A provisional to the originator's initial INVITE after its final:
+        // the ringing leg keeps the early dialog it is owed and the
+        // originator is shown nothing — the seam refuses it before any
+        // a-facing tag or RSeq is minted for it (RFC 3261 §17.2.1).
+        if cseq_method == "INVITE"
+            && status < 200
+            && relay::provisional_after_final(call, fx, status)
+        {
+            if !to_tag.is_empty() && source_leg_id != "a" {
+                self.track_b_early_dialog(call, &source_leg_id, resp, &to_tag);
+            }
+            return;
+        }
+
         // ── b-leg INVITE 1xx/2xx → per-fork a-facing tag map ──
         // Each callee early dialog (forking → several per b-leg) gets its own
         // a-facing tag so the caller sees independent early dialogs; the response

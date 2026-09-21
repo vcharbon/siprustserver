@@ -102,6 +102,14 @@ pub enum BufferedObservabilityEffect {
         status: u16,
         carried: u16,
     },
+    /// A provisional of `status` toward the a-leg's initial INVITE was
+    /// refused: that transaction already sent its final `carried` and emits
+    /// no further provisional (RFC 3261 §13.3.1.1 / §17.2.1). The router
+    /// counts it as `provisional_after_final_refused`.
+    ProvisionalAfterFinalRefused {
+        status: u16,
+        carried: u16,
+    },
     /// An asynchronous trigger (`event`: timer / timeout / internal-event)
     /// landed on a call already going away and `rule` — the highest-registered
     /// non-teardown rule it matched — was kept from running. The router counts

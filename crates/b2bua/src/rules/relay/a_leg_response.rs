@@ -1,6 +1,7 @@
 //! The UAS response the B2BUA mints on the a-leg's inbound INVITE (toward the
 //! originator), on that INVITE's own server transaction — and the one seam
-//! where a second final on that transaction is refused.
+//! where a second final, or a provisional after the final, on that
+//! transaction is refused.
 
 use call::Call;
 use sip_message::generators::{self, response_states_contact, GenerateResponseOpts};
@@ -20,7 +21,8 @@ use crate::effects::{
 /// A final (≥ 200) is admitted once per transaction (RFC 3261 §17.2.1): the
 /// first records itself as [`call::Leg::invite_final_sent`]; any later one is
 /// refused — `None`, nothing built — and reported as
-/// [`BufferedObservabilityEffect::SecondFinalRefused`]. A provisional passes.
+/// [`BufferedObservabilityEffect::SecondFinalRefused`]. A provisional passes
+/// only while the transaction carries no final ([`provisional_after_final`]).
 #[allow(clippy::too_many_arguments)]
 pub fn response_to_a_leg(
     call: &mut Call,
@@ -48,6 +50,8 @@ pub fn response_to_a_leg(
             return None;
         }
         call.a_leg.invite_final_sent = Some(status);
+    } else if provisional_after_final(call, fx, status) {
+        return None;
     }
     let opts = GenerateResponseOpts {
         to_tag,
@@ -71,4 +75,23 @@ pub fn response_to_a_leg(
         leg_id: Some("a".to_string()),
         provenance,
     })
+}
+
+/// Whether a provisional of `status` toward the a-leg's initial INVITE is
+/// refused: that transaction already sent its final, and a completed INVITE
+/// server transaction emits no further provisional (RFC 3261 §13.3.1.1 /
+/// §17.2.1). A refusal is reported as
+/// [`BufferedObservabilityEffect::ProvisionalAfterFinalRefused`]. The
+/// executors that would mint one ask here first, so a refused provisional
+/// touches no dialog tag and no reliable-provisional ladder on the way.
+pub fn provisional_after_final(call: &Call, fx: &mut HandlerEffects, status: u16) -> bool {
+    let Some(carried) = call.a_leg.invite_final_sent else { return false };
+    tracing::warn!(
+        call_ref = %call.call_ref,
+        status,
+        carried,
+        "provisional to the a-leg INVITE after its final refused"
+    );
+    fx.buffered.push(BufferedObservabilityEffect::ProvisionalAfterFinalRefused { status, carried });
+    true
 }

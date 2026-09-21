@@ -2,6 +2,7 @@
 //! toward the referrer, C's initial answer (→ c-realign), and the failure /
 //! no-answer terminals.
 
+use b2bua_sdk::provisional::absorbed_provisional_actions;
 use b2bua_sdk::sm_rule;
 use call::{CdrEventType, Direction, LegState, TransferPhase};
 use sip_message::Method;
@@ -14,7 +15,10 @@ use crate::rules::refer_transfer::notify::{
 use crate::rules::refer_transfer::ok;
 use crate::rules::{relay, Terminal};
 
-/// transfer-c-1xx-to-notify — C 1xx → NOTIFY active (deduped).
+/// transfer-c-1xx-to-notify — C 1xx → NOTIFY active (deduped). The referrer's
+/// peer is answered, so C's provisional is shown to no one: C keeps what it is
+/// owed (`Early`, a PRACK on a reliable one, the CDR event) and the referrer
+/// hears of the progress.
 pub(super) fn c_1xx_to_notify() -> RuleDefinition {
     sm_rule! {
         id: "transfer-c-1xx-to-notify",
@@ -23,6 +27,7 @@ pub(super) fn c_1xx_to_notify() -> RuleDefinition {
         transitions: [],
         effects: [
             Effect::Originate { method: Method::Notify, label: "NOTIFY active (C progress) → referrer" },
+            Effect::Originate { method: Method::Prack, label: "PRACK → C (reliable 1xx, nothing shown to A)" },
         ],
         matcher: Match::response()
             .method("INVITE")
@@ -34,13 +39,13 @@ pub(super) fn c_1xx_to_notify() -> RuleDefinition {
         handle: |ctx| {
             let st = state(ctx)?.clone();
             let resp = ctx.response()?;
+            let mut actions = absorbed_provisional_actions(ctx);
             // Dedupe identical repeats against the *last* status only.
             if st.last_c_leg_notified_status == Some(resp.status()) {
-                return ok(vec![]);
+                return ok(actions);
             }
             let mut new_state = st.clone();
             new_state.last_c_leg_notified_status = Some(resp.status());
-            let mut actions = Vec::new();
             actions.extend(notify(&st, SUB_STATE_ACTIVE_60, resp.status(), resp.reason()));
             actions.push(RuleAction::SetTransfer { state: Some(new_state) });
             ok(actions)

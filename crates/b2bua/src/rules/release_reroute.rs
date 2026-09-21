@@ -33,8 +33,9 @@
 //! presence is the activation guard, so every rule here is inert on ordinary
 //! calls. These are CORE rules registered BEFORE the generic core set
 //! (`defaults::default_rules_with`), so within CORE they out-rank
-//! `confirm-dialog` / `relay-provisional` / `route-failure` by order; the
-//! explicit `overrides` document the displacement. In-dialog INVITEs from
+//! `confirm-dialog` / `route-failure` by order; the explicit `overrides`
+//! document the displacement. The replacement leg's provisionals are the
+//! core's (`relay-provisional`): A is answered, so it absorbs them. In-dialog INVITEs from
 //! either original party are 491'd while the reroute is in flight (RFC 5407
 //! §3.1 retry-later, the same treatment the transfer machine applies); a BYE
 //! from either party still rides `relay-bye` and ends the call.
@@ -215,24 +216,6 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     leg_id: None,
                 });
                 ok(actions)
-            },
-        ),
-        // ── replacement leg progress: absorb its 18x (A is established — a
-        // provisional must NOT be relayed onto her answered dialog).
-        rule(
-            "reroute-b-provisional",
-            &["relay-provisional"],
-            Match::response()
-                .method("INVITE")
-                .status_class(1)
-                .direction(Direction::FromB)
-                .filter(is_new_leg),
-            |ctx| {
-                ok(vec![RuleAction::UpdateLegState {
-                    leg_id: ctx.source_leg_id.to_string(),
-                    state: LegState::Early,
-                    disposition: None,
-                }])
             },
         ),
         // ── replacement leg answers → ACK it, bridge A onto its SDP.

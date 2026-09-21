@@ -38,7 +38,7 @@ mod repeat;
 mod originate_tests;
 
 // Originating a leg + answering/acknowledging on an existing one.
-pub use a_leg_response::response_to_a_leg;
+pub use a_leg_response::{provisional_after_final, response_to_a_leg};
 pub use ack::ack_b_leg;
 pub(crate) use ack::{acked_invite_carries_offer, acked_invite_cseq};
 pub(crate) use originate::clamp_no_answer;
@@ -50,9 +50,10 @@ pub use egress::{apply_b_leg_egress, leg_egress_dest, outbound_proxy_route_set};
 
 // Transparency + advertisement across the back-to-back UA.
 pub use advert::stamp_a_facing_invite_advert;
+pub use b2bua_sdk::provisional::reliable_rseq;
 pub use passthrough::{
     own_the_rseq, relay_request_passthrough_headers, relay_response_passthrough_headers,
-    reliable_rseq, strip_reliability,
+    strip_reliability,
 };
 
 // Reading text back into typed values (decision fields, dialog state, bodies).

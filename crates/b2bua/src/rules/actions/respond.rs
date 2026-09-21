@@ -249,6 +249,11 @@ impl ActionExecutor<'_> {
         if !(100..200).contains(&status) || leg_id != call.a_leg.leg_id {
             return;
         }
+        // The a-leg INVITE already sent its final: refused at the seam before
+        // the caller's early identity is touched (RFC 3261 §17.2.1).
+        if relay::provisional_after_final(call, fx, status) {
+            return;
+        }
         // `to_tag` provided → the service states the caller's early identity: it
         // seeds the a-dialog, and re-stamps one a b-leg confirm minted before any
         // caller-facing response carried it. Absent → the B2BUA's own early
