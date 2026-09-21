@@ -4519,3 +4519,45 @@ async fn a_multipart_body_s_recording_locates_its_parts_and_keeps_the_binary_one
     assert_eq!(outcome.verdict.completed_steps.len(), 13, "every step ran");
     scene.finish().await;
 }
+
+/// Two answers one leg is owed on two transactions carry no order between them
+/// (RFC 3261 §17). The caller BYEs the early dialog its reliably-answered
+/// INVITE opened (§15.1, §12.1.2), and the system owes it 200 to the BYE and
+/// 487 to the INVITE (§15.1.2). The document lists the 487 first — the order
+/// one implementation emitted them in — and this system answers the BYE first:
+/// the run takes each where it lands, and the flow completes.
+#[tokio::test(start_paused = true)]
+async fn two_answers_on_two_transactions_are_taken_in_either_order() {
+    let scene = api_scene("pivot-early-bye-answer-order").await;
+    let (outcome, dir) = replay(&scene, "early-bye-answer-order.v3.json").await;
+    assert_bundle_is_complete(&outcome, &dir);
+    for step in (1..=17).map(|n| format!("s{n}")) {
+        assert!(
+            outcome.verdict.completed_steps.contains(&step),
+            "{step} never completed: {:#?}\nfailures: {:#?}",
+            outcome.verdict.completed_steps,
+            outcome.verdict.failures
+        );
+    }
+    // The rung proves the inversion only while the wire shows it: on leg A the
+    // BYE's 200 landed BEFORE the INVITE's 487 the document lists first.
+    let a_leg = &outcome.recording.legs()["A"];
+    let position = |start: &str, method: &str| {
+        a_leg
+            .iter()
+            .position(|m| {
+                let raw = text(m);
+                raw.starts_with(start)
+                    && raw.lines().any(|l| l.starts_with("CSeq:") && l.ends_with(method))
+            })
+            .unwrap_or_else(|| panic!("{start} to {method} was recorded: {a_leg:#?}"))
+    };
+    let bye_ok = position("SIP/2.0 200", " BYE");
+    let terminated = position("SIP/2.0 487", " INVITE");
+    assert!(
+        bye_ok < terminated,
+        "the system answered the BYE first: 200 at {bye_ok}, 487 at {terminated}"
+    );
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}

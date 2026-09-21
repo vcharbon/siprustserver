@@ -2,8 +2,12 @@
 //! run is on right now.
 //!
 //! Two ordering rules, and no third. Same-leg order is LIST order; cross-leg and
-//! cross-call order is `after`. Everything else here is what the three
-//! nondeterminism constructs mean at run time:
+//! cross-call order is `after`. List order binds within one transaction and
+//! between a send and what it provokes; it never binds where nothing could
+//! establish it — a relay standing behind a send (§6.7b) and an answer to a
+//! transaction this leg has already opened (§6.7c) arm beside the step in
+//! front of them. Everything else here is what the three nondeterminism
+//! constructs mean at run time:
 //!
 //! - **`alt`** — every branch's first message is armed at once; the first one to
 //!   arrive COMMITS the alt, and the run never backtracks. The other branches'
@@ -25,7 +29,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::plan::Plan;
+use sip_message::Method;
+
+use crate::plan::{CompiledStep, Discriminator, Plan};
 use crate::program::ItemKind;
 
 /// Where one step stands.
@@ -173,6 +179,59 @@ impl<'p> Cursor<'p> {
             })
     }
 
+    /// Whether every step of an item answers a transaction THIS leg has already
+    /// opened (§6.7c): an `expect` naming its transaction (`status` plus
+    /// `cseq-method`), on a transaction nothing armed here waits on, whose
+    /// request this leg sent at a completed step. RFC 3261 §17 orders no two
+    /// answers on two open transactions, so such a step arms beside whatever
+    /// stands in front of it; within one transaction list order binds.
+    fn answers_open_transaction(&self, frontier: &[String], armed: &[String]) -> bool {
+        !frontier.is_empty()
+            && frontier.iter().all(|id| {
+                let Some(step) = self.plan.step(id) else { return false };
+                let Discriminator::Response { cseq_method: Some(method), .. } = &step.discriminator
+                else {
+                    return false;
+                };
+                let method = Method::from_wire(method);
+                step.is_expect()
+                    && !armed.iter().any(|prev| {
+                        self.plan.step(prev).is_some_and(|s| answers(s, &method).is_some())
+                    })
+                    && self.transaction_open(step, &method)
+            })
+    }
+
+    /// Whether the transaction `step` answers is open at `step`'s place in its
+    /// leg: the leg's last send of `method` before it has completed, and no
+    /// answer to that send stands between the two — pending, which would be
+    /// the transaction's earlier turn, or a completed final, which ended it.
+    fn transaction_open(&self, step: &CompiledStep, method: &Method) -> bool {
+        let key = self.leg_key(&step.id);
+        let mut along: Vec<&CompiledStep> = self
+            .plan
+            .steps()
+            .into_iter()
+            .filter(|s| s.leg == step.leg && self.leg_key(&s.id) < key)
+            .collect();
+        along.sort_by_key(|s| self.leg_key(&s.id));
+        let Some(opened) = along.iter().rposition(|s| {
+            s.is_send()
+                && matches!(&s.discriminator, Discriminator::Request { method: m }
+                    if Method::from_wire(m) == *method)
+        }) else {
+            return false;
+        };
+        if self.steps.get(&along[opened].id).copied() != Some(StepStatus::Complete) {
+            return false;
+        }
+        along[opened + 1..].iter().all(|s| match (answers(s, method), self.steps.get(&s.id)) {
+            (Some(_), Some(StepStatus::Pending)) => false,
+            (Some(status), Some(StepStatus::Complete)) => status < 200,
+            _ => true,
+        })
+    }
+
     /// Whether every step an item puts on this leg is a `send`.
     ///
     /// Nothing armed consumes a datagram but an expect, so walking past a send
@@ -214,20 +273,33 @@ impl<'p> Cursor<'p> {
                 // arms its whole membership: neither is a relay standing in a
                 // queue, and both are authored constructs a capture cannot carry
                 // (lint `subset/alt`, `subset/unordered`).
-                let caused = !awaited
-                    && self.plan.program().items[index].kind == ItemKind::Message
-                    && self.caused_elsewhere(&frontier, &armed);
+                let is_message = self.plan.program().items[index].kind == ItemKind::Message;
+                let caused = !awaited && is_message && self.caused_elsewhere(&frontier, &armed);
                 if blocked && !caused && !self.races_with(&frontier, &armed) {
+                    // An answer to a transaction this leg already opened may be
+                    // on the wire now, whatever stands in front of it (§6.7c).
+                    if is_message && self.answers_open_transaction(&frontier, &armed) {
+                        armed.extend(frontier.iter().cloned());
+                        out.extend(frontier);
+                        continue;
+                    }
                     // A relay can stand behind a RUN of sends, not just one.
                     // Walking past a send ARMS NOTHING — a send is the runner's
                     // own act and never moves earlier — it only keeps the search
                     // alive for a `caused_elsewhere` arrival further down the
-                    // leg. The walk still stops dead at an expect of the leg's
-                    // own, which is where list order binds.
+                    // leg. The relay's walk still stops dead at an expect of the
+                    // leg's own, which is where list order binds for it.
                     if !awaited && self.all_sends(&frontier) {
                         continue;
                     }
-                    break;
+                    // A block is never walked past (§6.7b). A step of the leg's
+                    // own is: nothing behind it arms but an answer to a
+                    // transaction already open, which its place cannot order.
+                    if !is_message {
+                        break;
+                    }
+                    awaited = true;
+                    continue;
                 }
                 let all_optional = !frontier.is_empty()
                     && frontier
@@ -456,6 +528,18 @@ impl<'p> Cursor<'p> {
     }
 }
 
+/// The status an expect waits for on a response to `method`, where it does.
+fn answers(step: &CompiledStep, method: &Method) -> Option<u16> {
+    match &step.discriminator {
+        Discriminator::Response { status, cseq_method: Some(m) }
+            if step.is_expect() && Method::from_wire(m) == *method =>
+        {
+            Some(*status)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,6 +613,26 @@ mod tests {
             format!(r#"{{"ms":0,"from":"step:{from}","compressible":true,"timer_linked":false}}"#);
         format!(
             r#"{{"id":"{id}","leg":"{leg}","op":"expect","check":"record","msg":{{"method":"{method}"}},"delay":{d}}}"#
+        )
+    }
+
+    /// An expect gated on a response to a transaction the leg names.
+    fn answer(id: &str, leg: &str, status: u16, method: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","leg":"{leg}","op":"expect","check":"record","msg":{{"status":{status},"cseq-method":"{method}"}},"delay":{D}}}"#
+        )
+    }
+
+    /// An expect gated on a status alone, naming no transaction.
+    fn status_only(id: &str, leg: &str, status: u16) -> String {
+        format!(
+            r#"{{"id":"{id}","leg":"{leg}","op":"expect","check":"record","msg":{{"status":{status}}},"delay":{D}}}"#
+        )
+    }
+
+    fn request_expect(id: &str, leg: &str, method: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","leg":"{leg}","op":"expect","check":"record","msg":{{"method":"{method}"}},"delay":{D}}}"#
         )
     }
 
@@ -941,5 +1045,134 @@ mod tests {
         let mut cursor = Cursor::new(&p);
         cursor.complete("s1");
         assert_eq!(cursor.frontier(), ["s2"], "the alt waits for the send in front of it");
+    }
+
+    /// Two answers this leg is owed on two transactions it opened carry no
+    /// order between them (RFC 3261 §17): the BYE's 200 arms beside the
+    /// INVITE's 487 the document lists first, and whichever lands first is
+    /// taken first.
+    #[test]
+    fn an_answer_to_a_transaction_this_leg_opened_arms_beside_another_transaction_s_answer() {
+        let p = plan(&format!(
+            "[{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            send("s2", "A", "BYE"),
+            answer("s3", "A", 487, "INVITE"),
+            answer("s4", "A", 200, "BYE")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s3", "s4"], "both transactions are open: both armed");
+        cursor.complete("s4");
+        assert_eq!(cursor.frontier(), ["s3"], "the 487 is still owed");
+        cursor.complete("s3");
+        assert!(cursor.is_done());
+    }
+
+    /// The answer may be on the wire from the moment its request went out, so
+    /// a send this leg has not made yet cannot be what orders it — and walking
+    /// past that send never emits it early.
+    #[test]
+    fn an_answer_to_an_open_transaction_arms_behind_a_send() {
+        let p = plan(&format!(
+            "[{},{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            send("s2", "A", "BYE"),
+            answer("s3", "A", 487, "INVITE"),
+            send("s4", "A", "ACK"),
+            answer("s5", "A", 200, "BYE")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s3", "s5"], "the ACK behind the 487 is walked past");
+        cursor.complete("s5");
+        cursor.complete("s3");
+        assert_eq!(cursor.frontier(), ["s4"], "the ACK arms only once its turn comes");
+    }
+
+    /// The request is the gate: an answer to a request this leg has not sent
+    /// yet is an arrival nothing has provoked, and list order is all there is.
+    #[test]
+    fn an_answer_whose_request_has_not_gone_out_waits_its_turn() {
+        let p = plan(&format!(
+            "[{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            answer("s2", "A", 180, "INVITE"),
+            send("s3", "A", "BYE"),
+            answer("s4", "A", 200, "BYE")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        assert_eq!(cursor.frontier(), ["s2"], "the BYE has not gone out");
+    }
+
+    /// Within ONE transaction list order binds: a provisional before its final.
+    /// Beside an answer on ANOTHER transaction, only the transaction's first
+    /// pending answer arms, and its final stays behind it.
+    #[test]
+    fn answers_on_one_transaction_keep_list_order() {
+        let p = plan(&format!(
+            "[{},{},{}]",
+            send("s1", "A", "INVITE"),
+            answer("s2", "A", 180, "INVITE"),
+            answer("s3", "A", 200, "INVITE")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        assert_eq!(cursor.frontier(), ["s2"], "the final waits behind the provisional");
+
+        let q = plan(&format!(
+            "[{},{},{},{},{}]",
+            send("t1", "A", "INVITE"),
+            send("t2", "A", "PRACK"),
+            answer("t3", "A", 200, "PRACK"),
+            answer("t4", "A", 180, "INVITE"),
+            answer("t5", "A", 200, "INVITE")
+        ));
+        let mut other = Cursor::new(&q);
+        other.complete("t1");
+        other.complete("t2");
+        assert_eq!(
+            other.frontier(),
+            ["t3", "t4"],
+            "the INVITE's next provisional arms beside the PRACK's answer; its final does not"
+        );
+    }
+
+    /// An expect gated on a status alone names no transaction, so nothing says
+    /// which request it answers, and it waits its turn.
+    #[test]
+    fn an_answer_naming_no_transaction_waits_its_turn() {
+        let p = plan(&format!(
+            "[{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            send("s2", "A", "BYE"),
+            answer("s3", "A", 487, "INVITE"),
+            status_only("s4", "A", 200)
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s3"]);
+    }
+
+    /// A final already taken closed its transaction (RFC 3261 §17.1): a later
+    /// answer of the same method — a fork's second 2xx — is not an open
+    /// transaction's and keeps its place in the list.
+    #[test]
+    fn a_transaction_a_final_already_answered_opens_nothing() {
+        let p = plan(&format!(
+            "[{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            answer("s2", "A", 200, "INVITE"),
+            request_expect("s3", "A", "BYE"),
+            answer("s4", "A", 200, "INVITE")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s3"], "the second 2xx waits behind the BYE");
     }
 }

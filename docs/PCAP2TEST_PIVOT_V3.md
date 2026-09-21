@@ -1343,7 +1343,7 @@ A captured document carries no `after`: the chain barrier is derivable from
 "overlap": "s13"
 ```
 
-Same-leg order is list order and it BINDS (§6.7b is its one exception), so a
+Same-leg order is list order and it BINDS (§6.7b and §6.7c are its exceptions), so a
 document that lists two steps in the order the capture happened to see them has
 decided that order. `overlap`
 is how it declines to: the two steps arm TOGETHER on their leg's frontier, and
@@ -1396,9 +1396,51 @@ A message step only: an `alt` armed early could COMMIT before the send in front
 of it goes out, and an `unordered` group arms its whole membership. Neither is a
 relay standing in a queue, and a capture carries neither (§13.1).
 
-This is the ONE place where same-leg list order does not bind, and it un-asserts
-exactly what the capture never established: the order between a dwell the
-document holds and a latency it does not.
+Here same-leg list order does not bind, and what is un-asserted is exactly what
+the capture never established: the order between a dwell the document holds and
+a latency it does not. §6.7c is the other such place, for the same reason.
+
+### 6.7c The answer to a transaction already open
+
+A leg that has SENT a request is the client of the transaction it opened
+(RFC 3261 §17.1), and the response it is owed rides that transaction and no
+other. Two answers one leg is owed on two open transactions therefore carry no
+order between them: the order a capture shows is the order one implementation
+happened to emit them in, and no document can oblige another to keep it. A BYE
+on an early dialog is the canonical case — the UAS owes 200 to the BYE and
+487 to the INVITE (§15.1.2), and either may leave first — but the shape is
+general: a 200 to a PRACK and the next provisional of the INVITE, a 481 to a
+re-INVITE and the 200 to the BYE that crossed it.
+
+So an `expect` gated on a response whose transaction this leg has already
+opened is ARMED BESIDE whatever stands in front of it on the leg — another
+transaction's answer, or sends this leg has not made yet — and whichever the
+wire settles first settles first. The bounds, stated once here and nowhere per
+document:
+
+- the expect names its transaction: `status` plus `cseq-method`. A status alone
+  names no transaction and waits its turn;
+- the leg's last `send` of that method before the expect has COMPLETED. Before
+  that nothing has provoked the answer, and list order is all there is;
+- the expect is that transaction's FIRST pending answer. Within one transaction
+  list order binds — a provisional before its final, one final before the next
+  2xx a fork draws — so an answer standing behind an earlier pending answer of
+  the same transaction waits behind it;
+- no completed expect has taken a FINAL of that transaction since the send: a
+  final ends the transaction (§17.1), and a later answer of the same method is
+  another transaction's, not yet opened;
+- nothing already armed on the leg waits on the same transaction, so no two
+  armed steps can take each other's datagram;
+- a message step only, walked to across message steps only: a block (`alt`,
+  `unordered`) is never walked past nor armed early (§6.7b).
+
+Walking past a send emits nothing early, and walking past an expect of the
+leg's own un-orders nothing but this: everything else behind that expect keeps
+its place, and a relay (§6.7b) still stops at it.
+
+`overlap` (§6.7a) and `unordered` (§6.5) remain what a document says when it
+declines an order for a reason of its own; neither is needed to state this one,
+which is the transaction layer's and holds for every document alike.
 
 ### 6.8 delay and dwell
 
@@ -2829,9 +2871,10 @@ Its whole job:
 
 1. **Bind** each endpoint per its `side` and `binding`.
 2. **Sequence** the flow. Same-leg order is list order — save for a relay
-   standing behind a send, which arms beside it (§6.7b) — cross-leg and
-   cross-call order is `after`; a captured chain barrier comes from
-   `attempts[].leg` plus `position`.
+   standing behind a send (§6.7b) and an answer to a transaction the leg has
+   already opened (§6.7c), which arm beside what stands in front of them —
+   cross-leg and cross-call order is `after`; a captured chain barrier comes
+   from `attempts[].leg` plus `position`.
 3. **`send`**: emit exactly what `msg` states, plus tier-1 regeneration, plus
    any run-config injected headers — the run's own, and on a call's DIAL that
    call's own directive (§4.3) — plus any accessor substitution: a `${num:…}`
