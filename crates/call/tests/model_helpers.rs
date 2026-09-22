@@ -622,6 +622,7 @@ fn marks_number_the_decisions_and_stamp_what_follows() {
         to_tag: None,
         decision_ordinal: 99,
         headers: Vec::new(),
+        turn: 0,
     };
     let cdr = || CdrEvent {
         event_type: CdrEventType::InviteSent,
@@ -667,6 +668,44 @@ fn marks_number_the_decisions_and_stamp_what_follows() {
     let events: Vec<u32> =
         call.cdr_events.iter().rev().take(3).rev().map(|e| e.decision_ordinal).collect();
     assert_eq!(events, vec![0, 1, 2]);
+}
+
+/// Every entry appended carries the counter's turn, whatever the entry held;
+/// the seal moves the counter past a turn that appended an entry and leaves
+/// it where it stands after a turn that appended none.
+#[test]
+fn a_turn_numbers_its_entries_and_the_seal_moves_past_it() {
+    let mut call = representative_call();
+    call.a_leg.messages = MessageRing::default();
+    call.b_legs[0].messages = MessageRing::default();
+    call.message_seq = 0;
+    call.message_turn = 1;
+    let entry = || MessageEntry {
+        seq: 0,
+        at_ms: 5,
+        direction: MessageDirection::Received,
+        method: "INVITE".into(),
+        cseq: 1,
+        code: None,
+        to_tag: None,
+        decision_ordinal: 0,
+        headers: Vec::new(),
+        turn: 99,
+    };
+
+    let call = record_message(call, "a", 8, entry());
+    let call = record_message(call, "b-1", 8, entry());
+    let call = seal_turn(call);
+    assert_eq!(call.message_turn, 2, "past the turn that recorded two entries");
+    let call = seal_turn(call);
+    assert_eq!(call.message_turn, 2, "a turn that recorded nothing moves nothing");
+    let call = record_message(call, "a", 8, entry());
+    let call = seal_turn(call);
+    assert_eq!(call.message_turn, 3);
+
+    let turns = |leg: &Leg| leg.messages.entries.iter().map(|e| e.turn).collect::<Vec<u32>>();
+    assert_eq!(turns(&call.a_leg), vec![1, 2]);
+    assert_eq!(turns(&call.b_legs[0]), vec![1]);
 }
 
 /// The first termination's record stands: a second write under another

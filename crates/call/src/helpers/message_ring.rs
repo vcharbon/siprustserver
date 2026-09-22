@@ -21,3 +21,8 @@ pub fn record_message(mut call: Call, leg_id: &str, cap: usize, mut entry: Messa
     entry.decision_ordinal = call.decision_ordinal;
     update_leg(call, leg_id, |leg| leg.messages.push(entry, cap))
 }
+
+/// Stub: moves nothing yet.
+pub fn seal_turn(call: Call) -> Call {
+    call
+}

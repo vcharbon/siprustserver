@@ -312,6 +312,14 @@ pub struct Call {
     /// the call is live.
     #[serde(default)]
     pub termination: Option<Termination>,
+    /// The number of the turn the message ring records into — every entry
+    /// appended carries it ([`crate::helpers::record_message`]); `1` for the
+    /// initial INVITE's turn, advanced by one once a turn that appended an
+    /// entry lands ([`crate::helpers::seal_turn`]). Replicated with the ring,
+    /// so a node taking the call over numbers its turns past every entry the
+    /// body holds.
+    #[serde(default)]
+    pub message_turn: u32,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate

@@ -2,8 +2,10 @@
 //! SIP message a leg received or sent, in handling order, with the values of
 //! the configured headers — and nothing for a retransmission, inbound or
 //! outbound (RFC 3261 §17.2.1 replays, §13.2.2.4 re-ACKs, §13.3.1.4 2xx
-//! repeats). The cap keeps the last N entries and counts the evicted; a cap of
-//! `0` (the default) records nothing.
+//! repeats). Every entry carries the number of the turn that handled it, so
+//! two turns sharing a millisecond stay apart. The cap keeps the last N
+//! entries and counts the evicted; a cap of `0` (the default) records
+//! nothing.
 //!
 //! The SUT is the harness [`B2buaSut`], which hands the test every
 //! terminated `Call` — the ring as the record sees it — while the live copy
@@ -11,9 +13,14 @@
 //! store flushes it (`MsgpackCodec`).
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::config::{B2buaConfig, CdrConfig};
+use b2bua::decision::test_adapter::route_to;
+use b2bua::decision::{
+    CallDecisionEngine, CallTreatment, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
+};
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::{Call, CallBodyCodec, MessageDirection, MessageEntry, MsgpackCodec};
 use scenario_harness::{Agent, Harness, WaiverScope};
@@ -45,7 +52,25 @@ impl Sut {
         cdr: CdrConfig,
         tune: impl FnOnce(&mut B2buaConfig) + 'static,
     ) -> Self {
-        let b2bua = B2buaSut::route_all_to("127.0.0.1", 5070)
+        Self::spawn_with(h, B2buaSut::route_all_to("127.0.0.1", 5070), cdr, tune).await
+    }
+
+    /// The SUT under `decision`'s answers instead of routing everything to bob.
+    async fn spawn_deciding(
+        h: &Harness,
+        decision: Arc<dyn CallDecisionEngine>,
+        cdr: CdrConfig,
+    ) -> Self {
+        Self::spawn_with(h, B2buaSut::builder(decision), cdr, |_| {}).await
+    }
+
+    async fn spawn_with(
+        h: &Harness,
+        builder: b2bua_harness::B2buaSutBuilder,
+        cdr: CdrConfig,
+        tune: impl FnOnce(&mut B2buaConfig) + 'static,
+    ) -> Self {
+        let b2bua = builder
             .keep_terminated_calls()
             .tune(move |config| {
                 config.worker_allowed_target_suffixes = vec!["*".into()];
@@ -85,6 +110,11 @@ fn ring_on() -> CdrConfig {
 /// assertions read.
 fn rows(entries: &[MessageEntry]) -> Vec<(MessageDirection, &str, u32, Option<u16>)> {
     entries.iter().map(|e| (e.direction, e.method.as_str(), e.cseq, e.code)).collect()
+}
+
+/// The turn of every entry, in ring order.
+fn turns(entries: &[MessageEntry]) -> Vec<u32> {
+    entries.iter().map(|e| e.turn).collect()
 }
 
 fn b_leg(call: &Call) -> &call::Leg {
@@ -253,6 +283,62 @@ async fn a_basic_call_records_every_distinct_message_on_both_legs() {
     assert_eq!(b_leg(&done).messages.dropped, 0);
     // The turn's clock stamps every entry, and the seq keeps their order.
     assert!(done.a_leg.messages.entries.windows(2).all(|w| w[0].at_ms <= w[1].at_ms));
+    // Six turns recorded: the INVITE with its 100 and the INVITE sent on,
+    // the 180, the 200, the ACK, the caller's BYE with its 200 and the BYE
+    // sent on, the callee's 200 to it. A message received and what the turn
+    // sent for it share one number.
+    assert_eq!(turns(&done.a_leg.messages.entries), vec![1, 1, 2, 3, 4, 5, 5]);
+    assert_eq!(turns(&b_leg(&done).messages.entries), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(done.message_turn, 7, "the next turn's number");
+
+    let _report = h.finish().await;
+}
+
+/// A decision reply is a turn of its own: the callee's failure, with the
+/// ACK the layer answered it with, is one turn; the consult's reject folding
+/// back and sending the caller its final is the next — two numbers, though
+/// both turns run within the same millisecond.
+#[tokio::test(start_paused = true)]
+async fn two_turns_within_one_millisecond_carry_two_turn_numbers() {
+    let h = Harness::new("message-ring-turns-one-ms");
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.callback_context = Some("ctx".into());
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|_| {
+                CallTreatment::Reject(RejectDecision {
+                    reject_code: 486,
+                    reject_reason: Some("Busy Here".into()),
+                    update_headers: None,
+                    service_ext: Default::default(),
+                    label: None,
+                })
+            })
+            .build(),
+    );
+    let sut = Sut::spawn_deciding(&h, decision, ring_on()).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
+    bob.receive("INVITE").await.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+    call.expect(486).await;
+
+    let done = sut.assert_reaped().await;
+    let a = &done.a_leg.messages.entries;
+    let b = &b_leg(&done).messages.entries;
+    assert_eq!(
+        rows(b)[1..],
+        [(Received, "INVITE", b[0].cseq, Some(486)), (Authored, "ACK", b[0].cseq, None)]
+    );
+    assert_eq!(rows(a)[2], (Authored, "INVITE", a[0].cseq, Some(486)));
+    assert_eq!(b[1].at_ms, a[2].at_ms, "the failure and the reject share a millisecond");
+    assert_eq!(turns(b), vec![1, 2, 2], "the failure and its hop ACK are one turn");
+    assert_eq!(turns(a), vec![1, 1, 3], "the reject is the decision reply's turn");
 
     let _report = h.finish().await;
 }
@@ -465,6 +551,10 @@ async fn a_cancelled_setup_records_the_layer_answered_cancel() {
     // like the INVITE it cancels, none.
     assert_eq!(done.a_leg.messages.entries[3].to_tag, None);
     assert_eq!(done.a_leg.messages.entries[5].to_tag, done.a_leg.messages.entries[2].to_tag);
+    // The layer's answers carry the turn that handles the CANCEL they answer,
+    // the CANCEL sent on too; the hop ACK the callee's 487 draws, the 487's.
+    assert_eq!(turns(&done.a_leg.messages.entries), vec![1, 1, 2, 3, 3, 3]);
+    assert_eq!(turns(&b_leg(&done).messages.entries), vec![1, 2, 3, 4, 5, 5]);
 
     let _report = h.finish().await;
 }
@@ -788,11 +878,21 @@ async fn a_stray_cancel_and_its_481_are_recorded() {
         [(Received, "CANCEL", invite_cseq, None), (Authored, "CANCEL", invite_cseq, Some(481))],
         "{a:?}"
     );
+    assert_eq!(
+        turns(&live.a_leg.messages.entries)[5..],
+        [5, 5],
+        "the refusal is a turn of its own, the 481 in it"
+    );
 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    sut.assert_reaped().await;
+    let done = sut.assert_reaped().await;
+    assert_eq!(
+        turns(&done.a_leg.messages.entries)[7..],
+        [6, 6],
+        "the turn after the refusal takes the next number"
+    );
 
     let _report = h.finish().await;
 }

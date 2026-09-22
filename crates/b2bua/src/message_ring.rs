@@ -108,6 +108,7 @@ impl Ring {
                     to_tag: cancel_tag,
                     decision_ordinal: 0,
                     headers: sip_message::capture::captured_headers(headers, &self.names),
+                    turn: 0,
                 };
                 let cancel_ok = MessageEntry {
                     direction: MessageDirection::Authored,
@@ -217,6 +218,7 @@ impl Ring {
             to_tag: req.to().tag().map(str::to_string),
             decision_ordinal: 0,
             headers: req.captured_headers(&self.names),
+            turn: 0,
         }
     }
 
@@ -232,6 +234,7 @@ impl Ring {
             to_tag: resp.to().tag().map(str::to_string),
             decision_ordinal: 0,
             headers: resp.captured_headers(&self.names),
+            turn: 0,
         }
     }
 }

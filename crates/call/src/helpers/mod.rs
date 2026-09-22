@@ -56,7 +56,7 @@ pub use leg::{
 };
 pub use lens::{update_dialog, update_leg};
 pub use lifecycle::{lifecycle_advances, lifecycle_position, lifecycle_regresses};
-pub use message_ring::record_message;
+pub use message_ring::{record_message, seal_turn};
 pub use obligation::{
     acked_2xx, advance_ladder, answers_initial_invite, clear_retained, obligations_in,
     retained_for, Scope,

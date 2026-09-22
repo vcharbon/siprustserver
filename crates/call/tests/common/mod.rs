@@ -321,6 +321,7 @@ pub fn representative_call() -> Call {
         decision_log: vec![representative_mark()],
         decision_ordinal: 1,
         termination: None,
+        message_turn: 0,
         sm_cursors: BTreeMap::new(),
     }
 }
@@ -705,9 +706,21 @@ fn arb_message_entry() -> impl Strategy<Value = MessageEntry> {
         proptest::option::of(arb_tag()),
         any::<u32>(),
         proptest::collection::vec(("(Allow|Accept|Privacy)", "[a-zA-Z0-9, ]{0,24}"), 0..3),
+        any::<u32>(),
     )
         .prop_map(
-            |(seq, at_ms, direction, method, cseq, code, to_tag, decision_ordinal, headers)| {
+            |(
+                seq,
+                at_ms,
+                direction,
+                method,
+                cseq,
+                code,
+                to_tag,
+                decision_ordinal,
+                headers,
+                turn,
+            )| {
                 MessageEntry {
                     seq,
                     at_ms,
@@ -718,6 +731,7 @@ fn arb_message_entry() -> impl Strategy<Value = MessageEntry> {
                     to_tag,
                     decision_ordinal,
                     headers,
+                    turn,
                 }
             },
         )
@@ -988,6 +1002,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
                 },
             ),
         ),
+        any::<u32>(),
     );
 
     (head, collections, state, trace, tail, release).prop_map(
@@ -1008,7 +1023,14 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
                 sm_cursors,
                 message_seq,
             ),
-            (reliable_provisionals, decision_log, termination, subscriptions, reroute),
+            (
+                reliable_provisionals,
+                decision_log,
+                termination,
+                subscriptions,
+                reroute,
+                message_turn,
+            ),
         )| Call {
             call_ref,
             a_leg,
@@ -1049,6 +1071,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             decision_ordinal: decision_log.len() as u32,
             decision_log,
             termination,
+            message_turn,
             sm_cursors,
         },
     )
