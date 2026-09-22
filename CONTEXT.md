@@ -235,6 +235,15 @@ re-emits the metric as a safety net.
 _Avoid_: re-deriving the constraint in the b2bua or repl layer (single picker =
 the proxy).
 
+**Unwired node** (replication off):
+A b2bua with no replication store (`B2buaDeps.replication = None`, the runners'
+default). It still echoes the proxy's `w_pri`/`w_bak` onto `topology` — the
+cookie stays the one placement authority — but `CallState::flush`/`remove`
+never touch the call store: the topology says where a backup *would* live, the
+wired store says whether one is kept. The switch is `CallState.repl_store`, in
+one place.
+_Avoid_: "legacy path", "non-HA path" (they name a code age, not the switch).
+
 **Reclaim stream** vs **Backup stream** (the two pull flows, from a node N's view):
 *Reclaim* = N pulls the partition where **N is primary** — its own calls that a peer
 backed up while N was down — and re-serves them (`partition=pri` on the wire; stored

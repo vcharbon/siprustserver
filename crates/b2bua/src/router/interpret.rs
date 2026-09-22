@@ -107,12 +107,14 @@ pub(super) async fn process_result(
     }
 
     // Replicate a non-terminated, backed-up call to its peer after each
-    // authoritative mutation (the S10 flush-on-mutation wiring point).
-    // `CallState::flush` is a no-op for calls with no replicable topology, so
-    // the non-HA path is unchanged; for a backed-up call it routes through the
-    // S8 write-side policy (Forward when primary, Reverse when acting-backup)
-    // so the backup holds the latest state. The flush rides the buffered
-    // terminate-writer (non-blocking).
+    // authoritative mutation (the S10 flush-on-mutation wiring point). The
+    // backup test here keeps a wired node from writing a call nobody backs up;
+    // `CallState::flush` itself is a no-op on a node with no replication store,
+    // so a backup peer stamped by the front proxy alone never opens the store.
+    // A backed-up call on a wired node routes through the S8 write-side policy
+    // (Forward when primary, Reverse when acting-backup) so the backup holds
+    // the latest state. The flush rides the buffered terminate-writer
+    // (non-blocking).
     //
     // `Terminating` MUST flush too, not just `Active`: a teardown-in-progress
     // carries authoritative state the replica needs — the b-leg `ByeSent`

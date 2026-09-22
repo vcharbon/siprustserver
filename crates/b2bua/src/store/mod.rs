@@ -103,11 +103,14 @@ struct Inner {
 pub struct CallState {
     inner: Arc<Mutex<Inner>>,
     store: Arc<dyn CallStore>,
-    /// The replicating store, set only when replication is wired (S10). When
-    /// `Some`, [`flush`](CallState::flush)/[`remove`](CallState::remove) route a
-    /// call that carries a non-empty `topology.bak` through the S8 write-side
-    /// policy ([`flush_replicated`]); when `None`, the legacy `PutOpts::default()`
-    /// path is used (backward compatible + correct for non-proxied calls).
+    /// The replicating store, set only when replication is wired (S10). It is
+    /// the one switch on the store write path: `None` and
+    /// [`flush`](CallState::flush)/[`remove`](CallState::remove) touch the store
+    /// not at all, whatever topology a call carries (the front proxy stamps a
+    /// backup peer on every call whenever two workers are alive, and nothing
+    /// reads what an unwired node would write). `Some` and a call with a
+    /// non-empty `topology.bak` rides the S8 write-side policy
+    /// ([`ReplicationPlan`]); a call with no backup takes `PutOpts::default()`.
     repl_store: Option<Arc<ReplicatingCallStore>>,
     terminate_writer: BufferedTerminateWriter,
     codec: MsgpackCodec,
@@ -181,9 +184,9 @@ impl CallState {
         self
     }
 
-    /// Opt into replication: route the flush/remove of any call that carries a
-    /// non-empty `topology.bak` through the S8 write-side policy. Builder-style so
-    /// existing [`CallState::new`] callers are unchanged (backward compatible).
+    /// Opt into replication: open the store write path, and route the
+    /// flush/remove of any call that carries a non-empty `topology.bak` through
+    /// the S8 write-side policy. Without this call the store is never written.
     /// `repl` MUST be the same store the [`BufferedTerminateWriter`] drains to, so
     /// the changelog bump (keyed off the `PutOpts.peer` this path sets) fires.
     pub fn with_replication(mut self, repl: Arc<ReplicatingCallStore>) -> Self {
@@ -361,12 +364,13 @@ impl CallState {
             .filter(|bak| !bak.is_empty())
     }
 
-    /// Resolve the store target + propagate opts for `call_ref`. When a backup is
-    /// resolvable (replicating store + non-empty `topology.bak`) this is the S8
-    /// write-side policy ([`ReplicationPlan`]) — Forward when we own the ref,
-    /// Reverse (acting-backup) when the ref names a crashed peer. Otherwise it is
-    /// today's local-only path: `(partition_of, PutOpts::default())`, no peer →
-    /// the replicating store makes NO changelog bump (backward compatible).
+    /// Resolve the store target + propagate opts for `call_ref`, on a wired
+    /// node only (the callers gate on `repl_store` first). When a backup is
+    /// resolvable (non-empty `topology.bak`) this is the S8 write-side policy
+    /// ([`ReplicationPlan`]) — Forward when we own the ref, Reverse
+    /// (acting-backup) when the ref names a crashed peer. Otherwise it is the
+    /// local-only path: `(partition_of, PutOpts::default())`, no peer → the
+    /// replicating store makes NO changelog bump.
     fn store_target(&self, call_ref: &str) -> (PartitionRole, String, PutOpts) {
         match self.backup_of(call_ref) {
             Some(bak) => {
@@ -381,12 +385,13 @@ impl CallState {
         }
     }
 
-    /// Drop a call from memory + the store (its txns/queue are torn down by the
-    /// router's `RemoveCall` interpreter step, not here).
+    /// Drop a call from memory, and from the store when a replication store is
+    /// wired (its txns/queue are torn down by the router's `RemoveCall`
+    /// interpreter step, not here).
     pub fn remove(&self, call_ref: &str) {
         // Resolve the replication target BEFORE evicting the in-memory call (the
         // topology lookup `backup_of` needs the call still present).
-        let (role, primary, opts) = self.store_target(call_ref);
+        let target = self.repl_store.as_ref().map(|_| self.store_target(call_ref));
 
         let mut inner = self.inner.lock().unwrap();
         let keys = inner.indexed.remove(call_ref).unwrap_or_default();
@@ -400,7 +405,9 @@ impl CallState {
         inner.setup_cancelled.remove(call_ref);
         drop(inner);
 
-        self.terminate_writer.submit_delete(role, primary, call_ref.to_string(), keys, opts);
+        if let Some((role, primary, opts)) = target {
+            self.terminate_writer.submit_delete(role, primary, call_ref.to_string(), keys, opts);
+        }
     }
 
     /// **Local-only self-release teardown** (ADR-0014): drop a live acting-backup
@@ -670,12 +677,13 @@ impl CallState {
 
     /// Encode + submit the call to the store (replication path; non-blocking).
     ///
-    /// When the call carries a non-empty `topology.bak` and a replicating store is
-    /// wired, the put rides the S8 write-side policy (`call_gen = topology.gen`,
-    /// peer = the backup, direction Forward/Reverse). The `ReplicatingCallStore`
-    /// the [`BufferedTerminateWriter`] drains to then bumps its changelog for that
-    /// peer. With no topology / no backup / no replicating store it is today's
-    /// `PutOpts::default()` (no propagation) path.
+    /// A no-op, allocation-free, when no replicating store is wired. Otherwise,
+    /// when the call carries a non-empty `topology.bak`, the put rides the S8
+    /// write-side policy (`call_gen = topology.gen`, peer = the backup, direction
+    /// Forward/Reverse) and the `ReplicatingCallStore` the
+    /// [`BufferedTerminateWriter`] drains to bumps its changelog for that peer;
+    /// with no topology / no backup it is the `PutOpts::default()` (no
+    /// propagation) path.
     pub fn flush(&self, call: &Call) {
         self.flush_with_ttl(call, self.replicated_ttl_ms);
     }
@@ -688,6 +696,9 @@ impl CallState {
     /// replicas keep the long backstop (refreshed every keepalive), so a held call's
     /// replica never expires mid-call.
     pub fn flush_with_ttl(&self, call: &Call, ttl_ms: i64) {
+        if self.repl_store.is_none() {
+            return;
+        }
         let indexes = call_index_keys(call);
         // The authoritative `(p,b)` lives on the in-memory call (bumped by
         // `update`); the passed `call` may be a pre-bump clone, so prefer the
