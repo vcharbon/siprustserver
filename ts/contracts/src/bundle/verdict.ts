@@ -402,7 +402,9 @@ export const RunVerdict = Schema.Struct({
   informative: Schema.optionalKey(Schema.Array(Informative)),
   waived: Schema.optionalKey(Schema.Array(Waived)),
   retransmits: Schema.optionalKey(Schema.Array(RetransmitNote)),
-  timings: Schema.optionalKey(Schema.Array(TimingNote))
+  timings: Schema.optionalKey(Schema.Array(TimingNote)),
+  /** What the lane states about how it ran the case, by name; echoed, never interpreted. */
+  lane_facts: Schema.optionalKey(Schema.Record(Schema.String, Schema.String))
 })
 export interface RunVerdict extends Schema.Schema.Type<typeof RunVerdict> {}
 

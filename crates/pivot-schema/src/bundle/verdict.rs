@@ -590,6 +590,11 @@ pub struct RunVerdict {
     /// (§9.2). A document that declares none is absent from this list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timings: Vec<TimingNote>,
+    /// What the lane states about how it ran the case, by name (which service
+    /// answered it, and why), so a sweep can count it. Echoed, never
+    /// interpreted; the status above is computed from `failures` alone.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub lane_facts: std::collections::BTreeMap<String, String>,
 }
 
 impl RunVerdict {
@@ -613,6 +618,7 @@ impl RunVerdict {
             waived: Vec::new(),
             retransmits: Vec::new(),
             timings: Vec::new(),
+            lane_facts: std::collections::BTreeMap::new(),
         }
     }
 
@@ -697,6 +703,18 @@ mod tests {
         // The status is a statement about gating checks; an informative finding
         // is not one of them.
         assert!(verdict.passed());
+    }
+
+    /// What the lane states about how it ran the case survives the bundle
+    /// form, and a verdict stating nothing writes no field.
+    #[test]
+    fn the_lanes_facts_are_written_only_when_stated() {
+        let mut verdict = RunVerdict::ok("c", "upstream-fake");
+        assert!(!serde_json::to_string(&verdict).unwrap().contains("lane_facts"));
+        verdict.lane_facts.insert("service".into(), "scripted".into());
+        let text = serde_json::to_string(&verdict).unwrap();
+        assert!(text.contains(r#""lane_facts":{"service":"scripted"}"#), "{text}");
+        assert_eq!(serde_json::from_str::<RunVerdict>(&text).unwrap(), verdict);
     }
 
     fn violation(emitter: &str) -> crate::violation::RfcViolation {

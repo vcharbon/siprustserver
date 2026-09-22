@@ -111,6 +111,13 @@ describe("the failure vocabulary", () => {
   })
 })
 
+describe("the lane's facts", () => {
+  it("reads what the lane stated about how it ran the case", () => {
+    const verdict = decodeRunVerdictSync({ case: "c", lane: "l", status: "ok", lane_facts: { service: "scripted" } })
+    expect(verdict.lane_facts?.["service"]).toBe("scripted")
+  })
+})
+
 describe("a negative run", () => {
   const negative = decodeRunVerdictSync(JSON.parse(read(BUNDLE, "verdict-negative.json")) as unknown)
 
