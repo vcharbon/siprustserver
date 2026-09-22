@@ -38,7 +38,8 @@ pub enum CdrQueueDeclare {
     /// `own` (default): the writer declares the queue durable, bounded by
     /// `x-max-length` with `x-overflow=drop-head` (`B2BUA_CDR_RABBITMQ_MAX_LEN`,
     /// default 100000; `0` disables the bound). Every other declarer of the
-    /// queue must pass the same arguments or the broker refuses both.
+    /// queue must pass the same arguments, or the broker refuses the later,
+    /// mismatching declare (406 PRECONDITION_FAILED).
     Own { max_len: i64 },
     /// `existing`: the broker already holds the queue; the writer declares it
     /// passively (fails if absent) and never states its arguments, so a queue
@@ -100,37 +101,37 @@ impl RabbitMqCdrSettings {
     /// The writer these settings describe, publishing the default
     /// [`JsonRecordEncoder`] record and recording into `metrics` (the registry
     /// the core exports, so `cdr_written_total` and `cdr_dropped_total` count
-    /// its publishes).
-    pub fn into_sink(self, metrics: &B2buaMetrics) -> Arc<dyn CdrWriter> {
-        self.into_sink_with_encoder(Arc::new(JsonRecordEncoder), metrics)
+    /// its publishes). Every default entry point of the kit comes through here.
+    pub fn into_writer(self, metrics: &B2buaMetrics) -> RabbitMqCdrWriter {
+        self.into_writer_with_encoder(Arc::new(JsonRecordEncoder), metrics)
     }
 
-    /// [`Self::into_sink`] publishing the bytes `encoder` produces.
-    pub fn into_sink_with_encoder(
+    /// [`Self::into_writer`] publishing the bytes `encoder` produces.
+    pub fn into_writer_with_encoder(
         self,
         encoder: Arc<dyn CdrEncoder>,
         metrics: &B2buaMetrics,
-    ) -> Arc<dyn CdrWriter> {
-        Arc::new(RabbitMqCdrWriter::new(self, encoder, metrics.clone()))
+    ) -> RabbitMqCdrWriter {
+        RabbitMqCdrWriter::new(self, encoder, metrics.clone())
     }
 }
 
-/// The RabbitMQ sink the settings read through `get` select, publishing the
+/// The RabbitMQ writer the settings read through `get` select, publishing the
 /// default record and recording into `metrics`; `Ok(None)` when no URL is set.
-pub fn rabbitmq_cdr_sink_from_lookup(
+pub fn rabbitmq_cdr_writer_from_lookup(
     get: impl Fn(&str) -> Option<String>,
     metrics: &B2buaMetrics,
-) -> Result<Option<Arc<dyn CdrWriter>>, String> {
-    rabbitmq_cdr_sink_from_lookup_with_encoder(get, Arc::new(JsonRecordEncoder), metrics)
+) -> Result<Option<RabbitMqCdrWriter>, String> {
+    Ok(RabbitMqCdrSettings::from_lookup(get)?.map(|s| s.into_writer(metrics)))
 }
 
-/// [`rabbitmq_cdr_sink_from_lookup`] publishing the bytes `encoder` produces.
-pub fn rabbitmq_cdr_sink_from_lookup_with_encoder(
+/// [`rabbitmq_cdr_writer_from_lookup`] publishing the bytes `encoder` produces.
+pub fn rabbitmq_cdr_writer_from_lookup_with_encoder(
     get: impl Fn(&str) -> Option<String>,
     encoder: Arc<dyn CdrEncoder>,
     metrics: &B2buaMetrics,
-) -> Result<Option<Arc<dyn CdrWriter>>, String> {
-    Ok(RabbitMqCdrSettings::from_lookup(get)?.map(|s| s.into_sink_with_encoder(encoder, metrics)))
+) -> Result<Option<RabbitMqCdrWriter>, String> {
+    Ok(RabbitMqCdrSettings::from_lookup(get)?.map(|s| s.into_writer_with_encoder(encoder, metrics)))
 }
 
 /// Publishes terminated-call CDRs, encoded by its [`CdrEncoder`], onto an AMQP
@@ -154,6 +155,11 @@ impl RabbitMqCdrWriter {
         metrics: B2buaMetrics,
     ) -> Self {
         Self { settings, encoder, chan: Mutex::new(None), metrics }
+    }
+
+    /// The settings this writer publishes under.
+    pub fn settings(&self) -> &RabbitMqCdrSettings {
+        &self.settings
     }
 
     /// The bytes published for `call`; `None`, counted as one dropped record,
@@ -325,7 +331,7 @@ mod tests {
             Ok(None)
         );
         let metrics = B2buaMetrics::new();
-        assert!(rabbitmq_cdr_sink_from_lookup(lookup(&[]), &metrics).expect("ok").is_none());
+        assert!(rabbitmq_cdr_writer_from_lookup(lookup(&[]), &metrics).expect("ok").is_none());
     }
 
     #[test]
@@ -481,13 +487,88 @@ mod tests {
         assert_eq!((metrics.cdr_dropped_total(), metrics.cdr_written_total()), (1, 0));
     }
 
+    /// The native record of [`a_call`], created at 1000 and terminated at 2000,
+    /// as the RabbitMQ sink has always published it.
+    const GOLDEN: &str = concat!(
+        r#"{"call_ref":"w0|sink-probe@10.0.0.9|alicetag","created_at":1000,"terminated_at":2000,"#,
+        r#""a_leg":{"call_id":"sink-probe@10.0.0.9","from_tag":"alicetag","state":"trying"},"#,
+        r#""b_legs":[],"events":[{"type":"invite_received","timestamp":1000,"leg_id":"a","#,
+        r#""status_code":null,"reason":null,"decision_ordinal":0}],"decision_log":[],"#,
+        r#""termination":null}"#
+    );
+
+    /// The same call discharged at 500, before its creation: clamped and flagged.
+    const GOLDEN_SKEWED: &str = concat!(
+        r#"{"call_ref":"w0|sink-probe@10.0.0.9|alicetag","created_at":1000,"terminated_at":1000,"#,
+        r#""clock_skew_clamped":true,"#,
+        r#""a_leg":{"call_id":"sink-probe@10.0.0.9","from_tag":"alicetag","state":"trying"},"#,
+        r#""b_legs":[],"events":[{"type":"invite_received","timestamp":1000,"leg_id":"a","#,
+        r#""status_code":null,"reason":null,"decision_ordinal":0}],"decision_log":[],"#,
+        r#""termination":null}"#
+    );
+
+    fn assert_publishes_the_golden_record(w: &RabbitMqCdrWriter) {
+        let call = a_call();
+        for (t, golden) in [(2_000, GOLDEN), (500, GOLDEN_SKEWED)] {
+            let got = w.payload(&call, t).expect("the default record encodes");
+            assert_eq!(String::from_utf8(got).expect("utf-8"), golden, "terminated_at={t}");
+        }
+    }
+
+    /// The default settings entry point publishes the native record, byte for
+    /// byte.
+    #[test]
+    fn into_writer_publishes_the_golden_native_record() {
+        let w = settings(OWN_DEFAULT).into_writer(&B2buaMetrics::new());
+        assert_publishes_the_golden_record(&w);
+    }
+
+    /// The default lookup entry point, which `RunnerBase::rabbitmq_cdr_sink_from_env`
+    /// reads the process env through, publishes the native record, byte for byte.
+    #[test]
+    fn the_default_lookup_publishes_the_golden_native_record() {
+        let w = rabbitmq_cdr_writer_from_lookup(
+            lookup(&[("B2BUA_CDR_RABBITMQ_URL", "amqp://h/%2f")]),
+            &B2buaMetrics::new(),
+        )
+        .expect("ok")
+        .expect("some");
+        assert_publishes_the_golden_record(&w);
+    }
+
+    /// Records the `terminated_at` each call is encoded with.
+    #[derive(Default)]
+    struct RecordingEncoder {
+        seen: std::sync::Mutex<Vec<i64>>,
+    }
+
+    impl CdrEncoder for RecordingEncoder {
+        fn encode(&self, _call: &Call, terminated_at: i64) -> Result<Vec<u8>, CdrEncodeError> {
+            self.seen.lock().unwrap().push(terminated_at);
+            Ok(Vec::new())
+        }
+    }
+
+    /// The writer hands the encoder the raw discharge stamp, even one that
+    /// precedes the call's creation (cross-node skew); clamping is the
+    /// encoder's.
+    #[test]
+    fn the_writer_passes_a_skewed_terminated_at_through_unclamped() {
+        let enc = Arc::new(RecordingEncoder::default());
+        let w = writer(OWN_DEFAULT, enc.clone());
+        let call = a_call();
+        assert_eq!(call.created_at, 1_000);
+        assert_eq!(w.payload(&call, 500), Some(Vec::new()));
+        assert_eq!(*enc.seen.lock().unwrap(), vec![500]);
+    }
+
     /// The selected sink publishes: a write against an unparsable broker URI
     /// fails before any socket is opened and counts one dropped record, which
     /// the discarding default never does.
     #[tokio::test]
     async fn a_set_url_selects_the_broker_sink_not_the_discarding_default() {
         let metrics = B2buaMetrics::new();
-        let sink = rabbitmq_cdr_sink_from_lookup(
+        let sink = rabbitmq_cdr_writer_from_lookup(
             lookup(&[("B2BUA_CDR_RABBITMQ_URL", "not an amqp uri")]),
             &metrics,
         )
@@ -504,7 +585,7 @@ mod tests {
     async fn a_sink_selected_with_an_encoder_encodes_through_it() {
         let metrics = B2buaMetrics::new();
         let enc = Arc::new(RefusingEncoder::default());
-        let sink = rabbitmq_cdr_sink_from_lookup_with_encoder(
+        let sink = rabbitmq_cdr_writer_from_lookup_with_encoder(
             lookup(&[("B2BUA_CDR_RABBITMQ_URL", "not an amqp uri")]),
             enc.clone(),
             &metrics,

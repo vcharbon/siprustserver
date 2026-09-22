@@ -61,7 +61,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrRecord, CdrWriter, JsonRecordEncoder};
+use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrRecord, CdrWriter};
 use b2bua::config::{B2buaConfig, CdrConfig};
 use b2bua::decision::CallDecisionEngine;
 use b2bua::limiter::{CallLimiter, NoopLimiter};
@@ -82,7 +82,7 @@ use sip_txn::IdGen;
 mod cdr_rabbitmq;
 mod replication;
 pub use cdr_rabbitmq::{
-    rabbitmq_cdr_sink_from_lookup, rabbitmq_cdr_sink_from_lookup_with_encoder, CdrQueueDeclare,
+    rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder, CdrQueueDeclare,
     RabbitMqCdrSettings, RabbitMqCdrWriter,
 };
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
@@ -709,11 +709,13 @@ impl RunnerBase {
     }
 
     /// The RabbitMQ CDR sink the env selects ([`RabbitMqCdrSettings`]),
-    /// publishing the default [`JsonRecordEncoder`] record and recording into
-    /// [`Self::metrics`]; `None` when the URL is unset. Panics (boot refusal)
-    /// on a malformed `B2BUA_CDR_RABBITMQ_*` value.
+    /// publishing the default [`JsonRecordEncoder`](b2bua::cdr::JsonRecordEncoder)
+    /// record and recording into [`Self::metrics`]; `None` when the URL is
+    /// unset. Panics (boot refusal) on a malformed `B2BUA_CDR_RABBITMQ_*` value.
     pub fn rabbitmq_cdr_sink_from_env(&self) -> Option<Arc<dyn CdrWriter>> {
-        self.rabbitmq_cdr_sink_from_env_with_encoder(Arc::new(JsonRecordEncoder))
+        rabbitmq_cdr_writer_from_lookup(|k| env::var(k).ok(), &self.metrics)
+            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))
+            .map(|w| self.wired_cdr_sink(w))
     }
 
     /// [`Self::rabbitmq_cdr_sink_from_env`] publishing the bytes `encoder`
@@ -722,8 +724,13 @@ impl RunnerBase {
         &self,
         encoder: Arc<dyn CdrEncoder>,
     ) -> Option<Arc<dyn CdrWriter>> {
-        let settings = RabbitMqCdrSettings::from_lookup(|k| env::var(k).ok())
-            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))?;
+        rabbitmq_cdr_writer_from_lookup_with_encoder(|k| env::var(k).ok(), encoder, &self.metrics)
+            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))
+            .map(|w| self.wired_cdr_sink(w))
+    }
+
+    fn wired_cdr_sink(&self, writer: RabbitMqCdrWriter) -> Arc<dyn CdrWriter> {
+        let settings = writer.settings();
         tracing::info!(
             service = %self.name,
             sink = "rabbitmq",
@@ -732,7 +739,7 @@ impl RunnerBase {
             buffer = self.env.cdr_queue,
             "CDR sink wired"
         );
-        Some(settings.into_sink_with_encoder(encoder, &self.metrics))
+        Arc::new(writer)
     }
 
     /// The peer-to-peer replication the env selects ([`ReplicationSettings`]),

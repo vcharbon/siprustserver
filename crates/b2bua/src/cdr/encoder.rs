@@ -14,6 +14,11 @@ pub type CdrEncodeError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// Encodes one terminated call into its published record. Stateless: the same
 /// `call` and `terminated_at` yield the same bytes, so a sink may retry or
 /// re-encode freely.
+///
+/// `terminated_at` is the discharging node's raw clock read, passed through
+/// unclamped: after a takeover under clock skew it may precede
+/// `call.created_at` (minted on the origin node). An encoder that publishes a
+/// duration clamps it itself, as [`build_record`] does and flags.
 pub trait CdrEncoder: Send + Sync {
     fn encode(&self, call: &Call, terminated_at: i64) -> Result<Vec<u8>, CdrEncodeError>;
 }
