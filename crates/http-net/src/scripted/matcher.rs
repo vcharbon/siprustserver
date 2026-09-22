@@ -1,9 +1,10 @@
 //! Request matching: target (method + path, query cut off) and body
 //! fragments, with `${capture:…}` as the one wildcard.
 //!
-//! The body is compact-re-serialised when it parses as JSON, so a
-//! pretty-printing peer matches the same fragments; otherwise it is matched
-//! as (lossily decoded) text.
+//! A JSON body has its whitespace outside strings dropped before matching, so
+//! a pretty-printing peer matches the same fragments; every other byte (number
+//! spelling, escapes, key order, duplicate keys) is kept as the peer sent it.
+//! A body that is not JSON is matched as (lossily decoded) text.
 
 use super::program::{HttpBindings, HttpRequestMatch};
 use super::template::{self, Captures, Piece};
@@ -14,10 +15,58 @@ pub(super) const CAPTURE_CAP: usize = 4096;
 
 /// The body as fragments are matched against it.
 pub(super) fn normalize(body: &[u8]) -> String {
-    match serde_json::from_slice::<serde_json::Value>(body) {
-        Ok(value) => value.to_string(),
-        Err(_) => String::from_utf8_lossy(body).into_owned(),
+    if serde_json::from_slice::<serde::de::IgnoredAny>(body).is_err() {
+        return String::from_utf8_lossy(body).into_owned();
     }
+    let mut out = String::with_capacity(body.len());
+    let (mut in_string, mut escape) = (false, false);
+    // Valid JSON is valid UTF-8.
+    for c in String::from_utf8_lossy(body).chars() {
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if !matches!(c, ' ' | '\t' | '\n' | '\r') {
+            in_string = c == '"';
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Whether `text` is a JSON number, `true`, `false` or `null`.
+fn is_scalar(text: &str) -> bool {
+    if matches!(text, "true" | "false" | "null") {
+        return true;
+    }
+    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
+    let rest = text.strip_prefix('-').unwrap_or(text);
+    let int = digits(rest);
+    if int == 0 || (int > 1 && rest.starts_with('0')) {
+        return false;
+    }
+    let mut rest = &rest[int..];
+    if let Some(frac) = rest.strip_prefix('.') {
+        let n = digits(frac);
+        if n == 0 {
+            return false;
+        }
+        rest = &frac[n..];
+    }
+    if let Some(exp) = rest.strip_prefix(['e', 'E']) {
+        let exp = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+        let n = digits(exp);
+        if n == 0 {
+            return false;
+        }
+        rest = &exp[n..];
+    }
+    rest.is_empty()
 }
 
 fn path_only(path: &str) -> &str {
@@ -71,6 +120,12 @@ pub(super) fn matches(
     Ok(())
 }
 
+/// Whether the bind-resolved `pattern` is found in `text`: a literal
+/// fragment it matches is at least as specific as it.
+pub(super) fn pattern_matches(pattern: &[Piece], text: &str) -> bool {
+    find(pattern, &HttpBindings::new(), text, &mut Captures::new()).is_ok()
+}
+
 enum Miss {
     Absent,
     OverCap(String),
@@ -83,8 +138,8 @@ enum Seg {
 
 /// Locate one fragment in `body`. A capture already taken matches as its
 /// value; an untaken one matches one JSON scalar: the content of a string
-/// when the fragment has an open quote before it, a number or literal up to
-/// the next `,` `}` `]` otherwise.
+/// when the fragment has an open quote before it, otherwise a number, `true`,
+/// `false` or `null` ending at the next `,` `}` `]`.
 fn find(
     pieces: &[Piece],
     bindings: &HttpBindings,
@@ -202,7 +257,7 @@ fn rest_matches(
                     },
                     _ => limit,
                 };
-                if !*in_string && end == pos {
+                if !*in_string && !is_scalar(&body[pos..end]) {
                     return Ok(false);
                 }
                 if end - pos > CAPTURE_CAP {
@@ -268,8 +323,22 @@ mod tests {
     }
 
     #[test]
-    fn json_bodies_are_compacted_and_other_bodies_kept() {
+    fn json_bodies_lose_whitespace_outside_strings_only() {
         assert_eq!(normalize(b"{ \"a\" : [ 1 , 2 ] }"), r#"{"a":[1,2]}"#);
-        assert_eq!(normalize(b"a=1&b=2"), "a=1&b=2");
+        assert_eq!(
+            normalize(br#"{ "b" : 1e3, "a" : "x \" y\\", "a" : 1.50, "u" : "\/" }"#),
+            r#"{"b":1e3,"a":"x \" y\\","a":1.50,"u":"\/"}"#
+        );
+        assert_eq!(normalize(b"a = 1&b=2"), "a = 1&b=2", "not JSON: kept");
+    }
+
+    #[test]
+    fn a_scalar_is_a_json_number_or_literal() {
+        for ok in ["0", "-1", "1.50", "-1.5e3", "2E+10", "true", "false", "null"] {
+            assert!(is_scalar(ok), "{ok}");
+        }
+        for bad in ["", "-", "01", "1.", ".5", "1e", "\"x\"", "{", "[1", "tru", "1 "] {
+            assert!(!is_scalar(bad), "{bad}");
+        }
     }
 }

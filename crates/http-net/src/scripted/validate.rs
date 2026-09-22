@@ -1,15 +1,17 @@
 //! The checks `add` runs: a script it accepts can be served as written.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use super::error::HttpScriptError;
+use super::open::Fragment;
 use super::program::{HttpBindings, HttpReply, HttpRequestMatch, HttpScript, HttpScriptStep};
 use super::template::{self, Piece};
 
 /// What `add` keeps of a checked script's open.
 pub(super) struct Checked {
-    /// The open's fragments, bindings resolved: the open-match rule's sets.
-    pub fragments: BTreeSet<String>,
+    /// The fragments an opening request must carry (the open's, and step 0's
+    /// for a reified script): the open-match rule's set.
+    pub fragments: Vec<Fragment>,
     /// Whether the open states a `${bind:…}` fragment.
     pub attributable: bool,
 }
@@ -24,6 +26,15 @@ pub(super) fn check(
         if steps.is_empty() {
             return Err(HttpScriptError::NoStep);
         }
+        let target = |m: &HttpRequestMatch| {
+            format!("{} {}", m.method, m.path.split_once('?').map_or(m.path.as_str(), |(p, _)| p))
+        };
+        if target(&steps[0].expect) != target(&script.open) {
+            return Err(HttpScriptError::StepZeroTarget {
+                open: target(&script.open),
+                expected: target(&steps[0].expect),
+            });
+        }
         let mut previous_mints = true;
         for (index, step) in steps.iter().enumerate() {
             if !previous_mints {
@@ -34,14 +45,16 @@ pub(super) fn check(
                 check_reply(&step.reply, bindings, &format!("step {index} reply"), &captured)?;
         }
     }
-    let mut attributable = false;
-    let mut fragments = BTreeSet::new();
-    for entry in &script.open.contains {
-        attributable |= template::parse(entry)
-            .map(|pieces| pieces.iter().any(|p| matches!(p, Piece::Bind(_))))
-            .unwrap_or(false);
-        fragments.insert(template::show(entry, bindings));
-    }
+    let attributable = script.open.contains.iter().any(|entry| {
+        template::parse(entry)
+            .is_ok_and(|pieces| pieces.iter().any(|p| matches!(p, Piece::Bind(_))))
+    });
+    let step_zero = match &script.step {
+        HttpScriptStep::Reified(steps) => steps[0].expect.contains.as_slice(),
+        HttpScriptStep::Code(_) => &[],
+    };
+    let fragments =
+        script.open.contains.iter().chain(step_zero).map(|e| Fragment::new(e, bindings)).collect();
     Ok(Checked { fragments, attributable })
 }
 
@@ -91,7 +104,28 @@ fn check_reply(
     match reply {
         HttpReply::Silence | HttpReply::Reset => Ok(false),
         HttpReply::Late { then, .. } => check_reply(then, bindings, at, captured),
-        HttpReply::Respond { headers, body, .. } => {
+        HttpReply::Respond { status, headers, body } => {
+            if !final_status(*status) {
+                return Err(HttpScriptError::InvalidStatus { at: at.to_string(), status: *status });
+            }
+            for (name, value) in headers {
+                let invalid = |why: String| HttpScriptError::InvalidHeader {
+                    at: at.to_string(),
+                    name: name.clone(),
+                    why,
+                };
+                header_name(name).map_err(invalid)?;
+                // Literal text and bound values are known now; a capture is
+                // checked when the reply renders.
+                for piece in parse(value, at)? {
+                    let known = match &piece {
+                        Piece::Lit(text) => text.as_str(),
+                        Piece::Bind(name) => bindings.get(name).unwrap_or(""),
+                        Piece::Capture(_) | Piece::Continuation => "",
+                    };
+                    header_value(known).map_err(invalid)?;
+                }
+            }
             let mut mints = false;
             for text in headers.iter().map(|(_, v)| v).chain(std::iter::once(body)) {
                 for piece in parse(text, at)? {
@@ -123,5 +157,28 @@ fn bound(bindings: &HttpBindings, name: &str, at: &str) -> Result<(), HttpScript
     match bindings.get(name) {
         Some(_) => Ok(()),
         None => Err(HttpScriptError::UnknownBind { at: at.to_string(), name: name.to_string() }),
+    }
+}
+
+/// A status a final response can carry (RFC 9110 §15: 1xx is interim).
+pub(super) fn final_status(status: u16) -> bool {
+    (200..=599).contains(&status)
+}
+
+/// A header name is a token (RFC 9110 §5.1).
+pub(super) fn header_name(name: &str) -> Result<(), String> {
+    let tchar = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    if name.is_empty() || !name.bytes().all(tchar) {
+        return Err("the name is not a token".to_string());
+    }
+    Ok(())
+}
+
+/// A header value a server sends: visible ASCII, space and tab (RFC 9110
+/// §5.5; obs-text is not sent).
+pub(super) fn header_value(value: &str) -> Result<(), String> {
+    match value.bytes().find(|&b| !(b == b'\t' || (0x20..0x7f).contains(&b))) {
+        Some(b) => Err(format!("byte 0x{b:02x} cannot be sent in a value")),
+        None => Ok(()),
     }
 }

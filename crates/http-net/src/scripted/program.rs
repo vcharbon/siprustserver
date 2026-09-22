@@ -5,7 +5,7 @@
 //! [`HttpScriptStep`] answers that request and every follow-up that returns
 //! the continuation token the previous reply carried. Matching is direct text:
 //! each [`HttpRequestMatch::contains`] entry is a substring of the request
-//! body (the body compact-re-serialised first when it parses as JSON).
+//! body (a JSON body with its whitespace outside strings dropped first).
 //!
 //! Templates (match entries, reply header values and bodies) accept exactly
 //! three placeholders: `${bind:NAME}` (a value given at `add`),
@@ -63,7 +63,7 @@ pub struct HttpRequestMatch {
     /// both sides.
     pub path: String,
     /// Body fragments, each a template over `${bind:…}` and `${capture:…}`
-    /// that must be a substring of the (compacted) body. One entry is one
+    /// that must be a substring of the (whitespace-stripped) body. One entry is one
     /// `"key":value` fragment; a span over two keys depends on the peer's key
     /// order and is not portable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -126,8 +126,9 @@ impl fmt::Debug for HttpScriptStep {
 /// reply.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpReifiedStep {
-    /// The request expected at this position. Step 0's is checked on the
-    /// opening request in addition to [`HttpScript::open`].
+    /// The request expected at this position. Step 0's takes part in the
+    /// open match together with [`HttpScript::open`], whose method and path
+    /// it must state.
     pub expect: HttpRequestMatch,
     /// The reply to it.
     pub reply: HttpReply,
@@ -144,7 +145,9 @@ impl HttpReifiedStep {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HttpReply {
-    /// A complete response. Header values and the body are templates.
+    /// A complete response. Header values and the body are templates; the
+    /// status is a final one (200-599), header names are tokens and values
+    /// visible ASCII (checked at `add`, and at render for captured values).
     Respond {
         /// Status code; a stated 5xx is a response like any other.
         status: u16,

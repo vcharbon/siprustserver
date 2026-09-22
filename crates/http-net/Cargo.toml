@@ -27,7 +27,7 @@ async-trait = { workspace = true }
 # Recording timestamps come from the injected wall-clock seam.
 sip-clock = { path = "../sip-clock" }
 # The scripted service (`scripted`): programs are serde documents, request
-# bodies are compacted as JSON before fragment matching, and the continuation
+# bodies are validated as JSON before fragment matching, and the continuation
 # token is base64url on the wire.
 serde = { workspace = true }
 serde_json = { workspace = true }

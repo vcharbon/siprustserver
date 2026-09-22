@@ -873,7 +873,18 @@ async fn a_literal_fragment_is_more_specific_than_a_capture_on_the_same_key() {
             HttpBindings::new(),
         )
         .unwrap();
-    let abc = svc.add(opening(&[r#""id":"abc""#], "abc"), HttpBindings::new()).unwrap();
+    let abc = svc
+        .add(
+            HttpScript::reified(
+                HttpRequestMatch::post("/s").contains(r#""id":"abc""#),
+                vec![HttpReifiedStep::new(
+                    HttpRequestMatch::post("/s"),
+                    HttpReply::respond(200, "abc"),
+                )],
+            ),
+            HttpBindings::new(),
+        )
+        .unwrap();
     let (net, _h) = serve(&svc).await;
 
     assert_eq!(body(&post(&net, "/s", r#"{"id":"abc"}"#).await), "abc", "the literal wins");

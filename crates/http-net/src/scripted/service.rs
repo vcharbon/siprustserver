@@ -40,7 +40,7 @@ struct State {
 struct Instance {
     script: Arc<HttpScript>,
     bindings: Arc<HttpBindings>,
-    fragments: std::collections::BTreeSet<String>,
+    fragments: Vec<super::open::Fragment>,
     opened: bool,
     progress: Progress,
 }
@@ -179,16 +179,20 @@ impl ScriptedHttpService {
                 tokens.push(token);
             }
         }
-        match tokens.as_slice() {
-            [] => self.open(req, &body),
-            [token] if token.nonce != self.shared.nonce => Err(finding(
+        let own = tokens.iter().filter(|t| t.nonce == self.shared.nonce).count();
+        match (tokens.as_slice(), own) {
+            ([], _) => self.open(req, &body),
+            ([token], 1) => self.follow(req, &body, token),
+            (foreign, 0) => Err(finding(
                 HttpFindingKind::ForeignToken,
                 Vec::new(),
                 req,
-                format!("a token of another service (nonce {:016x})", token.nonce),
+                format!(
+                    "tokens of another service only (nonces {:016x?})",
+                    foreign.iter().map(|t| t.nonce).collect::<Vec<_>>()
+                ),
             )),
-            [token] => self.follow(req, &body, token),
-            several => Err(finding(
+            (several, _) => Err(finding(
                 HttpFindingKind::Ambiguous,
                 several
                     .iter()
@@ -196,12 +200,13 @@ impl ScriptedHttpService {
                     .map(|t| t.instance)
                     .collect(),
                 req,
-                format!("{} tokens in one body", several.len()),
+                format!("{} tokens in one body, {own} of this service", several.len()),
             )),
         }
     }
 
-    /// A tokenless request: the open-match rule picks the instance it opens.
+    /// A tokenless request: the open-match rule picks the instance it opens,
+    /// among those whose open and step 0 both match.
     fn open(&self, req: &HttpRequest, body: &str) -> Result<Serve, Refusal> {
         let mut state = self.shared.state.lock().unwrap();
         let mut candidates = Vec::new();
@@ -212,7 +217,19 @@ impl ScriptedHttpService {
                 continue;
             }
             let mut captures = Captures::new();
-            match matcher::matches(&inst.script.open, &inst.bindings, req, body, &mut captures) {
+            let step_zero = match &inst.script.step {
+                HttpScriptStep::Reified(steps) => Some(&steps[0].expect),
+                HttpScriptStep::Code(_) => None,
+            };
+            let opens =
+                matcher::matches(&inst.script.open, &inst.bindings, req, body, &mut captures)
+                    .and_then(|()| match step_zero {
+                        Some(expect) => {
+                            matcher::matches(expect, &inst.bindings, req, body, &mut captures)
+                        }
+                        None => Ok(()),
+                    });
+            match opens {
                 Ok(()) => {
                     candidates
                         .push(Candidate { instance: i as u64, fragments: inst.fragments.clone() });
@@ -358,14 +375,32 @@ impl ScriptedHttpService {
         Ok(Serve { instance, reply, bindings, captures: Captures::new(), token })
     }
 
-    fn record(&self, finding: HttpFinding) -> HttpAnswer {
+    /// Record `finding` and build the `500` that answers it.
+    fn record(&self, finding: HttpFinding) -> HttpResponse {
         let body = format!("{:?}: {}\n", finding.kind, finding.detail);
         self.shared.state.lock().unwrap().findings.push(finding);
-        HttpAnswer::Response(
-            HttpResponse::status(500)
-                .with_body(body.into_bytes())
-                .header("content-type", "text/plain; charset=utf-8"),
-        )
+        HttpResponse::status(500)
+            .with_body(body.into_bytes())
+            .header("content-type", "text/plain; charset=utf-8")
+    }
+
+    /// Answer `req`, naming the instance that served it when one did.
+    async fn serve(&self, req: &HttpRequest) -> (HttpAnswer, Option<u64>) {
+        let serve = match self.decide(req) {
+            Ok(serve) => serve,
+            Err(finding) => return (HttpAnswer::Response(self.record(*finding)), None),
+        };
+        let token = serve.token.render();
+        let answer = match render(&serve.reply, &serve, &token) {
+            Ok(rendered) => deliver(rendered).await,
+            Err(why) => HttpAnswer::Response(self.record(*finding(
+                HttpFindingKind::Unmatched,
+                vec![serve.instance],
+                req,
+                format!("the script's reply does not render: {why}"),
+            ))),
+        };
+        (answer, Some(serve.instance))
     }
 }
 
@@ -393,9 +428,16 @@ fn render(reply: &HttpReply, serve: &Serve, token: &str) -> Result<Rendered, Str
     };
     Ok(match reply {
         HttpReply::Respond { status, headers, body } => {
+            if !validate::final_status(*status) {
+                return Err(format!("status {status} is not a final response status"));
+            }
             let mut resp = HttpResponse::status(*status).with_body(text(body)?.into_bytes());
             for (name, value) in headers {
-                resp = resp.header(name.clone(), text(value)?);
+                let value = text(value)?;
+                validate::header_name(name)
+                    .and_then(|()| validate::header_value(&value))
+                    .map_err(|why| format!("header {name:?}: {why}"))?;
+                resp = resp.header(name.clone(), value);
             }
             Rendered::Respond(resp)
         }
@@ -441,31 +483,25 @@ fn finding(
 
 #[async_trait]
 impl HttpService for ScriptedHttpService {
-    /// For a caller that cannot close a connection: [`HttpReply::Reset`]
-    /// panics here, loudly, rather than turn into a response it is not.
+    /// For a caller that cannot close a connection: a [`HttpReply::Reset`]
+    /// is answered `500` and recorded as [`HttpFindingKind::ResetNotForwarded`],
+    /// so a caller that does not forward `answer` fails the run instead of
+    /// passing for a reset.
     async fn handle(&self, req: HttpRequest) -> HttpResponse {
-        match self.answer(req).await {
-            HttpAnswer::Response(resp) => resp,
-            HttpAnswer::Abort => {
-                panic!("HttpReply::Reset reached HttpService::handle: call HttpService::answer")
-            }
+        match self.serve(&req).await {
+            (HttpAnswer::Response(resp), _) => resp,
+            (HttpAnswer::Abort, instance) => self.record(*finding(
+                HttpFindingKind::ResetNotForwarded,
+                instance.into_iter().collect(),
+                &req,
+                "a Reset reached HttpService::handle: the caller does not forward \
+                 HttpService::answer"
+                    .to_string(),
+            )),
         }
     }
 
     async fn answer(&self, req: HttpRequest) -> HttpAnswer {
-        let serve = match self.decide(&req) {
-            Ok(serve) => serve,
-            Err(finding) => return self.record(*finding),
-        };
-        let token = serve.token.render();
-        match render(&serve.reply, &serve, &token) {
-            Ok(rendered) => deliver(rendered).await,
-            Err(why) => self.record(*finding(
-                HttpFindingKind::Unmatched,
-                vec![serve.instance],
-                &req,
-                format!("the script's reply does not render: {why}"),
-            )),
-        }
+        self.serve(&req).await.0
     }
 }
