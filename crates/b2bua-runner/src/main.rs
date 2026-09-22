@@ -41,6 +41,7 @@
 //!                   kernel wmem_default; clamped at wmem_max) — ADR-0033
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
 //!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024)
+//!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _MAX_LEN  the RabbitMQ CDR sink (see `b2bua_runner_kit`)
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
 //!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)
@@ -98,7 +99,6 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use b2bua::cdr::CdrWriter;
 use b2bua::decision::{CallLimiterEntry, ScriptedDecisionEngine};
 use b2bua::repl::{PeerResolver, ReplicatingCallStore};
 use b2bua::ReplicationSetup;
@@ -107,8 +107,6 @@ use b2bua_runner_kit::{
 };
 use repl_net::RealReplicationNetwork;
 use topology::{Membership, Peer, StaticMembership};
-
-mod cdr_rabbitmq;
 
 /// Always-on "stress" limiter entry attached to every routed call so the full
 /// admit/release/refresh chain is exercised on all traffic (the endurance suite
@@ -290,35 +288,9 @@ async fn main() {
     validate_default_dest(&dest_host, &base.config.worker_allowed_target_suffixes)
         .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
 
-    // CDR sink: publish to RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else
-    // the kit's discarding default. Either way it sits behind the
-    // `BufferedCdrWriter` bounded queue (drop-on-overload at `cdr_queue` depth),
-    // so the in-process max buffer is identical regardless of sink. The writer
-    // records into `base.metrics` — the SAME registry the core exports at
-    // `/metrics` (a private registry here would leave `b2bua_cdr_written_total`
-    // dead at 0).
-    let cdr_sink: Option<Arc<dyn CdrWriter>> = match env::var("B2BUA_CDR_RABBITMQ_URL") {
-        Ok(url) if !url.trim().is_empty() => {
-            let queue = env_or("B2BUA_CDR_RABBITMQ_QUEUE", "cdr");
-            let max_len: i64 = env_or("B2BUA_CDR_RABBITMQ_MAX_LEN", "100000")
-                .parse()
-                .expect("B2BUA_CDR_RABBITMQ_MAX_LEN");
-            tracing::info!(
-                sink = "rabbitmq",
-                %queue,
-                max_len,
-                buffer = base.env.cdr_queue,
-                "CDR sink wired"
-            );
-            Some(Arc::new(cdr_rabbitmq::RabbitMqCdrWriter::new(
-                url,
-                queue,
-                max_len,
-                base.metrics.clone(),
-            )))
-        }
-        _ => None,
-    };
+    // CDR sink: RabbitMQ when `B2BUA_CDR_RABBITMQ_URL` is set, else the kit's
+    // discarding default, either way behind the kit's bounded buffer.
+    let cdr_sink = base.rabbitmq_cdr_sink_from_env();
 
     let mut deps = base.deps(
         Arc::new(ScriptedDecisionEngine::route_all_to_with_limiter(

@@ -43,12 +43,6 @@ async-trait = { workspace = true }
 # Lifecycle logging (ADR-0026). The subscriber itself is installed by the kit's
 # `bind`; this binary only emits.
 tracing = { workspace = true }
-# CDR-on-RabbitMQ sink (cdr_rabbitmq.rs). lapin is runtime-agnostic; the two
-# trait shims bind it to the running tokio runtime. serde_json encodes the CDR.
-lapin = { workspace = true }
-tokio-executor-trait = { workspace = true }
-tokio-reactor-trait = { workspace = true }
-serde_json = { workspace = true }
 
 # jemalloc global allocator (see the #[global_allocator] note in src/main.rs):
 # glibc malloc ratchets RSS under sustained SIP churn (arena retention) and never

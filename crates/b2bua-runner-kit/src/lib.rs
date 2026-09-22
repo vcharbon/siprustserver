@@ -17,6 +17,8 @@
 //! - [`RunnerBase::deps`] — production-shaped defaults for every dependency
 //!   (store / buffered CDR / limiter-from-env / metrics / clock / id-gen),
 //!   each overridable field-by-field on the returned [`B2buaDeps`];
+//! - [`RunnerBase::rabbitmq_cdr_sink_from_env`] — the RabbitMQ CDR sink the
+//!   `B2BUA_CDR_RABBITMQ_*` grammar selects, passed to [`RunnerBase::deps`];
 //! - [`RunnerBase::spawn`] / [`RunnerBase::spawn_probe_server`] /
 //!   [`RunnerBase::spawn_gauge_sampler`] / [`RunnerBase::run_until_shutdown`]
 //!   — core spawn, the `/metrics`+`/ready` probe, the memory-attribution
@@ -44,6 +46,11 @@
 //! discovery (kube-coupled; build a `ReplicationSetup` and assign
 //! `deps.replication`), and binary-specific CDR sinks / allocator wiring —
 //! those are the runner's own, injected through the seams above.
+//!
+//! The RabbitMQ CDR sink's env grammar:
+//!   B2BUA_CDR_RABBITMQ_URL     AMQP URI; set → one JSON `CdrRecord` per terminated call (unset = discard)
+//!   B2BUA_CDR_RABBITMQ_QUEUE   destination queue             (default cdr)
+//!   B2BUA_CDR_RABBITMQ_MAX_LEN broker `x-max-length`, drop-head (default 100000; 0 = unbounded)
 
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -69,7 +76,7 @@ use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 use sip_txn::IdGen;
 
 mod cdr_rabbitmq;
-pub use cdr_rabbitmq::{rabbitmq_cdr_sink_from_lookup, RabbitMqCdrSettings};
+pub use cdr_rabbitmq::{rabbitmq_cdr_sink_from_lookup, RabbitMqCdrSettings, RabbitMqCdrWriter};
 
 /// A CDR sink that discards every record. The default sink when a runner wires
 /// no external CDR store — for load/endurance the process must not accumulate
@@ -690,6 +697,28 @@ impl RunnerBase {
                 Arc::new(NoopLimiter)
             }
         }
+    }
+
+    /// The RabbitMQ CDR sink `B2BUA_CDR_RABBITMQ_*` selects, recording into
+    /// [`Self::metrics`]; `None` when the URL is unset. Panics (boot refusal)
+    /// on a malformed `B2BUA_CDR_RABBITMQ_MAX_LEN`.
+    pub fn rabbitmq_cdr_sink_from_env(&self) -> Option<Arc<dyn CdrWriter>> {
+        let settings = RabbitMqCdrSettings::from_lookup(|k| env::var(k).ok())
+            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))?;
+        tracing::info!(
+            service = %self.name,
+            sink = "rabbitmq",
+            queue = %settings.queue,
+            max_len = settings.max_len,
+            buffer = self.env.cdr_queue,
+            "CDR sink wired"
+        );
+        Some(Arc::new(RabbitMqCdrWriter::new(
+            settings.url,
+            settings.queue,
+            settings.max_len,
+            self.metrics.clone(),
+        )))
     }
 
     /// Production-shaped [`B2buaDeps`] defaults around the injected decision
