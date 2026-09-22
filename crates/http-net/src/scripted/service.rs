@@ -21,6 +21,9 @@ use super::validate;
 use super::verdict::{HttpFinding, HttpFindingKind, HttpScriptHandle, HttpVerdict};
 use crate::{HttpAnswer, HttpRequest, HttpResponse, HttpService};
 
+/// How many near-miss opens an unmatched opening request's diagnostic lists.
+const NEAR_MISSES_SHOWN: usize = 3;
+
 /// The state every clone of a service and every handle share.
 pub(super) struct Shared {
     nonce: u64,
@@ -169,7 +172,13 @@ impl ScriptedHttpService {
     /// Decide the reply to `req`: a step to serve, or a finding.
     fn decide(&self, req: &HttpRequest) -> Result<Serve, Refusal> {
         let body = matcher::normalize(&req.body);
-        let tokens = HttpContinuation::scan(&String::from_utf8_lossy(&req.body));
+        // The same token echoed in two places is one position, not two.
+        let mut tokens: Vec<HttpContinuation> = Vec::new();
+        for token in HttpContinuation::scan(&String::from_utf8_lossy(&req.body)) {
+            if !tokens.contains(&token) {
+                tokens.push(token);
+            }
+        }
         match tokens.as_slice() {
             [] => self.open(req, &body),
             [token] if token.nonce != self.shared.nonce => Err(finding(
@@ -218,7 +227,13 @@ impl ScriptedHttpService {
                 let detail = if near.is_empty() {
                     format!("no unopened script opens {} {}", req.method, req.path)
                 } else {
-                    format!("no unopened script opens this request: {}", near.join("; "))
+                    let shown = near.len().min(NEAR_MISSES_SHOWN);
+                    let more = near.len() - shown;
+                    let more = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+                    format!(
+                        "no unopened script opens this request: {}{more}",
+                        near[..shown].join("; ")
+                    )
                 };
                 return Err(finding(HttpFindingKind::Unmatched, Vec::new(), req, detail));
             }

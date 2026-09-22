@@ -640,3 +640,16 @@ async fn a_code_reply_that_does_not_render_is_unmatched() {
     assert_eq!(verdict.findings.len(), 1, "{verdict:?}");
     assert_eq!(verdict.findings[0].kind, HttpFindingKind::Unmatched);
 }
+
+#[tokio::test(start_paused = true)]
+async fn the_same_token_echoed_twice_is_one_position() {
+    let svc = ScriptedHttpService::new();
+    let script = svc.add(two_step(), cell("c1")).unwrap();
+    let (net, _h) = serve(&svc).await;
+
+    let token = ctx(&post(&net, "/start", r#"{"cell":"c1"}"#).await);
+    let resp =
+        post(&net, "/next", &format!(r#"{{"cell":"c1","ctx":"{token}","copy":"{token}"}}"#)).await;
+    assert_eq!(resp.status, 200, "{}", body(&resp));
+    assert!(script.verdict().is_green());
+}
