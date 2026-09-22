@@ -58,9 +58,9 @@ pub struct B2buaCore {
     /// drop leaves them to die with the endpoint/channels as before.
     tasks: Vec<tokio::task::JoinHandle<()>>,
     /// The X11 fail-back command sender of a wired node, retained so the
-    /// channel the router selects on stays open while the core lives whatever
-    /// the supervisor and its pullers drop. `None` on an unwired node: no
-    /// channel exists and the router has no receiver to poll.
+    /// channel the router selects on stays open while the core lives. `None`
+    /// on an unwired node: the receiver is created in the same arm as this
+    /// sender, so the router then has none to poll.
     _repl_tx: Option<tokio::sync::mpsc::UnboundedSender<router::ReplCommand>>,
 }
 
@@ -237,7 +237,7 @@ impl B2buaCore {
         // constructs none of these: no writer task, no channel, no receiver for
         // the router to poll.
         let repl_store = replication.as_ref().map(|s| s.store.clone());
-        let (readiness, supervisor, repl_tx, repl_rx) = match &replication {
+        let (readiness, supervisor, fail_back) = match &replication {
             Some(setup) => {
                 let self_ordinal = config.self_ordinal.clone();
                 // The writer drains to the replicating store itself so its
@@ -319,11 +319,14 @@ impl B2buaCore {
                         }
                     }
                 }));
-                (readiness, Some(supervisor), Some(repl_tx), Some(repl_rx))
+                (readiness, Some(supervisor), Some((repl_tx, repl_rx)))
             }
             // Unwired node: always-200 OPTIONS, no replication part at all.
-            None => (Readiness::always_ready(), None, None, None),
+            None => (Readiness::always_ready(), None, None),
         };
+        // One `Option` holds both halves of the fail-back channel: the router's
+        // receiver exists only alongside the retained sender.
+        let (repl_tx, repl_rx) = fail_back.unzip();
 
         // The re-entry channel feeds both fire-and-forget results and the call
         // reaper's verdicts; created before the dispatcher so the reaper's

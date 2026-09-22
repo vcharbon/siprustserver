@@ -51,17 +51,6 @@ fn cookie_call() -> Call {
     build_initial_call(&invite_with_cookie("w0", "w1"), src, &config, 0)
 }
 
-/// Let any spawned task run. A wired node's writer is asynchronous: under the
-/// paused current-thread runtime every submitted op is applied to the store
-/// once the drainer is polled, which a handful of yields guarantees. An unwired
-/// node spawns no writer; the yields keep the read order of the assertions
-/// below the one a wired node would need.
-async fn drain() {
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
-    }
-}
-
 /// With no replication store wired, a call that names a backup peer is created,
 /// mutated and flushed over several turns, then removed: the store holds no body
 /// and no index key at any point, no flush counts as propagated, and the state
@@ -89,7 +78,6 @@ async fn a_store_with_no_replication_wired_holds_nothing_after_a_call() {
         state.update(before.clone());
         state.flush(&before);
     }
-    drain().await;
     assert_eq!(
         store.lens(),
         (0, 0),
@@ -98,7 +86,6 @@ async fn a_store_with_no_replication_wired_holds_nothing_after_a_call() {
     assert_eq!(metrics.repl_flush_propagated_total(), 0, "nothing propagated on the off path");
 
     state.remove(&call_ref);
-    drain().await;
     assert!(state.peek(&call_ref).is_none(), "remove still evicts the in-memory call");
     assert_eq!(store.lens(), (0, 0), "the store holds nothing after the call");
 }
@@ -182,7 +169,6 @@ async fn no_replication_wired_sends_the_store_neither_put_nor_delete() {
     state.update(before.clone());
     state.flush(&before);
     state.remove(&call_ref);
-    drain().await;
 
     assert_eq!(store.puts.load(Ordering::SeqCst), 0, "no put reaches the store");
     assert_eq!(store.deletes.load(Ordering::SeqCst), 0, "no delete reaches the store");

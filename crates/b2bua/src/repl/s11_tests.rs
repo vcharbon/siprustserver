@@ -104,7 +104,7 @@ fn call_state_metered(
     metrics: B2buaMetrics,
 ) -> CallState {
     let store = Arc::new(InMemoryCallStore::new()) as Arc<dyn CallStore>;
-    let writer = BufferedTerminateWriter::spawn(store.clone(), 1024);
+    let writer = BufferedTerminateWriter::spawn(repl.clone() as Arc<dyn CallStore>, 1024);
     CallState::new(store, ordinal, metrics).with_replication(repl, writer)
 }
 

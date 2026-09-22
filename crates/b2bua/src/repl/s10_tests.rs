@@ -139,7 +139,7 @@ async fn cookie_parse_sets_topology_pri_bak() {
     assert_eq!(topo.bak, "w1", "w_bak reaches topology.bak");
     assert_eq!(topo.gen, 1, "brand-new call starts at gen=1");
 
-    // No cookie (non-proxied INVITE) → topology stays None (legacy flush path).
+    // No cookie (non-proxied INVITE) → topology stays None.
     let raw = "INVITE sip:bob@example.com SIP/2.0\r\n\
         Via: SIP/2.0/UDP 10.0.0.9:5060;branch=z9hG4bK-nocookie\r\n\
         Max-Forwards: 70\r\n\

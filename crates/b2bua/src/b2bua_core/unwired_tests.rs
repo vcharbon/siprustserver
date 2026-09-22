@@ -1,9 +1,9 @@
 //! What a core constructs is decided by its replication switch alone: an
 //! unwired node (`B2buaDeps.replication = None`) exposes no replicating store,
-//! no supervisor, no terminate writer and no fail-back sender, so the router
-//! has no fail-back receiver to poll (the receiver only ever exists paired with
-//! that sender); a wired node exposes all four. Asserted by construction on the
-//! `Option`s, never by counting tasks.
+//! no supervisor, no terminate writer and no fail-back sender; the router's
+//! fail-back receiver exists only alongside that sender, created in the same
+//! arm of the core's replication match. A wired node exposes all four.
+//! Asserted by construction on the `Option`s, never by counting tasks.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ async fn an_unwired_core_constructs_no_replication_part() {
     assert!(core.terminate_writer().is_none(), "no terminate writer on an unwired node");
     assert!(
         core.fail_back_sender().is_none(),
-        "no fail-back channel on an unwired node: the router has no receiver to poll"
+        "no fail-back sender on an unwired node; the receiver exists only alongside it"
     );
 }
 

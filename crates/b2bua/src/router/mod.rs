@@ -186,8 +186,9 @@ pub async fn run(
             },
             cmd = next_fail_back(&mut repl_rx) => match cmd {
                 Some(cmd) => on_repl_command(&ctx, cmd).await,
-                // Every sender is gone: the arm retires instead of resolving
-                // `None` on every poll.
+                // Retires the arm if every sender is gone, instead of resolving
+                // `None` on every poll; no current wiring reaches it (the
+                // supervisor the router's readiness holds keeps a sender).
                 None => repl_rx = None,
             },
         }
