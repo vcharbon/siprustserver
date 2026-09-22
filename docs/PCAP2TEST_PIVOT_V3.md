@@ -70,6 +70,14 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-09-22 — a CANCEL sent after its INVITE's final is answered 200 or 481,
+and either satisfies the step.** A UAS holds its INVITE server transaction in
+Completed after a non-2xx final until the ACK or Timer H (RFC 3261 §17.2.1), and
+a CANCEL matching a transaction draws 200 while one matching none draws 481
+(§9.2). An expect naming either final to a CANCEL the leg sent after a final to
+its INVITE reached it takes the other as its own (§6.7d, §14). No document
+field changes.
+
 **2026-09-22 — an unmatched response is charged to the expect of its own
 transaction, and a final retires it.** A response rides the client transaction
 of the request it answers (RFC 3261 §17.1.3), so a datagram no armed expect
@@ -1453,6 +1461,35 @@ which is the transaction layer's and holds for every document alike.
 The same fact keeps the two armed answers' charges apart: a datagram no armed
 expect matched is charged to the expect of ITS transaction, never to the one
 armed beside it (§14, item 4).
+
+### 6.7d The answer to a CANCEL sent after its INVITE's final
+
+A CANCEL matching an existing transaction draws 200 whatever that transaction's
+state, and one matching none draws 481 (RFC 3261 §9.2). After a non-2xx final
+the INVITE server transaction lingers in Completed until the ACK or Timer H
+(§17.2.1), and a UAS may dispose of it earlier or never have kept it. So a
+CANCEL a leg sends AFTER a final to its INVITE has reached it draws 200 from a
+UAS still holding the transaction and 481 from one that no longer does. Both are
+conformant, and which one a capture shows says how long one implementation held
+the transaction, nothing a document can oblige another to keep.
+
+So an `expect` naming 200 or 481 to a CANCEL is satisfied by the other of the
+two. The bounds, stated once here and nowhere per document:
+
+- the expect names its transaction: `status` 200 or 481 plus `cseq-method:
+  CANCEL`. A status alone names no transaction and takes only its own status;
+- only the pair: any other final to the CANCEL is the discriminator's to judge;
+- the leg's recording — this run's wire, never the document's list order —
+  shows a final (status 200 or above) to the INVITE of the CANCEL's CSeq number
+  ARRIVING before the CANCEL was sent. The CANCEL is the one the expect's
+  opening send emitted, else the leg's last one, the transaction item 4 of §14
+  charges on. A CANCEL sent while the INVITE was unanswered is the ordinary race
+  of §9.1, and a 481 to it is a finding; a provisional before it does not count.
+
+The arrival COMPLETES the step as a match: attributed to it, its content read
+under its own `check` mode as the named status's would be, and its recording
+line noted `tolerated: …` with both statuses. Nothing is failed and nothing
+retired.
 
 ### 6.8 delay and dwell
 
@@ -2910,7 +2947,9 @@ Its whole job:
    charged ends the transaction and RETIRES the expect (a required one; an
    `optional` is released, and so is every tolerated absence armed on that
    transaction), the verdict listing it under `retired`; a block member is
-   charged but never retired.
+   charged but never retired. The one status an expect takes besides its own:
+   200 for 481 or 481 for 200 on a CANCEL the leg sent after its INVITE's final
+   reached it (§6.7d), a match and no failure.
 5. **Lane scoping** (§9.1): evaluate every check, and record a CLASSIFIED one as
    informative instead of gating when the run's lane is not `case.origin_lane`,
    unless the run configuration states that class outright. One comparison, no

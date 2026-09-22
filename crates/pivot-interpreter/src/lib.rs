@@ -43,6 +43,7 @@
 //! - `gate` — what an `expect` gates on, and what it does with a datagram
 //!   that does not match.
 //! - `claim` — how a UAS claims its inbound INVITE.
+//! - `cancel` — the answer to a CANCEL sent after its INVITE's final.
 //! - `cursor` — the scheduler: readiness, `after`, dwell, `alt` commit,
 //!   `optional` release, `unordered` completion.
 //! - `early` — the early dialogs a forking callee answers under (§6.1).
@@ -71,6 +72,7 @@
 
 pub(crate) mod background;
 pub(crate) mod bundle;
+pub(crate) mod cancel;
 pub(crate) mod checks;
 pub(crate) mod claim;
 pub(crate) mod close;

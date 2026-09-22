@@ -4670,3 +4670,52 @@ fn assert_substituted_finals_run_on(outcome: &Outcome, substituted: &[(&str, u16
     );
     assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
 }
+
+/// A CANCEL sent after its INVITE's final reached the caller draws 200 from a
+/// UAS whose INVITE server transaction still lingers in Completed (RFC 3261
+/// §17.2.1, §9.2) and 481 from one that disposed of it. The document names the
+/// 481; this system answers 200. The step takes it, the recording line says
+/// why, and the call runs to its ACK with nothing retired and nothing
+/// abandoned.
+#[tokio::test(start_paused = true)]
+async fn a_cancel_sent_after_its_invite_s_final_takes_200_or_481() {
+    let scene = api_scene("pivot-late-cancel-final").await;
+    let (outcome, dir) = replay(&scene, "late-cancel-final.v3.json").await;
+    assert_bundle_is_complete(&outcome, &dir);
+    let verdict = &outcome.verdict;
+    for step in (1..=9).map(|n| format!("s{n}")) {
+        assert!(
+            verdict.completed_steps.contains(&step),
+            "{step} never completed: {:#?}\nfailures: {:#?}",
+            verdict.completed_steps,
+            verdict.failures
+        );
+    }
+    assert!(verdict.retired.is_empty(), "nothing retired: {:?}", verdict.retired);
+    assert!(verdict.abandoned.is_none(), "nothing abandoned: {:#?}", verdict.abandoned);
+    let a_leg = &outcome.recording.legs()["A"];
+    let answer = a_leg
+        .iter()
+        .find(|m| {
+            m.dir == Dir::In
+                && text(m).lines().any(|l| l.starts_with("CSeq:") && l.ends_with(" CANCEL"))
+        })
+        .unwrap_or_else(|| panic!("the CANCEL was answered: {a_leg:#?}"));
+    assert!(text(answer).starts_with("SIP/2.0 200"), "this system answers 200: {}", text(answer));
+    assert_eq!(answer.step.as_deref(), Some("s8"), "the step naming 481 took the 200");
+    assert_eq!(
+        answer.note.as_deref(),
+        Some(
+            "tolerated: a final to a CANCEL sent after the INVITE's final arrived on this leg \
+             draws 200 while the server transaction lives and 481 once it is gone \
+             (RFC 3261 §9.2, §17.2.1); 200 arrived where the step names 481"
+        ),
+        "the recording says why"
+    );
+    let acks: Vec<_> =
+        a_leg.iter().filter(|m| m.dir == Dir::Out && text(m).starts_with("ACK ")).collect();
+    assert_eq!(acks.len(), 1, "one ACK on A: {a_leg:#?}");
+    assert_eq!(acks[0].step.as_deref(), Some("s9"), "the scripted ACK, not the close's");
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}

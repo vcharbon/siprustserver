@@ -43,6 +43,7 @@ use sip_message::{Method, SipMessage, SipResponse};
 use sip_retransmit::Schedule;
 use tokio::time::Instant;
 
+use crate::cancel;
 use crate::checks::{self, MessageObservables};
 use crate::close::{self, Owed};
 use crate::deviation::StepEffects;
@@ -980,20 +981,44 @@ impl<'a, 'p> Runner<'a, 'p> {
         // takes a datagram whose HEADER SET diverges (`gate::body_content_holds`)
         // — the step names each difference and fails, rather than refusing the
         // message and abandoning the call several steps past the cause.
+        // A late CANCEL's other final answers the step as its own status would
+        // (§6.7d): read off this leg's wire, beside the structural gate.
+        let ladder = if inbound.status.is_some()
+            && Method::from_wire(&inbound.cseq_method) == Method::Cancel
+        {
+            self.instance.recording().legs().remove(&leg).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let late_cancel = |step: &CompiledStep| {
+            let opener = self.instance.cursor().opening_send(&step.id);
+            cancel::answers_late_cancel(step, &inbound, &ladder, opener)
+        };
+        let gates = |step: &CompiledStep| {
+            gate::discriminates(step, &inbound).matches() || late_cancel(step)
+        };
         let matched = gated
             .iter()
             .find(|step| {
-                gate::discriminates(step, &inbound).matches()
+                gates(step)
                     && self.rides_fork(step, &inbound).matches()
                     && gate::content_holds(step, &inbound, &scope, &resolver).matches()
             })
             .or_else(|| {
                 gated.iter().find(|step| {
-                    gate::discriminates(step, &inbound).matches()
+                    gates(step)
                         && self.rides_fork(step, &inbound).matches()
                         && gate::body_content_holds(step, &inbound, &scope).matches()
                         && self.takes_header_divergent(step, &inbound, actor, &leg)
                 })
+            });
+        let tolerated = matched
+            .filter(|step| !gate::discriminates(step, &inbound).matches())
+            .and_then(|step| match (&step.discriminator, inbound.status) {
+                (Discriminator::Response { status, .. }, Some(arrived)) => {
+                    Some(cancel::note(*status, arrived))
+                }
+                _ => None,
             });
         let Some(step) = matched.cloned() else {
             // Charged to the expect of the transaction the datagram rides
@@ -1107,6 +1132,9 @@ impl<'a, 'p> Runner<'a, 'p> {
         }
         if let Some(seq) = seq {
             self.instance.recording().attribute(&leg, seq, &step.id);
+            if let Some(note) = &tolerated {
+                self.instance.recording().renote(&leg, seq, note);
+            }
         }
         // The step now owns these bytes: every later copy of them on this leg is
         // a repeat of THIS message, which is the unit §6.9 counts.
