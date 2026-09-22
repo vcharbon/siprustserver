@@ -110,10 +110,11 @@ impl HttpResponse {
     }
 }
 
-/// The server side: an application that answers requests. The simulated fabric
-/// invokes this **in-process** (the real handler runs, after the transit
-/// delay), so a test drives client → fabric → real-server → fabric → client
-/// deterministically under a paused clock.
+/// The server side: an application that answers requests. Transports call
+/// [`answer`](Self::answer); the simulated fabric invokes it **in-process**
+/// (the real handler runs, after the transit delay), so a test drives
+/// client → fabric → real-server → fabric → client deterministically under a
+/// paused clock.
 #[async_trait]
 pub trait HttpService: Send + Sync {
     /// Handle one request and produce a response. Infallible at this layer —

@@ -17,8 +17,13 @@
 //!   ([`HttpScriptHandle::verdict`]).
 
 mod error;
+mod matcher;
+mod open;
 mod program;
 mod service;
+mod template;
+mod token;
+mod validate;
 mod verdict;
 
 pub use error::HttpScriptError;

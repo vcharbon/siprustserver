@@ -27,6 +27,12 @@
 //!   into a capture sink (stamped with the injected [`sip_clock::Clock`]) for
 //!   test assertions.
 //!
+//! ## Scripted service
+//! [`scripted::ScriptedHttpService`] is an [`HttpService`] for tests: it serves
+//! the exchanges a scenario states as a program and answers anything else
+//! `500`, recorded as a finding. Its faults include closing the connection
+//! without a response, through [`HttpService::answer`] and [`HttpAnswer`].
+//!
 //! ## Failure counters
 //! The real transport classifies every client failure into
 //! `http_request_failures_total{peer, cause}` ([`failures`]) — counters only,

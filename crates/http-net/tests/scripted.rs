@@ -544,11 +544,14 @@ fn step(reply: HttpReply) -> HttpReifiedStep {
     HttpReifiedStep::new(HttpRequestMatch::post("/x"), reply)
 }
 
+/// What a refusal must be.
+type Expect = fn(&HttpScriptError) -> bool;
+
 #[test]
 fn add_refuses_scripts_that_cannot_be_served() {
     let open = || HttpRequestMatch::post("/x");
     let tail = || step(HttpReply::respond(200, ""));
-    let cases: Vec<(HttpScript, fn(&HttpScriptError) -> bool)> = vec![
+    let cases: Vec<(HttpScript, Expect)> = vec![
         (HttpScript::reified(open(), vec![]), |e| matches!(e, HttpScriptError::NoStep)),
         (HttpScript::reified(open(), vec![step(HttpReply::Silence), tail()]), |e| {
             matches!(e, HttpScriptError::UnreachableStep { index: 1, previous: 0 })
@@ -619,4 +622,21 @@ async fn a_reified_program_is_a_serde_document() {
         Ok((HttpReply::respond(200, ""), None))
     });
     assert!(serde_json::to_string(&code).is_err(), "a code step is not a document");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_code_reply_that_does_not_render_is_unmatched() {
+    let svc = ScriptedHttpService::new();
+    let broken = HttpScript::code(HttpRequestMatch::post("/start"), |_, _, _| {
+        Ok((HttpReply::respond(200, r#"{"id":"${capture:id}"}"#), None))
+    });
+    let script = svc.add(broken, HttpBindings::new()).unwrap();
+    let (net, _h) = serve(&svc).await;
+
+    let resp = post(&net, "/start", "{}").await;
+    assert_eq!(resp.status, 500);
+    assert!(body(&resp).contains("does not render"), "{}", body(&resp));
+    let verdict = script.verdict();
+    assert_eq!(verdict.findings.len(), 1, "{verdict:?}");
+    assert_eq!(verdict.findings[0].kind, HttpFindingKind::Unmatched);
 }

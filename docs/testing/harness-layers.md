@@ -33,6 +33,7 @@ Note the crate boundary people trip on: `callflow`/`Harness`/`Agent` live in
 | LB proxy behaviour (routing, compliance, stateless contract) | `crates/sip-proxy/tests/` (e.g. `rfc_proxy_compliance.rs`, `stateless_final_response_contract.rs`) — `Harness` + real proxy |
 | HA failover with SIP: kill/reboot/partition mid-call, takeover transparency, limiter parity | `failover-harness` |
 | Replication-plane correctness in isolation (convergence, split-brain) | `ha-harness` |
+| A SUT's HTTP exchanges stated as a program: any request the program does not state fails the run | `http-net::scripted` — `ScriptedHttpService` bound on the scene's `SimulatedHttpNetwork` (or `RealHttpNetwork`), one `add` per expected conversation, `verdict()` at the end |
 | Real cluster / load / endurance | `crates/loadgen` + `e2e/` (see their READMEs) — out of scope for this doc |
 
 ## What is checked automatically vs. what you must assert
@@ -86,5 +87,6 @@ NOT automatic (deliberately — timeout/reap/stall fixtures would false-fail):
 | `crates/b2bua-harness/src/lib.rs` — `B2buaScene` + `assert_fully_reaped` docs | Canonical ports, the 4-invariant leak oracle |
 | `crates/failover-harness/src/lib.rs` + `src/harness.rs` | Cluster invariants, `transparent_matrix!`, `worker_clock_offsets` design |
 | `crates/ha-harness/src/lib.rs` module doc | Pure repl-plane harness |
+| `crates/http-net/src/scripted/mod.rs` module doc | The scripted HTTP service: program, continuation token, faults, hard-failure rule |
 | `crates/b2bua/src/timers.rs` module doc | The epoch+`Key` `DelayQueue` timer driver (cancellation correctness, physical removal) |
 | [`CONTEXT.md`](../../CONTEXT.md) | Vocabulary — e.g. "callflow choreography" vs ADR-0018 "Callflow shape" vs ADR-0013 `CallScenario` |

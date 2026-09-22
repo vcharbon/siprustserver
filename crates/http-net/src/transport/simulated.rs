@@ -22,6 +22,11 @@
 //!   [`HttpError::Connect`] (connection refused).
 //! - [`Fault::ErrorAfter`] — after `ms`, the request fails with
 //!   [`HttpError::Io`] (ECONNRESET-style, distinct from a clean `Cut`).
+//!
+//! Faults are checked before the service is looked up: a faulted request is
+//! one no service saw. A service answering [`HttpAnswer::Abort`] is a reset
+//! of that one exchange, reported as [`HttpError::Io`] after the return
+//! transit.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -32,7 +37,8 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 
 use super::{
-    BindError, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
+    BindError, HttpAnswer, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
+    HttpTransport,
 };
 
 /// A dst-keyed connection fault. Apply with [`SimulatedHttpNetwork::apply_fault`].
@@ -223,8 +229,13 @@ impl HttpTransport for SimulatedHttpNetwork {
         // Request in transit -> handler runs in-process -> response in transit.
         let delay = self.transit_delay(dst);
         tokio::time::sleep(Duration::from_millis(delay)).await;
-        let resp = service.handle(req).await;
+        let answer = service.answer(req).await;
         tokio::time::sleep(Duration::from_millis(delay)).await;
-        Ok(resp)
+        match answer {
+            HttpAnswer::Response(resp) => Ok(resp),
+            HttpAnswer::Abort => {
+                Err(HttpError::Io { addr: dst, reason: "connection reset".into() })
+            }
+        }
     }
 }

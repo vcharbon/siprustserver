@@ -19,11 +19,12 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::{JoinHandle, JoinSet};
 
 use super::{
-    BindError, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
+    BindError, HttpAnswer, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
+    HttpTransport,
 };
 
 /// The real HTTP transport. Clone shares the pooled client.
@@ -48,7 +49,8 @@ impl RealHttpNetwork {
     }
 }
 
-/// A running real server: aborts its accept loop on drop.
+/// A running real server: aborts its accept loop, and with it every open
+/// connection, on drop.
 struct RealServerHandle {
     addr: SocketAddr,
     task: JoinHandle<()>,
@@ -83,54 +85,17 @@ impl HttpTransport for RealHttpNetwork {
         let local = listener.local_addr().map_err(|e| BindError::Io(e.to_string()))?;
 
         let task = tokio::spawn(async move {
+            // Dropped with this task when the handle aborts it, which aborts
+            // every connection still open (a withheld answer included).
+            let mut connections = JoinSet::new();
             loop {
-                let (stream, _peer) = match listener.accept().await {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                let svc = service.clone();
-                tokio::spawn(async move {
-                    let io = TokioIo::new(stream);
-                    let handler = service_fn(move |req: Request<Incoming>| {
-                        let svc = svc.clone();
-                        async move {
-                            let method = req.method().to_string();
-                            // path_and_query preserves the query string
-                            // (`?debug=true`); fall back to the bare path.
-                            let path = req
-                                .uri()
-                                .path_and_query()
-                                .map(|pq| pq.as_str().to_string())
-                                .unwrap_or_else(|| req.uri().path().to_string());
-                            let headers = req
-                                .headers()
-                                .iter()
-                                .map(|(k, v)| {
-                                    (k.as_str().to_string(), v.to_str().unwrap_or("").to_string())
-                                })
-                                .collect();
-                            let body = req
-                                .into_body()
-                                .collect()
-                                .await
-                                .map(|c| c.to_bytes().to_vec())
-                                .unwrap_or_default();
-                            let resp =
-                                svc.handle(HttpRequest { method, path, headers, body }).await;
-                            let mut builder = Response::builder().status(resp.status);
-                            for (name, value) in &resp.headers {
-                                builder = builder.header(name.as_str(), value.as_str());
-                            }
-                            let built = builder
-                                .body(Full::new(Bytes::from(resp.body)))
-                                .expect("status + headers + full body always builds a response");
-                            Ok::<_, std::convert::Infallible>(built)
-                        }
-                    });
-                    let _ = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(io, handler)
-                        .await;
-                });
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((stream, _peer)) = accepted else { continue };
+                        connections.spawn(serve_connection(stream, service.clone()));
+                    }
+                    Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                }
             }
         });
 
@@ -172,4 +137,49 @@ impl HttpTransport for RealHttpNetwork {
             .to_vec();
         Ok(HttpResponse { status, headers, body })
     }
+}
+
+/// Serve one accepted connection until the peer closes it. A service
+/// answering [`HttpAnswer::Abort`] fails the exchange, and hyper closes the
+/// connection without writing a response (RFC 9112 §9.6).
+async fn serve_connection(stream: TcpStream, service: Arc<dyn HttpService>) {
+    let io = TokioIo::new(stream);
+    let handler = service_fn(move |req: Request<Incoming>| {
+        let svc = service.clone();
+        async move {
+            let method = req.method().to_string();
+            // path_and_query preserves the query string (`?debug=true`); fall
+            // back to the bare path.
+            let path = req
+                .uri()
+                .path_and_query()
+                .map(|pq| pq.as_str().to_string())
+                .unwrap_or_else(|| req.uri().path().to_string());
+            let headers = req
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body =
+                req.into_body().collect().await.map(|c| c.to_bytes().to_vec()).unwrap_or_default();
+            let resp = match svc.answer(HttpRequest { method, path, headers, body }).await {
+                HttpAnswer::Response(resp) => resp,
+                HttpAnswer::Abort => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "the service closed the connection without a response",
+                    ));
+                }
+            };
+            let mut builder = Response::builder().status(resp.status);
+            for (name, value) in &resp.headers {
+                builder = builder.header(name.as_str(), value.as_str());
+            }
+            let built = builder
+                .body(Full::new(Bytes::from(resp.body)))
+                .expect("status + headers + full body always builds a response");
+            Ok(built)
+        }
+    });
+    let _ = hyper::server::conn::http1::Builder::new().serve_connection(io, handler).await;
 }
