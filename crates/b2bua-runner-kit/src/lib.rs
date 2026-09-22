@@ -18,7 +18,8 @@
 //!   (store / buffered CDR / limiter-from-env / metrics / clock / id-gen),
 //!   each overridable field-by-field on the returned [`B2buaDeps`];
 //! - [`RunnerBase::rabbitmq_cdr_sink_from_env`] — the RabbitMQ CDR sink the
-//!   `B2BUA_CDR_RABBITMQ_*` grammar selects, passed to [`RunnerBase::deps`];
+//!   `B2BUA_CDR_RABBITMQ_*` grammar selects, passed to [`RunnerBase::deps`]
+//!   (`_with_encoder` publishes a runner-chosen [`CdrEncoder`] format);
 //! - [`RunnerBase::replication_setup_from_env`] — the peer-to-peer
 //!   replication the `B2BUA_REPL*` grammar selects ([`ReplicationSettings`]:
 //!   static or EndpointSlice membership, per-attempt peer addressing), assigned
@@ -51,15 +52,16 @@
 //! the runner's choice to take: a runner may assign any other
 //! `ReplicationSetup` to `deps.replication`. The CDR sink is the runner's choice too:
 //! the kit ships the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env
-//! grammar) and the discarding default, and a runner may pass any other
-//! [`CdrWriter`] to [`RunnerBase::deps`].
+//! grammar) and the discarding default; a runner may give the RabbitMQ sink
+//! its own [`CdrEncoder`] or pass any other [`CdrWriter`] to
+//! [`RunnerBase::deps`].
 
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use b2bua::cdr::{BufferedCdrWriter, CdrRecord, CdrWriter};
+use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrRecord, CdrWriter, JsonRecordEncoder};
 use b2bua::config::{B2buaConfig, CdrConfig};
 use b2bua::decision::CallDecisionEngine;
 use b2bua::limiter::{CallLimiter, NoopLimiter};
@@ -79,7 +81,10 @@ use sip_txn::IdGen;
 
 mod cdr_rabbitmq;
 mod replication;
-pub use cdr_rabbitmq::{rabbitmq_cdr_sink_from_lookup, RabbitMqCdrSettings, RabbitMqCdrWriter};
+pub use cdr_rabbitmq::{
+    rabbitmq_cdr_sink_from_lookup, rabbitmq_cdr_sink_from_lookup_with_encoder, CdrQueueDeclare,
+    RabbitMqCdrSettings, RabbitMqCdrWriter,
+};
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
 
 /// A CDR sink that discards every record. The default sink when a runner wires
@@ -704,20 +709,30 @@ impl RunnerBase {
     }
 
     /// The RabbitMQ CDR sink the env selects ([`RabbitMqCdrSettings`]),
-    /// recording into [`Self::metrics`]; `None` when the URL is unset. Panics
-    /// (boot refusal) on a malformed `B2BUA_CDR_RABBITMQ_MAX_LEN`.
+    /// publishing the default [`JsonRecordEncoder`] record and recording into
+    /// [`Self::metrics`]; `None` when the URL is unset. Panics (boot refusal)
+    /// on a malformed `B2BUA_CDR_RABBITMQ_*` value.
     pub fn rabbitmq_cdr_sink_from_env(&self) -> Option<Arc<dyn CdrWriter>> {
+        self.rabbitmq_cdr_sink_from_env_with_encoder(Arc::new(JsonRecordEncoder))
+    }
+
+    /// [`Self::rabbitmq_cdr_sink_from_env`] publishing the bytes `encoder`
+    /// produces: the runner chooses the record format, the kit owns delivery.
+    pub fn rabbitmq_cdr_sink_from_env_with_encoder(
+        &self,
+        encoder: Arc<dyn CdrEncoder>,
+    ) -> Option<Arc<dyn CdrWriter>> {
         let settings = RabbitMqCdrSettings::from_lookup(|k| env::var(k).ok())
             .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))?;
         tracing::info!(
             service = %self.name,
             sink = "rabbitmq",
             queue = %settings.queue,
-            max_len = settings.max_len,
+            declare = ?settings.declare,
             buffer = self.env.cdr_queue,
             "CDR sink wired"
         );
-        Some(settings.into_sink(&self.metrics))
+        Some(settings.into_sink_with_encoder(encoder, &self.metrics))
     }
 
     /// The peer-to-peer replication the env selects ([`ReplicationSettings`]),

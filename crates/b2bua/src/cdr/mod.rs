@@ -4,9 +4,11 @@
 //! CDR per call; [`BufferedCdrWriter`] is the production drop-on-overload buffer.
 
 mod buffered;
+mod encoder;
 mod memory;
 
 pub use buffered::BufferedCdrWriter;
+pub use encoder::{CdrEncodeError, CdrEncoder, JsonRecordEncoder};
 pub use memory::InMemoryCdrWriter;
 
 use async_trait::async_trait;
