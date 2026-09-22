@@ -11,7 +11,7 @@ use http_net::scripted::{
     HttpBindings, HttpFindingKind, HttpReifiedStep, HttpReply, HttpRequestMatch, HttpScript,
     ScriptedHttpService,
 };
-use http_net::{HttpError, HttpRequest, HttpResponse, HttpTransport, RealHttpNetwork};
+use http_net::{HttpError, HttpRequest, HttpResponse, HttpService, HttpTransport, RealHttpNetwork};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -148,4 +148,67 @@ async fn dropping_the_server_closes_a_silenced_connection() {
     let closed = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut rest)).await;
     assert!(closed.is_ok(), "the connection task outlived its server");
     assert!(rest.is_empty());
+}
+
+/// A wrapper that forwards only `handle`: it cannot close a connection.
+struct HandleOnly(ScriptedHttpService);
+
+#[async_trait::async_trait]
+impl HttpService for HandleOnly {
+    async fn handle(&self, req: HttpRequest) -> HttpResponse {
+        self.0.handle(req).await
+    }
+}
+
+/// A `Reset` that reaches `handle` must not pass for a proper reset: the peer
+/// gets a 500 and the run a gating finding.
+#[tokio::test]
+async fn a_reset_reaching_handle_is_a_500_and_a_finding_not_a_close() {
+    let svc = ScriptedHttpService::new();
+    let script = svc.add(single(HttpReply::Reset), HttpBindings::new()).unwrap();
+    let net = RealHttpNetwork::new();
+    let handle =
+        net.serve("127.0.0.1:0".parse().unwrap(), Arc::new(HandleOnly(svc.clone()))).await.unwrap();
+
+    let mut stream = TcpStream::connect(handle.local_addr()).await.unwrap();
+    let read = raw_post(&mut stream, "{}", Duration::from_millis(500)).await;
+    let text = read.map(|r| String::from_utf8_lossy(&r).into_owned());
+    // Keep-alive: the answer arrives and the connection stays open.
+    assert!(text.is_none(), "a status line, and no close: {text:?}");
+    let resp = net
+        .request(handle.local_addr(), HttpRequest::post("/start", b"{}".to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status, 500);
+    let verdict = script.verdict();
+    assert!(!verdict.is_green(), "{verdict:?}");
+    assert!(verdict.findings.iter().any(|f| f.kind == HttpFindingKind::ResetNotForwarded));
+}
+
+/// A capture that renders an invalid header value is a finding and a 500,
+/// never a panic that closes the connection.
+#[tokio::test]
+async fn a_header_value_that_cannot_be_sent_is_a_finding() {
+    let svc = ScriptedHttpService::new();
+    let script = svc
+        .add(
+            HttpScript::reified(
+                HttpRequestMatch::post("/start"),
+                vec![HttpReifiedStep::new(
+                    HttpRequestMatch::post("/start").contains(r#"id="${capture:id}""#),
+                    HttpReply::respond(200, "").header("x-id", "${capture:id}"),
+                )],
+            ),
+            HttpBindings::new(),
+        )
+        .unwrap();
+    let net = RealHttpNetwork::new();
+    let handle = net.serve("127.0.0.1:0".parse().unwrap(), Arc::new(svc.clone())).await.unwrap();
+
+    let resp = net
+        .request(handle.local_addr(), HttpRequest::post("/start", b"id=\"a\r\nb\"".to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status, 500);
+    assert!(!script.verdict().is_green());
 }

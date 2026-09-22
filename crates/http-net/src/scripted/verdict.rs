@@ -21,6 +21,10 @@ pub enum HttpFindingKind {
     Ambiguous,
     /// At run end, an instance whose last step was never reached.
     Unserved,
+    /// A `Reset` reached [`HttpService::handle`](crate::HttpService::handle),
+    /// which cannot close a connection: the caller does not forward
+    /// [`answer`](crate::HttpService::answer). Answered `500`.
+    ResetNotForwarded,
     /// A valid token minted by another service (a straggler of an earlier
     /// run against a standing peer). Answered `500`; advisory.
     ForeignToken,

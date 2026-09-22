@@ -653,3 +653,261 @@ async fn the_same_token_echoed_twice_is_one_position() {
     assert_eq!(resp.status, 200, "{}", body(&resp));
     assert!(script.verdict().is_green());
 }
+
+// ── Review findings ─────────────────────────────────────────────────────────
+
+/// A payload that is a well-formed token but for its checksum is the peer's
+/// data: the request is an opening request, never a follow-up of instance 0.
+#[tokio::test(start_paused = true)]
+async fn a_token_with_a_wrong_checksum_is_user_data() {
+    use base64::Engine;
+    let svc = ScriptedHttpService::with_nonce(5);
+    let first = svc
+        .add(
+            HttpScript::reified(
+                HttpRequestMatch::post("/s"),
+                vec![
+                    HttpReifiedStep::new(
+                        HttpRequestMatch::post("/s"),
+                        HttpReply::respond(200, r#"{"ctx":"${continuation}"}"#),
+                    ),
+                    HttpReifiedStep::new(
+                        HttpRequestMatch::post("/s"),
+                        HttpReply::respond(200, "second"),
+                    ),
+                ],
+            ),
+            HttpBindings::new(),
+        )
+        .unwrap();
+    let second = svc.add(opening_at("/s", "opened-2"), HttpBindings::new()).unwrap();
+    let (net, _h) = serve(&svc).await;
+    post(&net, "/s", "{}").await;
+
+    // The wire form, written out: 8 checksum bytes (zeros, wrong) + a payload
+    // naming this service's nonce, instance 0, position 1.
+    let mut payload = vec![0u8; 8];
+    payload.extend_from_slice(br#"{"n":5,"i":0,"a":{"k":"r","p":1}}"#);
+    let forged =
+        format!("~hc.{}.~", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload));
+    let resp = post(&net, "/s", &format!(r#"{{"ctx":"{forged}"}}"#)).await;
+    assert_eq!(body(&resp), "opened-2");
+    assert!(second.verdict().opened);
+    assert!(!first.verdict().complete, "the forged token did not advance instance 0");
+}
+
+fn opening_at(path: &str, reply: &str) -> HttpScript {
+    HttpScript::reified(
+        HttpRequestMatch::post(path),
+        vec![HttpReifiedStep::new(HttpRequestMatch::post(path), HttpReply::respond(200, reply))],
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retransmit_after_completion_does_not_regress_the_instance() {
+    let svc = ScriptedHttpService::new();
+    let steps = vec![
+        HttpReifiedStep::new(
+            HttpRequestMatch::post("/s"),
+            HttpReply::respond(200, r#"{"ctx":"${continuation}"}"#),
+        ),
+        HttpReifiedStep::new(
+            HttpRequestMatch::post("/n"),
+            HttpReply::respond(200, r#"{"ctx":"${continuation}"}"#),
+        ),
+        HttpReifiedStep::new(HttpRequestMatch::post("/l"), HttpReply::respond(204, "")),
+    ];
+    let script = svc
+        .add(HttpScript::reified(HttpRequestMatch::post("/s"), steps), HttpBindings::new())
+        .unwrap();
+    let (net, _h) = serve(&svc).await;
+
+    let t1 = ctx(&post(&net, "/s", "{}").await);
+    let a = post(&net, "/n", &format!(r#"{{"ctx":"{t1}"}}"#)).await;
+    post(&net, "/l", &format!(r#"{{"ctx":"{}"}}"#, ctx(&a))).await;
+    let again = post(&net, "/n", &format!(r#"{{"ctx":"{t1}"}}"#)).await;
+    assert_eq!(again, a, "the late retransmit is answered identically");
+    assert!(script.verdict().complete, "an older token never regresses the instance");
+}
+
+/// Serve one request against a single-step script opening on `fragment`.
+async fn one(fragment: &str, reply: &str, request: &str) -> HttpResponse {
+    let svc = ScriptedHttpService::new();
+    let script = HttpScript::reified(
+        HttpRequestMatch::post("/s").contains(fragment),
+        vec![HttpReifiedStep::new(HttpRequestMatch::post("/s"), HttpReply::respond(200, reply))],
+    );
+    svc.add(script, HttpBindings::new()).unwrap();
+    let (net, _h) = serve(&svc).await;
+    post(&net, "/s", request).await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_scalar_capture_takes_only_a_number_or_a_literal() {
+    let fragment = r#""id":${capture:id}"#;
+    let reply = r#"{"echo":${capture:id}}"#;
+    for request in [r#"{"id":{"a":1},"z":2}"#, r#"{"id":[1,2],"z":2}"#, r#"{"id":"x,y","z":2}"#] {
+        assert_eq!(one(fragment, reply, request).await.status, 500, "{request}");
+    }
+    for (request, echoed) in [
+        (r#"{"id":-1.5e3,"z":2}"#, r#"{"echo":-1.5e3}"#),
+        (r#"{"id":1.50}"#, r#"{"echo":1.50}"#),
+        (r#"{"id":null}"#, r#"{"echo":null}"#),
+        (r#"{"id":false}"#, r#"{"echo":false}"#),
+    ] {
+        let resp = one(fragment, reply, request).await;
+        assert_eq!(body(&resp), echoed, "{request}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn normalisation_drops_only_whitespace_outside_strings() {
+    let e_acute = "caf\u{e9}";
+    let matching = [
+        (r#""x":1e3"#.to_string(), "{ \"x\" : 1e3 }".to_string()),
+        (r#""x":1.50"#.to_string(), "{\n  \"x\": 1.50\n}".to_string()),
+        (r#""u":"a\/b""#.to_string(), r#"{ "u": "a\/b" }"#.to_string()),
+        (format!(r#""n":"{e_acute}""#), format!(r#"{{ "n": "{e_acute}" }}"#)),
+        (r#""n":"café""#.to_string(), r#"{"n": "café"}"#.to_string()),
+        (r#""r":{"b":1,"a":2}"#.to_string(), r#"{"r": {"b": 1, "a": 2}}"#.to_string()),
+        (r#""id":"a""#.to_string(), r#"{"id":"a", "id":"b"}"#.to_string()),
+        (r#""n":18446744073709551616"#.to_string(), r#"{"n": 18446744073709551616}"#.to_string()),
+        (r#""s":"a b""#.to_string(), r#"{ "s": "a b" }"#.to_string()),
+    ];
+    for (fragment, request) in matching {
+        let resp = one(&fragment, "ok", &request).await;
+        assert_eq!(resp.status, 200, "{fragment} in {request}: {}", body(&resp));
+    }
+    let resp = one(r#""s":"ab""#, "ok", r#"{ "s": "a b" }"#).await;
+    assert_eq!(resp.status, 500, "whitespace inside a string is data");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_open_match_weighs_step_zero_expect_too() {
+    let svc = ScriptedHttpService::new();
+    let mk = |v: &str| {
+        HttpScript::reified(
+            HttpRequestMatch::post("/s"),
+            vec![HttpReifiedStep::new(
+                HttpRequestMatch::post("/s").contains(format!(r#""b":{v}"#)),
+                HttpReply::respond(200, v),
+            )],
+        )
+    };
+    let one = svc.add(mk("1"), HttpBindings::new()).unwrap();
+    let two = svc.add(mk("2"), HttpBindings::new()).unwrap();
+    let (net, _h) = serve(&svc).await;
+
+    let resp = post(&net, "/s", r#"{"b":2}"#).await;
+    assert_eq!(body(&resp), "2");
+    assert!(two.verdict().is_green(), "{:?}", two.verdict());
+    assert!(!one.verdict().opened, "the sibling step 0 refuses is not consumed");
+    assert!(svc.findings().iter().all(|f| f.kind == HttpFindingKind::Unserved));
+}
+
+#[tokio::test(start_paused = true)]
+async fn tokens_all_foreign_are_an_advisory_however_many() {
+    let earlier = ScriptedHttpService::with_nonce(1);
+    earlier.add(two_step(), cell("c1")).unwrap();
+    earlier.add(two_step(), cell("c2")).unwrap();
+    let (earlier_net, _e) = serve(&earlier).await;
+    let s1 = ctx(&post(&earlier_net, "/start", r#"{"cell":"c1"}"#).await);
+    let s2 = ctx(&post(&earlier_net, "/start", r#"{"cell":"c2"}"#).await);
+
+    let svc = ScriptedHttpService::with_nonce(2);
+    let (net, _h) = serve(&svc).await;
+    let resp = post(&net, "/next", &format!(r#"{{"ctx":"{s1}","history":["{s2}"]}}"#)).await;
+    assert_eq!(resp.status, 500);
+    let findings = svc.findings();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].kind, HttpFindingKind::ForeignToken);
+    assert!(findings[0].is_advisory());
+}
+
+#[tokio::test(start_paused = true)]
+async fn opens_differing_only_in_capture_names_are_one_set() {
+    let svc = ScriptedHttpService::new();
+    let x = svc
+        .add(
+            HttpScript::reified(
+                HttpRequestMatch::post("/s").contains(r#""id":"${capture:x}""#),
+                vec![HttpReifiedStep::new(
+                    HttpRequestMatch::post("/s"),
+                    HttpReply::respond(200, "x:${capture:x}"),
+                )],
+            ),
+            HttpBindings::new(),
+        )
+        .unwrap();
+    let y = svc
+        .add(
+            HttpScript::reified(
+                HttpRequestMatch::post("/s").contains(r#""id":"${capture:y}""#),
+                vec![HttpReifiedStep::new(
+                    HttpRequestMatch::post("/s"),
+                    HttpReply::respond(200, "y:${capture:y}"),
+                )],
+            ),
+            HttpBindings::new(),
+        )
+        .unwrap();
+    let (net, _h) = serve(&svc).await;
+
+    assert_eq!(body(&post(&net, "/s", r#"{"id":"abc"}"#).await), "x:abc", "FIFO");
+    assert_eq!(body(&post(&net, "/s", r#"{"id":"def"}"#).await), "y:def");
+    assert!(x.verdict().is_green() && y.verdict().is_green());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_literal_fragment_is_more_specific_than_a_capture_on_the_same_key() {
+    let svc = ScriptedHttpService::new();
+    let any = svc
+        .add(
+            HttpScript::reified(
+                HttpRequestMatch::post("/s").contains(r#""id":"${capture:x}""#),
+                vec![HttpReifiedStep::new(
+                    HttpRequestMatch::post("/s"),
+                    HttpReply::respond(200, "any"),
+                )],
+            ),
+            HttpBindings::new(),
+        )
+        .unwrap();
+    let abc = svc.add(opening(&[r#""id":"abc""#], "abc"), HttpBindings::new()).unwrap();
+    let (net, _h) = serve(&svc).await;
+
+    assert_eq!(body(&post(&net, "/s", r#"{"id":"abc"}"#).await), "abc", "the literal wins");
+    assert_eq!(body(&post(&net, "/s", r#"{"id":"zzz"}"#).await), "any");
+    assert!(any.verdict().is_green() && abc.verdict().is_green());
+}
+
+#[test]
+fn add_refuses_what_a_server_cannot_send() {
+    let bad =
+        |reply: HttpReply| HttpScript::reified(HttpRequestMatch::post("/x"), vec![step(reply)]);
+    for status in [42, 99, 600, 1000] {
+        let err = refused(bad(HttpReply::respond(status, "")), HttpBindings::new());
+        assert!(matches!(err, HttpScriptError::InvalidStatus { .. }), "{status}: {err:?}");
+    }
+    for (name, value) in [("bad name", "v"), ("", "v"), ("x-ok", "a\r\nb"), ("x-ok", "caf\u{e9}")] {
+        let err =
+            refused(bad(HttpReply::respond(200, "").header(name, value)), HttpBindings::new());
+        assert!(matches!(err, HttpScriptError::InvalidHeader { .. }), "{name:?}: {err:?}");
+    }
+    let err = refused(
+        bad(HttpReply::respond(200, "").header("x-ok", "${bind:v}")),
+        HttpBindings::new().bind("v", "a\nb"),
+    );
+    assert!(matches!(err, HttpScriptError::InvalidHeader { .. }), "a bound value: {err:?}");
+    let err = refused(
+        HttpScript::reified(
+            HttpRequestMatch::post("/start"),
+            vec![HttpReifiedStep::new(
+                HttpRequestMatch::post("/other"),
+                HttpReply::respond(200, ""),
+            )],
+        ),
+        HttpBindings::new(),
+    );
+    assert!(matches!(err, HttpScriptError::StepZeroTarget { .. }), "{err:?}");
+}

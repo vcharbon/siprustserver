@@ -62,4 +62,32 @@ pub enum HttpScriptError {
         /// The step that mints no token.
         previous: usize,
     },
+    /// Step 0 answers the opening request, so its method and path are the
+    /// open's.
+    #[error("step 0 expects {expected}, the open is {open}")]
+    StepZeroTarget {
+        /// The open's `method path`.
+        open: String,
+        /// Step 0's `method path`.
+        expected: String,
+    },
+    /// A status no final response can carry (RFC 9110 §15: 2xx to 5xx).
+    #[error("{at}: status {status} is not a final response status (200-599)")]
+    InvalidStatus {
+        /// Where.
+        at: String,
+        /// The status.
+        status: u16,
+    },
+    /// A header name that is not a token, or a value with a byte a server
+    /// cannot send (RFC 9110 §5.1, §5.5).
+    #[error("{at}: header {name:?}: {why}")]
+    InvalidHeader {
+        /// Where.
+        at: String,
+        /// The header name.
+        name: String,
+        /// What is wrong.
+        why: String,
+    },
 }
