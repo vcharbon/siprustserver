@@ -407,8 +407,8 @@ impl ScriptedHttpService {
             Ok(serve) => serve,
             Err(finding) => return (HttpAnswer::Response(self.record(*finding)), None),
         };
-        let token = self.shared.codec.wrap(&serve.token.render());
-        let answer = match render(&serve.reply, &serve, &token) {
+        let token = serve.token.render();
+        let answer = match render(&serve.reply, &serve, &token, self.shared.codec.as_ref()) {
             Ok(rendered) => deliver(rendered).await,
             Err(why) => HttpAnswer::Response(self.record(*finding(
                 HttpFindingKind::Unmatched,
@@ -438,19 +438,28 @@ enum Rendered {
     Reset,
 }
 
-fn render(reply: &HttpReply, serve: &Serve, token: &str) -> Result<Rendered, String> {
-    let text = |t: &str| {
+/// `reply` rendered, the raw `token` wrapped by `codec` against the reply body
+/// it stands in.
+fn render(
+    reply: &HttpReply,
+    serve: &Serve,
+    token: &str,
+    codec: &dyn HttpContinuationCodec,
+) -> Result<Rendered, String> {
+    let text = |t: &str, continuation: &str| {
         let pieces = template::parse(t).map_err(|bad| format!("placeholder {bad}"))?;
-        template::render(&pieces, &serve.bindings, &serve.captures, token)
+        template::render(&pieces, &serve.bindings, &serve.captures, continuation)
     };
     Ok(match reply {
         HttpReply::Respond { status, headers, body } => {
             if !validate::final_status(*status) {
                 return Err(format!("status {status} is not a final response status"));
             }
-            let mut resp = HttpResponse::status(*status).with_body(text(body)?.into_bytes());
+            let wrapped = codec.wrap(token, &text(body, "")?);
+            let mut resp =
+                HttpResponse::status(*status).with_body(text(body, &wrapped)?.into_bytes());
             for (name, value) in headers {
-                let value = text(value)?;
+                let value = text(value, &wrapped)?;
                 validate::header_name(name)
                     .and_then(|()| validate::header_value(&value))
                     .map_err(|why| format!("header {name:?}: {why}"))?;
@@ -459,7 +468,9 @@ fn render(reply: &HttpReply, serve: &Serve, token: &str) -> Result<Rendered, Str
             Rendered::Respond(resp)
         }
         HttpReply::Silence => Rendered::Silence,
-        HttpReply::Late { ms, then } => Rendered::Late(*ms, Box::new(render(then, serve, token)?)),
+        HttpReply::Late { ms, then } => {
+            Rendered::Late(*ms, Box::new(render(then, serve, token, codec)?))
+        }
         HttpReply::Reset => Rendered::Reset,
     })
 }

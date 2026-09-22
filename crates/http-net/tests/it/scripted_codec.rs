@@ -18,7 +18,7 @@ const PREFIX: &str = "hex:";
 struct HexCodec;
 
 impl HttpContinuationCodec for HexCodec {
-    fn wrap(&self, token: &str) -> String {
+    fn wrap(&self, token: &str, _reply: &str) -> String {
         let hex: String = token.bytes().map(|b| format!("{b:02x}")).collect();
         format!("{PREFIX}{hex}")
     }
@@ -145,8 +145,8 @@ struct Watched {
 }
 
 impl HttpContinuationCodec for Watched {
-    fn wrap(&self, token: &str) -> String {
-        HexCodec.wrap(token)
+    fn wrap(&self, token: &str, reply: &str) -> String {
+        HexCodec.wrap(token, reply)
     }
 
     fn unwrap(&self, body: &[u8]) -> Vec<String> {
@@ -164,7 +164,7 @@ async fn a_wrapped_look_alike_that_unwraps_to_no_token_is_user_data() {
     let (net, _h) = serve(&svc).await;
 
     // `hex:` + the hex of text shaped like a token, whose checksum fails.
-    let decoy = HexCodec.wrap("~hc.AAAAAAAAAAAAAAAAAAAAAA.~");
+    let decoy = HexCodec.wrap("~hc.AAAAAAAAAAAAAAAAAAAAAA.~", "");
     let resp = post(&net, "/start", &format!(r#"{{"cell":"c1","note":"{decoy}"}}"#)).await;
     assert_eq!(
         seen.lock().unwrap().as_slice(),
@@ -242,6 +242,62 @@ async fn fragments_match_the_body_as_sent_never_the_unwrapped_token() {
 
 #[test]
 fn the_identity_codec_wraps_nothing_and_unwraps_nothing() {
-    assert_eq!(IdentityCodec.wrap("~hc.abc.~"), "~hc.abc.~");
+    assert_eq!(IdentityCodec.wrap("~hc.abc.~", "{}"), "~hc.abc.~");
     assert!(IdentityCodec.unwrap(b"{\"ctx\":\"~hc.abc.~\"}").is_empty());
+}
+
+/// A codec whose wrapping echoes a field of the reply it stands in, as a peer
+/// whose context mirrors its own answer does; it records the replies it saw.
+struct Echoing {
+    replies: Arc<Mutex<Vec<String>>>,
+}
+
+impl HttpContinuationCodec for Echoing {
+    fn wrap(&self, token: &str, reply: &str) -> String {
+        self.replies.lock().unwrap().push(reply.to_string());
+        let reply: serde_json::Value = serde_json::from_str(reply).unwrap();
+        HexCodec.wrap(&format!("{}|{token}", reply["cell"].as_str().unwrap_or("-")), "")
+    }
+
+    fn unwrap(&self, body: &[u8]) -> Vec<String> {
+        HexCodec
+            .unwrap(body)
+            .into_iter()
+            .map(|t| t.split_once('|').map_or(t.clone(), |(_, token)| token.to_string()))
+            .collect()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_wrapping_reads_the_reply_it_stands_in_rendered_without_the_continuation() {
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let svc = ScriptedHttpService::with_codec(Arc::new(Echoing { replies: replies.clone() }));
+    let script = HttpScript::reified(
+        HttpRequestMatch::post("/start").contains(r#""cell":"${bind:cell}""#),
+        vec![
+            HttpReifiedStep::new(
+                HttpRequestMatch::post("/start"),
+                HttpReply::respond(200, r#"{"cell":"${bind:cell}","ctx":"${continuation}"}"#),
+            ),
+            HttpReifiedStep::new(
+                HttpRequestMatch::post("/next"),
+                HttpReply::respond(200, r#"{"done":true}"#),
+            ),
+        ],
+    );
+    let handle = svc.add(script, cell("c1")).unwrap();
+    let (net, _h) = serve(&svc).await;
+
+    let wrapped = ctx(&post(&net, "/start", r#"{"cell":"c1"}"#).await);
+    assert_eq!(
+        replies.lock().unwrap().first().map(String::as_str),
+        Some(r#"{"cell":"c1","ctx":""}"#),
+        "the codec saw the reply, bindings resolved and the continuation empty"
+    );
+    let echoed = HexCodec.unwrap(format!(r#""{wrapped}""#).as_bytes()).remove(0);
+    assert!(echoed.starts_with("c1|~hc."), "the wrapping echoes the reply's field: {echoed}");
+
+    let second = post(&net, "/next", &format!(r#"{{"ctx":"{wrapped}"}}"#)).await;
+    assert_eq!(second.status, 200, "{}", text(&second));
+    assert!(handle.verdict().is_green(), "{:?}", handle.verdict());
 }

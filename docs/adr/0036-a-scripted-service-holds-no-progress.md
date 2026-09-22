@@ -28,8 +28,10 @@ nested in another document) and hand it back in that form.
 2. **The token may travel wrapped.** A continuation codec
    (`HttpContinuationCodec`) wraps the token where the reply template places
    it and unwraps candidates from a request body before the scan. The raw scan
-   always runs too; the default codec wraps nothing. The wrapping never carries
-   state of its own, so the service holds no progress either way.
+   always runs too; the default codec wraps nothing. The codec sees the reply
+   body it stands in (its continuation empty), so a wrapping may echo the
+   reply's own fields; it never carries state of its own, so the service holds
+   no progress either way.
 
 ## Consequences
 
