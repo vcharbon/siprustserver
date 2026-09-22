@@ -671,8 +671,8 @@ fn marks_number_the_decisions_and_stamp_what_follows() {
 }
 
 /// Every entry appended carries the counter's turn, whatever the entry held;
-/// the seal moves the counter past a turn that appended an entry and leaves
-/// it where it stands after a turn that appended none.
+/// the seal moves the counter past every turn, one that appended nothing
+/// included: one turn, one number.
 #[test]
 fn a_turn_numbers_its_entries_and_the_seal_moves_past_it() {
     let mut call = representative_call();
@@ -698,13 +698,13 @@ fn a_turn_numbers_its_entries_and_the_seal_moves_past_it() {
     let call = seal_turn(call);
     assert_eq!(call.message_turn, 2, "past the turn that recorded two entries");
     let call = seal_turn(call);
-    assert_eq!(call.message_turn, 2, "a turn that recorded nothing moves nothing");
+    assert_eq!(call.message_turn, 3, "a turn that recorded nothing takes a number too");
     let call = record_message(call, "a", 8, entry());
     let call = seal_turn(call);
-    assert_eq!(call.message_turn, 3);
+    assert_eq!(call.message_turn, 4);
 
     let turns = |leg: &Leg| leg.messages.entries.iter().map(|e| e.turn).collect::<Vec<u32>>();
-    assert_eq!(turns(&call.a_leg), vec![1, 2]);
+    assert_eq!(turns(&call.a_leg), vec![1, 3]);
     assert_eq!(turns(&call.b_legs[0]), vec![1]);
 }
 

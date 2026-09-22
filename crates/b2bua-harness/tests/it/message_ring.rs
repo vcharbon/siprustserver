@@ -474,6 +474,15 @@ async fn retransmissions_add_nothing() {
     assert_eq!(rows(&after.a_leg.messages.entries), rows(&baseline.a_leg.messages.entries));
     assert_eq!(rows(&b_leg(&after).messages.entries), rows(&b_leg(&baseline).messages.entries));
     assert_eq!(after.message_seq, baseline.message_seq);
+    // Each repeat was a turn, the re-ACK a quiet one: one number each though
+    // they appended nothing, so the next recorded turn leaves a gap.
+    assert_eq!(sut.b2bua.metrics().repl_quiet_turns_total("re-ack"), 1);
+    assert!(
+        after.message_turn > baseline.message_turn,
+        "the repeats' turns took numbers: {} then {}",
+        baseline.message_turn,
+        after.message_turn
+    );
 
     // The caller's BYE again: the non-INVITE server transaction replays its
     // 200 (§17.2.1); nothing reaches the call.
@@ -485,6 +494,10 @@ async fn retransmissions_add_nothing() {
     pump(&h, &[&alice]).await;
     let terminating = sut.live(&call.call_id(), dialog.local_tag());
     assert_eq!(terminating.a_leg.messages.entries.len(), 7);
+    assert_eq!(
+        terminating.a_leg.messages.entries[5].turn, after.message_turn,
+        "the BYE's turn is the one after the repeats'"
+    );
     assert_eq!(terminating.message_seq, baseline.message_seq + 3, "BYE, its 200, the relayed BYE");
     bob_bye.respond(200, "OK").await;
 
