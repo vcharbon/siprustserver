@@ -170,6 +170,12 @@ describe("the run configuration", () => {
       decodeRunConfigSync({ lane: "upstream-fake", clock: "virtual", route_target: "h:1", media: "rewritten" })
     ).toThrow()
   })
+
+  it("reads the identity nonce a lane seeded, and none where the run minted its own", () => {
+    const seeded = decodeRunConfigSync({ lane: "upstream-fake", clock: "virtual", route_target: "h:1", identity_nonce: "n1" })
+    expect(seeded.identity_nonce).toBe("n1")
+    expect(config.identity_nonce).toBeUndefined()
+  })
 })
 
 describe("a recorded message", () => {
