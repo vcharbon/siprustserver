@@ -285,3 +285,27 @@ async fn the_client_view_is_stamped_on_the_recorder_clock_in_request_order() {
             if headers.iter().any(|(k, v)| k == "x-served" && v == "yes")
     ));
 }
+
+/// On a real socket the served record carries the connection's remote address
+/// and no client exchange: the requester is out of the recording.
+#[tokio::test]
+async fn a_request_served_on_a_real_socket_records_its_peer() {
+    let recorder = Recorder::with_clock(TransportKind::Live, Clock::system());
+    let real = Arc::new(http_net::RealHttpNetwork::new());
+    let rec = RecordingHttpNetwork::new(real.clone(), &recorder, CLIENT);
+    let server = rec.serve(addr("127.0.0.1:0"), Arc::new(Ok200)).await.unwrap();
+    let dst = server.local_addr();
+
+    let resp = real.request(dst, HttpRequest::post("/calls", b"x".to_vec())).await.unwrap();
+    assert_eq!(resp.status, 200);
+
+    let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
+    assert_eq!(entries.len(), 1);
+    let e = &entries[0];
+    assert!(e.served);
+    assert_eq!(e.requester, None);
+    assert_eq!(e.service, lane_key(dst), "the bound address, not the requested port 0");
+    let peer = e.peer.expect("the peer address is recorded");
+    assert!(peer.ip().is_loopback() && peer != dst, "{peer}");
+    assert!(matches!(&e.outcome, Some(HttpOutcome::Response(r)) if r.status == 200));
+}

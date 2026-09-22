@@ -50,7 +50,9 @@ pub struct RunReport {
     /// The audit verdict from the recording layer's `close()` (informational;
     /// a basic harness run does not fail on it).
     pub audit: Result<(), SignalingAuditViolation>,
-    /// Findings the caller folds into the report beside the RFC fold.
+    /// Findings the caller adds to the report beside the RFC fold — a
+    /// scripted HTTP service's verdicts among them. A gating one fails the
+    /// rendered doc; none is rule-sourced.
     pub extra_anomalies: Vec<seq_report::Anomaly>,
     recorder: Recorder,
     events: Vec<Stamped<SignalingNetworkEvent>>,
@@ -115,9 +117,12 @@ impl RunReport {
         to_sip_entries(&self.events)
     }
 
-    /// The HTTP exchanges recorded on the run's recorder.
+    /// The HTTP exchanges recorded on the run's recorder (any
+    /// `http_net::RecordingHttpNetwork` built on it), in request order.
     pub fn http_entries(&self) -> Vec<http_net::RecordedHttpEntry> {
-        Vec::new()
+        http_net::to_http_entries(
+            &self.recorder.for_tag::<http_net::HttpNetworkEvent>(http_net::HTTP_TAG).snapshot(),
+        )
     }
 
     /// The recorder's drained scenario state (lanes + anomalies).

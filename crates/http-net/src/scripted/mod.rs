@@ -8,7 +8,9 @@
 //! - **Continuation.** Position within an instance rides an opaque token the
 //!   service mints into its replies (`${continuation}`) and scans back from
 //!   the next request body; the service keeps no progress used for matching,
-//!   so concurrent instances and retransmitted requests cannot interfere.
+//!   so concurrent instances and retransmitted requests cannot interfere. The
+//!   token may travel under a peer-specific wrapping ([`HttpContinuationCodec`],
+//!   none by default). ADR-0036.
 //! - **Faults.** A reply may be withheld ([`HttpReply::Silence`]), delayed
 //!   ([`HttpReply::Late`]) or turned into a connection close
 //!   ([`HttpReply::Reset`], through [`HttpService::answer`](crate::HttpService::answer)).

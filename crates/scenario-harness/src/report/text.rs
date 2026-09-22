@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use http_net::RecordedHttpEntry;
 use layer_harness::{Lane, RecordedScenario, TransportKind};
 use seq_report::Anomaly;
 use sip_net::RecordedSipEntry;
@@ -114,12 +115,13 @@ pub struct TextReports {
     pub files: BTreeMap<String, String>,
 }
 
-/// Render the global + per-endpoint text views. Pure — call
+/// Render the global + per-endpoint + per-service text views. Pure — call
 /// [`TextReports::write_to`] to materialise them on disk.
 pub fn render(
     scenario_name: &str,
     description: Option<&str>,
     entries: &[RecordedSipEntry],
+    http: &[RecordedHttpEntry],
     scenario: &RecordedScenario,
     passed: bool,
     extra_anomalies: &[Anomaly],
@@ -137,7 +139,11 @@ pub fn render(
         passed,
         extra_anomalies,
     );
+    let doc = super::http::with_rows(doc, http, &scenario.lanes);
     files.insert(format!("{scenario_name}.global.txt"), seq_report::render_global_txt(&doc));
+
+    // Per-service views — the HTTP exchanges each recorded service took.
+    files.extend(super::http::service_views(http, &scenario.lanes));
 
     // Per-endpoint views — one per lane that sent or received a message.
     for lane in &scenario.lanes {

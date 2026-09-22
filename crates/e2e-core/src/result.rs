@@ -67,10 +67,10 @@ pub struct RunResult {
     /// (`rfc` rows carry `advisory: false`) instead of crashing it report-less.
     pub passed: bool,
     pub checks: Vec<CheckVerdict>,
-    /// Findings the report surfaces alongside the diagram — the role-aware RFC
-    /// suite fold plus the structural recorder anomalies; each row tags its
-    /// endpoint and advisory/gating severity (same fold as the HTML report's
-    /// anomaly list).
+    /// The RFC findings of the run: the diagram's anomalies the audit rule
+    /// registry sourced (`rule_sourced`), each tagged with its endpoint and
+    /// advisory/gating severity. Structural recorder findings and harness
+    /// verdicts (an HTTP service's, a failed expect) stay in `seq_doc` only.
     pub rfc: Vec<Anomaly>,
     /// Media artifacts (media-exchanging shapes only; empty otherwise).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -103,7 +103,7 @@ impl RunResult {
             cell,
             passed,
             checks: check_verdicts,
-            rfc: seq_doc.anomalies.clone(),
+            rfc: seq_doc.anomalies.iter().filter(|a| a.rule_sourced).cloned().collect(),
             media: Vec::new(),
             seq_doc,
             timings,

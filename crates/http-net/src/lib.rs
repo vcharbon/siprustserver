@@ -23,9 +23,9 @@
 //! - `RealHttpNetwork` — hyper server + a pooled `reqwest` client; **feature
 //!   `real`**, filled in by the runner slice. Its tests run on a real
 //!   (non-paused) runtime.
-//! - [`RecordingHttpNetwork`] — a decorator that tees every client exchange
-//!   into a capture sink (stamped with the injected [`sip_clock::Clock`]) for
-//!   test assertions.
+//! - [`RecordingHttpNetwork`] — a test decorator that records both sides of
+//!   every exchange onto the `layer-harness` `Recorder` ([`HTTP_TAG`]), so HTTP
+//!   joins the run's ladder; [`to_http_entries`] reads the channel back.
 //!
 //! ## Scripted service
 //! [`scripted::ScriptedHttpService`] is an [`HttpService`] for tests: it serves
@@ -53,8 +53,7 @@ mod transport;
 #[cfg(feature = "real")]
 pub use transport::RealHttpNetwork;
 pub use transport::{
-    to_http_entries, BindError, CapturedExchange, Direction, ExchangeOutcome, Fault, HttpAnswer,
-    HttpError, HttpNetworkEvent, HttpOutcome, HttpRequest, HttpResponse, HttpServerHandle,
-    HttpService, HttpTransport, RecordedHttpEntry, RecordingHttpNetwork, SimulatedHttpNetwork,
-    HTTP_TAG,
+    to_http_entries, BindError, CapturedExchange, ExchangeOutcome, Fault, HttpAnswer, HttpError,
+    HttpNetworkEvent, HttpOutcome, HttpRequest, HttpResponse, HttpServerHandle, HttpService,
+    HttpTransport, RecordedHttpEntry, RecordingHttpNetwork, SimulatedHttpNetwork, HTTP_TAG,
 };

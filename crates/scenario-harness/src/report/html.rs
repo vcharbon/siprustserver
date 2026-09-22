@@ -9,23 +9,26 @@
 //! artifact is still produced by [`super::svg`] (a different output format, kept
 //! as-is). This file is now purely the SIP→`SeqDoc` adaptor for HTML output.
 
+use http_net::RecordedHttpEntry;
 use layer_harness::RecordedScenario;
 use seq_report::Anomaly;
 use sip_net::RecordedSipEntry;
 
 use super::project::sip_doc;
 
-/// Render the whole report as one HTML document string via the shared renderer.
+/// Render the whole report as one HTML document string via the shared renderer,
+/// the HTTP exchanges drawn among the SIP rows.
 /// `extra_anomalies` carries the RFC 3261 CSeq hard-gate findings (if any), so a
 /// trace that violates the rule renders the FAIL badge + lists the violation.
 pub fn render(
     scenario_name: &str,
     description: Option<&str>,
     entries: &[RecordedSipEntry],
+    http: &[RecordedHttpEntry],
     scenario: &RecordedScenario,
     passed: bool,
     extra_anomalies: &[Anomaly],
 ) -> String {
     let doc = sip_doc(scenario_name, description, entries, scenario, passed, extra_anomalies);
-    seq_report::render_html(&doc)
+    seq_report::render_html(&super::http::with_rows(doc, http, &scenario.lanes))
 }

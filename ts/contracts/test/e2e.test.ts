@@ -143,6 +143,26 @@ describe("a cell result", () => {
     expect(JSON.parse(text)).toEqual(RUN_RESULT)
   })
 
+  it("reads an HTTP row and a service lane", () => {
+    const doc = decodeSeqDocSync({
+      ...SEQ_DOC,
+      lanes: [...SEQ_DOC.lanes, { id: "10.0.0.9:8080", label: "routing (10.0.0.9:8080)", kind: "service" }],
+      rows: [
+        {
+          atMs: 5,
+          seq: 9,
+          from: "10.0.0.9:8080",
+          to: "127.0.0.1:5060",
+          label: "no reply",
+          detail: null,
+          conn: null,
+          kind: { http: { delivered: false } }
+        }
+      ]
+    })
+    expect(doc.rows.map((row) => rowDelivered(row.kind))).toEqual([false])
+  })
+
   it("reads the row planes and the anomaly severity", () => {
     const doc = decodeSeqDocSync(SEQ_DOC)
     expect(doc.rows.map((row) => rowDelivered(row.kind))).toEqual([true, false, undefined])

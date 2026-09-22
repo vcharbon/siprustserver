@@ -1,204 +1,165 @@
-//! `RecordingHttpNetwork` — a decorator that tees every client exchange into a
-//! shared capture sink, stamped with the injected [`Clock`]'s timestamp.
+//! `RecordingHttpNetwork` — a decorator that records every exchange onto the
+//! `layer-harness` [`Recorder`] under the typed channel [`HTTP_TAG`], so HTTP
+//! shares the run's one sequence and clock with every other recorded layer.
 //!
-//! Wraps any [`HttpTransport`]; [`serve`](HttpTransport::serve) passes straight
-//! through, while each [`request`](HttpTransport::request) records what was sent
-//! and what came back (response status/body or transport error). This is the
-//! raw feed test assertions read via [`captured`](RecordingHttpNetwork::captured).
+//! Two sides, each recorded at its own instant:
+//! - the CLIENT side: [`request`](HttpTransport::request) records
+//!   [`HttpNetworkEvent::Sent`] before the inner request is awaited and
+//!   [`HttpNetworkEvent::Received`] when it ends;
+//! - the SERVED side: [`serve`](HttpTransport::serve) wraps the service, which
+//!   records [`HttpNetworkEvent::Served`] at handler entry and
+//!   [`HttpNetworkEvent::Answered`] at completion, and registers the bound
+//!   address as a [`NetworkTag::Service`] lane.
 //!
-//! The row is opened BEFORE the inner request is awaited and settled when it
-//! answers, so a caller that stops waiting — a `timeout` around the call drops
-//! the future at that await — leaves the exchange it made rather than a gap the
-//! record cannot explain. The stamp is therefore the instant the request went
-//! out, which is where a ladder puts it.
+//! Each side ends [`HttpOutcome::Abandoned`] when its future is dropped first
+//! (the caller's timeout firing on a withheld answer), so an exchange never
+//! leaves a gap the record cannot explain. On the simulated fabric the served
+//! handler runs inside the client's request future, so the served record names
+//! the client exchange it answers; on a real socket it names the peer address.
 //!
-//! Mirrors `repl-net`'s recording decorator: minimal — capture only, no audit
-//! rules / severity ledger.
+//! Test-only: the decorator needs a `Recorder`, which production never builds.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
-use layer_harness::{LaneKey, Recorder, Stamped};
-use sip_clock::Clock;
+use layer_harness::{lane_key, Channel, EventSequencer, LaneKey, NetworkTag, Recorder};
 
 use super::{
-    BindError, HttpError, HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport,
+    peer, BindError, HttpAnswer, HttpError, HttpRequest, HttpResponse, HttpServerHandle,
+    HttpService, HttpTransport,
 };
-
-/// Whether a captured datum was the request or the reply, for symmetry with the
-/// other layers' recorders.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
-    /// The request the client sent.
-    Sent,
-    /// The reply (or transport error) the client received.
-    Received,
-}
-
-/// The outcome of one recorded exchange.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExchangeOutcome {
-    /// A response came back.
-    Response {
-        /// HTTP status.
-        status: u16,
-        /// Response headers as `(name, value)` pairs.
-        headers: Vec<(String, String)>,
-        /// Response body bytes.
-        body: Vec<u8>,
-    },
-    /// The transport failed (rendered to a string for capture).
-    Error(String),
-}
-
-/// What an exchange says of itself when the caller stopped waiting for it.
-const ABANDONED: &str = "timed out: the caller dropped the request before an answer";
-
-/// One captured request/response exchange with endpoint + timestamp.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CapturedExchange {
-    /// When the request WENT OUT (ms), from the injected `Clock`.
-    pub at_ms: i64,
-    /// The destination the request went to.
-    pub dst: SocketAddr,
-    /// Request method (e.g. `"POST"`).
-    pub method: String,
-    /// Request path-and-query (e.g. `"/v1/admit"` or `"/routes?debug=true"`).
-    pub path: String,
-    /// Request headers as `(name, value)` pairs.
-    pub req_headers: Vec<(String, String)>,
-    /// Request body bytes.
-    pub req_body: Vec<u8>,
-    /// What came back.
-    pub outcome: ExchangeOutcome,
-}
 
 /// The `layer-harness` channel key HTTP exchanges are recorded under.
 pub const HTTP_TAG: &str = "http-net/HttpNetwork";
+
+/// The lane name a served address gets when none was given.
+const DEFAULT_SERVICE_NAME: &str = "http-service";
 
 /// How one side of an exchange ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HttpOutcome {
     /// A response.
     Response(HttpResponse),
-    /// A transport error, as the client saw it.
+    /// The transport failed, as the client saw it.
     Error(String),
-    /// The connection closed without a response.
+    /// The service closed the connection without a response.
     Abort,
-    /// The future was dropped before the exchange ended.
+    /// The side's future was dropped before the exchange ended.
     Abandoned,
 }
 
-/// One observation on the HTTP channel.
+/// One observation on the [`HTTP_TAG`] channel. An ending event names the
+/// `seq` of the event that opened its side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HttpNetworkEvent {
-    /// A client sent `request` to `dst`.
+    /// A client on lane `client` sent `request` to `dst`.
     Sent { client: LaneKey, dst: SocketAddr, request: HttpRequest },
     /// The client exchange opened at seq `exchange` ended.
     Received { exchange: u64, outcome: HttpOutcome },
-    /// A bound service took `request`.
+    /// The service on lane `service` took `request`. `exchange` is the client
+    /// exchange it answers when a recording client on the same recorder sent
+    /// it; `peer` the connection's remote address when the transport has one.
     Served {
         service: LaneKey,
         peer: Option<SocketAddr>,
         exchange: Option<u64>,
         request: HttpRequest,
     },
-    /// The service answer to the request served at seq `served`.
+    /// The service's answer to the request served at seq `served`.
     Answered { served: u64, outcome: HttpOutcome },
 }
 
-/// One exchange as the ladder draws it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RecordedHttpEntry {
-    pub seq: u64,
-    pub at_ms: u64,
-    pub requester: Option<LaneKey>,
-    pub peer: Option<SocketAddr>,
-    pub service: LaneKey,
-    pub request: HttpRequest,
-    pub reply_seq: Option<u64>,
-    pub reply_at_ms: Option<u64>,
-    pub outcome: Option<HttpOutcome>,
-    pub served: bool,
+/// The client exchange whose future is running: the recorder it was recorded
+/// on (by its sequencer) and the `seq` of its [`HttpNetworkEvent::Sent`].
+#[derive(Clone)]
+struct ClientExchange {
+    sequencer: Arc<EventSequencer>,
+    seq: u64,
 }
 
-/// The exchanges `events` record.
-pub fn to_http_entries(_events: &[Stamped<HttpNetworkEvent>]) -> Vec<RecordedHttpEntry> {
-    Vec::new()
+tokio::task_local! {
+    static EXCHANGE: ClientExchange;
 }
 
-type Sink = Arc<Mutex<Vec<CapturedExchange>>>;
-
-/// A row already in the sink, waiting for its outcome.
-///
-/// Settled by [`settle`](OpenRow::settle) when the inner request answers, and
-/// by its own `Drop` when the caller gave up first: either way the row states
-/// how the exchange ended.
-struct OpenRow {
-    sink: Sink,
-    index: usize,
+/// One side's pending end: recorded by [`settle`](Self::settle), or as
+/// [`HttpOutcome::Abandoned`] on drop.
+struct Pending {
+    channel: Channel<HttpNetworkEvent>,
+    opened: u64,
+    served: bool,
     settled: bool,
 }
 
-impl OpenRow {
-    /// Open a row for `exchange`, whose outcome is not known yet.
-    fn open(sink: &Sink, exchange: CapturedExchange) -> Self {
-        let mut rows = sink.lock().unwrap();
-        rows.push(exchange);
-        OpenRow { sink: Arc::clone(sink), index: rows.len() - 1, settled: false }
+impl Pending {
+    fn end(&self, outcome: HttpOutcome) {
+        let opened = self.opened;
+        self.channel.record(if self.served {
+            HttpNetworkEvent::Answered { served: opened, outcome }
+        } else {
+            HttpNetworkEvent::Received { exchange: opened, outcome }
+        });
     }
 
-    fn write(&self, outcome: ExchangeOutcome) {
-        if let Some(row) = self.sink.lock().unwrap().get_mut(self.index) {
-            row.outcome = outcome;
-        }
-    }
-
-    /// State how the exchange ended. The row is then done with.
-    fn settle(mut self, outcome: ExchangeOutcome) {
+    fn settle(mut self, outcome: HttpOutcome) {
         self.settled = true;
-        self.write(outcome);
+        self.end(outcome);
     }
 }
 
-impl Drop for OpenRow {
+impl Drop for Pending {
     fn drop(&mut self) {
-        if self.settled {
-            return;
+        if !self.settled {
+            self.end(HttpOutcome::Abandoned);
         }
-        self.write(ExchangeOutcome::Error(ABANDONED.to_string()));
     }
 }
 
-/// Records every client exchange that flows through the wrapped transport.
-/// Clone shares the same capture sink, so a clone kept for `captured()` sees
-/// all exchanges.
+/// Records every exchange that flows through the wrapped transport. Clones
+/// share the channel and the service names.
 #[derive(Clone)]
 pub struct RecordingHttpNetwork {
     inner: Arc<dyn HttpTransport>,
-    sink: Sink,
-    clock: Clock,
+    recorder: Recorder,
+    channel: Channel<HttpNetworkEvent>,
+    client: LaneKey,
+    names: Arc<Mutex<HashMap<SocketAddr, String>>>,
 }
 
 impl RecordingHttpNetwork {
-    /// Wrap `inner`, recording onto `recorder` from the `client` lane.
+    /// Wrap `inner`, recording onto `recorder`. Requests are recorded as sent
+    /// from the lane `client` (the requester's lane key on the ladder).
     pub fn new(
         inner: Arc<dyn HttpTransport>,
         recorder: &Recorder,
-        _client: impl Into<LaneKey>,
+        client: impl Into<LaneKey>,
     ) -> Self {
-        Self { inner, sink: Arc::new(Mutex::new(Vec::new())), clock: recorder.clock() }
+        Self {
+            inner,
+            recorder: recorder.clone(),
+            channel: recorder.for_tag(HTTP_TAG),
+            client: client.into(),
+            names: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-    /// Name the service lane `serve` registers at `addr`.
-    pub fn with_service_name(self, _addr: SocketAddr, _name: impl Into<String>) -> Self {
+    /// Name the service lane [`serve`](HttpTransport::serve) registers for
+    /// `addr` (the requested address).
+    pub fn with_service_name(self, addr: SocketAddr, name: impl Into<String>) -> Self {
+        self.names.lock().unwrap().insert(addr, name.into());
         self
     }
 
-    /// The exchanges this client lane made.
-    pub fn exchanges(&self) -> Vec<CapturedExchange> {
-        self.sink.lock().unwrap().clone()
+    /// The channel this network records on.
+    pub fn channel(&self) -> Channel<HttpNetworkEvent> {
+        self.channel.clone()
+    }
+
+    /// The exchanges this network's client lane sent, in request order, read
+    /// from the channel.
+    pub fn exchanges(&self) -> Vec<super::CapturedExchange> {
+        super::entries::client_exchanges(&self.channel.snapshot(), &self.client)
     }
 }
 
@@ -209,31 +170,95 @@ impl HttpTransport for RecordingHttpNetwork {
         addr: SocketAddr,
         service: Arc<dyn HttpService>,
     ) -> Result<Box<dyn HttpServerHandle>, BindError> {
-        self.inner.serve(addr, service).await
+        let bound = Arc::new(OnceLock::new());
+        let recorded = Arc::new(RecordedService {
+            inner: service,
+            channel: self.channel.clone(),
+            sequencer: self.recorder.sequencer(),
+            requested: addr,
+            bound: bound.clone(),
+        });
+        let handle = self.inner.serve(addr, recorded).await?;
+        let local = handle.local_addr();
+        let _ = bound.set(lane_key(local));
+        let name = {
+            let names = self.names.lock().unwrap();
+            names.get(&addr).or_else(|| names.get(&local)).cloned()
+        };
+        self.recorder.register_lane(
+            local,
+            name.unwrap_or_else(|| DEFAULT_SERVICE_NAME.to_string()),
+            NetworkTag::Service,
+        );
+        Ok(handle)
     }
 
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        let row = OpenRow::open(
-            &self.sink,
-            CapturedExchange {
-                at_ms: self.clock.now_ms(),
-                dst,
-                method: req.method.clone(),
-                path: req.path.clone(),
-                req_headers: req.headers.clone(),
-                req_body: req.body.clone(),
-                outcome: ExchangeOutcome::Error(ABANDONED.to_string()),
-            },
-        );
-        let result = self.inner.request(dst, req).await;
-        row.settle(match &result {
-            Ok(resp) => ExchangeOutcome::Response {
-                status: resp.status,
-                headers: resp.headers.clone(),
-                body: resp.body.clone(),
-            },
-            Err(e) => ExchangeOutcome::Error(e.to_string()),
+        let mut seq = 0;
+        self.channel.record_with(|s| {
+            seq = s;
+            HttpNetworkEvent::Sent { client: self.client.clone(), dst, request: req.clone() }
+        });
+        let pending =
+            Pending { channel: self.channel.clone(), opened: seq, served: false, settled: false };
+        let exchange = ClientExchange { sequencer: self.recorder.sequencer(), seq };
+        let result = EXCHANGE.scope(exchange, self.inner.request(dst, req)).await;
+        pending.settle(match &result {
+            Ok(resp) => HttpOutcome::Response(resp.clone()),
+            Err(e) => HttpOutcome::Error(e.to_string()),
         });
         result
+    }
+}
+
+/// A served service, recording the served side of every request it answers.
+struct RecordedService {
+    inner: Arc<dyn HttpService>,
+    channel: Channel<HttpNetworkEvent>,
+    sequencer: Arc<EventSequencer>,
+    requested: SocketAddr,
+    bound: Arc<OnceLock<LaneKey>>,
+}
+
+impl RecordedService {
+    fn open(&self, req: &HttpRequest) -> Pending {
+        // Only a client exchange recorded on this recorder is ours to name.
+        let exchange = EXCHANGE
+            .try_with(ClientExchange::clone)
+            .ok()
+            .filter(|x| Arc::ptr_eq(&x.sequencer, &self.sequencer))
+            .map(|x| x.seq);
+        let service = self.bound.get().cloned().unwrap_or_else(|| lane_key(self.requested));
+        let mut seq = 0;
+        self.channel.record_with(|s| {
+            seq = s;
+            HttpNetworkEvent::Served {
+                service,
+                peer: peer::current(),
+                exchange,
+                request: req.clone(),
+            }
+        });
+        Pending { channel: self.channel.clone(), opened: seq, served: true, settled: false }
+    }
+}
+
+#[async_trait]
+impl HttpService for RecordedService {
+    async fn handle(&self, req: HttpRequest) -> HttpResponse {
+        let pending = self.open(&req);
+        let resp = self.inner.handle(req).await;
+        pending.settle(HttpOutcome::Response(resp.clone()));
+        resp
+    }
+
+    async fn answer(&self, req: HttpRequest) -> HttpAnswer {
+        let pending = self.open(&req);
+        let answer = self.inner.answer(req).await;
+        pending.settle(match &answer {
+            HttpAnswer::Response(resp) => HttpOutcome::Response(resp.clone()),
+            HttpAnswer::Abort => HttpOutcome::Abort,
+        });
+        answer
     }
 }

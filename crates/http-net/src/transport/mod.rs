@@ -6,17 +6,17 @@ use async_trait::async_trait;
 
 #[cfg(feature = "real")]
 mod cause;
+mod entries;
+mod peer;
 #[cfg(feature = "real")]
 mod real;
 mod recording;
 mod simulated;
 
+pub use entries::{to_http_entries, CapturedExchange, ExchangeOutcome, RecordedHttpEntry};
 #[cfg(feature = "real")]
 pub use real::RealHttpNetwork;
-pub use recording::{
-    to_http_entries, CapturedExchange, Direction, ExchangeOutcome, HttpNetworkEvent, HttpOutcome,
-    RecordedHttpEntry, RecordingHttpNetwork, HTTP_TAG,
-};
+pub use recording::{HttpNetworkEvent, HttpOutcome, RecordingHttpNetwork, HTTP_TAG};
 pub use simulated::{Fault, SimulatedHttpNetwork};
 
 /// A one-shot HTTP request.

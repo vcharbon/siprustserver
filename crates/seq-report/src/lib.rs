@@ -41,6 +41,9 @@
 //! - [`RowKind::Sip`] / [`RowKind::Repl`] are point-to-point arrows
 //!   (`from` → `to`); the two planes are styled differently (colour in HTML, a
 //!   plane tag in text) so a human can tell them apart at a glance.
+//! - [`RowKind::Http`] is an HTTP request (requester → a [`LaneKind::Service`]
+//!   lane) or its reply (back), drawn in its own style; `delivered` is `false`
+//!   for a reply that never came.
 //! - [`RowKind::Lifecycle`] is a full-width BAND across all lanes (`to == None`),
 //!   a centred annotation in time order (e.g. `crash b1`, `reboot b1`).
 //!

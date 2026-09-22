@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use super::codec::{HttpContinuationCodec, IdentityCodec};
 use super::error::HttpScriptError;
 use super::matcher;
 use super::open::{self, Candidate, Pick};
@@ -27,6 +28,7 @@ const NEAR_MISSES_SHOWN: usize = 3;
 /// The state every clone of a service and every handle share.
 pub(super) struct Shared {
     nonce: u64,
+    codec: Arc<dyn HttpContinuationCodec>,
     state: Mutex<State>,
 }
 
@@ -118,24 +120,25 @@ impl Default for ScriptedHttpService {
 
 impl ScriptedHttpService {
     /// A service with a random token nonce, so a token minted by another
-    /// service (another run against the same peer) is told apart.
+    /// service (another run against the same peer) is told apart. Tokens
+    /// travel unwrapped.
     pub fn new() -> Self {
         Self::with_nonce(token::random_nonce())
     }
 
-    /// A service whose tokens travel under `codec`.
-    pub fn with_codec(_codec: Arc<dyn super::HttpContinuationCodec>) -> Self {
-        Self::new()
+    /// A service whose tokens carry `nonce`, unwrapped.
+    pub fn with_nonce(nonce: u64) -> Self {
+        Self::with_nonce_and_codec(nonce, Arc::new(IdentityCodec))
+    }
+
+    /// A service with a random nonce whose tokens travel under `codec`.
+    pub fn with_codec(codec: Arc<dyn HttpContinuationCodec>) -> Self {
+        Self::with_nonce_and_codec(token::random_nonce(), codec)
     }
 
     /// A service whose tokens carry `nonce` and travel under `codec`.
-    pub fn with_nonce_and_codec(nonce: u64, _codec: Arc<dyn super::HttpContinuationCodec>) -> Self {
-        Self::with_nonce(nonce)
-    }
-
-    /// A service whose tokens carry `nonce`.
-    pub fn with_nonce(nonce: u64) -> Self {
-        Self { shared: Arc::new(Shared { nonce, state: Mutex::new(State::default()) }) }
+    pub fn with_nonce_and_codec(nonce: u64, codec: Arc<dyn HttpContinuationCodec>) -> Self {
+        Self { shared: Arc::new(Shared { nonce, codec, state: Mutex::new(State::default()) }) }
     }
 
     /// Add one instance of `script`, its `${bind:…}` resolved from `bindings`.
@@ -182,11 +185,15 @@ impl ScriptedHttpService {
     /// Decide the reply to `req`: a step to serve, or a finding.
     fn decide(&self, req: &HttpRequest) -> Result<Serve, Refusal> {
         let body = matcher::normalize(&req.body);
-        // The same token echoed in two places is one position, not two.
+        // The raw body first, then what the codec unwraps from it. The same
+        // token found twice (echoed twice, or raw and wrapped) is one position.
+        let raw = String::from_utf8_lossy(&req.body).into_owned();
         let mut tokens: Vec<HttpContinuation> = Vec::new();
-        for token in HttpContinuation::scan(&String::from_utf8_lossy(&req.body)) {
-            if !tokens.contains(&token) {
-                tokens.push(token);
+        for text in std::iter::once(raw).chain(self.shared.codec.unwrap(&req.body)) {
+            for token in HttpContinuation::scan(&text) {
+                if !tokens.contains(&token) {
+                    tokens.push(token);
+                }
             }
         }
         let own = tokens.iter().filter(|t| t.nonce == self.shared.nonce).count();
@@ -400,7 +407,7 @@ impl ScriptedHttpService {
             Ok(serve) => serve,
             Err(finding) => return (HttpAnswer::Response(self.record(*finding)), None),
         };
-        let token = serve.token.render();
+        let token = self.shared.codec.wrap(&serve.token.render());
         let answer = match render(&serve.reply, &serve, &token) {
             Ok(rendered) => deliver(rendered).await,
             Err(why) => HttpAnswer::Response(self.record(*finding(

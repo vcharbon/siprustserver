@@ -91,8 +91,8 @@ impl HttpTransport for RealHttpNetwork {
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
-                        let Ok((stream, _peer)) = accepted else { continue };
-                        connections.spawn(serve_connection(stream, service.clone()));
+                        let Ok((stream, peer)) = accepted else { continue };
+                        connections.spawn(serve_connection(stream, peer, service.clone()));
                     }
                     Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 }
@@ -142,7 +142,7 @@ impl HttpTransport for RealHttpNetwork {
 /// Serve one accepted connection until the peer closes it. A service
 /// answering [`HttpAnswer::Abort`] fails the exchange, and hyper closes the
 /// connection without writing a response (RFC 9112 §9.6).
-async fn serve_connection(stream: TcpStream, service: Arc<dyn HttpService>) {
+async fn serve_connection(stream: TcpStream, peer: SocketAddr, service: Arc<dyn HttpService>) {
     let io = TokioIo::new(stream);
     let handler = service_fn(move |req: Request<Incoming>| {
         let svc = service.clone();
@@ -162,7 +162,8 @@ async fn serve_connection(stream: TcpStream, service: Arc<dyn HttpService>) {
                 .collect();
             let body =
                 req.into_body().collect().await.map(|c| c.to_bytes().to_vec()).unwrap_or_default();
-            let resp = match svc.answer(HttpRequest { method, path, headers, body }).await {
+            let req = HttpRequest { method, path, headers, body };
+            let resp = match super::peer::scope(peer, svc.answer(req)).await {
                 HttpAnswer::Response(resp) => resp,
                 HttpAnswer::Abort => {
                     return Err(std::io::Error::new(
