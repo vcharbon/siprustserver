@@ -79,8 +79,6 @@ pub enum CriticalStateEffect {
         id: String,
     },
     CancelAllTimers,
-    /// Flush the call to the store (replication path).
-    Flush,
     /// Remove the call from memory + store, cancel its txns, poison its queue.
     RemoveCall,
 }

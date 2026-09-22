@@ -149,7 +149,6 @@ pub(super) async fn process_result(
             CriticalStateEffect::CancelAllTimers => {
                 ctx.timers.cancel_all(call_ref.to_string()).await
             }
-            CriticalStateEffect::Flush => ctx.state.flush(&result.call),
             CriticalStateEffect::RemoveCall => remove_call = true,
         }
     }

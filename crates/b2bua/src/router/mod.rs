@@ -106,7 +106,7 @@ pub struct RouterCtx {
     /// `invariants::enforce` on each `→ Terminated` transition.
     pub obligations: Arc<ObligationSet>,
     /// Self-reported readiness driving the OPTIONS health responder (S7). The
-    /// default/legacy path uses [`Readiness::always_ready`] → always 200.
+    /// unwired node uses [`Readiness::always_ready`] → always 200.
     pub readiness: Readiness,
     /// Worker-side overload signal stamped on every OPTIONS-200 reply as
     /// `X-Overload: v=1; elu=…; gc=…; adm=…`. The front proxy's ELU-band AIMD
@@ -159,12 +159,14 @@ pub enum ReplCommand {
 }
 
 /// Run the router loop over the txn-event + timer-fire channels until both close.
+/// `repl_rx` is the fail-back command receiver of a wired node; an unwired node
+/// passes `None` and the loop never polls for one.
 pub async fn run(
     ctx: Arc<RouterCtx>,
     mut txn_rx: mpsc::Receiver<sip_txn::TransactionEvent>,
     mut timer_rx: mpsc::UnboundedReceiver<CallEvent>,
     mut reentry_rx: mpsc::UnboundedReceiver<CallEvent>,
-    mut repl_rx: mpsc::UnboundedReceiver<ReplCommand>,
+    mut repl_rx: Option<mpsc::UnboundedReceiver<ReplCommand>>,
 ) {
     loop {
         tokio::select! {
@@ -182,12 +184,23 @@ pub async fn run(
                     ingress::on_event(&ctx, ev).await;
                 }
             },
-            cmd = repl_rx.recv() => {
-                if let Some(cmd) = cmd {
-                    on_repl_command(&ctx, cmd).await;
-                }
+            cmd = next_fail_back(&mut repl_rx) => match cmd {
+                Some(cmd) => on_repl_command(&ctx, cmd).await,
+                // Every sender is gone: the arm retires instead of resolving
+                // `None` on every poll.
+                None => repl_rx = None,
             },
         }
+    }
+}
+
+/// The next fail-back command; pending forever when no receiver exists.
+async fn next_fail_back(
+    rx: &mut Option<mpsc::UnboundedReceiver<ReplCommand>>,
+) -> Option<ReplCommand> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 

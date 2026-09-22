@@ -1,8 +1,7 @@
 //! Buffered terminate-path writer — port of `BufferedTerminateWriter`. Decouples
 //! the router from the store: `submit_*` never blocks (drop-on-full), a drainer
-//! task performs the actual `put`/`delete`. The in-memory store can't stall, but
-//! keeping the seam identical means the future replicating store slots in
-//! unchanged.
+//! task performs the actual `put`/`delete`. A wired node spawns one over its
+//! replicating store; an unwired node has none.
 
 use std::sync::Arc;
 

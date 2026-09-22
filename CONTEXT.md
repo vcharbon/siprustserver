@@ -240,8 +240,11 @@ A b2bua with no replication store (`B2buaDeps.replication = None`, the runners'
 default). It still echoes the proxy's `w_pri`/`w_bak` onto `topology` — the
 cookie stays the one placement authority — but `CallState::flush`/`remove`
 never touch the call store: the topology says where a backup *would* live, the
-wired store says whether one is kept. The one switch is `CallState.repl_store`,
-read by `flush` and by `remove`.
+wired store says whether one is kept. The one switch is `CallState.repl`, the
+replicating store and its terminate writer together, read by `flush` and by
+`remove`. It constructs no replication part at all: no writer task, no
+supervisor, no changelog server, no fail-back channel (the router then has no
+receiver to poll). `b2bua_core::unwired_tests` asserts this by construction.
 _Avoid_: "legacy path", "non-HA path" (they name a code age, not the switch).
 
 **Reclaim stream** vs **Backup stream** (the two pull flows, from a node N's view):

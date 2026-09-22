@@ -39,14 +39,15 @@ pub struct B2buaCore {
     metrics: B2buaMetrics,
     cdr: Arc<dyn CdrWriter>,
     /// Readiness handle (the supervisor-backed one when replication is wired,
-    /// else the always-ready legacy one). Kept so [`begin_draining`] can latch it.
+    /// else the always-ready one of an unwired node). Kept so
+    /// [`begin_draining`] can latch it.
     readiness: Readiness,
     /// Worker-side overload signal. Re-exposed via
     /// [`overload`](Self::overload) so callers/tests can read the published
     /// header and advance the `adm` counter; a periodic task drives its EWMAs.
     overload: OverloadSignal,
     /// The running replication supervisor (kept alive so its pullers + reconcile
-    /// loop are not dropped). `None` on the legacy/non-replicating path.
+    /// loop are not dropped). `None` on an unwired node.
     supervisor: Option<ReplicationSupervisor>,
     /// The replicating call store when replication is wired (`None` otherwise),
     /// re-exposed so the S10b failover harness can introspect/assert replica
@@ -56,10 +57,11 @@ pub struct B2buaCore {
     /// loop). [`abort`](Self::abort) aborts them for a simulated crash; ordinary
     /// drop leaves them to die with the endpoint/channels as before.
     tasks: Vec<tokio::task::JoinHandle<()>>,
-    /// Retained X11 fail-back command sender — keeps the `repl_rx` channel the
-    /// router selects on open even on the legacy path (no supervisor/puller holds
-    /// a clone there), so a closed channel never busy-loops the router.
-    _repl_tx: tokio::sync::mpsc::UnboundedSender<router::ReplCommand>,
+    /// The X11 fail-back command sender of a wired node, retained so the
+    /// channel the router selects on stays open while the core lives whatever
+    /// the supervisor and its pullers drop. `None` on an unwired node: no
+    /// channel exists and the router has no receiver to poll.
+    _repl_tx: Option<tokio::sync::mpsc::UnboundedSender<router::ReplCommand>>,
 }
 
 /// Optional replication wiring for [`B2buaDeps`]. Supplying `Some(..)` turns a
@@ -221,36 +223,29 @@ impl B2buaCore {
         );
         let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());
 
-        // The store the terminate-writer drains to: the replicating store when
-        // wired (so its changelog bumps on flushes carrying a peer), else the
-        // caller's `dyn CallStore` (the in-memory legacy path).
-        let drain_store: Arc<dyn CallStore> = match &replication {
-            Some(s) => s.store.clone(),
-            None => store.clone(),
-        };
-        let terminate_writer = BufferedTerminateWriter::spawn(drain_store, 1024);
-
-        let mut state =
-            CallState::new(store, terminate_writer, config.self_ordinal.clone(), metrics.clone())
-                .with_clock(clock.clone());
+        let mut state = CallState::new(store, config.self_ordinal.clone(), metrics.clone())
+            .with_clock(clock.clone());
 
         // Abort handles for the directly-spawned tasks (serve loop + router).
         // Collected so a harness can simulate a crash by aborting them.
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-        // X11 fail-back command channel (puller/go-active → router). Created
-        // unconditionally; `repl_tx` is retained on `Self` so the channel never
-        // closes on the legacy (no-replication) path — otherwise `repl_rx.recv()`
-        // would resolve `None` every poll and busy-loop the router select.
-        let (repl_tx, repl_rx) = tokio::sync::mpsc::unbounded_channel::<router::ReplCommand>();
-
-        // Replication wiring (opt-in). When present: serve our changelog, start
-        // the puller supervisor, gate readiness on it, and route flushes through
-        // the replicating store.
+        // Replication wiring (opt-in). When present: drain the store write path
+        // through a buffered writer into the replicating store, serve our
+        // changelog, start the puller supervisor, gate readiness on it, and open
+        // the X11 fail-back command channel (puller → router). An unwired node
+        // constructs none of these: no writer task, no channel, no receiver for
+        // the router to poll.
         let repl_store = replication.as_ref().map(|s| s.store.clone());
-        let (readiness, supervisor) = match &replication {
+        let (readiness, supervisor, repl_tx, repl_rx) = match &replication {
             Some(setup) => {
                 let self_ordinal = config.self_ordinal.clone();
+                // The writer drains to the replicating store itself so its
+                // changelog bumps on every flush carrying a peer.
+                let writer =
+                    BufferedTerminateWriter::spawn(setup.store.clone() as Arc<dyn CallStore>, 1024);
+                let (repl_tx, repl_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<router::ReplCommand>();
                 // Route flushes/removes for backed-up calls through the policy, and
                 // stamp the replicated-body TTL with the operator's **reboot budget**
                 // (ADR-0011 X11): an orphaned backup Element self-evicts after the
@@ -260,7 +255,7 @@ impl B2buaCore {
                 // gap so a healthy idle call's backup is never evicted prematurely).
                 let replicated_ttl_ms = config.reboot_budget_sec.saturating_mul(1000);
                 state = state
-                    .with_replication(setup.store.clone())
+                    .with_replication(setup.store.clone(), writer)
                     .with_replicated_ttl_ms(replicated_ttl_ms);
 
                 // Start the topology-driven puller supervisor over the membership.
@@ -324,10 +319,10 @@ impl B2buaCore {
                         }
                     }
                 }));
-                (readiness, Some(supervisor))
+                (readiness, Some(supervisor), Some(repl_tx), Some(repl_rx))
             }
-            // Legacy/default path: always-200 OPTIONS, no replication.
-            None => (Readiness::always_ready(), None),
+            // Unwired node: always-200 OPTIONS, no replication part at all.
+            None => (Readiness::always_ready(), None, None, None),
         };
 
         // The re-entry channel feeds both fire-and-forget results and the call
@@ -535,17 +530,17 @@ impl B2buaCore {
     pub(crate) fn fail_back_sender(
         &self,
     ) -> Option<&tokio::sync::mpsc::UnboundedSender<router::ReplCommand>> {
-        Some(&self._repl_tx)
+        self._repl_tx.as_ref()
     }
 
-    /// The replicating call store, when replication is wired (`None` on the
-    /// legacy path). The S10b failover harness reads it to assert a replica
+    /// The replicating call store, when replication is wired (`None` on an
+    /// unwired node). The S10b failover harness reads it to assert a replica
     /// landed on the backup (`get_call`) and to introspect the reclaimed gen.
     pub fn repl_store(&self) -> Option<&Arc<ReplicatingCallStore>> {
         self.repl_store.as_ref()
     }
 
-    /// The replication supervisor, when wired (`None` on the legacy path). The
+    /// The replication supervisor, when wired (`None` on an unwired node). The
     /// failover harness reads its `is_ready`/`all_bootstrapped`/`all_current`
     /// gates to mark a rebooted worker alive in the proxy registry.
     pub fn supervisor(&self) -> Option<&ReplicationSupervisor> {

@@ -105,7 +105,7 @@ fn call_state_metered(
 ) -> CallState {
     let store = Arc::new(InMemoryCallStore::new()) as Arc<dyn CallStore>;
     let writer = BufferedTerminateWriter::spawn(store.clone(), 1024);
-    CallState::new(store, writer, ordinal, metrics).with_replication(repl)
+    CallState::new(store, ordinal, metrics).with_replication(repl, writer)
 }
 
 /// Seed a call body into `(role, primary)` of the replicating store.

@@ -98,21 +98,30 @@ struct Inner {
     setup_cancelled: HashSet<String>,
 }
 
+/// The store write path of a wired node: the replicating store the S8 policy
+/// targets and the buffered writer that drains to it. The two exist together
+/// or not at all.
+#[derive(Clone)]
+struct Replication {
+    store: Arc<ReplicatingCallStore>,
+    writer: BufferedTerminateWriter,
+}
+
 /// The call store. Clone-cheap (one `Arc`); share across the stack.
 #[derive(Clone)]
 pub struct CallState {
     inner: Arc<Mutex<Inner>>,
     store: Arc<dyn CallStore>,
-    /// The replicating store, set only when replication is wired (S10). It is
-    /// the one switch on the store write path: `None` and
+    /// The replication wiring, present only on a wired node (S10). It is the
+    /// one switch on the store write path: `None` and
     /// [`flush`](CallState::flush)/[`remove`](CallState::remove) touch the store
     /// not at all, whatever topology a call carries (the front proxy stamps a
     /// backup peer on every call whenever two workers are alive, and nothing
-    /// reads what an unwired node would write). `Some` and a call with a
-    /// non-empty `topology.bak` rides the S8 write-side policy
-    /// ([`ReplicationPlan`]); a call with no backup takes `PutOpts::default()`.
-    repl_store: Option<Arc<ReplicatingCallStore>>,
-    terminate_writer: BufferedTerminateWriter,
+    /// reads what an unwired node would write); there is then no writer either.
+    /// `Some` and a call with a non-empty `topology.bak` rides the S8 write-side
+    /// policy ([`ReplicationPlan`]); a call with no backup takes
+    /// `PutOpts::default()`.
+    repl: Option<Replication>,
     codec: MsgpackCodec,
     self_ordinal: String,
     metrics: B2buaMetrics,
@@ -145,17 +154,17 @@ impl CallState {
         Ok(bodies.iter().filter_map(|b| self.codec.decode(b).ok()).collect())
     }
 
+    /// An unwired call state over `store`: the store is read (`load_owned`)
+    /// and never written until [`with_replication`](Self::with_replication).
     pub fn new(
         store: Arc<dyn CallStore>,
-        terminate_writer: BufferedTerminateWriter,
         self_ordinal: impl Into<String>,
         metrics: B2buaMetrics,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner::default())),
             store,
-            repl_store: None,
-            terminate_writer,
+            repl: None,
             codec: MsgpackCodec::new(),
             self_ordinal: self_ordinal.into(),
             metrics,
@@ -184,21 +193,31 @@ impl CallState {
         self
     }
 
-    /// Opt into replication: open the store write path, and route the
-    /// flush/remove of any call that carries a non-empty `topology.bak` through
-    /// the S8 write-side policy. Without this call the store is never written.
-    /// `repl` MUST be the same store the [`BufferedTerminateWriter`] drains to, so
-    /// the changelog bump (keyed off the `PutOpts.peer` this path sets) fires.
-    pub fn with_replication(mut self, repl: Arc<ReplicatingCallStore>) -> Self {
-        self.repl_store = Some(repl);
+    /// Opt into replication: open the store write path through `writer`, and
+    /// route the flush/remove of any call that carries a non-empty
+    /// `topology.bak` through the S8 write-side policy. Without this call the
+    /// store is never written and no writer exists. `repl` MUST be the store
+    /// `writer` drains to, so the changelog bump (keyed off the `PutOpts.peer`
+    /// this path sets) fires.
+    pub fn with_replication(
+        mut self,
+        repl: Arc<ReplicatingCallStore>,
+        writer: BufferedTerminateWriter,
+    ) -> Self {
+        self.repl = Some(Replication { store: repl, writer });
         self
     }
 
-    /// The buffered writer the store write path submits to, for the tests that
-    /// assert what an unwired node constructs.
+    /// The replicating store, when replication is wired.
+    fn repl_store(&self) -> Option<&Arc<ReplicatingCallStore>> {
+        self.repl.as_ref().map(|r| &r.store)
+    }
+
+    /// The buffered writer the store write path submits to, when replication
+    /// is wired, for the tests that assert what an unwired node constructs.
     #[cfg(test)]
     pub(crate) fn terminate_writer(&self) -> Option<&BufferedTerminateWriter> {
-        Some(&self.terminate_writer)
+        self.repl.as_ref().map(|r| &r.writer)
     }
 
     /// Insert a freshly-created call + index it. Returns its `callRef`.
@@ -361,7 +380,7 @@ impl CallState {
     /// stamped it onto `topology.bak` at INVITE time (see [`crate::initial_invite`]),
     /// so the b2bua never recomputes HRW — it just echoes `w_bak`.
     fn backup_of(&self, call_ref: &str) -> Option<String> {
-        self.repl_store.as_ref()?;
+        self.repl_store()?;
         let inner = self.inner.lock().unwrap();
         inner
             .calls
@@ -398,7 +417,7 @@ impl CallState {
     pub fn remove(&self, call_ref: &str) {
         // Resolve the replication target BEFORE evicting the in-memory call (the
         // topology lookup `backup_of` needs the call still present).
-        let target = self.repl_store.as_ref().map(|_| self.store_target(call_ref));
+        let target = self.repl.as_ref().map(|r| (self.store_target(call_ref), &r.writer));
 
         let mut inner = self.inner.lock().unwrap();
         let keys = inner.indexed.remove(call_ref).unwrap_or_default();
@@ -412,8 +431,8 @@ impl CallState {
         inner.setup_cancelled.remove(call_ref);
         drop(inner);
 
-        if let Some((role, primary, opts)) = target {
-            self.terminate_writer.submit_delete(role, primary, call_ref.to_string(), keys, opts);
+        if let Some(((role, primary, opts), writer)) = target {
+            writer.submit_delete(role, primary, call_ref.to_string(), keys, opts);
         }
     }
 
@@ -514,7 +533,7 @@ impl CallState {
     /// the router re-anchors the call's absolute timer deadlines by this offset
     /// before re-arming them (clock-skew hardening).
     pub async fn reclaim_scan(&self) -> Vec<(Call, i64)> {
-        let Some(repl) = self.repl_store.as_ref() else {
+        let Some(repl) = self.repl_store() else {
             return Vec::new();
         };
         let bodies =
@@ -562,7 +581,7 @@ impl CallState {
     /// then materialised through the evicting read. Returns the decoded call plus
     /// its persisted receive-time clock-skew offset (`0` when none).
     pub async fn peek_reclaimable_raw(&self, call_ref: &str) -> Option<(Call, i64)> {
-        let repl = self.repl_store.as_ref()?;
+        let repl = self.repl_store()?;
         let (role, primary) = partition_of(&self.self_ordinal, call_ref);
         if role != PartitionRole::Primary {
             return None;
@@ -583,7 +602,7 @@ impl CallState {
         required: PartitionRole,
         call_ref: &str,
     ) -> Result<(Call, i64), ReplicaMiss> {
-        let repl = self.repl_store.as_ref().ok_or(ReplicaMiss::Absent)?;
+        let repl = self.repl_store().ok_or(ReplicaMiss::Absent)?;
         let (role, primary) = partition_of(&self.self_ordinal, call_ref);
         if role != required {
             return Err(ReplicaMiss::WrongRole);
@@ -611,7 +630,7 @@ impl CallState {
     /// Excludes non-terminal expired Elements (missed-delete ghosts `reap` evicts
     /// silently). Empty when no replicating store is wired.
     pub async fn expired_terminal_fallbacks(&self, now_ms: i64) -> Vec<Call> {
-        let Some(repl) = self.repl_store.as_ref() else {
+        let Some(repl) = self.repl_store() else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -638,7 +657,7 @@ impl CallState {
     /// the replica memory with **no CDR** (the accepted double-failure). No-op
     /// without a replicating store.
     pub async fn reap_replica(&self, now_ms: i64) {
-        if let Some(repl) = self.repl_store.as_ref() {
+        if let Some(repl) = self.repl_store() {
             repl.reap(now_ms).await;
         }
     }
@@ -675,7 +694,7 @@ impl CallState {
             inner.calls.insert(call.call_ref.clone(), call);
         }
         if origin == MaterialiseOrigin::Reclaim {
-            if let (Some(repl), Some(backup)) = (self.repl_store.as_ref(), backup) {
+            if let (Some(repl), Some(backup)) = (self.repl_store(), backup) {
                 repl.reestablish_backup(&call_ref, &backup);
             }
         }
@@ -703,9 +722,9 @@ impl CallState {
     /// replicas keep the long backstop (refreshed every keepalive), so a held call's
     /// replica never expires mid-call.
     pub fn flush_with_ttl(&self, call: &Call, ttl_ms: i64) {
-        if self.repl_store.is_none() {
+        let Some(writer) = self.repl.as_ref().map(|r| &r.writer) else {
             return;
-        }
+        };
         let indexes = call_index_keys(call);
         // The authoritative `(p,b)` lives on the in-memory call (bumped by
         // `update`); the passed `call` may be a pre-bump clone, so prefer the
@@ -753,7 +772,7 @@ impl CallState {
         if self.backup_of(&call.call_ref).is_some() {
             self.metrics.bump_repl_flush_propagated();
         }
-        self.terminate_writer.submit_put(
+        writer.submit_put(
             role,
             primary,
             call.call_ref.clone(),
@@ -795,7 +814,7 @@ impl CallState {
     /// exercised this fallback — the blind spot that let a real-traffic takeover
     /// gap pass the unit tests. See `b2bua-harness` `failover_real_uac_routing`.
     pub async fn resolve_from_replica_index(&self, call_id: &str, tag: &str) -> Option<String> {
-        let repl = self.repl_store.as_ref()?;
+        let repl = self.repl_store()?;
         if !tag.is_empty() {
             if let Ok(Some(r)) = repl.get_index(&format!("leg:{call_id}|{tag}")).await {
                 self.metrics.bump_repl_takeover_resolved();

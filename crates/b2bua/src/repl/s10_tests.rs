@@ -96,9 +96,8 @@ async fn replicating_callstate_flush_lands_on_peer() {
     // CallState, and the replication handle share one Arc over that same state.
     let store: Arc<ReplicatingCallStore> = Arc::new(w0.store.clone());
     let writer = BufferedTerminateWriter::spawn(store.clone() as Arc<dyn CallStore>, 1024);
-    let state =
-        CallState::new(store.clone() as Arc<dyn CallStore>, writer, "w0", B2buaMetrics::new())
-            .with_replication(store.clone());
+    let state = CallState::new(store.clone() as Arc<dyn CallStore>, "w0", B2buaMetrics::new())
+        .with_replication(store.clone(), writer);
 
     // Build a call from an INVITE carrying the w_pri=w0;w_bak=w1 cookie. The
     // callRef encodes primary w0, so the write-side policy routes it Forward → w1.
@@ -162,13 +161,8 @@ async fn cookie_parse_sets_topology_pri_bak() {
 // ---------------------------------------------------------------------------
 #[tokio::test(start_paused = true)]
 async fn update_bumps_call_gen() {
-    let writer = BufferedTerminateWriter::spawn(
-        Arc::new(crate::store::InMemoryCallStore::new()) as Arc<dyn CallStore>,
-        16,
-    );
     let state = CallState::new(
         Arc::new(crate::store::InMemoryCallStore::new()) as Arc<dyn CallStore>,
-        writer,
         "w0",
         B2buaMetrics::new(),
     );

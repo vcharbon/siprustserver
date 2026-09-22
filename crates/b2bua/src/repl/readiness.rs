@@ -40,7 +40,7 @@ pub enum ReadinessState {
 
 /// The two cluster gates readiness reads. Implemented for
 /// [`ReplicationSupervisor`]; a trivial always-true impl backs
-/// [`Readiness::always_ready`] for the legacy/default path.
+/// [`Readiness::always_ready`] for an unwired node.
 pub trait ReadinessSource: Send + Sync {
     /// Every reachable peer has finished Bootstrap re-hydration (S6).
     fn all_bootstrapped(&self) -> bool;
@@ -71,7 +71,7 @@ impl ReadinessSource for ReplicationSupervisor {
 }
 
 /// A trivial source that is always bootstrapped + current. Backs the
-/// default/legacy path (no replication wired) so OPTIONS keeps answering 200.
+/// unwired node (no replication wired) so OPTIONS keeps answering 200.
 struct AlwaysReadySource;
 
 impl ReadinessSource for AlwaysReadySource {
@@ -117,7 +117,7 @@ impl Readiness {
         }
     }
 
-    /// Default/legacy readiness: always `Ready` (until drained). Keeps the
+    /// An unwired node's readiness: always `Ready` (until drained). Keeps the
     /// always-200 OPTIONS contract for nodes with no replication wired.
     pub fn always_ready() -> Self {
         Self::new(Arc::new(AlwaysReadySource))

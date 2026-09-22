@@ -2,7 +2,7 @@
 //! whose topology names a backup peer (the front proxy's stickiness cookie is
 //! stamped whenever two workers are alive) still flushes and deletes nothing
 //! on a node with no replication store: nothing reads what such a node would
-//! write, and a dropped delete would strand the body for good.
+//! write, and the node holds no writer to write it with.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,10 +13,7 @@ use call::Call;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 
-use super::{
-    BufferedTerminateWriter, CallState, CallStore, InMemoryCallStore, PartitionRole, PutOpts,
-    StoreError,
-};
+use super::{CallState, CallStore, InMemoryCallStore, PartitionRole, PutOpts, StoreError};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
@@ -42,16 +39,10 @@ fn invite_with_cookie(pri: &str, bak: &str) -> SipRequest {
     }
 }
 
-/// A `CallState` with no replication store, over `store`, draining to it
-/// through a writer of `capacity` slots: the wiring of a node whose
-/// replication switch is off.
-fn unwired_state(
-    store: &Arc<InMemoryCallStore>,
-    capacity: usize,
-    metrics: &B2buaMetrics,
-) -> CallState {
-    let writer = BufferedTerminateWriter::spawn(store.clone() as Arc<dyn CallStore>, capacity);
-    CallState::new(store.clone() as Arc<dyn CallStore>, writer, "w0", metrics.clone())
+/// A `CallState` with no replication store, over `store`: the wiring of a
+/// node whose replication switch is off.
+fn unwired_state(store: &Arc<InMemoryCallStore>, metrics: &B2buaMetrics) -> CallState {
+    CallState::new(store.clone() as Arc<dyn CallStore>, "w0", metrics.clone())
 }
 
 fn cookie_call() -> Call {
@@ -60,10 +51,11 @@ fn cookie_call() -> Call {
     build_initial_call(&invite_with_cookie("w0", "w1"), src, &config, 0)
 }
 
-/// Let the writer's drainer task run. The writer is asynchronous: under the
+/// Let any spawned task run. A wired node's writer is asynchronous: under the
 /// paused current-thread runtime every submitted op is applied to the store
-/// once the drainer is polled, which a handful of yields guarantees. The
-/// assertions below read the store only after this.
+/// once the drainer is polled, which a handful of yields guarantees. An unwired
+/// node spawns no writer; the yields keep the read order of the assertions
+/// below the one a wired node would need.
 async fn drain() {
     for _ in 0..16 {
         tokio::task::yield_now().await;
@@ -72,12 +64,14 @@ async fn drain() {
 
 /// With no replication store wired, a call that names a backup peer is created,
 /// mutated and flushed over several turns, then removed: the store holds no body
-/// and no index key at any point, and no flush counts as propagated.
+/// and no index key at any point, no flush counts as propagated, and the state
+/// holds no writer that could have written.
 #[tokio::test(start_paused = true)]
 async fn a_store_with_no_replication_wired_holds_nothing_after_a_call() {
     let store = Arc::new(InMemoryCallStore::new());
     let metrics = B2buaMetrics::new();
-    let state = unwired_state(&store, 16, &metrics);
+    let state = unwired_state(&store, &metrics);
+    assert!(state.terminate_writer().is_none(), "an unwired state constructs no writer");
 
     let call = cookie_call();
     let call_ref = call.call_ref.clone();
@@ -107,33 +101,6 @@ async fn a_store_with_no_replication_wired_holds_nothing_after_a_call() {
     drain().await;
     assert!(state.peek(&call_ref).is_none(), "remove still evicts the in-memory call");
     assert_eq!(store.lens(), (0, 0), "the store holds nothing after the call");
-}
-
-/// The harm a write on the off path does: the writer drops on a full channel,
-/// so a delete submitted behind an undrained flush is lost and the body it would
-/// have removed stays forever (no reaper runs without a replication store). With
-/// no write at all there is nothing to strand. The put and the delete are
-/// submitted with no await between them; under the current-thread test runtime
-/// (`start_paused`) the drainer cannot run in that window, so a one-slot writer
-/// sees them back to back and drops the delete. A multi-threaded runtime could
-/// drain the put first, and this scenario would then not reach the drop.
-#[tokio::test(start_paused = true)]
-async fn a_dropped_delete_strands_nothing_when_no_replication_is_wired() {
-    let store = Arc::new(InMemoryCallStore::new());
-    let metrics = B2buaMetrics::new();
-    let state = unwired_state(&store, 1, &metrics);
-
-    let call = cookie_call();
-    let call_ref = call.call_ref.clone();
-    state.create(call);
-    let before = state.peek(&call_ref).unwrap();
-    state.update(before.clone());
-    state.flush(&before);
-    state.remove(&call_ref);
-    drain().await;
-
-    assert!(state.peek(&call_ref).is_none(), "remove evicts the in-memory call");
-    assert_eq!(store.lens(), (0, 0), "no body is stranded in a store nothing reads");
 }
 
 /// A store that counts the writes reaching it, over an in-memory store.
@@ -206,9 +173,7 @@ impl CallStore for CountingStore {
 #[tokio::test(start_paused = true)]
 async fn no_replication_wired_sends_the_store_neither_put_nor_delete() {
     let store = Arc::new(CountingStore::default());
-    let writer = BufferedTerminateWriter::spawn(store.clone() as Arc<dyn CallStore>, 16);
-    let state =
-        CallState::new(store.clone() as Arc<dyn CallStore>, writer, "w0", B2buaMetrics::new());
+    let state = CallState::new(store.clone() as Arc<dyn CallStore>, "w0", B2buaMetrics::new());
 
     let call = cookie_call();
     let call_ref = call.call_ref.clone();

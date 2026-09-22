@@ -14,7 +14,7 @@ use std::sync::Arc;
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::metrics::B2buaMetrics;
-use b2bua::store::{BufferedTerminateWriter, CallState, InMemoryCallStore, MaterialiseOrigin};
+use b2bua::store::{CallState, InMemoryCallStore, MaterialiseOrigin};
 use b2bua::trace::{install_process_traces, traces, CallTraces};
 use observe::{RateDraw, SampleAdmission, TokenBucket};
 use sip_clock::Clock;
@@ -56,8 +56,7 @@ fn invite(call_id: &str) -> SipRequest {
 
 fn state(clock: Clock) -> CallState {
     let store = Arc::new(InMemoryCallStore::new());
-    let writer = BufferedTerminateWriter::spawn(store.clone(), 64);
-    CallState::new(store, writer, "w0", B2buaMetrics::new()).with_clock(clock)
+    CallState::new(store, "w0", B2buaMetrics::new()).with_clock(clock)
 }
 
 /// A replica body as it arrives from another node: `sampled` and carrying the

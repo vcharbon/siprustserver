@@ -10,7 +10,7 @@ use std::time::Duration;
 use b2bua::config::B2buaConfig;
 use b2bua::initial_invite::build_initial_call;
 use b2bua::metrics::B2buaMetrics;
-use b2bua::store::{BufferedTerminateWriter, CallState, InMemoryCallStore, MaterialiseOrigin};
+use b2bua::store::{CallState, InMemoryCallStore, MaterialiseOrigin};
 use sip_clock::Clock;
 use sip_message::generators::{
     generate_out_of_dialog_request, GenerateOutOfDialogRequestOpts, OutOfDialogMethod,
@@ -49,8 +49,7 @@ fn invite(call_id: &str) -> SipRequest {
 
 fn state(clock: Clock) -> CallState {
     let store = Arc::new(InMemoryCallStore::new());
-    let writer = BufferedTerminateWriter::spawn(store.clone(), 64);
-    CallState::new(store, writer, "w0", B2buaMetrics::new()).with_clock(clock)
+    CallState::new(store, "w0", B2buaMetrics::new()).with_clock(clock)
 }
 
 fn call(call_id: &str, created_at: i64) -> call::Call {
