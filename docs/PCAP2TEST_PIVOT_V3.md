@@ -70,6 +70,14 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-09-22 — a tolerated absence is released only in front of the leg's
+first pending required step.** An expect armed beside a pending required expect
+or an unsent send (§6.7b, §6.7c) released every `optional` standing before it,
+including those behind that pending step, whose order against it is unknown.
+The release now stops at the leg's first pending step that is not an `optional`
+expect (§6.5, §14). §6.7c's bounds state the method-wide armed-answer check and
+the block rule as the scheduler applies them. No document field changes.
+
 **2026-09-22 — a CANCEL sent after its INVITE's final is answered 200 or 481,
 and either satisfies the step.** A UAS holds its INVITE server transaction in
 Completed after a non-2xx final until the ACK or Timer H (RFC 3261 §17.2.1), and
@@ -1278,7 +1286,10 @@ plus `cseq-method`. A later assertion may cite which branch ran, through
 **`optional: true`** on an expect — tolerated absence. The step is released when
 a later step on the same leg MATCHES first, and released again — rather than
 failed — when its OWN budget (`within_ms`, else `timing.expect_budget_ms`)
-expires.
+expires. The match releases only the tolerated absences standing in front of
+the leg's first PENDING step that is not one — a required expect or a send not
+yet made: an expect armed beside such a step (§6.7b, §6.7c) says nothing about
+the order of what stands behind it, and those optionals stay armed.
 
 Both releases are normative, and the budget one is what keeps a tolerated
 absence from wedging the steps behind it forever: nothing else states when the
@@ -1445,10 +1456,15 @@ document:
 - no completed or retired expect has taken a FINAL of that transaction since
   the send: a final ends the transaction (§17.1), and a later answer of the
   same method is another transaction's, not yet opened;
-- nothing already armed on the leg waits on the same transaction, so no two
-  armed steps can take each other's datagram;
+- nothing already armed on the leg answers the same METHOD, an older
+  transaction's included: two armed steps with one discriminator would take
+  each other's datagram;
 - a message step only, walked to across message steps only: a block (`alt`,
-  `unordered`) is never walked past nor armed early (§6.7b).
+  `unordered`) standing between the leg's first blocking item and the candidate
+  stops the walk, and is never armed early (§6.7b). A block that IS the leg's
+  blocking item — an armed `alt` or `unordered` — lets the candidate arm beside
+  it: its members are armed already, and one on the candidate's transaction
+  refuses it by the bullet above.
 
 Walking past a send emits nothing early, and walking past an expect of the
 leg's own un-orders nothing but this: everything else behind that expect keeps
@@ -2935,7 +2951,9 @@ Its whole job:
 4. **`expect`**: gate on op, leg alignment, discriminator and `within_ms`, whose
    budget opens at the step's own dwell (§6.8). Then apply `check`, then any
    inline `checks`. An `optional` expect is RELEASED — never failed — when a
-   later step on its leg matches first, or when its own budget expires (§6.5).
+   later step on its leg matches first with no pending required expect or
+   unsent send standing in front of the optional, or when its own budget
+   expires (§6.5).
    A datagram no armed expect matched is charged to the armed expect of ITS
    transaction — a response rides the client transaction of the request it
    answers, CSeq method and number (RFC 3261 §17.1.3), and the expect's

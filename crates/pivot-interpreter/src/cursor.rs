@@ -15,7 +15,8 @@
 //!   them.
 //! - **`optional`** — a tolerated absence never blocks its leg. It stays armed
 //!   beside the steps behind it, and is RELEASED the moment a later step on the
-//!   same leg MATCHES. A send releases nothing: the runner decides when it
+//!   same leg MATCHES, unless a pending required expect or unsent send stands
+//!   in front of it. A send releases nothing: the runner decides when it
 //!   sends, so a send overtaking a tolerated expect says nothing about a
 //!   message still in flight toward it.
 //! - **`unordered`** — every member is armed together and the group completes
@@ -194,10 +195,12 @@ impl<'p> Cursor<'p> {
 
     /// Whether every step of an item answers a transaction THIS leg has already
     /// opened (§6.7c): an `expect` naming its transaction (`status` plus
-    /// `cseq-method`), on a transaction nothing armed here waits on, whose
-    /// request this leg sent at a completed step. RFC 3261 §17 orders no two
-    /// answers on two open transactions, so such a step arms beside whatever
-    /// stands in front of it; within one transaction list order binds.
+    /// `cseq-method`), whose method no expect armed here answers (one
+    /// discriminator armed twice would let either step take the other's
+    /// datagram), and whose request this leg sent at a completed step.
+    /// RFC 3261 §17 orders no two answers on two open transactions, so such a
+    /// step arms beside whatever stands in front of it; within one transaction
+    /// list order binds.
     fn answers_open_transaction(&self, frontier: &[String], armed: &[String]) -> bool {
         !frontier.is_empty()
             && frontier.iter().all(|id| {
@@ -464,7 +467,10 @@ impl<'p> Cursor<'p> {
     /// Only an EXPECT releases a tolerated absence behind it (§6.5: "released
     /// when a later step on the same leg MATCHES first"). A send is emitted, not
     /// matched: the runner controls when it sends, and letting it overtake an
-    /// optional expect would discard a message still in flight.
+    /// optional expect would discard a message still in flight. The release
+    /// stops at the leg's first PENDING step that is not a tolerated absence —
+    /// a required expect or a send not yet made: an expect armed beside it
+    /// (§6.7b, §6.7c) says nothing about the order of what stands behind it.
     pub fn complete(&mut self, step: &str) -> Vec<String> {
         self.commit(step);
         let Some(compiled) = self.plan.step(step) else { return Vec::new() };
@@ -478,15 +484,16 @@ impl<'p> Cursor<'p> {
             self.refresh_items();
             return released;
         }
-        let earlier: Vec<String> = self
+        let mut along: Vec<&CompiledStep> = self
             .plan
             .steps()
-            .iter()
-            .filter(|s| s.leg == leg && s.optional_expect())
+            .into_iter()
+            .filter(|s| s.leg == leg && self.leg_key(&s.id) < key)
             .filter(|s| self.steps.get(&s.id).copied() == Some(StepStatus::Pending))
-            .filter(|s| self.leg_key(&s.id) < key)
-            .map(|s| s.id.clone())
             .collect();
+        along.sort_by_key(|s| self.leg_key(&s.id));
+        let earlier: Vec<String> =
+            along.iter().take_while(|s| s.optional_expect()).map(|s| s.id.clone()).collect();
         for id in earlier {
             self.steps.insert(id.clone(), StepStatus::Released);
             self.released.push(id.clone());
@@ -701,6 +708,22 @@ mod tests {
 
     /// A declared race arms both steps at once, so the leg is not committed to
     /// the order the capture happened to see.
+    /// An `optional` expect of a request relayed from `from` on another leg.
+    fn optional_relayed_request(id: &str, leg: &str, method: &str, from: &str) -> String {
+        let d =
+            format!(r#"{{"ms":0,"from":"step:{from}","compressible":true,"timer_linked":false}}"#);
+        format!(
+            r#"{{"id":"{id}","leg":"{leg}","op":"expect","optional":true,"check":"record","msg":{{"method":"{method}"}},"delay":{d}}}"#
+        )
+    }
+
+    /// An `optional` expect gated on a response to a transaction the leg names.
+    fn optional_answer(id: &str, leg: &str, status: u16, method: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","leg":"{leg}","op":"expect","optional":true,"check":"record","msg":{{"status":{status},"cseq-method":"{method}"}},"delay":{D}}}"#
+        )
+    }
+
     #[test]
     fn a_declared_race_arms_beside_the_step_it_names() {
         let p = plan(&format!(
@@ -1340,5 +1363,127 @@ mod tests {
         let relay =
             plan(&format!("[{},{}]", send("s1", "B", "INVITE"), relayed("s2", "A", 183, "s1")));
         assert_eq!(Cursor::new(&relay).opening_send("s2"), None, "this leg sent no INVITE");
+    }
+
+    /// An answer armed beside a REQUIRED expect still pending (§6.7c) releases
+    /// no tolerated absence standing between the two: their order against the
+    /// answer is unknown, and the INVITE's 180 behind its pending 183 may still
+    /// come.
+    #[test]
+    fn an_answer_armed_beside_a_pending_expect_releases_no_optional_behind_it() {
+        let p = plan(&format!(
+            "[{},{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            send("s2", "A", "INFO"),
+            answer("s3", "A", 183, "INVITE"),
+            optional("s4", "A", 180),
+            answer("s5", "A", 200, "INFO")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s3", "s5"], "the INFO's answer arms beside the 183");
+        assert!(cursor.complete("s5").is_empty(), "nothing released past the pending 183");
+        assert_eq!(cursor.status("s4"), Some(StepStatus::Pending));
+        assert!(cursor.complete("s3").is_empty());
+        assert_eq!(cursor.frontier(), ["s4"], "the tolerated 180 is armed in its turn");
+        cursor.complete("s4");
+        assert_eq!(cursor.status("s4"), Some(StepStatus::Complete));
+        assert!(cursor.is_done());
+    }
+
+    /// A relay armed early behind a send this leg has not made (§6.7b) releases
+    /// no tolerated absence standing behind that send: the send has not gone
+    /// out, so nothing says the optional's message will not still come.
+    /// Optionals standing before the pending send are released as ever.
+    #[test]
+    fn a_relay_armed_past_a_pending_send_releases_no_optional_behind_it() {
+        let p = plan(&format!(
+            "[{},{},{},{},{},{}]",
+            send("s1", "A", "BYE"),
+            send("s2", "B", "INVITE"),
+            optional("s3", "B", 100),
+            send("s4", "B", "ACK"),
+            optional_relayed_request("s5", "B", "INFO", "s1"),
+            relayed_request("s6", "B", "BYE", "s1")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s3", "s4", "s5", "s6"]);
+        assert_eq!(cursor.complete("s6"), ["s3"], "the optional before the send is released");
+        assert_eq!(cursor.status("s5"), Some(StepStatus::Pending), "the one behind it is not");
+        cursor.complete("s4");
+        assert_eq!(cursor.frontier(), ["s5"]);
+    }
+
+    /// An armed answer of the same METHOD refuses the candidate even where it
+    /// waits on an older transaction: two steps with one discriminator armed
+    /// together would take each other's datagram.
+    #[test]
+    fn an_answer_does_not_arm_beside_an_armed_answer_of_the_same_method() {
+        let p = plan(&format!(
+            "[{},{},{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            send("s2", "A", "PRACK"),
+            optional_answer("s3", "A", 200, "PRACK"),
+            send("s4", "A", "PRACK"),
+            request_expect("s5", "A", "INFO"),
+            answer("s6", "A", 200, "PRACK")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        cursor.complete("s4");
+        assert_eq!(cursor.frontier(), ["s3", "s5"], "s6 waits: s3 would take its 200");
+    }
+
+    /// A block standing between the leg's blocking step and the candidate stops
+    /// the walk: an `unordered` group is never walked past.
+    #[test]
+    fn an_unordered_group_in_front_stops_the_walk_to_an_open_transaction_s_answer() {
+        let group = format!(
+            r#"{{"id":"u1","op":"unordered","steps":[{},{}]}}"#,
+            request_expect("s4", "A", "INFO"),
+            request_expect("s5", "A", "UPDATE")
+        );
+        let p = plan(&format!(
+            "[{},{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            send("s2", "A", "BYE"),
+            answer("s3", "A", 180, "INVITE"),
+            group,
+            answer("s6", "A", 200, "BYE")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s3"], "the group is not walked past");
+    }
+
+    /// A block that IS the leg's blocking item lets an answer to another open
+    /// transaction arm beside it: the branch heads are armed already, and a
+    /// candidate on their own transaction is refused.
+    #[test]
+    fn an_answer_arms_beside_an_armed_alt() {
+        let alt = format!(
+            r#"{{"id":"a1","op":"alt","branches":[
+                 {{"name":"answered","steps":[{}]}},
+                 {{"name":"busy","steps":[{}]}}]}}"#,
+            answer("s3", "A", 200, "INVITE"),
+            answer("s4", "A", 486, "INVITE")
+        );
+        let p = plan(&format!(
+            "[{},{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            send("s2", "A", "BYE"),
+            alt,
+            answer("s5", "A", 200, "BYE"),
+            answer("s6", "A", 487, "INVITE")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s3", "s4", "s5"], "the INVITE's 487 is refused");
     }
 }
