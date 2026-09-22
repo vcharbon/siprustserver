@@ -170,6 +170,12 @@ impl<'p> Instance<'p> {
         self.cursor.release(step)
     }
 
+    /// Retire a required expect a final on its own transaction made
+    /// unsatisfiable; refused on anything else.
+    pub fn retire_step(&mut self, step: &str) -> bool {
+        self.cursor.retire(step)
+    }
+
     /// Deliver an inbound INVITE to the claim table: which leg owns it.
     pub fn claim(
         &mut self,
@@ -257,6 +263,7 @@ impl<'p> Instance<'p> {
         }
         self.verdict.completed_steps = self.cursor.completed().to_vec();
         self.verdict.released_optional = self.cursor.released().to_vec();
+        self.verdict.retired = self.cursor.retired().to_vec();
         crate::must_fail::invert(&mut self.verdict, self.plan, &self.recording);
     }
 }

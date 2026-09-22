@@ -394,6 +394,7 @@ export const RunVerdict = Schema.Struct({
   branches: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   completed_steps: Schema.optionalKey(Schema.Array(Schema.String)),
   released_optional: Schema.optionalKey(Schema.Array(Schema.String)),
+  retired: Schema.optionalKey(Schema.Array(Schema.String)),
   rfc_violations: Schema.optionalKey(Schema.Array(ViolationNote)),
   must_fail: Schema.optionalKey(Schema.Array(DeclaredNote)),
   tolerated: Schema.optionalKey(Schema.Array(Failure)),

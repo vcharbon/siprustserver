@@ -70,6 +70,14 @@ document, the `pivot-schema` structs and the generator. Every batch gets an
 entry here, and the entry is the index: what changed, and where the contract
 now reads.
 
+**2026-09-22 — an unmatched response is charged to the expect of its own
+transaction, and a final retires it.** A response rides the client transaction
+of the request it answers (RFC 3261 §17.1.3), so a datagram no armed expect
+matched is charged to the armed expect waiting on that transaction, not to the
+first expect of the leg; a final so charged retires the expect, and the run goes
+on where the tail is still composable (§14). No document field changes; the
+verdict gains `retired`, the retired steps.
+
 **2026-09-15 — the settle waits on the scripted legs' own INVITE server
 transactions.** A non-2xx final a scripted leg sent to an INVITE holds a server
 transaction in Completed until the ACK the system owes on the INVITE's branch
@@ -1426,9 +1434,9 @@ document:
   list order binds — a provisional before its final, one final before the next
   2xx a fork draws — so an answer standing behind an earlier pending answer of
   the same transaction waits behind it;
-- no completed expect has taken a FINAL of that transaction since the send: a
-  final ends the transaction (§17.1), and a later answer of the same method is
-  another transaction's, not yet opened;
+- no completed or retired expect has taken a FINAL of that transaction since
+  the send: a final ends the transaction (§17.1), and a later answer of the
+  same method is another transaction's, not yet opened;
 - nothing already armed on the leg waits on the same transaction, so no two
   armed steps can take each other's datagram;
 - a message step only, walked to across message steps only: a block (`alt`,
@@ -1441,6 +1449,10 @@ its place, and a relay (§6.7b) still stops at it.
 `overlap` (§6.7a) and `unordered` (§6.5) remain what a document says when it
 declines an order for a reason of its own; neither is needed to state this one,
 which is the transaction layer's and holds for every document alike.
+
+The same fact keeps the two armed answers' charges apart: a datagram no armed
+expect matched is charged to the expect of ITS transaction, never to the one
+armed beside it (§14, item 4).
 
 ### 6.8 delay and dwell
 
@@ -2887,6 +2899,18 @@ Its whole job:
    budget opens at the step's own dwell (§6.8). Then apply `check`, then any
    inline `checks`. An `optional` expect is RELEASED — never failed — when a
    later step on its leg matches first, or when its own budget expires (§6.5).
+   A datagram no armed expect matched is charged to the armed expect of ITS
+   transaction — a response rides the client transaction of the request it
+   answers, CSeq method and number (RFC 3261 §17.1.3), and the expect's
+   transaction is the one the leg's own send of that method opened, read off the
+   recording, never off the step's captured `cseq` (§6.3): the armed expect
+   naming the very status, else the first REQUIRED one in leg order, else the
+   first `optional`. With no armed expect on that transaction it is charged to
+   the closest step: a discriminator match, else the first armed. A FINAL so
+   charged ends the transaction and RETIRES the expect (a required one; an
+   `optional` is released, and so is every tolerated absence armed on that
+   transaction), the verdict listing it under `retired`; a block member is
+   charged but never retired.
 5. **Lane scoping** (§9.1): evaluate every check, and record a CLASSIFIED one as
    informative instead of gating when the run's lane is not `case.origin_lane`,
    unless the run configuration states that class outright. One comparison, no
@@ -2943,14 +2967,22 @@ message that expect waits for can still arrive. What ends the SCRIPT is a failur
 that leaves the run nothing to compose, and there are two:
 
 - a required `expect` whose budget ran out — the message is MISSING;
-- an arrival that leaves an armed expect UNSATISFIABLE — a FINAL response on the
-  very transaction the expect is gated on, carrying a status it cannot match. RFC
-  3261 §17.1 ends a client transaction at its final, so no response of another
-  status rides it again. A provisional ends nothing, a request ends nothing, and
-  a final for another transaction ends nothing. Where several expects are armed on
-  one leg — `alt` branches, an `unordered` group — the arrival must contradict
-  EVERY required one; an `optional` expect is released rather than failed (§6.5)
-  and never blocks.
+- an arrival that leaves the TAIL uncomposable — a FINAL response on the very
+  transaction a required expect is gated on, carrying a status it cannot match.
+  RFC 3261 §17.1 ends a client transaction at its final, so no response of
+  another status rides it again and the expect is retired (item 4). Whether the
+  run goes on is then a DIALOG fact: it ends where the retired step named a
+  PROVISIONAL (the tail was scripted for a transaction still open), or where an
+  INVITE final is of the other class than the one named (2xx against non-2xx)
+  on a leg whose dialog no INVITE 2xx has yet confirmed — the initial INVITE's
+  final decides whether the dialog the tail was scripted for exists (§12.1,
+  §13.2.2.3), while a re-INVITE's final of either class leaves it as it was.
+  Every other retirement goes on: the ACK behind a substituted reject composes
+  off the final that came. A provisional ends nothing, a request ends nothing,
+  and a final for another transaction ends nothing. Where several expects are
+  armed on one leg as a block — `alt` branches, an `unordered` group — none is
+  retired and the arrival must contradict EVERY required one; an `optional`
+  expect is released rather than failed (§6.5) and never blocks.
 
 **This rule is polarity-free.** A `must_fail` declaration (§11.2) changes nothing
 about WHEN a script ends — only what the verdict makes of what was recorded. A
@@ -2974,8 +3006,9 @@ like a scripted dialog that is not terminal.
 The run then settles and evaluates its postconditions like any other case. The
 steps the script never ran do NOT raise `flow-incomplete`: they were abandoned by
 this rule, and the verdict states that rather than hiding it — `completed_steps`
-stays the truth about what ran, and an `abandoned` section names the leg and step
-the script stopped at, the nodes it never ran, and every act the close emitted.
+stays the truth about what ran, `retired` names the expects a final on their own
+transaction retired, and an `abandoned` section names the leg and step the script
+stopped at, the nodes it never ran, and every act the close emitted.
 
 What the interpreter never does: read `calls` beyond leg sequencing and the id
 and caller leg a per-call lane directive is placed by (`joined_by` included: a join explains the chain to a reviewer and a driver, and sequences

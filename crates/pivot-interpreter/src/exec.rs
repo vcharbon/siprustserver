@@ -51,6 +51,7 @@ use crate::gate::{self, GateVerdict, Inbound};
 use crate::instance::Instance;
 use crate::plan::{CompiledStep, Discriminator, Plan};
 use crate::preserve;
+use crate::program::ItemKind;
 use crate::progress;
 use crate::recording::Recording;
 use crate::render::{self, UriComposer};
@@ -926,6 +927,9 @@ impl<'a, 'p> Runner<'a, 'p> {
             }
         };
 
+        // The dialog's confirmation BEFORE this message taught the leg anything:
+        // what a tail that no longer matches was scripted for (`progress`).
+        let confirmed_before = self.stacks.get(&leg).is_some_and(|stack| stack.confirmed());
         // Learn the dialog facts before matching: a step's inline checks may
         // read what this very message taught the leg.
         if let Some(stack) = self.stacks.get_mut(&leg) {
@@ -992,25 +996,52 @@ impl<'a, 'p> Runner<'a, 'p> {
                 })
             });
         let Some(step) = matched.cloned() else {
-            // Diagnose against the step this datagram came CLOSEST to: one whose
+            // Charged to the expect of the transaction the datagram rides
+            // (RFC 3261 §17.1.3), else to the step it came CLOSEST to: one whose
             // discriminator matched and whose content did not says exactly what
             // is wrong, where an unordered group's first member would describe a
-            // step the datagram was never for.
-            let closest = gated
-                .iter()
-                .find(|step| gate::discriminates(step, &inbound).matches())
-                .unwrap_or(&gated[0]);
-            let reason = match gate::discriminates(closest, &inbound) {
+            // step the datagram was never for (`progress`).
+            let ladder = self.instance.recording().legs().remove(&leg).unwrap_or_default();
+            let (closest, own_transaction, retired, released, ends) = {
+                let cursor = self.instance.cursor();
+                let items = &self.instance.plan().program().items;
+                let armed: Vec<progress::Armed<'_>> = gated
+                    .iter()
+                    .map(|step| progress::Armed {
+                        step,
+                        opener: cursor.opening_send(&step.id),
+                        retirable: items[step.loc.item].kind == ItemKind::Message,
+                    })
+                    .collect();
+                let unmatched = progress::unmatched(&inbound, &armed, &ladder, confirmed_before)
+                    .expect("the leg has an armed expect");
+                (
+                    unmatched.charged.clone(),
+                    unmatched.own_transaction,
+                    unmatched.retired,
+                    unmatched.released,
+                    unmatched.ends,
+                )
+            };
+            let reason = match gate::discriminates(&closest, &inbound) {
                 GateVerdict::Rejects(why) => why,
-                GateVerdict::Matches => match self.rides_fork(closest, &inbound) {
+                GateVerdict::Matches => match self.rides_fork(&closest, &inbound) {
                     GateVerdict::Rejects(why) => why,
                     GateVerdict::Matches => {
-                        match gate::content_holds(closest, &inbound, &scope, &resolver) {
+                        match gate::content_holds(&closest, &inbound, &scope, &resolver) {
                             GateVerdict::Rejects(why) => why,
                             GateVerdict::Matches => "no armed expect matched".into(),
                         }
                     }
                 },
+            };
+            let reason = if own_transaction {
+                format!(
+                    "{reason}; on the {} transaction {} waits on",
+                    inbound.cseq_method, closest.id
+                )
+            } else {
+                reason
             };
             let also_armed: Vec<&str> =
                 gated.iter().map(|s| s.id.as_str()).filter(|id| *id != closest.id).collect();
@@ -1027,11 +1058,42 @@ impl<'a, 'p> Runner<'a, 'p> {
                 reason,
                 arrived: inbound.arrived(),
             });
-            self.answer_unscripted(&leg, &message).await;
+            // What the leg owes for this datagram is the scripted tail's where
+            // the run goes on past a retired step; otherwise it is composed here,
+            // as for any arrival the flow refused.
+            if retired.is_empty() || ends {
+                self.answer_unscripted(&leg, &message).await;
+            }
+            // A final ended the transaction the charged step waits on: the step
+            // is retired, the tolerated absences on that transaction released,
+            // and what stands behind them measures from now. No timing note and
+            // no outcome: the step took nothing.
+            let now = Instant::now();
+            for id in &released {
+                if self.instance.release_step(id) {
+                    self.completed_at.insert(id.clone(), now);
+                }
+            }
+            for id in &retired {
+                if self.instance.retire_step(id) {
+                    self.completed_at.insert(id.clone(), now);
+                }
+            }
+            if !retired.is_empty() || !released.is_empty() {
+                if let Some(seq) = seq {
+                    let note = format!(
+                        "the final of the transaction {step} waits on: {} where the step names {}; {step} {}",
+                        inbound.status.unwrap_or(0),
+                        closest.discriminator,
+                        if retired.is_empty() { "released" } else { "retired" }
+                    );
+                    self.instance.recording().renote(&leg, seq, &note);
+                }
+                self.settle_blocks(now);
+            }
             // The run goes on unless this arrival left the leg with nothing it
             // can still be satisfied by (§11.2).
-            let ladder = self.instance.recording().legs().remove(&leg).unwrap_or_default();
-            if !progress::blocks(&inbound, &gated, &ladder) {
+            if !ends {
                 return true;
             }
             self.end_script(Some(&leg), Some(&step));

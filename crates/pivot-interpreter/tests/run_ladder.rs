@@ -4016,9 +4016,12 @@ async fn a_positive_run_whose_answer_is_a_reject_ends_its_script_and_closes() {
             outcome.verdict.completed_steps
         );
     }
-    // Everything the caller's tail scripted is abandoned: the answer never came,
-    // so neither did the ACK that confirms it nor the BYE that ends it.
-    for never in ["s7", "s8", "s10", "s11", "s12", "s13"] {
+    // The refused answer's expect is RETIRED — the 486 ended its transaction
+    // (§17.1.3) and was charged on it — and everything the caller's tail
+    // scripted behind it is abandoned: the ACK that confirms the answer never
+    // came, nor the BYE that ends it.
+    assert_eq!(outcome.verdict.retired, ["s7"]);
+    for never in ["s8", "s10", "s11", "s12", "s13"] {
         assert!(
             abandoned.pending.iter().any(|step| step == never),
             "{never} is abandoned: {:?}",
@@ -4560,4 +4563,110 @@ async fn two_answers_on_two_transactions_are_taken_in_either_order() {
     );
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
+}
+
+/// A response no armed expect matched is charged to the expect of ITS
+/// transaction (RFC 3261 §17.1.3: CSeq method and number), whatever else is
+/// armed on the leg; a final so charged retires that expect, and the flow runs
+/// on. The callee rejects the INVITE (600) while the caller's PRACK is
+/// unanswered; the system answers the PRACK 200 itself, where the document
+/// names 481. One failure, on the PRACK step; the scripted ACK to the 600 goes
+/// out; nothing is abandoned. The order the 600 and the 200 leave in is the
+/// system's own, and the rung holds under either.
+#[tokio::test(start_paused = true)]
+async fn a_final_on_one_transaction_is_charged_to_that_transaction_s_expect_alone() {
+    let scene = api_scene("pivot-answer-on-the-other-transaction").await;
+    let (outcome, _dir) = replay(&scene, "answer-on-the-other-transaction.v3.json").await;
+    assert_substituted_finals_run_on(&outcome, &[("s12", 481, "PRACK", 200)]);
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// Two finals on two transactions, both substituted: the callee's 600 where the
+/// document names 486 to the INVITE, and the system's 200 where it names 481
+/// to the PRACK. Each is charged to the expect of the transaction it rides,
+/// never to the other's; both are retired; the ACK to the 600 is the scripted
+/// one (a final of the same class leaves the dialog the tail was scripted for
+/// where it was) and the flow completes.
+#[tokio::test(start_paused = true)]
+async fn two_substituted_finals_on_two_transactions_are_charged_one_to_each_expect() {
+    let scene = api_scene("pivot-answers-on-two-transactions-substituted").await;
+    let (outcome, _dir) = replay(&scene, "answers-on-two-transactions-substituted.v3.json").await;
+    assert_substituted_finals_run_on(
+        &outcome,
+        &[("s11", 486, "INVITE", 600), ("s12", 481, "PRACK", 200)],
+    );
+    scene.b2bua.assert_fully_reaped();
+    scene.finish().await;
+}
+
+/// The shape the two rungs above share: every listed `(step, named, method,
+/// arrived)` is exactly one `UnmatchedDatagram` on that step and no other
+/// failure exists; the listed steps are the retired ones; every other step
+/// completed; leg A's ACK went out under its scripted step, not the generic
+/// close's; the 600 was never repeated (the ACK landed inside T1); the run
+/// settled.
+fn assert_substituted_finals_run_on(outcome: &Outcome, substituted: &[(&str, u16, &str, u16)]) {
+    let verdict = &outcome.verdict;
+    assert!(verdict.abandoned.is_none(), "nothing abandoned: {:#?}", verdict.abandoned);
+    assert_eq!(verdict.failures.len(), substituted.len(), "failures: {:#?}", verdict.failures);
+    for (step_id, named, method, arrived_status) in substituted {
+        let charged = verdict
+            .failures
+            .iter()
+            .find(|f| matches!(f, Failure::UnmatchedDatagram { step, .. } if step == step_id))
+            .unwrap_or_else(|| panic!("{step_id} is charged: {:#?}", verdict.failures));
+        let Failure::UnmatchedDatagram { gated_on, arrived, .. } = charged else { unreachable!() };
+        assert!(
+            matches!(gated_on, GatedOn::Response { status, cseq_method: Some(m) }
+                if status == named && m == method),
+            "{step_id} gated on {gated_on}"
+        );
+        assert!(
+            matches!(arrived, Arrived::Response { status, cseq_method, .. }
+                if status == arrived_status && cseq_method == method),
+            "{step_id} took {arrived}"
+        );
+    }
+    let mut retired = verdict.retired.clone();
+    retired.sort();
+    let mut expected: Vec<String> = substituted.iter().map(|(s, ..)| s.to_string()).collect();
+    expected.sort();
+    assert_eq!(retired, expected, "the charged steps are the retired ones");
+    for step in (1..=13).map(|n| format!("s{n}")) {
+        if expected.contains(&step) {
+            continue;
+        }
+        assert!(
+            verdict.completed_steps.contains(&step),
+            "{step} never completed: {:#?}\nfailures: {:#?}",
+            verdict.completed_steps,
+            verdict.failures
+        );
+    }
+    let a_leg = &outcome.recording.legs()["A"];
+    let ladder: Vec<String> = a_leg
+        .iter()
+        .map(|m| {
+            format!(
+                "{:?} {} step={:?} repeat_of={:?} note={:?}",
+                m.dir,
+                text(m).lines().next().unwrap_or_default(),
+                m.step,
+                m.repeat_of,
+                m.note
+            )
+        })
+        .collect();
+    let acks: Vec<_> =
+        a_leg.iter().filter(|m| m.dir == Dir::Out && text(m).starts_with("ACK ")).collect();
+    assert_eq!(acks.len(), 1, "one ACK on A: {ladder:#?}");
+    assert_eq!(acks[0].step.as_deref(), Some("s13"), "the scripted ACK, not the close's");
+    assert!(
+        !a_leg.iter().any(|m| m.dir == Dir::In
+            && text(m).starts_with("SIP/2.0 600")
+            && m.repeat_of.is_some()),
+        "the 600 was never repeated: {ladder:#?}"
+    );
+    assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
 }

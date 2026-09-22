@@ -547,6 +547,11 @@ pub struct RunVerdict {
     /// Expect steps released without arriving because they were `optional`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub released_optional: Vec<String>,
+    /// Required expect steps a final on their own transaction retired: the
+    /// status it carried was charged on them, and no other rides that
+    /// transaction again (RFC 3261 §17.1.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<String>,
     /// The RFC violations the document declares, each with whether it gates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rfc_violations: Vec<ViolationNote>,
@@ -599,6 +604,7 @@ impl RunVerdict {
             branches: std::collections::BTreeMap::new(),
             completed_steps: Vec::new(),
             released_optional: Vec::new(),
+            retired: Vec::new(),
             rfc_violations: Vec::new(),
             must_fail: Vec::new(),
             tolerated: Vec::new(),

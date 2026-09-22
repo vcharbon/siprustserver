@@ -246,6 +246,11 @@ impl LegStack {
         self.has_dialog
     }
 
+    /// Whether an INVITE 2xx has confirmed the leg's dialog (RFC 3261 §13).
+    pub fn confirmed(&self) -> bool {
+        self.confirmed
+    }
+
     /// The INVITE this leg sent most recently, whether or not it is ACKed.
     pub fn sent_invite(&self) -> Option<&SipRequest> {
         self.sent_invites.last()

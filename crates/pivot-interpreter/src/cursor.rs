@@ -43,6 +43,10 @@ pub enum StepStatus {
     Complete,
     /// An `optional` expect a later step on its leg overtook.
     Released,
+    /// A required expect a FINAL on its own transaction retired: the status it
+    /// carried was charged on the step, and no other rides that transaction
+    /// again (RFC 3261 §17.1.3).
+    Retired,
     /// A step of an `alt` branch that did not run.
     Discarded,
 }
@@ -74,6 +78,7 @@ pub struct Cursor<'p> {
     /// Completion order, for the verdict.
     completed: Vec<String>,
     released: Vec<String>,
+    retired: Vec<String>,
 }
 
 impl<'p> Cursor<'p> {
@@ -88,6 +93,7 @@ impl<'p> Cursor<'p> {
             injected: BTreeSet::new(),
             completed: Vec::new(),
             released: Vec::new(),
+            retired: Vec::new(),
         }
     }
 
@@ -110,11 +116,18 @@ impl<'p> Cursor<'p> {
         &self.released
     }
 
+    pub fn retired(&self) -> &[String] {
+        &self.retired
+    }
+
     /// Whether a node id — a step's or a block's — has completed. This is what
     /// `after` waits on.
     pub fn node_complete(&self, node: &str) -> bool {
         if let Some(status) = self.steps.get(node) {
-            return matches!(status, StepStatus::Complete | StepStatus::Released);
+            return matches!(
+                status,
+                StepStatus::Complete | StepStatus::Released | StepStatus::Retired
+            );
         }
         self.plan
             .program()
@@ -205,31 +218,54 @@ impl<'p> Cursor<'p> {
     /// Whether the transaction `step` answers is open at `step`'s place in its
     /// leg: the leg's last send of `method` before it has completed, and no
     /// answer to that send stands between the two — pending, which would be
-    /// the transaction's earlier turn, or a completed final, which ended it.
+    /// the transaction's earlier turn, or a settled final, which ended it.
     fn transaction_open(&self, step: &CompiledStep, method: &Method) -> bool {
+        let Some((opened, behind)) = self.opener_along(step, method) else { return false };
+        if self.steps.get(&opened.id).copied() != Some(StepStatus::Complete) {
+            return false;
+        }
+        behind.iter().all(|s| match (answers(s, method), self.steps.get(&s.id)) {
+            (Some(_), Some(StepStatus::Pending | StepStatus::Retired)) => false,
+            (Some(status), Some(StepStatus::Complete)) => status < 200,
+            _ => true,
+        })
+    }
+
+    /// The send that opened the transaction an expect waits on: the leg's last
+    /// `send` of the expect's `cseq-method` standing before it in leg order.
+    /// `None` on a step naming no transaction, and on one whose leg sent no
+    /// such request before it (a relay of another leg's origination).
+    pub fn opening_send(&self, step: &str) -> Option<&'p str> {
+        let step = self.plan.step(step)?;
+        let Discriminator::Response { cseq_method: Some(method), .. } = &step.discriminator else {
+            return None;
+        };
+        let (opened, _) = self.opener_along(step, &Method::from_wire(method))?;
+        Some(opened.id.as_str())
+    }
+
+    /// The last send of `method` before `step` on its leg, and every step of
+    /// the leg standing between the two, in leg order.
+    fn opener_along(
+        &self,
+        step: &CompiledStep,
+        method: &Method,
+    ) -> Option<(&'p CompiledStep, Vec<&'p CompiledStep>)> {
         let key = self.leg_key(&step.id);
-        let mut along: Vec<&CompiledStep> = self
+        let mut along: Vec<&'p CompiledStep> = self
             .plan
             .steps()
             .into_iter()
             .filter(|s| s.leg == step.leg && self.leg_key(&s.id) < key)
             .collect();
         along.sort_by_key(|s| self.leg_key(&s.id));
-        let Some(opened) = along.iter().rposition(|s| {
+        let opened = along.iter().rposition(|s| {
             s.is_send()
                 && matches!(&s.discriminator, Discriminator::Request { method: m }
                     if Method::from_wire(m) == *method)
-        }) else {
-            return false;
-        };
-        if self.steps.get(&along[opened].id).copied() != Some(StepStatus::Complete) {
-            return false;
-        }
-        along[opened + 1..].iter().all(|s| match (answers(s, method), self.steps.get(&s.id)) {
-            (Some(_), Some(StepStatus::Pending)) => false,
-            (Some(status), Some(StepStatus::Complete)) => status < 200,
-            _ => true,
-        })
+        })?;
+        let behind = along.split_off(opened + 1);
+        Some((along[opened], behind))
     }
 
     /// Whether every step an item puts on this leg is a `send`.
@@ -471,6 +507,27 @@ impl<'p> Cursor<'p> {
         }
         self.steps.insert(step.to_string(), StepStatus::Released);
         self.released.push(step.to_string());
+        self.refresh_items();
+        true
+    }
+
+    /// Retire a required expect a FINAL on its own transaction has made
+    /// unsatisfiable (RFC 3261 §17.1.3): the final was charged on it, and the
+    /// leg moves past it. Refused on anything but a pending required expect of
+    /// a message item — an `optional` is released, and a block member (`alt`
+    /// branch, `unordered` member) keeps the block's own all-or-none rule, as
+    /// §6.7c never arms one beside another transaction's answer.
+    pub fn retire(&mut self, step: &str) -> bool {
+        let retirable = self.plan.step(step).is_some_and(|s| {
+            s.is_expect()
+                && !s.optional_expect()
+                && self.plan.program().items[s.loc.item].kind == ItemKind::Message
+        }) && self.steps.get(step).copied() == Some(StepStatus::Pending);
+        if !retirable {
+            return false;
+        }
+        self.steps.insert(step.to_string(), StepStatus::Retired);
+        self.retired.push(step.to_string());
         self.refresh_items();
         true
     }
@@ -1174,5 +1231,114 @@ mod tests {
         cursor.complete("s1");
         cursor.complete("s2");
         assert_eq!(cursor.frontier(), ["s3"], "the second 2xx waits behind the BYE");
+    }
+
+    /// A final on a transaction retires the required expect it was charged on:
+    /// the step settles, what stands behind it arms, and an `after` or a dwell
+    /// anchored on it is satisfied.
+    #[test]
+    fn a_retired_expect_settles_and_what_stands_behind_it_arms() {
+        let p = plan(&format!(
+            "[{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            send("s2", "A", "PRACK"),
+            answer("s3", "A", 481, "PRACK"),
+            send("s4", "A", "ACK")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        cursor.complete("s2");
+        assert_eq!(cursor.frontier(), ["s3"]);
+        assert!(cursor.retire("s3"), "a pending required expect of a message item retires");
+        assert_eq!(cursor.status("s3"), Some(StepStatus::Retired));
+        assert!(cursor.node_complete("s3"), "an anchor on a retired step is satisfied");
+        assert_eq!(cursor.retired(), ["s3"]);
+        assert_eq!(cursor.frontier(), ["s4"], "the leg moves past it");
+        assert!(!cursor.retire("s3"), "retired once");
+    }
+
+    /// Retirement is refused on everything that is not a pending required
+    /// expect of a message item: a send, a completed step, an `optional` (which
+    /// is released instead), an `alt` branch and an `unordered` member.
+    #[test]
+    fn retirement_is_refused_outside_a_pending_required_message_expect() {
+        let alt = format!(
+            r#"{{"id":"a1","op":"alt","branches":[
+                 {{"name":"answered","steps":[{}]}},
+                 {{"name":"busy","steps":[{}]}}]}}"#,
+            expect("s3", "A", 200),
+            expect("s4", "A", 486)
+        );
+        let group = format!(
+            r#"{{"id":"u1","op":"unordered","steps":[{},{}]}}"#,
+            answer("s6", "A", 200, "BYE"),
+            answer("s7", "A", 487, "INVITE")
+        );
+        let p = plan(&format!(
+            "[{},{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            optional("s2", "A", 183),
+            alt,
+            send("s5", "A", "BYE"),
+            group
+        ));
+        let mut cursor = Cursor::new(&p);
+        assert!(!cursor.retire("s1"), "a send");
+        cursor.complete("s1");
+        assert!(!cursor.retire("s1"), "a completed step");
+        assert!(!cursor.retire("s2"), "an optional is released, never retired");
+        assert!(cursor.release("s2"));
+        assert!(!cursor.retire("s3") && !cursor.retire("s4"), "an alt branch");
+        cursor.complete("s3");
+        cursor.complete("s5");
+        assert_eq!(cursor.frontier(), ["s6", "s7"]);
+        assert!(!cursor.retire("s6") && !cursor.retire("s7"), "an unordered member");
+        assert!(cursor.retired().is_empty());
+    }
+
+    /// A retired final CLOSES its transaction for §6.7c: a later answer of the
+    /// same method behind it is another transaction's, not yet opened, and is
+    /// not walked to.
+    #[test]
+    fn a_required_expect_behind_a_retired_final_of_its_transaction_is_not_walked_to() {
+        let p = plan(&format!(
+            "[{},{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            answer("s2", "A", 486, "INVITE"),
+            send("s3", "A", "ACK"),
+            request_expect("s4", "A", "BYE"),
+            answer("s5", "A", 200, "INVITE")
+        ));
+        let mut cursor = Cursor::new(&p);
+        cursor.complete("s1");
+        assert!(cursor.retire("s2"));
+        cursor.complete("s3");
+        assert_eq!(cursor.frontier(), ["s4"], "the 200 is not the retired transaction's answer");
+    }
+
+    /// The send that opened the transaction an expect waits on: the leg's last
+    /// send of that method before it, whatever stands between; none for a
+    /// status-only expect or a leg that never sent the method.
+    #[test]
+    fn the_opening_send_is_the_last_send_of_the_method_before_the_expect() {
+        let p = plan(&format!(
+            "[{},{},{},{},{},{},{}]",
+            send("s1", "A", "INVITE"),
+            send("s2", "A", "PRACK"),
+            answer("s3", "A", 200, "PRACK"),
+            send("s4", "A", "PRACK"),
+            answer("s5", "A", 481, "PRACK"),
+            answer("s6", "A", 600, "INVITE"),
+            status_only("s7", "A", 200)
+        ));
+        let cursor = Cursor::new(&p);
+        assert_eq!(cursor.opening_send("s3"), Some("s2"));
+        assert_eq!(cursor.opening_send("s5"), Some("s4"));
+        assert_eq!(cursor.opening_send("s6"), Some("s1"));
+        assert_eq!(cursor.opening_send("s7"), None, "a status alone names no transaction");
+        assert_eq!(cursor.opening_send("s1"), None, "a send waits on nothing");
+        let relay =
+            plan(&format!("[{},{}]", send("s1", "B", "INVITE"), relayed("s2", "A", 183, "s1")));
+        assert_eq!(Cursor::new(&relay).opening_send("s2"), None, "this leg sent no INVITE");
     }
 }
