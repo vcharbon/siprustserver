@@ -516,7 +516,8 @@ pub(super) async fn reject_stray_cancel(
 }
 
 /// A request refused on a live call's behalf is still a message of the
-/// call's: the ring records it and the answer, and the record lands.
+/// call's: the ring records it and the answer as a turn of their own, and
+/// the record lands.
 fn record_refusal(
     ctx: &RouterCtx,
     call: Call,
@@ -528,7 +529,7 @@ fn record_refusal(
     let Some(ring) = crate::message_ring::Ring::of(&ctx.config) else { return };
     let CallEvent::Sip { message, .. } = event else { return };
     let SipMessage::Request(req) = message.as_ref() else { return };
-    ctx.state.update(ring.refused(call, leg_id, req, answer, now_ms));
+    ctx.state.update(call::helpers::seal_turn(ring.refused(call, leg_id, req, answer, now_ms)));
 }
 
 /// Run the synchronous rule chain for one in-dialog event, with the

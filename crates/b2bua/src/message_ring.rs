@@ -6,7 +6,9 @@
 //! re-sends of an unreliable provisional (RFC 3261 §13.3.1.1) are each a
 //! message of their own and are recorded per copy: that is what the wire
 //! shows. The liveness probe this stack originates and its answer are not
-//! dialog history and are recorded on neither face.
+//! dialog history and are recorded on neither face. Every entry carries the
+//! number of the turn recording it; the router seals the turn where its
+//! record lands (`call::helpers::seal_turn`).
 //!
 //! The header values an entry keeps are read off the parsed message by
 //! `sip-message` here, once; nothing downstream re-reads a datagram.
@@ -152,10 +154,10 @@ impl Ring {
         self.record(call, leg_id, trying)
     }
 
-    /// Record a request the router refused on the call's behalf without a
-    /// turn — one naming a dialog the leg does not hold, a CANCEL matching no
-    /// transaction (RFC 3261 §12.2.2, §9.2) — with the answer it sent, if any
-    /// (an ACK draws none).
+    /// Record a request the router refused on the call's behalf without
+    /// running the rules — one naming a dialog the leg does not hold, a
+    /// CANCEL matching no transaction (RFC 3261 §12.2.2, §9.2) — with the
+    /// answer it sent, if any (an ACK draws none).
     pub(crate) fn refused(
         &self,
         call: Call,

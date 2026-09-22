@@ -241,7 +241,7 @@ pub fn build_initial_call(
         decision_log: Vec::new(),
         decision_ordinal: 0,
         termination: None,
-        message_turn: 0,
+        message_turn: 1,
         sm_cursors: std::collections::BTreeMap::new(),
     }
 }

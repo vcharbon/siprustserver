@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use call::helpers::seal_termination_seq;
+use call::helpers::{seal_termination_seq, seal_turn};
 use call::{CallModelState, TimerType};
 use sip_message::Method;
 use sip_txn::TxnKind;
@@ -59,11 +59,16 @@ pub(super) async fn process_result(
     // termination this turn began is cut after it: every ring entry with
     // `seq <= termination.last_seq` was received or sent as part of
     // beginning the termination, every later one came after (the peer's 200
-    // to the relayed BYE, the ACK to a 487). With the ring off the cut stays
-    // `0`.
+    // to the relayed BYE, the ACK to a 487). The turn is sealed with it, so
+    // the next turn's entries take the next number. With the ring off the
+    // cut stays `0`.
     let result = match crate::message_ring::Ring::of(&ctx.config) {
         Some(ring) => HandlerResult {
-            call: seal_termination_seq(ring.sent(result.call, &result.effects.outbound, now_ms)),
+            call: seal_turn(seal_termination_seq(ring.sent(
+                result.call,
+                &result.effects.outbound,
+                now_ms,
+            ))),
             effects: result.effects,
         },
         None => result,
