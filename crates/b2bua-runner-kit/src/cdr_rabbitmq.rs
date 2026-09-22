@@ -1,6 +1,6 @@
-//! The RabbitMQ CDR sink a runner composes from env: `B2BUA_CDR_RABBITMQ_URL`
-//! set → [`RabbitMqCdrWriter`], publishing one JSON [`CdrRecord`] per
-//! terminated call; unset → no sink, and [`crate::RunnerBase::deps`] keeps its
+//! The RabbitMQ CDR sink a runner composes from env ([`RabbitMqCdrSettings`]):
+//! [`RabbitMqCdrWriter`] publishes one JSON [`CdrRecord`] per terminated call;
+//! without a URL there is no sink, and [`crate::RunnerBase::deps`] keeps its
 //! discarding default.
 //!
 //! ## Buffering
@@ -30,7 +30,7 @@ use lapin::{
 };
 use tokio::sync::Mutex;
 
-/// The RabbitMQ sink's env grammar.
+/// The RabbitMQ CDR sink's env grammar, the one statement of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RabbitMqCdrSettings {
     /// AMQP URI (`amqp://user:pass@host:5672/vhost`), `B2BUA_CDR_RABBITMQ_URL`.
@@ -51,24 +51,27 @@ impl RabbitMqCdrSettings {
         };
         let queue = get("B2BUA_CDR_RABBITMQ_QUEUE").unwrap_or_else(|| "cdr".to_string());
         let raw_max = get("B2BUA_CDR_RABBITMQ_MAX_LEN").unwrap_or_else(|| "100000".to_string());
-        let max_len = raw_max.trim().parse().map_err(|e| {
+        let max_len = raw_max.parse().map_err(|e| {
             format!("B2BUA_CDR_RABBITMQ_MAX_LEN must be an integer, got {raw_max:?}: {e}")
         })?;
         Ok(Some(Self { url, queue, max_len }))
     }
+
+    /// The writer these settings describe, recording into `metrics` (the
+    /// registry the core exports, so `cdr_written_total` and
+    /// `cdr_dropped_total` count its publishes).
+    pub fn into_sink(self, metrics: &B2buaMetrics) -> Arc<dyn CdrWriter> {
+        Arc::new(RabbitMqCdrWriter::new(self.url, self.queue, self.max_len, metrics.clone()))
+    }
 }
 
 /// The RabbitMQ sink the settings read through `get` select, recording into
-/// `metrics` (the registry the core exports, so `cdr_written_total` and
-/// `cdr_dropped_total` count its publishes); `Ok(None)` when no URL is set.
+/// `metrics`; `Ok(None)` when no URL is set.
 pub fn rabbitmq_cdr_sink_from_lookup(
     get: impl Fn(&str) -> Option<String>,
     metrics: &B2buaMetrics,
 ) -> Result<Option<Arc<dyn CdrWriter>>, String> {
-    Ok(RabbitMqCdrSettings::from_lookup(get)?.map(|s| {
-        Arc::new(RabbitMqCdrWriter::new(s.url, s.queue, s.max_len, metrics.clone()))
-            as Arc<dyn CdrWriter>
-    }))
+    Ok(RabbitMqCdrSettings::from_lookup(get)?.map(|s| s.into_sink(metrics)))
 }
 
 /// Publishes terminated-call CDRs as JSON onto an AMQP queue.
@@ -259,13 +262,21 @@ mod tests {
         ]))
         .expect_err("a non-integer bound must refuse boot");
         assert!(e.contains("B2BUA_CDR_RABBITMQ_MAX_LEN"), "msg was: {e}");
+        assert!(
+            RabbitMqCdrSettings::from_lookup(lookup(&[
+                ("B2BUA_CDR_RABBITMQ_URL", "amqp://h/%2f"),
+                ("B2BUA_CDR_RABBITMQ_MAX_LEN", " 5"),
+            ]))
+            .is_err(),
+            "a padded bound is not an integer either"
+        );
     }
 
     /// The selected sink publishes: a write against an unparsable broker URI
     /// fails before any socket is opened and counts one dropped record, which
     /// the discarding default never does.
     #[tokio::test]
-    async fn a_set_url_selects_a_sink_that_publishes_each_record() {
+    async fn a_set_url_selects_the_broker_sink_not_the_discarding_default() {
         let metrics = B2buaMetrics::new();
         let sink = rabbitmq_cdr_sink_from_lookup(
             lookup(&[("B2BUA_CDR_RABBITMQ_URL", "not an amqp uri")]),

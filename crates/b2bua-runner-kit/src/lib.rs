@@ -44,13 +44,11 @@
 //! What deliberately does NOT live here: the decision engine (the one piece a
 //! runner exists to choose), the composed service list, replication membership
 //! discovery (kube-coupled; build a `ReplicationSetup` and assign
-//! `deps.replication`), and binary-specific CDR sinks / allocator wiring —
-//! those are the runner's own, injected through the seams above.
-//!
-//! The RabbitMQ CDR sink's env grammar:
-//!   B2BUA_CDR_RABBITMQ_URL     AMQP URI; set → one JSON `CdrRecord` per terminated call (unset = discard)
-//!   B2BUA_CDR_RABBITMQ_QUEUE   destination queue             (default cdr)
-//!   B2BUA_CDR_RABBITMQ_MAX_LEN broker `x-max-length`, drop-head (default 100000; 0 = unbounded)
+//! `deps.replication`), and allocator wiring — those are the runner's own,
+//! injected through the seams above. The CDR sink is the runner's choice too:
+//! the kit ships the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env
+//! grammar) and the discarding default, and a runner may pass any other
+//! [`CdrWriter`] to [`RunnerBase::deps`].
 
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -699,9 +697,9 @@ impl RunnerBase {
         }
     }
 
-    /// The RabbitMQ CDR sink `B2BUA_CDR_RABBITMQ_*` selects, recording into
-    /// [`Self::metrics`]; `None` when the URL is unset. Panics (boot refusal)
-    /// on a malformed `B2BUA_CDR_RABBITMQ_MAX_LEN`.
+    /// The RabbitMQ CDR sink the env selects ([`RabbitMqCdrSettings`]),
+    /// recording into [`Self::metrics`]; `None` when the URL is unset. Panics
+    /// (boot refusal) on a malformed `B2BUA_CDR_RABBITMQ_MAX_LEN`.
     pub fn rabbitmq_cdr_sink_from_env(&self) -> Option<Arc<dyn CdrWriter>> {
         let settings = RabbitMqCdrSettings::from_lookup(|k| env::var(k).ok())
             .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))?;
@@ -713,12 +711,7 @@ impl RunnerBase {
             buffer = self.env.cdr_queue,
             "CDR sink wired"
         );
-        Some(Arc::new(RabbitMqCdrWriter::new(
-            settings.url,
-            settings.queue,
-            settings.max_len,
-            self.metrics.clone(),
-        )))
+        Some(settings.into_sink(&self.metrics))
     }
 
     /// Production-shaped [`B2buaDeps`] defaults around the injected decision

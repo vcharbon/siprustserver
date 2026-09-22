@@ -181,8 +181,8 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 # speak plaintext `http://` only (internal cluster / collector), so no TLS stack,
 # no h2, no system-proxy probing is compiled in.
 reqwest = { version = "0.13", default-features = false }
-# CDR-on-RabbitMQ sink (b2bua-runner) + the dedicated CDR metrics consumer
-# (cdr-consumer-runner). `lapin` is the async AMQP 0-9-1 client; it is runtime-
+# CDR-on-RabbitMQ sink (b2bua-runner-kit, composed by every runner) + the
+# dedicated CDR metrics consumer (cdr-consumer-runner). `lapin` is the async AMQP 0-9-1 client; it is runtime-
 # agnostic, so the two `*-trait` shims bind its executor/reactor to the same
 # tokio runtime everything else runs on (no second async runtime). Producer-side
 # the existing `BufferedCdrWriter` bounded queue is preserved in front of the
