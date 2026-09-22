@@ -506,6 +506,12 @@ impl Harness {
         self.network.await_in_flight(Duration::from_millis(200)).await;
     }
 
+    /// The run's recorder, so a scene records other channels (an HTTP
+    /// service's exchanges) on the same sequence and clock as the SIP trace.
+    pub fn recorder(&self) -> Recorder {
+        self.recorder.clone()
+    }
+
     /// The recording decorator handle — lets a caller read the raw signaling
     /// event channel (`recording().channel().snapshot()`) to run an audit rule
     /// directly over the trace WITHOUT consuming the harness or invoking the

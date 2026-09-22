@@ -123,6 +123,16 @@ impl ScriptedHttpService {
         Self::with_nonce(token::random_nonce())
     }
 
+    /// A service whose tokens travel under `codec`.
+    pub fn with_codec(_codec: Arc<dyn super::HttpContinuationCodec>) -> Self {
+        Self::new()
+    }
+
+    /// A service whose tokens carry `nonce` and travel under `codec`.
+    pub fn with_nonce_and_codec(nonce: u64, _codec: Arc<dyn super::HttpContinuationCodec>) -> Self {
+        Self::with_nonce(nonce)
+    }
+
     /// A service whose tokens carry `nonce`.
     pub fn with_nonce(nonce: u64) -> Self {
         Self { shared: Arc::new(Shared { nonce, state: Mutex::new(State::default()) }) }

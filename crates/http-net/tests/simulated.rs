@@ -12,6 +12,7 @@ use http_net::{
     ExchangeOutcome, Fault, HttpError, HttpRequest, HttpResponse, HttpService, HttpTransport,
     RecordingHttpNetwork, SimulatedHttpNetwork,
 };
+use layer_harness::{Recorder, TransportKind};
 use sip_clock::testkit::advance_in_100ms_chunks;
 use sip_clock::Clock;
 
@@ -244,7 +245,11 @@ async fn headers_and_query_travel_through_the_fabric() {
 #[tokio::test(start_paused = true)]
 async fn recorder_captures_request_headers_and_response_headers() {
     let sim = Arc::new(SimulatedHttpNetwork::new());
-    let rec = RecordingHttpNetwork::new(sim.clone(), Clock::test_at(0));
+    let rec = RecordingHttpNetwork::new(
+        sim.clone(),
+        &Recorder::with_clock(TransportKind::Fake, Clock::test_at(0)),
+        "10.0.0.5:5060",
+    );
     let dst = addr("10.0.0.2:8080");
     let _server = rec.serve(dst, Arc::new(ReflectService)).await.unwrap();
 
@@ -256,7 +261,7 @@ async fn recorder_captures_request_headers_and_response_headers() {
     advance_in_100ms_chunks(Duration::from_millis(10)).await;
     h.await.unwrap().unwrap();
 
-    let cap = rec.captured();
+    let cap = rec.exchanges();
     assert_eq!(cap.len(), 1);
     assert_eq!(cap[0].path, "/routes?seed=1");
     assert!(cap[0].req_headers.iter().any(|(k, v)| k == "x-debug" && v == "yes"));
@@ -275,7 +280,11 @@ async fn recorder_captures_request_headers_and_response_headers() {
 #[tokio::test(start_paused = true)]
 async fn recorder_keeps_the_row_of_a_request_the_caller_abandoned() {
     let sim = Arc::new(SimulatedHttpNetwork::new());
-    let rec = RecordingHttpNetwork::new(sim.clone(), Clock::test_at(0));
+    let rec = RecordingHttpNetwork::new(
+        sim.clone(),
+        &Recorder::with_clock(TransportKind::Fake, Clock::test_at(0)),
+        "10.0.0.5:5060",
+    );
     let (svc, _calls) = echo();
     let dst = addr("10.0.0.1:8080");
     let _server = rec.serve(dst, svc).await.unwrap();
@@ -294,7 +303,7 @@ async fn recorder_keeps_the_row_of_a_request_the_caller_abandoned() {
     advance_in_100ms_chunks(Duration::from_millis(200)).await;
     assert!(h.await.unwrap().is_err(), "the caller's budget fires under stall");
 
-    let cap = rec.captured();
+    let cap = rec.exchanges();
     assert_eq!(cap.len(), 1, "the abandoned request is recorded, not dropped");
     assert_eq!(cap[0].path, "/calls");
     assert_eq!(cap[0].req_body, b"asked");
@@ -312,7 +321,11 @@ async fn recorder_keeps_the_row_of_a_request_the_caller_abandoned() {
 async fn recorder_stamps_an_exchange_when_the_request_went_out() {
     let sim = Arc::new(SimulatedHttpNetwork::new());
     let clock = Clock::test_at(0);
-    let rec = RecordingHttpNetwork::new(sim.clone(), clock.clone());
+    let rec = RecordingHttpNetwork::new(
+        sim.clone(),
+        &Recorder::with_clock(TransportKind::Fake, clock.clone()),
+        "10.0.0.5:5060",
+    );
     let (svc, _calls) = echo();
     let dst = addr("10.0.0.1:8080");
     let _server = rec.serve(dst, svc).await.unwrap();
@@ -327,7 +340,7 @@ async fn recorder_stamps_an_exchange_when_the_request_went_out() {
     advance_in_100ms_chunks(Duration::from_millis(2000)).await;
     h.await.unwrap().unwrap();
 
-    let cap = rec.captured();
+    let cap = rec.exchanges();
     assert_eq!(cap.len(), 1);
     assert!(
         cap[0].at_ms - sent_at < 500,
@@ -339,7 +352,11 @@ async fn recorder_stamps_an_exchange_when_the_request_went_out() {
 #[tokio::test(start_paused = true)]
 async fn recorder_captures_response_and_error() {
     let sim = Arc::new(SimulatedHttpNetwork::new());
-    let rec = RecordingHttpNetwork::new(sim.clone(), Clock::test_at(0));
+    let rec = RecordingHttpNetwork::new(
+        sim.clone(),
+        &Recorder::with_clock(TransportKind::Fake, Clock::test_at(0)),
+        "10.0.0.5:5060",
+    );
     let (svc, _calls) = echo();
     let dst = addr("10.0.0.1:8080");
     let _server = rec.serve(dst, svc).await.unwrap();
@@ -355,7 +372,7 @@ async fn recorder_captures_response_and_error() {
     sim.apply_fault(Fault::Cut { dst });
     let _ = rec.request(dst, HttpRequest::get("/gone")).await;
 
-    let cap = rec.captured();
+    let cap = rec.exchanges();
     assert_eq!(cap.len(), 2);
     assert_eq!(cap[0].method, "POST");
     assert_eq!(cap[0].path, "/hi");

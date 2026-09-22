@@ -1812,6 +1812,7 @@ dependencies = [
  "http-net",
  "hyper",
  "hyper-util",
+ "layer-harness",
  "reqwest",
  "serde",
  "serde_json",
@@ -3786,6 +3787,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "http-net",
  "layer-harness",
  "observe",
  "seq-report",

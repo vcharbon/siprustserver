@@ -29,10 +29,14 @@ observe = { path = "../observe" }
 sip-net = { path = "../sip-net" }
 layer-harness = { path = "../layer-harness" }
 seq-report = { path = "../seq-report" }
+# HTTP exchanges a run records on its `Recorder` join the ladder.
+http-net = { path = "../http-net" }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# The HTTP sample runs on real sockets too.
+http-net = { path = "../http-net", features = ["real"] }
 # Test-only: the harness itself never emits. Its own tests log through the
 # facade to prove the capture buffer a run installs is the one that sees it.
 tracing = { workspace = true }

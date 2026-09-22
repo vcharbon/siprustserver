@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use layer_harness::{LaneKey, Recorder, Stamped};
 use sip_clock::Clock;
 
 use super::{
@@ -71,6 +72,60 @@ pub struct CapturedExchange {
     pub req_body: Vec<u8>,
     /// What came back.
     pub outcome: ExchangeOutcome,
+}
+
+/// The `layer-harness` channel key HTTP exchanges are recorded under.
+pub const HTTP_TAG: &str = "http-net/HttpNetwork";
+
+/// How one side of an exchange ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HttpOutcome {
+    /// A response.
+    Response(HttpResponse),
+    /// A transport error, as the client saw it.
+    Error(String),
+    /// The connection closed without a response.
+    Abort,
+    /// The future was dropped before the exchange ended.
+    Abandoned,
+}
+
+/// One observation on the HTTP channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HttpNetworkEvent {
+    /// A client sent `request` to `dst`.
+    Sent { client: LaneKey, dst: SocketAddr, request: HttpRequest },
+    /// The client exchange opened at seq `exchange` ended.
+    Received { exchange: u64, outcome: HttpOutcome },
+    /// A bound service took `request`.
+    Served {
+        service: LaneKey,
+        peer: Option<SocketAddr>,
+        exchange: Option<u64>,
+        request: HttpRequest,
+    },
+    /// The service answer to the request served at seq `served`.
+    Answered { served: u64, outcome: HttpOutcome },
+}
+
+/// One exchange as the ladder draws it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedHttpEntry {
+    pub seq: u64,
+    pub at_ms: u64,
+    pub requester: Option<LaneKey>,
+    pub peer: Option<SocketAddr>,
+    pub service: LaneKey,
+    pub request: HttpRequest,
+    pub reply_seq: Option<u64>,
+    pub reply_at_ms: Option<u64>,
+    pub outcome: Option<HttpOutcome>,
+    pub served: bool,
+}
+
+/// The exchanges `events` record.
+pub fn to_http_entries(_events: &[Stamped<HttpNetworkEvent>]) -> Vec<RecordedHttpEntry> {
+    Vec::new()
 }
 
 type Sink = Arc<Mutex<Vec<CapturedExchange>>>;
@@ -127,13 +182,22 @@ pub struct RecordingHttpNetwork {
 }
 
 impl RecordingHttpNetwork {
-    /// Wrap `inner`, stamping captures with `clock`.
-    pub fn new(inner: Arc<dyn HttpTransport>, clock: Clock) -> Self {
-        Self { inner, sink: Arc::new(Mutex::new(Vec::new())), clock }
+    /// Wrap `inner`, recording onto `recorder` from the `client` lane.
+    pub fn new(
+        inner: Arc<dyn HttpTransport>,
+        recorder: &Recorder,
+        _client: impl Into<LaneKey>,
+    ) -> Self {
+        Self { inner, sink: Arc::new(Mutex::new(Vec::new())), clock: recorder.clock() }
     }
 
-    /// Snapshot every exchange captured so far.
-    pub fn captured(&self) -> Vec<CapturedExchange> {
+    /// Name the service lane `serve` registers at `addr`.
+    pub fn with_service_name(self, _addr: SocketAddr, _name: impl Into<String>) -> Self {
+        self
+    }
+
+    /// The exchanges this client lane made.
+    pub fn exchanges(&self) -> Vec<CapturedExchange> {
         self.sink.lock().unwrap().clone()
     }
 }

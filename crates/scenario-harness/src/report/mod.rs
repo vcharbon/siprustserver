@@ -6,6 +6,7 @@
 //! of truth, as the migration's recording-first design intends.
 
 pub mod html;
+pub mod http;
 pub mod project;
 pub mod svg;
 pub mod text;

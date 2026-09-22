@@ -244,6 +244,7 @@ fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lan
             NetworkTag::Core => LaneKind::Sut,
             NetworkTag::Ext if name == "proxy" => LaneKind::Sut,
             NetworkTag::Ext => LaneKind::Ua,
+            NetworkTag::Service => LaneKind::Service,
         };
         if seen.insert(id.clone()) {
             let mut lane = Lane::new(id, label, kind);

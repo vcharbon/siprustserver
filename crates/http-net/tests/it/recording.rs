@@ -1,0 +1,287 @@
+//! `RecordingHttpNetwork` on the `layer-harness` `Recorder`: every exchange is
+//! events on one typed channel, stamped from the recorder's sequencer, so HTTP
+//! interleaves with every other channel of the run. The served side is
+//! recorded by `serve()`; the client side by `request()`.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use http_net::{
+    to_http_entries, ExchangeOutcome, Fault, HttpAnswer, HttpError, HttpNetworkEvent, HttpOutcome,
+    HttpRequest, HttpResponse, HttpService, HttpTransport, RecordingHttpNetwork,
+    SimulatedHttpNetwork, HTTP_TAG,
+};
+use layer_harness::{lane_key, NetworkTag, Recorder, TransportKind};
+use sip_clock::testkit::advance_in_100ms_chunks;
+use sip_clock::Clock;
+
+const CLIENT: &str = "10.0.0.5:5060";
+
+fn addr(s: &str) -> std::net::SocketAddr {
+    s.parse().unwrap()
+}
+
+fn recorder() -> Recorder {
+    Recorder::with_clock(TransportKind::Fake, Clock::test_at(0))
+}
+
+struct Ok200;
+
+#[async_trait]
+impl HttpService for Ok200 {
+    async fn handle(&self, req: HttpRequest) -> HttpResponse {
+        HttpResponse::ok(req.body).header("x-served", "yes")
+    }
+}
+
+/// Never answers.
+struct Withhold;
+
+#[async_trait]
+impl HttpService for Withhold {
+    async fn handle(&self, _req: HttpRequest) -> HttpResponse {
+        std::future::pending().await
+    }
+}
+
+/// Closes the connection without a response.
+struct Resets;
+
+#[async_trait]
+impl HttpService for Resets {
+    async fn handle(&self, _req: HttpRequest) -> HttpResponse {
+        HttpResponse::status(500)
+    }
+
+    async fn answer(&self, _req: HttpRequest) -> HttpAnswer {
+        HttpAnswer::Abort
+    }
+}
+
+async fn send(rec: &RecordingHttpNetwork, dst: std::net::SocketAddr, path: &str) {
+    let h = tokio::spawn({
+        let rec = rec.clone();
+        let req = HttpRequest::post(path, b"{\"k\":1}".to_vec());
+        async move { rec.request(dst, req).await }
+    });
+    advance_in_100ms_chunks(Duration::from_millis(10)).await;
+    let _ = h.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_exchange_rides_the_recorder_sequence_between_other_channels() {
+    let recorder = recorder();
+    let other = recorder.for_tag::<&'static str>("demo/Other");
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let dst = addr("10.0.0.1:8080");
+    let _server = sim.serve(dst, Arc::new(Ok200)).await.unwrap();
+    let rec = RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT);
+
+    other.record("before");
+    send(&rec, dst, "/calls").await;
+    other.record("after");
+
+    let events = recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot();
+    assert_eq!(events.len(), 2, "request and reply: {events:?}");
+    let before = other.snapshot()[0].seq;
+    let after = other.snapshot()[1].seq;
+    assert!(before < events[0].seq && events[1].seq < after, "one sequence: {events:?}");
+    match &events[0].event {
+        HttpNetworkEvent::Sent { client, dst: to, request } => {
+            assert_eq!(client, CLIENT);
+            assert_eq!(*to, dst);
+            assert_eq!(request.path, "/calls");
+        }
+        other => panic!("expected the request first, got {other:?}"),
+    }
+    match &events[1].event {
+        HttpNetworkEvent::Received { exchange, outcome: HttpOutcome::Response(resp) } => {
+            assert_eq!(*exchange, events[0].seq, "the reply names its request");
+            assert_eq!(resp.status, 200);
+        }
+        other => panic!("expected the reply, got {other:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn serve_records_the_served_side_paired_with_the_recording_client() {
+    let recorder = recorder();
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let dst = addr("10.0.0.1:8080");
+    let rec = RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT);
+    let _server = rec.serve(dst, Arc::new(Ok200)).await.unwrap();
+
+    send(&rec, dst, "/calls").await;
+
+    let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
+    assert_eq!(entries.len(), 1, "one exchange, drawn once: {entries:?}");
+    let e = &entries[0];
+    assert!(e.served, "a recorded service saw it, so the served side is the row source");
+    assert_eq!(e.requester.as_deref(), Some(CLIENT), "paired with the client's lane");
+    assert_eq!(e.service, lane_key(dst));
+    assert_eq!(e.request.path, "/calls");
+    match &e.outcome {
+        Some(HttpOutcome::Response(resp)) => assert_eq!(resp.status, 200),
+        other => panic!("expected a response, got {other:?}"),
+    }
+    assert!(e.reply_seq.is_some_and(|s| s > e.seq));
+}
+
+#[tokio::test(start_paused = true)]
+async fn serve_registers_the_service_lane() {
+    let recorder = recorder();
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let dst = addr("10.0.0.1:8080");
+    let rec =
+        RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT).with_service_name(dst, "bl");
+    let _server = rec.serve(dst, Arc::new(Ok200)).await.unwrap();
+
+    let lanes = recorder.snapshot().lanes;
+    let lane = lanes.iter().find(|l| l.key == lane_key(dst)).expect("a lane for the service");
+    assert_eq!(lane.network, NetworkTag::Service);
+    assert_eq!(lane.names, vec!["bl".to_string()]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_from_an_unrecorded_client_is_served_without_a_requester() {
+    let recorder = recorder();
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let dst = addr("10.0.0.1:8080");
+    let rec = RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT);
+    let _server = rec.serve(dst, Arc::new(Ok200)).await.unwrap();
+
+    let h = tokio::spawn({
+        let sim = sim.clone();
+        async move { sim.request(dst, HttpRequest::post("/calls", Vec::new())).await }
+    });
+    advance_in_100ms_chunks(Duration::from_millis(10)).await;
+    h.await.unwrap().unwrap();
+
+    let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].served);
+    assert_eq!(entries[0].requester, None);
+    assert_eq!(entries[0].peer, None, "the simulated fabric carries no peer address");
+    assert!(rec.exchanges().is_empty(), "the recording client made no exchange");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_no_service_saw_is_drawn_from_the_client_side() {
+    let recorder = recorder();
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let dst = addr("10.0.0.1:8080");
+    let rec = RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT);
+    let _server = rec.serve(dst, Arc::new(Ok200)).await.unwrap();
+    sim.apply_fault(Fault::Cut { dst });
+
+    let err = rec.request(dst, HttpRequest::get("/gone")).await.unwrap_err();
+    assert!(matches!(err, HttpError::Connect(_)));
+
+    let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
+    assert_eq!(entries.len(), 1);
+    let e = &entries[0];
+    assert!(!e.served);
+    assert_eq!(e.requester.as_deref(), Some(CLIENT));
+    assert_eq!(e.service, lane_key(dst));
+    assert!(matches!(e.outcome, Some(HttpOutcome::Error(_))), "{:?}", e.outcome);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_withheld_answer_is_abandoned_on_both_sides_when_the_caller_gives_up() {
+    let recorder = recorder();
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let dst = addr("10.0.0.1:8080");
+    let rec = RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT);
+    let _server = rec.serve(dst, Arc::new(Withhold)).await.unwrap();
+
+    let h = tokio::spawn({
+        let rec = rec.clone();
+        async move {
+            tokio::time::timeout(
+                Duration::from_millis(150),
+                rec.request(dst, HttpRequest::post("/calls", b"asked".to_vec())),
+            )
+            .await
+        }
+    });
+    advance_in_100ms_chunks(Duration::from_millis(200)).await;
+    assert!(h.await.unwrap().is_err(), "the caller's budget fires");
+
+    let events = recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot();
+    assert!(
+        events.iter().any(|e| matches!(
+            e.event,
+            HttpNetworkEvent::Received { outcome: HttpOutcome::Abandoned, .. }
+        )),
+        "the client side ends abandoned: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e.event,
+            HttpNetworkEvent::Answered { outcome: HttpOutcome::Abandoned, .. }
+        )),
+        "the served side ends abandoned: {events:?}"
+    );
+    let entries = to_http_entries(&events);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].outcome, Some(HttpOutcome::Abandoned));
+
+    let cap = rec.exchanges();
+    assert_eq!(cap.len(), 1, "the abandoned request is in the client view");
+    assert!(
+        matches!(&cap[0].outcome, ExchangeOutcome::Error(d) if d.starts_with("timed out")),
+        "{:?}",
+        cap[0].outcome
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn serve_forwards_answer_so_a_reset_stays_a_reset() {
+    let recorder = recorder();
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let dst = addr("10.0.0.1:8080");
+    let rec = RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT);
+    let _server = rec.serve(dst, Arc::new(Resets)).await.unwrap();
+
+    let h = tokio::spawn({
+        let rec = rec.clone();
+        async move { rec.request(dst, HttpRequest::post("/calls", Vec::new())).await }
+    });
+    advance_in_100ms_chunks(Duration::from_millis(10)).await;
+    let err = h.await.unwrap().unwrap_err();
+    assert!(matches!(err, HttpError::Io { .. }), "a reset reaches the client: {err:?}");
+
+    let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].outcome, Some(HttpOutcome::Abort));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_client_view_is_stamped_on_the_recorder_clock_in_request_order() {
+    let clock = Clock::test_at(0);
+    let recorder = Recorder::with_clock(TransportKind::Fake, clock.clone());
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let dst = addr("10.0.0.1:8080");
+    let rec = RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT);
+    let _server = rec.serve(dst, Arc::new(Ok200)).await.unwrap();
+    sim.apply_fault(Fault::Delay { dst, ms: 500 });
+
+    let sent_at = clock.now_ms();
+    let h = tokio::spawn({
+        let rec = rec.clone();
+        async move { rec.request(dst, HttpRequest::get("/x")).await }
+    });
+    advance_in_100ms_chunks(Duration::from_millis(2000)).await;
+    h.await.unwrap().unwrap();
+    send(&rec, dst, "/y").await;
+
+    let cap = rec.exchanges();
+    assert_eq!(cap.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["/x", "/y"]);
+    assert!(cap[0].at_ms - sent_at < 500, "stamped at the request: {}", cap[0].at_ms);
+    assert!(matches!(
+        &cap[0].outcome,
+        ExchangeOutcome::Response { status: 200, headers, .. }
+            if headers.iter().any(|(k, v)| k == "x-served" && v == "yes")
+    ));
+}

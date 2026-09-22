@@ -76,6 +76,8 @@ pub enum LaneKind {
     /// A cluster node that carries BOTH SIP and replication traffic plus
     /// lifecycle markers (a b2bua worker, e.g. `b1`/`b2`).
     Node,
+    /// An HTTP service the actors consult (the requests' destination).
+    Service,
 }
 
 /// One diagram column. `id` is the stable key rows reference; `label` is the
@@ -124,6 +126,12 @@ pub enum RowKind {
     /// A replication changelog frame.
     Repl {
         /// `false` when the frame was not observed delivered.
+        delivered: bool,
+    },
+    /// An HTTP request or reply.
+    Http {
+        /// `false` when no reply came back (reset, withheld, abandoned) or the
+        /// request reached no service.
         delivered: bool,
     },
     /// An operator/chaos event — rendered as a full-width band, not an arrow.

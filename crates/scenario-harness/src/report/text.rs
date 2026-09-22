@@ -151,6 +151,7 @@ pub fn render(
         let net = match lane.network {
             layer_harness::NetworkTag::Ext => "ext",
             layer_harness::NetworkTag::Core => "core",
+            layer_harness::NetworkTag::Service => "service",
         };
         let view_label = match lane.names.first() {
             Some(n) => format!("{n} (endpoint, network={net})"),

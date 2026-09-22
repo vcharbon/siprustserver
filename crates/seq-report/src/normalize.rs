@@ -51,7 +51,7 @@ fn role_of_lane(lane: &Lane) -> String {
         return match lane.kind {
             crate::LaneKind::Sut => "sut".to_string(),
             crate::LaneKind::Node => "node".to_string(),
-            crate::LaneKind::Ua => "ua".to_string(),
+            crate::LaneKind::Ua | crate::LaneKind::Service => "ua".to_string(),
         };
     }
     name.to_string()
@@ -182,6 +182,7 @@ fn force_delivered(kind: RowKind) -> RowKind {
     match kind {
         RowKind::Sip { .. } => RowKind::Sip { delivered: true },
         RowKind::Repl { .. } => RowKind::Repl { delivered: true },
+        RowKind::Http { .. } => RowKind::Http { delivered: true },
         RowKind::Lifecycle => RowKind::Lifecycle,
     }
 }

@@ -16,6 +16,7 @@
 //!   recorded; an instance left short of its last step is unserved at run end
 //!   ([`HttpScriptHandle::verdict`]).
 
+mod codec;
 mod error;
 mod matcher;
 mod open;
@@ -26,6 +27,7 @@ mod token;
 mod validate;
 mod verdict;
 
+pub use codec::{HttpContinuationCodec, IdentityCodec};
 pub use error::HttpScriptError;
 pub use program::{
     HttpBindings, HttpCode, HttpReifiedStep, HttpReply, HttpRequestMatch, HttpScript,

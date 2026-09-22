@@ -116,3 +116,33 @@ async fn render_svg_matches_the_html_reports_diagram() {
     let html = seq_report::render_html(&result.seq_doc);
     assert!(html.contains(&svg), "the HTML report must embed the same SVG render_svg returns");
 }
+
+/// `rfc` republishes the rule-sourced findings only: a harness finding the
+/// run carries (an HTTP verdict, here) reaches the diagram's anomaly list and
+/// never the RFC findings.
+#[tokio::test(start_paused = true)]
+async fn rfc_keeps_only_rule_sourced_findings() {
+    let case = model::load_test_case(&workspace_root().join("e2e/cases/basic-call-identity.json"))
+        .expect("committed case loads");
+    let mut rt = FakeLsbcB2bua.build("result/rule-sourced", &fake_cfg()).await;
+    BasicCall.run(&mut rt, &case.input).await;
+    let (mut report, _rfc_gate) = rt.finish().await;
+    report.extra_anomalies.push(seq_report::Anomaly {
+        check: "http.unmatched".into(),
+        detail: "no script opens POST /x".into(),
+        lane: None,
+        endpoint: None,
+        advisory: Some(false),
+        row_seqs: Vec::new(),
+        rule_sourced: false,
+    });
+    let cell = CellId {
+        case: case.id.clone(),
+        shape: "basic-call".into(),
+        infra: "fake-lsbc-b2bua".into(),
+    };
+    let result = RunResult::from_run(cell, &report, Vec::new(), &[]);
+    assert!(result.seq_doc.anomalies.iter().any(|a| a.check == "http.unmatched"));
+    assert!(result.rfc.iter().all(|a| a.rule_sourced), "{:?}", result.rfc);
+    assert!(!result.seq_doc.passed, "a gating harness finding fails the diagram");
+}

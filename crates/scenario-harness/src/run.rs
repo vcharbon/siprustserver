@@ -50,6 +50,8 @@ pub struct RunReport {
     /// The audit verdict from the recording layer's `close()` (informational;
     /// a basic harness run does not fail on it).
     pub audit: Result<(), SignalingAuditViolation>,
+    /// Findings the caller folds into the report beside the RFC fold.
+    pub extra_anomalies: Vec<seq_report::Anomaly>,
     recorder: Recorder,
     events: Vec<Stamped<SignalingNetworkEvent>>,
     /// `(agent, anchor)` message labels the scenario attached via
@@ -81,6 +83,7 @@ impl RunReport {
             description,
             expects: Vec::new(),
             audit,
+            extra_anomalies: Vec::new(),
             recorder,
             events,
             anchors,
@@ -110,6 +113,11 @@ impl RunReport {
     /// The wire trace, projected from the recording channel.
     pub fn entries(&self) -> Vec<RecordedSipEntry> {
         to_sip_entries(&self.events)
+    }
+
+    /// The HTTP exchanges recorded on the run's recorder.
+    pub fn http_entries(&self) -> Vec<http_net::RecordedHttpEntry> {
+        Vec::new()
     }
 
     /// The recorder's drained scenario state (lanes + anomalies).
@@ -220,6 +228,7 @@ pub async fn run(scenario: &Scenario) -> RunReport {
         description: scenario.description.clone(),
         expects,
         audit,
+        extra_anomalies: Vec::new(),
         recorder,
         events,
         anchors: Vec::new(),

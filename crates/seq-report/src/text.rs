@@ -167,9 +167,9 @@ fn render_row(out: &mut String, row: &SeqRow, base: i64, doc: &SeqDoc) {
             ));
             out.push('\n');
         }
-        RowKind::Sip { delivered } | RowKind::Repl { delivered } => {
+        RowKind::Sip { delivered } | RowKind::Repl { delivered } | RowKind::Http { delivered } => {
             let plane = match row.kind {
-                RowKind::Sip { .. } => "SIP ",
+                RowKind::Sip { .. } | RowKind::Http { .. } => "SIP ",
                 RowKind::Repl { .. } => "REPL",
                 RowKind::Lifecycle => unreachable!(),
             };

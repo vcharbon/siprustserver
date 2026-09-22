@@ -99,6 +99,7 @@ fn lane_color(kind: LaneKind) -> &'static str {
         LaneKind::Ua => "#0f766e",
         LaneKind::Sut => "#92400e",
         LaneKind::Node => "#1e3a8a",
+        LaneKind::Service => "#0f766e",
     }
 }
 
@@ -580,7 +581,9 @@ fn svg_markup(
                     escape(&ts),
                 ));
             }
-            RowKind::Sip { delivered } | RowKind::Repl { delivered } => {
+            RowKind::Sip { delivered }
+            | RowKind::Repl { delivered }
+            | RowKind::Http { delivered } => {
                 let is_repl = matches!(row.kind, RowKind::Repl { .. });
                 // Per-key color for arrows carrying a `conn`: repl rows key on
                 // the socket (two flows to the same node, pre-crash vs
@@ -719,14 +722,16 @@ fn render_payloads(
         let ts = ts_label(doc, row.at_ms, base);
         match row.kind {
             RowKind::Lifecycle => {}
-            RowKind::Sip { delivered } | RowKind::Repl { delivered } => {
+            RowKind::Sip { delivered }
+            | RowKind::Repl { delivered }
+            | RowKind::Http { delivered } => {
                 let class = match row.kind {
-                    RowKind::Sip { .. } => "seq-sip",
+                    RowKind::Sip { .. } | RowKind::Http { .. } => "seq-sip",
                     RowKind::Repl { .. } => "seq-repl",
                     RowKind::Lifecycle => unreachable!(),
                 };
                 let plane = match row.kind {
-                    RowKind::Sip { .. } => "SIP",
+                    RowKind::Sip { .. } | RowKind::Http { .. } => "SIP",
                     RowKind::Repl { .. } => "REPL",
                     RowKind::Lifecycle => unreachable!(),
                 };

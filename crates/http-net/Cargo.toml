@@ -26,6 +26,8 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 # Recording timestamps come from the injected wall-clock seam.
 sip-clock = { path = "../sip-clock" }
+# The recording decorator records onto the test harness's `Recorder`.
+layer-harness = { path = "../layer-harness" }
 # The scripted service (`scripted`): programs are serde documents, request
 # bodies are validated as JSON before fragment matching, and the continuation
 # token is base64url on the wire.
@@ -49,3 +51,4 @@ tokio = { workspace = true }
 # `cargo test -p http-net` exercises the real transport too.
 http-net = { path = ".", features = ["real"] }
 sip-clock = { path = "../sip-clock", features = ["testkit"] }
+layer-harness = { path = "../layer-harness" }

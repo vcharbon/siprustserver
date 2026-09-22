@@ -13,7 +13,10 @@ mod simulated;
 
 #[cfg(feature = "real")]
 pub use real::RealHttpNetwork;
-pub use recording::{CapturedExchange, Direction, ExchangeOutcome, RecordingHttpNetwork};
+pub use recording::{
+    to_http_entries, CapturedExchange, Direction, ExchangeOutcome, HttpNetworkEvent, HttpOutcome,
+    RecordedHttpEntry, RecordingHttpNetwork, HTTP_TAG,
+};
 pub use simulated::{Fault, SimulatedHttpNetwork};
 
 /// A one-shot HTTP request.
