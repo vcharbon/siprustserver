@@ -19,6 +19,10 @@
 //!   each overridable field-by-field on the returned [`B2buaDeps`];
 //! - [`RunnerBase::rabbitmq_cdr_sink_from_env`] — the RabbitMQ CDR sink the
 //!   `B2BUA_CDR_RABBITMQ_*` grammar selects, passed to [`RunnerBase::deps`];
+//! - [`RunnerBase::replication_setup_from_env`] — the peer-to-peer
+//!   replication the `B2BUA_REPL*` grammar selects ([`ReplicationSettings`]:
+//!   static or EndpointSlice membership, per-attempt peer addressing), assigned
+//!   to `deps.replication`;
 //! - [`RunnerBase::spawn`] / [`RunnerBase::spawn_probe_server`] /
 //!   [`RunnerBase::spawn_gauge_sampler`] / [`RunnerBase::run_until_shutdown`]
 //!   — core spawn, the `/metrics`+`/ready` probe, the memory-attribution
@@ -42,10 +46,10 @@
 //! ```
 //!
 //! What deliberately does NOT live here: the decision engine (the one piece a
-//! runner exists to choose), the composed service list, replication membership
-//! discovery (kube-coupled; build a `ReplicationSetup` and assign
-//! `deps.replication`), and allocator wiring — those are the runner's own,
-//! injected through the seams above. The CDR sink is the runner's choice too:
+//! runner exists to choose), the composed service list, and allocator wiring —
+//! those are the runner's own, injected through the seams above. Replication is
+//! the runner's choice to take: a runner may assign any other
+//! `ReplicationSetup` to `deps.replication`. The CDR sink is the runner's choice too:
 //! the kit ships the RabbitMQ sink ([`RabbitMqCdrSettings`] holds its env
 //! grammar) and the discarding default, and a runner may pass any other
 //! [`CdrWriter`] to [`RunnerBase::deps`].
@@ -65,7 +69,7 @@ use b2bua::rules::ServiceDef;
 use b2bua::store::InMemoryCallStore;
 use b2bua::target_admission::{classify_admission, AdmissionVerdict};
 use b2bua::tier1_brake::{build_tier1_brake_hook, Tier1BrakeConfig, Tier1BrakeCounters};
-use b2bua::{B2buaCore, B2buaDeps};
+use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use call::Call;
 use http_net::RealHttpNetwork;
 use sip_clock::Clock;
@@ -717,6 +721,16 @@ impl RunnerBase {
             "CDR sink wired"
         );
         Some(settings.into_sink(&self.metrics))
+    }
+
+    /// The peer-to-peer replication the env selects ([`ReplicationSettings`]),
+    /// its store on [`Self::clock`]; `None` when replication is off or has no
+    /// membership. Panics (boot refusal) on a malformed `B2BUA_REPL_LISTEN` or
+    /// `B2BUA_REPL_PORT`.
+    pub async fn replication_setup_from_env(&self) -> Option<ReplicationSetup> {
+        replication_setup_from_lookup(|k| env::var(k).ok(), self.clock.clone())
+            .await
+            .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))
     }
 
     /// Production-shaped [`B2buaDeps`] defaults around the injected decision

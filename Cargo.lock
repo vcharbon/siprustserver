@@ -546,19 +546,14 @@ name = "b2bua-runner"
 version = "0.1.0"
 dependencies = [
  "announcement",
- "async-trait",
  "b2bua",
  "b2bua-runner-kit",
  "call",
  "jemalloc-stats",
- "kube",
  "probe-http",
- "repl-net",
- "rustls",
  "serde_json",
  "tikv-jemallocator",
  "tokio",
- "topology",
  "tracing",
 ]
 

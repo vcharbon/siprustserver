@@ -26,20 +26,7 @@ probe-http = { path = "../probe-http" }
 # service registry (`compose_services`) so its diagram is generated alongside.
 announcement = { path = "../announcement" }
 call = { path = "../call" }
-# Replication wiring (S11): the real TCP transport + the shared membership seam
-# (with the kube EndpointSlice informer feature for in-cluster discovery).
-repl-net = { path = "../repl-net" }
-topology = { path = "../topology", features = ["kube"] }
-# Build a default in-cluster kube client for K8sMembership.
-kube = { version = "1", default-features = false, features = ["client", "rustls-tls"] }
-# rustls 0.23 ships no compile-time default CryptoProvider unless a provider
-# feature is enabled; kube's `rustls-tls` doesn't pick one, so the process must
-# install one before the first TLS handshake or the kube client panics at
-# startup ("Could not automatically determine the process-level CryptoProvider").
-# Pin `ring` (already in the tree) and install it at the top of main().
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tokio = { workspace = true }
-async-trait = { workspace = true }
 # Lifecycle logging (ADR-0026). The subscriber itself is installed by the kit's
 # `bind`; this binary only emits.
 tracing = { workspace = true }

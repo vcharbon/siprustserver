@@ -63,20 +63,11 @@
 //!   B2BUA_STRESS_LIMITER_ID always-on limiter id on every call; "" disables  (default global-stress)
 //!   B2BUA_STRESS_LIMITER_LIMIT cap for that entry (never rejects in practice) (default 999999)
 //!
-//! ## HA replication (S11) — opt-in via `B2BUA_REPL=1` (default off = legacy)
-//!   B2BUA_REPL          "1"/"true" enables peer-to-peer call replication
-//!   B2BUA_REPL_LISTEN   replication TCP listen addr     (default 0.0.0.0:9092)
-//!   B2BUA_REPL_PORT     port peers are reached on       (default = REPL_LISTEN port)
-//!   B2BUA_PEERS         static membership `ord@host,..`  (dev/local; takes precedence)
-//!   B2BUA_REPL_SERVICE  headless Service to discover     (default b2bua-worker)
-//!   B2BUA_NAMESPACE     namespace for k8s discovery      (default $POD_NAMESPACE / sip-test)
+//! ## HA replication (S11) — opt-in via `B2BUA_REPL=1` (default off: unwired node)
+//!   B2BUA_REPL / _REPL_LISTEN / _REPL_PORT / B2BUA_PEERS / B2BUA_REPL_SERVICE /
+//!   B2BUA_NAMESPACE  the replication grammar (see `b2bua_runner_kit::ReplicationSettings`)
 //!
-//! Two deferred S11 decisions are resolved here:
-//!   - **Incarnation gen** = boot wall-clock seconds (monotonic across pod
-//!     restarts → `(new_gen,0) > (old_gen,*)` holds; see [`boot_incarnation`]).
-//!   - **Replication addressing** = port-agnostic `Peer.host` + a cluster-wide
-//!     `B2BUA_REPL_PORT` (see [`make_addr_resolver`]) — no per-peer port grammar.
-//! And SIGTERM latches the worker into `Draining` (OPTIONS 503 + readiness
+//! SIGTERM latches the worker into `Draining` (OPTIONS 503 + readiness
 //! probe fails) so k8s steers new calls away while in-flight calls finish.
 
 // Use jemalloc instead of the glibc system allocator. Under the many tokio
@@ -94,19 +85,10 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::env;
-use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
 use b2bua::decision::{CallLimiterEntry, ScriptedDecisionEngine};
-use b2bua::repl::{PeerResolver, ReplicatingCallStore};
-use b2bua::ReplicationSetup;
-use b2bua_runner_kit::{
-    env_flag, env_or, resolve, split_host_port, validate_default_dest, RunnerEnv,
-};
-use repl_net::RealReplicationNetwork;
-use topology::{Membership, Peer, StaticMembership};
+use b2bua_runner_kit::{env_or, split_host_port, validate_default_dest, RunnerEnv};
 
 /// Always-on "stress" limiter entry attached to every routed call so the full
 /// admit/release/refresh chain is exercised on all traffic (the endurance suite
@@ -122,142 +104,6 @@ fn stress_limiter_from_env() -> Option<CallLimiterEntry> {
         .and_then(|s| s.trim().parse::<i64>().ok())
         .unwrap_or(999_999);
     Some(CallLimiterEntry { id, limit })
-}
-
-/// **Incarnation gen** (deferred S11 decision: boot wall-clock vs pod epoch).
-/// We pick **boot wall-clock milliseconds**: normally monotonic across pod
-/// restarts, so a rebooted worker serves under a higher `gen` than its previous
-/// life — `(new_gen, 0) > (old_gen, *)` — and pullers apply its frames without
-/// a manual reset (ADR-0011 X9). Milliseconds (not seconds) so a sub-second
-/// crash-restart cannot reuse the previous life's gen with the counter reset to
-/// 0 — under the old seconds gen a warm peer kept tailing from its stale high
-/// counter and silently skipped every new entry. The wall clock can still step
-/// BACKWARD (NTP/VM resync); that case — and any residual collision — is
-/// handled server-side: `Changelog::needs_reset` forces a `ResetToBootstrap`
-/// whenever a puller presents a same-gen counter above our head or a
-/// future-gen watermark. Falls back to 0 only if the wall clock is before the
-/// epoch (never, in practice).
-fn boot_incarnation() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
-}
-
-/// Where replication peer addresses come from (ADR-0012 D3).
-enum ReplAddressing {
-    /// Static `B2BUA_PEERS`: the host is a bare IP or a user-provided DNS name —
-    /// use it directly (IP fast-path, else resolve the name).
-    Static,
-    /// k8s informer: derive the **stable per-pod FQDN** from the ordinal (=
-    /// StatefulSet pod name) and resolve it FRESH per connect, so a restarted
-    /// peer's new IP is picked up without a membership delta. Falls back to the
-    /// EndpointSlice-supplied host (a Pod IP) if CoreDNS misses, so we are not
-    /// hard-dependent on DNS for liveness.
-    K8sPodDns { service: String, namespace: String },
-}
-
-/// **Replication addressing** (ADR-0012 D3 / deferred S11 decision). Membership is
-/// port-agnostic (a Pod has one IP, many ports); every peer's repl server is at
-/// `<resolved-host>:repl_port`, where `repl_port` is one cluster-wide config value
-/// (`B2BUA_REPL_PORT`). The address is resolved **fresh on every connect attempt**
-/// so a restarted peer self-heals via the puller's own reconnect loop. `None`
-/// (unresolvable right now) → the puller backs off and retries, re-resolving.
-struct ReplResolver {
-    repl_port: u16,
-    addressing: ReplAddressing,
-}
-
-#[async_trait]
-impl PeerResolver for ReplResolver {
-    async fn resolve(&self, peer: &Peer) -> Option<SocketAddr> {
-        let addr = match &self.addressing {
-            ReplAddressing::Static => {
-                if let Ok(ip) = peer.host.parse::<IpAddr>() {
-                    Some(SocketAddr::new(ip, self.repl_port))
-                } else {
-                    tokio::net::lookup_host((peer.host.as_str(), self.repl_port))
-                        .await
-                        .ok()
-                        .and_then(|mut it| it.next())
-                }
-            }
-            ReplAddressing::K8sPodDns { service, namespace } => {
-                // Prefer the stable per-pod DNS name (D3): re-resolving it picks up
-                // a restarted peer's new IP without any membership delta.
-                let fqdn = format!("{}.{}.{}.svc.cluster.local", peer.ordinal, service, namespace);
-                let by_dns = tokio::net::lookup_host((fqdn.as_str(), self.repl_port))
-                    .await
-                    .ok()
-                    .and_then(|mut it| it.next());
-                // CoreDNS miss / NXDOMAIN-while-not-ready → fall back to the
-                // EndpointSlice host (a Pod IP). Backoff+retry covers transients.
-                by_dns.or_else(|| {
-                    peer.host.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, self.repl_port))
-                })
-            }
-        };
-        // Fires once per (re)connect attempt — its presence (with a *new* addr)
-        // proves the puller redirected to a restarted peer (handoff §7 / ADR-0012
-        // D3). `None` → unresolvable now; the puller backs off and retries.
-        match addr {
-            Some(a) => tracing::info!(peer = %peer.ordinal, addr = %a, "repl peer resolved"),
-            None => tracing::warn!(peer = %peer.ordinal, "repl peer unresolvable (will retry)"),
-        }
-        addr
-    }
-}
-
-fn make_addr_resolver(repl_port: u16, addressing: ReplAddressing) -> b2bua::repl::AddrResolver {
-    Arc::new(ReplResolver { repl_port, addressing })
-}
-
-/// Resolve cluster membership for replication. `B2BUA_PEERS` (a static
-/// `ord@host,..` list, used for dev/local) takes precedence; otherwise the k8s
-/// EndpointSlice informer watches the headless `B2BUA_REPL_SERVICE`. Returns
-/// `None` (→ replication stays off) if neither a static list nor an in-cluster
-/// kube client is available — liveness over completeness, the worker still
-/// serves SIP.
-async fn build_membership() -> Option<(Arc<dyn Membership>, ReplAddressing)> {
-    let peers = env_or("B2BUA_PEERS", "");
-    if !peers.trim().is_empty() {
-        match StaticMembership::from_string(&peers, "B2BUA_PEERS") {
-            Ok(m) => {
-                tracing::info!(source = "B2BUA_PEERS", %peers, "replication membership");
-                return Some((Arc::new(m), ReplAddressing::Static));
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "B2BUA_PEERS parse error — replication disabled");
-                return None;
-            }
-        }
-    }
-    let service = env_or("B2BUA_REPL_SERVICE", "b2bua-worker");
-    let namespace = env::var("B2BUA_NAMESPACE")
-        .or_else(|_| env::var("POD_NAMESPACE"))
-        .unwrap_or_else(|_| "sip-test".to_string());
-    // rustls 0.23 has no default CryptoProvider compiled in; install ring once
-    // before the kube client opens its first TLS connection (idempotent — a
-    // second call returns Err, which we ignore).
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    match kube::Client::try_default().await {
-        Ok(client) => {
-            tracing::info!(
-                source = "k8s-endpointslice",
-                %service,
-                %namespace,
-                "replication membership"
-            );
-            // Reach peers by their stable per-pod DNS name (ADR-0012 D3), built from
-            // the ordinal + this Service + namespace.
-            let addressing = ReplAddressing::K8sPodDns {
-                service: service.clone(),
-                namespace: namespace.clone(),
-            };
-            Some((Arc::new(topology::K8sMembership::spawn(client, namespace, service)), addressing))
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "no kube client and no B2BUA_PEERS — replication disabled");
-            None
-        }
-    }
 }
 
 #[tokio::main]
@@ -301,62 +147,8 @@ async fn main() {
         cdr_sink,
     );
 
-    // --- Replication wiring (opt-in, S11). `None` keeps the legacy path. ---
-    deps.replication = if env_flag("B2BUA_REPL") {
-        match build_membership().await {
-            Some((membership, addressing)) => {
-                let repl_listen = resolve(&env_or("B2BUA_REPL_LISTEN", "0.0.0.0:9092"));
-                // Cluster-wide repl port peers are reached on; defaults to our
-                // own listen port (homogeneous pool).
-                let repl_port: u16 = env_or("B2BUA_REPL_PORT", &repl_listen.port().to_string())
-                    .parse()
-                    .expect("B2BUA_REPL_PORT");
-                let incarnation_gen = boot_incarnation();
-                let store =
-                    Arc::new(ReplicatingCallStore::new(incarnation_gen, base.clock.clone()));
-                tracing::info!(
-                    listen = %repl_listen,
-                    peer_port = repl_port,
-                    incarnation_gen,
-                    "replication ENABLED"
-                );
-                // Diagnostic: log the discovered peer set a few times so we can
-                // see whether the K8sMembership informer actually populates peers
-                // (it starts empty and fills async). Empty after several seconds
-                // ⇒ informer/watch problem; populated ⇒ the issue is downstream.
-                {
-                    let m = membership.clone();
-                    tokio::spawn(async move {
-                        for _ in 0..6 {
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            let peers: Vec<String> = m
-                                .snapshot()
-                                .into_iter()
-                                .map(|p| {
-                                    format!(
-                                        "{}@{} ready={} terminating={}",
-                                        p.ordinal, p.host, p.ready, p.terminating
-                                    )
-                                })
-                                .collect();
-                            tracing::info!(peers = %peers.join(", "), "repl membership snapshot");
-                        }
-                    });
-                }
-                Some(ReplicationSetup {
-                    network: Arc::new(RealReplicationNetwork::new()),
-                    membership,
-                    store,
-                    listen_addr: repl_listen,
-                    addr_resolver: make_addr_resolver(repl_port, addressing),
-                    incarnation_gen,
-                })
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
+    // Replication (opt-in, S11): `None` leaves the node unwired.
+    deps.replication = base.replication_setup_from_env().await;
 
     // No extra ServiceDefs: the in-tree services (transfer, relay-first-18x)
     // ride `default_rules()` at runtime; `compose_services()` (lib.rs) is the

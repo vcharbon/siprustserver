@@ -1,67 +1,282 @@
 //! Peer-to-peer call replication a runner composes from env
-//! ([`ReplicationSettings`]). Stub: the grammar is not read yet.
+//! ([`ReplicationSettings`]): where the peer set comes from, how a peer's
+//! replication address is resolved, and the [`ReplicationSetup`] a runner
+//! assigns to `deps.replication`. Replication off leaves the node unwired.
+//!
+//! ## Env grammar
+//!   B2BUA_REPL          truthy (`1`/`true`/`yes`/`on`) enables replication (default off)
+//!   B2BUA_REPL_LISTEN   replication TCP listen addr        (default 0.0.0.0:9092)
+//!   B2BUA_REPL_PORT     port every peer is reached on      (default = the REPL_LISTEN port)
+//!   B2BUA_PEERS         static membership `ord@host,..`; set, it takes precedence
+//!                       over discovery; malformed, replication stays off
+//!   B2BUA_REPL_SERVICE  headless Service whose EndpointSlices name the peers
+//!                       (default b2bua-worker)
+//!   B2BUA_NAMESPACE     namespace of that Service          (default $POD_NAMESPACE, then sip-test)
+//!
+//! A malformed `B2BUA_REPL_LISTEN` or `B2BUA_REPL_PORT` refuses the boot. A
+//! malformed peer list, or discovery without an in-cluster kube client, leaves
+//! the node unwired and logs why: the worker still serves SIP.
+//!
+//! ## Addressing (ADR-0012 D3)
+//! Membership is port-agnostic; every peer's replication server is at
+//! `<host>:B2BUA_REPL_PORT`, one cluster-wide port. The address is resolved on
+//! every connect attempt, so a restarted peer's new IP is picked up without a
+//! membership change. A static peer's host is used as given (an IP, or a name
+//! resolved per attempt). A discovered peer is reached by its stable pod DNS
+//! name ([`pod_dns_name`]), falling back to its EndpointSlice address (the pod
+//! IP) when DNS misses.
+//!
+//! ## Incarnation
+//! The changelog's incarnation gen is the boot wall clock in milliseconds, so
+//! a restarted node serves under a higher gen than its previous life
+//! (ADR-0011 X9); a backward clock step is caught by `Changelog::needs_reset`.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+use b2bua::repl::{PeerResolver, ReplicatingCallStore};
 use b2bua::ReplicationSetup;
+use repl_net::RealReplicationNetwork;
 use sip_clock::Clock;
-use topology::Peer;
+use topology::{parse_peer_list, Membership, Peer, StaticMembership};
+
+use crate::is_truthy;
 
 /// Where the peer set comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MembershipSource {
-    /// `B2BUA_PEERS`, parsed.
+    /// `B2BUA_PEERS`, parsed, sorted by ordinal.
     Static(Vec<Peer>),
-    /// The EndpointSlices of the headless `service` in `namespace`.
+    /// The EndpointSlices of the headless `service` in `namespace`, watched
+    /// through the in-cluster kube client.
     EndpointSlices { service: String, namespace: String },
 }
 
 /// How a peer's replication address is resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplAddressing {
-    /// The peer's host as given.
+    /// The peer's host as given: an IP, or a name resolved per connect attempt.
     Static,
-    /// The peer's stable pod DNS name.
+    /// The peer's stable pod DNS name ([`pod_dns_name`]), falling back to its
+    /// host (the pod IP) when DNS misses.
     PodDns { service: String, namespace: String },
 }
 
-/// The replication env grammar.
+/// The replication env grammar, the one statement of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicationSettings {
-    /// `B2BUA_REPL_LISTEN`.
+    /// Where this node serves its changelog, `B2BUA_REPL_LISTEN`.
     pub listen: SocketAddr,
-    /// `B2BUA_REPL_PORT`.
+    /// The port every peer is reached on, `B2BUA_REPL_PORT`.
     pub peer_port: u16,
-    /// `B2BUA_PEERS`, or discovery.
+    /// `B2BUA_PEERS` when set, else discovery of `B2BUA_REPL_SERVICE`.
     pub membership: MembershipSource,
 }
 
 impl ReplicationSettings {
-    /// Stub.
+    /// Reads the grammar through `get`. `Ok(None)` when replication is off or
+    /// the peer list is malformed (logged); `Err` naming the variable when the
+    /// listen address or the peer port is malformed.
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
-        let _ = get;
-        Ok(None)
+        if !get("B2BUA_REPL").is_some_and(|v| is_truthy(&v)) {
+            return Ok(None);
+        }
+        let raw_listen = get("B2BUA_REPL_LISTEN").unwrap_or_else(|| "0.0.0.0:9092".to_string());
+        let listen =
+            raw_listen.to_socket_addrs().ok().and_then(|mut a| a.next()).ok_or_else(|| {
+                format!("B2BUA_REPL_LISTEN must be a resolvable host:port, got {raw_listen:?}")
+            })?;
+        let peer_port = match get("B2BUA_REPL_PORT") {
+            None => listen.port(),
+            Some(raw) => raw
+                .parse()
+                .map_err(|e| format!("B2BUA_REPL_PORT must be a port number, got {raw:?}: {e}"))?,
+        };
+        let peers = get("B2BUA_PEERS").unwrap_or_default();
+        let membership = if peers.trim().is_empty() {
+            MembershipSource::EndpointSlices {
+                service: get("B2BUA_REPL_SERVICE").unwrap_or_else(|| "b2bua-worker".to_string()),
+                namespace: get("B2BUA_NAMESPACE")
+                    .or_else(|| get("POD_NAMESPACE"))
+                    .unwrap_or_else(|| "sip-test".to_string()),
+            }
+        } else {
+            match parse_peer_list("B2BUA_PEERS", &peers) {
+                Ok(mut list) => {
+                    list.sort_by(|a, b| a.ordinal.cmp(&b.ordinal));
+                    MembershipSource::Static(list)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "B2BUA_PEERS parse error — replication disabled");
+                    return Ok(None);
+                }
+            }
+        };
+        Ok(Some(Self { listen, peer_port, membership }))
     }
 
-    /// Stub.
+    /// How the membership these settings select is addressed.
     pub fn addressing(&self) -> ReplAddressing {
-        ReplAddressing::Static
+        match &self.membership {
+            MembershipSource::Static(_) => ReplAddressing::Static,
+            MembershipSource::EndpointSlices { service, namespace } => {
+                ReplAddressing::PodDns { service: service.clone(), namespace: namespace.clone() }
+            }
+        }
+    }
+
+    /// The setup these settings describe: the membership, a replicating store
+    /// under `incarnation_gen` on `clock`, the real replication transport and
+    /// the per-attempt peer resolver. `None` (logged) when discovery has no
+    /// in-cluster kube client.
+    pub async fn into_setup(self, clock: Clock, incarnation_gen: u64) -> Option<ReplicationSetup> {
+        let addressing = self.addressing();
+        let membership = self.membership.into_membership().await?;
+        tracing::info!(
+            listen = %self.listen,
+            peer_port = self.peer_port,
+            incarnation_gen,
+            "replication ENABLED"
+        );
+        spawn_membership_log(membership.clone());
+        Some(ReplicationSetup {
+            network: Arc::new(RealReplicationNetwork::new()),
+            membership,
+            store: Arc::new(ReplicatingCallStore::new(incarnation_gen, clock)),
+            listen_addr: self.listen,
+            addr_resolver: Arc::new(ReplResolver { repl_port: self.peer_port, addressing }),
+            incarnation_gen,
+        })
     }
 }
 
-/// Stub.
-pub fn pod_dns_name(ordinal: &str, service: &str, namespace: &str) -> String {
-    let _ = (ordinal, service, namespace);
-    String::new()
+impl MembershipSource {
+    async fn into_membership(self) -> Option<Arc<dyn Membership>> {
+        match self {
+            MembershipSource::Static(peers) => {
+                let listed: Vec<String> =
+                    peers.iter().map(|p| format!("{}@{}", p.ordinal, p.host)).collect();
+                tracing::info!(
+                    source = "B2BUA_PEERS",
+                    peers = %listed.join(","),
+                    "replication membership"
+                );
+                Some(Arc::new(StaticMembership::from_peers(peers)))
+            }
+            MembershipSource::EndpointSlices { service, namespace } => {
+                // Installing the provider a second time returns Err; ignored.
+                let _ = rustls::crypto::ring::default_provider().install_default();
+                match kube::Client::try_default().await {
+                    Ok(client) => {
+                        tracing::info!(
+                            source = "k8s-endpointslice",
+                            %service,
+                            %namespace,
+                            "replication membership"
+                        );
+                        Some(Arc::new(topology::K8sMembership::spawn(client, namespace, service)))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "no kube client and no B2BUA_PEERS — replication disabled"
+                        );
+                        None
+                    }
+                }
+            }
+        }
+    }
 }
 
-/// Stub.
+/// The stable DNS name of a discovered peer: its ordinal is its pod name
+/// (the EndpointSlice `targetRef`), under the headless `service`.
+pub fn pod_dns_name(ordinal: &str, service: &str, namespace: &str) -> String {
+    format!("{ordinal}.{service}.{namespace}.svc.cluster.local")
+}
+
+/// The replication setup the grammar read through `get` selects, its store on
+/// `clock` under a boot-wall-clock incarnation gen; `Ok(None)` when
+/// replication is off or has no membership.
 pub async fn replication_setup_from_lookup(
     get: impl Fn(&str) -> Option<String>,
     clock: Clock,
 ) -> Result<Option<ReplicationSetup>, String> {
-    let _ = (get, clock);
-    Ok(None)
+    let Some(settings) = ReplicationSettings::from_lookup(get)? else {
+        return Ok(None);
+    };
+    Ok(settings.into_setup(clock, boot_incarnation()).await)
+}
+
+/// Boot wall clock in milliseconds, so a sub-second restart still takes a
+/// higher gen; 0 only for a clock before the epoch.
+fn boot_incarnation() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Logs the peer set every 2 s for 12 s after boot: a discovered membership
+/// starts empty and fills asynchronously, so a set still empty then names a
+/// discovery problem rather than a replication one.
+fn spawn_membership_log(membership: Arc<dyn Membership>) {
+    tokio::spawn(async move {
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let peers: Vec<String> = membership
+                .snapshot()
+                .into_iter()
+                .map(|p| {
+                    format!(
+                        "{}@{} ready={} terminating={}",
+                        p.ordinal, p.host, p.ready, p.terminating
+                    )
+                })
+                .collect();
+            tracing::info!(peers = %peers.join(", "), "repl membership snapshot");
+        }
+    });
+}
+
+/// Resolves a peer to `<address>:repl_port` afresh on every connect attempt;
+/// `None` makes the puller back off and retry.
+struct ReplResolver {
+    repl_port: u16,
+    addressing: ReplAddressing,
+}
+
+#[async_trait]
+impl PeerResolver for ReplResolver {
+    async fn resolve(&self, peer: &Peer) -> Option<SocketAddr> {
+        let addr = match &self.addressing {
+            ReplAddressing::Static => match peer.host.parse::<IpAddr>() {
+                Ok(ip) => Some(SocketAddr::new(ip, self.repl_port)),
+                Err(_) => lookup_host(&peer.host, self.repl_port).await,
+            },
+            ReplAddressing::PodDns { service, namespace } => {
+                let name = pod_dns_name(&peer.ordinal, service, namespace);
+                match lookup_host(&name, self.repl_port).await {
+                    Some(a) => Some(a),
+                    None => peer
+                        .host
+                        .parse::<IpAddr>()
+                        .ok()
+                        .map(|ip| SocketAddr::new(ip, self.repl_port)),
+                }
+            }
+        };
+        // One line per attempt: a new address after a restart shows the
+        // puller followed the peer.
+        match addr {
+            Some(a) => tracing::info!(peer = %peer.ordinal, addr = %a, "repl peer resolved"),
+            None => tracing::warn!(peer = %peer.ordinal, "repl peer unresolvable (will retry)"),
+        }
+        addr
+    }
+}
+
+async fn lookup_host(host: &str, port: u16) -> Option<SocketAddr> {
+    tokio::net::lookup_host((host, port)).await.ok().and_then(|mut a| a.next())
 }
 
 #[cfg(test)]
