@@ -692,6 +692,17 @@ async fn cell_detail(
         result.rfc.iter().filter(|a| seen.insert((a.lane.clone(), a.detail.clone()))).collect();
     rfc.sort_by_key(|a| !a.is_gating());
     let has_gating = rfc.iter().any(|a| a.is_gating());
+    // The diagram's other findings: the recorder's layer-close checks, lane
+    // name conflicts and harness verdicts, which `rfc` does not carry.
+    let mut seen_other = std::collections::HashSet::new();
+    let mut other: Vec<&seq_report::Anomaly> = result
+        .seq_doc
+        .anomalies
+        .iter()
+        .filter(|a| !a.rule_sourced)
+        .filter(|a| seen_other.insert((a.check.clone(), a.lane.clone(), a.detail.clone())))
+        .collect();
+    other.sort_by_key(|a| !a.is_gating());
     Ok(page(
         &format!("Cell {cell}"),
         html! {
@@ -750,6 +761,31 @@ async fn cell_detail(
                 table {
                     tr { th { "rule" } th { "endpoint" } th { "severity" } th { "detail" } }
                     @for a in &rfc {
+                        tr {
+                            td { code { (a.check) } }
+                            td {
+                                @if let Some(ep) = &a.endpoint { b { (ep) } " " }
+                                span .muted-inline { (a.lane.as_deref().unwrap_or("")) }
+                            }
+                            td {
+                                @if a.is_gating() { span .fail { "GATING" } }
+                                @else { span .advisory { "advisory" } }
+                            }
+                            td { (a.detail) }
+                        }
+                    }
+                }
+            }
+            @if !other.is_empty() {
+                h2 { "Structural and harness findings" }
+                p .muted {
+                    "Findings outside the RFC suite: the recording layer's own checks "
+                    "(queue leaks, in-flight imbalance, undeliverable datagrams, lane name "
+                    "conflicts) and harness verdicts. Gating rows failed the cell."
+                }
+                table {
+                    tr { th { "check" } th { "endpoint" } th { "severity" } th { "detail" } }
+                    @for a in &other {
                         tr {
                             td { code { (a.check) } }
                             td {

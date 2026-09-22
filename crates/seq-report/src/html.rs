@@ -226,9 +226,10 @@ pub fn render_html(doc: &SeqDoc) -> String {
 
     // The HTTP plane is named only where the doc has one, so a SIP-only
     // report renders as before.
+    let http_css = http_css(doc, "");
     let http_legend = if has_http(doc) {
         format!(
-            "<span><i class=\"swatch\" style=\"border-top-color:{HTTP_COLOR};border-top-style:dotted\"></i>HTTP</span>\n"
+            "<span><i class=\"swatch\" style=\"border-top-color:{HTTP_COLOR};border-top-style:dotted\"></i>HTTP</span>\n      "
         )
     } else {
         String::new()
@@ -275,8 +276,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
   .payload-head {{ margin-bottom: 8px; }}
   .seq-sip .payload-head {{ color: {SIP_COLOR}; }}
   .seq-repl .payload-head {{ color: {REPL_COLOR}; }}
-  .seq-http .payload-head {{ color: {HTTP_COLOR}; }}
-  .ts {{ color: #6b7280; font-family: monospace; }}
+{http_css}  .ts {{ color: #6b7280; font-family: monospace; }}
   /* Clickable diagram messages: hover thickens the arrow + tints the hit row;
      the selected row stays tinted. */
   .seq-msg:hover line {{ stroke-width: 3; }}
@@ -339,7 +339,7 @@ pub fn render_html(doc: &SeqDoc) -> String {
     <div class="legend">
       <span><i class="swatch" style="border-top-color:{SIP_COLOR}"></i>SIP</span>
       <span><i class="swatch" style="border-top-color:{REPL_COLOR};border-top-style:dashed"></i>Replication (dashed; hue = per-socket connection)</span>
-      {http_legend}      <span><i class="swatch" style="border-top-color:{BAND_COLOR}"></i>Lifecycle (crash / reboot / failover / partition)</span>
+      {http_legend}<span><i class="swatch" style="border-top-color:{BAND_COLOR}"></i>Lifecycle (crash / reboot / failover / partition)</span>
       <span><i class="swatch" style="border-top-color:{VIEW_COLOR}"></i>View (what an observer believes about a node)</span>
       <span style="color:{LOST_COLOR}">✗ lost — frame emitted into a dead / superseded socket; the stub stops short of the lane (never reached the live node)</span>
       {flow_chips}
@@ -421,6 +421,7 @@ pub fn render_embed(doc: &SeqDoc) -> String {
     let anoms_of_row = row_anomaly_map(&views);
     let svg = svg_markup(doc, &items, base, &lane_idx, &anoms_of_row, &views);
     let payloads = render_payloads(doc, &items, base, &anoms_of_row, &views);
+    let http_css = http_css(doc, ".seq-embed ");
 
     format!(
         r#"<div class="seq-embed">
@@ -439,8 +440,7 @@ pub fn render_embed(doc: &SeqDoc) -> String {
   .seq-embed .payload-head {{ margin-bottom: 8px; }}
   .seq-embed .seq-sip .payload-head {{ color: {SIP_COLOR}; }}
   .seq-embed .seq-repl .payload-head {{ color: {REPL_COLOR}; }}
-  .seq-embed .seq-http .payload-head {{ color: {HTTP_COLOR}; }}
-  .seq-embed .ts {{ color: #6b7280; font-family: monospace; }}
+{http_css}  .seq-embed .ts {{ color: #6b7280; font-family: monospace; }}
   .seq-embed .seq-msg {{ cursor: pointer; }}
   .seq-embed .seq-msg:hover line {{ stroke-width: 3; }}
   .seq-embed .seq-msg:hover text {{ text-decoration: underline; }}
@@ -988,6 +988,15 @@ fn render_views_sections(doc: &SeqDoc, base: i64) -> String {
     }
     out.push_str("</ul></div>\n");
     out
+}
+
+/// The HTTP plane's payload style under `scope`, empty for a doc without it.
+fn http_css(doc: &SeqDoc, scope: &str) -> String {
+    if has_http(doc) {
+        format!("  {scope}.seq-http .payload-head {{ color: {HTTP_COLOR}; }}\n")
+    } else {
+        String::new()
+    }
 }
 
 /// Whether the doc draws the HTTP plane.

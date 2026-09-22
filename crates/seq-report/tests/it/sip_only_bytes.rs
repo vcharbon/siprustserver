@@ -13,7 +13,7 @@ fn row(seq: u64, from: &str, to: Option<&str>, label: &str, kind: RowKind) -> Se
         to: to.map(Into::into),
         label: label.into(),
         detail: Some(format!("{label} SIP/2.0\r\nCall-ID: c-1\r\n")),
-        conn: (seq % 2 == 0).then(|| "c-1@host".to_string()),
+        conn: seq.is_multiple_of(2).then(|| "c-1@host".to_string()),
         kind,
     }
 }

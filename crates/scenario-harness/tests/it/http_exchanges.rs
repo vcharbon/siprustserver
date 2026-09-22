@@ -20,7 +20,7 @@ use http_net::scripted::{
 };
 use http_net::{HttpRequest, HttpResponse, HttpTransport, RecordingHttpNetwork};
 use layer_harness::{lane_key, NetworkTag};
-use scenario_harness::report::{self, http::verdict_anomalies};
+use scenario_harness::report::{self, http_verdict::verdict_anomalies};
 use scenario_harness::{Agent, Harness, RunReport};
 use seq_report::{LaneKind, RowKind, SeqDoc};
 

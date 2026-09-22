@@ -1,6 +1,5 @@
-//! The HTTP plane of a run's report: the exchanges recorded on the run's
-//! recorder ([`http_net::HTTP_TAG`]) as ladder rows, the per-service wire views
-//! of the text report, and a scripted service's findings as report anomalies.
+//! The HTTP plane of a run's ladder: the exchanges recorded on the run's
+//! recorder ([`http_net::HTTP_TAG`]) as rows of the report's doc.
 //!
 //! An exchange is a request row from the requester's lane to the service lane
 //! and a reply row back, each at the `seq` of its own record, so the rows sit
@@ -8,15 +7,11 @@
 //! recording client's lane when one sent the request; otherwise the peer
 //! address the served side saw, mapped onto a registered lane when one matches.
 
-use std::collections::HashSet;
 use std::net::SocketAddr;
 
-use http_net::scripted::{HttpFinding, HttpFindingKind};
 use http_net::{HttpOutcome, HttpRequest, HttpResponse, RecordedHttpEntry};
 use layer_harness::{Lane as RecLane, NetworkTag};
-use seq_report::{Anomaly, Lane, LaneKind, RowKind, SeqDoc, SeqRow};
-
-use super::wire::format_clock;
+use seq_report::{Lane, LaneKind, RowKind, SeqDoc, SeqRow};
 
 /// The lane id of a requester seen only by its address.
 const PEER_LANE_PREFIX: &str = "http-client ";
@@ -25,7 +20,7 @@ const PEER_LANE_PREFIX: &str = "http-client ";
 /// lane they need that the SIP projection did not declare.
 pub fn with_rows(mut doc: SeqDoc, entries: &[RecordedHttpEntry], rec_lanes: &[RecLane]) -> SeqDoc {
     for e in entries {
-        let service = ensure_lane(&mut doc, &e.service, LaneKind::Service);
+        let service = service_lane(&mut doc, &e.service, rec_lanes);
         let requester = requester_lane(&mut doc, e, rec_lanes);
         doc.rows.push(SeqRow {
             at_ms: e.at_ms as i64,
@@ -69,103 +64,17 @@ pub fn with_rows(mut doc: SeqDoc, entries: &[RecordedHttpEntry], rec_lanes: &[Re
     doc
 }
 
-/// The per-service wire views of the text report, keyed by relative path
-/// (`service/<name>.txt`): every exchange a service lane took, request and
-/// reply as sent.
-pub fn service_views(
-    entries: &[RecordedHttpEntry],
-    rec_lanes: &[RecLane],
-) -> Vec<(String, String)> {
-    let base = entries.iter().map(|e| e.at_ms as i64).min().unwrap_or(0);
-    rec_lanes
-        .iter()
-        .filter(|l| l.network == NetworkTag::Service)
-        .filter_map(|lane| {
-            let mine: Vec<&RecordedHttpEntry> =
-                entries.iter().filter(|e| e.service == lane.key).collect();
-            if mine.is_empty() {
-                return None;
-            }
-            let name = lane.names.first().cloned().unwrap_or_else(|| lane.addr.to_string());
-            let mut out = format!("HTTP exchanges served by {name} ({})\n\n", lane.addr);
-            for e in mine {
-                let from = e
-                    .requester
-                    .clone()
-                    .or_else(|| e.peer.map(|p| p.to_string()))
-                    .unwrap_or_else(|| "?".to_string());
-                out.push_str(&format!(
-                    "── [T+{}] {from} → {name} ── {} {}\n",
-                    format_clock(e.at_ms as i64 - base),
-                    e.request.method,
-                    e.request.path
-                ));
-                out.push_str(&head_and_body(&e.request.headers, &e.request.body));
-                let at = e.reply_at_ms.map(|t| format!("T+{}", format_clock(t as i64 - base)));
-                let at = at.unwrap_or_else(|| "open".to_string());
-                match &e.outcome {
-                    Some(HttpOutcome::Response(resp)) => {
-                        out.push_str(&format!("── [{at}] {name} → {from} ── {}\n", resp.status));
-                        out.push_str(&head_and_body(&resp.headers, &resp.body));
-                    }
-                    Some(HttpOutcome::Abort) => {
-                        out.push_str(&format!("── [{at}] {name} ✗ reset, no response\n\n"));
-                    }
-                    Some(HttpOutcome::Abandoned) | Some(HttpOutcome::Error(_)) | None => {
-                        out.push_str(&format!("── [{at}] {name} ✗ no reply\n\n"));
-                    }
-                }
-            }
-            Some((format!("service/{}.txt", slug(&name)), out))
-        })
-        .collect()
-}
-
-/// The report anomalies of a scripted service's findings: gating unless the
-/// finding is advisory, never RFC-rule-sourced, each linked to the request row
-/// it refused (the served `500` answering the same request).
-pub fn verdict_anomalies(findings: &[HttpFinding], entries: &[RecordedHttpEntry]) -> Vec<Anomaly> {
-    let mut linked: HashSet<u64> = HashSet::new();
-    findings
-        .iter()
-        .map(|f| {
-            let row = entries.iter().find(|e| {
-                !linked.contains(&e.seq)
-                    && e.served
-                    && e.request.method == f.method
-                    && e.request.path == f.path
-                    && String::from_utf8_lossy(&e.request.body) == f.body
-                    && matches!(&e.outcome, Some(HttpOutcome::Response(r)) if r.status == 500)
-            });
-            if let Some(e) = row {
-                linked.insert(e.seq);
-            }
-            let detail = if f.method.is_empty() {
-                f.detail.clone()
-            } else {
-                format!("{} {}: {}", f.method, f.path, f.detail)
-            };
-            Anomaly {
-                check: check_of(f.kind).to_string(),
-                detail,
-                lane: row.map(|e| e.service.clone()),
-                endpoint: None,
-                advisory: Some(f.is_advisory()),
-                row_seqs: row.map(|e| vec![e.seq]).unwrap_or_default(),
-                rule_sourced: false,
-            }
-        })
-        .collect()
-}
-
-fn check_of(kind: HttpFindingKind) -> &'static str {
-    match kind {
-        HttpFindingKind::Unmatched => "http.unmatched",
-        HttpFindingKind::Ambiguous => "http.ambiguous",
-        HttpFindingKind::Unserved => "http.unserved",
-        HttpFindingKind::ResetNotForwarded => "http.resetNotForwarded",
-        HttpFindingKind::ForeignToken => "http.foreignToken",
+/// The service lane `key`, declared (named as registered) on first use.
+fn service_lane(doc: &mut SeqDoc, key: &str, rec_lanes: &[RecLane]) -> String {
+    if !doc.lanes.iter().any(|l| l.id == key) {
+        let label = rec_lanes
+            .iter()
+            .find(|l| l.key == key)
+            .and_then(|l| l.names.first().map(|n| format!("{n} ({})", l.addr)))
+            .unwrap_or_else(|| key.to_string());
+        doc.lanes.push(Lane::new(key, label, LaneKind::Service));
     }
+    key.to_string()
 }
 
 /// The lane an exchange's request leaves from.
@@ -224,20 +133,4 @@ fn pretty(headers: &[(String, String)], body: &[u8]) -> String {
         Err(_) => out.push_str(&String::from_utf8_lossy(body)),
     }
     out
-}
-
-/// Headers, a blank line, and the body as sent.
-fn head_and_body(headers: &[(String, String)], body: &[u8]) -> String {
-    let mut out: String = headers.iter().map(|(k, v)| format!("{k}: {v}\n")).collect();
-    out.push('\n');
-    out.push_str(&String::from_utf8_lossy(body));
-    out.push_str("\n\n");
-    out
-}
-
-/// A file-name-safe form of a lane name.
-fn slug(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-        .collect()
 }

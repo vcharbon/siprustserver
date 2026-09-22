@@ -1,7 +1,7 @@
 //! Focused replication-exchange report (ADR-0006 recording-first).
 //!
 //! ## Why a focused renderer instead of reusing `scenario-harness`
-//! The `scenario-harness` renderers ([`report::svg`]/`text`/`html`) consume a
+//! The `scenario-harness` report writers (`report::write_all`) consume a
 //! SIP-specific recording: `RecordedSipEntry` + `Lane`s drained from the
 //! `layer-harness` `Recorder`, with wire text formatted by `sip-net`. Projecting
 //! a [`CapturedFrame`] (a decoded *replication* `Frame` with `(from,to,dir)`

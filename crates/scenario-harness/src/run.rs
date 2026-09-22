@@ -107,9 +107,10 @@ impl RunReport {
         self.rfc_findings.get_or_init(|| sip_net::evaluate_rfc_findings(&self.events))
     }
 
-    /// `true` when every `Expect` matched.
+    /// `true` when every `Expect` matched and no extra anomaly gates.
     pub fn passed(&self) -> bool {
         self.expects.iter().all(|e| e.passed)
+            && !self.extra_anomalies.iter().any(seq_report::Anomaly::is_gating)
     }
 
     /// The wire trace, projected from the recording channel.

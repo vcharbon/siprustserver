@@ -4,10 +4,7 @@
 //! and `seq_report::render_html` draws the sequence diagram + per-message
 //! expandable wire text + legend, exactly the same machinery the failover
 //! harness uses for its three-plane view.
-//!
-//! The previous bespoke SVG-embedding HTML lived here; the standalone SVG
-//! artifact is still produced by [`super::svg`] (a different output format, kept
-//! as-is). This file is now purely the SIP→`SeqDoc` adaptor for HTML output.
+//! This file is purely the recording→`SeqDoc` adaptor for HTML output.
 
 use http_net::RecordedHttpEntry;
 use layer_harness::RecordedScenario;

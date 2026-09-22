@@ -4,7 +4,8 @@
 //!
 //! The ladder's row source is the served side whenever a recorded service
 //! handled the request; the client side is drawn only for an exchange no
-//! service saw (a cut, a stall, a mid-flight error).
+//! service saw (a cut, a stall, a mid-flight error). Both readings are in
+//! `seq` order.
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -42,48 +43,64 @@ pub struct RecordedHttpEntry {
     pub served: bool,
 }
 
-/// Every exchange `events` record, in request order.
+/// Every exchange `events` record, in `seq` order of the requests.
+///
+/// A served request pairs with the client exchange it answers: by the
+/// exchange the served record names (the simulated fabric runs the handler
+/// inside the client's future), else, for a request that arrived on a socket,
+/// with the earliest unpaired client request to the same address carrying
+/// the same method, target and body that was sent before it and had not ended
+/// when it arrived. A paired exchange is drawn once, from the served side,
+/// with the client's lane; its end is the service's, unless the service
+/// answered and the client never got the answer (a caller that stopped
+/// waiting shows as such). An unpaired served request's end is the service's
+/// view only.
 pub fn to_http_entries(events: &[Stamped<HttpNetworkEvent>]) -> Vec<RecordedHttpEntry> {
-    let mut clients: HashMap<u64, &LaneKey> = HashMap::new();
-    let mut answered: HashSet<u64> = HashSet::new();
+    let mut events: Vec<&Stamped<HttpNetworkEvent>> = events.iter().collect();
+    events.sort_by_key(|e| e.seq);
     let mut client_ends: HashMap<u64, &Stamped<HttpNetworkEvent>> = HashMap::new();
     let mut served_ends: HashMap<u64, &Stamped<HttpNetworkEvent>> = HashMap::new();
-    for e in events {
+    for e in &events {
         match &e.event {
-            HttpNetworkEvent::Sent { client, .. } => {
-                clients.insert(e.seq, client);
-            }
-            HttpNetworkEvent::Served { exchange: Some(x), .. } => {
-                answered.insert(*x);
-            }
-            HttpNetworkEvent::Served { .. } => {}
             HttpNetworkEvent::Received { exchange, .. } => {
                 client_ends.insert(*exchange, e);
             }
             HttpNetworkEvent::Answered { served, .. } => {
                 served_ends.insert(*served, e);
             }
+            _ => {}
         }
     }
-    let ending = |end: Option<&&Stamped<HttpNetworkEvent>>| match end {
-        Some(e) => match &e.event {
-            HttpNetworkEvent::Received { outcome, .. }
-            | HttpNetworkEvent::Answered { outcome, .. } => {
-                (Some(e.seq), Some(e.at_ms), Some(outcome.clone()))
-            }
-            _ => (None, None, None),
-        },
-        None => (None, None, None),
+    let pairs = pair(&events, &client_ends);
+    let paired: HashSet<u64> = pairs.values().copied().collect();
+    let sent: HashMap<u64, &LaneKey> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            HttpNetworkEvent::Sent { client, .. } => Some((e.seq, client)),
+            _ => None,
+        })
+        .collect();
+    let ending = |end: Option<&Stamped<HttpNetworkEvent>>| match end.map(|e| (e, &e.event)) {
+        Some((e, HttpNetworkEvent::Received { outcome, .. }))
+        | Some((e, HttpNetworkEvent::Answered { outcome, .. })) => {
+            (Some(e.seq), Some(e.at_ms), Some(outcome.clone()))
+        }
+        _ => (None, None, None),
     };
     let mut entries = Vec::new();
-    for e in events {
+    for e in &events {
         match &e.event {
-            HttpNetworkEvent::Served { service, peer, exchange, request } => {
-                let (reply_seq, reply_at_ms, outcome) = ending(served_ends.get(&e.seq));
+            HttpNetworkEvent::Served { service, peer, request, .. } => {
+                let client = pairs.get(&e.seq).copied();
+                let end = drawn_end(
+                    served_ends.get(&e.seq).copied(),
+                    client.and_then(|c| client_ends.get(&c)).copied(),
+                );
+                let (reply_seq, reply_at_ms, outcome) = ending(end);
                 entries.push(RecordedHttpEntry {
                     seq: e.seq,
                     at_ms: e.at_ms,
-                    requester: exchange.and_then(|x| clients.get(&x)).map(|c| (*c).clone()),
+                    requester: client.and_then(|c| sent.get(&c)).map(|c| (*c).clone()),
                     peer: *peer,
                     service: service.clone(),
                     request: request.clone(),
@@ -93,8 +110,8 @@ pub fn to_http_entries(events: &[Stamped<HttpNetworkEvent>]) -> Vec<RecordedHttp
                     served: true,
                 });
             }
-            HttpNetworkEvent::Sent { client, dst, request } if !answered.contains(&e.seq) => {
-                let (reply_seq, reply_at_ms, outcome) = ending(client_ends.get(&e.seq));
+            HttpNetworkEvent::Sent { client, dst, request } if !paired.contains(&e.seq) => {
+                let (reply_seq, reply_at_ms, outcome) = ending(client_ends.get(&e.seq).copied());
                 entries.push(RecordedHttpEntry {
                     seq: e.seq,
                     at_ms: e.at_ms,
@@ -112,6 +129,70 @@ pub fn to_http_entries(events: &[Stamped<HttpNetworkEvent>]) -> Vec<RecordedHttp
         }
     }
     entries
+}
+
+/// The end a paired exchange's reply row draws: the service's, unless the
+/// service answered and the client never got that answer (it stopped waiting,
+/// or the connection failed on the way back) — then the client's.
+fn drawn_end<'a>(
+    served: Option<&'a Stamped<HttpNetworkEvent>>,
+    client: Option<&'a Stamped<HttpNetworkEvent>>,
+) -> Option<&'a Stamped<HttpNetworkEvent>> {
+    let outcome = |end: Option<&Stamped<HttpNetworkEvent>>| match end.map(|e| &e.event) {
+        Some(HttpNetworkEvent::Received { outcome, .. })
+        | Some(HttpNetworkEvent::Answered { outcome, .. }) => Some(outcome.clone()),
+        _ => None,
+    };
+    match (outcome(served), outcome(client)) {
+        (Some(HttpOutcome::Response(_)), Some(c)) if !matches!(c, HttpOutcome::Response(_)) => {
+            client
+        }
+        (None, Some(_)) => client,
+        _ => served.or(client),
+    }
+}
+
+/// Served seq → the client exchange (its `Sent` seq) it answers.
+fn pair(
+    events: &[&Stamped<HttpNetworkEvent>],
+    client_ends: &HashMap<u64, &Stamped<HttpNetworkEvent>>,
+) -> HashMap<u64, u64> {
+    let mut pairs = HashMap::new();
+    let mut taken: HashSet<u64> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            HttpNetworkEvent::Served { exchange: Some(x), .. } => Some(*x),
+            _ => None,
+        })
+        .collect();
+    for e in events {
+        let HttpNetworkEvent::Served { service, exchange, request, .. } = &e.event else {
+            continue;
+        };
+        if let Some(x) = exchange {
+            pairs.insert(e.seq, *x);
+            continue;
+        }
+        let client = events.iter().find_map(|c| match &c.event {
+            HttpNetworkEvent::Sent { dst, request: sent, .. }
+                if c.seq < e.seq
+                    && !taken.contains(&c.seq)
+                    && lane_key(*dst) == *service
+                    && sent.method == request.method
+                    && sent.path == request.path
+                    && sent.body == request.body
+                    && client_ends.get(&c.seq).is_none_or(|end| end.seq > e.seq) =>
+            {
+                Some(c.seq)
+            }
+            _ => None,
+        });
+        if let Some(c) = client {
+            taken.insert(c);
+            pairs.insert(e.seq, c);
+        }
+    }
+    pairs
 }
 
 /// The outcome of one client exchange.
@@ -161,8 +242,9 @@ pub(super) fn client_exchanges(
             _ => None,
         })
         .collect();
-    events
-        .iter()
+    let mut sent: Vec<&Stamped<HttpNetworkEvent>> = events.iter().collect();
+    sent.sort_by_key(|e| e.seq);
+    sent.into_iter()
         .filter_map(|e| match &e.event {
             HttpNetworkEvent::Sent { client: from, dst, request } if from == client => {
                 Some(CapturedExchange {

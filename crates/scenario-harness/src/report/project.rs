@@ -226,7 +226,9 @@ fn project_lanes(rec_lanes: &[RecLane], entries: &[RecordedSipEntry]) -> Vec<Lan
     let mut lanes: Vec<Lane> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for l in rec_lanes {
+    // A service lane is declared by the HTTP projection only when an exchange
+    // uses it (`super::http`), so an idle service draws no empty column.
+    for l in rec_lanes.iter().filter(|l| l.network != NetworkTag::Service) {
         let id = l.key.clone();
         let addr = l.addr.to_string();
         let sublane = id.contains('#');

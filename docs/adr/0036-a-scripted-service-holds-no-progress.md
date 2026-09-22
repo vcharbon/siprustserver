@@ -21,9 +21,10 @@ nested in another document) and hand it back in that form.
    every reply that names a next step (`${continuation}`) and reads it back
    from the next request body. The token carries the service's nonce, the
    instance, the position and the captures (or a code step's state), under a
-   checksum. Matching reads nothing else: the service keeps only two monotone
-   facts per instance, `opened` and how far it got, and the verdict alone
-   reads them.
+   checksum. A tokened request is matched on the token alone. Per instance the
+   service keeps two monotone facts: `opened`, which the open-match rule reads
+   so an opened instance is never opened again, and how far it got, which only
+   the verdict reads.
 2. **The token may travel wrapped.** A continuation codec
    (`HttpContinuationCodec`) wraps the token where the reply template places
    it and unwraps candidates from a request body before the scan. The raw scan
@@ -32,8 +33,10 @@ nested in another document) and hand it back in that form.
 
 ## Consequences
 
-- Concurrent instances cannot interfere, and a retransmitted request is
-  answered identically: same token, same step, same reply.
+- Concurrent instances cannot interfere, and a retransmitted tokened request
+  is answered identically: same token, same step, same reply. A repeated
+  OPENING request carries no token: it opens the next identical unopened
+  instance, or is unmatched when none is left (POST is not idempotent).
 - A token minted by an earlier run reaching a new service (a standing peer
   finishing an old call) is told apart by its nonce and reported as an
   advisory, never matched.

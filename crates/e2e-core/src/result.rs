@@ -61,7 +61,8 @@ pub struct MediaRef {
 #[serde(rename_all = "camelCase")]
 pub struct RunResult {
     pub cell: CellId,
-    /// Check verdicts all passed AND the run's expects held AND the RFC hard
+    /// Check verdicts all passed AND the run's expects held AND no extra
+    /// anomaly of the run gates (an HTTP service's verdict) AND the RFC hard
     /// gate found no gating (non-advisory, subject-applicable, unwaived)
     /// violation. A gating RFC violation FAILS the cell with the report intact
     /// (`rfc` rows carry `advisory: false`) instead of crashing it report-less.

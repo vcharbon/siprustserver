@@ -15,7 +15,9 @@
 //! (the caller's timeout firing on a withheld answer), so an exchange never
 //! leaves a gap the record cannot explain. On the simulated fabric the served
 //! handler runs inside the client's request future, so the served record names
-//! the client exchange it answers; on a real socket it names the peer address.
+//! the client exchange it answers; on a real socket it names the peer address,
+//! and [`to_http_entries`](super::to_http_entries) pairs it with the client
+//! request by address and request identity.
 //!
 //! Test-only: the decorator needs a `Recorder`, which production never builds.
 

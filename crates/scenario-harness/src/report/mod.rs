@@ -7,8 +7,8 @@
 
 pub mod html;
 pub mod http;
+pub mod http_verdict;
 pub mod project;
-pub mod svg;
 pub mod text;
 pub mod wire;
 
@@ -102,9 +102,10 @@ fn cross_message_anomalies(report: &RunReport) -> Vec<seq_report::Anomaly> {
         .collect()
 }
 
-/// Render and write all three artifacts for a run under `out_dir`:
-/// `<name>.svg`, `<name>.html`, `<name>.global.txt`, and `<net>/<agent>.txt`
-/// per endpoint. Returns the paths written.
+/// Render and write the artifacts of a run under `out_dir`: `<name>.svg` and
+/// `<name>.html` (one doc, the SIP and HTTP planes), `<name>.global.txt`,
+/// `<net>/<agent>.txt` per endpoint and `service/<name>.txt` per recorded
+/// HTTP service. Returns the paths written.
 pub fn write_all(report: &RunReport, out_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let entries = report.entries();
     let http = report.http_entries();
@@ -118,14 +119,15 @@ pub fn write_all(report: &RunReport, out_dir: &Path) -> std::io::Result<Vec<Path
     std::fs::create_dir_all(out_dir)?;
     let mut written = Vec::new();
 
-    let svg_doc = svg::render(&entries, &scenario.lanes, scenario.transport_kind);
+    let doc = project::sip_doc(name, desc, &entries, &scenario, passed, &extra_anomalies);
+    let doc = http::with_rows(doc, &http, &scenario.lanes);
+
     let svg_path = out_dir.join(format!("{name}.svg"));
-    std::fs::write(&svg_path, svg_doc)?;
+    std::fs::write(&svg_path, seq_report::render_svg(&doc))?;
     written.push(svg_path);
 
-    let html_doc = html::render(name, desc, &entries, &http, &scenario, passed, &extra_anomalies);
     let html_path = out_dir.join(format!("{name}.html"));
-    std::fs::write(&html_path, html_doc)?;
+    std::fs::write(&html_path, seq_report::render_html(&doc))?;
     written.push(html_path);
 
     let texts = text::render(name, desc, &entries, &http, &scenario, passed, &extra_anomalies);

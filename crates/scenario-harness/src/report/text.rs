@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use http_net::RecordedHttpEntry;
-use layer_harness::{Lane, RecordedScenario, TransportKind};
+use http_net::{HttpOutcome, RecordedHttpEntry};
+use layer_harness::{Lane, NetworkTag, RecordedScenario, TransportKind};
 use seq_report::Anomaly;
 use sip_net::RecordedSipEntry;
 
@@ -142,8 +142,10 @@ pub fn render(
     let doc = super::http::with_rows(doc, http, &scenario.lanes);
     files.insert(format!("{scenario_name}.global.txt"), seq_report::render_global_txt(&doc));
 
-    // Per-service views — the HTTP exchanges each recorded service took.
-    files.extend(super::http::service_views(http, &scenario.lanes));
+    // Per-service views — the HTTP exchanges each recorded service took, on the
+    // global view's timeline.
+    let doc_base = doc.rows.iter().map(|r| r.at_ms).min().unwrap_or(0);
+    files.extend(service_views(http, &scenario.lanes, doc_base));
 
     // Per-endpoint views — one per lane that sent or received a message.
     for lane in &scenario.lanes {
@@ -170,6 +172,74 @@ pub fn render(
     }
 
     TextReports { files }
+}
+
+/// The per-service wire views of the text report, keyed by relative path
+/// (`service/<name>.txt`): every exchange a service lane took, request and
+/// reply as sent, stamped from `base` (the run's timeline start).
+fn service_views(
+    entries: &[RecordedHttpEntry],
+    rec_lanes: &[Lane],
+    base: i64,
+) -> Vec<(String, String)> {
+    rec_lanes
+        .iter()
+        .filter(|l| l.network == NetworkTag::Service)
+        .filter_map(|lane| {
+            let mine: Vec<&RecordedHttpEntry> =
+                entries.iter().filter(|e| e.service == lane.key).collect();
+            if mine.is_empty() {
+                return None;
+            }
+            let name = lane.names.first().cloned().unwrap_or_else(|| lane.addr.to_string());
+            let mut out = format!("HTTP exchanges served by {name} ({})\n\n", lane.addr);
+            for e in mine {
+                let from = e
+                    .requester
+                    .clone()
+                    .or_else(|| e.peer.map(|p| p.to_string()))
+                    .unwrap_or_else(|| "?".to_string());
+                out.push_str(&format!(
+                    "── [T+{}] {from} → {name} ── {} {}\n",
+                    format_clock(e.at_ms as i64 - base),
+                    e.request.method,
+                    e.request.path
+                ));
+                out.push_str(&head_and_body(&e.request.headers, &e.request.body));
+                let at = e.reply_at_ms.map(|t| format!("T+{}", format_clock(t as i64 - base)));
+                let at = at.unwrap_or_else(|| "open".to_string());
+                match &e.outcome {
+                    Some(HttpOutcome::Response(resp)) => {
+                        out.push_str(&format!("── [{at}] {name} → {from} ── {}\n", resp.status));
+                        out.push_str(&head_and_body(&resp.headers, &resp.body));
+                    }
+                    Some(HttpOutcome::Abort) => {
+                        out.push_str(&format!("── [{at}] {name} ✗ reset, no response\n\n"));
+                    }
+                    Some(HttpOutcome::Abandoned) | Some(HttpOutcome::Error(_)) | None => {
+                        out.push_str(&format!("── [{at}] {name} ✗ no reply\n\n"));
+                    }
+                }
+            }
+            Some((format!("service/{}.txt", slug(&name)), out))
+        })
+        .collect()
+}
+
+/// Headers, a blank line, and the body as sent.
+fn head_and_body(headers: &[(String, String)], body: &[u8]) -> String {
+    let mut out: String = headers.iter().map(|(k, v)| format!("{k}: {v}\n")).collect();
+    out.push('\n');
+    out.push_str(&String::from_utf8_lossy(body));
+    out.push_str("\n\n");
+    out
+}
+
+/// A file-name-safe form of a lane name.
+fn slug(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect()
 }
 
 impl TextReports {

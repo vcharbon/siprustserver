@@ -232,7 +232,7 @@ async fn alice_calls_bob_full_dialog() {
     assert!(svg.contains("INVITE") && svg.contains("180 Ringing") && svg.contains("200 OK"));
     assert!(svg.contains("ACK") && svg.contains("BYE"));
     // Arrows are clickable targets (index carried for the HTML handler).
-    assert!(svg.contains(r#"data-trace-index="0""#));
+    assert!(svg.contains(r#"data-idx="0""#));
     assert!(svg.contains("cursor:pointer"));
 
     let global = std::fs::read_to_string(out.join("alice-calls-bob.global.txt")).unwrap();
