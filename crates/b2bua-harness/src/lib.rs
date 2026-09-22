@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use b2bua::cdr::{CdrRecord, InMemoryCdrWriter};
+use b2bua::cdr::{CdrRecord, CdrWriter};
 use b2bua::config::B2buaConfig;
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
 use b2bua::limiter::{CallLimiter, NoopLimiter};
@@ -34,6 +34,10 @@ use sip_proxy::{
 };
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
+
+pub mod terminated;
+
+pub use terminated::{TerminatedCalls, TerminatedCallsWriter};
 
 // ===========================================================================
 // Shared b2bua spawn primitive
@@ -67,9 +71,9 @@ pub struct B2buaSpawnParams {
     pub replication: Option<ReplicationSetup>,
     pub clock: Clock,
     pub id_gen: Arc<IdGen>,
-    /// CDR writer; cloned into the deps (the caller keeps its own handle to
-    /// snapshot records).
-    pub cdr: InMemoryCdrWriter,
+    /// CDR writer handed to the deps (the caller keeps its own handle to
+    /// snapshot what it wrote).
+    pub cdr: Arc<dyn CdrWriter>,
     /// Worker-side overload signal to inject (migration/08 sampler-injection
     /// seam). `None` → the core mints a fresh [`OverloadSignal::live`] exactly as
     /// before. A `start_paused` test passes one built over the `simulated()`
@@ -157,7 +161,7 @@ pub fn spawn_b2bua_core(
         config,
         decision,
         limiter,
-        cdr: Arc::new(cdr),
+        cdr,
         store,
         store_faults,
         wire_faults: wire_faults.unwrap_or_default(),
@@ -382,7 +386,7 @@ pub fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
 /// of the scenario (drop tears the worker tasks down with the endpoint).
 pub struct B2buaSut {
     pub addr: SocketAddr,
-    cdr: InMemoryCdrWriter,
+    cdr: TerminatedCallsWriter,
     metrics: B2buaMetrics,
     _core: B2buaCore,
 }
@@ -532,7 +536,7 @@ impl B2buaSutBuilder {
                 std::collections::HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
             )
             .await;
-        let cdr = InMemoryCdrWriter::new();
+        let cdr = TerminatedCallsWriter::new(TerminatedCalls::default());
         let params = B2buaSpawnParams {
             ordinal: "w0".into(),
             sip_addr: sa,
@@ -543,7 +547,7 @@ impl B2buaSutBuilder {
             replication: None,
             clock: Clock::test_at(0),
             id_gen: Arc::new(IdGen::seeded(0xB2B0)),
-            cdr: cdr.clone(),
+            cdr: Arc::new(cdr.clone()),
             overload,
             adaptation_http,
             compose,
@@ -705,7 +709,13 @@ impl B2buaSut {
     }
 
     pub fn cdr_records(&self) -> Vec<CdrRecord> {
-        self.cdr.snapshot()
+        self.cdr.records()
+    }
+
+    /// Every terminated `Call` as the CDR writer saw it, in write order: the
+    /// message rings, the decision log and the termination record whole.
+    pub fn terminated_calls(&self) -> Vec<call::Call> {
+        self.cdr.terminated_calls()
     }
 
     /// The transaction layer's own counters — what left under a bound,

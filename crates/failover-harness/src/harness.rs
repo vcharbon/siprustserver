@@ -753,7 +753,7 @@ impl ReplicatedB2buaSut {
             replication,
             clock: self.clock.clone(),
             id_gen: Arc::new(IdGen::seeded(self.id_seed())),
-            cdr: self.cdr.clone(),
+            cdr: Arc::new(self.cdr.clone()),
             // DETERMINISTIC overload signal (ELU pinned to 0). The default `None`
             // rides `OverloadSignal::live`, whose `LiveLoadSampler` reads the REAL
             // tokio `worker_total_busy_duration` over REAL wall-clock — a signal

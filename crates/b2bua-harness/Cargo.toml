@@ -27,14 +27,14 @@ tokio = { workspace = true, features = ["test-util"] }
 # the `failover-harness` crate (multi-worker `spawn_proxy_inner`), so the
 # LoadBalancer `ProxyCore` wiring is a normal dependency, not test-only.
 sip-proxy = { path = "../sip-proxy" }
+# The `CdrWriter` impl that keeps each terminated `Call` (`src/terminated.rs`).
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 # The one schedule the SUT walks, so a test counts the rungs an RFC class
 # owes rather than restating T1/T2 arithmetic (ADR-0032 X1).
 sip-retransmit = { path = "../sip-retransmit" }
-# CANCEL-during-slow-decision test: wraps the decision engine to stall new_call.
-async-trait = { workspace = true }
 # Slice 3b: real RTP media through the signalling-only B2BUA. Media flows
 # peer-to-peer on a separate simulated fabric to the addresses the SDP (relayed
 # by the B2BUA) advertises; the classifier proves it reached the right peer.

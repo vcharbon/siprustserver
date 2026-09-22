@@ -26,7 +26,7 @@ use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
 use sip_txn::IdGen;
 
-use crate::common::probe_cdr::{ProbeCdr, TerminatedCalls};
+use b2bua_harness::{TerminatedCalls, TerminatedCallsWriter};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
@@ -87,7 +87,7 @@ impl Sut {
             config,
             decision,
             limiter,
-            cdr: Arc::new(ProbeCdr::new(terminated.clone())),
+            cdr: Arc::new(TerminatedCallsWriter::new(terminated.clone())),
             store: Arc::new(InMemoryCallStore::new()),
             store_faults: Default::default(),
             wire_faults: Default::default(),

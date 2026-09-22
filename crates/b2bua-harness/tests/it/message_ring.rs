@@ -5,29 +5,19 @@
 //! repeats). The cap keeps the last N entries and counts the evicted; a cap of
 //! `0` (the default) records nothing.
 //!
-//! The SUT is spawned bare so a probe [`CdrWriter`] hands the test the
+//! The SUT is the harness [`B2buaSut`], which hands the test every
 //! terminated `Call` — the ring as the record sees it — while the live copy
 //! is read mid-call for the steady-state body measurement, encoded the way the
 //! store flushes it (`MsgpackCodec`).
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua::config::{B2buaConfig, CdrConfig};
-use b2bua::decision::ScriptedDecisionEngine;
-use b2bua::limiter::NoopLimiter;
-use b2bua::metrics::B2buaMetrics;
-use b2bua::store::InMemoryCallStore;
-use b2bua::{B2buaCore, B2buaDeps};
-use b2bua_harness::settle_until;
+use b2bua_harness::{settle_until, B2buaSut};
 use call::{Call, CallBodyCodec, MessageDirection, MessageEntry, MsgpackCodec};
 use scenario_harness::{Agent, Harness, WaiverScope};
-use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
-use sip_txn::IdGen;
-
-use crate::common::probe_cdr::{ProbeCdr, TerminatedCalls};
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -39,11 +29,10 @@ const BOB: &str = "127.0.0.1:5070";
 const B2BUA: &str = "127.0.0.1:5080";
 const ORDINAL: &str = "w0";
 
-/// A bare SUT routing everything to bob, its ring configured by `cdr`.
+/// The harness SUT routing everything to bob, its ring configured by `cdr`.
 struct Sut {
     addr: SocketAddr,
-    core: B2buaCore,
-    terminated: TerminatedCalls,
+    b2bua: B2buaSut,
 }
 
 impl Sut {
@@ -51,64 +40,35 @@ impl Sut {
         Self::spawn_tuned(h, cdr, |_| {}).await
     }
 
-    async fn spawn_tuned(h: &Harness, cdr: CdrConfig, tune: impl FnOnce(&mut B2buaConfig)) -> Self {
-        // A UA on both faces, as `B2buaSut` declares it; the harness baseline
-        // tuning (the keepalive cadence, the panic-ELU backstop off under a
-        // paused clock) as `B2buaSut::start` applies it.
-        let (endpoint, addr) = h
-            .bind_sut_with_roles(
-                "b2bua",
-                B2BUA,
-                std::collections::HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
-            )
+    async fn spawn_tuned(
+        h: &Harness,
+        cdr: CdrConfig,
+        tune: impl FnOnce(&mut B2buaConfig) + 'static,
+    ) -> Self {
+        let b2bua = B2buaSut::route_all_to("127.0.0.1", 5070)
+            .tune(move |config| {
+                config.worker_allowed_target_suffixes = vec!["*".into()];
+                config.cdr = cdr;
+                tune(config);
+            })
+            .start(h, "b2bua", B2BUA)
             .await;
-        let terminated = TerminatedCalls::default();
-        let mut config = B2buaConfig {
-            self_ordinal: ORDINAL.into(),
-            sip_local_ip: addr.ip().to_string(),
-            sip_local_port: addr.port(),
-            worker_allowed_target_suffixes: vec!["*".into()],
-            keepalive_interval_sec: 30,
-            keepalive_timeout_sec: 5,
-            overload_panic_elu_threshold: 1.1,
-            cdr,
-            ..Default::default()
-        };
-        tune(&mut config);
-        let deps = B2buaDeps {
-            config,
-            decision: Arc::new(ScriptedDecisionEngine::route_all_to("127.0.0.1", 5070)),
-            limiter: Arc::new(NoopLimiter),
-            cdr: Arc::new(ProbeCdr::new(terminated.clone())),
-            store: Arc::new(InMemoryCallStore::new()),
-            store_faults: Default::default(),
-            wire_faults: Default::default(),
-            clock: Clock::test_at(0),
-            id_gen: Arc::new(IdGen::seeded(0xB2B0)),
-            replication: None,
-            metrics: B2buaMetrics::new(),
-            adaptation_http: None,
-            compose: b2bua::rules::ComposeOptions::default(),
-        };
-        let core = B2buaCore::spawn(endpoint, deps);
-        Self { addr, core, terminated }
+        Self { addr: b2bua.addr, b2bua }
     }
 
     fn live(&self, call_id: &str, from_tag: &str) -> Call {
         let call_ref = call::derive_call_ref(ORDINAL, call_id, from_tag);
-        self.core.live_call(&call_ref).expect("the call is live")
+        self.b2bua.live_call(&call_ref).expect("the call is live")
     }
 
     /// Every call created is reaped and the one CDR is written.
     async fn assert_reaped(&self) -> Call {
-        settle_until(|| self.terminated.snapshot().len() == 1).await;
-        settle_until(|| self.core.active_calls() == 0).await;
-        assert_eq!(self.core.active_calls(), 0, "the call is removed");
-        assert_eq!(self.core.lock_count(), 0, "no stranded per-call lock");
-        let m = self.core.metrics();
-        assert_eq!(m.creations_total(), m.removals_total(), "every call created is removed");
-        let terminated = self.terminated.snapshot();
+        settle_until(|| self.b2bua.terminated_calls().len() == 1).await;
+        settle_until(|| self.b2bua.active_calls() == 0).await;
+        self.b2bua.assert_fully_reaped();
+        let terminated = self.b2bua.terminated_calls();
         assert_eq!(terminated.len(), 1, "exactly one CDR per call");
+        assert_eq!(self.b2bua.cdr_records().len(), 1, "the record is written beside the call");
         terminated.into_iter().next().unwrap()
     }
 }
