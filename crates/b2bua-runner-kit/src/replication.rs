@@ -46,7 +46,7 @@ use crate::is_truthy;
 
 /// Where the peer set comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MembershipSource {
+pub(crate) enum MembershipSource {
     /// `B2BUA_PEERS`, parsed, sorted by ordinal.
     Static(Vec<Peer>),
     /// The EndpointSlices of the headless `service` in `namespace`, watched
@@ -56,7 +56,7 @@ pub enum MembershipSource {
 
 /// How a peer's replication address is resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplAddressing {
+pub(crate) enum ReplAddressing {
     /// The peer's host as given: an IP, or a name resolved per connect attempt.
     Static,
     /// The peer's stable pod DNS name ([`pod_dns_name`]), falling back to its
@@ -68,11 +68,11 @@ pub enum ReplAddressing {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicationSettings {
     /// Where this node serves its changelog, `B2BUA_REPL_LISTEN`.
-    pub listen: SocketAddr,
+    pub(crate) listen: SocketAddr,
     /// The port every peer is reached on, `B2BUA_REPL_PORT`.
-    pub peer_port: u16,
+    pub(crate) peer_port: u16,
     /// `B2BUA_PEERS` when set, else discovery of `B2BUA_REPL_SERVICE`.
-    pub membership: MembershipSource,
+    pub(crate) membership: MembershipSource,
 }
 
 impl ReplicationSettings {
@@ -118,7 +118,7 @@ impl ReplicationSettings {
     }
 
     /// How the membership these settings select is addressed.
-    pub fn addressing(&self) -> ReplAddressing {
+    pub(crate) fn addressing(&self) -> ReplAddressing {
         match &self.membership {
             MembershipSource::Static(_) => ReplAddressing::Static,
             MembershipSource::EndpointSlices { service, namespace } => {
@@ -193,7 +193,7 @@ impl MembershipSource {
 
 /// The stable DNS name of a discovered peer: its ordinal is its pod name
 /// (the EndpointSlice `targetRef`), under the headless `service`.
-pub fn pod_dns_name(ordinal: &str, service: &str, namespace: &str) -> String {
+pub(crate) fn pod_dns_name(ordinal: &str, service: &str, namespace: &str) -> String {
     format!("{ordinal}.{service}.{namespace}.svc.cluster.local")
 }
 
