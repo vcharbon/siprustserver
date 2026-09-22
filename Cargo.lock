@@ -570,9 +570,12 @@ dependencies = [
  "b2bua",
  "call",
  "http-net",
+ "kube",
  "lapin",
  "observe",
  "probe-http",
+ "repl-net",
+ "rustls",
  "serde_json",
  "sip-clock",
  "sip-message",
@@ -581,6 +584,7 @@ dependencies = [
  "tokio",
  "tokio-executor-trait",
  "tokio-reactor-trait",
+ "topology",
  "tracing",
 ]
 

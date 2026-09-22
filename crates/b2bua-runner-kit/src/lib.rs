@@ -74,7 +74,12 @@ use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 use sip_txn::IdGen;
 
 mod cdr_rabbitmq;
+mod replication;
 pub use cdr_rabbitmq::{rabbitmq_cdr_sink_from_lookup, RabbitMqCdrSettings, RabbitMqCdrWriter};
+pub use replication::{
+    pod_dns_name, replication_setup_from_lookup, MembershipSource, ReplAddressing,
+    ReplicationSettings,
+};
 
 /// A CDR sink that discards every record. The default sink when a runner wires
 /// no external CDR store — for load/endurance the process must not accumulate
