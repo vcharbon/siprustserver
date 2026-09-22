@@ -106,6 +106,29 @@ impl LimiterMetrics {
             "sum of all live counts (current concurrent across ids)",
             stats.current_total.to_string(),
         );
+        metric(
+            "limiter_admission_max",
+            "gauge",
+            "largest per-id sum over the admission lookback (what an admit compares with its limit)",
+            stats.admission_max.to_string(),
+        );
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exposes_the_admission_max_beside_the_live_total() {
+        let stats =
+            WindowStats { live_keys: 3, current_total: 7, admission_max: 4, auto_cleared: 0 };
+        let text = LimiterMetrics::new().prometheus_text(stats);
+        assert!(
+            text.contains("\n# TYPE limiter_admission_max gauge\nlimiter_admission_max 4\n"),
+            "{text}"
+        );
+        assert!(text.contains("\nlimiter_current_total 7\n"), "{text}");
     }
 }

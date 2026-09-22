@@ -189,10 +189,20 @@ impl WindowStore {
 
     /// Live gauges + the cumulative auto-clear counter, for metrics.
     pub fn stats(&self) -> WindowStats {
+        // The windows `admit` sums: the current one and the N-1 before it.
+        let cur = self.current_window();
+        let from = cur - (self.cfg.active_windows - 1) * self.cfg.window_sec;
         let inner = self.inner.lock().unwrap();
+        let mut lookback: HashMap<&str, i64> = HashMap::new();
+        for ((id, w), en) in &inner.map {
+            if (from..=cur).contains(w) {
+                *lookback.entry(id.as_str()).or_insert(0) += en.count;
+            }
+        }
         WindowStats {
             live_keys: inner.map.len() as u64,
             current_total: inner.map.values().map(|e| e.count).sum(),
+            admission_max: lookback.into_values().max().unwrap_or(0),
             auto_cleared: inner.auto_cleared,
         }
     }
@@ -203,8 +213,14 @@ impl WindowStore {
 pub struct WindowStats {
     /// Number of live `(id, window)` keys (leak monitor).
     pub live_keys: u64,
-    /// Sum of all live counts (current concurrent across all ids).
+    /// Sum of all live counts (current concurrent across all ids). A count whose
+    /// release was lost stays here until its key's TTL, after the admission
+    /// lookback has stopped counting it.
     pub current_total: i64,
+    /// The largest per-id sum over the admission lookback: the value the next
+    /// admit of that id compares with its limit, which leaked counts older than
+    /// the lookback no longer reach.
+    pub admission_max: i64,
     /// Cumulative keys removed by TTL sweep.
     pub auto_cleared: u64,
 }

@@ -148,3 +148,30 @@ async fn seeded_fuzz_keeps_counts_nonnegative_and_consistent() {
         assert_eq!(total, net, "live total tracks admits-minus-releases");
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn admission_max_is_the_lookback_sum_admit_compares_not_the_live_total() {
+    let s = store(); // 3 active 1 s windows, 4 s TTL
+                     // Two holds whose release never arrives: they stay in the store until TTL.
+    for _ in 0..2 {
+        assert!(matches!(s.admit(&entry("A", 2)), AdmitResult::Admitted { .. }));
+    }
+    assert_eq!(s.stats().admission_max, 2);
+    // Past the 3-window lookback, still under the TTL: admission no longer
+    // counts the leaked holds and admits A to its cap again.
+    advance(3000).await;
+    assert_eq!(s.stats().admission_max, 0);
+    for _ in 0..2 {
+        assert!(matches!(s.admit(&entry("A", 2)), AdmitResult::Admitted { .. }));
+    }
+    assert!(matches!(s.admit(&entry("B", 5)), AdmitResult::Admitted { .. }));
+    let stats = s.stats();
+    assert_eq!(stats.current_total, 5, "the live total still holds the leaked counts");
+    assert_eq!(stats.admission_max, 2, "the largest per-id lookback sum is A's 2");
+    // The gauge is exactly what admit compares: A at 2 is full.
+    assert!(matches!(s.admit(&entry("A", 2)), AdmitResult::Rejected { .. }));
+    // Once the leaked key's TTL elapses the live total agrees again.
+    advance(1000).await;
+    s.sweep_now();
+    assert_eq!(s.stats().current_total, 3);
+}
