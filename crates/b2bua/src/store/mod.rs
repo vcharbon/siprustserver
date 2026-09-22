@@ -194,6 +194,13 @@ impl CallState {
         self
     }
 
+    /// The buffered writer the store write path submits to, for the tests that
+    /// assert what an unwired node constructs.
+    #[cfg(test)]
+    pub(crate) fn terminate_writer(&self) -> Option<&BufferedTerminateWriter> {
+        Some(&self.terminate_writer)
+    }
+
     /// Insert a freshly-created call + index it. Returns its `callRef`.
     pub fn create(&self, call: Call) -> String {
         let call_ref = call.call_ref.clone();

@@ -29,6 +29,9 @@ use crate::store::{BufferedTerminateWriter, CallState, CallStore, StoreFaults};
 use crate::timers::TimerService;
 use crate::wire_faults::WireFaults;
 
+#[cfg(test)]
+mod unwired_tests;
+
 /// A running B2BUA worker. Holds the shared context; the router loop runs on a
 /// spawned task that lives until the endpoint closes.
 pub struct B2buaCore {
@@ -517,6 +520,22 @@ impl B2buaCore {
     #[cfg(test)]
     pub(crate) fn router_ctx(&self) -> &Arc<RouterCtx> {
         &self.ctx
+    }
+
+    /// The buffered terminate writer the call store write path submits to, for
+    /// the tests that assert what an unwired node constructs.
+    #[cfg(test)]
+    pub(crate) fn terminate_writer(&self) -> Option<&BufferedTerminateWriter> {
+        self.ctx.state.terminate_writer()
+    }
+
+    /// The fail-back command sender the router's receiver pairs with, for the
+    /// tests that assert what an unwired node constructs.
+    #[cfg(test)]
+    pub(crate) fn fail_back_sender(
+        &self,
+    ) -> Option<&tokio::sync::mpsc::UnboundedSender<router::ReplCommand>> {
+        Some(&self._repl_tx)
     }
 
     /// The replicating call store, when replication is wired (`None` on the
