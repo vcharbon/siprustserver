@@ -26,3 +26,6 @@ sip-net = { path = "../sip-net" }
 sip-txn = { path = "../sip-txn" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+
+[dev-dependencies]
+sip-message = { path = "../sip-message" }

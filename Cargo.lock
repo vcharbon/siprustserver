@@ -576,6 +576,7 @@ dependencies = [
  "observe",
  "probe-http",
  "sip-clock",
+ "sip-message",
  "sip-net",
  "sip-txn",
  "tokio",

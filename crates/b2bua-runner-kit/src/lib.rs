@@ -68,6 +68,9 @@ use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 use sip_txn::IdGen;
 
+mod cdr_rabbitmq;
+pub use cdr_rabbitmq::{rabbitmq_cdr_sink_from_lookup, RabbitMqCdrSettings};
+
 /// A CDR sink that discards every record. The default sink when a runner wires
 /// no external CDR store — for load/endurance the process must not accumulate
 /// records in memory. Always wrapped by `BufferedCdrWriter` (see
