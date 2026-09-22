@@ -735,6 +735,12 @@ impl B2buaSut {
         self._core.active_calls()
     }
 
+    /// The live copy of `call_ref` this worker serves, if any (introspection:
+    /// what its rules read at the next event).
+    pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
+        self._core.live_call(call_ref)
+    }
+
     /// Live per-call serialization-lock count. Should return to 0 once traffic
     /// drains; a residue is the orphan-reject lock leak (one stranded lock per
     /// in-dialog request that 481'd without tearing its per-call state down).

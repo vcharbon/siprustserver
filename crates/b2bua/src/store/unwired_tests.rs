@@ -5,13 +5,18 @@
 //! write, and a dropped delete would strand the body for good.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use call::Call;
 use sip_message::parser::custom::CustomParser;
 use sip_message::{SipMessage, SipParser, SipRequest};
 
-use super::{BufferedTerminateWriter, CallState, CallStore, InMemoryCallStore};
+use super::{
+    BufferedTerminateWriter, CallState, CallStore, InMemoryCallStore, PartitionRole, PutOpts,
+    StoreError,
+};
 use crate::config::B2buaConfig;
 use crate::initial_invite::build_initial_call;
 use crate::metrics::B2buaMetrics;
@@ -108,8 +113,10 @@ async fn a_store_with_no_replication_wired_holds_nothing_after_a_call() {
 /// so a delete submitted behind an undrained flush is lost and the body it would
 /// have removed stays forever (no reaper runs without a replication store). With
 /// no write at all there is nothing to strand. The put and the delete are
-/// submitted with no yield between them, so a one-slot writer sees them
-/// back-to-back whatever the runtime's scheduling.
+/// submitted with no await between them; under the current-thread test runtime
+/// (`start_paused`) the drainer cannot run in that window, so a one-slot writer
+/// sees them back to back and drops the delete. A multi-threaded runtime could
+/// drain the put first, and this scenario would then not reach the drop.
 #[tokio::test(start_paused = true)]
 async fn a_dropped_delete_strands_nothing_when_no_replication_is_wired() {
     let store = Arc::new(InMemoryCallStore::new());
@@ -127,4 +134,91 @@ async fn a_dropped_delete_strands_nothing_when_no_replication_is_wired() {
 
     assert!(state.peek(&call_ref).is_none(), "remove evicts the in-memory call");
     assert_eq!(store.lens(), (0, 0), "no body is stranded in a store nothing reads");
+}
+
+/// A store that counts the writes reaching it, over an in-memory store.
+#[derive(Default)]
+struct CountingStore {
+    inner: InMemoryCallStore,
+    puts: AtomicUsize,
+    deletes: AtomicUsize,
+}
+
+#[async_trait]
+impl CallStore for CountingStore {
+    async fn get_call(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+    ) -> Result<Option<Arc<[u8]>>, StoreError> {
+        self.inner.get_call(role, primary, call_ref).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn put_call(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+        body: Vec<u8>,
+        indexes: &[String],
+        ttl_ms: i64,
+        call_gen: i64,
+        call_bgen: i64,
+        opts: &PutOpts,
+    ) -> Result<(), StoreError> {
+        self.puts.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .put_call(role, primary, call_ref, body, indexes, ttl_ms, call_gen, call_bgen, opts)
+            .await
+    }
+
+    async fn delete_call(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+        indexes: &[String],
+        opts: &PutOpts,
+    ) -> Result<(), StoreError> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        self.inner.delete_call(role, primary, call_ref, indexes, opts).await
+    }
+
+    async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError> {
+        self.inner.get_index(index_key).await
+    }
+
+    async fn scan_calls(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+    ) -> Result<Vec<Vec<u8>>, StoreError> {
+        self.inner.scan_calls(role, primary).await
+    }
+}
+
+/// The delete is gated on its own, not only invisible behind a gated flush: with
+/// no replication store wired, a create → update → flush → remove sends the
+/// store neither a put nor a delete. A store that holds nothing cannot show a
+/// suppressed delete, so the writes are counted at the store instead.
+#[tokio::test(start_paused = true)]
+async fn no_replication_wired_sends_the_store_neither_put_nor_delete() {
+    let store = Arc::new(CountingStore::default());
+    let writer = BufferedTerminateWriter::spawn(store.clone() as Arc<dyn CallStore>, 16);
+    let state =
+        CallState::new(store.clone() as Arc<dyn CallStore>, writer, "w0", B2buaMetrics::new());
+
+    let call = cookie_call();
+    let call_ref = call.call_ref.clone();
+    state.create(call);
+    let before = state.peek(&call_ref).unwrap();
+    state.update(before.clone());
+    state.flush(&before);
+    state.remove(&call_ref);
+    drain().await;
+
+    assert_eq!(store.puts.load(Ordering::SeqCst), 0, "no put reaches the store");
+    assert_eq!(store.deletes.load(Ordering::SeqCst), 0, "no delete reaches the store");
 }

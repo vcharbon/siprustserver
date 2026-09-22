@@ -64,6 +64,7 @@ async fn a_worker_with_no_replication_wired_writes_nothing_to_its_store() {
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
+    let call_id = call.call_id();
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
@@ -77,6 +78,16 @@ async fn a_worker_with_no_replication_wired_writes_nothing_to_its_store() {
         1,
         "the proxy placed the call on exactly one worker"
     );
+    // The premise: the proxy named a backup peer and the serving worker stamped
+    // it onto the call, so the topology alone would have opened the store.
+    let live = [("w0", &w0), ("w1", &w1)]
+        .into_iter()
+        .find_map(|(ordinal, sut)| {
+            sut.live_call(&call::derive_call_ref(ordinal, &call_id, dialog.local_tag()))
+        })
+        .expect("one worker serves the call");
+    let topology = live.topology.expect("the cookie stamps a topology on the call");
+    assert!(!topology.bak.is_empty(), "the cookie names a backup peer: {topology:?}");
     for (name, store) in stores {
         assert_eq!(
             store.lens(),
