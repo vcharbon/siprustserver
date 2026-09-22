@@ -100,12 +100,14 @@ pub(crate) mod stack;
 pub(crate) mod state;
 
 pub use exec::{Lane, Outcome};
+pub use instance::mint_nonce;
 pub use media::{Booking, MediaMode};
 pub use plan::{Plan, PlanError};
 pub use recording::Recording;
 pub use render::UriComposer;
 pub use replay::{replay, ReplayError};
 pub use settle::Sut;
+pub use stack::{dialog_identity, DialogIdentity};
 
 /// The run bundle's wire contracts, owned by [`pivot_schema::bundle`].
 pub use pivot_schema::bundle::{

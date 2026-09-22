@@ -88,10 +88,11 @@ impl<'p> Instance<'p> {
         for violation in &plan.document().rfc_violations {
             verdict.note_violation(violation);
         }
+        let nonce = config.identity_nonce.clone().unwrap_or_else(mint_nonce);
         Instance {
             plan,
             config,
-            nonce: mint_nonce(),
+            nonce,
             state: RunState::new(),
             cursor: Cursor::new(plan),
             claims: ClaimIndex::new(candidates),
@@ -295,7 +296,7 @@ fn claim_candidates(plan: &Plan, config: &RunConfig) -> Vec<Candidate> {
 /// A fresh dialog-identity nonce. Wall time plus a process counter: the counter
 /// separates instances inside one process, the timestamp separates processes and
 /// reruns — and neither reads `tokio::time`, which a paused test rewinds.
-fn mint_nonce() -> String {
+pub fn mint_nonce() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let stamp = std::time::SystemTime::now()
@@ -437,6 +438,16 @@ mod tests {
         let second = Instance::new(&plan, bound());
         assert_ne!(first.nonce(), second.nonce());
         assert!(!first.nonce().is_empty());
+    }
+
+    /// A lane that seeds the nonce knows the ids its dials carry before the
+    /// run starts.
+    #[test]
+    fn an_instance_takes_the_nonce_its_lane_seeds() {
+        let plan = plan("arrival-order");
+        let bound = config(IdentityBindings::new().bind("called-0-0", "e164", "0900004"));
+        let instance = Instance::new(&plan, bound.with_identity_nonce("lane-seed-1"));
+        assert_eq!(instance.nonce(), "lane-seed-1");
     }
 
     #[test]

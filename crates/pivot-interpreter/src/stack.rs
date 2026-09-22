@@ -200,6 +200,22 @@ pub struct LegStack {
     ids: u64,
 }
 
+/// The dialog identity a leg's out-of-dialog requests carry: its Call-ID and
+/// its own tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogIdentity {
+    pub call_id: String,
+    pub local_tag: String,
+}
+
+/// The identity leg `leg` dials under in the run seeded by `nonce`.
+pub fn dialog_identity(leg: &str, nonce: &str) -> DialogIdentity {
+    DialogIdentity {
+        call_id: format!("{leg}-{nonce}@pivot.invalid"),
+        local_tag: format!("{leg}-{nonce}-tag"),
+    }
+}
+
 impl LegStack {
     /// A leg that has not spoken yet. `local_uri`/`remote_uri` are the
     /// addresses its From and To carry; the lane composes them.
@@ -214,10 +230,11 @@ impl LegStack {
         let leg = leg.into();
         let local_uri = local_uri.into();
         let remote_uri = remote_uri.into();
+        let identity = dialog_identity(&leg, run_nonce);
         LegStack {
             dialog: StackDialog {
-                call_id: format!("{leg}-{run_nonce}@pivot.invalid"),
-                local_tag: format!("{leg}-{run_nonce}-tag"),
+                call_id: identity.call_id,
+                local_tag: identity.local_tag,
                 remote_tag: String::new(),
                 local_uri,
                 remote_uri: remote_uri.clone(),
@@ -1014,6 +1031,18 @@ mod tests {
     fn stack(leg: &str, nonce: &str) -> LegStack {
         let addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         LegStack::new(leg, addr, addr, nonce, "", "")
+    }
+
+    /// A leg's dialog carries the identity [`dialog_identity`] names for its
+    /// leg and nonce: what a lane computes before the run.
+    #[test]
+    fn a_leg_dials_under_the_identity_its_leg_and_nonce_name() {
+        let identity = dialog_identity("A", "n1");
+        assert_eq!(identity.call_id, "A-n1@pivot.invalid");
+        assert_eq!(identity.local_tag, "A-n1-tag");
+        let leg = stack("A", "n1");
+        assert_eq!(leg.call_id(), identity.call_id);
+        assert_eq!(leg.dialog.local_tag, identity.local_tag);
     }
 
     /// A UAS stack that has taken an inbound INVITE, and the INVITE itself.
