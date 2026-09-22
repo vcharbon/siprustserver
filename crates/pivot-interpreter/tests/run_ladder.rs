@@ -4671,9 +4671,9 @@ fn assert_substituted_finals_run_on(outcome: &Outcome, substituted: &[(&str, u16
     assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
 }
 
-/// A CANCEL sent after its INVITE's final reached the caller draws 200 from a
-/// UAS whose INVITE server transaction still lingers in Completed (RFC 3261
-/// §17.2.1, §9.2) and 481 from one that disposed of it. The document names the
+/// A CANCEL sent after its INVITE's non-2xx final reached the caller draws 200
+/// from a UAS whose INVITE server transaction still lingers in Completed
+/// (RFC 3261 §17.2.1, §9.2) and 481 from one that disposed of it. The document names the
 /// 481; this system answers 200. The step takes it, the recording line says
 /// why, and the call runs to its ACK with nothing retired and nothing
 /// abandoned.
@@ -4706,8 +4706,8 @@ async fn a_cancel_sent_after_its_invite_s_final_takes_200_or_481() {
     assert_eq!(
         answer.note.as_deref(),
         Some(
-            "tolerated: a final to a CANCEL sent after the INVITE's final arrived on this leg \
-             draws 200 while the server transaction lives and 481 once it is gone \
+            "tolerated: a final to a CANCEL sent after the INVITE's non-2xx final arrived on \
+             this leg draws 200 while the server transaction lives and 481 once it is gone \
              (RFC 3261 §9.2, §17.2.1); 200 arrived where the step names 481"
         ),
         "the recording says why"

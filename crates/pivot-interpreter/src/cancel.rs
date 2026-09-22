@@ -1,12 +1,14 @@
-//! The answer to a CANCEL sent after its INVITE's final
+//! The answer to a CANCEL sent after its INVITE's non-2xx final
 //! (`PCAP2TEST_PIVOT_V3.md` §6.7d).
 //!
 //! A UAS keeps its INVITE server transaction in Completed after a non-2xx final
 //! until the ACK or Timer H (RFC 3261 §17.2.1). A CANCEL matching a transaction
 //! draws 200 whatever that transaction's state; one matching none draws 481
-//! (§9.2). So a CANCEL a leg sends AFTER a final to its INVITE reached it draws
-//! 200 or 481 by how long the UAS holds the transaction, both conformant, and
-//! an expect naming either is satisfied by the other. The fact is read off the
+//! (§9.2). So a CANCEL a leg sends AFTER a non-2xx final to its INVITE reached
+//! it draws 200 or 481 by how long the UAS holds the transaction, both
+//! conformant, and an expect naming either is satisfied by the other. A 2xx
+//! ends the server transaction at once (§17.2.1), so a CANCEL after one is not
+//! covered. The fact is read off the
 //! leg's recording — this run's wire — never off the document's list order.
 
 use pivot_schema::bundle::{Dir, RecordedMessage};
@@ -22,8 +24,8 @@ const EITHER: [u16; 2] = [200, 481];
 /// Whether `inbound` answers `step` as the other final a late CANCEL draws: the
 /// step is an expect naming 200 or 481 to CANCEL, the arrival is the other of
 /// the two on the CANCEL transaction the step waits on, and `leg` records a
-/// final to the INVITE of the same CSeq number arriving BEFORE that CANCEL was
-/// sent. The CANCEL is the one sent under `opener` (the step's opening send,
+/// non-2xx final to the INVITE of the same CSeq number arriving BEFORE that
+/// CANCEL was sent. The CANCEL is the one sent under `opener` (the step's opening send,
 /// `Cursor::opening_send`), else the leg's last CANCEL sent — the transaction
 /// `progress` charges the step on.
 pub fn answers_late_cancel(
@@ -51,7 +53,7 @@ pub fn answers_late_cancel(
         && leg[..at].iter().any(|recorded| {
             recorded.dir == Dir::In
                 && matches!(parse(recorded), Some(SipMessage::Response(r))
-                    if r.status() >= 200
+                    if r.status() >= 300
                         && *r.cseq().method() == Method::Invite
                         && r.cseq().seq() == cseq)
         })
@@ -60,9 +62,9 @@ pub fn answers_late_cancel(
 /// The recording note a tolerated late-CANCEL final carries.
 pub fn note(named: u16, arrived: u16) -> String {
     format!(
-        "tolerated: a final to a CANCEL sent after the INVITE's final arrived on this leg draws \
-         200 while the server transaction lives and 481 once it is gone (RFC 3261 §9.2, \
-         §17.2.1); {arrived} arrived where the step names {named}"
+        "tolerated: a final to a CANCEL sent after the INVITE's non-2xx final arrived on this \
+         leg draws 200 while the server transaction lives and 481 once it is gone \
+         (RFC 3261 §9.2, §17.2.1); {arrived} arrived where the step names {named}"
     )
 }
 
@@ -245,6 +247,30 @@ mod tests {
         assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, Some("s7")));
         let other = arrival(&response(200, 2, "CANCEL"));
         assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &other, &late(), Some("s7")));
+    }
+
+    /// A 2xx ends the INVITE server transaction at once (RFC 3261 §17.2.1): no
+    /// Completed state lingers, and a CANCEL sent after it is not covered.
+    #[test]
+    fn a_cancel_sent_after_a_2xx_to_its_invite_gets_nothing() {
+        let leg = ladder(&[
+            (Dir::Out, request("INVITE", 1), Some("s1")),
+            (Dir::In, response(200, 1, "INVITE"), Some("s6")),
+            (Dir::Out, request("CANCEL", 1), Some("s7")),
+        ]);
+        let ok = arrival(&response(200, 1, "CANCEL"));
+        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, Some("s7")));
+    }
+
+    #[test]
+    fn a_leg_that_sent_no_cancel_gets_nothing() {
+        let leg = ladder(&[
+            (Dir::Out, request("INVITE", 1), Some("s1")),
+            (Dir::In, response(486, 1, "INVITE"), Some("s6")),
+        ]);
+        let ok = arrival(&response(200, 1, "CANCEL"));
+        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, None));
+        assert!(!answers_late_cancel(&expects(481, Some("CANCEL")), &ok, &leg, Some("s7")));
     }
 
     #[test]

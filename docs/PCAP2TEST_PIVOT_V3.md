@@ -78,12 +78,13 @@ The release now stops at the leg's first pending step that is not an `optional`
 expect (§6.5, §14). §6.7c's bounds state the method-wide armed-answer check and
 the block rule as the scheduler applies them. No document field changes.
 
-**2026-09-22 — a CANCEL sent after its INVITE's final is answered 200 or 481,
-and either satisfies the step.** A UAS holds its INVITE server transaction in
-Completed after a non-2xx final until the ACK or Timer H (RFC 3261 §17.2.1), and
-a CANCEL matching a transaction draws 200 while one matching none draws 481
-(§9.2). An expect naming either final to a CANCEL the leg sent after a final to
-its INVITE reached it takes the other as its own (§6.7d, §14). No document
+**2026-09-22 — a CANCEL sent after its INVITE's non-2xx final is answered 200
+or 481, and either satisfies the step.** A UAS holds its INVITE server
+transaction in Completed after a non-2xx final until the ACK or Timer H
+(RFC 3261 §17.2.1), and a CANCEL matching a transaction draws 200 while one
+matching none draws 481 (§9.2). An expect naming either final to a CANCEL the
+leg sent after a non-2xx final to its INVITE reached it takes the other as its
+own (§6.7d, §14). No document
 field changes.
 
 **2026-09-22 — an unmatched response is charged to the expect of its own
@@ -1289,7 +1290,10 @@ failed — when its OWN budget (`within_ms`, else `timing.expect_budget_ms`)
 expires. The match releases only the tolerated absences standing in front of
 the leg's first PENDING step that is not one — a required expect or a send not
 yet made: an expect armed beside such a step (§6.7b, §6.7c) says nothing about
-the order of what stands behind it, and those optionals stay armed.
+the order of what stands behind it, and those optionals stay armed. An optional
+so kept can take a later datagram that a later step on its leg with the same
+discriminator also names: a document scripting two such steps is ambiguous, and
+the run reads list order.
 
 Both releases are normative, and the budget one is what keeps a tolerated
 absence from wedging the steps behind it forever: nothing else states when the
@@ -1463,8 +1467,8 @@ document:
   `unordered`) standing between the leg's first blocking item and the candidate
   stops the walk, and is never armed early (§6.7b). A block that IS the leg's
   blocking item — an armed `alt` or `unordered` — lets the candidate arm beside
-  it: its members are armed already, and one on the candidate's transaction
-  refuses it by the bullet above.
+  it: its members are armed already, and one of the candidate's method refuses
+  it by the bullet above.
 
 Walking past a send emits nothing early, and walking past an expect of the
 leg's own un-orders nothing but this: everything else behind that expect keeps
@@ -1478,14 +1482,14 @@ The same fact keeps the two armed answers' charges apart: a datagram no armed
 expect matched is charged to the expect of ITS transaction, never to the one
 armed beside it (§14, item 4).
 
-### 6.7d The answer to a CANCEL sent after its INVITE's final
+### 6.7d The answer to a CANCEL sent after its INVITE's non-2xx final
 
 A CANCEL matching an existing transaction draws 200 whatever that transaction's
 state, and one matching none draws 481 (RFC 3261 §9.2). After a non-2xx final
 the INVITE server transaction lingers in Completed until the ACK or Timer H
 (§17.2.1), and a UAS may dispose of it earlier or never have kept it. So a
-CANCEL a leg sends AFTER a final to its INVITE has reached it draws 200 from a
-UAS still holding the transaction and 481 from one that no longer does. Both are
+CANCEL a leg sends AFTER a non-2xx final to its INVITE has reached it draws 200
+from a UAS still holding the transaction and 481 from one that no longer does. Both are
 conformant, and which one a capture shows says how long one implementation held
 the transaction, nothing a document can oblige another to keep.
 
@@ -1496,8 +1500,10 @@ two. The bounds, stated once here and nowhere per document:
   CANCEL`. A status alone names no transaction and takes only its own status;
 - only the pair: any other final to the CANCEL is the discriminator's to judge;
 - the leg's recording — this run's wire, never the document's list order —
-  shows a final (status 200 or above) to the INVITE of the CANCEL's CSeq number
-  ARRIVING before the CANCEL was sent. The CANCEL is the one the expect's
+  shows a non-2xx final (status 300 or above) to the INVITE of the CANCEL's
+  CSeq number ARRIVING before the CANCEL was sent. A 2xx ends the INVITE server
+  transaction at once (§17.2.1), so a CANCEL sent after one is not covered;
+  neither is a leg that sent no CANCEL. The CANCEL is the one the expect's
   opening send emitted, else the leg's last one, the transaction item 4 of §14
   charges on. A CANCEL sent while the INVITE was unanswered is the ordinary race
   of §9.1, and a 481 to it is a finding; a provisional before it does not count.
@@ -2966,8 +2972,8 @@ Its whole job:
    `optional` is released, and so is every tolerated absence armed on that
    transaction), the verdict listing it under `retired`; a block member is
    charged but never retired. The one status an expect takes besides its own:
-   200 for 481 or 481 for 200 on a CANCEL the leg sent after its INVITE's final
-   reached it (§6.7d), a match and no failure.
+   200 for 481 or 481 for 200 on a CANCEL the leg sent after its INVITE's
+   non-2xx final reached it (§6.7d), a match and no failure.
 5. **Lane scoping** (§9.1): evaluate every check, and record a CLASSIFIED one as
    informative instead of gating when the run's lane is not `case.origin_lane`,
    unless the run configuration states that class outright. One comparison, no

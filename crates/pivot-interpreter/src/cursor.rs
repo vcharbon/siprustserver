@@ -468,9 +468,8 @@ impl<'p> Cursor<'p> {
     /// when a later step on the same leg MATCHES first"). A send is emitted, not
     /// matched: the runner controls when it sends, and letting it overtake an
     /// optional expect would discard a message still in flight. The release
-    /// stops at the leg's first PENDING step that is not a tolerated absence —
-    /// a required expect or a send not yet made: an expect armed beside it
-    /// (§6.7b, §6.7c) says nothing about the order of what stands behind it.
+    /// stops at the leg's first PENDING step that is not a tolerated absence
+    /// (§6.5).
     pub fn complete(&mut self, step: &str) -> Vec<String> {
         self.commit(step);
         let Some(compiled) = self.plan.step(step) else { return Vec::new() };
@@ -706,8 +705,6 @@ mod tests {
         )
     }
 
-    /// A declared race arms both steps at once, so the leg is not committed to
-    /// the order the capture happened to see.
     /// An `optional` expect of a request relayed from `from` on another leg.
     fn optional_relayed_request(id: &str, leg: &str, method: &str, from: &str) -> String {
         let d =
@@ -724,6 +721,8 @@ mod tests {
         )
     }
 
+    /// A declared race arms both steps at once, so the leg is not committed to
+    /// the order the capture happened to see.
     #[test]
     fn a_declared_race_arms_beside_the_step_it_names() {
         let p = plan(&format!(
