@@ -120,6 +120,25 @@ pub trait HttpService: Send + Sync {
     /// application errors travel as non-2xx [`HttpResponse`]s; only the
     /// *transport* fails with [`HttpError`].
     async fn handle(&self, req: HttpRequest) -> HttpResponse;
+
+    /// Answer one request: a response, or a connection closed without one.
+    /// Transports call this, never [`handle`](Self::handle) directly. The
+    /// default answers with `handle`'s response; a service that must close the
+    /// connection without responding (RFC 9112 §9.6) overrides it.
+    async fn answer(&self, req: HttpRequest) -> HttpAnswer {
+        HttpAnswer::Response(self.handle(req).await)
+    }
+}
+
+/// What a service does with one request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HttpAnswer {
+    /// Send this response.
+    Response(HttpResponse),
+    /// Close the connection without a response. The simulated fabric reports
+    /// it to the client as [`HttpError::Io`]; the real server drops the
+    /// connection before writing a status line.
+    Abort,
 }
 
 /// A bound server. Dropping it deregisters the service (simulated) / shuts the

@@ -1806,11 +1806,15 @@ name = "http-net"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "http-body-util",
+ "http-net",
  "hyper",
  "hyper-util",
  "reqwest",
+ "serde",
+ "serde_json",
  "sip-clock",
  "thiserror 2.0.18",
  "tokio",

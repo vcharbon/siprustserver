@@ -41,12 +41,13 @@
 //! timeout fires when the harness advances. See `b2bua::limiter_http`.
 
 pub mod failures;
+pub mod scripted;
 mod transport;
 
 #[cfg(feature = "real")]
 pub use transport::RealHttpNetwork;
 pub use transport::{
-    BindError, CapturedExchange, Direction, ExchangeOutcome, Fault, HttpError, HttpRequest,
-    HttpResponse, HttpServerHandle, HttpService, HttpTransport, RecordingHttpNetwork,
+    BindError, CapturedExchange, Direction, ExchangeOutcome, Fault, HttpAnswer, HttpError,
+    HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport, RecordingHttpNetwork,
     SimulatedHttpNetwork,
 };
