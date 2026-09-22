@@ -478,9 +478,9 @@ fn policy_body_three_states_round_trip() {
 ///   decode — a body emitted without the field fails to decode (the next field's
 ///   marker lands where the bool is expected), and a `None` body is not
 ///   byte-identical to a field-absent one (`None` serializes an explicit nil).
-///   Contrast `sm_cursors` below — the one field whose absence decodes: it
-///   is the LAST field, carries `#[serde(default, skip_serializing_if)]`, and
-///   has an explicit field-absent decode assertion.
+///   Contrast `sm_cursors` below — the genuine back-compat field — which is the
+///   LAST field, carries `#[serde(default, skip_serializing_if)]`, and has an
+///   explicit field-absent decode assertion.
 ///
 /// The TS source has no dedicated codec test for this field (it is covered only
 /// generically by the round-trip property); this pins its contract.

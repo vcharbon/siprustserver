@@ -321,10 +321,7 @@ pub struct Call {
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate
-    /// machine-bound rules. An empty map drops off the wire and an absent one
-    /// decodes empty; under the positional codec a skipped field must be the
-    /// last, so this MUST remain the last `Call` field. The replicated body
-    /// has no cross-version compatibility (ADR-0008).
+    /// machine-bound rules. An empty map drops off the wire.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sm_cursors: BTreeMap<MachineId, StateLabel>,
 }
