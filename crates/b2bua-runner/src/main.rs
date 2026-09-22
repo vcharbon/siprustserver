@@ -41,7 +41,7 @@
 //!                   kernel wmem_default; clamped at wmem_max) — ADR-0033
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
 //!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024)
-//!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _MAX_LEN  the RabbitMQ CDR sink (see `b2bua_runner_kit`)
+//!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _DECLARE / _MAX_LEN  the RabbitMQ CDR sink (see `b2bua_runner_kit`)
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)
 //!   B2BUA_CALL_CAP  max concurrent calls before drop    (default 1_000_000)
 //!   B2BUA_KEEPALIVE_SEC in-dialog OPTIONS keepalive interval (default 300 = 5 min, min 120)

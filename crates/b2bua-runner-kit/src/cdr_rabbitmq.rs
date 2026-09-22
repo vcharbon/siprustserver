@@ -68,11 +68,33 @@ impl RabbitMqCdrSettings {
             return Ok(None);
         };
         let queue = get("B2BUA_CDR_RABBITMQ_QUEUE").unwrap_or_else(|| "cdr".to_string());
-        let raw_max = get("B2BUA_CDR_RABBITMQ_MAX_LEN").unwrap_or_else(|| "100000".to_string());
-        let max_len = raw_max.parse().map_err(|e| {
-            format!("B2BUA_CDR_RABBITMQ_MAX_LEN must be an integer, got {raw_max:?}: {e}")
-        })?;
-        Ok(Some(Self { url, queue, declare: CdrQueueDeclare::Own { max_len } }))
+        let raw_max = get("B2BUA_CDR_RABBITMQ_MAX_LEN");
+        let raw_declare = get("B2BUA_CDR_RABBITMQ_DECLARE").filter(|v| !v.trim().is_empty());
+        let declare = match raw_declare.as_deref() {
+            None | Some("own") => {
+                let raw_max = raw_max.unwrap_or_else(|| "100000".to_string());
+                let max_len = raw_max.parse().map_err(|e| {
+                    format!("B2BUA_CDR_RABBITMQ_MAX_LEN must be an integer, got {raw_max:?}: {e}")
+                })?;
+                CdrQueueDeclare::Own { max_len }
+            }
+            Some("existing") => {
+                if let Some(raw_max) = raw_max {
+                    return Err(format!(
+                        "B2BUA_CDR_RABBITMQ_MAX_LEN={raw_max:?} has no effect with \
+                         B2BUA_CDR_RABBITMQ_DECLARE=existing: the broker holds the queue \
+                         and its arguments; unset it"
+                    ));
+                }
+                CdrQueueDeclare::Existing
+            }
+            Some(other) => {
+                return Err(format!(
+                    "B2BUA_CDR_RABBITMQ_DECLARE must be `own` or `existing`, got {other:?}"
+                ));
+            }
+        };
+        Ok(Some(Self { url, queue, declare }))
     }
 
     /// The writer these settings describe, publishing the default
@@ -137,22 +159,38 @@ impl RabbitMqCdrWriter {
     /// The bytes published for `call`; `None`, counted as one dropped record,
     /// when the encoder refuses it.
     fn payload(&self, call: &Call, terminated_at: i64) -> Option<Vec<u8>> {
-        let _ = (call, terminated_at, &self.encoder);
-        unimplemented!("red")
+        match self.encoder.encode(call, terminated_at) {
+            Ok(payload) => Some(payload),
+            Err(e) => {
+                // A record the encoder refuses is a bug, not a transient fault;
+                // count it as dropped and move on (never poison the drainer).
+                self.metrics.bump_cdr_dropped();
+                tracing::warn!(call_ref = %call.call_ref, error = %e, "CDR encode failed");
+                None
+            }
+        }
     }
 
     /// The queue declaration [`CdrQueueDeclare`] states.
     fn declaration(&self) -> (QueueDeclareOptions, FieldTable) {
         let mut args = FieldTable::default();
-        let max_len = match self.settings.declare {
-            CdrQueueDeclare::Own { max_len } => max_len,
-            CdrQueueDeclare::Existing => 0,
-        };
-        if max_len > 0 {
-            args.insert("x-max-length".into(), AMQPValue::LongLongInt(max_len));
-            args.insert("x-overflow".into(), AMQPValue::LongString(LongString::from("drop-head")));
+        match self.settings.declare {
+            CdrQueueDeclare::Own { max_len } => {
+                if max_len > 0 {
+                    // Drop the OLDEST record on overflow so a stalled consumer
+                    // never grows the broker without limit.
+                    args.insert("x-max-length".into(), AMQPValue::LongLongInt(max_len));
+                    args.insert(
+                        "x-overflow".into(),
+                        AMQPValue::LongString(LongString::from("drop-head")),
+                    );
+                }
+                (QueueDeclareOptions { durable: true, ..Default::default() }, args)
+            }
+            CdrQueueDeclare::Existing => {
+                (QueueDeclareOptions { passive: true, ..Default::default() }, args)
+            }
         }
-        (QueueDeclareOptions { durable: true, ..Default::default() }, args)
     }
 
     /// Connect over the same tokio runtime everything else uses, then declare
@@ -341,7 +379,7 @@ mod tests {
 
     #[test]
     fn declare_own_and_blank_select_the_owned_queue() {
-        for v in ["own", ""] {
+        for v in ["own", "", "  "] {
             let s = RabbitMqCdrSettings::from_lookup(lookup(&[
                 ("B2BUA_CDR_RABBITMQ_URL", "amqp://h/%2f"),
                 ("B2BUA_CDR_RABBITMQ_DECLARE", v),

@@ -24,8 +24,7 @@ pub struct JsonRecordEncoder;
 
 impl CdrEncoder for JsonRecordEncoder {
     fn encode(&self, call: &Call, terminated_at: i64) -> Result<Vec<u8>, CdrEncodeError> {
-        let _ = (call, terminated_at, build_record);
-        unimplemented!("red")
+        Ok(serde_json::to_vec(&build_record(call, terminated_at))?)
     }
 }
 
