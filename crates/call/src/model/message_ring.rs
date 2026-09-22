@@ -42,13 +42,9 @@ pub struct MessageEntry {
     pub decision_ordinal: u32,
     pub headers: Vec<(String, String)>,
     /// The turn that handled the message (`Call::message_turn` at the
-    /// append). A turn is one handling of one event under the call's lock —
-    /// a received message, a timer, a decision reply, a refused request, a
-    /// discharge — and every entry it appends carries its number: the
-    /// message handled, what the transaction layer answered it with on its
-    /// own (the 100 Trying, the ACK of a non-2xx final, a CANCEL's 200 and
-    /// 487), what the turn sent. Turns count from `1` per call; `0` is no
-    /// turn. The body is positional, so this stays the last field.
+    /// append): the message handled, what the transaction layer answered it
+    /// with on its own and what the turn sent share one number. Turns count
+    /// from `1` per call; `0` is no turn.
     #[serde(default)]
     pub turn: u32,
 }

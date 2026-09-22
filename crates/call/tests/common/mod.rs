@@ -321,7 +321,7 @@ pub fn representative_call() -> Call {
         decision_log: vec![representative_mark()],
         decision_ordinal: 1,
         termination: None,
-        message_turn: 0,
+        message_turn: 1,
         sm_cursors: BTreeMap::new(),
     }
 }

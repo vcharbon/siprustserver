@@ -312,21 +312,19 @@ pub struct Call {
     /// the call is live.
     #[serde(default)]
     pub termination: Option<Termination>,
-    /// The number of the turn the message ring records into — every entry
-    /// appended carries it ([`crate::helpers::record_message`]); `1` for the
-    /// initial INVITE's turn, advanced by one once a turn that appended an
-    /// entry lands ([`crate::helpers::seal_turn`]). Replicated with the ring,
-    /// so a node taking the call over numbers its turns past every entry the
-    /// body holds.
-    #[serde(default)]
+    /// The turn being handled (one event under the call's lock), whose number
+    /// every ring entry it appends carries; `1` for the initial INVITE's turn,
+    /// advanced by one as each turn lands ([`crate::helpers::seal_turn`]).
+    /// A takeover resumes from the last flushed body: later turns died with
+    /// their entries on the primary, so no surviving entry shares a number.
     pub message_turn: u32,
     /// Per-call state-machine cursors (ADR-0016 X4): the single home for every
     /// active machine's current state label, keyed by [`MachineId`]. The
     /// `SetState` action is its sole writer; the rule engine reads it to gate
-    /// machine-bound rules. `#[serde(default, skip_serializing_if)]` keeps
-    /// old/new bodies interoperable under the positional msgpack codec — empty
-    /// maps drop off the wire and absent maps decode to empty, so this MUST
-    /// remain the last `Call` field.
+    /// machine-bound rules. An empty map drops off the wire and an absent one
+    /// decodes empty; under the positional codec a skipped field must be the
+    /// last, so this MUST remain the last `Call` field. The replicated body
+    /// has no cross-version compatibility (ADR-0008).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sm_cursors: BTreeMap<MachineId, StateLabel>,
 }

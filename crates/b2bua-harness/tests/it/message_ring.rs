@@ -477,11 +477,10 @@ async fn retransmissions_add_nothing() {
     // Each repeat was a turn, the re-ACK a quiet one: one number each though
     // they appended nothing, so the next recorded turn leaves a gap.
     assert_eq!(sut.b2bua.metrics().repl_quiet_turns_total("re-ack"), 1);
-    assert!(
-        after.message_turn > baseline.message_turn,
-        "the repeats' turns took numbers: {} then {}",
-        baseline.message_turn,
-        after.message_turn
+    assert_eq!(
+        after.message_turn,
+        baseline.message_turn + 2,
+        "the re-ACK's turn and the absorbed ACK's took a number each"
     );
 
     // The caller's BYE again: the non-INVITE server transaction replays its
