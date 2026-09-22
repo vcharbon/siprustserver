@@ -414,9 +414,17 @@ pub struct B2buaSutBuilder {
     store: Option<Arc<dyn CallStore>>,
     store_faults: Option<StoreFaults>,
     wire_faults: Option<WireFaults>,
+    keep_terminated_calls: bool,
 }
 
 impl B2buaSutBuilder {
+    /// Keep every terminated `Call` whole for [`B2buaSut::terminated_calls`].
+    /// Off by default: a long-running SUT keeps the records only.
+    pub fn keep_terminated_calls(mut self) -> Self {
+        self.keep_terminated_calls = true;
+        self
+    }
+
     /// Route the b-leg through the front proxy at `(host, port)` (the
     /// `alice → proxy → b2bua → proxy → bob` topology; see
     /// [`B2buaConfig::b2b_outbound_proxy`]).
@@ -523,6 +531,7 @@ impl B2buaSutBuilder {
             store,
             store_faults,
             wire_faults,
+            keep_terminated_calls,
         } = self;
         // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
         // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
@@ -536,7 +545,11 @@ impl B2buaSutBuilder {
                 std::collections::HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
             )
             .await;
-        let cdr = TerminatedCallsWriter::new(TerminatedCalls::default());
+        let cdr = if keep_terminated_calls {
+            TerminatedCallsWriter::new(TerminatedCalls::default())
+        } else {
+            TerminatedCallsWriter::records_only()
+        };
         let params = B2buaSpawnParams {
             ordinal: "w0".into(),
             sip_addr: sa,
@@ -603,6 +616,7 @@ impl B2buaSut {
             store: None,
             store_faults: None,
             wire_faults: None,
+            keep_terminated_calls: false,
         }
     }
 
@@ -714,8 +728,11 @@ impl B2buaSut {
 
     /// Every terminated `Call` as the CDR writer saw it, in write order: the
     /// message rings, the decision log and the termination record whole.
+    /// Panics unless the builder was told to
+    /// [`keep_terminated_calls`](B2buaSutBuilder::keep_terminated_calls).
+    #[track_caller]
     pub fn terminated_calls(&self) -> Vec<call::Call> {
-        self.cdr.terminated_calls()
+        self.cdr.terminated_calls().expect("the SUT was built without keep_terminated_calls()")
     }
 
     /// The transaction layer's own counters — what left under a bound,

@@ -106,6 +106,34 @@ pub fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// `value` trimmed, `None` when it is absent or blank: a knob set to nothing
+/// states nothing.
+pub fn stated(value: Option<String>) -> Option<String> {
+    value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// The comma-separated names `value` lists, `None` when it names none: a list
+/// of blanks states nothing, as a blank value does.
+pub fn stated_list(value: Option<String>) -> Option<Vec<String>> {
+    stated(value).map(|v| split_csv(&v)).filter(|names| !names.is_empty())
+}
+
+/// The env var `key` as [`stated`] reads it.
+pub fn env_stated(key: &str) -> Option<String> {
+    stated(env::var(key).ok())
+}
+
+/// `B2BUA_CDR_MESSAGE_RING` (default `0`, off) and `B2BUA_CDR_CAPTURED_HEADERS`
+/// (comma-separated, default none) as `lookup` states them; a blank value is
+/// unset. An unparsable cap refuses the boot.
+fn cdr_ring_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> (usize, Vec<String>) {
+    let ring = stated(lookup("B2BUA_CDR_MESSAGE_RING"))
+        .map(|v| v.parse().expect("B2BUA_CDR_MESSAGE_RING"))
+        .unwrap_or(0);
+    let headers = stated_list(lookup("B2BUA_CDR_CAPTURED_HEADERS")).unwrap_or_default();
+    (ring, headers)
+}
+
 /// Truthy env flag: `1`/`true`/`yes`/`on` (case-insensitive) → true.
 pub fn env_flag(key: &str) -> bool {
     is_truthy(&env_or(key, "0"))
@@ -309,7 +337,7 @@ pub struct RunnerEnv {
     /// (default empty = no relay; structural headers never relayable).
     pub relay_headers: Vec<String>,
     /// `B2BUA_CDR_MESSAGE_RING` — the per-leg message-ring cap on the call
-    /// record (default 0 = off).
+    /// record (default 0 = off; blank = unset).
     pub cdr_message_ring: usize,
     /// `B2BUA_CDR_CAPTURED_HEADERS` — the header names every ring entry
     /// captures the values of, comma-separated (default empty).
@@ -333,6 +361,7 @@ impl RunnerEnv {
     /// Parse the full generic env grammar. Panics (refuses boot) on an
     /// unparseable value — a typo'd knob must never silently become a default.
     pub fn from_env() -> Self {
+        let (cdr_message_ring, cdr_captured_headers) = cdr_ring_from_lookup(|k| env::var(k).ok());
         Self {
             listen: env_or("B2BUA_LISTEN", "0.0.0.0:5060"),
             advertise: env::var("B2BUA_ADVERTISE").ok(),
@@ -419,10 +448,8 @@ impl RunnerEnv {
                 .parse()
                 .expect("B2BUA_RETRY_AFTER_JITTER_SEC"),
             relay_headers: split_csv(&env_or("B2BUA_RELAY_HEADERS", "")),
-            cdr_message_ring: env_or("B2BUA_CDR_MESSAGE_RING", "0")
-                .parse()
-                .expect("B2BUA_CDR_MESSAGE_RING"),
-            cdr_captured_headers: split_csv(&env_or("B2BUA_CDR_CAPTURED_HEADERS", "")),
+            cdr_message_ring,
+            cdr_captured_headers,
             limiter_url: env_or("LIMITER_URL", ""),
             limiter_timeout_ms: env_or("LIMITER_TIMEOUT_MS", "150").parse().unwrap_or(150),
             limiter_refresh_sec: env_or("LIMITER_WINDOW_SECONDS", "300").parse().unwrap_or(300),
@@ -1057,6 +1084,47 @@ mod tests {
         // boundaries are in range
         assert!(validate_tier1_pct(1).is_ok());
         assert!(validate_tier1_pct(100).is_ok());
+    }
+
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs: Vec<(String, String)> =
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn a_blank_value_states_nothing() {
+        assert_eq!(stated(None), None);
+        assert_eq!(stated(Some(String::new())), None);
+        assert_eq!(stated(Some("  ".into())), None);
+        assert_eq!(stated(Some(" 8 ".into())), Some("8".into()));
+        assert_eq!(stated_list(Some(" , ".into())), None);
+        assert_eq!(stated_list(Some("Allow, ".into())), Some(vec!["Allow".to_string()]));
+    }
+
+    #[test]
+    fn the_ring_knobs_read_blank_as_unset() {
+        assert_eq!(cdr_ring_from_lookup(lookup(&[])), (0, vec![]));
+        assert_eq!(
+            cdr_ring_from_lookup(lookup(&[
+                ("B2BUA_CDR_MESSAGE_RING", ""),
+                ("B2BUA_CDR_CAPTURED_HEADERS", " , ")
+            ])),
+            (0, vec![])
+        );
+        assert_eq!(
+            cdr_ring_from_lookup(lookup(&[
+                ("B2BUA_CDR_MESSAGE_RING", " 16 "),
+                ("B2BUA_CDR_CAPTURED_HEADERS", "Allow, Accept")
+            ])),
+            (16, vec!["Allow".to_string(), "Accept".to_string()])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "B2BUA_CDR_MESSAGE_RING")]
+    fn an_unparsable_ring_cap_refuses_the_boot() {
+        cdr_ring_from_lookup(lookup(&[("B2BUA_CDR_MESSAGE_RING", "lots")]));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use b2bua::config::{B2buaConfig, CdrConfig};
-use b2bua_harness::{settle_until, B2buaSut};
+use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::{Call, CallBodyCodec, MessageDirection, MessageEntry, MsgpackCodec};
 use scenario_harness::{Agent, Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
@@ -46,6 +46,7 @@ impl Sut {
         tune: impl FnOnce(&mut B2buaConfig) + 'static,
     ) -> Self {
         let b2bua = B2buaSut::route_all_to("127.0.0.1", 5070)
+            .keep_terminated_calls()
             .tune(move |config| {
                 config.worker_allowed_target_suffixes = vec!["*".into()];
                 config.cdr = cdr;
@@ -794,6 +795,23 @@ async fn a_stray_cancel_and_its_481_are_recorded() {
     sut.assert_reaped().await;
 
     let _report = h.finish().await;
+}
+
+/// A SUT built without `keep_terminated_calls()` keeps the records only:
+/// asking it for the terminated calls is a test bug, never an empty answer.
+#[tokio::test(start_paused = true)]
+async fn a_sut_not_keeping_terminated_calls_refuses_to_answer() {
+    let s = B2buaScene::new("ring-not-kept").await;
+    let mut dialog = s.establish().await;
+    s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    settle_until(|| s.b2bua.active_calls() == 0).await;
+    s.b2bua.assert_fully_reaped();
+    assert_eq!(s.b2bua.cdr_records().len(), 1, "the record is written");
+    let asked =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.b2bua.terminated_calls()));
+    assert!(asked.is_err(), "no terminated call is kept, and none is claimed");
+    let _report = s.finish().await;
 }
 
 /// The CANCEL of a recorded INVITE datagram (RFC 3261 §9.1): the same
