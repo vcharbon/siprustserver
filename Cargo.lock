@@ -555,6 +555,7 @@ dependencies = [
  "probe-http",
  "repl-net",
  "rustls",
+ "serde_json",
  "tikv-jemallocator",
  "tokio",
  "topology",

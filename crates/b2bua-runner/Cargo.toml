@@ -44,6 +44,10 @@ async-trait = { workspace = true }
 # `bind`; this binary only emits.
 tracing = { workspace = true }
 
+[dev-dependencies]
+# tests/overload_dashboard_names.rs parses the Grafana dashboard JSON.
+serde_json = { workspace = true }
+
 # jemalloc global allocator (see the #[global_allocator] note in src/main.rs):
 # glibc malloc ratchets RSS under sustained SIP churn (arena retention) and never
 # returns memory to the OS, OOMing a long soak. jemalloc's decay purging bounds
