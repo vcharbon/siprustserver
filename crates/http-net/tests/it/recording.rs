@@ -309,3 +309,69 @@ async fn a_request_served_on_a_real_socket_records_its_peer() {
     assert!(peer.ip().is_loopback() && peer != dst, "{peer}");
     assert!(matches!(&e.outcome, Some(HttpOutcome::Response(r)) if r.status == 200));
 }
+
+/// Both sides recorded on one recorder over real sockets: the served handler
+/// runs on the server's connection task, out of the client's future, and the
+/// exchange is still drawn once, from the served side, paired to the client.
+#[tokio::test]
+async fn both_sides_recorded_on_real_sockets_draw_one_exchange() {
+    let recorder = Recorder::with_clock(TransportKind::Live, Clock::system());
+    let rec =
+        RecordingHttpNetwork::new(Arc::new(http_net::RealHttpNetwork::new()), &recorder, CLIENT);
+    let server = rec.serve(addr("127.0.0.1:0"), Arc::new(Ok200)).await.unwrap();
+    let dst = server.local_addr();
+
+    for body in [&b"one"[..], &b"two"[..]] {
+        let resp = rec.request(dst, HttpRequest::post("/calls", body.to_vec())).await.unwrap();
+        assert_eq!(resp.status, 200);
+    }
+
+    let entries = to_http_entries(&recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot());
+    assert_eq!(entries.len(), 2, "each exchange drawn once: {entries:?}");
+    for (e, body) in entries.iter().zip([&b"one"[..], &b"two"[..]]) {
+        assert!(e.served, "the served side is the row source");
+        assert_eq!(e.requester.as_deref(), Some(CLIENT), "paired to the recording client");
+        assert_eq!(e.request.body, body);
+        assert!(e.peer.is_some());
+    }
+    assert_eq!(rec.exchanges().len(), 2, "the client view is unchanged");
+}
+
+/// The caller stops waiting while the reply is in transit: the service
+/// answered, the client never got it. The drawn reply is the client's view.
+#[tokio::test(start_paused = true)]
+async fn a_caller_that_gives_up_during_the_reply_transit_is_drawn_without_the_reply() {
+    let recorder = recorder();
+    let sim = Arc::new(SimulatedHttpNetwork::new());
+    let dst = addr("10.0.0.1:8080");
+    let rec = RecordingHttpNetwork::new(sim.clone(), &recorder, CLIENT);
+    let _server = rec.serve(dst, Arc::new(Ok200)).await.unwrap();
+    // 100 ms each way: the service answers at 100 ms, the reply would land at
+    // 200 ms, the caller gives up at 150 ms.
+    sim.apply_fault(Fault::Delay { dst, ms: 100 });
+
+    let h = tokio::spawn({
+        let rec = rec.clone();
+        async move {
+            tokio::time::timeout(
+                Duration::from_millis(150),
+                rec.request(dst, HttpRequest::post("/calls", Vec::new())),
+            )
+            .await
+        }
+    });
+    advance_in_100ms_chunks(Duration::from_millis(300)).await;
+    assert!(h.await.unwrap().is_err(), "the caller gave up");
+
+    let events = recorder.for_tag::<HttpNetworkEvent>(HTTP_TAG).snapshot();
+    assert!(
+        events.iter().any(|e| matches!(
+            e.event,
+            HttpNetworkEvent::Answered { outcome: HttpOutcome::Response(_), .. }
+        )),
+        "the service did answer: {events:?}"
+    );
+    let entries = to_http_entries(&events);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].outcome, Some(HttpOutcome::Abandoned), "the client's view wins");
+}

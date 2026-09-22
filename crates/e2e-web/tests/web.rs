@@ -483,3 +483,57 @@ async fn load_run_files_serve_and_reject_traversal() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+/// The cell page shows the run's structural findings (recorder layer-close
+/// checks, lane name conflicts), which the result carries in its diagram's
+/// anomalies and not in its RFC findings.
+#[tokio::test]
+async fn the_cell_page_lists_structural_findings_beside_the_rfc_ones() {
+    use e2e_core::result::{self, CellId, RunResult, Timings};
+    use seq_report::{Anomaly, SeqDoc};
+
+    let root = temp_e2e("structural");
+    let rfc = Anomaly {
+        check: "cseq-in-dialog-order".into(),
+        detail: "CSeq went backwards".into(),
+        lane: None,
+        endpoint: None,
+        advisory: Some(true),
+        row_seqs: Vec::new(),
+        rule_sourced: true,
+    };
+    let structural = Anomaly {
+        check: "queueLeak".into(),
+        detail: "1 datagram left unread on bob".into(),
+        rule_sourced: false,
+        ..rfc.clone()
+    };
+    let cell = CellId { case: "c".into(), shape: "s".into(), infra: "i".into() };
+    let run = RunResult {
+        cell: cell.clone(),
+        passed: true,
+        checks: Vec::new(),
+        rfc: vec![rfc.clone()],
+        media: Vec::new(),
+        seq_doc: SeqDoc {
+            title: "c".into(),
+            description: None,
+            passed: true,
+            lanes: Vec::new(),
+            rows: Vec::new(),
+            anomalies: vec![rfc, structural],
+            views: Vec::new(),
+            epoch_base_ms: None,
+        },
+        timings: Timings { first_ms: 0, last_ms: 0, messages: 0 },
+    };
+    result::write_result(&result::run_dir(&root.join("runs"), "camp", "t0"), &run).unwrap();
+
+    let app = app(&root);
+    let (st, html) = get(&app, &format!("/runs/camp/t0/cells/{}", cell.dir_name()), false).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(html.contains("cseq-in-dialog-order"), "the RFC finding: {html}");
+    assert!(html.contains("queueLeak"), "the structural finding: {html}");
+    assert!(html.contains("1 datagram left unread on bob"));
+    std::fs::remove_dir_all(&root).ok();
+}

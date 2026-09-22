@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Unified sequence — sip-only</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; color: #111827; margin: 0;
+         display: flex; flex-direction: column; height: 100vh; }
+  header { padding: 12px 20px; border-bottom: 1px solid #e5e7eb; }
+  h1 { font-size: 1.25rem; margin: 0; }
+  .status { font-weight: bold; color: #dc2626; }
+  .desc { color: #4b5563; margin: 0.25rem 0 0; }
+  .legend { margin: 0.5rem 0 0; font-size: 0.9rem; }
+  .legend span { margin-right: 1.25rem; }
+  .swatch { display: inline-block; width: 1.4rem; height: 0; vertical-align: middle;
+            border-top-width: 3px; border-top-style: solid; margin-right: 0.35rem; }
+  /* Two-pane viewport-filling layout: scrollable diagram on the left, FIXED
+     always-visible message-detail panel on the right. */
+  .main { display: flex; flex: 1; overflow: hidden; }
+  .diagram-panel { flex: 1; overflow: auto; padding: 20px; }
+  .diagram-panel svg { display: block; }
+  .detail-panel { width: 500px; border-left: 1px solid #e5e7eb; background: #ffffff;
+                  display: flex; flex-direction: column; overflow: hidden; }
+  .detail-header { padding: 12px 16px; background: #f3f4f6; border-bottom: 1px solid #e5e7eb;
+                   font-size: 13px; font-weight: 600; color: #374151; }
+  .detail-body { flex: 1; overflow: auto; padding: 16px; }
+  .detail-placeholder { color: #9ca3af; font-style: italic; padding: 20px; text-align: center; }
+  .payload-head { margin-bottom: 8px; }
+  .seq-sip .payload-head { color: #2563eb; }
+  .seq-repl .payload-head { color: #9333ea; }
+  .ts { color: #6b7280; font-family: monospace; }
+  /* Clickable diagram messages: hover thickens the arrow + tints the hit row;
+     the selected row stays tinted. */
+  .seq-msg:hover line { stroke-width: 3; }
+  .seq-msg:hover text { text-decoration: underline; }
+  .seq-msg:hover rect { fill: rgba(37, 99, 235, 0.05); }
+  .seq-msg.selected rect { fill: rgba(37, 99, 235, 0.12); }
+  /* Rows an anomaly links to, highlighted after clicking that anomaly. */
+  .seq-msg.anomaly-hit rect { fill: rgba(220, 38, 38, 0.10); }
+  .seq-msg.anomaly-hit.selected rect { fill: rgba(220, 38, 38, 0.20); }
+  /* Hidden payload blocks: the click handler copies these into `.detail-body`.
+     The `<pre>` shows the FULL content with no inner scrollbar / no height
+     clamp — `white-space: pre-wrap` + `overflow-wrap: anywhere` wrap long header
+     lines instead of forcing a horizontal scrollbar; the `.detail-body` itself
+     scrolls if the payload is very long. */
+  .payload { display: none; }
+  pre { background: #f9fafb; padding: 8px; border-radius: 4px; margin: 4px 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible;
+        max-height: none; }
+  .anomalies { padding: 12px 20px; border-top: 1px solid #e5e7eb; }
+  .anomalies ul { list-style: none; padding-left: 0; margin: 0.5rem 0 0; }
+  .anomaly { margin: 3px 0; padding: 4px 8px; border-left: 3px solid transparent;
+             border-radius: 4px; font-size: 0.9rem; }
+  .anomaly.gating { border-left-color: #dc2626; background: #fef2f2; }
+  .anomaly.advisory { border-left-color: #d97706; background: #fffbeb; }
+  .anomaly.linked { cursor: pointer; }
+  .anomaly.linked:hover .jump { text-decoration: underline; }
+  .anomaly.selected { outline: 2px solid #2563eb; }
+  .sev { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 6px;
+         border-radius: 8px; margin-right: 6px; vertical-align: 1px; }
+  .sev.gating { background: #dc2626; color: #fff; }
+  .sev.advisory { background: #fbbf24; color: #451a03; }
+  /* The "→ <first linked message>" affordance on a linked anomaly. */
+  .jump { color: #2563eb; font-family: monospace; font-size: 11px; margin-left: 6px;
+          white-space: nowrap; }
+  /* Anomaly context shown with a message's payload in the detail panel. */
+  /* Views plane: the belief table + the disagreements list under the diagram. */
+  .views { padding: 12px 20px; border-top: 1px solid #e5e7eb; }
+  .views table { border-collapse: collapse; font-size: 0.85rem; }
+  .views th, .views td { border: 1px solid #e5e7eb; padding: 3px 8px; text-align: left;
+                         white-space: nowrap; }
+  .views th { background: #f3f4f6; }
+  .views td.disputed { background: #fef3c7; }
+  .views td.moved { font-weight: 600; color: #4338ca; }
+  .views .sig { color: #6b7280; font-size: 0.75rem; }
+  .views ul { list-style: none; padding-left: 0; }
+  .views li { margin: 3px 0; padding: 4px 8px; border-left: 3px solid #4338ca;
+              background: #eef2ff; border-radius: 4px; font-size: 0.9rem; }
+  .payload-anoms .pa { border-left: 3px solid; padding: 4px 8px; margin: 6px 0;
+                       border-radius: 4px; font-size: 12px; }
+  .pa.gating { border-color: #dc2626; background: #fef2f2; }
+  .pa.advisory { border-color: #d97706; background: #fffbeb; }
+</style></head>
+<body>
+  <header>
+    <h1>Unified sequence: sip-only</h1>
+    <p>Status: <span class="status">FAIL</span> &middot; 2 anomalies recorded (<span style="color:#dc2626">1 gating</span> · <span style="color:#d97706">1 advisory</span>)</p>
+    <p class="desc">no HTTP plane</p>
+    
+    <div class="legend">
+      <span><i class="swatch" style="border-top-color:#2563eb"></i>SIP</span>
+      <span><i class="swatch" style="border-top-color:#9333ea;border-top-style:dashed"></i>Replication (dashed; hue = per-socket connection)</span>
+      <span><i class="swatch" style="border-top-color:#b91c1c"></i>Lifecycle (crash / reboot / failover / partition)</span>
+      <span><i class="swatch" style="border-top-color:#4338ca"></i>View (what an observer believes about a node)</span>
+      <span style="color:#dc2626">✗ lost — frame emitted into a dead / superseded socket; the stub stops short of the lane (never reached the live node)</span>
+      <span><i class="swatch" style="border-top-color:#ea580c"></i>Call-ID c-1@host</span>
+
+    </div>
+  </header>
+  <div class="main">
+    <div class="diagram-panel"><svg xmlns="http://www.w3.org/2000/svg" width="690" height="376" font-family="system-ui, sans-serif" font-size="12">
+<defs><marker id="ah-sip" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2563eb"/></marker><marker id="ah-conn-0" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9333ea"/></marker><marker id="ah-conn-1" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0891b2"/></marker><marker id="ah-conn-2" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ca8a04"/></marker><marker id="ah-conn-3" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#16a34a"/></marker><marker id="ah-conn-4" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#db2777"/></marker><marker id="ah-conn-5" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7c3aed"/></marker><marker id="ah-conn-6" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0d9488"/></marker><marker id="ah-conn-7" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ea580c"/></marker></defs>
+<text x="540" y="18" text-anchor="middle" font-weight="bold" fill="#6b7280">10.0.0.9:5070</text>
+<path d="M520 28 L520 34 L560 34 L560 28" fill="none" stroke="#9ca3af" stroke-width="1"/>
+<line x1="90" y1="70" x2="90" y2="361" stroke="#d1d5db" stroke-width="1"/>
+<text x="90" y="35" text-anchor="middle" font-weight="bold" fill="#0f766e">alice (10.0.0.1:5060)</text>
+<line x1="240" y1="70" x2="240" y2="361" stroke="#d1d5db" stroke-width="1"/>
+<text x="240" y="35" text-anchor="middle" font-weight="bold" fill="#1e3a8a">b1 (10.0.0.2:5060)</text>
+<line x1="390" y1="70" x2="390" y2="361" stroke="#d1d5db" stroke-width="1"/>
+<text x="390" y="35" text-anchor="middle" font-weight="bold" fill="#1e3a8a">b2 (10.0.0.3:5060)</text>
+<line x1="540" y1="70" x2="540" y2="361" stroke="#d1d5db" stroke-width="1"/>
+<text x="540" y="35" text-anchor="middle" font-weight="bold" fill="#0f766e">bob</text>
+<g class="seq-msg seq-sip" data-idx="0" style="cursor:pointer">
+<line x1="90" y1="93" x2="240" y2="93" stroke="#2563eb" stroke-width="1.5" opacity="1" marker-end="url(#ah-sip)"/>
+<text x="165" y="89" text-anchor="middle" fill="#2563eb" opacity="1">INVITE sip:bob@x</text>
+<text x="6" y="96" fill="#6b7280" font-family="monospace" font-size="10">T+0.000s</text>
+<rect x="15" y="70" width="300" height="46" fill="transparent"/>
+</g>
+<g class="seq-msg seq-repl" data-idx="1" style="cursor:pointer">
+<line x1="240" y1="139" x2="390" y2="139" stroke="#ea580c" stroke-width="1.5" opacity="1" marker-end="url(#ah-conn-7)" stroke-dasharray="5 3"/>
+<text x="315" y="135" text-anchor="middle" fill="#ea580c" opacity="1">Data[Create/bak] c-1@host</text>
+<text x="6" y="142" fill="#6b7280" font-family="monospace" font-size="10">T+0.007s</text>
+<rect x="165" y="116" width="300" height="46" fill="transparent"/>
+</g>
+<rect x="40" y="174" width="640" height="22" fill="#fee2e2" stroke="#b91c1c" stroke-dasharray="3 2"/>
+<text x="345" y="189" text-anchor="middle" fill="#b91c1c" font-weight="bold">⏻ crash b1 &#160; (T+0.014s)</text>
+<g class="seq-msg seq-sip" data-idx="3" style="cursor:pointer">
+<line x1="240" y1="231" x2="540" y2="231" stroke="#ea580c" stroke-width="1.5" opacity="1" marker-end="url(#ah-conn-7)"/>
+<text x="390" y="227" text-anchor="middle" fill="#ea580c" opacity="1">INVITE sip:bob@y</text>
+<text x="228" y="235" text-anchor="middle" fill="#dc2626" font-size="13" font-weight="bold">⚠</text>
+<text x="6" y="234" fill="#6b7280" font-family="monospace" font-size="10">T+0.021s</text>
+<rect x="165" y="208" width="450" height="46" fill="transparent"/>
+</g>
+<g class="seq-msg seq-repl" data-idx="4" style="cursor:pointer">
+<line x1="390" y1="277" x2="293" y2="277" stroke="#9333ea" stroke-width="1.5" opacity="0.5" stroke-dasharray="5 3"/>
+<text x="341" y="273" text-anchor="middle" fill="#9333ea" opacity="0.8">PullRequest ✗ lost</text>
+<text x="293" y="282" text-anchor="middle" fill="#dc2626" font-size="15" font-weight="bold">✗</text>
+<text x="6" y="280" fill="#6b7280" font-family="monospace" font-size="10">T+0.028s</text>
+<rect x="165" y="254" width="300" height="46" fill="transparent"/>
+</g>
+<g class="seq-msg seq-sip" data-idx="5" style="cursor:pointer">
+<line x1="540" y1="323" x2="345" y2="323" stroke="#ea580c" stroke-width="1.5" opacity="0.5"/>
+<text x="442" y="319" text-anchor="middle" fill="#ea580c" opacity="0.8">200 OK ✗ lost</text>
+<text x="345" y="328" text-anchor="middle" fill="#dc2626" font-size="15" font-weight="bold">✗</text>
+<text x="6" y="326" fill="#6b7280" font-family="monospace" font-size="10">T+0.035s</text>
+<rect x="165" y="300" width="450" height="46" fill="transparent"/>
+</g>
+</svg>
+<div class="anomalies"><h2>Anomalies</h2>
+<ul>
+<li class="anomaly gating linked" data-rows="3"><span class="sev gating">GATING</span><code>cseq-in-dialog-order</code> [alice]: CSeq went backwards <span class="jump">→ INVITE sip:bob@y @ T+0.021s</span></li>
+<li class="anomaly advisory"><span class="sev advisory">advisory</span><code>queueLeak</code>: 1 datagram left </li>
+</ul></div>
+</div>
+    <div class="detail-panel">
+      <div class="detail-header">Message Detail</div>
+      <div class="detail-body">
+        <div class="detail-placeholder">Click a message to inspect</div>
+      </div>
+    </div>
+  </div>
+  <!-- Hidden, already-HTML-escaped payload blocks, one per diagram message. The
+       click handler copies the matching `#evt-{N}` innerHTML into .detail-body. -->
+  <div class="payload seq-sip" id="evt-0" hidden><div class="payload-head"><code>alice (10.0.0.1:5060) → b1 (10.0.0.2:5060)</code> &nbsp; <b>[SIP] INVITE sip:bob@x</b> &nbsp; <span class="ts">T+0.000s</span></div><pre>INVITE sip:bob@x SIP/2.0
+Call-ID: c-1
+</pre></div>
+<div class="payload seq-repl" id="evt-1" hidden><div class="payload-head"><code>b1 (10.0.0.2:5060) → b2 (10.0.0.3:5060)</code> &nbsp; <code style="color:#ea580c">conn c-1@host</code> &nbsp; <b>[REPL] Data[Create/bak]</b> &nbsp; <span class="ts">T+0.007s</span></div><pre>Data[Create/bak] SIP/2.0
+Call-ID: c-1
+</pre></div>
+<div class="payload seq-sip" id="evt-3" hidden><div class="payload-head"><code>b1 (10.0.0.2:5060) → bob</code> &nbsp; <code style="color:#ea580c">conn c-1@host</code> &nbsp; <b>[SIP] INVITE sip:bob@y</b> &nbsp; <span class="ts">T+0.021s</span></div><div class="payload-anoms"><div class="pa gating">⚠ <code>cseq-in-dialog-order</code> CSeq went backwards</div></div><pre>INVITE sip:bob@y SIP/2.0
+Call-ID: c-1
+</pre></div>
+<div class="payload seq-repl" id="evt-4" hidden><div class="payload-head"><code>b2 (10.0.0.3:5060) → b1 (10.0.0.2:5060)</code> &nbsp; <b>[REPL] PullRequest</b> &nbsp; <span class="ts">T+0.028s</span> ✗ LOST IN TRANSIT</div><pre>PullRequest SIP/2.0
+Call-ID: c-1
+</pre></div>
+<div class="payload seq-sip" id="evt-5" hidden><div class="payload-head"><code>bob → b1 (10.0.0.2:5060)</code> &nbsp; <code style="color:#ea580c">conn c-1@host</code> &nbsp; <b>[SIP] 200 OK</b> &nbsp; <span class="ts">T+0.035s</span> ✗ LOST IN TRANSIT (defunct conn c-1@host)</div><pre>200 OK SIP/2.0
+Call-ID: c-1
+</pre></div>
+
+  <script>
+    function showRow(g) {
+      document.querySelectorAll('.seq-msg.selected').forEach(s => s.classList.remove('selected'));
+      g.classList.add('selected');
+      const src = document.getElementById('evt-' + g.dataset.idx);
+      document.querySelector('.detail-body').innerHTML = src ? src.innerHTML
+          : '<div class="detail-placeholder">No payload recorded for this message</div>';
+    }
+    document.querySelectorAll('.seq-msg').forEach(g => g.addEventListener('click', () => showRow(g)));
+    // A linked anomaly jumps to its offending message(s): highlight every
+    // linked row, scroll the first into view, and open its payload (which
+    // carries the anomaly context) in the detail panel.
+    document.querySelectorAll('.anomaly.linked').forEach(li => li.addEventListener('click', () => {
+      document.querySelectorAll('.anomaly.selected').forEach(s => s.classList.remove('selected'));
+      li.classList.add('selected');
+      document.querySelectorAll('.seq-msg.anomaly-hit').forEach(s => s.classList.remove('anomaly-hit'));
+      const ords = li.dataset.rows.split(',');
+      ords.forEach(o => {
+        const g = document.querySelector('.seq-msg[data-idx="' + o + '"]');
+        if (g) g.classList.add('anomaly-hit');
+      });
+      const first = document.querySelector('.seq-msg[data-idx="' + ords[0] + '"]');
+      if (first) {
+        first.scrollIntoView({ block: 'center', inline: 'nearest' });
+        showRow(first);
+      }
+    }));
+  </script>
+</body></html>

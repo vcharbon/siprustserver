@@ -5,7 +5,7 @@
 //! The test codec wraps a token as `hex:` + the hex of its bytes, a form in
 //! which the token's own delimiters never appear on the wire.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use http_net::scripted::{
     HttpBindings, HttpContinuationCodec, HttpFindingKind, HttpReifiedStep, HttpReply,
@@ -139,16 +139,77 @@ async fn the_same_token_raw_and_wrapped_is_one_position() {
     assert!(handle.verdict().is_green(), "{:?}", handle.verdict());
 }
 
+/// A codec that remembers what it unwrapped, so a test sees the scan read it.
+struct Watched {
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl HttpContinuationCodec for Watched {
+    fn wrap(&self, token: &str) -> String {
+        HexCodec.wrap(token)
+    }
+
+    fn unwrap(&self, body: &[u8]) -> Vec<String> {
+        let found = HexCodec.unwrap(body);
+        self.seen.lock().unwrap().extend(found.iter().cloned());
+        found
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_wrapped_look_alike_that_unwraps_to_no_token_is_user_data() {
-    let svc = ScriptedHttpService::with_codec(Arc::new(HexCodec));
-    svc.add(two_step(), cell("c1")).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let svc = ScriptedHttpService::with_codec(Arc::new(Watched { seen: seen.clone() }));
+    let handle = svc.add(two_step(), cell("c1")).unwrap();
     let (net, _h) = serve(&svc).await;
 
-    // `hex:` + the hex of text that is no token: a fresh opening request.
-    let decoy = HexCodec.wrap("~hc.not-a-token.~");
+    // `hex:` + the hex of text shaped like a token, whose checksum fails.
+    let decoy = HexCodec.wrap("~hc.AAAAAAAAAAAAAAAAAAAAAA.~");
     let resp = post(&net, "/start", &format!(r#"{{"cell":"c1","note":"{decoy}"}}"#)).await;
-    assert_eq!(resp.status, 200, "the decoy is data, the request opens: {}", text(&resp));
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        ["~hc.AAAAAAAAAAAAAAAAAAAAAA.~"],
+        "the scan unwrapped the decoy"
+    );
+    assert_eq!(resp.status, 200, "and took it for data: the request opens: {}", text(&resp));
+    assert!(handle.verdict().opened);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wrapped_token_of_another_service_is_a_foreign_advisory() {
+    let theirs = ScriptedHttpService::with_nonce_and_codec(1, Arc::new(HexCodec));
+    theirs.add(two_step(), cell("c1")).unwrap();
+    let (their_net, _t) = serve(&theirs).await;
+    let wrapped = ctx(&post(&their_net, "/start", r#"{"cell":"c1"}"#).await);
+
+    let ours = ScriptedHttpService::with_nonce_and_codec(2, Arc::new(HexCodec));
+    ours.add(two_step(), cell("c1")).unwrap();
+    let (net, _h) = serve(&ours).await;
+    let resp = post(&net, "/next", &format!(r#"{{"ctx":"{wrapped}"}}"#)).await;
+    assert_eq!(resp.status, 500, "{}", text(&resp));
+    let findings = ours.findings();
+    let foreign: Vec<_> =
+        findings.iter().filter(|f| f.kind == HttpFindingKind::ForeignToken).collect();
+    assert_eq!(foreign.len(), 1, "{findings:?}");
+    assert!(foreign[0].is_advisory() && foreign[0].instances.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wrapped_own_token_beside_a_different_raw_own_token_is_ambiguous() {
+    let svc = ScriptedHttpService::with_codec(Arc::new(HexCodec));
+    let first = svc.add(two_step(), cell("c1")).unwrap();
+    let second = svc.add(two_step(), cell("c2")).unwrap();
+    let (net, _h) = serve(&svc).await;
+
+    let wrapped = ctx(&post(&net, "/start", r#"{"cell":"c1"}"#).await);
+    let other = ctx(&post(&net, "/start", r#"{"cell":"c2"}"#).await);
+    let raw = HexCodec.unwrap(other.as_bytes()).remove(0);
+    let resp = post(&net, "/next", &format!(r#"{{"a":"{wrapped}","b":"{raw}"}}"#)).await;
+    assert_eq!(resp.status, 500, "{}", text(&resp));
+    for handle in [&first, &second] {
+        let findings = handle.verdict().findings;
+        assert!(findings.iter().any(|f| f.kind == HttpFindingKind::Ambiguous), "{findings:?}");
+    }
 }
 
 #[tokio::test(start_paused = true)]

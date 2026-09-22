@@ -167,6 +167,7 @@ async fn an_unmatched_request_is_a_gating_finding_linked_to_its_row() {
     assert!(!finding.rule_sourced, "not an RFC rule");
     assert_eq!(finding.row_seqs, vec![stray_row.seq], "linked to the request row");
     assert!(!doc.passed, "a gating HTTP finding fails the doc");
+    assert!(!report.passed(), "and the run");
 }
 
 #[tokio::test(start_paused = true)]
@@ -202,6 +203,43 @@ async fn the_written_artifacts_carry_the_service_view() {
     assert!(view.contains(r#""target":"bob""#), "the reply body as sent: {view}");
     let html = std::fs::read_to_string(out.join("http-artifacts.html")).unwrap();
     assert!(html.contains("seq-http"), "the html draws the HTTP plane");
+    let svg = std::fs::read_to_string(out.join("http-artifacts.svg")).unwrap();
+    assert_eq!(svg, seq_report::render_svg(&report::seq_doc(&report)), "the svg is the doc's");
+    assert!(svg.contains("seq-http"), "the svg draws the HTTP plane");
+
+    // The service view counts time from the run's start, as the global view.
+    let stamp = |text: &str| {
+        let at = text.find("POST /route").unwrap();
+        let open = text[..at].rfind("[T+").unwrap();
+        text[open..open + text[open..].find(']').unwrap() + 1].to_string()
+    };
+    assert_eq!(stamp(&view), stamp(&global), "one timeline:\n{view}\n{global}");
+    assert_ne!(stamp(&view), "[T+0.000s]", "the request came after the INVITE");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_service_nobody_called_draws_no_column() {
+    let h = Harness::new("http-unused");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", BOB).await;
+    let service: std::net::SocketAddr = "10.9.0.1:8080".parse().unwrap();
+    let net = RecordingHttpNetwork::new(
+        Arc::new(http_net::SimulatedHttpNetwork::new()),
+        &h.recorder(),
+        BOB,
+    )
+    .with_service_name(service, "routing");
+    let _server = net.serve(service, Arc::new(ScriptedHttpService::new())).await.unwrap();
+    dialog(&alice, &bob, || async { HttpResponse::ok(Vec::new()) }).await;
+    let report = h.finish().await;
+
+    let doc = report::seq_doc(&report);
+    assert!(doc.lanes.iter().all(|l| l.kind != LaneKind::Service), "{:?}", doc.lanes);
+    let out = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("http-unused");
+    let _ = std::fs::remove_dir_all(&out);
+    report::write_all(&report, &out).unwrap();
+    let svg = std::fs::read_to_string(out.join("http-unused.svg")).unwrap();
+    assert!(!svg.contains("routing"), "no empty service column: {svg}");
 }
 
 /// The service on a real socket, called by a client outside the recording (as

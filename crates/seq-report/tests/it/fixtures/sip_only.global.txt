@@ -1,0 +1,39 @@
+================================================================================
+  Unified sequence: sip-only
+  Status: FAIL
+  Lanes: alice, b1, b2, 10.0.0.9:5070#bob
+  Rows: 6  (sip=3, repl=2, lifecycle=1)
+================================================================================
+
+  no HTTP plane
+--------------------------------------------------------------------------------
+  legend: [SIP] request/response · [REPL] replication frame · [VIEW] belief change · === lifecycle ===
+--------------------------------------------------------------------------------
+[T+0.000s] [SIP ] alice (10.0.0.1:5060) -> b1 (10.0.0.2:5060)  INVITE sip:bob@x
+        INVITE sip:bob@x SIP/2.0
+        Call-ID: c-1
+        
+[T+0.007s] [REPL] b1 (10.0.0.2:5060) -> b2 (10.0.0.3:5060)  Data[Create/bak] c-1@host
+        Data[Create/bak] SIP/2.0
+        Call-ID: c-1
+        
+
+[T+0.014s] ================================ crash b1 =================================
+
+[T+0.021s] [SIP ] b1 (10.0.0.2:5060) -> bob  INVITE sip:bob@y c-1@host
+        INVITE sip:bob@y SIP/2.0
+        Call-ID: c-1
+        
+[T+0.028s] [REPL] b2 (10.0.0.3:5060) -> b1 (10.0.0.2:5060)  PullRequest  ✗ [LOST IN TRANSIT]
+        PullRequest SIP/2.0
+        Call-ID: c-1
+        
+[T+0.035s] [SIP ] bob -> b1 (10.0.0.2:5060)  200 OK c-1@host  ✗ [LOST IN TRANSIT]
+        200 OK SIP/2.0
+        Call-ID: c-1
+        
+
+--------------------------------------------------------------------------------
+Anomalies (2):
+  • GATING cseq-in-dialog-order [alice]: CSeq went backwards
+  • advisory queueLeak: 1 datagram left

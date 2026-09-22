@@ -145,4 +145,5 @@ async fn rfc_keeps_only_rule_sourced_findings() {
     assert!(result.seq_doc.anomalies.iter().any(|a| a.check == "http.unmatched"));
     assert!(result.rfc.iter().all(|a| a.rule_sourced), "{:?}", result.rfc);
     assert!(!result.seq_doc.passed, "a gating harness finding fails the diagram");
+    assert!(!result.passed, "and the cell");
 }
