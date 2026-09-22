@@ -11,6 +11,8 @@ mod call_store;
 mod faults;
 mod memory;
 mod terminate_writer;
+#[cfg(test)]
+mod unwired_tests;
 
 pub use call_store::{
     partition_of, role_of, CallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
