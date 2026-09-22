@@ -115,12 +115,9 @@ async fn main() {
     jemalloc_stats::log_config();
 
     // The b-leg callee (`B2BUA_DEST`) is passed to the decision engine as an
-    // UNRESOLVED host:port. A DNS name is resolved PER CALL — and round-robined
-    // across a headless Service's pod set — in b2bua's `apply_route`, so the b-leg
-    // goes pod-direct from the LB VIP with no kube-proxy ClusterIP NAT. Resolving
-    // once here would instead pin every call to a single startup-resolved pod (and
-    // could fail the worker's boot if the callee Service has no endpoints yet). An
-    // IP literal passes straight through the resolver unchanged.
+    // unresolved host:port: the core never resolves a name. Behind
+    // `B2BUA_OUTBOUND_PROXY` the proxy resolves the Request-URI name; without it
+    // only an IP literal is sent, a name destination is dropped at send.
     let dest = env_or("B2BUA_DEST", "127.0.0.1:5070");
     let (dest_host, dest_port) = split_host_port(&dest);
 
