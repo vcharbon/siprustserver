@@ -16,7 +16,8 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
-    CallTreatment, NewCallRequest, NewCallResponse, RejectDecision, ScriptedDecisionEngine,
+    CallTreatment, NewCallRequest, NewCallResponse, RedirectContact, RedirectDecision,
+    RejectDecision, ReleaseOutcome, ScriptedDecisionEngine,
 };
 use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold, NoopLimiter};
 use b2bua::metrics::B2buaMetrics;
@@ -274,6 +275,195 @@ async fn a_rejected_call_holds_the_reject_label_and_service_ext() {
         vec![(CdrEventType::InviteReceived, "a", 0), (CdrEventType::Reject, "a", 1)]
     );
     assert!(done.b_legs.is_empty());
+
+    let _report = h.finish().await;
+}
+
+/// One service slice, `{"svc": {"token": token}}`.
+fn svc_slice(token: &str) -> std::collections::BTreeMap<String, serde_json::Value> {
+    [("svc".to_string(), serde_json::json!({ "token": token }))].into_iter().collect()
+}
+
+/// The `svc` slice the terminated call holds.
+fn svc(call: &Call) -> Option<&serde_json::Value> {
+    call.ext.as_ref().and_then(|e| e.get("svc"))
+}
+
+/// A 3xx redirect to `contact`, carrying `service_ext` and `label`.
+fn redirect(
+    contact: &str,
+    service_ext: std::collections::BTreeMap<String, serde_json::Value>,
+    label: &str,
+) -> RedirectDecision {
+    RedirectDecision {
+        code: 302,
+        reason: Some("Moved Temporarily".into()),
+        contacts: vec![RedirectContact { uri: contact.into(), q: None }],
+        update_headers: None,
+        service_ext,
+        label: Some(label.into()),
+    }
+}
+
+/// A redirect decision seeds its `service_ext` exactly as a route or a reject
+/// does, a core-reserved key skipped (ADR-0016).
+#[tokio::test(start_paused = true)]
+async fn a_redirected_call_holds_the_redirect_service_ext() {
+    let h = Harness::new("decision-log-redirect");
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut ext = svc_slice("t-redirect");
+                ext.insert("relayed-failure-headers".into(), serde_json::json!("not a slice"));
+                NewCallResponse::Redirect(redirect("sip:elsewhere@127.0.0.1", ext, "moved"))
+            })
+            .build(),
+    );
+    let sut = Sut::spawn(&h, decision).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
+    call.expect(302).await;
+
+    let done = sut.assert_reaped().await;
+    assert_eq!(marks(&done), vec![(DecisionKind::Redirect, Some("a"), Some("moved"))]);
+    assert_eq!(svc(&done), Some(&serde_json::json!({"token": "t-redirect"})));
+    assert_ne!(
+        done.ext.as_ref().and_then(|e| e.get("relayed-failure-headers")),
+        Some(&serde_json::json!("not a slice")),
+        "a core-reserved key is no service slice"
+    );
+
+    let _report = h.finish().await;
+}
+
+/// A failover consult answered with a redirect seeds its `service_ext` over
+/// the route's, as a failover reject does.
+#[tokio::test(start_paused = true)]
+async fn a_failover_redirect_seeds_its_service_ext() {
+    let h = Harness::new("decision-log-failover-redirect");
+    let alice = h.agent("alice", ALICE).await;
+    let carol = h.agent("carol", CAROL).await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.callback_context = Some("ctx".into());
+                r.service_ext = svc_slice("t-route");
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|_| {
+                CallTreatment::Redirect(redirect(
+                    "sip:elsewhere@127.0.0.1",
+                    svc_slice("t-redirect"),
+                    "moved",
+                ))
+            })
+            .build(),
+    );
+    let sut = Sut::spawn(&h, decision).await;
+
+    let mut call = alice.invite(&carol).with_sdp(OFFER).through(sut.addr).send().await;
+    carol.receive("INVITE").await.respond(486, "Busy Here").await;
+    carol.receive("ACK").await;
+    call.expect(302).await;
+
+    let done = sut.assert_reaped().await;
+    assert_eq!(
+        marks(&done),
+        vec![
+            (DecisionKind::Route, Some("a"), None),
+            (DecisionKind::FailoverRedirect, Some("b-1"), Some("moved")),
+        ]
+    );
+    assert_eq!(svc(&done), Some(&serde_json::json!({"token": "t-redirect"})));
+
+    let _report = h.finish().await;
+}
+
+/// A redirect answering a limiter refusal of the route seeds its `service_ext`.
+#[tokio::test(start_paused = true)]
+async fn a_limiter_failover_redirect_seeds_its_service_ext() {
+    let h = Harness::new("decision-log-limiter-redirect");
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.callback_context = Some("ctx".into());
+                r.call_limiter = vec![CallLimiterEntry { id: "cap".into(), limit: 1 }];
+                r.service_ext = svc_slice("t-route");
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|req| {
+                assert_eq!(req.failure.origin, "call_limiter");
+                CallTreatment::Redirect(redirect(
+                    "sip:elsewhere@127.0.0.1",
+                    svc_slice("t-redirect"),
+                    "moved",
+                ))
+            })
+            .build(),
+    );
+    let sut = Sut::spawn_with(&h, decision, Arc::new(RefusingLimiter("cap")), Vec::new()).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
+    call.expect(302).await;
+
+    let done = sut.assert_reaped().await;
+    assert_eq!(marks(&done), vec![(DecisionKind::FailoverRedirect, None, Some("moved"))]);
+    assert_eq!(svc(&done), Some(&serde_json::json!({"token": "t-redirect"})));
+    assert!(done.b_legs.is_empty(), "the refused route dialed nothing");
+
+    let _report = h.finish().await;
+}
+
+/// A subscribed release answered `Release` merges its `service_ext` over the
+/// route's before the teardown, as a release reroute does.
+#[tokio::test(start_paused = true)]
+async fn a_release_decision_merges_its_service_ext() {
+    let h = Harness::new("decision-log-release");
+    let alice = h.agent("alice", ALICE).await;
+    let bob = h.agent("bob", BOB).await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5071);
+                r.features.platform.max_duration_sec = 5;
+                r.callback_context = Some("ctx".into());
+                r.subscriptions = vec![call::ReleaseEventKind::MaxCallDuration];
+                r.service_ext = svc_slice("t-route");
+                NewCallResponse::Route(r)
+            })
+            .on_release(|_| {
+                ReleaseOutcome::Respond(CallReleaseResponse::Release {
+                    label: Some("hangup".into()),
+                    service_ext: svc_slice("t-release"),
+                })
+            })
+            .build(),
+    );
+    let sut = Sut::spawn(&h, decision).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let _dialog = call.ack().await;
+    bob.receive("ACK").await;
+
+    h.advance(std::time::Duration::from_secs(6)).await;
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+
+    let done = sut.assert_reaped().await;
+    assert_eq!(
+        marks(&done),
+        vec![(DecisionKind::Route, Some("a"), None), (DecisionKind::Release, None, Some("hangup")),]
+    );
+    assert_eq!(svc(&done), Some(&serde_json::json!({"token": "t-release"})));
 
     let _report = h.finish().await;
 }

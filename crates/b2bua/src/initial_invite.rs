@@ -21,7 +21,7 @@ use sip_txn::IdGen;
 use crate::config::B2buaConfig;
 use b2bua_sdk::reason_phrase::default_reason;
 
-use crate::decision::apply_reject::apply_reject;
+use crate::decision::apply_reject::{apply_redirect, apply_reject};
 use crate::decision::apply_route::apply_route;
 use crate::decision::{
     CallDecisionEngine, CallDecisionError, NewCallRequest, NewCallResponse, RedirectContact,
@@ -326,21 +326,15 @@ pub async fn handle_initial_invite(
             id_gen,
             now_ms,
         ),
-        Ok(NewCallResponse::Redirect(rd)) => {
-            let call =
-                mark_decision(call, now_ms, DecisionKind::Redirect, Some("a".into()), rd.label);
-            reject_call(
-                call,
-                &a_invite,
-                rd.code,
-                rd.reason,
-                rd.update_headers.as_ref(),
-                &rd.contacts,
-                id_gen,
-                now_ms,
-                TerminationCause::DecisionReject,
-            )
-        }
+        Ok(NewCallResponse::Redirect(rd)) => apply_redirect(
+            call,
+            rd,
+            DecisionKind::Redirect,
+            Some("a".into()),
+            &a_invite,
+            id_gen,
+            now_ms,
+        ),
         // `Relay` is a failover-only treatment; with no captured downstream
         // failure at new-call time it falls back to 480 (ADR-0017 X5).
         Ok(NewCallResponse::Relay { label }) => {

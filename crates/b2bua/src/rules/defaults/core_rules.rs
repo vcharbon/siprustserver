@@ -897,14 +897,21 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                             .collect()
                     })
                     .unwrap_or_default();
-                ok(vec![
+                // A redirect seeds its service slices exactly as a route does.
+                let mut actions = Vec::new();
+                let service_ext = parse_service_ext(payload);
+                if !service_ext.is_empty() {
+                    actions.push(RuleAction::MergeCallExt { ext: service_ext });
+                }
+                actions.extend([
                     RuleAction::RespondToALeg { status, reason, header_updates, contacts },
                     RuleAction::BeginTermination {
                         reason: Some("failover-redirect".into()),
                         cause: TerminationCause::DecisionReject,
                         by_leg: None,
                     },
-                ])
+                ]);
+                ok(actions)
             },
         ),
         // A 481 to a re-INVITE, UPDATE, INFO, MESSAGE, REFER or keepalive OPTIONS

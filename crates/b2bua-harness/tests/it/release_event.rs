@@ -117,7 +117,10 @@ async fn unsubscribed_max_duration_keeps_local_teardown_without_consult() {
             .fallback(move |_req| NewCallResponse::Route(route_with_cap(5070, false)))
             .on_release(move |_req| {
                 c.fetch_add(1, Ordering::SeqCst);
-                ReleaseOutcome::Respond(CallReleaseResponse::Release { label: None })
+                ReleaseOutcome::Respond(CallReleaseResponse::Release {
+                    label: None,
+                    service_ext: Default::default(),
+                })
             })
             .build(),
     );
@@ -180,6 +183,7 @@ async fn subscribed_release_consults_engine_then_tears_down() {
                 cap.lock().unwrap().push(req.clone());
                 ReleaseOutcome::Respond(CallReleaseResponse::Release {
                     label: Some("hangup".into()),
+                    service_ext: Default::default(),
                 })
             })
             .build(),

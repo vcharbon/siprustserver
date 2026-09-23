@@ -441,20 +441,15 @@ async fn limiter_reject_failover(
             id_gen,
             now_ms,
         ),
-        Ok(CallTreatment::Redirect(rd)) => {
-            let call = mark_decision(call, now_ms, DecisionKind::FailoverRedirect, None, rd.label);
-            crate::initial_invite::reject_call(
-                call,
-                a_invite,
-                rd.code,
-                rd.reason,
-                rd.update_headers.as_ref(),
-                &rd.contacts,
-                id_gen,
-                now_ms,
-                TerminationCause::DecisionReject,
-            )
-        }
+        Ok(CallTreatment::Redirect(rd)) => super::apply_reject::apply_redirect(
+            call,
+            rd,
+            DecisionKind::FailoverRedirect,
+            None,
+            a_invite,
+            id_gen,
+            now_ms,
+        ),
         // Relay with no captured failure (a limiter reject is pre-leg) → 480
         // fallback (ADR-0017 X5); a backend error → the final the engine
         // stated, else 486 Busy Here: the stack's own, no decision behind it

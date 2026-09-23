@@ -108,9 +108,10 @@ pub(crate) fn parse_label(payload: &serde_json::Value) -> Option<String> {
     payload.get("label").and_then(|v| v.as_str()).map(str::to_string)
 }
 
-/// The decision's `service_ext` on a fold payload — a reject's, merged as a
-/// route's are; a core-reserved key is not a service slice (ADR-0016).
-pub(super) fn parse_service_ext(payload: &serde_json::Value) -> call::ExtMap {
+/// The decision's `service_ext` on a fold payload — a reject's, a redirect's or
+/// a release's, merged as a route's are; a core-reserved key is not a service
+/// slice (ADR-0016).
+pub(crate) fn parse_service_ext(payload: &serde_json::Value) -> call::ExtMap {
     payload
         .get("service_ext")
         .and_then(|v| v.as_object())

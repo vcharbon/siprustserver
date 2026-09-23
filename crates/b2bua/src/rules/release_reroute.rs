@@ -143,7 +143,13 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     _ => return None,
                 };
                 let cause = release_fold_cause(payload);
-                ok(vec![
+                // A release seeds its service slices exactly as a route does.
+                let mut actions = Vec::new();
+                let service_ext = super::defaults::parse_service_ext(payload);
+                if !service_ext.is_empty() {
+                    actions.push(RuleAction::MergeCallExt { ext: service_ext });
+                }
+                actions.extend([
                     RuleAction::AddCdrEvent {
                         event_type: CdrEventType::Bye,
                         leg_id: ctx.call.a_leg().leg_id.clone(),
@@ -155,7 +161,8 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                         cause,
                         by_leg: None,
                     },
-                ])
+                ]);
+                ok(actions)
             },
         ),
         // ── release consult folded: `reroute` → replacement b-leg + slice.

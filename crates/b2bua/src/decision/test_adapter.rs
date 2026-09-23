@@ -331,6 +331,7 @@ fn treatment_from_obj(obj: &serde_json::Value) -> Option<CallTreatment> {
             reason: obj.get("reason").and_then(|v| v.as_str()).map(str::to_string),
             contacts: parse_contacts(obj.get("contacts")),
             update_headers: parse_update_headers(obj.get("update_headers")),
+            service_ext: parse_service_ext(obj),
             label: parse_label(obj),
         })),
         "relay" => Some(CallTreatment::Relay { label: parse_label(obj) }),
@@ -795,7 +796,9 @@ impl CallDecisionEngine for ScriptedDecisionEngine {
     ) -> Result<CallReleaseResponse, CallDecisionError> {
         match &self.release {
             // Unscripted: the trait's back-compat default (local teardown).
-            None => Ok(CallReleaseResponse::Release { label: None }),
+            None => {
+                Ok(CallReleaseResponse::Release { label: None, service_ext: Default::default() })
+            }
             Some(f) => match f(&req) {
                 ReleaseOutcome::Respond(resp) => Ok(resp),
                 ReleaseOutcome::Error => {

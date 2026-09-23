@@ -50,7 +50,7 @@ pub trait CallDecisionEngine: Send + Sync {
         &self,
         _req: CallReleaseRequest,
     ) -> Result<CallReleaseResponse, CallDecisionError> {
-        Ok(CallReleaseResponse::Release { label: None })
+        Ok(CallReleaseResponse::Release { label: None, service_ext: Default::default() })
     }
 }
 

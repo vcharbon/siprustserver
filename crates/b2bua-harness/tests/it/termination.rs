@@ -729,7 +729,10 @@ async fn a_release_decision_ends_the_call_under_the_decision() {
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
     let decision = released_route(|| {
-        ReleaseOutcome::Respond(CallReleaseResponse::Release { label: Some("hangup".into()) })
+        ReleaseOutcome::Respond(CallReleaseResponse::Release {
+            label: Some("hangup".into()),
+            service_ext: Default::default(),
+        })
     });
     let sut = Sut::spawn_tuned(&h, decision, |_| {}).await;
 

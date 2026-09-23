@@ -201,6 +201,9 @@ pub struct RedirectDecision {
     pub reason: Option<String>,
     pub contacts: Vec<RedirectContact>,
     pub update_headers: Option<SipHeaderUpdates>,
+    /// Seeded exactly as a route's `service_ext`: the slices a redirected
+    /// call's record carries.
+    pub service_ext: BTreeMap<String, serde_json::Value>,
     /// See [`RouteDecision::label`].
     pub label: Option<String>,
 }
@@ -381,6 +384,9 @@ pub enum CallReleaseResponse {
     Release {
         /// See [`RouteDecision::label`].
         label: Option<String>,
+        /// Service slices merged into the call before the teardown, exactly
+        /// as a route's `service_ext` (a core-reserved key is skipped).
+        service_ext: BTreeMap<String, serde_json::Value>,
     },
     /// Reroute the established call to `RouteDecision::destination`.
     Route(RouteDecision),

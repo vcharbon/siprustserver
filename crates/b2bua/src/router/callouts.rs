@@ -224,6 +224,9 @@ struct FailureRedirectPayload {
     /// See [`FailureRejectPayload::origin`].
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<&'static str>,
+    /// The redirect's service slices, merged by the fold as a route's are.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    service_ext: std::collections::BTreeMap<String, serde_json::Value>,
     /// The decision's label, for the fold's `MarkDecision`.
     #[serde(skip_serializing_if = "Option::is_none")]
     label: Option<String>,
@@ -343,6 +346,7 @@ async fn failure_outcome(
                         update_headers: rd.update_headers,
                         failed_leg_id,
                         origin: (depth > 0).then_some("call_limiter"),
+                        service_ext: rd.service_ext,
                         label: rd.label,
                     }),
                 );
@@ -449,8 +453,12 @@ pub(super) fn spawn_release_callout(
             }
             // Release, engine error, or deadline expiry → the local teardown
             // (the fail-safe the request demands).
-            Ok(CallReleaseResponse::Release { label }) => {
-                ("release", json!({ "label": label, "event": event }))
+            Ok(CallReleaseResponse::Release { label, service_ext }) => {
+                let mut payload = json!({ "label": label, "event": event });
+                if !service_ext.is_empty() {
+                    payload["service_ext"] = json!(service_ext);
+                }
+                ("release", payload)
             }
             Err(_) => {
                 ("release", json!({"reason": "engine_error", "event": event, STACK_AUTHORED: true}))
