@@ -2,7 +2,7 @@
 //! b-leg INVITE. Port of `decision/apply/applyRoute.ts` (the load-bearing path:
 //! attach features, seed service ext, run the limiter, create the b-leg).
 
-use call::helpers::{add_originated_b_leg, mark_decision, set_call_ext};
+use call::helpers::{add_originated_b_leg, mark_decision};
 use call::{Call, CallLimiterState, DecisionKind, TerminationCause, TimerEntry, TimerType};
 use sip_clock::Clock;
 use sip_message::SipRequest;
@@ -90,15 +90,8 @@ pub async fn apply_route(
     // parity, same as `features`).
     call.subscriptions = route.subscriptions.clone();
 
-    // Seed per-service ext slices (service-layer activation gate). A
-    // core-reserved key is not a service slice and no service id may collide
-    // with it (ADR-0016) — a decision response cannot write it.
-    for (service_id, value) in route.service_ext {
-        if crate::rules::relay::is_core_reserved_ext(&service_id) {
-            continue;
-        }
-        call = set_call_ext(call, &service_id, Some(value));
-    }
+    // Seed per-service ext slices (service-layer activation gate).
+    call = super::apply_reject::seed_service_ext(call, route.service_ext);
 
     // ── Target admission: reject non-IP non-allow-listed destinations early ──
     // Catches the case where call-control returns a bogus host (e.g. `kindlab`

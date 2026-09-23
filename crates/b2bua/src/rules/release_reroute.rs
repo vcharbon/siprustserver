@@ -105,9 +105,7 @@ fn fail_teardown(ctx: &RuleContext, reason: &'static str) -> Vec<RuleAction> {
 /// deadline) ends it under the event that raised the consult, which the fold
 /// names.
 fn release_fold_cause(payload: &serde_json::Value) -> TerminationCause {
-    let unanswered = crate::decision_log::stack_authored(payload)
-        && payload.get("reason").and_then(|v| v.as_str()) != Some("limiter_rejected");
-    if !unanswered {
+    if !crate::decision_log::stack_authored(payload) {
         return TerminationCause::DecisionRelease;
     }
     let event = payload

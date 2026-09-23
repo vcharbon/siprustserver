@@ -444,11 +444,20 @@ pub(super) fn spawn_release_callout(
                     // reject here does NOT re-consult the engine — the call was
                     // going down anyway, so the reject degrades to the release
                     // default (local teardown) instead of a recursive failover
-                    // walk.
-                    Err(_) => (
-                        "release",
-                        json!({"reason": "limiter_rejected", "event": event, STACK_AUTHORED: true}),
-                    ),
+                    // walk. The answer still stands for everything but its
+                    // route: the release is marked under its label and its
+                    // service slices are merged.
+                    Err(_) => {
+                        let mut payload = json!({
+                            "reason": "limiter_rejected",
+                            "event": event,
+                            "label": route.label,
+                        });
+                        if !route.service_ext.is_empty() {
+                            payload["service_ext"] = json!(route.service_ext);
+                        }
+                        ("release", payload)
+                    }
                 }
             }
             // Release, engine error, or deadline expiry → the local teardown

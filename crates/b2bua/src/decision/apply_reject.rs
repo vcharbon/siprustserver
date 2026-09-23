@@ -13,9 +13,13 @@ use sip_txn::IdGen;
 use super::schemas::{RedirectDecision, RejectDecision};
 use crate::effects::HandlerResult;
 
-/// Seed a decision's `service_ext` slices on `call`; a core-reserved key is
-/// not a service slice and is skipped (ADR-0016).
-fn seed_service_ext(mut call: Call, service_ext: BTreeMap<String, serde_json::Value>) -> Call {
+/// Seed a decision's `service_ext` slices on `call` — a route's, a reject's or
+/// a redirect's alike. A core-reserved key is not a service slice and no
+/// service id may collide with it (ADR-0016): a decision cannot write it.
+pub(super) fn seed_service_ext(
+    mut call: Call,
+    service_ext: BTreeMap<String, serde_json::Value>,
+) -> Call {
     for (service_id, value) in service_ext {
         if crate::rules::relay::is_core_reserved_ext(&service_id) {
             continue;

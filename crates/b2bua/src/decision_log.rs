@@ -5,10 +5,11 @@
 //! message and event it emits is stamped with the decision's ordinal.
 //!
 //! A mark records a decision the decision layer returned AND the stack
-//! applied. A fold the callout resolved on its own — an unanswered consult, a
-//! limiter-refused reroute, the terminal limiter final — carries
-//! [`STACK_AUTHORED`] and marks nothing; a fold landing on a call already going
-//! away applies nothing and marks nothing.
+//! applied. A fold the callout resolved on its own — an unanswered consult,
+//! the terminal limiter final — carries [`STACK_AUTHORED`] and marks nothing;
+//! a fold landing on a call already going away applies nothing and marks
+//! nothing. A release reroute the limiter refuses is applied as a release:
+//! marked under the answer's label, its service slices merged.
 
 use call::helpers::mark_decision;
 use call::{Call, CallModelState, DecisionKind};
