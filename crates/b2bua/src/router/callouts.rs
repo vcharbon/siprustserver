@@ -12,8 +12,8 @@ use serde_json::json;
 
 use super::RouterCtx;
 use crate::decision::{
-    CallFailureRequest, CallReferResponse, CallReleaseResponse, CallSnapshot, CallTreatment,
-    FailureInfo, RouteDecision, SipHeaderUpdates,
+    CallDecisionError, CallFailureRequest, CallReferResponse, CallReleaseResponse, CallSnapshot,
+    CallTreatment, FailureInfo, RouteDecision, SipHeaderUpdates,
 };
 use crate::decision_log::STACK_ORIGIN;
 use crate::event::CallEvent;
@@ -353,7 +353,22 @@ async fn failure_outcome(
             Ok(CallTreatment::Relay { label }) => {
                 return ("terminate", terminate_payload(request, &failed_leg_id, Some(label)));
             }
-            Err(_) => {
+            // The engine's stated refusal: the reject fold a decision reject
+            // takes, on the stack's own account.
+            Err(CallDecisionError::Refused { code, reason, update_headers }) => {
+                let mut payload = to_payload(FailureRejectPayload {
+                    code,
+                    reason,
+                    update_headers,
+                    failed_leg_id,
+                    origin: (depth > 0).then_some("call_limiter"),
+                    service_ext: Default::default(),
+                    label: None,
+                });
+                payload[STACK_ORIGIN] = json!(true);
+                return ("reject", payload);
+            }
+            Err(CallDecisionError::Unavailable(_)) => {
                 return ("terminate", terminate_payload(request, &failed_leg_id, None));
             }
         }

@@ -22,7 +22,8 @@ use crate::config::B2buaConfig;
 use crate::decision::apply_reject::apply_reject;
 use crate::decision::apply_route::apply_route;
 use crate::decision::{
-    CallDecisionEngine, NewCallRequest, NewCallResponse, RedirectContact, SipHeaderUpdates,
+    CallDecisionEngine, CallDecisionError, NewCallRequest, NewCallResponse, RedirectContact,
+    SipHeaderUpdates,
 };
 use crate::effects::{HandlerEffects, HandlerResult};
 use crate::event::CallEvent;
@@ -354,8 +355,20 @@ pub async fn handle_initial_invite(
                 TerminationCause::DecisionReject,
             )
         }
-        // No decision was returned: nothing to record, the stack's own final.
-        Err(_unavailable) => reject_call(
+        // No decision was returned: nothing to record, the stack's own final —
+        // the one the engine stated, else 503.
+        Err(CallDecisionError::Refused { code, reason, update_headers }) => reject_call(
+            call,
+            &a_invite,
+            code,
+            reason,
+            update_headers.as_ref(),
+            &[],
+            id_gen,
+            now_ms,
+            TerminationCause::Admission,
+        ),
+        Err(CallDecisionError::Unavailable(_)) => reject_call(
             call,
             &a_invite,
             503,
@@ -493,7 +506,7 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
 /// The reason phrase a reject wears when the decision states none. `500` is the
 /// fail-safe every adapter reaches for, so it wears its own RFC 3261 §21.5.1
 /// phrase rather than the `603` fallthrough.
-fn default_reason(status: u16) -> String {
+pub(crate) fn default_reason(status: u16) -> String {
     match status {
         302 => "Moved Temporarily",
         403 => "Forbidden",

@@ -78,6 +78,7 @@ mod service_http;
 mod service_timers;
 mod setup_stall_global_duration_reap;
 mod setup_timeout;
+mod stated_refusal;
 mod store_fault;
 mod suppress_18x;
 mod target_admission_gate;

@@ -829,11 +829,13 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     _ => return None,
                 };
                 let status = payload.get("code").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
+                // The initial path's reason policy: a reject stating no phrase
+                // wears its code's.
                 let reason = payload
                     .get("reason")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("Declined")
-                    .to_string();
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::initial_invite::default_reason(status));
                 let header_updates = parse_header_updates(payload);
                 // A reject seeds its service slices exactly as a route does.
                 let mut actions = Vec::new();
@@ -841,8 +843,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 if !service_ext.is_empty() {
                     actions.push(RuleAction::MergeCallExt { ext: service_ext });
                 }
-                // The limiter chain's terminal 486 is the stack's own capacity
-                // statement, not a decision.
+                // The limiter chain's terminal 486 and the engine's stated
+                // refusal are the stack's own finals, not decisions.
                 let cause = if crate::decision_log::stack_authored(payload) {
                     TerminationCause::Admission
                 } else {

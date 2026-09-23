@@ -10,7 +10,8 @@ use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
 use crate::decision::{
-    header_lines, CallDecisionEngine, CallFailureRequest, CallTreatment, FailureInfo,
+    header_lines, CallDecisionEngine, CallDecisionError, CallFailureRequest, CallTreatment,
+    FailureInfo,
 };
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
 use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
@@ -455,8 +456,9 @@ async fn limiter_reject_failover(
             )
         }
         // Relay with no captured failure (a limiter reject is pre-leg) → 480
-        // fallback (ADR-0017 X5); a backend error → 486 Busy Here, the
-        // stack's own final, no decision behind it and no mark.
+        // fallback (ADR-0017 X5); a backend error → the final the engine
+        // stated, else 486 Busy Here: the stack's own, no decision behind it
+        // and no mark.
         Ok(CallTreatment::Relay { label }) => {
             let call = mark_decision(call, now_ms, DecisionKind::FailoverTerminate, None, label);
             crate::initial_invite::reject_call(
@@ -471,7 +473,20 @@ async fn limiter_reject_failover(
                 TerminationCause::DecisionReject,
             )
         }
-        Err(_) => crate::initial_invite::reject_call(
+        Err(CallDecisionError::Refused { code, reason, update_headers }) => {
+            crate::initial_invite::reject_call(
+                call,
+                a_invite,
+                code,
+                reason,
+                update_headers.as_ref(),
+                &[],
+                id_gen,
+                now_ms,
+                TerminationCause::Admission,
+            )
+        }
+        Err(CallDecisionError::Unavailable(_)) => crate::initial_invite::reject_call(
             call,
             a_invite,
             486,
