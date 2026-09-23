@@ -56,6 +56,8 @@ pub struct Invite<'a> {
     /// A declared `delayed-automatic` deviation carried onto the
     /// [`ClientInvite`] (honoured by `ack`/`ack_delayed`).
     delayed_automatic: Option<DelayedAutomatic>,
+    /// The `(Call-ID, From tag)` the dialog is created under; `None` mints both.
+    identity: Option<(String, String)>,
 }
 
 impl<'a> Invite<'a> {
@@ -76,6 +78,7 @@ impl<'a> Invite<'a> {
             request_uri: None,
             max_forwards: None,
             delayed_automatic: None,
+            identity: None,
         }
     }
 
@@ -173,6 +176,14 @@ impl<'a> Invite<'a> {
         self
     }
 
+    /// Create the dialog under `call_id` and From tag `from_tag` instead of the
+    /// ones the caller mints, so a peer bound to them before the dial knows
+    /// the dialog. The test owns their uniqueness (RFC 3261 §8.1.1.4, §19.3).
+    pub fn identity(mut self, call_id: impl Into<String>, from_tag: impl Into<String>) -> Self {
+        self.identity = Some((call_id.into(), from_tag.into()));
+        self
+    }
+
     /// Send the initial INVITE to `proxy` instead of directly to the peer (the
     /// Request-URI still targets the peer). Used to drive an LB/record-routing
     /// proxy; subsequent in-dialog requests then follow the route set learned
@@ -188,8 +199,9 @@ impl<'a> Invite<'a> {
         let caller = self.caller;
         let peer = self.peer;
         let wire_dst = self.wire_dst.unwrap_or(peer.addr);
-        let call_id = format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip());
-        let from_tag = caller.tag();
+        let (call_id, from_tag) = self.identity.clone().unwrap_or_else(|| {
+            (format!("{}-{}@{}", caller.name, caller.ids.next(), caller.addr.ip()), caller.tag())
+        });
         // Default identities are the agent URIs / a peer-addressed R-URI; a Test
         // case may override any of From/To/R-URI from its input data.
         let request_uri = self.request_uri.clone().unwrap_or_else(|| {
