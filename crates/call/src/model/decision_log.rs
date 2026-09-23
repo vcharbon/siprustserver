@@ -13,7 +13,8 @@
 use serde::{Deserialize, Serialize};
 
 /// The closed set of decision families this stack applies: the decision
-/// point crossed with the treatment it returned.
+/// point crossed with the treatment it returned. The replicated encoding is
+/// positional: a new variant is appended, never inserted or reordered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionKind {

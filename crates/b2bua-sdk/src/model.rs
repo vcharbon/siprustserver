@@ -906,11 +906,13 @@ pub enum RuleAction {
         events: Vec<call::ReleaseEventKind>,
     },
     /// Record a decision a service's own rule applies on the call's decision
-    /// log (`call::helpers::mark_decision`), ahead of the actions that carry
-    /// it out, so every message and event they emit is stamped with its
-    /// ordinal. The engine's own decisions never need it: the initial route
-    /// and reject mark directly, and an async fold is marked where it lands,
-    /// before any rule reads it.
+    /// log (`call::helpers::mark_decision`). A CDR event is stamped with the
+    /// ordinal current when its action runs, so the mark goes ahead of the
+    /// events it governs — first in the list, by convention; the messages a
+    /// turn sends are stamped with the ordinal the call holds when the turn
+    /// ends, whatever the mark's place. The engine's own decisions never need
+    /// it: the initial route and reject mark directly, and an async fold is
+    /// marked where it lands, before any rule reads it.
     MarkDecision {
         kind: call::DecisionKind,
         /// The leg whose event the decision answers; see `DecisionMark`.
