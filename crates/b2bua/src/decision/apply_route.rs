@@ -542,7 +542,7 @@ fn record_failure_round_trip(
             },
             crate::trace::intake::json_body(treatment),
         ),
-        Err(err) => ("error", err.to_string().into_bytes()),
+        Err(err) => crate::trace::intake::error_outcome(err),
     };
     crate::trace::emit::round_trip(
         call,

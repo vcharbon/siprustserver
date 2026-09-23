@@ -89,9 +89,27 @@ pub(crate) fn record_new_call(
     };
     let (outcome, body) = match response {
         Ok(treatment) => (treatment_name(treatment), json_body(treatment)),
-        Err(err) => ("error", err.to_string().into_bytes()),
+        Err(err) => error_outcome(err),
     };
     emit::round_trip(call, "/call/new", sent_at_ms, &request, received_at_ms, outcome, &body);
+}
+
+/// The trace outcome and body of a consult the engine answered with an error:
+/// a stated refusal is recorded as the `reject` the async failure fold records,
+/// its final and the stack-authored flag as the body; anything else is `error`.
+pub(crate) fn error_outcome(err: &CallDecisionError) -> (&'static str, Vec<u8>) {
+    match err {
+        CallDecisionError::Refused { code, reason, update_headers } => (
+            "reject",
+            json_body(&serde_json::json!({
+                "code": code,
+                "reason": reason,
+                "update_headers": update_headers,
+                crate::decision_log::STACK_AUTHORED: true,
+            })),
+        ),
+        CallDecisionError::Unavailable(_) => ("error", err.to_string().into_bytes()),
+    }
 }
 
 fn stamp(call: &mut Call, ids: registry::TraceIds) {

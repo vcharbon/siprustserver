@@ -834,8 +834,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 let reason = payload
                     .get("reason")
                     .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| crate::initial_invite::default_reason(status));
+                    .unwrap_or_else(|| b2bua_sdk::reason_phrase::default_reason(status))
+                    .to_string();
                 let header_updates = parse_header_updates(payload);
                 // A reject seeds its service slices exactly as a route does.
                 let mut actions = Vec::new();

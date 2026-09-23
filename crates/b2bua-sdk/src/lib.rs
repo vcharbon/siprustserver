@@ -24,9 +24,11 @@
 
 pub mod config;
 pub mod event;
+pub mod fold_payload;
 pub mod header_update;
 pub mod model;
 pub mod provisional;
+pub mod reason_phrase;
 pub mod relayed_final;
 pub mod service;
 

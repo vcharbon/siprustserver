@@ -15,7 +15,7 @@ use crate::decision::{
     CallDecisionError, CallFailureRequest, CallReferResponse, CallReleaseResponse, CallSnapshot,
     CallTreatment, FailureInfo, RouteDecision, SipHeaderUpdates,
 };
-use crate::decision_log::STACK_ORIGIN;
+use crate::decision_log::STACK_AUTHORED;
 use crate::event::CallEvent;
 use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
 
@@ -175,7 +175,7 @@ pub(super) fn spawn_refer_callout(
             Ok(CallReferResponse::Reject { code, reason, label }) => {
                 ("reject", json!({ "reject_code": code, "reject_reason": reason, "label": label }))
             }
-            Err(_) => ("error", json!({ STACK_ORIGIN: true })),
+            Err(_) => ("error", json!({ STACK_AUTHORED: true })),
         };
         record_round_trip(&trace, &ctx2, "/call/refer", sent_at_ms, &request, outcome, &payload);
         send_internal(&ctx2, call_ref, "refer-http-result", outcome, payload, Vec::new());
@@ -305,7 +305,7 @@ async fn failure_outcome(
                                 "reason": "Busy Here",
                                 "failed_leg_id": failed_leg_id,
                                 "origin": "call_limiter",
-                                STACK_ORIGIN: true,
+                                STACK_AUTHORED: true,
                             }),
                         );
                     }
@@ -365,7 +365,7 @@ async fn failure_outcome(
                     service_ext: Default::default(),
                     label: None,
                 });
-                payload[STACK_ORIGIN] = json!(true);
+                payload[STACK_AUTHORED] = json!(true);
                 return ("reject", payload);
             }
             Err(CallDecisionError::Unavailable(_)) => {
@@ -402,7 +402,7 @@ fn terminate_payload(
         }
         Some(None) => {}
         None => {
-            p.insert(STACK_ORIGIN.into(), json!(true));
+            p.insert(STACK_AUTHORED.into(), json!(true));
         }
     }
     serde_json::Value::Object(p)
@@ -443,7 +443,7 @@ pub(super) fn spawn_release_callout(
                     // walk.
                     Err(_) => (
                         "release",
-                        json!({"reason": "limiter_rejected", "event": event, STACK_ORIGIN: true}),
+                        json!({"reason": "limiter_rejected", "event": event, STACK_AUTHORED: true}),
                     ),
                 }
             }
@@ -453,7 +453,7 @@ pub(super) fn spawn_release_callout(
                 ("release", json!({ "label": label, "event": event }))
             }
             Err(_) => {
-                ("release", json!({"reason": "engine_error", "event": event, STACK_ORIGIN: true}))
+                ("release", json!({"reason": "engine_error", "event": event, STACK_AUTHORED: true}))
             }
         };
         record_round_trip(

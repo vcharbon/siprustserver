@@ -19,6 +19,8 @@ use sip_message::{SipHeader, SipMessage, SipRequest, SipStr};
 use sip_txn::IdGen;
 
 use crate::config::B2buaConfig;
+use b2bua_sdk::reason_phrase::default_reason;
+
 use crate::decision::apply_reject::apply_reject;
 use crate::decision::apply_route::apply_route;
 use crate::decision::{
@@ -418,7 +420,7 @@ pub(crate) fn reject_call(
     now_ms: i64,
     cause: TerminationCause,
 ) -> HandlerResult {
-    let reason = reason.unwrap_or_else(|| default_reason(status));
+    let reason = reason.unwrap_or_else(|| default_reason(status).to_string());
     // A redirect whose target does not read cannot be authored: the caller dials
     // what a 3xx Contact names, so an invented one sends it at an address the
     // decision never stated (055). Answer the plain server error instead — the
@@ -501,23 +503,6 @@ fn build_request(invite: &SipRequest) -> NewCallRequest {
         sip_body: (!invite.body().is_empty())
             .then(|| String::from_utf8_lossy(invite.body()).into_owned()),
     }
-}
-
-/// The reason phrase a reject wears when the decision states none. `500` is the
-/// fail-safe every adapter reaches for, so it wears its own RFC 3261 §21.5.1
-/// phrase rather than the `603` fallthrough.
-pub(crate) fn default_reason(status: u16) -> String {
-    match status {
-        302 => "Moved Temporarily",
-        403 => "Forbidden",
-        404 => "Not Found",
-        480 => "Temporarily Unavailable",
-        486 => "Busy Here",
-        500 => "Server Internal Error",
-        503 => "Service Unavailable",
-        _ => "Declined",
-    }
-    .to_string()
 }
 
 /// Build the extra response headers for a reject/redirect: the non-structural
