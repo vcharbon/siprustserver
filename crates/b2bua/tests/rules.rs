@@ -5029,6 +5029,20 @@ fn observe_bye_answering(_ctx: &RuleContext) -> Option<RuleHandleResult> {
     ]))
 }
 
+/// Observes every BYE with a write AND a record mutation (a cursor move and a
+/// teardown), which an observation may not carry either.
+fn observe_bye_mutating(_ctx: &RuleContext) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::observe(vec![
+        ext_write("seen", serde_json::json!({"bye": true})),
+        RuleAction::SetState { machine: MachineId::new(TEST_MACHINE), to: StateLabel::new("S2") },
+        RuleAction::BeginTermination {
+            reason: Some("observer".into()),
+            cause: TerminationCause::Supervisor,
+            by_leg: None,
+        },
+    ]))
+}
+
 /// Observes every BYE after `observe_bye`, reading what it wrote.
 fn observe_bye_second(ctx: &RuleContext) -> Option<RuleHandleResult> {
     let first = ctx.call.ext().and_then(|e| e.get("seen")).cloned();
@@ -5083,22 +5097,61 @@ fn an_observed_event_still_reaches_the_rule_that_claims_it() {
     // The same turn without the observer: the same teardown, no slice.
     let bare = run_bye(&default_rules(), &call);
     assert_eq!(finals_to_a(&bare), vec![200]);
-    assert!(bare.call.ext.as_ref().and_then(|e| e.get("seen")).is_none());
     assert_ne!(bare.call.state, CallModelState::Active, "relay-bye tore the call down");
-    assert_eq!(result.call.state, bare.call.state, "the observed turn tears down alike");
-    assert_eq!(result.call.termination, bare.call.termination, "and records the same end");
+    assert_eq!(
+        without_seen(result.call),
+        bare.call,
+        "the observed turn is the bare turn but the write"
+    );
 }
 
-/// An observation carries only call-ext writes: anything else it states is
-/// dropped, and the claiming rule's handling is the only wire effect.
+/// `call` with the observers' `seen` slice removed (and an ext map it leaves
+/// empty dropped, as a call that never had one carries none).
+fn without_seen(call: call::Call) -> call::Call {
+    let mut call = call::helpers::set_call_ext(call, "seen", None);
+    if call.ext.as_ref().is_some_and(|e| e.is_empty()) {
+        call.ext = None;
+    }
+    call
+}
+
+/// An observation carries only call-ext writes: a final in one is an
+/// authoring bug, caught in debug builds as an undeclared effect is.
+#[cfg(debug_assertions)]
 #[test]
-fn an_observation_carries_only_call_ext_writes() {
-    let call = confirmed_call();
+#[should_panic(expected = "an observation writes call ext only")]
+fn an_observation_stating_a_final_is_an_authoring_bug() {
     let mut rules = vec![observer("test-observer", observe_bye_answering)];
     rules.extend(default_rules());
-    let result = run_bye(&rules, &call);
-    assert!(result.call.ext.as_ref().and_then(|e| e.get("seen")).is_some());
-    assert_eq!(finals_to_a(&result), vec![200], "no 486 from the observer");
+    let _ = run_bye(&rules, &confirmed_call());
+}
+
+/// A record mutation in an observation is the same authoring bug.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "an observation writes call ext only")]
+fn an_observation_mutating_the_record_is_an_authoring_bug() {
+    let mut rules = vec![observer("test-observer", observe_bye_mutating)];
+    rules.extend(default_rules());
+    let _ = run_bye(&rules, &confirmed_call());
+}
+
+/// In release the non-ext actions are dropped: nothing but the write leaks
+/// into the turn, whose handling is the claiming rule's alone.
+#[cfg(not(debug_assertions))]
+#[test]
+fn an_observation_leaks_nothing_but_its_writes() {
+    let call = confirmed_call();
+    let bare = run_bye(&default_rules(), &call);
+    let handles: [fn(&RuleContext) -> Option<RuleHandleResult>; 2] =
+        [observe_bye_answering, observe_bye_mutating];
+    for handle in handles {
+        let mut rules = vec![observer("test-observer", handle)];
+        rules.extend(default_rules());
+        let result = run_bye(&rules, &call);
+        assert_eq!(finals_to_a(&result), vec![200], "no 486 from the observer");
+        assert_eq!(without_seen(result.call), bare.call, "no cursor move, no teardown of its own");
+    }
 }
 
 /// Observers chain in rank order, each reading what the one before wrote, and

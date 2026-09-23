@@ -1,7 +1,9 @@
 //! Rule selection + execution — port of `Matcher.ts` (`pickRanked`) +
 //! `RuleExecutor.ts`. First handler returning `Some` wins; its actions run
 //! through the [`ActionExecutor`], then termination is finalized + invariants
-//! enforced. No candidate → the default handler. Selection gates on the
+//! enforced. A handler that only observes writes its call-ext slices and the
+//! chain goes on ([`RuleHandleResult::observe`]). No candidate → the default
+//! handler. Selection gates on the
 //! call's lifecycle too: a call already going away makes no forward progress
 //! on its own clock, so an asynchronous trigger reaches only its teardown
 //! rules there (`RuleDefinition::teardown`) and every other candidate is
@@ -116,6 +118,7 @@ pub fn execute_rules(
             if outcome.observes {
                 report_diagnostics(rule, call, &outcome);
                 let next = apply_observation(rule, call, &outcome.actions);
+                crate::trace::emit::rule_observed(&next, exec.now_ms, rule.id);
                 observed = Some(next);
                 continue;
             }
@@ -151,8 +154,9 @@ pub fn execute_rules(
 }
 
 /// Apply an observation's call-ext writes to `call`. Any other action is not
-/// an observation's to take: it is dropped and logged, so the claiming rule's
-/// handling stays the turn's only effect.
+/// an observation's to take: an authoring bug, which panics under
+/// `debug_assertions` (as an undeclared effect does) and is dropped and logged
+/// in release, so the claiming rule's handling stays the turn's only effect.
 fn apply_observation(rule: &RuleDefinition, call: &Call, actions: &[RuleAction]) -> Call {
     let mut call = call.clone();
     for action in actions {
@@ -163,12 +167,21 @@ fn apply_observation(rule: &RuleDefinition, call: &Call, actions: &[RuleAction])
                     call = call::helpers::set_call_ext(call, key, value);
                 }
             }
-            other => tracing::error!(
-                call_ref = %call.call_ref,
-                rule = %rule.id,
-                action = ?other,
-                "an observing rule may only write call ext; action dropped"
-            ),
+            other => {
+                if cfg!(debug_assertions) {
+                    panic!(
+                        "rule '{}' observed with a {:?} action (an observation writes call ext only)",
+                        rule.id,
+                        other.effect_kind(),
+                    );
+                }
+                tracing::error!(
+                    call_ref = %call.call_ref,
+                    rule = %rule.id,
+                    action = ?other,
+                    "an observing rule may only write call ext; action dropped"
+                );
+            }
         }
     }
     call

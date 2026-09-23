@@ -385,9 +385,13 @@ impl RuleHandleResult {
     }
 
     /// Record without claiming: the engine applies `actions` — call-ext writes
-    /// ([`RuleAction::MergeCallExt`]) only; anything else is dropped and
-    /// logged — and hands the event on to the next ranked rule, which reads
-    /// the call with the writes and handles the event as it would have.
+    /// ([`RuleAction::MergeCallExt`]) only; anything else panics under
+    /// `debug_assertions`, is dropped and logged in release — and hands the
+    /// event on to the next ranked rule, whose handler reads the call with the
+    /// writes and handles the event as it would have. The candidates are
+    /// selected once, on the call before any observation, so a later rule's
+    /// filter never sees the writes; and an observer ranked below the rule
+    /// that claims the event never runs.
     pub fn observe(actions: Vec<RuleAction>) -> Self {
         Self { actions, diagnostics: Vec::new(), observes: true }
     }
