@@ -375,11 +375,21 @@ pub struct RuleHandleResult {
     /// refusal it owns. The engine logs and counts these; they emit no wire
     /// traffic of their own, so a rule can never route on one.
     pub diagnostics: Vec<RuleDiagnostic>,
+    /// The rule observed the event without claiming it ([`Self::observe`]).
+    pub observes: bool,
 }
 
 impl RuleHandleResult {
     pub fn new(actions: Vec<RuleAction>) -> Self {
-        Self { actions, diagnostics: Vec::new() }
+        Self { actions, diagnostics: Vec::new(), observes: false }
+    }
+
+    /// Record without claiming: the engine applies `actions` — call-ext writes
+    /// ([`RuleAction::MergeCallExt`]) only; anything else is dropped and
+    /// logged — and hands the event on to the next ranked rule, which reads
+    /// the call with the writes and handles the event as it would have.
+    pub fn observe(actions: Vec<RuleAction>) -> Self {
+        Self { actions, diagnostics: Vec::new(), observes: true }
     }
 
     /// The same actions, carrying `diagnostic` — what a rule returns when an

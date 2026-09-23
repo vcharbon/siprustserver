@@ -4995,3 +4995,123 @@ mod going_away_gate {
         assert_eq!(machines, vec!["global-call"], "every service machine is deactivated");
     }
 }
+
+// ── observation: a rule that records without claiming ────────────────────────
+
+fn bye_event() -> CallEvent {
+    CallEvent::Sip {
+        message: Box::new(SipMessage::Request(in_dialog_request(sip_message::Method::Bye))),
+        src: "127.0.0.1:5060".parse().unwrap(),
+        matched_client_txn: false,
+    }
+}
+
+fn ext_write(key: &str, value: serde_json::Value) -> RuleAction {
+    RuleAction::MergeCallExt { ext: [(key.to_string(), value)].into_iter().collect() }
+}
+
+/// Observes every BYE: records it under `seen`.
+fn observe_bye(_ctx: &RuleContext) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::observe(vec![ext_write("seen", serde_json::json!({"bye": true}))]))
+}
+
+/// Observes every BYE with a write AND a final of its own, which an
+/// observation may not carry.
+fn observe_bye_answering(_ctx: &RuleContext) -> Option<RuleHandleResult> {
+    Some(RuleHandleResult::observe(vec![
+        ext_write("seen", serde_json::json!({"bye": true})),
+        RuleAction::Respond {
+            status: 486,
+            reason: "Busy Here".into(),
+            body: vec![],
+            content_type: None,
+        },
+    ]))
+}
+
+/// Observes every BYE after `observe_bye`, reading what it wrote.
+fn observe_bye_second(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    let first = ctx.call.ext().and_then(|e| e.get("seen")).cloned();
+    Some(RuleHandleResult::observe(vec![ext_write(
+        "second",
+        serde_json::json!({"first_seen": first.is_some()}),
+    )]))
+}
+
+fn observer(
+    id: &'static str,
+    handle: fn(&RuleContext) -> Option<RuleHandleResult>,
+) -> RuleDefinition {
+    RuleDefinition::core(id, SERVICE_LAYER, &[], Match::request().method("BYE"), handle)
+}
+
+fn run_bye(rules: &[RuleDefinition], call: &call::Call) -> HandlerResult {
+    let event = bye_event();
+    let config = B2buaConfig::default();
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
+    let ctx = ctx_for(call, &event, &config);
+    execute_rules(rules, call, &ctx, &exec, &b2bua::obligations::ObligationSet::core())
+}
+
+fn confirmed_call() -> call::Call {
+    let mut call = test_call();
+    call.a_leg.state = LegState::Confirmed;
+    call
+}
+
+/// A rule that observes the BYE writes its call-ext slice and the event goes
+/// on to the rule that claims it: the core's relay answers and tears down.
+#[test]
+fn an_observed_event_still_reaches_the_rule_that_claims_it() {
+    let call = confirmed_call();
+    let mut rules = vec![observer("test-observer", observe_bye)];
+    rules.extend(default_rules());
+    let result = run_bye(&rules, &call);
+    assert_eq!(
+        result.call.ext.as_ref().and_then(|e| e.get("seen")),
+        Some(&serde_json::json!({"bye": true})),
+        "the observation's write lands"
+    );
+    assert_eq!(finals_to_a(&result), vec![200], "relay-bye answered the BYE");
+
+    // The same turn without the observer: the same teardown, no slice.
+    let bare = run_bye(&default_rules(), &call);
+    assert_eq!(finals_to_a(&bare), vec![200]);
+    assert!(bare.call.ext.as_ref().and_then(|e| e.get("seen")).is_none());
+    assert_ne!(bare.call.state, CallModelState::Active, "relay-bye tore the call down");
+    assert_eq!(result.call.state, bare.call.state, "the observed turn tears down alike");
+    assert_eq!(result.call.termination, bare.call.termination, "and records the same end");
+}
+
+/// An observation carries only call-ext writes: anything else it states is
+/// dropped, and the claiming rule's handling is the only wire effect.
+#[test]
+fn an_observation_carries_only_call_ext_writes() {
+    let call = confirmed_call();
+    let mut rules = vec![observer("test-observer", observe_bye_answering)];
+    rules.extend(default_rules());
+    let result = run_bye(&rules, &call);
+    assert!(result.call.ext.as_ref().and_then(|e| e.get("seen")).is_some());
+    assert_eq!(finals_to_a(&result), vec![200], "no 486 from the observer");
+}
+
+/// Observers chain in rank order, each reading what the one before wrote, and
+/// an event no rule claims keeps what the observers wrote.
+#[test]
+fn observers_chain_and_an_unclaimed_event_keeps_their_writes() {
+    let call = confirmed_call();
+    let rules =
+        vec![observer("test-observer", observe_bye), observer("test-second", observe_bye_second)];
+    let result = run_bye(&rules, &call);
+    let ext = result.call.ext.as_ref().expect("the writes persist");
+    assert!(ext.get("seen").is_some());
+    assert_eq!(ext.get("second"), Some(&serde_json::json!({"first_seen": true})));
+    assert!(result.effects.outbound.is_empty(), "nothing claimed the BYE here");
+    assert_eq!(result.call.state, CallModelState::Active);
+}

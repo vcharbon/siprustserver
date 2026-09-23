@@ -16,7 +16,9 @@ use crate::obligations::ObligationSet;
 
 use super::actions::ActionExecutor;
 use super::invariants;
-use super::model::{EffectKind, RuleAction, RuleContext, RuleDefinition, RuleHandleResult};
+use super::model::{
+    EffectKind, RuleAction, RuleCall, RuleContext, RuleDefinition, RuleHandleResult,
+};
 
 /// A machine-bound rule (ADR-0016 X1) is a candidate only when its owner
 /// machine's cursor is one of its `active_states`. A machine-less core rule is
@@ -91,8 +93,10 @@ pub fn pick_ranked<'a>(
 }
 
 /// Run the rule chain for `ctx` over the authoritative `call`. The first
-/// matching rule that returns `Some` handles the event; no candidate → the
-/// default no-op result (the unchanged call, no effects). A fire the
+/// matching rule that returns `Some` handles the event; a result that only
+/// observes ([`RuleHandleResult::observe`]) writes its call-ext slices and the
+/// chain goes on over the call with those writes. No candidate → the default
+/// no-op result (the call as the observers left it, no effects). A fire the
 /// going-away gate absorbed is counted either way.
 pub fn execute_rules(
     rules: &[RuleDefinition],
@@ -102,8 +106,19 @@ pub fn execute_rules(
     obligations: &ObligationSet,
 ) -> HandlerResult {
     let selection = select(rules, call, ctx);
+    // The call as the observers so far left it; `None` until one wrote.
+    let mut observed: Option<Call> = None;
     for rule in selection.ranked {
+        let call = observed.as_ref().unwrap_or(call);
+        let rule_ctx = RuleContext { call: RuleCall::new(call), ..*ctx };
+        let ctx = &rule_ctx;
         if let Some(outcome) = (rule.handle)(ctx) {
+            if outcome.observes {
+                report_diagnostics(rule, call, &outcome);
+                let next = apply_observation(rule, call, &outcome.actions);
+                observed = Some(next);
+                continue;
+            }
             let before = call.clone();
             report_diagnostics(rule, call, &outcome);
             check_declared_effects(rule, &outcome.actions);
@@ -129,9 +144,34 @@ pub fn execute_rules(
             return enforced;
         }
     }
+    let call = observed.as_ref().unwrap_or(call);
     let mut result = HandlerResult::new(call.clone());
     note_absorbed(&mut result.effects, call, ctx, &selection.absorbed);
     result
+}
+
+/// Apply an observation's call-ext writes to `call`. Any other action is not
+/// an observation's to take: it is dropped and logged, so the claiming rule's
+/// handling stays the turn's only effect.
+fn apply_observation(rule: &RuleDefinition, call: &Call, actions: &[RuleAction]) -> Call {
+    let mut call = call.clone();
+    for action in actions {
+        match action {
+            RuleAction::MergeCallExt { ext } => {
+                for (key, value) in ext {
+                    let value = (!value.is_null()).then(|| value.clone());
+                    call = call::helpers::set_call_ext(call, key, value);
+                }
+            }
+            other => tracing::error!(
+                call_ref = %call.call_ref,
+                rule = %rule.id,
+                action = ?other,
+                "an observing rule may only write call ext; action dropped"
+            ),
+        }
+    }
+    call
 }
 
 /// Count a fire the going-away gate absorbed: one effect per turn, naming
