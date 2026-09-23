@@ -180,7 +180,9 @@ async fn a_dial_carries_the_identity_its_caller_seeds() {
     uas.respond(200, "OK").with_sdp(SDP_ANSWER).send().await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
+    let ack = bob.receive("ACK").await;
+    assert_eq!(ack.request().call_id(), CALL_ID);
+    assert_eq!(ack.request().from().tag(), Some(FROM_TAG));
     let mut bye = dialog.bye().await;
     let mut bye_in = bob.receive("BYE").await;
     assert_eq!(bye_in.request().call_id(), CALL_ID);
