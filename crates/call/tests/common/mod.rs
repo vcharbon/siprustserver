@@ -751,6 +751,8 @@ fn arb_decision_kind() -> impl Strategy<Value = DecisionKind> {
         Just(DecisionKind::ReleaseRoute),
         Just(DecisionKind::TransferAllow),
         Just(DecisionKind::TransferReject),
+        Just(DecisionKind::InfoRelay),
+        Just(DecisionKind::InfoAcknowledge),
     ]
 }
 

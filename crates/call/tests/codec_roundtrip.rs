@@ -136,6 +136,29 @@ fn the_decision_log_round_trips() {
     assert_eq!(decoded.cdr_events.last().unwrap().decision_ordinal, 2);
 }
 
+/// A decision on an in-dialog INFO — relay it to the peer, or answer it
+/// locally — is logged under its own kind, named `info_relay` /
+/// `info_acknowledge` on the wire, and round-trips like every mark.
+#[test]
+fn an_in_dialog_info_decision_round_trips_under_its_own_kind() {
+    use call::helpers::mark_decision;
+    use call::DecisionKind;
+
+    assert_eq!(serde_json::to_value(DecisionKind::InfoRelay).unwrap(), "info_relay");
+    assert_eq!(serde_json::to_value(DecisionKind::InfoAcknowledge).unwrap(), "info_acknowledge");
+
+    let codec = MsgpackCodec::new();
+    let call = representative_call();
+    let call =
+        mark_decision(call, 1_000, DecisionKind::InfoRelay, Some("b-1".into()), Some("k1".into()));
+    let call = mark_decision(call, 2_000, DecisionKind::InfoAcknowledge, Some("b-1".into()), None);
+    let decoded = codec.decode(&codec.encode(&call)).unwrap();
+    assert_eq!(decoded, call);
+    let kinds: Vec<DecisionKind> =
+        decoded.decision_log.iter().rev().take(2).map(|m| m.kind).collect();
+    assert_eq!(kinds, [DecisionKind::InfoAcknowledge, DecisionKind::InfoRelay]);
+}
+
 /// The termination record is replicated state — the node that discharges a
 /// call a peer began terminating writes the record the peer wrote — so it
 /// survives the codec in every shape: none, a leg-caused one not yet cut, a
