@@ -55,9 +55,17 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 15
+          # The broker's store on memory: it restarts empty anyway (no PVC), and
+          # a disk-backed store waits on the host's fsync before confirming a
+          # publish, which a busy host stretches past a publisher's confirm bound.
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/rabbitmq }
           resources:
             requests: { cpu: "200m", memory: "256Mi" }
             limits:   { memory: "1Gi" }
+      volumes:
+        - name: data
+          emptyDir: { medium: Memory, sizeLimit: 256Mi }
 ---
 # Stable ClusterIP so the workers + consumer resolve a single broker at startup.
 apiVersion: v1
