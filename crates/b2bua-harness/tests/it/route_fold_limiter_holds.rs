@@ -181,8 +181,8 @@ async fn failover_fold_on_a_terminating_call_releases_its_holds() {
     // ── bob's withheld 487 resolves the b-leg; the call terminates ─────────
     b_inv.respond(487, "Request Terminated").await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    b2bua.assert_fully_reaped();
     settle_until(|| rig.store.stats().current_total == 0).await;
+    b2bua.assert_fully_reaped();
     assert_eq!(
         rig.store.stats().current_total,
         0,
@@ -236,8 +236,8 @@ async fn failover_fold_after_the_call_is_gone_releases_its_holds() {
     cxl.expect(200).await;
     call.expect(487).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    b2bua.assert_fully_reaped();
     settle_until(|| rig.store.stats().current_total == 0).await;
+    b2bua.assert_fully_reaped();
     assert_eq!(rig.store.stats().live_keys, 1, "only the initial route admitted so far");
 
     // ── the fold lands on the evicted call ─────────────────────────────────
@@ -336,8 +336,8 @@ async fn release_reroute_fold_on_a_terminating_call_releases_its_holds() {
     bob_bye.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    b2bua.assert_fully_reaped();
     settle_until(|| rig.store.stats().current_total == 0).await;
+    b2bua.assert_fully_reaped();
     assert_eq!(
         rig.store.stats().current_total,
         0,
@@ -391,10 +391,8 @@ async fn failover_fold_on_a_live_call_records_and_releases_its_holds() {
     let mut bye = dialog.bye().await;
     carol.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    b2bua.assert_fully_reaped();
+    settle_until(|| b2bua.is_reaped()).await;
     settle_until(|| rig.store.stats().current_total == 0).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -448,8 +446,8 @@ async fn failover_route_refused_on_its_second_limiter_increments_nothing() {
         "the refused route dials nothing",
     );
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    b2bua.assert_fully_reaped();
     settle_until(|| rig.store.stats().current_total == 0).await;
+    b2bua.assert_fully_reaped();
     let stats = rig.store.stats();
     assert_eq!(stats.live_keys, 1, "the refused admit created no key for x nor y");
     assert_eq!(stats.current_total, 0, "the call's own hold on w is released");

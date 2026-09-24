@@ -165,7 +165,7 @@ async fn a_fork_the_caller_never_saw_answers_under_its_own_dialog() {
     bob_bye.expect(200).await;
     drop(dialog);
 
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

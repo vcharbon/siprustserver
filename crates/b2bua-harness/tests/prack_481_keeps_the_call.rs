@@ -152,6 +152,6 @@ async fn a_481_answering_a_stack_originated_prack_does_not_end_the_call() {
 
     let report = h.finish().await;
     write_flow_report(&report);
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }

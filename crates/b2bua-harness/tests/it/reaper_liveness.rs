@@ -113,7 +113,7 @@ async fn limiter_refresh_self_touch_does_not_mask_staleness() {
     // The reap settles the obligations: the limiter hold is released.
     settle_until(|| store.stats().current_total == 0).await;
 
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -158,7 +158,7 @@ async fn received_sip_refreshes_liveness() {
     h.advance(Duration::from_secs(95)).await;
     settle_until(|| b2bua.cdr_records().len() == 1).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "silent call reaped after the idle window");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

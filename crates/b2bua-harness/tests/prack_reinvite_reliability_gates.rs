@@ -153,7 +153,7 @@ async fn a_provisional_to_a_reinvite_whose_originator_offered_no_100rel_leaves_u
     bye.expect(200).await;
 
     let _report = h.finish().await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -227,6 +227,6 @@ async fn a_reliable_provisional_to_a_relayed_update_reaches_the_originator_as_no
     bye.expect(200).await;
 
     let _report = h.finish().await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }

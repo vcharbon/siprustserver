@@ -3155,15 +3155,20 @@ async fn serve_limiter(
 
 /// The scene a LIMITED document replays against: the deployed-engine decision —
 /// which honours the lane's `X-Api-Call` egress directive, its admission entry
-/// included — over the system's own `HttpCallLimiter` pointed at `net`.
-async fn limited_scene(name: &str, net: &SimulatedHttpNetwork) -> B2buaScene {
+/// included — over the system's own `HttpCallLimiter` pointed at `net`, whose
+/// `store` the reaped check reads.
+async fn limited_scene(
+    name: &str,
+    net: &SimulatedHttpNetwork,
+    store: Arc<WindowStore>,
+) -> B2buaScene {
     let client: Arc<dyn CallLimiter> = Arc::new(HttpCallLimiter::new(
         Arc::new(net.clone()),
         LIMITER_ADDR.parse().expect("the limiter address parses"),
         std::time::Duration::from_millis(150),
     ));
     B2buaScene::with_b2bua(name, move |bob_port| {
-        B2buaSut::route_api_call("127.0.0.1", bob_port).limiter(client)
+        B2buaSut::route_api_call("127.0.0.1", bob_port).limiter(client).limiter_store(store)
     })
     .await
 }
@@ -3196,7 +3201,7 @@ async fn rung_six_a_limited_second_call_is_refused_before_any_b_leg() {
     };
     let net = SimulatedHttpNetwork::new();
     let (store, _limiter) = serve_limiter(&net).await;
-    let scene = limited_scene("pivot-bc-01", &net).await;
+    let scene = limited_scene("pivot-bc-01", &net, store).await;
     let extra = BTreeMap::from([
         ("uac2".to_string(), scene.h.agent("uac2", "127.0.0.1:5061").await),
         ("uas2".to_string(), scene.h.agent("uas2", &format!("127.0.0.1:{IDLE_PORT}")).await),
@@ -3252,10 +3257,6 @@ async fn rung_six_a_limited_second_call_is_refused_before_any_b_leg() {
         "{:#?}",
         outcome.verdict.failures
     );
-
-    // The limiter's own counter agrees: one hold taken, the refusal never
-    // incremented, and the teardown gave the slot back.
-    assert_eq!(store.stats().current_total, 0, "the admitted call released its slot");
 
     // Both calls were BILLED, and the document says so with the only per-record
     // scoping `{count, checks}` has: the count. Which record carries what is

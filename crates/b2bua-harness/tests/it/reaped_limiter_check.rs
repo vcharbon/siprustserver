@@ -86,7 +86,7 @@ async fn call_through_a_backend_that_drops_releases(name: &str) -> B2buaScene {
     .await;
     let mut dialog = s.establish().await;
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s
 }
 
@@ -116,7 +116,7 @@ async fn every_routed_call_holds_the_default_limiter_until_it_ends() {
     assert_eq!((count.admitted, count.released, count.stored), (1, 0, Some(1)));
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     assert_eq!(store.held(DEFAULT_LIMITER_ID), 0, "the hangup releases the default");
     s.b2bua.assert_fully_reaped();
     assert_eq!(s.b2bua.cdr_records().len(), 1, "exactly one CDR");
@@ -137,7 +137,7 @@ async fn a_route_s_own_limiters_are_held_with_the_default() {
     assert_eq!(held(), [2, 1, 1], "holds on x, y and the default while the call is up");
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     assert_eq!(held(), [0, 0, 0], "the hangup releases every hold");
     s.b2bua.assert_fully_reaped();
     assert_eq!(s.b2bua.cdr_records().len(), 1, "exactly one CDR");
@@ -154,7 +154,7 @@ async fn a_route_refused_on_its_second_limiter_holds_nothing() {
     .await;
     let mut call = s.alice.invite(&s.bob).with_sdp(OFFER).through(s.b2bua.addr).send().await;
     call.expect(486).await;
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     let store = s.b2bua.limiter_store().expect("the default limiter has a store");
     assert_eq!(["x", "y", DEFAULT_LIMITER_ID].map(|id| store.held(id)), [0, 0, 0]);
     assert_eq!(s.b2bua.limiter_count().admitted, 0, "nothing granted");
@@ -205,7 +205,7 @@ async fn a_failover_route_holds_its_own_limiters_with_the_default() {
     let mut bye = dialog.bye().await;
     carol.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(held(), [0, 0, 0, 0], "the hangup releases every hold");
     let count = b2bua.limiter_count();
     assert_eq!((count.admitted, count.released), (6, 6), "three holds per route");

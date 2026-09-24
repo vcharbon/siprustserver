@@ -390,16 +390,8 @@ pub struct B2buaSut {
     pub addr: SocketAddr,
     cdr: TerminatedCallsWriter,
     metrics: B2buaMetrics,
-    limiter: SutLimiter,
+    limiter: limiter::SutLimiter,
     _core: B2buaCore,
-}
-
-/// The limiter side of a running [`B2buaSut`]: the hold ledger every limiter
-/// is counted on, the store check 6 reads, and the default limiter's server.
-struct SutLimiter {
-    ledger: Arc<limiter::HoldLedger>,
-    store: Option<Arc<call_limiter::WindowStore>>,
-    _server: Option<Box<dyn http_net::HttpServerHandle>>,
 }
 
 /// Composable builder for a single-SUT [`B2buaSut`] (slice 3). Replaces the
@@ -558,28 +550,17 @@ impl B2buaSutBuilder {
             keep_terminated_calls,
         } = self;
         let (decision, limiter, sut_limiter) = match limiter {
-            Some(own) => (
-                decision,
-                own,
-                SutLimiter { ledger: Default::default(), store: limiter_store, _server: None },
-            ),
+            Some(own) => (decision, own, limiter::SutLimiter::own(limiter_store)),
             None => {
                 assert!(limiter_store.is_none(), "limiter_store names a custom limiter's store");
-                let default = limiter::DefaultLimiter::serve().await;
+                let (client, sut_limiter) = limiter::SutLimiter::serve_default().await;
                 let decision: Arc<dyn CallDecisionEngine> =
                     Arc::new(limiter::DefaultLimiterDecision { inner: decision });
-                let sut_limiter = SutLimiter {
-                    ledger: Default::default(),
-                    store: Some(default.store),
-                    _server: Some(default.server),
-                };
-                (decision, default.client, sut_limiter)
+                (decision, client, sut_limiter)
             }
         };
-        let limiter: Arc<dyn CallLimiter> = Arc::new(limiter::CountingLimiter {
-            inner: limiter,
-            ledger: sut_limiter.ledger.clone(),
-        });
+        let limiter: Arc<dyn CallLimiter> =
+            Arc::new(limiter::CountingLimiter { inner: limiter, ledger: sut_limiter.ledger() });
         // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
         // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
         // `{Uac, Uas}` and the proxy-subject audit rules (no-target-404,
@@ -823,17 +804,28 @@ impl B2buaSut {
         self._core.lock_count()
     }
 
-    /// The holds the SUT was granted and released so far, and its store's
-    /// count when it has one.
+    /// Every call created has been removed: the condition to settle on before
+    /// [`assert_fully_reaped`](Self::assert_fully_reaped). A call leaves the
+    /// map ([`active_calls`](Self::active_calls)) before its removal is
+    /// counted, so `active_calls() == 0` alone can hold while a removal is
+    /// still pending.
+    pub fn is_reaped(&self) -> bool {
+        self.metrics.removals_total() == self.metrics.creations_total()
+    }
+
+    /// The holds the SUT was granted and released so far, its fail-opens, and
+    /// its store's count when it has one. A release counts when it is issued:
+    /// one issued by a detached task (a route fold for a call already gone)
+    /// can still be in flight to the store when the call is reaped.
     pub fn limiter_count(&self) -> LimiterCount {
-        self.limiter.ledger.count(self.limiter.store.as_deref())
+        self.limiter.count()
     }
 
     /// The store the reaped check reads: the default limiter's, or the one
     /// registered with [`B2buaSutBuilder::limiter_store`]. Per-id probes read
     /// it with `held(id)`.
     pub fn limiter_store(&self) -> Option<&Arc<call_limiter::WindowStore>> {
-        self.limiter.store.as_ref()
+        self.limiter.store()
     }
 
     /// The named "no leak" oracle: every call created has been reaped and no
@@ -846,13 +838,18 @@ impl B2buaSut {
     ///   4. the reaper's last-touched ledger is empty.
     ///   5. no setup-CANCEL mark is left.
     ///   6. every limiter hold the SUT was granted is released exactly once,
-    ///      and its limiter store counts no hold ([`limiter_count`](Self::limiter_count)).
+    ///      its limiter store counts no hold, and the default limiter never
+    ///      failed open ([`limiter_count`](Self::limiter_count)).
     ///
     /// A new leak dimension (e.g. the `b2bua_timer_queue_len − b2bua_timer_live`
     /// tombstone gap from the CLAUDE.md timer hazard) is added here once and is
     /// then checked by every reap test — the locality this oracle exists for.
     ///
-    /// Call it *after* the teardown has drained (see [`settle_until`]).
+    /// Call it *after* the teardown has drained: settle on
+    /// [`is_reaped`](Self::is_reaped) (see [`settle_until`]). A scenario whose
+    /// holds are released by a detached task (a route fold landing after its
+    /// call is gone) also settles on the store's count, since that release can
+    /// land after the call is reaped.
     #[track_caller]
     pub fn assert_fully_reaped(&self) {
         self.assert_fully_reaped_leaving(LimiterLeak::NONE)
@@ -897,9 +894,9 @@ impl B2buaSut {
             "mark leak: {} stranded setup-CANCEL mark(s)",
             self._core.setup_cancelled_count()
         );
-        // 6. every limiter hold granted is released once, and the store
-        //    counts none.
-        self.limiter_count().assert_matches(leak);
+        // 6. every limiter hold granted is released once, the store counts
+        //    none, and the default limiter never failed open.
+        self.limiter.assert_drained(leak);
     }
 }
 

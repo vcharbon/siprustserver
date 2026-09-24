@@ -90,7 +90,7 @@ impl Sut {
     /// Every call created is reaped and the one CDR is written.
     async fn assert_reaped(&self) -> Call {
         settle_until(|| self.b2bua.terminated_calls().len() == 1).await;
-        settle_until(|| self.b2bua.active_calls() == 0).await;
+        settle_until(|| self.b2bua.is_reaped()).await;
         self.b2bua.assert_fully_reaped();
         let terminated = self.b2bua.terminated_calls();
         assert_eq!(terminated.len(), 1, "exactly one CDR per call");
@@ -917,7 +917,7 @@ async fn a_sut_not_keeping_terminated_calls_refuses_to_answer() {
     let mut dialog = s.establish().await;
     s.hangup(&mut dialog).await;
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     assert_eq!(s.b2bua.cdr_records().len(), 1, "the record is written");
     let asked =

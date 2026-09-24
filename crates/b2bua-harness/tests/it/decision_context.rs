@@ -471,7 +471,7 @@ async fn failover_route_limiter_is_admitted_and_released_at_termination() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| store.stats().current_total == 0).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _ = h.finish().await;

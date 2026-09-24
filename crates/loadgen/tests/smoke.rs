@@ -296,7 +296,7 @@ async fn loadgen_mux_smoke_basic_concurrent() {
     // No leak: every call's mux entries reclaimed; SUT fully reaped.
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The on-disk report renders an OK callflow.
@@ -344,7 +344,7 @@ async fn loadgen_to_user_correlation_rides_the_to_header() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (to-user)");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -371,7 +371,7 @@ async fn loadgen_mux_smoke_all_scenarios() {
     }
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -410,7 +410,7 @@ async fn loadgen_mux_smoke_timed_and_long_call() {
     // The long_call recorded its single OPTIONS-ping checkpoint.
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (timed/long-call)");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -460,7 +460,7 @@ async fn loadgen_mux_smoke_prack_update_mix() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (prack_update)");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -529,7 +529,7 @@ async fn loadgen_mux_smoke_rerouting_prack_mix() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (rerouting_prack)");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -1136,7 +1136,7 @@ async fn loadgen_post_call_cleanup_no_leak() {
     // Post-call cleanup is COMPLETE across every failure-teardown path.
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak after a failing-call mix");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -1460,7 +1460,7 @@ async fn loadgen_settle_gate_recovers_dropped_bye() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -1707,7 +1707,7 @@ async fn loadgen_settle_gate_permanent_notify_loss_names_obligation() {
     // SUT is fully reaped despite the NOK verdict.
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -1771,7 +1771,7 @@ async fn loadgen_ringing_gate_counts_every_ring() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 /// **In-process endurance** — a sustained real-clock run of the mix against the
@@ -1956,7 +1956,7 @@ async fn loadgen_pooled_case_identities_and_dwell_overrides() {
     // No leak, as everywhere: mux registry reclaimed, SUT fully reaped.
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (pooled case)");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -2034,7 +2034,7 @@ async fn loadgen_case_checks_pass_and_render_verdicts() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (checked case)");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -2093,7 +2093,7 @@ async fn loadgen_failing_check_reclassifies_to_check_fail() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (check_fail)");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -2236,7 +2236,7 @@ async fn loadgen_allow_violations_waives_named_rfc_rule() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (allow_violations)");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -2437,7 +2437,7 @@ async fn loadgen_named_leg_specs_demux_number_form_transfer_leg() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak (named legs)");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 

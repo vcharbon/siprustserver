@@ -86,7 +86,7 @@ async fn callee_byes_across_the_initial_2xx_and_the_callers_ack_still_lands() {
     assert!(ack.body().is_empty(), "alice ACKed bare, so the relayed ACK is bare");
 
     alice_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();
@@ -139,7 +139,7 @@ async fn callee_byes_across_the_delayed_offer_initial_2xx_and_the_sut_still_acks
     );
 
     alice_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();
@@ -201,7 +201,7 @@ async fn callee_byes_across_the_reinvite_2xx_and_the_sut_still_acks() {
 
     // ── the teardown completes normally on top of the ACK ────────────────────
     alice_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();
@@ -271,7 +271,7 @@ async fn callee_byes_across_an_offer_carrying_reinvite_2xx_and_the_ack_keeps_its
     );
 
     alice_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();
@@ -315,7 +315,7 @@ async fn caller_byes_across_the_reinvite_2xx_and_the_sut_still_acks() {
     );
 
     bob_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();
@@ -356,7 +356,7 @@ async fn a_late_ack_into_a_reaped_dialog_is_absorbed_never_answered() {
     let mut bob_bye = bob_dialog.bye().await;
     bob_bye.expect(200).await;
     alice.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // ── the late ACK lands on nothing. It must draw no response whatsoever. ──
@@ -412,7 +412,7 @@ async fn a_repeated_reinvite_2xx_across_the_bye_draws_one_ack_per_copy() {
     bob.receive("ACK").await;
 
     alice_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();

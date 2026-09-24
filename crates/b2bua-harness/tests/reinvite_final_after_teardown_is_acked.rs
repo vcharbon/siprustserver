@@ -81,7 +81,7 @@ async fn the_487_to_a_relayed_reinvite_after_the_bye_is_acked() {
     bob.receive("CANCEL").await.respond(200, "OK").await;
     let mut bob_bye = bob.receive("BYE").await;
     bob_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
 
     // ── the call is gone when bob's own 487 (§9.2, §15.1.2) arrives ──────────
     bob_reinv.respond(487, "Request Terminated").await;

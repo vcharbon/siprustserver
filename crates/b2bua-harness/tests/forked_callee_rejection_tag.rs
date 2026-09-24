@@ -250,7 +250,7 @@ async fn a_non_first_fork_s_answer_rides_its_own_caller_tag() {
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();

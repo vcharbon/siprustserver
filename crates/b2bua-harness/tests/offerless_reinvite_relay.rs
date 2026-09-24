@@ -65,6 +65,6 @@ async fn callee_offerless_reinvite_relays_offerless() {
     bye.expect(200).await;
 
     let _report = h.finish().await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }

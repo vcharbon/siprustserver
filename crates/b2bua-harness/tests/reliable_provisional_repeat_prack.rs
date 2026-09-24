@@ -194,7 +194,7 @@ async fn a_repeat_of_a_stack_pracked_provisional_draws_no_second_prack() {
         "the originator sees the stripped provisional once — bob's repeat is absorbed here, \
          it is not hers to receive again",
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -260,6 +260,6 @@ async fn a_repeat_behind_the_18x_mask_draws_no_second_prack() {
         "the masking path acknowledges one reliable provisional once (RFC 3262 §4) — a repeat \
          is a retransmission, not a rung owed its own PRACK",
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }

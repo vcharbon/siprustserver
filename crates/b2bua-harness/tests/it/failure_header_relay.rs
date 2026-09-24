@@ -116,7 +116,7 @@ async fn a_failing_finals_headers_ride_the_decision_authored_final() {
     );
     assert_eq!(raw("Reason"), ["Q.850;cause=34"], "the decision's own statement rides too");
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
@@ -173,7 +173,7 @@ async fn a_decision_header_update_owns_the_name_it_states() {
         "a name the decision does not state still travels"
     );
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
@@ -212,7 +212,7 @@ async fn the_resynthesized_relay_final_restates_the_callees_headers() {
     assert_eq!(raw("P-Charging-Vector"), ["icid-value=\"cv-bleg-3\""]);
     assert_eq!(raw("Allow"), ["INVITE, ACK, CANCEL, BYE"]);
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
@@ -255,7 +255,7 @@ async fn privacy_id_withholds_the_identity_the_failing_final_conceals() {
     assert_eq!(raw("Privacy"), ["id"], "the privacy instruction itself travels");
     assert_eq!(raw("P-Vendor-Thing"), ["annotation"], "privacy withholds only the assertion");
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
@@ -321,7 +321,7 @@ async fn a_superseded_attempts_headers_do_not_answer_a_later_no_answer() {
         "no charging correlation for a leg that produced no final"
     );
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
@@ -378,7 +378,7 @@ async fn a_plan_authored_redirect_carries_none_of_the_refusals_headers() {
         "a new instruction correlates no peer's charging"
     );
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
@@ -455,7 +455,7 @@ async fn a_capacity_refusal_carries_none_of_the_failed_peers_headers() {
         "a capacity refusal correlates no peer's charging"
     );
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
@@ -516,7 +516,7 @@ async fn the_setup_deadline_final_speaks_only_for_itself() {
         "the timed-out final correlates no peer's charging"
     );
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }

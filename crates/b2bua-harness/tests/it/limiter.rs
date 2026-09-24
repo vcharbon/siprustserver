@@ -117,7 +117,7 @@ async fn release_on_bye_frees_the_slot() {
 
     // The release must drain the counter back to 0.
     settle_until(|| store.stats().current_total == 0).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The freed slot admits a fresh call (bob sees its INVITE, not a 486).

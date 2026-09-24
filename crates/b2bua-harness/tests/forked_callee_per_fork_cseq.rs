@@ -167,7 +167,7 @@ async fn each_callee_fork_numbers_its_requests_from_its_own_invite() {
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();
@@ -271,7 +271,7 @@ async fn an_answer_under_an_unrung_tag_starts_its_own_sequence() {
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();

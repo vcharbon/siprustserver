@@ -234,7 +234,7 @@ async fn readable_addresses_still_route_and_answer() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }

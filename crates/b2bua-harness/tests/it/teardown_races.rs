@@ -73,6 +73,7 @@ async fn bye_bye_glare_reaps_once_and_releases_the_limiter_once() {
     let decision = route_limited("127.0.0.1", 5070, "trunk-A", 1);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -96,8 +97,6 @@ async fn bye_bye_glare_reaps_once_and_releases_the_limiter_once() {
     bob.drain().await;
     h.advance(Duration::from_secs(33)).await;
 
-    settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter released exactly once on the BYE glare");
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 
@@ -119,6 +118,7 @@ async fn reinvite_crossing_bye_terminates_and_releases_the_limiter() {
     let decision = route_limited("127.0.0.1", 5071, "trunk-A", 1);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -144,8 +144,6 @@ async fn reinvite_crossing_bye_terminates_and_releases_the_limiter() {
     bob.drain().await;
     h.advance(Duration::from_secs(33)).await;
 
-    settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter released after the re-INVITE/BYE crossing");
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 

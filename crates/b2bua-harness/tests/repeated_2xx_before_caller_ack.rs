@@ -156,7 +156,7 @@ async fn a_reinvite_2xx_repeated_before_the_ack_draws_none_then_the_originators_
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();
@@ -230,7 +230,7 @@ async fn a_delayed_offer_2xx_repeated_before_the_ack_draws_none_then_the_answer_
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();

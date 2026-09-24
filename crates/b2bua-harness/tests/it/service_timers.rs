@@ -271,7 +271,7 @@ async fn service_timer_fires_and_owning_rule_reaps_the_silent_call() {
         "CDR carries the service's own marker: {:?}",
         reasons_of(&cdrs[0]),
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -359,7 +359,7 @@ async fn two_keys_fire_independently_and_same_key_rearm_supersedes() {
     let slows = reasons.iter().filter(|r| *r == "dual_slow").count();
     assert_eq!(fasts, 2, "fast fired at 3 s and (re-armed, superseded) at 5 s: {reasons:?}");
     assert_eq!(slows, 1, "slow fired once at its own deadline: {reasons:?}");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

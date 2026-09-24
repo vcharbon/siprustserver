@@ -136,7 +136,7 @@ async fn stale_active_call_is_swept_and_reaped() {
         "the CDR names the reap: {:?}",
         reason_of(&cdrs[0])
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert!(b2bua.metrics().reaper_verdicts_total() >= 1);
     assert_eq!(b2bua.metrics().reaper_discharged_total(), 0, "rules path was healthy");
@@ -173,7 +173,7 @@ async fn handler_panic_strike1_reaps_via_rules() {
         "the CDR names the panic: {:?}",
         reason_of(&cdrs[0])
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.metrics().handler_panics_total(), 1);
     assert_eq!(b2bua.metrics().reaper_discharged_total(), 0, "strike 1 stays on the rules path");
@@ -208,7 +208,7 @@ async fn second_panic_discharges_outside_the_rules() {
         "the CDR names the discharge: {:?}",
         reason_of(&cdrs[0])
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.metrics().handler_panics_total(), 2, "both panics observed");
     assert_eq!(b2bua.metrics().reaper_discharged_total(), 1, "the strike-2 bypass fired");
@@ -265,7 +265,7 @@ async fn wedged_setup_is_aborted_and_reaped() {
         reasons.iter().any(|r| r == "unanswered_at_termination"),
         "the CDR records the synthesized final: {reasons:?}"
     );
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert!(b2bua.metrics().reaper_verdicts_total() >= 3, "escalation ladder ran");
 

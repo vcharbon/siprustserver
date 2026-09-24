@@ -168,7 +168,7 @@ async fn loadgen_driver_basic_calls_on_fake_net() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -218,7 +218,7 @@ async fn loadgen_fake_net_recovers_targeted_dropped_bye() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -254,7 +254,7 @@ async fn loadgen_fake_net_crossing_bye() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -300,7 +300,7 @@ async fn loadgen_fake_net_cancel_answer_crossing_accepts_either_branch() {
     // A cancel-wins straggler may lean on the SUT's own dead-call detection —
     // advance past it before the strict release oracle.
     h.advance(Duration::from_secs(40)).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -336,7 +336,7 @@ async fn loadgen_fake_net_prack_update_early() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -386,7 +386,7 @@ async fn loadgen_fake_net_crossing_bye_recovers_dropped_byes() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -428,7 +428,7 @@ async fn loadgen_fake_net_reinvite_x10_serialized() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -482,7 +482,7 @@ async fn loadgen_fake_net_reinvite_x10_loss_soak() {
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak under loss");
     h.advance(Duration::from_secs(40)).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -540,7 +540,7 @@ async fn loadgen_fake_net_loss_soak_recovers_with_retransmit() {
     // (chunked advance — every intermediate timer fires in order), then the
     // strict release oracle.
     h.advance(Duration::from_secs(40)).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -581,7 +581,7 @@ async fn fork_e2e(base: u16, shape: &'static str, seed: u64) {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -640,7 +640,7 @@ async fn loadgen_fake_net_forked_loss_soak() {
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak under loss");
     h.advance(Duration::from_secs(40)).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -690,7 +690,7 @@ async fn loss_soak(base: u16, id: &'static str, seed: u64, ring_ms: u64) {
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "{id}: mux registry leak under loss");
     h.advance(Duration::from_secs(40)).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -755,7 +755,7 @@ async fn loadgen_fake_net_recovers_dropped_early_update() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -807,7 +807,7 @@ async fn loadgen_fake_net_rerouting_noanswer() {
     // Drain past the SUT's dead-call detection before the strict release oracle
     // (a straggler CANCEL/487 tail settles on the paused timeline either way).
     h.advance(Duration::from_secs(40)).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -851,6 +851,6 @@ async fn loadgen_fake_net_recovers_dropped_prack() {
 
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak");
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }

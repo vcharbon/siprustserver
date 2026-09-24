@@ -97,7 +97,7 @@ async fn in_dialog_bye_store_fault_500_then_retry_succeeds() {
     s.bob.receive("BYE").await.respond(200, "OK").await;
     bye2.expect(200).await;
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     assert_eq!(
         s.b2bua.metrics().store_fault_rejected_total(),
@@ -151,7 +151,7 @@ async fn keepalive_audit_store_fault_fails_open_and_rearms() {
 
     // Normal teardown; fully reaped.
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
 
     let _report = s.finish().await;

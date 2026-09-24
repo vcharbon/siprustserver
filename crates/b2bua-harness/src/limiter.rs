@@ -6,8 +6,8 @@
 //! [`HttpCallLimiter`], and every route its decision engine returns carries one
 //! extra non-binding entry ([`DEFAULT_LIMITER_ID`]), so every routed call holds
 //! a limiter and must drain it. Whatever limiter the SUT runs, a
-//! [`HoldLedger`] counts the holds the SUT was granted and the holds it
-//! released.
+//! [`HoldLedger`] counts the holds the SUT was granted, the holds it released
+//! and the admits that failed open.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
-    CallTreatment, NewCallRequest, NewCallResponse,
+    CallTreatment, NewCallRequest, NewCallResponse, RouteDecision,
 };
 use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold};
 use b2bua::limiter_http::HttpCallLimiter;
@@ -34,10 +34,10 @@ pub const DEFAULT_LIMITER_ID: &str = "sut-default";
 /// hold is never swept away before the reaped check reads it.
 const DEFAULT_STORE_TTL_SEC: i64 = 10 * 365 * 24 * 3600;
 
-/// The default client's fail-open budget. The default store answers every
-/// request after the fabric's transit delay, so the budget only has to outlast
-/// the largest single clock jump a paused scenario makes while a request is in
-/// flight; a limiter that fails open is a scenario's own limiter.
+/// The default client's fail-open budget. Fail-open is never exercised on the
+/// default limiter (the reaped check refuses one), so the budget only has to
+/// outlast the largest single clock jump a paused scenario makes while a
+/// request is in flight.
 const DEFAULT_CLIENT_BUDGET: Duration = Duration::from_secs(24 * 3600);
 
 /// Where the default limiter listens on its private fabric.
@@ -64,8 +64,11 @@ impl LimiterLeak {
 pub struct LimiterCount {
     /// Holds the limiter granted the SUT (entries of every admitted batch).
     pub admitted: i64,
-    /// Holds the SUT released.
+    /// Holds the SUT released, counted when the release is issued.
     pub released: i64,
+    /// Admits that failed open ([`AdmitOutcome::Unavailable`]): the call went
+    /// on holding nothing.
+    pub failed_open: i64,
     /// The registered store's live count summed over every key, if the SUT
     /// has a store (the default limiter's, or one registered by the test).
     pub stored: Option<i64>,
@@ -112,6 +115,7 @@ impl LimiterCount {
 pub(crate) struct HoldLedger {
     admitted: AtomicI64,
     released: AtomicI64,
+    failed_open: AtomicI64,
 }
 
 impl HoldLedger {
@@ -119,14 +123,16 @@ impl HoldLedger {
         LimiterCount {
             admitted: self.admitted.load(Ordering::SeqCst),
             released: self.released.load(Ordering::SeqCst),
+            failed_open: self.failed_open.load(Ordering::SeqCst),
             stored: store.map(|s| s.stats().current_total),
         }
     }
 }
 
 /// A [`CallLimiter`] that forwards to `inner` and records on `ledger` every
-/// hold granted (on [`AdmitOutcome::Admitted`]) and every hold released (when
-/// the release is issued). A refresh moves holds and counts nothing.
+/// hold granted (on [`AdmitOutcome::Admitted`]), every admit that failed open
+/// and every hold released (when the release is issued). A refresh moves
+/// holds and counts nothing.
 pub(crate) struct CountingLimiter {
     pub(crate) inner: Arc<dyn CallLimiter>,
     pub(crate) ledger: Arc<HoldLedger>,
@@ -136,8 +142,14 @@ pub(crate) struct CountingLimiter {
 impl CallLimiter for CountingLimiter {
     async fn admit(&self, entries: &[LimiterEntry]) -> AdmitOutcome {
         let outcome = self.inner.admit(entries).await;
-        if matches!(outcome, AdmitOutcome::Admitted { .. }) {
-            self.ledger.admitted.fetch_add(entries.len() as i64, Ordering::SeqCst);
+        match outcome {
+            AdmitOutcome::Admitted { .. } => {
+                self.ledger.admitted.fetch_add(entries.len() as i64, Ordering::SeqCst);
+            }
+            AdmitOutcome::Unavailable => {
+                self.ledger.failed_open.fetch_add(1, Ordering::SeqCst);
+            }
+            AdmitOutcome::Rejected { .. } => {}
         }
         outcome
     }
@@ -152,16 +164,25 @@ impl CallLimiter for CountingLimiter {
     }
 }
 
-/// The default limiter: a [`WindowStore`] on the harness clock, served on a
-/// private simulated HTTP fabric and reached through [`HttpCallLimiter`].
-pub(crate) struct DefaultLimiter {
-    pub(crate) store: Arc<WindowStore>,
-    pub(crate) client: Arc<dyn CallLimiter>,
-    pub(crate) server: Box<dyn HttpServerHandle>,
+/// The limiter side of a running SUT: the ledger its limiter is counted on,
+/// the store the reaped check reads, and the default limiter's server when the
+/// SUT runs the default.
+pub(crate) struct SutLimiter {
+    ledger: Arc<HoldLedger>,
+    store: Option<Arc<WindowStore>>,
+    default_server: Option<Box<dyn HttpServerHandle>>,
 }
 
-impl DefaultLimiter {
-    pub(crate) async fn serve() -> Self {
+impl SutLimiter {
+    /// A test's own limiter, with the store behind it when registered.
+    pub(crate) fn own(store: Option<Arc<WindowStore>>) -> Self {
+        Self { ledger: Default::default(), store, default_server: None }
+    }
+
+    /// The default limiter: a [`WindowStore`] on the harness clock, served on
+    /// a private simulated HTTP fabric. Returns the [`HttpCallLimiter`] that
+    /// reaches it with the SUT side.
+    pub(crate) async fn serve_default() -> (Arc<dyn CallLimiter>, Self) {
         let addr: SocketAddr = DEFAULT_LIMITER_ADDR.parse().expect("default limiter address");
         let http = SimulatedHttpNetwork::new();
         let cfg = LimiterConfig { ttl_sec: DEFAULT_STORE_TTL_SEC, ..LimiterConfig::default() };
@@ -170,7 +191,37 @@ impl DefaultLimiter {
         let server = http.serve(addr, service).await.expect("default limiter binds");
         let client: Arc<dyn CallLimiter> =
             Arc::new(HttpCallLimiter::new(Arc::new(http), addr, DEFAULT_CLIENT_BUDGET));
-        Self { store, client, server }
+        let sut =
+            Self { ledger: Default::default(), store: Some(store), default_server: Some(server) };
+        (client, sut)
+    }
+
+    pub(crate) fn ledger(&self) -> Arc<HoldLedger> {
+        self.ledger.clone()
+    }
+
+    pub(crate) fn store(&self) -> Option<&Arc<WindowStore>> {
+        self.store.as_ref()
+    }
+
+    pub(crate) fn count(&self) -> LimiterCount {
+        self.ledger.count(self.store.as_deref())
+    }
+
+    /// Check 6 of the reaped check: the count matches `leak`, and the default
+    /// limiter never failed open (a fail-open would hide the call's holds).
+    #[track_caller]
+    pub(crate) fn assert_drained(&self, leak: LimiterLeak) {
+        let count = self.count();
+        if self.default_server.is_some() {
+            assert_eq!(
+                count.failed_open, 0,
+                "the default limiter failed open on {} admit(s): those calls held nothing \
+                 the reaped check can see",
+                count.failed_open
+            );
+        }
+        count.assert_matches(leak);
     }
 }
 
@@ -181,14 +232,14 @@ pub(crate) struct DefaultLimiterDecision {
     pub(crate) inner: Arc<dyn CallDecisionEngine>,
 }
 
-fn with_default_entry(treatment: CallTreatment) -> CallTreatment {
+fn with_default_entry(mut route: RouteDecision) -> RouteDecision {
+    route.call_limiter.push(CallLimiterEntry { id: DEFAULT_LIMITER_ID.into(), limit: i64::MAX });
+    route
+}
+
+fn treatment_with_default_entry(treatment: CallTreatment) -> CallTreatment {
     match treatment {
-        CallTreatment::Route(mut route) => {
-            route
-                .call_limiter
-                .push(CallLimiterEntry { id: DEFAULT_LIMITER_ID.into(), limit: i64::MAX });
-            CallTreatment::Route(route)
-        }
+        CallTreatment::Route(route) => CallTreatment::Route(with_default_entry(route)),
         other => other,
     }
 }
@@ -196,14 +247,14 @@ fn with_default_entry(treatment: CallTreatment) -> CallTreatment {
 #[async_trait]
 impl CallDecisionEngine for DefaultLimiterDecision {
     async fn new_call(&self, req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
-        self.inner.new_call(req).await.map(with_default_entry)
+        self.inner.new_call(req).await.map(treatment_with_default_entry)
     }
 
     async fn call_failure(
         &self,
         req: CallFailureRequest,
     ) -> Result<CallFailureResponse, CallDecisionError> {
-        self.inner.call_failure(req).await.map(with_default_entry)
+        self.inner.call_failure(req).await.map(treatment_with_default_entry)
     }
 
     async fn call_refer(
@@ -219,10 +270,7 @@ impl CallDecisionEngine for DefaultLimiterDecision {
     ) -> Result<CallReleaseResponse, CallDecisionError> {
         match self.inner.call_release(req).await? {
             CallReleaseResponse::Route(route) => {
-                match with_default_entry(CallTreatment::Route(route)) {
-                    CallTreatment::Route(route) => Ok(CallReleaseResponse::Route(route)),
-                    _ => unreachable!("a route stays a route"),
-                }
+                Ok(CallReleaseResponse::Route(with_default_entry(route)))
             }
             release => Ok(release),
         }
@@ -245,6 +293,42 @@ mod tests {
         async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
             holds.to_vec()
         }
+    }
+
+    /// Every admit fails open.
+    struct FailsOpen;
+
+    #[async_trait]
+    impl CallLimiter for FailsOpen {
+        async fn admit(&self, _entries: &[LimiterEntry]) -> AdmitOutcome {
+            AdmitOutcome::Unavailable
+        }
+        async fn release(&self, _holds: &[LimiterHold]) {}
+        async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
+            holds.to_vec()
+        }
+    }
+
+    /// One admit through `sut`'s ledger over a limiter that fails open.
+    async fn one_fail_open(sut: &SutLimiter) {
+        let limiter = CountingLimiter { inner: Arc::new(FailsOpen), ledger: sut.ledger() };
+        limiter.admit(&[entry("x"), entry("y")]).await;
+        assert_eq!(sut.count().failed_open, 1);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "the default limiter failed open on 1 admit(s)")]
+    async fn a_fail_open_on_the_default_limiter_fails_the_check() {
+        let (_client, sut) = SutLimiter::serve_default().await;
+        one_fail_open(&sut).await;
+        sut.assert_drained(LimiterLeak::NONE);
+    }
+
+    #[tokio::test]
+    async fn a_fail_open_on_a_test_s_own_limiter_passes_the_check() {
+        let sut = SutLimiter::own(None);
+        one_fail_open(&sut).await;
+        sut.assert_drained(LimiterLeak::NONE);
     }
 
     fn entry(id: &str) -> LimiterEntry {
@@ -298,7 +382,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "the store still counts 1 hold(s)")]
     fn a_hold_the_store_still_counts_is_a_leak() {
-        let count = LimiterCount { admitted: 1, released: 1, stored: Some(1) };
+        let count = LimiterCount { admitted: 1, released: 1, failed_open: 0, stored: Some(1) };
         count.assert_matches(LimiterLeak::NONE);
     }
 
@@ -308,7 +392,8 @@ mod tests {
         use b2bua::decision::RejectDecision;
         let mut own = route_to("127.0.0.1", 5070);
         own.call_limiter = vec![CallLimiterEntry { id: "x".into(), limit: 3 }];
-        let CallTreatment::Route(route) = with_default_entry(CallTreatment::Route(own)) else {
+        let CallTreatment::Route(route) = treatment_with_default_entry(CallTreatment::Route(own))
+        else {
             panic!("a route stays a route");
         };
         let ids: Vec<&str> = route.call_limiter.iter().map(|e| e.id.as_str()).collect();
@@ -320,6 +405,6 @@ mod tests {
             service_ext: Default::default(),
             label: None,
         });
-        assert!(matches!(with_default_entry(reject), CallTreatment::Reject(_)));
+        assert!(matches!(treatment_with_default_entry(reject), CallTreatment::Reject(_)));
     }
 }

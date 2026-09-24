@@ -68,7 +68,7 @@ async fn assert_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
 
     run_actor_asserting(scenario, &env).await;
 
-    settle_until(|| scene.b2bua.active_calls() == 0).await;
+    settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
 
     let report = scene.finish().await;
@@ -173,7 +173,7 @@ async fn realcall_refer_no_leak() {
 
     // The transfer completed and alice BYE'd: the SUT BYE'd every leg (B + C) and
     // left no call state behind.
-    settle_until(|| scene.b2bua.active_calls() == 0).await;
+    settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
 
     // No waiver: every media-realign re-INVITE the SUT sends is answered by the
@@ -210,7 +210,7 @@ async fn failing_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
         "voluntarily-failing actor scenario `{name}` unexpectedly succeeded: {result:?}"
     );
 
-    settle_until(|| scene.b2bua.active_calls() == 0).await;
+    settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     let _ = scene.finish().await;
 }
@@ -253,7 +253,7 @@ async fn realcall_refer_charlie_reject_no_leak() {
     // and the SUT reaps promptly (see the refer happy-path note on the late BYE).
     drain_callees(&scene.bob, &charlie).await;
 
-    settle_until(|| scene.b2bua.active_calls() == 0).await;
+    settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     let _ = scene.finish().await;
 }

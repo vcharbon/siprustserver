@@ -36,7 +36,7 @@ async fn the_ring_names_the_b2bua_and_the_refusal_names_nothing() {
     let busy = call.expect(486).await;
     assert_eq!(contacts(&busy), Vec::<String>::new(), "a refusal names no reachable dialog");
 
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
@@ -70,7 +70,7 @@ async fn a_relayed_reinvite_answer_names_the_target_and_its_failure_does_not() {
     s.bob.receive("ACK").await;
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
@@ -90,7 +90,7 @@ async fn the_answer_carries_the_contact_the_caller_addresses() {
     s.bob.receive("ACK").await;
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.active_calls() == 0).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }

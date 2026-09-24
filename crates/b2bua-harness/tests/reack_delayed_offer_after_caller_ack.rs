@@ -70,7 +70,7 @@ async fn a_delayed_offer_2xx_repeated_after_the_relayed_ack_re_sends_that_ack() 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();
@@ -132,7 +132,7 @@ async fn a_reinvite_2xx_copy_re_sends_its_own_bare_ack_not_the_initial_answer() 
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     alice.drain().await;
     bob.drain().await;
     b2bua.assert_fully_reaped();

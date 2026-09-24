@@ -353,6 +353,6 @@ async fn refer_unreadable_refer_to_rejected_400() {
     alice_bye.expect(200).await;
 
     let _ = h.finish().await;
-    settle_until(|| b2bua.active_calls() == 0).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
