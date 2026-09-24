@@ -1,12 +1,14 @@
 //! The shared decoder for **route-shaped internal-event payloads** (built by
 //! the router's `route_result_payload`) and the parity actions both async
 //! route folds — `failover-create-leg` (`call-failure-result`) and
-//! `release-reroute` (`call-release-result`) — must apply identically.
-//! One parser + one parity-action builder so the folds cannot drift from each
-//! other or from the initial `apply_route`.
+//! `release-reroute` (`call-release-result`) — must apply identically, and the
+//! reader of the limiter holds both carry ([`route_fold_holds`]). One parser +
+//! one parity-action builder so the folds cannot drift from each other or from
+//! the initial `apply_route`.
 
 use call::{CallModelState, TimerType};
 
+use crate::event::CallEvent;
 use crate::rules::model::{RuleAction, RuleContext, TimerDelay};
 use b2bua_sdk::header_update::payload_lines;
 
@@ -16,8 +18,8 @@ use b2bua_sdk::header_update::payload_lines;
 /// `Terminated` call is moot: the caller already holds its final, so the fold
 /// drives no forward progress — no new leg toward a callee whose caller is
 /// gone, no second final on the a-leg's completed transaction (RFC 3261
-/// §17.2.1). The termination in progress owns the teardown; a limiter INCR
-/// the dispatching callout already admitted ages out of its window.
+/// §17.2.1). The termination in progress owns the teardown; the holds a route
+/// fold carries still become the call's ([`route_fold_holds`]).
 pub(crate) fn fold_lands_on_going_away_call(ctx: &RuleContext) -> bool {
     matches!(ctx.call.state(), CallModelState::Terminating | CallModelState::Terminated)
 }
@@ -87,19 +89,41 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
             Some(serde_json::Value::String(s)) => Some(s.clone().into_bytes()),
             Some(_) => None,
         },
-        limiter_holds: payload.get("call_limiter").and_then(|v| v.as_object()).and_then(|o| {
-            let window = o.get("window")?.as_i64()?;
-            let entries: Vec<(String, i64)> = o
-                .get("entries")?
-                .as_array()?
-                .iter()
-                .filter_map(|e| {
-                    Some((e.get("id")?.as_str()?.to_string(), e.get("limit")?.as_i64()?))
-                })
-                .collect();
-            Some((entries, window))
-        }),
+        limiter_holds: admitted_holds(payload),
     })
+}
+
+/// The `(topic, outcome)` of the two route-shaped folds: a failover route and
+/// a release reroute. Only these carry holds their dispatching task admitted.
+const ROUTE_FOLDS: [(&str, &str); 2] =
+    [("call-failure-result", "failover"), ("call-release-result", "reroute")];
+
+/// The limiter holds a route fold carries, as `(entries, window)`: admitted
+/// by its dispatching task before the fold was posted, so owned by the call
+/// the fold names from then on — recorded on its ledger, or released when no
+/// call is left to record them. `None` for any other event, or a route fold
+/// that admitted nothing.
+pub(crate) fn route_fold_holds(event: &CallEvent) -> Option<(Vec<(String, i64)>, i64)> {
+    let CallEvent::InternalEvent { topic, outcome, payload, .. } = event else {
+        return None;
+    };
+    if !ROUTE_FOLDS.iter().any(|(t, o)| t == topic && o == outcome) {
+        return None;
+    }
+    admitted_holds(payload)
+}
+
+/// A route payload's `call_limiter` object: `None` when absent or empty.
+fn admitted_holds(payload: &serde_json::Value) -> Option<(Vec<(String, i64)>, i64)> {
+    let o = payload.get("call_limiter")?.as_object()?;
+    let window = o.get("window")?.as_i64()?;
+    let entries: Vec<(String, i64)> = o
+        .get("entries")?
+        .as_array()?
+        .iter()
+        .filter_map(|e| Some((e.get("id")?.as_str()?.to_string(), e.get("limit")?.as_i64()?)))
+        .collect();
+    (!entries.is_empty()).then_some((entries, window))
 }
 
 /// The decision's `label` on a fold payload, read by the router's fold mark

@@ -73,6 +73,7 @@ mod reinvite;
 mod reinvite_cancel;
 mod release_event;
 mod response_contact_scope;
+mod route_fold_limiter_holds;
 mod second_final_refused;
 mod service_http;
 mod service_timers;

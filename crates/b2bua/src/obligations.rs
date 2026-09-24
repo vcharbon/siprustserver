@@ -17,7 +17,7 @@
 //! - **idempotent** — `settle` appends only what `effects` does not already
 //!   discharge, so a rule that emitted its own cleanup is not doubled, and
 //!   settling twice is a no-op. Dedupe semantics are kind-local (the limiter's
-//!   `(limiter_id, window)` key vs the CDR's single flag), which is why
+//!   per-`(limiter_id, window)` count vs the CDR's single flag), which is why
 //!   derive/dedupe/append live together in one `settle` pass instead of a
 //!   framework-owned key round-trip.
 //!
@@ -30,7 +30,7 @@
 //! funnels through.
 
 use call::Call;
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects, SoftBoundedEffect};
 
@@ -101,8 +101,8 @@ impl ObligationSet {
 /// Kind `"limiter"` — every recorded hold is decremented exactly once on
 /// termination (the strong INCR↔DECR invariant). Fail-open admissions
 /// (`increment_succeeded == Some(false)`) carry no real increment, so they are
-/// skipped. Dedupes against any release a rule already emitted. Verbatim
-/// extraction of the former `invariants::enforce` limiter block.
+/// skipped. A release a rule already emitted discharges one hold of its
+/// `(limiter_id, window)`; two holds on one key are two releases.
 pub struct LimiterObligations;
 
 impl ObligationKind for LimiterObligations {
@@ -111,21 +111,26 @@ impl ObligationKind for LimiterObligations {
     }
 
     fn settle(&self, call: &Call, effects: &mut HandlerEffects) {
-        let already: HashSet<(String, i64)> = effects
-            .soft
-            .iter()
-            .map(|SoftBoundedEffect::DecrementLimiter { limiter_id, window }| {
-                (limiter_id.clone(), *window)
-            })
-            .collect();
+        // A multiset: each release already emitted discharges ONE hold of its
+        // `(limiter_id, window)`, so two holds on one key owe two releases.
+        let mut already: HashMap<(&str, i64), usize> = HashMap::new();
+        for SoftBoundedEffect::DecrementLimiter { limiter_id, window } in &effects.soft {
+            *already.entry((limiter_id.as_str(), *window)).or_default() += 1;
+        }
+        let mut owed = Vec::new();
         for entry in &call.limiter_entries {
             if entry.increment_succeeded == Some(false) {
                 continue;
             }
-            let key = (entry.limiter_id.clone(), entry.origin_window);
-            if already.contains(&key) {
-                continue;
+            if let Some(n) = already.get_mut(&(entry.limiter_id.as_str(), entry.origin_window)) {
+                if *n > 0 {
+                    *n -= 1;
+                    continue;
+                }
             }
+            owed.push(entry);
+        }
+        for entry in owed {
             effects.soft.push(SoftBoundedEffect::DecrementLimiter {
                 limiter_id: entry.limiter_id.clone(),
                 window: entry.origin_window,

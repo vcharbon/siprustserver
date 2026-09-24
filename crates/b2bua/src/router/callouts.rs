@@ -78,10 +78,10 @@ fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
 /// from each other (or from the initial `apply_route` chain's semantics).
 /// `Ok(None)`: nothing to admit, or the limiter was unavailable (fail-open —
 /// no holds recorded, initial-route parity); `Ok(Some((entries, window)))`:
-/// admitted holds for the resolution rule to fold into the call
-/// (`RecordLimiterHolds`; if the call dies before the fold lands, the orphaned
-/// INCR ages out of the limiter window); `Err(limiter_id)`: rejected over-cap —
-/// the caller owns the treatment.
+/// admitted holds the fold carries to the call, whose ledger takes them
+/// (`RecordLimiterHolds`, on a live or Terminating call) or which the router
+/// releases when the call is gone (`route_fold_holds`); `Err(limiter_id)`:
+/// rejected over-cap — the caller owns the treatment.
 async fn admit_route_limiters(
     limiter: &dyn CallLimiter,
     route: &RouteDecision,

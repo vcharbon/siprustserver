@@ -636,6 +636,44 @@ fn decision_folds_on_a_live_call_still_apply() {
     );
 }
 
+/// A route fold payload carrying the holds its dispatching task admitted:
+/// `x` + `y` at window 300.
+fn route_fold_payload_with_holds() -> serde_json::Value {
+    let mut payload = route_fold_payload();
+    payload["call_limiter"] = serde_json::json!({
+        "window": 300,
+        "entries": [ { "id": "x", "limit": 10 }, { "id": "y", "limit": 10 } ],
+    });
+    payload
+}
+
+#[test]
+fn route_fold_holds_join_a_terminating_call_ledger() {
+    // A route fold landing on a going-away call drives no progress, but the
+    // holds its dispatching task admitted become the call's: they join the
+    // ledger (so the terminal settle releases them) — no leg, no refresh
+    // cadence. Both route folds (failover, release reroute) alike.
+    let mut call = test_call();
+    call.state = CallModelState::Terminating;
+    call.callback_context = Some("cb".into());
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+    for (topic, outcome) in
+        [("call-failure-result", "failover"), ("call-release-result", "reroute")]
+    {
+        let payload = route_fold_payload_with_holds();
+        let candidates = fold_candidates(&call, topic, outcome, payload.clone());
+        let [rule_id] = candidates[..] else {
+            panic!("one teardown rule takes the {topic}/{outcome} holds, got {candidates:?}");
+        };
+        let actions = fold_result(&call, rule_id, topic, outcome, payload);
+        let [RuleAction::RecordLimiterHolds { entries, window }] = &actions[..] else {
+            panic!("{rule_id} records the holds and nothing else, got {actions:?}");
+        };
+        assert_eq!(entries, &vec![("x".to_string(), 10), ("y".to_string(), 10)]);
+        assert_eq!(*window, 300);
+    }
+}
+
 #[test]
 fn begin_termination_scrubs_per_leg_no_answer_entries() {
     // Entering `terminating` cancels every per-leg NoAnswer ledger entry —
@@ -3754,7 +3792,7 @@ mod header_update_removal_withholds_a_relayed_name {
 // the refactor: over arbitrary call snapshots (states × limiter entries incl.
 // fail-open × pre-emitted effects), the new `enforce(&ObligationSet::core(), …)`
 // must produce an effect set and call identical to the pre-extraction body
-// (kept VERBATIM below as the oracle).
+// (kept below as the oracle, its limiter dedupe counted per hold).
 mod enforce_equivalence {
     use super::*;
     use b2bua::effects::{
@@ -3763,9 +3801,9 @@ mod enforce_equivalence {
     use b2bua::obligations::ObligationSet;
     use call::{CallLimiterState, TimerEntry};
     use proptest::prelude::*;
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
-    /// The pre-extraction `enforce` body (ADR-0010 X5 shape), verbatim.
+    /// The pre-extraction `enforce` body (ADR-0010 X5 shape).
     fn old_enforce(before: &call::Call, mut result: HandlerResult) -> HandlerResult {
         let became_terminated = before.state != CallModelState::Terminated
             && result.call.state == CallModelState::Terminated;
@@ -3787,20 +3825,20 @@ mod enforce_equivalence {
             result.effects.buffered.push(BufferedObservabilityEffect::WriteCdr);
         }
 
-        let already: HashSet<(String, i64)> = result
-            .effects
-            .soft
-            .iter()
-            .map(|SoftBoundedEffect::DecrementLimiter { limiter_id, window }| {
-                (limiter_id.clone(), *window)
-            })
-            .collect();
-        for entry in &result.call.limiter_entries {
+        // One release per hold: a pre-emitted release discharges one hold of
+        // its key.
+        let mut already: HashMap<(String, i64), usize> = HashMap::new();
+        for SoftBoundedEffect::DecrementLimiter { limiter_id, window } in &result.effects.soft {
+            *already.entry((limiter_id.clone(), *window)).or_default() += 1;
+        }
+        let entries = result.call.limiter_entries.clone();
+        for entry in &entries {
             if entry.increment_succeeded == Some(false) {
                 continue;
             }
             let key = (entry.limiter_id.clone(), entry.origin_window);
-            if already.contains(&key) {
+            if let Some(n) = already.get_mut(&key).filter(|n| **n > 0) {
+                *n -= 1;
                 continue;
             }
             result.effects.soft.push(SoftBoundedEffect::DecrementLimiter {
@@ -3909,6 +3947,63 @@ mod enforce_equivalence {
                 "effect lanes must be identical (order included)"
             );
         }
+    }
+}
+
+// ── the limiter settle: one release per recorded hold ────────────────────────
+mod limiter_settle {
+    use super::*;
+    use b2bua::effects::{HandlerEffects, SoftBoundedEffect};
+    use b2bua::obligations::ObligationSet;
+    use call::CallLimiterState;
+
+    fn hold(id: &str, window: i64) -> CallLimiterState {
+        CallLimiterState {
+            limiter_id: id.into(),
+            limit: 10,
+            origin_window: window,
+            increment_succeeded: Some(true),
+        }
+    }
+
+    fn release(id: &str, window: i64) -> SoftBoundedEffect {
+        SoftBoundedEffect::DecrementLimiter { limiter_id: id.into(), window }
+    }
+
+    fn releases_of(effects: &HandlerEffects, id: &str, window: i64) -> usize {
+        effects
+            .soft
+            .iter()
+            .filter(|SoftBoundedEffect::DecrementLimiter { limiter_id, window: w }| {
+                limiter_id == id && *w == window
+            })
+            .count()
+    }
+
+    #[test]
+    fn two_holds_on_one_key_are_two_releases() {
+        let mut call = test_call();
+        call.limiter_entries = vec![hold("x", 300), hold("x", 300), hold("y", 300)];
+        let mut effects = HandlerEffects::new();
+        ObligationSet::core().settle(&call, &mut effects);
+        assert_eq!(releases_of(&effects, "x", 300), 2, "{:?}", effects.soft);
+        assert_eq!(releases_of(&effects, "y", 300), 1, "{:?}", effects.soft);
+    }
+
+    #[test]
+    fn a_rule_emitted_release_discharges_one_hold_of_its_key() {
+        // Two holds on `(x, 300)` and one release a rule already emitted for
+        // that key: the settle owes the second one, not zero.
+        let mut call = test_call();
+        call.limiter_entries = vec![hold("x", 300), hold("x", 300)];
+        let mut effects = HandlerEffects::new();
+        effects.soft.push(release("x", 300));
+        ObligationSet::core().settle(&call, &mut effects);
+        assert_eq!(releases_of(&effects, "x", 300), 2, "{:?}", effects.soft);
+
+        // Settling again discharges nothing more.
+        ObligationSet::core().settle(&call, &mut effects);
+        assert_eq!(releases_of(&effects, "x", 300), 2, "{:?}", effects.soft);
     }
 }
 

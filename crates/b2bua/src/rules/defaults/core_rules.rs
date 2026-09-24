@@ -24,7 +24,7 @@ use crate::rules::model::{
 
 use super::route_fold::{
     fold_lands_on_going_away_call, parse_header_updates, parse_route_fold, parse_service_ext,
-    route_fold_parity_actions,
+    route_fold_holds, route_fold_parity_actions,
 };
 
 fn rule(
@@ -767,6 +767,27 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(actions)
             },
         ),
+        // ── route-fold holds on a going-away call ───────────────────────────
+        // A route fold (failover route, release reroute) landing on a
+        // Terminating call drives no progress — the going-away gate absorbs its
+        // fold rule — but the holds its dispatching task admitted are the
+        // call's: they join the ledger and the terminal settle releases them,
+        // with no LimiterRefresh re-arm on a dying call. A Terminated call is
+        // never resident on a rule turn; its folds take the router's gone-call
+        // release.
+        rule(
+            "route-fold-holds-on-going-away-call",
+            &[],
+            Match::internal_event().filter(|ctx| {
+                ctx.call.state() == CallModelState::Terminating
+                    && route_fold_holds(ctx.event).is_some()
+            }),
+            |ctx| {
+                let (entries, window) = route_fold_holds(ctx.event)?;
+                ok(vec![RuleAction::RecordLimiterHolds { entries, window }])
+            },
+        )
+        .runs_while_terminating(),
         // `terminate` (or backend error) → relay the original failure to the
         // caller (response path; the no-answer path carries no status) and tear
         // the call down.
