@@ -36,6 +36,7 @@ mod init;
 mod node;
 #[cfg(feature = "otlp")]
 mod otlp;
+mod payload_targets;
 mod plane;
 mod rate_draw;
 mod test_buffer;

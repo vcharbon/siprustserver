@@ -1,6 +1,6 @@
-//! Every connection the RabbitMQ CDR sink abandons ends its client IO thread:
-//! a broker that stalls the handshake or never confirms leaves no thread (nor
-//! socket) behind, however many times the sink reconnects. One test per
+//! Every connection the RabbitMQ CDR sink abandons ends its client IO thread
+//! and its tasks: a broker that stalls the handshake or never confirms leaves
+//! no thread, task or socket behind, however many times the sink reconnects. One test per
 //! binary, so no other test's connections are counted.
 
 mod support;
@@ -59,6 +59,20 @@ fn io_loop_threads() -> usize {
         .count()
 }
 
+fn alive_tasks() -> usize {
+    tokio::runtime::Handle::current().metrics().num_alive_tasks()
+}
+
+async fn alive_tasks_reach(want: usize) -> usize {
+    let give_up = Instant::now() + Duration::from_secs(3);
+    let mut n = alive_tasks();
+    while n != want && Instant::now() < give_up {
+        tokio::time::sleep(10 * MS).await;
+        n = alive_tasks();
+    }
+    n
+}
+
 async fn io_loop_threads_reach(want: usize) -> usize {
     let give_up = Instant::now() + Duration::from_secs(3);
     let mut n = io_loop_threads();
@@ -70,8 +84,10 @@ async fn io_loop_threads_reach(want: usize) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn abandoned_connections_leave_no_io_thread_behind() {
+async fn abandoned_connections_leave_no_io_thread_nor_task_behind() {
     let broker = FakeBroker::start(Reply::Silent).await;
+    // The broker's accept loop is the only task before the sink runs.
+    let baseline = alive_tasks();
     let bounds = CdrDeliveryBounds {
         window: 8,
         connect_timeout: 150 * MS,
@@ -106,6 +122,7 @@ async fn abandoned_connections_leave_no_io_thread_behind() {
     assert!(io_loop_threads_reach(0).await <= 1, "only the last attempt may still be live");
     drop(w);
     assert_eq!(io_loop_threads_reach(0).await, 0, "every abandoned connection's thread ended");
+    assert_eq!(alive_tasks_reach(baseline).await, baseline, "no session leaves a task behind");
     assert_eq!(metrics.cdr_written_total(), 0);
     assert_eq!(metrics.cdr_dropped_total(), 12);
 }

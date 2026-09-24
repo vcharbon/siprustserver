@@ -1,37 +1,21 @@
 //! The RabbitMQ CDR sink a runner composes from env ([`RabbitMqCdrSettings`]):
-//! [`RabbitMqCdrWriter`] publishes one record per terminated call, in the
-//! format its [`CdrEncoder`] produces (default [`JsonRecordEncoder`]); without
-//! a URL there is no sink, and [`crate::RunnerBase::deps`] keeps its
-//! discarding default.
+//! [`RabbitMqCdrWriter`] publishes one record per terminated call, encoded by
+//! its [`CdrEncoder`] (default [`JsonRecordEncoder`]).
 //!
-//! ## Contract
-//! Every record handed to [`RabbitMqCdrWriter::write`] ends, once, in exactly
-//! one of `cdr_written_total` (the broker acked it on a confirm-mode channel)
-//! or `cdr_dropped_total` (refused by the encoder, no connection, reconnect
-//! backoff, window full past the publish bound, publish failed, nacked,
-//! returned unroutable, no confirm within the confirm bound, or the connection
-//! ended with it unconfirmed). A record the broker held and later lost is
-//! outside what the sink can see.
+//! Contract: each record handed to `write` counts once, in `cdr_written_total`
+//! when the broker acked it on a confirm-mode channel, else in
+//! `cdr_dropped_total`. Dropped means unconfirmed, not lost: a record whose ack
+//! never arrived may still reach the queue.
 //!
-//! ## Bounded waits
-//! Delivery is best-effort telemetry and never slows the call path: the writer
-//! sits behind the `BufferedCdrWriter` [`crate::RunnerBase::deps`] installs
-//! (non-blocking enqueue, drop-on-overload at `B2BUA_CDR_QUEUE`, one drainer
-//! calling this writer serially), and every wait of that drainer on the broker
-//! is bounded ([`CdrDeliveryBounds`]): the connect, a window slot plus the
-//! publish hand-off, and, off the drainer, each confirm. At most `window`
-//! publishes await their confirm at once. A broker that is down, refusing,
-//! hung or flow-controlling therefore turns into dropped records, never into
-//! a stalled drainer or a growing memory. After a failed connection the next
-//! attempt waits out a doubling backoff, and records arriving meanwhile are
-//! dropped; a connection that delivered reconnects at once when it ends.
-//!
-//! A queue the writer owns ([`CdrQueueDeclare::Own`]) is declared with
-//! `x-max-length` + `x-overflow=drop-head`: a consumer that falls behind loses
-//! the oldest records instead of growing the broker. A returned publish ends
-//! the connection, so the next one declares the queue again.
+//! Bounds: the writer runs behind the kit's `BufferedCdrWriter` drainer (the
+//! grammar refuses `B2BUA_CDR_QUEUE=0` beside a URL); every broker wait is
+//! bounded by [`CdrDeliveryBounds`], so a broker fault becomes dropped records,
+//! never a stalled call path or growing memory.
 
 mod backoff;
+mod confirms;
+mod connector;
+mod declaration;
 mod session;
 mod settings;
 mod socket_kill;
@@ -48,7 +32,8 @@ use tokio::time::{timeout, Instant};
 use backoff::Backoff;
 use session::Session;
 pub use settings::{
-    CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, MAX_WAIT_MS, MAX_WINDOW,
+    CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, MAX_DRAINER_WAIT_MS, MAX_WAIT_MS,
+    MAX_WINDOW,
 };
 
 impl RabbitMqCdrSettings {

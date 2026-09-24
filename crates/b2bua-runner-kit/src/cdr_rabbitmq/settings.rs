@@ -22,7 +22,9 @@ pub enum CdrQueueDeclare {
 
 /// The bounds of every wait the sink makes on the broker, and of the records it
 /// holds unconfirmed. Each is a positive integer variable, unset takes the
-/// default; a wait is at most [`MAX_WAIT_MS`], the window at most [`MAX_WINDOW`].
+/// default. A wait the drainer makes (connect, publish) is at most
+/// [`MAX_DRAINER_WAIT_MS`]; the confirm and backoff waits, off the drainer, at
+/// most [`MAX_WAIT_MS`]; the window at most [`MAX_WINDOW`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CdrDeliveryBounds {
     /// Publishes awaiting the broker's confirm at once,
@@ -48,6 +50,8 @@ pub struct CdrDeliveryBounds {
 
 /// The longest wait any `_MS` bound states: one hour.
 pub const MAX_WAIT_MS: u64 = 3_600_000;
+/// The longest connect or publish bound: one minute.
+pub const MAX_DRAINER_WAIT_MS: u64 = 60_000;
 /// The largest publish window.
 pub const MAX_WINDOW: u64 = 65_536;
 
@@ -67,17 +71,29 @@ impl Default for CdrDeliveryBounds {
 impl CdrDeliveryBounds {
     fn from_lookup(get: &impl Fn(&str) -> Option<String>) -> Result<Self, String> {
         let d = Self::default();
-        let ms = |key: &str, default: Duration| -> Result<Duration, String> {
-            bounded(get, key, default.as_millis() as u64, MAX_WAIT_MS).map(Duration::from_millis)
+        let ms = |key: &str, default: Duration, max: u64| -> Result<Duration, String> {
+            bounded(get, key, default.as_millis() as u64, max).map(Duration::from_millis)
         };
         let bounds = Self {
             window: bounded(get, "B2BUA_CDR_RABBITMQ_WINDOW", d.window as u64, MAX_WINDOW)?
                 as usize,
-            connect_timeout: ms("B2BUA_CDR_RABBITMQ_CONNECT_TIMEOUT_MS", d.connect_timeout)?,
-            publish_timeout: ms("B2BUA_CDR_RABBITMQ_PUBLISH_TIMEOUT_MS", d.publish_timeout)?,
-            confirm_timeout: ms("B2BUA_CDR_RABBITMQ_CONFIRM_TIMEOUT_MS", d.confirm_timeout)?,
-            backoff_min: ms("B2BUA_CDR_RABBITMQ_BACKOFF_MS", d.backoff_min)?,
-            backoff_max: ms("B2BUA_CDR_RABBITMQ_BACKOFF_MAX_MS", d.backoff_max)?,
+            connect_timeout: ms(
+                "B2BUA_CDR_RABBITMQ_CONNECT_TIMEOUT_MS",
+                d.connect_timeout,
+                MAX_DRAINER_WAIT_MS,
+            )?,
+            publish_timeout: ms(
+                "B2BUA_CDR_RABBITMQ_PUBLISH_TIMEOUT_MS",
+                d.publish_timeout,
+                MAX_DRAINER_WAIT_MS,
+            )?,
+            confirm_timeout: ms(
+                "B2BUA_CDR_RABBITMQ_CONFIRM_TIMEOUT_MS",
+                d.confirm_timeout,
+                MAX_WAIT_MS,
+            )?,
+            backoff_min: ms("B2BUA_CDR_RABBITMQ_BACKOFF_MS", d.backoff_min, MAX_WAIT_MS)?,
+            backoff_max: ms("B2BUA_CDR_RABBITMQ_BACKOFF_MAX_MS", d.backoff_max, MAX_WAIT_MS)?,
         };
         if bounds.backoff_max < bounds.backoff_min {
             return Err(format!(
@@ -125,7 +141,9 @@ pub struct RabbitMqCdrSettings {
 
 impl RabbitMqCdrSettings {
     /// Reads the grammar through `get`; `Ok(None)` when the URL is unset or
-    /// blank. `Err` names the variable when `QUEUE` is blank, when `MAX_LEN`
+    /// blank. `Err` names the variable when `B2BUA_CDR_QUEUE` is `0` (no
+    /// buffer between the call path and the broker), when `QUEUE` is blank or
+    /// padded, when `MAX_LEN`
     /// is not a non-negative integer, when `DECLARE` is neither `own` nor
     /// `existing` (blank = `own`), when `MAX_LEN` is set beside
     /// `DECLARE=existing` (the broker owns the bound), or when a bound of
@@ -135,10 +153,17 @@ impl RabbitMqCdrSettings {
             return Ok(None);
         };
         let queue = get("B2BUA_CDR_RABBITMQ_QUEUE").unwrap_or_else(|| "cdr".to_string());
-        if queue.trim().is_empty() {
+        if queue.trim().is_empty() || queue.trim() != queue {
             return Err(format!(
-                "B2BUA_CDR_RABBITMQ_QUEUE must name a queue, got {queue:?}; unset it for `cdr`"
+                "B2BUA_CDR_RABBITMQ_QUEUE must name a queue with no surrounding whitespace, \
+                 got {queue:?}; unset it for `cdr`"
             ));
+        }
+        if get("B2BUA_CDR_QUEUE").and_then(|q| q.parse::<usize>().ok()) == Some(0) {
+            return Err("B2BUA_CDR_QUEUE=0 calls the CDR sink inline on the call path; with \
+                 B2BUA_CDR_RABBITMQ_URL set every broker wait would stall calls: give the \
+                 CDR buffer a depth"
+                .to_string());
         }
         let raw_max = get("B2BUA_CDR_RABBITMQ_MAX_LEN");
         let raw_declare = get("B2BUA_CDR_RABBITMQ_DECLARE").filter(|v| !v.trim().is_empty());
@@ -341,7 +366,13 @@ mod tests {
             "B2BUA_CDR_RABBITMQ_BACKOFF_MS",
             "B2BUA_CDR_RABBITMQ_BACKOFF_MAX_MS",
         ] {
-            let too_big = if key.ends_with("_WINDOW") { MAX_WINDOW + 1 } else { MAX_WAIT_MS + 1 };
+            let too_big = if key.ends_with("_WINDOW") {
+                MAX_WINDOW + 1
+            } else if key.ends_with("_CONNECT_TIMEOUT_MS") || key.ends_with("_PUBLISH_TIMEOUT_MS") {
+                60_001
+            } else {
+                3_600_001
+            };
             for v in ["0", "-1", "soon", "", " 5", &too_big.to_string()] {
                 let e = with_url(&[(key, v)]).expect_err("an unbounded or unreadable wait");
                 assert!(e.contains(key), "{key}={v:?}: {e}");
@@ -358,5 +389,44 @@ mod tests {
         .expect_err("a ceiling below the floor");
         assert!(e.contains("B2BUA_CDR_RABBITMQ_BACKOFF_MS"), "msg was: {e}");
         assert!(e.contains("B2BUA_CDR_RABBITMQ_BACKOFF_MAX_MS"), "msg was: {e}");
+    }
+
+    #[test]
+    fn the_drainer_waits_are_capped_at_a_minute_and_the_others_at_an_hour() {
+        let s = with_url(&[
+            ("B2BUA_CDR_RABBITMQ_CONNECT_TIMEOUT_MS", "60000"),
+            ("B2BUA_CDR_RABBITMQ_PUBLISH_TIMEOUT_MS", "60000"),
+            ("B2BUA_CDR_RABBITMQ_CONFIRM_TIMEOUT_MS", "3600000"),
+            ("B2BUA_CDR_RABBITMQ_BACKOFF_MAX_MS", "3600000"),
+        ])
+        .expect("ok")
+        .expect("some");
+        assert_eq!(s.bounds.connect_timeout, Duration::from_secs(60));
+        assert_eq!(s.bounds.confirm_timeout, Duration::from_secs(3_600));
+    }
+
+    #[test]
+    fn a_queue_name_with_surrounding_whitespace_is_refused_naming_its_variable() {
+        for v in [" cdr", "cdr ", "\tcdr"] {
+            let e = with_url(&[("B2BUA_CDR_RABBITMQ_QUEUE", v)]).expect_err("padded queue name");
+            assert!(e.contains("B2BUA_CDR_RABBITMQ_QUEUE"), "{v:?}: {e}");
+        }
+    }
+
+    /// A zero `B2BUA_CDR_QUEUE` makes the CDR buffer a passthrough, which would
+    /// put every broker wait on the call path.
+    #[test]
+    fn an_unbuffered_cdr_path_beside_a_broker_is_refused_naming_both_variables() {
+        for v in ["0", "00"] {
+            let e = with_url(&[("B2BUA_CDR_QUEUE", v)]).expect_err("an unbuffered broker sink");
+            assert!(e.contains("B2BUA_CDR_QUEUE"), "{v:?}: {e}");
+            assert!(e.contains("B2BUA_CDR_RABBITMQ_URL"), "{v:?}: {e}");
+        }
+        assert!(with_url(&[("B2BUA_CDR_QUEUE", "8")]).expect("ok").is_some());
+        assert_eq!(
+            RabbitMqCdrSettings::from_lookup(lookup(&[("B2BUA_CDR_QUEUE", "0")])),
+            Ok(None),
+            "without a broker a passthrough blocks on nothing"
+        );
     }
 }

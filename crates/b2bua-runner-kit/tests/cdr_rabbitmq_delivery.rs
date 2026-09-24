@@ -91,6 +91,16 @@ async fn settle(m: &B2buaMetrics, want: (u64, u64)) {
     assert_eq!(counts(m), want, "(written, dropped)");
 }
 
+/// Waits (up to 2 s) until the broker received `n` publishes, so a reply
+/// switched next applies to the following one only.
+async fn published(broker: &FakeBroker, n: usize) {
+    let give_up = Instant::now() + Duration::from_secs(2);
+    while broker.count(|c| &c.published) < n && Instant::now() < give_up {
+        tokio::time::sleep(MS).await;
+    }
+    assert_eq!(broker.count(|c| &c.published), n);
+}
+
 /// Writes one record, asserting the writer returned within `bound`.
 async fn write_within(w: &RabbitMqCdrWriter, call: &Call, bound: Duration) {
     let t0 = Instant::now();
@@ -360,4 +370,55 @@ async fn every_record_ends_written_or_dropped_exactly_once() {
     let (written, dropped) = counts(&m);
     assert_eq!(written + dropped, n, "written {written} + dropped {dropped} != {n} records");
     assert!(written > 0 && dropped > 0);
+}
+
+#[tokio::test]
+async fn a_multiple_ack_counts_every_publish_it_covers_once() {
+    let broker = FakeBroker::start(Reply::AckMultipleEvery(10)).await;
+    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let call = a_call();
+    for _ in 0..100 {
+        w.write(&call, 2_000).await;
+    }
+    settle(&m, (100, 0)).await;
+    tokio::time::sleep(100 * MS).await;
+    assert_eq!(counts(&m), (100, 0), "no record counted twice");
+}
+
+/// Publish 1 is never confirmed; publish 2 is acked at once. Publish 1's
+/// confirm bound ends the session with publish 2 still queued behind it in
+/// the tracker: its ack, already received, still counts it written.
+#[tokio::test]
+async fn a_publish_acked_before_its_session_ends_is_counted_written() {
+    let broker = FakeBroker::start(Reply::Silent).await;
+    let (w, m) = writer_to(broker.url(), bounds(), 64);
+    let call = a_call();
+    w.write(&call, 2_000).await;
+    published(&broker, 1).await;
+    broker.reply(Reply::Ack);
+    w.write(&call, 2_000).await;
+    settle(&m, (1, 1)).await;
+}
+
+/// With one window slot taken by a publish the broker never confirms, the
+/// next record waits for a slot; the session ending at the (shorter) confirm
+/// bound releases it at once, before the publish bound.
+#[tokio::test]
+async fn a_record_waiting_for_a_slot_returns_when_the_session_ends() {
+    let broker = FakeBroker::start(Reply::Silent).await;
+    let b = CdrDeliveryBounds {
+        window: 1,
+        publish_timeout: 2_000 * MS,
+        confirm_timeout: 300 * MS,
+        ..bounds()
+    };
+    let (w, m) = writer_to(broker.url(), b, 64);
+    let call = a_call();
+    w.write(&call, 2_000).await;
+    let t0 = Instant::now();
+    w.write(&call, 2_000).await;
+    let took = t0.elapsed();
+    assert!(took < 1_000 * MS, "the waiter took {took:?}: the session end must release it");
+    settle(&m, (0, 2)).await;
+    assert_eq!(broker.count(|c| &c.published), 1, "nothing is published on an ended session");
 }

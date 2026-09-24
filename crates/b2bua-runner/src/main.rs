@@ -40,7 +40,7 @@
 //!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default empty =
 //!                   kernel wmem_default; clamped at wmem_max) — ADR-0033
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
-//!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024)
+//!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024; 0 = unbuffered, refused beside a RabbitMQ URL)
 //!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _DECLARE / _MAX_LEN / _WINDOW / _*_TIMEOUT_MS / _BACKOFF*_MS
 //!                   the RabbitMQ CDR sink (see `b2bua_runner_kit::RabbitMqCdrSettings`)
 //!   B2BUA_CONCURRENCY handler concurrency ceiling       (default 8192; safety, not a rate cap)

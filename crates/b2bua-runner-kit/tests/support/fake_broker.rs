@@ -21,6 +21,9 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reply {
     Ack,
+    /// No ack until every `n`th publish, then one `multiple=true` ack
+    /// covering it and every earlier unacked publish.
+    AckMultipleEvery(u64),
     /// An ack sent after this delay, the connection meanwhile serving others.
     AckAfter(Duration),
     Nack,
@@ -296,6 +299,17 @@ fn answer(reply: Reply, ch: u16, tag: u64, rk: &str, out: &mpsc::UnboundedSender
     match reply {
         Reply::Ack => {
             let _ = out.send(ack(ch, tag));
+        }
+        Reply::AckMultipleEvery(n) => {
+            if tag.is_multiple_of(n) {
+                let _ = out.send(method(
+                    ch,
+                    AMQPClass::Basic(basic::AMQPMethod::Ack(basic::Ack {
+                        delivery_tag: tag,
+                        multiple: true,
+                    })),
+                ));
+            }
         }
         Reply::AckAfter(delay) => {
             let out = out.clone();
