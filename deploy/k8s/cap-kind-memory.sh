@@ -34,6 +34,7 @@ APP_CAP_MB="${APP_CAP_MB:-1664}"       # app node: b2bua real RSS is ~735Mi stea
                                        # co-tenant (rabbitmq/cdr ~170Mi) + node overhead. 1280
                                        # node-cgroup-OOM'd worker-1 mid-soak (2026-06-13 01:49).
 LOAD_CAP_MB="${LOAD_CAP_MB:-1536}"     # load node: sipp UAS + co-located UAC generators
+INFRA_CAP_MB="${INFRA_CAP_MB:-1536}"   # infra node: broker (1Gi limit) + limiter + CDR consumer
 WORKER_CAP_MB="${WORKER_CAP_MB:-1280}" # fallback when a worker's tier label is unknown
 
 # -a: cap stopped nodes too (their config applies on next start).
@@ -53,6 +54,7 @@ worker_cap_for() {  # name -> echoes capMB
     edge) echo "$EDGE_CAP_MB" ;;
     app)  echo "$APP_CAP_MB"  ;;
     load) echo "$LOAD_CAP_MB" ;;
+    infra) echo "$INFRA_CAP_MB" ;;
     *)    echo "$WORKER_CAP_MB" ;;  # unlabelled / kubectl not ready
   esac
 }

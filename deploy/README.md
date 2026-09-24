@@ -78,7 +78,7 @@ historical layout.
 | `CLUSTER` / `NS` | `sip-e2e` / `sip-test` | kind cluster name / namespace. |
 | `SUT_IMAGE` | `siprustserver:dev` | Rust SUT image tag. |
 | `WORKER_REPLICAS` | `2` | b2bua worker pool size. |
-| `OBS_ENABLE` | `1` | Bring up the observability stack (Grafana :3333, VictoriaMetrics :8428). `0` to skip. |
+| `OBS_ENABLE` | `1` | Bring up the observability stack (Grafana :3333, VictoriaMetrics :8428) on `up`, re-apply the in-cluster scrapers on every `deploy`, and fail either when the cluster's series do not reach VictoriaMetrics within `OBS_CHECK_WAIT` (180 s); `./run.sh obs-check` runs the check alone. `0` to skip. |
 | `REPL_ENABLE` / `REPL_PORT` | `0` / `9092` | HA call replication (chaos suite sets `1`). |
 
 Host preflight knobs (see system requirements below):
@@ -126,6 +126,10 @@ cd deploy/k8s
 ./chaos.sh kill         # inject one worker kill against a running stack
 ./chaos.sh down
 # knobs: CALLS=30 CPS=3 KILL_TARGET=b2bua-worker-0 PASS_THRESHOLD=90 KEEP=1
+# faults of the shared dependencies (the limiter, the CDR broker, their node):
+./chaos.sh limiterkill | limiterrestart | limiternetcut | limiterreject | limiterslow | limiterfreeze
+./chaos.sh brokerfreeze | infranodekill
+./chaos.sh cleanup      # undo any of them an interrupted caller left applied
 ```
 
 It is a **shell script, not a `cargo test`** — real kind clusters + image builds

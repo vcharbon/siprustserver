@@ -25,7 +25,10 @@ spec:
         prometheus.io/port: "9093"
         prometheus.io/path: "/metrics"
     spec:
-      nodeSelector: { tier: app }
+      # The infra node (cluster.yaml), alone with the other shared dependencies.
+      nodeSelector: { tier: infra }
+      tolerations:
+        - { key: tier, operator: Equal, value: infra, effect: NoSchedule }
       containers:
         - name: cdr-consumer
           image: ${SUT_IMAGE}

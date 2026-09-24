@@ -27,6 +27,7 @@
 #   ./run.sh up                      # (re)create cluster + build/load images + observability
 #   ./run.sh deploy                  # apply uas + workers + proxy, wait ready
 #   ./run.sh obs                     # (re)deploy observability stack only (idempotent)
+#   ./run.sh obs-check               # every series the deployed stack must have is in VM
 #   ./run.sh caps 200 30             # 200 cps for 30s, sample CPU/mem
 #   ./run.sh sweep 30 50 100 200 400 # run a list of caps, 30s sampling each
 #   ./run.sh all 30 50 100 200 400   # up + deploy + sweep (leaves cluster up)
@@ -144,8 +145,9 @@ CDR_CONSUMER_PAYLOAD="${CDR_CONSUMER_PAYLOAD:-json}"
 export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO LIMITER_CAP RABBITMQ_IMAGE
 export CDR_CONSUMER_PAYLOAD
 # Observability: VictoriaMetrics + Grafana host stack + in-cluster vmagent/KSM/
-# node-exporter/fluent-bit. Deployed automatically on `up` so the freshly
-# (re)created cluster always has scraping wired and Grafana dashboards loaded.
+# node-exporter/fluent-bit. Deployed automatically on `up`, re-applied at the
+# end of every `deploy`, and both fail when the series do not reach
+# VictoriaMetrics (obs_check), so a cluster never runs unobserved.
 # Set OBS_ENABLE=0 to skip (e.g. CI without docker compose).
 OBS_ENABLE="${OBS_ENABLE:-1}"
 OBS_DIR="${OBS_DIR:-$REPO_ROOT/deploy/observability}"
@@ -326,6 +328,46 @@ obs() {
   hostip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   log "deploying observability (Grafana http://127.0.0.1:${gport}${hostip:+ / http://$hostip:$gport}, VictoriaMetrics :8428)"
   "$OBS_DIR/install.sh" --bootstrap
+  obs_check cluster
+}
+
+# The series a healthy scrape of this cluster puts in VictoriaMetrics: `cluster`
+# is the in-cluster scrapers' own (kube-state-metrics, cAdvisor, node-exporter,
+# the pod scrape); `stack` adds the deployed workloads'. One selector per line.
+obs_series() { # $1 cluster|stack
+  cat <<EOF2
+kube_pod_info
+container_cpu_usage_seconds_total
+container_memory_rss
+node_cpu_seconds_total
+up{job="kubernetes-pods"}
+EOF2
+  [ "$1" = stack ] || return 0
+  cat <<EOF2
+kube_pod_info{exported_namespace="$NS"}
+container_memory_rss{namespace="$NS"}
+b2bua_active_calls{namespace="$NS"}
+limiter_admission_max{namespace="$NS"}
+cdr_consumed_total{namespace="$NS"}
+sip_proxy_requests_total{namespace="$NS"}
+EOF2
+}
+# In-cluster scrapers (vmagent, kube-state-metrics, node-exporter, fluent-bit),
+# applied idempotently: a cluster recreated or deployed without them has no series.
+obs_addons() { "$OBS_DIR/install.sh" --apply; }
+# Fail when VictoriaMetrics lacks a fresh sample of a series obs_series names.
+obs_check() { # $1 cluster|stack
+  local -a series
+  mapfile -t series < <(obs_series "$1")
+  "$OBS_DIR/check.sh" --wait "${OBS_CHECK_WAIT:-180}" "${series[@]}" && return 0
+  printf '\033[1;31m!! %s\033[0m\n' "observability: VictoriaMetrics is missing series of this cluster. Check that vmagent runs (kubectl -n observability get pods; logs deploy/vmagent) and that the host accepts the kind subnet on 8428/9428/10428 (a host firewall drops the remote write). OBS_ENABLE=0 skips observability." >&2
+  return 1
+}
+# The deploy's observability gate: scrapers applied, the stack's series landing.
+obs_ensure() {
+  [ "$OBS_ENABLE" = "1" ] || { log "OBS_ENABLE=0 — no observability gate"; return 0; }
+  obs_addons || die "observability: applying the kind-addons failed"
+  obs_check stack || die "observability: series missing after deploy (./run.sh obs-check lists them)"
 }
 
 deploy() {
@@ -401,6 +443,7 @@ deploy() {
   if [ "${ISOLATION_SMOKE:-1}" = "1" ]; then
     isolation_smoke
   fi
+  obs_ensure
   log "stack ready"
   kubectl -n "$NS" get pods -o wide
 }
@@ -699,6 +742,7 @@ run_main() {
     up)     up ;;
     deploy) deploy ;;
     obs)    obs ;;
+    obs-check) obs_check stack ;;
     caps)   caps "$@" ;;
     sweep)  sweep "$@" ;;
     all)    up; deploy; sweep "$@" ;;
@@ -708,7 +752,7 @@ run_main() {
     sipext-up) sipext_up ;;
     uas-up) sipp_uas_up ;;
     down)   down ;;
-    *) die "usage: $0 {up|deploy|obs|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|vip-smoke|isolation-smoke|sipext-up|uas-up|down}" ;;
+    *) die "usage: $0 {up|deploy|obs|obs-check|caps <cps> <secs>|sweep <secs> <cps...>|all <secs> <cps...>|heal-kindnet|vip-smoke|isolation-smoke|sipext-up|uas-up|down}" ;;
   esac
 }
 

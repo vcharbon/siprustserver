@@ -83,6 +83,23 @@ impl Hist {
         self.max
     }
 
+    /// Append this histogram as one Prometheus histogram series set of `family`
+    /// with the extra `labels` (`k="v",…`): cumulative `_bucket`s at every bound
+    /// (seconds) and `+Inf`, `_sum` (seconds) and `_count`. A bound's bucket holds
+    /// the values at or under it, as `record` files them.
+    fn write_prometheus(&self, family: &str, labels: &str, out: &mut String) {
+        let mut cum = 0u64;
+        for (bound_ms, n) in self.bounds.iter().zip(&self.counts) {
+            cum += n;
+            let le = (bound_ms * 1e6).round() / 1e9;
+            out.push_str(&format!("{family}_bucket{{{labels},le=\"{le}\"}} {cum}\n"));
+        }
+        out.push_str(&format!("{family}_bucket{{{labels},le=\"+Inf\"}} {}\n", self.total));
+        let sum_s = (self.sum * 1e6).round() / 1e9;
+        out.push_str(&format!("{family}_sum{{{labels}}} {sum_s}\n"));
+        out.push_str(&format!("{family}_count{{{labels}}} {}\n", self.total));
+    }
+
     fn mean_ms(&self) -> f64 {
         if self.total == 0 {
             0.0
@@ -416,6 +433,24 @@ impl Reporter {
                     h.quantile_ms(q) / 1000.0
                 ));
             }
+        }
+        out.push_str("# HELP loadgen_e2e_latency_seconds End-to-end call latency.\n");
+        out.push_str("# TYPE loadgen_e2e_latency_seconds histogram\n");
+        for (scenario, h) in &g.e2e {
+            h.write_prometheus(
+                "loadgen_e2e_latency_seconds",
+                &format!("scenario=\"{scenario}\""),
+                &mut out,
+            );
+        }
+        out.push_str("# HELP loadgen_checkpoint_latency_seconds Named-checkpoint latency.\n");
+        out.push_str("# TYPE loadgen_checkpoint_latency_seconds histogram\n");
+        for ((scenario, name), h) in &g.checkpoints {
+            h.write_prometheus(
+                "loadgen_checkpoint_latency_seconds",
+                &format!("scenario=\"{scenario}\",checkpoint=\"{name}\""),
+                &mut out,
+            );
         }
         out
     }
@@ -812,6 +847,52 @@ mod tests {
             "clear sub-bucket dir missing"
         );
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// The latency histograms are also exported as Prometheus histograms, so a
+    /// scrape series gives the latency of any time window (histogram_quantile
+    /// over an increase), which the cumulative quantile gauges cannot.
+    #[test]
+    fn latency_histograms_are_exported_as_prometheus_histograms() {
+        let r = Reporter::new(ReporterCfg { sample_cap: 0, background_record_every: 0 });
+        for (setup, e2e) in [(5, 9_000), (50, 9_500), (900_000, 950_000)] {
+            r.record(
+                "basic_call",
+                &CallOutcome::Ok,
+                "",
+                Duration::from_millis(e2e),
+                &[("time_to_200", Duration::from_millis(setup))],
+                None,
+                ChaosTag::Clear,
+            );
+        }
+        let prom = r.render_prometheus();
+        assert!(prom.contains("# TYPE loadgen_checkpoint_latency_seconds histogram"), "{prom}");
+        assert!(prom.contains("# TYPE loadgen_e2e_latency_seconds histogram"), "{prom}");
+        let family = "loadgen_checkpoint_latency_seconds";
+        let labels = "scenario=\"basic_call\",checkpoint=\"time_to_200\"";
+        let buckets: Vec<(f64, u64)> = prom
+            .lines()
+            .filter_map(|l| l.strip_prefix(&format!("{family}_bucket{{{labels},le=\"")))
+            .map(|rest| {
+                let (le, n) = rest.split_once("\"} ").unwrap();
+                let le = if le == "+Inf" { f64::INFINITY } else { le.parse().unwrap() };
+                (le, n.parse().unwrap())
+            })
+            .collect();
+        assert_eq!(buckets.len(), 49, "48 bounds and +Inf: {prom}");
+        assert!(buckets.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 <= w[1].1), "{buckets:?}");
+        let at = |secs: f64| buckets.iter().find(|(le, _)| *le >= secs).unwrap().1;
+        assert_eq!(at(0.005), 1, "5 ms falls in the first bucket reaching 5 ms");
+        assert_eq!(at(0.05), 2);
+        assert_eq!(buckets[47].1, 2, "900 s is past the last bound (~730 s)");
+        assert_eq!(buckets[48], (f64::INFINITY, 3));
+        assert!(prom.contains(&format!("{family}_count{{{labels}}} 3\n")), "{prom}");
+        assert!(prom.contains(&format!("{family}_sum{{{labels}}} 900.055\n")), "{prom}");
+        assert!(
+            prom.contains("loadgen_e2e_latency_seconds_count{scenario=\"basic_call\"} 3\n"),
+            "{prom}"
+        );
     }
 
     /// The case dimension splits ONE class into per-failure-mode sample buckets:
