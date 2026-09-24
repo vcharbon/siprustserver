@@ -10,8 +10,9 @@
 //!   3. Subscribed + engine says `Route` → the CONNECTED call is rerouted:
 //!      replacement b-leg dialed (A's offer), answered, ACKed; the a-leg is
 //!      re-INVITEd onto the new answer SDP; the old b-leg is BYEd; the call
-//!      continues and a normal hangup works. Limiter parity: the reroute
-//!      route's `call_limiter` holds are admitted and released.
+//!      continues and a normal hangup works. The reroute route's
+//!      `call_limiter` holds replace the original route's and are released
+//!      at hangup.
 //!   4. The reroute route OWNS the follow-up policy: its features re-arm the
 //!      GlobalDuration cap and its (empty) `subscriptions` replace the
 //!      original registry, so the SECOND expiry tears down locally with no
@@ -319,9 +320,11 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     // The displaced original b-leg is BYEd.
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    // Limiter parity: the reroute's hold was admitted alongside the original.
-    settle_until(|| store.stats().current_total == 2).await;
-    assert_eq!(store.stats().current_total, 2, "trunk-A + announce-cap holds live");
+    // The reroute's route owns the call's holds: its announce-cap hold
+    // replaces the original route's trunk-A hold.
+    settle_until(|| store.held("trunk-A") == 0 && store.held("announce-cap") == 1).await;
+    assert_eq!(store.held("trunk-A"), 0, "the replaced route's trunk-A hold is released");
+    assert_eq!(store.held("announce-cap"), 1, "the reroute's announce-cap hold is live");
 
     // ── the rerouted call continues; a normal hangup works ────────────────
     h.advance(Duration::from_secs(5)).await;
@@ -330,7 +333,7 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     alice_bye.expect(200).await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "both holds released at hangup");
+    assert_eq!(store.stats().current_total, 0, "the hangup releases the reroute's hold");
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 

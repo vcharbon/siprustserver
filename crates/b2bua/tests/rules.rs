@@ -675,6 +675,47 @@ fn route_fold_holds_join_a_terminating_call_ledger() {
 }
 
 #[test]
+fn a_live_route_fold_hands_the_call_holds_to_its_route() {
+    // Both route folds on a live call replace the call's holds with the
+    // route's: the admitted set (plus the refresh cadence), or none when the
+    // route admitted nothing.
+    let mut call = test_call();
+    call.callback_context = Some("cb".into());
+    call = call::helpers::add_b_leg(call, b_leg_pending());
+    for (rule_id, topic, outcome) in [
+        ("failover-create-leg", "call-failure-result", "failover"),
+        ("release-result-reroute", "call-release-result", "reroute"),
+    ] {
+        let actions = fold_result(&call, rule_id, topic, outcome, route_fold_payload_with_holds());
+        let replaced: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                RuleAction::ReplaceLimiterHolds { holds } => Some(holds.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            replaced,
+            vec![Some((vec![("x".to_string(), 10), ("y".to_string(), 10)], 300))],
+            "{rule_id} hands the call's holds to the admitted set, got {actions:?}",
+        );
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                RuleAction::ScheduleTimer { timer_type: TimerType::LimiterRefresh, .. }
+            )),
+            "{rule_id} keeps the new holds refreshed, got {actions:?}",
+        );
+
+        let actions = fold_result(&call, rule_id, topic, outcome, route_fold_payload());
+        assert!(
+            actions.iter().any(|a| matches!(a, RuleAction::ReplaceLimiterHolds { holds: None })),
+            "{rule_id} releases the call's holds for a route that admitted none, got {actions:?}",
+        );
+    }
+}
+
+#[test]
 fn begin_termination_scrubs_per_leg_no_answer_entries() {
     // Entering `terminating` cancels every per-leg NoAnswer ledger entry —
     // including the entry of a leg the teardown loop skips as already
@@ -3828,8 +3869,10 @@ mod enforce_equivalence {
         // One release per hold: a pre-emitted release discharges one hold of
         // its key.
         let mut already: HashMap<(String, i64), usize> = HashMap::new();
-        for SoftBoundedEffect::DecrementLimiter { limiter_id, window } in &result.effects.soft {
-            *already.entry((limiter_id.clone(), *window)).or_default() += 1;
+        for effect in &result.effects.soft {
+            if let SoftBoundedEffect::DecrementLimiter { limiter_id, window } = effect {
+                *already.entry((limiter_id.clone(), *window)).or_default() += 1;
+            }
         }
         let entries = result.call.limiter_entries.clone();
         for entry in &entries {
@@ -3970,12 +4013,16 @@ mod limiter_settle {
         SoftBoundedEffect::DecrementLimiter { limiter_id: id.into(), window }
     }
 
+    /// Every release of `(id, window)` the turn sends, whatever its kind.
     fn releases_of(effects: &HandlerEffects, id: &str, window: i64) -> usize {
         effects
             .soft
             .iter()
-            .filter(|SoftBoundedEffect::DecrementLimiter { limiter_id, window: w }| {
-                limiter_id == id && *w == window
+            .filter(|effect| match effect {
+                SoftBoundedEffect::DecrementLimiter { limiter_id, window: w }
+                | SoftBoundedEffect::ReleaseReplacedHold { limiter_id, window: w } => {
+                    limiter_id == id && *w == window
+                }
             })
             .count()
     }
@@ -4004,6 +4051,81 @@ mod limiter_settle {
         // Settling again discharges nothing more.
         ObligationSet::core().settle(&call, &mut effects);
         assert_eq!(releases_of(&effects, "x", 300), 2, "{:?}", effects.soft);
+    }
+
+    #[test]
+    fn a_replaced_route_release_discharges_no_ledger_hold() {
+        // The replaced route's hold on `(x, 300)` is off the ledger; the
+        // ledger's own hold on that key still owes its release.
+        let mut call = test_call();
+        call.limiter_entries = vec![hold("x", 300)];
+        let mut effects = HandlerEffects::new();
+        effects
+            .soft
+            .push(SoftBoundedEffect::ReleaseReplacedHold { limiter_id: "x".into(), window: 300 });
+        ObligationSet::core().settle(&call, &mut effects);
+        assert_eq!(releases_of(&effects, "x", 300), 2, "{:?}", effects.soft);
+    }
+
+    /// Execute `actions` on `call` for a failover fold's turn, then enforce.
+    fn fold_turn(call: &call::Call, actions: &[RuleAction]) -> HandlerResult {
+        let event =
+            fold_event(call, "call-failure-result", "failover", route_fold_payload_with_holds());
+        let config = B2buaConfig::default();
+        let ctx = ctx_for(call, &event, &config);
+        let id_gen = IdGen::seeded(1);
+        let exec = ActionExecutor {
+            config: &config,
+            id_gen: &id_gen,
+            now_ms: 0,
+            wire_faults: &b2bua::wire_faults::WireFaults::none(),
+        };
+        let result = exec.execute(actions, call, &ctx);
+        invariants::enforce(&ObligationSet::core(), call, result, 0, false)
+    }
+
+    #[test]
+    fn replacing_the_holds_releases_the_replaced_route_and_records_the_new_one() {
+        // Two holds on `(x, 300)`, a fail-open `y` (no increment) and `z`:
+        // every live hold is released, the fail-open entry is only dropped,
+        // and the new route's `x` at 600 is the ledger.
+        let mut call = test_call();
+        let mut fail_open = hold("y", 300);
+        fail_open.increment_succeeded = Some(false);
+        call.limiter_entries = vec![hold("x", 300), hold("x", 300), fail_open, hold("z", 300)];
+        let result = fold_turn(
+            &call,
+            &[RuleAction::ReplaceLimiterHolds { holds: Some((vec![("x".into(), 10)], 600)) }],
+        );
+        assert_eq!(result.call.limiter_entries, vec![hold("x", 600)]);
+        assert_eq!(releases_of(&result.effects, "x", 300), 2, "{:?}", result.effects.soft);
+        assert_eq!(releases_of(&result.effects, "y", 300), 0, "{:?}", result.effects.soft);
+        assert_eq!(releases_of(&result.effects, "z", 300), 1, "{:?}", result.effects.soft);
+        assert_eq!(releases_of(&result.effects, "x", 600), 0, "the new hold is kept");
+
+        // A route that admitted nothing leaves the call uncounted.
+        let result = fold_turn(&call, &[RuleAction::ReplaceLimiterHolds { holds: None }]);
+        assert!(result.call.limiter_entries.is_empty(), "{:?}", result.call.limiter_entries);
+        assert_eq!(releases_of(&result.effects, "x", 300), 2, "{:?}", result.effects.soft);
+        assert_eq!(releases_of(&result.effects, "z", 300), 1, "{:?}", result.effects.soft);
+    }
+
+    #[test]
+    fn replacing_the_holds_on_the_turn_that_ends_the_call_releases_each_hold_once() {
+        // The replaced route and the new one both hold `(x, 300)`. The turn
+        // replaces then terminates: the two replaced holds and the new one
+        // are three releases — the replaced ones never discharge the new.
+        let mut call = test_call();
+        call.limiter_entries = vec![hold("x", 300), hold("x", 300)];
+        let result = fold_turn(
+            &call,
+            &[
+                RuleAction::ReplaceLimiterHolds { holds: Some((vec![("x".into(), 10)], 300)) },
+                RuleAction::TerminateCall { cause: TerminationCause::Supervisor, by_leg: None },
+            ],
+        );
+        assert_eq!(result.call.state, CallModelState::Terminated, "the turn ends the call");
+        assert_eq!(releases_of(&result.effects, "x", 300), 3, "{:?}", result.effects.soft);
     }
 }
 

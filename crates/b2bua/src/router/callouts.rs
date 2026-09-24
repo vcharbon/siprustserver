@@ -115,7 +115,8 @@ fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
 /// `Ok(None)`: nothing to admit, or the limiter was unavailable (fail-open —
 /// no holds recorded, initial-route parity); `Ok(Some((entries, window)))`:
 /// admitted holds the fold carries to the call, whose ledger takes them
-/// (`RecordLimiterHolds`, on a live or Terminating call) or which
+/// (`ReplaceLimiterHolds` on a live call, `RecordLimiterHolds` on a
+/// Terminating one) or which
 /// [`release_route_fold_holds`] releases when no call can take the fold;
 /// `Err(limiter_id)`: rejected over-cap — the caller owns the treatment.
 async fn admit_route_limiters(

@@ -101,8 +101,9 @@ impl ObligationSet {
 /// Kind `"limiter"` — every recorded hold is decremented exactly once on
 /// termination (the strong INCR↔DECR invariant). Fail-open admissions
 /// (`increment_succeeded == Some(false)`) carry no real increment, so they are
-/// skipped. A release a rule already emitted discharges one hold of its
-/// `(limiter_id, window)`; two holds on one key are two releases.
+/// skipped. A `DecrementLimiter` a rule already emitted discharges one hold of
+/// its `(limiter_id, window)`; two holds on one key are two releases. A
+/// replaced route's `ReleaseReplacedHold` discharges none.
 pub struct LimiterObligations;
 
 impl ObligationKind for LimiterObligations {
@@ -114,8 +115,12 @@ impl ObligationKind for LimiterObligations {
         // A multiset: each release already emitted discharges ONE hold of its
         // `(limiter_id, window)`, so two holds on one key owe two releases.
         let mut already: HashMap<(&str, i64), usize> = HashMap::new();
-        for SoftBoundedEffect::DecrementLimiter { limiter_id, window } in &effects.soft {
-            *already.entry((limiter_id.as_str(), *window)).or_default() += 1;
+        // A replaced route's release (`ReleaseReplacedHold`) is off the
+        // ledger already and discharges none of its entries.
+        for effect in &effects.soft {
+            if let SoftBoundedEffect::DecrementLimiter { limiter_id, window } = effect {
+                *already.entry((limiter_id.as_str(), *window)).or_default() += 1;
+            }
         }
         let mut owed = Vec::new();
         for entry in &call.limiter_entries {

@@ -187,6 +187,20 @@ impl WindowStore {
         inner.auto_cleared - before
     }
 
+    /// The live count `id` holds, summed over every window still stored
+    /// (TTL-expired keys excluded): the per-id share of
+    /// [`WindowStats::current_total`].
+    pub fn held(&self, id: &str) -> i64 {
+        let now_ms = self.now_ms();
+        let inner = self.inner.lock().unwrap();
+        inner
+            .map
+            .iter()
+            .filter(|((k, _), en)| k == id && en.expires_at_ms > now_ms)
+            .map(|(_, en)| en.count)
+            .sum()
+    }
+
     /// Live gauges + the cumulative auto-clear counter, for metrics.
     pub fn stats(&self) -> WindowStats {
         // The windows `admit` sums: the current one and the N-1 before it.

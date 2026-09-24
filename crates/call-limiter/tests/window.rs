@@ -175,3 +175,21 @@ async fn admission_max_is_the_lookback_sum_admit_compares_not_the_live_total() {
     s.sweep_now();
     assert_eq!(s.stats().current_total, 3);
 }
+
+#[tokio::test(start_paused = true)]
+async fn held_is_one_id_s_live_count_across_windows() {
+    let s = store(); // 1 s windows, 4 s TTL
+    let AdmitResult::Admitted { window: w0 } = s.admit(&entry("A", 5)) else { panic!() };
+    s.admit(&entry("B", 5));
+    advance(1000).await;
+    s.admit(&entry("A", 5));
+    assert_eq!(s.held("A"), 2, "both windows of A count");
+    assert_eq!(s.held("B"), 1);
+    assert_eq!(s.held("C"), 0, "an id never admitted holds nothing");
+    s.release(&[Hold { id: "A".into(), window: w0 }]);
+    assert_eq!(s.held("A"), 1);
+    // Past the first admit's TTL its key no longer counts, swept or not.
+    advance(3500).await;
+    assert_eq!(s.held("A"), 1, "the second window's A is still live");
+    assert_eq!(s.held("B"), 0, "B's key expired");
+}

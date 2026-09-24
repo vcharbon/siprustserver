@@ -167,8 +167,9 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
         // Output parity with the initial/failover route: the
         // shared `route_fold_parity_actions` applies features (incl. the
         // GlobalDuration re-arm — the rerouted call gets the route's fresh
-        // cap), service_ext, subscriptions, and the router-admitted limiter
-        // holds; `CreateLeg` honors the identity/header/body rewrites.
+        // cap), service_ext, subscriptions, and the limiter holds (the
+        // reroute's admitted holds replace the call's); `CreateLeg` honors
+        // the identity/header/body rewrites.
         rule(
             "release-result-reroute",
             &[],

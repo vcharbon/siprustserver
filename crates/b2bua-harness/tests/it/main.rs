@@ -72,6 +72,7 @@ mod refer_transparent_relay;
 mod reinvite;
 mod reinvite_cancel;
 mod release_event;
+mod reroute_limiter_holds;
 mod response_contact_scope;
 mod route_fold_limiter_holds;
 mod second_final_refused;

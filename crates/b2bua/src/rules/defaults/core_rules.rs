@@ -738,7 +738,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 // (one shared parser + parity-action builder, also used by the
                 // `release-reroute` fold): features (incl. the GlobalDuration
                 // re-arm), service_ext, subscriptions, update_body, and the
-                // limiter holds the router's fold already admitted.
+                // limiter holds (the route's admitted holds replace the call's).
                 let fold = parse_route_fold(payload)?;
                 let failed_leg_id =
                     payload.get("failed_leg_id").and_then(|v| v.as_str()).unwrap_or("");

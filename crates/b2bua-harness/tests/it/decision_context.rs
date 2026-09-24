@@ -475,6 +475,65 @@ async fn failover_route_limiter_is_admitted_and_released_at_termination() {
     let _ = h.finish().await;
 }
 
+// ── 3a. Failover Route over a limited initial route: the holds are replaced ─
+
+#[tokio::test]
+async fn failover_route_limiter_replaces_the_initial_route_holds() {
+    let h = Harness::with_transit_delay("failover-limiter-replaces", 0);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let carol = h.agent("carol", "127.0.0.1:5070").await; // first target — 503s
+    let bob = h.agent("bob", "127.0.0.1:5071").await; // reroute target
+
+    let http = SimulatedHttpNetwork::new();
+    let (store, _lh) = serve_limiter(&http).await;
+
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.callback_context = Some("ctx-replace".into());
+                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 5 }];
+                NewCallResponse::Route(r)
+            })
+            .on_failure(|_| {
+                let mut r = route_to("127.0.0.1", 5071);
+                r.call_limiter = vec![CallLimiterEntry { id: "trunk-B".into(), limit: 5 }];
+                CallTreatment::Route(r)
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter_client(&http))
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    carol.receive("INVITE").await.respond(503, "Service Unavailable").await;
+    carol.receive("ACK").await;
+
+    // The failover route owns the call's holds: trunk-B replaces trunk-A.
+    let mut bob_uas = bob.receive("INVITE").await;
+    settle_until(|| store.held("trunk-A") == 0 && store.held("trunk-B") == 1).await;
+    assert_eq!(store.held("trunk-A"), 0, "the replaced route's trunk-A hold is released");
+    assert_eq!(store.held("trunk-B"), 1, "the failover route's trunk-B hold is live");
+
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(store.stats().current_total, 1, "the answered call holds trunk-B alone");
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| store.stats().current_total == 0).await;
+    assert_eq!(store.stats().current_total, 0, "BYE released the failover hold");
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+
+    let _ = h.finish().await;
+}
+
 // ── 3b. Failover Route limiter reject → bounded re-consult ──────────────────
 
 #[tokio::test]

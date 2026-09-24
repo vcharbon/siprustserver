@@ -84,9 +84,17 @@ pub enum CriticalStateEffect {
 }
 
 /// Soft-bounded effects — limiter decrements with a short timeout (never block).
+/// Both variants release one hold; they differ in what the terminal settle
+/// counts against the call's ledger.
 #[derive(Debug, Clone)]
 pub enum SoftBoundedEffect {
+    /// Release a hold the call's ledger still records: the settle counts it
+    /// as discharging one ledger entry of its `(limiter_id, window)`.
     DecrementLimiter { limiter_id: String, window: i64 },
+    /// Release a hold of a replaced route, already removed from the ledger:
+    /// the settle never counts it, so it cannot stand in for a remaining
+    /// hold on the same `(limiter_id, window)`.
+    ReleaseReplacedHold { limiter_id: String, window: i64 },
 }
 
 /// Buffered observability effects — drop-on-overload is acceptable.

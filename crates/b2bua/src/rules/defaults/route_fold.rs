@@ -151,8 +151,10 @@ pub(crate) fn parse_service_ext(payload: &serde_json::Value) -> call::ExtMap {
 /// The output-parity bookkeeping actions BOTH async route folds emit before
 /// their `CreateLeg` — what the initial `apply_route` applies at route time:
 /// features (incl. the GlobalDuration re-arm), service_ext merge, the
-/// release-subscription registry, and the already-admitted limiter holds
-/// (+ the LimiterRefresh cadence that keeps them alive).
+/// release-subscription registry, and the limiter holds (+ the LimiterRefresh
+/// cadence that keeps them alive). The applied route owns the call's holds:
+/// the replaced route's are released and the fold's admitted ones, if any,
+/// take their place.
 pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> Vec<RuleAction> {
     let mut actions = Vec::new();
     if let Some(f) = &fold.features {
@@ -177,8 +179,8 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
         // like `apply_route` on the initial path.
         actions.push(RuleAction::SetSubscriptions { events: events.clone() });
     }
-    if let Some((entries, window)) = &fold.limiter_holds {
-        actions.push(RuleAction::RecordLimiterHolds { entries: entries.clone(), window: *window });
+    actions.push(RuleAction::ReplaceLimiterHolds { holds: fold.limiter_holds.clone() });
+    if fold.limiter_holds.is_some() {
         actions.push(RuleAction::ScheduleTimer {
             timer_type: TimerType::LimiterRefresh,
             delay: TimerDelay::secs(ctx.config.limiter_refresh_sec),

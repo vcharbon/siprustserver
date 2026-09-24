@@ -162,7 +162,8 @@ pub(super) async fn process_result(
 
     for eff in &result.effects.soft {
         match eff {
-            SoftBoundedEffect::DecrementLimiter { limiter_id, window } => {
+            SoftBoundedEffect::DecrementLimiter { limiter_id, window }
+            | SoftBoundedEffect::ReleaseReplacedHold { limiter_id, window } => {
                 ctx.limiter
                     .release(&[crate::limiter::LimiterHold {
                         limiter_id: limiter_id.clone(),

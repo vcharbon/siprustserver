@@ -937,13 +937,23 @@ pub enum RuleAction {
     MergeCallExt {
         ext: ExtMap,
     },
-    /// Record **already-admitted** limiter holds on the call. The async
-    /// failover route's admit runs in the router's fire-and-forget task (the
-    /// rule layer is sync); this folds the holds into the replicated call so
-    /// termination decrements them. `entries` are `(limiter_id, limit)`.
+    /// Append **already-admitted** limiter holds to the call's ledger, next to
+    /// the holds it carries, so termination decrements them. For holds that do
+    /// not replace the call's route (a route fold landing on a going-away
+    /// call). `entries` are `(limiter_id, limit)`.
     RecordLimiterHolds {
         entries: Vec<(String, i64)>,
         window: i64,
+    },
+    /// Hand the call's limiter holds to the route a fold applies: the latest
+    /// applied route owns them. Every hold the call carries leaves the ledger
+    /// and is released (a fail-open entry holds nothing and is only dropped);
+    /// `holds`, `(entries, window)` already admitted by the fold's dispatching
+    /// task, are recorded in their place. `None`: the route admitted nothing
+    /// (it states no limiter, or its admit failed open) and the call is left
+    /// uncounted.
+    ReplaceLimiterHolds {
+        holds: Option<(Vec<(String, i64)>, i64)>,
     },
     /// Synthesize a final failure response on the a-leg INVITE server txn
     /// (the terminate-after-`/call/failure` path — relay the b-leg failure to A
@@ -1080,6 +1090,7 @@ impl RuleAction {
             | RuleAction::SetFeatures { .. }
             | RuleAction::MergeCallExt { .. }
             | RuleAction::RecordLimiterHolds { .. }
+            | RuleAction::ReplaceLimiterHolds { .. }
             | RuleAction::ResolveCancelledReinvite { .. } => EffectKind::Bookkeeping,
         }
     }
