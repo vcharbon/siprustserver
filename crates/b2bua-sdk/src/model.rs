@@ -947,11 +947,8 @@ pub enum RuleAction {
     },
     /// Hand the call's limiter holds to the route a fold applies: the latest
     /// applied route owns them. Every hold the call carries leaves the ledger
-    /// and is released (a fail-open entry holds nothing and is only dropped);
-    /// `holds`, `(entries, window)` already admitted by the fold's dispatching
-    /// task, are recorded in their place. `None`: the route admitted nothing
-    /// (it states no limiter, or its admit failed open) and the call is left
-    /// uncounted.
+    /// and is released; `holds`, `(entries, window)` already admitted by the
+    /// fold's dispatching task, take their place (`None`: nothing admitted).
     ReplaceLimiterHolds {
         holds: Option<(Vec<(String, i64)>, i64)>,
     },

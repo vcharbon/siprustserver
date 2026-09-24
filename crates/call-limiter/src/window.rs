@@ -187,9 +187,10 @@ impl WindowStore {
         inner.auto_cleared - before
     }
 
-    /// The live count `id` holds, summed over every window still stored
-    /// (TTL-expired keys excluded): the per-id share of
-    /// [`WindowStats::current_total`].
+    /// The live count `id` holds, summed over every window whose key has not
+    /// reached its TTL: the per-id share of [`WindowStats::current_total`]
+    /// once the store is swept (that total still counts expired, unswept
+    /// keys).
     pub fn held(&self, id: &str) -> i64 {
         let now_ms = self.now_ms();
         let inner = self.inner.lock().unwrap();

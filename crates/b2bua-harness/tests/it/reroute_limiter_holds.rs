@@ -16,14 +16,15 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
-    CallLimiterEntry, CallReleaseResponse, CallTreatment, NewCallResponse, ReleaseOutcome,
-    ScriptedDecisionEngine,
+    CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
+    CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
+    CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
 use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold};
 use b2bua::limiter_http::HttpCallLimiter;
@@ -114,6 +115,42 @@ impl CallLimiter for UnavailableOnAdmit {
 
 fn limiters(ids: &[&str]) -> Vec<CallLimiterEntry> {
     ids.iter().map(|id| CallLimiterEntry { id: (*id).into(), limit: 10 }).collect()
+}
+
+/// Delays the `n`-th `call_failure` (1-based) by `delay` before delegating.
+struct DelayNthFailure {
+    n: usize,
+    delay: Duration,
+    failures: AtomicUsize,
+    inner: Arc<dyn CallDecisionEngine>,
+}
+
+#[async_trait]
+impl CallDecisionEngine for DelayNthFailure {
+    async fn new_call(&self, req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
+        self.inner.new_call(req).await
+    }
+    async fn call_failure(
+        &self,
+        req: CallFailureRequest,
+    ) -> Result<CallFailureResponse, CallDecisionError> {
+        if self.failures.fetch_add(1, Ordering::SeqCst) + 1 == self.n {
+            tokio::time::sleep(self.delay).await;
+        }
+        self.inner.call_failure(req).await
+    }
+    async fn call_refer(
+        &self,
+        req: CallReferRequest,
+    ) -> Result<CallReferResponse, CallDecisionError> {
+        self.inner.call_refer(req).await
+    }
+    async fn call_release(
+        &self,
+        req: CallReleaseRequest,
+    ) -> Result<CallReleaseResponse, CallDecisionError> {
+        self.inner.call_release(req).await
+    }
 }
 
 /// A route toward `host:port` with `ids` as its call limiters and a callback
@@ -320,6 +357,93 @@ async fn consecutive_failovers_hold_only_the_latest_route() {
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
     let _ = h.finish().await;
+}
+
+/// A refused replacement route keeps the call's holds. The initial route
+/// holds `x`; bob busies out and the failover route `[y, z]` is refused on its
+/// second entry (`z` at its cap): nothing is incremented, not even `y`, and
+/// the call still holds `x` while the limiter-reject re-consult is in flight.
+/// The re-consult's route `[z]` (room this time) is applied and replaces `x`.
+#[tokio::test(start_paused = true)]
+async fn refused_failover_route_keeps_the_call_holds_until_a_route_is_applied() {
+    let h = Harness::new("reroute-holds-refused-failover");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let carol = h.agent("carol", "127.0.0.1:5071").await;
+    let rig = limiter_rig().await;
+    let origins = Arc::new(Mutex::new(Vec::new()));
+    let seen = origins.clone();
+    let decision = Arc::new(DelayNthFailure {
+        n: 2,
+        delay: Duration::from_secs(1),
+        failures: AtomicUsize::new(0),
+        inner: Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(|_| NewCallResponse::Route(limited_route("127.0.0.1", 5070, &["x"])))
+                .on_failure(move |req| {
+                    seen.lock().unwrap().push(req.failure.origin.clone());
+                    if req.failure.origin == "call_limiter" {
+                        return CallTreatment::Route(limited_route("127.0.0.1", 5071, &["z"]));
+                    }
+                    // `z` at cap 0 is refused (its witness already holds one).
+                    let mut r = limited_route("127.0.0.1", 5099, &[]);
+                    r.call_limiter = vec![
+                        CallLimiterEntry { id: "y".into(), limit: 10 },
+                        CallLimiterEntry { id: "z".into(), limit: 0 },
+                    ];
+                    CallTreatment::Route(r)
+                })
+                .build(),
+        ),
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(rig.client.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    rig.expect_holds([1, 0, 0], "the initial route holds x").await;
+    bob_uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+
+    // ── the failover route is refused; the re-consult is in flight ─────────
+    h.advance(Duration::from_millis(500)).await;
+    assert_eq!(
+        *origins.lock().unwrap(),
+        vec!["external".to_string()],
+        "the failover route was answered; the re-consult is still delayed",
+    );
+    rig.expect_holds([1, 0, 0], "the refused route incremented nothing; x stays held").await;
+
+    // ── the re-consult's route is applied and replaces x ────────────────────
+    let mut carol_uas = carol.receive("INVITE").await;
+    assert_eq!(
+        *origins.lock().unwrap(),
+        vec!["external".to_string(), "call_limiter".to_string()],
+        "the refused route re-consulted with the limiter origin",
+    );
+    rig.expect_holds([0, 0, 1], "the applied route's z replaces x").await;
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    carol.receive("ACK").await;
+
+    let mut bye = dialog.bye().await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+    rig.expect_holds([0, 0, 0], "the hangup releases the applied route's hold").await;
+
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let report = h.finish().await;
+    assert_eq!(
+        invite_final_statuses(&report, alice.addr()),
+        vec![200],
+        "the a-leg INVITE transaction carries exactly one final: the 200",
+    );
 }
 
 /// The fold that replaces the holds also ends the call. Initial `[x, x]`, the

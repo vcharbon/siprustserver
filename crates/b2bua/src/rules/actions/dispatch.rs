@@ -329,7 +329,12 @@ impl ActionExecutor<'_> {
             RuleAction::ReplaceLimiterHolds { holds } => {
                 // The replaced holds leave the ledger in this turn's write and
                 // are released through the soft lane, after the new leg's
-                // INVITE; the settle does not count these releases.
+                // INVITE; the settle does not count these releases. A
+                // fail-open entry holds nothing and is only dropped. `None`
+                // (no limiter stated, or a fail-open admit) leaves the call
+                // uncounted.
+                // FIXME(limiter): a crash before this turn's flush lands re-releases these from the stale replica.
+                // Fix: release the replaced holds once the fold turn's replication flush is acknowledged.
                 for entry in std::mem::take(&mut call.limiter_entries) {
                     if entry.increment_succeeded != Some(false) {
                         fx.soft.push(SoftBoundedEffect::ReleaseReplacedHold {

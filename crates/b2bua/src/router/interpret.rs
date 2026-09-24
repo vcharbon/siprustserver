@@ -161,24 +161,27 @@ pub(super) async fn process_result(
     emit_outbound(ctx, call_ref, &result, now_ms).await;
 
     for eff in &result.effects.soft {
-        match eff {
-            SoftBoundedEffect::DecrementLimiter { limiter_id, window }
-            | SoftBoundedEffect::ReleaseReplacedHold { limiter_id, window } => {
-                ctx.limiter
-                    .release(&[crate::limiter::LimiterHold {
-                        limiter_id: limiter_id.clone(),
-                        window: *window,
-                    }])
-                    .await;
-                if crate::trace::sampled(&result.call) {
-                    crate::trace::emit::limiter(
-                        &result.call,
-                        now_ms,
-                        "release",
-                        &format!("{limiter_id} @ {window}"),
-                    );
-                }
+        let (limiter_id, window, op) = match eff {
+            SoftBoundedEffect::DecrementLimiter { limiter_id, window } => {
+                (limiter_id, window, "release")
             }
+            SoftBoundedEffect::ReleaseReplacedHold { limiter_id, window } => {
+                (limiter_id, window, "release-replaced")
+            }
+        };
+        ctx.limiter
+            .release(&[crate::limiter::LimiterHold {
+                limiter_id: limiter_id.clone(),
+                window: *window,
+            }])
+            .await;
+        if crate::trace::sampled(&result.call) {
+            crate::trace::emit::limiter(
+                &result.call,
+                now_ms,
+                op,
+                &format!("{limiter_id} @ {window}"),
+            );
         }
     }
 
