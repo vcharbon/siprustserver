@@ -380,3 +380,48 @@ async fn recorder_captures_response_and_error() {
     assert!(matches!(cap[0].outcome, ExchangeOutcome::Response { status: 200, .. }));
     assert!(matches!(cap[1].outcome, ExchangeOutcome::Error(_)));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_request_is_in_flight_to_its_destination_until_answered() {
+    let net = SimulatedHttpNetwork::new();
+    let (svc, _calls) = echo();
+    let dst = addr("10.0.0.1:8080");
+    let _server = net.serve(dst, svc).await.unwrap();
+    net.apply_fault(Fault::Delay { dst, ms: 50 });
+
+    let h = tokio::spawn({
+        let net = net.clone();
+        async move { net.request(dst, HttpRequest::post("/hi", vec![])).await }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(net.in_flight(dst), 1, "sent, not yet answered");
+    assert_eq!(net.in_flight(addr("10.0.0.2:8080")), 0, "counted per destination");
+    advance_in_100ms_chunks(Duration::from_millis(200)).await;
+    assert!(h.await.unwrap().is_ok());
+    assert_eq!(net.in_flight(dst), 0, "answered");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_its_caller_abandons_leaves_the_flight() {
+    let net = SimulatedHttpNetwork::new();
+    let (svc, _calls) = echo();
+    let dst = addr("10.0.0.1:8080");
+    let _server = net.serve(dst, svc).await.unwrap();
+    net.apply_fault(Fault::Stall { dst });
+
+    let h = tokio::spawn({
+        let net = net.clone();
+        async move {
+            tokio::time::timeout(
+                Duration::from_millis(150),
+                net.request(dst, HttpRequest::post("/hi", vec![])),
+            )
+            .await
+        }
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(net.in_flight(dst), 1, "stalled");
+    advance_in_100ms_chunks(Duration::from_millis(300)).await;
+    assert!(h.await.unwrap().is_err(), "the caller timed out");
+    assert_eq!(net.in_flight(dst), 0, "a dropped request is no longer in flight");
+}

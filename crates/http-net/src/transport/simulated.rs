@@ -96,6 +96,34 @@ struct Shared {
     default_delay_ms: u64,
     /// Woken on any [`Fault::Resume`]; stalled requests re-check the fault map.
     resume: Notify,
+    /// Requests started and not yet finished or dropped, keyed by destination.
+    in_flight: Mutex<HashMap<SocketAddr, usize>>,
+}
+
+/// Counts one request to `dst` as in flight until it finishes or its future
+/// is dropped (a caller's timeout).
+struct InFlight<'a> {
+    shared: &'a Shared,
+    dst: SocketAddr,
+}
+
+impl<'a> InFlight<'a> {
+    fn start(shared: &'a Shared, dst: SocketAddr) -> Self {
+        *shared.in_flight.lock().unwrap().entry(dst).or_default() += 1;
+        Self { shared, dst }
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        let mut in_flight = self.shared.in_flight.lock().unwrap();
+        if let Some(n) = in_flight.get_mut(&self.dst) {
+            *n -= 1;
+            if *n == 0 {
+                in_flight.remove(&self.dst);
+            }
+        }
+    }
 }
 
 /// The simulated HTTP fabric. Clone shares the routing table + fault state.
@@ -126,6 +154,7 @@ impl SimulatedHttpNetwork {
                 delays: Mutex::new(HashMap::new()),
                 default_delay_ms: transit_delay_ms.max(1),
                 resume: Notify::new(),
+                in_flight: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -152,6 +181,13 @@ impl SimulatedHttpNetwork {
                 self.shared.resume.notify_waiters();
             }
         }
+    }
+
+    /// Requests to `dst` started and not yet answered, failed or abandoned by
+    /// their caller: what a test settles on before it reads a side effect a
+    /// detached request still owes.
+    pub fn in_flight(&self, dst: SocketAddr) -> usize {
+        self.shared.in_flight.lock().unwrap().get(&dst).copied().unwrap_or(0)
     }
 
     fn transit_delay(&self, dst: SocketAddr) -> u64 {
@@ -201,6 +237,7 @@ impl HttpTransport for SimulatedHttpNetwork {
     }
 
     async fn request(&self, dst: SocketAddr, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let _in_flight = InFlight::start(&self.shared, dst);
         // Resolve faults first (re-checking after each stall wake).
         loop {
             let fault = self.shared.faults.lock().unwrap().get(&dst).cloned();
