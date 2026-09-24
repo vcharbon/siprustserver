@@ -78,6 +78,7 @@ async fn limiter_refresh_self_touch_does_not_mask_staleness() {
     let decision = route_with_limiter("127.0.0.1", 5072, "trunk-A", 1);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             // No keepalive inside the horizon; an aggressive refresh cadence
             // (10 s << idle 60 s) so the self-touch masking is fully exercised.
@@ -111,7 +112,6 @@ async fn limiter_refresh_self_touch_does_not_mask_staleness() {
 
     // The reap settles the obligations: the limiter hold is released.
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "reap released the limiter hold");
 
     settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();

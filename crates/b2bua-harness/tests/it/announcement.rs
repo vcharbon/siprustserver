@@ -203,6 +203,7 @@ async fn announcement_clip_fails_after_answer_rejects_caller_without_bye() {
     mrf.receive("BYE").await.respond(200, "OK").await;
 
     let _ = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     assert_eq!(b2bua.active_calls(), 0, "the call reaps — no stranded a-leg BYE");
 }
 

@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::run::RunReport;
 use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
@@ -152,5 +152,6 @@ async fn a_481_answering_a_stack_originated_prack_does_not_end_the_call() {
 
     let report = h.finish().await;
     write_flow_report(&report);
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }

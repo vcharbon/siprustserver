@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::run::RunReport;
 use scenario_harness::Harness;
@@ -194,6 +194,7 @@ async fn a_repeat_of_a_stack_pracked_provisional_draws_no_second_prack() {
         "the originator sees the stripped provisional once — bob's repeat is absorbed here, \
          it is not hers to receive again",
     );
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -259,5 +260,6 @@ async fn a_repeat_behind_the_18x_mask_draws_no_second_prack() {
         "the masking path acknowledges one reliable provisional once (RFC 3262 §4) — a repeat \
          is a retransmission, not a rung owed its own PRACK",
     );
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }

@@ -115,6 +115,7 @@ async fn max_duration_byes_both_legs_and_releases_the_limiter() {
     let decision = route_limited("127.0.0.1", 5070, "trunk-A", 1, 60);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -183,6 +184,7 @@ async fn max_duration_fires_mid_reinvite_and_releases_the_limiter() {
     let decision = route_limited("127.0.0.1", 5075, "trunk-A", 1, 10);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -225,7 +227,6 @@ async fn max_duration_fires_mid_reinvite_and_releases_the_limiter() {
     h.advance(Duration::from_secs(33)).await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter released at the max-duration teardown");
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 
@@ -259,6 +260,7 @@ async fn provisional_storm_before_connect_trips_the_cap_and_releases_the_limiter
     let decision = route_limited("127.0.0.1", 5071, "trunk-A", 1, 3_600);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| c.reaper_enabled = false)
         .start(&h, "b2bua", "127.0.0.1:5081")
         .await;
@@ -296,7 +298,6 @@ async fn provisional_storm_before_connect_trips_the_cap_and_releases_the_limiter
     bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter hold released at the cap teardown");
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 
@@ -323,6 +324,7 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
     let decision = route_limited("127.0.0.1", 5076, "trunk-A", 1, 3_600);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| c.reaper_enabled = false)
         .start(&h, "b2bua", "127.0.0.1:5086")
         .await;
@@ -408,6 +410,7 @@ async fn in_dialog_message_storm_trips_the_cap_and_releases_the_limiter() {
     let decision = route_limited("127.0.0.1", 5072, "trunk-A", 1, 3_600);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         // Keepalive far out so the ONLY in-dialog events are our OPTIONS — the
         // count is then exactly 2 per round, deterministic.
         .tune(|c| {
@@ -463,7 +466,6 @@ async fn in_dialog_message_storm_trips_the_cap_and_releases_the_limiter() {
     b_bye.respond(200, "OK").await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter hold released at the cap teardown");
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 
@@ -524,6 +526,7 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
     let (store, _limiter_srv) = serve_limiter(&http).await;
     let b2bua = B2buaSut::builder(Arc::new(SilentFailoverEngine))
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.max_messages_per_call = CAP;
             c.reaper_enabled = false;
@@ -568,7 +571,6 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
         reasons_of(&cdrs[0]),
     );
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter hold released on the cap turn itself");
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 

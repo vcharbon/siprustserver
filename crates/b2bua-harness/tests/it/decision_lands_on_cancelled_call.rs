@@ -264,8 +264,11 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
                 .build(),
         ),
     });
-    let b2bua =
-        B2buaSut::builder(decision).limiter(limiter).start(&h, "b2bua", "127.0.0.1:5080").await;
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter)
+        .limiter_store(store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     h.advance(Duration::from_millis(200)).await;
@@ -283,14 +286,10 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 1);
 
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    b2bua.assert_fully_reaped();
-
     // The admit really happened (its window key is live) AND the termination
     // discharged it — the INCR↔DECR pairing survives the drop.
-    settle_until(|| store.stats().current_total == 0).await;
-    let stats = store.stats();
-    assert_eq!(stats.live_keys, 1, "the dropped route's admit INCRed a real hold");
-    assert_eq!(stats.current_total, 0, "the termination DECRed the carried hold");
+    assert_eq!(store.stats().live_keys, 1, "the dropped route's admit INCRed a real hold");
+    b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
     assert_eq!(

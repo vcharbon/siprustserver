@@ -74,6 +74,7 @@ async fn rejected_call_gets_486_and_no_second_increment() {
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -103,6 +104,7 @@ async fn release_on_bye_frees_the_slot() {
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -115,7 +117,8 @@ async fn release_on_bye_frees_the_slot() {
 
     // The release must drain the counter back to 0.
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "BYE must release the limiter hold");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
 
     // The freed slot admits a fresh call (bob sees its INVITE, not a 486).
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -141,6 +144,7 @@ async fn fail_open_admits_when_limiter_is_cut() {
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -163,16 +167,18 @@ async fn shared_counting_across_two_workers() {
     let carol = h.agent("carol", "127.0.0.1:5061").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let http = SimulatedHttpNetwork::new();
-    let (_store, _lh) = serve_limiter(&http).await;
+    let (store, _lh) = serve_limiter(&http).await;
 
     // Two workers, distinct ordinals, ONE shared limiter server.
     let w0 = B2buaSut::builder(route_with_limiter("127.0.0.1", 5070, "trunk-A", 1))
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| c.self_ordinal = "w0".into())
         .start(&h, "w0", "127.0.0.1:5080")
         .await;
     let w1 = B2buaSut::builder(route_with_limiter("127.0.0.1", 5070, "trunk-A", 1))
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| c.self_ordinal = "w1".into())
         .start(&h, "w1", "127.0.0.1:5081")
         .await;
@@ -194,7 +200,7 @@ async fn failover_on_reject_routes_to_backup() {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let bob2 = h.agent("bob2", "127.0.0.1:5071").await;
     let http = SimulatedHttpNetwork::new();
-    let (_store, _lh) = serve_limiter(&http).await;
+    let (store, _lh) = serve_limiter(&http).await;
 
     // Primary route: trunk-A cap 1 + callback_context (failover-capable).
     // On /call/failure: failover to bob2 (no limiter).
@@ -211,6 +217,7 @@ async fn failover_on_reject_routes_to_backup() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 

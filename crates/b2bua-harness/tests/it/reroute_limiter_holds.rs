@@ -12,7 +12,8 @@
 //! admitted outside the call, so a surplus release shows as a count below the
 //! witness instead of vanishing under the store's floor at 0. The store is
 //! probed per id while the call is up and drained to the witnesses after it
-//! ends.
+//! ends; the witnesses are then released, so the reaped check reads the store
+//! empty.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,7 +31,7 @@ use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold};
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut};
 use call::ReleaseEventKind;
-use call_limiter::wire::AdmitEntry;
+use call_limiter::wire::{AdmitEntry, Hold};
 use call_limiter::{AdmitResult, LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
@@ -49,6 +50,8 @@ const IDS: [&str; 3] = ["x", "y", "z"];
 struct LimiterRig {
     store: Arc<WindowStore>,
     client: Arc<dyn CallLimiter>,
+    /// The window the witness holds landed in.
+    witness_window: i64,
     _server: Box<dyn HttpServerHandle>,
 }
 
@@ -69,15 +72,25 @@ impl LimiterRig {
         settle_until(|| self.all_holds() == expected).await;
         assert_eq!(self.all_holds(), expected, "holds on {IDS:?}: {why}");
     }
+
+    /// Settle until the call holds nothing, then release the witnesses so the
+    /// store reads empty for the reaped check.
+    async fn expect_drained(&self, why: &str) {
+        self.expect_holds([0, 0, 0], why).await;
+        let witnesses: Vec<Hold> =
+            IDS.iter().map(|id| Hold { id: (*id).into(), window: self.witness_window }).collect();
+        self.store.release(&witnesses);
+    }
 }
 
 async fn limiter_rig() -> LimiterRig {
     let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let http = SimulatedHttpNetwork::new();
     let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let witness_window = store.current_window();
     for id in IDS {
         let witness = store.admit(&[AdmitEntry { id: id.into(), limit: 100 }]);
-        assert!(matches!(witness, AdmitResult::Admitted { .. }), "witness hold on {id}");
+        assert_eq!(witness, AdmitResult::Admitted { window: witness_window }, "witness on {id}");
     }
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = http.serve(laddr, server).await.unwrap();
@@ -86,7 +99,7 @@ async fn limiter_rig() -> LimiterRig {
     // production-sized budget could expire between.
     let client: Arc<dyn CallLimiter> =
         Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_secs(2)));
-    LimiterRig { store, client, _server: handle }
+    LimiterRig { store, client, witness_window, _server: handle }
 }
 
 /// A limiter whose `n`-th admit (1-based) is unavailable — the fail-open
@@ -195,6 +208,7 @@ async fn busy_then_failover_answered(
     let carol = h.agent("carol", "127.0.0.1:5071").await;
     let b2bua = B2buaSut::builder(one_failover(initial, failover))
         .limiter(limiter)
+        .limiter_store(rig.store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -220,8 +234,8 @@ async fn busy_then_failover_answered(
     carol.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("the hangup releases the failover route's holds").await;
     b2bua.assert_fully_reaped();
-    rig.expect_holds([0, 0, 0], "the hangup releases the failover route's holds").await;
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
@@ -326,6 +340,7 @@ async fn consecutive_failovers_hold_only_the_latest_route() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -351,8 +366,8 @@ async fn consecutive_failovers_hold_only_the_latest_route() {
     dave.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("the hangup releases the latest route's hold").await;
     b2bua.assert_fully_reaped();
-    rig.expect_holds([0, 0, 0], "the hangup releases the latest route's hold").await;
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
@@ -398,6 +413,7 @@ async fn refused_failover_route_keeps_the_call_holds_until_a_route_is_applied() 
     });
     let b2bua = B2buaSut::builder(decision)
         .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -433,8 +449,8 @@ async fn refused_failover_route_keeps_the_call_holds_until_a_route_is_applied() 
     carol.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("the hangup releases the applied route's hold").await;
     b2bua.assert_fully_reaped();
-    rig.expect_holds([0, 0, 0], "the hangup releases the applied route's hold").await;
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
@@ -466,6 +482,7 @@ async fn failover_fold_that_ends_the_call_releases_every_hold_once() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -478,8 +495,8 @@ async fn failover_fold_that_ends_the_call_releases_every_hold_once() {
     // ── the fold's CreateLeg is refused: the call ends in the fold's turn ──
     call.expect(503).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("every hold on (x, window) is released exactly once").await;
     b2bua.assert_fully_reaped();
-    rig.expect_holds([0, 0, 0], "every hold on (x, window) is released exactly once").await;
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
@@ -520,6 +537,7 @@ async fn release_reroute_replaces_the_route_holds() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -559,8 +577,8 @@ async fn release_reroute_replaces_the_route_holds() {
     media.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("the hangup releases the reroute's holds").await;
     b2bua.assert_fully_reaped();
-    rig.expect_holds([0, 0, 0], "the hangup releases the reroute's holds").await;
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");

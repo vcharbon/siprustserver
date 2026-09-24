@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{NewCallResponse, ScriptedDecisionEngine};
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::{RAck, RSeq, Require, Supported};
@@ -153,6 +153,7 @@ async fn a_provisional_to_a_reinvite_whose_originator_offered_no_100rel_leaves_u
     bye.expect(200).await;
 
     let _report = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -226,5 +227,6 @@ async fn a_reliable_provisional_to_a_relayed_update_reaches_the_originator_as_no
     bye.expect(200).await;
 
     let _report = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }

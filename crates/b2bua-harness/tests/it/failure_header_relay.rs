@@ -398,7 +398,9 @@ async fn a_capacity_refusal_carries_none_of_the_failed_peers_headers() {
     let limiter: Arc<dyn CallLimiter> =
         Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_millis(150)));
     let s = B2buaScene::with_b2bua("failure-hdr-limiter-refusal", move |_bob_port| {
-        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::numbering_plan())).limiter(limiter)
+        B2buaSut::builder(Arc::new(ScriptedDecisionEngine::numbering_plan()))
+            .limiter(limiter)
+            .limiter_store(store)
     })
     .await;
     // The failover hop's limiter entry admits nothing, so its refusal — not a

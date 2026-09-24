@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -353,5 +353,6 @@ async fn refer_unreadable_refer_to_rejected_400() {
     alice_bye.expect(200).await;
 
     let _ = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }

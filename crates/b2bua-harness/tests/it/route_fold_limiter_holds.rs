@@ -149,6 +149,7 @@ async fn failover_fold_on_a_terminating_call_releases_its_holds() {
     });
     let b2bua = B2buaSut::builder(decision)
         .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -222,6 +223,7 @@ async fn failover_fold_after_the_call_is_gone_releases_its_holds() {
     });
     let b2bua = B2buaSut::builder(decision)
         .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -296,6 +298,7 @@ async fn release_reroute_fold_on_a_terminating_call_releases_its_holds() {
     });
     let b2bua = B2buaSut::builder(decision)
         .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -368,6 +371,7 @@ async fn failover_fold_on_a_live_call_records_and_releases_its_holds() {
     });
     let b2bua = B2buaSut::builder(decision)
         .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -390,7 +394,8 @@ async fn failover_fold_on_a_live_call_records_and_releases_its_holds() {
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
     settle_until(|| rig.store.stats().current_total == 0).await;
-    assert_eq!(rig.store.stats().current_total, 0, "the hangup releases both failover holds");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
@@ -427,6 +432,7 @@ async fn failover_route_refused_on_its_second_limiter_increments_nothing() {
     });
     let b2bua = B2buaSut::builder(decision)
         .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 

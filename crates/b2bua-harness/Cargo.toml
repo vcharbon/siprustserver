@@ -29,6 +29,10 @@ tokio = { workspace = true, features = ["test-util"] }
 sip-proxy = { path = "../sip-proxy" }
 # The `CdrWriter` impl that keeps each terminated `Call` (`src/terminated.rs`).
 async-trait = { workspace = true }
+# The SUT's default call limiter (`src/limiter.rs`): a real `WindowStore` served
+# by a `LimiterServer` on the simulated HTTP fabric.
+http-net = { path = "../http-net" }
+call-limiter = { path = "../call-limiter" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -40,10 +44,6 @@ sip-retransmit = { path = "../sip-retransmit" }
 # by the B2BUA) advertises; the classifier proves it reached the right peer.
 media = { path = "../media" }
 media-harness = { path = "../media-harness" }
-# Limiter scenarios: a real LimiterServer on the simulated HTTP fabric, reached
-# by the b2bua's HttpCallLimiter.
-http-net = { path = "../http-net" }
-call-limiter = { path = "../call-limiter" }
 serde_json = { workspace = true }
 # The trace-machinery tests install their own admission gate and read the
 # thread-scoped capture buffer (ADR-0026); no OTel tree in tests.

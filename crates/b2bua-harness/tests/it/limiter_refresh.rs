@@ -63,6 +63,7 @@ async fn refresh_keeps_a_long_call_counted_across_a_window() {
     // Refresh once per second (matches the window).
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter)
+        .limiter_store(store.clone())
         .tune(|c| {
             c.limiter_refresh_sec = 1;
         })

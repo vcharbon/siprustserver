@@ -9,7 +9,7 @@ use std::sync::Arc;
 use b2bua::cdr::{CdrRecord, CdrWriter};
 use b2bua::config::B2buaConfig;
 use b2bua::decision::{CallDecisionEngine, ScriptedDecisionEngine};
-use b2bua::limiter::{CallLimiter, NoopLimiter};
+use b2bua::limiter::CallLimiter;
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::{CallStore, FaultInjectingCallStore, InMemoryCallStore, StoreFaults};
 use b2bua::wire_faults::WireFaults;
@@ -35,8 +35,10 @@ use sip_proxy::{
 use sip_txn::IdGen;
 use tokio::task::JoinHandle;
 
+pub mod limiter;
 pub mod terminated;
 
+pub use limiter::{LimiterCount, LimiterLeak, DEFAULT_LIMITER_ID};
 pub use terminated::{TerminatedCalls, TerminatedCallsWriter};
 
 // ===========================================================================
@@ -388,7 +390,16 @@ pub struct B2buaSut {
     pub addr: SocketAddr,
     cdr: TerminatedCallsWriter,
     metrics: B2buaMetrics,
+    limiter: SutLimiter,
     _core: B2buaCore,
+}
+
+/// The limiter side of a running [`B2buaSut`]: the hold ledger every limiter
+/// is counted on, the store check 6 reads, and the default limiter's server.
+struct SutLimiter {
+    ledger: Arc<limiter::HoldLedger>,
+    store: Option<Arc<call_limiter::WindowStore>>,
+    _server: Option<Box<dyn http_net::HttpServerHandle>>,
 }
 
 /// Composable builder for a single-SUT [`B2buaSut`] (slice 3). Replaces the
@@ -399,13 +410,14 @@ pub struct B2buaSut {
 /// an optional chain method. [`start`](Self::start) is the single terminal that
 /// binds and spawns the core, preserving the exact wiring the old `start_inner`
 /// had (binds `{Uac, Uas}` roles; keepalive defaults 30/5 applied FIRST then the
-/// caller `tune` LAST so a test overriding keepalive still wins; `NoopLimiter`,
-/// empty services, no replication, `Clock::test_at(0)`, id-gen seed `0xB2B0`,
-/// ordinal `"w0"` defaults).
+/// caller `tune` LAST so a test overriding keepalive still wins; the default
+/// limiter (see [`limiter`](Self::limiter)), empty services, no replication,
+/// `Clock::test_at(0)`, id-gen seed `0xB2B0`, ordinal `"w0"` defaults).
 pub struct B2buaSutBuilder {
     decision: Arc<dyn CallDecisionEngine>,
     outbound_proxy: Option<(String, u16)>,
-    limiter: Arc<dyn CallLimiter>,
+    limiter: Option<Arc<dyn CallLimiter>>,
+    limiter_store: Option<Arc<call_limiter::WindowStore>>,
     services: Vec<b2bua::rules::ServiceDef>,
     tune: Box<dyn FnOnce(&mut B2buaConfig)>,
     overload: Option<b2bua::overload::OverloadSignal>,
@@ -434,10 +446,21 @@ impl B2buaSutBuilder {
     }
 
     /// Use a custom [`CallLimiter`] (e.g. an `HttpCallLimiter` over the
-    /// simulated HTTP fabric serving a real `LimiterServer`). Defaults to
-    /// `NoopLimiter`.
+    /// simulated HTTP fabric serving a real `LimiterServer`); the decision
+    /// engine's routes are then left as the engine states them.
+    ///
+    /// Without one, the SUT runs the default limiter: a real store behind the
+    /// production HTTP client, with a [`DEFAULT_LIMITER_ID`] entry appended to
+    /// every route the engine returns, so every routed call holds it.
     pub fn limiter(mut self, limiter: Arc<dyn CallLimiter>) -> Self {
-        self.limiter = limiter;
+        self.limiter = Some(limiter);
+        self
+    }
+
+    /// The store behind the custom [`limiter`](Self::limiter): the reaped
+    /// check then also requires its count back to 0.
+    pub fn limiter_store(mut self, store: Arc<call_limiter::WindowStore>) -> Self {
+        self.limiter_store = Some(store);
         self
     }
 
@@ -523,6 +546,7 @@ impl B2buaSutBuilder {
             decision,
             outbound_proxy,
             limiter,
+            limiter_store,
             services,
             tune,
             overload,
@@ -533,6 +557,29 @@ impl B2buaSutBuilder {
             wire_faults,
             keep_terminated_calls,
         } = self;
+        let (decision, limiter, sut_limiter) = match limiter {
+            Some(own) => (
+                decision,
+                own,
+                SutLimiter { ledger: Default::default(), store: limiter_store, _server: None },
+            ),
+            None => {
+                assert!(limiter_store.is_none(), "limiter_store names a custom limiter's store");
+                let default = limiter::DefaultLimiter::serve().await;
+                let decision: Arc<dyn CallDecisionEngine> =
+                    Arc::new(limiter::DefaultLimiterDecision { inner: decision });
+                let sut_limiter = SutLimiter {
+                    ledger: Default::default(),
+                    store: Some(default.store),
+                    _server: Some(default.server),
+                };
+                (decision, default.client, sut_limiter)
+            }
+        };
+        let limiter: Arc<dyn CallLimiter> = Arc::new(limiter::CountingLimiter {
+            inner: limiter,
+            ledger: sut_limiter.ledger.clone(),
+        });
         // The B2BUA terminates each leg as a UA (UAS on the a-leg, UAC on the
         // b-leg) — it is NOT an RFC 3261 §16 proxy, so its bind declares
         // `{Uac, Uas}` and the proxy-subject audit rules (no-target-404,
@@ -596,18 +643,19 @@ impl B2buaSutBuilder {
             tune(config);
         });
         let metrics = core.metrics().clone();
-        B2buaSut { addr: sa, cdr, metrics, _core: core }
+        B2buaSut { addr: sa, cdr, metrics, limiter: sut_limiter, _core: core }
     }
 }
 
 impl B2buaSut {
     /// Base builder: a B2BUA driven by `decision`, every other axis at its
-    /// default (no outbound proxy, `NoopLimiter`, no services, no-op tune).
+    /// default (no outbound proxy, the default limiter, no services, no-op tune).
     pub fn builder(decision: Arc<dyn CallDecisionEngine>) -> B2buaSutBuilder {
         B2buaSutBuilder {
             decision,
             outbound_proxy: None,
-            limiter: Arc::new(NoopLimiter),
+            limiter: None,
+            limiter_store: None,
             services: Vec::new(),
             tune: Box::new(|_| {}),
             overload: None,
@@ -775,14 +823,30 @@ impl B2buaSut {
         self._core.lock_count()
     }
 
+    /// The holds the SUT was granted and released so far, and its store's
+    /// count when it has one.
+    pub fn limiter_count(&self) -> LimiterCount {
+        self.limiter.ledger.count(self.limiter.store.as_deref())
+    }
+
+    /// The store the reaped check reads: the default limiter's, or the one
+    /// registered with [`B2buaSutBuilder::limiter_store`]. Per-id probes read
+    /// it with `held(id)`.
+    pub fn limiter_store(&self) -> Option<&Arc<call_limiter::WindowStore>> {
+        self.limiter.store.as_ref()
+    }
+
     /// The named "no leak" oracle: every call created has been reaped and no
-    /// per-call state survives. Asserts the three invariants the reap tests
-    /// used to spell out by hand:
+    /// per-call state survives. Asserts:
     ///   1. `creations_total() == removals_total()` — every call's lifecycle
     ///      closed (the `active_calls` lens misses orphan-reject leaks, which
     ///      never insert a call; the paired counters + `lock_count` catch them).
     ///   2. `active_calls() == 0` — no live call left in the map.
     ///   3. `lock_count() == 0` — no stranded per-call serialization lock.
+    ///   4. the reaper's last-touched ledger is empty.
+    ///   5. no setup-CANCEL mark is left.
+    ///   6. every limiter hold the SUT was granted is released exactly once,
+    ///      and its limiter store counts no hold ([`limiter_count`](Self::limiter_count)).
     ///
     /// A new leak dimension (e.g. the `b2bua_timer_queue_len − b2bua_timer_live`
     /// tombstone gap from the CLAUDE.md timer hazard) is added here once and is
@@ -791,6 +855,14 @@ impl B2buaSut {
     /// Call it *after* the teardown has drained (see [`settle_until`]).
     #[track_caller]
     pub fn assert_fully_reaped(&self) {
+        self.assert_fully_reaped_leaving(LimiterLeak::NONE)
+    }
+
+    /// [`assert_fully_reaped`](Self::assert_fully_reaped) for a scenario that
+    /// leaves limiter holds behind on purpose: check 6 requires exactly
+    /// `leak`, every other check is unchanged.
+    #[track_caller]
+    pub fn assert_fully_reaped_leaving(&self, leak: LimiterLeak) {
         let (creations, removals) = (self.metrics.creations_total(), self.metrics.removals_total());
         assert_eq!(
             creations, removals,
@@ -825,6 +897,9 @@ impl B2buaSut {
             "mark leak: {} stranded setup-CANCEL mark(s)",
             self._core.setup_cancelled_count()
         );
+        // 6. every limiter hold granted is released once, and the store
+        //    counts none.
+        self.limiter_count().assert_matches(leak);
     }
 }
 

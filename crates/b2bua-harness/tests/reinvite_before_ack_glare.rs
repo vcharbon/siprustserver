@@ -19,7 +19,7 @@
 
 use std::net::SocketAddr;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Harness, WaiverScope};
 use sip_message::generators::InDialogMethod;
 
@@ -97,6 +97,7 @@ async fn reinvite_overtaking_the_ack_is_491ed() {
     bye.expect(200).await;
 
     let _report = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -152,6 +153,7 @@ async fn caller_reinvite_overtaking_the_ack_is_491ed() {
     bye.expect(200).await;
 
     let _report = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -216,6 +218,7 @@ async fn reinvite_toward_the_unacked_face_is_491ed() {
     bye.expect(200).await;
 
     let _report = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -279,6 +282,7 @@ async fn caller_reinvite_overtaking_the_initial_ack_is_491ed() {
     bye.expect(200).await;
 
     let report = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 
     // The 491'd newcomer left no trace on the b-leg: two INVITEs (the setup and
@@ -345,6 +349,7 @@ async fn callee_reinvite_before_the_initial_ack_is_491ed() {
     bye.expect(200).await;
 
     let report = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 
     // Alice saw exactly one in-dialog INVITE — bob's retry, never the 491'd one.

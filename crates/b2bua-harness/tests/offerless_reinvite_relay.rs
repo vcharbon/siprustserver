@@ -8,7 +8,7 @@
 //! `reinvite.rs::alice_reinvite` pins the originator→originated direction; this
 //! pins the originated→originator one, where the relay target is the a-leg.
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 
@@ -65,5 +65,6 @@ async fn callee_offerless_reinvite_relays_offerless() {
     bye.expect(200).await;
 
     let _report = h.finish().await;
+    settle_until(|| b2bua.active_calls() == 0).await;
     b2bua.assert_fully_reaped();
 }

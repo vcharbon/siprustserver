@@ -97,6 +97,7 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
     let decision = route_with_limiter("127.0.0.1", 5070, "trunk-A", 1);
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         // Isolate the timer mechanism: the reaper's liveness policy has its own
         // suite (`reaper_liveness.rs`); in production the reaper was masked by
         // the LimiterRefresh self-touch, so it must not save this test either.
@@ -146,7 +147,6 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
 
     // The limiter hold is released once teardown completes (the leak fixed by this test).
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "limiter hold released at teardown");
 
     // CDR records the setup timeout; per-call state fully reclaimed.
     settle_until(|| !b2bua.cdr_records().is_empty()).await;

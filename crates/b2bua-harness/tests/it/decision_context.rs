@@ -447,6 +447,7 @@ async fn failover_route_limiter_is_admitted_and_released_at_termination() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -470,7 +471,8 @@ async fn failover_route_limiter_is_admitted_and_released_at_termination() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "BYE released the failover hold");
+    settle_until(|| b2bua.active_calls() == 0).await;
+    b2bua.assert_fully_reaped();
 
     let _ = h.finish().await;
 }
@@ -504,6 +506,7 @@ async fn failover_route_limiter_replaces_the_initial_route_holds() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
@@ -527,7 +530,6 @@ async fn failover_route_limiter_replaces_the_initial_route_holds() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "BYE released the failover hold");
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 
@@ -573,6 +575,7 @@ async fn failover_route_limiter_reject_reconsults_with_call_limiter_origin() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 

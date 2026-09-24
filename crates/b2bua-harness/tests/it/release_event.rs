@@ -272,6 +272,7 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     );
     let b2bua = B2buaSut::builder(decision)
         .limiter(limiter_client(&http))
+        .limiter_store(store.clone())
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
@@ -333,7 +334,6 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     alice_bye.expect(200).await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    assert_eq!(store.stats().current_total, 0, "the hangup releases the reroute's hold");
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     b2bua.assert_fully_reaped();
 
