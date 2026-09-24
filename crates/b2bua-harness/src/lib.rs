@@ -866,6 +866,18 @@ impl B2buaSut {
     /// `leak`, every other check is unchanged.
     #[track_caller]
     pub fn assert_fully_reaped_leaving(&self, leak: LimiterLeak) {
+        self.assert_calls_reaped();
+        // 6. every limiter hold granted is released once, the store counts
+        //    none, and the default limiter never failed open.
+        self.limiter.assert_drained(leak);
+    }
+
+    /// Checks 1–5 of [`assert_fully_reaped`](Self::assert_fully_reaped): every
+    /// call created was reaped and no per-call state survives, the limiter
+    /// aside. For a caller that judges the calls at one instant and the
+    /// limiter after a later settle, which a release still in flight needs.
+    #[track_caller]
+    pub fn assert_calls_reaped(&self) {
         let (creations, removals) = (self.metrics.creations_total(), self.metrics.removals_total());
         assert_eq!(
             creations, removals,
@@ -900,9 +912,6 @@ impl B2buaSut {
             "mark leak: {} stranded setup-CANCEL mark(s)",
             self._core.setup_cancelled_count()
         );
-        // 6. every limiter hold granted is released once, the store counts
-        //    none, and the default limiter never failed open.
-        self.limiter.assert_drained(leak);
     }
 }
 

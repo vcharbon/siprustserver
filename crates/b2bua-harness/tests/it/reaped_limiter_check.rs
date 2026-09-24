@@ -106,6 +106,25 @@ async fn a_declared_limiter_leak_passes_the_reaped_check() {
     let _ = s.finish().await;
 }
 
+/// The call-state checks judge the calls alone: a hold the store still
+/// counts is left to the full check.
+#[tokio::test]
+async fn the_call_state_checks_leave_the_limiter_to_the_full_check() {
+    let s = call_through_a_backend_that_drops_releases("reaped-calls-only").await;
+    s.b2bua.assert_calls_reaped();
+    s.b2bua.assert_fully_reaped_leaving(LimiterLeak { unreleased: 0, stored: 2 });
+    let _ = s.finish().await;
+}
+
+/// A call still established fails the call-state checks.
+#[tokio::test]
+#[should_panic(expected = "call leak")]
+async fn a_call_not_yet_reaped_fails_the_call_state_checks() {
+    let s = B2buaScene::new("reaped-calls-live").await;
+    let _dialog = s.establish().await;
+    s.b2bua.assert_calls_reaped();
+}
+
 #[tokio::test]
 async fn every_routed_call_holds_the_default_limiter_until_it_ends() {
     let s = B2buaScene::new("reaped-limiter-default").await;
