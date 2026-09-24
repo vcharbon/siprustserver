@@ -729,12 +729,12 @@ impl B2buaMetrics {
         );
         counter(
             "b2bua_cdr_written_total",
-            "CDRs successfully written to the sink",
+            "CDRs the sink delivered (for a broker sink: acked by the broker)",
             self.cdr_written_total(),
         );
         counter(
             "b2bua_cdr_dropped_total",
-            "CDRs dropped (submit-queue overflow or sink failure)",
+            "CDRs dropped (submit-queue overflow, or a record the sink did not deliver)",
             self.cdr_dropped_total(),
         );
         // ── Tier-3 admission gate (migration/09) ──

@@ -136,8 +136,13 @@ KEEPALIVED_IMAGE="${KEEPALIVED_IMAGE:-siprustserver-keepalived:dev}"
 # The broker is a public image pulled + side-loaded into kind so the run is
 # offline-capable like every other image.
 RABBITMQ_IMAGE="${RABBITMQ_IMAGE:-rabbitmq:3.13-management}"
+# How the cdr-consumer reads a record (its CDR_PAYLOAD): `json` counts the
+# workers' JSON record and sums its duration; `opaque` counts deliveries of any
+# format, for workers publishing another encoding.
+CDR_CONSUMER_PAYLOAD="${CDR_CONSUMER_PAYLOAD:-json}"
 # PROXY_VIP/PROXY_TARGET/SIP_PORT are exported by lib/net-env.sh.
 export SUT_IMAGE WORKER_REPLICAS REPL_ENABLE REPL_PORT SCENARIO LIMITER_CAP RABBITMQ_IMAGE
+export CDR_CONSUMER_PAYLOAD
 # Observability: VictoriaMetrics + Grafana host stack + in-cluster vmagent/KSM/
 # node-exporter/fluent-bit. Deployed automatically on `up` so the freshly
 # (re)created cluster always has scraping wired and Grafana dashboards loaded.

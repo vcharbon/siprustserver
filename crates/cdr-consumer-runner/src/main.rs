@@ -1,13 +1,14 @@
 //! `cdr-consumer-runner` — the dedicated CDR metrics consumer.
 //!
-//! Drains the RabbitMQ CDR queue the b2bua workers publish to (one JSON
-//! [`CdrRecord`] per terminated call) and turns it into two Prometheus counters:
+//! Drains the RabbitMQ CDR queue the b2bua workers publish to (one record per
+//! terminated call) and turns it into Prometheus counters ([`counting`]):
 //!
 //! - `cdr_consumed_total` — total number of CDRs consumed
-//! - `cdr_call_duration_ms_total` — summed call duration across all CDRs,
-//!   i.e. Σ (terminated_at − created_at)
+//! - in `json` mode, `cdr_call_duration_ms_total` — summed call duration across
+//!   all CDRs, i.e. Σ (terminated_at − created_at) — and
+//!   `cdr_parse_errors_total` for payloads that do not decode.
 //!
-//! plus `cdr_parse_errors_total` for malformed payloads. It does NOT persist
+//! `opaque` mode counts deliveries whatever their format. It does NOT persist
 //! anything — it is telemetry only — so on restart the counters reset to 0 and
 //! vmagent/Grafana see the usual counter-reset (handled by `rate()`/`increase()`).
 //!
@@ -20,8 +21,10 @@
 //! - `CDR_QUEUE`          queue name to consume    (default `cdr`)
 //! - `CDR_QUEUE_MAX_LEN`  broker `x-max-length`    (default `100000`; MUST match the producer)
 //! - `CDR_METRICS_LISTEN` Prometheus listen addr   (default `0.0.0.0:9093`)
+//! - `CDR_PAYLOAD`        `json` or `opaque`       (default `json`; see [`counting::Payload`])
 
-use std::sync::atomic::{AtomicU64, Ordering};
+mod counting;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,51 +34,21 @@ use lapin::{
     types::{AMQPValue, FieldTable, LongString},
     Connection, ConnectionProperties,
 };
-use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+use counting::{Metrics, Payload};
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-/// The only fields we read off a CDR; serde_json ignores the rest.
-#[derive(Deserialize)]
-struct CdrDurationView {
-    created_at: i64,
-    terminated_at: i64,
-}
-
-#[derive(Default)]
-struct Metrics {
-    consumed: AtomicU64,
-    duration_ms: AtomicU64,
-    parse_errors: AtomicU64,
-}
-
-impl Metrics {
-    fn prometheus_text(&self) -> String {
-        let consumed = self.consumed.load(Ordering::Relaxed);
-        let duration_ms = self.duration_ms.load(Ordering::Relaxed);
-        let parse_errors = self.parse_errors.load(Ordering::Relaxed);
-        let mut s = String::new();
-        s.push_str("# HELP cdr_consumed_total total CDRs consumed from the RabbitMQ queue\n");
-        s.push_str("# TYPE cdr_consumed_total counter\n");
-        s.push_str(&format!("cdr_consumed_total {consumed}\n"));
-        s.push_str("# HELP cdr_call_duration_ms_total summed call duration in ms across all consumed CDRs (terminated_at - created_at)\n");
-        s.push_str("# TYPE cdr_call_duration_ms_total counter\n");
-        s.push_str(&format!("cdr_call_duration_ms_total {duration_ms}\n"));
-        s.push_str("# HELP cdr_parse_errors_total CDR payloads that failed to decode\n");
-        s.push_str("# TYPE cdr_parse_errors_total counter\n");
-        s.push_str(&format!("cdr_parse_errors_total {parse_errors}\n"));
-        // Dropped log lines + trace-admission denials (ADR-0026).
-        s.push_str(&observe::counters::prometheus_text());
-        s
-    }
-}
-
 /// Hand-rolled Prometheus exposition + liveness server (mirrors b2bua-runner).
-async fn serve_metrics(addr: std::net::SocketAddr, metrics: Arc<Metrics>) -> std::io::Result<()> {
+async fn serve_metrics(
+    addr: std::net::SocketAddr,
+    metrics: Arc<Metrics>,
+    payload: Payload,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "metrics server listening (/metrics)");
     loop {
@@ -86,7 +59,10 @@ async fn serve_metrics(addr: std::net::SocketAddr, metrics: Arc<Metrics>) -> std
             let n = stream.read(&mut buf).await.unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             let (status, body) = if req.starts_with("GET /metrics") {
-                ("200 OK", metrics.prometheus_text())
+                let mut text = metrics.prometheus_text(payload);
+                // Dropped log lines + trace-admission denials (ADR-0026).
+                text.push_str(&observe::counters::prometheus_text());
+                ("200 OK", text)
             } else if req.starts_with("GET /healthz") {
                 ("200 OK", "ok\n".to_string())
             } else {
@@ -107,6 +83,7 @@ async fn consume(
     url: &str,
     queue: &str,
     max_len: i64,
+    payload: Payload,
     metrics: &Metrics,
 ) -> Result<(), lapin::Error> {
     let props = ConnectionProperties::default()
@@ -140,16 +117,8 @@ async fn consume(
 
     while let Some(delivery) = consumer.next().await {
         let delivery = delivery?;
-        match serde_json::from_slice::<CdrDurationView>(&delivery.data) {
-            Ok(view) => {
-                let dur = (view.terminated_at - view.created_at).max(0) as u64;
-                metrics.consumed.fetch_add(1, Ordering::Relaxed);
-                metrics.duration_ms.fetch_add(dur, Ordering::Relaxed);
-            }
-            Err(e) => {
-                metrics.parse_errors.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(error = %e, "CDR payload parse error");
-            }
+        if let Err(e) = metrics.count(payload, &delivery.data) {
+            tracing::warn!(error = %e, "CDR payload parse error");
         }
         // Ack regardless: a malformed record is counted, not redelivered forever.
         delivery.ack(BasicAckOptions::default()).await?;
@@ -173,6 +142,8 @@ async fn main() {
     let queue = env_or("CDR_QUEUE", "cdr");
     let max_len: i64 = env_or("CDR_QUEUE_MAX_LEN", "100000").parse().expect("CDR_QUEUE_MAX_LEN");
     let metrics_listen = env_or("CDR_METRICS_LISTEN", "0.0.0.0:9093");
+    let payload = Payload::from_env_value(std::env::var("CDR_PAYLOAD").ok().as_deref())
+        .unwrap_or_else(|e| panic!("{e}"));
     let addr: std::net::SocketAddr = metrics_listen
         .parse()
         .unwrap_or_else(|e| panic!("bad CDR_METRICS_LISTEN {metrics_listen:?}: {e}"));
@@ -181,7 +152,7 @@ async fn main() {
 
     let m = metrics.clone();
     tokio::spawn(async move {
-        if let Err(e) = serve_metrics(addr, m).await {
+        if let Err(e) = serve_metrics(addr, m, payload).await {
             tracing::error!(error = %e, "metrics server error");
         }
     });
@@ -189,7 +160,7 @@ async fn main() {
     // Reconnect loop: the broker may be down at startup or bounce mid-run. CDRs
     // missed while disconnected are bounded by the broker's own x-max-length.
     loop {
-        if let Err(e) = consume(&url, &queue, max_len, &metrics).await {
+        if let Err(e) = consume(&url, &queue, max_len, payload, &metrics).await {
             tracing::warn!(
                 node = observe::node(),
                 state = "disconnected",

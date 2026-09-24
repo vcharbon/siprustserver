@@ -82,8 +82,9 @@ use sip_txn::IdGen;
 mod cdr_rabbitmq;
 mod replication;
 pub use cdr_rabbitmq::{
-    rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder, CdrQueueDeclare,
-    RabbitMqCdrSettings, RabbitMqCdrWriter,
+    rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder,
+    CdrDeliveryBounds, CdrQueueDeclare, RabbitMqCdrSettings, RabbitMqCdrWriter, MAX_WAIT_MS,
+    MAX_WINDOW,
 };
 pub use replication::{replication_setup_from_lookup, ReplicationSettings};
 

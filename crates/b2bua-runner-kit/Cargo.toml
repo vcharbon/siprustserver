@@ -44,3 +44,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 sip-message = { path = "../sip-message" }
+# The scripted AMQP 0-9-1 broker the CDR sink's delivery tests run against
+# (tests/support/fake_broker.rs): lapin's own frame codec, so the wire is the
+# client's.
+amq-protocol = { version = "7", default-features = false }

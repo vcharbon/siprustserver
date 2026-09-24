@@ -561,6 +561,7 @@ dependencies = [
 name = "b2bua-runner-kit"
 version = "0.1.0"
 dependencies = [
+ "amq-protocol",
  "async-trait",
  "b2bua",
  "call",
