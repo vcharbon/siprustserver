@@ -75,7 +75,9 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
         }
         let Some(call) = resident_or_materialised(ctx, &call_ref).await else {
             maybe_reject_orphan(ctx, &event).await;
-            release_orphaned_fold_holds(ctx, &event).await;
+            // A route fold for a vanished call: no call is left to record
+            // the holds its dispatching task admitted.
+            super::callouts::release_route_fold_holds(ctx.limiter.as_ref(), &event).await;
             // This event was dispatched into a fresh per-call queue (one
             // `bump_creation`) and took the per-call lock, but resolved to NO
             // live call — nothing will ever emit `RemoveCall`, and a per-call
@@ -821,17 +823,4 @@ async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
             }
         }
     }
-}
-
-/// A route fold for a vanished call: the holds its dispatching task admitted
-/// have no call left to record them, so they are released here.
-async fn release_orphaned_fold_holds(ctx: &RouterCtx, event: &CallEvent) {
-    let Some((entries, window)) = crate::rules::defaults::route_fold_holds(event) else {
-        return;
-    };
-    let holds: Vec<crate::limiter::LimiterHold> = entries
-        .into_iter()
-        .map(|(limiter_id, _)| crate::limiter::LimiterHold { limiter_id, window })
-        .collect();
-    ctx.limiter.release(&holds).await;
 }

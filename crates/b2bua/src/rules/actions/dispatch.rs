@@ -321,9 +321,10 @@ impl ActionExecutor<'_> {
                 }
             }
             RuleAction::RecordLimiterHolds { entries, window } => {
-                // Holds were INCRed by the router's failover fold; recording
-                // them here is what makes the `→ terminated` invariant DECR
-                // them (and the LimiterRefresh cadence re-stamp them).
+                // Holds a route fold (failover, reroute, or its going-away
+                // teardown) carries, already INCRed by its dispatching task:
+                // on the ledger, the `→ terminated` settle DECRs them and a
+                // live call's LimiterRefresh migrates them.
                 for (limiter_id, limit) in entries {
                     call.limiter_entries.push(call::CallLimiterState {
                         limiter_id: limiter_id.clone(),

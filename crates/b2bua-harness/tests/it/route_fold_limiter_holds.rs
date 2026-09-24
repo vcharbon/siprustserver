@@ -271,7 +271,7 @@ async fn release_reroute_fold_on_a_terminating_call_releases_its_holds() {
     let h = Harness::new("release-reroute-fold-holds-terminating-call");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
-    let mrf = h.agent("mrf", "127.0.0.1:5090").await;
+    let media = h.agent("media", "127.0.0.1:5090").await;
     let rig = limiter_rig().await;
     let decision = Arc::new(DelayedDecisionEngine {
         failure_delay: Duration::ZERO,
@@ -322,7 +322,7 @@ async fn release_reroute_fold_on_a_terminating_call_releases_its_holds() {
     // ── the reroute fold lands on the Terminating call ─────────────────────
     h.advance(Duration::from_secs(RELEASE_DELAY.as_secs())).await;
     assert!(
-        mrf.try_receive_tolerating("INVITE", &[]).await.is_none(),
+        media.try_receive_tolerating("INVITE", &[]).await.is_none(),
         "the fold dials no replacement leg for a call whose parties hung up",
     );
     let stats = rig.store.stats();
@@ -395,4 +395,65 @@ async fn failover_fold_on_a_live_call_records_and_releases_its_holds() {
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
     let _ = h.finish().await;
+}
+
+/// A failover route whose SECOND limiter is at its cap: the all-or-none admit
+/// refuses it and increments nothing — not even the first entry, which had
+/// room. The refusal ends the chain in the stack's 486; the call's own hold
+/// on `w` is released and the store drains to 0 with no key for `x` or `y`.
+#[tokio::test(start_paused = true)]
+async fn failover_route_refused_on_its_second_limiter_increments_nothing() {
+    let h = Harness::new("failover-fold-refused-second-limiter");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let carol = h.agent("carol", "127.0.0.1:5071").await;
+    let rig = limiter_rig().await;
+    let decision = Arc::new(DelayedDecisionEngine {
+        failure_delay: Duration::ZERO,
+        release_delay: Duration::ZERO,
+        inner: Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(|_| initial_route(5070, &["w"]))
+                .on_failure(|_| {
+                    let mut r = route_to("127.0.0.1", 5071);
+                    r.call_limiter = vec![
+                        CallLimiterEntry { id: "x".into(), limit: 10 },
+                        CallLimiterEntry { id: "y".into(), limit: 0 },
+                    ];
+                    CallTreatment::Route(r)
+                })
+                .build(),
+        ),
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(rig.client.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    bob.receive("INVITE").await.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+    assert_eq!(rig.store.stats().live_keys, 1, "the initial route holds w");
+
+    // ── the refused failover ends the call in the stack's 486 ──────────────
+    call.expect(486).await;
+    assert!(
+        carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
+        "the refused route dials nothing",
+    );
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_fully_reaped();
+    settle_until(|| rig.store.stats().current_total == 0).await;
+    let stats = rig.store.stats();
+    assert_eq!(stats.live_keys, 1, "the refused admit created no key for x nor y");
+    assert_eq!(stats.current_total, 0, "the call's own hold on w is released");
+
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let report = h.finish().await;
+    assert_eq!(
+        invite_final_statuses(&report, alice.addr()),
+        vec![486],
+        "the a-leg INVITE transaction carries exactly one final: the 486",
+    );
 }

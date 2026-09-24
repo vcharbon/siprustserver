@@ -17,7 +17,9 @@ use crate::decision::{
 };
 use crate::decision_log::STACK_AUTHORED;
 use crate::event::CallEvent;
-use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
+use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold};
+use crate::rules::defaults::route_fold_holds;
+use tokio::sync::mpsc;
 
 /// Fold a callout result back into the router as a re-entrant internal event.
 /// Sent via the router's event channel rather than calling `on_event` directly:
@@ -32,13 +34,47 @@ fn send_internal(
     payload: serde_json::Value,
     body: Vec<u8>,
 ) {
-    let _ = ctx.reentry_tx.send(CallEvent::InternalEvent {
+    let _ = ctx.reentry_tx.send(internal_event(call_ref, topic, outcome, payload, body));
+}
+
+fn internal_event(
+    call_ref: String,
+    topic: &str,
+    outcome: &str,
+    payload: serde_json::Value,
+    body: Vec<u8>,
+) -> CallEvent {
+    CallEvent::InternalEvent {
         call_ref,
         topic: topic.to_string(),
         outcome: outcome.to_string(),
         payload,
         body,
-    });
+    }
+}
+
+/// Post a route fold to the router. A fold the router can no longer take (its
+/// channel closed) is never recorded by a call, so its admitted holds are
+/// released here.
+async fn send_route_fold(
+    tx: &mpsc::UnboundedSender<CallEvent>,
+    limiter: &dyn CallLimiter,
+    fold: CallEvent,
+) {
+    if let Err(mpsc::error::SendError(fold)) = tx.send(fold) {
+        release_route_fold_holds(limiter, &fold).await;
+    }
+}
+
+/// Release the limiter holds a route fold carries ([`route_fold_holds`]) —
+/// for a fold no call will record.
+pub(super) async fn release_route_fold_holds(limiter: &dyn CallLimiter, fold: &CallEvent) {
+    let Some((entries, window)) = route_fold_holds(fold) else {
+        return;
+    };
+    let holds: Vec<LimiterHold> =
+        entries.into_iter().map(|(limiter_id, _)| LimiterHold { limiter_id, window }).collect();
+    limiter.release(&holds).await;
 }
 
 /// Record one detached decision round trip on a traced call's root span
@@ -79,9 +115,9 @@ fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
 /// `Ok(None)`: nothing to admit, or the limiter was unavailable (fail-open —
 /// no holds recorded, initial-route parity); `Ok(Some((entries, window)))`:
 /// admitted holds the fold carries to the call, whose ledger takes them
-/// (`RecordLimiterHolds`, on a live or Terminating call) or which the router
-/// releases when the call is gone (`route_fold_holds`); `Err(limiter_id)`:
-/// rejected over-cap — the caller owns the treatment.
+/// (`RecordLimiterHolds`, on a live or Terminating call) or which
+/// [`release_route_fold_holds`] releases when no call can take the fold;
+/// `Err(limiter_id)`: rejected over-cap — the caller owns the treatment.
 async fn admit_route_limiters(
     limiter: &dyn CallLimiter,
     route: &RouteDecision,
@@ -249,7 +285,8 @@ pub(super) fn spawn_failure_callout(
         let sent_at_ms = ctx2.clock.now_ms();
         let (outcome, payload) = failure_outcome(&ctx2, snapshot, &request).await;
         record_round_trip(&trace, &ctx2, "/call/failure", sent_at_ms, &request, outcome, &payload);
-        send_internal(&ctx2, call_ref, "call-failure-result", outcome, payload, Vec::new());
+        let fold = internal_event(call_ref, "call-failure-result", outcome, payload, Vec::new());
+        send_route_fold(&ctx2.reentry_tx, ctx2.limiter.as_ref(), fold).await;
     });
 }
 
@@ -482,7 +519,8 @@ pub(super) fn spawn_release_callout(
             outcome,
             &payload,
         );
-        send_internal(&ctx2, call_ref, "call-release-result", outcome, payload, Vec::new());
+        let fold = internal_event(call_ref, "call-release-result", outcome, payload, Vec::new());
+        send_route_fold(&ctx2.reentry_tx, ctx2.limiter.as_ref(), fold).await;
     });
 }
 
@@ -749,5 +787,69 @@ fn parse_call_failure_request(v: &serde_json::Value) -> CallFailureRequest {
             sip_headers: parse_header_lines(v.get("sip_headers")),
         },
         snapshot: CallSnapshot::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    use super::*;
+
+    /// Records every release; admits nothing.
+    #[derive(Default)]
+    struct RecordingLimiter {
+        released: Mutex<Vec<LimiterHold>>,
+    }
+
+    #[async_trait]
+    impl CallLimiter for RecordingLimiter {
+        async fn admit(&self, _entries: &[LimiterEntry]) -> AdmitOutcome {
+            AdmitOutcome::Unavailable
+        }
+        async fn release(&self, holds: &[LimiterHold]) {
+            self.released.lock().unwrap().extend_from_slice(holds);
+        }
+        async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
+            holds.to_vec()
+        }
+    }
+
+    fn failover_fold() -> CallEvent {
+        let mut route = crate::decision::test_adapter::route_to("127.0.0.1", 5070);
+        route.call_limiter = vec![
+            crate::decision::CallLimiterEntry { id: "x".into(), limit: 10 },
+            crate::decision::CallLimiterEntry { id: "y".into(), limit: 10 },
+        ];
+        let admitted = Some((vec![("x".to_string(), 10), ("y".to_string(), 10)], 300));
+        let payload = route_result_payload(route, admitted, Some("b-1".into()));
+        internal_event("call-1".into(), "call-failure-result", "failover", payload, Vec::new())
+    }
+
+    #[tokio::test]
+    async fn a_route_fold_the_router_cannot_take_releases_its_holds() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let limiter = RecordingLimiter::default();
+        send_route_fold(&tx, &limiter, failover_fold()).await;
+        let released: Vec<(String, i64)> = limiter
+            .released
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| (h.limiter_id.clone(), h.window))
+            .collect();
+        assert_eq!(released, vec![("x".to_string(), 300), ("y".to_string(), 300)]);
+    }
+
+    #[tokio::test]
+    async fn a_delivered_route_fold_keeps_its_holds() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let limiter = RecordingLimiter::default();
+        send_route_fold(&tx, &limiter, failover_fold()).await;
+        assert!(limiter.released.lock().unwrap().is_empty(), "the call's ledger takes them");
+        assert!(route_fold_holds(&rx.recv().await.unwrap()).is_some(), "the fold carries them");
     }
 }

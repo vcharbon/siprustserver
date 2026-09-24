@@ -768,13 +768,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             },
         ),
         // ── route-fold holds on a going-away call ───────────────────────────
-        // A route fold (failover route, release reroute) landing on a
-        // Terminating call drives no progress — the going-away gate absorbs its
-        // fold rule — but the holds its dispatching task admitted are the
-        // call's: they join the ledger and the terminal settle releases them,
-        // with no LimiterRefresh re-arm on a dying call. A Terminated call is
-        // never resident on a rule turn; its folds take the router's gone-call
-        // release.
+        // The holds a route fold carries join a Terminating call's ledger and
+        // the terminal settle releases them; no LimiterRefresh re-arm. A
+        // Terminated call is never resident on a rule turn (its folds take the
+        // router's gone-call release).
         rule(
             "route-fold-holds-on-going-away-call",
             &[],
