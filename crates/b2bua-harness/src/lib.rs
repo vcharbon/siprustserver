@@ -38,7 +38,7 @@ use tokio::task::JoinHandle;
 pub mod limiter;
 pub mod terminated;
 
-pub use limiter::{LimiterCount, LimiterLeak, DEFAULT_LIMITER_ID};
+pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
 pub use terminated::{TerminatedCalls, TerminatedCallsWriter};
 
 // ===========================================================================
@@ -819,6 +819,12 @@ impl B2buaSut {
     /// can still be in flight to the store when the call is reaped.
     pub fn limiter_count(&self) -> LimiterCount {
         self.limiter.count()
+    }
+
+    /// An owned [`LimiterProbe`] on the same count, for a check that outlives
+    /// a borrow of the SUT.
+    pub fn limiter_probe(&self) -> LimiterProbe {
+        self.limiter.probe()
     }
 
     /// The store the reaped check reads: the default limiter's, or the one

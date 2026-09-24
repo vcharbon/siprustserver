@@ -164,6 +164,22 @@ impl CallLimiter for CountingLimiter {
     }
 }
 
+/// An owned handle on a SUT's limiter count, for a check that outlives a
+/// borrow of the SUT (a drop-time gate, a settle future).
+#[derive(Clone)]
+pub struct LimiterProbe {
+    ledger: Arc<HoldLedger>,
+    store: Option<Arc<WindowStore>>,
+}
+
+impl LimiterProbe {
+    /// The count at this instant: what
+    /// [`B2buaSut::limiter_count`](crate::B2buaSut::limiter_count) reads.
+    pub fn count(&self) -> LimiterCount {
+        self.ledger.count(self.store.as_deref())
+    }
+}
+
 /// The limiter side of a running SUT: the ledger its limiter is counted on,
 /// the store the reaped check reads, and the default limiter's server when the
 /// SUT runs the default.
@@ -206,6 +222,10 @@ impl SutLimiter {
 
     pub(crate) fn count(&self) -> LimiterCount {
         self.ledger.count(self.store.as_deref())
+    }
+
+    pub(crate) fn probe(&self) -> LimiterProbe {
+        LimiterProbe { ledger: self.ledger.clone(), store: self.store.clone() }
     }
 
     /// Check 6 of the reaped check: the count matches `leak`, and the default
@@ -342,6 +362,17 @@ mod tests {
     fn counting() -> (CountingLimiter, Arc<HoldLedger>) {
         let ledger = Arc::new(HoldLedger::default());
         (CountingLimiter { inner: Arc::new(Grants), ledger: ledger.clone() }, ledger)
+    }
+
+    #[tokio::test]
+    async fn a_probe_reads_the_count_after_its_sut_side_moves_on() {
+        let (_client, sut) = SutLimiter::serve_default().await;
+        let probe = sut.probe();
+        let limiter = CountingLimiter { inner: Arc::new(Grants), ledger: sut.ledger() };
+        limiter.admit(&[entry("x"), entry("y")]).await;
+        limiter.release(&[hold("x")]).await;
+        assert_eq!(probe.count(), sut.count());
+        assert_eq!((probe.count().admitted, probe.count().released), (2, 1));
     }
 
     #[tokio::test]

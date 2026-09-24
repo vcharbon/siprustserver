@@ -6,7 +6,9 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -89,6 +91,9 @@ pub struct Harness {
     /// [`tag_anchor`](Harness::tag_anchor), surfaced on the [`RunReport`] for
     /// the E2E check engine (ADR-0019).
     anchors: Rc<RefCell<Vec<crate::anchors::AnchorTag>>>,
+    /// Futures [`finish`](Harness::finish) awaits before it settles the fabric
+    /// (see [`settle_before_finish`](Harness::settle_before_finish)).
+    finish_settles: RefCell<Vec<Pin<Box<dyn Future<Output = ()>>>>>,
 }
 
 impl Harness {
@@ -207,6 +212,7 @@ impl Harness {
             waivers,
             recv_timeout,
             anchors,
+            finish_settles: RefCell::new(Vec::new()),
         }
     }
 
@@ -296,6 +302,25 @@ impl Harness {
     /// `offending` field carries.
     pub fn wire_entries(&self) -> Vec<sip_net::RecordedSipEntry> {
         sip_net::audit_wire_entries(&self.recording.channel().snapshot())
+    }
+
+    /// Register a future that [`finish`](Self::finish) and
+    /// [`finish_collecting`](Self::finish_collecting) await, in registration
+    /// order, before they settle the fabric: how a fixture waits out work that
+    /// trails the scenario's last message (a SUT's post-call round trip to a
+    /// side service) so a check it runs after the run reads a settled state.
+    /// The future must complete on its own within a bounded time.
+    pub fn settle_before_finish(&self, settle: impl Future<Output = ()> + 'static) {
+        self.finish_settles.borrow_mut().push(Box::pin(settle));
+    }
+
+    /// Await the registered [`settle_before_finish`](Self::settle_before_finish)
+    /// futures.
+    async fn run_finish_settles(&self) {
+        let settles = std::mem::take(&mut *self.finish_settles.borrow_mut());
+        for settle in settles {
+            settle.await;
+        }
     }
 
     /// Disarm the Drop-time RFC 3261 CSeq hard gate. For multi-SUT harnesses
@@ -563,6 +588,7 @@ impl Harness {
         self.dump.disarm();
         self.log_dump.disarm();
         self.cseq_gate.disarm();
+        self.run_finish_settles().await;
         self.settle_network().await;
         let events = self.recording.channel().snapshot();
         // The full RFC suite runs ONCE per finished run: this set feeds the hard
@@ -634,6 +660,7 @@ impl Harness {
         self.log_dump.disarm();
         self.artifact_dump.disarm();
         self.cseq_gate.disarm();
+        self.run_finish_settles().await;
         self.settle_network().await;
         let events = self.recording.channel().snapshot();
         // The full RFC suite runs ONCE per finished run: this set feeds the gate,
