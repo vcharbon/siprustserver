@@ -278,9 +278,13 @@ up() {
 
   # Cap each kind node's memory so the cluster can never starve the WSL2 host
   # (an uncapped node + a parallel cargo build OOM'd the host once). Pod limits
-  # still apply inside; this is the node-container backstop.
+  # still apply inside; this is the node-container backstop. A refused cap
+  # (over the budget, or an app node below its worker's limit) stops `up`:
+  # the script applies nothing when it refuses, so continuing would leave the
+  # cluster uncapped.
   log "capping kind node memory (host-starvation backstop)"
-  CLUSTER="$CLUSTER" "$REPO_ROOT/deploy/k8s/cap-kind-memory.sh" || true
+  CLUSTER="$CLUSTER" "$REPO_ROOT/deploy/k8s/cap-kind-memory.sh" \
+    || die "kind node memory caps refused (cap-kind-memory.sh above); the cluster is up but UNCAPPED: fix the caps and re-run cap-kind-memory.sh, or ./run.sh down"
 
   # External SIP plane: create the no-NAT sipext bridge and dual-home the two
   # tier=edge nodes (the ONLY components attached to both planes).
