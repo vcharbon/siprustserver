@@ -108,6 +108,53 @@ pub fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// The socket buffer size a `B2BUA_UDP_*BUF` knob requests, in bytes: 4 MiB
+/// when unset, `None` (the kernel default) when set blank.
+fn socket_buffer_knob(key: &str) -> Option<usize> {
+    stated(Some(env_or(key, "4194304"))).map(|s| s.parse().unwrap_or_else(|_| panic!("{key}")))
+}
+
+/// Log the buffer sizes the kernel granted the signalling socket, warning when
+/// it clamped a request. Linux reports twice the size it granted, so an
+/// unclamped request reads back doubled.
+fn log_socket_buffers(
+    service: &str,
+    endpoint: &dyn UdpEndpoint,
+    recv_requested: Option<usize>,
+    send_requested: Option<usize>,
+) {
+    let Some(granted) = endpoint.socket_buffers() else { return };
+    tracing::info!(
+        service,
+        rcvbuf = granted.recv,
+        rcvbuf_requested = ?recv_requested,
+        sndbuf = granted.send,
+        sndbuf_requested = ?send_requested,
+        "signalling socket buffers"
+    );
+    for (knob, requested, effective, cap) in [
+        ("B2BUA_UDP_RCVBUF", recv_requested, granted.recv, "net.core.rmem_max"),
+        ("B2BUA_UDP_SNDBUF", send_requested, granted.send, "net.core.wmem_max"),
+    ] {
+        if let Some(requested) = requested.filter(|&r| buffer_was_clamped(r, effective)) {
+            tracing::warn!(
+                service,
+                knob,
+                requested,
+                effective,
+                "the kernel clamped the socket buffer: raise {cap}"
+            );
+        }
+    }
+}
+
+/// Whether the kernel granted less than `requested`, given the size it reports
+/// back (twice the grant on Linux).
+fn buffer_was_clamped(requested: usize, reported: usize) -> bool {
+    let unclamped = if cfg!(target_os = "linux") { requested.saturating_mul(2) } else { requested };
+    reported < unclamped
+}
+
 /// `value` trimmed, `None` when it is absent or blank: a knob set to nothing
 /// states nothing.
 pub fn stated(value: Option<String>) -> Option<String> {
@@ -258,9 +305,14 @@ pub struct RunnerEnv {
     /// `B2BUA_QUEUE` — inbound UDP queue depth, packets (default 8192).
     pub queue_max: usize,
     /// `B2BUA_UDP_SNDBUF` — `SO_SNDBUF` requested on the signalling socket,
-    /// bytes (default empty = the kernel's `wmem_default`; clamped at
+    /// bytes (default 4 MiB; empty = the kernel's `wmem_default`; clamped at
     /// `wmem_max`). See ADR-0033.
     pub udp_sndbuf: Option<usize>,
+    /// `B2BUA_UDP_RCVBUF` — `SO_RCVBUF` requested on the signalling socket,
+    /// bytes (default 4 MiB; empty = the kernel's `rmem_default`; clamped at
+    /// `rmem_max`). What overflows it is dropped by the kernel and exported as
+    /// `b2bua_udp_kernel_rx_dropped_total`.
+    pub udp_rcvbuf: Option<usize>,
     /// `B2BUA_CDR_QUEUE` — buffered-CDR submit queue depth (default 1024).
     pub cdr_queue: usize,
     /// `B2BUA_ORDINAL` — worker ordinal stamped in callRef (default `w0`).
@@ -388,10 +440,8 @@ impl RunnerEnv {
                 .unwrap_or(false),
             metrics_addr: env_or("B2BUA_METRICS", "0.0.0.0:9091"),
             queue_max: env_or("B2BUA_QUEUE", "8192").parse().expect("B2BUA_QUEUE"),
-            udp_sndbuf: match env_or("B2BUA_UDP_SNDBUF", "") {
-                s if s.is_empty() => None,
-                s => Some(s.parse().expect("B2BUA_UDP_SNDBUF")),
-            },
+            udp_sndbuf: socket_buffer_knob("B2BUA_UDP_SNDBUF"),
+            udp_rcvbuf: socket_buffer_knob("B2BUA_UDP_RCVBUF"),
             cdr_queue: env_or("B2BUA_CDR_QUEUE", "1024").parse().expect("B2BUA_CDR_QUEUE"),
             ordinal: env_or("B2BUA_ORDINAL", "w0"),
             // Dispatch throttle ceilings — deliberately high so they never cap
@@ -522,12 +572,16 @@ impl RunnerEnv {
         if let Some(bytes) = self.udp_sndbuf {
             bind_opts = bind_opts.with_send_buffer(bytes);
         }
+        if let Some(bytes) = self.udp_rcvbuf {
+            bind_opts = bind_opts.with_recv_buffer(bytes);
+        }
         let endpoint: Arc<dyn UdpEndpoint> = net
             .bind_udp(bind_opts)
             .await
             .unwrap_or_else(|e| panic!("bind {listen_sa} failed: {e:?}"))
             .into();
         let local = endpoint.local_addr();
+        log_socket_buffers(name, endpoint.as_ref(), self.udp_rcvbuf, self.udp_sndbuf);
 
         // The `UdpTransport` facade's Prometheus-visible shape: the brake
         // counters + live queue depth / queue_max / tail-drop / refused sends
@@ -538,12 +592,14 @@ impl RunnerEnv {
             let ep_depth = endpoint.clone();
             let ep_tail = endpoint.clone();
             let ep_would_block = endpoint.clone();
+            let ep_kernel = endpoint.clone();
             UdpTransportMetrics::new(
                 self.queue_max,
                 brake_counters.clone(),
                 Arc::new(move || ep_depth.queue_depth() as u64),
                 Arc::new(move || ep_tail.counters().tail_dropped),
                 Arc::new(move || ep_would_block.counters().send_would_block),
+                Arc::new(move || ep_kernel.counters().kernel_rx_dropped),
             )
         };
         tracing::info!(
@@ -1062,6 +1118,17 @@ mod tests {
 
     fn suffixes(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Linux reports twice the grant: a 4 MiB request under a 3 MiB
+    /// `rmem_max` reads back 6 MiB, above the request, and is still a clamp.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_buffer_reported_below_twice_the_request_was_clamped() {
+        const MIB: usize = 1 << 20;
+        assert!(!buffer_was_clamped(4 * MIB, 8 * MIB));
+        assert!(buffer_was_clamped(4 * MIB, 6 * MIB));
+        assert!(buffer_was_clamped(4 * MIB, 416 * 1024));
     }
 
     #[test]

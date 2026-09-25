@@ -640,6 +640,9 @@ impl UdpEndpoint for RecordedEndpoint {
     fn counters(&self) -> UdpEndpointCounters {
         self.inner.counters()
     }
+    fn socket_buffers(&self) -> Option<crate::types::SocketBuffers> {
+        self.inner.socket_buffers()
+    }
 }
 
 impl Drop for RecordedEndpoint {
@@ -821,6 +824,9 @@ impl UdpEndpoint for ParanoidEndpoint {
     }
     fn counters(&self) -> UdpEndpointCounters {
         self.inner.counters()
+    }
+    fn socket_buffers(&self) -> Option<crate::types::SocketBuffers> {
+        self.inner.socket_buffers()
     }
 }
 

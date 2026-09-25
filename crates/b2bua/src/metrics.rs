@@ -1191,6 +1191,9 @@ pub type LiveGauge = Arc<dyn Fn() -> u64 + Send + Sync>;
 ///     underlying [`UdpEndpoint`] (`endpoint.queueDepth()` /
 ///     `endpoint.counters().tail_dropped`).
 ///   - `queue_max` → the bind's configured bound (a constant, copied once).
+///   - `kernel_rx_dropped` → an injected [`LiveGauge`] over
+///     `endpoint.counters().kernel_rx_dropped`: datagrams the kernel dropped
+///     before the queue saw them, which no other facet counts.
 ///   - `drops_tier1_brake` / `tier1_reject_sent` → the shared
 ///     [`Tier1BrakeCounters`] the `preIngress` hook mutates.
 ///   - `buffered_send` → the [`BufferedSendCounters`] (zero until the
@@ -1212,6 +1215,9 @@ pub struct UdpTransportMetrics {
     /// Outbound datagrams the socket refused because its send buffer was
     /// full (ADR-0033): a live getter over the bound endpoint.
     send_would_block: LiveGauge,
+    /// Datagrams the kernel dropped on the socket before the receive pump read
+    /// them (a full `SO_RCVBUF`): a live getter over the bound endpoint.
+    kernel_rx_dropped: LiveGauge,
     brake: Tier1BrakeCounters,
     buffered_send: BufferedSendCounters,
     buffered_send_peer_count: LiveGauge,
@@ -1226,6 +1232,7 @@ impl std::fmt::Debug for UdpTransportMetrics {
             .field("drops_tier1_brake", &self.drops_tier1_brake())
             .field("drops_tail_drop", &self.drops_tail_drop())
             .field("send_would_block", &self.send_would_block())
+            .field("kernel_rx_dropped", &self.kernel_rx_dropped())
             .field("tier1_reject_sent", &self.tier1_reject_sent())
             .field("buffered_send", &self.buffered_send)
             .field("buffered_send_peer_count", &self.buffered_send_peer_count())
@@ -1243,6 +1250,8 @@ impl UdpTransportMetrics {
     ///   - `queue_depth` / `drops_tail_drop`: live getters over the bound
     ///     endpoint (typically `move || endpoint.queue_depth()` and
     ///     `move || endpoint.counters().tail_dropped` with a shared handle).
+    ///   - `send_would_block` / `kernel_rx_dropped`: live getters over the same
+    ///     endpoint's `counters()`.
     ///
     /// Buffered-send facets default to empty/zero — use
     /// [`with_buffered`](Self::with_buffered) once the `BufferedUdpEndpoint`
@@ -1253,12 +1262,14 @@ impl UdpTransportMetrics {
         queue_depth: LiveGauge,
         drops_tail_drop: LiveGauge,
         send_would_block: LiveGauge,
+        kernel_rx_dropped: LiveGauge,
     ) -> Self {
         Self {
             queue_depth,
             queue_max,
             drops_tail_drop,
             send_would_block,
+            kernel_rx_dropped,
             brake,
             buffered_send: BufferedSendCounters::new(),
             buffered_send_peer_count: Arc::new(|| 0),
@@ -1301,6 +1312,10 @@ impl UdpTransportMetrics {
     pub fn send_would_block(&self) -> u64 {
         (self.send_would_block)()
     }
+    /// Datagrams the kernel dropped before the receive pump read them.
+    pub fn kernel_rx_dropped(&self) -> u64 {
+        (self.kernel_rx_dropped)()
+    }
     /// Stateless 503s the brake emitted (`tier1RejectSent`).
     pub fn tier1_reject_sent(&self) -> u64 {
         self.brake.tier1_reject_sent()
@@ -1323,7 +1338,8 @@ impl UdpTransportMetrics {
     /// assignment. All series use the `b2bua_udp_*` namespace.
     ///
     /// Counters (monotonic): `tier1_brake_drops`, `tier1_reject_sent`,
-    /// `tail_dropped`, and the six `buffered_send_*`. Gauges (instantaneous):
+    /// `tail_dropped`, `send_would_block`, `kernel_rx_dropped`, and the six
+    /// `buffered_send_*`. Gauges (instantaneous):
     /// `queue_depth`, `queue_max`, `buffered_send_peers`. The two brake counters
     /// keep their existing standalone names (`b2bua_udp_tier1_brake_drops_total`
     /// / `b2bua_udp_tier1_reject_sent_total`) so dashboards built against the
@@ -1387,6 +1403,12 @@ impl UdpTransportMetrics {
             "b2bua_udp_send_would_block_total",
             "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the transaction owner; ADR-0033).",
             self.send_would_block(),
+        );
+        counter(
+            &mut s,
+            "b2bua_udp_kernel_rx_dropped_total",
+            "Inbound datagrams the kernel dropped on the signalling socket before the stack read them, mostly on a full receive buffer (SO_RCVBUF, B2BUA_UDP_RCVBUF).",
+            self.kernel_rx_dropped(),
         );
 
         // ── Buffered (non-blocking) outbound send (port of
@@ -1599,6 +1621,7 @@ mod tests {
             Arc::new(move || d.load(Ordering::Relaxed)),
             Arc::new(move || t.load(Ordering::Relaxed)),
             Arc::new(|| 0),
+            Arc::new(|| 7),
         );
         (m, brake, depth, tail)
     }
@@ -1674,6 +1697,8 @@ mod tests {
         assert!(txt.contains("b2bua_udp_queue_depth 3"));
         assert!(txt.contains("b2bua_udp_queue_max 5"));
         assert!(txt.contains("b2bua_udp_tail_dropped_total 11"));
+        assert!(txt.contains("b2bua_udp_kernel_rx_dropped_total 7"));
+        assert!(txt.contains("# TYPE b2bua_udp_kernel_rx_dropped_total counter"));
         // Buffered-send facets render at zero (drainer not yet ported).
         assert!(txt.contains("b2bua_udp_buffered_send_enqueued_total 0"));
         assert!(txt.contains("b2bua_udp_buffered_send_dropped_queue_full_total 0"));

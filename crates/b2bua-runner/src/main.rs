@@ -37,8 +37,10 @@
 //!                   b-leg goes straight to the callee (local/dev only). (unset)
 //!   B2BUA_METRICS   Prometheus HTTP listen addr       (default 0.0.0.0:9091)
 //!   B2BUA_QUEUE     inbound UDP queue depth (packets)  (default 8192)
-//!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default empty =
-//!                   kernel wmem_default; clamped at wmem_max) — ADR-0033
+//!   B2BUA_UDP_SNDBUF SO_SNDBUF on the signalling socket, bytes (default 4 MiB;
+//!                   empty = kernel wmem_default; clamped at wmem_max) — ADR-0033
+//!   B2BUA_UDP_RCVBUF SO_RCVBUF on the signalling socket, bytes (default 4 MiB;
+//!                   empty = kernel rmem_default; clamped at rmem_max)
 //!   B2BUA_ORDINAL   worker ordinal stamped in callRef  (default w0)
 //!   B2BUA_CDR_QUEUE buffered-CDR submit queue depth    (default 1024; 0 = unbuffered, refused beside a RabbitMQ URL)
 //!   B2BUA_CDR_RABBITMQ_URL / _QUEUE / _DECLARE / _MAX_LEN / _WINDOW / _*_TIMEOUT_MS / _BACKOFF*_MS

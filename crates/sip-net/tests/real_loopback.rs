@@ -13,6 +13,10 @@ fn loopback(queue_max: usize) -> BindUdpOpts {
     BindUdpOpts::new("127.0.0.1:0".parse().unwrap(), queue_max)
 }
 
+fn loopback_at(addr: &str) -> BindUdpOpts {
+    BindUdpOpts::new(addr.parse().unwrap(), 64)
+}
+
 #[tokio::test]
 async fn loopback_send_recv() {
     let net = RealSignalingNetwork::new();
@@ -135,32 +139,82 @@ fn every_bound_socket_pins_fragmentation_on_both_families() {
     use sip_net::real::build_bound_socket;
 
     for (addr, ipv4) in [("127.0.0.1:0", true), ("[::1]:0", false)] {
-        let socket = build_bound_socket(addr.parse().unwrap(), false, None).expect("bound socket");
+        let socket = build_bound_socket(&loopback_at(addr)).expect("bound socket");
         let mode = mtu_discover_mode(socket.as_raw_fd(), ipv4).expect("readable MTU-discover mode");
         assert_eq!(mode, PMTUDISC_DONT, "{addr} must be pinned to fragment");
         assert_ne!(mode, PMTUDISC_DO, "{addr} must never refuse an oversize datagram");
     }
 }
 
-/// A requested `SO_SNDBUF` reaches the socket. The kernel reports at least
-/// the request back (it doubles for its own overhead and clamps only at
-/// `net.core.wmem_max`, which no host sets below this request).
+/// A requested `SO_SNDBUF` reaches the socket. The kernel reports twice the
+/// request back (it doubles for its own overhead and clamps only at
+/// `net.core.wmem_max`, which no host sets below this request), a value the
+/// 212 992 default never equals.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_requested_send_buffer_is_applied_to_the_socket() {
     use sip_net::real::build_bound_socket;
 
-    let requested = 131_072;
-    let socket = build_bound_socket("127.0.0.1:0".parse().unwrap(), false, Some(requested))
-        .expect("bound socket");
+    let requested = 32_768;
+    let socket =
+        build_bound_socket(&loopback(64).with_send_buffer(requested)).expect("bound socket");
     let effective = socket.send_buffer_size().expect("readable SO_SNDBUF");
-    assert!(effective >= requested, "SO_SNDBUF {effective} < requested {requested}");
+    assert_eq!(effective, 2 * requested, "SO_SNDBUF is not the request");
 
-    let default = build_bound_socket("127.0.0.1:0".parse().unwrap(), false, None)
+    let default = build_bound_socket(&loopback(64))
         .expect("bound socket")
         .send_buffer_size()
         .expect("readable SO_SNDBUF");
     assert!(default > 0, "the kernel default is still what an unstated bind gets");
+}
+
+/// A requested `SO_RCVBUF` reaches the socket, and the bound endpoint reports
+/// what the kernel granted: twice the request, since `rmem_max` is at least
+/// 212 992 on every Linux host.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_requested_receive_buffer_is_applied_and_read_back() {
+    use sip_net::real::build_bound_socket;
+
+    let requested = 32_768;
+    let socket =
+        build_bound_socket(&loopback(64).with_recv_buffer(requested)).expect("bound socket");
+    let effective = socket.recv_buffer_size().expect("readable SO_RCVBUF");
+    assert_eq!(effective, 2 * requested, "SO_RCVBUF is not the request");
+
+    let net = RealSignalingNetwork::new();
+    let ep = net.bind_udp(loopback(64).with_recv_buffer(requested)).await.unwrap();
+    let buffers = ep.socket_buffers().expect("a real endpoint reports its buffers");
+    assert_eq!(buffers.recv, 2 * requested, "the endpoint reports what the kernel granted");
+    assert!(buffers.send > 0);
+}
+
+/// Datagrams the kernel drops on a full receive buffer are counted on the
+/// endpoint. The runtime is current-thread and the test never yields between
+/// the sends and the reads, so the receive pump cannot drain the buffer. The
+/// read polls with a thread sleep because loopback delivery may complete in
+/// ksoftirqd after `send_to` returns.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "current_thread")]
+async fn kernel_receive_drops_are_counted_on_the_endpoint() {
+    let net = RealSignalingNetwork::new();
+    // The kernel raises a 1-byte request to its floor: a few datagrams fill it.
+    let ep = net.bind_udp(loopback(64).with_recv_buffer(1)).await.unwrap();
+    assert_eq!(ep.counters().kernel_rx_dropped, 0);
+
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let datagram = vec![b'x'; 1_000];
+    for _ in 0..64 {
+        sender.send_to(&datagram, ep.local_addr()).unwrap();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut dropped = ep.counters().kernel_rx_dropped;
+    while dropped == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        dropped = ep.counters().kernel_rx_dropped;
+    }
+    assert!(dropped > 0, "64 datagrams into a floor-sized buffer dropped none");
+    assert!(dropped < 64, "the buffer held none of them");
 }
 
 /// A loopback address on this host whose path carries `len` bytes in ONE
@@ -477,7 +531,7 @@ async fn fragmentation_probe() {
         use sip_net::fragmentation::{mtu_discover_mode, PMTUDISC_DO};
         use sip_net::real::build_bound_socket;
 
-        let probe = build_bound_socket("127.0.0.1:0".parse().unwrap(), false, None).unwrap();
+        let probe = build_bound_socket(&loopback(64)).unwrap();
         let mode = mtu_discover_mode(probe.as_raw_fd(), true).unwrap();
         assert_ne!(
             mode, PMTUDISC_DO,
