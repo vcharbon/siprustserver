@@ -172,6 +172,68 @@ async fn emergency_invite_bypasses_the_empty_bucket_and_establishes() {
     let _r = h.finish().await;
 }
 
+/// A run of emergency calls past an exhausted bucket leaves no debt: the next
+/// non-emergency INVITE is refused with a Retry-After of one refill interval,
+/// and is admitted and established once that interval has passed. Real clock,
+/// rate 1/s: five emergency calls with a debt would hold new calls off for 5 s.
+#[tokio::test]
+async fn non_emergency_admission_resumes_one_refill_after_an_emergency_run() {
+    let h = Harness::with_transit_delay("b2bua-tier3-emergency-no-debt", 0)
+        .describe("emergency calls past an empty bucket leave no debt for the next call");
+    let alice = h.agent("alice", "127.0.0.1:5067").await;
+    let bob = h.agent("bob", "127.0.0.1:5077").await;
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5077)
+        .tune(|c| {
+            c.cps_bucket_size = 1;
+            c.cps_bucket_rate = 1;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5087")
+        .await;
+
+    // Five emergency calls: the first spends the lone token, the rest pass the
+    // empty bucket.
+    for _ in 0..5 {
+        let mut call = alice
+            .invite(&bob)
+            .with_sdp(OFFER)
+            .with_header("Resource-Priority", "esnet.0")
+            .through(b2bua.addr)
+            .send()
+            .await;
+        bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
+        call.expect(200).await;
+        let mut dialog = call.ack().await;
+        bob.receive("ACK").await;
+        let mut bye = dialog.bye().await;
+        bob.receive("BYE").await.respond(200, "OK").await;
+        bye.expect(200).await;
+    }
+
+    // The bucket is empty, not in debt: one token away at 1/s.
+    let mut shed = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let resp = shed.expect(503).await;
+    let retry = resp.header::<RetryAfter>().expect("a Retry-After").expect("readable Retry-After");
+    assert_eq!(retry.token(), "1", "Retry-After is one refill interval");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+
+    assert_eq!(b2bua.overload().metrics().emergency_admitted_total, 5);
+    assert_eq!(b2bua.overload().metrics().non_emergency_admitted_total, 1);
+    assert_eq!(b2bua.metrics().overload_rejected_total(), 1);
+    settle_until(|| b2bua.cdr_records().len() == 6).await;
+
+    let _r = h.finish().await;
+}
+
 /// A non-emergency new INVITE admitted by a bucket with room advances the
 /// published `adm` counter (the X-Overload `adm` field LBs diff for treated rate)
 /// exactly once, and the call proceeds normally to bob. Port of the TS

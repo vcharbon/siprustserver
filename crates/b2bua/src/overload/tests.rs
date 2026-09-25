@@ -151,23 +151,58 @@ async fn the_bucket_refills_over_time() {
     assert!(sig.should_admit(false).admit, "a refilled token should admit");
 }
 
-/// Emergency callers ALWAYS admit and are NEVER counted on `adm`, but still
-/// consume a token — so the bucket can go negative and a subsequent
-/// non-emergency caller is shed.
+/// Emergency callers ALWAYS admit and are NEVER counted on `adm`. They spend a
+/// token when one is there, so they share the rate with non-emergency calls,
+/// and pass without one when the bucket is empty, leaving no debt.
 #[tokio::test(start_paused = true)]
-async fn emergency_always_admits_consumes_and_can_overdraft_the_bucket() {
-    // Capacity 1, no refill: a single non-emergency token exists.
-    let (sig, _ctl) = admission_sig(1, 0, 1.0);
-    // Two emergency admits both succeed (the 2nd drives the level negative).
+async fn emergency_always_admits_and_spends_only_a_token_that_is_there() {
+    // Capacity 2, no refill.
+    let (sig, _ctl) = admission_sig(2, 0, 1.0);
+    // The first emergency admit spends one of the two tokens…
+    assert_eq!(sig.should_admit(true), AdmitDecision::admitted());
+    assert_eq!(sig.metrics().token_bucket_level, 1.0);
+    // …so one non-emergency call is left in the budget.
+    assert_eq!(sig.should_admit(false), AdmitDecision::admitted());
+    // An emergency call on the empty bucket is still admitted, with no debt.
     assert_eq!(sig.should_admit(true), AdmitDecision::admitted());
     assert_eq!(sig.should_admit(true), AdmitDecision::admitted());
+    assert_eq!(sig.metrics().token_bucket_level, 0.0);
     // Emergency admits are NOT counted on `adm` (the caller skips the bump;
     // `should_admit` itself never touches the counter).
     assert_eq!(sig.metrics().non_emergency_admitted_total, 0);
-    // The overdraft means the next NON-emergency caller finds the bucket empty.
     let d = sig.should_admit(false);
     assert!(!d.admit);
     assert_eq!(d.reason, Some(AdmitReason::BucketEmpty));
+}
+
+/// An emergency surge above the refill rate leaves the bucket empty, not in
+/// debt: once it ends, a non-emergency INVITE waits at most one refill interval
+/// (`1 / rate`), its Retry-After says so, and the level metric reads the refill.
+#[tokio::test(start_paused = true)]
+async fn an_emergency_surge_leaves_no_debt_behind() {
+    let (sig, _ctl) = admission_sig(100, 100, 1.0);
+    // 60 s of emergency INVITEs at 500/s (five every 10 ms), five times the rate.
+    for step in 0..6000 {
+        if step > 0 {
+            tokio::time::advance(Duration::from_millis(10)).await;
+        }
+        for _ in 0..5 {
+            assert_eq!(sig.should_admit(true), AdmitDecision::admitted());
+        }
+    }
+    // The surge spent every token it found and owes nothing.
+    assert!(sig.metrics().token_bucket_level < 1.0);
+    let d = sig.should_admit(false);
+    assert!(!d.admit);
+    assert_eq!(d.reason, Some(AdmitReason::BucketEmpty));
+    assert_eq!(d.retry_after_sec, 1, "one token away at 100/s");
+    // One refill interval later the next non-emergency call is admitted.
+    tokio::time::advance(Duration::from_millis(10)).await;
+    assert_eq!(sig.should_admit(false), AdmitDecision::admitted());
+    // The level metric reads the real refill: half a second at 100/s.
+    tokio::time::advance(Duration::from_millis(500)).await;
+    let level = sig.metrics().token_bucket_level;
+    assert!((level - 50.0).abs() < 1e-6, "level {level}");
 }
 
 /// Once a token is consumed, an EWMA-ELU above the panic threshold sheds the
@@ -194,7 +229,7 @@ async fn panic_elu_backstop_503s_after_the_token_is_consumed() {
 
 /// The panic-ELU backstop is a NON-emergency control: an emergency caller is
 /// admitted even when the worker's ELU is pegged (it bypasses both the bucket
-/// gate's empty-check and the panic check — it only `consume_forced`s).
+/// gate's empty-check and the panic check — it spends a token only when one is there).
 #[tokio::test(start_paused = true)]
 async fn panic_elu_never_sheds_an_emergency_call() {
     let (sig, ctl) = admission_sig(1000, 0, 0.75);
@@ -237,7 +272,7 @@ async fn prometheus_text_renders_inputs_and_decisions() {
     ctl.set_gc_fraction(0.0);
     sig.sample(); // seat the ELU EWMA at 0.42
                   // One non-emergency admit (drains the lone token), one emergency admit
-                  // (consume_forced → overdraft), then a non-emergency reject (bucket empty).
+                  // (on the empty bucket), then a non-emergency reject (bucket empty).
     assert!(sig.should_admit(false).admit);
     sig.increment_non_emergency_admitted();
     assert!(sig.should_admit(true).admit);
