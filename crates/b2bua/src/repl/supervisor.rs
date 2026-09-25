@@ -259,6 +259,9 @@ struct SupervisorInner {
     /// (the live `B2buaCore` does, before `start`); the sim/test supervisors leave
     /// it unset so pullers drive the store only.
     repl_tx: Mutex<Option<mpsc::UnboundedSender<crate::router::ReplCommand>>>,
+    /// The memory admission gate handed to every spawned puller (ADR-0037).
+    /// `None` until [`set_capacity`](ReplicationSupervisor::set_capacity).
+    capacity: Mutex<Option<crate::capacity::CapacityGate>>,
     /// Set once the Reclaim flows are all ready and the Backup streams may open
     /// (ADR-0014 boot order). Latched true; subsequent reconciles spawn Backup
     /// pullers for any newly-added peer.
@@ -336,6 +339,7 @@ impl ReplicationSupervisor {
                 metrics,
                 reconcile_period: DEFAULT_RECONCILE_PERIOD,
                 repl_tx: Mutex::new(None),
+                capacity: Mutex::new(None),
                 backup_enabled: AtomicBool::new(false),
                 membership: Mutex::new(None),
                 peers: Mutex::new(HashMap::new()),
@@ -350,6 +354,12 @@ impl ReplicationSupervisor {
     /// so the initial pullers pick it up; a re-spawned puller reads it too.
     pub fn set_repl_sink(&self, tx: mpsc::UnboundedSender<crate::router::ReplCommand>) {
         *self.inner.repl_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// Wire the memory admission gate whose backup ceilings every puller
+    /// applies (ADR-0037). Call **before** [`start`](Self::start).
+    pub fn set_capacity(&self, gate: crate::capacity::CapacityGate) {
+        *self.inner.capacity.lock().unwrap() = Some(gate);
     }
 
     /// Spawn the Reclaim pullers per current peer (excluding self), keep them in
@@ -585,6 +595,10 @@ impl ReplicationSupervisor {
         // Forward X11 fail-back commands to the router when a live core wired a sink.
         let puller = match self.inner.repl_tx.lock().unwrap().clone() {
             Some(tx) => puller.with_repl_sink(tx),
+            None => puller,
+        };
+        let puller = match self.inner.capacity.lock().unwrap().clone() {
+            Some(gate) => puller.with_capacity(gate),
             None => puller,
         };
         let (cancel_tx, cancel_rx) = watch::channel(false);

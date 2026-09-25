@@ -7,7 +7,8 @@
 //! ([`crate::tier1_brake`]) fires at arrival time on a queue-depth threshold,
 //! the Tier-3 admission gate here fires on the CPS bucket / panic-ELU
 //! backstop. This module also publishes the `X-Overload` load signal the front
-//! proxy's ELU-band AIMD consumes.
+//! proxy's ELU-band AIMD consumes. The memory bounds, which do refuse
+//! emergency calls at their emergency ceiling, are [`crate::capacity`].
 //!
 //! - `reject` — [`build_reject_new_call_503`] + [`jittered_retry_after`] +
 //!   [`StatelessRejectTagger`]: the single reject-new-call primitive both tiers

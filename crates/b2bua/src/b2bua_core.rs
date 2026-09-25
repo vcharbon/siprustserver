@@ -15,6 +15,7 @@ use sip_net::UdpEndpoint;
 use sip_txn::{IdGen, TransactionConfig, TransactionLayer};
 use topology::Membership;
 
+use crate::capacity::{CapacityGate, Occupancy};
 use crate::cdr::CdrWriter;
 use crate::config::B2buaConfig;
 use crate::decision::CallDecisionEngine;
@@ -134,6 +135,11 @@ pub struct B2buaDeps {
     /// [`ComposeOptions::without_core_refer_transfer`](crate::rules::ComposeOptions::without_core_refer_transfer)
     /// so an in-dialog REFER relays transparently instead of being intercepted.
     pub compose: crate::rules::ComposeOptions,
+    /// Memory admission gate (ADR-0037), configured here from
+    /// `config.capacity`. `None` builds [`CapacityGate::live`]. A host that
+    /// installs the gate on its ingress brake passes the same gate; a test
+    /// passes one over a simulated [`SystemProbe`](crate::capacity::SystemProbe).
+    pub capacity: Option<CapacityGate>,
 }
 
 impl B2buaCore {
@@ -191,6 +197,7 @@ impl B2buaCore {
             metrics,
             adaptation_http,
             compose,
+            capacity,
         } = deps;
 
         let parser: Arc<dyn SipParser + Send + Sync> = Arc::new(CustomParser::new());
@@ -237,6 +244,8 @@ impl B2buaCore {
         // constructs none of these: no writer task, no channel, no receiver for
         // the router to poll.
         let repl_store = replication.as_ref().map(|s| s.store.clone());
+        let capacity = capacity.unwrap_or_else(CapacityGate::live);
+        capacity.configure(&config.capacity);
         let (readiness, supervisor, fail_back) = match &replication {
             Some(setup) => {
                 let self_ordinal = config.self_ordinal.clone();
@@ -269,6 +278,7 @@ impl B2buaCore {
                 // Pullers forward X11 fail-back commands to the router; wire the
                 // sink BEFORE `start` so the initial pullers carry it.
                 supervisor.set_repl_sink(repl_tx.clone());
+                supervisor.set_capacity(capacity.clone());
                 supervisor.start(setup.membership.clone());
 
                 // Serve our changelog to pulling peers. `ReplServer` reads bodies
@@ -394,6 +404,7 @@ impl B2buaCore {
             obligations: Arc::new(crate::obligations::ObligationSet::core()),
             readiness: readiness.clone(),
             overload: overload.clone(),
+            capacity: capacity.clone(),
             keepalive_waves: crate::lifecycle::keepalive_timeout_waves(),
             reentry_tx,
             // Arc-share the injected port into every per-call `ctx.clone()`,
@@ -438,15 +449,17 @@ impl B2buaCore {
             }));
         }
 
-        // The worker-side overload sampler. Rides `tokio::time::interval` so a
+        // The worker-side load sampler. Rides `tokio::time::interval` so a
         // paused-clock test advances it with `tokio::time::advance` like every
         // other behaviour
         // timer (CLAUDE.md: behaviour rides `tokio::time` directly). Each tick
-        // reads the ELU/GC sampler and feeds the EWMAs published on `X-Overload`.
+        // reads the ELU/GC sampler and feeds the EWMAs published on `X-Overload`,
+        // then samples the capacity gate (RSS + the level the ingress brake reads).
         // Aborted with the other tasks on a simulated `crash()`. This task owns no
         // per-call state, so it needs no release path.
         {
             let overload = overload.clone();
+            let ctx2 = ctx.clone();
             tasks.push(tokio::spawn(async move {
                 let mut tick = tokio::time::interval(OverloadSignal::SAMPLE_PERIOD);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -454,6 +467,10 @@ impl B2buaCore {
                 loop {
                     tick.tick().await;
                     overload.sample();
+                    ctx2.capacity.sample(Occupancy {
+                        calls: ctx2.state.active_count() as u64,
+                        transactions: ctx2.txn.metrics().active_transactions() as u64,
+                    });
                 }
             }));
         }
@@ -563,6 +580,11 @@ impl B2buaCore {
     /// published `X-Overload` header; a periodic task drives its EWMAs.
     pub fn overload(&self) -> &OverloadSignal {
         &self.overload
+    }
+
+    /// The memory admission gate (ADR-0037) the running core decides with.
+    pub fn capacity(&self) -> &CapacityGate {
+        &self.ctx.capacity
     }
 
     /// Readiness gate, routed through the SAME latched [`Readiness`] state

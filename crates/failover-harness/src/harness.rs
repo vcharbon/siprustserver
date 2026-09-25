@@ -179,6 +179,11 @@ pub struct ReplicatedB2buaSut {
     /// ledger's sampler sees the process go, and the parked handles of a dead
     /// incarnation stop being read as a running node.
     alive: Arc<AtomicBool>,
+    /// The system information this node's capacity gate reads (ADR-0037).
+    /// Simulated so a run is deterministic; RSS starts at 0. Every
+    /// incarnation's gate reads the same control, so a set value survives a
+    /// reboot.
+    system: b2bua::capacity::SimulatedSystemControl,
 }
 
 /// A shared handle to the `scenario_harness::Harness` so a worker can re-bind its
@@ -262,6 +267,17 @@ impl ReplicatedB2buaSut {
         // X11 reclaim/handback counters under test. Fall back to the (empty) field
         // only while crashed.
         self.core.as_ref().map(|c| c.metrics()).unwrap_or(&self.metrics)
+    }
+
+    /// The simulated system information this node's capacity gate samples
+    /// (ADR-0037): set the RSS here to drive the RSS bounds.
+    pub fn system(&self) -> &b2bua::capacity::SimulatedSystemControl {
+        &self.system
+    }
+
+    /// The live core's memory admission gate. Panics while crashed.
+    pub fn capacity(&self) -> &b2bua::capacity::CapacityGate {
+        self.core.as_ref().expect("capacity of a crashed worker").capacity()
     }
 
     /// Non-2xx INVITE finals this worker's transaction layer re-sent on Timer G
@@ -779,6 +795,7 @@ impl ReplicatedB2buaSut {
             store: None,
             store_faults: None,
             wire_faults: None,
+            capacity: Some(b2bua::capacity::CapacityGate::new(Arc::new(self.system.probe()))),
         };
         b2bua_harness::spawn_b2bua_core(endpoint, params, |config| {
             // EXACT production (kind) timers — `deploy/k8s/manifests/20-worker.yaml`.
@@ -1571,6 +1588,7 @@ impl FailoverHarness {
             tune: self.worker_tune.clone(),
             views: self.views.clone(),
             alive: Arc::new(AtomicBool::new(true)),
+            system: b2bua::capacity::simulated().1,
         };
         let (setup, store, membership) = sut.wiring.setup(gen, &node_clock);
         sut.store = store;

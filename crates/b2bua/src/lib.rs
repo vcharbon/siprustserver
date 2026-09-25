@@ -20,6 +20,7 @@
 //! Builds on the `call` data model (ADR-0010).
 
 pub mod b2bua_core;
+pub mod capacity;
 pub mod cdr;
 pub mod config;
 pub mod decision;

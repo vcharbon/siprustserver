@@ -103,6 +103,10 @@ pub struct B2buaSpawnParams {
     pub store_faults: Option<StoreFaults>,
     /// Wire-fault handle (`b2bua::wire_faults`). `None` → compliant emission.
     pub wire_faults: Option<WireFaults>,
+    /// Memory admission gate (ADR-0037). `None` → the core builds one over the
+    /// real process. A test passes one over a simulated
+    /// [`SystemProbe`](b2bua::capacity::SystemProbe) to drive the RSS bounds.
+    pub capacity: Option<b2bua::capacity::CapacityGate>,
 }
 
 /// Builds the base [`B2buaConfig`] (ip/port/ordinal/outbound_proxy wired),
@@ -138,6 +142,7 @@ pub fn spawn_b2bua_core(
         store,
         store_faults,
         wire_faults,
+        capacity,
     } = params;
     let mut config = B2buaConfig {
         self_ordinal: ordinal,
@@ -173,6 +178,7 @@ pub fn spawn_b2bua_core(
         metrics: B2buaMetrics::new(),
         adaptation_http,
         compose,
+        capacity,
     };
     B2buaCore::spawn_with_overload(endpoint, deps, services, overload)
 }
@@ -418,6 +424,7 @@ pub struct B2buaSutBuilder {
     store: Option<Arc<dyn CallStore>>,
     store_faults: Option<StoreFaults>,
     wire_faults: Option<WireFaults>,
+    capacity: Option<b2bua::capacity::CapacityGate>,
     keep_terminated_calls: bool,
 }
 
@@ -486,6 +493,15 @@ impl B2buaSutBuilder {
         self
     }
 
+    /// Inject the memory admission gate (ADR-0037). Defaults to one over the
+    /// real process; a test builds one over `b2bua::capacity::simulated()` and
+    /// keeps the control to set the RSS the gate samples. Its ceilings come
+    /// from `config.capacity` (set them through [`tune`](Self::tune)).
+    pub fn capacity(mut self, gate: b2bua::capacity::CapacityGate) -> Self {
+        self.capacity = Some(gate);
+        self
+    }
+
     /// Inject the generic service-authorable async-HTTP capability
     /// ([`AdaptationHttpPort`](b2bua::AdaptationHttpPort)) a registered service's
     /// `RuleAction::ServiceHttpRequest` fires over. Defaults to `None` (a service
@@ -547,6 +563,7 @@ impl B2buaSutBuilder {
             store,
             store_faults,
             wire_faults,
+            capacity,
             keep_terminated_calls,
         } = self;
         let (decision, limiter, sut_limiter) = match limiter {
@@ -595,6 +612,7 @@ impl B2buaSutBuilder {
             store,
             store_faults,
             wire_faults,
+            capacity,
         };
         let core = spawn_b2bua_core(endpoint, params, |config| {
             // Production default is 300 s (5 min); the paused-clock keepalive
@@ -645,6 +663,7 @@ impl B2buaSut {
             store: None,
             store_faults: None,
             wire_faults: None,
+            capacity: None,
             keep_terminated_calls: false,
         }
     }
@@ -781,6 +800,11 @@ impl B2buaSut {
     /// [`OverloadSignal::increment_non_emergency_admitted`].
     pub fn overload(&self) -> &b2bua::overload::OverloadSignal {
         self._core.overload()
+    }
+
+    /// The memory admission gate (ADR-0037) the running core decides with.
+    pub fn capacity(&self) -> &b2bua::capacity::CapacityGate {
+        self._core.capacity()
     }
 
     /// Ground-truth live call-map size (`inner.calls.len()`). An orphan-reject

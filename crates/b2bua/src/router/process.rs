@@ -232,7 +232,7 @@ async fn reaper_verdict_gate(
 }
 
 /// The initial-INVITE admission ladder: store-fault probe → retransmit guard →
-/// Tier-3 admission gate → build + rule the new call.
+/// capacity gate → Tier-3 admission gate → build + rule the new call.
 async fn initial_invite_turn(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -272,6 +272,25 @@ async fn initial_invite_turn(
     // `build_initial_call`/`create`, so no dialog, CDR, limiter hold, or
     // replicated state is ever born.
     let is_emergency = is_emergency_request(req);
+
+    // ── Capacity gate (ADR-0037), ahead of the CPS bucket so a memory reject
+    // spends no token. Exact live-call and transaction counts; this INVITE's
+    // own server transaction is not one the new call is judged against.
+    let occupancy = crate::capacity::Occupancy {
+        calls: ctx.state.active_count() as u64,
+        transactions: (ctx.txn.metrics().active_transactions() as u64).saturating_sub(1),
+    };
+    if let Some(bound) = ctx.capacity.refuses(is_emergency, occupancy) {
+        let resp = crate::capacity::build_capacity_reject_503(
+            ctx.id_gen.new_tag(),
+            req,
+            ctx.config.retry_after_base_sec,
+        );
+        let _ = ctx.txn.send_response(resp, src).await;
+        ctx.capacity.record_reject(bound, is_emergency, crate::capacity::Tier::Admission);
+        return Turn::Shed;
+    }
+
     let decision = ctx.overload.should_admit(is_emergency);
     if !decision.admit {
         let resp = crate::overload::build_reject_new_call_503(

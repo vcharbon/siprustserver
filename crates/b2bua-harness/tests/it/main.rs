@@ -21,6 +21,7 @@ mod cancel_200_crossing_internal;
 mod cancel_after_answer;
 mod cancel_before_provisional;
 mod cancel_during_slow_decision;
+mod capacity_admission;
 mod cdr_write_before_remove;
 mod decision_context;
 mod decision_deadline;

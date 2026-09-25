@@ -49,6 +49,7 @@ async fn unwired_core(ordinal: &str) -> B2buaCore {
         metrics: B2buaMetrics::new(),
         adaptation_http: None,
         compose: crate::rules::ComposeOptions::default(),
+        capacity: None,
     };
     B2buaCore::spawn(endpoint, deps)
 }

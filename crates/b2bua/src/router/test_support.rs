@@ -80,6 +80,7 @@ pub async fn node(ordinal: &str) -> Node {
         metrics: metrics.clone(),
         adaptation_http: None,
         compose: crate::rules::ComposeOptions::default(),
+        capacity: None,
     };
     Node { core: B2buaCore::spawn(endpoint, deps), store, cdr, metrics, clock }
 }

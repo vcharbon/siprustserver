@@ -300,6 +300,80 @@ pub struct B2buaConfig {
     /// The call record's raw context — the per-leg message ring and the
     /// headers it captures. Off by default: the runner turns it on.
     pub cdr: CdrConfig,
+    /// **Capacity admission** (ADR-0037): the live-call, transaction and RSS
+    /// ceilings above which a new call is refused, and the backup-copy
+    /// ceilings. Every bound is off by default.
+    pub capacity: CapacityConfig,
+}
+
+/// A pair of admission ceilings on one measured quantity. At or above
+/// `normal` a new non-emergency call is refused; at or above `emergency`
+/// every new call is refused. `None` leaves that class unbounded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ceilings {
+    pub normal: Option<u64>,
+    pub emergency: Option<u64>,
+}
+
+impl Ceilings {
+    /// The ceiling a call of this class is refused at: a non-emergency call
+    /// meets the lower of the two, an emergency call only `emergency`.
+    pub fn for_class(&self, is_emergency: bool) -> Option<u64> {
+        if is_emergency {
+            self.emergency
+        } else {
+            match (self.normal, self.emergency) {
+                (Some(n), Some(e)) => Some(n.min(e)),
+                (n, e) => n.or(e),
+            }
+        }
+    }
+
+    fn validate(&self, name: &str) -> Result<(), String> {
+        if self.normal == Some(0) || self.emergency == Some(0) {
+            return Err(format!("capacity.{name}: a ceiling of 0 refuses every call; unset it"));
+        }
+        if let (Some(n), Some(e)) = (self.normal, self.emergency) {
+            if e < n {
+                return Err(format!(
+                    "capacity.{name}: emergency ceiling {e} is below the normal ceiling {n}; \
+                     emergency calls keep priority, so their ceiling must be the higher one"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The worker's memory bounds (ADR-0037). Live calls and transactions are
+/// counted exactly; RSS is the process resident set, sampled. The backup
+/// ceilings bound the replica bodies this node holds for its peers: at either
+/// one a replica of a call not yet held is not stored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CapacityConfig {
+    /// Live calls this worker serves, takeover copies included.
+    pub calls: Ceilings,
+    /// Live SIP transactions, every role and state.
+    pub transactions: Ceilings,
+    /// Process resident set size, in bytes.
+    pub rss_bytes: Ceilings,
+    /// Backup replica bodies held for peers.
+    pub backup_calls: Option<u64>,
+    /// Process RSS above which a new backup replica is not stored.
+    pub backup_rss_bytes: Option<u64>,
+}
+
+impl CapacityConfig {
+    /// Refuses a zero ceiling and an emergency ceiling below its normal one.
+    pub fn validate(&self) -> Result<(), String> {
+        self.calls.validate("calls")?;
+        self.transactions.validate("transactions")?;
+        self.rss_bytes.validate("rss_bytes")?;
+        if self.backup_calls == Some(0) || self.backup_rss_bytes == Some(0) {
+            return Err("capacity: a backup ceiling of 0 stores no backup; unset it".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// What the call keeps of its own SIP traffic for the record it writes.
@@ -378,6 +452,7 @@ impl Default for B2buaConfig {
             default_sdp: None,
             node_capabilities: sip_message::generators::CapabilitySet::default(),
             cdr: CdrConfig::default(),
+            capacity: CapacityConfig::default(),
         }
     }
 }
@@ -563,6 +638,7 @@ impl B2buaConfig {
                 self.cps_bucket_size
             ));
         }
+        self.capacity.validate()?;
         Ok(())
     }
 
@@ -827,5 +903,56 @@ mod tests {
         // never a degenerate near-zero bound.
         let c = B2buaConfig { invite_txn_timeout_sec: 0, ..Default::default() };
         assert_eq!(c.invite_txn_timeout_ms(), 158_000);
+    }
+
+    fn with_capacity(capacity: CapacityConfig) -> B2buaConfig {
+        B2buaConfig { capacity, ..Default::default() }
+    }
+
+    #[test]
+    fn capacity_ceilings_are_off_by_default_and_validate() {
+        assert_eq!(B2buaConfig::default().capacity, CapacityConfig::default());
+        let ok = CapacityConfig {
+            calls: Ceilings { normal: Some(10), emergency: Some(12) },
+            transactions: Ceilings { normal: Some(100), emergency: None },
+            rss_bytes: Ceilings { normal: None, emergency: Some(1 << 30) },
+            backup_calls: Some(10),
+            backup_rss_bytes: Some(1 << 29),
+        };
+        assert_eq!(with_capacity(ok).validate(), Ok(()));
+    }
+
+    #[test]
+    fn an_emergency_ceiling_below_the_normal_one_is_refused() {
+        let c = with_capacity(CapacityConfig {
+            calls: Ceilings { normal: Some(10), emergency: Some(9) },
+            ..Default::default()
+        });
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("capacity.calls"), "{err}");
+    }
+
+    #[test]
+    fn a_zero_ceiling_is_refused() {
+        for capacity in [
+            CapacityConfig {
+                rss_bytes: Ceilings { normal: Some(0), emergency: None },
+                ..Default::default()
+            },
+            CapacityConfig { backup_calls: Some(0), ..Default::default() },
+        ] {
+            assert!(with_capacity(capacity).validate().is_err(), "{capacity:?}");
+        }
+    }
+
+    #[test]
+    fn a_class_meets_its_own_ceiling() {
+        let both = Ceilings { normal: Some(10), emergency: Some(12) };
+        assert_eq!(both.for_class(false), Some(10));
+        assert_eq!(both.for_class(true), Some(12));
+        let hard_only = Ceilings { normal: None, emergency: Some(12) };
+        assert_eq!(hard_only.for_class(false), Some(12), "the hard ceiling bounds everyone");
+        let soft_only = Ceilings { normal: Some(10), emergency: None };
+        assert_eq!(soft_only.for_class(true), None);
     }
 }

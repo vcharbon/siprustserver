@@ -188,6 +188,7 @@ async fn spawn_reclaimer_core(
         metrics: crate::metrics::B2buaMetrics::new(),
         adaptation_http: None,
         compose: crate::rules::ComposeOptions::default(),
+        capacity: None,
     };
     (B2buaCore::spawn(endpoint, deps), store)
 }

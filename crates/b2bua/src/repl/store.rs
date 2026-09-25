@@ -20,6 +20,7 @@
 //! (CLAUDE.md timer hazard).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -100,6 +101,10 @@ pub struct ReplicatingCallStore {
     clock: Clock,
     /// `callRef → CallMeta`, updated atomically with the body.
     meta: Arc<Mutex<HashMap<String, CallMeta>>>,
+    /// Entries of `meta` whose role is [`PartitionRole::Backup`]. Changed only
+    /// under the `meta` lock, in the same step as the entry, so it never
+    /// drifts from a scan of `meta`.
+    backups: Arc<AtomicU64>,
     /// `callRef → deleted_at_ms`: the apply-side resurrection guard. A `Put` for a
     /// ref deleted within [`RESURRECTION_TOMBSTONE_MS`] is rejected so a late
     /// reverse-flush cannot re-create a just-discharged call (delete-wins, extended
@@ -123,6 +128,7 @@ impl ReplicatingCallStore {
             changelog,
             clock,
             meta: Arc::new(Mutex::new(HashMap::new())),
+            backups: Arc::new(AtomicU64::new(0)),
             tombstones: Arc::new(Mutex::new(HashMap::new())),
             default_ttl_ms: DEFAULT_REPLICATED_TTL_MS,
         }
@@ -261,10 +267,26 @@ impl ReplicatingCallStore {
     /// One brief lock; no body touched. Includes expired-but-not-yet-reaped
     /// entries — the reaper, not the gauge, prunes.
     pub fn meta_counts(&self) -> (u64, u64) {
-        let meta = self.meta.lock().unwrap();
-        let total = meta.len() as u64;
-        let backup = meta.values().filter(|m| m.role == PartitionRole::Backup).count() as u64;
-        (total, backup)
+        let total = self.meta.lock().unwrap().len() as u64;
+        (total, self.backup_held())
+    }
+
+    /// Backup replica bodies this node holds for its peers, exact. The puller
+    /// reads it against the backup ceiling (ADR-0037).
+    pub fn backup_held(&self) -> u64 {
+        self.backups.load(Ordering::Relaxed)
+    }
+
+    /// Account one `meta` entry leaving role `old` for role `new` (`None` =
+    /// absent). Called under the `meta` lock.
+    fn account_role(&self, old: Option<PartitionRole>, new: Option<PartitionRole>) {
+        let was = old == Some(PartitionRole::Backup);
+        let is = new == Some(PartitionRole::Backup);
+        if is && !was {
+            self.backups.fetch_add(1, Ordering::Relaxed);
+        } else if was && !is {
+            self.backups.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     /// Map propagate direction → the partition tag the frame carries.
@@ -321,8 +343,13 @@ impl ReplicatingCallStore {
         if !self.is_expired(call_ref) {
             return false;
         }
-        let Some(gone) = self.meta.lock().unwrap().remove(call_ref) else {
-            return false;
+        let gone = {
+            let mut meta = self.meta.lock().unwrap();
+            let Some(gone) = meta.remove(call_ref) else {
+                return false;
+            };
+            self.account_role(Some(gone.role), None);
+            gone
         };
         let _ = self
             .inner
@@ -352,7 +379,12 @@ impl ReplicatingCallStore {
                 .collect()
         };
         for (call_ref, role, primary, indexes) in &expired {
-            self.meta.lock().unwrap().remove(call_ref);
+            {
+                let mut meta = self.meta.lock().unwrap();
+                if let Some(gone) = meta.remove(call_ref) {
+                    self.account_role(Some(gone.role), None);
+                }
+            }
             let _ = self
                 .inner
                 .delete_call(*role, primary, call_ref, indexes, &PutOpts::default())
@@ -445,6 +477,7 @@ impl CallStore for ReplicatingCallStore {
             };
             match meta.get_mut(call_ref) {
                 Some(m) => {
+                    self.account_role(Some(m.role), Some(role));
                     m.meta = ref_meta;
                     m.role = role;
                     m.primary = primary.to_string();
@@ -457,6 +490,7 @@ impl CallStore for ReplicatingCallStore {
                     }
                 }
                 None => {
+                    self.account_role(None, Some(role));
                     meta.insert(
                         call_ref.to_string(),
                         CallMeta {
@@ -492,7 +526,12 @@ impl CallStore for ReplicatingCallStore {
         opts: &PutOpts,
     ) -> Result<(), StoreError> {
         self.inner.delete_call(role, primary, call_ref, indexes, opts).await?;
-        self.meta.lock().unwrap().remove(call_ref);
+        {
+            let mut meta = self.meta.lock().unwrap();
+            if let Some(gone) = meta.remove(call_ref) {
+                self.account_role(Some(gone.role), None);
+            }
+        }
         // Tombstone the ref so a late reverse-flush cannot resurrect it (see
         // `put_call`); pruned in `reap`.
         self.tombstones.lock().unwrap().insert(call_ref.to_string(), self.clock.now_ms());
@@ -550,5 +589,62 @@ impl BodySource for ReplicatingCallStore {
             .filter(|(_, m)| !matches!(m.expiry_at_ms, Some(e) if now >= e))
             .map(|(k, _)| k.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod backup_count_tests {
+    //! Pins `backup_held` to a scan of the meta map through every writer that
+    //! adds, re-roles or removes an entry.
+
+    use super::*;
+
+    fn scanned(store: &ReplicatingCallStore) -> u64 {
+        let meta = store.meta.lock().unwrap();
+        meta.values().filter(|m| m.role == PartitionRole::Backup).count() as u64
+    }
+
+    async fn put(store: &ReplicatingCallStore, role: PartitionRole, call_ref: &str, ttl_ms: i64) {
+        store
+            .put_call(role, "w0", call_ref, b"b".to_vec(), &[], ttl_ms, 1, 0, &PutOpts::default())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_backup_count_matches_a_scan_through_every_writer() {
+        let clock = Clock::test_at(0);
+        let store = ReplicatingCallStore::new(1, clock.clone()).with_default_ttl_ms(0);
+        let check = |want: u64| {
+            assert_eq!(store.backup_held(), want);
+            assert_eq!(store.backup_held(), scanned(&store));
+        };
+
+        put(&store, PartitionRole::Backup, "w0|a|t", 0).await;
+        put(&store, PartitionRole::Backup, "w0|b|t", 0).await;
+        put(&store, PartitionRole::Primary, "w1|c|t", 0).await;
+        check(2);
+
+        put(&store, PartitionRole::Backup, "w0|a|t", 0).await;
+        check(2);
+        put(&store, PartitionRole::Primary, "w0|a|t", 0).await;
+        check(1);
+        put(&store, PartitionRole::Backup, "w0|a|t", 0).await;
+        check(2);
+
+        store
+            .delete_call(PartitionRole::Backup, "w0", "w0|b|t", &[], &PutOpts::default())
+            .await
+            .unwrap();
+        check(1);
+
+        put(&store, PartitionRole::Backup, "w0|d|t", 1_000).await;
+        put(&store, PartitionRole::Backup, "w0|e|t", 1_000).await;
+        check(3);
+        tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
+        assert!(store.get_call(PartitionRole::Backup, "w0", "w0|d|t").await.unwrap().is_none());
+        check(2);
+        store.reap(clock.now_ms()).await;
+        check(1);
     }
 }

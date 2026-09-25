@@ -113,6 +113,9 @@ pub struct RouterCtx {
     /// (`sip_proxy::load_observer`) consumes it; the EWMAs advance only while a
     /// sampler task drives [`OverloadSignal::sample`].
     pub overload: OverloadSignal,
+    /// Memory admission gate (ADR-0037): refuses a new call at a live-call,
+    /// transaction or RSS ceiling. The overload sampler task samples it.
+    pub capacity: crate::capacity::CapacityGate,
     /// Re-entrant event sink: fire-and-forget work (the async `/call/refer`
     /// round-trip) folds its result back into the router by sending a
     /// `CallEvent::InternalEvent` here, which `run` consumes via `on_event` —

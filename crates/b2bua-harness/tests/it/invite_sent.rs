@@ -97,6 +97,7 @@ impl Sut {
             metrics: B2buaMetrics::new(),
             adaptation_http: None,
             compose: b2bua::rules::ComposeOptions::default(),
+            capacity: None,
         };
         let core = B2buaCore::spawn_with_services(endpoint, deps, services);
         Self { addr, core, terminated }

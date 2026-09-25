@@ -129,6 +129,10 @@ enum ApplyOutcome {
     Applied,
     Dominated,
     Refused,
+    /// A backup replica of a call not held yet, left unstored at a backup
+    /// ceiling (ADR-0037). Says nothing about the call; the next `Put` that
+    /// finds room stores it.
+    Shed,
 }
 
 /// Backoff knobs for a puller (tests inject short values).
@@ -249,6 +253,9 @@ pub struct Puller {
     /// `None` outside a live `B2buaCore` (the sim/unit puller tests drive the
     /// store directly), so the existing constructors stay source-compatible.
     repl_tx: Option<mpsc::UnboundedSender<ReplCommand>>,
+    /// The memory admission gate whose backup ceilings bound the replicas this
+    /// node stores for its peers (ADR-0037). `None` stores every replica.
+    capacity: Option<crate::capacity::CapacityGate>,
     /// Decoder for a stored Element's body. The Forward `Delete` guard reads the
     /// Element's lifecycle state, and the store persists the same encoding.
     codec: MsgpackCodec,
@@ -298,6 +305,7 @@ impl Puller {
                 status_tx,
                 metrics,
                 repl_tx: None,
+                capacity: None,
                 codec: MsgpackCodec::new(),
                 bootstrap_started_at: std::sync::Mutex::new(
                     (!warm).then(tokio::time::Instant::now),
@@ -312,6 +320,13 @@ impl Puller {
     /// tests, which assert on the store directly) are unchanged.
     pub fn with_repl_sink(mut self, tx: mpsc::UnboundedSender<ReplCommand>) -> Self {
         self.repl_tx = Some(tx);
+        self
+    }
+
+    /// Attach the memory admission gate whose backup ceilings this puller
+    /// applies (ADR-0037).
+    pub fn with_capacity(mut self, gate: crate::capacity::CapacityGate) -> Self {
+        self.capacity = Some(gate);
         self
     }
 
@@ -860,6 +875,19 @@ impl Puller {
                         _ => ApplyOutcome::Applied,
                     },
                 };
+                let outcome = if outcome == ApplyOutcome::Applied
+                    && stored.is_none()
+                    && role == PartitionRole::Backup
+                    && self
+                        .capacity
+                        .as_ref()
+                        .and_then(|g| g.refuses_backup(self.store.backup_held()))
+                        .is_some()
+                {
+                    ApplyOutcome::Shed
+                } else {
+                    outcome
+                };
                 if outcome == ApplyOutcome::Refused && mode == ApplyMode::Forward {
                     self.metrics.record_repl_forward_flush_refused("put");
                 }
@@ -1037,7 +1065,7 @@ impl Puller {
         body: Option<Arc<[u8]>>,
         origin_now_ms: i64,
     ) {
-        use ApplyOutcome::{Applied, Dominated, Refused};
+        use ApplyOutcome::{Applied, Dominated, Refused, Shed};
         let Some(tx) = &self.repl_tx else { return };
         if mode == ApplyMode::Forward && !bootstrapped {
             return;
@@ -1060,6 +1088,7 @@ impl Puller {
                 origin_now_ms,
             },
             (ApplyMode::Forward, Applied | Dominated) | (ApplyMode::Bootstrap, _) => return,
+            (_, Shed) => return,
         };
         let _ = tx.send(cmd);
     }
@@ -1210,5 +1239,140 @@ mod tests {
             status.borrow().bootstrap_complete,
             "first catch-up Noop observed ⇒ bootstrap-complete",
         );
+    }
+
+    // ---- backup ceilings (ADR-0037) ----
+
+    /// A Backup-flow puller on `w1` pulling `w0`, its gate at `capacity`.
+    fn backup_puller(
+        capacity: crate::config::CapacityConfig,
+    ) -> (
+        Puller,
+        ReplicatingCallStore,
+        crate::capacity::CapacityGate,
+        crate::capacity::SimulatedSystemControl,
+    ) {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        let (probe, control) = crate::capacity::simulated();
+        let gate = crate::capacity::CapacityGate::new(Arc::new(probe));
+        gate.configure(&capacity);
+        let net: Arc<dyn ReplicationNetwork> =
+            Arc::new(PacedNet { n: 0, gap_ms: 100, w_scan: Watermark::new(1, 1) });
+        let (puller, _status) = Puller::new_at(
+            "w0",
+            "w1",
+            Partition::Bak,
+            "127.0.0.1:9".parse().unwrap(),
+            net,
+            store.clone(),
+            PullerConfig::fast_test(),
+            Watermark::new(0, 0),
+            B2buaMetrics::new(),
+        );
+        (puller.with_capacity(gate.clone()), store, gate, control)
+    }
+
+    async fn put(p: &Puller, partition: Partition, call_ref: &str, gen: i64) -> ApplyOutcome {
+        let body: Arc<[u8]> = Arc::from(b"body".to_vec().into_boxed_slice());
+        p.apply_to_store(
+            Op::Put,
+            partition,
+            call_ref,
+            gen,
+            0,
+            0,
+            0,
+            &[],
+            Some(body),
+            ApplyMode::Forward,
+        )
+        .await
+    }
+
+    async fn held(store: &ReplicatingCallStore, call_ref: &str) -> bool {
+        store.get_call(PartitionRole::Backup, "w0", call_ref).await.unwrap().is_some()
+    }
+
+    /// At the count ceiling a replica of a new call is not stored; replicas
+    /// already held keep taking updates, and a freed slot lets the next `Put`
+    /// of the shed call in.
+    #[tokio::test]
+    async fn the_backup_count_ceiling_sheds_new_replicas_only() {
+        let (p, store, gate, _) = backup_puller(crate::config::CapacityConfig {
+            backup_calls: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
+        assert_eq!(put(&p, Partition::Bak, "w0|b|t", 1).await, ApplyOutcome::Applied);
+        assert_eq!(store.backup_held(), 2);
+
+        assert_eq!(put(&p, Partition::Bak, "w0|c|t", 1).await, ApplyOutcome::Shed);
+        assert!(!held(&store, "w0|c|t").await, "a shed replica is not stored");
+        assert_eq!(gate.backup_shed_total(crate::capacity::BackupBound::Calls), 1);
+
+        assert_eq!(
+            put(&p, Partition::Bak, "w0|a|t", 2).await,
+            ApplyOutcome::Applied,
+            "a held replica keeps taking updates at the ceiling"
+        );
+
+        let delete = p
+            .apply_to_store(
+                Op::Delete,
+                Partition::Bak,
+                "w0|b|t",
+                2,
+                0,
+                0,
+                0,
+                &[],
+                None,
+                ApplyMode::Forward,
+            )
+            .await;
+        assert_eq!(delete, ApplyOutcome::Applied);
+        assert_eq!(store.backup_held(), 1);
+        assert_eq!(put(&p, Partition::Bak, "w0|c|t", 2).await, ApplyOutcome::Applied);
+        assert!(held(&store, "w0|c|t").await, "the next Put after a free slot stores it");
+    }
+
+    /// At the backup RSS ceiling a replica of a new call is not stored.
+    #[tokio::test]
+    async fn the_backup_rss_ceiling_sheds_new_replicas() {
+        let (p, store, gate, control) = backup_puller(crate::config::CapacityConfig {
+            backup_rss_bytes: Some(1000),
+            ..Default::default()
+        });
+        assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
+        control.set_rss_bytes(Some(1000));
+        gate.sample(crate::capacity::Occupancy::default());
+        assert_eq!(put(&p, Partition::Bak, "w0|b|t", 1).await, ApplyOutcome::Shed);
+        assert_eq!(put(&p, Partition::Bak, "w0|a|t", 2).await, ApplyOutcome::Applied);
+        assert_eq!(gate.backup_shed_total(crate::capacity::BackupBound::Rss), 1);
+        assert_eq!(store.backup_held(), 1);
+    }
+
+    /// Our own calls coming home (the `Pri` partition) are never shed: they
+    /// are live calls, not backups.
+    #[tokio::test]
+    async fn a_reclaimed_own_call_is_never_shed() {
+        let (p, store, _, _) = backup_puller(crate::config::CapacityConfig {
+            backup_calls: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
+        assert_eq!(put(&p, Partition::Pri, "w1|mine|t", 1).await, ApplyOutcome::Applied);
+        assert_eq!(store.backup_held(), 1);
+    }
+
+    /// A shed replica is not a split: nothing rides up to the router.
+    #[tokio::test]
+    async fn a_shed_replica_signals_nothing() {
+        let (p, _, _, _) = backup_puller(crate::config::CapacityConfig::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let p = p.with_repl_sink(tx);
+        p.signal_put_outcome(ApplyMode::Forward, ApplyOutcome::Shed, true, "w0|a|t", None, 0);
+        p.signal_put_outcome(ApplyMode::Reverse, ApplyOutcome::Shed, true, "w0|a|t", None, 0);
+        assert!(rx.try_recv().is_err());
     }
 }

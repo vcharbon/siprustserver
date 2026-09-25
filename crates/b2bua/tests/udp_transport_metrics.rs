@@ -77,7 +77,12 @@ async fn setup(
 ) -> (SimulatedSignalingNetwork, Arc<dyn UdpEndpoint>, Box<dyn UdpEndpoint>, UdpTransportMetrics) {
     let net = SimulatedSignalingNetwork::new(TRANSIT_MS);
     let brake = Tier1BrakeCounters::new();
-    let hook = build_tier1_brake_hook(brake_config(), brake.clone(), &IdGen::seeded(3));
+    let hook = build_tier1_brake_hook(
+        brake_config(),
+        brake.clone(),
+        &IdGen::seeded(3),
+        b2bua::capacity::CapacityGate::live(),
+    );
 
     let b2bua: Arc<dyn UdpEndpoint> = net
         .bind_udp(BindUdpOpts::new(b2bua_addr(), QUEUE_MAX).with_pre_ingress(hook))
