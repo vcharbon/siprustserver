@@ -4,15 +4,15 @@
 //! End-to-end through a running `B2buaCore`: a new-dialog INVITE is gated by the
 //! CPS token bucket + the panic-ELU backstop before any call/dialog state is
 //! created. The gate's UNIT behaviour (bucket drain/refill, panic-ELU, emergency
-//! overdraft, reason tags) is pinned in `b2bua::overload::tests`; this file proves
+//! admits past an empty bucket, reason tags) is pinned in `b2bua::overload::tests`; this file proves
 //! the WIRING — the verdict turns into a real stateless 503 on the wire (with the
 //! overload `Reason` + `Retry-After`), no per-call resources are born for a reject,
 //! emergency bypasses the empty bucket, and an admit advances the published `adm`.
 //!
-//! Real-clock (not `start_paused`): every assertion is instant — a size-0 bucket
-//! rejects/admits the FIRST INVITE with no timer to wait on, so the suite stays
-//! far under the 60 s slow-lane threshold. The time-based refill path is the one
-//! piece that needs a clock, and it is covered by the paused-clock unit test
+//! Real-clock (not `start_paused`): a size-0 bucket rejects/admits the FIRST
+//! INVITE with no timer to wait on, and the one refill the emergency no-debt
+//! test waits for is 1 s, so the suite stays far under the 60 s slow-lane
+//! threshold. The refill rate itself is pinned by the paused-clock unit test
 //! `overload::tests::the_bucket_refills_over_time`.
 
 use b2bua_harness::{settle_until, B2buaSut};

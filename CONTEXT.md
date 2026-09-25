@@ -207,6 +207,15 @@ _Avoid_: "overload" for these rejects (overload is the rate and loop shedding
 of the CPS bucket, the panic-ELU backstop and the queue brake); "limit" for a
 ceiling (the call limiter owns that word).
 
+**CPS bucket** (Tier-3 admission):
+The worker's token bucket on new-dialog INVITEs, refilled at `cps_bucket_rate`
+up to `cps_bucket_size`; an empty bucket refuses a non-emergency call with a
+503 whose `Retry-After` is the time to the next token. An emergency call spends
+a token when one is there and passes an empty bucket owing nothing, so the
+level stays in `[0, size]` and non-emergency admission resumes `1 / rate`
+seconds after any surge.
+_Avoid_: "overdraft" or "debt" (the bucket has none).
+
 ## HA replication glossary
 
 The peer-to-peer call-replication vocabulary (ADR-0011 / `docs/plan/

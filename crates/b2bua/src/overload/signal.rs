@@ -28,12 +28,12 @@ pub struct OverloadMetrics {
     pub reject_bucket_empty_total: u64,
     /// Tier-3 rejects because the worker's EWMA-ELU exceeded the panic backstop.
     pub reject_panic_elu_total: u64,
-    /// Current CPS token-bucket level. A negative emergency overdraft reads as 0.
+    /// Current CPS token-bucket level, in `[0, capacity]`.
     pub token_bucket_level: f64,
     /// Monotonic count of EMERGENCY new-dialog INVITEs this worker admitted
     /// (Resource-Priority esnet/wps/q735 or an admitted `;emerg`/`;em` marker).
-    /// These ALWAYS admit (bypassing the bucket-empty + panic-ELU checks, only
-    /// `consume_forced`-ing a token) and are NOT counted on `adm`/the
+    /// These ALWAYS admit (bypassing the bucket-empty + panic-ELU checks, spending
+    /// a token only when one is there) and are NOT counted on `adm`/the
     /// non-emergency total — so without this counter the emergency-admit branch
     /// would be entirely uncounted. The sum `non_emergency_admitted_total +
     /// emergency_admitted_total` is the worker's total admit rate.
@@ -164,9 +164,11 @@ impl OverloadSignal {
     /// request (`sip_message::is_emergency_request`).
     ///
     /// Order:
-    /// 1. **Emergency** → always admit, but `consume_forced` one token (the level
-    ///    may go negative) so the bucket reflects true CPS load. Emergency callers
-    ///    never see a reject and are NOT counted on `adm` (the caller must skip
+    /// 1. **Emergency** → always admit, spending a token when one is there and
+    ///    leaving no debt when the bucket is empty: emergency requests get
+    ///    preference under overload (RFC 7339 §5.10.1), which never bills later
+    ///    non-emergency callers. Emergency callers never see a reject and are NOT counted on
+    ///    `adm` (the caller must skip
     ///    [`increment_non_emergency_admitted`](OverloadSignal::increment_non_emergency_admitted)
     ///    for them — LBs cap non-emergency traffic only).
     /// 2. **Hard CPS gate** — `try_consume`; on empty → reject `bucket_empty` with
@@ -183,8 +185,8 @@ impl OverloadSignal {
         let mut inner = self.inner.lock().unwrap();
 
         if is_emergency {
-            // Always admit; still consume so the bucket tracks true CPS load.
-            inner.bucket.consume_forced();
+            // Share the rate while tokens remain; never overdraw.
+            let _ = inner.bucket.try_consume();
             return AdmitDecision::admitted();
         }
 

@@ -66,7 +66,7 @@ impl OverloadSignal {
         gauge(
             &mut s,
             "b2bua_overload_token_bucket_level",
-            "Current CPS token-bucket level (tokens remaining; a negative emergency overdraft reads as 0).",
+            "Current CPS token-bucket level (tokens remaining, never below 0).",
             m.token_bucket_level,
         );
         gauge(

@@ -209,8 +209,8 @@ pub struct B2buaConfig {
     /// `AppConfig.cpsBucketSize`). The hard ceiling on a *burst* of new-dialog
     /// INVITEs this worker will admit: tokens accrue at
     /// [`cps_bucket_rate`](Self::cps_bucket_rate)/s up to this cap, and the
-    /// admission gate consumes one per new INVITE (emergency callers consume
-    /// unconditionally, which may drive the level negative). `0` disables the
+    /// admission gate consumes one per new INVITE (an emergency caller is
+    /// admitted on an empty bucket and owes nothing). `0` disables the
     /// hard CPS gate (every non-emergency INVITE passes the bucket — the
     /// panic-ELU backstop still applies). TS default **1000**. Overridable via
     /// `B2BUA_CPS_BUCKET_SIZE`.
