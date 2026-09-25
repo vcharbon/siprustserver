@@ -164,7 +164,7 @@ fn the_exposition_names_every_series() {
     assert!(txt.contains("b2bua_capacity_rss_bytes 4096\n"));
     assert!(txt.contains("b2bua_capacity_ceiling{bound=\"calls\",class=\"emergency\"} 12\n"));
     assert!(
-        !txt.contains("bound=\"transactions\",class=\"normal\"} "),
+        !txt.contains("b2bua_capacity_ceiling{bound=\"transactions\""),
         "unset ceilings are absent"
     );
     assert!(txt.contains("b2bua_capacity_ceiling{bound=\"calls\",class=\"backup\"} 7\n"));

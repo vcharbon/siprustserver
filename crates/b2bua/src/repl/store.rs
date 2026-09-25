@@ -297,6 +297,22 @@ impl ReplicatingCallStore {
         self.shed.lock().unwrap().floor(primary)
     }
 
+    /// Drop every shed mark of `primary`.
+    pub fn clear_shed_of(&self, primary: &str) {
+        self.shed.lock().unwrap().clear_primary(primary);
+    }
+
+    /// Whether a `Put` of `call_ref` falls in its resurrection-tombstone
+    /// window, so [`put_call`](CallStore::put_call) would ignore it.
+    pub fn is_tombstoned(&self, call_ref: &str) -> bool {
+        let now = self.clock.now_ms();
+        self.tombstones
+            .lock()
+            .unwrap()
+            .get(call_ref)
+            .is_some_and(|&deleted_at| now - deleted_at < RESURRECTION_TOMBSTONE_MS)
+    }
+
     /// Standing shed marks, all primaries.
     pub fn shed_count(&self) -> usize {
         self.shed.lock().unwrap().len()

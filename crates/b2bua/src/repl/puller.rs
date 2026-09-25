@@ -324,9 +324,13 @@ impl Puller {
     }
 
     /// The position this flow may report having applied, given it received
-    /// up to `at`: never past a replica it left unstored (ADR-0037), so a
-    /// draining primary does not read a shed call as held (ADR-0031 D2).
+    /// up to `at`: a Backup flow never claims past a replica it left unstored
+    /// (ADR-0037), so a draining primary does not read a shed call as held
+    /// (ADR-0031 D2). A Reclaim flow sheds nothing.
     fn claimable(&self, at: Watermark) -> Watermark {
+        if self.is_reclaim() {
+            return at;
+        }
         match self.store.shed_floor(self.peer_ordinal()) {
             Some(floor) if floor < at => floor,
             _ => at,
@@ -611,6 +615,13 @@ impl Puller {
         // advance W and apply the Reverse rule from the first frame. A cold pull
         // starts pre-bootstrap: apply ungated, hold W until the first Noop.
         let mut bootstrapped = since != Watermark::new(0, 0);
+        // A Backup scan re-sends every live body of the primary, so the shed
+        // marks of an earlier stream (an old incarnation, a ref deleted while
+        // disconnected) say nothing about it: they go, and a body still left
+        // out marks itself again (ADR-0037).
+        if !bootstrapped && !self.is_reclaim() {
+            self.store.clear_shed_of(self.peer_ordinal());
+        }
         // Bodies imported during the pre-`Noop` bootstrap phase — the
         // re-hydration diagnostic (Reclaim flow only): a pass that re-stalls at
         // the same value across reconnects would signal truncation (now
@@ -892,6 +903,7 @@ impl Puller {
                 let outcome = if outcome == ApplyOutcome::Applied
                     && stored.is_none()
                     && role == PartitionRole::Backup
+                    && !self.store.is_tombstoned(call_ref)
                     && self
                         .capacity
                         .as_ref()
@@ -1456,35 +1468,26 @@ mod tests {
         }
     }
 
-    /// While a shed replica stands, the flow reports no position past the last
-    /// one it held everything up to, whatever else it applies; once the
-    /// replica is stored, the report catches up (ADR-0031 D2 x ADR-0037).
-    #[tokio::test(start_paused = true)]
-    async fn a_shed_replica_holds_the_reported_position_until_it_is_stored() {
-        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+    /// Run a cold puller of `partition` from `w0` on `w1` through `script`,
+    /// its gate at `capacity`; the positions it reported.
+    async fn reported_positions(
+        partition: Partition,
+        store: &ReplicatingCallStore,
+        capacity: crate::config::CapacityConfig,
+        script: Vec<Frame>,
+    ) -> Vec<Watermark> {
         let (probe, _control) = crate::capacity::simulated();
         let gate = crate::capacity::CapacityGate::new(Arc::new(probe));
-        gate.configure(&crate::config::CapacityConfig {
-            backup_calls: Some(1),
-            ..Default::default()
-        });
-        let script = VecDeque::from([
-            Frame::Noop { at: Watermark::new(1, 1) },
-            data(Op::Put, "w0|a|t", 1, 2),
-            data(Op::Put, "w0|b|t", 1, 3),
-            data(Op::Put, "w0|a|t", 2, 4),
-            Frame::Noop { at: Watermark::new(1, 4) },
-            data(Op::Delete, "w0|a|t", 3, 5),
-            data(Op::Put, "w0|b|t", 2, 6),
-            Frame::Noop { at: Watermark::new(1, 6) },
-        ]);
+        gate.configure(&capacity);
         let sent = Arc::new(Mutex::new(Vec::new()));
-        let net: Arc<dyn ReplicationNetwork> =
-            Arc::new(RecordingNet { script: Mutex::new(Some(script)), sent: sent.clone() });
+        let net: Arc<dyn ReplicationNetwork> = Arc::new(RecordingNet {
+            script: Mutex::new(Some(VecDeque::from(script))),
+            sent: sent.clone(),
+        });
         let (puller, _status) = Puller::new_at(
             "w0",
             "w1",
-            Partition::Bak,
+            partition,
             "127.0.0.1:9".parse().unwrap(),
             net,
             store.clone(),
@@ -1493,23 +1496,137 @@ mod tests {
             B2buaMetrics::new(),
         );
         let puller = puller.with_capacity(gate);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        tokio::spawn(async move { puller.run(cancel_rx).await });
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let task = tokio::spawn(async move { puller.run(cancel_rx).await });
         for _ in 0..40 {
             tokio::time::advance(Duration::from_millis(10)).await;
             tokio::task::yield_now().await;
         }
-
-        let reported: Vec<u64> = sent
+        let _ = cancel_tx.send(true);
+        task.abort();
+        let reported = sent
             .lock()
             .unwrap()
             .iter()
             .filter_map(|f| match f {
-                Frame::Position { at } => Some(at.counter),
+                Frame::Position { at } => Some(*at),
                 _ => None,
             })
             .collect();
-        assert_eq!(reported, vec![1, 2, 2, 2, 2, 2, 6, 6], "positions reported per frame");
+        reported
+    }
+
+    fn at(counter: u64) -> Watermark {
+        Watermark::new(1, counter)
+    }
+
+    /// While a shed replica stands, the flow reports no position past the last
+    /// one it held everything up to, whatever else it applies; once the
+    /// replica is stored, the report catches up (ADR-0031 D2 x ADR-0037).
+    #[tokio::test(start_paused = true)]
+    async fn a_shed_replica_holds_the_reported_position_until_it_is_stored() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        let reported = reported_positions(
+            Partition::Bak,
+            &store,
+            crate::config::CapacityConfig { backup_calls: Some(1), ..Default::default() },
+            vec![
+                Frame::Noop { at: at(1) },
+                data(Op::Put, "w0|a|t", 1, 2),
+                data(Op::Put, "w0|b|t", 1, 3),
+                data(Op::Put, "w0|a|t", 2, 4),
+                Frame::Noop { at: at(4) },
+                data(Op::Delete, "w0|a|t", 3, 5),
+                data(Op::Put, "w0|b|t", 2, 6),
+                Frame::Noop { at: at(6) },
+            ],
+        )
+        .await;
+        let want: Vec<Watermark> = [1, 2, 2, 2, 2, 2, 6, 6].into_iter().map(at).collect();
+        assert_eq!(reported, want, "positions reported per frame");
         assert_eq!(store.shed_count(), 0, "the stored replica cleared its mark");
+    }
+
+    /// A Delete of a shed replica's call releases the position it held.
+    #[tokio::test(start_paused = true)]
+    async fn a_deleted_shed_replica_releases_the_position() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        let reported = reported_positions(
+            Partition::Bak,
+            &store,
+            crate::config::CapacityConfig { backup_calls: Some(1), ..Default::default() },
+            vec![
+                Frame::Noop { at: at(1) },
+                data(Op::Put, "w0|a|t", 1, 2),
+                data(Op::Put, "w0|b|t", 1, 3),
+                data(Op::Delete, "w0|b|t", 2, 4),
+            ],
+        )
+        .await;
+        let want: Vec<Watermark> = [1, 2, 2, 4].into_iter().map(at).collect();
+        assert_eq!(reported, want);
+    }
+
+    /// A Backup scan drops the marks an earlier stream left (an old
+    /// incarnation of the primary): the scan re-sends every live body.
+    #[tokio::test(start_paused = true)]
+    async fn a_backup_scan_drops_the_marks_of_an_earlier_stream() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        store.note_shed("w0|x|t", "w0", at(3), 0);
+        let reported = reported_positions(
+            Partition::Bak,
+            &store,
+            crate::config::CapacityConfig::default(),
+            vec![Frame::Noop { at: Watermark::new(2, 1) }],
+        )
+        .await;
+        assert_eq!(reported, vec![Watermark::new(2, 1)]);
+        assert_eq!(store.shed_count(), 0);
+    }
+
+    /// A Reclaim flow sheds nothing, so a Backup flow's marks of the same
+    /// peer never cap it.
+    #[tokio::test(start_paused = true)]
+    async fn a_reclaim_flow_is_never_capped_by_backup_marks() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        store.note_shed("w0|x|t", "w0", at(1), 0);
+        let reported = reported_positions(
+            Partition::Pri,
+            &store,
+            crate::config::CapacityConfig::default(),
+            vec![Frame::Noop { at: at(9) }],
+        )
+        .await;
+        assert_eq!(reported, vec![at(9)]);
+        assert_eq!(store.shed_count(), 1, "the Backup flow's mark stands");
+    }
+
+    /// A re-delivered Put of a call deleted inside the tombstone window is
+    /// ignored by the store, never shed: it marks nothing.
+    #[tokio::test]
+    async fn a_tombstoned_put_is_not_shed() {
+        let (p, store, gate, _) = backup_puller(crate::config::CapacityConfig {
+            backup_calls: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Applied);
+        let delete = p
+            .apply_to_store(
+                Op::Delete,
+                Partition::Bak,
+                "w0|a|t",
+                2,
+                0,
+                0,
+                0,
+                &[],
+                None,
+                ApplyMode::Forward,
+            )
+            .await;
+        assert_eq!(delete, ApplyOutcome::Applied);
+        assert_eq!(put(&p, Partition::Bak, "w0|c|t", 1).await, ApplyOutcome::Applied);
+        assert_ne!(put(&p, Partition::Bak, "w0|a|t", 1).await, ApplyOutcome::Shed);
+        assert_eq!(gate.backup_shed_total(crate::capacity::BackupBound::Calls), 0);
     }
 }

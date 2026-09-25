@@ -53,6 +53,15 @@ impl ShedMarks {
         }
     }
 
+    /// Drop every mark of `primary`.
+    pub(super) fn clear_primary(&mut self, primary: &str) {
+        if let Some(set) = self.floors.remove(primary) {
+            for (_, call_ref) in set {
+                self.by_ref.remove(&call_ref);
+            }
+        }
+    }
+
     /// The lowest floor among `primary`'s marks.
     pub(super) fn floor(&self, primary: &str) -> Option<Watermark> {
         self.floors.get(primary).and_then(|set| set.first()).map(|(w, _)| *w)
@@ -110,6 +119,17 @@ mod shed_marks_tests {
         marks.clear("w0|a|t");
         assert_eq!(marks.len(), 0);
         assert_eq!(marks.floor("w0"), None);
+    }
+
+    #[test]
+    fn a_primary_is_cleared_alone() {
+        let mut marks = ShedMarks::default();
+        marks.mark("w0|a|t", "w0", w(5), None);
+        marks.mark("w2|c|t", "w2", w(1), None);
+        marks.clear_primary("w0");
+        assert_eq!(marks.floor("w0"), None);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks.floor("w2"), Some(w(1)));
     }
 
     #[test]
