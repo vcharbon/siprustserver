@@ -107,6 +107,14 @@ impl LiveLoadSampler {
         }
     }
 
+    /// The budget read now, or `last` when the read was voided; stored as `last`.
+    fn refresh_budget(&self, last: &mut CpuBudget) -> CpuBudget {
+        if let Some(budget) = (self.budget)() {
+            *last = budget;
+        }
+        *last
+    }
+
     /// Sum `worker_total_busy_duration` across all runtime workers (the cumulative
     /// busy clock; monotonic, never reset). `cfg(tokio_unstable)` gates the broader
     /// metrics surface — see the struct docs.
@@ -138,10 +146,8 @@ impl LoadSampler for LiveLoadSampler {
         prev.at = now;
         prev.busy_total = busy_now;
         // Busy fraction of the CPU the runtime may use over the interval.
-        if let Some(budget) = (self.budget)() {
-            prev.budget = budget;
-        }
-        clamp01(busy / (prev.budget.capacity(workers) * wall))
+        let capacity = self.refresh_budget(&mut prev.budget).capacity(workers);
+        clamp01(busy / (capacity * wall))
     }
 
     fn gc_fraction(&self) -> f64 {
@@ -208,6 +214,23 @@ impl SimulatedLoadControl {
 #[cfg(test)]
 mod sampler_tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    /// A voided budget read keeps the last full one; the next full read replaces it.
+    #[test]
+    fn a_voided_budget_read_keeps_the_last_full_read() {
+        static VOID: AtomicBool = AtomicBool::new(false);
+        fn source() -> Option<CpuBudget> {
+            (!VOID.load(Ordering::Relaxed))
+                .then_some(CpuBudget { quota: Some(0.5), affinity: Some(8) })
+        }
+        let s = LiveLoadSampler::with_budget(source);
+        let mut last = CpuBudget { quota: None, affinity: None };
+        assert_eq!(s.refresh_budget(&mut last).capacity(1), 0.5);
+        VOID.store(true, Ordering::Relaxed);
+        assert_eq!(s.refresh_budget(&mut last).capacity(1), 0.5);
+        assert_eq!(last.quota, Some(0.5));
+    }
 
     /// The simulated control and sampler share one cell: a value set through
     /// the control is read back through the sampler, and readings are clamped
