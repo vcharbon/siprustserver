@@ -14,6 +14,14 @@ pub fn socket_buffers(socket: &impl AsFd) -> std::io::Result<SocketBuffers> {
     Ok(SocketBuffers { recv: socket.recv_buffer_size()?, send: socket.send_buffer_size()? })
 }
 
+/// Whether the kernel granted less than `requested`, given the size it
+/// reports back: Linux reports twice the grant, so an unclamped request reads
+/// back doubled.
+pub fn was_clamped(requested: usize, reported: usize) -> bool {
+    let unclamped = if cfg!(target_os = "linux") { requested.saturating_mul(2) } else { requested };
+    reported < unclamped
+}
+
 /// Datagrams the kernel dropped on `socket` since it was created: a full
 /// receive buffer, plus the few checksum and filter drops the kernel charges to
 /// the same socket counter (`sk_drops`, the `drops` column of `/proc/net/udp`).
@@ -53,5 +61,21 @@ pub fn rx_dropped(socket: &impl AsFd) -> std::io::Result<u64> {
     {
         let _ = socket;
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::was_clamped;
+
+    /// A 4 MiB request under a 3 MiB `rmem_max` reads back 6 MiB, above the
+    /// request, and is still a clamp.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_buffer_reported_below_twice_the_request_was_clamped() {
+        const MIB: usize = 1 << 20;
+        assert!(!was_clamped(4 * MIB, 8 * MIB));
+        assert!(was_clamped(4 * MIB, 6 * MIB));
+        assert!(was_clamped(4 * MIB, 416 * 1024));
     }
 }

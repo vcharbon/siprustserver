@@ -75,6 +75,7 @@ use b2bua::{B2buaCore, B2buaDeps, ReplicationSetup};
 use call::Call;
 use http_net::RealHttpNetwork;
 use sip_clock::Clock;
+use sip_net::socket_stats::was_clamped;
 use sip_net::types::BindUdpOpts;
 use sip_net::{RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 use sip_txn::IdGen;
@@ -115,8 +116,7 @@ fn socket_buffer_knob(key: &str) -> Option<usize> {
 }
 
 /// Log the buffer sizes the kernel granted the signalling socket, warning when
-/// it clamped a request. Linux reports twice the size it granted, so an
-/// unclamped request reads back doubled.
+/// it clamped a request ([`was_clamped`]).
 fn log_socket_buffers(
     service: &str,
     endpoint: &dyn UdpEndpoint,
@@ -136,7 +136,7 @@ fn log_socket_buffers(
         ("B2BUA_UDP_RCVBUF", recv_requested, granted.recv, "net.core.rmem_max"),
         ("B2BUA_UDP_SNDBUF", send_requested, granted.send, "net.core.wmem_max"),
     ] {
-        if let Some(requested) = requested.filter(|&r| buffer_was_clamped(r, effective)) {
+        if let Some(requested) = requested.filter(|&r| was_clamped(r, effective)) {
             tracing::warn!(
                 service,
                 knob,
@@ -146,13 +146,6 @@ fn log_socket_buffers(
             );
         }
     }
-}
-
-/// Whether the kernel granted less than `requested`, given the size it reports
-/// back (twice the grant on Linux).
-fn buffer_was_clamped(requested: usize, reported: usize) -> bool {
-    let unclamped = if cfg!(target_os = "linux") { requested.saturating_mul(2) } else { requested };
-    reported < unclamped
 }
 
 /// `value` trimmed, `None` when it is absent or blank: a knob set to nothing
@@ -1118,17 +1111,6 @@ mod tests {
 
     fn suffixes(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// Linux reports twice the grant: a 4 MiB request under a 3 MiB
-    /// `rmem_max` reads back 6 MiB, above the request, and is still a clamp.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_buffer_reported_below_twice_the_request_was_clamped() {
-        const MIB: usize = 1 << 20;
-        assert!(!buffer_was_clamped(4 * MIB, 8 * MIB));
-        assert!(buffer_was_clamped(4 * MIB, 6 * MIB));
-        assert!(buffer_was_clamped(4 * MIB, 416 * 1024));
     }
 
     #[test]

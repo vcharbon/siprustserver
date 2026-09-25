@@ -41,9 +41,13 @@
 //!   PROXY_METRICS    Prometheus HTTP listen addr           (default 0.0.0.0:9090)
 //!   PROXY_QUEUE      inbound UDP queue depth (packets)      (default 8192)
 //!   PROXY_UDP_SNDBUF SO_SNDBUF requested on every signalling socket, bytes
-//!                    (default empty = kernel wmem_default; the kernel clamps
-//!                    at wmem_max). Size it well above the neighbour
+//!                    (default 4 MiB; empty = kernel wmem_default; the kernel
+//!                    clamps at wmem_max). Size it well above the neighbour
 //!                    unresolved queue (unres_qlen_bytes) — ADR-0033
+//!   PROXY_UDP_RCVBUF SO_RCVBUF requested on every signalling socket, bytes
+//!                    (default 4 MiB; empty = kernel rmem_default; the kernel
+//!                    clamps at rmem_max). Overflow is counted in
+//!                    sip_proxy_udp_kernel_rx_dropped_total
 //!   PROXY_SHARD_STALL_MS  a recv shard still on one packet past this is
 //!                    stalled: /readyz NotReady, gauge
 //!                    sip_proxy_recv_shards_stalled       (default 2000)
@@ -86,8 +90,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sip_clock::Clock;
+use sip_net::socket_stats::was_clamped;
 use sip_net::types::{BindUdpOpts, PreIngressAction, PreIngressHook};
-use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork};
+use sip_net::{BindError, RealSignalingNetwork, SignalingNetwork, UdpEndpoint};
 use sip_proxy::health::{HealthProbe, HealthProbeConfig};
 use sip_proxy::load_observer::{LoadObserverConfig, WorkerLoadObserver};
 use sip_proxy::observability::ProxyMetrics;
@@ -107,6 +112,48 @@ use topology::{K8sMembership, Membership};
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// The socket buffer size a `PROXY_UDP_*BUF` knob requests, in bytes: 4 MiB
+/// when unset, `None` (the kernel default) when set blank.
+fn socket_buffer_knob(key: &str) -> Option<usize> {
+    match env_or(key, "4194304").trim() {
+        "" => None,
+        s => Some(s.parse().unwrap_or_else(|_| panic!("{key}"))),
+    }
+}
+
+/// Log the buffer sizes the kernel granted one face's signalling socket,
+/// warning when it clamped a request ([`was_clamped`]).
+fn log_socket_buffers(
+    face: &str,
+    endpoint: &dyn UdpEndpoint,
+    recv_requested: Option<usize>,
+    send_requested: Option<usize>,
+) {
+    let Some(granted) = endpoint.socket_buffers() else { return };
+    tracing::info!(
+        face,
+        rcvbuf = granted.recv,
+        rcvbuf_requested = ?recv_requested,
+        sndbuf = granted.send,
+        sndbuf_requested = ?send_requested,
+        "signalling socket buffers"
+    );
+    for (knob, requested, effective, cap) in [
+        ("PROXY_UDP_RCVBUF", recv_requested, granted.recv, "net.core.rmem_max"),
+        ("PROXY_UDP_SNDBUF", send_requested, granted.send, "net.core.wmem_max"),
+    ] {
+        if let Some(requested) = requested.filter(|&r| was_clamped(r, effective)) {
+            tracing::warn!(
+                face,
+                knob,
+                requested,
+                effective,
+                "the kernel clamped the socket buffer: raise {cap}"
+            );
+        }
+    }
 }
 
 fn resolve(addr: &str) -> SocketAddr {
@@ -582,10 +629,8 @@ async fn main() {
     let workers = env_or("PROXY_WORKERS", "");
     let metrics_addr = env_or("PROXY_METRICS", "0.0.0.0:9090");
     let queue_max: usize = env_or("PROXY_QUEUE", "8192").parse().expect("PROXY_QUEUE");
-    let udp_sndbuf: Option<usize> = match env_or("PROXY_UDP_SNDBUF", "") {
-        s if s.is_empty() => None,
-        s => Some(s.parse().expect("PROXY_UDP_SNDBUF")),
-    };
+    let udp_sndbuf = socket_buffer_knob("PROXY_UDP_SNDBUF");
+    let udp_rcvbuf = socket_buffer_knob("PROXY_UDP_RCVBUF");
     let shard_stall_ms: u64 =
         env_or("PROXY_SHARD_STALL_MS", "2000").parse().expect("PROXY_SHARD_STALL_MS");
     let hmac_kid = env_or("PROXY_HMAC_KID", "k0");
@@ -713,9 +758,14 @@ async fn main() {
     // packets against it, so the self-gate's intake age is a difference of two
     // readings of a SINGLE monotonic-anchored timeline.
     let clock = Clock::system();
-    let with_sndbuf = |opts: BindUdpOpts| match udp_sndbuf {
-        Some(bytes) => opts.with_send_buffer(bytes),
-        None => opts,
+    let with_buffers = |mut opts: BindUdpOpts| {
+        if let Some(bytes) = udp_sndbuf {
+            opts = opts.with_send_buffer(bytes);
+        }
+        if let Some(bytes) = udp_rcvbuf {
+            opts = opts.with_recv_buffer(bytes);
+        }
+        opts
     };
     let mut endpoints = Vec::with_capacity(recv_shards);
     for _ in 0..recv_shards {
@@ -726,7 +776,7 @@ async fn main() {
             bind_deadline,
             is_udp_in_use,
             || {
-                let opts = with_sndbuf(
+                let opts = with_buffers(
                     BindUdpOpts::new(listen_sa, queue_max)
                         .with_reuse_port(recv_shards > 1)
                         .with_pre_ingress(intake_shed.clone())
@@ -754,7 +804,7 @@ async fn main() {
                 bind_deadline,
                 is_udp_in_use,
                 || {
-                    let opts = with_sndbuf(
+                    let opts = with_buffers(
                         BindUdpOpts::new(*ext_sa, queue_max)
                             .with_reuse_port(recv_shards > 1)
                             .with_pre_ingress(intake_shed.clone())
@@ -768,6 +818,14 @@ async fn main() {
             ext_endpoints.push(ep);
         }
     }
+    // Every shard of a face requests the same buffers: its first socket speaks
+    // for the face.
+    if let Some(ep) = endpoints.first() {
+        log_socket_buffers("internal", ep.as_ref(), udp_rcvbuf, udp_sndbuf);
+    }
+    if let Some(ep) = ext_endpoints.first() {
+        log_socket_buffers("external", ep.as_ref(), udp_rcvbuf, udp_sndbuf);
+    }
 
     // Separate endpoint for the OPTIONS health probe (its own source socket).
     // Port 0 (ephemeral) never conflicts; the retry wrapper keeps the fatal
@@ -780,7 +838,7 @@ async fn main() {
         bind_deadline,
         is_udp_in_use,
         || {
-            let opts = with_sndbuf(BindUdpOpts::new(probe_sa, 1024).with_clock(clock.clone()));
+            let opts = with_buffers(BindUdpOpts::new(probe_sa, 1024).with_clock(clock.clone()));
             async move { net.bind_udp(opts).await }
         },
     )
@@ -955,6 +1013,7 @@ async fn main() {
         queue = queue_max,
         recv_shards,
         udp_sndbuf = ?udp_sndbuf,
+        udp_rcvbuf = ?udp_rcvbuf,
         shard_stall_ms,
         "listening"
     );

@@ -9,4 +9,4 @@
 pub mod metrics;
 pub mod peer_failures;
 
-pub use metrics::ProxyMetrics;
+pub use metrics::{ProxyMetrics, UdpShardStats};

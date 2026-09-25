@@ -31,7 +31,7 @@ use crate::cancel_lru::CancelBranchLru;
 use crate::face::FaceCidrs;
 use crate::liveness::ShardPulse;
 use crate::observability::metrics::Face;
-use crate::observability::ProxyMetrics;
+use crate::observability::{ProxyMetrics, UdpShardStats};
 use crate::registry::WorkerRegistry;
 use crate::resolver::{HostResolver, NamedForwarder, ResolverConfig, SystemResolver};
 use crate::self_gate::{AlwaysAdmitGate, IntakeAgeRecorder, ProxySelfGate};
@@ -369,23 +369,9 @@ impl ProxyCore {
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tick.tick().await;
-                    let c = endpoint.counters();
-                    // Intake-shed drops are counted on BOTH faces — in
-                    // dual-face mode callers arrive on the external socket, so
-                    // its pre-ingress drops must not be invisible.
-                    let ext = ext_endpoint.as_ref().map(|e| e.counters());
-                    let ext_shed = ext.map_or(0, |c| c.pre_ingress_dropped);
-                    // Refused sends are counted on BOTH faces too: the
-                    // external face is the one toward peers that vanish.
-                    let ext_would_block = ext.map_or(0, |c| c.send_would_block);
                     metrics.set_udp_endpoint_stats(
                         shard,
-                        endpoint.queue_depth() as u64,
-                        endpoint.queue_max() as u64,
-                        c.enqueued,
-                        c.tail_dropped,
-                        c.pre_ingress_dropped + ext_shed,
-                        c.send_would_block + ext_would_block,
+                        UdpShardStats::of_faces(&*endpoint, ext_endpoint.as_deref()),
                     );
                 }
             })

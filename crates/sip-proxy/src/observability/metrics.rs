@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use sip_net::UdpEndpoint;
+
 /// Inbound vs outbound, for `sip_messages_total{direction}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -186,6 +188,58 @@ struct HealthGauges {
     dead: AtomicU64,
 }
 
+/// One recv shard's endpoint state: receive-queue gauges and the endpoints'
+/// lifetime counters, every field summed over the shard's faces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UdpShardStats {
+    pub queue_depth: u64,
+    pub queue_max: u64,
+    pub enqueued: u64,
+    pub tail_dropped: u64,
+    pub intake_shed: u64,
+    pub send_would_block: u64,
+    /// Datagrams the kernel dropped on the shard's sockets before the recv
+    /// pump read them (a full `SO_RCVBUF`).
+    pub kernel_rx_dropped: u64,
+}
+
+impl UdpShardStats {
+    /// The shard's stats over its internal face and, in dual-face mode, its
+    /// external face, where callers arrive.
+    pub fn of_faces(internal: &dyn UdpEndpoint, external: Option<&dyn UdpEndpoint>) -> Self {
+        let mut stats = Self::of_endpoint(internal);
+        if let Some(ext) = external {
+            stats += Self::of_endpoint(ext);
+        }
+        stats
+    }
+
+    fn of_endpoint(ep: &dyn UdpEndpoint) -> Self {
+        let c = ep.counters();
+        Self {
+            queue_depth: ep.queue_depth() as u64,
+            queue_max: ep.queue_max() as u64,
+            enqueued: c.enqueued,
+            tail_dropped: c.tail_dropped,
+            intake_shed: c.pre_ingress_dropped,
+            send_would_block: c.send_would_block,
+            kernel_rx_dropped: c.kernel_rx_dropped,
+        }
+    }
+}
+
+impl std::ops::AddAssign for UdpShardStats {
+    fn add_assign(&mut self, o: Self) {
+        self.queue_depth += o.queue_depth;
+        self.queue_max += o.queue_max;
+        self.enqueued += o.enqueued;
+        self.tail_dropped += o.tail_dropped;
+        self.intake_shed += o.intake_shed;
+        self.send_would_block += o.send_would_block;
+        self.kernel_rx_dropped += o.kernel_rx_dropped;
+    }
+}
+
 /// Live proxy metrics. Cheap to share behind an `Arc`.
 #[derive(Default)]
 pub struct ProxyMetrics {
@@ -246,13 +300,10 @@ pub struct ProxyMetrics {
     send_failures: AtomicU64,
     /// Endpoint receive-queue stats, one slot per recv shard, published by
     /// each core's maintenance tick — without them a tail-dropping queue shows
-    /// 100% forwarded (the blind spot that hid the 2026-06-12 burst collapse
-    /// from the gates). Keyed by shard index so N reuse-port cores don't stomp
-    /// one gauge; rendered as the cross-shard aggregate (sum), keeping the
-    /// metric names/meaning dashboards already use. Not hot: written every
-    /// sweep tick, read at render.
-    /// `[depth, max, enqueued, tail_dropped, pre_ingress_dropped]`.
-    udp_shards: Mutex<BTreeMap<usize, [u64; 6]>>,
+    /// 100% forwarded. Keyed by shard index so N reuse-port cores don't stomp
+    /// one gauge; rendered as the cross-shard aggregate (sum). Not hot:
+    /// written every sweep tick, read at render.
+    udp_shards: Mutex<BTreeMap<usize, UdpShardStats>>,
     health: HealthGauges,
     /// `1` ⇒ the worker pool has **zero routable (`Alive`) workers** — the proxy
     /// can serve no new dialog. Set from the registry by the runner's health
@@ -421,31 +472,15 @@ impl ProxyMetrics {
     /// Publish one recv shard's endpoint receive-queue state (gauges) and
     /// lifetime counters (monotonic, endpoint-owned — stored, not accumulated).
     /// Single-socket deployments are just `shard = 0`.
-    pub fn set_udp_endpoint_stats(
-        &self,
-        shard: usize,
-        queue_depth: u64,
-        queue_max: u64,
-        enqueued: u64,
-        tail_dropped: u64,
-        pre_ingress_dropped: u64,
-        send_would_block: u64,
-    ) {
-        self.udp_shards.lock().unwrap().insert(
-            shard,
-            [queue_depth, queue_max, enqueued, tail_dropped, pre_ingress_dropped, send_would_block],
-        );
+    pub fn set_udp_endpoint_stats(&self, shard: usize, stats: UdpShardStats) {
+        self.udp_shards.lock().unwrap().insert(shard, stats);
     }
 
-    /// Cross-shard aggregate
-    /// `[depth, max, enqueued, tail_dropped, pre_ingress_dropped, send_would_block]`.
-    fn udp_totals(&self) -> [u64; 6] {
-        let shards = self.udp_shards.lock().unwrap();
-        let mut t = [0u64; 6];
-        for v in shards.values() {
-            for (acc, x) in t.iter_mut().zip(v) {
-                *acc += x;
-            }
+    /// Cross-shard aggregate.
+    fn udp_totals(&self) -> UdpShardStats {
+        let mut t = UdpShardStats::default();
+        for v in self.udp_shards.lock().unwrap().values() {
+            t += *v;
         }
         t
     }
@@ -509,7 +544,7 @@ impl ProxyMetrics {
         self.send_failures.load(Ordering::Relaxed)
     }
     pub fn udp_tail_dropped_total(&self) -> u64 {
-        self.udp_totals()[3]
+        self.udp_totals().tail_dropped
     }
     pub fn overload_stale_decrease_total(&self) -> u64 {
         self.overload_stale_decrease.load(Ordering::Relaxed)
@@ -706,37 +741,46 @@ impl ProxyMetrics {
             "counter",
             self.send_failures.load(Ordering::Relaxed),
         );
-        let [udp_depth, udp_max, udp_enq, udp_drop, udp_shed, udp_would_block] = self.udp_totals();
+        let UdpShardStats {
+            queue_depth: udp_depth,
+            queue_max: udp_max,
+            enqueued: udp_enq,
+            tail_dropped: udp_drop,
+            intake_shed: udp_shed,
+            send_would_block: udp_would_block,
+            kernel_rx_dropped: udp_kernel_drop,
+        } = self.udp_totals();
         g(
             &mut s,
             "sip_proxy_udp_queue_depth",
-            "Inbound UDP queue depth (sampled, summed over recv shards).",
+            "Inbound UDP queue depth (sampled, summed over recv shards and both faces).",
             "gauge",
             udp_depth,
         );
         g(
             &mut s,
             "sip_proxy_udp_queue_max",
-            "Inbound UDP queue capacity (summed over recv shards).",
+            "Inbound UDP queue capacity (summed over recv shards and both faces).",
             "gauge",
             udp_max,
         );
         g(
             &mut s,
             "sip_proxy_udp_enqueued_total",
-            "Datagrams accepted into the inbound queue(s).",
+            "Datagrams accepted into the inbound queue(s), summed over recv shards and both faces.",
             "counter",
             udp_enq,
         );
         g(
             &mut s,
             "sip_proxy_udp_tail_dropped_total",
-            "Datagrams tail-dropped by the full inbound queue(s).",
+            "Datagrams tail-dropped by the full inbound queue(s), summed over recv shards and both faces.",
             "counter",
             udp_drop,
         );
         g(&mut s, "sip_proxy_intake_shed_total", "New non-emergency INVITEs dropped by the depth-watermark pre-ingress shed (the selective last-line guard below the admission layer).", "counter", udp_shed);
         g(&mut s, "sip_proxy_udp_send_would_block_total", "Outbound datagrams dropped because the socket's send buffer was full (a blocking send would have parked the recv shard; ADR-0033). Summed over recv shards and both faces.", "counter", udp_would_block);
+        g(&mut s, "sip_proxy_udp_kernel_rx_dropped_total", "Inbound datagrams the kernel dropped on the signalling sockets before the proxy read them, mostly on a full receive buffer (SO_RCVBUF, PROXY_UDP_RCVBUF). Summed over recv shards and both faces.", "counter", udp_kernel_drop);
         g(&mut s, "sip_proxy_recv_shards_stalled", "Recv shards that dequeued a packet more than PROXY_SHARD_STALL_MS ago and have not returned to waiting: parked, not idle. Non-zero flips /readyz.", "gauge", self.recv_shards_stalled.load(Ordering::Relaxed));
         g(
             &mut s,
@@ -788,6 +832,90 @@ impl ProxyMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shard's stats sum its two faces: the external face, where callers
+    /// arrive, is not invisible in any series.
+    #[test]
+    fn a_dual_face_shard_sums_both_faces() {
+        use sip_net::UdpEndpointCounters;
+
+        struct Face(usize, UdpEndpointCounters);
+        #[async_trait::async_trait]
+        impl UdpEndpoint for Face {
+            async fn send_to(
+                &self,
+                _buf: &[u8],
+                _dst: std::net::SocketAddr,
+            ) -> Result<(), sip_net::SendError> {
+                Ok(())
+            }
+            async fn recv(&self) -> Option<sip_net::UdpPacket> {
+                None
+            }
+            fn try_recv(&self) -> Option<sip_net::UdpPacket> {
+                None
+            }
+            fn local_addr(&self) -> std::net::SocketAddr {
+                "127.0.0.1:5060".parse().unwrap()
+            }
+            fn queue_depth(&self) -> usize {
+                self.0
+            }
+            fn queue_max(&self) -> usize {
+                8
+            }
+            fn counters(&self) -> UdpEndpointCounters {
+                self.1
+            }
+        }
+        let face = |n: u64| {
+            Face(
+                n as usize,
+                UdpEndpointCounters {
+                    enqueued: n,
+                    tail_dropped: n,
+                    pre_ingress_dropped: n,
+                    send_would_block: n,
+                    kernel_rx_dropped: n,
+                    ..UdpEndpointCounters::default()
+                },
+            )
+        };
+        let (int, ext) = (face(1), face(10));
+        let each = |v| UdpShardStats {
+            queue_depth: v,
+            queue_max: 16,
+            enqueued: v,
+            tail_dropped: v,
+            intake_shed: v,
+            send_would_block: v,
+            kernel_rx_dropped: v,
+        };
+        assert_eq!(UdpShardStats::of_faces(&int, Some(&ext)), each(11));
+        assert_eq!(UdpShardStats::of_faces(&int, None), UdpShardStats { queue_max: 8, ..each(1) });
+    }
+
+    /// Each shard's endpoint stats render summed over the shards; the kernel
+    /// drop count is its own counter beside the queue's tail drops.
+    #[test]
+    fn udp_shard_stats_render_summed_over_shards() {
+        let m = ProxyMetrics::new();
+        let shard = |kernel_rx_dropped| UdpShardStats {
+            queue_max: 8,
+            tail_dropped: 1,
+            kernel_rx_dropped,
+            ..UdpShardStats::default()
+        };
+        m.set_udp_endpoint_stats(0, shard(3));
+        m.set_udp_endpoint_stats(1, shard(4));
+        m.set_udp_endpoint_stats(1, shard(5));
+
+        let txt = m.prometheus_text();
+        assert!(txt.contains("\nsip_proxy_udp_queue_max 16\n"));
+        assert!(txt.contains("\nsip_proxy_udp_tail_dropped_total 2\n"));
+        assert!(txt.contains("# TYPE sip_proxy_udp_kernel_rx_dropped_total counter"));
+        assert!(txt.contains("\nsip_proxy_udp_kernel_rx_dropped_total 8\n"));
+    }
 
     #[test]
     fn counters_move_and_render() {
