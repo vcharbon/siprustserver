@@ -99,20 +99,20 @@ fn the_level_follows_the_sample() {
     });
     g.sample(occ(9, 0));
     assert_eq!(g.level(), Level::Open);
-    assert_eq!(g.refuses_at_ingress(false), None);
+    assert_eq!(g.refused_at_sample(false), None);
 
     g.sample(occ(10, 0));
     assert_eq!(g.level(), Level::ShedNormal);
-    assert_eq!(g.refuses_at_ingress(false), Some(Bound::Calls));
-    assert_eq!(g.refuses_at_ingress(true), None);
+    assert_eq!(g.refused_at_sample(false), Some(Bound::Calls));
+    assert_eq!(g.refused_at_sample(true), None);
 
     g.sample(occ(12, 0));
     assert_eq!(g.level(), Level::ShedAll);
-    assert_eq!(g.refuses_at_ingress(true), Some(Bound::Calls));
+    assert_eq!(g.refused_at_sample(true), Some(Bound::Calls));
 
     control.set_rss_bytes(Some(2500));
     g.sample(occ(0, 0));
-    assert_eq!(g.refuses_at_ingress(true), Some(Bound::Rss), "names the bound it met");
+    assert_eq!(g.refused_at_sample(true), Some(Bound::Rss), "names the bound it met");
 
     control.set_rss_bytes(Some(0));
     g.sample(occ(0, 0));
@@ -136,14 +136,14 @@ fn the_backup_ceilings_refuse_and_count() {
 }
 
 #[test]
-fn rejects_are_counted_by_bound_class_and_tier() {
+fn rejects_are_counted_by_bound_and_class() {
     let (g, _) = gate(CapacityConfig::default());
-    g.record_reject(Bound::Calls, false, Tier::Ingress);
-    g.record_reject(Bound::Calls, false, Tier::Ingress);
-    g.record_reject(Bound::Rss, true, Tier::Admission);
-    assert_eq!(g.rejected_total(Bound::Calls, false, Tier::Ingress), 2);
-    assert_eq!(g.rejected_total(Bound::Calls, true, Tier::Ingress), 0);
-    assert_eq!(g.rejected_total(Bound::Rss, true, Tier::Admission), 1);
+    g.record_reject(Bound::Calls, false);
+    g.record_reject(Bound::Calls, false);
+    g.record_reject(Bound::Rss, true);
+    assert_eq!(g.rejected_total(Bound::Calls, false), 2);
+    assert_eq!(g.rejected_total(Bound::Calls, true), 0);
+    assert_eq!(g.rejected_total(Bound::Rss, true), 1);
     assert_eq!(g.rejected_sum(), 3);
 }
 
@@ -156,14 +156,10 @@ fn the_exposition_names_every_series() {
     });
     control.set_rss_bytes(Some(4096));
     g.sample(occ(10, 0));
-    g.record_reject(Bound::Calls, false, Tier::Admission);
+    g.record_reject(Bound::Calls, false);
     let txt = g.prometheus_text();
-    assert!(txt.contains(
-        "b2bua_capacity_rejected_total{bound=\"calls\",class=\"normal\",tier=\"admission\"} 1\n"
-    ));
-    assert!(txt.contains(
-        "b2bua_capacity_rejected_total{bound=\"rss\",class=\"emergency\",tier=\"ingress\"} 0\n"
-    ));
+    assert!(txt.contains("b2bua_capacity_rejected_total{bound=\"calls\",class=\"normal\"} 1\n"));
+    assert!(txt.contains("b2bua_capacity_rejected_total{bound=\"rss\",class=\"emergency\"} 0\n"));
     assert!(txt.contains("b2bua_capacity_level 1\n"));
     assert!(txt.contains("b2bua_capacity_rss_bytes 4096\n"));
     assert!(txt.contains("b2bua_capacity_ceiling{bound=\"calls\",class=\"emergency\"} 12\n"));
@@ -171,7 +167,7 @@ fn the_exposition_names_every_series() {
         !txt.contains("bound=\"transactions\",class=\"normal\"} "),
         "unset ceilings are absent"
     );
-    assert!(txt.contains("b2bua_capacity_ceiling{bound=\"backup_calls\",class=\"backup\"} 7\n"));
+    assert!(txt.contains("b2bua_capacity_ceiling{bound=\"calls\",class=\"backup\"} 7\n"));
     assert!(txt.contains("b2bua_repl_backup_shed_total{bound=\"calls\"} 0\n"));
 }
 

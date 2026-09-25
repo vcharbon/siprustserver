@@ -61,7 +61,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use b2bua::capacity::CapacityGate;
 use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrRecord, CdrWriter};
 use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
 use b2bua::decision::CallDecisionEngine;
@@ -499,9 +498,6 @@ impl RunnerEnv {
         // new INVITEs silently instead of returning a routable 503 + Retry-After.
         // The counters are retained for the `/metrics` scrape.
         let brake_counters = Tier1BrakeCounters::new();
-        // The memory admission gate (ADR-0037): the core samples and configures
-        // it, the brake reads its level, so both hold the same one.
-        let capacity = CapacityGate::live();
         let brake_hook = build_tier1_brake_hook(
             Tier1BrakeConfig {
                 queue_max: self.queue_max,
@@ -514,7 +510,6 @@ impl RunnerEnv {
             // by. Independent of the core's generator: the brake replies before
             // the datagram is ever queued, so no core state is involved.
             &IdGen::from_entropy(),
-            capacity.clone(),
         );
 
         // Real, non-recording transport: a plain tokio UDP socket. Bind into an
@@ -640,6 +635,7 @@ impl RunnerEnv {
             cps_bucket_rate: self.cps_bucket_rate,
             overload_panic_elu_threshold: self.overload_panic_elu_threshold,
             retry_after_base_sec: self.retry_after_base_sec,
+            retry_after_jitter_sec: self.retry_after_jitter_sec,
             worker_allowed_target_suffixes: self.worker_allowed_target_suffixes.clone(),
             relay_headers: self.relay_headers.clone(),
             cdr: CdrConfig {
@@ -670,7 +666,6 @@ impl RunnerEnv {
             clock: Clock::system(),
             metrics_sa,
             observe,
-            capacity,
             env: self,
         }
     }
@@ -707,9 +702,6 @@ pub struct RunnerBase {
     /// The installed process subscriber (ADR-0026). Held for the process
     /// lifetime: dropping it drains the log writer and flushes pending spans.
     pub observe: observe::ObserveGuard,
-    /// The memory admission gate the Tier-1 brake reads; [`deps`](Self::deps)
-    /// hands the same gate to the core (ADR-0037).
-    pub capacity: CapacityGate,
 }
 
 impl RunnerBase {
@@ -831,9 +823,9 @@ impl RunnerBase {
             // `ComposeOptions::default().without_core_refer_transfer()` before
             // `spawn` (every field is pub) — ADR-0016 opt-out seam.
             compose: b2bua::rules::ComposeOptions::default(),
-            // The gate the Tier-1 brake already reads: the core configures and
-            // samples this one.
-            capacity: Some(self.capacity.clone()),
+            // The core builds the memory admission gate over the real process
+            // from `config.capacity` (ADR-0037).
+            capacity: None,
         }
     }
 

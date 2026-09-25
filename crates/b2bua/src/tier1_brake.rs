@@ -3,14 +3,8 @@
 //!
 //! Its one goal is to **reject new non-emergency calls when the ingress queue
 //! is saturated**, before the datagram is queued and before any transaction or
-//! call state exists. Below the threshold, and while the capacity gate is open,
-//! it is an integer compare and one atomic load, and the packet is accepted
-//! untouched.
-//!
-//! It also sends the capacity gate's reject ([`crate::capacity`], ADR-0037):
-//! while the gate's last sample refuses a class of new call, an initial INVITE
-//! of that class — emergency included at the emergency ceiling — gets
-//! [`build_capacity_reject_503`] at any queue depth, counted on the gate.
+//! call state exists. Below the threshold it is a single integer compare and
+//! the packet is accepted untouched.
 //!
 //! At or above `floor(queue_max * tier1_threshold_pct / 100)` the datagram is
 //! classified:
@@ -51,7 +45,6 @@ use sip_message::{serialize, CustomParser, SipMessage, SipParser};
 use sip_net::types::{PreIngressAction, PreIngressHook};
 use sip_txn::IdGen;
 
-use crate::capacity::{build_capacity_reject_503, CapacityGate, Level, Tier};
 use crate::overload::{build_reject_new_call_503, jittered_retry_after, StatelessRejectTagger};
 
 /// Tunables for the Tier-1 brake. Cheap to copy.
@@ -140,13 +133,11 @@ impl Tier1BrakeCounters {
 /// The returned closure runs at arrival time for every datagram, with the live
 /// inbound-queue `depth`, and applies the classification in the module doc.
 /// `id_gen` seeds the [`StatelessRejectTagger`] the rejects are identified by;
-/// it is consulted here, not per datagram. `capacity` is the gate the core
-/// samples; the hook reads only its level.
+/// it is consulted here, not per datagram.
 pub fn build_tier1_brake_hook(
     config: Tier1BrakeConfig,
     counters: Tier1BrakeCounters,
     id_gen: &IdGen,
-    capacity: CapacityGate,
 ) -> PreIngressHook {
     let threshold = config.threshold();
     let base = config.retry_after_base_sec;
@@ -154,8 +145,7 @@ pub fn build_tier1_brake_hook(
     let parser = CustomParser::new();
     let tagger = StatelessRejectTagger::from_id_gen(id_gen);
     Arc::new(move |raw: &[u8], _src, depth: usize| {
-        let queue_full = depth >= threshold;
-        if !queue_full && capacity.level() == Level::Open {
+        if depth < threshold {
             return PreIngressAction::Accept;
         }
         // Seven bytes decide every class the brake always admits — responses,
@@ -173,18 +163,7 @@ pub fn build_tier1_brake_hook(
         if req.to().tag().is_some() {
             return PreIngressAction::Accept;
         }
-        let is_emergency = is_emergency_request(&req);
-        if let Some(bound) = capacity.refuses_at_ingress(is_emergency) {
-            let (to_tag, roll) = tagger.for_request(&req);
-            let retry_after = jittered_retry_after(base, jitter, || roll);
-            let resp = build_capacity_reject_503(to_tag, &req, retry_after);
-            capacity.record_reject(bound, is_emergency, Tier::Ingress);
-            return PreIngressAction::Reply(serialize(&SipMessage::Response(resp)));
-        }
-        if !queue_full {
-            return PreIngressAction::Accept;
-        }
-        if is_emergency {
+        if is_emergency_request(&req) {
             counters.record_emergency_bypass();
             return PreIngressAction::Accept;
         }
@@ -290,30 +269,8 @@ Content-Length: 0\r\n\r\n"
             retry_after_base_sec: 5,
             retry_after_jitter_sec: jitter_sec,
         };
-        let hook =
-            build_tier1_brake_hook(cfg, counters.clone(), &IdGen::seeded(1), CapacityGate::live());
+        let hook = build_tier1_brake_hook(cfg, counters.clone(), &IdGen::seeded(1));
         (hook, counters)
-    }
-
-    /// Brake hook over a capacity gate with call ceilings 10 (normal) and 12
-    /// (emergency), sampled at `calls` live calls.
-    fn brake_at_calls(calls: u64) -> (PreIngressHook, Tier1BrakeCounters, CapacityGate) {
-        let (probe, _control) = crate::capacity::simulated();
-        let gate = CapacityGate::new(std::sync::Arc::new(probe));
-        gate.configure(&crate::config::CapacityConfig {
-            calls: crate::config::Ceilings { normal: Some(10), emergency: Some(12) },
-            ..Default::default()
-        });
-        gate.sample(crate::capacity::Occupancy { calls, transactions: 0 });
-        let counters = Tier1BrakeCounters::new();
-        let cfg = Tier1BrakeConfig {
-            queue_max: 5,
-            tier1_threshold_pct: 40,
-            retry_after_base_sec: 5,
-            retry_after_jitter_sec: 0,
-        };
-        let hook = build_tier1_brake_hook(cfg, counters.clone(), &IdGen::seeded(1), gate.clone());
-        (hook, counters, gate)
     }
 
     /// Brake hook under test: threshold 2, jitter 0 (so `Retry-After` is
@@ -490,63 +447,5 @@ Content-Length: 0\r\n\r\n"
             0,
             "below threshold the brake does not classify, so nothing is counted"
         );
-    }
-
-    // ---- capacity gate (ADR-0037) ----
-
-    /// At the normal call ceiling a new non-emergency INVITE is refused at an
-    /// empty queue, with the capacity 503: Retry-After, no Reason.
-    #[test]
-    fn at_the_normal_call_ceiling_a_new_invite_is_refused_at_any_depth() {
-        let (hook, counters, gate) = brake_at_calls(10);
-        let PreIngressAction::Reply(resp) = hook(&new_invite(0), src(), 0) else {
-            panic!("a new non-emergency INVITE at the call ceiling must be refused");
-        };
-        assert_eq!(status_line(&resp), b"SIP/2.0 503 Service Unavailable");
-        assert!(find(&resp, b"Retry-After: 5\r\n").is_some());
-        assert!(find(&resp, b"Reason:").is_none(), "{:?}", String::from_utf8_lossy(&resp));
-        assert_eq!(gate.rejected_total(crate::capacity::Bound::Calls, false, Tier::Ingress), 1);
-        assert_eq!(counters.tier1_reject_sent(), 0, "the queue brake did not shed it");
-    }
-
-    /// Emergency keeps priority between the two ceilings and is refused at
-    /// the emergency one.
-    #[test]
-    fn emergency_invites_pass_until_the_emergency_ceiling() {
-        let (hook, _, gate) = brake_at_calls(11);
-        assert_eq!(hook(&invite_buf(1, true, None), src(), 0), PreIngressAction::Accept);
-        let (hook, _, gate_full) = brake_at_calls(12);
-        assert!(matches!(hook(&invite_buf(2, true, None), src(), 0), PreIngressAction::Reply(_)));
-        assert_eq!(gate.rejected_sum(), 0);
-        assert_eq!(gate_full.rejected_total(crate::capacity::Bound::Calls, true, Tier::Ingress), 1);
-    }
-
-    /// A shedding gate refuses new calls only: in-dialog requests, other
-    /// methods and responses pass.
-    #[test]
-    fn a_shedding_gate_passes_everything_but_new_invites() {
-        let (hook, _, gate) = brake_at_calls(12);
-        assert_eq!(hook(&invite_buf(3, false, Some("bob-3")), src(), 0), PreIngressAction::Accept);
-        assert_eq!(hook(&options_buf(3), src(), 0), PreIngressAction::Accept);
-        assert_eq!(hook(&response_buf(), src(), 0), PreIngressAction::Accept);
-        assert_eq!(gate.rejected_sum(), 0);
-    }
-
-    /// The capacity reject is stateless too (RFC 3261 §8.2.7).
-    #[test]
-    fn a_retransmitted_invite_draws_the_identical_capacity_reject() {
-        let (hook, _, _) = brake_at_calls(10);
-        let invite = new_invite(5);
-        assert_eq!(hook(&invite, src(), 0), hook(&invite, src(), 0));
-    }
-
-    /// Below every ceiling the queue brake alone decides, as before.
-    #[test]
-    fn an_open_gate_leaves_the_queue_brake_alone() {
-        let (hook, counters, gate) = brake_at_calls(9);
-        assert_eq!(hook(&new_invite(0), src(), 0), PreIngressAction::Accept);
-        assert!(matches!(hook(&new_invite(1), src(), 2), PreIngressAction::Reply(_)));
-        assert_eq!(counters.tier1_reject_sent(), 1);
-        assert_eq!(gate.rejected_sum(), 0);
     }
 }

@@ -25,10 +25,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use repl_net::frame::{Op, Partition};
+use repl_net::frame::{Op, Partition, Watermark};
 use sip_clock::Clock;
 
 use super::changelog::{BodySource, Changelog, RefMeta};
+use super::shed_marks::ShedMarks;
 use crate::store::{
     CallStore, InMemoryCallStore, PartitionRole, PropagateDirection, PutOpts, StoreError,
 };
@@ -105,6 +106,9 @@ pub struct ReplicatingCallStore {
     /// under the `meta` lock, in the same step as the entry, so it never
     /// drifts from a scan of `meta`.
     backups: Arc<AtomicU64>,
+    /// Backup replicas left unstored at a backup ceiling (ADR-0037). A mark
+    /// clears when the ref's body is stored or deleted, or expires.
+    shed: Arc<Mutex<ShedMarks>>,
     /// `callRef → deleted_at_ms`: the apply-side resurrection guard. A `Put` for a
     /// ref deleted within [`RESURRECTION_TOMBSTONE_MS`] is rejected so a late
     /// reverse-flush cannot re-create a just-discharged call (delete-wins, extended
@@ -129,6 +133,7 @@ impl ReplicatingCallStore {
             clock,
             meta: Arc::new(Mutex::new(HashMap::new())),
             backups: Arc::new(AtomicU64::new(0)),
+            shed: Arc::new(Mutex::new(ShedMarks::default())),
             tombstones: Arc::new(Mutex::new(HashMap::new())),
             default_ttl_ms: DEFAULT_REPLICATED_TTL_MS,
         }
@@ -271,10 +276,30 @@ impl ReplicatingCallStore {
         (total, self.backup_held())
     }
 
-    /// Backup replica bodies this node holds for its peers, exact. The puller
-    /// reads it against the backup ceiling (ADR-0037).
+    /// Backup replica bodies this node holds for its peers, exact, expired
+    /// ones included until evicted. The puller reads it against the backup
+    /// ceiling (ADR-0037).
     pub fn backup_held(&self) -> u64 {
         self.backups.load(Ordering::Relaxed)
+    }
+
+    /// Record that a replica of `call_ref` from `primary` was left unstored,
+    /// `floor` being the last position the flow could claim before it. The
+    /// mark expires with the backstop a stored body of `ttl_ms` would have.
+    pub fn note_shed(&self, call_ref: &str, primary: &str, floor: Watermark, ttl_ms: i64) {
+        let expiry = self.expiry_for(self.clock.now_ms(), ttl_ms);
+        self.shed.lock().unwrap().mark(call_ref, primary, floor, expiry);
+    }
+
+    /// The highest position `primary`'s flow may report: the lowest floor of
+    /// its standing shed marks, `None` when it has none.
+    pub fn shed_floor(&self, primary: &str) -> Option<Watermark> {
+        self.shed.lock().unwrap().floor(primary)
+    }
+
+    /// Standing shed marks, all primaries.
+    pub fn shed_count(&self) -> usize {
+        self.shed.lock().unwrap().len()
     }
 
     /// Account one `meta` entry leaving role `old` for role `new` (`None` =
@@ -400,6 +425,7 @@ impl ReplicatingCallStore {
             .lock()
             .unwrap()
             .retain(|_, &mut deleted_at| now_ms - deleted_at < RESURRECTION_TOMBSTONE_MS);
+        self.shed.lock().unwrap().reap(now_ms);
         self.changelog.reap(now_ms);
     }
 }
@@ -509,6 +535,8 @@ impl CallStore for ReplicatingCallStore {
             }
         }
 
+        self.shed.lock().unwrap().clear(call_ref);
+
         // HA path only: non-blocking changelog bump for the pulling peer.
         if let Some(peer) = &opts.peer {
             let partition = Self::partition_for(opts.direction);
@@ -532,6 +560,7 @@ impl CallStore for ReplicatingCallStore {
                 self.account_role(Some(gone.role), None);
             }
         }
+        self.shed.lock().unwrap().clear(call_ref);
         // Tombstone the ref so a late reverse-flush cannot resurrect it (see
         // `put_call`); pruned in `reap`.
         self.tombstones.lock().unwrap().insert(call_ref.to_string(), self.clock.now_ms());

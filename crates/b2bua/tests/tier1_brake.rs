@@ -109,12 +109,7 @@ async fn setup() -> (
 ) {
     let net = SimulatedSignalingNetwork::new(TRANSIT_MS);
     let counters = Tier1BrakeCounters::new();
-    let hook = build_tier1_brake_hook(
-        brake_config(),
-        counters.clone(),
-        &IdGen::seeded(11),
-        b2bua::capacity::CapacityGate::live(),
-    );
+    let hook = build_tier1_brake_hook(brake_config(), counters.clone(), &IdGen::seeded(11));
 
     let b2bua = net
         .bind_udp(BindUdpOpts::new(b2bua_addr(), QUEUE_MAX).with_pre_ingress(hook))

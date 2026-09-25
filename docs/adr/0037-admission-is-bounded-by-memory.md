@@ -23,17 +23,20 @@ kills it, and a kill drops every call it serves.
    refused. Emergency calls keep priority between the two, and the higher
    ceiling still protects the process. Every ceiling is an explicit setting;
    none is derived from the host or the container, and all are off by default.
-3. **The reject is a 503 with `Retry-After` and no `Reason`.** It is sent
-   from the ingress brake while the last sample refuses the call's class, with
-   no transaction created, and from the admission gate from exact counts,
-   ahead of the CPS bucket so it spends no token. In-dialog requests are never
-   refused.
+3. **The reject is a 503 with a jittered `Retry-After` and no `Reason`.** The
+   initial-INVITE admission gate sends it from exact counts, ahead of the CPS
+   bucket so it spends no token, through the INVITE server transaction. The
+   stateless ingress brake does not: it cannot tell a new INVITE from a
+   retransmission of one already admitted, and refusing that retransmission
+   would end a call being set up. In-dialog requests are never refused.
 4. **Backup replicas have their own ceilings:** a count and an RSS ceiling,
    set lower than the admission ones. At either, a replica of a call this node
    does not hold yet is not stored. Updates and deletes of held replicas, and a
    node's own calls coming back from a peer, always apply. A replica left out
    is stored by the call's next write that finds room, since every write
-   carries the whole body.
+   carries the whole body. Until then the backup's flow reports no position
+   past the write it left out, so a draining primary never reads that call as
+   held (ADR-0031 D2).
 5. **RSS is sampled, counts are exact.** RSS is read every 100 ms through an
    injectable `SystemProbe`; tests drive it through a simulated one.
 
@@ -41,7 +44,12 @@ kills it, and a kill drops every call it serves.
 
 - A call whose replica was left out has no backup until its next write lands;
   a primary failure in that window loses it. The shed is counted
-  (`b2bua_repl_backup_shed_total`), never silent.
+  (`b2bua_repl_backup_shed_total`), never silent, and a drain in that window
+  runs to its grace instead of exiting caught up.
+- The counts are exact per decision, but INVITEs judged at once on a
+  multi-thread runtime can pass together before either call exists: a call
+  ceiling is overshot by at most one call per runtime worker thread, a backup
+  count ceiling by at most one replica per other peer.
 - RSS lags up to one sample and stays high after a drain while the allocator
   keeps freed pages, so the RSS ceilings must leave room below the process
   limit; the counts react at once.

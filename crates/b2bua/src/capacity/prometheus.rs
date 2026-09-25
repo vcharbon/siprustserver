@@ -3,19 +3,20 @@
 
 use std::fmt::Write;
 
-use super::gate::{BackupBound, Bound, CapacityGate, Tier};
+use super::gate::{BackupBound, Bound, CapacityGate};
 
 impl CapacityGate {
     /// The gate's series, appended to the worker's `/metrics` body:
-    ///   - `b2bua_capacity_rejected_total{bound,class,tier}` (counter): new
-    ///     calls refused, by the bound met, the call's class
-    ///     (`normal`/`emergency`) and the tier that sent the 503.
+    ///   - `b2bua_capacity_rejected_total{bound,class}` (counter): new calls
+    ///     refused, by the bound met and the call's class
+    ///     (`normal`/`emergency`).
     ///   - `b2bua_capacity_level` (gauge): 0 open, 1 non-emergency calls
     ///     refused, 2 every new call refused, as of the last sample.
     ///   - `b2bua_capacity_rss_bytes` (gauge): the RSS the gate last read;
     ///     absent without a reading.
     ///   - `b2bua_capacity_ceiling{bound,class}` (gauge): each configured
-    ///     ceiling; an unset one is absent.
+    ///     ceiling, the backup ones under `class="backup"` with the `bound`
+    ///     values of `b2bua_repl_backup_shed_total`; an unset one is absent.
     ///   - `b2bua_repl_backup_shed_total{bound}` (counter): backup replicas
     ///     not stored.
     pub fn prometheus_text(&self) -> String {
@@ -26,15 +27,12 @@ impl CapacityGate {
         );
         for bound in Bound::ALL {
             for (class, emergency) in [("normal", false), ("emergency", true)] {
-                for tier in Tier::ALL {
-                    let _ = writeln!(
-                        s,
-                        "b2bua_capacity_rejected_total{{bound=\"{}\",class=\"{class}\",tier=\"{}\"}} {}",
-                        bound.as_str(),
-                        tier.as_str(),
-                        self.rejected_total(bound, emergency, tier)
-                    );
-                }
+                let _ = writeln!(
+                    s,
+                    "b2bua_capacity_rejected_total{{bound=\"{}\",class=\"{class}\"}} {}",
+                    bound.as_str(),
+                    self.rejected_total(bound, emergency)
+                );
             }
         }
         let _ = write!(
@@ -70,12 +68,17 @@ impl CapacityGate {
                 }
             }
         }
-        for (bound, v) in
-            [("backup_calls", limits.backup_calls), ("backup_rss", limits.backup_rss_bytes)]
-        {
+        let backup = [
+            (BackupBound::Calls, limits.backup_calls),
+            (BackupBound::Rss, limits.backup_rss_bytes),
+        ];
+        for (bound, v) in backup {
             if let Some(v) = v {
-                let _ =
-                    writeln!(s, "b2bua_capacity_ceiling{{bound=\"{bound}\",class=\"backup\"}} {v}");
+                let _ = writeln!(
+                    s,
+                    "b2bua_capacity_ceiling{{bound=\"{}\",class=\"backup\"}} {v}",
+                    bound.as_str()
+                );
             }
         }
         s.push_str(

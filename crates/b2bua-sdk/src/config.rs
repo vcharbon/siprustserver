@@ -238,6 +238,11 @@ pub struct B2buaConfig {
     /// from the bucket's time-to-next-token. TS default **5**. Overridable via
     /// `B2BUA_RETRY_AFTER_BASE_SEC`.
     pub retry_after_base_sec: u32,
+    /// **Retry-After jitter span** (seconds) of the capacity 503 (ADR-0037):
+    /// `retry_after_base_sec + U[0, jitter]`, so callers refused while a
+    /// ceiling holds do not return together. `0` pins it to the base.
+    /// Overridable via `B2BUA_RETRY_AFTER_JITTER_SEC`.
+    pub retry_after_jitter_sec: u32,
     /// **b-leg target admission allow-list** (port of
     /// `AppConfig.workerAllowedTargetSuffixes`). The decision boundary classifies
     /// `route.destination.host` against this list (see `target_admission`): an IP
@@ -434,6 +439,7 @@ impl Default for B2buaConfig {
             cps_bucket_rate: 500,
             overload_panic_elu_threshold: 0.75,
             retry_after_base_sec: 5,
+            retry_after_jitter_sec: 5,
             // b-leg admission allow-list. TS env default is the single K8s
             // in-cluster DNS suffix `.svc.cluster.local`; production traffic
             // (pod FQDNs) always passes, bogus hostnames are 503'd pre-leg. The

@@ -22,6 +22,7 @@ mod readiness;
 mod replication;
 mod self_endpoint;
 mod server;
+mod shed_marks;
 mod store;
 mod supervisor;
 

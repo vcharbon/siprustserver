@@ -1,5 +1,5 @@
-//! [`CapacityGate`]: the configured ceilings, the last sampled RSS, the
-//! shedding level the ingress brake reads, and the reject tallies.
+//! [`CapacityGate`]: the configured ceilings, the last sampled RSS and level,
+//! and the reject tallies.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,28 +59,6 @@ impl BackupBound {
     }
 }
 
-/// Where a capacity reject was sent from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tier {
-    /// The pre-ingress brake, statelessly, before any transaction exists.
-    Ingress,
-    /// The initial-INVITE admission gate, through the INVITE server transaction.
-    Admission,
-}
-
-impl Tier {
-    /// Both tiers.
-    pub const ALL: [Tier; 2] = [Tier::Ingress, Tier::Admission];
-
-    /// Short stable tag, keyed by the `tier` metric label.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Tier::Ingress => "ingress",
-            Tier::Admission => "admission",
-        }
-    }
-}
-
 /// What the gate shed at its last sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -113,17 +91,17 @@ struct Inner {
     shed_normal: AtomicU8,
     /// The bound an emergency call met at the last sample (index + 1).
     shed_all: AtomicU8,
-    /// Rejects by `[bound][class][tier]`, class 0 = normal, 1 = emergency.
-    rejected: [[[AtomicU64; 2]; 2]; 3],
+    /// Rejects by `[bound][class]`, class 0 = normal, 1 = emergency.
+    rejected: [[AtomicU64; 2]; 3],
     backup_shed: [AtomicU64; 2],
 }
 
 /// The worker's memory admission gate (ADR-0037). Clone-cheap (one `Arc`).
 ///
 /// Decisions read exact live-call and transaction counts passed by the caller
-/// and the RSS of the last [`sample`](Self::sample). The sample also records a
-/// [`Level`], which the stateless ingress brake reads with one atomic load.
-/// Every bound is off until [`configure`](Self::configure) sets one.
+/// and the RSS of the last [`sample`](Self::sample). The sample also records
+/// the [`Level`] the metrics publish. Every bound is off until
+/// [`configure`](Self::configure) sets one.
 #[derive(Clone)]
 pub struct CapacityGate {
     inner: Arc<Inner>,
@@ -193,9 +171,8 @@ impl CapacityGate {
         }
     }
 
-    /// The bound a new call of this class met at the last sample. One atomic
-    /// load: the ingress brake's read.
-    pub fn refuses_at_ingress(&self, is_emergency: bool) -> Option<Bound> {
+    /// The bound a new call of this class met at the last sample.
+    pub fn refused_at_sample(&self, is_emergency: bool) -> Option<Bound> {
         let slot = if is_emergency { &self.inner.shed_all } else { &self.inner.shed_normal };
         match slot.load(Ordering::Relaxed) {
             NONE_REACHED => None,
@@ -210,24 +187,25 @@ impl CapacityGate {
     }
 
     /// Count one reject sent for `bound`.
-    pub fn record_reject(&self, bound: Bound, is_emergency: bool, tier: Tier) {
-        self.inner.rejected[bound.index()][usize::from(is_emergency)][tier as usize]
+    pub fn record_reject(&self, bound: Bound, is_emergency: bool) {
+        self.inner.rejected[bound.index()][usize::from(is_emergency)]
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Rejects sent for `bound` to calls of this class from `tier`.
-    pub fn rejected_total(&self, bound: Bound, is_emergency: bool, tier: Tier) -> u64 {
-        self.inner.rejected[bound.index()][usize::from(is_emergency)][tier as usize]
-            .load(Ordering::Relaxed)
+    /// Rejects sent for `bound` to calls of this class.
+    pub fn rejected_total(&self, bound: Bound, is_emergency: bool) -> u64 {
+        self.inner.rejected[bound.index()][usize::from(is_emergency)].load(Ordering::Relaxed)
     }
 
-    /// Every capacity reject sent, all bounds, classes and tiers.
+    /// Every capacity reject sent, all bounds and classes.
     pub fn rejected_sum(&self) -> u64 {
-        self.inner.rejected.iter().flatten().flatten().map(|c| c.load(Ordering::Relaxed)).sum()
+        self.inner.rejected.iter().flatten().map(|c| c.load(Ordering::Relaxed)).sum()
     }
 
     /// Whether a backup replica of a call this node does not hold yet may be
-    /// stored while it holds `held` of them. A refusal is counted.
+    /// stored while it holds `held` of them. A refusal is counted. Pullers of
+    /// different peers decide concurrently, so the count ceiling may be passed
+    /// by one replica per other peer.
     pub fn refuses_backup(&self, held: u64) -> Option<BackupBound> {
         let limits = self.limits();
         let bound = if limits.backup_calls.is_some_and(|max| held >= max) {

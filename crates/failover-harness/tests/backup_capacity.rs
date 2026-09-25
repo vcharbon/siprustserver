@@ -1,14 +1,18 @@
-//! **A backup replica is not stored above the backup RSS ceiling, and the
-//! next write after the reading falls back stores it** (ADR-0037). The
-//! ceiling is read from each worker's injected system probe through the live
-//! supervisor → puller wiring; the call itself is never touched by it.
+//! **A backup replica is not stored above the backup RSS ceiling, the backup
+//! does not report its flow caught up meanwhile, and the next write after the
+//! reading falls back stores it** (ADR-0037, ADR-0031 D2). The ceiling is read
+//! from each worker's injected system probe through the live supervisor →
+//! puller wiring; the call itself is never touched by it.
 //!
 //! ```text
 //!   call A establishes            its replica lands on its backup
 //!   both workers' RSS → 2 000     above the 1 000 backup ceiling
-//!   call B establishes            its backup does not store it; A's stays
+//!   call B establishes            its backup does not store it; B's primary
+//!                                 never reads that flow as caught up
+//!   alice INFO on call A          A's held replica still takes the update
 //!   both workers' RSS → 0
-//!   alice INFO on call B          the flush that follows stores B's replica
+//!   alice INFO on call B          the flush that follows stores B's replica;
+//!                                 the flow reports caught up again
 //!   both calls end                one CDR each, nothing left behind
 //! ```
 
@@ -16,8 +20,8 @@ use std::time::Duration;
 
 use b2bua::capacity::BackupBound;
 use failover_harness::{
-    assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness,
-    ReplicatedB2buaSut,
+    assert_call_fully_released, total_cdrs_for, worker_ordinals, FailoverHarness, Partition,
+    PartitionRole, ReplicatedB2buaSut,
 };
 use scenario_harness::{Agent, Dialog};
 use sip_message::generators::InDialogMethod;
@@ -42,6 +46,13 @@ async fn establish(alice: &Agent, bob: &Agent, proxy: std::net::SocketAddr) -> (
     let dialog = call.ack().await;
     bob.receive("ACK").await;
     (dialog, primary)
+}
+
+/// alice sends INFO in `dialog`, bob answers 200.
+async fn info(dialog: &mut Dialog, bob: &Agent) {
+    let mut info = dialog.request(InDialogMethod::Info, None).await;
+    bob.receive("INFO").await.respond(200, "OK").await;
+    info.expect(200).await;
 }
 
 /// `(primary, backup)` by the primary's ordinal.
@@ -94,17 +105,35 @@ async fn a_backup_above_its_rss_ceiling_is_stored_by_the_next_write_below_it() {
         .expect("the primary stores call B");
     assert!(!backup_b.scan_backed_up(&primary_b).contains(&ref_b), "B is not backed up");
     assert!(backup_b.capacity().backup_shed_total(BackupBound::Rss) >= 1);
-    assert!(backup_a.scan_backed_up(&primary_a).contains(&ref_a), "A's replica stays");
+    for _ in 0..10 {
+        fh.advance(Duration::from_millis(500)).await;
+        assert!(
+            !serving_b.flow_caught_up(backup_b.ordinal(), Partition::Bak),
+            "a flow holding a shed replica never reports caught up"
+        );
+    }
+
+    let gen_a = backup_a.call_gen(PartitionRole::Backup, &primary_a, &ref_a);
+    info(&mut dialog_a, &bob).await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert!(
+        backup_a.call_gen(PartitionRole::Backup, &primary_a, &ref_a) > gen_a,
+        "A's held replica takes updates above the ceiling"
+    );
 
     // ── below the ceiling, the next write stores it ─────────────────────────
     w_b1.system().set_rss_bytes(Some(0));
     w_b2.system().set_rss_bytes(Some(0));
     fh.advance(Duration::from_millis(300)).await;
-    let mut info = dialog_b.request(InDialogMethod::Info, None).await;
-    bob.receive("INFO").await.respond(200, "OK").await;
-    info.expect(200).await;
+    info(&mut dialog_b, &bob).await;
     fh.advance(Duration::from_millis(500)).await;
     assert!(backup_b.scan_backed_up(&primary_b).contains(&ref_b), "B is backed up now");
+    let caught_up = fh
+        .pump_until(Duration::from_millis(100), Duration::from_secs(10), async || {
+            serving_b.flow_caught_up(backup_b.ordinal(), Partition::Bak)
+        })
+        .await;
+    assert!(caught_up, "the flow reports caught up once B is held");
 
     // ── both calls end cleanly ──────────────────────────────────────────────
     scenario_harness::callflow::hangup(&mut dialog_a, &bob).await;

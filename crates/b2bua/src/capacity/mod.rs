@@ -8,14 +8,14 @@
 //! their own count and RSS ceilings, at which a replica of a call not yet held
 //! is not stored. In-dialog traffic is never refused.
 //!
-//! Two tiers send the reject, [`build_capacity_reject_503`]: the ingress brake
-//! ([`crate::tier1_brake`]) from the level of the last sample, before any
-//! transaction exists, and the initial-INVITE admission gate from exact counts,
-//! ahead of the CPS bucket.
+//! The initial-INVITE admission gate sends the reject,
+//! [`build_capacity_reject_503`], from exact counts, ahead of the CPS bucket and
+//! behind the INVITE server transaction, which absorbs retransmissions of an
+//! admitted INVITE.
 //!
 //! - `probe`: the [`SystemProbe`] read seam and its [`simulated`] pair.
 //! - `gate`: [`CapacityGate`], its ceilings, sample, level and tallies.
-//! - `reject`: the 503 both tiers send.
+//! - `reject`: the 503 the gate answers with.
 //! - `prometheus`: `/metrics` exposition.
 
 mod gate;
@@ -23,7 +23,7 @@ mod probe;
 mod prometheus;
 mod reject;
 
-pub use gate::{BackupBound, Bound, CapacityGate, Level, Occupancy, Tier};
+pub use gate::{BackupBound, Bound, CapacityGate, Level, Occupancy};
 pub use probe::{simulated, SimulatedSystemControl, SimulatedSystemProbe, SystemProbe};
 pub use reject::build_capacity_reject_503;
 

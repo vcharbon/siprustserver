@@ -323,6 +323,16 @@ impl Puller {
         self
     }
 
+    /// The position this flow may report having applied, given it received
+    /// up to `at`: never past a replica it left unstored (ADR-0037), so a
+    /// draining primary does not read a shed call as held (ADR-0031 D2).
+    fn claimable(&self, at: Watermark) -> Watermark {
+        match self.store.shed_floor(self.peer_ordinal()) {
+            Some(floor) if floor < at => floor,
+            _ => at,
+        }
+    }
+
     /// Attach the memory admission gate whose backup ceilings this puller
     /// applies (ADR-0037).
     pub fn with_capacity(mut self, gate: crate::capacity::CapacityGate) -> Self {
@@ -680,6 +690,10 @@ impl Puller {
                             mode,
                         )
                         .await;
+                    if outcome == ApplyOutcome::Shed {
+                        let floor = self.status_tx.borrow().watermark;
+                        self.store.note_shed(&call_ref, self.peer_ordinal(), floor, body_ttl_ms);
+                    }
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
                     }
@@ -702,7 +716,7 @@ impl Puller {
                         // frames all share `at = W`: claiming W before the whole
                         // scan is applied would be false, so the bootstrap claim
                         // is made once, on the first catch-up `Noop`.
-                        if conn.send(Frame::Position { at }).await.is_err() {
+                        if conn.send(Frame::Position { at: self.claimable(at) }).await.is_err() {
                             return RunOutcome::Disconnected;
                         }
                     }
@@ -733,7 +747,7 @@ impl Puller {
                     // the first one is the bootstrap's own claim (every scan body
                     // is applied by now), the idle ones keep the claim fresh
                     // (ADR-0031 D2).
-                    if conn.send(Frame::Position { at }).await.is_err() {
+                    if conn.send(Frame::Position { at: self.claimable(at) }).await.is_err() {
                         return RunOutcome::Disconnected;
                     }
                 }
@@ -1374,5 +1388,128 @@ mod tests {
         p.signal_put_outcome(ApplyMode::Forward, ApplyOutcome::Shed, true, "w0|a|t", None, 0);
         p.signal_put_outcome(ApplyMode::Reverse, ApplyOutcome::Shed, true, "w0|a|t", None, 0);
         assert!(rx.try_recv().is_err());
+    }
+
+    /// A connection that plays a fixed script, one frame per `gap_ms`, and
+    /// records every frame the puller sends back.
+    struct RecordingConn {
+        frames: Mutex<VecDeque<Frame>>,
+        sent: Arc<Mutex<Vec<Frame>>>,
+    }
+
+    #[async_trait]
+    impl ReplicationConnection for RecordingConn {
+        async fn send(&self, frame: Frame) -> Result<(), SendError> {
+            self.sent.lock().unwrap().push(frame);
+            Ok(())
+        }
+        async fn recv(&self) -> Option<Frame> {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let next = self.frames.lock().unwrap().pop_front();
+            match next {
+                Some(f) => Some(f),
+                None => std::future::pending().await,
+            }
+        }
+        fn peer_addr(&self) -> SocketAddr {
+            "127.0.0.1:9".parse().unwrap()
+        }
+        fn local_addr(&self) -> SocketAddr {
+            "127.0.0.1:8".parse().unwrap()
+        }
+    }
+
+    struct RecordingNet {
+        script: Mutex<Option<VecDeque<Frame>>>,
+        sent: Arc<Mutex<Vec<Frame>>>,
+    }
+
+    #[async_trait]
+    impl ReplicationNetwork for RecordingNet {
+        async fn connect(
+            &self,
+            _dst: SocketAddr,
+        ) -> Result<Box<dyn ReplicationConnection>, ConnectError> {
+            let frames = self.script.lock().unwrap().take().unwrap_or_default();
+            Ok(Box::new(RecordingConn { frames: Mutex::new(frames), sent: self.sent.clone() }))
+        }
+        async fn listen(
+            &self,
+            _local: SocketAddr,
+        ) -> Result<Box<dyn ReplicationListener>, ListenError> {
+            unreachable!("the recording net is pull-only")
+        }
+    }
+
+    fn data(op: Op, call_ref: &str, gen: i64, counter: u64) -> Frame {
+        Frame::Data {
+            at: Watermark::new(1, counter),
+            op,
+            partition: Partition::Bak,
+            call_ref: call_ref.to_string(),
+            call_gen: gen,
+            call_bgen: 0,
+            body_ttl_ms: 0,
+            origin_now_ms: 0,
+            indexes: Vec::new(),
+            body: (op == Op::Put).then(|| Arc::from(b"body".to_vec().into_boxed_slice())),
+        }
+    }
+
+    /// While a shed replica stands, the flow reports no position past the last
+    /// one it held everything up to, whatever else it applies; once the
+    /// replica is stored, the report catches up (ADR-0031 D2 x ADR-0037).
+    #[tokio::test(start_paused = true)]
+    async fn a_shed_replica_holds_the_reported_position_until_it_is_stored() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        let (probe, _control) = crate::capacity::simulated();
+        let gate = crate::capacity::CapacityGate::new(Arc::new(probe));
+        gate.configure(&crate::config::CapacityConfig {
+            backup_calls: Some(1),
+            ..Default::default()
+        });
+        let script = VecDeque::from([
+            Frame::Noop { at: Watermark::new(1, 1) },
+            data(Op::Put, "w0|a|t", 1, 2),
+            data(Op::Put, "w0|b|t", 1, 3),
+            data(Op::Put, "w0|a|t", 2, 4),
+            Frame::Noop { at: Watermark::new(1, 4) },
+            data(Op::Delete, "w0|a|t", 3, 5),
+            data(Op::Put, "w0|b|t", 2, 6),
+            Frame::Noop { at: Watermark::new(1, 6) },
+        ]);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let net: Arc<dyn ReplicationNetwork> =
+            Arc::new(RecordingNet { script: Mutex::new(Some(script)), sent: sent.clone() });
+        let (puller, _status) = Puller::new_at(
+            "w0",
+            "w1",
+            Partition::Bak,
+            "127.0.0.1:9".parse().unwrap(),
+            net,
+            store.clone(),
+            PullerConfig::fast_test(),
+            Watermark::new(0, 0),
+            B2buaMetrics::new(),
+        );
+        let puller = puller.with_capacity(gate);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        tokio::spawn(async move { puller.run(cancel_rx).await });
+        for _ in 0..40 {
+            tokio::time::advance(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
+        }
+
+        let reported: Vec<u64> = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Position { at } => Some(at.counter),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported, vec![1, 2, 2, 2, 2, 2, 6, 6], "positions reported per frame");
+        assert_eq!(store.shed_count(), 0, "the stored replica cleared its mark");
     }
 }

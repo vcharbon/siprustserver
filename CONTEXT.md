@@ -198,10 +198,11 @@ pass, an RFC 3326 value at most — the cause is typed); "snapshot" for the cut
 The worker's bound on what it holds: live calls, live SIP transactions and
 process RSS, each with a **normal ceiling** (a new non-emergency call is
 refused at it) and an **emergency ceiling** (every new call is refused at it).
-A refused call draws a 503 with `Retry-After` and no `Reason`, and no call
-state is born. The **backup ceilings** (a count and an RSS value) keep a
+A refused call draws a 503 with a jittered `Retry-After` and no `Reason`, and
+no call state is born. The **backup ceilings** (a count and an RSS value) keep a
 replica of a call not yet held out of the store; a replica left out this way
-is **shed**, and the call's next write that finds room stores it.
+is **shed**, and the call's next write that finds room stores it; until then
+the backup's flow reports no position past the shed write.
 _Avoid_: "overload" for these rejects (overload is the rate and loop shedding
 of the CPS bucket, the panic-ELU backstop and the queue brake); "limit" for a
 ceiling (the call limiter owns that word).
