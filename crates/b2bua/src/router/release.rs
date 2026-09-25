@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use super::RouterCtx;
+use crate::metrics::RemovalClass;
 
 /// How a call's per-node runtime state is being released. Every path that frees
 /// per-call state funnels through [`release_call`] — the ONE teardown executor —
@@ -48,13 +49,13 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
             // `removal` exactly once (dispatch.rs). We deliberately do NOT
             // bump here — removal is counted at the single dispatch-queue
             // teardown site so creations/removals stay a matched pair.
-            ctx.dispatcher.enqueue_poison(call_ref);
+            ctx.dispatcher.enqueue_poison(call_ref, RemovalClass::Terminated);
         }
         ReleaseKind::SelfRelease => {
             if ctx.state.drop_local(call_ref) {
                 ctx.timers.cancel_all(call_ref.to_string()).await;
                 let _ = ctx.txn.cancel_txns_for_call(call_ref).await;
-                ctx.dispatcher.enqueue_poison(call_ref);
+                ctx.dispatcher.enqueue_poison(call_ref, RemovalClass::SelfRelease);
                 ctx.metrics.bump_repl_self_release();
                 // Folded into the dead peer's takeover episode, never its own
                 // line: shedding is the tail of the takeover it ends.
@@ -63,7 +64,7 @@ pub(super) async fn release_call(ctx: &Arc<RouterCtx>, call_ref: &str, kind: Rel
         }
         ReleaseKind::Orphan => {
             ctx.state.discard_orphan(call_ref);
-            ctx.dispatcher.enqueue_poison(call_ref);
+            ctx.dispatcher.enqueue_poison(call_ref, RemovalClass::Orphan);
         }
     }
 }

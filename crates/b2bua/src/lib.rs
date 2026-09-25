@@ -55,7 +55,9 @@ pub use router::AdaptationHttpPort;
 pub use config::B2buaConfig;
 pub use effects::{HandlerEffects, HandlerResult};
 pub use event::CallEvent;
-pub use metrics::{B2buaMetrics, BufferedSendCounters, LiveGauge, UdpTransportMetrics};
+pub use metrics::{
+    B2buaMetrics, BufferedSendCounters, LiveGauge, RemovalClass, UdpTransportMetrics,
+};
 pub use wire_faults::{WireFaultPoint, WireFaults};
 // The callflow-service authoring macros live in the public Rule SDK (ADR-0016
 // slice 6); re-export them so in-tree services keep using `b2bua::define_service!`

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{mpsc, Semaphore};
 
-use crate::metrics::B2buaMetrics;
+use crate::metrics::{B2buaMetrics, RemovalClass};
 
 /// A unit of per-call work — a self-contained future capturing the router +
 /// the event.
@@ -39,7 +39,7 @@ pub type FailureHook = Arc<dyn Fn(&str, HandlerFailure) + Send + Sync>;
 
 enum DispatchItem {
     Event(DispatchBody),
-    Poison,
+    Poison(RemovalClass),
 }
 
 struct PerCallQueue {
@@ -125,11 +125,13 @@ impl PerCallDispatcher {
         ));
     }
 
-    /// Signal the worker for `call_ref` to drain and exit (call eviction).
-    pub fn enqueue_poison(&self, call_ref: &str) {
+    /// Signal the worker for `call_ref` to drain and exit (call eviction). The
+    /// first poison the worker dequeues names the removal's class; a later one
+    /// (a release by an event queued ahead of it) is discarded with the queue.
+    pub fn enqueue_poison(&self, call_ref: &str, class: RemovalClass) {
         let map = self.queues.lock().unwrap();
         if let Some(q) = map.get(call_ref) {
-            let _ = q.tx.try_send(DispatchItem::Poison);
+            let _ = q.tx.try_send(DispatchItem::Poison(class));
         }
     }
 
@@ -165,9 +167,12 @@ async fn worker(
     failure_hook: Option<FailureHook>,
     inflight: InflightMap,
 ) {
+    // The map holds the sender until below, so the loop ends only on a poison.
+    let mut class = RemovalClass::Orphan;
     while let Some(item) = rx.recv().await {
         match item {
-            DispatchItem::Poison => {
+            DispatchItem::Poison(c) => {
+                class = c;
                 while rx.try_recv().is_ok() {}
                 break;
             }
@@ -203,7 +208,7 @@ async fn worker(
     }
     inflight.lock().unwrap().remove(&call_ref);
     queues.lock().unwrap().remove(&call_ref);
-    metrics.bump_removal();
+    metrics.bump_removal_of(class);
 }
 
 #[cfg(test)]
@@ -268,5 +273,42 @@ mod tests {
         }
         assert!(metrics.queue_drops_total() >= 1, "expected queue drops");
         gate.notify_waiters();
+    }
+
+    /// A queue's removal takes the class of the first poison it dequeues: a
+    /// terminated call whose queued event then released it again as an orphan
+    /// is one `terminated` removal, and the classes sum to the removals.
+    #[tokio::test]
+    async fn removal_counts_the_first_poison_class() {
+        let metrics = B2buaMetrics::new();
+        let d = PerCallDispatcher::new(1, 8, 1024, metrics.clone());
+        let gate = Arc::new(Notify::new());
+        let started = Arc::new(Notify::new());
+        {
+            let (gate, started) = (gate.clone(), started.clone());
+            d.dispatch(
+                "a",
+                Box::pin(async move {
+                    started.notify_one();
+                    gate.notified().await;
+                }),
+            );
+        }
+        started.notified().await;
+        d.enqueue_poison("a", RemovalClass::Terminated);
+        d.enqueue_poison("a", RemovalClass::Orphan);
+        d.dispatch("b", Box::pin(async {}));
+        d.enqueue_poison("b", RemovalClass::Orphan);
+        gate.notify_waiters();
+        while d.queue_count() > 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(metrics.removals_total(), 2);
+        assert_eq!(metrics.removals_of_total(RemovalClass::Terminated), 1);
+        assert_eq!(metrics.removals_of_total(RemovalClass::Orphan), 1);
+        assert_eq!(metrics.removals_of_total(RemovalClass::SelfRelease), 0);
+        let text = metrics.prometheus_text();
+        assert!(text.contains("b2bua_call_removals_by_class_total{class=\"terminated\"} 1"));
+        assert!(text.contains("b2bua_call_removals_by_class_total{class=\"orphan\"} 1"));
     }
 }

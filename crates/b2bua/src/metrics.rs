@@ -65,6 +65,9 @@ struct Inner {
     message_cap_terminated: AtomicU64,
     creations: AtomicU64,
     removals: AtomicU64,
+    removals_terminated: AtomicU64,
+    removals_self_release: AtomicU64,
+    removals_orphan: AtomicU64,
     // router / handler
     handler_timeouts: AtomicU64,
     force_purge: AtomicU64,
@@ -293,6 +296,30 @@ pub struct B2buaMetrics {
     per_peer: Arc<crate::peer_failures::PeerFailures>,
 }
 
+/// Why a per-call dispatch queue was torn down: the release that poisoned it.
+/// Every removal has exactly one class; they partition `b2bua_call_removals_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalClass {
+    /// A call that terminated: it owes its CDR.
+    Terminated,
+    /// A takeover copy shed by an acting backup (ADR-0014): the call lives on
+    /// at its primary, which owes the CDR.
+    SelfRelease,
+    /// A queue that never held a call: an initial INVITE shed statelessly
+    /// (overload, store fault) or an event naming no resident call. No CDR.
+    Orphan,
+}
+
+impl RemovalClass {
+    pub fn label(self) -> &'static str {
+        match self {
+            RemovalClass::Terminated => "terminated",
+            RemovalClass::SelfRelease => "self_release",
+            RemovalClass::Orphan => "orphan",
+        }
+    }
+}
+
 macro_rules! counter {
     ($bump:ident, $get:ident, $field:ident) => {
         pub fn $bump(&self) {
@@ -315,6 +342,24 @@ impl B2buaMetrics {
     counter!(bump_saturation, saturation_total, saturation);
     counter!(bump_creation, creations_total, creations);
     counter!(bump_removal, removals_total, removals);
+
+    /// One queue teardown of class `class`: bumps the removal and its class.
+    pub fn bump_removal_of(&self, class: RemovalClass) {
+        self.bump_removal();
+        self.removal_class_counter(class).fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn removals_of_total(&self, class: RemovalClass) -> u64 {
+        self.removal_class_counter(class).load(Ordering::Relaxed)
+    }
+
+    fn removal_class_counter(&self, class: RemovalClass) -> &AtomicU64 {
+        match class {
+            RemovalClass::Terminated => &self.inner.removals_terminated,
+            RemovalClass::SelfRelease => &self.inner.removals_self_release,
+            RemovalClass::Orphan => &self.inner.removals_orphan,
+        }
+    }
     counter!(bump_handler_timeout, handler_timeouts_total, handler_timeouts);
     counter!(bump_force_purge, force_purge_total, force_purge);
     counter!(bump_fast_reject_terminating, fast_reject_terminating_total, fast_reject_terminating);
@@ -865,6 +910,14 @@ impl B2buaMetrics {
         s.push_str(&format!("b2bua_drain_seconds_bucket{{le=\"+Inf\"}} {drain_count}\n"));
         s.push_str(&format!("b2bua_drain_seconds_sum {drain_sum_s}\n"));
         s.push_str(&format!("b2bua_drain_seconds_count {drain_count}\n"));
+        s.push_str("# HELP b2bua_call_removals_by_class_total b2bua_call_removals_total by the release that tore the queue down (terminated: a call that owes its CDR; self_release: an acting backup's takeover copy; orphan: a queue that never held a call, e.g. a stateless admission shed or an event for a gone call)\n# TYPE b2bua_call_removals_by_class_total counter\n");
+        for class in [RemovalClass::Terminated, RemovalClass::SelfRelease, RemovalClass::Orphan] {
+            s.push_str(&format!(
+                "b2bua_call_removals_by_class_total{{class=\"{}\"}} {}\n",
+                class.label(),
+                self.removals_of_total(class)
+            ));
+        }
 
         // Gauges last (direct writes — they end the `counter` closure's borrow).
         s.push_str("# HELP b2bua_active_calls live calls this worker is serving (creations - removals; now a true gauge since the two are paired)\n# TYPE b2bua_active_calls gauge\n");
