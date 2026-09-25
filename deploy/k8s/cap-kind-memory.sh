@@ -20,7 +20,13 @@
 # `kind create` (run.sh `up` calls this). Pod-level limits (20-worker.yaml: 2Gi)
 # still apply inside; this is the node-container backstop.
 #
-# Override per-invocation:  TOTAL_CAP_MB=8192 APP_CAP_MB=1024 ./cap-kind-memory.sh
+# App-node rule: APP_CAP_MB >= APP_POD_LIMIT_MB (the worker pod's memory limit)
+# + APP_COTENANT_MB (the limits of the other pods an app node can hold) +
+# NODE_OVERHEAD_MB (the node's own systemd/containerd/kubelet and DaemonSets).
+# Below it the node cgroup OOM-kills the worker before its own pod limit applies;
+# the script refuses such a cap.
+#
+# Override per-invocation:  TOTAL_CAP_MB=8192 EDGE_CAP_MB=1024 ./cap-kind-memory.sh
 set -euo pipefail
 
 CLUSTER="${CLUSTER:-sip-e2e}"
@@ -29,13 +35,17 @@ TOTAL_CAP_MB="${TOTAL_CAP_MB:-9728}"   # 9.5 GiB whole-cluster hard ceiling. Hos
                                        # observability stack (~1.9 GiB) and the page cache.
 CP_CAP_MB="${CP_CAP_MB:-1536}"         # control-plane reservation (etcd+apiserver ~1 GiB)
 EDGE_CAP_MB="${EDGE_CAP_MB:-768}"      # edge node: front proxy pod is 512 Mi + kubelet
-APP_CAP_MB="${APP_CAP_MB:-1664}"       # app node: b2bua real RSS is ~735Mi steady + a takeover
-                                       # spike to ~1010Mi (glibc arena-retained, not freed) + a
-                                       # co-tenant (rabbitmq/cdr ~170Mi) + node overhead. 1280
-                                       # node-cgroup-OOM'd worker-1 mid-soak (2026-06-13 01:49).
+APP_POD_LIMIT_MB="${APP_POD_LIMIT_MB:-2048}"  # the worker pod's memory limit (20-worker.yaml 2Gi)
+APP_COTENANT_MB="${APP_COTENANT_MB:-0}"       # summed limits of the other pods on one app node
+NODE_OVERHEAD_MB="${NODE_OVERHEAD_MB:-512}"   # node system.slice ~160Mi + DaemonSets ~200Mi, measured
+APP_CAP_MB="${APP_CAP_MB:-$(( APP_POD_LIMIT_MB + APP_COTENANT_MB + NODE_OVERHEAD_MB ))}"
 LOAD_CAP_MB="${LOAD_CAP_MB:-1536}"     # load node: sipp UAS + co-located UAC generators
 INFRA_CAP_MB="${INFRA_CAP_MB:-1536}"   # infra node: broker (1Gi limit) + limiter + CDR consumer
 WORKER_CAP_MB="${WORKER_CAP_MB:-1280}" # fallback when a worker's tier label is unknown
+
+app_floor=$(( APP_POD_LIMIT_MB + APP_COTENANT_MB + NODE_OVERHEAD_MB ))
+[ "$APP_CAP_MB" -lt "$app_floor" ] && {
+  echo "APP_CAP_MB ${APP_CAP_MB}m is below worker limit ${APP_POD_LIMIT_MB}m + co-tenants ${APP_COTENANT_MB}m + node overhead ${NODE_OVERHEAD_MB}m = ${app_floor}m: the node would OOM-kill the worker before its pod limit"; exit 1; }
 
 # -a: cap stopped nodes too (their config applies on next start).
 mapfile -t nodes < <(docker ps -a --filter "name=${CLUSTER}" --format '{{.Names}}')
