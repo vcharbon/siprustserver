@@ -22,7 +22,11 @@ use super::handle::Command;
 use super::txn::{sweep_max_age, CancelWire, Timer, Transaction, TxnRole};
 
 pub(super) struct Owner {
-    pub(super) txns: HashMap<String, Transaction>,
+    /// Boxed so a bucket is a pointer, not the multi-KB record: the table's
+    /// doubling step and its footprint after a drain scale with the live count
+    /// only through 32-byte buckets, and a txn's own memory goes back to the
+    /// allocator when it is deleted.
+    pub(super) txns: HashMap<String, Box<Transaction>>,
     pub(super) timers: DelayQueue<Timer>,
     pub(super) parser: Arc<dyn SipParser + Send + Sync>,
     pub(super) events_tx: mpsc::Sender<TransactionEvent>,
@@ -83,6 +87,20 @@ pub(super) struct Owner {
     pub(super) recent_uas_tags: HashMap<(String, String), (String, tokio::time::Instant)>,
     /// [`TransactionConfig::strict_to_tag`](crate::TransactionConfig).
     pub(super) strict_to_tag: bool,
+}
+
+/// Below this many buckets a table is never shrunk: the saving is noise and a
+/// small idle node would rehash on every sweep.
+const SHRINK_MIN_CAPACITY: usize = 1024;
+
+/// Give a drained table back to the allocator: once it is under a quarter full
+/// it is rehashed to twice its length. The factor-of-four gap is the hysteresis
+/// that keeps a table oscillating around one size from rehashing every sweep.
+fn shrink_idle<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
+    let cap = map.capacity();
+    if cap > SHRINK_MIN_CAPACITY && map.len() < cap / 4 {
+        map.shrink_to(map.len() * 2);
+    }
 }
 
 /// The next expired timer. Only ever awaited while `q` is non-empty — an empty
@@ -186,7 +204,7 @@ impl Owner {
         let branch = txn.branch.clone();
         // A re-insert of the same branch (rare) must not double-count: drop the
         // displaced txn's contribution before adding the new one.
-        if let Some(old) = self.txns.insert(branch.clone(), txn) {
+        if let Some(old) = self.txns.insert(branch.clone(), Box::new(txn)) {
             // The displaced txn's queue entries are keyed by the SAME branch string
             // the replacement now owns; left in the wheel they would fire against
             // the new txn (spurious retransmit/timeout/cleanup) and their Keys would
@@ -402,6 +420,9 @@ impl Owner {
             self.delete_txn(&branch);
         }
         self.recent_uas_tags.retain(|_, (_, since)| since.elapsed() < ms(TIMER_L));
+        shrink_idle(&mut self.txns);
+        shrink_idle(&mut self.txn_index);
+        shrink_idle(&mut self.recent_uas_tags);
         // Census the retained retransmit-buffer bytes (same periodic pass) so a
         // buffer-retention leak is visible vs flat txns.
         let buf_bytes: u64 = self

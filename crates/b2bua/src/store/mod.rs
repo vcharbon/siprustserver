@@ -59,7 +59,10 @@ pub enum MaterialiseOrigin {
 
 #[derive(Default)]
 struct Inner {
-    calls: HashMap<String, Call>,
+    /// Boxed so a bucket is a pointer, not the whole record: the table's
+    /// doubling step and its footprint after a drain stay small, and a call's
+    /// own memory goes back to the allocator when it is removed.
+    calls: HashMap<String, Box<Call>>,
     /// SIP routing index: `leg:callId|tag` / `leg:callId` / `ctx:...` → callRef.
     sip_index: HashMap<String, String>,
     /// The index keys each call currently owns (for clean re-index on update).
@@ -96,6 +99,31 @@ struct Inner {
     /// lands on a cancelled call. Node-local, never serialized; cleared on
     /// `remove`/`drop_local`/`discard_orphan`.
     setup_cancelled: HashSet<String>,
+}
+
+/// Below this many buckets a table is never shrunk: the saving is noise and a
+/// small node would rehash on every removal.
+const SHRINK_MIN_CAPACITY: usize = 1024;
+
+/// Give a drained table back to the allocator: once it is under a quarter full
+/// it is rehashed to twice its length. The factor-of-four gap is the hysteresis
+/// that keeps the amortised cost per removal constant.
+fn shrink_idle<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
+    let cap = map.capacity();
+    if cap > SHRINK_MIN_CAPACITY && map.len() < cap / 4 {
+        map.shrink_to(map.len() * 2);
+    }
+}
+
+impl Inner {
+    /// Shrink every per-call map after a removal (see [`shrink_idle`]).
+    fn shrink_idle(&mut self) {
+        shrink_idle(&mut self.calls);
+        shrink_idle(&mut self.sip_index);
+        shrink_idle(&mut self.indexed);
+        shrink_idle(&mut self.locks);
+        shrink_idle(&mut self.touched);
+    }
 }
 
 /// The store write path of a wired node: the replicating store the S8 policy
@@ -226,7 +254,7 @@ impl CallState {
         let now_ms = self.clock.now_ms();
         let mut inner = self.inner.lock().unwrap();
         Self::reindex(&mut inner, &call);
-        inner.calls.insert(call_ref.clone(), call);
+        inner.calls.insert(call_ref.clone(), Box::new(call));
         inner.touched.insert(call_ref.clone(), now_ms);
         call_ref
     }
@@ -278,7 +306,7 @@ impl CallState {
 
     /// Snapshot a call (clone) from memory, if present.
     pub fn peek(&self, call_ref: &str) -> Option<Call> {
-        self.inner.lock().unwrap().calls.get(call_ref).cloned()
+        self.inner.lock().unwrap().calls.get(call_ref).map(|c| (**c).clone())
     }
 
     /// The `bak:{primary}` body of `call_ref` — the acting-backup takeover
@@ -349,7 +377,9 @@ impl CallState {
             return;
         }
         Self::reindex(&mut inner, &call);
-        inner.calls.insert(call.call_ref.clone(), call);
+        if let Some(slot) = inner.calls.get_mut(&call.call_ref) {
+            **slot = call;
+        }
     }
 
     /// Raise the resident copy's `(p,b)` to at least `(gen, bak_gen)` and return
@@ -370,7 +400,7 @@ impl CallState {
         }
         t.gen = t.gen.max(gen);
         t.bak_gen = t.bak_gen.max(bak_gen);
-        Some(call.clone())
+        Some((**call).clone())
     }
 
     /// The backup peer for a call from its `CallTopology.bak`, or `None` when no
@@ -429,6 +459,7 @@ impl CallState {
         inner.takeover.remove(call_ref);
         inner.touched.remove(call_ref);
         inner.setup_cancelled.remove(call_ref);
+        inner.shrink_idle();
         drop(inner);
 
         if let Some(((role, primary, opts), writer)) = target {
@@ -457,6 +488,7 @@ impl CallState {
         inner.takeover.remove(call_ref);
         inner.touched.remove(call_ref);
         inner.setup_cancelled.remove(call_ref);
+        inner.shrink_idle();
         present
     }
 
@@ -486,6 +518,7 @@ impl CallState {
         // (Tier-3 / store-fault): the mark was set with no call ever resident,
         // and this is its only teardown path.
         inner.setup_cancelled.remove(call_ref);
+        inner.shrink_idle();
     }
 
     /// Mark `call_ref` as a live acting-backup **takeover copy** (ADR-0011 X11 /
@@ -691,7 +724,7 @@ impl CallState {
             crate::trace::adopt_replicated(&mut call, now_ms);
             Self::reindex(&mut inner, &call);
             inner.touched.insert(call.call_ref.clone(), now_ms);
-            inner.calls.insert(call.call_ref.clone(), call);
+            inner.calls.insert(call.call_ref.clone(), Box::new(call));
         }
         if origin == MaterialiseOrigin::Reclaim {
             if let (Some(repl), Some(backup)) = (self.repl_store(), backup) {
