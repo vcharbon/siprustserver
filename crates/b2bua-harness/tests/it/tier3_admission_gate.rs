@@ -5,9 +5,10 @@
 //! CPS token bucket + the panic-ELU backstop before any call/dialog state is
 //! created. The gate's UNIT behaviour (bucket drain/refill, panic-ELU, emergency
 //! admits on an empty bucket, reason tags) is pinned in `b2bua::overload::tests`;
-//! this file proves the WIRING — the verdict turns into a real stateless 503 on the wire (with the
-//! overload `Reason` + `Retry-After`), no per-call resources are born for a reject,
-//! emergency bypasses the empty bucket, and an admit advances the published `adm`.
+//! this file proves the WIRING — the verdict turns into a real stateless 503 on
+//! the wire (with the overload `Reason` + `Retry-After`), no per-call resources
+//! are born for a reject, emergency bypasses the empty bucket, and an admit
+//! advances the published `adm`.
 //!
 //! Real-clock except the emergency no-debt test: a size-0 bucket rejects/admits
 //! the FIRST INVITE with no timer to wait on. The no-debt test waits for one
