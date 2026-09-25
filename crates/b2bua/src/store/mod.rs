@@ -107,7 +107,7 @@ const SHRINK_MIN_CAPACITY: usize = 1024;
 
 /// Give a drained table back to the allocator: once it is under a quarter full
 /// it is rehashed to twice its length. The factor-of-four gap is the hysteresis
-/// that keeps the amortised cost per removal constant.
+/// that keeps a table oscillating around one size from rehashing on every removal.
 fn shrink_idle<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
     let cap = map.capacity();
     if cap > SHRINK_MIN_CAPACITY && map.len() < cap / 4 {
@@ -116,7 +116,8 @@ fn shrink_idle<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
 }
 
 impl Inner {
-    /// Shrink every per-call map after a removal (see [`shrink_idle`]).
+    /// Shrink the per-call maps after a removal (see [`shrink_idle`]); the
+    /// membership sets hold pointer-sized buckets and are left as they are.
     fn shrink_idle(&mut self) {
         shrink_idle(&mut self.calls);
         shrink_idle(&mut self.sip_index);

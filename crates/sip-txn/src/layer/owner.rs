@@ -423,6 +423,12 @@ impl Owner {
         shrink_idle(&mut self.txns);
         shrink_idle(&mut self.txn_index);
         shrink_idle(&mut self.recent_uas_tags);
+        // `shrink_to_fit` only trims the slab's free tail and never moves an
+        // entry, so every `Key` stored on a txn stays valid (`compact` would not).
+        let cap = self.timers.capacity();
+        if cap > SHRINK_MIN_CAPACITY && self.timers.len() < cap / 4 {
+            self.timers.shrink_to_fit();
+        }
         // Census the retained retransmit-buffer bytes (same periodic pass) so a
         // buffer-retention leak is visible vs flat txns.
         let buf_bytes: u64 = self
