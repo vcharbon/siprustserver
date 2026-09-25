@@ -7,9 +7,10 @@
 #                              process stops, sockets stay open, nothing answers
 #   pf_reject_tcp / pf_unreject  TCP RST to new connections on a port, in the pod's
 #                              netns; the kubelet's probes (from its node) still pass
-#   pf_delay / pf_undelay      netem delay on the pod's eth0
+#   pf_delay / pf_loss / pf_undelay  netem delay / 100 % loss on the pod's eth0
 #   pf_node_stop / pf_node_start  the whole kind node, as a machine loss
 #   pf_clear_pod               undo every pod fault above; idempotent
+#   pf_pod_residue             name every pod fault still applied (empty = clean)
 #
 # Every fault is undone by its pair or by pf_clear_pod, whatever state a killed
 # caller left behind. Callers provide NS; the functions return non-zero and print
@@ -41,9 +42,22 @@ pf_pod_host() { # $1 pod
   echo "$node $pid"
 }
 
+# "<node> <pid>" of the pod's sandbox: its netns outlives any restart of the
+# pod's containers, so a network fault is applied and undone through it.
+pf_pod_sandbox() { # $1 pod
+  local node uid sb pid
+  node="$(pf_pod_node "$1")"; [ -n "$node" ] || return 1
+  uid="$(kubectl -n "$NS" get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null)"; [ -n "$uid" ] || return 1
+  sb="$(docker exec "$node" crictl pods --label "io.kubernetes.pod.uid=$uid" --state ready -q 2>/dev/null | head -n 1)"
+  [ -n "$sb" ] || return 1
+  pid="$(docker exec "$node" crictl inspectp --output go-template --template '{{.info.pid}}' "$sb" 2>/dev/null)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  echo "$node $pid"
+}
+
 # Run a command in the pod's network namespace, from its node.
 pf_netns() { # $1 pod  $2.. command
-  local host; host="$(pf_pod_host "$1")" || return 1; shift
+  local host; host="$(pf_pod_sandbox "$1")" || return 1; shift
   docker exec "${host% *}" nsenter -t "${host#* }" -n -- "$@"
 }
 
@@ -86,7 +100,13 @@ pf_unreject() { # $1 pod: delete every rule this file added
 }
 
 pf_delay()   { pf_netns "$1" tc qdisc replace dev eth0 root netem delay "${2}ms"; } # $1 pod  $2 ms
-pf_undelay() { pf_netns "$1" tc qdisc del dev eth0 root 2>/dev/null || true; }
+pf_loss()    { pf_netns "$1" tc qdisc replace dev eth0 root netem loss 100%; }     # $1 pod
+# Remove any qdisc on eth0; fails unless the netns answers and holds no netem.
+pf_undelay() {
+  pf_netns "$1" tc qdisc del dev eth0 root 2>/dev/null
+  local q; q="$(pf_netns "$1" tc qdisc show dev eth0)" || return 1
+  ! grep -q netem <<< "$q"
+}
 
 # Undo every pod fault on the live pod of a selector: thaw, no REJECT rule, no
 # qdisc on eth0 (which also removes a netem loss set from inside the pod).
@@ -96,6 +116,19 @@ pf_clear_pod() { # $1 selector
   pf_unreject "$pod" 2>/dev/null
   pf_undelay "$pod"
   return 0
+}
+
+# Every pod fault still applied to pod $1, one word each (netem, reject,
+# frozen), or "unreadable" when its netns or cgroup cannot be read.
+pf_pod_residue() { # $1 pod
+  local q r cg f
+  q="$(pf_netns "$1" tc qdisc show dev eth0 2>/dev/null)" || { echo unreadable; return; }
+  grep -q netem <<< "$q" && echo netem
+  r="$(pf_netns "$1" iptables -S INPUT 2>/dev/null)" || { echo unreadable; return; }
+  grep -q -- "$PF_REJECT_TAG" <<< "$r" && echo reject
+  cg="$(pf_cgroup "$1")" || { echo unreadable; return; }
+  f="$(docker exec "${cg% *}" cat "${cg#* }/cgroup.freeze" 2>/dev/null)" || { echo unreadable; return; }
+  [ "$f" = 0 ] || echo frozen
 }
 
 # Nodes by label, as docker container names.

@@ -56,7 +56,8 @@ nodes:
   # tier=infra: the shared dependencies of the call path (call limiter, CDR
   # broker + consumer), alone on their node so a node fault takes them out
   # without touching a worker or a generator. The taint keeps every other pod
-  # (cluster add-ons included) off it; the infra manifests tolerate it.
+  # (cluster add-ons included) off it; the infra manifests tolerate it. The
+  # masq-exempt DaemonSet does not: no SIP flow starts or ends on this node.
   - role: worker
     labels:
       tier: infra

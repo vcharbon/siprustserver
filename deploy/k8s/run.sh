@@ -363,6 +363,13 @@ obs_check() { # $1 cluster|stack
   printf '\033[1;31m!! %s\033[0m\n' "observability: VictoriaMetrics is missing series of this cluster. Check that vmagent runs (kubectl -n observability get pods; logs deploy/vmagent) and that the host accepts the kind subnet on 8428/9428/10428 (a host firewall drops the remote write). OBS_ENABLE=0 skips observability." >&2
   return 1
 }
+# The shared dependencies' manifests (50/55/56) run on a tier=infra node
+# (cluster.yaml): a cluster made before it has none, and they would stay Pending.
+require_infra_node() {
+  kubectl get nodes -l tier=infra -o name 2>/dev/null | grep -q . \
+    || die "no tier=infra node in cluster '$CLUSTER': it predates the infra node (cluster.yaml) — recreate it: ./run.sh down && ./run.sh up"
+}
+
 # The deploy's observability gate: scrapers applied, the stack's series landing.
 obs_ensure() {
   [ "$OBS_ENABLE" = "1" ] || { log "OBS_ENABLE=0 — no observability gate"; return 0; }
@@ -372,6 +379,7 @@ obs_ensure() {
 
 deploy() {
   preflight
+  require_infra_node
   apply_manifest "$MANIFEST_DIR/00-namespace.yaml"
   # NOTE: the sipp-scenarios / sipp-exporter ConfigMaps are GONE — scenarios
   # and the stat exporter are bind-mounted straight into the docker-on-sipext

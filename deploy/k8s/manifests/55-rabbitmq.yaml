@@ -58,6 +58,9 @@ spec:
           # The broker's store on memory: it restarts empty anyway (no PVC), and
           # a disk-backed store waits on the host's fsync before confirming a
           # publish, which a busy host stretches past a publisher's confirm bound.
+          # Sized for a full queue: x-max-length 100000 records of ~1.2 KB is
+          # ~120 MB of messages plus the store's index; the tmpfs counts toward
+          # the 1Gi memory limit.
           volumeMounts:
             - { name: data, mountPath: /var/lib/rabbitmq }
           resources:
@@ -65,7 +68,7 @@ spec:
             limits:   { memory: "1Gi" }
       volumes:
         - name: data
-          emptyDir: { medium: Memory, sizeLimit: 256Mi }
+          emptyDir: { medium: Memory, sizeLimit: 512Mi }
 ---
 # Stable ClusterIP so the workers + consumer resolve a single broker at startup.
 apiVersion: v1

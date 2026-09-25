@@ -458,24 +458,13 @@ limiter_kill() {
 # CHAOS: a NETWORK interruption to the shared call-limiter WITHOUT killing it.
 # `tc netem loss 100%` on the limiter pod's eth0 black-holes all traffic for
 # NETCUT_SECS, so worker->limiter admits/releases/refreshes time out (150ms
-# budget) and the b2bua fails open — same observable effect as a kill but the
-# pod (and its in-memory counters) stay intact, so on restore the counters are
-# still warm. Requires NET_ADMIN + iproute2 (set on 50-call-limiter / image).
+# budget) and the b2bua fails open. The kubelet's probes are cut too, so a
+# netcut longer than the liveness budget (3 x 10 s) also restarts the limiter's
+# container; the pod's netns outlives that restart, and the fault is applied and
+# undone in it from the node (lib/pod-faults.sh), never through the container.
 NETCUT_SECS="${NETCUT_SECS:-60}"
 limiter_netcut() {
-  local pod
-  pod="$(kubectl -n "$NS" get pod -l "$LIMITER_SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-  if [ -z "$pod" ]; then log "limiter_netcut: no call-limiter pod found"; return; fi
-  log "CHAOS: limiter_netcut — 100% packet loss on $pod eth0 for ${NETCUT_SECS}s (pod stays up)"
-  push_metric 'sip_chaos_event{type="limiter_netcut",phase="start"} 1
-sip_chaos_active{type="limiter_netcut"} 1'
-  kubectl -n "$NS" exec "$pod" -- tc qdisc add dev eth0 root netem loss 100% >/dev/null 2>&1 \
-    || warn "limiter_netcut: tc add failed (NET_ADMIN/iproute2 present?)"
-  pf_sleep "$NETCUT_SECS"
-  kubectl -n "$NS" exec "$pod" -- tc qdisc del dev eth0 root >/dev/null 2>&1 || true
-  log "limiter_netcut: removed netem on $pod (connectivity restored)"
-  push_metric 'sip_chaos_event{type="limiter_netcut",result="pass"} 1
-sip_chaos_active{type="limiter_netcut"} 0'
+  timed_pod_fault "$LIMITER_SELECTOR" pf_loss "$NETCUT_SECS" pf_undelay limiter_netcut
 }
 
 # ── Faults of the call path's shared dependencies (the limiter, the CDR
@@ -485,8 +474,9 @@ LIMITER_PORT="${LIMITER_PORT:-8080}"
 LIMITER_REJECT_SECS="${LIMITER_REJECT_SECS:-60}"
 LIMITER_SLOW_SECS="${LIMITER_SLOW_SECS:-60}"
 LIMITER_SLOW_MS="${LIMITER_SLOW_MS:-300}"          # above the workers' limiter budget (LIMITER_TIMEOUT_MS)
-# Under the limiter's liveness budget (3 x 10 s): a longer freeze is a kubelet restart.
-LIMITER_FREEZE_SECS="${LIMITER_FREEZE_SECS:-20}"
+# Well under the limiter's liveness budget (3 x 10 s): a longer freeze is a
+# kubelet restart (limiter_freeze notes one).
+LIMITER_FREEZE_SECS="${LIMITER_FREEZE_SECS:-15}"
 BROKER_SELECTOR="${BROKER_SELECTOR:-app=rabbitmq}"
 # Under the broker's liveness budget (3 x 30 s, 15 s timeout).
 BROKER_FREEZE_SECS="${BROKER_FREEZE_SECS:-45}"
@@ -495,17 +485,21 @@ INFRA_HOLD_S="${INFRA_HOLD_S:-120}"
 INFRA_BACK_TIMEOUT="${INFRA_BACK_TIMEOUT:-300}"
 
 # Run fault $2 on the live pod of selector $1 for $3 seconds, then undo it ($4).
+# Returns 0, 1 when the fault could not be applied (no pod, apply failed: the
+# event did not happen), or 2 when it could not be undone (chaos_cleanup and
+# chaos_verify_clean must then clear and prove it).
 timed_pod_fault() { # $1 selector  $2 apply fn  $3 secs  $4 undo fn  $5 event type  [$6 apply arg]
-  local pod; pod="$(pf_pod_of "$1")"
+  local pod rc=0; pod="$(pf_pod_of "$1")"
   [ -n "$pod" ] || { warn "$5: no live pod for $1"; return 1; }
   log "CHAOS: $5 on $pod for ${3}s"
   push_metric "sip_chaos_event{type=\"$5\",phase=\"start\"} 1
 sip_chaos_active{type=\"$5\"} 1"
-  "$2" "$pod" ${6:+"$6"} || warn "$5: applying the fault to $pod failed"
+  "$2" "$pod" ${6:+"$6"} || { warn "$5: applying the fault to $pod failed"; return 1; }
   pf_sleep "$3"
-  "$4" "$pod" || warn "$5: undoing the fault on $pod failed (chaos_cleanup clears it)"
-  log "$5: $pod restored"
+  "$4" "$pod" || { warn "$5: undoing the fault on $pod failed (chaos_cleanup clears it)"; rc=2; }
+  [ "$rc" = 0 ] && log "$5: $pod restored"
   push_metric "sip_chaos_active{type=\"$5\"} 0"
+  return "$rc"
 }
 
 # CHAOS: graceful limiter restart (SIGTERM, a new pod with empty counters).
@@ -523,9 +517,17 @@ limiter_reject() {
 limiter_slow() {
   timed_pod_fault "$LIMITER_SELECTOR" pf_delay "$LIMITER_SLOW_SECS" pf_undelay limiter_slow "$LIMITER_SLOW_MS"
 }
-# CHAOS: the limiter hangs: sockets open, no reply.
+# CHAOS: the limiter hangs: sockets open, no reply. A container restart during
+# the freeze (the kubelet's liveness verdict) is noted: the event then covered
+# a restart too.
 limiter_freeze() {
-  timed_pod_fault "$LIMITER_SELECTOR" pf_freeze "$LIMITER_FREEZE_SECS" pf_thaw limiter_freeze
+  local pod r0 r1 rc
+  pod="$(pf_pod_of "$LIMITER_SELECTOR")"
+  r0="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)"
+  timed_pod_fault "$LIMITER_SELECTOR" pf_freeze "$LIMITER_FREEZE_SECS" pf_thaw limiter_freeze; rc=$?
+  r1="$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)"
+  [ "${r1:-0}" != "${r0:-0}" ] && warn "limiter_freeze: the limiter's container restarted during the freeze ($r0 -> $r1)"
+  return "$rc"
 }
 # CHAOS: the broker hangs: connections open, no frame read or sent.
 broker_freeze() {
@@ -534,19 +536,34 @@ broker_freeze() {
 
 # CHAOS: lose the node(s) of INFRA_NODE_SELECTOR for INFRA_HOLD_S, then bring
 # them back and wait until every pod bound to them is Ready again. Sets
-# INFRA_OUTAGE_S (stop to all Ready; empty when they did not come back).
-INFRA_OUTAGE_S=""
+# INFRA_OUTAGE_S (stop to all Ready; empty when they did not come back) and
+# INFRA_NOTREADY_SEEN (1 once the API server reported a stopped node NotReady:
+# the proof the fault took). Returns 1 when no node could be stopped, 2 when a
+# node or its pods did not come back.
+INFRA_OUTAGE_S=""; INFRA_NOTREADY_SEEN=0
 infra_node_kill() {
-  local nodes n t0 deadline pending
+  local nodes n t0 deadline pending stopped=0
   nodes="$(pf_nodes_of "$INFRA_NODE_SELECTOR")"
   [ -n "$nodes" ] || { warn "infra_node_kill: no node labelled $INFRA_NODE_SELECTOR"; return 1; }
-  INFRA_OUTAGE_S=""; t0=$(date +%s)
+  INFRA_OUTAGE_S=""; INFRA_NOTREADY_SEEN=0; t0=$(date +%s)
   log "CHAOS: infra_node_kill — stopping $(echo "$nodes" | tr '\n' ' ')for ${INFRA_HOLD_S}s"
   push_metric 'sip_chaos_event{type="infra_node_kill",phase="start"} 1
 sip_chaos_active{type="infra_node_kill"} 1'
-  for n in $nodes; do pf_node_stop "$n" || warn "infra_node_kill: docker stop $n failed"; done
-  pf_sleep "$INFRA_HOLD_S"
-  for n in $nodes; do pf_node_start "$n" "$INFRA_BACK_TIMEOUT" || warn "infra_node_kill: $n not Ready"; done
+  for n in $nodes; do
+    if pf_node_stop "$n"; then stopped=1; else warn "infra_node_kill: docker stop $n failed"; fi
+  done
+  [ "$stopped" = 1 ] || return 1
+  deadline=$(( t0 + INFRA_HOLD_S ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if [ "$INFRA_NOTREADY_SEEN" = 0 ]; then
+      for n in $nodes; do
+        [ "$(kubectl get node "$n" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ] \
+          || INFRA_NOTREADY_SEEN=1
+      done
+    fi
+    pf_sleep 5
+  done
+  for n in $nodes; do pf_node_start "$n" "$INFRA_BACK_TIMEOUT" || { warn "infra_node_kill: $n not Ready"; return 2; }; done
   push_metric 'sip_chaos_active{type="infra_node_kill"} 0'
   deadline=$(( t0 + INFRA_HOLD_S + INFRA_BACK_TIMEOUT ))
   while :; do
@@ -557,7 +574,7 @@ sip_chaos_active{type="infra_node_kill"} 1'
         | awk '$2 != "True" { printf "%s ", $1 }')"
     done
     [ -z "$pending" ] && break
-    [ "$(date +%s)" -lt "$deadline" ] || { warn "infra_node_kill: not Ready in time: $pending"; return 1; }
+    [ "$(date +%s)" -lt "$deadline" ] || { warn "infra_node_kill: not Ready in time: $pending"; return 2; }
     sleep 2
   done
   INFRA_OUTAGE_S=$(( $(date +%s) - t0 ))
@@ -575,6 +592,23 @@ chaos_cleanup() {
   pf_clear_pod "$LIMITER_SELECTOR"
   pf_clear_pod "$BROKER_SELECTOR"
   push_metric 'sip_chaos_active{type="limiter_netcut"} 0'
+}
+
+# Prove chaos_cleanup left nothing: no stopped kind node of this cluster, and no
+# netem, REJECT rule or frozen cgroup on any live limiter or broker pod. Prints
+# the residue ("<pod|node> <what>", one per line) and fails when there is any.
+chaos_verify_clean() {
+  local n sel pod what bad=""
+  for n in $(pf_stopped_nodes "${CLUSTER:-sip-e2e}"); do bad+="$n stopped"$'\n'; done
+  for sel in "$LIMITER_SELECTOR" "$BROKER_SELECTOR"; do
+    for pod in $(kubectl -n "$NS" get pod -l "$sel" \
+        -o jsonpath='{range .items[*]}{.metadata.deletionTimestamp}{" "}{.metadata.name}{"\n"}{end}' 2>/dev/null | awk '$0 ~ /^ / { print $1 }'); do
+      for what in $(pf_pod_residue "$pod"); do bad+="$pod $what"$'\n'; done
+    done
+  done
+  [ -z "$bad" ] && return 0
+  printf '%s' "$bad"
+  return 1
 }
 
 # CHAOS: cut_external_plane — sever the CURRENT VRRP master's edge node from
@@ -798,6 +832,7 @@ chaos_main() {
     limiterreject) limiter_reject ;;
     limiterslow) limiter_slow ;;
     limiterfreeze) limiter_freeze ;;
+    verifyclean) chaos_verify_clean ;;
     brokerfreeze) broker_freeze ;;
     infranodekill) infra_node_kill ;;
     cleanup)   chaos_cleanup ;;
