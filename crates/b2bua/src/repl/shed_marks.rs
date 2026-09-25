@@ -25,8 +25,9 @@ pub(super) struct ShedMarks {
 
 impl ShedMarks {
     /// Mark `call_ref` of `primary` shed with `floor`, the shed write sent by
-    /// incarnation `gen`. A ref already marked keeps its first floor: nothing
-    /// past it has been held since.
+    /// incarnation `gen`. A ref already marked by that incarnation keeps its
+    /// first floor: nothing past it has been held since. A newer incarnation's
+    /// write replaces the mark.
     pub(super) fn mark(
         &mut self,
         call_ref: &str,
@@ -35,9 +36,13 @@ impl ShedMarks {
         floor: Watermark,
         expiry_at_ms: Option<i64>,
     ) {
-        if let Some(m) = self.by_ref.get_mut(call_ref) {
-            m.expiry_at_ms = expiry_at_ms;
-            return;
+        match self.by_ref.get_mut(call_ref) {
+            Some(m) if m.gen >= gen => {
+                m.expiry_at_ms = expiry_at_ms;
+                return;
+            }
+            Some(_) => self.clear(call_ref),
+            None => {}
         }
         self.floors.entry(primary.to_string()).or_default().insert((floor, call_ref.to_string()));
         let mark = Mark { primary: primary.to_string(), gen, floor, expiry_at_ms };
@@ -145,6 +150,15 @@ mod shed_marks_tests {
         assert_eq!(marks.floor("w0"), None);
         assert_eq!(marks.len(), 1);
         assert_eq!(marks.floor("w2"), Some(w(1)));
+    }
+
+    #[test]
+    fn a_newer_incarnation_replaces_a_mark() {
+        let mut marks = ShedMarks::default();
+        marks.mark("w0|a|t", "w0", 1, Watermark::new(1, 4), None);
+        marks.mark("w0|a|t", "w0", 2, Watermark::new(2, 7), None);
+        marks.drop_older("w0", 2);
+        assert_eq!(marks.floor("w0"), Some(Watermark::new(2, 7)));
     }
 
     #[test]
