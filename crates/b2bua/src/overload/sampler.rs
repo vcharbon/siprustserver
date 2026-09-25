@@ -47,9 +47,9 @@ pub trait LoadSampler: Send + Sync {
 /// processing work between two reads, clamped to `0..=1` — the signal the
 /// proxy band classifier and the Tier-3 panic-ELU backstop both key on. The
 /// capacity is [`CpuBudget::capacity`]: the cgroup CPU quota when it is below
-/// the worker count (a sub-core limit, a pool sized past its limit), else the
+/// the worker count and the affinity set gives every worker a CPU, else the
 /// worker count. The budget is re-read on every `elu()`, so a resized limit
-/// takes effect at the next sample. The GC
+/// takes effect at the next sample; a read that fails keeps the last one. The GC
 /// fraction is structurally `0`: Rust has no stop-the-world GC pauses to
 /// attribute.
 ///
@@ -70,16 +70,18 @@ pub(super) struct LiveLoadSampler {
     /// runtime). Reads `RuntimeMetrics` off it on every `elu()`.
     handle: Option<tokio::runtime::Handle>,
     /// Reads the process's CPU budget; [`CpuBudget::read`] in production.
-    budget: fn() -> CpuBudget,
+    budget: fn() -> Option<CpuBudget>,
     /// Last `(instant, Σ worker busy total)` snapshot; the busy ratio is the
     /// delta of the busy sum over the delta of `capacity × wall_elapsed`.
     prev: Mutex<BusySnapshot>,
 }
 
-/// A `(wall instant, summed worker busy time)` snapshot for the busy-ratio diff.
+/// A `(wall instant, summed worker busy time)` snapshot for the busy-ratio
+/// diff, with the last CPU budget read in full.
 struct BusySnapshot {
     at: std::time::Instant,
     busy_total: std::time::Duration,
+    budget: CpuBudget,
 }
 
 impl LiveLoadSampler {
@@ -91,13 +93,17 @@ impl LiveLoadSampler {
     }
 
     /// A live sampler whose CPU budget comes from `budget`.
-    pub(super) fn with_budget(budget: fn() -> CpuBudget) -> Self {
+    pub(super) fn with_budget(budget: fn() -> Option<CpuBudget>) -> Self {
         let handle = tokio::runtime::Handle::try_current().ok();
         let busy_total = handle.as_ref().map(Self::sum_busy).unwrap_or_default();
         Self {
             handle,
             budget,
-            prev: Mutex::new(BusySnapshot { at: std::time::Instant::now(), busy_total }),
+            prev: Mutex::new(BusySnapshot {
+                at: std::time::Instant::now(),
+                busy_total,
+                budget: budget().unwrap_or(CpuBudget { quota: None, affinity: None }),
+            }),
         }
     }
 
@@ -132,7 +138,10 @@ impl LoadSampler for LiveLoadSampler {
         prev.at = now;
         prev.busy_total = busy_now;
         // Busy fraction of the CPU the runtime may use over the interval.
-        clamp01(busy / ((self.budget)().capacity(workers) * wall))
+        if let Some(budget) = (self.budget)() {
+            prev.budget = budget;
+        }
+        clamp01(busy / (prev.budget.capacity(workers) * wall))
     }
 
     fn gc_fraction(&self) -> f64 {

@@ -76,8 +76,8 @@ fn run_offered(cores: f64, sampler: fn() -> OverloadSignal) -> OverloadSignal {
 
 /// A one-core quota over an affinity set with a CPU for every worker.
 fn one_core_quota() -> OverloadSignal {
-    fn budget() -> CpuBudget {
-        CpuBudget { quota: Some(1.0), affinity: Some(64) }
+    fn budget() -> Option<CpuBudget> {
+        Some(CpuBudget { quota: Some(1.0), affinity: Some(64) })
     }
     OverloadSignal::new(Arc::new(LiveLoadSampler::with_budget(budget)))
 }

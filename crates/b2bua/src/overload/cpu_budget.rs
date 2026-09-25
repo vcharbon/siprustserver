@@ -10,6 +10,8 @@
 //! full for this process, and a limit above the visible root (an outer
 //! container's) is not seen.
 
+use std::cell::Cell;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 /// Reads a file's contents; `None` when it is absent or unreadable.
@@ -29,8 +31,23 @@ pub(super) struct CpuBudget {
 
 impl CpuBudget {
     /// The running process's budget, read from `/proc` and `/sys/fs/cgroup`.
-    pub(super) fn read() -> Self {
-        Self::read_with(&|p: &Path| std::fs::read_to_string(p).ok())
+    /// `None` when a file failed to read for any reason but being absent (fd
+    /// exhaustion under load): a partial read would pass for "no quota".
+    pub(super) fn read() -> Option<Self> {
+        Self::read_checked(&|p: &Path| std::fs::read_to_string(p))
+    }
+
+    fn read_checked(read: &dyn Fn(&Path) -> io::Result<String>) -> Option<Self> {
+        let failed = Cell::new(false);
+        let budget = Self::read_with(&|p: &Path| match read(p) {
+            Ok(s) => Some(s),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(_) => {
+                failed.set(true);
+                None
+            }
+        });
+        (!failed.get()).then_some(budget)
     }
 
     fn read_with(read: ReadFile) -> Self {
@@ -233,6 +250,26 @@ mod cpu_budget_tests {
         .collect();
         let b = CpuBudget::read_with(&|p: &Path| fs.get(p).cloned());
         assert_eq!(b, budget(Some(0.5), Some(8)));
+    }
+
+    /// An absent file is an answer; any other read error voids the whole read.
+    #[test]
+    fn read_checked_voids_a_read_with_an_error_other_than_absent() {
+        let files = |fail: bool| {
+            move |p: &Path| -> io::Result<String> {
+                match p.to_str() {
+                    Some("/proc/self/cgroup") => Ok("0::/\n".into()),
+                    Some("/proc/self/status") => Ok("Cpus_allowed_list:\t0-3\n".into()),
+                    Some("/sys/fs/cgroup/cgroup.controllers") => Ok("cpu".into()),
+                    Some("/sys/fs/cgroup/cpu.max") if fail => {
+                        Err(io::Error::from_raw_os_error(24)) // EMFILE
+                    }
+                    _ => Err(io::ErrorKind::NotFound.into()),
+                }
+            }
+        };
+        assert_eq!(CpuBudget::read_checked(&files(false)), Some(budget(None, Some(4))));
+        assert_eq!(CpuBudget::read_checked(&files(true)), None);
     }
 
     #[test]
