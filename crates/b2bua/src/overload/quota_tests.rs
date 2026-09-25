@@ -4,6 +4,7 @@
 //! Real time and real CPU, so the offered loads sit well clear of the 0.75
 //! threshold on both sides.
 
+use super::cpu_budget::CpuBudget;
 use super::sampler::LiveLoadSampler;
 use super::*;
 use std::sync::Arc;
@@ -73,8 +74,12 @@ fn run_offered(cores: f64, sampler: fn() -> OverloadSignal) -> OverloadSignal {
     sig
 }
 
+/// A one-core quota over an affinity set with a CPU for every worker.
 fn one_core_quota() -> OverloadSignal {
-    OverloadSignal::new(Arc::new(LiveLoadSampler::with_cpu_quota(Some(1.0))))
+    fn budget() -> CpuBudget {
+        CpuBudget { quota: Some(1.0), affinity: Some(64) }
+    }
+    OverloadSignal::new(Arc::new(LiveLoadSampler::with_budget(budget)))
 }
 
 /// 0.9 of a one-core quota spread over four workers is overload of the CPU the
@@ -91,16 +96,15 @@ fn panic_elu_sheds_when_offered_work_nears_the_cpu_quota() {
 /// A light load against the same quota reads light and admits.
 #[test]
 fn light_load_on_the_cpu_quota_admits() {
-    let sig = run_offered(0.3, one_core_quota);
+    let sig = run_offered(0.2, one_core_quota);
     let elu = sig.metrics().elu_ewma;
     assert!(elu < 0.6, "elu {elu}");
     assert!(sig.should_admit(false).admit, "elu {elu}");
 }
 
 /// The production path end to end: the quota read from this process's own
-/// cgroup. Meaningful only under a one-core quota, hence ignored; run it as
-/// `systemd-run --user --wait --pipe -p CPUQuota=100% <test binary> --ignored
-/// --exact overload::quota_tests::live_signal_sheds_under_a_real_one_core_quota`.
+/// cgroup. Meaningful only under a one-core quota, hence ignored and run by
+/// `just test-cpu-quota`.
 #[test]
 #[ignore = "needs a one-core cgroup CPU quota on the test process"]
 fn live_signal_sheds_under_a_real_one_core_quota() {

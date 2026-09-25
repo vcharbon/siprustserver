@@ -33,6 +33,13 @@ test-slow:
 # Both lanes.
 test-all: test test-slow
 
+# The live ELU under a real one-core cgroup CPU quota (a transient systemd
+# user scope): the one `overload::quota_tests` case no other lane can run.
+test-cpu-quota:
+    cargo test -p b2bua --lib --no-run
+    systemd-run --user --wait --pipe --quiet --same-dir -p CPUQuota=100% -E PATH -E HOME \
+        cargo test -p b2bua --lib -- --ignored --exact overload::quota_tests::live_signal_sheds_under_a_real_one_core_quota
+
 # ── review gates ───────────────────────────────────────────────────────
 
 lint:

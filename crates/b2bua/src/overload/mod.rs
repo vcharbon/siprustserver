@@ -16,8 +16,8 @@
 //!   with.
 //! - `sampler` — the [`LoadSampler`] read seam: the live tokio busy-ratio
 //!   sampler and the injectable [`simulated`] pair for paused-clock tests.
-//! - `cpu_quota` — the process's cgroup CPU quota in fractional cores, the
-//!   live sampler's capacity when it is below the runtime's worker count.
+//! - `cpu_budget` — the process's cgroup CPU quota and affinity set, and the
+//!   capacity the live sampler's busy ratio divides by.
 //! - `ewma` — the smoothing primitive behind the published readings.
 //! - `bucket` — the hard CPS token bucket (rides `tokio::time::Instant`).
 //! - `admission` — the gate's verdict types ([`AdmitDecision`],
@@ -41,7 +41,7 @@
 
 mod admission;
 mod bucket;
-mod cpu_quota;
+mod cpu_budget;
 mod ewma;
 mod prometheus;
 mod reject;
