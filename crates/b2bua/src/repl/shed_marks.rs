@@ -10,6 +10,8 @@ use repl_net::frame::Watermark;
 
 struct Mark {
     primary: String,
+    /// The incarnation of the primary that sent the shed write.
+    gen: u64,
     floor: Watermark,
     expiry_at_ms: Option<i64>,
 }
@@ -22,12 +24,14 @@ pub(super) struct ShedMarks {
 }
 
 impl ShedMarks {
-    /// Mark `call_ref` of `primary` shed with `floor`. A ref already marked
-    /// keeps its first floor: nothing past it has been held since.
+    /// Mark `call_ref` of `primary` shed with `floor`, the shed write sent by
+    /// incarnation `gen`. A ref already marked keeps its first floor: nothing
+    /// past it has been held since.
     pub(super) fn mark(
         &mut self,
         call_ref: &str,
         primary: &str,
+        gen: u64,
         floor: Watermark,
         expiry_at_ms: Option<i64>,
     ) {
@@ -36,10 +40,21 @@ impl ShedMarks {
             return;
         }
         self.floors.entry(primary.to_string()).or_default().insert((floor, call_ref.to_string()));
-        self.by_ref.insert(
-            call_ref.to_string(),
-            Mark { primary: primary.to_string(), floor, expiry_at_ms },
-        );
+        let mark = Mark { primary: primary.to_string(), gen, floor, expiry_at_ms };
+        self.by_ref.insert(call_ref.to_string(), mark);
+    }
+
+    /// Drop `primary`'s marks sent by an incarnation older than `gen`.
+    pub(super) fn drop_older(&mut self, primary: &str, gen: u64) {
+        let Some(set) = self.floors.get(primary) else { return };
+        let stale: Vec<String> = set
+            .iter()
+            .filter(|(_, r)| self.by_ref.get(r).is_some_and(|m| m.gen < gen))
+            .map(|(_, r)| r.clone())
+            .collect();
+        for call_ref in stale {
+            self.clear(&call_ref);
+        }
     }
 
     /// Drop the mark on `call_ref`: its replica is stored, or its call gone.
@@ -99,9 +114,9 @@ mod shed_marks_tests {
     fn the_floor_is_the_lowest_standing_mark_of_the_primary() {
         let mut marks = ShedMarks::default();
         assert_eq!(marks.floor("w0"), None);
-        marks.mark("w0|a|t", "w0", w(5), None);
-        marks.mark("w0|b|t", "w0", w(9), None);
-        marks.mark("w2|c|t", "w2", w(1), None);
+        marks.mark("w0|a|t", "w0", 1, w(5), None);
+        marks.mark("w0|b|t", "w0", 1, w(9), None);
+        marks.mark("w2|c|t", "w2", 1, w(1), None);
         assert_eq!(marks.floor("w0"), Some(w(5)));
         marks.clear("w0|a|t");
         assert_eq!(marks.floor("w0"), Some(w(9)));
@@ -113,8 +128,8 @@ mod shed_marks_tests {
     #[test]
     fn a_ref_shed_again_keeps_its_first_floor() {
         let mut marks = ShedMarks::default();
-        marks.mark("w0|a|t", "w0", w(5), None);
-        marks.mark("w0|a|t", "w0", w(8), None);
+        marks.mark("w0|a|t", "w0", 1, w(5), None);
+        marks.mark("w0|a|t", "w0", 1, w(8), None);
         assert_eq!(marks.floor("w0"), Some(w(5)));
         marks.clear("w0|a|t");
         assert_eq!(marks.len(), 0);
@@ -124,8 +139,8 @@ mod shed_marks_tests {
     #[test]
     fn a_primary_is_cleared_alone() {
         let mut marks = ShedMarks::default();
-        marks.mark("w0|a|t", "w0", w(5), None);
-        marks.mark("w2|c|t", "w2", w(1), None);
+        marks.mark("w0|a|t", "w0", 1, w(5), None);
+        marks.mark("w2|c|t", "w2", 1, w(1), None);
         marks.clear_primary("w0");
         assert_eq!(marks.floor("w0"), None);
         assert_eq!(marks.len(), 1);
@@ -133,10 +148,22 @@ mod shed_marks_tests {
     }
 
     #[test]
+    fn marks_of_an_older_incarnation_are_dropped() {
+        let mut marks = ShedMarks::default();
+        marks.mark("w0|old|t", "w0", 1, Watermark::new(1, 4), None);
+        marks.mark("w0|scan|t", "w0", 2, Watermark::new(0, 0), None);
+        marks.drop_older("w0", 2);
+        assert_eq!(marks.len(), 1, "a mark made while scanning the new incarnation stays");
+        assert_eq!(marks.floor("w0"), Some(Watermark::new(0, 0)));
+        marks.drop_older("w0", 3);
+        assert_eq!(marks.len(), 0);
+    }
+
+    #[test]
     fn an_expired_mark_is_reaped() {
         let mut marks = ShedMarks::default();
-        marks.mark("w0|a|t", "w0", w(5), Some(1_000));
-        marks.mark("w0|b|t", "w0", w(7), None);
+        marks.mark("w0|a|t", "w0", 1, w(5), Some(1_000));
+        marks.mark("w0|b|t", "w0", 1, w(7), None);
         marks.reap(999);
         assert_eq!(marks.len(), 2);
         marks.reap(1_000);

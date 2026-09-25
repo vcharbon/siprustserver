@@ -331,7 +331,7 @@ impl Puller {
         if self.is_reclaim() {
             return at;
         }
-        match self.store.shed_floor(self.peer_ordinal()) {
+        match self.store.shed_floor(self.peer_ordinal(), at.gen) {
             Some(floor) if floor < at => floor,
             _ => at,
         }
@@ -703,7 +703,13 @@ impl Puller {
                         .await;
                     if outcome == ApplyOutcome::Shed {
                         let floor = self.status_tx.borrow().watermark;
-                        self.store.note_shed(&call_ref, self.peer_ordinal(), floor, body_ttl_ms);
+                        self.store.note_shed(
+                            &call_ref,
+                            self.peer_ordinal(),
+                            at.gen,
+                            floor,
+                            body_ttl_ms,
+                        );
                     }
                     if !bootstrapped {
                         applied_in_bootstrap += 1;
@@ -1468,9 +1474,10 @@ mod tests {
         }
     }
 
-    /// Run a cold puller of `partition` from `w0` on `w1` through `script`,
-    /// its gate at `capacity`; the positions it reported.
+    /// Run a puller of `partition` from `w0` on `w1`, resuming from `start`,
+    /// through `script`, its gate at `capacity`; the positions it reported.
     async fn reported_positions(
+        start: Watermark,
         partition: Partition,
         store: &ReplicatingCallStore,
         capacity: crate::config::CapacityConfig,
@@ -1492,7 +1499,7 @@ mod tests {
             net,
             store.clone(),
             PullerConfig::fast_test(),
-            Watermark::new(0, 0),
+            start,
             B2buaMetrics::new(),
         );
         let puller = puller.with_capacity(gate);
@@ -1527,6 +1534,7 @@ mod tests {
     async fn a_shed_replica_holds_the_reported_position_until_it_is_stored() {
         let store = ReplicatingCallStore::new(1, Clock::test_at(0));
         let reported = reported_positions(
+            Watermark::new(0, 0),
             Partition::Bak,
             &store,
             crate::config::CapacityConfig { backup_calls: Some(1), ..Default::default() },
@@ -1552,6 +1560,7 @@ mod tests {
     async fn a_deleted_shed_replica_releases_the_position() {
         let store = ReplicatingCallStore::new(1, Clock::test_at(0));
         let reported = reported_positions(
+            Watermark::new(0, 0),
             Partition::Bak,
             &store,
             crate::config::CapacityConfig { backup_calls: Some(1), ..Default::default() },
@@ -1572,8 +1581,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_backup_scan_drops_the_marks_of_an_earlier_stream() {
         let store = ReplicatingCallStore::new(1, Clock::test_at(0));
-        store.note_shed("w0|x|t", "w0", at(3), 0);
+        store.note_shed("w0|x|t", "w0", 1, at(3), 0);
         let reported = reported_positions(
+            Watermark::new(0, 0),
             Partition::Bak,
             &store,
             crate::config::CapacityConfig::default(),
@@ -1584,13 +1594,40 @@ mod tests {
         assert_eq!(store.shed_count(), 0);
     }
 
+    /// `frame` as the primary's next incarnation (gen 2) sends it.
+    fn reborn(mut frame: Frame) -> Frame {
+        if let Frame::Data { at, .. } = &mut frame {
+            at.gen = 2;
+        }
+        frame
+    }
+
+    /// A rebooted primary is tailed warm, with no scan: the marks its old
+    /// incarnation's writes left go at the first position of the new one.
+    #[tokio::test(start_paused = true)]
+    async fn a_warm_resume_past_a_reboot_drops_the_old_incarnations_marks() {
+        let store = ReplicatingCallStore::new(1, Clock::test_at(0));
+        store.note_shed("w0|x|t", "w0", 1, at(3), 0);
+        let reported = reported_positions(
+            at(5),
+            Partition::Bak,
+            &store,
+            crate::config::CapacityConfig::default(),
+            vec![reborn(data(Op::Put, "w0|y|t", 1, 1)), Frame::Noop { at: Watermark::new(2, 1) }],
+        )
+        .await;
+        assert_eq!(reported, vec![Watermark::new(2, 1), Watermark::new(2, 1)]);
+        assert_eq!(store.shed_count(), 0);
+    }
+
     /// A Reclaim flow sheds nothing, so a Backup flow's marks of the same
     /// peer never cap it.
     #[tokio::test(start_paused = true)]
     async fn a_reclaim_flow_is_never_capped_by_backup_marks() {
         let store = ReplicatingCallStore::new(1, Clock::test_at(0));
-        store.note_shed("w0|x|t", "w0", at(1), 0);
+        store.note_shed("w0|x|t", "w0", 1, at(1), 0);
         let reported = reported_positions(
+            Watermark::new(0, 0),
             Partition::Pri,
             &store,
             crate::config::CapacityConfig::default(),
@@ -1605,7 +1642,7 @@ mod tests {
     /// ignored by the store, never shed: it marks nothing.
     #[tokio::test]
     async fn a_tombstoned_put_is_not_shed() {
-        let (p, store, gate, _) = backup_puller(crate::config::CapacityConfig {
+        let (p, _store, gate, _) = backup_puller(crate::config::CapacityConfig {
             backup_calls: Some(1),
             ..Default::default()
         });

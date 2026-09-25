@@ -283,18 +283,30 @@ impl ReplicatingCallStore {
         self.backups.load(Ordering::Relaxed)
     }
 
-    /// Record that a replica of `call_ref` from `primary` was left unstored,
-    /// `floor` being the last position the flow could claim before it. The
-    /// mark expires with the backstop a stored body of `ttl_ms` would have.
-    pub fn note_shed(&self, call_ref: &str, primary: &str, floor: Watermark, ttl_ms: i64) {
+    /// Record that a replica of `call_ref` sent by incarnation `gen` of
+    /// `primary` was left unstored, `floor` being the last position the flow
+    /// could claim before it. The mark expires with the backstop a stored body
+    /// of `ttl_ms` would have.
+    pub fn note_shed(
+        &self,
+        call_ref: &str,
+        primary: &str,
+        gen: u64,
+        floor: Watermark,
+        ttl_ms: i64,
+    ) {
         let expiry = self.expiry_for(self.clock.now_ms(), ttl_ms);
-        self.shed.lock().unwrap().mark(call_ref, primary, floor, expiry);
+        self.shed.lock().unwrap().mark(call_ref, primary, gen, floor, expiry);
     }
 
-    /// The highest position `primary`'s flow may report: the lowest floor of
-    /// its standing shed marks, `None` when it has none.
-    pub fn shed_floor(&self, primary: &str) -> Option<Watermark> {
-        self.shed.lock().unwrap().floor(primary)
+    /// The highest position `primary`'s flow may report while it streams
+    /// incarnation `gen`: the lowest floor of its standing shed marks, `None`
+    /// when it has none. Marks an older incarnation sent are dropped first: a
+    /// rebooted primary serves none of their calls.
+    pub fn shed_floor(&self, primary: &str, gen: u64) -> Option<Watermark> {
+        let mut shed = self.shed.lock().unwrap();
+        shed.drop_older(primary, gen);
+        shed.floor(primary)
     }
 
     /// Drop every shed mark of `primary`.
