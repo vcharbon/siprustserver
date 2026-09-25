@@ -198,7 +198,7 @@
       "id": 32,
       "type": "timeseries",
       "title": "b2bua_overload_token_bucket_level",
-      "description": "Current CPS token-bucket level (tokens remaining; a negative emergency overdraft reads as 0).",
+      "description": "Current CPS token-bucket level (tokens remaining, never below 0).",
       "gridPos": { "h": 7, "w": 8, "x": 8, "y": 34 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [{ "expr": "b2bua_overload_token_bucket_level", "refId": "A" }],

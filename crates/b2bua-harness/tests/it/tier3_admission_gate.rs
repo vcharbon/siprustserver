@@ -4,16 +4,14 @@
 //! End-to-end through a running `B2buaCore`: a new-dialog INVITE is gated by the
 //! CPS token bucket + the panic-ELU backstop before any call/dialog state is
 //! created. The gate's UNIT behaviour (bucket drain/refill, panic-ELU, emergency
-//! admits past an empty bucket, reason tags) is pinned in `b2bua::overload::tests`; this file proves
-//! the WIRING — the verdict turns into a real stateless 503 on the wire (with the
+//! admits on an empty bucket, reason tags) is pinned in `b2bua::overload::tests`;
+//! this file proves the WIRING — the verdict turns into a real stateless 503 on the wire (with the
 //! overload `Reason` + `Retry-After`), no per-call resources are born for a reject,
 //! emergency bypasses the empty bucket, and an admit advances the published `adm`.
 //!
-//! Real-clock (not `start_paused`): a size-0 bucket rejects/admits the FIRST
-//! INVITE with no timer to wait on, and the one refill the emergency no-debt
-//! test waits for is 1 s, so the suite stays far under the 60 s slow-lane
-//! threshold. The refill rate itself is pinned by the paused-clock unit test
-//! `overload::tests::the_bucket_refills_over_time`.
+//! Real-clock except the emergency no-debt test: a size-0 bucket rejects/admits
+//! the FIRST INVITE with no timer to wait on. The no-debt test waits for one
+//! refill, so it runs paused and advances the clock by exactly that interval.
 
 use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
@@ -174,9 +172,10 @@ async fn emergency_invite_bypasses_the_empty_bucket_and_establishes() {
 
 /// A run of emergency calls past an exhausted bucket leaves no debt: the next
 /// non-emergency INVITE is refused with a Retry-After of one refill interval,
-/// and is admitted and established once that interval has passed. Real clock,
-/// rate 1/s: five emergency calls with a debt would hold new calls off for 5 s.
-#[tokio::test]
+/// and is admitted and established once that interval has passed. Paused clock,
+/// rate 1/s: five emergency calls with a debt would hold new calls off for 5 s,
+/// and no token can refill while the calls run.
+#[tokio::test(start_paused = true)]
 async fn non_emergency_admission_resumes_one_refill_after_an_emergency_run() {
     let h = Harness::with_transit_delay("b2bua-tier3-emergency-no-debt", 0)
         .describe("emergency calls past an empty bucket leave no debt for the next call");
@@ -215,7 +214,7 @@ async fn non_emergency_admission_resumes_one_refill_after_an_emergency_run() {
     let retry = resp.header::<RetryAfter>().expect("a Retry-After").expect("readable Retry-After");
     assert_eq!(retry.token(), "1", "Retry-After is one refill interval");
 
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    h.advance(std::time::Duration::from_secs(1)).await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;

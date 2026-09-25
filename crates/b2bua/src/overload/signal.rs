@@ -164,10 +164,13 @@ impl OverloadSignal {
     /// request (`sip_message::is_emergency_request`).
     ///
     /// Order:
-    /// 1. **Emergency** → always admit, spending a token when one is there and
-    ///    leaving no debt when the bucket is empty: emergency requests get
-    ///    preference under overload (RFC 7339 §5.10.1), which never bills later
-    ///    non-emergency callers. Emergency callers never see a reject and are NOT counted on
+    /// 1. **Emergency** → always admit: the gate is the overloaded element
+    ///    applying the local preference policy of RFC 7339 §5.10.1 to
+    ///    emergency / RFC 4412 Resource-Priority requests. The call spends a
+    ///    token when one is there and owes nothing on an empty bucket, so it
+    ///    never delays a later non-emergency call. This bucket does not bound
+    ///    emergency load; the capacity gate's emergency ceilings do (ADR-0037).
+    ///    Emergency callers never see a reject here and are NOT counted on
     ///    `adm` (the caller must skip
     ///    [`increment_non_emergency_admitted`](OverloadSignal::increment_non_emergency_admitted)
     ///    for them — LBs cap non-emergency traffic only).

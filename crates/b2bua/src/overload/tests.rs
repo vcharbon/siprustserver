@@ -191,7 +191,8 @@ async fn an_emergency_surge_leaves_no_debt_behind() {
         }
     }
     // The surge spent every token it found and owes nothing.
-    assert!(sig.metrics().token_bucket_level < 1.0);
+    let level = sig.metrics().token_bucket_level;
+    assert!((0.0..1.0).contains(&level), "level {level}");
     let d = sig.should_admit(false);
     assert!(!d.admit);
     assert_eq!(d.reason, Some(AdmitReason::BucketEmpty));
@@ -201,8 +202,8 @@ async fn an_emergency_surge_leaves_no_debt_behind() {
     assert_eq!(sig.should_admit(false), AdmitDecision::admitted());
     // The level metric reads the real refill: half a second at 100/s.
     tokio::time::advance(Duration::from_millis(500)).await;
-    let level = sig.metrics().token_bucket_level;
-    assert!((level - 50.0).abs() < 1e-6, "level {level}");
+    let refilled = sig.metrics().token_bucket_level;
+    assert!((refilled - 50.0).abs() < 1e-6, "level {refilled}");
 }
 
 /// Once a token is consumed, an EWMA-ELU above the panic threshold sheds the
