@@ -38,12 +38,19 @@ pub trait LoadSampler: Send + Sync {
 /// ```text
 ///   elu = (Σ_w busy_total(w)_now − Σ_w busy_total(w)_prev)
 ///         ─────────────────────────────────────────────────
-///                 num_workers × wall_elapsed_since_prev
+///         min(num_workers, cpu_quota) × wall_elapsed_since_prev
 /// ```
 ///
-/// i.e. the share of available worker-thread time the runtime actually spent
+/// i.e. the share of the CPU the runtime may use that it actually spent
 /// processing work between two reads, clamped to `0..=1` — the signal the
-/// proxy band classifier and the Tier-3 panic-ELU backstop both key on. The GC
+/// proxy band classifier and the Tier-3 panic-ELU backstop both key on. The
+/// capacity is the worker count, or the process's cgroup CPU quota in
+/// fractional cores ([`super::cpu_quota`]) when that is smaller: a runtime
+/// sized past its quota, or one worker under a sub-core limit, otherwise reads
+/// `used / workers` and stays below the backstop until the quota throttles it.
+/// The quota is read once at construction. The affinity set is not a
+/// capacity here: tokio already sizes its pool to it, and workers
+/// time-sliced on fewer cores accrue overlapping busy time. The GC
 /// fraction is structurally `0`: Rust has no stop-the-world GC pauses to
 /// attribute.
 ///
@@ -63,8 +70,10 @@ pub(super) struct LiveLoadSampler {
     /// The runtime handle captured at construction (`None` when built outside a
     /// runtime). Reads `RuntimeMetrics` off it on every `elu()`.
     handle: Option<tokio::runtime::Handle>,
+    /// The cgroup CPU quota in cores, `None` when unlimited.
+    cpu_quota: Option<f64>,
     /// Last `(instant, Σ worker busy total)` snapshot; the busy ratio is the
-    /// delta of the busy sum over the delta of `num_workers × wall_elapsed`.
+    /// delta of the busy sum over the delta of `capacity × wall_elapsed`.
     prev: Mutex<BusySnapshot>,
 }
 
@@ -75,14 +84,21 @@ struct BusySnapshot {
 }
 
 impl LiveLoadSampler {
-    /// Build a live sampler over the current tokio runtime (if any). The busy
-    /// ratio normalises by the *actual* wall time between reads, so no nominal
-    /// sample window is configured here.
+    /// Build a live sampler over the current tokio runtime (if any), capped by
+    /// this process's cgroup CPU quota. The busy ratio normalises by the
+    /// *actual* wall time between reads, so no nominal sample window is
+    /// configured here.
     pub(super) fn new() -> Self {
+        Self::with_cpu_quota(super::cpu_quota::cpu_quota_cores())
+    }
+
+    /// A live sampler whose capacity is capped by `cpu_quota` cores.
+    pub(super) fn with_cpu_quota(cpu_quota: Option<f64>) -> Self {
         let handle = tokio::runtime::Handle::try_current().ok();
         let busy_total = handle.as_ref().map(Self::sum_busy).unwrap_or_default();
         Self {
             handle,
+            cpu_quota,
             prev: Mutex::new(BusySnapshot { at: std::time::Instant::now(), busy_total }),
         }
     }
@@ -105,7 +121,8 @@ impl LoadSampler for LiveLoadSampler {
         };
         let now = std::time::Instant::now();
         let busy_now = Self::sum_busy(handle);
-        let num_workers = handle.metrics().num_workers().max(1);
+        let workers = handle.metrics().num_workers().max(1) as f64;
+        let capacity = self.cpu_quota.map_or(workers, |q| q.min(workers));
 
         let mut prev = self.prev.lock().unwrap();
         let wall = now.saturating_duration_since(prev.at).as_secs_f64();
@@ -117,8 +134,8 @@ impl LoadSampler for LiveLoadSampler {
         let busy = busy_now.saturating_sub(prev.busy_total).as_secs_f64();
         prev.at = now;
         prev.busy_total = busy_now;
-        // Busy fraction of the available worker-thread time over the interval.
-        clamp01(busy / (num_workers as f64 * wall))
+        // Busy fraction of the CPU the runtime may use over the interval.
+        clamp01(busy / (capacity * wall))
     }
 
     fn gc_fraction(&self) -> f64 {
