@@ -71,6 +71,15 @@ kills it, and a kill drops every call it serves.
 - RSS lags up to one sample and stays high after a drain while the allocator
   keeps freed pages, so the RSS ceilings must leave room below the process
   limit; the counts react at once.
+- `B2BUA_MAX_RSS` covers the live heap and what the allocator holds around
+  it, so it is sized from the measured process, not from the heap alone
+  (ADR-0038): the off-heap base after a drain, then per live call and per live
+  transaction the allocated bytes times the slab slack, which settles at a
+  ratio the arena count sets (`active/allocated` 1.01 with one arena, 1.27
+  with one arena per thread, at 63 k transactions held for 5 min). A setting
+  that makes RSS follow the host instead — a heap-profile sample every 8 KiB
+  costs a byte per live byte — is a hazard the startup line and
+  `jemalloc_footprint_hazards` name; the ceilings assume none.
 - A transaction ceiling also counts the transactions of rejected and finished
   INVITEs that linger for their timers, so it is sized from the offered rate,
   not from live calls alone.

@@ -5,8 +5,10 @@
 //! steady-state RSS — glibc malloc retains freed arena chunks and ratchets RSS
 //! under sustained SIP churn (a no-chaos soak measured ~209 MiB/h growth with
 //! all logical state flat, → node-cgroup OOM). jemalloc returns dirty/muzzy
-//! pages to the OS on a time-based decay; the worker tunes that aggressively via
-//! `_RJEM_MALLOC_CONF=dirty_decay_ms:1000,muzzy_decay_ms:1000`.
+//! pages to the OS on a time-based decay; the workspace compiles a 1 s decay
+//! and `thp:never` into jemalloc (`.cargo/config.toml`, ADR-0038) and
+//! `_RJEM_MALLOC_CONF` overrides it key by key. [`footprint`] states what the
+//! resolved settings cost on the host and [`log_config`] reports it at startup.
 //!
 //! That fix is only observable if we can SEE it. This crate reads jemalloc's own
 //! counters and renders them as Prometheus text appended to each runner's
@@ -34,9 +36,13 @@
 //! zero. Gate the dependency on the same `cfg(not(target_env = "msvc"))` as the
 //! allocator. On msvc this crate is no-op stubs so callers need no second cfg.
 
+pub mod footprint;
+
 #[cfg(not(target_env = "msvc"))]
 mod imp {
     use tikv_jemalloc_ctl::{epoch, stats};
+
+    use crate::footprint::{host_thp_mode, Report, Resolved};
 
     /// Read a `mallctl` value by name, tolerating any error (feature-off build,
     /// unknown key on an older jemalloc, size mismatch) by yielding `None` so the
@@ -54,6 +60,17 @@ mod imp {
         unsafe {
             tikv_jemalloc_ctl::raw::read::<T>(name).ok()
         }
+    }
+
+    /// Read a string-valued `mallctl` (`opt.thp`); `None` on any error.
+    ///
+    /// SAFETY: `read_str` transmutes the returned pointer to a NUL-terminated
+    /// C string, which is what every `const char *` mallctl yields.
+    fn raw_str(name: &[u8]) -> Option<String> {
+        #[allow(unsafe_code)] // irreducible mallctl FFI; see SAFETY above
+        let bytes = unsafe { tikv_jemalloc_ctl::raw::read_str(name).ok()? };
+        // The slice carries the C string's NUL terminator.
+        Some(String::from_utf8_lossy(bytes).trim_end_matches('\0').to_owned())
     }
 
     fn push_gauge(s: &mut String, name: &str, help: &str, v: impl std::fmt::Display) {
@@ -193,6 +210,20 @@ mod imp {
         // while every APP gauge is flat names the leaking object by its SIZE — no
         // backtrace/symbol resolution (unreliable on an optimised+inlined binary).
         // Emitted as `jemalloc_bin_live_bytes{size="N"}` (curregs×size).
+        //
+        // Beside it, what the class costs in pages: `jemalloc_bin_active_bytes`
+        // is curslabs×slab_size, so active/live per class is that class's slab
+        // utilisation. A heap-profiling sample of a small object lives in its
+        // own page-rounded extent, outside every slab, plus the pad page of a
+        // cache-oblivious large extent: jemalloc counts it in the nmalloc and
+        // ndalloc of the bin of its ROUNDED size but in no curregs, so it is
+        // absent from `allocated` and present in `active`.
+        // `jemalloc_bin_sampled_live{size="4096"}` is that count for every
+        // sampled object up to a page, nmalloc−ndalloc−curregs, and
+        // `_sampled_bytes` the pages it holds.
+        let page: usize = raw(b"arenas.page\0").unwrap_or(4096);
+        let pad_pages = u64::from(raw::<bool>(b"opt.cache_oblivious\0").unwrap_or(true));
+        let mut sampled_extent_bytes = 0u64;
         if let Some(nbins) = raw::<u32>(b"arenas.nbins\0") {
             for j in 0..nbins {
                 let szname = format!("arenas.bin.{j}.size\0");
@@ -206,8 +237,39 @@ mod imp {
                     "jemalloc_bin_live_bytes{{size=\"{size}\"}} {}\n",
                     curregs.saturating_mul(size)
                 ));
+                let slab_size =
+                    raw::<usize>(format!("arenas.bin.{j}.slab_size\0").as_bytes()).unwrap_or(0);
+                let curslabs =
+                    raw::<usize>(format!("stats.arenas.4096.bins.{j}.curslabs\0").as_bytes())
+                        .unwrap_or(0);
+                let nonfull =
+                    raw::<usize>(format!("stats.arenas.4096.bins.{j}.nonfull_slabs\0").as_bytes())
+                        .unwrap_or(0);
+                s.push_str(&format!(
+                    "jemalloc_bin_active_bytes{{size=\"{size}\"}} {}\n",
+                    curslabs.saturating_mul(slab_size)
+                ));
+                s.push_str(&format!("jemalloc_bin_nonfull_slabs{{size=\"{size}\"}} {nonfull}\n"));
+                let nmalloc =
+                    raw::<u64>(format!("stats.arenas.4096.bins.{j}.nmalloc\0").as_bytes())
+                        .unwrap_or(0);
+                let ndalloc =
+                    raw::<u64>(format!("stats.arenas.4096.bins.{j}.ndalloc\0").as_bytes())
+                        .unwrap_or(0);
+                let sampled = nmalloc.saturating_sub(ndalloc).saturating_sub(curregs as u64);
+                let pages = size.div_ceil(page) as u64 + pad_pages;
+                let bytes = sampled.saturating_mul(pages * page as u64);
+                sampled_extent_bytes = sampled_extent_bytes.saturating_add(bytes);
+                s.push_str(&format!("jemalloc_bin_sampled_live{{size=\"{size}\"}} {sampled}\n"));
+                s.push_str(&format!("jemalloc_bin_sampled_bytes{{size=\"{size}\"}} {bytes}\n"));
             }
         }
+        push_gauge(
+            &mut s,
+            "jemalloc_sampled_extent_bytes",
+            "Active bytes held by heap-profile samples of small objects (outside allocated).",
+            sampled_extent_bytes,
+        );
         // Large (extent) classes: `lextents.<j>.curlextents` × `arenas.lextent.<j>.size`.
         if let Some(nlex) = raw::<u32>(b"arenas.nlextents\0") {
             for j in 0..nlex {
@@ -226,7 +288,6 @@ mod imp {
         }
 
         // --- decay backlog + activity: the CPU-cost evidence --------------------
-        let page: usize = raw(b"arenas.page\0").unwrap_or(4096);
         if let Some(p) = raw::<usize>(b"stats.arenas.4096.pdirty\0") {
             push_gauge(
                 &mut s,
@@ -297,6 +358,51 @@ mod imp {
                 v as u8,
             );
         }
+        // Heap profiling costs a page per sampled small object (see the bin
+        // gauges), so the resolved sampling interval is part of the footprint.
+        if let Some(v) = raw::<bool>(b"prof.active\0") {
+            push_gauge(
+                &mut s,
+                "jemalloc_prof_active",
+                "1 if heap profiling samples allocations.",
+                v as u8,
+            );
+        }
+        if let Some(v) = raw::<usize>(b"opt.lg_prof_sample\0") {
+            push_gauge(
+                &mut s,
+                "jemalloc_opt_lg_prof_sample",
+                "Resolved lg2 of the mean bytes between heap-profile samples (jemalloc default 19).",
+                v,
+            );
+        }
+        // The footprint report: what the resolved settings cost on this host
+        // and whether they can hold here (the startup line's numbers, live).
+        let report = Report::of(resolved());
+        push_gauge(
+            &mut s,
+            "jemalloc_page_bytes",
+            "Allocator page size, fixed at build.",
+            report.resolved.page,
+        );
+        push_gauge(
+            &mut s,
+            "jemalloc_cache_oblivious",
+            "1 if every large extent (a heap-profile sample included) carries one pad page.",
+            u8::from(report.resolved.cache_oblivious),
+        );
+        push_gauge(
+            &mut s,
+            "jemalloc_prof_sample_overhead_ratio",
+            "Expected sampled-extent bytes per live small byte at the resolved profiling interval (0 = no sampling).",
+            format!("{:.6}", report.sample_overhead),
+        );
+        push_gauge(
+            &mut s,
+            "jemalloc_footprint_hazards",
+            "Resolved settings whose footprint cannot hold on this host (see the startup line).",
+            report.hazards.len(),
+        );
 
         // --- OS ground truth: localise the leak ON or OFF the heap --------------
         // jemalloc only accounts for jemalloc-managed pages. The cgroup OOMs on
@@ -359,20 +465,45 @@ mod imp {
     /// config is visible without scraping `/metrics`. Pairs with the
     /// `jemalloc_opt_*` gauges for the silent-MALLOC_CONF-failure check.
     pub fn log_config() {
-        let dirty: isize = raw(b"opt.dirty_decay_ms\0").unwrap_or(-1);
-        let muzzy: isize = raw(b"opt.muzzy_decay_ms\0").unwrap_or(-1);
-        let narenas: u32 = raw(b"arenas.narenas\0").unwrap_or(0);
-        let bg: bool = raw(b"background_thread\0").unwrap_or(false);
-        // prof.active is the live profiling switch; absent (Err) on a build
-        // without --enable-prof (the tikv-jemallocator "profiling" feature).
-        let prof: i8 = match raw::<bool>(b"prof.active\0") {
-            Some(true) => 1,
-            Some(false) => 0,
-            None => -1,
-        };
-        eprintln!(
-            "jemalloc active: dirty_decay_ms={dirty} muzzy_decay_ms={muzzy} narenas={narenas} background_thread={bg} prof.active={prof} (confirm decay == _RJEM_MALLOC_CONF; prof=-1 means built WITHOUT profiling)"
-        );
+        eprintln!("{}", footprint_report().line());
+    }
+
+    /// The footprint of the resolved configuration on this host.
+    pub fn footprint_report() -> Report {
+        Report::of(resolved())
+    }
+
+    /// The resolved settings, from `mallctl`, `/proc/self/status` and the
+    /// host's THP switch. `prof.active` is absent on a build without
+    /// profiling (the tikv-jemallocator "profiling" feature).
+    fn resolved() -> Resolved {
+        let threads = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|st| st.lines().find_map(|l| l.strip_prefix("Threads:")?.trim().parse().ok()))
+            .unwrap_or(0);
+        let host_thp = std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled")
+            .ok()
+            .and_then(|e| host_thp_mode(&e));
+        Resolved {
+            page: raw(b"arenas.page\0").unwrap_or(4096),
+            cache_oblivious: raw(b"opt.cache_oblivious\0").unwrap_or(true),
+            prof_active: raw::<bool>(b"prof.active\0"),
+            lg_prof_sample: raw::<usize>(b"opt.lg_prof_sample\0").unwrap_or(19) as u32,
+            narenas: raw(b"arenas.narenas\0").unwrap_or(0),
+            thp: raw_str(b"opt.thp\0").unwrap_or_else(|| "?".into()),
+            host_thp,
+            dirty_decay_ms: raw::<isize>(b"opt.dirty_decay_ms\0").unwrap_or(-1) as i64,
+            muzzy_decay_ms: raw::<isize>(b"opt.muzzy_decay_ms\0").unwrap_or(-1) as i64,
+            background_thread: raw(b"background_thread\0").unwrap_or(false),
+            threads,
+        }
+    }
+
+    /// `(allocated, active)` bytes from a fresh stats epoch; `None` when
+    /// jemalloc is not answering.
+    pub fn footprint_bytes() -> Option<(u64, u64)> {
+        epoch::advance().ok()?;
+        Some((stats::allocated::read().ok()? as u64, stats::active::read().ok()? as u64))
     }
 
     /// Trigger a jemalloc heap profile dump and return the raw profile bytes
@@ -411,9 +542,44 @@ mod imp {
         String::new()
     }
     pub fn log_config() {}
+    pub fn footprint_bytes() -> Option<(u64, u64)> {
+        None
+    }
+    /// No allocator to read: the system allocator's footprint is its own.
+    pub fn footprint_report() -> Option<crate::footprint::Report> {
+        None
+    }
     pub fn dump_profile() -> Result<Vec<u8>, String> {
         Err("jemalloc unavailable on msvc".to_string())
     }
 }
 
-pub use imp::{dump_profile, log_config, prometheus_text};
+pub use imp::{dump_profile, footprint_bytes, footprint_report, log_config, prometheus_text};
+
+#[cfg(all(test, not(target_env = "msvc")))]
+mod exposition_tests {
+    use super::prometheus_text;
+
+    /// What a footprint reading needs beside `allocated`/`active`: the pages
+    /// each size class holds, the sampled objects outside every slab, and the
+    /// resolved profiling interval with the overhead it implies here.
+    #[test]
+    fn the_exposition_names_the_footprint_of_each_size_class_and_of_profiling() {
+        let text = prometheus_text();
+        for name in [
+            "jemalloc_bin_live_bytes{size=\"3072\"}",
+            "jemalloc_bin_active_bytes{size=\"3072\"}",
+            "jemalloc_bin_sampled_live{size=\"4096\"}",
+            "jemalloc_sampled_extent_bytes ",
+            "jemalloc_page_bytes ",
+            "jemalloc_opt_lg_prof_sample ",
+            "jemalloc_prof_sample_overhead_ratio ",
+            "jemalloc_footprint_hazards ",
+        ] {
+            assert!(text.contains(name), "missing {name} in:\n{text}");
+        }
+        // This process samples nothing and the workspace compiles `thp:never`
+        // in, so no hazard holds here, whatever the host's THP mode.
+        assert!(text.contains("\njemalloc_footprint_hazards 0\n"), "{text}");
+    }
+}

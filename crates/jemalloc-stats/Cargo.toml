@@ -21,3 +21,12 @@ unsafe_code = "deny"
 # tikv-jemallocator. Version-locked to tikv-jemalloc-sys 0.7 (one jemalloc in
 # the process); a mismatched sys version would link a second, unused jemalloc.
 tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
+
+[dev-dependencies]
+# The footprint test drives an allocation pattern on a multi-thread runtime.
+tokio = { workspace = true }
+
+# The footprint test allocates through the same jemalloc it reads (a test
+# binary has no allocator of its own); `profiling` for the sampling cases.
+[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
+tikv-jemallocator = { version = "0.7", features = ["profiling"] }

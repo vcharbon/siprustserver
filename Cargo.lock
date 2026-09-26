@@ -2170,6 +2170,8 @@ name = "jemalloc-stats"
 version = "0.1.0"
 dependencies = [
  "tikv-jemalloc-ctl",
+ "tikv-jemallocator",
+ "tokio",
 ]
 
 [[package]]
