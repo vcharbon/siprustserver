@@ -57,11 +57,12 @@ pub struct Tier1BrakeConfig {
     /// The brake engages once the live queue depth reaches
     /// `floor(queue_max * pct / 100)`.
     pub tier1_threshold_pct: u32,
-    /// `Retry-After` base seconds stamped on the reject.
+    /// `Retry-After` base seconds stamped on the reject, floored at 1 s.
     pub retry_after_base_sec: u32,
-    /// `Retry-After` jitter span seconds; `0` pins every reject to the base.
-    /// Otherwise the offset is request-derived, so it spreads a shed fleet
-    /// without varying between retransmissions of one call.
+    /// `Retry-After` jitter span seconds: the reject's value is uniform over
+    /// `[max(base, 1), max(base, 1) + jitter]`, `0` pinning it to the floored
+    /// base. The offset is request-derived, so it spreads a shed fleet without
+    /// varying between retransmissions of one call.
     pub retry_after_jitter_sec: u32,
 }
 

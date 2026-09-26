@@ -365,7 +365,8 @@ pub struct RunnerEnv {
     pub cps_bucket_rate: u32,
     /// `B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD` — panic-ELU backstop (default 0.75).
     pub overload_panic_elu_threshold: f64,
-    /// `B2BUA_RETRY_AFTER_BASE_SEC` — base Retry-After on overload 503s (default 5).
+    /// `B2BUA_RETRY_AFTER_BASE_SEC` — base Retry-After on overload 503s, floored
+    /// at 1 s (default 5).
     pub retry_after_base_sec: u32,
     /// `WORKER_ALLOWED_TARGET_SUFFIXES` — b-leg target-admission allow-list,
     /// comma-separated (default `.svc.cluster.local`; `*` = allow all, the
@@ -376,8 +377,8 @@ pub struct RunnerEnv {
     /// new, non-emergency INVITE is shed with a STATELESS 503 before the parser
     /// runs — the cheapest shed in the stack, ahead of the Tier-3 gate.
     pub udp_tier1_pct: u32,
-    /// `B2BUA_RETRY_AFTER_JITTER_SEC` — the brake 503's Retry-After is
-    /// `retry_after_base_sec + U[0, jitter]` (default 5).
+    /// `B2BUA_RETRY_AFTER_JITTER_SEC` — the brake and capacity 503s' Retry-After
+    /// is uniform over `[max(base, 1), max(base, 1) + jitter]` (default 5).
     pub retry_after_jitter_sec: u32,
     /// `B2BUA_RELAY_HEADERS` — opt-in transparent header relay, comma-separated
     /// names copied from the a-leg INVITE onto every originated b-leg INVITE

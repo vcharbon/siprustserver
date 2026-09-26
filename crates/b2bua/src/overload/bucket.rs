@@ -32,11 +32,9 @@ impl TokenBucket {
         }
     }
 
-    /// Accrue tokens for the time elapsed since the last refill (capped at
-    /// `capacity`). A no-op when no time has passed (paused clock between
-    /// advances).
-    fn refill(&mut self) {
-        let now = tokio::time::Instant::now();
+    /// Accrue tokens for the time elapsed since the last refill up to `now`
+    /// (capped at `capacity`). A no-op when `now` is not past the last refill.
+    fn refill_at(&mut self, now: tokio::time::Instant) {
         let elapsed_sec = now.saturating_duration_since(self.last_refill).as_secs_f64();
         if elapsed_sec <= 0.0 {
             return;
@@ -51,7 +49,13 @@ impl TokenBucket {
     /// zero refill rate the hint is `60`, a finite Retry-After for a
     /// misconfigured `rate == 0`.
     pub(super) fn try_consume(&mut self) -> Result<(), u32> {
-        self.refill();
+        self.try_consume_at(tokio::time::Instant::now())
+    }
+
+    /// [`try_consume`](TokenBucket::try_consume) with the refill read at
+    /// `now`: the whole decision, hint included, sees that one instant.
+    fn try_consume_at(&mut self, now: tokio::time::Instant) -> Result<(), u32> {
+        self.refill_at(now);
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
             return Ok(());
@@ -65,7 +69,7 @@ impl TokenBucket {
 
     /// Current level, after a refill.
     pub(super) fn level(&mut self) -> f64 {
-        self.refill();
+        self.refill_at(tokio::time::Instant::now());
         self.tokens
     }
 }
@@ -85,16 +89,18 @@ mod bucket_tests {
         assert_eq!(b.level(), 0.0);
     }
 
-    /// A failed consume's Retry-After comes from the refill that failed it: a
-    /// bucket a hair short of a token hints 1 s, not 0, though the token
-    /// accrues right after the reject.
+    /// A failed consume's Retry-After comes from the refill that failed it. The
+    /// consume is judged at 999 µs (0.999 tokens) while the clock already reads
+    /// 1001 µs, where a token is there: a hint read from a second refill would
+    /// be 0.
     #[tokio::test(start_paused = true)]
     async fn a_failed_consume_never_hints_retry_now() {
+        let t0 = tokio::time::Instant::now();
         let mut b = TokenBucket::new(1, 1000);
-        assert_eq!(b.try_consume(), Ok(()));
-        tokio::time::advance(std::time::Duration::from_micros(999)).await;
-        assert_eq!(b.try_consume(), Err(1), "0.999 of a token is not a token");
-        tokio::time::advance(std::time::Duration::from_micros(2)).await;
+        assert_eq!(b.try_consume_at(t0), Ok(()));
+        tokio::time::advance(std::time::Duration::from_micros(1001)).await;
+        let consume_at = t0 + std::time::Duration::from_micros(999);
+        assert_eq!(b.try_consume_at(consume_at), Err(1), "0.999 of a token is not a token");
         assert_eq!(b.try_consume(), Ok(()), "the token accrued after the reject");
     }
 }

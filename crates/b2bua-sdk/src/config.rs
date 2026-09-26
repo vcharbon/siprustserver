@@ -233,15 +233,17 @@ pub struct B2buaConfig {
     /// `>= 1.0` effectively disables it (the clamped ELU never exceeds 1).
     /// Overridable via `B2BUA_OVERLOAD_PANIC_ELU_THRESHOLD`.
     pub overload_panic_elu_threshold: f64,
-    /// **Retry-After base** (seconds; port of `AppConfig.retryAfterBaseSec`) for
-    /// the panic-ELU 503. The `bucket_empty` 503 instead derives its Retry-After
-    /// from the bucket's time-to-next-token. A new-call reject never carries
-    /// less than 1 s, whatever this value. TS default **5**. Overridable via
-    /// `B2BUA_RETRY_AFTER_BASE_SEC`.
+    /// **Retry-After base** (seconds; port of `AppConfig.retryAfterBaseSec`) of
+    /// the new-call 503s: the panic-ELU reject, the capacity reject, the Tier-1
+    /// brake and the dispatcher cap shed. The `bucket_empty` 503 instead derives
+    /// its Retry-After from the bucket's time-to-next-token. A new-call reject
+    /// never carries less than 1 s, whatever this value. TS default **5**.
+    /// Overridable via `B2BUA_RETRY_AFTER_BASE_SEC`.
     pub retry_after_base_sec: u32,
-    /// **Retry-After jitter span** (seconds) of the capacity 503 (ADR-0037):
-    /// `retry_after_base_sec + U[0, jitter]`, so callers refused while a
-    /// ceiling holds do not return together. `0` pins it to the base.
+    /// **Retry-After jitter span** (seconds) of the capacity 503 (ADR-0037) and
+    /// the Tier-1 brake: uniform over `[b, b + jitter]` with
+    /// `b = max(retry_after_base_sec, 1)`, so callers refused together do not
+    /// return together. `0` pins it to `b`.
     /// Overridable via `B2BUA_RETRY_AFTER_JITTER_SEC`.
     pub retry_after_jitter_sec: u32,
     /// **b-leg target admission allow-list** (port of
