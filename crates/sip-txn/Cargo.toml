@@ -25,3 +25,8 @@ tracing.workspace = true
 # see docs/testing/test-clock.md. Features are additive over the workspace
 # `full`.
 tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+# Harness seams on the layer's counters, for a post-call gate proven to fire.
+# Test-only: never enabled by a production build.
+testkit = []

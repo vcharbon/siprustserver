@@ -461,7 +461,8 @@ impl TransactionMetrics {
     /// Counts one non-2xx INVITE final dropped on an unseen branch, as the
     /// layer does when it drops one: a harness seam proving that a post-call
     /// gate on [`server_final_unseen_branch`](Self::server_final_unseen_branch)
-    /// fires. Production code never calls it.
+    /// fires.
+    #[cfg(feature = "testkit")]
     pub fn count_server_final_unseen_branch(&self) {
         self.inner.server_final_unseen_branch.fetch_add(1, Ordering::Relaxed);
     }
