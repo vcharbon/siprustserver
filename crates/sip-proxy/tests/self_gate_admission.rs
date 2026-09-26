@@ -146,6 +146,7 @@ async fn assert_wire_503(
     name: &str,
     gate_reason: Option<&'static str>,
     retry: u32,
+    expect_retry_after: u32,
     expect_reason_text: &str,
 ) {
     let h = Harness::with_transit_delay(name, 0);
@@ -161,7 +162,11 @@ async fn assert_wire_503(
     assert_eq!(resp.status(), 503, "a rejected new external INVITE must get a 503");
     assert_eq!(resp.reason(), "Service Unavailable");
     let retry_after = resp.header::<RetryAfter>().expect("503 carries Retry-After").expect("reads");
-    assert_eq!(retry_after.token(), retry.to_string(), "503 must carry the gate's Retry-After");
+    assert_eq!(
+        retry_after.token(),
+        expect_retry_after.to_string(),
+        "503 must carry the gate's Retry-After, floored at 1 s"
+    );
     let reason = resp.header::<Reason>().expect("503 carries Reason").expect("reads");
     assert_eq!(reason.token(), "SIP");
     assert_eq!(reason.param("cause").and_then(ParamValue::as_str), Some("503"));
@@ -203,19 +208,29 @@ Content-Length: 0\r\n\r\n",
 
 #[tokio::test]
 async fn rejected_invite_returns_503_with_cps_reason_and_retry_after() {
-    assert_wire_503("self-gate-503-cps", Some("proxy_overload_cps"), 3, "proxy_overload_cps").await;
+    assert_wire_503("self-gate-503-cps", Some("proxy_overload_cps"), 3, 3, "proxy_overload_cps")
+        .await;
 }
 
 #[tokio::test]
 async fn rejected_invite_returns_503_with_elu_reason_and_retry_after() {
-    assert_wire_503("self-gate-503-elu", Some("proxy_overload_elu"), 1, "proxy_overload_elu").await;
+    assert_wire_503("self-gate-503-elu", Some("proxy_overload_elu"), 1, 1, "proxy_overload_elu")
+        .await;
 }
 
 #[tokio::test]
 async fn rejected_invite_without_a_reason_falls_back_to_proxy_overload_cps() {
     // The gate handed back `reason: None`; the request path's
     // `unwrap_or_else(|| "proxy_overload_cps")` fallback must fill it.
-    assert_wire_503("self-gate-503-fallback", None, 7, "proxy_overload_cps").await;
+    assert_wire_503("self-gate-503-fallback", None, 7, 7, "proxy_overload_cps").await;
+}
+
+/// A gate hint of 0 goes on the wire as 1: a `Retry-After` of 0 (RFC 3261
+/// §20.33) asks for no wait, which a reject must never invite.
+#[tokio::test]
+async fn a_gate_hint_of_zero_goes_on_the_wire_as_one_second() {
+    assert_wire_503("self-gate-503-zero", Some("proxy_overload_cps"), 0, 1, "proxy_overload_cps")
+        .await;
 }
 
 // ── End-to-end through the REAL EluCpsGate (not a double) ────────────────────

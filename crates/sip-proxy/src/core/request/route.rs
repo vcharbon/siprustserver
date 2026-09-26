@@ -8,9 +8,7 @@
 use std::net::SocketAddr;
 
 use sip_message::emergency::is_emergency_request;
-use sip_message::header::{
-    MaxForwards, ProxyRequire, RetryAfter, RouteEntry, Unsupported, Uri, Via,
-};
+use sip_message::header::{MaxForwards, ProxyRequire, RouteEntry, Unsupported, Uri, Via};
 use sip_message::{Method, SipMessage, SipRequest};
 
 use crate::addr::ProxyAddr;
@@ -23,7 +21,7 @@ use crate::strategy::{DecodeResult, SelectOpts};
 use crate::trace::emit;
 
 use super::super::{is_dialog_creating, ProxyCore};
-use super::reply::{extra_header, proxy_reason};
+use super::reply::{extra_header, proxy_reason, reject_retry_after};
 use super::{top_via_branch, RouteOutcome};
 
 /// The hop budget RFC 3261 §8.1.1.6 gives a request that names none — and the
@@ -297,7 +295,7 @@ impl ProxyCore {
                     let reason =
                         decision.reason.unwrap_or_else(|| "proxy_overload_cps".to_string());
                     let extra = [
-                        extra_header(RetryAfter::new(decision.retry_after_sec.to_string())),
+                        extra_header(reject_retry_after(decision.retry_after_sec)),
                         extra_header(proxy_reason(503, &reason)),
                     ];
                     // The shed fact precedes the 503 it explains: `reply` is

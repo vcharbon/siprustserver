@@ -56,7 +56,8 @@ pub struct AdmitDecision {
     /// Set on rejection — the `Reason` phrase (`proxy_overload_elu` /
     /// `proxy_overload_cps`). `None` on an admit.
     pub reason: Option<String>,
-    /// `Retry-After` seconds on rejection. `0` on an admit.
+    /// `Retry-After` seconds on rejection, which the wire floors at 1 s. `0` on
+    /// an admit.
     pub retry_after_sec: u32,
 }
 
@@ -336,11 +337,10 @@ impl TokenBucket {
         }
     }
 
-    /// Accrue tokens for the elapsed time since the last refill (capped at
-    /// `capacity`). A no-op when no time has passed (paused clock between
-    /// advances) — the TS `elapsedSec <= 0` guard.
-    fn refill(&mut self) {
-        let now = tokio::time::Instant::now();
+    /// Accrue tokens for the time elapsed since the last refill up to `now`
+    /// (capped at `capacity`). A no-op when `now` is not past the last refill
+    /// — the TS `elapsedSec <= 0` guard.
+    fn refill_at(&mut self, now: tokio::time::Instant) {
         let elapsed_sec = now.saturating_duration_since(self.last_refill).as_secs_f64();
         if elapsed_sec <= 0.0 {
             return;
@@ -349,37 +349,34 @@ impl TokenBucket {
         self.last_refill = now;
     }
 
-    /// Try to consume one token. Returns `true` (and decrements) iff ≥ 1 is
-    /// available after a refill; `false` leaves the bucket untouched.
-    fn try_consume(&mut self) -> bool {
-        self.refill();
+    /// Try to consume one token after a refill. `Ok` decrements; `Err` leaves
+    /// the bucket untouched and carries the seconds until a token, computed
+    /// from the same refill as the failed consume, so it is always ≥ 1. With a
+    /// zero refill rate the hint is `60` (the TS fallback), a finite
+    /// Retry-After for a misconfigured `rate == 0`.
+    fn try_consume(&mut self) -> Result<(), u32> {
+        self.try_consume_at(tokio::time::Instant::now())
+    }
+
+    /// [`try_consume`](TokenBucket::try_consume) with the refill read at
+    /// `now`: the whole decision, hint included, sees that one instant.
+    fn try_consume_at(&mut self, now: tokio::time::Instant) -> Result<(), u32> {
+        self.refill_at(now);
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
-            true
-        } else {
-            false
+            return Ok(());
         }
+        if self.rate_per_sec <= 0.0 {
+            return Err(60);
+        }
+        // `tokens < 1` here, so the quotient is positive and its ceiling ≥ 1.
+        Err(((1.0 - self.tokens) / self.rate_per_sec).ceil() as u32)
     }
 
     /// Current level, floored at `0`. Port of TS `level`.
     fn level(&mut self) -> f64 {
-        self.refill();
+        self.refill_at(tokio::time::Instant::now());
         self.tokens.max(0.0)
-    }
-
-    /// Seconds until ≥ 1 token will be available (`0` if available now). With a
-    /// zero refill rate and an empty bucket, returns `60` (the TS fallback so a
-    /// misconfigured `rate == 0` still hands the caller a finite Retry-After).
-    /// Port of TS `retryAfterSec`.
-    fn retry_after_sec(&mut self) -> u32 {
-        self.refill();
-        if self.tokens >= 1.0 {
-            return 0;
-        }
-        if self.rate_per_sec <= 0.0 {
-            return 60;
-        }
-        ((1.0 - self.tokens) / self.rate_per_sec).ceil() as u32
     }
 }
 
@@ -549,8 +546,8 @@ impl ProxySelfGate for EluCpsGate {
     /// faithful to TS `tryAdmitExternal`:
     /// 1. **ELU** — `elu_ewma > elu_critical` → reject `proxy_overload_elu`,
     ///    `Retry-After: 1` (the bucket is NOT touched).
-    /// 2. **CPS bucket** — `try_consume`; on empty → reject `proxy_overload_cps`,
-    ///    `Retry-After = bucket.retry_after_sec()`.
+    /// 2. **CPS bucket** — `try_consume`; on empty → reject `proxy_overload_cps`
+    ///    with the time-to-token of that same failed consume as `Retry-After`.
     /// 3. Otherwise **admit** (a token was consumed in step 2).
     fn try_admit_external(&self) -> AdmitDecision {
         let mut inner = self.inner.lock().unwrap();
@@ -564,8 +561,7 @@ impl ProxySelfGate for EluCpsGate {
         }
 
         // 2. Hard CPS gate.
-        if !inner.bucket.try_consume() {
-            let retry = inner.bucket.retry_after_sec();
+        if let Err(retry) = inner.bucket.try_consume() {
             drop(inner);
             self.rejected_cps.fetch_add(1, Ordering::Relaxed);
             self.shed.record(REASON_CPS, "shed", 1);
@@ -696,6 +692,21 @@ mod tests {
 
     /// With ELU calm, the gate admits until the CPS bucket drains, then sheds
     /// with `proxy_overload_cps`. Port of the `!bucket.tryConsume()` branch.
+    /// A failed consume's Retry-After comes from the refill that failed it. The
+    /// consume is judged at 999 µs (0.999 tokens) while the clock already reads
+    /// 1001 µs, where a token is there: a hint read from a second refill would
+    /// be 0.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_consume_never_hints_retry_now() {
+        let t0 = tokio::time::Instant::now();
+        let mut b = TokenBucket::new(1, 1000);
+        assert_eq!(b.try_consume_at(t0), Ok(()));
+        tokio::time::advance(std::time::Duration::from_micros(1001)).await;
+        let consume_at = t0 + std::time::Duration::from_micros(999);
+        assert_eq!(b.try_consume_at(consume_at), Err(1), "0.999 of a token is not a token");
+        assert_eq!(b.try_consume(), Ok(()), "the token accrued after the reject");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn admits_until_the_cps_bucket_drains_then_503s_cps() {
         // Capacity 2, refill 0/s so the bucket can't top up between consumes.
