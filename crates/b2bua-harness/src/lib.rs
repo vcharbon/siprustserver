@@ -793,6 +793,13 @@ impl B2buaSut {
         &self.metrics
     }
 
+    /// Kill the process: its tasks stop and its socket closes, as on a crash,
+    /// and every call it held goes with its memory. A fresh [`B2buaSutBuilder::start`]
+    /// on the same address stands for the restarted process.
+    pub fn crash(&mut self) {
+        self._core.abort();
+    }
+
     /// The worker-side overload signal (migration/08) the running core publishes
     /// on its OPTIONS-200 `X-Overload` header. A test reads its EWMAs after
     /// advancing the paused clock (to prove the spawned 100 ms sampler task ran)

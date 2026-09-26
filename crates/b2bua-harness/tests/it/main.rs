@@ -93,6 +93,7 @@ mod tier3_admission_gate;
 mod unacked_2xx_reap;
 mod unacked_reinvite_2xx_reap;
 mod unreadable_routing_target;
+mod unroutable;
 mod unwired_store;
 mod update_matrix;
 mod update_response_relay;

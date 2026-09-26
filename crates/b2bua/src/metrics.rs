@@ -72,7 +72,16 @@ struct Inner {
     handler_timeouts: AtomicU64,
     force_purge: AtomicU64,
     fast_reject_terminating: AtomicU64,
-    unroutable_dropped: AtomicU64,
+    // Messages and events that resolved to no call (`router::unroutable`), in
+    // three classes that never overlap. `unroutable_dropped`: wire messages
+    // that drew no answer, keyed by kind (`ACK`, or a response's status class
+    // `2xx`). `unroutable_refused`: wire requests answered on no call's
+    // behalf, keyed "method|code". `unroutable_internal`: this node's own
+    // events naming no call, keyed "event|method" — a client transaction
+    // released from its call timing out; no peer sees it.
+    unroutable_dropped: Mutex<BTreeMap<String, u64>>,
+    unroutable_refused: Mutex<BTreeMap<String, u64>>,
+    unroutable_internal: Mutex<BTreeMap<String, u64>>,
     // call reaper (ADR-0020). `handler_panics` counts dispatcher-observed body
     // panics (pre-reaper these were swallowed — the zero-CDR leak class);
     // `reaper_verdicts` counts injected synthetic events (stale + fatal +
@@ -288,12 +297,39 @@ struct Inner {
 }
 
 /// Clone-cheap handle to the B2BUA counter set.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct B2buaMetrics {
     inner: Arc<Inner>,
     /// Cardinality-bounded per-peer failure/timeout counters
     /// (`b2bua_peer_failures_total{peer,scope,kind}`). Shared across clones.
     per_peer: Arc<crate::peer_failures::PeerFailures>,
+}
+
+/// The unroutable series published at 0 from startup, so `increase()` reads
+/// their first event: every drop kind, and the 481 and the timeout of each
+/// method this stack serves. A rarer series (a 405, an extension method)
+/// appears at its first event.
+const UNROUTABLE_DROPPED_KINDS: [&str; 7] = ["ACK", "1xx", "2xx", "3xx", "4xx", "5xx", "6xx"];
+const UNROUTABLE_SEEDED_METHODS: [&str; 9] =
+    ["INVITE", "BYE", "CANCEL", "OPTIONS", "UPDATE", "INFO", "REFER", "NOTIFY", "PRACK"];
+
+impl Default for B2buaMetrics {
+    fn default() -> Self {
+        let inner = Inner::default();
+        {
+            let mut dropped = inner.unroutable_dropped.lock().unwrap();
+            let mut refused = inner.unroutable_refused.lock().unwrap();
+            let mut internal = inner.unroutable_internal.lock().unwrap();
+            for kind in UNROUTABLE_DROPPED_KINDS {
+                dropped.insert(kind.to_string(), 0);
+            }
+            for method in UNROUTABLE_SEEDED_METHODS {
+                refused.insert(format!("{method}|481"), 0);
+                internal.insert(format!("timeout|{method}"), 0);
+            }
+        }
+        Self { inner: Arc::new(inner), per_peer: Arc::default() }
+    }
 }
 
 /// Why a per-call dispatch queue was torn down: the release that poisoned it.
@@ -363,7 +399,6 @@ impl B2buaMetrics {
     counter!(bump_handler_timeout, handler_timeouts_total, handler_timeouts);
     counter!(bump_force_purge, force_purge_total, force_purge);
     counter!(bump_fast_reject_terminating, fast_reject_terminating_total, fast_reject_terminating);
-    counter!(bump_unroutable_dropped, unroutable_dropped_total, unroutable_dropped);
     counter!(bump_cdr_written, cdr_written_total, cdr_written);
     counter!(bump_cdr_dropped, cdr_dropped_total, cdr_dropped);
     // Tier-3 admission gate (migration/09).
@@ -480,6 +515,70 @@ impl B2buaMetrics {
     pub fn retransmits_total(&self, ladder: &str, method: &str, code: Option<u16>) -> u64 {
         let key = retransmit_key(ladder, method, code);
         self.inner.retransmits.lock().unwrap().get(&key).copied().unwrap_or(0)
+    }
+
+    /// Count one wire message naming no call that drew no answer, for
+    /// `b2bua_unroutable_dropped_total{kind}`: `kind` is `ACK` or a response's
+    /// status class (`1xx`…`6xx`).
+    pub fn record_unroutable_dropped(&self, kind: &str) {
+        *self.inner.unroutable_dropped.lock().unwrap().entry(kind.to_string()).or_insert(0) += 1;
+    }
+
+    /// Wire messages naming no call that drew no answer, every kind.
+    pub fn unroutable_dropped_total(&self) -> u64 {
+        self.inner.unroutable_dropped.lock().unwrap().values().sum()
+    }
+
+    /// Wire messages naming no call that drew no answer, of one `kind`.
+    pub fn unroutable_dropped_of(&self, kind: &str) -> u64 {
+        self.inner.unroutable_dropped.lock().unwrap().get(kind).copied().unwrap_or(0)
+    }
+
+    /// Count one wire request naming no call that this node answered `code`,
+    /// for `b2bua_unroutable_refused_total{method,code}`.
+    pub fn record_unroutable_refused(&self, method: &str, code: u16) {
+        *self
+            .inner
+            .unroutable_refused
+            .lock()
+            .unwrap()
+            .entry(format!("{method}|{code}"))
+            .or_insert(0) += 1;
+    }
+
+    /// Wire requests naming no call answered `code`, of one `method`.
+    pub fn unroutable_refused_of(&self, method: &str, code: u16) -> u64 {
+        let key = format!("{method}|{code}");
+        self.inner.unroutable_refused.lock().unwrap().get(&key).copied().unwrap_or(0)
+    }
+
+    /// Wire requests naming no call that this node answered, every kind.
+    pub fn unroutable_refused_total(&self) -> u64 {
+        self.inner.unroutable_refused.lock().unwrap().values().sum()
+    }
+
+    /// Count one of this node's own events that named no call, for
+    /// `b2bua_unroutable_internal_total{event,method}`; `method` is the timed-out
+    /// request's, empty for an event that carries none.
+    pub fn record_unroutable_internal(&self, event: &str, method: &str) {
+        *self
+            .inner
+            .unroutable_internal
+            .lock()
+            .unwrap()
+            .entry(format!("{event}|{method}"))
+            .or_insert(0) += 1;
+    }
+
+    /// This node's own events that named no call, of one `event` and `method`.
+    pub fn unroutable_internal_of(&self, event: &str, method: &str) -> u64 {
+        let key = format!("{event}|{method}");
+        self.inner.unroutable_internal.lock().unwrap().get(&key).copied().unwrap_or(0)
+    }
+
+    /// This node's own events that named no call, every kind.
+    pub fn unroutable_internal_total(&self) -> u64 {
+        self.inner.unroutable_internal.lock().unwrap().values().sum()
     }
 
     /// Count one dialog-level ladder that ran to its give-up, for
@@ -768,11 +867,6 @@ impl B2buaMetrics {
             self.fast_reject_terminating_total(),
         );
         counter(
-            "b2bua_unroutable_dropped_total",
-            "messages dropped: no route resolved",
-            self.unroutable_dropped_total(),
-        );
-        counter(
             "b2bua_cdr_written_total",
             "CDRs the sink delivered (for a broker sink: acked by the broker)",
             self.cdr_written_total(),
@@ -862,6 +956,24 @@ impl B2buaMetrics {
             } else {
                 s.push_str(&format!("b2bua_retransmits_total{{ladder=\"{ladder}\",method=\"{method}\",code=\"{code}\"}} {v}\n"));
             }
+        }
+        s.push_str("# HELP b2bua_unroutable_dropped_total wire messages that resolved to no call and drew no answer, by kind (ACK, or a response's status class); nothing a peer waits on\n# TYPE b2bua_unroutable_dropped_total counter\n");
+        for (kind, v) in self.inner.unroutable_dropped.lock().unwrap().iter() {
+            s.push_str(&format!("b2bua_unroutable_dropped_total{{kind=\"{kind}\"}} {v}\n"));
+        }
+        s.push_str("# HELP b2bua_unroutable_refused_total wire requests that resolved to no call, answered on no call's behalf (481 RFC 3261 §12.2.2/§15.1.2/§9.2, 405 §8.2.1) by method and code; a stray CANCEL's 481 is stateless, so each repeat of it counts again\n# TYPE b2bua_unroutable_refused_total counter\n");
+        for (k, v) in self.inner.unroutable_refused.lock().unwrap().iter() {
+            let (method, code) = k.split_once('|').unwrap_or((k.as_str(), ""));
+            s.push_str(&format!(
+                "b2bua_unroutable_refused_total{{method=\"{method}\",code=\"{code}\"}} {v}\n"
+            ));
+        }
+        s.push_str("# HELP b2bua_unroutable_internal_total this node's own events that resolved to no call, by event and method (timeout: a client transaction released from its call reached Timer B/F); no wire message and no peer waiting\n# TYPE b2bua_unroutable_internal_total counter\n");
+        for (k, v) in self.inner.unroutable_internal.lock().unwrap().iter() {
+            let (event, method) = k.split_once('|').unwrap_or((k.as_str(), ""));
+            s.push_str(&format!(
+                "b2bua_unroutable_internal_total{{event=\"{event}\",method=\"{method}\"}} {v}\n"
+            ));
         }
         s.push_str("# HELP b2bua_repeat_give_ups_total dialog-level ladders that ran to their give-up with the obligation still undischarged (ack-of-2xx: RFC 3261 §13.3.1.4, prack-of: RFC 3262 §3); the rate a peer goes deaf at\n# TYPE b2bua_repeat_give_ups_total counter\n");
         for (obligation, v) in self.inner.repeat_give_ups.lock().unwrap().iter() {
@@ -1463,6 +1575,33 @@ mod tests {
         assert!(txt.contains("b2bua_requests_total{method=\"BYE\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"INVITE\",code=\"200\"} 1"));
         assert!(txt.contains("b2bua_responses_total{method=\"BYE\",code=\"200\"} 1"));
+    }
+
+    #[test]
+    fn unroutable_series_are_published_at_zero_from_startup() {
+        let txt = B2buaMetrics::new().prometheus_text();
+        assert!(txt.contains("b2bua_unroutable_dropped_total{kind=\"ACK\"} 0"));
+        assert!(txt.contains("b2bua_unroutable_refused_total{method=\"BYE\",code=\"481\"} 0"));
+        assert!(
+            txt.contains("b2bua_unroutable_internal_total{event=\"timeout\",method=\"OPTIONS\"} 0")
+        );
+    }
+
+    #[test]
+    fn unroutable_classes_render_apart() {
+        let m = B2buaMetrics::new();
+        m.record_unroutable_dropped("ACK");
+        m.record_unroutable_dropped("2xx");
+        m.record_unroutable_refused("BYE", 481);
+        m.record_unroutable_internal("timeout", "OPTIONS");
+        assert_eq!(m.unroutable_dropped_total(), 2, "only wire messages left unanswered");
+        let txt = m.prometheus_text();
+        assert!(txt.contains("b2bua_unroutable_dropped_total{kind=\"ACK\"} 1"));
+        assert!(txt.contains("b2bua_unroutable_dropped_total{kind=\"2xx\"} 1"));
+        assert!(txt.contains("b2bua_unroutable_refused_total{method=\"BYE\",code=\"481\"} 1"));
+        assert!(
+            txt.contains("b2bua_unroutable_internal_total{event=\"timeout\",method=\"OPTIONS\"} 1")
+        );
     }
 
     #[test]

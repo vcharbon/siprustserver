@@ -141,7 +141,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
             // §9.2 481 here. Every other unroutable request is the peer's to
             // re-send or give up on.
             reject_stray_cancel(ctx, None, &event).await;
-            ctx.metrics.bump_unroutable_dropped();
+            ctx.metrics.record_unroutable_dropped(event.kind());
             return;
         }
     };
