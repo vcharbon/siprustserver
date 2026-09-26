@@ -201,4 +201,13 @@ Content-Length: 0\r\n\r\n";
         assert!(out.contains("Retry-After: 7\r\n"), "{out}");
         assert!(!out.contains("Reason:"), "{out}");
     }
+
+    /// A hint of 0 goes on the wire as 1 (RFC 3261 §20.33: 0 invites an
+    /// immediate retry).
+    #[test]
+    fn a_capacity_reject_never_carries_retry_after_zero() {
+        let resp = build_capacity_reject_503("cap-tag".into(), &invite(), 0);
+        let out = String::from_utf8(serialize(&SipMessage::Response(resp))).expect("utf-8");
+        assert!(out.contains("Retry-After: 1\r\n"), "{out}");
+    }
 }

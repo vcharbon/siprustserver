@@ -31,22 +31,27 @@ use sip_message::types::SipHeader;
 use sip_message::SipRequest;
 use sip_txn::IdGen;
 
+/// The least `Retry-After` (seconds) a new-call reject carries: a value of `0`
+/// (RFC 3261 §20.33) asks for no wait, which a reject must never invite.
+pub const MIN_REJECT_RETRY_AFTER_SEC: u32 = 1;
+
 /// Compute a jittered `Retry-After` value (seconds).
 ///
 /// Randomness is **injected**: `roll` yields a fresh value in
 /// `[0, u64::MAX]`, keeping this function deterministic and unit-testable.
 ///
-/// Returns `base_sec` unchanged when `jitter_sec == 0`, otherwise
-/// `base_sec + (roll % (jitter_sec + 1))` — a uniform offset in the inclusive
-/// range `[0, jitter_sec]`.
+/// The value is uniform over `[b, b + jitter_sec]` with
+/// `b = max(base_sec, MIN_REJECT_RETRY_AFTER_SEC)`; `roll` is not consulted
+/// when `jitter_sec == 0`.
 pub fn jittered_retry_after(base_sec: u32, jitter_sec: u32, roll: impl FnOnce() -> u64) -> u32 {
+    let base = base_sec.max(MIN_REJECT_RETRY_AFTER_SEC);
     if jitter_sec == 0 {
-        return base_sec;
+        return base;
     }
     // `jitter_sec + 1` fits in u64 (jitter_sec: u32); the modulus is in
-    // [0, jitter_sec] so the sum cannot exceed base_sec + jitter_sec.
+    // [0, jitter_sec].
     let offset = (roll() % (u64::from(jitter_sec) + 1)) as u32;
-    base_sec + offset
+    base.saturating_add(offset)
 }
 
 /// Derives a transactionless reject's identity from the request itself, so
@@ -90,7 +95,8 @@ impl StatelessRejectTagger {
 /// overload — the one reject shape shared by the Tier-1 ingress brake and the
 /// Tier-3 admission gate. `to_tag` is the caller's tag (see the module doc);
 /// `retry_after_sec` is the caller's hint (bucket time-to-token, or
-/// [`jittered_retry_after`] of the configured base).
+/// [`jittered_retry_after`] of the configured base), floored at
+/// [`MIN_REJECT_RETRY_AFTER_SEC`].
 pub fn build_reject_new_call_503(
     to_tag: String,
     req: &SipRequest,
@@ -109,7 +115,7 @@ pub fn build_reject_new_call_503(
                 },
                 SipHeader {
                     name: "Retry-After".to_string().into(),
-                    value: retry_after_sec.to_string().into(),
+                    value: retry_after_sec.max(MIN_REJECT_RETRY_AFTER_SEC).to_string().into(),
                 },
             ],
             ..Default::default()
@@ -156,6 +162,16 @@ mod jitter_tests {
                 "roll={roll} produced {v}, outside [{base}, {}]",
                 base + jitter
             );
+        }
+    }
+
+    /// A base of 0 never yields 0: the spread starts at one second.
+    #[test]
+    fn a_zero_base_never_hints_retry_now() {
+        assert_eq!(jittered_retry_after(0, 0, || 0), 1);
+        for roll in 0u64..20 {
+            let v = jittered_retry_after(0, 4, || roll);
+            assert!((1..=5).contains(&v), "roll={roll} produced {v}");
         }
     }
 
@@ -257,5 +273,12 @@ Content-Length: 0\r\n\r\n"
         let out = wire(30);
         assert!(out.contains("Reason: SIP;cause=503;text=\"overload\"\r\n"), "{out}");
         assert!(out.contains("Retry-After: 30\r\n"), "{out}");
+    }
+
+    /// A hint of 0 goes on the wire as 1 (RFC 3261 §20.33: 0 invites an
+    /// immediate retry).
+    #[test]
+    fn the_reject_never_carries_retry_after_zero() {
+        assert!(wire(0).contains("Retry-After: 1\r\n"));
     }
 }

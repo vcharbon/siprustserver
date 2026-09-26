@@ -235,7 +235,8 @@ pub struct B2buaConfig {
     pub overload_panic_elu_threshold: f64,
     /// **Retry-After base** (seconds; port of `AppConfig.retryAfterBaseSec`) for
     /// the panic-ELU 503. The `bucket_empty` 503 instead derives its Retry-After
-    /// from the bucket's time-to-next-token. TS default **5**. Overridable via
+    /// from the bucket's time-to-next-token. A new-call reject never carries
+    /// less than 1 s, whatever this value. TS default **5**. Overridable via
     /// `B2BUA_RETRY_AFTER_BASE_SEC`.
     pub retry_after_base_sec: u32,
     /// **Retry-After jitter span** (seconds) of the capacity 503 (ADR-0037):

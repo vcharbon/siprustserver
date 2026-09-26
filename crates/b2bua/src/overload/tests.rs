@@ -206,6 +206,26 @@ async fn an_emergency_surge_leaves_no_debt_behind() {
     assert!((refilled - 50.0).abs() < 1e-6, "level {refilled}");
 }
 
+/// A `retry_after_base_sec` of 0 still rejects with a Retry-After of at least
+/// one second (RFC 3261 §20.33: 0 would invite an immediate retry).
+#[tokio::test(start_paused = true)]
+async fn a_zero_retry_after_base_never_hints_retry_now() {
+    let (sampler, ctl) = simulated();
+    let sig = OverloadSignal::new(Arc::new(sampler));
+    sig.configure_admission(&crate::config::B2buaConfig {
+        cps_bucket_size: 1000,
+        cps_bucket_rate: 0,
+        overload_panic_elu_threshold: 0.75,
+        retry_after_base_sec: 0,
+        ..Default::default()
+    });
+    ctl.set_elu(0.9);
+    sig.sample();
+    let d = sig.should_admit(false);
+    assert_eq!(d.reason, Some(AdmitReason::PanicElu));
+    assert_eq!(d.retry_after_sec, 1);
+}
+
 /// Once a token is consumed, an EWMA-ELU above the panic threshold sheds the
 /// (non-emergency) call with `panic_elu` + the configured Retry-After base.
 #[tokio::test(start_paused = true)]

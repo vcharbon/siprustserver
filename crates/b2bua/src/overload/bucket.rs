@@ -45,30 +45,22 @@ impl TokenBucket {
         self.last_refill = now;
     }
 
-    /// Try to consume one token. Returns `true` (and decrements) iff ≥ 1 is
-    /// available after a refill; `false` leaves the bucket untouched.
-    pub(super) fn try_consume(&mut self) -> bool {
+    /// Try to consume one token after a refill. `Ok` decrements; `Err` leaves
+    /// the bucket untouched and carries the seconds until a token, computed
+    /// from the same refill as the failed consume, so it is always ≥ 1. With a
+    /// zero refill rate the hint is `60`, a finite Retry-After for a
+    /// misconfigured `rate == 0`.
+    pub(super) fn try_consume(&mut self) -> Result<(), u32> {
         self.refill();
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Seconds until ≥ 1 token will be available (`0` if available now). With a
-    /// zero refill rate and an empty bucket, returns `60` — a misconfigured
-    /// `rate == 0` still hands the caller a finite Retry-After.
-    pub(super) fn retry_after_sec(&mut self) -> u32 {
-        self.refill();
-        if self.tokens >= 1.0 {
-            return 0;
+            return Ok(());
         }
         if self.rate_per_sec <= 0.0 {
-            return 60;
+            return Err(60);
         }
-        ((1.0 - self.tokens) / self.rate_per_sec).ceil() as u32
+        // `tokens < 1` here, so the quotient is positive and its ceiling ≥ 1.
+        Err(((1.0 - self.tokens) / self.rate_per_sec).ceil() as u32)
     }
 
     /// Current level, after a refill.
@@ -88,9 +80,21 @@ mod bucket_tests {
     async fn token_bucket_never_goes_below_zero() {
         let mut b = TokenBucket::new(1, 0);
         assert_eq!(b.level(), 1.0);
-        assert!(b.try_consume());
-        assert!(!b.try_consume());
+        assert_eq!(b.try_consume(), Ok(()));
+        assert_eq!(b.try_consume(), Err(60));
         assert_eq!(b.level(), 0.0);
-        assert_eq!(b.retry_after_sec(), 60);
+    }
+
+    /// A failed consume's Retry-After comes from the refill that failed it: a
+    /// bucket a hair short of a token hints 1 s, not 0, though the token
+    /// accrues right after the reject.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_consume_never_hints_retry_now() {
+        let mut b = TokenBucket::new(1, 1000);
+        assert_eq!(b.try_consume(), Ok(()));
+        tokio::time::advance(std::time::Duration::from_micros(999)).await;
+        assert_eq!(b.try_consume(), Err(1), "0.999 of a token is not a token");
+        tokio::time::advance(std::time::Duration::from_micros(2)).await;
+        assert_eq!(b.try_consume(), Ok(()), "the token accrued after the reject");
     }
 }

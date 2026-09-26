@@ -28,7 +28,9 @@ pub struct AdmitDecision {
     pub admit: bool,
     /// The rejection reason when `!admit`; `None` on an admit.
     pub reason: Option<AdmitReason>,
-    /// Suggested `Retry-After` value (seconds) when `!admit` (0 on an admit).
+    /// Suggested `Retry-After` value (seconds): at least
+    /// [`MIN_REJECT_RETRY_AFTER_SEC`](super::MIN_REJECT_RETRY_AFTER_SEC) when
+    /// `!admit`, 0 on an admit.
     pub retry_after_sec: u32,
 }
 
@@ -37,8 +39,10 @@ impl AdmitDecision {
     pub(super) fn admitted() -> Self {
         Self { admit: true, reason: None, retry_after_sec: 0 }
     }
-    /// A reject verdict carrying the reason + a Retry-After hint.
+    /// A reject verdict carrying the reason + a Retry-After hint, floored at
+    /// [`MIN_REJECT_RETRY_AFTER_SEC`](super::MIN_REJECT_RETRY_AFTER_SEC).
     pub(super) fn rejected(reason: AdmitReason, retry_after_sec: u32) -> Self {
+        let retry_after_sec = retry_after_sec.max(super::MIN_REJECT_RETRY_AFTER_SEC);
         Self { admit: false, reason: Some(reason), retry_after_sec }
     }
 }

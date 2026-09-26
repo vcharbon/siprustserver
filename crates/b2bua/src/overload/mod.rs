@@ -49,7 +49,10 @@ mod sampler;
 mod signal;
 
 pub use admission::{AdmitDecision, AdmitReason};
-pub use reject::{build_reject_new_call_503, jittered_retry_after, StatelessRejectTagger};
+pub use reject::{
+    build_reject_new_call_503, jittered_retry_after, StatelessRejectTagger,
+    MIN_REJECT_RETRY_AFTER_SEC,
+};
 pub use sampler::{simulated, LoadSampler, SimulatedLoadControl, SimulatedLoadSampler};
 pub use signal::{OverloadMetrics, OverloadSignal};
 

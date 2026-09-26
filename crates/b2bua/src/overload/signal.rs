@@ -175,7 +175,7 @@ impl OverloadSignal {
     ///    [`increment_non_emergency_admitted`](OverloadSignal::increment_non_emergency_admitted)
     ///    for them — LBs cap non-emergency traffic only).
     /// 2. **Hard CPS gate** — `try_consume`; on empty → reject `bucket_empty` with
-    ///    `Retry-After = bucket.retry_after_sec()`.
+    ///    the time-to-token of that same failed consume as `Retry-After`.
     /// 3. **Panic-ELU backstop** — only after a token was consumed: if the
     ///    EWMA-ELU exceeds the configured threshold → reject `panic_elu` with
     ///    `Retry-After = retry_after_base_sec`. The LB-side AIMD is the primary
@@ -194,8 +194,7 @@ impl OverloadSignal {
         }
 
         // Hard CPS gate.
-        if !inner.bucket.try_consume() {
-            let retry = inner.bucket.retry_after_sec();
+        if let Err(retry) = inner.bucket.try_consume() {
             drop(inner);
             self.reject_bucket_empty.fetch_add(1, Ordering::Relaxed);
             return AdmitDecision::rejected(AdmitReason::BucketEmpty, retry);
