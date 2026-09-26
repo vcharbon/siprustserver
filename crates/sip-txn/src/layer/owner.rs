@@ -471,6 +471,7 @@ impl Owner {
                 self.do_cancel_txns_for_call(endpoint, &call_ref).await;
                 let _ = reply.send(());
             }
+            Command::ForgetUnanswered { branch } => self.forget_unanswered(&branch),
             Command::ActiveTxnCount { call_ref, reply } => {
                 let n = self.txn_index.get(call_ref.as_str()).map_or(0, |s| s.len());
                 let _ = reply.send(n);

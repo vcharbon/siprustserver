@@ -268,6 +268,13 @@ pub(crate) struct MetricsInner {
     /// flat `messages_processed` is the signature of a malformed-traffic flood or a
     /// parser regression — distinguishable from "no traffic arrived".
     pub parse_errors: AtomicU64,
+    /// Non-INVITE server transactions forgotten unanswered at the consumer's
+    /// request ([`TransactionLayer::forget_unanswered`](crate::TransactionLayer::forget_unanswered)):
+    /// one per request copy the consumer discarded before answering it.
+    pub unanswered_forgotten: AtomicU64,
+    /// Forget requests a full command queue refused; the transaction they
+    /// named absorbs its retransmissions until the sweep.
+    pub forget_refused: AtomicU64,
     /// Outbound `send_to` failures (logged-and-swallowed so a send error never
     /// aborts the owner). A climb here means the socket is failing (ENOBUFS/EPERM
     /// under netfilter churn) while everything else looks idle.
@@ -301,6 +308,8 @@ impl MetricsInner {
             to_tag_filled: AtomicU64::new(0),
             fallback_to_tag_used: AtomicU64::new(0),
             parse_errors: AtomicU64::new(0),
+            unanswered_forgotten: AtomicU64::new(0),
+            forget_refused: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
         }
     }
@@ -360,7 +369,9 @@ impl TransactionMetrics {
         self.events_tx.max_capacity() - self.events_tx.capacity()
     }
 
-    /// Events dropped because the output queue was at capacity, by reason.
+    /// Events the full output queue refused, by reason: dropped, or deferred
+    /// for a critical event. Counted per wire copy — a dropped non-INVITE
+    /// request's retransmission is admitted afresh and may be dropped again.
     pub fn event_queue_drops(&self, reason: EventQueueDropReason) -> u64 {
         self.inner.event_queue_drops[reason.index()].load(Ordering::Relaxed)
     }
@@ -486,6 +497,21 @@ impl TransactionMetrics {
     /// Inbound packets the parser rejected and dropped (counter).
     pub fn parse_errors(&self) -> u64 {
         self.inner.parse_errors.load(Ordering::Relaxed)
+    }
+
+    /// Non-INVITE server transactions forgotten unanswered for the consumer
+    /// (counter).
+    pub fn unanswered_forgotten(&self) -> u64 {
+        self.inner.unanswered_forgotten.load(Ordering::Relaxed)
+    }
+
+    /// Forget requests the full command queue refused (counter, expected 0).
+    pub fn forget_refused(&self) -> u64 {
+        self.inner.forget_refused.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn count_forget_refused(&self) {
+        self.inner.forget_refused.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Outbound `send_to` failures (counter).

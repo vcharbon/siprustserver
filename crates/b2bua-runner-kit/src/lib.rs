@@ -1059,7 +1059,7 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     s.push_str("# HELP b2bua_txn_event_queue_capacity Inbound->app events channel capacity.\n");
     s.push_str("# TYPE b2bua_txn_event_queue_capacity gauge\n");
     s.push_str(&format!("b2bua_txn_event_queue_capacity {}\n", m.event_queue_capacity()));
-    s.push_str("# HELP b2bua_txn_event_queue_drops_total Events shed when the inbound->app channel was full, by class.\n");
+    s.push_str("# HELP b2bua_txn_event_queue_drops_total Events the full inbound->app channel refused, by class, counted per wire copy (a dropped non-INVITE request is readmitted on each retransmission); a critical class is deferred, not lost.\n");
     s.push_str("# TYPE b2bua_txn_event_queue_drops_total counter\n");
     for r in EventQueueDropReason::ALL {
         s.push_str(&format!(
@@ -1068,6 +1068,12 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
             m.event_queue_drops(r)
         ));
     }
+    s.push_str("# HELP b2bua_txn_unanswered_forgotten_total Non-INVITE server transactions forgotten because the router discarded their request unrun (queue full, call cap, behind a release), so the retransmission is admitted again.\n");
+    s.push_str("# TYPE b2bua_txn_unanswered_forgotten_total counter\n");
+    s.push_str(&format!("b2bua_txn_unanswered_forgotten_total {}\n", m.unanswered_forgotten()));
+    s.push_str("# HELP b2bua_txn_forget_refused_total Forget requests the full txn command queue refused; the transaction absorbs its retransmissions until the sweep. Expected 0.\n");
+    s.push_str("# TYPE b2bua_txn_forget_refused_total counter\n");
+    s.push_str(&format!("b2bua_txn_forget_refused_total {}\n", m.forget_refused()));
     s.push_str("# HELP b2bua_txn_retransmits_total transaction-ladder rungs the txn layer put on the wire (Timer A/E, the CANCEL sub-ladder, Timer G), by what paced them (ladder), the request's method, and the final's status on a Timer G row; the dialog-level ladders are b2bua_retransmits_total.\n");
     s.push_str("# TYPE b2bua_txn_retransmits_total counter\n");
     for row in m.retransmit_rows() {

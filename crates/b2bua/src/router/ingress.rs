@@ -2,7 +2,8 @@
 //! per-peer timeout attribution, the acting-backup self-release notice, the
 //! out-of-dialog OPTIONS health responder, resolution (an event resolving to
 //! no call goes to [`super::unroutable`]), the full-guarantee cap shed, and
-//! finally the per-call FIFO dispatch.
+//! finally the per-call FIFO dispatch, guarded so a request discarded unrun
+//! is readmitted on its retransmission ([`super::unanswered`]).
 
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ use super::process::process;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::{replica_takeover_call_ref, resolve};
 use super::responses::build_options_health_response;
+use super::unanswered::UnansweredGuard;
 use super::unroutable::Lookup;
 use super::RouterCtx;
 use crate::event::CallEvent;
@@ -175,9 +177,9 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // can reach, because no call is ever born). Shed a NEW initial INVITE here
     // with a stateless 503 instead (mirrors the Tier-3 admission gate: stateless,
     // no per-call resources, sent through the INVITE server txn that carries the
-    // 100). In-dialog events for an at-cap new call_ref stay on the silent
-    // `dispatch` cap-drop (an in-dialog request with no live call is an orphan the
-    // protocol resends / the peer 481s; only the initial INVITE owes a final).
+    // 100). Any other event for an at-cap new call_ref is cap-dropped by
+    // `dispatch`; a non-INVITE request among them has its transaction forgotten
+    // (`UnansweredGuard`), so its retransmission is admitted again.
     if res.initial_invite && ctx.dispatcher.would_drop_new_at_cap(&call_ref) {
         if let CallEvent::Sip { message, src, .. } = &event {
             if let SipMessage::Request(req) = message.as_ref() {
@@ -196,9 +198,11 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     }
 
     let ctx2 = ctx.clone();
+    let guard = UnansweredGuard::for_event(&ctx.txn, &event);
     ctx.dispatcher.dispatch(
         &call_ref,
         Box::pin(async move {
+            guard.disarm();
             process(&ctx2, event, res).await;
         }),
     );

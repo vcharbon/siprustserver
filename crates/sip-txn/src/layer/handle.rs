@@ -126,6 +126,11 @@ pub(super) enum Command {
         call_ref: String,
         reply: oneshot::Sender<usize>,
     },
+    /// Forget the non-INVITE server transaction at `branch` if it has sent
+    /// nothing yet (`Trying`); no reply.
+    ForgetUnanswered {
+        branch: String,
+    },
     /// Register `call_ref` for a one-shot [`TransactionEvent::CallQuiesced`] when
     /// its last transaction clears (ADR-0014 self-release). If it already has no
     /// transactions, `CallQuiesced` is emitted at once.
@@ -287,6 +292,19 @@ impl TransactionLayer {
     ) -> Result<usize, TransactionLayerClosed> {
         self.roundtrip(|reply| Command::ActiveTxnCount { call_ref: call_ref.to_string(), reply })
             .await
+    }
+
+    /// The consumer discarded the non-INVITE request whose server transaction
+    /// is `branch` before answering it: forget that transaction if it is still
+    /// `Trying`, so the UAC's retransmission (RFC 3261 §17.1.2.2) is admitted
+    /// afresh instead of absorbed unanswered. A transaction that has sent a
+    /// response is kept. Never waits: a full command queue refuses the request
+    /// and counts it (`forget_refused`).
+    pub fn forget_unanswered(&self, branch: &str) {
+        let cmd = Command::ForgetUnanswered { branch: branch.to_string() };
+        if self.cmd_tx.try_send(cmd).is_err() {
+            self.metrics.count_forget_refused();
+        }
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last

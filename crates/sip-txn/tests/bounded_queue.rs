@@ -148,6 +148,37 @@ async fn a_non_invite_request_the_full_queue_dropped_is_admitted_on_its_retransm
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
 }
 
+/// Every copy the full queue refuses is dropped and counted on its own; the
+/// first copy that finds room is admitted, once.
+#[tokio::test(start_paused = true)]
+async fn each_dropped_copy_is_counted_and_the_first_copy_with_room_is_admitted() {
+    let mut stack = Stack::build(1, UDP_QUEUE_MAX, 1024).await;
+    let cap = stack.txn.metrics().event_queue_capacity();
+    saturate(&stack, cap).await;
+
+    let bye = inbound_request("BYE", "z9hG4bK-bye-twice", "bye-twice@unit", Some("dlg-tag"));
+    for _ in 0..2 {
+        stack.inject(&bye).await;
+        elapse_ms(100).await;
+    }
+    let m = stack.txn.metrics();
+    assert_eq!(m.event_queue_drops(EventQueueDropReason::RequestOther), 2, "one per copy");
+    assert_eq!(m.active_transactions(), 0);
+
+    assert_eq!(stack.drain_events().len(), cap);
+    stack.inject(&bye).await;
+    elapse_ms(100).await;
+    let delivered = requests_of(&stack.drain_events(), "BYE");
+    assert_eq!(delivered.len(), 1, "the third copy reaches the consumer");
+    assert_eq!(stack.txn.metrics().event_queue_drops(EventQueueDropReason::RequestOther), 2);
+
+    let ok = generate_response(&delivered[0], 200, "OK", &GenerateResponseOpts::default());
+    stack.txn.send_response(ok, addr(PEER)).await.unwrap();
+    elapse_ms(33_000).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1);
+    assert_eq!(stack.txn.metrics().active_transactions(), 0);
+}
+
 /// A flood of distinct non-INVITE requests into a full queue leaves no
 /// transaction behind: what the queue sheds costs the layer nothing.
 #[tokio::test(start_paused = true)]
@@ -174,9 +205,10 @@ async fn non_invite_requests_shed_by_a_full_queue_leave_no_transaction() {
     assert!(stack.drain_peer().is_empty());
 }
 
-/// An INVITE whose 100 Trying already silenced the caller's retransmission
-/// is its own only delivery (RFC 3261 §17.2.1): a full queue defers it, and it
-/// reaches the consumer once the queue has room.
+/// Pin (holds without the non-INVITE fix): an INVITE whose 100 Trying already
+/// silenced the caller's retransmission is its own only delivery (RFC 3261
+/// §17.2.1), so a full queue defers it, and it reaches the consumer once the
+/// queue has room.
 #[tokio::test(start_paused = true)]
 async fn an_invite_the_full_queue_could_not_take_is_deferred_not_dropped() {
     let mut stack = Stack::build(1, UDP_QUEUE_MAX, 1024).await;

@@ -95,8 +95,8 @@ impl PerCallDispatcher {
     }
 
     /// Enqueue a handler body for `call_ref`, lazily creating the queue + worker.
-    /// Drops (and counts) the body when the per-call queue is full or the global
-    /// queue cap is reached.
+    /// Drops (and counts) the body unrun when the per-call queue is full or the
+    /// global queue cap is reached; whatever the body captured is dropped with it.
     pub fn dispatch(&self, call_ref: &str, body: DispatchBody) {
         let mut map = self.queues.lock().unwrap();
         if let Some(q) = map.get(call_ref) {
@@ -173,7 +173,12 @@ async fn worker(
         match item {
             DispatchItem::Poison(c) => {
                 class = c;
-                while rx.try_recv().is_ok() {}
+                // Bodies queued behind the release are discarded unrun.
+                while let Ok(item) = rx.try_recv() {
+                    if matches!(item, DispatchItem::Event(_)) {
+                        metrics.bump_release_discard();
+                    }
+                }
                 break;
             }
             DispatchItem::Event(body) => {

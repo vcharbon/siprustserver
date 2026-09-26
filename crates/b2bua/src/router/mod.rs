@@ -11,7 +11,8 @@
 //! the replication reclaim/discharge funnels,
 //! [`restore_hygiene`] the replicated-timer restore seam, [`release`] the one
 //! per-call teardown executor, [`responses`] the locally-authored response
-//! builders, [`peer_metrics`] per-peer failure attribution, and
+//! builders, [`peer_metrics`] per-peer failure attribution,
+//! [`unanswered`] the forget of a request discarded before any body ran, and
 //! [`unroutable`] the answer and accounting of an event naming no call.
 
 mod callouts;
@@ -27,6 +28,7 @@ mod responses;
 mod restore_hygiene;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod unanswered;
 mod unroutable;
 
 pub(crate) use reclaim::reap_expired_replicas;

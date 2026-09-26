@@ -22,8 +22,9 @@ impl Owner {
     /// Offer an ordinary event to the bounded output queue. Producers NEVER block
     /// — a full queue drops the newest and counts it (drop-newest), so backpressure
     /// never reaches the recv path. Correct for events the protocol will resend if
-    /// lost (inbound non-INVITE requests, provisionals, 2xx that the UAS keeps
-    /// retransmitting until ACKed) — provided no transaction absorbs that resend.
+    /// lost (inbound non-INVITE requests, reliable provisionals (RFC 3262), 2xx
+    /// that the UAS keeps retransmitting until ACKed) — provided no transaction
+    /// absorbs that resend.
     /// `true` when the queue took the event.
     pub(super) fn emit(&mut self, event: TransactionEvent) -> bool {
         self.offer(event, false)

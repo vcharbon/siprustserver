@@ -273,7 +273,8 @@ impl Owner {
 
         // Tier-3 overload admission (a stateless 503 ahead of txn creation)
         // deliberately sits ABOVE this layer — see docs/adr/0007 "Deferred".
-        // This layer admits every request its event queue takes (below).
+        // This layer admits every INVITE, and every other request its event
+        // queue takes (below).
 
         // ── New server transaction ─────────────────────────────────────────────
         let kind =
@@ -342,6 +343,18 @@ impl Owner {
         }
     }
 
+    /// Forget the non-INVITE server transaction at `branch` while it is still
+    /// `Trying`: the consumer discarded its request unanswered, and only an
+    /// unseen branch lets the UAC's retransmission in again. Counted.
+    pub(super) fn forget_unanswered(&mut self, branch: &str) {
+        let unanswered = self.txns.get(branch).is_some_and(|t| {
+            t.role == TxnRole::Server && t.kind == TxnKind::NonInvite && t.state == TxnState::Trying
+        });
+        if unanswered && self.delete_txn(branch) {
+            self.metrics.unanswered_forgotten.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// The retransmission path (RFC 3261 §17.2.1): a request whose branch
     /// already holds a server transaction draws that transaction's cached
     /// response — a repeat no timer paced, counted as `trigger` under the
@@ -350,9 +363,11 @@ impl Owner {
     /// record, ADR-0014) owes the retransmission its most recent provisional:
     /// a 100 Trying is composed from `req`, sent and cached, as the admit path
     /// does for the first copy. A non-INVITE transaction still awaiting its
-    /// first response sends nothing: it exists only while its request is with
-    /// the consumer. `true` when a transaction absorbed the request, `false`
-    /// when the branch is unseen or empty.
+    /// first response sends nothing: its request is the consumer's to answer.
+    /// A copy the event queue drops, or the consumer discards before handling
+    /// it ([`TransactionLayer::forget_unanswered`](crate::TransactionLayer::forget_unanswered)),
+    /// leaves no transaction behind. `true` when a transaction absorbed the
+    /// request, `false` when the branch is unseen or empty.
     pub(super) async fn replay_cached(
         &mut self,
         endpoint: &dyn UdpEndpoint,

@@ -27,6 +27,7 @@ mod decision_context;
 mod decision_deadline;
 mod decision_lands_on_cancelled_call;
 mod decision_log;
+mod discarded_request_readmitted;
 mod failure;
 mod failure_header_relay;
 mod fake_prack;

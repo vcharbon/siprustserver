@@ -57,6 +57,7 @@ struct Inner {
     // dispatcher
     queue_drops: AtomicU64,
     cap_drops: AtomicU64,
+    release_discards: AtomicU64,
     saturation: AtomicU64,
     // MAX_MESSAGES_PER_CALL cap-defense: calls torn down for crossing the
     // per-call message cap (a runaway re-INVITE/OPTIONS storm or glare loop).
@@ -375,6 +376,7 @@ impl B2buaMetrics {
     counter!(bump_message_cap_terminated, message_cap_terminated_total, message_cap_terminated);
     counter!(bump_queue_drop, queue_drops_total, queue_drops);
     counter!(bump_cap_drop, cap_drops_total, cap_drops);
+    counter!(bump_release_discard, release_discards_total, release_discards);
     counter!(bump_saturation, saturation_total, saturation);
     counter!(bump_creation, creations_total, creations);
     counter!(bump_removal, removals_total, removals);
@@ -840,10 +842,15 @@ impl B2buaMetrics {
         counter("b2bua_message_cap_terminated_total", "calls terminated for exceeding max_messages_per_call (cap-defense; a climbing rate names a runaway-traffic call class)", self.message_cap_terminated_total());
         counter(
             "b2bua_dispatch_queue_drops_total",
-            "events dropped: per-call queue full",
+            "events dropped: per-call queue full (a non-INVITE request's transaction is forgotten so its retransmission is admitted again)",
             self.queue_drops_total(),
         );
-        counter("b2bua_dispatch_cap_drops_total", "events hitting the global call cap: a new initial INVITE is shed with a stateless 503 (ADR-0022), an in-dialog orphan is silently dropped", self.cap_drops_total());
+        counter("b2bua_dispatch_cap_drops_total", "events hitting the global call cap: a new initial INVITE is shed with a stateless 503 (ADR-0022), any other event is dropped (a non-INVITE request's transaction is forgotten so its retransmission is admitted again)", self.cap_drops_total());
+        counter(
+            "b2bua_dispatch_release_discards_total",
+            "events queued behind a call's release, discarded unrun",
+            self.release_discards_total(),
+        );
         counter(
             "b2bua_dispatch_saturation_total",
             "global handler concurrency saturation hits",

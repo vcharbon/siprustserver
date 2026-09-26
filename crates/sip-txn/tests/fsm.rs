@@ -1363,3 +1363,60 @@ async fn late_100_does_not_reopen_a_completed_invite_txn() {
         "the retransmitted 486 is absorbed, not re-surfaced"
     );
 }
+
+// ── forget_unanswered: the consumer discarded a request before answering ─────
+
+/// A non-INVITE request the consumer discarded unanswered: forgetting its
+/// `Trying` transaction lets the next copy in (RFC 3261 §17.1.2.2), where the
+/// transaction would otherwise absorb it silently.
+#[tokio::test(start_paused = true)]
+async fn a_forgotten_trying_non_invite_admits_its_retransmission() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let (branch, bye) = ("z9hG4bK-forget", inbound_request("BYE", "z9hG4bK-forget", "f@u", None));
+    stack.inject(&bye).await;
+    elapse_ms(60).await;
+    assert!(has_message_request(&stack.drain_events(), "BYE"));
+
+    stack.txn.forget_unanswered(branch);
+    elapse_ms(10).await;
+    assert_eq!(active(&stack), 0);
+    assert_eq!(stack.txn.metrics().unanswered_forgotten(), 1);
+
+    stack.inject(&bye).await;
+    elapse_ms(60).await;
+    assert!(has_message_request(&stack.drain_events(), "BYE"), "the copy is admitted afresh");
+    let resp = parse_response(&response_bytes(200, "OK", "BYE", branch, "f@u", true));
+    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
+    elapse_ms(33_000).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1);
+    assert_eq!(active(&stack), 0);
+}
+
+/// Only an unanswered non-INVITE transaction is forgotten: one that has sent
+/// its final keeps replaying it (§17.2.2), and an INVITE transaction — whose
+/// 100 Trying stopped the caller's retransmissions — is never touched.
+#[tokio::test(start_paused = true)]
+async fn forget_unanswered_keeps_answered_and_invite_transactions() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let answered = "z9hG4bK-answered";
+    stack.inject(&inbound_request("OPTIONS", answered, "a@u", None)).await;
+    stack.inject(&inbound_request("INVITE", "z9hG4bK-inv-kept", "i@u", None)).await;
+    elapse_ms(60).await;
+    let _ = stack.drain_events();
+    let resp = parse_response(&response_bytes(200, "OK", "OPTIONS", answered, "a@u", true));
+    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
+    elapse_ms(60).await;
+    let _ = stack.drain_peer();
+
+    stack.txn.forget_unanswered(answered);
+    stack.txn.forget_unanswered("z9hG4bK-inv-kept");
+    stack.txn.forget_unanswered("z9hG4bK-unseen");
+    elapse_ms(10).await;
+    assert_eq!(active(&stack), 2, "neither transaction is forgotten");
+    assert_eq!(stack.txn.metrics().unanswered_forgotten(), 0);
+
+    stack.inject(&inbound_request("OPTIONS", answered, "a@u", None)).await;
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the cached 200 is replayed");
+    assert!(stack.drain_events().is_empty());
+}
