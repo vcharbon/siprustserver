@@ -14,12 +14,12 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallLimiterEntry, CallTreatment, NewCallResponse, RouteDecision, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
 use b2bua_harness::{
     settle_until, B2buaScene, B2buaSut, LimiterLeak, BOB_PORT, DEFAULT_LIMITER_ID,
 };
-use call_limiter::wire::{AdmitEntry, Hold};
-use call_limiter::{AdmitResult, LimiterConfig, WindowStore};
+use call_limiter::wire::AdmitEntry;
+use call_limiter::{AdmitResult, CallStore, LimiterConfig};
 use scenario_harness::Harness;
 use sip_clock::Clock;
 
@@ -27,30 +27,34 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
 /// A limiter backend over a real store that applies every admit and drops
-/// every release: the SUT releases its holds, the store keeps counting them.
+/// every release: the SUT releases its calls, the store keeps counting them.
 struct DropsReleases {
-    store: Arc<WindowStore>,
+    store: Arc<CallStore>,
 }
 
 #[async_trait]
 impl CallLimiter for DropsReleases {
-    async fn admit(&self, entries: &[LimiterEntry]) -> AdmitOutcome {
+    async fn admit(
+        &self,
+        call_ref: &str,
+        entries: &[LimiterEntry],
+        release_on_refusal: bool,
+    ) -> AdmitOutcome {
         let wire: Vec<AdmitEntry> =
             entries.iter().map(|e| AdmitEntry { id: e.id.clone(), limit: e.limit }).collect();
-        match self.store.admit(&wire) {
-            AdmitResult::Admitted { window } => AdmitOutcome::Admitted { window },
+        match self.store.admit(call_ref, &wire, release_on_refusal) {
+            AdmitResult::Admitted => AdmitOutcome::Admitted,
             AdmitResult::Rejected { limiter_id } => AdmitOutcome::Rejected { limiter_id },
+            AdmitResult::Released => AdmitOutcome::Released,
         }
     }
-    async fn release(&self, _holds: &[LimiterHold]) {}
-    async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
-        let wire: Vec<Hold> =
-            holds.iter().map(|h| Hold { id: h.limiter_id.clone(), window: h.window }).collect();
-        self.store
-            .refresh(&wire)
-            .into_iter()
-            .map(|h| LimiterHold { limiter_id: h.id, window: h.window })
-            .collect()
+    async fn release(&self, _call_ref: &str) {}
+    async fn refresh(&self, call_ref: &str) -> RefreshOutcome {
+        if self.store.refresh(call_ref) {
+            RefreshOutcome::Known
+        } else {
+            RefreshOutcome::Unknown
+        }
     }
 }
 
@@ -76,7 +80,7 @@ fn routes_holding(ids: &'static [(&'static str, i64)]) -> Arc<ScriptedDecisionEn
 /// One call through a SUT whose limiter drops releases: established, hung up
 /// by alice, reaped. Returns the scene for the caller's reaped check.
 async fn call_through_a_backend_that_drops_releases(name: &str) -> B2buaScene {
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let limiter = Arc::new(DropsReleases { store: store.clone() });
     let s = B2buaScene::with_b2bua(name, move |_| {
         B2buaSut::builder(routes_holding(&[("x", 10), ("y", 10)]))
@@ -142,8 +146,8 @@ async fn every_routed_call_holds_the_default_limiter_until_it_ends() {
     let _ = s.finish().await;
 }
 
-/// The route's own entries `[x, x, y]` (two holds on one `(id, window)`, a
-/// distinct id) are admitted with the default in one batch and all released.
+/// The route's own entries `[x, x, y]` (the same id twice, a distinct id)
+/// are admitted with the default in one set and all released.
 #[tokio::test]
 async fn a_route_s_own_limiters_are_held_with_the_default() {
     let s = B2buaScene::with_b2bua("reaped-limiter-own-and-default", |_| {
@@ -163,8 +167,8 @@ async fn a_route_s_own_limiters_are_held_with_the_default() {
     let _ = s.finish().await;
 }
 
-/// `[x, y(0)]` is refused on its second entry: the batch, the default
-/// included, increments nothing and the caller gets 486.
+/// `[x, y(0)]` is refused on its second entry: the set, the default
+/// included, counts nothing and the caller gets 486.
 #[tokio::test]
 async fn a_route_refused_on_its_second_limiter_holds_nothing() {
     let s = B2buaScene::with_b2bua("reaped-limiter-refused", |_| {
@@ -227,7 +231,11 @@ async fn a_failover_route_holds_its_own_limiters_with_the_default() {
     settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(held(), [0, 0, 0, 0], "the hangup releases every hold");
     let count = b2bua.limiter_count();
-    assert_eq!((count.admitted, count.released), (6, 6), "three holds per route");
+    assert_eq!(
+        (count.admitted, count.released),
+        (6, 6),
+        "three holds per route: the failover replaced the initial set, the hangup released it"
+    );
     b2bua.assert_fully_reaped();
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");

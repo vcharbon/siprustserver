@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The deployed call-limiter process: serves the limiter HTTP API + /metrics + /healthz over the real (hyper) transport, runs the periodic TTL-sweep janitor, and reads window/active/ttl config from the environment. Stateless, no persistence — shared cluster-wide as a single replica."
+description = "The deployed call-limiter process: serves the limiter HTTP API + /metrics + /healthz over the real (hyper) transport, runs the periodic lease janitor, and reads the lease config from the environment. Stateless, no persistence — shared cluster-wide as a single replica."
 
 [lints]
 workspace = true

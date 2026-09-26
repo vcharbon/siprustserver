@@ -1,19 +1,20 @@
-//! A reroute's limiter holds replace the replaced route's.
+//! A reroute's limiter set replaces the replaced route's.
 //!
-//! The limiter holds of a call belong to its latest applied route. When a
-//! failover route or a release reroute is applied, the holds the call carries
-//! from the route it replaces are released, and the new route's admitted holds
-//! (if any) become the call's. A route that states no limiter, or whose admit
-//! fails open, still replaces: the call is then uncounted.
+//! The limiter set of a call belongs to its latest applied route. When a
+//! failover route or a release reroute is applied, its dispatching task has
+//! replaced the call's set on the limiter in one admit: the replaced route's
+//! holds are freed and the new route's become the call's. A route that states
+//! no limiter still replaces: the call is then uncounted. A route whose admit
+//! fails open leaves the call uncounted too, its old set on the limiter until
+//! its lease lapses (a failed admit is never released).
 //!
 //! Every scenario carries several limiters: distinct ids on one route, the
-//! same id on the replaced and the new route, two holds on one
-//! `(id, window)`, overlapping sets. Each id carries one **witness** hold
-//! admitted outside the call, so a surplus release shows as a count below the
-//! witness instead of vanishing under the store's floor at 0. The store is
-//! probed per id while the call is up and drained to the witnesses after it
-//! ends; the witnesses are then released, so the reaped check reads the store
-//! empty.
+//! same id on the replaced and the new route, the same id twice, overlapping
+//! sets. Each id carries one **witness** hold admitted under a call of its
+//! own, so a surplus release shows as a count below the witness instead of
+//! vanishing under the store's floor at 0. The store is probed per id while
+//! the call is up and drained to the witnesses after it ends; the witnesses
+//! are then released, so the reaped check reads the store empty.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,12 +28,12 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
 use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut};
+use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut, LimiterLeak};
 use call::ReleaseEventKind;
-use call_limiter::wire::{AdmitEntry, Hold};
-use call_limiter::{AdmitResult, LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::wire::AdmitEntry;
+use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use sip_clock::Clock;
@@ -46,12 +47,10 @@ const ALICE_REALIGN: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN 
 const IDS: [&str; 3] = ["x", "y", "z"];
 
 /// A real `LimiterServer` on the simulated HTTP fabric, so every admit is a
-/// genuine hold the store counts, with one witness hold per id in [`IDS`].
+/// genuine set the store counts, with one witness hold per id in [`IDS`].
 struct LimiterRig {
-    store: Arc<WindowStore>,
+    store: Arc<CallStore>,
     client: Arc<dyn CallLimiter>,
-    /// The window the witness holds landed in.
-    witness_window: i64,
     _server: Box<dyn HttpServerHandle>,
 }
 
@@ -77,20 +76,30 @@ impl LimiterRig {
     /// store reads empty for the reaped check.
     async fn expect_drained(&self, why: &str) {
         self.expect_holds([0, 0, 0], why).await;
-        let witnesses: Vec<Hold> =
-            IDS.iter().map(|id| Hold { id: (*id).into(), window: self.witness_window }).collect();
-        self.store.release(&witnesses);
+        for id in IDS {
+            self.store.release(&format!("witness-{id}"));
+        }
+    }
+
+    /// Extend every witness's lease.
+    fn refresh_witnesses(&self) {
+        for id in IDS {
+            assert!(self.store.refresh(&format!("witness-{id}")), "witness on {id} is known");
+        }
     }
 }
 
-async fn limiter_rig() -> LimiterRig {
+async fn limiter_rig_with(cfg: LimiterConfig) -> LimiterRig {
     let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
-    let witness_window = store.current_window();
+    let store = Arc::new(CallStore::new(cfg, Clock::test_at(0)));
     for id in IDS {
-        let witness = store.admit(&[AdmitEntry { id: id.into(), limit: 100 }]);
-        assert_eq!(witness, AdmitResult::Admitted { window: witness_window }, "witness on {id}");
+        let witness = store.admit(
+            &format!("witness-{id}"),
+            &[AdmitEntry { id: id.into(), limit: 100 }],
+            false,
+        );
+        assert_eq!(witness, AdmitResult::Admitted, "witness on {id}");
     }
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = http.serve(laddr, server).await.unwrap();
@@ -99,7 +108,11 @@ async fn limiter_rig() -> LimiterRig {
     // production-sized budget could expire between.
     let client: Arc<dyn CallLimiter> =
         Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_secs(2)));
-    LimiterRig { store, client, witness_window, _server: handle }
+    LimiterRig { store, client, _server: handle }
+}
+
+async fn limiter_rig() -> LimiterRig {
+    limiter_rig_with(LimiterConfig::default()).await
 }
 
 /// A limiter whose `n`-th admit (1-based) is unavailable — the fail-open
@@ -112,17 +125,22 @@ struct UnavailableOnAdmit {
 
 #[async_trait]
 impl CallLimiter for UnavailableOnAdmit {
-    async fn admit(&self, entries: &[LimiterEntry]) -> AdmitOutcome {
+    async fn admit(
+        &self,
+        call_ref: &str,
+        entries: &[LimiterEntry],
+        release_on_refusal: bool,
+    ) -> AdmitOutcome {
         if self.admits.fetch_add(1, Ordering::SeqCst) + 1 == self.n {
             return AdmitOutcome::Unavailable;
         }
-        self.inner.admit(entries).await
+        self.inner.admit(call_ref, entries, release_on_refusal).await
     }
-    async fn release(&self, holds: &[LimiterHold]) {
-        self.inner.release(holds).await
+    async fn release(&self, call_ref: &str) {
+        self.inner.release(call_ref).await
     }
-    async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
-        self.inner.refresh(holds).await
+    async fn refresh(&self, call_ref: &str) -> RefreshOutcome {
+        self.inner.refresh(call_ref).await
     }
 }
 
@@ -192,7 +210,8 @@ fn one_failover(
 /// Bob busies out, carol rings then answers, alice hangs up: the failover
 /// shape every single-failover scenario shares. `before` and `after` are the
 /// call's expected holds on [`IDS`] while bob is dialed and once the failover
-/// route is applied.
+/// route is applied. Returns the SUT and the rig once the call is reaped, for
+/// the caller's own drain and reaped checks.
 async fn busy_then_failover_answered(
     initial: &'static [&'static str],
     failover: &'static [&'static str],
@@ -201,7 +220,7 @@ async fn busy_then_failover_answered(
     name: &str,
     before: [i64; 3],
     after: [i64; 3],
-) {
+) -> (B2buaSut, LimiterRig) {
     let h = Harness::new(name);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -218,7 +237,7 @@ async fn busy_then_failover_answered(
     bob_uas.respond(486, "Busy Here").await;
     bob.receive("ACK").await;
 
-    // ── the failover route is applied: its holds replace the initial ones ──
+    // ── the failover route is applied: its set replaces the initial one ───
     let mut carol_uas = carol.receive("INVITE").await;
     carol_uas.respond(180, "Ringing").await;
     call.expect(180).await;
@@ -234,25 +253,35 @@ async fn busy_then_failover_answered(
     carol.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    rig.expect_drained("the hangup releases the failover route's holds").await;
-    b2bua.assert_fully_reaped();
-
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
     let _ = h.finish().await;
+    (b2bua, rig)
+}
+
+/// The shape above, drained: the hangup releases the failover route's set.
+async fn busy_then_failover_answered_drained(
+    initial: &'static [&'static str],
+    failover: &'static [&'static str],
+    name: &str,
+    before: [i64; 3],
+    after: [i64; 3],
+) {
+    let rig = limiter_rig().await;
+    let limiter = rig.client.clone();
+    let (b2bua, rig) =
+        busy_then_failover_answered(initial, failover, rig, limiter, name, before, after).await;
+    rig.expect_drained("the hangup releases the failover route's holds").await;
+    b2bua.assert_fully_reaped();
 }
 
 /// Initial `[x, y]`, failover `[y, z]` (an overlapping set): once the failover
 /// is applied the call holds `y` and `z` once each and nothing on `x`.
 #[tokio::test(start_paused = true)]
 async fn failover_route_replaces_the_initial_route_holds() {
-    let rig = limiter_rig().await;
-    let limiter = rig.client.clone();
-    busy_then_failover_answered(
+    busy_then_failover_answered_drained(
         &["x", "y"],
         &["y", "z"],
-        rig,
-        limiter,
         "reroute-holds-failover-overlapping",
         [1, 1, 0],
         [0, 1, 1],
@@ -260,17 +289,13 @@ async fn failover_route_replaces_the_initial_route_holds() {
     .await;
 }
 
-/// Initial `[x, x]` (two holds on one `(id, window)`), failover `[x]`: both
-/// replaced holds are released, the failover's one remains.
+/// Initial `[x, x]` (the same id twice), failover `[x]`: the call reduces
+/// `x` and holds it once.
 #[tokio::test(start_paused = true)]
 async fn failover_route_on_the_same_id_holds_it_once() {
-    let rig = limiter_rig().await;
-    let limiter = rig.client.clone();
-    busy_then_failover_answered(
+    busy_then_failover_answered_drained(
         &["x", "x"],
         &["x"],
-        rig,
-        limiter,
         "reroute-holds-failover-same-id",
         [2, 0, 0],
         [1, 0, 0],
@@ -278,16 +303,13 @@ async fn failover_route_on_the_same_id_holds_it_once() {
     .await;
 }
 
-/// A failover route stating no limiter replaces `[x, y]` with nothing.
+/// A failover route stating no limiter replaces `[x, y]` with nothing: the
+/// call is uncounted from then on.
 #[tokio::test(start_paused = true)]
 async fn failover_route_without_limiters_releases_the_initial_route_holds() {
-    let rig = limiter_rig().await;
-    let limiter = rig.client.clone();
-    busy_then_failover_answered(
+    busy_then_failover_answered_drained(
         &["x", "y"],
         &[],
-        rig,
-        limiter,
         "reroute-holds-failover-unlimited",
         [1, 1, 0],
         [0, 0, 0],
@@ -296,26 +318,42 @@ async fn failover_route_without_limiters_releases_the_initial_route_holds() {
 }
 
 /// The failover route `[y, z]`'s admit fails open (the limiter is unavailable
-/// for that admit only): the call proceeds uncounted, and `[x]`, the replaced
-/// route's hold, is released all the same.
+/// for that admit only): the call proceeds uncounted. Its replaced set `[x]`
+/// stays on the limiter — a failed admit is never released, so nothing frees
+/// it but its lease — and the hangup releases nothing. The witnesses, whose
+/// leases are refreshed, outlive it.
 #[tokio::test(start_paused = true)]
-async fn failover_route_admitted_fail_open_releases_the_initial_route_holds() {
-    let rig = limiter_rig().await;
+async fn failover_route_admitted_fail_open_leaves_the_call_uncounted() {
+    let rig = limiter_rig_with(LimiterConfig { lease_sec: 20 }).await;
     let limiter: Arc<dyn CallLimiter> = Arc::new(UnavailableOnAdmit {
         n: 2,
         admits: AtomicUsize::new(0),
         inner: rig.client.clone(),
     });
-    busy_then_failover_answered(
+    let (b2bua, rig) = busy_then_failover_answered(
         &["x"],
         &["y", "z"],
         rig,
         limiter,
         "reroute-holds-failover-fail-open",
         [1, 0, 0],
-        [0, 0, 0],
+        [1, 0, 0],
     )
     .await;
+    // The call is over and reaped; the fail-open route's set never reached
+    // the limiter and the replaced `[x]` was never released.
+    assert_eq!(rig.all_holds(), [1, 0, 0], "the replaced set stays until its lease lapses");
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released, count.failed_open), (1, 0, 1));
+
+    for _ in 0..22 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    rig.store.sweep_now();
+    assert_eq!(rig.store.stats().lease_expired_calls, 1, "the uncounted call's set lapsed");
+    rig.expect_drained("only the lease frees a set the call never released").await;
+    b2bua.assert_fully_reaped_leaving(LimiterLeak { unreleased: 1, stored: 0 });
 }
 
 /// Two consecutive failovers `[x]` → `[y]` → `[z]`: at each point only the
@@ -374,13 +412,14 @@ async fn consecutive_failovers_hold_only_the_latest_route() {
     let _ = h.finish().await;
 }
 
-/// A refused replacement route keeps the call's holds. The initial route
+/// A refused replacement route releases the call's set. The initial route
 /// holds `x`; bob busies out and the failover route `[y, z]` is refused on its
-/// second entry (`z` at its cap): nothing is incremented, not even `y`, and
-/// the call still holds `x` while the limiter-reject re-consult is in flight.
-/// The re-consult's route `[z]` (room this time) is applied and replaces `x`.
+/// second entry (`z` at its cap): nothing is counted, not even `y`, and the
+/// call's `x` is released in the same step, while the limiter-reject
+/// re-consult is still in flight. The re-consult's route `[z]` (room this
+/// time) is applied as the call's set.
 #[tokio::test(start_paused = true)]
-async fn refused_failover_route_keeps_the_call_holds_until_a_route_is_applied() {
+async fn refused_failover_route_releases_the_call_holds_before_the_re_consult() {
     let h = Harness::new("reroute-holds-refused-failover");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -400,11 +439,11 @@ async fn refused_failover_route_keeps_the_call_holds_until_a_route_is_applied() 
                     if req.failure.origin == "call_limiter" {
                         return CallTreatment::Route(limited_route("127.0.0.1", 5071, &["z"]));
                     }
-                    // `z` at cap 0 is refused (its witness already holds one).
+                    // `z` at cap 1 is refused (its witness already holds one).
                     let mut r = limited_route("127.0.0.1", 5099, &[]);
                     r.call_limiter = vec![
                         CallLimiterEntry { id: "y".into(), limit: 10 },
-                        CallLimiterEntry { id: "z".into(), limit: 0 },
+                        CallLimiterEntry { id: "z".into(), limit: 1 },
                     ];
                     CallTreatment::Route(r)
                 })
@@ -430,16 +469,21 @@ async fn refused_failover_route_keeps_the_call_holds_until_a_route_is_applied() 
         vec!["external".to_string()],
         "the failover route was answered; the re-consult is still delayed",
     );
-    rig.expect_holds([1, 0, 0], "the refused route incremented nothing; x stays held").await;
+    // Read at once: a settle would wait through the delayed re-consult.
+    assert_eq!(
+        rig.all_holds(),
+        [0, 0, 0],
+        "holds on {IDS:?}: the refused route counted nothing and released x",
+    );
 
-    // ── the re-consult's route is applied and replaces x ────────────────────
+    // ── the re-consult's route is applied as the call's set ────────────────
     let mut carol_uas = carol.receive("INVITE").await;
     assert_eq!(
         *origins.lock().unwrap(),
         vec!["external".to_string(), "call_limiter".to_string()],
         "the refused route re-consulted with the limiter origin",
     );
-    rig.expect_holds([0, 0, 1], "the applied route's z replaces x").await;
+    rig.expect_holds([0, 0, 1], "the applied route's z is the call's set").await;
     carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     let mut dialog = call.ack().await;
@@ -462,14 +506,13 @@ async fn refused_failover_route_keeps_the_call_holds_until_a_route_is_applied() 
     );
 }
 
-/// The fold that replaces the holds also ends the call. Initial `[x, x]`, the
+/// The fold that replaces the set also ends the call. Initial `[x, x]`, the
 /// failover route `[x]` points at a host the target admission gate refuses:
-/// the fold's turn records the new hold, releases the two replaced ones and
-/// terminates the call, whose settle releases the new one. Three releases for
-/// three holds on one `(x, window)`: the replaced holds' releases never stand
-/// in for the new hold's.
+/// the fold's dispatching task replaced the set with `[x]`, the fold's turn
+/// states it and terminates the call, whose settle releases the call once.
+/// The store drains to the witnesses.
 #[tokio::test(start_paused = true)]
-async fn failover_fold_that_ends_the_call_releases_every_hold_once() {
+async fn failover_fold_that_ends_the_call_releases_the_call_once() {
     let h = Harness::new("reroute-holds-fold-ends-the-call");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -495,7 +538,9 @@ async fn failover_fold_that_ends_the_call_releases_every_hold_once() {
     // ── the fold's CreateLeg is refused: the call ends in the fold's turn ──
     call.expect(503).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    rig.expect_drained("every hold on (x, window) is released exactly once").await;
+    rig.expect_drained("the one release frees the set the fold left").await;
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released), (3, 3), "two holds replaced, one released");
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;

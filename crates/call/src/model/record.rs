@@ -109,17 +109,28 @@ pub struct PrackedProvisional {
     pub rseq: i64,
 }
 
-/// Active limiter entry on a call.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The call's admission state on the call limiter, which keys every hold by
+/// `call_ref`: whether the limiter counts the call, and the ids of the set it
+/// last admitted (observability: the CDR and the decision snapshot name them).
+/// A counted call refreshes its lease while it lives and owes one release at
+/// its end; an uncounted one (no limiter stated, or an admit that failed
+/// open) never refreshes or releases.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLimiterState {
-    pub limiter_id: String,
-    pub limit: i64,
-    /// Rounded timestamp when this call's count was INCRed.
-    pub origin_window: i64,
-    /// Whether the matching INCR actually succeeded. `Some(false)` = fail-open
-    /// admission → the termination DECR must be skipped. `None` on pre-fix
-    /// entries (which all reflect successful INCRs).
-    pub increment_succeeded: Option<bool>,
+    pub counted: bool,
+    pub ids: Vec<String>,
+}
+
+impl CallLimiterState {
+    /// The state after an admitted set: counted iff the set is not empty.
+    pub fn admitted(ids: Vec<String>) -> Self {
+        Self { counted: !ids.is_empty(), ids }
+    }
+
+    /// The state of a call the limiter does not count.
+    pub fn uncounted() -> Self {
+        Self::default()
+    }
 }
 
 /// A single `name: value` header line.
@@ -213,7 +224,9 @@ pub struct Call {
     pub billing_context: Option<String>,
     /// Snapshot of the original a-leg INVITE; never mutated.
     pub a_leg_invite: ALegInviteSnapshot,
-    pub limiter_entries: Vec<CallLimiterState>,
+    /// The call's admission state on the call limiter, keyed by `call_ref`.
+    #[serde(default)]
+    pub limiter: CallLimiterState,
     /// Serializable timer intents (not runtime fibers).
     pub timers: Vec<TimerEntry>,
     pub cdr_events: Vec<CdrEvent>,

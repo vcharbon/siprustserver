@@ -423,7 +423,7 @@ pub struct B2buaSutBuilder {
     decision: Arc<dyn CallDecisionEngine>,
     outbound_proxy: Option<(String, u16)>,
     limiter: Option<Arc<dyn CallLimiter>>,
-    limiter_store: Option<Arc<call_limiter::WindowStore>>,
+    limiter_store: Option<Arc<call_limiter::CallStore>>,
     services: Vec<b2bua::rules::ServiceDef>,
     tune: Box<dyn FnOnce(&mut B2buaConfig)>,
     overload: Option<b2bua::overload::OverloadSignal>,
@@ -467,7 +467,7 @@ impl B2buaSutBuilder {
 
     /// The store behind the custom [`limiter`](Self::limiter): the reaped
     /// check then also requires its count back to 0.
-    pub fn limiter_store(mut self, store: Arc<call_limiter::WindowStore>) -> Self {
+    pub fn limiter_store(mut self, store: Arc<call_limiter::CallStore>) -> Self {
         self.limiter_store = Some(store);
         self
     }
@@ -929,7 +929,7 @@ impl B2buaSut {
     /// The store the reaped check reads: the default limiter's, or the one
     /// registered with [`B2buaSutBuilder::limiter_store`]. Per-id probes read
     /// it with `held(id)`.
-    pub fn limiter_store(&self) -> Option<&Arc<call_limiter::WindowStore>> {
+    pub fn limiter_store(&self) -> Option<&Arc<call_limiter::CallStore>> {
         self.limiter.store()
     }
 

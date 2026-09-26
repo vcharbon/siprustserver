@@ -2,7 +2,7 @@
 //! the router's `route_result_payload`) and the parity actions both async
 //! route folds — `failover-create-leg` (`call-failure-result`) and
 //! `release-reroute` (`call-release-result`) — must apply identically, and the
-//! reader of the limiter holds both carry ([`route_fold_holds`]). One parser +
+//! reader of the limiter state both carry ([`route_fold_holds`]). One parser +
 //! one parity-action builder so the folds cannot drift from each other or from
 //! the initial `apply_route`.
 
@@ -48,8 +48,9 @@ pub(crate) struct RouteFold {
     /// `update_body` wire shape: absent = keep A's INVITE body, null = drop
     /// (`Some(vec![])`), string = substitute.
     pub body_override: Option<Vec<u8>>,
-    /// Limiter holds the dispatching task already admitted: `(entries, window)`.
-    pub limiter_holds: Option<(Vec<(String, i64)>, i64)>,
+    /// The call's admission state after the dispatching task replaced its
+    /// set on the limiter; `None` on a payload that carries none.
+    pub limiter: Option<call::CallLimiterState>,
 }
 
 /// Parse a route-shaped payload. `None` only when the mandatory
@@ -89,41 +90,38 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
             Some(serde_json::Value::String(s)) => Some(s.clone().into_bytes()),
             Some(_) => None,
         },
-        limiter_holds: admitted_holds(payload),
+        limiter: admitted_state(payload),
     })
 }
 
 /// The `(topic, outcome)` of the two route-shaped folds: a failover route and
-/// a release reroute. Only these carry holds their dispatching task admitted.
+/// a release reroute. Only these carry a limiter state their dispatching task
+/// settled.
 const ROUTE_FOLDS: [(&str, &str); 2] =
     [("call-failure-result", "failover"), ("call-release-result", "reroute")];
 
-/// The limiter holds a route fold carries, as `(entries, window)`: admitted
-/// by its dispatching task before the fold was posted, so owned by the call
-/// the fold names from then on — recorded on its ledger, or released when no
-/// call is left to record them. `None` for any other event, or a route fold
-/// that admitted nothing.
-pub(crate) fn route_fold_holds(event: &CallEvent) -> Option<(Vec<(String, i64)>, i64)> {
+/// The call's admission state a route fold carries: its dispatching task
+/// replaced the call's set on the limiter before the fold was posted, so the
+/// call the fold names owns that set from then on — stated on its record, or
+/// released when no call is left to state it on. `None` for any other event,
+/// or a route fold carrying no state.
+pub(crate) fn route_fold_holds(event: &CallEvent) -> Option<call::CallLimiterState> {
     let CallEvent::InternalEvent { topic, outcome, payload, .. } = event else {
         return None;
     };
     if !ROUTE_FOLDS.iter().any(|(t, o)| t == topic && o == outcome) {
         return None;
     }
-    admitted_holds(payload)
+    admitted_state(payload)
 }
 
-/// A route payload's `call_limiter` object: `None` when absent or empty.
-fn admitted_holds(payload: &serde_json::Value) -> Option<(Vec<(String, i64)>, i64)> {
+/// A route payload's `call_limiter` object: `None` when absent or malformed.
+fn admitted_state(payload: &serde_json::Value) -> Option<call::CallLimiterState> {
     let o = payload.get("call_limiter")?.as_object()?;
-    let window = o.get("window")?.as_i64()?;
-    let entries: Vec<(String, i64)> = o
-        .get("entries")?
-        .as_array()?
-        .iter()
-        .filter_map(|e| Some((e.get("id")?.as_str()?.to_string(), e.get("limit")?.as_i64()?)))
-        .collect();
-    (!entries.is_empty()).then_some((entries, window))
+    let counted = o.get("counted")?.as_bool()?;
+    let ids: Vec<String> =
+        o.get("ids")?.as_array()?.iter().filter_map(|e| Some(e.as_str()?.to_string())).collect();
+    Some(call::CallLimiterState { counted, ids })
 }
 
 /// The decision's `label` on a fold payload, read by the router's fold mark
@@ -151,10 +149,10 @@ pub(crate) fn parse_service_ext(payload: &serde_json::Value) -> call::ExtMap {
 /// The output-parity bookkeeping actions BOTH async route folds emit before
 /// their `CreateLeg` — what the initial `apply_route` applies at route time:
 /// features (incl. the GlobalDuration re-arm), service_ext merge, the
-/// release-subscription registry, and the limiter holds (+ the LimiterRefresh
-/// cadence that keeps them alive). The applied route owns the call's holds:
-/// the replaced route's are released and the fold's admitted ones, if any,
-/// take their place.
+/// release-subscription registry, and the limiter state (+ the LimiterRefresh
+/// cadence that keeps a counted call's lease alive). The applied route owns
+/// the call's set: the dispatching task replaced it on the limiter, and the
+/// fold states whether the call is counted.
 pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> Vec<RuleAction> {
     let mut actions = Vec::new();
     if let Some(f) = &fold.features {
@@ -179,8 +177,13 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
         // like `apply_route` on the initial path.
         actions.push(RuleAction::SetSubscriptions { events: events.clone() });
     }
-    actions.push(RuleAction::ReplaceLimiterHolds { holds: fold.limiter_holds.clone() });
-    if fold.limiter_holds.is_some() {
+    if let Some(limiter) = &fold.limiter {
+        actions.push(RuleAction::ReplaceLimiterHolds {
+            counted: limiter.counted,
+            ids: limiter.ids.clone(),
+        });
+    }
+    if fold.limiter.as_ref().is_some_and(|l| l.counted) {
         actions.push(RuleAction::ScheduleTimer {
             timer_type: TimerType::LimiterRefresh,
             delay: TimerDelay::secs(ctx.config.limiter_refresh_sec),

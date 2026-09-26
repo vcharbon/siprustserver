@@ -7,7 +7,7 @@
 //! The whole topology rides ONE fake clock (`#[tokio::test(start_paused = true)]`)
 //! through `FailoverHarness::advance`; every cell routes through the simulated LB
 //! and runs with the **genuine limiter logic over the simulated HTTP fabric** —
-//! the b2bua's `HttpCallLimiter` client → a real `LimiterServer` + `WindowStore`,
+//! the b2bua's `HttpCallLimiter` client → a real `LimiterServer` + `CallStore`,
 //! but over `SimulatedHttpNetwork` (no socket) on the same fake `Clock::test_at(0)`
 //! (no wall-clock). The HTTP round-trips + window/TTL expiry advance with
 //! `FailoverHarness::advance`, exactly like the SIP/repl sims, so the
@@ -24,7 +24,7 @@ use b2bua::decision::{
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
@@ -106,8 +106,11 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     drop((b1_lane, b2_lane));
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
+    // Its lease outlives the replica TTL, so a set the crashed primary never
+    // releases is freed by the backup's reap, never by the lease: the sweep
+    // proves the release.
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LimiterConfig { lease_sec: 3600 }, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 

@@ -221,12 +221,7 @@ pub fn representative_call() -> Call {
             ],
             body: SDP_BODY.to_vec(),
         },
-        limiter_entries: vec![CallLimiterState {
-            limiter_id: "subscriber:alice@example.com".into(),
-            limit: 5,
-            origin_window: 1_779_440_000,
-            increment_succeeded: Some(true),
-        }],
+        limiter: CallLimiterState::admitted(vec!["subscriber:alice@example.com".into()]),
         timers: vec![
             TimerEntry {
                 id: "timer-no-answer-a".into(),
@@ -846,14 +841,8 @@ fn arb_cdr() -> impl Strategy<Value = CdrEvent> {
         })
 }
 fn arb_limiter() -> impl Strategy<Value = CallLimiterState> {
-    (arb_tag(), any::<i64>(), any::<i64>(), proptest::option::of(any::<bool>())).prop_map(
-        |(limiter_id, limit, origin_window, increment_succeeded)| CallLimiterState {
-            limiter_id,
-            limit,
-            origin_window,
-            increment_succeeded,
-        },
-    )
+    (any::<bool>(), proptest::collection::vec(arb_tag(), 0..3))
+        .prop_map(|(counted, ids)| CallLimiterState { counted, ids })
 }
 fn arb_tagmap() -> impl Strategy<Value = TagMapping> {
     (arb_tag(), arb_tag(), arb_tag()).prop_map(|(a_tag, b_leg_id, b_tag)| TagMapping {
@@ -946,7 +935,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
         arb_aleg_invite(),
     );
     let collections = (
-        proptest::collection::vec(arb_limiter(), 0..3),
+        arb_limiter(),
         proptest::collection::vec(arb_timer(), 0..4),
         proptest::collection::vec(arb_cdr(), 0..4),
         proptest::collection::vec(arb_tagmap(), 0..3),
@@ -1010,7 +999,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
     (head, collections, state, trace, tail, release).prop_map(
         |(
             (call_ref, a_leg, b_legs, active_peer, callback_context, billing_context, a_leg_invite),
-            (limiter_entries, timers, cdr_events, tag_map),
+            (limiter, timers, cdr_events, tag_map),
             (state, created_at, a_leg_pending_vias, a_leg_pending_cseq),
             (trace_id, root_span_id, sampled, worker_index, topology),
             (
@@ -1041,7 +1030,7 @@ pub fn arb_call() -> impl Strategy<Value = Call> {
             callback_context,
             billing_context,
             a_leg_invite,
-            limiter_entries,
+            limiter,
             timers,
             cdr_events,
             state,

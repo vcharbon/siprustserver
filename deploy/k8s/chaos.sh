@@ -444,7 +444,7 @@ orphan_kill() {
 # limiter FUNCTION only: while it is down the b2bua fails OPEN (admits with no
 # holds, 150ms budget), so calls keep flowing — the cap simply stops being
 # enforced. The Deployment (strategy: Recreate) brings a fresh, empty pod back;
-# active calls' refresh timers re-populate its counters within ~LIMITER_WINDOW.
+# the calls admitted before it are released on it as no-ops.
 limiter_kill() {
   log "CHAOS: killing the shared call-limiter pod (b2bua fails open while it's down)"
   push_metric 'sip_chaos_event{type="limiter_kill",phase="start"} 1'

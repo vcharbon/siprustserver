@@ -395,8 +395,8 @@ pub struct RunnerEnv {
     pub limiter_url: String,
     /// `LIMITER_TIMEOUT_MS` — per-request fail-open budget (default 150).
     pub limiter_timeout_ms: u64,
-    /// `LIMITER_WINDOW_SECONDS` — refresh cadence; MUST match the limiter
-    /// service window (default 300).
+    /// `LIMITER_REFRESH_SECONDS` — how often a counted call extends its lease;
+    /// below the limiter service's `LIMITER_LEASE_SECONDS` (default 40).
     pub limiter_refresh_sec: i64,
     /// `B2BUA_DRAIN_GRACE_MS` — SIGTERM drain grace before exit (default 5000).
     pub drain_grace_ms: u64,
@@ -502,7 +502,7 @@ impl RunnerEnv {
             cdr_captured_headers,
             limiter_url: env_or("LIMITER_URL", ""),
             limiter_timeout_ms: env_or("LIMITER_TIMEOUT_MS", "150").parse().unwrap_or(150),
-            limiter_refresh_sec: env_or("LIMITER_WINDOW_SECONDS", "300").parse().unwrap_or(300),
+            limiter_refresh_sec: env_or("LIMITER_REFRESH_SECONDS", "40").parse().unwrap_or(40),
             drain_grace_ms: env_or("B2BUA_DRAIN_GRACE_MS", "5000").parse().unwrap_or(5000),
             drain_min_ms: env_or("B2BUA_DRAIN_MIN_MS", "1000").parse().unwrap_or(1000),
             capacity: capacity_env::capacity_from_lookup(|k| env::var(k).ok())

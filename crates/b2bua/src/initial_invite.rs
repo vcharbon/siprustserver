@@ -198,7 +198,7 @@ pub fn build_initial_call(
         callback_context: None,
         billing_context: None,
         a_leg_invite,
-        limiter_entries: vec![],
+        limiter: Default::default(),
         timers: vec![],
         cdr_events: vec![CdrEvent {
             event_type: CdrEventType::InviteReceived,

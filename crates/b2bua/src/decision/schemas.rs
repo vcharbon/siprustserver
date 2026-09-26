@@ -313,7 +313,7 @@ pub struct CallSnapshot {
     pub sm_cursors: BTreeMap<String, String>,
     /// What the routing decision activated.
     pub features: Option<FeatureActivations>,
-    /// Live limiter holds on the call.
+    /// The ids of the limiter set the call last admitted.
     pub limiter_ids: Vec<String>,
 }
 
@@ -352,7 +352,7 @@ impl CallSnapshot {
                 .map(|(m, s)| (m.as_str().to_string(), s.as_str().to_string()))
                 .collect(),
             features: call.features.clone(),
-            limiter_ids: call.limiter_entries.iter().map(|e| e.limiter_id.clone()).collect(),
+            limiter_ids: call.limiter.ids.clone(),
         }
     }
 }

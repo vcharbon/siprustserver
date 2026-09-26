@@ -28,7 +28,7 @@ use b2bua::decision::{
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::trace::{install_process_traces, CallTraces};
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_lost_no_cdr, worker_ordinals, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
 };
@@ -99,7 +99,7 @@ async fn a_takeover_opens_this_nodes_own_root_span_linked_to_the_nominals() {
 
     // The shared limiter lives outside the workers, so it survives the crash.
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http
         .serve(LIMITER_ADDR.parse().expect("limiter addr"), server)

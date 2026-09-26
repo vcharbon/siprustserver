@@ -180,17 +180,18 @@ async fn discharge_folded_terminal(
 /// reclaim it (crashed for good, past the replica TTL = `reboot_budget`) must NOT be
 /// left to pin its limiter slot or leak its replica body forever. So this pass, in
 /// order:
-///   1. for each **expired deferred terminal**, release the call's limiter hold(s)
-///      (the body carries `limiter_entries`; this is the SAME decrement the discharge
-///      funnel would emit) and count it as a lost-CDR cleanup — the accepted
-///      double-failure (primary down AND never returns): limiter freed, memory freed,
-///      **CDR lost**.
+///   1. for each **expired deferred terminal**, release the call on the limiter
+///      (the body carries `limiter.counted`; this is the SAME `release(call_ref)`
+///      the discharge funnel emits) and count it as a lost-CDR cleanup — the
+///      accepted double-failure (primary down AND never returns): limiter freed,
+///      memory freed, **CDR lost**.
 ///   2. `reap_replica` then physically evicts every expired body (the just-released
 ///      terminals + the missed-delete ghosts) and prunes the resurrection tombstones.
-/// A primary that reboots *inside* `reboot_budget` reclaims and discharges first, then
-/// its propagated delete evicts the backup's copy — so the reclaim-discharge and this
-/// lossy cleanup are mutually exclusive by the TTL boundary (no double limiter
-/// release). Spawned as a paced task by `b2bua_core`.
+///
+/// A primary that reboots *inside* `reboot_budget` reclaims and discharges first;
+/// when its propagated delete never reaches this backup, this pass releases the
+/// same call a second time, which the limiter applies as a no-op (the release is
+/// keyed by `call_ref`). Spawned as a paced task by `b2bua_core`.
 pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
     for terminal in ctx.state.expired_terminal_fallbacks(now_ms).await {
         // No per-call lock: this is a `bak:` Element the backup self-released (never
@@ -207,15 +208,13 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
     ctx.state.reap_replica(now_ms).await;
 }
 
-/// Release the cluster-wide limiter hold(s) a never-reclaimed deferred terminal
+/// Release the cluster-wide limiter set a never-reclaimed deferred terminal
 /// still owns, WITHOUT writing a CDR or propagating a delete. Mirrors the
-/// `LimiterObligations` derivation (skip fail-open admissions) so the decrement
-/// matches the increment the primary made on admission exactly once. The backup is
-/// the only node that can free this slot once its primary is dead for good.
+/// `LimiterObligations` derivation (an uncounted call owes nothing). The backup
+/// is the only node that can free this slot once its primary is dead for good.
 async fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
-    let holds = crate::limiter::live_holds(call);
-    if !holds.is_empty() {
-        ctx.limiter.release(&holds).await;
+    if call.limiter.counted {
+        ctx.limiter.release(&call.call_ref).await;
     }
 }
 

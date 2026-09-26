@@ -1,15 +1,17 @@
-//! Call-limiter seam — the b2bua side of the sliding-window limiter.
+//! Call-limiter seam — the b2bua side of the limiter keyed by the call.
 //!
-//! The honest-outcome trait: [`CallLimiter::admit`] reports
-//! [`AdmitOutcome::Admitted`] / [`AdmitOutcome::Rejected`] /
-//! [`AdmitOutcome::Unavailable`], and the **call site owns the fail-open
-//! policy** (`apply_route` maps `Unavailable` → admit with no holds). admit is
-//! batched + transactional: every entry for a call increments together or not
-//! at all.
+//! Every request names the call (`call_ref`): [`CallLimiter::admit`] replaces
+//! the call's whole set on the server, checked net of what the call already
+//! holds, and reports [`AdmitOutcome::Admitted`] / [`AdmitOutcome::Rejected`]
+//! / [`AdmitOutcome::Released`] / [`AdmitOutcome::Unavailable`];
+//! [`CallLimiter::release`] drops the set (idempotent);
+//! [`CallLimiter::refresh`] extends its lease. The **call site owns the
+//! fail-open policy**: an `Unavailable` admit leaves the call uncounted, and
+//! an uncounted call never refreshes or releases.
 //!
 //! The HTTP client implementation lives in [`crate::limiter_http`]; this module
-//! is just the trait + a no-op (used when `LIMITER_URL` is unset and in tests
-//! that don't exercise limits).
+//! is the trait + a no-op (used when `LIMITER_URL` is unset and in tests that
+//! don't exercise limits).
 
 use async_trait::async_trait;
 
@@ -22,73 +24,73 @@ pub struct LimiterEntry {
     pub limit: i64,
 }
 
-/// A recorded admission: an id and the window its increment landed in. The b2bua
-/// stores these on the call and replays them on release / refresh.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LimiterHold {
-    /// The limiter id.
-    pub limiter_id: String,
-    /// The window timestamp the increment landed in.
-    pub window: i64,
-}
-
-/// The honest outcome of a transactional admit.
+/// The honest outcome of one admit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdmitOutcome {
-    /// Every entry was incremented atomically at this server-computed window.
-    Admitted {
-        /// The shared window all entries landed in.
-        window: i64,
-    },
-    /// At least one entry was over cap; nothing was incremented.
+    /// The call's set is now the entries sent; the call is counted.
+    Admitted,
+    /// An id the call adds is at its cap; the call's set is what it was, or
+    /// nothing when the admit asked for release on refusal.
     Rejected {
-        /// The first id found over cap.
+        /// The first id found at its cap.
         limiter_id: String,
     },
-    /// The backend was unreachable / slow / errored. The caller decides what to
-    /// do (b2bua: fail open — admit with no holds).
+    /// The call was released within the last lease: the server holds nothing
+    /// for it and re-creates nothing.
+    Released,
+    /// The backend was unreachable / slow / errored. The caller decides what
+    /// to do (b2bua: fail open — the call runs uncounted).
     Unavailable,
 }
 
-/// The cluster-wide hold(s) a call still owns: every recorded limiter entry
-/// whose admission increment succeeded (a fail-open admission records
-/// `increment_succeeded == Some(false)` and holds nothing). The decrement /
-/// refresh derived from this list matches the increment made at admission
-/// exactly once — every caller that replays a call's holds derives them here.
-pub(crate) fn live_holds(call: &call::Call) -> Vec<LimiterHold> {
-    call.limiter_entries
-        .iter()
-        .filter(|e| e.increment_succeeded != Some(false))
-        .map(|e| LimiterHold { limiter_id: e.limiter_id.clone(), window: e.origin_window })
-        .collect()
+/// The honest outcome of one refresh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// The call's lease was extended.
+    Known,
+    /// The server holds no set for the call (released or lapsed); nothing was
+    /// re-created.
+    Unknown,
+    /// The backend was unreachable / slow / errored.
+    Unavailable,
 }
 
 /// Admission/release/refresh seam for per-call concurrency limits.
 #[async_trait]
 pub trait CallLimiter: Send + Sync {
-    /// Try to admit one call carrying `entries` (all-or-none).
-    async fn admit(&self, entries: &[LimiterEntry]) -> AdmitOutcome;
-    /// Release the recorded holds (decrement each, best-effort).
-    async fn release(&self, holds: &[LimiterHold]);
-    /// Migrate each hold to the current window; returns the updated holds. On
-    /// failure the holds are returned unchanged.
-    async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold>;
+    /// Replace the call's set with `entries` (all-or-none, net of the set the
+    /// call holds). `release_on_refusal` drops the call's current set in the
+    /// same step when a cap refuses.
+    async fn admit(
+        &self,
+        call_ref: &str,
+        entries: &[LimiterEntry],
+        release_on_refusal: bool,
+    ) -> AdmitOutcome;
+    /// Drop the call's set, best-effort. Idempotent on the server.
+    async fn release(&self, call_ref: &str);
+    /// Extend the call's lease.
+    async fn refresh(&self, call_ref: &str) -> RefreshOutcome;
 }
 
-/// Always admits (with no holds); release/refresh are no-ops. Used when
-/// `LIMITER_URL` is unset, preserving today's non-limiting behaviour.
+/// Always unavailable: every admit fails open, so nothing is ever released or
+/// refreshed. Used when `LIMITER_URL` is unset, preserving the non-limiting
+/// behaviour.
 #[derive(Clone, Default)]
 pub struct NoopLimiter;
 
 #[async_trait]
 impl CallLimiter for NoopLimiter {
-    async fn admit(&self, _entries: &[LimiterEntry]) -> AdmitOutcome {
-        // Treat "no limiter configured" like a down backend: admit, no holds, so
-        // nothing is ever released or refreshed.
+    async fn admit(
+        &self,
+        _call_ref: &str,
+        _entries: &[LimiterEntry],
+        _release_on_refusal: bool,
+    ) -> AdmitOutcome {
         AdmitOutcome::Unavailable
     }
-    async fn release(&self, _holds: &[LimiterHold]) {}
-    async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
-        holds.to_vec()
+    async fn release(&self, _call_ref: &str) {}
+    async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+        RefreshOutcome::Unavailable
     }
 }

@@ -9,7 +9,7 @@ use call::helpers::{
 };
 use call::{Call, CdrEvent, TagMapping};
 
-use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance, SoftBoundedEffect};
+use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance};
 use crate::rules::model::{MessageTransform, RuleAction, RuleContext};
 use crate::rules::relay;
 
@@ -320,32 +320,11 @@ impl ActionExecutor<'_> {
                     *call = call::helpers::set_call_ext(call.clone(), service_id, v);
                 }
             }
-            RuleAction::RecordLimiterHolds { entries, window } => {
-                // Holds already INCRed by a route fold's dispatching task: on
-                // the ledger, the `→ terminated` settle DECRs them and a live
-                // call's LimiterRefresh migrates them.
-                record_limiter_holds(call, entries, *window);
-            }
-            RuleAction::ReplaceLimiterHolds { holds } => {
-                // The replaced holds leave the ledger in this turn's write and
-                // are released through the soft lane, after the new leg's
-                // INVITE; the settle does not count these releases. A
-                // fail-open entry holds nothing and is only dropped. `None`
-                // (no limiter stated, or a fail-open admit) leaves the call
-                // uncounted.
-                // FIXME(limiter): a crash before this turn's flush lands re-releases these from the stale replica.
-                // Fix: release the replaced holds once the fold turn's replication flush is acknowledged.
-                for entry in std::mem::take(&mut call.limiter_entries) {
-                    if entry.increment_succeeded != Some(false) {
-                        fx.soft.push(SoftBoundedEffect::ReleaseReplacedHold {
-                            limiter_id: entry.limiter_id,
-                            window: entry.origin_window,
-                        });
-                    }
-                }
-                if let Some((entries, window)) = holds {
-                    record_limiter_holds(call, entries, *window);
-                }
+            RuleAction::ReplaceLimiterHolds { counted, ids } => {
+                // The fold's dispatching task already replaced the call's set
+                // on the limiter; this turn's write states the outcome, which
+                // the terminal settle reads to owe one release.
+                call.limiter = call::CallLimiterState { counted: *counted, ids: ids.clone() };
             }
             RuleAction::RelayFailureToALeg { status, reason } => {
                 self.relay_failure_to_a_leg(call, fx, ctx, *status, reason);
@@ -402,18 +381,5 @@ impl ActionExecutor<'_> {
         if let Some(req) = ctx.request() {
             self.relay_request(call, fx, ctx, target_leg, req, target_to_tag);
         }
-    }
-}
-
-/// Append `entries`, admitted at `window` by a route fold's dispatching task,
-/// to the call's ledger as live holds.
-fn record_limiter_holds(call: &mut Call, entries: &[(String, i64)], window: i64) {
-    for (limiter_id, limit) in entries {
-        call.limiter_entries.push(call::CallLimiterState {
-            limiter_id: limiter_id.clone(),
-            limit: *limit,
-            origin_window: window,
-            increment_succeeded: Some(true),
-        });
     }
 }

@@ -1,6 +1,6 @@
 {
   "uid": "call-limiter",
-  "title": "Call limiter — shared sliding-window (Rust)",
+  "title": "Call limiter — shared, keyed by call (Rust)",
   "tags": ["siprustserver", "call-limiter", "limiter"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -51,11 +51,11 @@
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },
     {
-      "id": 5, "type": "stat", "title": "Live keys",
-      "description": "`limiter_live_keys` — live (id, window) keys held. Leak monitor: should stay bounded (≈ number of active limiter ids × active windows).",
+      "id": 5, "type": "stat", "title": "Calls counted",
+      "description": "`limiter_calls` — calls holding a set. Leak monitor: should track the active calls carrying a limiter.",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "limiter_live_keys", "refId": "A" }],
+      "targets": [{ "expr": "limiter_calls", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "none" } }
     },
     {
@@ -77,7 +77,7 @@
     },
     {
       "id": 8, "type": "timeseries", "title": "Release / refresh (per-s)",
-      "description": "release = holds dropped on BYE/terminate; refresh = holds migrated to the current window for long calls (every LIMITER_WINDOW_SECONDS). Both should track admitted/s in steady state — the full chain on every call.",
+      "description": "release = calls released on BYE/terminate; refresh = leases extended for long calls (every LIMITER_REFRESH_SECONDS). Both should track admitted/s in steady state — the full chain on every call.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
@@ -99,13 +99,13 @@
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
     },
     {
-      "id": 10, "type": "timeseries", "title": "Leak monitor — live keys + auto-cleared/s",
-      "description": "live_keys (gauge) should stay bounded; auto_cleared/s = window keys removed by the TTL sweep (crash-recovery / leaked-hold cleanup). A rising live_keys with no traffic, or a steady auto_cleared/s, signals holds not being released — investigate the b2bua release path.",
+      "id": 10, "type": "timeseries", "title": "Leak monitor — calls counted + lease-expired/s",
+      "description": "limiter_calls (gauge) should stay bounded; lease-expired/s = call sets dropped because their lease lapsed (crash-recovery / lost-release cleanup). A rising limiter_calls with no traffic, or a steady lease-expired/s, signals calls not being released — investigate the b2bua release path.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "limiter_live_keys", "refId": "A", "legendFormat": "live keys" },
-        { "expr": "rate(limiter_auto_cleared_total[1m])", "refId": "B", "legendFormat": "auto-cleared/s" }
+        { "expr": "limiter_calls", "refId": "A", "legendFormat": "live keys" },
+        { "expr": "rate(limiter_lease_expired_calls_total[1m])", "refId": "B", "legendFormat": "lease-expired/s" }
       ],
       "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }, "tooltip": { "mode": "multi" } }
@@ -116,7 +116,7 @@
     },
     {
       "id": 12, "type": "timeseries", "title": "Concurrent (all ids) over time",
-      "description": "`limiter_current_total` over time. During limiter_kill/limiter_netcut this dips (fail-open admits record no holds; existing holds age out via TTL) then refills within ~LIMITER_WINDOW_SECONDS as active calls' refresh timers re-populate the counters.",
+      "description": "`limiter_current_total` over time. During limiter_kill/limiter_netcut this dips (fail-open admits count nothing; a restarted limiter starts empty and the calls admitted before it never re-register) and refills with new calls.",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 23 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [

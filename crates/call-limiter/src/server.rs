@@ -1,5 +1,5 @@
 //! [`LimiterServer`] — the [`HttpService`] that routes the limiter API onto the
-//! [`WindowStore`], bumping [`LimiterMetrics`] at the edges.
+//! [`CallStore`], bumping [`LimiterMetrics`] at the edges.
 //!
 //! Routes: `POST /v1/admit`, `POST /v1/release`, `POST /v1/refresh`,
 //! `GET /metrics`, `GET /healthz`. A malformed body is `400`; an unknown route
@@ -12,23 +12,23 @@ use async_trait::async_trait;
 use http_net::{HttpRequest, HttpResponse, HttpService};
 
 use crate::metrics::LimiterMetrics;
-use crate::window::{AdmitResult, WindowStore};
+use crate::store::{AdmitResult, CallStore};
 use crate::wire::{AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest};
 
-/// The limiter HTTP service: a window store + its metrics.
+/// The limiter HTTP service: a call store + its metrics.
 pub struct LimiterServer {
-    store: Arc<WindowStore>,
+    store: Arc<CallStore>,
     metrics: LimiterMetrics,
 }
 
 impl LimiterServer {
     /// Build over a shared store. The same store can be handed to the janitor.
-    pub fn new(store: Arc<WindowStore>, metrics: LimiterMetrics) -> Self {
+    pub fn new(store: Arc<CallStore>, metrics: LimiterMetrics) -> Self {
         Self { store, metrics }
     }
 
     /// The shared store (for the runner's janitor task).
-    pub fn store(&self) -> Arc<WindowStore> {
+    pub fn store(&self) -> Arc<CallStore> {
         self.store.clone()
     }
 
@@ -58,18 +58,20 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad admit body: {e}")),
                 };
-                let resp = match self.store.admit(&parsed.entries) {
-                    AdmitResult::Admitted { window } => {
-                        self.metrics.on_admit(true);
-                        AdmitResponse { admitted: true, window: Some(window), rejected_id: None }
+                let outcome =
+                    self.store.admit(&parsed.call_ref, &parsed.entries, parsed.release_on_refusal);
+                self.metrics.on_admit(&outcome);
+                let resp = match outcome {
+                    AdmitResult::Admitted => {
+                        AdmitResponse { admitted: true, rejected_id: None, released: false }
                     }
-                    AdmitResult::Rejected { limiter_id } => {
-                        self.metrics.on_admit(false);
-                        AdmitResponse {
-                            admitted: false,
-                            window: None,
-                            rejected_id: Some(limiter_id),
-                        }
+                    AdmitResult::Rejected { limiter_id } => AdmitResponse {
+                        admitted: false,
+                        rejected_id: Some(limiter_id),
+                        released: false,
+                    },
+                    AdmitResult::Released => {
+                        AdmitResponse { admitted: false, rejected_id: None, released: true }
                     }
                 };
                 json_ok(&resp)
@@ -79,7 +81,7 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad release body: {e}")),
                 };
-                self.store.release(&parsed.entries);
+                self.store.release(&parsed.call_ref);
                 self.metrics.on_release();
                 json_ok(&serde_json::json!({}))
             }
@@ -88,9 +90,9 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad refresh body: {e}")),
                 };
-                let entries = self.store.refresh(&parsed.entries);
-                self.metrics.on_refresh();
-                json_ok(&RefreshResponse { entries })
+                let known = self.store.refresh(&parsed.call_ref);
+                self.metrics.on_refresh(known);
+                json_ok(&RefreshResponse { known })
             }
             ("GET", "/metrics") => {
                 HttpResponse::ok(self.metrics.prometheus_text(self.store.stats()).into_bytes())

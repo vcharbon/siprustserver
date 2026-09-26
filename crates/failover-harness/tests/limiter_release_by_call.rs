@@ -24,7 +24,7 @@ use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use call::ReleaseEventKind;
 use call_limiter::wire::AdmitEntry;
-use call_limiter::{AdmitResult, LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     cookie_field, FailoverHarness, ReplicatedB2buaSut, WorkerHealth, RULE_CSEQ_IN_DIALOG_ORDER,
 };
@@ -53,6 +53,12 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
+/// A lease outliving the replica TTL (`reboot_budget_sec`, 600 s): a set the
+/// crashed primary never releases is freed by the backup's reap or the
+/// reborn primary's reclaim, never by the lease, so each cell proves the
+/// release it names.
+const LEASE_OUTLIVING_THE_REPLICA_TTL: LimiterConfig = LimiterConfig { lease_sec: 3600 };
+
 fn ha_harness(name: &str) -> FailoverHarness {
     FailoverHarness::new(name, &["b1", "b2"])
 }
@@ -77,17 +83,21 @@ fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
 /// with one witness hold per id in [`IDS`].
 struct LimiterRig {
     http: SimulatedHttpNetwork,
-    store: Arc<WindowStore>,
+    store: Arc<CallStore>,
     _server: Box<dyn HttpServerHandle>,
 }
 
 impl LimiterRig {
     async fn serve() -> Self {
         let http = SimulatedHttpNetwork::new();
-        let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+        let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
         for id in IDS {
-            let witness = store.admit(&[AdmitEntry { id: id.into(), limit: 100 }]);
-            assert!(matches!(witness, AdmitResult::Admitted { .. }), "witness hold on {id}");
+            let witness = store.admit(
+                &format!("witness-{id}"),
+                &[AdmitEntry { id: id.into(), limit: 100 }],
+                false,
+            );
+            assert_eq!(witness, AdmitResult::Admitted, "witness hold on {id}");
         }
         let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
         let handle = http.serve(laddr(), server).await.unwrap();
@@ -177,8 +187,8 @@ fn release_reroute_decision(
 /// fold replaces the call's set on the limiter and dials the media server, and
 /// its flush never lands. The primary crashes. The caller's BYE fails over to
 /// the backup, whose copy still says `[x, y]`; its lossy cleanup releases the
-/// call, which frees what the limiter holds for it, `y` and `z`, and nothing
-/// of `x`: the witness on `x` is intact and the call drains to 0.
+/// call by `call_ref`, which frees what the limiter holds for it, `y` and `z`,
+/// and nothing of `x`: the witness on `x` is intact and the call drains to 0.
 #[tokio::test(start_paused = true)]
 async fn a_crash_between_a_reroute_fold_and_its_flush_releases_the_call_once() {
     let mut fh = ha_harness("limiter-release-by-call-fold-flush-lost");

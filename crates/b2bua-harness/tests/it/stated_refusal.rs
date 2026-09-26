@@ -16,7 +16,7 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallTreatment, HeaderUpdate,
     NewCallRequest, NewCallResponse, RejectDecision, SipHeaderUpdates,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold, NoopLimiter};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, NoopLimiter, RefreshOutcome};
 use b2bua::metrics::B2buaMetrics;
 use b2bua::store::InMemoryCallStore;
 use b2bua::{B2buaCore, B2buaDeps};
@@ -115,15 +115,15 @@ struct RefusingLimiter;
 
 #[async_trait]
 impl CallLimiter for RefusingLimiter {
-    async fn admit(&self, entries: &[LimiterEntry]) -> AdmitOutcome {
+    async fn admit(&self, _: &str, entries: &[LimiterEntry], _: bool) -> AdmitOutcome {
         match entries.iter().find(|e| e.id == "cap") {
             Some(e) => AdmitOutcome::Rejected { limiter_id: e.id.clone() },
             None => AdmitOutcome::Unavailable,
         }
     }
-    async fn release(&self, _holds: &[LimiterHold]) {}
-    async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
-        holds.to_vec()
+    async fn release(&self, _call_ref: &str) {}
+    async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+        RefreshOutcome::Unavailable
     }
 }
 

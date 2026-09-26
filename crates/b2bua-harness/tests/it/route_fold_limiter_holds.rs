@@ -1,20 +1,22 @@
-//! The limiter holds an asynchronous route fold carries.
+//! The limiter set an asynchronous route fold settles for its call.
 //!
 //! A failover (`/call/failure`) or release-reroute consult runs detached from
-//! the call: when the decision answers a route with call limiters, the
-//! dispatching task admits them (all-or-none) BEFORE the fold reaches the
-//! call. Those holds are then the call's to release, whatever became of the
-//! call meanwhile:
+//! the call: when the decision answers a route, the dispatching task replaces
+//! the call's set on the limiter (one admit net of the set the call holds)
+//! BEFORE the fold reaches the call. That set is then the call's to release,
+//! whatever became of the call meanwhile:
 //!
-//!  - live call: the fold records them; the call's termination releases them;
-//!  - going-away call (`Terminating`): the fold drives no progress, yet the
-//!    holds join the call's ledger and its termination releases them;
-//!  - gone call (evicted before the fold landed): the router releases them.
+//!  - live call: the fold states it; the call's termination releases the call;
+//!  - going-away call (`Terminating`): the fold drives no progress, yet it
+//!    states the set and the call's termination releases the call;
+//!  - gone call (released before the fold's admit landed): the admit meets the
+//!    call's tombstone and holds nothing.
 //!
 //! Every scenario carries several limiters: distinct ids on one route, the
-//! same id on the initial and the failover route (two holds on one
-//! `(id, window)` are two releases), overlapping sets across a reroute. The
-//! store is probed while the call holds them and drained to 0 after it ends.
+//! same id on the initial and the failover route, overlapping sets across a
+//! reroute. Each id carries one **witness** hold admitted under a call of its
+//! own, so a surplus release reads below the witness. The store is probed per
+//! id while the call holds its set and drained to the witnesses after it ends.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -31,7 +33,8 @@ use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut};
 use call::ReleaseEventKind;
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::wire::AdmitEntry;
+use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use sip_clock::Clock;
@@ -46,6 +49,9 @@ const FAILURE_DELAY: Duration = Duration::from_millis(900);
 const RELEASE_DELAY: Duration = Duration::from_secs(3);
 /// The route-supplied ring deadline of the first b-leg.
 const NO_ANSWER_SEC: i64 = 5;
+
+/// Every id a scenario may hold; each carries one witness hold.
+const IDS: [&str; 3] = ["x", "y", "z"];
 
 /// Delay `call_failure` / `call_release` before delegating.
 struct DelayedDecisionEngine {
@@ -82,17 +88,50 @@ impl CallDecisionEngine for DelayedDecisionEngine {
 }
 
 /// A real `LimiterServer` on the simulated HTTP fabric, so every admit is a
-/// genuine hold the store counts.
+/// genuine set the store counts, with one witness hold per id in [`IDS`].
 struct LimiterRig {
-    store: Arc<WindowStore>,
+    store: Arc<CallStore>,
     client: Arc<dyn CallLimiter>,
     _server: Box<dyn HttpServerHandle>,
+}
+
+impl LimiterRig {
+    /// The holds the call owns on `id`: the store's count less the witness.
+    fn holds(&self, id: &str) -> i64 {
+        self.store.held(id) - 1
+    }
+
+    fn all_holds(&self) -> [i64; 3] {
+        IDS.map(|id| self.holds(id))
+    }
+
+    async fn expect_holds(&self, expected: [i64; 3], why: &str) {
+        settle_until(|| self.all_holds() == expected).await;
+        assert_eq!(self.all_holds(), expected, "holds on {IDS:?}: {why}");
+    }
+
+    /// Settle until the call holds nothing, then release the witnesses so the
+    /// store reads empty for the reaped check.
+    async fn expect_drained(&self, why: &str) {
+        self.expect_holds([0, 0, 0], why).await;
+        for id in IDS {
+            self.store.release(&format!("witness-{id}"));
+        }
+    }
 }
 
 async fn limiter_rig() -> LimiterRig {
     let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    for id in IDS {
+        let witness = store.admit(
+            &format!("witness-{id}"),
+            &[AdmitEntry { id: id.into(), limit: 100 }],
+            false,
+        );
+        assert_eq!(witness, AdmitResult::Admitted, "witness on {id}");
+    }
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = http.serve(laddr, server).await.unwrap();
     // A fail-open budget above the paused-clock HTTP round trip: the detached
@@ -127,9 +166,8 @@ fn failover_route(port: u16, ids: &[&str]) -> CallTreatment {
 /// Failover fold on a `Terminating` call. Bob rings and never answers; the
 /// no-answer consult parks; the caller CANCELs; bob withholds the 487 of the
 /// b-leg CANCEL so the call is still resident (Terminating) when the fold
-/// lands. The initial route holds `x`; the failover route admits `x` + `y` —
-/// the same id twice at one window, plus a distinct one. All three are
-/// released once the call ends.
+/// lands. The initial route holds `x`; the failover route replaces it with
+/// `x` + `y` — `x` kept, `y` added. The call is released once it ends.
 #[tokio::test(start_paused = true)]
 async fn failover_fold_on_a_terminating_call_releases_its_holds() {
     let h = Harness::new("failover-fold-holds-terminating-call");
@@ -157,7 +195,7 @@ async fn failover_fold_on_a_terminating_call_releases_its_holds() {
     let mut b_inv = bob.receive("INVITE").await;
     b_inv.respond(180, "Ringing").await;
     call.expect(180).await;
-    assert_eq!(rig.store.stats().current_total, 1, "the initial route holds x");
+    rig.expect_holds([1, 0, 0], "the initial route holds x").await;
 
     // ── the ring deadline: the consult parks, the ringing b-leg is CANCELed ──
     h.advance(Duration::from_secs(NO_ANSWER_SEC as u64)).await;
@@ -174,20 +212,13 @@ async fn failover_fold_on_a_terminating_call_releases_its_holds() {
         carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
         "the fold dials no leg toward a callee whose caller is gone",
     );
-    let stats = rig.store.stats();
-    assert_eq!(stats.live_keys, 2, "the failover admit INCRed x and y at the window");
-    assert_eq!(stats.current_total, 3, "x twice (initial + failover) and y are held");
+    rig.expect_holds([1, 1, 0], "the fold replaced the call's set: x kept, y added").await;
 
     // ── bob's withheld 487 resolves the b-leg; the call terminates ─────────
     b_inv.respond(487, "Request Terminated").await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    settle_until(|| rig.store.stats().current_total == 0).await;
+    rig.expect_drained("the termination releases the call's set").await;
     b2bua.assert_fully_reaped();
-    assert_eq!(
-        rig.store.stats().current_total,
-        0,
-        "the termination releases the initial hold and both failover holds",
-    );
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
@@ -201,11 +232,11 @@ async fn failover_fold_on_a_terminating_call_releases_its_holds() {
 
 /// Failover fold on a call already gone. Bob busies out at once; the consult
 /// parks; the caller CANCELs, which resolves the last leg: the call terminates
-/// (its own hold on `x` released) and is evicted before the fold lands. The
-/// fold's admitted `x` + `y` have no call left to carry them: the router
-/// releases them.
+/// (released, its `x` freed) and is evicted before the fold's admit lands. The
+/// admit meets the call's tombstone: `x` + `y` are never counted, and the
+/// fold has no call left to state them on.
 #[tokio::test(start_paused = true)]
-async fn failover_fold_after_the_call_is_gone_releases_its_holds() {
+async fn failover_fold_after_the_call_is_gone_holds_nothing() {
     let h = Harness::new("failover-fold-holds-gone-call");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -230,27 +261,29 @@ async fn failover_fold_after_the_call_is_gone_releases_its_holds() {
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     bob.receive("INVITE").await.respond(486, "Busy Here").await;
     bob.receive("ACK").await;
+    rig.expect_holds([1, 0, 0], "the initial route holds x").await;
 
     // ── the caller gives up while the consult is in flight ─────────────────
     let mut cxl = call.cancel().await;
     cxl.expect(200).await;
     call.expect(487).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    settle_until(|| rig.store.stats().current_total == 0).await;
-    b2bua.assert_fully_reaped();
-    assert_eq!(rig.store.stats().live_keys, 1, "only the initial route admitted so far");
+    rig.expect_holds([0, 0, 0], "the terminated call released its set").await;
+    b2bua.assert_calls_reaped();
+    let refused_before = rig.store.stats().admits_refused_released;
 
-    // ── the fold lands on the evicted call ─────────────────────────────────
+    // ── the fold's admit lands on the evicted call's tombstone ─────────────
     h.advance(Duration::from_secs(2)).await;
     assert!(
         carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
         "the fold dials no leg for a call that is gone",
     );
-    settle_until(|| rig.store.stats().current_total == 0).await;
-    let stats = rig.store.stats();
-    assert_eq!(stats.live_keys, 2, "the failover admit INCRed y at the window");
-    assert_eq!(stats.current_total, 0, "the router releases the gone call's fold holds");
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    assert_eq!(
+        rig.store.stats().admits_refused_released,
+        refused_before + 1,
+        "the fold's admit was refused by the tombstone",
+    );
+    rig.expect_drained("the gone call's fold counted nothing").await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -266,8 +299,8 @@ async fn failover_fold_after_the_call_is_gone_releases_its_holds() {
 /// Release-reroute fold on a `Terminating` call. The established call holds
 /// `x` + `y`; its duration cap raises the subscribed release consult, which
 /// parks; the caller hangs up and bob withholds his 200 to the relayed BYE so
-/// the call is still Terminating when the fold lands. The reroute admits `y` +
-/// `z` (an overlapping set). Every hold is released once the call ends.
+/// the call is still Terminating when the fold lands. The reroute replaces the
+/// set with `y` + `z` (an overlapping set). The call is released once it ends.
 #[tokio::test(start_paused = true)]
 async fn release_reroute_fold_on_a_terminating_call_releases_its_holds() {
     let h = Harness::new("release-reroute-fold-holds-terminating-call");
@@ -313,7 +346,7 @@ async fn release_reroute_fold_on_a_terminating_call_releases_its_holds() {
     call.expect(200).await;
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
-    assert_eq!(rig.store.stats().current_total, 2, "the established call holds x and y");
+    rig.expect_holds([1, 1, 0], "the established call holds x and y").await;
 
     // ── the cap raises the release consult, which parks ─────────────────────
     h.advance(Duration::from_secs(61)).await;
@@ -328,30 +361,23 @@ async fn release_reroute_fold_on_a_terminating_call_releases_its_holds() {
         media.try_receive_tolerating("INVITE", &[]).await.is_none(),
         "the fold dials no replacement leg for a call whose parties hung up",
     );
-    let stats = rig.store.stats();
-    assert_eq!(stats.live_keys, 3, "the reroute admit INCRed y and z at the window");
-    assert_eq!(stats.current_total, 4, "x, y twice and z are held");
+    rig.expect_holds([0, 1, 1], "the reroute replaced the call's set: y kept, x freed, z added")
+        .await;
 
     // ── bob's 200 ends the call ─────────────────────────────────────────────
     bob_bye.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    settle_until(|| rig.store.stats().current_total == 0).await;
+    rig.expect_drained("the termination releases the reroute's set").await;
     b2bua.assert_fully_reaped();
-    assert_eq!(
-        rig.store.stats().current_total,
-        0,
-        "the termination releases the route's holds and the reroute's",
-    );
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
     let _ = h.finish().await;
 }
 
-/// Control: the same failover fold on a live call records its holds — they
-/// stay held while the rerouted call is up — and the call's hangup releases
-/// them.
+/// Control: the same failover fold on a live call states its set — held
+/// while the rerouted call is up — and the call's hangup releases it.
 #[tokio::test(start_paused = true)]
 async fn failover_fold_on_a_live_call_records_and_releases_its_holds() {
     let h = Harness::new("failover-fold-holds-live-call");
@@ -384,15 +410,13 @@ async fn failover_fold_on_a_live_call_records_and_releases_its_holds() {
     call.expect(200).await;
     let mut dialog = call.ack().await;
     carol.receive("ACK").await;
-    let stats = rig.store.stats();
-    assert_eq!(stats.live_keys, 2, "the failover admit INCRed x and y");
-    assert_eq!(stats.current_total, 2, "the rerouted call holds x and y");
+    rig.expect_holds([1, 1, 0], "the rerouted call holds x and y").await;
 
     let mut bye = dialog.bye().await;
     carol.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.is_reaped()).await;
-    settle_until(|| rig.store.stats().current_total == 0).await;
+    rig.expect_drained("the hangup releases the call").await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -401,11 +425,11 @@ async fn failover_fold_on_a_live_call_records_and_releases_its_holds() {
 }
 
 /// A failover route whose SECOND limiter is at its cap: the all-or-none admit
-/// refuses it and increments nothing — not even the first entry, which had
-/// room. The refusal ends the chain in the stack's 486; the call's own hold
-/// on `w` is released and the store drains to 0 with no key for `x` or `y`.
+/// refuses it and counts nothing — not even the first entry, which had room —
+/// and releases the call's own `x` in the same step. The refusal ends the
+/// chain in the stack's 486; the store drains to the witnesses.
 #[tokio::test(start_paused = true)]
-async fn failover_route_refused_on_its_second_limiter_increments_nothing() {
+async fn failover_route_refused_on_its_second_limiter_counts_nothing() {
     let h = Harness::new("failover-fold-refused-second-limiter");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -416,12 +440,13 @@ async fn failover_route_refused_on_its_second_limiter_increments_nothing() {
         release_delay: Duration::ZERO,
         inner: Arc::new(
             ScriptedDecisionEngine::builder()
-                .fallback(|_| initial_route(5070, &["w"]))
+                .fallback(|_| initial_route(5070, &["x"]))
                 .on_failure(|_| {
                     let mut r = route_to("127.0.0.1", 5071);
+                    // `z` at cap 1 is refused: its witness already holds one.
                     r.call_limiter = vec![
-                        CallLimiterEntry { id: "x".into(), limit: 10 },
-                        CallLimiterEntry { id: "y".into(), limit: 0 },
+                        CallLimiterEntry { id: "y".into(), limit: 10 },
+                        CallLimiterEntry { id: "z".into(), limit: 1 },
                     ];
                     CallTreatment::Route(r)
                 })
@@ -437,7 +462,6 @@ async fn failover_route_refused_on_its_second_limiter_increments_nothing() {
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     bob.receive("INVITE").await.respond(486, "Busy Here").await;
     bob.receive("ACK").await;
-    assert_eq!(rig.store.stats().live_keys, 1, "the initial route holds w");
 
     // ── the refused failover ends the call in the stack's 486 ──────────────
     call.expect(486).await;
@@ -446,11 +470,10 @@ async fn failover_route_refused_on_its_second_limiter_increments_nothing() {
         "the refused route dials nothing",
     );
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    settle_until(|| rig.store.stats().current_total == 0).await;
+    rig.expect_drained("the refused admit counted nothing and released x").await;
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released), (1, 1), "x granted, released by the refusal");
     b2bua.assert_fully_reaped();
-    let stats = rig.store.stats();
-    assert_eq!(stats.live_keys, 1, "the refused admit created no key for x nor y");
-    assert_eq!(stats.current_total, 0, "the call's own hold on w is released");
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");

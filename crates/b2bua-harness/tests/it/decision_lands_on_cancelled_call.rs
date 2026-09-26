@@ -33,7 +33,7 @@ use b2bua::decision::{
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{establish, hangup, invite_final_statuses, settle_until, B2buaSut};
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::{Harness, RunReport};
 use sip_clock::Clock;
@@ -241,7 +241,7 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     // `limiter.rs`), so the INCR is a genuine cluster hold we can probe.
     let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr, server).await.unwrap();
     // Fail-open budget well above the paused-clock HTTP round trip: the 1 ms
@@ -286,9 +286,11 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 1);
 
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    // The admit really happened (its window key is live) AND the termination
-    // discharged it — the INCR↔DECR pairing survives the drop.
-    assert_eq!(store.stats().live_keys, 1, "the dropped route's admit INCRed a real hold");
+    // The admit really happened AND the termination released the call — the
+    // admit↔release pairing survives the drop.
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released), (1, 1), "the dropped route's hold is released");
+    assert_eq!(store.calls(), 0, "the store holds nothing for the call");
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;

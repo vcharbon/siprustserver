@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use b2bua::decision::{
     test_adapter::route_to, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
 use scenario_harness::Harness;
@@ -48,19 +48,19 @@ struct SpyLimiter {
 
 #[async_trait]
 impl CallLimiter for SpyLimiter {
-    async fn admit(&self, _entries: &[LimiterEntry]) -> AdmitOutcome {
+    async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
         self.admitted.store(true, Ordering::SeqCst);
         self.touched.store(true, Ordering::SeqCst);
         // If admission ever reaches us it would otherwise admit (fail-open),
         // but the whole point of the test is that it must NOT reach us.
         AdmitOutcome::Unavailable
     }
-    async fn release(&self, _holds: &[LimiterHold]) {
+    async fn release(&self, _call_ref: &str) {
         self.touched.store(true, Ordering::SeqCst);
     }
-    async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
+    async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
         self.touched.store(true, Ordering::SeqCst);
-        holds.to_vec()
+        RefreshOutcome::Unavailable
     }
 }
 

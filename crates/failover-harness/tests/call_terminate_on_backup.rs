@@ -36,7 +36,7 @@ use b2bua::decision::{
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_fully_over, assert_call_lost_no_cdr, worker_ordinals, FailoverHarness, ProxySut,
     ReplicatedB2buaSut, WorkerHealth,
@@ -58,6 +58,12 @@ const LIMITER_ADDR: &str = "10.0.0.1:8080";
 fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
+
+/// A lease outliving the replica TTL (`reboot_budget_sec`, 600 s): a set the
+/// crashed primary never releases is freed by the backup's reap or the
+/// reborn primary's reclaim, never by the lease, so each cell proves the
+/// release it names.
+const LEASE_OUTLIVING_THE_REPLICA_TTL: LimiterConfig = LimiterConfig { lease_sec: 3600 };
 
 fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))
@@ -96,7 +102,7 @@ struct Established {
     alice: Agent,
     bob: Agent,
     proxy: ProxySut,
-    store: Arc<WindowStore>,
+    store: Arc<CallStore>,
     /// The limiter HTTP server handle — must outlive the cell (drop closes it).
     lh: Box<dyn HttpServerHandle>,
     w_b1: ReplicatedB2buaSut,
@@ -127,7 +133,7 @@ async fn establish_with(name: &str, decision: Arc<dyn CallDecisionEngine>) -> Es
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 

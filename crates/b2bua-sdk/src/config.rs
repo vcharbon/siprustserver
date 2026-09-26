@@ -87,10 +87,10 @@ pub struct B2buaConfig {
     /// coverage. [`validate`](Self::validate) enforces both this and the absolute
     /// floors. The non-replicating path ignores this (TTL stays `CALL_TTL_MS`).
     pub reboot_budget_sec: i64,
-    /// Limiter-refresh cadence, seconds — how often an admitted call migrates its
-    /// holds to the current window so a long call never ages out of the summed
-    /// lookback. Must match the limiter service's `LIMITER_WINDOW_SECONDS`. TS
-    /// default 300. The test harness lowers this for fast paused-clock tests.
+    /// Limiter-refresh cadence, seconds — how often a counted call extends its
+    /// lease on the limiter. Below the limiter service's `LIMITER_LEASE_SECONDS`
+    /// (120) by a margin that survives a missed refresh: default 40. The test
+    /// harness lowers this for fast paused-clock tests.
     pub limiter_refresh_sec: i64,
     /// **Keepalive catch-up speed-up** (ADR-0014, performance-only). On reboot a
     /// primary's `ReclaimAll` re-materialises its whole `pri:{self}` partition;
@@ -423,7 +423,7 @@ impl Default for B2buaConfig {
             keepalive_interval_sec: 300,
             keepalive_timeout_sec: 32,
             reboot_budget_sec: 600,
-            limiter_refresh_sec: 300,
+            limiter_refresh_sec: 40,
             keepalive_catchup_speedup: 10,
             max_catchup_window_sec: None,
             reaper_enabled: true,

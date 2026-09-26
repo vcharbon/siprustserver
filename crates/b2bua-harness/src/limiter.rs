@@ -1,17 +1,18 @@
 //! The call limiter a [`B2buaSut`](crate::B2buaSut) runs against, and the
 //! count the reaped check reads from it.
 //!
-//! By default the SUT reaches a real [`WindowStore`] served by a
+//! By default the SUT reaches a real [`CallStore`] served by a
 //! [`LimiterServer`] on a private simulated HTTP fabric, through the production
 //! [`HttpCallLimiter`], and every route its decision engine returns carries one
 //! extra non-binding entry ([`DEFAULT_LIMITER_ID`]), so every routed call holds
 //! a limiter and must drain it. Whatever limiter the SUT runs, a
-//! [`HoldLedger`] counts the holds the SUT was granted, the holds it released
-//! and the admits that failed open.
+//! [`HoldLedger`] counts, per call, the holds the SUT was granted, the holds
+//! it released (a replaced set counts as released) and the admits that failed
+//! open.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -20,9 +21,9 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, RouteDecision,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
 use b2bua::limiter_http::HttpCallLimiter;
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 
@@ -30,9 +31,9 @@ use sip_clock::Clock;
 /// refuses, so it counts calls without changing any admission outcome.
 pub const DEFAULT_LIMITER_ID: &str = "sut-default";
 
-/// The default store's key TTL: longer than any scenario runs, so a leaked
-/// hold is never swept away before the reaped check reads it.
-const DEFAULT_STORE_TTL_SEC: i64 = 10 * 365 * 24 * 3600;
+/// The default store's lease: longer than any scenario runs, so a leaked
+/// set never lapses before the reaped check reads it.
+const DEFAULT_STORE_LEASE_SEC: i64 = 10 * 365 * 24 * 3600;
 
 /// The default client's fail-open budget. Fail-open is never exercised on the
 /// default limiter (the reaped check refuses one), so the budget only has to
@@ -62,21 +63,23 @@ impl LimiterLeak {
 /// The SUT's limiter count at one instant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LimiterCount {
-    /// Holds the limiter granted the SUT (entries of every admitted batch).
+    /// Holds the limiter granted the SUT (entries of every admitted set).
     pub admitted: i64,
-    /// Holds the SUT released, counted when the release is issued.
+    /// Holds the SUT released: the set of every call it released, and every
+    /// set a later admit of the call replaced or a refusal dropped.
     pub released: i64,
     /// Admits that failed open ([`AdmitOutcome::Unavailable`]): the call went
-    /// on holding nothing.
+    /// on uncounted, its granted holds left to the store's lease.
     pub failed_open: i64,
-    /// The registered store's live count summed over every key, if the SUT
+    /// The registered store's live count summed over every id, if the SUT
     /// has a store (the default limiter's, or one registered by the test).
     pub stored: Option<i64>,
 }
 
 impl LimiterCount {
-    /// Holds granted and not released. Negative when the SUT released a hold
-    /// it was never granted, or released one twice.
+    /// Holds granted and not released. A release of a call the SUT holds no
+    /// set for (a second release, a call never admitted) counts nothing, so
+    /// this never reads negative.
     pub fn unreleased(&self) -> i64 {
         self.admitted - self.released
     }
@@ -86,14 +89,6 @@ impl LimiterCount {
     #[track_caller]
     pub fn assert_matches(&self, leak: LimiterLeak) {
         let unreleased = self.unreleased();
-        assert!(
-            unreleased >= 0,
-            "limiter surplus: the SUT released {} hold(s) more than it was granted \
-             ({} admitted, {} released)",
-            -unreleased,
-            self.admitted,
-            self.released
-        );
         assert_eq!(
             unreleased, leak.unreleased,
             "limiter leak: {unreleased} hold(s) granted and never released \
@@ -110,29 +105,69 @@ impl LimiterCount {
     }
 }
 
-/// The holds a SUT was granted and released, counted at its limiter seam.
+/// The holds a SUT was granted and released, counted at its limiter seam:
+/// per call, the size of the set the SUT holds.
 #[derive(Debug, Default)]
 pub(crate) struct HoldLedger {
-    admitted: AtomicI64,
-    released: AtomicI64,
-    failed_open: AtomicI64,
+    inner: Mutex<Ledger>,
+}
+
+#[derive(Debug, Default)]
+struct Ledger {
+    /// `call_ref` -> holds of the set the SUT was granted and still holds.
+    sets: HashMap<String, i64>,
+    admitted: i64,
+    released: i64,
+    failed_open: i64,
 }
 
 impl HoldLedger {
-    pub(crate) fn count(&self, store: Option<&WindowStore>) -> LimiterCount {
+    pub(crate) fn count(&self, store: Option<&CallStore>) -> LimiterCount {
+        let ledger = self.inner.lock().unwrap();
         LimiterCount {
-            admitted: self.admitted.load(Ordering::SeqCst),
-            released: self.released.load(Ordering::SeqCst),
-            failed_open: self.failed_open.load(Ordering::SeqCst),
+            admitted: ledger.admitted,
+            released: ledger.released,
+            failed_open: ledger.failed_open,
             stored: store.map(|s| s.stats().current_total),
         }
+    }
+
+    fn on_admit(
+        &self,
+        call_ref: &str,
+        granted: i64,
+        outcome: &AdmitOutcome,
+        release_on_refusal: bool,
+    ) {
+        let mut ledger = self.inner.lock().unwrap();
+        match outcome {
+            AdmitOutcome::Admitted => {
+                ledger.released += ledger.sets.remove(call_ref).unwrap_or(0);
+                ledger.admitted += granted;
+                if granted > 0 {
+                    ledger.sets.insert(call_ref.to_string(), granted);
+                }
+            }
+            AdmitOutcome::Rejected { .. } => {
+                if release_on_refusal {
+                    ledger.released += ledger.sets.remove(call_ref).unwrap_or(0);
+                }
+            }
+            AdmitOutcome::Released => {}
+            AdmitOutcome::Unavailable => ledger.failed_open += 1,
+        }
+    }
+
+    fn on_release(&self, call_ref: &str) {
+        let mut ledger = self.inner.lock().unwrap();
+        ledger.released += ledger.sets.remove(call_ref).unwrap_or(0);
     }
 }
 
 /// A [`CallLimiter`] that forwards to `inner` and records on `ledger` every
 /// hold granted (on [`AdmitOutcome::Admitted`]), every admit that failed open
-/// and every hold released (when the release is issued). A refresh moves
-/// holds and counts nothing.
+/// and every hold released: at a release of the call, at the replacement of
+/// its set, and at a refusal that dropped it. A refresh counts nothing.
 pub(crate) struct CountingLimiter {
     pub(crate) inner: Arc<dyn CallLimiter>,
     pub(crate) ledger: Arc<HoldLedger>,
@@ -140,27 +175,24 @@ pub(crate) struct CountingLimiter {
 
 #[async_trait]
 impl CallLimiter for CountingLimiter {
-    async fn admit(&self, entries: &[LimiterEntry]) -> AdmitOutcome {
-        let outcome = self.inner.admit(entries).await;
-        match outcome {
-            AdmitOutcome::Admitted { .. } => {
-                self.ledger.admitted.fetch_add(entries.len() as i64, Ordering::SeqCst);
-            }
-            AdmitOutcome::Unavailable => {
-                self.ledger.failed_open.fetch_add(1, Ordering::SeqCst);
-            }
-            AdmitOutcome::Rejected { .. } => {}
-        }
+    async fn admit(
+        &self,
+        call_ref: &str,
+        entries: &[LimiterEntry],
+        release_on_refusal: bool,
+    ) -> AdmitOutcome {
+        let outcome = self.inner.admit(call_ref, entries, release_on_refusal).await;
+        self.ledger.on_admit(call_ref, entries.len() as i64, &outcome, release_on_refusal);
         outcome
     }
 
-    async fn release(&self, holds: &[LimiterHold]) {
-        self.ledger.released.fetch_add(holds.len() as i64, Ordering::SeqCst);
-        self.inner.release(holds).await;
+    async fn release(&self, call_ref: &str) {
+        self.ledger.on_release(call_ref);
+        self.inner.release(call_ref).await;
     }
 
-    async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
-        self.inner.refresh(holds).await
+    async fn refresh(&self, call_ref: &str) -> RefreshOutcome {
+        self.inner.refresh(call_ref).await
     }
 }
 
@@ -169,7 +201,7 @@ impl CallLimiter for CountingLimiter {
 #[derive(Clone)]
 pub struct LimiterProbe {
     ledger: Arc<HoldLedger>,
-    store: Option<Arc<WindowStore>>,
+    store: Option<Arc<CallStore>>,
 }
 
 impl LimiterProbe {
@@ -185,24 +217,24 @@ impl LimiterProbe {
 /// SUT runs the default.
 pub(crate) struct SutLimiter {
     ledger: Arc<HoldLedger>,
-    store: Option<Arc<WindowStore>>,
+    store: Option<Arc<CallStore>>,
     default_server: Option<Box<dyn HttpServerHandle>>,
 }
 
 impl SutLimiter {
     /// A test's own limiter, with the store behind it when registered.
-    pub(crate) fn own(store: Option<Arc<WindowStore>>) -> Self {
+    pub(crate) fn own(store: Option<Arc<CallStore>>) -> Self {
         Self { ledger: Default::default(), store, default_server: None }
     }
 
-    /// The default limiter: a [`WindowStore`] on the harness clock, served on
+    /// The default limiter: a [`CallStore`] on the harness clock, served on
     /// a private simulated HTTP fabric. Returns the [`HttpCallLimiter`] that
     /// reaches it with the SUT side.
     pub(crate) async fn serve_default() -> (Arc<dyn CallLimiter>, Self) {
         let addr: SocketAddr = DEFAULT_LIMITER_ADDR.parse().expect("default limiter address");
         let http = SimulatedHttpNetwork::new();
-        let cfg = LimiterConfig { ttl_sec: DEFAULT_STORE_TTL_SEC, ..LimiterConfig::default() };
-        let store = Arc::new(WindowStore::new(cfg, Clock::test_at(0)));
+        let cfg = LimiterConfig { lease_sec: DEFAULT_STORE_LEASE_SEC };
+        let store = Arc::new(CallStore::new(cfg, Clock::test_at(0)));
         let service = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
         let server = http.serve(addr, service).await.expect("default limiter binds");
         let client: Arc<dyn CallLimiter> =
@@ -216,7 +248,7 @@ impl SutLimiter {
         self.ledger.clone()
     }
 
-    pub(crate) fn store(&self) -> Option<&Arc<WindowStore>> {
+    pub(crate) fn store(&self) -> Option<&Arc<CallStore>> {
         self.store.as_ref()
     }
 
@@ -247,7 +279,7 @@ impl SutLimiter {
 
 /// A decision engine that appends the [`DEFAULT_LIMITER_ID`] entry to every
 /// route `inner` returns (new call, failover, release reroute), after the
-/// route's own entries, so both are admitted in one batch.
+/// route's own entries, so both are admitted in one set.
 pub(crate) struct DefaultLimiterDecision {
     pub(crate) inner: Arc<dyn CallDecisionEngine>,
 }
@@ -301,17 +333,17 @@ impl CallDecisionEngine for DefaultLimiterDecision {
 mod tests {
     use super::*;
 
-    /// Grants every batch at window 0 and ignores releases.
+    /// Grants every set and ignores releases.
     struct Grants;
 
     #[async_trait]
     impl CallLimiter for Grants {
-        async fn admit(&self, _entries: &[LimiterEntry]) -> AdmitOutcome {
-            AdmitOutcome::Admitted { window: 0 }
+        async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
+            AdmitOutcome::Admitted
         }
-        async fn release(&self, _holds: &[LimiterHold]) {}
-        async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
-            holds.to_vec()
+        async fn release(&self, _call_ref: &str) {}
+        async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+            RefreshOutcome::Known
         }
     }
 
@@ -320,19 +352,33 @@ mod tests {
 
     #[async_trait]
     impl CallLimiter for FailsOpen {
-        async fn admit(&self, _entries: &[LimiterEntry]) -> AdmitOutcome {
+        async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
             AdmitOutcome::Unavailable
         }
-        async fn release(&self, _holds: &[LimiterHold]) {}
-        async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
-            holds.to_vec()
+        async fn release(&self, _call_ref: &str) {}
+        async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+            RefreshOutcome::Unavailable
+        }
+    }
+
+    /// Refuses every set on its first entry.
+    struct Refuses;
+
+    #[async_trait]
+    impl CallLimiter for Refuses {
+        async fn admit(&self, _: &str, entries: &[LimiterEntry], _: bool) -> AdmitOutcome {
+            AdmitOutcome::Rejected { limiter_id: entries[0].id.clone() }
+        }
+        async fn release(&self, _call_ref: &str) {}
+        async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+            RefreshOutcome::Unknown
         }
     }
 
     /// One admit through `sut`'s ledger over a limiter that fails open.
     async fn one_fail_open(sut: &SutLimiter) {
         let limiter = CountingLimiter { inner: Arc::new(FailsOpen), ledger: sut.ledger() };
-        limiter.admit(&[entry("x"), entry("y")]).await;
+        limiter.admit("c1", &[entry("x"), entry("y")], false).await;
         assert_eq!(sut.count().failed_open, 1);
     }
 
@@ -355,13 +401,9 @@ mod tests {
         LimiterEntry { id: id.into(), limit: 10 }
     }
 
-    fn hold(id: &str) -> LimiterHold {
-        LimiterHold { limiter_id: id.into(), window: 0 }
-    }
-
-    fn counting() -> (CountingLimiter, Arc<HoldLedger>) {
+    fn counting(inner: Arc<dyn CallLimiter>) -> (CountingLimiter, Arc<HoldLedger>) {
         let ledger = Arc::new(HoldLedger::default());
-        (CountingLimiter { inner: Arc::new(Grants), ledger: ledger.clone() }, ledger)
+        (CountingLimiter { inner, ledger: ledger.clone() }, ledger)
     }
 
     #[tokio::test]
@@ -369,44 +411,69 @@ mod tests {
         let (_client, sut) = SutLimiter::serve_default().await;
         let probe = sut.probe();
         let limiter = CountingLimiter { inner: Arc::new(Grants), ledger: sut.ledger() };
-        limiter.admit(&[entry("x"), entry("y")]).await;
-        limiter.release(&[hold("x")]).await;
+        limiter.admit("c1", &[entry("x"), entry("y")], false).await;
+        limiter.admit("c2", &[entry("x")], false).await;
+        limiter.release("c1").await;
         assert_eq!(probe.count(), sut.count());
-        assert_eq!((probe.count().admitted, probe.count().released), (2, 1));
+        assert_eq!((probe.count().admitted, probe.count().released), (3, 2));
     }
 
     #[tokio::test]
-    async fn every_granted_hold_released_once_matches_no_leak() {
-        let (limiter, ledger) = counting();
-        limiter.admit(&[entry("x"), entry("x"), entry("y")]).await;
-        limiter.refresh(&[hold("x")]).await;
-        limiter.release(&[hold("x"), hold("x"), hold("y")]).await;
+    async fn every_granted_set_released_once_matches_no_leak() {
+        let (limiter, ledger) = counting(Arc::new(Grants));
+        limiter.admit("c1", &[entry("x"), entry("x"), entry("y")], false).await;
+        limiter.refresh("c1").await;
+        limiter.release("c1").await;
+        ledger.count(None).assert_matches(LimiterLeak::NONE);
+    }
+
+    #[tokio::test]
+    async fn a_replaced_set_counts_as_released() {
+        let (limiter, ledger) = counting(Arc::new(Grants));
+        limiter.admit("c1", &[entry("x"), entry("y")], false).await;
+        limiter.admit("c1", &[entry("y"), entry("z")], true).await;
+        assert_eq!((ledger.count(None).admitted, ledger.count(None).released), (4, 2));
+        limiter.release("c1").await;
+        ledger.count(None).assert_matches(LimiterLeak::NONE);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_drops_the_set_counts_it_as_released() {
+        let (limiter, ledger) = counting(Arc::new(Grants));
+        limiter.admit("c1", &[entry("x")], false).await;
+        let (refusing, _) = counting(Arc::new(Refuses));
+        let refusing = CountingLimiter { inner: refusing.inner, ledger: ledger.clone() };
+        refusing.admit("c1", &[entry("y")], false).await;
+        assert_eq!(ledger.count(None).unreleased(), 1, "a refusal keeping the set");
+        refusing.admit("c1", &[entry("y")], true).await;
         ledger.count(None).assert_matches(LimiterLeak::NONE);
     }
 
     #[tokio::test]
     #[should_panic(expected = "1 hold(s) granted and never released")]
-    async fn a_granted_hold_never_released_is_a_leak() {
-        let (limiter, ledger) = counting();
-        limiter.admit(&[entry("x"), entry("y")]).await;
-        limiter.release(&[hold("x")]).await;
+    async fn a_granted_set_never_released_is_a_leak() {
+        let (limiter, ledger) = counting(Arc::new(Grants));
+        limiter.admit("c1", &[entry("x")], false).await;
+        limiter.admit("c2", &[entry("y")], false).await;
+        limiter.release("c1").await;
         ledger.count(None).assert_matches(LimiterLeak::NONE);
     }
 
     #[tokio::test]
-    #[should_panic(expected = "released 1 hold(s) more than it was granted")]
-    async fn a_second_release_of_one_hold_is_a_surplus() {
-        let (limiter, ledger) = counting();
-        limiter.admit(&[entry("x")]).await;
-        limiter.release(&[hold("x")]).await;
-        limiter.release(&[hold("x")]).await;
+    async fn a_second_release_of_one_call_counts_nothing() {
+        let (limiter, ledger) = counting(Arc::new(Grants));
+        limiter.admit("c1", &[entry("x")], false).await;
+        limiter.release("c1").await;
+        limiter.release("c1").await;
+        limiter.release("never-admitted").await;
+        assert_eq!(ledger.count(None).released, 1);
         ledger.count(None).assert_matches(LimiterLeak::NONE);
     }
 
     #[tokio::test]
     async fn a_declared_unreleased_hold_matches() {
-        let (limiter, ledger) = counting();
-        limiter.admit(&[entry("x"), entry("y")]).await;
+        let (limiter, ledger) = counting(Arc::new(Grants));
+        limiter.admit("c1", &[entry("x"), entry("y")], false).await;
         ledger.count(None).assert_matches(LimiterLeak { unreleased: 2, stored: 0 });
     }
 

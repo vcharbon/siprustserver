@@ -1,15 +1,13 @@
-//! `call-limiter` — a sliding-window concurrent-call limiter, served as a
-//! dedicated stateless HTTP process and shared cluster-wide.
+//! `call-limiter` — a concurrent-call limiter keyed by the call, served as a
+//! dedicated HTTP process and shared cluster-wide.
 //!
 //! This crate is b2bua-agnostic. It carries:
-//! - [`WindowStore`] — the windowed counter core. A faithful port of the TS
-//!   in-memory limiter (`CallLimiter.memory.ts`): N active windows summed,
-//!   per-key TTL, whole-store sweep-on-access. The per-op atomics match the
-//!   Redis Lua scripts (`CallLimiter.redis.ts`): admit = sum-then-incr, refresh
-//!   = incr-current-before-decr-origin (never undercounts), release = decrement
-//!   floored at 0.
-//! - The [`wire`] DTOs for the **batched, transactional** HTTP API: one `admit`
-//!   carries every limiter entry for a call and increments **all or none**.
+//! - [`CallStore`] — the keyed core: per call the multiset of ids it holds and
+//!   a lease, per id the live count. One `admit` replaces a call's whole set
+//!   atomically, checked net of the set it already holds; `release` is
+//!   idempotent by call; `refresh` extends the lease; a lapsed lease drops the
+//!   set.
+//! - The [`wire`] DTOs of the HTTP API: every request names its call.
 //! - [`LimiterServer`] — an [`http_net::HttpService`] routing `/v1/*` +
 //!   `/metrics` + `/healthz` onto the core.
 //! - [`LimiterMetrics`] — global counters + gauges (no per-id labels).
@@ -18,9 +16,9 @@
 
 mod metrics;
 mod server;
-mod window;
+mod store;
 pub mod wire;
 
 pub use metrics::LimiterMetrics;
 pub use server::LimiterServer;
-pub use window::{AdmitResult, LimiterConfig, WindowStore};
+pub use store::{AdmitResult, CallStore, LimiterConfig, StoreStats};

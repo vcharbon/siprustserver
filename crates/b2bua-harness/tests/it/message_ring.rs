@@ -863,8 +863,13 @@ async fn a_stray_cancel_and_its_481_are_recorded() {
     );
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
-    // No keepalive round inside the wait for Timer L (RFC 6026 §7.1, 32 s).
-    let sut = Sut::spawn_tuned(&h, ring_on(), |c| c.keepalive_interval_sec = 120).await;
+    // No keepalive round and no limiter refresh inside the wait for Timer L
+    // (RFC 6026 §7.1, 32 s): each would be a turn of its own.
+    let sut = Sut::spawn_tuned(&h, ring_on(), |c| {
+        c.keepalive_interval_sec = 120;
+        c.limiter_refresh_sec = 120;
+    })
+    .await;
 
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(sut.addr).send().await;
     let mut uas = bob.receive("INVITE").await;

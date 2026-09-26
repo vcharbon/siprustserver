@@ -62,9 +62,9 @@ has zero buggy rejections and zero silent misparses.
   from long-term storage; in Rust an internal memory buffer + tokio cleanup is
   closer to the in-memory test layer and removes the dependency.
 - **Call-limiter cross-worker shared state → a dedicated in-memory Rust service,
-  not Redis** (decision now reached). The `call-limiter` crate ports the sliding-
-  window `WindowStore` (a faithful port of `CallLimiter.memory.ts` + the
-  `CallLimiter.redis.ts` Lua atomics) and `call-limiter-runner` serves it cluster-
-  wide over HTTP (a single ClusterIP replica, stateless, re-filled by refresh
-  timers on restart). Redis is **not** used; b2bua talks to it via the
+  not Redis** (decision now reached). The `call-limiter` crate keys every hold by
+  the call (`CallStore`: per-call set + lease, replacing the sliding-window port of
+  `CallLimiter.memory.ts` + the `CallLimiter.redis.ts` Lua atomics) and
+  `call-limiter-runner` serves it cluster-wide over HTTP (a single ClusterIP
+  replica, stateless, empty on restart). Redis is **not** used; b2bua talks to it via the
   `HttpCallLimiter` client and **fails open** when it is unreachable.

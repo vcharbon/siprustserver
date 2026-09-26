@@ -1,8 +1,8 @@
-//! HA-coupled limiter: a call admitted on the primary replicates its limiter
-//! hold to the backup; when the primary crashes and the in-dialog BYE fails over
-//! to the backup, the backup hydrates the call (holds included) and releases the
-//! hold on termination — so the shared counter drains on the **takeover** node
-//! (decrement-via-backup-BYE / decrement-after-respawn).
+//! HA-coupled limiter: a call admitted on the primary replicates its counted
+//! state to the backup; when the primary crashes and the in-dialog BYE fails
+//! over to the backup, the backup hydrates the call and releases it by
+//! `call_ref` on termination — so the shared counter drains on the **takeover**
+//! node (decrement-via-backup-BYE / decrement-after-respawn).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use b2bua::decision::{
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use call_limiter::wire::AdmitEntry;
-use call_limiter::{AdmitResult, LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_fully_over, cookie_field, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
     RULE_CSEQ_IN_DIALOG_ORDER,
@@ -42,6 +42,12 @@ const LIMITER_ADDR: &str = "10.0.0.1:8080";
 fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
+
+/// A lease outliving the replica TTL (`reboot_budget_sec`, 600 s): a set the
+/// crashed primary never releases is freed by the backup's reap or the
+/// reborn primary's reclaim, never by the lease, so each cell proves the
+/// release it names.
+const LEASE_OUTLIVING_THE_REPLICA_TTL: LimiterConfig = LimiterConfig { lease_sec: 3600 };
 
 /// The `FailoverHarness` every limiter-HA case runs on. The RFC audit gates in
 /// full; a case whose fault gives one leg two owners declares ADR-0014's accepted
@@ -94,16 +100,11 @@ fn limited_decision() -> Arc<dyn CallDecisionEngine> {
     )
 }
 
-/// A short, realistic limiter window for the TTL-leak-budget test — the Rust
-/// equivalent of the TS `limiter-ttl-leak-budget` config override
-/// (`limiterWindowSeconds: 120`, `limiterActiveWindows: 1`,
-/// `limiterTtlSeconds: 120`). A 2-minute window/TTL is long enough to exceed any
-/// plausible call-establishment timer yet short enough that the paused clock
-/// reaches one full window + slack (~125 s of virtual time) cheaply. The whole
-/// `LimiterConfig::default()` (300 s / 3 windows / 1200 s TTL) would force a
-/// >20-minute virtual advance for the same coverage.
-fn ttl_leak_config() -> LimiterConfig {
-    LimiterConfig { window_sec: 120, active_windows: 1, ttl_sec: 120 }
+/// The lease of the leak-budget test: long enough to exceed any plausible
+/// call-establishment timer, short enough that the paused clock reaches one
+/// lease + slack (~125 s of virtual time) cheaply.
+fn lease_leak_config() -> LimiterConfig {
+    LimiterConfig { lease_sec: 120 }
 }
 
 #[tokio::test(start_paused = true)]
@@ -114,7 +115,7 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
@@ -236,7 +237,7 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
@@ -334,9 +335,7 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
     assert_eq!(backup.active_calls(), 0, "the backup never owned a live copy");
 }
 
-/// TTL leak-budget recovery when the primary is **permanently** dead — the Rust
-/// port of `tests/sip-front-proxy/failover/limiter-ttl-leak-budget.test.ts`
-/// ("leaked limiter slot recovers via TTL when primary is permanently dead").
+/// Lease recovery when the primary is **permanently** dead.
 ///
 /// This is the worst-case capacity-recovery path. Every OTHER limiter-HA test
 /// drains the shared counter through an *active* release: the takeover backup's
@@ -344,45 +343,26 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
 /// a respawned primary's local terminate (`decrement-after-respawn`), or the
 /// restored `SetupTimeout` (`setup_stalled_call…`). Here NONE of those fire:
 ///
-///   1. `LimiterConfig { window 120 s, 1 active window, TTL 120 s }`. Call A is
-///      established through the proxy → admitted → shared counter = 1. The hold's
-///      TTL is anchored at that admit (the owner's `LimiterRefresh` timer, armed
-///      for admit + `limiter_refresh_sec`, would re-anchor it — but the owner
-///      dies before it fires).
+///   1. A 120 s lease. Call A is established through the proxy → admitted →
+///      shared counter = 1. The owner's `LimiterRefresh` timer would extend the
+///      lease — but the owner dies before it fires.
 ///   2. The primary crashes **permanently** — no graceful BYE, no respawn, no
-///      reclaim. The hold is leaked: nothing on the SIP plane will ever release
+///      reclaim. The set is leaked: nothing on the SIP plane will ever release
 ///      it. The backup holds a *non-terminal* (`Established`) replica, so the
-///      Model-Y `reap_expired_replicas` lossy path — which only releases holds of
-///      `Terminating`/`Terminated` replicas (`expired_terminal_fallbacks`) — does
-///      **not** touch it either. The ONLY remaining recovery mechanism is the
-///      `WindowStore` per-key TTL.
-///   3. Advance one full window + slack (~125 s). The hold's `expires_at_ms` has
-///      now passed, but nothing has swept it yet — the store sweeps only on
-///      access and no limiter op runs during the dead window, so the counter is
-///      still a leaked 1.
-///   4. Call B is established through the proxy → it lands on the surviving worker
-///      (the LB filters to `Alive`). Crucially, Call B arrives at ~125 s, which is
-///      the NEXT window (W1 = `[120, 240)`); with `active_windows = 1` its phase-1
-///      check inspects only W1 (count 0), so Call B is admitted *unconditionally* —
-///      its admission is NOT the regression signal. What its admit DOES do is sweep
-///      the now-expired Call A key out of the dead W0 bucket (`WindowStore::admit`
-///      sweeps expired keys before the phase-1 check), dropping the leaked hold.
-///      The regression guard is therefore the POST-establish state: `current_total`
-///      back to 1 (Call B's own hold, Call A's swept away) and `auto_cleared` bumped
-///      by that sweep. If the admit-time sweep regressed, Call A's leaked W0 key
-///      would survive Call B's admit (it lives in a different window, so it is never
-///      re-counted, but it is also never reaped) and `current_total` would read 2 —
-///      flagging a leak that would otherwise persist indefinitely after a crash with
-///      no peer takeover. This is exactly the TS source's shape (Call B establishes +
-///      `expectCdrCount == 1`); in production the same recovery happens via the Redis
-///      key TTLs configured to the same window/TTL constants. (NB: the 486-reject
-///      path — where a leaked key blocks admission — is only reachable when both
-///      calls share a window, i.e. `window_sec` large enough that W0 still covers
-///      Call B; this config's 120 s window puts Call B in W1, so the count, not the
-///      decision, is the load-bearing signal here.)
+///      Model-Y `reap_expired_replicas` lossy path — which only releases
+///      `Terminating`/`Terminated` replicas (`expired_terminal_fallbacks`) —
+///      does **not** touch it either. The ONLY remaining recovery is the lease.
+///   3. Advance one lease + slack (~125 s): the set lapsed. Call B is then
+///      established through the proxy on the surviving worker; its admit is
+///      what sweeps Call A's lapsed set (the store sweeps on access), and the
+///      regression guard is the post-establish state: `current_total` back to
+///      1 (Call B's own set, Call A's dropped) and `lease_expired_calls` bumped.
+///      Call B's admission is not the signal: `trunk-A` is capped at 1, so a
+///      set that failed to lapse would 486 it, which the establish would fail
+///      on; the count and the counter say the recovery came from the lease.
 #[tokio::test(start_paused = true)]
-async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead() {
-    let mut fh = ha_harness("limiter-ha-ttl-leak-budget");
+async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_dead() {
+    let mut fh = ha_harness("limiter-ha-lease-leak-budget");
     let alice = fh.agent("alice", ALICE).await;
     // Two callees: Call A dials bob1, Call B dials bob2. The b-leg keeps the a-leg
     // R-URI (the decision sets only the wire hop — see `limited_decision`) and the
@@ -392,9 +372,9 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
     let bob2 = fh.agent("bob2", BOB2).await;
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
-    // Short 2-minute window/TTL so the paused clock reaches the leak budget fast.
+    // A 2-minute lease so the paused clock reaches the leak budget fast.
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(ttl_leak_config(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(lease_leak_config(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
@@ -444,107 +424,65 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
     call.expect(180).await;
     uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
-    // Deliberate, benign deviation from the TS source (which leaves Call A in an
-    // early/unACKed state, line 99): we fully confirm Call A so the leaked replica
-    // is `Established`, not early. The slot is consumed at INVITE-routing time
-    // regardless, so this does not change the leaked-slot-recovery coverage:
-    // `Established` and early replicas are BOTH non-terminal, so both are equally
-    // ignored by the Model-Y lossy reap (`expired_terminal_fallbacks` returns only
-    // `Terminating`/`Terminated`). We confirm simply to exercise the fully-established
-    // shape end to end.
+    // Call A is fully confirmed so the leaked replica is `Established`, not
+    // early: `Established` and early replicas are BOTH non-terminal, so both are
+    // equally ignored by the Model-Y lossy reap (`expired_terminal_fallbacks`
+    // returns only `Terminating`/`Terminated`).
     let _dialog = call.ack().await;
     bob1.receive("ACK").await;
 
     // Drive establish + replicate primary → backup (so the backup carries a
     // non-terminal replica — the case the lossy reap must NOT release).
     fh.advance(Duration::from_millis(500)).await;
-    assert_eq!(store.stats().current_total, 1, "Call A admitted: one hold leaked-to-be");
+    assert_eq!(store.stats().current_total, 1, "Call A admitted: one set leaked-to-be");
 
-    // Bind the primary by the cookie's w_pri (the backup is reached only via
-    // `w_b1`/`w_b2` later, so it needs no separate live binding here).
     let primary: &mut ReplicatedB2buaSut = if primary_ord == "b1" { &mut w_b1 } else { &mut w_b2 };
 
     // ── Permanently kill the primary: no BYE, no respawn, no reclaim ──────────
-    // The hold is leaked. With no in-dialog request ever routed to the backup,
+    // The set is leaked. With no in-dialog request ever routed to the backup,
     // the backup never takes the call over, so its replica stays `Established`
     // (non-terminal) — invisible to the Model-Y lossy reap.
     primary.crash();
     proxy.set_health(&primary_ord, WorkerHealth::Dead);
 
-    // ── Advance past the window so the per-key TTL elapses ─────────────────────
-    // 125 s = 120 s window + 5 s slack. Nothing is in flight (Call A is dead, no
-    // BYE), so a single advance is safe — there is no second deadline to react to
-    // between steps. The store is read on access only; with no traffic NOTHING
-    // sweeps during the dead window, so the counter stays a leaked 1 even though
-    // the key's `expires_at_ms` (admit + 120 s) has now passed. The owner being
-    // dead means no `LimiterRefresh` ever re-anchored the TTL, so it expires
-    // exactly one window after the admit — and the leaked 1 survives, unswept,
-    // right up to Call B's admit below. Deliberately NO explicit `sweep_now()`
-    // here: matching the TS source, Call B's admit must be the thing that reaps
-    // the leaked key, so the admit-time-sweep regression guard stays armed (drop
-    // the `sweep(&mut inner, now_ms)` at the top of `WindowStore::admit` and this
-    // test FAILS on `current_total == 2` below — Call A's expired key is never
-    // reaped, so Call B's own admit leaves the total at 2, not on a 486: Call B
-    // lands in the next window and is admitted either way).
-    let cleared_before = store.stats().auto_cleared;
-    assert_eq!(store.stats().current_total, 1, "hold still leaked right after the crash");
+    // ── Advance past the lease ────────────────────────────────────────────────
+    // 125 s = 120 s lease + 5 s slack. Nothing is in flight (Call A is dead, no
+    // BYE), so a single advance is safe. The owner being dead means no
+    // `LimiterRefresh` ever extended the lease, so the set lapses exactly one
+    // lease after the admit. Deliberately NO explicit `sweep_now()` here: Call
+    // B's admit is the access that sweeps the lapsed set.
+    let lapsed_before = store.stats().lease_expired_calls;
     fh.advance(Duration::from_secs(125)).await;
-    assert_eq!(
-        store.stats().current_total,
-        1,
-        "the leaked hold is STILL a 1 at +125 s — expired but unswept (no access has run \
-         a sweep); only Call B's admit recovers it",
-    );
 
-    // ── Call B — lands in the NEXT window, so it is admitted unconditionally ───
+    // ── Call B — admitted under the cap of 1 once Call A's set lapsed ─────────
     // With the primary Dead, the LB has exactly one alive candidate (the
     // survivor), so Call B lands there. It targets bob2 (a distinct callee) so its
     // b-leg sits on its own RFC-audit lane, away from Call A's leaked dialog.
     // Uninterrupted happy path → `callflow` (CLAUDE.md).
-    //
-    // `establish` succeeding is NOT the regression guard. With this config
-    // (window 120 s, `active_windows = 1`) Call B's INVITE arrives at ~125 s, which
-    // is window W1 = `[120, 240)`; its phase-1 check inspects only W1 (count 0), so
-    // admission is unconditional whether or not the leaked W0 key was swept. The
-    // 486-reject path the recovery is meant to prevent is only reachable when both
-    // calls share a window (a larger `window_sec`); here they do not, so the guard
-    // is the POST-establish count + `auto_cleared` delta below, not the decision.
-    //
-    // What the admit DOES do is sweep the now-expired Call A key out of the dead W0
-    // bucket (window.rs `admit` line ~121, before its phase-1 check) — that sweep is
-    // what drops the leaked hold, recovering the slot exactly as the TS source's
-    // `expectCdrCount == 1` shape documents.
     let mut call_b = scenario_harness::callflow::establish(&alice, &bob2, proxy.addr()).await;
     assert_eq!(
         store.stats().current_total,
         1,
-        "post-recovery total back to 1 — Call B's admit swept the expired Call A W0 key, \
-         then took its own slot. With the admit-time sweep removed Call A's leaked W0 key \
-         survives (it is in a different window, so never re-counted but also never reaped) \
-         and this reads 2 — that 2 is the regression signal, not a 486",
+        "post-recovery total back to 1 — Call A's lapsed set was dropped, Call B took the slot",
     );
-    assert!(
-        store.stats().auto_cleared > cleared_before,
-        "the recovery was via the TTL auto-clear path (Call B's admit-time sweep), not an \
-         active release",
+    assert_eq!(
+        store.stats().lease_expired_calls,
+        lapsed_before + 1,
+        "the recovery was the lease lapsing (Call A's set), not an active release",
     );
-    // Belt-and-braces, NOT the discriminator: confirm no Model-Y lossy reap was
-    // counted. This is intentionally a weak signal here — the reap only fires after
-    // `reboot_budget_sec` (600 s) of replica TTL, and the test finishes at ~126 s, so
-    // this reads 0 regardless of the replica's terminal state (and the test never
-    // asserts the backup's replica is non-terminal). The genuine TTL-recovery-vs-
-    // backup-discharge discriminator is the `auto_cleared > cleared_before` check
-    // above. We keep this assert as a cheap guard that the reap path stayed quiet
-    // within the test budget.
+    // Belt-and-braces, NOT the discriminator: no Model-Y lossy reap was counted.
+    // The reap only fires after `reboot_budget_sec` (600 s) of replica TTL, and
+    // the test finishes at ~126 s, so this reads 0 regardless of the replica's
+    // terminal state.
     assert_eq!(
         w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
         0,
         "no Model-Y lossy reap was counted within the ~126 s test budget (reboot_budget is \
-         600 s, so the reap cannot fire here regardless): recovery came from the limiter TTL",
+         600 s, so the reap cannot fire here regardless): recovery came from the lease",
     );
 
-    // Clean teardown so Call B writes its CDR and releases its own hold. Wait for
-    // BOTH the limiter to drain AND the CDR to land: the limiter decrement and the
+    // Clean teardown so Call B writes its CDR and releases its own set. Wait for
+    // BOTH the limiter to drain AND the CDR to land: the limiter release and the
     // CDR write ride different obligation lanes (the CDR-lane reorder, ADR-0020),
     // so the limiter can hit 0 a flush before the CDR is recorded — settling on the
     // limiter alone would race ahead of the write.
@@ -555,7 +493,7 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
                 && w_b1.cdr_records().len() + w_b2.cdr_records().len() == 1
         })
         .await;
-    assert!(drained, "Call B's clean BYE released its limiter hold AND wrote exactly one CDR",);
+    assert!(drained, "Call B's clean BYE released its limiter set AND wrote exactly one CDR",);
 
     // Call A's CDR is the accepted loss (its primary crashed for good and never
     // reclaimed); only Call B terminated cleanly, so exactly one CDR exists.
@@ -582,14 +520,14 @@ async fn leaked_limiter_slot_recovers_via_ttl_when_primary_is_permanently_dead()
 /// Here the dialog is **served on the backup mid-outage** (a re-INVITE the backup
 /// takes over and reverse-propagates), THEN the primary returns and the terminal
 /// BYE lands back on the **reborn primary**, which discharges the reverse-folded
-/// call. The signal under test (TS `expectLimiterCount(0)`): the limiter
-/// `origin_window` stamped at the original admit must survive the whole
-/// bak→pri round-trip (admit on pri → takeover-fold on bak → reverse-flush back
-/// to pri → reclaim → BYE-discharge on pri). If the reclaim/switchback re-stamps
-/// the origin to the reborn primary's current epoch, the decrement targets a
-/// limiter key the original increment never wrote, the count stays a leaked 1, and
-/// the next call under the same id would 486. `current_total == 0` after the BYE
-/// proves the window was preserved across the switchback.
+/// call. The signal under test (TS `expectLimiterCount(0)`): the call's
+/// `call_ref` and counted state stamped at the original admit must survive the
+/// whole bak→pri round-trip (admit on pri → takeover-fold on bak →
+/// reverse-flush back to pri → reclaim → BYE-discharge on pri). If the
+/// reclaim/switchback re-derived the key or dropped the counted flag, the
+/// release would name a call the limiter never admitted, the count would stay
+/// a leaked 1, and the next call under the same id would 486.
+/// `current_total == 0` after the BYE proves the key was preserved.
 ///
 /// Mechanism in this harness (the no-probe analogue of the production k8s LB):
 /// `crash()` + `set_health(Dead)` makes the proxy fail the in-dialog re-INVITE
@@ -608,7 +546,7 @@ async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 
@@ -763,11 +701,11 @@ async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
 
     // ── Phase 3: BYE routes back to the returned primary (decode_forward) ─────
     // The cookie's w_pri is alive again, so alice's BYE routes to the reborn
-    // primary — NOT the backup. It terminates the reclaimed call locally and emits
-    // the limiter decrement against the cluster-shared store using the call's
-    // PRESERVED origin_window (carried through admit→takeover-fold→reverse-flush→
-    // reclaim). If the switchback re-stamped the origin to the primary's new epoch,
-    // this decrement would miss and `current_total` would stay a leaked 1.
+    // primary — NOT the backup. It terminates the reclaimed call locally and
+    // releases it on the cluster-shared store by its PRESERVED `call_ref`
+    // (carried through admit→takeover-fold→reverse-flush→reclaim). If the
+    // switchback re-derived the key, this release would miss and
+    // `current_total` would stay a leaked 1.
     let creations_before = primary.metrics().creations_total();
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let _ = &alice;
@@ -787,12 +725,12 @@ async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
         "the switchback BYE on the returned primary must drain the shared limiter to 0",
     );
 
-    // THE regression guard (TS `expectLimiterCount(0)`): the decrement landed on the
-    // origin window, so the cluster-shared counter is back to 0.
+    // THE regression guard (TS `expectLimiterCount(0)`): the release named the
+    // admitted call, so the cluster-shared counter is back to 0.
     assert_eq!(
         store.stats().current_total,
         0,
-        "switchback BYE decremented the shared limiter via the preserved origin_window",
+        "switchback BYE released the shared limiter via the preserved call_ref",
     );
     // The discharge happened on the RETURNED PRIMARY (it created/reclaimed the call
     // locally to serve the BYE), not via a backup lossy reap.
@@ -841,12 +779,12 @@ fn failover_decision() -> Arc<dyn CallDecisionEngine> {
 
 /// A rerouted call's holds after a takeover. The initial route holds `x` + `y`;
 /// bob busies out and the failover route to charlie replaces them with `y` +
-/// `z`, which the backup holds in its replica. The primary crashes after the
+/// `z`, which the backup counts in its replica. The primary crashes after the
 /// failover; the caller's BYE fails over to the backup, whose lossy
-/// auto-cleanup releases the replica's holds: `y` and `z`, never the replaced
-/// `x` again. Each id carries one witness hold admitted outside the call, so a
-/// surplus release reads below the witness instead of vanishing under the
-/// store's floor at 0.
+/// auto-cleanup releases the call by `call_ref`: `y` and `z` are freed, never
+/// the replaced `x` again. Each id carries one witness hold admitted under a
+/// call of its own, so a surplus release reads below the witness instead of
+/// vanishing under the store's floor at 0.
 #[tokio::test(start_paused = true)]
 async fn rerouted_call_holds_drain_on_the_takeover_node_without_re_releasing_the_replaced_route() {
     let mut fh = ha_harness("limiter-ha-rerouted-takeover");
@@ -856,10 +794,14 @@ async fn rerouted_call_holds_drain_on_the_takeover_node_without_re_releasing_the
 
     // Shared limiter server on its own simulated HTTP fabric (survives crashes).
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     for id in ["x", "y", "z"] {
-        let witness = store.admit(&[AdmitEntry { id: id.into(), limit: 100 }]);
-        assert!(matches!(witness, AdmitResult::Admitted { .. }), "witness hold on {id}");
+        let witness = store.admit(
+            &format!("witness-{id}"),
+            &[AdmitEntry { id: id.into(), limit: 100 }],
+            false,
+        );
+        assert_eq!(witness, AdmitResult::Admitted, "witness hold on {id}");
     }
     let holds = || ["x", "y", "z"].map(|id| store.held(id) - 1);
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));

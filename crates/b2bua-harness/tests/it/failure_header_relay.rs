@@ -16,7 +16,7 @@ use b2bua::decision::ScriptedDecisionEngine;
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaScene, B2buaSut, BOB_PORT};
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 use sip_message::header::HeaderName;
@@ -392,7 +392,7 @@ async fn a_plan_authored_redirect_carries_none_of_the_refusals_headers() {
 async fn a_capacity_refusal_carries_none_of_the_failed_peers_headers() {
     let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr, server).await.unwrap();
     let limiter: Arc<dyn CallLimiter> =

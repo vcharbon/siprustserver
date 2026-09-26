@@ -76,8 +76,8 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
         }
         let Some(call) = resident_or_materialised(ctx, &call_ref).await else {
             maybe_reject_orphan(ctx, &event).await;
-            // A route fold for a vanished call: no call is left to record
-            // the holds its dispatching task admitted.
+            // A route fold for a vanished call: no call is left to own the
+            // set its dispatching task admitted.
             super::callouts::release_route_fold_holds(ctx.limiter.as_ref(), &event).await;
             // This event was dispatched into a fresh per-call queue (one
             // `bump_creation`) and took the per-call lock, but resolved to NO
@@ -128,7 +128,7 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             record_refusal(ctx, call, &res.source_leg_id, &event, Some(&answer), now_ms);
             return;
         }
-        // The limiter-refresh timer is async (an HTTP call to migrate holds), so
+        // The limiter-refresh timer is async (an HTTP call to extend the lease), so
         // it is handled outside the synchronous rule chain — like initial-INVITE.
         if matches!(&event, CallEvent::Timer { timer_type: TimerType::LimiterRefresh, .. }) {
             let before = call.clone();
@@ -415,14 +415,14 @@ async fn initial_invite_turn(
 
 /// The 069 drop result: the pre-handler call — no b-leg, no wire effects —
 /// carrying ONLY what the discarded turn already committed *outside* the call.
-/// The limiter holds `apply_route` INCRemented ride over so the queued
-/// termination's standard obligation discharge still DECRs each one
-/// (the INCR↔DECR pairing survives the drop), and the trace stamp rides over
+/// The limiter state `apply_route` admitted rides over so the queued
+/// termination's standard obligation discharge still releases the call
+/// (the admit↔release pairing survives the drop), and the trace stamp rides over
 /// so a sampled call's later turns (the CANCEL, the 487, the termination that
 /// closes its registry entry) still emit into its trace.
 fn dropped_on_setup_cancel(pre: &Call, handled: HandlerResult) -> HandlerResult {
     let mut call = pre.clone();
-    call.limiter_entries = handled.call.limiter_entries;
+    call.limiter = handled.call.limiter;
     call.trace_id = handled.call.trace_id;
     call.root_span_id = handled.call.root_span_id;
     call.sampled = handled.call.sampled;
@@ -812,39 +812,23 @@ fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call
     }
 }
 
-/// Handle a `LimiterRefresh` timer: migrate every live hold to the current
-/// window (an async `/v1/refresh` call), update the stored windows, and re-arm
-/// the timer while the call is alive.
+/// Handle a `LimiterRefresh` timer: extend a counted call's lease (an async
+/// `/v1/refresh` call) and re-arm the timer while the call is alive. A
+/// failed or unknown refresh changes nothing here: the next cycle retries,
+/// and a set the server no longer holds is released as a no-op at the end.
 async fn handle_limiter_refresh(
     ctx: &Arc<RouterCtx>,
     mut call: Call,
     now_ms: i64,
 ) -> HandlerResult {
-    let holds = crate::limiter::live_holds(&call);
-
     let mut fx = HandlerEffects::new();
-    if holds.is_empty() {
+    if !call.limiter.counted {
         return HandlerResult { call, effects: fx };
     }
 
-    // All holds migrate to the same current window; adopt it for every live
-    // entry. On a backend failure `refresh` returns the holds unchanged, so the
-    // windows simply stay put and we retry next cycle.
-    let updated = ctx.limiter.refresh(&holds).await;
+    let outcome = ctx.limiter.refresh(&call.call_ref).await;
     if crate::trace::sampled(&call) {
-        crate::trace::emit::limiter(
-            &call,
-            now_ms,
-            "refresh",
-            &format!("{} hold(s) -> window {:?}", holds.len(), updated.first().map(|h| h.window)),
-        );
-    }
-    if let Some(new_window) = updated.first().map(|h| h.window) {
-        for e in call.limiter_entries.iter_mut() {
-            if e.increment_succeeded != Some(false) {
-                e.origin_window = new_window;
-            }
-        }
+        crate::trace::emit::limiter(&call, now_ms, "refresh", &format!("{outcome:?}"));
     }
 
     if call.state == CallModelState::Active {

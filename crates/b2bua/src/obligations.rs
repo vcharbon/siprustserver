@@ -17,7 +17,7 @@
 //! - **idempotent** — `settle` appends only what `effects` does not already
 //!   discharge, so a rule that emitted its own cleanup is not doubled, and
 //!   settling twice is a no-op. Dedupe semantics are kind-local (the limiter's
-//!   per-`(limiter_id, window)` count vs the CDR's single flag), which is why
+//!   one release per call vs the CDR's single flag), which is why
 //!   derive/dedupe/append live together in one `settle` pass instead of a
 //!   framework-owned key round-trip.
 //!
@@ -30,7 +30,6 @@
 //! funnels through.
 
 use call::Call;
-use std::collections::HashMap;
 
 use crate::effects::{BufferedObservabilityEffect, HandlerEffects, SoftBoundedEffect};
 
@@ -42,7 +41,7 @@ pub struct Obligation {
     /// Stable kind id ("limiter", "cdr", …) — metrics labels / audit lines only.
     pub kind: &'static str,
     /// Dedupe key, unique within `kind` for one call
-    /// (limiter: `"{limiter_id}:{origin_window}"`; cdr: `"cdr"`).
+    /// (limiter: the `call_ref`; cdr: `"cdr"`).
     pub key: String,
 }
 
@@ -98,12 +97,11 @@ impl ObligationSet {
     }
 }
 
-/// Kind `"limiter"` — every recorded hold is decremented exactly once on
-/// termination (the strong INCR↔DECR invariant). Fail-open admissions
-/// (`increment_succeeded == Some(false)`) carry no real increment, so they are
-/// skipped. A `DecrementLimiter` a rule already emitted discharges one hold of
-/// its `(limiter_id, window)`; two holds on one key are two releases. A
-/// replaced route's `ReleaseReplacedHold` discharges none.
+/// Kind `"limiter"` — a counted call releases its limiter set exactly once
+/// at termination (the strong admit↔release invariant), with one
+/// `release(call_ref)` the server applies idempotently. An uncounted call
+/// (no limiter stated, or an admit that failed open) owes nothing. A
+/// `ReleaseLimiter` a rule already emitted discharges it.
 pub struct LimiterObligations;
 
 impl ObligationKind for LimiterObligations {
@@ -112,46 +110,21 @@ impl ObligationKind for LimiterObligations {
     }
 
     fn settle(&self, call: &Call, effects: &mut HandlerEffects) {
-        // A multiset: each release already emitted discharges ONE hold of its
-        // `(limiter_id, window)`, so two holds on one key owe two releases.
-        let mut already: HashMap<(&str, i64), usize> = HashMap::new();
-        // A replaced route's release (`ReleaseReplacedHold`) is off the
-        // ledger already and discharges none of its entries.
-        for effect in &effects.soft {
-            if let SoftBoundedEffect::DecrementLimiter { limiter_id, window } = effect {
-                *already.entry((limiter_id.as_str(), *window)).or_default() += 1;
-            }
+        if !call.limiter.counted {
+            return;
         }
-        let mut owed = Vec::new();
-        for entry in &call.limiter_entries {
-            if entry.increment_succeeded == Some(false) {
-                continue;
-            }
-            if let Some(n) = already.get_mut(&(entry.limiter_id.as_str(), entry.origin_window)) {
-                if *n > 0 {
-                    *n -= 1;
-                    continue;
-                }
-            }
-            owed.push(entry);
-        }
-        for entry in owed {
-            effects.soft.push(SoftBoundedEffect::DecrementLimiter {
-                limiter_id: entry.limiter_id.clone(),
-                window: entry.origin_window,
-            });
+        let already = effects.soft.iter().any(|e| matches!(e, SoftBoundedEffect::ReleaseLimiter));
+        if !already {
+            effects.soft.push(SoftBoundedEffect::ReleaseLimiter);
         }
     }
 
     fn owed(&self, call: &Call) -> Vec<Obligation> {
-        call.limiter_entries
-            .iter()
-            .filter(|e| e.increment_succeeded != Some(false))
-            .map(|e| Obligation {
-                kind: "limiter",
-                key: format!("{}:{}", e.limiter_id, e.origin_window),
-            })
-            .collect()
+        if call.limiter.counted {
+            vec![Obligation { kind: "limiter", key: call.call_ref.clone() }]
+        } else {
+            Vec::new()
+        }
     }
 }
 

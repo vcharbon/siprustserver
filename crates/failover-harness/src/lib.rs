@@ -105,7 +105,7 @@ pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
 pub async fn assert_call_fully_over(
     nodes: &[&ReplicatedB2buaSut],
     call_ref: &str,
-    limiter: &call_limiter::WindowStore,
+    limiter: &call_limiter::CallStore,
 ) {
     // #2 — over everywhere (0 owners, no replica trace, memory clean).
     assert_call_fully_released(nodes, call_ref).await;
@@ -148,7 +148,7 @@ pub async fn assert_call_fully_over(
 pub async fn assert_call_lost_no_cdr(
     nodes: &[&ReplicatedB2buaSut],
     call_ref: &str,
-    limiter: &call_limiter::WindowStore,
+    limiter: &call_limiter::CallStore,
 ) {
     assert_call_fully_released(nodes, call_ref).await;
     let cdrs = total_cdrs_for(nodes, call_ref);

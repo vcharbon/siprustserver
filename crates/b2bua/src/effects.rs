@@ -83,18 +83,12 @@ pub enum CriticalStateEffect {
     RemoveCall,
 }
 
-/// Soft-bounded effects — limiter decrements with a short timeout (never block).
-/// Both variants release one hold; they differ in what the terminal settle
-/// counts against the call's ledger.
+/// Soft-bounded effects — limiter requests with a short timeout (never block).
 #[derive(Debug, Clone)]
 pub enum SoftBoundedEffect {
-    /// Release a hold the call's ledger still records: the settle counts it
-    /// as discharging one ledger entry of its `(limiter_id, window)`.
-    DecrementLimiter { limiter_id: String, window: i64 },
-    /// Release a hold of a replaced route, already removed from the ledger:
-    /// the settle never counts it, so it cannot stand in for a remaining
-    /// hold on the same `(limiter_id, window)`.
-    ReleaseReplacedHold { limiter_id: String, window: i64 },
+    /// Release the call's limiter set: one `release(call_ref)`, idempotent on
+    /// the server. The terminal settle emits it once for a counted call.
+    ReleaseLimiter,
 }
 
 /// Buffered observability effects — drop-on-overload is acceptable.

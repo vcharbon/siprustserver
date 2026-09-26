@@ -1,12 +1,13 @@
-//! Wire DTOs for the batched/transactional limiter HTTP API.
+//! Wire DTOs for the call-keyed limiter HTTP API.
 //!
 //! Endpoints:
 //! - `POST /v1/admit`   [`AdmitRequest`]  -> [`AdmitResponse`]
 //! - `POST /v1/release` [`ReleaseRequest`] -> `200 {}`
 //! - `POST /v1/refresh` [`RefreshRequest`] -> [`RefreshResponse`]
 //!
-//! The server owns the clock, so it computes and returns the window timestamp;
-//! the client stores it and echoes it back on release/refresh.
+//! Every request names the call (`call_ref`); the server keeps the call's set
+//! and its lease, so the client stores nothing but whether the call is
+//! counted.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,54 +20,51 @@ pub struct AdmitEntry {
     pub limit: i64,
 }
 
-/// `POST /v1/admit` body: all entries for one call. Admitted all-or-none.
+/// `POST /v1/admit` body: the call's whole set, replacing what it holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmitRequest {
-    /// Every limiter entry the call must satisfy.
+    /// The call the set belongs to.
+    pub call_ref: String,
+    /// Every limiter entry the call must satisfy, admitted all-or-none.
     pub entries: Vec<AdmitEntry>,
+    /// On a cap refusal, drop the call's current set in the same step.
+    #[serde(default)]
+    pub release_on_refusal: bool,
 }
 
-/// `POST /v1/admit` response. `admitted == true` carries the shared `window`
-/// every entry was incremented in; `admitted == false` carries the first
-/// `rejected_id` that was over cap (nothing was incremented).
+/// `POST /v1/admit` response. `admitted` carries the whole set; a cap
+/// refusal names the first `rejected_id` at its cap; `released` states a
+/// refusal by the call's tombstone (the call ended), which names no id.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmitResponse {
-    /// Whether all entries were admitted (and thus incremented).
+    /// Whether the call's set is now the entries sent.
     pub admitted: bool,
-    /// The window timestamp all entries were incremented in (present iff admitted).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub window: Option<i64>,
-    /// The first id that was over cap (present iff rejected).
+    /// The first id at its cap (present iff refused on a cap).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub rejected_id: Option<String>,
+    /// The call was released within the last lease: nothing is held for it.
+    #[serde(default)]
+    pub released: bool,
 }
 
-/// One recorded hold: an id and the window it was incremented in.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Hold {
-    /// The limiter id.
-    pub id: String,
-    /// The window timestamp the increment landed in.
-    pub window: i64,
-}
-
-/// `POST /v1/release` body: decrement each hold's window (floored at 0).
+/// `POST /v1/release` body: drop the call's set. Idempotent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseRequest {
-    /// Holds to release.
-    pub entries: Vec<Hold>,
+    /// The call to release.
+    pub call_ref: String,
 }
 
-/// `POST /v1/refresh` body: migrate each hold from its window to the current one.
+/// `POST /v1/refresh` body: extend the call's lease.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshRequest {
-    /// Holds to refresh.
-    pub entries: Vec<Hold>,
+    /// The call to keep alive.
+    pub call_ref: String,
 }
 
-/// `POST /v1/refresh` response: each hold with its new (current) window.
+/// `POST /v1/refresh` response: whether the store holds a set for the call.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshResponse {
-    /// Holds with updated windows.
-    pub entries: Vec<Hold>,
+    /// `false` for a call never admitted, released or lapsed: nothing was
+    /// re-created.
+    pub known: bool,
 }

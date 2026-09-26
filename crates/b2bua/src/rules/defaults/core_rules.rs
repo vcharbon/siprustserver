@@ -738,7 +738,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 // (one shared parser + parity-action builder, also used by the
                 // `release-reroute` fold): features (incl. the GlobalDuration
                 // re-arm), service_ext, subscriptions, update_body, and the
-                // limiter holds (the route's admitted holds replace the call's).
+                // limiter state (the route's admitted set replaced the call's).
                 let fold = parse_route_fold(payload)?;
                 let failed_leg_id =
                     payload.get("failed_leg_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -768,8 +768,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             },
         ),
         // ── route-fold holds on a going-away call ───────────────────────────
-        // The holds a route fold carries join a Terminating call's ledger and
-        // the terminal settle releases them; no LimiterRefresh re-arm. A
+        // A route fold's dispatching task replaced the call's set on the
+        // limiter: the state it carries becomes a Terminating call's, and the
+        // terminal settle releases by `call_ref`; no LimiterRefresh re-arm. A
         // Terminated call is never resident on a rule turn (its folds take the
         // router's gone-call release).
         rule(
@@ -780,8 +781,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     && route_fold_holds(ctx.event).is_some()
             }),
             |ctx| {
-                let (entries, window) = route_fold_holds(ctx.event)?;
-                ok(vec![RuleAction::RecordLimiterHolds { entries, window }])
+                let limiter = route_fold_holds(ctx.event)?;
+                ok(vec![RuleAction::ReplaceLimiterHolds {
+                    counted: limiter.counted,
+                    ids: limiter.ids,
+                }])
             },
         )
         .runs_while_terminating(),

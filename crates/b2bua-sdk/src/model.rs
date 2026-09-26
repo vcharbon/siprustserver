@@ -937,20 +937,15 @@ pub enum RuleAction {
     MergeCallExt {
         ext: ExtMap,
     },
-    /// Append **already-admitted** limiter holds to the call's ledger, next to
-    /// the holds it carries, so termination decrements them. For holds that do
-    /// not replace the call's route (a route fold landing on a going-away
-    /// call). `entries` are `(limiter_id, limit)`.
-    RecordLimiterHolds {
-        entries: Vec<(String, i64)>,
-        window: i64,
-    },
-    /// Hand the call's limiter holds to the route a fold applies: the latest
-    /// applied route owns them. Every hold the call carries leaves the ledger
-    /// and is released; `holds`, `(entries, window)` already admitted by the
-    /// fold's dispatching task, take their place (`None`: nothing admitted).
+    /// State the call's admission state after a route fold: the fold's
+    /// dispatching task already replaced the call's set on the limiter (one
+    /// `admit(call_ref, ..)` net of the set the call held), so the call is
+    /// `counted` iff that admit was granted a non-empty set, and `ids` names
+    /// it. On a live call the refresh cadence follows; on a going-away call
+    /// the terminal settle releases by `call_ref`.
     ReplaceLimiterHolds {
-        holds: Option<(Vec<(String, i64)>, i64)>,
+        counted: bool,
+        ids: Vec<String>,
     },
     /// Synthesize a final failure response on the a-leg INVITE server txn
     /// (the terminate-after-`/call/failure` path — relay the b-leg failure to A
@@ -1086,7 +1081,6 @@ impl RuleAction {
             | RuleAction::SetReroute { .. }
             | RuleAction::SetFeatures { .. }
             | RuleAction::MergeCallExt { .. }
-            | RuleAction::RecordLimiterHolds { .. }
             | RuleAction::ReplaceLimiterHolds { .. }
             | RuleAction::ResolveCancelledReinvite { .. } => EffectKind::Bookkeeping,
         }

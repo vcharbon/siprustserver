@@ -21,7 +21,7 @@
 //!
 //! Concern map:
 //!   - [`record`] — master [`Call`] record + call-level satellites (lifecycle
-//!     state, topology, peering, limiters, INVITE snapshot, tag map, policy)
+//!     state, topology, peering, limiter state, INVITE snapshot, tag map, policy)
 //!   - [`leg`] — [`Leg`] + state / disposition / role enums
 //!   - [`dialog`] — §12 dialog state + B2BUA-only dialog extensions
 //!   - [`emission`] / [`obligation`] — the retained emission a ladder repeats

@@ -17,7 +17,7 @@ use b2bua::decision::{
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{establish, settle_until, B2buaSut};
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{Fault, HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use sip_clock::Clock;
@@ -34,10 +34,8 @@ fn laddr() -> SocketAddr {
 /// Serve a real `LimiterServer` (default 300 s window, so the window never rolls
 /// mid-test) on `net` at [`LIMITER_ADDR`]; return the store (for count probes)
 /// and the server handle (keep alive for the test).
-async fn serve_limiter(
-    net: &SimulatedHttpNetwork,
-) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<CallStore>, Box<dyn HttpServerHandle>) {
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
     (store, handle)

@@ -27,7 +27,7 @@ use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
-use call_limiter::{LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
+use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
 use sip_clock::Clock;
@@ -41,10 +41,8 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-async fn serve_limiter(
-    net: &SimulatedHttpNetwork,
-) -> (Arc<WindowStore>, Box<dyn HttpServerHandle>) {
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
+async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<CallStore>, Box<dyn HttpServerHandle>) {
+    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let handle = net.serve(laddr(), server).await.unwrap();
     (store, handle)

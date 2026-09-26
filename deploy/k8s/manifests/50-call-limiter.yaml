@@ -1,9 +1,9 @@
-# Call-limiter service — the dedicated, stateless sliding-window concurrency
-# limiter shared cluster-wide. SINGLE replica (Deployment, not StatefulSet): one
-# authoritative in-memory counter set, no persistence. On restart the empty
-# state is re-filled within ~LIMITER_WINDOW_SECONDS by active calls' refresh
-# timers, and the b2bua fails open during the brief downtime — so this is a SPOF
-# for the limiter function only, never for calls.
+# Call-limiter service — the dedicated, stateless concurrency limiter keyed by
+# the call, shared cluster-wide. SINGLE replica (Deployment, not StatefulSet):
+# one authoritative in-memory set per call, no persistence. On restart the
+# store is empty: the calls admitted before it are released as no-ops, and the
+# b2bua fails open during the brief downtime — so this is a SPOF for the
+# limiter function only, never for calls.
 #
 # The b2bua workers reach it at call-limiter:8080 (LIMITER_URL on the worker).
 # Inert until a /call/new decision returns `call_limiter` entries.
@@ -44,9 +44,7 @@ spec:
               add: ["NET_ADMIN"]
           env:
             - { name: LIMITER_LISTEN,           value: "0.0.0.0:8080" }
-            - { name: LIMITER_WINDOW_SECONDS,   value: "300" }
-            - { name: LIMITER_ACTIVE_WINDOWS,   value: "3" }
-            - { name: LIMITER_TTL_SECONDS,      value: "1200" }
+            - { name: LIMITER_LEASE_SECONDS,    value: "120" }
           ports:
             - { name: http, containerPort: 8080, protocol: TCP }
           readinessProbe:

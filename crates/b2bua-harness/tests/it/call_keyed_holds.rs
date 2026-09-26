@@ -8,13 +8,10 @@
 //! lands holds nothing from it; an admit that failed open is never released.
 //!
 //! Every scenario carries several limiters with one **witness** hold per id,
-//! admitted outside the call, so a surplus release reads below the witness
-//! instead of vanishing under the store's floor at 0. The store is probed per
-//! id while the call is up and drained to the witnesses after it ends.
-//!
-//! The first tests run on today's `(id, window)` store and state its defects;
-//! `contract` states the keyed store and is compiled out (`cfg(any())`) until
-//! that store exists.
+//! admitted under a call of its own, so a surplus release reads below the
+//! witness instead of vanishing under the store's floor at 0. The store is
+//! probed per id while the call is up and drained to the witnesses after it
+//! ends.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -32,9 +29,11 @@ use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut};
 use call::ReleaseEventKind;
-use call_limiter::wire::{AdmitEntry, Hold};
-use call_limiter::{AdmitResult, LimiterConfig, LimiterMetrics, LimiterServer, WindowStore};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use call_limiter::wire::AdmitEntry;
+use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
+use http_net::{
+    HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport, SimulatedHttpNetwork,
+};
 use scenario_harness::Harness;
 use sip_clock::Clock;
 
@@ -46,12 +45,37 @@ const ALICE_REALIGN: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN 
 /// Every id a scenario may hold; each carries one witness hold.
 const IDS: [&str; 3] = ["x", "y", "z"];
 
-/// A real `LimiterServer` on the simulated HTTP fabric, so every admit is a
-/// genuine hold the store counts, with one witness hold per id in [`IDS`].
+const LADDR: &str = "10.0.0.1:8080";
+/// The production admit budget.
+const ADMIT_BUDGET: Duration = Duration::from_millis(150);
+/// A fail-open budget above the paused-clock HTTP round trip: a detached
+/// admit is woken inside a coarse `h.advance`, whose 100 ms chunks a
+/// production-sized budget could expire between.
+const WIDE_BUDGET: Duration = Duration::from_secs(2);
+/// A short lease, so the paused clock crosses it cheaply.
+const LEASE_SEC: i64 = 20;
+
+/// The limiter `inner` answering every request `after` it applied it: what a
+/// client past its budget sees as a timeout landed on the server.
+struct AnswersLate {
+    inner: Arc<dyn HttpService>,
+    after: Duration,
+}
+
+#[async_trait]
+impl HttpService for AnswersLate {
+    async fn handle(&self, req: HttpRequest) -> HttpResponse {
+        let resp = self.inner.handle(req).await;
+        tokio::time::sleep(self.after).await;
+        resp
+    }
+}
+
+/// A real keyed `LimiterServer` on the simulated HTTP fabric with one
+/// witness hold per id in [`IDS`], each under its own call.
 struct LimiterRig {
-    store: Arc<WindowStore>,
+    store: Arc<CallStore>,
     client: Arc<dyn CallLimiter>,
-    witness_window: i64,
     _server: Box<dyn HttpServerHandle>,
 }
 
@@ -75,29 +99,46 @@ impl LimiterRig {
     /// store reads empty for the reaped check.
     async fn expect_drained(&self, why: &str) {
         self.expect_holds([0, 0, 0], why).await;
-        let witnesses: Vec<Hold> =
-            IDS.iter().map(|id| Hold { id: (*id).into(), window: self.witness_window }).collect();
-        self.store.release(&witnesses);
+        for id in IDS {
+            self.store.release(&format!("witness-{id}"));
+        }
+    }
+
+    /// Extend every witness's lease.
+    fn refresh_witnesses(&self) {
+        for id in IDS {
+            assert!(self.store.refresh(&format!("witness-{id}")), "witness on {id} is known");
+        }
     }
 }
 
-async fn limiter_rig() -> LimiterRig {
-    let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+/// The rig under a client budget of `budget`; the server answers `answers_after`
+/// each request it applied.
+async fn limiter_rig_with(budget: Duration, answers_after: Option<Duration>) -> LimiterRig {
+    let laddr: SocketAddr = LADDR.parse().unwrap();
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(WindowStore::new(LimiterConfig::default(), Clock::test_at(0)));
-    let witness_window = store.current_window();
+    let store = Arc::new(CallStore::new(LimiterConfig { lease_sec: LEASE_SEC }, Clock::test_at(0)));
     for id in IDS {
-        let witness = store.admit(&[AdmitEntry { id: id.into(), limit: 100 }]);
-        assert_eq!(witness, AdmitResult::Admitted { window: witness_window }, "witness on {id}");
+        let witness = store.admit(
+            &format!("witness-{id}"),
+            &[AdmitEntry { id: id.into(), limit: 100 }],
+            false,
+        );
+        assert_eq!(witness, AdmitResult::Admitted, "witness on {id}");
     }
-    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+    let mut server: Arc<dyn HttpService> =
+        Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+    if let Some(after) = answers_after {
+        server = Arc::new(AnswersLate { inner: server, after });
+    }
     let handle = http.serve(laddr, server).await.unwrap();
-    // A fail-open budget above the paused-clock HTTP round trip: the detached
-    // admit is woken inside a coarse `h.advance`, whose 100 ms chunks a
-    // production-sized budget could expire between.
     let client: Arc<dyn CallLimiter> =
-        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_secs(2)));
-    LimiterRig { store, client, witness_window, _server: handle }
+        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, budget));
+    LimiterRig { store, client, _server: handle }
+}
+
+async fn limiter_rig(budget: Duration) -> LimiterRig {
+    limiter_rig_with(budget, None).await
 }
 
 /// Limiter entries `(id, cap)`. A cap of 2 on an id the call already holds
@@ -131,9 +172,9 @@ fn one_failover(
     )
 }
 
-/// Bob busies out, the failover route toward carol is admitted, carol
-/// answers, alice hangs up. `before` and `after` are the call's holds on
-/// [`IDS`] while bob is dialed and once the failover route is applied.
+/// Bob busies out, the failover route is admitted, carol answers, alice
+/// hangs up. `before` and `after` are the call's holds on [`IDS`] while bob
+/// is dialed and once the failover route is applied.
 async fn busy_then_failover_answered(
     initial: &'static [(&'static str, i64)],
     failover: &'static [(&'static str, i64)],
@@ -145,7 +186,7 @@ async fn busy_then_failover_answered(
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let carol = h.agent("carol", "127.0.0.1:5071").await;
-    let rig = limiter_rig().await;
+    let rig = limiter_rig(WIDE_BUDGET).await;
     let b2bua = B2buaSut::builder(one_failover(initial, failover))
         .limiter(rig.client.clone())
         .limiter_store(rig.store.clone())
@@ -159,13 +200,8 @@ async fn busy_then_failover_answered(
     bob.receive("ACK").await;
 
     // ── the failover route replaces the call's set: carol is dialed ────────
-    let Some(mut carol_uas) = carol.try_receive_tolerating("INVITE", &[]).await else {
-        panic!(
-            "the failover route {failover:?} is admitted: the call already holds {initial:?}, \
-             so the ids it keeps need no new slot; holds now {:?}",
-            rig.all_holds()
-        );
-    };
+    rig.expect_holds(after, "the failover route is admitted net of the ids the call keeps").await;
+    let mut carol_uas = carol.receive("INVITE").await;
     carol_uas.respond(180, "Ringing").await;
     call.expect(180).await;
     rig.expect_holds(after, "the failover route's holds alone while carol rings").await;
@@ -231,7 +267,7 @@ async fn release_reroute_keeping_an_id_at_its_cap_is_admitted() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let media = h.agent("media", "127.0.0.1:5090").await;
-    let rig = limiter_rig().await;
+    let rig = limiter_rig(WIDE_BUDGET).await;
     let decision = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(|_| {
@@ -255,6 +291,8 @@ async fn release_reroute_keeping_an_id_at_its_cap_is_admitted() {
         .tune(|c| {
             c.keepalive_interval_sec = 3_600;
             c.reaper_enabled = false;
+            // Inside the short lease, so the established call stays counted.
+            c.limiter_refresh_sec = 5;
         })
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
@@ -269,15 +307,13 @@ async fn release_reroute_keeping_an_id_at_its_cap_is_admitted() {
     rig.expect_holds([1, 1, 0], "the established call holds x and y").await;
 
     // ── the cap raises the release consult; the reroute is admitted ────────
-    h.advance(Duration::from_secs(61)).await;
-    let Some(mut media_uas) = media.try_receive_tolerating("INVITE", &[]).await else {
-        panic!(
-            "the reroute [y, z] is admitted: the call already holds y, so y needs no new \
-             slot; holds now {:?}",
-            rig.all_holds()
-        );
-    };
-    rig.expect_holds([0, 1, 1], "the reroute's holds alone once it is applied").await;
+    // The witnesses are refreshed across the wait so their leases hold.
+    for _ in 0..61 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    rig.expect_holds([0, 1, 1], "the reroute is admitted net of the y the call keeps").await;
+    let mut media_uas = media.receive("INVITE").await;
     media_uas.respond(200, "OK").with_sdp(MEDIA_ANSWER).await;
     let tag = media_uas.dialog().local_tag().to_string();
     while let Some(mut retrans) = media.try_receive_tolerating("INVITE", &[]).await {
@@ -354,7 +390,7 @@ async fn refused_replacement_releases_the_call_holds() {
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
     let carol = h.agent("carol", "127.0.0.1:5071").await;
-    let rig = limiter_rig().await;
+    let rig = limiter_rig(WIDE_BUDGET).await;
     let origins = Arc::new(Mutex::new(Vec::new()));
     let seen = origins.clone();
     let decision = Arc::new(DelayNthFailure {
@@ -437,255 +473,162 @@ async fn refused_replacement_releases_the_call_holds() {
     );
 }
 
-/// The keyed store's contract at the SIP level. Compiled out until the store
-/// exists: the fix phase removes the gate and settles the names.
-#[cfg(any())]
-mod contract {
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-    use std::time::Duration;
+/// Delays every `call_failure` by `delay` before delegating.
+struct DelayedFailure {
+    delay: Duration,
+    inner: Arc<dyn CallDecisionEngine>,
+}
 
-    use async_trait::async_trait;
-    use b2bua::decision::test_adapter::route_to;
-    use b2bua::decision::{
-        CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
-        CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest,
-        CallReleaseResponse, CallTreatment, NewCallRequest, NewCallResponse,
-        ScriptedDecisionEngine,
-    };
-    use b2bua::limiter::CallLimiter;
-    use b2bua::limiter_http::HttpCallLimiter;
-    use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut};
-    use call_limiter::wire::AdmitEntry;
-    use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-    use http_net::{Fault, HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
-    use scenario_harness::Harness;
-    use sip_clock::Clock;
-
-    use super::{limiters, ANSWER, IDS, OFFER};
-
-    const LADDR: &str = "10.0.0.1:8080";
-    /// The production admit budget.
-    const ADMIT_BUDGET: Duration = Duration::from_millis(150);
-    /// A short lease, so the paused clock crosses it cheaply.
-    const LEASE_SEC: i64 = 20;
-
-    /// A real keyed `LimiterServer` on the simulated HTTP fabric with one
-    /// witness hold per id, each under its own call.
-    struct KeyedRig {
-        http: SimulatedHttpNetwork,
-        store: Arc<CallStore>,
-        client: Arc<dyn CallLimiter>,
-        _server: Box<dyn HttpServerHandle>,
+#[async_trait]
+impl CallDecisionEngine for DelayedFailure {
+    async fn new_call(&self, req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
+        self.inner.new_call(req).await
     }
-
-    impl KeyedRig {
-        fn holds(&self, id: &str) -> i64 {
-            self.store.held(id) - 1
-        }
-
-        fn all_holds(&self) -> [i64; 3] {
-            IDS.map(|id| self.holds(id))
-        }
-
-        async fn expect_holds(&self, expected: [i64; 3], why: &str) {
-            settle_until(|| self.all_holds() == expected).await;
-            assert_eq!(self.all_holds(), expected, "holds on {IDS:?}: {why}");
-        }
-
-        async fn expect_drained(&self, why: &str) {
-            self.expect_holds([0, 0, 0], why).await;
-            for id in IDS {
-                self.store.release(&format!("witness-{id}"));
-            }
-        }
+    async fn call_failure(
+        &self,
+        req: CallFailureRequest,
+    ) -> Result<CallFailureResponse, CallDecisionError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.call_failure(req).await
     }
-
-    async fn keyed_rig(budget: Duration) -> KeyedRig {
-        let laddr: SocketAddr = LADDR.parse().unwrap();
-        let http = SimulatedHttpNetwork::new();
-        let store =
-            Arc::new(CallStore::new(LimiterConfig { lease_sec: LEASE_SEC }, Clock::test_at(0)));
-        for id in IDS {
-            let witness = store.admit(
-                &format!("witness-{id}"),
-                &[AdmitEntry { id: id.into(), limit: 100 }],
-                false,
-            );
-            assert_eq!(witness, AdmitResult::Admitted, "witness on {id}");
-        }
-        let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-        let handle = http.serve(laddr, server).await.unwrap();
-        let client: Arc<dyn CallLimiter> =
-            Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, budget));
-        KeyedRig { http, store, client, _server: handle }
+    async fn call_refer(
+        &self,
+        req: CallReferRequest,
+    ) -> Result<CallReferResponse, CallDecisionError> {
+        self.inner.call_refer(req).await
     }
-
-    /// Delays every `call_failure` by `delay` before delegating.
-    struct DelayedFailure {
-        delay: Duration,
-        inner: Arc<dyn CallDecisionEngine>,
+    async fn call_release(
+        &self,
+        req: CallReleaseRequest,
+    ) -> Result<CallReleaseResponse, CallDecisionError> {
+        self.inner.call_release(req).await
     }
+}
 
-    #[async_trait]
-    impl CallDecisionEngine for DelayedFailure {
-        async fn new_call(
-            &self,
-            req: NewCallRequest,
-        ) -> Result<NewCallResponse, CallDecisionError> {
-            self.inner.new_call(req).await
-        }
-        async fn call_failure(
-            &self,
-            req: CallFailureRequest,
-        ) -> Result<CallFailureResponse, CallDecisionError> {
-            tokio::time::sleep(self.delay).await;
-            self.inner.call_failure(req).await
-        }
-        async fn call_refer(
-            &self,
-            req: CallReferRequest,
-        ) -> Result<CallReferResponse, CallDecisionError> {
-            self.inner.call_refer(req).await
-        }
-        async fn call_release(
-            &self,
-            req: CallReleaseRequest,
-        ) -> Result<CallReleaseResponse, CallDecisionError> {
-            self.inner.call_release(req).await
-        }
+/// The initial admit lands on the server but its answer comes past the
+/// client's budget: the call runs uncounted, sends no refresh and no release,
+/// and the server's count for it lapses with its lease. The witnesses' leases
+/// are kept alive across it.
+#[tokio::test(start_paused = true)]
+async fn an_admit_that_times_out_and_lands_late_is_never_released() {
+    let h = Harness::new("keyed-holds-late-admit-never-released");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    // The limiter answers past the admit budget: the request lands, the
+    // client gives up.
+    let rig = limiter_rig_with(ADMIT_BUDGET, Some(Duration::from_millis(400))).await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.call_limiter = limiters(&[("x", 10), ("y", 10)]);
+                NewCallResponse::Route(r)
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .tune(|c| c.limiter_refresh_sec = 5)
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    rig.expect_holds([1, 1, 0], "the late admit counted the call on the server").await;
+
+    // Past several refresh periods the uncounted call has refreshed
+    // nothing: its server-side set lapses with its lease.
+    for _ in 0..LEASE_SEC {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
     }
+    h.advance(Duration::from_secs(2)).await;
+    rig.store.sweep_now();
+    rig.expect_holds([0, 0, 0], "the uncounted call's set lapsed with its lease").await;
+    assert_eq!(rig.store.stats().lease_expired_calls, 1);
 
-    /// The initial admit times out on the client but lands on the server: the
-    /// call runs uncounted, sends no refresh and no release, and the server's
-    /// count for it lapses with its lease. The witnesses' leases are kept
-    /// alive across it.
-    #[tokio::test(start_paused = true)]
-    async fn an_admit_that_times_out_and_lands_late_is_never_released() {
-        let h = Harness::new("keyed-holds-late-admit-never-released");
-        let alice = h.agent("alice", "127.0.0.1:5060").await;
-        let bob = h.agent("bob", "127.0.0.1:5070").await;
-        let rig = keyed_rig(ADMIT_BUDGET).await;
-        // The limiter answers past the admit budget: the request lands, the
-        // client gives up.
-        rig.http.apply_fault(Fault::Delay { dst: LADDR.parse().unwrap(), ms: 400 });
-        let decision = Arc::new(
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    rig.expect_drained("the uncounted call released nothing").await;
+    assert_eq!(rig.store.stats().releases_total, 3, "only the witnesses' releases");
+    let count = b2bua.limiter_count();
+    assert_eq!((count.failed_open, count.released), (1, 0));
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// A failover fold whose admit reaches the server after the call ended:
+/// the caller CANCELs while the consult is in flight, the call terminates
+/// and releases its set; the fold's admit then lands on the tombstone and
+/// holds nothing; the gone-call path releases nothing. The witnesses are
+/// intact.
+#[tokio::test(start_paused = true)]
+async fn a_fold_admitted_after_the_call_ended_holds_nothing() {
+    let h = Harness::new("keyed-holds-fold-after-the-call-ended");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let carol = h.agent("carol", "127.0.0.1:5071").await;
+    let rig = limiter_rig(WIDE_BUDGET).await;
+    let decision = Arc::new(DelayedFailure {
+        delay: Duration::from_millis(900),
+        inner: Arc::new(
             ScriptedDecisionEngine::builder()
                 .fallback(|_| {
                     let mut r = route_to("127.0.0.1", 5070);
+                    r.callback_context = Some("failover-ctx".into());
                     r.call_limiter = limiters(&[("x", 10), ("y", 10)]);
                     NewCallResponse::Route(r)
                 })
+                .on_failure(|_| {
+                    let mut r = route_to("127.0.0.1", 5071);
+                    r.call_limiter = limiters(&[("y", 10), ("z", 10)]);
+                    CallTreatment::Route(r)
+                })
                 .build(),
-        );
-        let b2bua = B2buaSut::builder(decision)
-            .limiter(rig.client.clone())
-            .limiter_store(rig.store.clone())
-            .tune(|c| c.limiter_refresh_sec = 5)
-            .start(&h, "b2bua", "127.0.0.1:5080")
-            .await;
+        ),
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
 
-        let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-        let mut uas = bob.receive("INVITE").await;
-        uas.respond(200, "OK").with_sdp(ANSWER).await;
-        call.expect(200).await;
-        let mut dialog = call.ack().await;
-        bob.receive("ACK").await;
-        rig.expect_holds([1, 1, 0], "the late admit counted the call on the server").await;
-        rig.http.apply_fault(Fault::Resume { dst: LADDR.parse().unwrap() });
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    bob.receive("INVITE").await.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+    rig.expect_holds([1, 1, 0], "the initial route's set").await;
 
-        // Past several refresh periods the uncounted call has refreshed
-        // nothing: its server-side set lapses with its lease.
-        for _ in 0..LEASE_SEC {
-            h.advance(Duration::from_secs(1)).await;
-            for id in IDS {
-                assert!(rig.store.refresh(&format!("witness-{id}")));
-            }
-        }
-        h.advance(Duration::from_secs(2)).await;
-        rig.store.sweep_now();
-        rig.expect_holds([0, 0, 0], "the uncounted call's set lapsed with its lease").await;
-        assert_eq!(rig.store.stats().lease_expired_calls, 1);
+    // ── the caller gives up while the consult is in flight ─────────────
+    let mut cxl = call.cancel().await;
+    cxl.expect(200).await;
+    call.expect(487).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_holds([0, 0, 0], "the terminated call released its set").await;
+    let refused_before = rig.store.stats().admits_refused_released;
 
-        let mut bye = dialog.bye().await;
-        bob.receive("BYE").await.respond(200, "OK").await;
-        bye.expect(200).await;
-        settle_until(|| b2bua.is_reaped()).await;
-        rig.expect_drained("the uncounted call released nothing").await;
-        assert_eq!(rig.store.stats().releases_total, 3, "only the witnesses' releases");
-        let count = b2bua.limiter_count();
-        assert_eq!((count.failed_open, count.released), (1, 0));
-        b2bua.assert_fully_reaped();
-        let _ = h.finish().await;
-    }
+    // ── the fold lands on the gone call: its admit hit the tombstone ───
+    h.advance(Duration::from_secs(2)).await;
+    assert!(
+        carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
+        "the fold dials no leg for a call that is gone",
+    );
+    assert_eq!(
+        rig.store.stats().admits_refused_released,
+        refused_before + 1,
+        "the fold's admit was refused by the tombstone",
+    );
+    rig.expect_drained("the fold's set was never counted; the witnesses are intact").await;
+    b2bua.assert_fully_reaped();
 
-    /// A failover fold whose admit reaches the server after the call ended:
-    /// the caller CANCELs while the consult is in flight, the call terminates
-    /// and releases its set; the fold's admit then lands on the tombstone and
-    /// holds nothing; the gone-call path's second release is a no-op. The
-    /// witnesses are intact.
-    #[tokio::test(start_paused = true)]
-    async fn a_fold_admitted_after_the_call_ended_holds_nothing() {
-        let h = Harness::new("keyed-holds-fold-after-the-call-ended");
-        let alice = h.agent("alice", "127.0.0.1:5060").await;
-        let bob = h.agent("bob", "127.0.0.1:5070").await;
-        let carol = h.agent("carol", "127.0.0.1:5071").await;
-        let rig = keyed_rig(Duration::from_secs(2)).await;
-        let decision = Arc::new(DelayedFailure {
-            delay: Duration::from_millis(900),
-            inner: Arc::new(
-                ScriptedDecisionEngine::builder()
-                    .fallback(|_| {
-                        let mut r = route_to("127.0.0.1", 5070);
-                        r.callback_context = Some("failover-ctx".into());
-                        r.call_limiter = limiters(&[("x", 10), ("y", 10)]);
-                        NewCallResponse::Route(r)
-                    })
-                    .on_failure(|_| {
-                        let mut r = route_to("127.0.0.1", 5071);
-                        r.call_limiter = limiters(&[("y", 10), ("z", 10)]);
-                        CallTreatment::Route(r)
-                    })
-                    .build(),
-            ),
-        });
-        let b2bua = B2buaSut::builder(decision)
-            .limiter(rig.client.clone())
-            .limiter_store(rig.store.clone())
-            .start(&h, "b2bua", "127.0.0.1:5080")
-            .await;
-
-        let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-        bob.receive("INVITE").await.respond(486, "Busy Here").await;
-        bob.receive("ACK").await;
-        rig.expect_holds([1, 1, 0], "the initial route's set").await;
-
-        // ── the caller gives up while the consult is in flight ─────────────
-        let mut cxl = call.cancel().await;
-        cxl.expect(200).await;
-        call.expect(487).await;
-        settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total())
-            .await;
-        rig.expect_holds([0, 0, 0], "the terminated call released its set").await;
-        let refused_before = rig.store.stats().admits_refused_released;
-
-        // ── the fold lands on the gone call: its admit hit the tombstone ───
-        h.advance(Duration::from_secs(2)).await;
-        assert!(
-            carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
-            "the fold dials no leg for a call that is gone",
-        );
-        assert_eq!(
-            rig.store.stats().admits_refused_released,
-            refused_before + 1,
-            "the fold's admit was refused by the tombstone",
-        );
-        rig.expect_drained("the fold's set was never counted; the witnesses are intact").await;
-        b2bua.assert_fully_reaped();
-
-        settle_until(|| !b2bua.cdr_records().is_empty()).await;
-        assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
-        let report = h.finish().await;
-        assert_eq!(invite_final_statuses(&report, alice.addr()), vec![487]);
-    }
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let report = h.finish().await;
+    assert_eq!(invite_final_statuses(&report, alice.addr()), vec![487]);
 }

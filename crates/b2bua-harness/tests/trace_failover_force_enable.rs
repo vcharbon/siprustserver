@@ -23,7 +23,7 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallFailureResponse, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, LimiterHold};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
 use b2bua::trace::{install_process_traces, traces, CallTraces};
 use b2bua_harness::{settle_until, B2buaSut};
 use observe::{RateDraw, SampleAdmission, TokenBucket};
@@ -41,12 +41,12 @@ struct FullLimiter;
 
 #[async_trait]
 impl CallLimiter for FullLimiter {
-    async fn admit(&self, _entries: &[LimiterEntry]) -> AdmitOutcome {
+    async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
         AdmitOutcome::Rejected { limiter_id: TRUNK.to_string() }
     }
-    async fn release(&self, _holds: &[LimiterHold]) {}
-    async fn refresh(&self, holds: &[LimiterHold]) -> Vec<LimiterHold> {
-        holds.to_vec()
+    async fn release(&self, _call_ref: &str) {}
+    async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+        RefreshOutcome::Unknown
     }
 }
 

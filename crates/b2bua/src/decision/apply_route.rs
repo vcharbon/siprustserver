@@ -119,15 +119,16 @@ pub async fn apply_route(
         );
     }
 
-    // Admission control: one BATCHED + TRANSACTIONAL admit for every limiter
-    // entry — all increment, or none. The b2bua owns the fail-open policy.
+    // Admission control: one admit of the route's whole limiter set, keyed by
+    // the call — all or none. The initial route holds nothing yet, so a
+    // refusal releases nothing. The b2bua owns the fail-open policy.
     if !route.call_limiter.is_empty() {
         let entries: Vec<LimiterEntry> = route
             .call_limiter
             .iter()
             .map(|e| LimiterEntry { id: e.id.clone(), limit: e.limit })
             .collect();
-        let outcome = limiter.admit(&entries).await;
+        let outcome = limiter.admit(&call.call_ref, &entries, false).await;
         if crate::trace::sampled(&call) {
             crate::trace::emit::limiter(
                 &call,
@@ -137,17 +138,10 @@ pub async fn apply_route(
             );
         }
         match outcome {
-            AdmitOutcome::Admitted { window } => {
-                for e in &route.call_limiter {
-                    call.limiter_entries.push(CallLimiterState {
-                        limiter_id: e.id.clone(),
-                        limit: e.limit,
-                        origin_window: window,
-                        increment_succeeded: Some(true),
-                    });
-                }
-                // Arm the refresh timer so a long call migrates its holds to the
-                // current window before they age out of the summed lookback.
+            AdmitOutcome::Admitted => {
+                call.limiter =
+                    CallLimiterState::admitted(entries.into_iter().map(|e| e.id).collect());
+                // Arm the refresh timer so a long call keeps its lease alive.
                 let entry = TimerEntry {
                     id: format!("{:?}", TimerType::LimiterRefresh),
                     timer_type: TimerType::LimiterRefresh,
@@ -157,8 +151,12 @@ pub async fn apply_route(
                 call.timers.push(entry.clone());
                 fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
             }
-            // Fail open: admit, record NO holds (nothing released or refreshed).
-            AdmitOutcome::Unavailable => {}
+            // Fail open: the call runs uncounted (nothing released or
+            // refreshed). A tombstone refusal (a `call_ref` released within the
+            // last lease) is a stale key, not a cap: the call runs uncounted too.
+            AdmitOutcome::Unavailable | AdmitOutcome::Released => {
+                call.limiter = CallLimiterState::uncounted();
+            }
             AdmitOutcome::Rejected { limiter_id } => {
                 return Box::pin(limiter_reject_failover(
                     call,
