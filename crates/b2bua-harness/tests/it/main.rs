@@ -16,6 +16,7 @@ mod announcement;
 mod basic_call;
 mod basic_call_media;
 mod bye_no_200_reap;
+mod call_keyed_holds;
 mod cancel_200_crossing;
 mod cancel_200_crossing_internal;
 mod cancel_after_answer;
