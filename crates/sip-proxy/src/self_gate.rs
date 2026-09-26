@@ -690,8 +690,6 @@ mod tests {
         assert!(g.try_admit_external().admit, "elu == critical is admit (strict >)");
     }
 
-    /// With ELU calm, the gate admits until the CPS bucket drains, then sheds
-    /// with `proxy_overload_cps`. Port of the `!bucket.tryConsume()` branch.
     /// A failed consume's Retry-After comes from the refill that failed it. The
     /// consume is judged at 999 µs (0.999 tokens) while the clock already reads
     /// 1001 µs, where a token is there: a hint read from a second refill would
@@ -707,6 +705,8 @@ mod tests {
         assert_eq!(b.try_consume(), Ok(()), "the token accrued after the reject");
     }
 
+    /// With ELU calm, the gate admits until the CPS bucket drains, then sheds
+    /// with `proxy_overload_cps`. Port of the `!bucket.tryConsume()` branch.
     #[tokio::test(start_paused = true)]
     async fn admits_until_the_cps_bucket_drains_then_503s_cps() {
         // Capacity 2, refill 0/s so the bucket can't top up between consumes.
