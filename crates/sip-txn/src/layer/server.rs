@@ -273,7 +273,7 @@ impl Owner {
 
         // Tier-3 overload admission (a stateless 503 ahead of txn creation)
         // deliberately sits ABOVE this layer — see docs/adr/0007 "Deferred".
-        // This layer admits unconditionally.
+        // This layer admits every request its event queue takes (below).
 
         // ── New server transaction ─────────────────────────────────────────────
         let kind =
@@ -325,9 +325,11 @@ impl Owner {
         }
 
         // Critical for INVITE: the 100 we just sent stops the UAC retransmitting,
-        // so this Message is the app's ONLY notice of the call — a drop would leave
-        // a timer-less server txn squatting until the sweep while the caller hears
-        // 100-then-silence. Non-INVITE requests stay lossy (the UAC resends them).
+        // so this Message is the app's ONLY notice of the call. A non-INVITE the
+        // full queue drops is not admitted: its transaction is forgotten, so the
+        // UAC's Timer E copy (§17.1.2.2; UDP-only, ADR-0027) is admitted afresh
+        // rather than absorbed unanswered by a Trying transaction.
+        let branch = branch.to_string();
         let event = TransactionEvent::Message {
             message: Box::new(SipMessage::Request(req)),
             src,
@@ -335,8 +337,8 @@ impl Owner {
         };
         if is_invite {
             self.emit_critical(event);
-        } else {
-            self.emit(event);
+        } else if !self.emit(event) {
+            self.delete_txn(&branch);
         }
     }
 
@@ -348,8 +350,9 @@ impl Owner {
     /// record, ADR-0014) owes the retransmission its most recent provisional:
     /// a 100 Trying is composed from `req`, sent and cached, as the admit path
     /// does for the first copy. A non-INVITE transaction still awaiting its
-    /// first response sends nothing. `true` when a transaction absorbed the
-    /// request, `false` when the branch is unseen or empty.
+    /// first response sends nothing: it exists only while its request is with
+    /// the consumer. `true` when a transaction absorbed the request, `false`
+    /// when the branch is unseen or empty.
     pub(super) async fn replay_cached(
         &mut self,
         endpoint: &dyn UdpEndpoint,

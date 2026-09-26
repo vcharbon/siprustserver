@@ -23,9 +23,10 @@ impl Owner {
     /// — a full queue drops the newest and counts it (drop-newest), so backpressure
     /// never reaches the recv path. Correct for events the protocol will resend if
     /// lost (inbound non-INVITE requests, provisionals, 2xx that the UAS keeps
-    /// retransmitting until ACKed).
-    pub(super) fn emit(&mut self, event: TransactionEvent) {
-        self.offer(event, false);
+    /// retransmitting until ACKed) — provided no transaction absorbs that resend.
+    /// `true` when the queue took the event.
+    pub(super) fn emit(&mut self, event: TransactionEvent) -> bool {
+        self.offer(event, false)
     }
 
     /// Offer a CRITICAL one-shot event — its only delivery, because the layer has
@@ -37,7 +38,8 @@ impl Owner {
         self.offer(event, true);
     }
 
-    fn offer(&mut self, event: TransactionEvent, critical: bool) {
+    /// `true` when the event was queued or deferred, `false` when it was dropped.
+    fn offer(&mut self, event: TransactionEvent, critical: bool) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
         // Preserve FIFO: once a critical backlog exists, queue further criticals
         // behind it rather than letting a fresh one jump the deferred ones.
@@ -46,11 +48,11 @@ impl Owner {
             self.metrics.event_queue_drops[reason.index()].fetch_add(1, Relaxed);
             self.deferred_events.push_back(event);
             self.arm_event_retry();
-            return;
+            return true;
         }
         let reason = EventQueueDropReason::of(&event);
         match self.events_tx.try_send(event) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(ev)) => {
                 self.metrics.event_queue_drops[reason.index()].fetch_add(1, Relaxed);
                 if critical {
@@ -58,12 +60,14 @@ impl Owner {
                     self.arm_event_retry();
                 }
                 // else: ordinary event, drop-newest (counted above).
+                critical
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 // Consumer gone — the owner winds down via its other arms; do not
                 // spin retrying into a closed channel.
                 self.deferred_events.clear();
                 self.event_retry_armed = false;
+                false
             }
         }
     }
