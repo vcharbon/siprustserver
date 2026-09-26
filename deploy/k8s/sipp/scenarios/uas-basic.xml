@@ -73,7 +73,47 @@
       a=rtpmap:0 PCMU/8000
     ]]>
   </send>
-  <recv request="ACK" rtd="true" crlf="true"/>
+  <!-- An in-dialog OPTIONS that arrives before the ACK (the ACK was lost) is
+       captured and answered 200 once the ACK is in: SIPp sends nothing while
+       its 200 is retransmitting (RFC 3261 section 13.3.1.4). The capture takes
+       the first run of adjacent Via (or v:) rows and of Record-Route rows, and
+       From / To / CSeq by their full names, in any case. -->
+  <label id="options_wait1"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="options_wait1">
+    <action>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_via_row,opt_via"/>
+      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_rr_row,opt_rr"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="opt_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="opt_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="opt_cseq"/>
+      <assign assign_to="options_due" value="1"/>
+    </action>
+  </recv>
+  <!-- A BYE before this ACK is taken here; SIPp matches a global recv only
+       ahead of the call in its group or behind it, so each ACK wait has one. -->
+  <recv request="BYE" optional="global" crlf="true" next="bye_anywhere"/>
+  <recv request="ACK" rtd="true" crlf="true">
+    <action>
+      <assign assign_to="acked" value="1"/>
+    </action>
+  </recv>
+  <label id="acked"/>
+  <send condexec="options_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$opt_via]
+      [$opt_rr]
+      From:[$opt_from]
+      To:[$opt_to]
+      Call-ID: [call_id]
+      CSeq:[$opt_cseq]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="options_due" value="0"/>
+    </action>
+  </send>
 
   <!-- Tolerant of in-dialog OPTIONS sent by the B2BUA's keepalive rule
        (TimerRules.keepaliveRule). The interval is `keepaliveIntervalSec`
@@ -90,7 +130,11 @@
        [last_To:] verbatim (the dialog's established To-tag is already present on
        the in-dialog re-INVITE — do NOT append another tag) and retransmits until
        the ACK arrives (2xx reliability, §13.3.1). -->
-  <recv request="INVITE" optional="true" crlf="true" next="answer_reinvite"/>
+  <recv request="INVITE" optional="true" crlf="true" next="answer_reinvite">
+    <action>
+      <assign assign_to="acked" value="0"/>
+    </action>
+  </recv>
   <recv request="OPTIONS" optional="true" crlf="true" next="answer_options"/>
   <recv request="BYE" crlf="true"/>
   <nop next="answer_bye"/>
@@ -118,8 +162,29 @@
       a=rtpmap:0 PCMU/8000
     ]]>
   </send>
-  <recv request="ACK" crlf="true"/>
-  <nop next="wait_terminator"/>
+  <label id="options_wait2"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="options_wait2">
+    <action>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_via_row,opt_via"/>
+      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_rr_row,opt_rr"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="opt_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="opt_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="opt_cseq"/>
+      <assign assign_to="options_due" value="1"/>
+    </action>
+  </recv>
+  <!-- SIPp runs a call one step per loop turn and reads its socket in between:
+       a BYE that lands while the call stands on a send or a nop (right after an
+       answered OPTIONS) matches no recv at hand; the global recv nearest behind
+       the call takes it. Each sits after the 200 its ACK wait retransmits, so the
+       BYE also stops that retransmission and the answer is not held behind it. -->
+  <recv request="BYE" optional="global" crlf="true" next="bye_anywhere"/>
+  <recv request="ACK" crlf="true">
+    <action>
+      <assign assign_to="acked" value="1"/>
+    </action>
+  </recv>
+  <nop next="acked"/>
 
   <label id="answer_options"/>
   <!-- 200 OK to in-dialog OPTIONS echoes [last_Record-Route:] (same as
@@ -140,6 +205,47 @@
   </send>
   <nop next="wait_terminator"/>
 
+  <!-- A BYE before the dialog's ACK (the 200's, or a re-INVITE's) is answered and
+       the call ends failed: the dialog was never confirmed. An OPTIONS held for
+       that ACK is answered before the call ends. -->
+  <label id="bye_anywhere"/>
+  <nop test="acked" next="answer_bye"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <send condexec="options_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$opt_via]
+      [$opt_rr]
+      From:[$opt_from]
+      To:[$opt_to]
+      Call-ID: [call_id]
+      CSeq:[$opt_cseq]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="options_due" value="0"/>
+    </action>
+  </send>
+  <nop next="end">
+    <action>
+      <assign assign_to="bye_before_ack" value="1"/>
+      <test variable="bye_before_ack" compare="equal" value="0" check_it="true"/>
+    </action>
+  </nop>
+
   <label id="answer_bye"/>
   <send>
     <![CDATA[
@@ -154,6 +260,24 @@
       Content-Length: 0
     ]]>
   </send>
+  <send condexec="options_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$opt_via]
+      [$opt_rr]
+      From:[$opt_from]
+      To:[$opt_to]
+      Call-ID: [call_id]
+      CSeq:[$opt_cseq]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="options_due" value="0"/>
+    </action>
+  </send>
+  <label id="end"/>
+  <Reference variables="opt_via_row,opt_rr_row"/>
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000"/>
 </scenario>

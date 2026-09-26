@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!--
-  Long-call UAC for endurance: INVITE → 200 → ACK → OPTIONS-driven hold → BYE.
+  Long-call UAC for endurance: INVITE → 200 → ACK → OPTIONS-driven hold until
+  the SUT ends the call.
 
   After ACK the scenario loops on in-dialog OPTIONS from the B2BUA's
   keepaliveRule (TimerRules), replying 200 OK to EACH one for the life
@@ -16,9 +17,13 @@
   count — size those (and the offered LONG_CPS) for the target steady
   concurrency.
 
-  The single exit path:
-    - keepalive timeout (B2BUA torn down, chaos, network failure) →
-      `recv timeout="420000" ontimeout="end_hold"` jumps to BYE.
+  The exit paths:
+    - the SUT's BYE (max duration, keepalive timeout, any policy teardown) is
+      answered 200 and ends the call successfully;
+    - silence (B2BUA torn down, chaos, network failure) ends the call as the
+      lane's `-recv_timeout` failure (timeout_recv), which endurance.sh's
+      stall taint reads against unexpected_msg. The hold carries no bound of
+      its own.
 
   Earlier revisions used a flat `<pause milliseconds="1200000"/>` and
   relied on sipp's "default `pingreply` behavior" to auto-200 in-dialog
@@ -31,16 +36,6 @@
   Loop pattern mirrors `uas-basic.xml` (the B-leg UAS). 200 OK echoes
   `[last_From:]` / `[last_To:]` / `[last_Call-ID:]` / `[last_CSeq:]` so
   the response carries the dialog tags + CSeq from the request.
-
-  The recv timeout is sized for the env-driven default
-  `KEEPALIVE_INTERVAL_SEC=300s` (src/config/AppConfig.ts) — 420 s
-  gives 120 s headroom. Under the reactive-only takeover model
-  (ADR-0014) a quiescent long-call on a rebooting worker is recovered
-  solely by the primary's bootstrap-rehydrate → ReclaimAll → smoothed
-  keepalive replay; the worst-positioned quiescent call survives iff
-  `reboot + smoothing_drain ≤ 120 s`. The embedded layer default is
-  900 s; if a deployment uses the embedded layer with that larger
-  interval, raise this timeout accordingly.
 
   RFC 3261 conformance:
     §11      In-dialog OPTIONS may be sent by either party; UAS
@@ -127,9 +122,9 @@
        (the `-l` ceiling freezes creation ~14 min in, so the whole population
        hits the cap together at run-start+1h, echoing hourly) — both chaos
        events merely coincided with the wave. With this branch only true
-       SILENCE (no keepalive for 420 s → end_hold → UAC BYE) reads as loss. -->
+       silence (the lane's -recv_timeout) reads as loss. -->
   <recv request="BYE" optional="true" next="answer_bye"/>
-  <recv request="OPTIONS" crlf="true" timeout="420000" ontimeout="end_hold"/>
+  <recv request="OPTIONS" crlf="true"/>
   <send>
     <![CDATA[
       SIP/2.0 200 OK
@@ -144,25 +139,6 @@
     ]]>
   </send>
   <nop next="hold_loop"/>
-
-  <label id="end_hold"/>
-  <send retrans="500">
-    <![CDATA[
-      BYE [next_url] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
-      [routes]
-      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
-      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
-      Call-ID: [call_id]
-      CSeq: 2 BYE
-      Contact: sip:sipp@[local_ip]:[local_port]
-      Max-Forwards: 70
-      Content-Length: 0
-    ]]>
-  </send>
-
-  <recv response="200" crlf="true"/>
-  <nop next="hold_done"/>
 
   <!-- AS-initiated teardown: answer the BYE and end the call SUCCESSFULLY. -->
   <label id="answer_bye"/>
@@ -181,6 +157,38 @@
   </send>
 
   <label id="hold_done"/>
+
+  <nop next="end"/>
+
+  <!-- SIPp runs a call one step per loop turn and reads its socket in between:
+       a request that lands while the call stands on a send or a nop matches no
+       recv at hand and comes here. An OPTIONS is answered and the call resumes
+       the step it stood on; a BYE ends the call as the hold's own BYE does.
+       Anything else is unexpected here too and fails the call. -->
+  <label id="_unexp.main"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="unexp_options"/>
+  <recv request="BYE" crlf="true" next="answer_bye"/>
+  <label id="unexp_options"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop>
+    <action>
+      <jump variable="_unexp.retaddr"/>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </nop>
+  <label id="end"/>
 
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="60000, 300000, 600000, 900000, 1200000"/>

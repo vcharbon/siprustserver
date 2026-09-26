@@ -61,6 +61,10 @@ hooks:
 image tag='siprustserver:dev':
     docker build -f deploy/docker/Dockerfile -t {{ tag }} .
 
+# Loopback check of the lane SIPp scenarios against in-dialog OPTIONS peers (needs `sipp`).
+sipp-check:
+    deploy/k8s/sipp/checks/run.sh
+
 # ── environment ────────────────────────────────────────────────────────
 
 # Check this machine can build the workspace (toolchain, mold, a real compile).

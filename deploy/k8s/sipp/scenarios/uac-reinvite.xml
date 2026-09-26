@@ -16,8 +16,7 @@
   correctly across failover. Each 60s hold answers any in-dialog OPTIONS
   (RFC 3261 §11): a rebooted worker's reclaim re-spreads restored dialogs'
   300s keepalives EARLIER, so a probe can land mid-hold even in a ~2 min
-  call; the ontimeout path preserves the 60s re-INVITE spacing when none
-  arrives.
+  call; the hold keeps its 60 s from the ACK whether or not one arrives.
 
   CSeq increments per in-dialog transaction (RFC 3261 §12.2.1.1):
     INVITE=1, re-INVITE=2, re-INVITE=3, BYE=4 — each ACK reuses its INVITE's CSeq.
@@ -81,12 +80,35 @@
   </send>
 
   <!-- ===== re-INVITE #1 at +60 s (likely served by one worker) ===== -->
-  <!-- 60s hold that answers in-dialog OPTIONS (RFC 3261 §11). The recv is
-       MANDATORY (sipp rejects an all-optional recv before a send); ontimeout
-       reproduces the former bare 60s pause when no keepalive probe arrives.
-       An answered probe re-parks and restarts the 60s hold. -->
-  <label id="hold1"/>
-  <recv request="OPTIONS" crlf="true" timeout="60000" ontimeout="hold1_done"/>
+  <!-- The hold lasts hold_ms from the ACK and answers every in-dialog OPTIONS
+       (RFC 3261 section 11). The first wait covers the whole hold; after an
+       answered OPTIONS the rest runs off the clock in 1 s steps, so a probe
+       ends the call at most 1 s late and never restarts the hold. `hold_ms`
+       and the first timeout are one value.
+       The answer sits after the step loop: a step that `_unexp.main` resumes
+       re-enters through the deadline check, never through a second answer. -->
+  <nop>
+    <action>
+      <assign assign_to="hold_ms" value="60000"/>
+      <gettimeofday assign_to="hold_t0_s,hold_t0_us"/>
+    </action>
+  </nop>
+  <recv request="OPTIONS" crlf="true" timeout="60000" ontimeout="hold1_done" next="hold1_options"/>
+  <label id="hold1_left"/>
+  <nop>
+    <action>
+      <gettimeofday assign_to="hold_s,hold_us"/>
+      <subtract assign_to="hold_s" variable="hold_t0_s"/>
+      <multiply assign_to="hold_s" value="1000"/>
+      <subtract assign_to="hold_us" variable="hold_t0_us"/>
+      <divide assign_to="hold_us" value="1000"/>
+      <add assign_to="hold_s" variable="hold_us"/>
+      <test assign_to="hold_over" variable="hold_s" compare="greater_than_equal" variable2="hold_ms"/>
+    </action>
+  </nop>
+  <nop test="hold_over" next="hold1_done"/>
+  <recv request="OPTIONS" crlf="true" timeout="1000" ontimeout="hold1_left"/>
+  <label id="hold1_options"/>
   <send>
     <![CDATA[
       SIP/2.0 200 OK
@@ -100,7 +122,7 @@
       Content-Length: 0
     ]]>
   </send>
-  <nop next="hold1"/>
+  <nop next="hold1_left"/>
   <label id="hold1_done"/>
   <send retrans="500">
     <![CDATA[
@@ -125,6 +147,19 @@
       a=rtpmap:0 PCMU/8000
     ]]>
   </send>
+  <!-- An in-dialog OPTIONS crossing the re-INVITE is captured and answered 200
+       after the ACK: SIPp sends nothing while its INVITE is retransmitting. -->
+  <label id="options_wait1"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="options_wait1">
+    <action>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_via_row,opt_via"/>
+      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_rr_row,opt_rr"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="opt_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="opt_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="opt_cseq"/>
+      <assign assign_to="options_due" value="1"/>
+    </action>
+  </recv>
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
   <recv response="200" rtd="true" crlf="true"/>
@@ -142,11 +177,53 @@
       Content-Length: 0
     ]]>
   </send>
+  <send condexec="options_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$opt_via]
+      [$opt_rr]
+      From:[$opt_from]
+      To:[$opt_to]
+      Call-ID: [call_id]
+      CSeq:[$opt_cseq]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="options_due" value="0"/>
+    </action>
+  </send>
 
   <!-- ===== re-INVITE #2 at +120 s (may be served by the OTHER worker post-failover) ===== -->
-  <!-- Second 60s hold: same answer-and-resume loop, distinct label pair. -->
-  <label id="hold2"/>
-  <recv request="OPTIONS" crlf="true" timeout="60000" ontimeout="hold2_done"/>
+  <!-- The hold lasts hold_ms from the ACK and answers every in-dialog OPTIONS
+       (RFC 3261 section 11). The first wait covers the whole hold; after an
+       answered OPTIONS the rest runs off the clock in 1 s steps, so a probe
+       ends the call at most 1 s late and never restarts the hold. `hold_ms`
+       and the first timeout are one value.
+       The answer sits after the step loop: a step that `_unexp.main` resumes
+       re-enters through the deadline check, never through a second answer. -->
+  <nop>
+    <action>
+      <assign assign_to="hold_ms" value="60000"/>
+      <gettimeofday assign_to="hold_t0_s,hold_t0_us"/>
+    </action>
+  </nop>
+  <recv request="OPTIONS" crlf="true" timeout="60000" ontimeout="hold2_done" next="hold2_options"/>
+  <label id="hold2_left"/>
+  <nop>
+    <action>
+      <gettimeofday assign_to="hold_s,hold_us"/>
+      <subtract assign_to="hold_s" variable="hold_t0_s"/>
+      <multiply assign_to="hold_s" value="1000"/>
+      <subtract assign_to="hold_us" variable="hold_t0_us"/>
+      <divide assign_to="hold_us" value="1000"/>
+      <add assign_to="hold_s" variable="hold_us"/>
+      <test assign_to="hold_over" variable="hold_s" compare="greater_than_equal" variable2="hold_ms"/>
+    </action>
+  </nop>
+  <nop test="hold_over" next="hold2_done"/>
+  <recv request="OPTIONS" crlf="true" timeout="1000" ontimeout="hold2_left"/>
+  <label id="hold2_options"/>
   <send>
     <![CDATA[
       SIP/2.0 200 OK
@@ -160,7 +237,7 @@
       Content-Length: 0
     ]]>
   </send>
-  <nop next="hold2"/>
+  <nop next="hold2_left"/>
   <label id="hold2_done"/>
   <send retrans="500">
     <![CDATA[
@@ -185,6 +262,19 @@
       a=rtpmap:0 PCMU/8000
     ]]>
   </send>
+  <!-- An in-dialog OPTIONS crossing the re-INVITE is captured and answered 200
+       after the ACK: SIPp sends nothing while its INVITE is retransmitting. -->
+  <label id="options_wait2"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="options_wait2">
+    <action>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_via_row,opt_via"/>
+      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_rr_row,opt_rr"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="opt_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="opt_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="opt_cseq"/>
+      <assign assign_to="options_due" value="1"/>
+    </action>
+  </recv>
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
   <recv response="200" rtd="true" crlf="true"/>
@@ -202,6 +292,22 @@
       Content-Length: 0
     ]]>
   </send>
+  <send condexec="options_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$opt_via]
+      [$opt_rr]
+      From:[$opt_from]
+      To:[$opt_to]
+      Call-ID: [call_id]
+      CSeq:[$opt_cseq]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="options_due" value="0"/>
+    </action>
+  </send>
 
   <!-- ===== teardown ===== -->
   <send retrans="500">
@@ -218,13 +324,103 @@
       Content-Length: 0
     ]]>
   </send>
+
+  <!-- An in-dialog OPTIONS crossing the BYE is answered 200 once the BYE
+       completes: the dialog stands until the BYE's final response (RFC 3261
+       section 15.1.1), and SIPp sends nothing while its BYE is retransmitting.
+       The OPTIONS is captured without leaving the wait, so the BYE's 200 that
+       follows it on the wire still finds the call on its recv. The capture
+       takes the first run of adjacent Via (or v:) rows and of Record-Route
+       rows, and From / To / CSeq by their full names, in any case. -->
+  <label id="options_wait3"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="options_wait3">
+    <action>
+      <ereg regexp="[[:cntrl:]](([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+([Vv][Ii][Aa]|[Vv])[[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_via_row,opt_via"/>
+      <ereg regexp="[[:cntrl:]]([Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*([[:cntrl:]]+[Rr][Ee][Cc][Oo][Rr][Dd]-[Rr][Oo][Uu][Tt][Ee][[:blank:]]*:[^[:cntrl:]]*)*)" search_in="msg" assign_to="opt_rr_row,opt_rr"/>
+      <ereg regexp=".*" search_in="hdr" header="From:" start_line="true" case_indep="true" assign_to="opt_from"/>
+      <ereg regexp=".*" search_in="hdr" header="To:" start_line="true" case_indep="true" assign_to="opt_to"/>
+      <ereg regexp=".*" search_in="hdr" header="CSeq:" start_line="true" case_indep="true" assign_to="opt_cseq"/>
+      <assign assign_to="options_due" value="1"/>
+    </action>
+  </recv>
   <recv response="200" crlf="true"/>
+  <send condexec="options_due">
+    <![CDATA[
+      SIP/2.0 200 OK
+      [$opt_via]
+      [$opt_rr]
+      From:[$opt_from]
+      To:[$opt_to]
+      Call-ID: [call_id]
+      CSeq:[$opt_cseq]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+    <action>
+      <assign assign_to="options_due" value="0"/>
+    </action>
+  </send>
 
   <!-- Terminal join point: the admitted path falls through after its BYE/200, a
        rejected initial INVITE jumps straight here. Either way the call ends
        Successful. -->
   <label id="rejected"/>
 
+  <nop next="end"/>
+
+  <!-- SIPp runs a call one step per loop turn and reads its socket in between:
+       a request that lands while the call stands on a send or a nop (the step
+       after a hold timeout), or that no recv at hand expects (a BYE mid-hold),
+       comes here. An OPTIONS is answered and the call resumes the step it stood
+       on. A BYE is answered and the call ends failed, as test_doesnt_match:
+       SIPp's own unexpected-BYE handling (200, unexpected_msg) does not run
+       while this hook exists. Anything else is unexpected here too and fails
+       the call. -->
+  <label id="_unexp.main"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="unexp_options"/>
+  <recv request="BYE" crlf="true"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="end">
+    <action>
+      <assign assign_to="sut_ended_call" value="1"/>
+      <test variable="sut_ended_call" compare="equal" value="0" check_it="true"/>
+    </action>
+  </nop>
+  <label id="unexp_options"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop>
+    <action>
+      <jump variable="_unexp.retaddr"/>
+      <assign assign_to="_unexp.retaddr" value="0"/>
+    </action>
+  </nop>
+  <label id="end"/>
+
+  <Reference variables="opt_via_row,opt_rr_row"/>
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
   <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000, 60000, 120000"/>
 </scenario>
