@@ -167,19 +167,24 @@ async fn worker(
     failure_hook: Option<FailureHook>,
     inflight: InflightMap,
 ) {
-    // The map holds the sender until below, so the loop ends only on a poison.
-    let mut class = RemovalClass::Orphan;
+    // The map holds the only sender until the poison arm removes it, so the
+    // worker exits through that arm; `rx` never closes while it loops.
     while let Some(item) = rx.recv().await {
         match item {
             DispatchItem::Poison(c) => {
-                class = c;
-                // Bodies queued behind the release are discarded unrun.
+                // The entry leaves the map first, so no `dispatch` can land in
+                // `rx` after the drain: every body queued behind the release is
+                // counted as it is discarded unrun, and a later event for the
+                // call_ref starts a fresh queue.
+                inflight.lock().unwrap().remove(&call_ref);
+                queues.lock().unwrap().remove(&call_ref);
                 while let Ok(item) = rx.try_recv() {
                     if matches!(item, DispatchItem::Event(_)) {
                         metrics.bump_release_discard();
                     }
                 }
-                break;
+                metrics.bump_removal_of(c);
+                return;
             }
             DispatchItem::Event(body) => {
                 if semaphore.available_permits() == 0 {
@@ -211,9 +216,6 @@ async fn worker(
             }
         }
     }
-    inflight.lock().unwrap().remove(&call_ref);
-    queues.lock().unwrap().remove(&call_ref);
-    metrics.bump_removal_of(class);
 }
 
 #[cfg(test)]

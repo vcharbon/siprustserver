@@ -127,9 +127,11 @@ pub(super) enum Command {
         reply: oneshot::Sender<usize>,
     },
     /// Forget the non-INVITE server transaction at `branch` if it has sent
-    /// nothing yet (`Trying`); no reply.
+    /// nothing yet (`Trying`) and holds the request's dialog identity; no reply.
     ForgetUnanswered {
         branch: String,
+        call_id: String,
+        from_tag: String,
     },
     /// Register `call_ref` for a one-shot [`TransactionEvent::CallQuiesced`] when
     /// its last transaction clears (ADR-0014 self-release). If it already has no
@@ -297,12 +299,18 @@ impl TransactionLayer {
     /// The consumer discarded the non-INVITE request whose server transaction
     /// is `branch` before answering it: forget that transaction if it is still
     /// `Trying`, so the UAC's retransmission (RFC 3261 §17.1.2.2) is admitted
-    /// afresh instead of absorbed unanswered. A transaction that has sent a
+    /// afresh instead of absorbed unanswered. The request's `call_id` and
+    /// `from_tag` must match the transaction's, so another peer's request on a
+    /// colliding branch is never forgotten; a transaction that has sent a
     /// response is kept. Never waits: a full command queue refuses the request
     /// and counts it (`forget_refused`).
-    pub fn forget_unanswered(&self, branch: &str) {
-        let cmd = Command::ForgetUnanswered { branch: branch.to_string() };
-        if self.cmd_tx.try_send(cmd).is_err() {
+    pub fn forget_unanswered(&self, branch: &str, call_id: &str, from_tag: &str) {
+        let cmd = Command::ForgetUnanswered {
+            branch: branch.to_string(),
+            call_id: call_id.to_string(),
+            from_tag: from_tag.to_string(),
+        };
+        if let Err(mpsc::error::TrySendError::Full(_)) = self.cmd_tx.try_send(cmd) {
             self.metrics.count_forget_refused();
         }
     }

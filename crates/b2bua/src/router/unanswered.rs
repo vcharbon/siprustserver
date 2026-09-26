@@ -16,9 +16,16 @@ use crate::event::CallEvent;
 /// from then on the body owns the answer.
 pub(super) struct UnansweredGuard {
     txn: TransactionLayer,
-    /// The request's top-Via branch; `None` once disarmed, or for an event
-    /// with no server transaction the forget could free.
-    branch: Option<String>,
+    /// The request's server transaction key — top-Via branch, Call-ID,
+    /// From-tag; `None` once disarmed, or for an event with no server
+    /// transaction the forget could free.
+    key: Option<TxnKey>,
+}
+
+struct TxnKey {
+    branch: String,
+    call_id: String,
+    from_tag: String,
 }
 
 impl UnansweredGuard {
@@ -28,30 +35,34 @@ impl UnansweredGuard {
     /// retransmitting, ACK has no transaction, and a CANCEL reaching the router
     /// matched none.
     pub(super) fn for_event(txn: &TransactionLayer, event: &CallEvent) -> Self {
-        let branch = match event {
+        let key = match event {
             CallEvent::Sip { message, .. } => match message.as_ref() {
                 SipMessage::Request(req)
                     if !matches!(req.method(), Method::Invite | Method::Ack | Method::Cancel) =>
                 {
-                    req.top_via().branch().filter(|b| !b.is_empty()).map(str::to_string)
+                    req.top_via().branch().filter(|b| !b.is_empty()).map(|branch| TxnKey {
+                        branch: branch.to_string(),
+                        call_id: req.call_id().as_str().to_string(),
+                        from_tag: req.from().tag().unwrap_or_default().to_string(),
+                    })
                 }
                 _ => None,
             },
             _ => None,
         };
-        Self { txn: txn.clone(), branch }
+        Self { txn: txn.clone(), key }
     }
 
     /// The body is running: it answers the request, or deliberately does not.
     pub(super) fn disarm(mut self) {
-        self.branch = None;
+        self.key = None;
     }
 }
 
 impl Drop for UnansweredGuard {
     fn drop(&mut self) {
-        if let Some(branch) = self.branch.take() {
-            self.txn.forget_unanswered(&branch);
+        if let Some(key) = self.key.take() {
+            self.txn.forget_unanswered(&key.branch, &key.call_id, &key.from_tag);
         }
     }
 }

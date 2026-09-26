@@ -344,11 +344,16 @@ impl Owner {
     }
 
     /// Forget the non-INVITE server transaction at `branch` while it is still
-    /// `Trying`: the consumer discarded its request unanswered, and only an
-    /// unseen branch lets the UAC's retransmission in again. Counted.
-    pub(super) fn forget_unanswered(&mut self, branch: &str) {
+    /// `Trying` and holds the discarded request's `call_id` and `from_tag`: the
+    /// consumer discarded that request unanswered, and only an unseen branch
+    /// lets the UAC's retransmission in again. Counted.
+    pub(super) fn forget_unanswered(&mut self, branch: &str, call_id: &str, from_tag: &str) {
         let unanswered = self.txns.get(branch).is_some_and(|t| {
-            t.role == TxnRole::Server && t.kind == TxnKind::NonInvite && t.state == TxnState::Trying
+            t.role == TxnRole::Server
+                && t.kind == TxnKind::NonInvite
+                && t.state == TxnState::Trying
+                && t.call_id == call_id
+                && t.from_tag == from_tag
         });
         if unanswered && self.delete_txn(branch) {
             self.metrics.unanswered_forgotten.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

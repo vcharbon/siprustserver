@@ -1377,7 +1377,14 @@ async fn a_forgotten_trying_non_invite_admits_its_retransmission() {
     elapse_ms(60).await;
     assert!(has_message_request(&stack.drain_events(), "BYE"));
 
-    stack.txn.forget_unanswered(branch);
+    // Another request's identity on the same branch forgets nothing.
+    stack.txn.forget_unanswered(branch, "other@u", "caller-tag");
+    stack.txn.forget_unanswered(branch, "f@u", "other-tag");
+    elapse_ms(10).await;
+    assert_eq!(active(&stack), 1, "a mismatching Call-ID or From-tag is not this transaction");
+    assert_eq!(stack.txn.metrics().unanswered_forgotten(), 0);
+
+    stack.txn.forget_unanswered(branch, "f@u", "caller-tag");
     elapse_ms(10).await;
     assert_eq!(active(&stack), 0);
     assert_eq!(stack.txn.metrics().unanswered_forgotten(), 1);
@@ -1408,9 +1415,9 @@ async fn forget_unanswered_keeps_answered_and_invite_transactions() {
     elapse_ms(60).await;
     let _ = stack.drain_peer();
 
-    stack.txn.forget_unanswered(answered);
-    stack.txn.forget_unanswered("z9hG4bK-inv-kept");
-    stack.txn.forget_unanswered("z9hG4bK-unseen");
+    stack.txn.forget_unanswered(answered, "a@u", "caller-tag");
+    stack.txn.forget_unanswered("z9hG4bK-inv-kept", "i@u", "caller-tag");
+    stack.txn.forget_unanswered("z9hG4bK-unseen", "u@u", "caller-tag");
     elapse_ms(10).await;
     assert_eq!(active(&stack), 2, "neither transaction is forgotten");
     assert_eq!(stack.txn.metrics().unanswered_forgotten(), 0);

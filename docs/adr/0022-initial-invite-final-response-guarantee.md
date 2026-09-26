@@ -146,9 +146,10 @@ synthesis to ride — the caller heard the auto-100 and then nothing.
 whose new call_ref `would_drop_new_at_cap`, it sends a **stateless 503** through
 the INVITE server txn (the same shape as the Tier-3 admission gate —
 `overload::build_reject_new_call_503`, no per-call state born) and returns, before
-`dispatch`. In-dialog events for an at-cap new call_ref keep the silent
-`dispatch` cap-drop: an in-dialog request with no live call is an orphan the peer
-481s / the protocol resends; only the initial INVITE owes a final. The check is
+`dispatch`. In-dialog events for an at-cap new call_ref keep the `dispatch`
+cap-drop; a non-INVITE request among them has its server transaction forgotten
+(`router::unanswered`), so its retransmission is admitted again and reaches the
+orphan path once the cap frees. Only the initial INVITE owes a final here. The check is
 race-free from the single-task router — only the router inserts queues, so between
 `would_drop_new_at_cap` and the following `dispatch` the count can only fall (a
 worker finishing), never rise. This path is unreachable under sane tuning (the
