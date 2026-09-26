@@ -458,6 +458,14 @@ impl TransactionMetrics {
         self.inner.server_final_unseen_branch.load(Ordering::Relaxed)
     }
 
+    /// Counts one non-2xx INVITE final dropped on an unseen branch, as the
+    /// layer does when it drops one: a harness seam proving that a post-call
+    /// gate on [`server_final_unseen_branch`](Self::server_final_unseen_branch)
+    /// fires. Production code never calls it.
+    pub fn count_server_final_unseen_branch(&self) {
+        self.inner.server_final_unseen_branch.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Responses re-rendered under the bound To-tag (counter).
     pub fn to_tag_coerced(&self) -> u64 {
         self.inner.to_tag_coerced.load(Ordering::Relaxed)
