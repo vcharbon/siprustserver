@@ -10,7 +10,7 @@ use sip_message::Method;
 use sip_retransmit::Class;
 use tokio::sync::mpsc;
 
-use crate::event::{EventQueueDropReason, TransactionEvent};
+use crate::event::{EventQueueClass, TransactionEvent};
 
 /// The transaction ladders this layer drives, in the order the family
 /// enumerates them. A dialog-level class is the TU's and never reaches here.
@@ -204,8 +204,22 @@ pub(crate) struct MetricsInner {
     pub inbound_message_bytes_total: AtomicU64,
     pub outbound_message_bytes_total: AtomicU64,
     pub outbound_messages_total: AtomicU64,
-    /// Per-reason drop counters, indexed by [`EventQueueDropReason::index`].
+    /// Ordinary events the full output queue dropped, by
+    /// [`EventQueueClass::index`].
     pub event_queue_drops: [AtomicU64; 6],
+    /// Critical events the full output queue deferred onto the retry deque, by
+    /// [`EventQueueClass::index`]. A deferral is a delivery postponed, never a
+    /// loss.
+    pub event_queue_deferrals: [AtomicU64; 6],
+    /// Critical events waiting on the retry deque right now (gauge), sampled
+    /// at the end of every owner turn.
+    pub event_queue_deferred: AtomicUsize,
+    /// Deferred requests removed because the sweep deleted the server
+    /// transaction that admitted them (counter).
+    pub deferred_swept: AtomicU64,
+    /// New initial INVITEs refused at a deferred-backlog ceiling, indexed
+    /// `[normal, emergency]` by the INVITE's class (counter).
+    pub deferred_refused: [AtomicU64; 2],
     /// Client transactions still open when their call was released — orphaned
     /// (see `Transaction::orphaned`), never cut short (counter).
     pub txn_orphaned_on_call_evict: AtomicU64,
@@ -292,6 +306,10 @@ impl MetricsInner {
             outbound_message_bytes_total: AtomicU64::new(0),
             outbound_messages_total: AtomicU64::new(0),
             event_queue_drops: Default::default(),
+            event_queue_deferrals: Default::default(),
+            event_queue_deferred: AtomicUsize::new(0),
+            deferred_swept: AtomicU64::new(0),
+            deferred_refused: Default::default(),
             txn_orphaned_on_call_evict: AtomicU64::new(0),
             orphaned_transactions: AtomicUsize::new(0),
             cancels_held: AtomicU64::new(0),
@@ -369,16 +387,41 @@ impl TransactionMetrics {
         self.events_tx.max_capacity() - self.events_tx.capacity()
     }
 
-    /// Events the full output queue refused, by reason: dropped, or deferred
-    /// for a critical event. Counted per wire copy — a dropped non-INVITE
-    /// request's retransmission is admitted afresh and may be dropped again.
-    pub fn event_queue_drops(&self, reason: EventQueueDropReason) -> u64 {
+    /// Ordinary events the full output queue dropped, by class. Counted per
+    /// wire copy — a dropped non-INVITE request's retransmission is admitted
+    /// afresh and may be dropped again.
+    pub fn event_queue_drops(&self, reason: EventQueueClass) -> u64 {
         self.inner.event_queue_drops[reason.index()].load(Ordering::Relaxed)
     }
 
-    /// Sum of all per-reason drop counters.
+    /// Sum of all per-class drop counters.
     pub fn event_queue_drops_total(&self) -> u64 {
-        EventQueueDropReason::ALL.iter().map(|r| self.event_queue_drops(*r)).sum()
+        EventQueueClass::ALL.iter().map(|r| self.event_queue_drops(*r)).sum()
+    }
+
+    /// Critical events the full output queue deferred, by class: each is
+    /// delivered once the queue has room, unless the sweep removes it with
+    /// its transaction ([`deferred_swept`](Self::deferred_swept)).
+    pub fn event_queue_deferrals(&self, reason: EventQueueClass) -> u64 {
+        self.inner.event_queue_deferrals[reason.index()].load(Ordering::Relaxed)
+    }
+
+    /// Critical events waiting for room in the output queue (gauge).
+    pub fn event_queue_deferred(&self) -> usize {
+        self.inner.event_queue_deferred.load(Ordering::Relaxed)
+    }
+
+    /// Deferred requests removed with the server transaction the sweep
+    /// deleted (counter).
+    pub fn deferred_swept(&self) -> u64 {
+        self.inner.deferred_swept.load(Ordering::Relaxed)
+    }
+
+    /// New initial INVITEs refused at a deferred-backlog ceiling
+    /// ([`DeferredBound`](crate::DeferredBound)), for the emergency class or
+    /// the normal one (counter).
+    pub fn deferred_refused(&self, emergency: bool) -> u64 {
+        self.inner.deferred_refused[usize::from(emergency)].load(Ordering::Relaxed)
     }
 
     /// Client transactions orphaned — left to close their own obligations —

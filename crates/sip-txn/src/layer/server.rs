@@ -271,15 +271,22 @@ impl Owner {
             return;
         }
 
-        // Tier-3 overload admission (a stateless 503 ahead of txn creation)
-        // deliberately sits ABOVE this layer — see docs/adr/0007 "Deferred".
-        // This layer admits every INVITE, and every other request its event
-        // queue takes (below).
-
-        // ── New server transaction ─────────────────────────────────────────────
+        // Call admission (Tier-3, capacity) sits ABOVE this layer — see
+        // docs/adr/0007 "Deferred". This layer refuses only a new initial
+        // INVITE its deferred backlog has no room for (ADR-0037), before any
+        // 100 Trying or transaction exists; it admits every other INVITE, and
+        // every other request its event queue takes (below).
         let kind =
             if req.method() == Method::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         let is_invite = matches!(kind, TxnKind::Invite);
+        if is_invite
+            && req.to().tag().is_none()
+            && self.refuse_on_backlog(endpoint, &req, src).await
+        {
+            return;
+        }
+
+        // ── New server transaction ─────────────────────────────────────────────
 
         // Attribute the server txn to its call so the B2BUA's acting-backup
         // self-release (ADR-0014) can count "transactions still serving this

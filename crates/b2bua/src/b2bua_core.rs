@@ -201,33 +201,8 @@ impl B2buaCore {
         } = deps;
 
         let parser: Arc<dyn SipParser + Send + Sync> = Arc::new(CustomParser::new());
-        let (txn, txn_rx) = TransactionLayer::spawn(
-            endpoint,
-            parser,
-            TransactionConfig {
-                // Sizes the bounded inbound→app events channel at `max(64, x*4)`.
-                // At 256 (→1024) a new-INVITE burst (e.g. a 200cps peak) fills the
-                // channel and drop-newest sheds in-dialog OPTIONS-200 keepalive
-                // responses for ESTABLISHED dialogs → KeepaliveTimeout BYEs healthy
-                // long calls. 1024 (→4096) gives the channel headroom to absorb the
-                // burst so in-dialog traffic is not starved.
-                udp_queue_max: 1024,
-                id_gen: id_gen.clone(),
-                // The deployment's initial-INVITE bound (default 158 s):
-                // `config.validate()` keeps `setup_timeout_sec` strictly below
-                // it, so the rules path always gives up before the txn layer.
-                invite_initial_timeout_ms: config.invite_txn_timeout_ms(),
-                // The initial INVITE's first-response bound (default Timer B):
-                // an out-of-dialog INVITE that draws nothing at all gives up
-                // here, and the first provisional swaps the bound above in.
-                invite_first_response_timeout_ms: config.invite_first_response_timeout_ms(),
-                // Held-CANCEL policy (ADR-0028): bounded grace by default;
-                // `cancel_strict_rfc3261_wait` selects the literal §9.1 wait.
-                cancel_hold_grace_ms: (!config.cancel_strict_rfc3261_wait)
-                    .then_some(sip_txn::timers::CANCEL_HOLD_GRACE),
-                strict_to_tag: true,
-            },
-        );
+        let txn_config = txn_config(&config, &id_gen);
+        let (txn, txn_rx) = TransactionLayer::spawn(endpoint, parser, txn_config);
         let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());
 
         let mut state = CallState::new(store, config.self_ordinal.clone(), metrics.clone())
@@ -825,4 +800,43 @@ fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> 
         }
     }
     true
+}
+
+/// The transaction layer's tunables for this worker: its event queue, the
+/// deployment's INVITE bounds and CANCEL policy, and the new-call ceiling on
+/// the deferred backlog ([`crate::deferred_bound`]).
+fn txn_config(config: &B2buaConfig, id_gen: &Arc<IdGen>) -> TransactionConfig {
+    let mut txn_config = TransactionConfig {
+        // Sizes the bounded inbound→app events channel at `max(64, x*4)`.
+        // At 256 (→1024) a new-INVITE burst (e.g. a 200cps peak) fills the
+        // channel and drop-newest sheds in-dialog OPTIONS-200 keepalive
+        // responses for ESTABLISHED dialogs → KeepaliveTimeout BYEs healthy
+        // long calls. 1024 (→4096) gives the channel headroom to absorb the
+        // burst so in-dialog traffic is not starved.
+        udp_queue_max: 1024,
+        id_gen: id_gen.clone(),
+        // The deployment's initial-INVITE bound (default 158 s):
+        // `config.validate()` keeps `setup_timeout_sec` strictly below
+        // it, so the rules path always gives up before the txn layer.
+        invite_initial_timeout_ms: config.invite_txn_timeout_ms(),
+        // The initial INVITE's first-response bound (default Timer B):
+        // an out-of-dialog INVITE that draws nothing at all gives up
+        // here, and the first provisional swaps the bound above in.
+        invite_first_response_timeout_ms: config.invite_first_response_timeout_ms(),
+        // Held-CANCEL policy (ADR-0028): bounded grace by default;
+        // `cancel_strict_rfc3261_wait` selects the literal §9.1 wait.
+        cancel_hold_grace_ms: (!config.cancel_strict_rfc3261_wait)
+            .then_some(sip_txn::timers::CANCEL_HOLD_GRACE),
+        strict_to_tag: true,
+        deferred_bound: None,
+    };
+    // The new-call ceiling on the deferred backlog. Its To-tag secret is
+    // drawn from its own generator so the core's id sequence is untouched.
+    txn_config.deferred_bound = Some(crate::deferred_bound::deferred_bound(
+        txn_config.event_capacity(),
+        config.retry_after_base_sec,
+        config.retry_after_jitter_sec,
+        &IdGen::from_entropy(),
+    ));
+    txn_config
 }

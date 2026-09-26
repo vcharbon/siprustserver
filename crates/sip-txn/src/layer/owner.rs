@@ -18,7 +18,9 @@ use crate::metrics::MetricsInner;
 use crate::rng::IdGen;
 use crate::timers::{ms, TIMER_L, TXN_SWEEP_INTERVAL};
 
-use super::handle::Command;
+use super::backlog::DeferredBound;
+use super::events::SweptServer;
+use super::handle::{Command, TransactionConfig};
 use super::txn::{sweep_max_age, CancelWire, Timer, Transaction, TxnRole};
 
 pub(super) struct Owner {
@@ -49,14 +51,16 @@ pub(super) struct Owner {
     /// lockstep: never let this drift from `txns`.
     pub(super) txn_index: HashMap<String, HashSet<String>>,
     /// CRITICAL events a full events queue deferred, in FIFO order — re-offered on
-    /// the [`Timer::EventRetry`] tick, NEVER dropped. These are one-shot signals
-    /// whose protocol-level redelivery the layer already consumed (a deleted txn's
-    /// Timeout, an answered CANCEL's Cancelled, a takeover copy's only CallQuiesced,
-    /// an auto-ACKed non-2xx final, an inbound INVITE whose 100 silenced the UAC);
-    /// a drop-newest `emit` would lose them exactly under the post-failover/overload
-    /// burst that produces them. Bounded by live txns + watches (same order as the
-    /// `txns` map), so this is not a new unbounded buffer.
+    /// the [`Timer::EventRetry`] tick, never dropped while their transaction
+    /// lives. These are one-shot signals whose protocol-level redelivery the
+    /// layer already consumed (a deleted txn's Timeout, an answered CANCEL's
+    /// Cancelled, a takeover copy's only CallQuiesced, an auto-ACKed non-2xx
+    /// final, an inbound INVITE whose 100 silenced the UAC). New initial INVITEs
+    /// are its only entries the consumer does not pace; `deferred_bound` caps
+    /// them and the sweep removes those whose transaction it deletes.
     pub(super) deferred_events: VecDeque<TransactionEvent>,
+    /// [`TransactionConfig::deferred_bound`](crate::TransactionConfig).
+    pub(super) deferred_bound: Option<DeferredBound>,
     /// Whether a [`Timer::EventRetry`] is already in the wheel (at most one).
     pub(super) event_retry_armed: bool,
     /// call_refs whose last txn cleared THIS turn but whose `CallQuiesced` must be
@@ -163,19 +167,21 @@ pub(super) async fn run(
             .metrics
             .timer_queue_len
             .store(owner.timers.len(), std::sync::atomic::Ordering::Relaxed);
+        owner
+            .metrics
+            .event_queue_deferred
+            .store(owner.deferred_events.len(), std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 impl Owner {
+    /// The owner over `events_tx`, holding the tunables of `config` (its
+    /// `udp_queue_max` already sized `events_tx`).
     pub(super) fn new(
         parser: Arc<dyn SipParser + Send + Sync>,
         events_tx: mpsc::Sender<TransactionEvent>,
         metrics: Arc<MetricsInner>,
-        id_gen: Arc<IdGen>,
-        invite_initial_timeout_ms: u64,
-        invite_first_response_timeout_ms: u64,
-        cancel_hold_grace_ms: Option<u64>,
-        strict_to_tag: bool,
+        config: TransactionConfig,
     ) -> Self {
         Self {
             txns: HashMap::new(),
@@ -183,17 +189,18 @@ impl Owner {
             parser,
             events_tx,
             metrics,
-            id_gen,
+            id_gen: config.id_gen,
             self_release_watch: HashSet::new(),
             txn_index: HashMap::new(),
             deferred_events: VecDeque::new(),
+            deferred_bound: config.deferred_bound,
             event_retry_armed: false,
             pending_quiesce: Vec::new(),
-            invite_initial_timeout_ms,
-            invite_first_response_timeout_ms,
-            cancel_hold_grace_ms,
+            invite_initial_timeout_ms: config.invite_initial_timeout_ms,
+            invite_first_response_timeout_ms: config.invite_first_response_timeout_ms,
+            cancel_hold_grace_ms: config.cancel_hold_grace_ms,
             recent_uas_tags: HashMap::new(),
-            strict_to_tag,
+            strict_to_tag: config.strict_to_tag,
         }
     }
 
@@ -416,9 +423,18 @@ impl Owner {
             })
             .map(|(b, _)| b.clone())
             .collect();
+        let mut swept_servers = Vec::new();
         for branch in stale {
+            if let Some(t) = self.txns.get(&branch).filter(|t| t.role == TxnRole::Server) {
+                swept_servers.push(SweptServer {
+                    call_id: t.call_id.clone(),
+                    from_tag: t.from_tag.clone(),
+                    branch: branch.clone(),
+                });
+            }
             self.delete_txn(&branch);
         }
+        self.drop_deferred_requests_of(&swept_servers);
         self.recent_uas_tags.retain(|_, (_, since)| since.elapsed() < ms(TIMER_L));
         shrink_idle(&mut self.txns);
         shrink_idle(&mut self.txn_index);

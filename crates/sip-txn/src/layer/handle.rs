@@ -16,12 +16,13 @@ use crate::metrics::{MetricsInner, TransactionMetrics};
 use crate::rng::IdGen;
 use crate::seed::{Reoffer, TxnSeed};
 
+use super::backlog::DeferredBound;
 use super::owner::{run, Owner};
 
 /// Tunables for the transaction layer.
 pub struct TransactionConfig {
     /// The network layer's recv-queue bound. The output event queue is sized
-    /// `max(64, udp_queue_max * 4)`.
+    /// from it ([`event_capacity`](Self::event_capacity)).
     pub udp_queue_max: usize,
     /// Identifier seam (Via branch / To-tag generation).
     pub id_gen: Arc<IdGen>,
@@ -62,6 +63,18 @@ pub struct TransactionConfig {
     /// makes the defect a test failure, and a test that exercises the
     /// correction itself turns it off.
     pub strict_to_tag: bool,
+    /// The ceilings on the deferred backlog past which a new initial INVITE is
+    /// refused ([`DeferredBound`]). `None` — the default — sets none: the
+    /// backlog then grows with the initial INVITEs admitted while the consumer
+    /// does not drain, until the sweep removes them with their transactions.
+    pub deferred_bound: Option<DeferredBound>,
+}
+
+impl TransactionConfig {
+    /// The output event queue's bound: `max(64, udp_queue_max * 4)`.
+    pub fn event_capacity(&self) -> usize {
+        std::cmp::max(64, self.udp_queue_max * 4)
+    }
 }
 
 impl Default for TransactionConfig {
@@ -73,6 +86,7 @@ impl Default for TransactionConfig {
             invite_first_response_timeout_ms: crate::timers::TIMER_B,
             cancel_hold_grace_ms: Some(crate::timers::CANCEL_HOLD_GRACE),
             strict_to_tag: true,
+            deferred_bound: None,
         }
     }
 }
@@ -166,23 +180,13 @@ impl TransactionLayer {
         parser: Arc<dyn SipParser + Send + Sync>,
         config: TransactionConfig,
     ) -> (Self, mpsc::Receiver<TransactionEvent>) {
-        let event_capacity = std::cmp::max(64, config.udp_queue_max * 4);
-        let (events_tx, events_rx) = mpsc::channel::<TransactionEvent>(event_capacity);
+        let (events_tx, events_rx) = mpsc::channel::<TransactionEvent>(config.event_capacity());
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(1024);
 
         let metrics_inner = Arc::new(MetricsInner::new());
         let metrics = TransactionMetrics::new(metrics_inner.clone(), events_tx.clone());
 
-        let owner = Owner::new(
-            parser,
-            events_tx,
-            metrics_inner,
-            config.id_gen,
-            config.invite_initial_timeout_ms,
-            config.invite_first_response_timeout_ms,
-            config.cancel_hold_grace_ms,
-            config.strict_to_tag,
-        );
+        let owner = Owner::new(parser, events_tx, metrics_inner, config);
         let owner_abort = tokio::spawn(run(owner, endpoint, cmd_rx)).abort_handle();
 
         (Self { cmd_tx, metrics, owner_abort }, events_rx)

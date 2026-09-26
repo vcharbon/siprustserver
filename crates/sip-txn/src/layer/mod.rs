@@ -19,8 +19,10 @@
 //! loop + map/wheel bookkeeping) · `client` (RFC 3261 §17.1 UAC FSM) ·
 //! `server` (§17.2 UAS FSM) · `bind` (the To-tag every outbound response is
 //! held to) · `seed` (ADR-0014 seeding + re-offer) · `events` (output-queue
-//! discipline) · `txn` (per-transaction state + timing policy).
+//! discipline) · `backlog` (new-call admission against the deferred backlog)
+//! · `txn` (per-transaction state + timing policy).
 
+mod backlog;
 mod bind;
 mod client;
 mod events;
@@ -30,4 +32,5 @@ mod seed;
 mod server;
 mod txn;
 
+pub use backlog::{DeferredBound, NewCallRefusal};
 pub use handle::{TransactionConfig, TransactionLayer, TransactionLayerClosed};

@@ -25,14 +25,15 @@ pub mod rng;
 pub mod seed;
 pub mod timers;
 
-// The layer actor: spawn, send API, per-call eviction, ADR-0014 self-release.
-pub use layer::{TransactionConfig, TransactionLayer, TransactionLayerClosed};
+// The layer actor: spawn, send API, per-call eviction, ADR-0014 self-release,
+// and the deferred-backlog ceiling on new calls.
+pub use layer::{
+    DeferredBound, NewCallRefusal, TransactionConfig, TransactionLayer, TransactionLayerClosed,
+};
 // The seeds a materialised call hands the layer, and a re-offer's disposition.
 pub use seed::{Reoffer, TxnSeed};
 // Upward events + the client-transaction handles `send_request` returns.
-pub use event::{
-    ClientTransactionHandle, EventQueueDropReason, TimeoutKind, TransactionEvent, TxnKind,
-};
+pub use event::{ClientTransactionHandle, EventQueueClass, TimeoutKind, TransactionEvent, TxnKind};
 // Observability read handle (shared atomics, readable off the actor thread).
 pub use metrics::{RetransmitRow, TransactionMetrics};
 // Identifier generation seam (Via branch / To-tag).

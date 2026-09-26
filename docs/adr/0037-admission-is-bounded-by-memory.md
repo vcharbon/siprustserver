@@ -29,6 +29,11 @@ kills it, and a kill drops every call it serves.
    stateless ingress brake does not: it cannot tell a new INVITE from a
    retransmission of one already admitted, and refusing that retransmission
    would end a call being set up. In-dialog requests are never refused.
+   The transaction layer sends the same 503 statelessly, before its 100
+   Trying, to a new initial INVITE its deferred-event backlog has no room
+   for: a router that stops draining is invisible to every other gate. Its
+   ceilings (one output queue of events for normal calls, two for emergency)
+   are sized by that queue, not by the host, and always on.
 4. **Backup replicas have their own ceilings:** a count and an RSS ceiling,
    set lower than the admission ones. At either, a replica of a call this node
    does not hold yet is not stored. Updates and deletes of held replicas, and a

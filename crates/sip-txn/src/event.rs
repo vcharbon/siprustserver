@@ -76,11 +76,11 @@ pub enum TransactionEvent {
     CallQuiesced { call_ref: String },
 }
 
-/// Reason class for an event shed when the bounded output queue is full.
-/// Operators want to know *which* message class is dropped under backpressure,
-/// not just an aggregate.
+/// The class of an event the full output queue refused: the `reason` label of
+/// both the drop counter (an ordinary event, lost) and the deferral counter (a
+/// critical event, delivered later), so backpressure reads per message class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EventQueueDropReason {
+pub enum EventQueueClass {
     RequestInvite,
     RequestOther,
     Response,
@@ -89,7 +89,7 @@ pub enum EventQueueDropReason {
     CallQuiesced,
 }
 
-impl EventQueueDropReason {
+impl EventQueueClass {
     pub(crate) fn of(event: &TransactionEvent) -> Self {
         match event {
             TransactionEvent::Cancelled { .. } => Self::Cancelled,
@@ -103,7 +103,7 @@ impl EventQueueDropReason {
         }
     }
 
-    pub const ALL: [EventQueueDropReason; 6] = [
+    pub const ALL: [EventQueueClass; 6] = [
         Self::RequestInvite,
         Self::RequestOther,
         Self::Response,

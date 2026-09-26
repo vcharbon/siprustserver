@@ -1036,7 +1036,7 @@ impl RunnerBase {
 /// shedding that tears down established dialogs under a new-call burst —
 /// invisible until this was exported.
 pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
-    use sip_txn::EventQueueDropReason;
+    use sip_txn::EventQueueClass;
     let mut s = String::new();
     s.push_str("# HELP b2bua_txn_active_transactions In-flight client+server transactions.\n");
     s.push_str("# TYPE b2bua_txn_active_transactions gauge\n");
@@ -1059,15 +1059,38 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     s.push_str("# HELP b2bua_txn_event_queue_capacity Inbound->app events channel capacity.\n");
     s.push_str("# TYPE b2bua_txn_event_queue_capacity gauge\n");
     s.push_str(&format!("b2bua_txn_event_queue_capacity {}\n", m.event_queue_capacity()));
-    s.push_str("# HELP b2bua_txn_event_queue_drops_total Events the full inbound->app channel refused, by class, counted per wire copy (a dropped non-INVITE request is readmitted on each retransmission); a critical class is deferred, not lost.\n");
+    s.push_str("# HELP b2bua_txn_event_queue_drops_total Ordinary events the full inbound->app channel dropped, by class, counted per wire copy (a dropped non-INVITE request is readmitted on each retransmission).\n");
     s.push_str("# TYPE b2bua_txn_event_queue_drops_total counter\n");
-    for r in EventQueueDropReason::ALL {
+    for r in EventQueueClass::ALL {
         s.push_str(&format!(
             "b2bua_txn_event_queue_drops_total{{reason=\"{}\"}} {}\n",
             r.label(),
             m.event_queue_drops(r)
         ));
     }
+    s.push_str("# HELP b2bua_txn_event_queue_deferred_total Critical events the full inbound->app channel deferred for later delivery, by class; a deferral is no loss.\n");
+    s.push_str("# TYPE b2bua_txn_event_queue_deferred_total counter\n");
+    for r in EventQueueClass::ALL {
+        s.push_str(&format!(
+            "b2bua_txn_event_queue_deferred_total{{reason=\"{}\"}} {}\n",
+            r.label(),
+            m.event_queue_deferrals(r)
+        ));
+    }
+    s.push_str("# HELP b2bua_txn_event_queue_deferred Critical events waiting for room in the inbound->app channel.\n");
+    s.push_str("# TYPE b2bua_txn_event_queue_deferred gauge\n");
+    s.push_str(&format!("b2bua_txn_event_queue_deferred {}\n", m.event_queue_deferred()));
+    s.push_str("# HELP b2bua_txn_deferred_refused_total New initial INVITEs refused 503 by the txn layer because its deferred backlog was at the ceiling of their class.\n");
+    s.push_str("# TYPE b2bua_txn_deferred_refused_total counter\n");
+    for (class, emergency) in [("normal", false), ("emergency", true)] {
+        s.push_str(&format!(
+            "b2bua_txn_deferred_refused_total{{class=\"{class}\"}} {}\n",
+            m.deferred_refused(emergency)
+        ));
+    }
+    s.push_str("# HELP b2bua_txn_deferred_swept_total Deferred requests removed with the server transaction the sweep deleted before the router took them.\n");
+    s.push_str("# TYPE b2bua_txn_deferred_swept_total counter\n");
+    s.push_str(&format!("b2bua_txn_deferred_swept_total {}\n", m.deferred_swept()));
     s.push_str("# HELP b2bua_txn_unanswered_forgotten_total Non-INVITE server transactions forgotten because the router discarded their request unrun (queue full, call cap, behind a release), so the retransmission is admitted again.\n");
     s.push_str("# TYPE b2bua_txn_unanswered_forgotten_total counter\n");
     s.push_str(&format!("b2bua_txn_unanswered_forgotten_total {}\n", m.unanswered_forgotten()));
@@ -1222,6 +1245,35 @@ mod tests {
     fn outbound_proxy_optional_when_not_required() {
         assert!(validate_outbound_proxy_requirement(false, false).is_ok());
         assert!(validate_outbound_proxy_requirement(false, true).is_ok());
+    }
+
+    /// The deferred-backlog series of the transaction layer are on the first
+    /// scrape, at 0, so a dashboard or probe reads a value from startup.
+    #[tokio::test]
+    async fn the_txn_deferred_backlog_series_are_published_at_zero_from_startup() {
+        use sip_net::{BindUdpOpts, SignalingNetwork, SimulatedSignalingNetwork};
+        let net = SimulatedSignalingNetwork::new(1);
+        let endpoint = net
+            .bind_udp(BindUdpOpts::new("127.0.0.1:5070".parse().unwrap(), 64))
+            .await
+            .expect("bind");
+        let parser = Arc::new(sip_message::CustomParser::new());
+        let (txn, _events) = sip_txn::TransactionLayer::spawn(
+            endpoint,
+            parser,
+            sip_txn::TransactionConfig::default(),
+        );
+        let text = txn_metrics_text(txn.metrics());
+        for line in [
+            "b2bua_txn_event_queue_deferred 0",
+            "b2bua_txn_event_queue_deferred_total{reason=\"request_invite\"} 0",
+            "b2bua_txn_event_queue_drops_total{reason=\"request_invite\"} 0",
+            "b2bua_txn_deferred_refused_total{class=\"normal\"} 0",
+            "b2bua_txn_deferred_refused_total{class=\"emergency\"} 0",
+            "b2bua_txn_deferred_swept_total 0",
+        ] {
+            assert!(text.lines().any(|l| l == line), "missing {line:?} in:\n{text}");
+        }
     }
 
     #[test]

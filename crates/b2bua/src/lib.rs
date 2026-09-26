@@ -25,6 +25,7 @@ pub mod cdr;
 pub mod config;
 pub mod decision;
 pub(crate) mod decision_log;
+pub mod deferred_bound;
 pub mod dispatch;
 pub mod drain;
 pub mod effects;
