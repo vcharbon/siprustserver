@@ -42,6 +42,18 @@ case "$case_path" in
     printf 'refused before any bundle\n' >&2
     exit 2
     ;;
+  *panics*)
+    # The run body panicked after a green verdict was written.
+    cat > "$out_dir/verdict.json" <<JSON
+{
+  "case": "stub",
+  "lane": "stub-lane",
+  "status": "ok"
+}
+JSON
+    printf 'the run body panicked\n' >&2
+    exit 4
+    ;;
   *fails*)
     cat > "$out_dir/verdict.json" <<JSON
 {

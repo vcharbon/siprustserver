@@ -258,7 +258,10 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       yield* Bundle.decodeRunRfcAudit(JSON.parse(yield* fs.readFileString(rfcPath)) as unknown)
     )
     : []
-  const structural = Bundle.verdictPassed(verdict) && rfcGating.length === 0
+  // A run whose body panicked never passes: whatever verdict it left was
+  // written before the unwind, so it cannot answer for what came after.
+  const structural = report.outcome._tag !== "panicked" && Bundle.verdictPassed(verdict) &&
+    rfcGating.length === 0
 
   const caseId = Campaign.cellCaseId(cell)
   const classification = yield* confrontCell(cell, context, absolute, pivot, verdict, caseId)

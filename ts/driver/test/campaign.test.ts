@@ -113,6 +113,18 @@ describe("a red cell", () => {
     expect(exitCodeOf(run)).toBe(1)
   })
 
+  it("is red where the run panicked, whatever verdict it left", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([replayCell({ case: caseNamed(cases, "panics.v3.json") })])
+    const cell = run.index.cells[0]!
+    const verdict = JSON.parse(fs.readFileSync(path.join(run.dir, cell.dir, "verdict.json"), "utf8"))
+    expect(verdict.status).toBe("ok")
+    expect(cell.passed).toBe(false)
+    expect(cell.error).toBeUndefined()
+    expect(exitCodeOf(run)).toBe(1)
+  })
+
   it("IS crashed where the interpreter refused before writing anything", async () => {
     const cases = runDir("cases")
     dirs.push(cases)
