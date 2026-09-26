@@ -25,7 +25,8 @@
 //! - **In-dialog request** (`LiveInDialog` — BYE, re-INVITE, …): fail
 //!   **closed** — `500` to that request; the call and its state stay untouched
 //!   (deliberately distinct from the `481` lookup-*miss*). A retry after the
-//!   store recovers proceeds normally.
+//!   store recovers proceeds normally. A request whose lookups found no call
+//!   (`router::unroutable`) is probed too, as is a failed replica-index read.
 //! - **Audit/keepalive timer** (`LiveAudit`): fail **open** — skip the probe
 //!   cycle, keep the call up, and RE-ARM the keepalive timer so liveness
 //!   detection resumes next interval (a store fault alone must never tear down

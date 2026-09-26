@@ -1,6 +1,7 @@
 //! Locally-authored response builders: the OPTIONS health reply, the
-//! call-layer-stateless store-fault 500 and the orphan 481. The overload reject
-//! lives with the policy that owns it — [`crate::overload::build_reject_new_call_503`].
+//! call-layer-stateless store-fault 500, and the 481 and 405 a request naming
+//! no call draws. The overload reject lives with the policy that owns it —
+//! [`crate::overload::build_reject_new_call_503`].
 
 use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
 use sip_message::types::SipHeader;
@@ -23,6 +24,18 @@ fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
 pub(super) fn build_481(req: &SipRequest, to_tag: Option<&str>) -> SipResponse {
     let opts = GenerateResponseOpts { to_tag: to_tag.map(str::to_owned), ..Default::default() };
     generate_response(req, 481, "Call/Transaction Does Not Exist", &opts)
+}
+
+/// `405 Method Not Allowed` to `req`, a request of a method the node does not
+/// serve (RFC 3261 §8.2.1), stating `allow` — the node's `Allow` — and under
+/// `to_tag` when `req`'s To has none (§8.2.6.2).
+pub(super) fn build_405(req: &SipRequest, to_tag: Option<&str>, allow: &str) -> SipResponse {
+    let opts = GenerateResponseOpts {
+        to_tag: to_tag.map(str::to_owned),
+        extra_headers: vec![hdr("Allow", allow)],
+        ..Default::default()
+    };
+    generate_response(req, 405, "Method Not Allowed", &opts)
 }
 
 /// Build the self-reported readiness reply to an out-of-dialog OPTIONS

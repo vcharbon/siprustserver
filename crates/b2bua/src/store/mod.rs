@@ -847,21 +847,27 @@ impl CallState {
     /// the in-dialog request-URI, so they resolve via the R-URI param and never
     /// exercised this fallback — the blind spot that let a real-traffic takeover
     /// gap pass the unit tests. See `b2bua-harness` `failover_real_uac_routing`.
-    pub async fn resolve_from_replica_index(&self, call_id: &str, tag: &str) -> Option<String> {
-        let repl = self.repl_store()?;
-        if !tag.is_empty() {
-            if let Ok(Some(r)) = repl.get_index(&format!("leg:{call_id}|{tag}")).await {
-                self.metrics.bump_repl_takeover_resolved();
-                self.note_takeover(&r, "resolved");
-                return Some(r);
-            }
-        }
-        let hit = repl.get_index(&format!("leg:{call_id}")).await.ok().flatten();
+    /// `Err` when a read failed: the store cannot say whether the dialog exists.
+    pub async fn resolve_from_replica_index(
+        &self,
+        call_id: &str,
+        tag: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let Some(repl) = self.repl_store() else { return Ok(None) };
+        let tagged = if tag.is_empty() {
+            None
+        } else {
+            repl.get_index(&format!("leg:{call_id}|{tag}")).await?
+        };
+        let hit = match tagged {
+            Some(r) => Some(r),
+            None => repl.get_index(&format!("leg:{call_id}")).await?,
+        };
         if let Some(r) = &hit {
             self.metrics.bump_repl_takeover_resolved();
             self.note_takeover(r, "resolved");
         }
-        hit
+        Ok(hit)
     }
 
     /// Fold one takeover event for `call_ref` into its dead primary's episode

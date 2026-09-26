@@ -10,7 +10,8 @@
 //! State transitions and rare events do NOT belong here — they are individual
 //! `info!` lines at their own site.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use observe::{WaveReport, WaveSet};
 
@@ -66,9 +67,76 @@ pub fn backend_waves(backend: &'static str) -> Arc<WaveSet> {
     })
 }
 
+/// Messages and events that resolved to no call (`router::unroutable`), keyed
+/// by class (`wire:ACK`, `wire:BYE:481`, `internal:timeout:OPTIONS`, …). Each
+/// line names the class, why it resolved to nothing, and the most recent
+/// example (`sample`: its Call-ID or transaction branch), so an episode of
+/// thousands prints a handful of lines that still point at one real message.
+pub struct UnroutableWaves {
+    waves: Arc<WaveSet>,
+    /// Class → (reason, sample) of the latest event; bounded by the classes.
+    samples: Arc<Mutex<HashMap<String, (&'static str, String)>>>,
+}
+
+impl Default for UnroutableWaves {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UnroutableWaves {
+    pub fn new() -> Self {
+        let samples: Arc<Mutex<HashMap<String, (&'static str, String)>>> = Arc::default();
+        let read = samples.clone();
+        let waves = WaveSet::new(move |class: &str, r: &WaveReport| {
+            let (reason, sample) = read.lock().unwrap().get(class).cloned().unwrap_or_default();
+            tracing::info!(
+                node = observe::node(),
+                class,
+                reason,
+                sample = %sample,
+                edge = %r.edge,
+                elapsed_ms = r.elapsed_ms,
+                totals = %r.tally,
+                "unroutable"
+            );
+        });
+        Self { waves, samples }
+    }
+
+    /// Record one event of `class`; `reason` says why it resolved to no call
+    /// and `sample` identifies it.
+    pub fn record(&self, class: &str, reason: &'static str, sample: String) {
+        self.samples.lock().unwrap().insert(class.to_string(), (reason, sample));
+        self.waves.record(class, "events", 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A storm of one class prints a handful of lines, each naming the class,
+    /// its reason and a real example.
+    #[tokio::test(start_paused = true)]
+    async fn an_unroutable_storm_prints_a_handful_of_lines_with_a_sample() {
+        let (_guard, log) = observe::test_buffer();
+        let waves = UnroutableWaves::new();
+        for i in 0..5_000 {
+            waves.record("wire:BYE:481", "no-ruri-callref-no-index", format!("call_id=c{i}"));
+        }
+        tokio::task::yield_now().await;
+        tokio::time::advance(observe::DEFAULT_IDLE_CLOSE_AFTER).await;
+        tokio::task::yield_now().await;
+
+        let lines = log.matching("unroutable");
+        assert!(lines.len() <= 4, "5000 events must not print 5000 lines: {lines:?}");
+        assert!(lines[0].contains("sample=call_id=c0"), "{}", lines[0].line());
+        assert!(lines[0].contains("reason=no-ruri-callref-no-index"), "{}", lines[0].line());
+        let last = lines.last().expect("the episode closes");
+        assert!(last.contains("edge=falling") && last.contains("events=5000"), "{}", last.line());
+        assert!(last.contains("sample=call_id=c4999"), "{}", last.line());
+    }
 
     /// The traffic-independence guarantee at the site that would break it
     /// first: a 5000-call failover owes a handful of lines, and the last one

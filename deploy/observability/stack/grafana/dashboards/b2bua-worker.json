@@ -83,14 +83,16 @@
     },
     {
       "id": 8, "type": "timeseries", "title": "Handler faults / sec",
-      "description": "handler_timeouts · force_purge (loop-guard purges) · fast_reject_terminating (requests rejected on a terminating call) · unroutable_dropped (no route resolved).",
+      "description": "handler_timeouts · force_purge (loop-guard purges) · fast_reject_terminating (requests rejected on a terminating call) · unroutable: messages and events that resolved to no call — dropped (an ACK or a response, by kind), refused (a request answered 481/405, by method), internal (a released transaction's timeout, no wire message).",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
         { "expr": "sum(rate(b2bua_handler_timeouts_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "handler_timeouts" },
         { "expr": "sum(rate(b2bua_force_purge_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "force_purge" },
         { "expr": "sum(rate(b2bua_fast_reject_terminating_total{pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "fast_reject_terminating" },
-        { "expr": "sum(rate(b2bua_unroutable_dropped_total{pod=~\"$pod\"}[1m]))", "refId": "D", "legendFormat": "unroutable_dropped" }
+        { "expr": "sum by (kind) (rate(b2bua_unroutable_dropped_total{pod=~\"$pod\"}[1m]))", "refId": "D", "legendFormat": "unroutable_dropped {{kind}}" },
+        { "expr": "sum by (method, code) (rate(b2bua_unroutable_refused_total{pod=~\"$pod\"}[1m]))", "refId": "E", "legendFormat": "unroutable_refused {{method}} {{code}}" },
+        { "expr": "sum by (event, method) (rate(b2bua_unroutable_internal_total{pod=~\"$pod\"}[1m]))", "refId": "F", "legendFormat": "unroutable_internal {{event}} {{method}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },

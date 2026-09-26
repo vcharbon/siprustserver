@@ -95,6 +95,8 @@ safety-net sweep (35 s) sits just above each window:
   §17.1.1.2 ladder, bounded by Timer B.
 - A `Timeout` for an orphan names no call; the router's per-peer failure
   accounting still sees the destination, as it does for a detached non-INVITE.
+  It counts on `b2bua_unroutable_internal_total{event="timeout"}`, apart from
+  the wire messages dropped (`router::unroutable`).
 - Orphan finals never reach the consumer, so a rule can no longer observe
   them; the layer's ACK is the whole response. The consumer-side rules for a
   crossing 2xx on a resident call (`resolve-cancelled-reinvite-response`) are

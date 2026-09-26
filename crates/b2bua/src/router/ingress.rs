@@ -1,17 +1,19 @@
 //! The pre-dispatch pipeline: every event enters here once. Data-path metrics,
 //! per-peer timeout attribution, the acting-backup self-release notice, the
-//! out-of-dialog OPTIONS health responder, resolution, the full-guarantee cap
-//! shed, and finally the per-call FIFO dispatch.
+//! out-of-dialog OPTIONS health responder, resolution (an event resolving to
+//! no call goes to [`super::unroutable`]), the full-guarantee cap shed, and
+//! finally the per-call FIFO dispatch.
 
 use std::sync::Arc;
 
 use sip_message::SipMessage;
 
 use super::peer_metrics::classify_b2bua_peer;
-use super::process::{process, reject_stray_cancel};
+use super::process::process;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::{replica_takeover_call_ref, resolve};
 use super::responses::build_options_health_response;
+use super::unroutable::Lookup;
 use super::RouterCtx;
 use crate::event::CallEvent;
 
@@ -120,6 +122,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     }
 
     let mut res = resolve(ctx, &event);
+    let mut lookup = Lookup::Answered;
     if res.call_ref.is_none() {
         // Acting-backup takeover BACKSTOP. The normal in-dialog key is the R-URI
         // `callref` param the B2BUA Contact stamps and the proxy preserves under
@@ -131,17 +134,15 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         // the replica store's SIP index (the puller imported it) before declaring
         // the event unroutable, so a failed-over in-dialog request is not silently
         // dropped and the dialog can still terminate on the backup.
-        res.call_ref = replica_takeover_call_ref(ctx, &event).await;
+        match replica_takeover_call_ref(ctx, &event).await {
+            Ok(found) => res.call_ref = found,
+            Err(_) => lookup = Lookup::Failed,
+        }
     }
     let call_ref = match res.call_ref.clone() {
         Some(r) => r,
         None => {
-            // A CANCEL reaches the router only when the transaction layer held
-            // no INVITE for it; naming no call either, it draws the RFC 3261
-            // §9.2 481 here. Every other unroutable request is the peer's to
-            // re-send or give up on.
-            reject_stray_cancel(ctx, None, &event).await;
-            ctx.metrics.record_unroutable_dropped(event.kind());
+            super::unroutable::on_unroutable(ctx, &event, lookup).await;
             return;
         }
     };

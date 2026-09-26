@@ -444,16 +444,7 @@ async fn in_dialog_store_fault_gate(
     if let CallEvent::Sip { message, src, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
             if ctx.store_faults.check(StoreFaultPoint::LiveInDialog).is_err() {
-                if req.method() != "ACK" {
-                    let resp = generate_response(
-                        req,
-                        500,
-                        "Server Internal Error",
-                        &GenerateResponseOpts::default(),
-                    );
-                    let _ = ctx.txn.send_response(resp, *src).await;
-                }
-                ctx.metrics.bump_store_fault_rejected();
+                refuse_on_store_fault(ctx, req, *src).await;
                 return true;
             }
         }
@@ -479,6 +470,22 @@ async fn in_dialog_store_fault_gate(
         }
     }
     false
+}
+
+/// Fail an in-dialog request CLOSED on a store fault (ADR-0023): 500 through
+/// its server transaction, an ACK dropped unanswered (RFC 3261 §17). Never the
+/// 481 of a lookup miss: the dialog may exist, the store cannot say.
+pub(super) async fn refuse_on_store_fault(
+    ctx: &RouterCtx,
+    req: &sip_message::SipRequest,
+    src: SocketAddr,
+) {
+    if req.method() != Method::Ack {
+        let resp =
+            generate_response(req, 500, "Server Internal Error", &GenerateResponseOpts::default());
+        let _ = ctx.txn.send_response(resp, src).await;
+    }
+    ctx.metrics.bump_store_fault_rejected();
 }
 
 /// The live call for an in-dialog event: resident, or materialised as an
@@ -534,7 +541,7 @@ async fn refuse_foreign_dialog(
 /// and none a call here could rebuild: 481 under `to_tag`, the tag the call's
 /// final to the INVITE carried where a call resolves, and no effect on any
 /// call. The 481 sent when `event` was such a CANCEL.
-pub(super) async fn reject_stray_cancel(
+async fn reject_stray_cancel(
     ctx: &RouterCtx,
     to_tag: Option<&str>,
     event: &CallEvent,
@@ -845,12 +852,13 @@ async fn handle_limiter_refresh(
     HandlerResult { call, effects: fx }
 }
 
-/// A request for a vanished call → 481 (ACK/responses are silently dropped).
+/// A request for a vanished call draws the answer a request naming no call is
+/// owed ([`super::unroutable::refusal`]); an ACK or a response draws nothing.
 async fn maybe_reject_orphan(ctx: &RouterCtx, event: &CallEvent) {
     if let CallEvent::Sip { message, src, .. } = event {
         if let SipMessage::Request(req) = message.as_ref() {
-            if req.method() != "ACK" {
-                let _ = ctx.txn.send_response(build_481(req, None), *src).await;
+            if let Some(answer) = super::unroutable::refusal(ctx, req) {
+                let _ = ctx.txn.send_response(answer, *src).await;
             }
         }
     }

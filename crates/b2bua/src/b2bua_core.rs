@@ -406,6 +406,7 @@ impl B2buaCore {
             overload: overload.clone(),
             capacity: capacity.clone(),
             keepalive_waves: crate::lifecycle::keepalive_timeout_waves(),
+            unroutable_waves: crate::lifecycle::UnroutableWaves::new(),
             reentry_tx,
             // Arc-share the injected port into every per-call `ctx.clone()`,
             // exactly like `decision`/`limiter`.

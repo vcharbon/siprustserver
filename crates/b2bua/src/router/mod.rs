@@ -11,7 +11,8 @@
 //! the replication reclaim/discharge funnels,
 //! [`restore_hygiene`] the replicated-timer restore seam, [`release`] the one
 //! per-call teardown executor, [`responses`] the locally-authored response
-//! builders, and [`peer_metrics`] per-peer failure attribution.
+//! builders, [`peer_metrics`] per-peer failure attribution, and
+//! [`unroutable`] the answer and accounting of an event naming no call.
 
 mod callouts;
 mod ingress;
@@ -26,6 +27,7 @@ mod responses;
 mod restore_hygiene;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod unroutable;
 
 pub(crate) use reclaim::reap_expired_replicas;
 // Consumed by the S7 readiness tests (`repl::s7_tests`) only.
@@ -125,6 +127,8 @@ pub struct RouterCtx {
     /// (ADR-0026): a peer going away is ONE episode — rising edge, ~5 s
     /// summaries, falling-edge totals — not one line per dead call.
     pub keepalive_waves: Arc<observe::WaveSet>,
+    /// Events that resolved to no call, aggregated per class (ADR-0026).
+    pub unroutable_waves: crate::lifecycle::UnroutableWaves,
     /// Host-injected generic async-HTTP capability (ADR-0016 seam). `Arc`-shared
     /// into every per-call `ctx.clone()` exactly like `decision`/`limiter`;
     /// `None` reproduces today's behaviour (the `ServiceHttpRequest` dispatch
