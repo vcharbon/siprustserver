@@ -258,10 +258,11 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
       yield* Bundle.decodeRunRfcAudit(JSON.parse(yield* fs.readFileString(rfcPath)) as unknown)
     )
     : []
-  // A run whose body panicked never passes: whatever verdict it left was
-  // written before the unwind, so it cannot answer for what came after.
-  const structural = report.outcome._tag !== "panicked" && Bundle.verdictPassed(verdict) &&
-    rfcGating.length === 0
+  // A run whose body panicked never passes, and no restatement makes it pass:
+  // whatever verdict it left was written before the unwind, so it cannot
+  // answer for what came after.
+  const panicked = report.outcome._tag === "panicked"
+  const structural = !panicked && Bundle.verdictPassed(verdict) && rfcGating.length === 0
 
   const caseId = Campaign.cellCaseId(cell)
   const classification = yield* confrontCell(cell, context, absolute, pivot, verdict, caseId)
@@ -280,9 +281,10 @@ const runPivotReplay = Effect.fn("Driver.runPivotReplay")(function* (
     yield* fs.writeFileString(path.join(absolute, RULE_HITS_FILE), CellHits.emitHits(final.hits))
   }
   return {
-    passed: final.passed,
-    detail:
-      final.passed === gated
+    passed: !panicked && final.passed,
+    detail: panicked
+      ? `replay exited ${report.exitCode} (panicked):\n${report.stderr}`
+      : final.passed === gated
         ? gated === structural
           ? rfcGating.length === 0
             ? report.stderr

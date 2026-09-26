@@ -327,6 +327,16 @@ describe("the post-run escape hatch", () => {
     expect(exitCodeOf(run)).toBe(1)
   })
 
+  it("never restates a panicked run as passed", async () => {
+    const cases = runDir("cases")
+    dirs.push(cases)
+    const run = await campaign([replayCell({ case: caseNamed(cases, "panics.v3.json") })], {
+      rig: { reclassifier: Reclassifier.layerWith(() => Effect.succeed({ passed: true, reason: "restated" })) }
+    })
+    expect(run.index.cells[0]!.passed).toBe(false)
+    expect(exitCodeOf(run)).toBe(1)
+  })
+
   it("changes nothing by default", async () => {
     const run = await campaign([replayCell()], { rig: {} })
     expect(run.index.cells[0]!.passed).toBe(true)
