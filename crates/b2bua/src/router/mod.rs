@@ -12,13 +12,15 @@
 //! [`restore_hygiene`] the replicated-timer restore seam, [`release`] the one
 //! per-call teardown executor, [`responses`] the locally-authored response
 //! builders, [`peer_metrics`] per-peer failure attribution,
-//! [`unanswered`] the forget of a request discarded before any body ran, and
+//! [`unanswered`] the forget of a request discarded before any body ran,
+//! [`must_run`] the events the dispatcher may not drop for want of room, and
 //! [`unroutable`] the answer and accounting of an event naming no call.
 
 mod callouts;
 mod ingress;
 mod interpret;
 mod materialise;
+mod must_run;
 mod peer_metrics;
 mod process;
 mod reclaim;

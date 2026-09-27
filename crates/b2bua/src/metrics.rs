@@ -72,6 +72,8 @@ struct Inner {
     // Port of the TS SipRouter cap (was missing in the Rust port — a call could
     // process unbounded in-dialog events, ratcheting txn/clone/store churn).
     message_cap_terminated: AtomicU64,
+    // Calls that crossed their lifetime message cap (the work bound).
+    message_cap_lifetime_terminated: AtomicU64,
     creations: AtomicU64,
     removals: AtomicU64,
     removals_terminated: AtomicU64,
@@ -418,6 +420,11 @@ impl B2buaMetrics {
     }
 
     counter!(bump_message_cap_terminated, message_cap_terminated_total, message_cap_terminated);
+    counter!(
+        bump_message_cap_lifetime_terminated,
+        message_cap_lifetime_terminated_total,
+        message_cap_lifetime_terminated
+    );
     counter!(bump_queue_drop, queue_drops_total, queue_drops);
     counter!(bump_cap_drop, cap_drops_total, cap_drops);
     counter!(bump_release_discard, release_discards_total, release_discards);
@@ -958,6 +965,7 @@ impl B2buaMetrics {
         let mut counter = |name: &str, help: &str, v: u64| {
             s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {v}\n"));
         };
+        counter("b2bua_message_cap_lifetime_terminated_total", "calls ended for crossing max_messages_per_call_lifetime: more events offered over the call's life than any healthy call sees, counted at dispatch in every state", self.message_cap_lifetime_terminated_total());
         counter("b2bua_message_cap_terminated_total", "calls terminated for exceeding max_messages_per_call (cap-defense; a climbing rate names a runaway-traffic call class)", self.message_cap_terminated_total());
         counter(
             "b2bua_dispatch_queue_drops_total",

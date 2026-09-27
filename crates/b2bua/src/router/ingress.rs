@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use sip_message::SipMessage;
 
+use super::must_run::Room;
 use super::peer_metrics::classify_b2bua_peer;
 use super::process::process;
 use super::release::{release_call, ReleaseKind};
@@ -203,29 +204,21 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         return;
     }
 
-    // Nothing leaves this point unaccounted. A request discarded unrun is
-    // forgotten or answered (`super::unanswered`). A `Cancelled` — the layer
-    // already answered 200 + 487 and the caller will not send it again —
-    // waits past a full queue and the cap, up to the call's overflow ceiling;
-    // a call flooded past it is torn down by the reaper. A reaper verdict,
-    // paced by the sweep, waits past every bound, so a teardown reaches even
-    // a flooded call.
+    // Nothing leaves this point unaccounted: a request discarded unrun is
+    // forgotten or answered (`super::unanswered`), a one-shot event waits
+    // past the bounds, and all but the node's own work counts toward the
+    // call's lifetime cap (`super::must_run`).
     let ctx2 = ctx.clone();
     let guard = UnansweredGuard::for_event(&ctx.txn, &event);
     let answer = InviteAnswer::of(ctx).hook_for(&event);
-    let must_run = matches!(event, CallEvent::Cancelled { .. });
-    let verdict = crate::reaper::is_reaper_event(&event);
+    let room = Room::of(ctx, &event, &call_ref);
+    let own = super::must_run::is_own(&event);
     let job = Job::new(Box::pin(async move {
         guard.disarm();
         process(&ctx2, event, res).await;
     }))
     .on_discard(answer);
-    let job = if verdict {
-        job.past_all_bounds()
-    } else if must_run {
-        job.past_bounds()
-    } else {
-        job
-    };
+    let job = room.admit(job);
+    let job = if own { job.own() } else { job };
     ctx.dispatcher.dispatch(&call_ref, job).await;
 }

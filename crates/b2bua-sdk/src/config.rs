@@ -31,6 +31,13 @@ pub struct B2buaConfig {
     /// inside one window and is torn down, while a healthy call outlasting any
     /// number of intervals never consumes the defense.
     pub max_messages_per_call: u64,
+    /// The work bound on a call over its whole life, in every state: past
+    /// this many events offered for it — counted at dispatch, before any
+    /// queue bound, so a stuck handler or a full queue hides none — the call
+    /// ends (ADR-0020). The node's own timers and internal events do not
+    /// count. A healthy call stays far below it: a 24 h call with 300 s
+    /// keepalives and session refreshes offers a few thousand. Never 0.
+    pub max_messages_per_call_lifetime: u64,
     /// Bounded CDR submit queue; `0` disables buffering (passthrough).
     pub cdr_buffer_queue_max: usize,
     /// REFER implicit-subscription expiry (RFC 3515), seconds. Armed at REFER
@@ -415,6 +422,7 @@ impl Default for B2buaConfig {
             // flood/glare loop is still capped inside one window. Override with
             // `B2BUA_MAX_MESSAGES_PER_CALL`.
             max_messages_per_call: 200,
+            max_messages_per_call_lifetime: 100_000,
             cdr_buffer_queue_max: 1_024,
             refer_subscription_expiry_sec: 60,
             refer_reinvite_answer_sec: 32,
@@ -508,6 +516,11 @@ impl B2buaConfig {
     /// refuses to start on `Err`; unit/sim harnesses construct configs directly
     /// and skip it). Returns the first violation as a human-readable message.
     pub fn validate(&self) -> Result<(), String> {
+        if self.max_messages_per_call_lifetime == 0 {
+            return Err("max_messages_per_call_lifetime=0: the per-call work bound has no \
+                        off; set it far above any healthy call"
+                .to_string());
+        }
         if self.keepalive_interval_sec < Self::MIN_KEEPALIVE_SEC {
             return Err(format!(
                 "keepalive_interval_sec={} < min {} s (2 min): a shorter in-dialog \
@@ -939,6 +952,13 @@ mod tests {
         });
         let err = c.validate().unwrap_err();
         assert!(err.contains("capacity.calls"), "{err}");
+    }
+
+    #[test]
+    fn a_lifetime_message_cap_of_zero_is_refused() {
+        let c = B2buaConfig { max_messages_per_call_lifetime: 0, ..Default::default() };
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("max_messages_per_call_lifetime"), "{err}");
     }
 
     #[test]

@@ -310,6 +310,12 @@ impl CallState {
         self.inner.lock().unwrap().calls.get(call_ref).map(|c| (**c).clone())
     }
 
+    /// The lifecycle state of the resident call `call_ref`, read without
+    /// cloning it.
+    pub fn model_state(&self, call_ref: &str) -> Option<CallModelState> {
+        self.inner.lock().unwrap().calls.get(call_ref).map(|c| c.state)
+    }
+
     /// The `bak:{primary}` body of `call_ref` — the acting-backup takeover
     /// source, read without inserting (the router's `materialise` module owns
     /// the decision and the insert). The `call_ref` encodes its original

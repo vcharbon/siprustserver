@@ -88,6 +88,11 @@ impl DialogIds {
         self.request(from, "BYE", cseq, branch, "")
     }
 
+    /// An INFO `from` sends in this dialog, as one datagram.
+    pub fn info(&self, from: &Agent, cseq: u32, branch: &str) -> Vec<u8> {
+        self.request(from, "INFO", cseq, branch, "")
+    }
+
     /// An offerless re-INVITE `from` sends in this dialog, as one datagram.
     pub fn reinvite(&self, from: &Agent, cseq: u32, branch: &str) -> Vec<u8> {
         let contact = format!("Contact: <sip:{}>\r\n", from.addr());

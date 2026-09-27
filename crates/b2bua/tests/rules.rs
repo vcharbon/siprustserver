@@ -5553,3 +5553,138 @@ mod limiter_refresh_armed {
         assert!(scheduled(&result).is_empty());
     }
 }
+
+// ── reaper-overflow: the wire teardown of a call flooded past its overflow ──
+
+/// The reaper's `outcome` verdict for `call`.
+fn reaper_verdict(call: &call::Call, outcome: &str) -> CallEvent {
+    CallEvent::InternalEvent {
+        call_ref: call.call_ref.clone(),
+        topic: b2bua::reaper::REAPER_TOPIC.into(),
+        outcome: outcome.into(),
+        payload: serde_json::json!({}),
+        body: Vec::new(),
+    }
+}
+
+/// `call` run through the default rules on the `overflow` verdict.
+fn on_overflow_verdict(call: &call::Call) -> HandlerResult {
+    on_verdict(call, b2bua::reaper::OUTCOME_OVERFLOW)
+}
+
+/// `call` run through the default rules on the reaper's `outcome` verdict.
+fn on_verdict(call: &call::Call, outcome: &str) -> HandlerResult {
+    let event = reaper_verdict(call, outcome);
+    let config = B2buaConfig::default();
+    let id_gen = IdGen::seeded(1);
+    let exec = ActionExecutor {
+        config: &config,
+        id_gen: &id_gen,
+        now_ms: 0,
+        wire_faults: &b2bua::wire_faults::WireFaults::none(),
+    };
+    let ctx = ctx_for(call, &event, &config);
+    execute_rules(&default_rules(), call, &ctx, &exec, &b2bua::obligations::ObligationSet::core())
+}
+
+/// A call whose b-leg rings on an INVITE its CANCEL can name.
+fn ringing_call() -> call::Call {
+    let mut leg = b_leg_pending();
+    // The INVITE this leg is ringing on, which its CANCEL names (RFC 3261 §9.1).
+    leg.dialogs[0].ext.pending_invite_txn = Some(call::InviteTxnHandle {
+        branch: "z9hG4bK-b1".into(),
+        original_invite: invite().image().to_vec(),
+        destination: call::HostPort { host: "10.0.0.2".into(), port: 5070 },
+    });
+    let call = call::helpers::add_b_leg(test_call(), leg);
+    let (_, actions) = handle_from_b1(&call, &b_leg_ringing_event(false));
+    let ringing = execute_from_b1(&call, &b_leg_ringing_event(false), &actions).call;
+    assert_eq!(ringing.b_legs[0].state, LegState::Early);
+    ringing
+}
+
+/// A ringing call condemned for flooding its overflow: its callee is alive
+/// and is CANCELed, and the CDR names the teardown.
+#[test]
+fn an_overflow_verdict_on_a_ringing_call_cancels_the_callee() {
+    let result = on_overflow_verdict(&ringing_call());
+    assert_eq!(requests_to(&result, "b-1", "CANCEL"), 1, "the ringing callee is CANCELed");
+    assert!(
+        result.call.cdr_events.iter().any(|e| e.reason.as_deref() == Some("dispatch-overflow")),
+        "the CDR names the teardown"
+    );
+}
+
+/// A call already terminating — bob hung up — is left to that teardown: the
+/// verdict records nothing, keeps the cause, and re-arms no timer.
+#[test]
+fn an_overflow_verdict_on_a_terminating_call_changes_nothing() {
+    let call = call::helpers::add_b_leg(test_call(), b_leg_pending());
+    let mut ending =
+        call::helpers::record_termination(call, 0, TerminationCause::RemoteBye, Some("b-1".into()));
+    ending.state = CallModelState::Terminating;
+
+    let result = on_overflow_verdict(&ending);
+    assert!(
+        !result.call.cdr_events.iter().any(|e| e.reason.as_deref() == Some("dispatch-overflow")),
+        "no overflow teardown is recorded"
+    );
+    assert_eq!(
+        result.call.termination.as_ref().map(|t| t.cause),
+        Some(TerminationCause::RemoteBye),
+        "the cause bob gave stays"
+    );
+    assert!(
+        !result.effects.critical.iter().any(|e| matches!(
+            e,
+            CriticalStateEffect::ScheduleTimer(t) if t.timer_type == TimerType::TerminatingTimeout
+        )),
+        "the terminating timer is not re-armed"
+    );
+}
+
+// ── reaper-message-cap: the work bound ──────────────────────────────────────
+
+/// An Active call past its lifetime message cap is torn down on the wire:
+/// the ringing callee is CANCELed, the cause is the cap.
+#[test]
+fn a_message_cap_verdict_on_a_ringing_call_cancels_the_callee() {
+    let result = on_verdict(&ringing_call(), b2bua::reaper::OUTCOME_MESSAGE_CAP);
+    assert_eq!(requests_to(&result, "b-1", "CANCEL"), 1, "the ringing callee is CANCELed");
+    assert_eq!(
+        result.call.termination.as_ref().map(|t| t.cause),
+        Some(TerminationCause::MessageCap)
+    );
+    assert!(result
+        .call
+        .cdr_events
+        .iter()
+        .any(|e| e.reason.as_deref() == Some("message-cap-lifetime")));
+}
+
+/// A terminating call past its cap — its peers already sent their BYE — is
+/// forced terminal now: its unresolved legs resolved, the reason recorded,
+/// the cause it already had kept.
+#[test]
+fn a_message_cap_verdict_on_a_terminating_call_forces_it_terminal() {
+    let mut ending = call::helpers::record_termination(
+        ringing_call(),
+        0,
+        TerminationCause::RemoteBye,
+        Some("b-1".into()),
+    );
+    ending.state = CallModelState::Terminating;
+    let result = on_verdict(&ending, b2bua::reaper::OUTCOME_MESSAGE_CAP);
+    assert_eq!(requests_to(&result, "b-1", "CANCEL"), 0, "nothing more on the wire");
+    assert!(result.call.b_legs.iter().all(call::helpers::leg_is_resolved));
+    assert!(result
+        .call
+        .cdr_events
+        .iter()
+        .any(|e| e.reason.as_deref() == Some("message-cap-lifetime")));
+    assert_eq!(
+        result.call.termination.as_ref().map(|t| t.cause),
+        Some(TerminationCause::RemoteBye),
+        "the first termination names who ended the call"
+    );
+}

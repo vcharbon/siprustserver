@@ -44,6 +44,7 @@ mod keepalive_configurable_interval;
 mod keepalive_reap_both_directions;
 mod keepalive_timeout;
 mod keepalive_via_proxy;
+mod lifetime_message_cap;
 mod limit_cases;
 mod limiter;
 mod limiter_refresh;

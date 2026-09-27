@@ -77,12 +77,14 @@ pub struct Job {
     body: DispatchBody,
     on_discard: Option<DiscardHook>,
     admission: Admission,
+    /// Counted toward the call's lifetime cap; `false` for the node's own work.
+    counted: bool,
 }
 
 impl Job {
     /// A body discarded when there is no room for it.
     pub fn new(body: DispatchBody) -> Self {
-        Self { body, on_discard: None, admission: Admission::Bounded }
+        Self { body, on_discard: None, admission: Admission::Bounded, counted: true }
     }
 
     /// `hook` runs in place of the body if it is discarded unrun; dropped
@@ -102,9 +104,17 @@ impl Job {
     }
 
     /// Queued past every bound, the overflow ceiling included; discarded only
-    /// behind the call's release. For a producer that paces itself.
+    /// behind the call's release. For an event its producer bounds per call:
+    /// a sweep-paced verdict, a timer fired once, a transaction's outcome.
     pub fn past_all_bounds(mut self) -> Self {
         self.admission = Admission::Always;
+        self
+    }
+
+    /// The node's own work — a timer it armed, an event it raised itself —
+    /// which does not count toward the call's lifetime cap.
+    pub fn own(mut self) -> Self {
+        self.counted = false;
         self
     }
 
@@ -154,11 +164,35 @@ struct PerCallQueue {
     /// How many past-bounds jobs wait in `overflow` — what the ceiling
     /// counts. Items admitted past every bound are not among them.
     waiting: usize,
+    /// Counted jobs offered for the call over its life, whatever became of
+    /// them.
+    offered: u64,
+    /// The lifetime cap was crossed: only jobs past every bound still get in.
+    capped: bool,
 }
 
 impl PerCallQueue {
     fn new(tx: mpsc::Sender<DispatchItem>) -> Self {
-        Self { tx, overflow: VecDeque::new(), released: None, waiting: 0 }
+        Self {
+            tx,
+            overflow: VecDeque::new(),
+            released: None,
+            waiting: 0,
+            offered: 0,
+            capped: false,
+        }
+    }
+
+    /// Count `job` against the lifetime cap `cap`; `true` when this job is
+    /// the one that crosses it.
+    fn count(&mut self, job: &Job, cap: u64) -> bool {
+        if !job.counted {
+            return false;
+        }
+        self.offered += 1;
+        let crossed = self.offered > cap && !self.capped;
+        self.capped |= crossed;
+        crossed
     }
 
     /// Queue `item` in FIFO order, or hand it back with why not. `ceiling`
@@ -239,6 +273,10 @@ pub enum PastBound {
 /// installs the only production hook (it tears the call down).
 pub type OverflowHook = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Hears a call that crossed its lifetime cap, once. The call reaper installs
+/// the only production hook (it ends the call).
+pub type LifetimeHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// What [`PerCallDispatcher::enqueue`] did with a job.
 enum Enqueued {
     Queued,
@@ -260,6 +298,10 @@ pub struct PerCallDispatcher {
     metrics: B2buaMetrics,
     failure_hook: Option<FailureHook>,
     overflow_hook: Option<OverflowHook>,
+    /// Counted jobs a call may be offered over its life, and who hears the
+    /// call that crosses it.
+    lifetime_cap: u64,
+    lifetime_hook: Option<LifetimeHook>,
     /// The currently in-flight body per call (FIFO ⇒ at most one) — the
     /// reaper's [`abort_in_flight`](Self::abort_in_flight) target.
     inflight: InflightMap,
@@ -275,6 +317,8 @@ impl PerCallDispatcher {
             metrics,
             failure_hook: None,
             overflow_hook: None,
+            lifetime_cap: u64::MAX,
+            lifetime_hook: None,
             inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -293,14 +337,29 @@ impl PerCallDispatcher {
         self
     }
 
+    /// Bound the counted jobs a call may be offered over its life (builder-
+    /// style). The job that crosses `cap`, and every later one not admitted
+    /// past every bound, is discarded as behind the call's release; `hook`
+    /// hears the call once, when it crosses.
+    pub fn with_lifetime_cap(mut self, cap: u64, hook: LifetimeHook) -> Self {
+        self.lifetime_cap = cap;
+        self.lifetime_hook = Some(hook);
+        self
+    }
+
     /// Abort the currently in-flight handler body for `call_ref` (ADR-0020 X6
     /// escalation rung): a hung body holds both the worker and the per-call
     /// lock; aborting drops the body future — releasing the lock guard — and
     /// the worker observes the cancellation and reports
-    /// [`HandlerFailure::Aborted`]. No-op when the call has no body in flight.
-    pub fn abort_in_flight(&self, call_ref: &str) {
-        if let Some(h) = self.inflight.lock().unwrap().get(call_ref) {
-            h.abort();
+    /// [`HandlerFailure::Aborted`]. No-op when the call has no body in flight;
+    /// `true` when there was one.
+    pub fn abort_in_flight(&self, call_ref: &str) -> bool {
+        match self.inflight.lock().unwrap().get(call_ref) {
+            Some(h) => {
+                h.abort();
+                true
+            }
+            None => false,
         }
     }
 
@@ -309,7 +368,14 @@ impl PerCallDispatcher {
     /// call's release already queued — is discarded unrun and counted, and its
     /// hook is awaited here.
     pub async fn dispatch(&self, call_ref: &str, job: Job) {
-        match self.enqueue(call_ref, job) {
+        let (enqueued, crossed) = self.enqueue(call_ref, job);
+        if crossed {
+            self.metrics.bump_message_cap_lifetime_terminated();
+            if let Some(hook) = &self.lifetime_hook {
+                hook(call_ref);
+            }
+        }
+        match enqueued {
             Enqueued::Queued => {}
             Enqueued::Discarded(why, job) => job.discard(why).await,
             Enqueued::Overflowed(job) => {
@@ -322,11 +388,17 @@ impl PerCallDispatcher {
     }
 
     /// The synchronous half of [`dispatch`](Self::dispatch), under the map
-    /// lock.
-    fn enqueue(&self, call_ref: &str, job: Job) -> Enqueued {
+    /// lock, and whether this job crossed the call's lifetime cap.
+    fn enqueue(&self, call_ref: &str, job: Job) -> (Enqueued, bool) {
         let mut map = self.queues.lock().unwrap();
         if let Some(q) = map.get_mut(call_ref) {
-            return match q.push(DispatchItem::Event(job), self.depth, &self.metrics) {
+            let crossed = q.count(&job, self.lifetime_cap);
+            if q.capped && job.admission != Admission::Always {
+                self.metrics.bump_release_discard();
+                let why = Discard::Released(RemovalClass::Terminated);
+                return (Enqueued::Discarded(why, job), crossed);
+            }
+            let enqueued = match q.push(DispatchItem::Event(job), self.depth, &self.metrics) {
                 Ok(()) => Enqueued::Queued,
                 Err((DispatchItem::Event(job), Refusal::Full { ceiling: false })) => {
                     self.metrics.bump_queue_drop();
@@ -343,18 +415,21 @@ impl PerCallDispatcher {
                 }
                 Err((DispatchItem::Poison(_), _)) => unreachable!("an event was pushed"),
             };
+            return (enqueued, crossed);
         }
         if map.len() >= self.cap {
             if job.admission == Admission::Bounded {
                 self.metrics.bump_cap_drop();
-                return Enqueued::Discarded(Discard::AtCap, job);
+                return (Enqueued::Discarded(Discard::AtCap, job), false);
             }
             self.metrics.bump_past_bound(PastBound::Cap);
         }
         let (tx, rx) = mpsc::channel(self.depth);
+        let mut queue = PerCallQueue::new(tx);
+        queue.count(&job, self.lifetime_cap);
         // Send before spawning the worker: capacity is fresh so this can't fail.
-        let _ = tx.try_send(DispatchItem::Event(job));
-        map.insert(call_ref.to_string(), PerCallQueue::new(tx));
+        let _ = queue.tx.try_send(DispatchItem::Event(job));
+        map.insert(call_ref.to_string(), queue);
         self.metrics.bump_creation();
         tokio::spawn(worker(
             call_ref.to_string(),
@@ -365,7 +440,7 @@ impl PerCallDispatcher {
             self.failure_hook.clone(),
             self.inflight.clone(),
         ));
-        Enqueued::Queued
+        (Enqueued::Queued, false)
     }
 
     /// Signal the worker for `call_ref` to drain and exit (call eviction),
@@ -877,5 +952,65 @@ mod tests {
         drained(&d).await;
         assert_eq!(*order.lock().unwrap(), vec!["queued", "v1", "v2", "cancelled"]);
         assert_eq!(metrics.overflow_depth(), 0);
+    }
+
+    /// A dispatcher whose calls may be offered `cap` counted jobs, recording
+    /// the calls that cross it.
+    fn capped(cap: u64, metrics: &B2buaMetrics) -> (PerCallDispatcher, Arc<Mutex<Vec<String>>>) {
+        let crossed = Arc::new(Mutex::new(Vec::new()));
+        let c = crossed.clone();
+        let d = PerCallDispatcher::new(1, 1, 1024, metrics.clone()).with_lifetime_cap(
+            cap,
+            Arc::new(move |call_ref: &str| c.lock().unwrap().push(call_ref.to_string())),
+        );
+        (d, crossed)
+    }
+
+    /// A stuck call still counts every job it is offered — queued or
+    /// discarded at the full queue. The one that crosses the cap is turned
+    /// away as behind a release, the hook hears the call once, later jobs are
+    /// turned away too, and a job past every bound still gets in.
+    #[tokio::test]
+    async fn a_stuck_calls_queued_and_discarded_jobs_count_toward_its_lifetime_cap() {
+        let metrics = B2buaMetrics::new();
+        let (d, crossed) = capped(3, &metrics);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let gate = park(&d).await;
+        d.dispatch("c", Job::new(record(&order, "queued"))).await;
+        d.dispatch("c", Job::new(record(&order, "full")).on_discard(recording_hook(&heard))).await;
+        assert!(crossed.lock().unwrap().is_empty(), "three jobs offered, none past the cap");
+        d.dispatch("c", Job::new(record(&order, "fourth")).on_discard(recording_hook(&heard)))
+            .await;
+        d.dispatch("c", Job::new(record(&order, "fifth")).on_discard(recording_hook(&heard))).await;
+        assert_eq!(*crossed.lock().unwrap(), vec!["c".to_string()], "heard once");
+        assert_eq!(metrics.message_cap_lifetime_terminated_total(), 1);
+        let released = Discard::Released(RemovalClass::Terminated);
+        assert_eq!(*heard.lock().unwrap(), vec![Discard::QueueFull, released, released]);
+
+        d.dispatch("c", Job::new(record(&order, "verdict")).own().past_all_bounds()).await;
+        gate.notify_one();
+        d.enqueue_poison("c", RemovalClass::Terminated);
+        drained(&d).await;
+        assert_eq!(*order.lock().unwrap(), vec!["queued", "verdict"]);
+    }
+
+    /// The node's own jobs — its timers, its verdicts — never count toward
+    /// the cap, however many there are.
+    #[tokio::test]
+    async fn the_nodes_own_jobs_do_not_count_toward_the_lifetime_cap() {
+        let metrics = B2buaMetrics::new();
+        let (d, crossed) = capped(1, &metrics);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let gate = park(&d).await;
+        for _ in 0..10 {
+            d.dispatch("c", Job::new(record(&order, "timer")).own()).await;
+            d.dispatch("c", Job::new(record(&order, "verdict")).own().past_all_bounds()).await;
+        }
+        assert!(crossed.lock().unwrap().is_empty());
+        assert_eq!(metrics.message_cap_lifetime_terminated_total(), 0);
+        gate.notify_one();
+        d.enqueue_poison("c", RemovalClass::Terminated);
+        drained(&d).await;
     }
 }

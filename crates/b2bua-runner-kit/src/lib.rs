@@ -319,6 +319,9 @@ pub struct RunnerEnv {
     /// `B2BUA_MAX_MESSAGES_PER_CALL` — loop/runaway cap-defense (default 200:
     /// TS default 100 + headroom for a multi-hour keepalive-held call).
     pub max_messages_per_call: u64,
+    /// `B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME` — the per-call work bound over
+    /// the call's life (default 100_000; 0 is refused).
+    pub max_messages_per_call_lifetime: u64,
     /// `B2BUA_KEEPALIVE_SEC` — in-dialog OPTIONS keepalive interval (default
     /// 300 s; a shorter poke breaks long-hold endurance traffic).
     pub keepalive_sec: i64,
@@ -447,6 +450,12 @@ impl RunnerEnv {
             max_messages_per_call: env_or("B2BUA_MAX_MESSAGES_PER_CALL", "200")
                 .parse()
                 .expect("B2BUA_MAX_MESSAGES_PER_CALL"),
+            max_messages_per_call_lifetime: env_or(
+                "B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME",
+                "100000",
+            )
+            .parse()
+            .expect("B2BUA_MAX_MESSAGES_PER_CALL_LIFETIME"),
             keepalive_sec: env_or("B2BUA_KEEPALIVE_SEC", "300")
                 .parse()
                 .expect("B2BUA_KEEPALIVE_SEC"),
@@ -672,6 +681,7 @@ impl RunnerEnv {
             event_dispatch_concurrency: self.concurrency,
             per_call_queue_cap: self.call_cap,
             max_messages_per_call: self.max_messages_per_call,
+            max_messages_per_call_lifetime: self.max_messages_per_call_lifetime,
             keepalive_interval_sec: self.keepalive_sec,
             keepalive_timeout_sec: self.keepalive_timeout_sec,
             reboot_budget_sec: self.reboot_budget_sec,

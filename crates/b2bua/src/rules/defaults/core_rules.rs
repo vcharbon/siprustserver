@@ -176,24 +176,41 @@ fn let_stand_final(payload: &serde_json::Value) -> RuleAction {
     }
 }
 /// The `reaper-overflow` body. The call is condemned for flooding its
-/// dispatch overflow, not found dead: its legs are alive, so the ordinary
-/// teardown runs — BYE to each confirmed leg, CANCEL to each early b-leg —
-/// with the reason on the CDR, and `TerminatingTimeout` bounds the wait for
-/// their answers. It does not run on a call already terminating.
+/// dispatch overflow, not found dead: its legs are alive, so they are torn
+/// down on the wire ([`teardown_on_the_wire`]). It does not run on a call
+/// already terminating.
 fn reap_overflow(ctx: &RuleContext) -> Option<RuleHandleResult> {
-    const REASON: &str = "dispatch-overflow";
+    teardown_on_the_wire(ctx, "dispatch-overflow", TerminationCause::Supervisor)
+}
+
+/// The `reaper-message-cap` body: the call crossed its lifetime message cap.
+/// An Active call's live legs are torn down on the wire; a terminating
+/// call's peers were already sent their BYE, so it is forced terminal now.
+fn reap_message_cap(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    const REASON: &str = "message-cap-lifetime";
+    match ctx.call.state() {
+        CallModelState::Active => teardown_on_the_wire(ctx, REASON, TerminationCause::MessageCap),
+        _ => force_terminal(ctx, REASON, TerminationCause::MessageCap),
+    }
+}
+
+/// End a call whose legs are alive: the reason on the CDR, then the ordinary
+/// teardown — BYE to each confirmed leg, CANCEL to each early b-leg, the
+/// final an unanswered a-leg is owed — with `TerminatingTimeout` bounding
+/// the wait for their answers.
+fn teardown_on_the_wire(
+    ctx: &RuleContext,
+    reason: &'static str,
+    cause: TerminationCause,
+) -> Option<RuleHandleResult> {
     ok(vec![
         RuleAction::AddCdrEvent {
             event_type: CdrEventType::Bye,
             leg_id: ctx.call.a_leg().leg_id.clone(),
             status_code: None,
-            reason: Some(REASON.into()),
+            reason: Some(reason.into()),
         },
-        RuleAction::BeginTermination {
-            reason: Some(REASON.into()),
-            cause: TerminationCause::Supervisor,
-            by_leg: None,
-        },
+        RuleAction::BeginTermination { reason: Some(reason.into()), cause, by_leg: None },
     ])
 }
 
@@ -205,6 +222,17 @@ fn reap_overflow(ctx: &RuleContext) -> Option<RuleHandleResult> {
 /// `BeginTermination` skips them all and just moves the lifecycle — finalize
 /// promotes, the invariant discharges the obligations.
 fn reap_force_terminal(ctx: &RuleContext, reason: &'static str) -> Option<RuleHandleResult> {
+    force_terminal(ctx, reason, TerminationCause::Supervisor)
+}
+
+/// Force every still-unresolved leg terminal, record `reason` on the CDR and
+/// command termination with `cause` (kept only where the call names no cause
+/// yet: the first termination names who ended the call).
+fn force_terminal(
+    ctx: &RuleContext,
+    reason: &'static str,
+    cause: TerminationCause,
+) -> Option<RuleHandleResult> {
     let mut actions = Vec::new();
     for leg in std::iter::once(ctx.call.a_leg()).chain(ctx.call.b_legs().iter()) {
         // `leg_is_resolved` also treats a still-`Cancelling` leg as unresolved, so
@@ -223,11 +251,7 @@ fn reap_force_terminal(ctx: &RuleContext, reason: &'static str) -> Option<RuleHa
         status_code: None,
         reason: Some(reason.into()),
     });
-    actions.push(RuleAction::BeginTermination {
-        reason: Some(reason.into()),
-        cause: TerminationCause::Supervisor,
-        by_leg: None,
-    });
+    actions.push(RuleAction::BeginTermination { reason: Some(reason.into()), cause, by_leg: None });
     ok(actions)
 }
 
@@ -1871,16 +1895,20 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             },
         ),
         // ── call reaper verdicts (ADR-0020 X1/X6) ───────────────────────────
-        // The reaper's sweep / panic-strike verdicts arrive as ordinary
-        // InternalEvents and are handled by ordinary CORE rules — the single
-        // funnel: force every unresolved leg terminal (no wire traffic — the
-        // call is provably dead: its stamp froze past the idle threshold, or
-        // its handler panicked), record the reason, and BeginTermination; the
+        // The reaper's verdicts arrive as ordinary InternalEvents and are
+        // handled by ordinary CORE rules — the single funnel. `stale` and
+        // `fatal-error` force every unresolved leg terminal with no wire
+        // traffic (the call is provably dead: its stamp froze past the idle
+        // threshold, or its handler panicked) and run while terminating: a
+        // wedged terminating call is exactly what they reap. `overflow` tears
+        // the live legs down on the wire and leaves a terminating call to its
+        // teardown. `message-cap` does either, as the call's state asks: the
+        // work bound applies in every state. Each records the reason and
+        // begins termination; the
         // invariant then promotes → Terminated and discharges the obligations
         // (CDR + limiter) exactly once. The `discharge` outcome deliberately
         // has NO rule (the router's bypass branch owns it — rules are the
-        // thing that failed by then). Teardown rules: a wedged terminating
-        // call is exactly what a verdict reaps.
+        // thing that failed by then).
         rule(
             "reaper-stale",
             &[],
@@ -1907,6 +1935,15 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 .outcome(crate::reaper::OUTCOME_OVERFLOW),
             reap_overflow,
         ),
+        rule(
+            "reaper-message-cap",
+            &[],
+            Match::internal_event()
+                .topic(crate::reaper::REAPER_TOPIC)
+                .outcome(crate::reaper::OUTCOME_MESSAGE_CAP),
+            reap_message_cap,
+        )
+        .runs_while_terminating(),
         rule(
             "terminating-safety-timeout",
             &[],
