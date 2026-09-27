@@ -4,8 +4,8 @@
 //! ceiling. CANCEL deliberately builds no client transaction of its own (it
 //! reuses the INVITE's branch), so the ladder rides the INVITE client txn as a
 //! sub-state — giving up at the ceiling abandons the CANCEL only, never an
-//! INVITE txn still owing a final. A txn nothing ever answered is the one case
-//! where the reverse holds: its Timer B (§17.1.1.2) ends both ladders at 64·T1.
+//! INVITE txn still owing a final. An INVITE's give-up does not end it either:
+//! the INVITE stops retransmitting and is held 64·T1 for its final.
 //! ACK is exempt: a 2xx ACK is TU-owned and rides no timer (§13.2.2.4).
 
 mod common;
@@ -231,17 +231,16 @@ async fn grace_sent_cancel_rides_the_ladder_beside_timer_a() {
     // - INVITE (Timer A, doubling): initial + 6 retransmits (0.5, 1.5, 3.5,
     //   7.5, 15.5, 31.5 s), then Timer B at 32 s;
     // - CANCEL: grace copy at 1 s, then the Timer-E ladder (0.5, 1.5, 3.5,
-    //   7.5 s, then the T2 plateau) — 9 retransmits, the last at 28.5 s. Its
-    //   own 64·T1 ceiling would land at 33 s, so on a callee that answers
-    //   NOTHING the INVITE's Timer B is what ends the ladder, one rung short.
+    //   7.5 s, then the T2 plateau) — 10 retransmits, the last at 32.5 s,
+    //   inside its own 64·T1 ceiling at 33 s: the INVITE's Timer B stops
+    //   Timer A only.
     elapse_ms(40_000).await;
     let msgs = stack.drain_peer();
     assert_eq!(count_requests(&msgs, "INVITE"), 7, "Timer A undisturbed beside the ladder");
-    assert_eq!(count_requests(&msgs, "CANCEL"), 10, "grace copy + 9 ladder retransmits");
-    assert_eq!(stack.txn.metrics().cancel_retransmits(), 9);
+    assert_eq!(count_requests(&msgs, "CANCEL"), 11, "grace copy + 10 ladder retransmits");
+    assert_eq!(stack.txn.metrics().cancel_retransmits(), 10);
     assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 1);
 
-    // Timer B took the txn with it: nothing is left to ring, re-send or answer.
     // §17.1.1.2 scopes Timer B to Calling, and this branch never left it.
     assert!(
         stack.drain_events().iter().any(|e| matches!(
@@ -250,9 +249,9 @@ async fn grace_sent_cancel_rides_the_ladder_beside_timer_a() {
         )),
         "the unanswered INVITE times out on Timer B, not the long initial bound"
     );
-    assert_eq!(stack.txn.metrics().active_transactions(), 0);
-    elapse_ms(8_000).await;
+    elapse_ms(25_000).await;
     assert!(stack.drain_peer().is_empty(), "quiescent past both ceilings");
+    assert_eq!(stack.txn.metrics().active_transactions(), 0, "forgotten 64·T1 after Timer B");
 }
 
 #[tokio::test(start_paused = true)]

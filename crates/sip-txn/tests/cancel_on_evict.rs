@@ -31,8 +31,8 @@ fn timeout_call_refs(events: &[TransactionEvent]) -> Vec<Option<String>> {
 }
 
 /// An active INVITE outlives its call as an orphan: Timer A keeps repeating it
-/// (§17.1.1.2 Calling — the request may not have arrived), Timer B purges it
-/// with a `Timeout` naming no call, and nothing of it survives.
+/// (§17.1.1.2 Calling — the request may not have arrived), Timer B gives it up
+/// with a `Timeout` naming no call, and 64·T1 later nothing of it survives.
 #[tokio::test(start_paused = true)]
 async fn t1_an_evicted_active_invite_runs_to_its_own_timer_b() {
     let mut stack = Stack::build(5, 64, 64).await;
@@ -52,8 +52,9 @@ async fn t1_an_evicted_active_invite_runs_to_its_own_timer_b() {
     assert_eq!(
         timeout_call_refs(&stack.drain_events()),
         vec![None],
-        "Timer B purges the orphan with a Timeout attributed to no call"
+        "Timer B gives the orphan up with a Timeout attributed to no call"
     );
+    elapse_ms(TIMER_B).await;
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
     assert_eq!(stack.txn.metrics().orphaned_transactions(), 0);
     assert_eq!(stack.txn.metrics().timer_queue_len(), 0);

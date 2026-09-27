@@ -213,12 +213,8 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     // … and the failed leg is cleared: the b2bua CANCELs the still-early carol
     // leg. carol is the DEAD gateway (it never sent a final — that silence is
     // what timed the b-leg INVITE client txn out and triggered the reroute), so
-    // it stays dead air and does not answer the CANCEL. This also keeps the trace
-    // genuinely RFC-clean under unacked-invite-non-2xx-final: the b2bua's
-    // carol INVITE client txn was already DELETED when the 158 s backstop fired
-    // (sip-txn `fire_timeout` → `delete_txn`), so a late 487 here would land on
-    // the unmatched-response path and never be hop-ACKed — an un-ACKable non-2xx
-    // final. A truly dead gateway emits none, so there is nothing to ACK.
+    // it stays dead air and does not answer the CANCEL. A gateway that did
+    // answer it 487 would be ACKed: `timed_out_invite_cancel` covers that.
     let _cancel = carol.receive("CANCEL").await;
     let _ = &carol_uas; // its retained INVITE server txn sends no final (dead air)
 

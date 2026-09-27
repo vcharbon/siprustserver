@@ -161,6 +161,7 @@ impl Transaction {
             retransmit_buf: None,
             ladder: None,
             timeout_kind: TimeoutKind::Response,
+            gave_up: false,
             orphaned: false,
         }
     }
@@ -238,6 +239,10 @@ pub(super) struct Transaction {
     /// INVITE bound) so the discrimination never compares the armed window
     /// against a magic duration.
     pub(super) timeout_kind: TimeoutKind,
+    /// This INVITE client txn gave up: its `Timeout` is delivered and it
+    /// waits 64·T1 for the final a CANCEL provokes (RFC 3261 §9.1), which it
+    /// ACKs and hands up (§17.1.1.3). It never times out again.
+    pub(super) gave_up: bool,
     /// The call this transaction served has been released while it was still
     /// open (`cancel_txns_for_call`). The layer then closes the transaction's
     /// own obligations — the hop ACK of a non-2xx and Timer D, the bare ACK of a

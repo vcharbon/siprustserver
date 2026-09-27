@@ -183,23 +183,24 @@ async fn held_cancel_is_sent_at_grace_expiry_when_no_response_ever() {
     assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 1);
 
     // The peer never responds at all: the grace copy rides the Timer-E ladder
-    // (a lost CANCEL toward a silent callee is re-sent — §17.1.2.2) until
-    // Timer B (32 s) kills the transaction, ladder included, and the caller
-    // hears the Timeout — with no CANCEL dropped (it already made the wire).
+    // (a lost CANCEL toward a silent callee is re-sent — §17.1.2.2) to its own
+    // 64·T1 ceiling, past Timer B (32 s): the INVITE's give-up surfaces the
+    // Timeout and holds the transaction for the final a CANCEL may provoke.
     // Ladder fires at 0.5/1.5/3.5/7.5 s after the grace copy, then the T2
-    // plateau: 9 re-sends before the txn dies at 32 s.
+    // plateau: 10 re-sends before the ceiling at 33 s.
     elapse_ms(35_000).await;
     let msgs = stack.drain_peer();
     assert!(count_requests(&msgs, "INVITE") >= 1, "Timer A retransmits ran");
-    assert_eq!(count_requests(&msgs, "CANCEL"), 9, "the ladder re-sends until the txn dies");
-    assert_eq!(stack.txn.metrics().cancel_retransmits(), 9);
+    assert_eq!(count_requests(&msgs, "CANCEL"), 10, "the ladder re-sends to its ceiling");
+    assert_eq!(stack.txn.metrics().cancel_retransmits(), 10);
     assert_eq!(stack.txn.metrics().held_cancels_dropped(), 0);
     assert_eq!(stack.txn.metrics().held_cancels_flushed(), 0);
     assert!(
         stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "Timer B timeout still surfaces to the caller"
     );
-    assert_eq!(stack.txn.metrics().active_transactions(), 0);
+    elapse_ms(30_000).await;
+    assert_eq!(stack.txn.metrics().active_transactions(), 0, "forgotten 64·T1 after Timer B");
 }
 
 #[tokio::test(start_paused = true)]
@@ -362,7 +363,7 @@ async fn held_cancel_is_flushed_when_the_timeout_outruns_the_grace_window() {
     stack.txn.send_request(reinvite_cancel(branch), addr(PEER), TxnKind::Invite).await.unwrap();
     assert_eq!(stack.txn.metrics().cancels_held(), 1);
 
-    elapse_ms(35_000).await;
+    elapse_ms(32_100).await;
     let msgs = stack.drain_peer();
     assert_eq!(
         count_requests(&msgs, "CANCEL"),
@@ -375,6 +376,12 @@ async fn held_cancel_is_flushed_when_the_timeout_outruns_the_grace_window() {
         stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
         "Timer B timeout still surfaces to the caller"
     );
+
+    // The flushed CANCEL rides its Timer-E ladder, and the given-up INVITE
+    // is forgotten 64·T1 after its Timeout.
+    elapse_ms(1_000).await;
+    assert_eq!(count_requests(&stack.drain_peer(), "CANCEL"), 1, "the ladder's first re-send");
+    elapse_ms(32_000).await;
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
 }
 
@@ -397,7 +404,7 @@ async fn strict_stack() -> Stack {
 }
 
 #[tokio::test(start_paused = true)]
-async fn strict_policy_holds_the_cancel_forever_and_drops_it_at_timer_b() {
+async fn strict_policy_holds_the_cancel_forever_and_drops_it_with_the_txn() {
     let mut stack = strict_stack().await;
     let branch = "z9hG4bK-strict-tb";
 
@@ -407,11 +414,18 @@ async fn strict_policy_holds_the_cancel_forever_and_drops_it_at_timer_b() {
     assert_eq!(stack.txn.metrics().cancels_held(), 1);
 
     // No grace timer exists under the strict policy: the peer never responds,
-    // Timer B (32 s) kills the transaction, and the held CANCEL dies with it —
-    // it must NEVER surface on the wire (the literal §9.1 wait).
+    // Timer B (32 s) gives the INVITE up, and the held CANCEL dies with the
+    // transaction 64·T1 later — it must NEVER surface on the wire (the
+    // literal §9.1 wait).
     elapse_ms(35_000).await;
     let msgs = stack.drain_peer();
     assert!(count_requests(&msgs, "INVITE") >= 1, "Timer A retransmits ran");
+    assert!(
+        stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
+        "Timer B timeout still surfaces to the caller"
+    );
+    elapse_ms(32_000).await;
+    let msgs = [msgs, stack.drain_peer()].concat();
     assert_eq!(
         count_requests(&msgs, "CANCEL"),
         0,
@@ -420,10 +434,6 @@ async fn strict_policy_holds_the_cancel_forever_and_drops_it_at_timer_b() {
     assert_eq!(stack.txn.metrics().held_cancels_dropped(), 1);
     assert_eq!(stack.txn.metrics().held_cancels_flushed(), 0);
     assert_eq!(stack.txn.metrics().held_cancels_flushed_pre1xx(), 0);
-    assert!(
-        stack.drain_events().iter().any(|e| matches!(e, TransactionEvent::Timeout { .. })),
-        "Timer B timeout still surfaces to the caller"
-    );
     assert_eq!(stack.txn.metrics().active_transactions(), 0);
 }
 

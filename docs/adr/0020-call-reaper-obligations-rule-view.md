@@ -21,7 +21,7 @@ it entirely:
    wire (BYE, CANCEL: its peers are alive, unlike a stale call's), and a
    verdict, every timer fire of the call (one per armed timer, the
    terminating call's timeout among them) and every client transaction's
-   outcome (at most two per transaction the call sent) past every bound. A
+   outcome (at most three per transaction the call sent) past every bound. A
    non-INVITE request left without a final when the call ends is forgotten at
    its release, and an in-dialog INVITE answered 481 there.)
 3. **Lost `TerminatingTimeout`** — the 32 s stuck-in-Terminating watchdog is

@@ -54,21 +54,22 @@ matches a Client/Invite txn:
   CANCEL has no effect on an answered request. Not an exception to the
   always-send rule: a final response resolves the leg on its own (487/486
   reject path, or the crossing-2xx reap), so no ring can persist.
-- whose txn **dies holding it**:
+- whose txn **ends holding it**:
   - **call evict** (`cancel_txns_for_call`) and **client timeout** (Timer B /
     the transaction bound) — a never-sent held CANCEL is flushed to the wire
     *first*: neither path may swallow a CANCEL still inside its grace window
-    (a tight custom config can let the bound outrun the grace). The evict
-    orphans the txn rather than deleting it (ADR-0034), so the flushed CANCEL
-    rides its Timer-E ladder from there.
+    (a tight custom config can let the bound outrun the grace). Neither
+    deletes the txn: the evict orphans it (ADR-0034), and an INVITE that
+    gives up is held 64·T1 past its `Timeout` (§9.1's wait for the final a
+    CANCEL provokes), so the flushed CANCEL rides its Timer-E ladder from
+    there, and a CANCEL the TU sends on the `Timeout` still meets this gate
+    and its final is ACKed (§17.1.1.3).
   - **final** — cleared unsent; the callee answered, cancellation is moot
     (§9.2, and the crossing-2xx reap owns the late answer).
   - Residual unsent-death paths, all pathological and counted in
     `held_cancels_dropped`: a same-branch txn displacement and the safety-net
-    sweep (both indicate a bug elsewhere). The timeout death send is a single
-    raw datagram (the txn is deleted in the same turn, so no ladder can ride
-    it): if that one datagram is lost, the callee still rides the terminating
-    backstop.
+    sweep (both indicate a bug elsewhere), and the end of a given-up INVITE's
+    hold under the strict policy.
 
 A CANCEL matching **no txn** is still sent raw: an absent txn is not proof the
 INVITE ended — a takeover-restored call (ADR-0014) CANCELs a b-leg whose
@@ -129,8 +130,8 @@ INVITE client txn as a sub-state of the parked datagram: every send that leaves
 a live txn behind it — the direct pass-through, the grace expiry, the
 first-provisional flush — arms a `CancelRetransmit` timer paced T1 → doubling →
 capped at T2. The ladder stops on the first response whose CSeq method is
-CANCEL, on the INVITE txn taking a final, on txn death (evict / timeout /
-displacement), and at its own 64·T1 ceiling — and the ceiling gives up on the
+CANCEL, on the INVITE txn taking a final, on txn death (the given-up hold's
+end / displacement), and at its own 64·T1 ceiling — and the ceiling gives up on the
 CANCEL only: the INVITE client txn continues under its own bound and still owes
 a final. A superseding CANCEL replaces the parked datagram, so the ladder
 always replays the newest copy; a CANCEL matching no txn stays a raw single

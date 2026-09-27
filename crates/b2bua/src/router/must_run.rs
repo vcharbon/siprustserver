@@ -29,7 +29,7 @@ impl Room {
     /// - What the node's own work produces waits past every bound: a reaper
     ///   verdict (paced by the sweep), a call's timer fire (one per arm, and
     ///   the next arm takes a turn of the call), and a client transaction's
-    ///   outcome (at most two per transaction the call sent, see
+    ///   outcome (at most three per transaction the call sent, see
     ///   [`is_transaction_outcome`]). None of them counts toward the overflow
     ///   ceiling, which detects a peer flooding the call. The lifetime cap
     ///   counts the outcomes, and admits them past it.
@@ -71,13 +71,14 @@ pub(super) fn keeps_room_past_lifetime_cap(event: &CallEvent) -> bool {
     matches!(event, CallEvent::Sip { message, .. } if matches!(message.as_ref(), SipMessage::Response(_)))
 }
 
-/// A client transaction's outcome, which the layer delivers once: its
-/// `Timeout`, or a final it matched to the transaction. The layer forgets a
-/// transaction on its 2xx or non-INVITE final and hands their repeats up
+/// A client transaction's outcome, each of which the layer delivers once:
+/// its `Timeout`, or a final it matched to the transaction. The layer forgets
+/// a transaction on its 2xx or non-INVITE final and hands their repeats up
 /// unmatched; it ACKs a non-2xx INVITE final and absorbs its repeats, and
-/// only a 2xx may still follow one. A provisional (lossy by design) and an
-/// unmatched response (a 2xx its UAS repeats until ACKed, RFC 3261
-/// §13.3.1.4, or a stray) are no outcome.
+/// only a 2xx may still follow one. An INVITE that gave up is held for the
+/// final its CANCEL provokes (RFC 3261 §9.1), so a `Timeout` may precede
+/// both. A provisional (lossy by design) and an unmatched response (a 2xx
+/// its UAS repeats until ACKed, §13.3.1.4, or a stray) are no outcome.
 fn is_transaction_outcome(event: &CallEvent) -> bool {
     match event {
         CallEvent::Timeout { .. } => true,

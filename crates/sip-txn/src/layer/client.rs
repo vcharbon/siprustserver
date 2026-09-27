@@ -264,8 +264,9 @@ impl Owner {
 
     /// Arms the Timer-E ladder for the on-wire CANCEL parked on `branch`,
     /// resetting the pacing to T1. No-op while a ladder is already running —
-    /// a re-send never resets the pacing. Callers: the three first-send sites
-    /// (direct pass-through, grace expiry, first-provisional flush) plus the
+    /// a re-send never resets the pacing. Callers: the first-send sites
+    /// (direct pass-through, grace expiry, first-provisional flush, the
+    /// give-up and evict flushes) plus the
     /// pass-through of a superseding CANCEL (a fresh TU datagram earns a fresh
     /// ladder even after a ceiling).
     fn arm_cancel_retransmit(&mut self, branch: &str) {
@@ -426,7 +427,7 @@ impl Owner {
 
     pub(super) async fn fire_timeout(&mut self, endpoint: &dyn UdpEndpoint, branch: &str) {
         let (call_ref, leg_id, method, destination, timeout_kind) = match self.txns.get(branch) {
-            Some(t) if t.state.is_active() => {
+            Some(t) if t.state.is_active() && !t.gave_up => {
                 // Every transaction names its method (RFC 3261 §17.1: the TU
                 // is told which request drew no answer), the non-INVITE ones
                 // included — a BYE's Timer F is not an OPTIONS's.
@@ -438,26 +439,31 @@ impl Owner {
             }
             _ => return,
         };
-        // A never-sent held CANCEL dying with the timed-out txn goes on the
-        // wire first under the bounded policy (ADR-0028 — same duty as the
-        // evict flush): a grace window that a tight custom config lets Timer B
-        // / the transaction bound outrun must not swallow the CANCEL.
-        let flush = match self.txns.get_mut(branch).and_then(|t| t.held_cancel.as_mut()) {
-            Some(h) if h.wire == CancelWire::Held && self.cancel_hold_grace_ms.is_some() => {
-                h.wire = CancelWire::SentPre1xx;
-                Some((h.buf.clone(), h.dest))
-            }
-            _ => None,
+        // A never-sent held CANCEL goes on the wire at the give-up under the
+        // bounded policy (ADR-0028 — same duty as the evict flush): a grace
+        // window that a tight custom config lets Timer B / the transaction
+        // bound outrun must not hold the CANCEL past the INVITE's own end.
+        let flush = match self.txns.get_mut(branch) {
+            Some(t) => match t.held_cancel.as_mut() {
+                Some(h) if h.wire == CancelWire::Held && self.cancel_hold_grace_ms.is_some() => {
+                    h.wire = CancelWire::SentPre1xx;
+                    Some((h.buf.clone(), h.dest, t.cancel_grace_key.take()))
+                }
+                _ => None,
+            },
+            None => None,
         };
-        if let Some((buf, dest)) = flush {
+        self.give_up(branch);
+        if let Some((buf, dest, grace)) = flush {
+            self.cancel_timer(grace);
             self.send_buffer(endpoint, &buf, dest).await;
             self.metrics
                 .held_cancels_flushed_pre1xx
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.arm_cancel_retransmit(branch);
         }
-        self.delete_txn(branch);
-        // Critical: the txn is gone and Timer B/F cancelled, so nothing re-fires —
-        // a dropped Timeout would strand the leg until the 1 h GlobalDuration.
+        // Critical: the give-up fires once, so nothing re-fires — a dropped
+        // Timeout would strand the leg until the 1 h GlobalDuration.
         self.emit_critical(TransactionEvent::Timeout {
             branch: branch.to_string(),
             call_ref,
@@ -468,11 +474,39 @@ impl Owner {
         });
     }
 
+    /// End the client txn at `branch` on its give-up. A non-INVITE is deleted.
+    /// An INVITE stops retransmitting and is held 64·T1 (RFC 3261 §9.1): the
+    /// TU abandons it with a CANCEL, which still matches it, and the final
+    /// that CANCEL provokes is ACKed (§17.1.1.3) and handed up.
+    fn give_up(&mut self, branch: &str) {
+        let retransmit = match self.txns.get_mut(branch) {
+            Some(t) if t.kind == TxnKind::Invite => {
+                t.gave_up = true;
+                t.ladder = None;
+                t.retransmit_key.take()
+            }
+            _ => {
+                self.delete_txn(branch);
+                return;
+            }
+        };
+        self.cancel_timer(retransmit);
+        self.hold_for(branch, TIMER_B);
+    }
+
     /// Hold the Completed client INVITE txn at `branch` for Timer D (RFC 3261
     /// §17.1.1.2): its cleanup deletes it once retransmitted finals can no
     /// longer arrive.
     fn hold_for_timer_d(&mut self, branch: &str) {
-        let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(TIMER_D));
+        self.hold_for(branch, TIMER_D);
+    }
+
+    /// Delete the txn at `branch` `hold_ms` from now, replacing any hold it
+    /// had.
+    fn hold_for(&mut self, branch: &str, hold_ms: u64) {
+        let old = self.txns.get_mut(branch).and_then(|t| t.cleanup_key.take());
+        self.cancel_timer(old);
+        let key = self.timers.insert(Timer::Cleanup(branch.to_string()), ms(hold_ms));
         if let Some(txn) = self.txns.get_mut(branch) {
             txn.cleanup_key = Some(key);
         }
@@ -852,15 +886,16 @@ impl Owner {
     ///
     /// The bound is measured from the ORIGINAL SEND, so its configured ordering
     /// against the app's setup/no-answer deadline holds however late the
-    /// provisional arrives. No-op for a non-INVITE and a txn already re-armed —
-    /// a second provisional never extends the bound.
+    /// provisional arrives. No-op for a non-INVITE, a txn already re-armed —
+    /// a second provisional never extends the bound — and a txn that gave up.
     fn rearm_invite_bound(&mut self, branch: &str) {
         let bound = self.invite_initial_timeout_ms;
         let remaining = match self.txns.get(branch) {
             Some(t)
                 if t.role == TxnRole::Client
                     && t.kind == TxnKind::Invite
-                    && t.timeout_kind == TimeoutKind::Response =>
+                    && t.timeout_kind == TimeoutKind::Response
+                    && !t.gave_up =>
             {
                 bound.saturating_sub(t.created_at.elapsed().as_millis() as u64).max(1)
             }

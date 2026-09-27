@@ -51,8 +51,9 @@ its own obligations with no consumer:
   A seeded transaction retains no request and is deleted at its 2xx, ACK-less.
 - **Nothing** — Timer A keeps repeating an INVITE in Calling and the held
   CANCEL keeps its §9.1 wait or its Timer E ladder; **Timer B** (or the
-  configured INVITE bound past a provisional) purges the transaction with a
-  `Timeout` naming no call, which the router drops.
+  configured INVITE bound past a provisional) gives the transaction up with a
+  `Timeout` naming no call, which the router drops, and 64·T1 later (the
+  §9.1 wait for the final its CANCEL provokes, ADR-0028) it is purged.
 - **Non-INVITE** — Timer E to its final or Timer F, as before.
 
 Server transactions are not touched, as before: their Timer H / J / L holds
@@ -80,8 +81,8 @@ safety-net sweep (35 s) sits just above each window:
 |---|---|---|
 | non-2xx final taken | Timer D = 64·T1 (≥ 32 s on UDP, §17.1.1.2) | the first final |
 | 2xx final taken | Timer M = 64·T1 (RFC 6026 §7.2, §8.4; matches the sender's §13.3.1.4 repeat bound) | the first 2xx |
-| no final, no provisional | Timer B = 64·T1 (§17.1.1.2) | the INVITE |
-| no final, a provisional | the configured INVITE bound (`invite_initial_timeout_ms`; §17.1.1.2 has no client timer in Proceeding — the bound is deployment policy) | the first provisional |
+| no final, no provisional | Timer B = 64·T1 (§17.1.1.2), then 64·T1 (§9.1) | the INVITE |
+| no final, a provisional | the configured INVITE bound (`invite_initial_timeout_ms`; §17.1.1.2 has no client timer in Proceeding — the bound is deployment policy), then 64·T1 (§9.1) | the first provisional |
 | non-INVITE, no final | Timer F = 64·T1 (§17.1.2.2) | the request |
 | CANCEL that draws nothing | its INVITE transaction's bound above; the CANCEL's own Timer E ladder stops at 64·T1 (§17.1.2.2) | the CANCEL |
 
@@ -92,7 +93,7 @@ safety-net sweep (35 s) sits just above each window:
 - An orphaned INVITE in Calling keeps repeating on Timer A after the call is
   gone: the request may not have reached the peer, and a peer that gets it
   late answers it (a 481 for a dead dialog, which the orphan ACKs). This is the
-  §17.1.1.2 ladder, bounded by Timer B.
+  §17.1.1.2 ladder, stopped at Timer B.
 - A `Timeout` for an orphan names no call; the router's per-peer failure
   accounting still sees the destination, as it does for a detached non-INVITE.
   It counts on `b2bua_unroutable_internal_total{event="timeout"}`, apart from

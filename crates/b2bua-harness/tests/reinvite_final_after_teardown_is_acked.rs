@@ -13,7 +13,8 @@
 //!
 //! The transaction outlives the call by exactly its own timers (RFC 3261
 //! §17.1.1.2, RFC 6026 §7.2): Timer D after a non-2xx, Timer M after a 2xx,
-//! Timer B with nothing ever taken — then it is purged with the rest.
+//! Timer B and its 64·T1 hold with nothing ever taken — then it is purged
+//! with the rest.
 //!
 //! ```text
 //!   the_487_to_a_relayed_reinvite_after_the_bye_is_acked
@@ -26,8 +27,9 @@
 //!                          at Timer D, nothing left
 //!   a_late_2xx_…_timer_m   each repeat of the 2xx re-draws the same ACK;
 //!                          purged at Timer M
-//!   …_purged_at_timer_b    the re-INVITE draws nothing: Timer A repeats it to
-//!                          Timer B, then it is purged, no ACK ever sent
+//!   …_purged_after_timer_b the re-INVITE draws nothing: Timer A repeats it to
+//!                          Timer B, it is held 64·T1 more for the final its
+//!                          CANCEL may provoke, then purged, no ACK ever sent
 //! ```
 
 use std::net::SocketAddr;
@@ -319,9 +321,10 @@ async fn a_late_2xx_is_re_acked_on_each_repeat_and_purged_at_timer_m() {
 /// Nothing ever comes back for the relayed re-INVITE: bob answers the BYE and
 /// is deaf to everything else. The orphaned transaction keeps its Timer A
 /// ladder (§17.1.1.2 Calling — the request may not have arrived), gives up at
-/// Timer B (64·T1 from the INVITE) and is purged having ACKed nothing.
+/// Timer B (64·T1 from the INVITE), is held 64·T1 more for the final its
+/// CANCEL may still provoke (§9.1), and is purged having ACKed nothing.
 #[tokio::test(start_paused = true)]
-async fn a_relayed_reinvite_that_draws_nothing_is_purged_at_timer_b() {
+async fn a_relayed_reinvite_that_draws_nothing_is_purged_after_timer_b() {
     let h = Harness::new("b2bua-reinvite-timer-b");
     let alice = h.agent("alice", "127.0.0.1:5064").await;
     let bob = h.agent("bob", "127.0.0.1:5074").await;
@@ -348,13 +351,14 @@ async fn a_relayed_reinvite_that_draws_nothing_is_purged_at_timer_b() {
     settle_until(|| b2bua.active_calls() == 0).await;
     assert_eq!(b2bua.txn_metrics().orphaned_transactions(), 1, "the orphan is still resident");
 
-    // ── Timer B, from the relayed INVITE: the orphan is purged having ACKed
-    //    nothing; the BYE's own Timer J, armed a transit later, ends last ─────
+    // ── Timer B, from the relayed INVITE, gives the orphan up; its 64·T1 hold
+    //    purges it having ACKed nothing. The BYE's own Timer J ends first ─────
     let elapsed = relayed_at.elapsed();
     h.advance(Duration::from_millis(TIMER_B + 100) - elapsed).await;
-    assert_eq!(b2bua.txn_metrics().orphaned_transactions(), 0, "the orphan is gone at Timer B");
-    h.advance(Duration::from_millis(T1)).await;
-    assert_eq!(b2bua.txn_metrics().active_transactions(), 0, "no transaction survives Timer J");
+    assert_eq!(b2bua.txn_metrics().orphaned_transactions(), 1, "held past Timer B");
+    h.advance(Duration::from_millis(TIMER_B + 2 * T1)).await;
+    assert_eq!(b2bua.txn_metrics().orphaned_transactions(), 0, "the orphan is gone");
+    assert_eq!(b2bua.txn_metrics().active_transactions(), 0, "no transaction survives");
     assert_eq!(b2bua.txn_metrics().timer_queue_len(), 0, "no timer survives the purge");
     drop(bob_reinv);
     alice.drain().await;

@@ -131,12 +131,14 @@ async fn a_relayed_reinvite_timeout_on_a_full_per_call_queue_reaches_the_call() 
         s.bob.receive("INFO").await.respond(200, "OK").await;
     }
     reinvite.try_expect(487).await.expect("the Timeout reaches the call");
-    let mut cancel = s.bob.receive("CANCEL").await;
-    cancel.respond(200, "OK").await;
     s.bob.receive("BYE").await.respond(200, "OK").await;
     s.alice.receive("BYE").await.respond(200, "OK").await;
     info1.expect(200).await;
     info2.expect(200).await;
+    // bob answered nothing on the re-INVITE: its CANCEL waits out the §9.1
+    // grace (ADR-0028) on the given-up transaction.
+    let mut cancel = s.bob.receive("CANCEL").await;
+    cancel.respond(200, "OK").await;
 
     settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();

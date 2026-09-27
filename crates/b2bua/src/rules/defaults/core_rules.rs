@@ -1424,8 +1424,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             // decision backend must get a shot at — the dead-gateway reroute is
             // the classic failover case. Mirror the
             // `no-answer` shape: record the timeout, destroy the failed leg
-            // (CANCELs a still-early dialog; a total blackhole gets a harmless
-            // raw CANCEL), and let `call-failure-result` drive the outcome.
+            // (its CANCEL meets the given-up transaction, which waits §9.1's
+            // 64·T1 for the final it provokes and ACKs it), and let
+            // `call-failure-result` drive the outcome.
             // Everything else (a-leg, confirmed-leg re-INVITE, BYE/OPTIONS
             // timeouts, no callback context) keeps the unconditional
             // termination below.
@@ -1504,11 +1505,24 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     ]);
                 }
             }
-            ok(vec![RuleAction::BeginTermination {
+            // A caller whose callee's INVITE gave up is answered 408 in this
+            // turn, before the CANCELed leg resolves (RFC 3261 §9.1 lets that
+            // wait 64·T1), as the failure consult's let-stand path answers it.
+            let mut actions = Vec::new();
+            if timed_out_invite && pending_b_leg && !originator_final_sent(&ctx.call) {
+                actions.push(RuleAction::RespondToALeg {
+                    status: 408,
+                    reason: "Request Timeout".into(),
+                    header_updates: vec![],
+                    contacts: vec![],
+                });
+            }
+            actions.push(RuleAction::BeginTermination {
                 reason: Some("timeout".into()),
                 cause: TerminationCause::Timeout(TimeoutKind::Transaction),
                 by_leg: Some(ctx.source_leg_id.to_string()),
-            }])
+            });
+            ok(actions)
         })
         // Teardown rule: on a terminating call the dead transaction still
         // resolves its leg.
