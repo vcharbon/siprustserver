@@ -157,7 +157,9 @@ impl InfraRuntime {
     /// — a gating RFC violation must fail the cell, but crashing it would
     /// throw away the diagram and findings table a human needs to see why.
     /// Keeps the SUT guards alive across `finish()` (the recording snapshot is
-    /// read first), then drops them.
+    /// read first), then drops them. An in-process b2bua SUT must have reaped
+    /// every call and released every limiter hold
+    /// ([`B2buaSut::assert_fully_reaped`]); a leak panics, which crashes the cell.
     pub async fn finish(self) -> (RunReport, Vec<sip_net::RfcFinding>) {
         // Drain already-due in-flight deliveries (SUT teardown, final 200s, CDR)
         // before the snapshot — the generic analogue of b2bua-harness
@@ -166,6 +168,10 @@ impl InfraRuntime {
         // any keepalive interval so it never trips a timer.
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        if let Some(b2bua) = &self._b2bua {
+            b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
+            b2bua.assert_fully_reaped();
         }
         let InfraRuntime { harness, agents, _proxy, _b2bua, _register_proxy, .. } = self;
         let (report, gate) = harness.finish_collecting().await;

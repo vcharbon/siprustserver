@@ -71,6 +71,8 @@ async fn cps_bucket_empty_503s_a_new_invite_statelessly() {
     // non-emergency new dialogs are).
     assert_eq!(b2bua.overload().metrics().non_emergency_admitted_total, 0);
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }
 
@@ -168,6 +170,8 @@ async fn emergency_invite_bypasses_the_empty_bucket_and_establishes() {
     bye.expect(200).await;
     settle_until(|| b2bua.cdr_records().len() == 1).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }
 
@@ -231,6 +235,8 @@ async fn non_emergency_admission_resumes_one_refill_after_an_emergency_run() {
     assert_eq!(b2bua.metrics().overload_rejected_total(), 1);
     settle_until(|| b2bua.cdr_records().len() == 6).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }
 
@@ -281,5 +287,7 @@ async fn admitted_non_emergency_invite_advances_the_adm_counter() {
     bye.expect(200).await;
     settle_until(|| b2bua.cdr_records().len() == 1).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }

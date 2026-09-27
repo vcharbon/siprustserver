@@ -102,6 +102,8 @@ async fn basic() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -229,6 +231,8 @@ async fn failover_reject() {
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -302,6 +306,8 @@ async fn failover_no_answer() {
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -351,6 +357,8 @@ async fn messages_all_a_relayed_fork_answers_under_the_180_s_tag() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -400,6 +408,8 @@ async fn messages_all_relays_every_18x_downgraded() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -451,6 +461,8 @@ async fn messages_one_per_value_dedupes_on_upstream_status() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -486,6 +498,8 @@ async fn disabled() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -787,6 +801,8 @@ async fn a_stray_prack_is_answered_here_and_never_reaches_the_callee() {
         .count();
     assert_eq!(leaked, 0, "the callee saw {leaked} PRACK(s) on a leg that negotiated none");
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -844,6 +860,8 @@ async fn the_rerouted_leg_is_solicited_the_same_reliability_as_the_first() {
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -901,5 +919,7 @@ async fn a_declared_advertisement_is_narrowed_by_the_strategy_not_discarded() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

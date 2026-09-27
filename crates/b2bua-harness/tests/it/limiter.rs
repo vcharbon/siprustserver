@@ -3,6 +3,8 @@
 //!
 //! Covers: reject → 486, release-on-BYE frees the slot, fail-open when the
 //! limiter is cut, shared counting across two workers, and failover-on-reject.
+//! Every route holds two limiters, the capped one and a wide one, and every
+//! call ends: each test drains the store to 0 in the reaped check.
 //! The refresh-on-long-call case (paused clock) lives in `limiter_refresh.rs`.
 
 use std::net::SocketAddr;
@@ -16,7 +18,7 @@ use b2bua::decision::{
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{establish, settle_until, B2buaSut};
+use b2bua_harness::{establish, hangup, settle_until, B2buaSut};
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{Fault, HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::Harness;
@@ -26,6 +28,11 @@ const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 
 const LIMITER_ADDR: &str = "10.0.0.1:8080";
+
+/// The wide limiter every route holds beside its capped one.
+fn wide() -> CallLimiterEntry {
+    CallLimiterEntry { id: "site-B".into(), limit: 100 }
+}
 
 fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
@@ -45,8 +52,8 @@ fn limiter_client(net: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     Arc::new(HttpCallLimiter::new(Arc::new(net.clone()), laddr(), Duration::from_millis(150)))
 }
 
-/// A decision that routes every call to `host:port` and attaches one limiter
-/// entry `{id, limit}`.
+/// A decision that routes every call to `host:port` and attaches the limiter
+/// entry `{id, limit}` then the wide one.
 fn route_with_limiter(host: &str, port: u16, id: &str, limit: i64) -> Arc<dyn CallDecisionEngine> {
     let host = host.to_string();
     let id = id.to_string();
@@ -54,11 +61,18 @@ fn route_with_limiter(host: &str, port: u16, id: &str, limit: i64) -> Arc<dyn Ca
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to(&host, port);
-                r.call_limiter = vec![CallLimiterEntry { id: id.clone(), limit }];
+                r.call_limiter = vec![CallLimiterEntry { id: id.clone(), limit }, wide()];
                 NewCallResponse::Route(r)
             })
             .build(),
     )
+}
+
+/// Settle until `sut` reaped every call and the store counts nothing, then
+/// run the reaped check.
+async fn assert_drained(sut: &B2buaSut, store: &CallStore) {
+    settle_until(|| sut.is_reaped() && store.stats().current_total == 0).await;
+    sut.assert_fully_reaped();
 }
 
 #[tokio::test]
@@ -76,18 +90,20 @@ async fn rejected_call_gets_486_and_no_second_increment() {
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
 
-    // First call admitted + answered.
-    let _dialog1 = establish(&alice, &bob, b2bua.addr).await;
-    assert_eq!(store.stats().current_total, 1, "first call incremented");
+    // First call admitted + answered: it holds both limiters.
+    let mut dialog1 = establish(&alice, &bob, b2bua.addr).await;
+    assert_eq!((store.held("trunk-A"), store.held("site-B")), (1, 1), "first call counted");
 
     // Second concurrent call: trunk-A at cap 1 → 486 Busy Here.
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
     let resp = call2.expect(486).await;
     assert_eq!(resp.status(), 486);
 
-    // No second increment happened (transactional reject).
-    assert_eq!(store.stats().current_total, 1, "reject did not increment");
+    // No second increment happened on either id (all or none).
+    assert_eq!((store.held("trunk-A"), store.held("site-B")), (1, 1), "reject took nothing");
 
+    hangup(&mut dialog1, &bob).await;
+    assert_drained(&b2bua, &store).await;
     let _ = h.finish().await;
 }
 
@@ -108,15 +124,11 @@ async fn release_on_bye_frees_the_slot() {
 
     // Establish then hang up call 1.
     let mut dialog1 = establish(&alice, &bob, b2bua.addr).await;
-    assert_eq!(store.stats().current_total, 1);
-    let mut bye = dialog1.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
+    assert_eq!(store.stats().current_total, 2);
+    hangup(&mut dialog1, &bob).await;
 
     // The release must drain the counter back to 0.
-    settle_until(|| store.stats().current_total == 0).await;
-    settle_until(|| b2bua.is_reaped()).await;
-    b2bua.assert_fully_reaped();
+    assert_drained(&b2bua, &store).await;
 
     // The freed slot admits a fresh call (bob sees its INVITE, not a 486).
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -124,8 +136,11 @@ async fn release_on_bye_frees_the_slot() {
     call2.expect(200).await;
     // Complete the handshake so the 2xx is ACKed (RFC 3261 §13.3.1.4 — an un-ACKed
     // answered call is now caught by the unacked-2xx-not-cleared audit).
-    call2.ack().await;
+    let mut dialog2 = call2.ack().await;
     bob.receive("ACK").await;
+    assert_eq!(store.stats().current_total, 2, "the second call holds both limiters");
+    hangup(&mut dialog2, &bob).await;
+    assert_drained(&b2bua, &store).await;
     let _ = h.finish().await;
 }
 
@@ -151,10 +166,14 @@ async fn fail_open_admits_when_limiter_is_cut() {
     bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
     // Complete the handshake so the 2xx is ACKed (unacked-2xx-not-cleared).
-    call.ack().await;
+    let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     // No increment ever reached the server (it was cut), so no hold to leak.
     assert_eq!(store.stats().current_total, 0, "fail-open records no hold");
+    assert_eq!(b2bua.limiter_count().failed_open, 1, "the admit failed open");
+
+    hangup(&mut dialog, &bob).await;
+    assert_drained(&b2bua, &store).await;
     let _ = h.finish().await;
 }
 
@@ -182,11 +201,15 @@ async fn shared_counting_across_two_workers() {
         .await;
 
     // Call through w0 fills the shared cap of 1.
-    let _d = establish(&alice, &bob, w0.addr).await;
+    let mut dialog = establish(&alice, &bob, w0.addr).await;
 
     // Call through w1 sees the SAME counter → rejected 486.
     let mut call2 = carol.invite(&bob).with_sdp(OFFER).through(w1.addr).send().await;
     assert_eq!(call2.expect(486).await.status(), 486);
+
+    hangup(&mut dialog, &bob).await;
+    assert_drained(&w0, &store).await;
+    assert_drained(&w1, &store).await;
     let _ = h.finish().await;
 }
 
@@ -200,17 +223,22 @@ async fn failover_on_reject_routes_to_backup() {
     let http = SimulatedHttpNetwork::new();
     let (store, _lh) = serve_limiter(&http).await;
 
-    // Primary route: trunk-A cap 1 + callback_context (failover-capable).
-    // On /call/failure: failover to bob2 (no limiter).
+    // Primary route: trunk-A cap 1 + the wide limiter + callback_context
+    // (failover-capable). On /call/failure: failover to bob2 under the wide
+    // limiter alone.
     let decision = Arc::new(
         ScriptedDecisionEngine::builder()
             .fallback(move |_req| {
                 let mut r = route_to("127.0.0.1", 5070);
-                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 1 }];
+                r.call_limiter = vec![CallLimiterEntry { id: "trunk-A".into(), limit: 1 }, wide()];
                 r.callback_context = Some("limiter-failover".into());
                 NewCallResponse::Route(r)
             })
-            .on_failure(move |_req| CallFailureResponse::Route(route_to("127.0.0.1", 5071)))
+            .on_failure(move |_req| {
+                let mut r = route_to("127.0.0.1", 5071);
+                r.call_limiter = vec![wide()];
+                CallFailureResponse::Route(r)
+            })
             .build(),
     );
     let b2bua = B2buaSut::builder(decision)
@@ -220,7 +248,7 @@ async fn failover_on_reject_routes_to_backup() {
         .await;
 
     // Call 1 fills the cap on the primary.
-    let _d = establish(&alice, &bob, b2bua.addr).await;
+    let mut dialog1 = establish(&alice, &bob, b2bua.addr).await;
 
     // Call 2 is rejected by the limiter, but callback_context → /call/failure →
     // failover to bob2: bob2 (not bob) receives the INVITE, no 486 to carol.
@@ -228,7 +256,17 @@ async fn failover_on_reject_routes_to_backup() {
     bob2.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
     call2.expect(200).await;
     // Complete the handshake so the 2xx is ACKed (unacked-2xx-not-cleared).
-    call2.ack().await;
+    let mut dialog2 = call2.ack().await;
     bob2.receive("ACK").await;
+    settle_until(|| store.held("site-B") == 2).await;
+    assert_eq!(
+        (store.held("trunk-A"), store.held("site-B")),
+        (1, 2),
+        "the failed-over call holds the backup route's limiter only"
+    );
+
+    hangup(&mut dialog1, &bob).await;
+    hangup(&mut dialog2, &bob2).await;
+    assert_drained(&b2bua, &store).await;
     let _ = h.finish().await;
 }

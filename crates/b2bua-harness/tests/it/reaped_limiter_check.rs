@@ -121,13 +121,23 @@ async fn the_call_state_checks_leave_the_limiter_to_the_full_check() {
     let _ = s.finish().await;
 }
 
-/// A call still established fails the call-state checks.
+/// A call still established fails the call-state checks; once it ends they
+/// pass.
 #[tokio::test]
-#[should_panic(expected = "call leak")]
 async fn a_call_not_yet_reaped_fails_the_call_state_checks() {
     let s = B2buaScene::new("reaped-calls-live").await;
-    let _dialog = s.establish().await;
-    s.b2bua.assert_calls_reaped();
+    let mut dialog = s.establish().await;
+    let live = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        s.b2bua.assert_calls_reaped();
+    }))
+    .expect_err("an established call fails the call-state checks");
+    let message = live.downcast_ref::<String>().map(String::as_str).unwrap_or_default();
+    assert!(message.contains("call leak"), "{message}");
+
+    s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    s.b2bua.assert_fully_reaped();
+    let _ = s.finish().await;
 }
 
 #[tokio::test]

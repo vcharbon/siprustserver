@@ -114,6 +114,8 @@ async fn a_retransmitted_2xx_repeats_the_advertisement_the_first_one_stated() {
     s.bob.receive("ACK").await;
     s.hangup(&mut dialog).await;
     let sut = s.b2bua.addr;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    s.b2bua.assert_fully_reaped();
     let report = s.finish().await;
 
     let answers: Vec<String> = report

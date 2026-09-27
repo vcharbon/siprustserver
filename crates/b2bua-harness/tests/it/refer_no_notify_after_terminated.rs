@@ -139,6 +139,13 @@ async fn no_notify_after_terminated() {
         "no NOTIFY toward the referrer after the terminal NOTIFY + slice clear"
     );
 
-    let _ = &mut alice_dialog;
+    // A hangs up the transferred call: its BYE reaches C and the orphaned B.
+    let mut alice_bye = alice_dialog.bye().await;
+    charlie.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

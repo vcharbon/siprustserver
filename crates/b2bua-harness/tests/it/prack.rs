@@ -16,7 +16,7 @@
 
 use std::net::SocketAddr;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Harness, ServerTxn, WaiverScope};
 use sip_message::header::{HeaderName, RAck, RSeq, Require, Supported};
 use sip_message::types::SipResponse;
@@ -109,6 +109,8 @@ async fn prack_reliable_provisional_relayed_end_to_end() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -189,6 +191,8 @@ async fn a_prack_naming_an_rseq_this_face_never_sent_takes_481() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -246,6 +250,8 @@ async fn a_pre_prack_callee_repeat_is_absorbed_and_keeps_its_a_facing_number() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let report = h.finish().await;
 
     // The vantage is the wire: a relayed repeat is byte-identical to the first,
@@ -314,6 +320,8 @@ async fn a_prack_retired_reliable_provisional_is_not_relayed_again() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -348,6 +356,8 @@ async fn an_unreliable_provisional_carries_no_rseq() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -439,6 +449,8 @@ async fn a_prack_naming_a_shown_rseq_under_a_wrong_cseq_takes_481() {
         .count();
     assert_eq!(relayed, 1, "the callee saw {relayed} PRACKs — the laundered stray is one of them");
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -498,6 +510,8 @@ async fn a_prack_carrying_no_rack_takes_400() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -558,5 +572,7 @@ async fn a_re_prack_of_an_acknowledged_provisional_is_still_relayed() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

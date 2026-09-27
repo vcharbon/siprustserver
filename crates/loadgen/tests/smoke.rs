@@ -54,6 +54,11 @@ const RECV_LOSSY: Duration = Duration::from_secs(45);
 /// refer-recovery flake; 45 s clears it with margin.
 const SETTLE_LOSS_SECS: u64 = 45;
 
+/// Reap ceiling for a slow-lane lossy run whose caller teardown was lost: the
+/// SUT's keepalive detects the dead dialog (30 s interval + 5 s grace), then its
+/// BYE rides the 32 s terminating timer, plus real-clock starvation headroom.
+const DEAD_DIALOG_REAP_SECS: u64 = 90;
+
 /// Peak-contention governor. These tests are real-clock over real loopback
 /// UDP, and libtest starts ALL of them at once — 20+ concurrent multi-worker
 /// runtimes, each bursting a driver against an in-process SUT whose per-call
@@ -1069,10 +1074,7 @@ async fn loadgen_mux_emergency_split_under_overload() {
     assert_eq!(em_503, 0, "an emergency call was shed — must never happen");
 
     // The b2bua exercised the gate: one stateless reject per shed (the gate
-    // `return`s before `build_initial_call`, so a shed births no call — this is
-    // why we assert the targeted leak canaries below rather than the call-
-    // lifecycle `assert_fully_reaped`, exactly as the authoritative
-    // `tier3_admission_gate` test does).
+    // `return`s before `build_initial_call`, so a shed births no call).
     assert!(
         b2bua.metrics().overload_rejected_total() >= ne_503,
         "every non-emergency shed must be a stateless overload reject:\n{}",
@@ -1086,14 +1088,12 @@ async fn loadgen_mux_emergency_split_under_overload() {
     );
     assert!(reporter.sample_count("basic_call_em", &ResultClass::Ok) > 0, "no OK sample kept");
 
-    // No RESOURCE leak from the sheds OR the emergency teardowns: no live call,
-    // no stranded per-call lock, no mux registry residue. (A stateless reject
-    // legitimately leaves `creations != removals`; it leaves no resource.)
+    // No leak from the sheds OR the emergency teardowns: no mux registry
+    // residue, every emergency call reaped and its limiter hold released.
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak under overload");
-    settle_until(|| b2bua.active_calls() == 0).await;
-    assert_eq!(b2bua.active_calls(), 0, "live call leak under overload");
-    assert_eq!(b2bua.lock_count(), 0, "stranded per-call lock under overload");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
 }
 
 /// Post-call cleanup across EVERY failure-teardown path, without an endurance
@@ -1190,10 +1190,11 @@ async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
     );
 
     // The loadgen's OWN mux state is always reclaimed once the call task ends,
-    // even for a failed lossy call. (SUT-side reap is NOT asserted: the SUT
-    // never saw these calls at all.)
+    // even for a failed lossy call; the SUT never saw these calls.
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak under loss");
+    assert_eq!(b2bua.metrics().creations_total(), 0, "the SUT saw no call");
+    b2bua.assert_fully_reaped();
 }
 
 /// The point of the feature: a heavy ~10%/datagram loss (which breaks the
@@ -1252,19 +1253,20 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
         "ringing gate metrics missing from /metrics"
     );
 
-    // The loadgen's mux state is clean regardless. (SUT full-reap is not asserted:
-    // a rare timed-out call's teardown is best-effort single-shot and its resender
-    // is cancelled at call-end, so the b2bua reaps that straggler on its own timers
-    // — the successful majority reap promptly because hangup awaits the BYE 200.)
+    // The loadgen's mux state is clean regardless, and the SUT reaps every call
+    // (a teardown the fabric ate ends on the SUT's 32 s terminating backstop).
     settle_until(|| core.registry_size() == 0).await;
     assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
+    settle_secs(SETTLE_LOSS_SECS, || b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
 }
 
 /// B9 baseline: the SAME lossy fabric, refer-only mix, NO retransmit — the
 /// multi-leg transfer (~3× the datagrams of a basic call, three serialized
 /// legs) breaks under loss, establishing that the recovery proof below is not
-/// vacuous. (No SUT-reap assert: with no retransmit the teardown itself can be
-/// lost — the very fragility the recovery test proves fixed.)
+/// vacuous. No SUT reaped check: its doomed calls give up at the end of the
+/// recv window, and a teardown the fabric ate then ends on the SUT's 32 s
+/// terminating backstop, past the default lane's 60 s real-clock budget.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_refer_drop_without_retransmit_breaks_transfers() {
     let (_h, b2bua, core, transport) = setup(6510, Correlation::header("X-Loadgen-Id"), 3).await;
@@ -1404,6 +1406,9 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
         "SUT holds {} live calls vs {nok} failed — a RECOVERED call leaked",
         b2bua.active_calls()
     );
+    // The failed calls' stragglers end on that same backstop.
+    settle_secs(SETTLE_LOSS_SECS, || b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
 }
 
 /// **P2 — the ack-gate RECOVERY side** (plan §5). A refer call's a-leg BYE — an
@@ -1837,6 +1842,9 @@ async fn loadgen_inprocess_endurance_lossy() {
         "SUT holds {} live calls vs {failed} failed",
         b2bua.active_calls()
     );
+    // The failed calls' dialogs end on the SUT's own dead-dialog detection.
+    settle_secs(DEAD_DIALOG_REAP_SECS, || b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
 }
 
 // ---------------------------------------------------------------------------

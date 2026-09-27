@@ -92,6 +92,8 @@ async fn non_allow_listed_b_leg_host_is_503ed_before_any_invite_is_sent() {
         "admission reject must record a Reject CDR event: {kinds:?}"
     );
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }
 
@@ -148,5 +150,7 @@ async fn admission_reject_short_circuits_before_the_limiter_is_touched() {
         "admission reject must record a Reject CDR event: {kinds:?}"
     );
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }

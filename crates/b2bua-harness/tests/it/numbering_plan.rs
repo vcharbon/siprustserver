@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use b2bua::decision::ScriptedDecisionEngine;
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{hangup, settle_until, B2buaSut};
 use scenario_harness::{Harness, RunReport};
 use sip_message::header::{
     Contact, HeaderName, HeaderValue, PAssertedIdentity, ParamValue, Reason,
@@ -101,8 +101,11 @@ async fn route_rewrites_from_to_ruri_pai_and_pani() {
 
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
-    call.ack().await;
+    let mut dialog = call.ack().await;
     bob.receive("ACK").await;
+    hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     finish_with_report(h).await;
 }
 
@@ -150,8 +153,11 @@ async fn reroutes_to_second_destination_on_failure() {
     assert_eq!(bob_uas.request().to().uri().host(), "bob");
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
-    call.ack().await;
+    let mut dialog = call.ack().await;
     bob.receive("ACK").await;
+    hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     finish_with_report(h).await;
 }
 
@@ -186,6 +192,8 @@ async fn direct_reject_carries_reason_header() {
     assert!(reason.is("Q.850"), "Reason protocol relayed: {}", reason.to_wire());
     assert_eq!(reason.param("cause").and_then(ParamValue::as_str), Some("21"));
     assert_eq!(reason.param("text").and_then(ParamValue::as_str), Some("call rejected"));
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     finish_with_report(h).await;
 }
 
@@ -225,6 +233,8 @@ async fn direct_302_redirect_carries_contact_list() {
     assert_eq!(contacts[0].param("q").and_then(ParamValue::as_str), Some("1"));
     assert_eq!(contacts[1].uri().text(), "sip:backup@alt2.example");
     assert_eq!(contacts[1].param("q").and_then(ParamValue::as_str), Some("0.5"));
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     finish_with_report(h).await;
 }
 
@@ -268,5 +278,7 @@ async fn reroute_exhaustion_redirects_caller() {
         contacts.iter().any(|c| c.uri().text() == "sip:overflow@alt.example"),
         "exhaustion redirect Contact present: {contacts:?}"
     );
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     finish_with_report(h).await;
 }

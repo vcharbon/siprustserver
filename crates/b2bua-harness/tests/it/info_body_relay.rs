@@ -14,7 +14,7 @@
 //! that a *bodyless* `Content-Type` is dropped on re-relay (the generator only
 //! stamps `Content-Type` when the body is non-empty): a real body survives.
 
-use b2bua_harness::B2buaScene;
+use b2bua_harness::{settle_until, B2buaScene};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::HeaderName;
 
@@ -63,6 +63,8 @@ async fn info_with_arbitrary_body_relays_content_type_and_bytes() {
     assert_eq!(s.b2bua.active_calls(), 1, "INFO transaction left the call up");
 
     s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 
@@ -105,5 +107,7 @@ async fn info_with_multipart_body_relays_verbatim() {
     info.expect(200).await;
 
     s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }

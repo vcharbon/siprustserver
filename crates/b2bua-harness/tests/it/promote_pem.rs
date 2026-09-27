@@ -6,7 +6,7 @@
 //! gated), confirms silently on Bob's real 200, and resyncs Alice with a
 //! re-INVITE when Bob's final SDP differs from the promoted early-media SDP.
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{hangup, settle_until, B2buaSut};
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
 use sip_message::error::SipParseError;
@@ -86,6 +86,8 @@ async fn promote_pem_happy_no_resync() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -129,6 +131,8 @@ async fn no_policy_control() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -176,6 +180,9 @@ async fn resync_sdp_changed() {
     bob.receive("INFO").await.respond(200, "OK").await;
     info.expect(200).await;
 
+    hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -209,6 +216,8 @@ async fn b_fails_post_promote() {
     );
     bye.respond(200, "OK").await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -255,6 +264,8 @@ async fn resync_failed_by_a() {
     );
     b_bye.respond(200, "OK").await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -284,6 +295,8 @@ async fn a_bye_during_window() {
     uas.respond(487, "Request Terminated").await;
     bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -308,7 +321,7 @@ async fn forking_resync() {
         .await;
     let ok = call.expect(200).await;
     assert_eq!(ok.body(), EARLY.as_bytes());
-    let _dialog = call.ack().await;
+    let mut dialog = call.ack().await;
 
     // Winning fork: 200 OK with To-tag FORK_T2 ≠ FORK_T1, different SDP.
     uas.respond(200, "OK").with_to_tag(FORK_T2).with_sdp(FINAL_DIFF).await;
@@ -330,6 +343,9 @@ async fn forking_resync() {
     resync.respond(200, "OK").with_sdp(EARLY).await;
     alice.receive("ACK").await;
 
+    hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -367,5 +383,7 @@ async fn in_dialog_rejection() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

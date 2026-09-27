@@ -94,6 +94,8 @@ async fn refer_reject_http_403() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -150,6 +152,8 @@ async fn refer_http_timeout() {
     bob.receive_tolerating("BYE", &["NOTIFY", "OPTIONS"]).await.respond(200, "OK").await;
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -190,6 +194,8 @@ async fn refer_replaces_rejected() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -238,6 +244,8 @@ async fn refer_out_of_dialog() {
     alice_bye.expect(200).await;
     let _ = &mut bob_dialog;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -298,6 +306,8 @@ async fn refer_second_during_authorizing() {
     bob.receive_tolerating("BYE", &["NOTIFY", "OPTIONS"]).await.respond(200, "OK").await;
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 

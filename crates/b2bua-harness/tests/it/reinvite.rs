@@ -14,7 +14,7 @@
 //!   crossing_reinvite_glare alice re-INVITE relayed; bob's crosses → 491
 //! ```
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 
@@ -63,6 +63,8 @@ async fn failed_reinvite_keeps_dialog_state() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -102,6 +104,8 @@ async fn a_relayed_reinvite_481_is_reported_and_leaves_the_call_up() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -159,6 +163,8 @@ async fn reinvite_18x_then_488_keeps_call() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -212,6 +218,8 @@ async fn alice_reinvite() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -261,6 +269,8 @@ async fn bob_reinvite() {
     alice.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -317,5 +327,7 @@ async fn crossing_reinvite_glare() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

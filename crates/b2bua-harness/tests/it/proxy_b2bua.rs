@@ -108,6 +108,8 @@ async fn alice_calls_bob_through_proxy_and_b2bua() {
     assert_eq!(cdrs[0].b_legs.len(), 1, "one b-leg");
 
     // ── Routing assertions (every message made all four hops) ────────────────
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let entries = report.entries();
     assert!(entries.iter().all(|e| e.delivered), "all hops delivered");

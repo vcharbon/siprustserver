@@ -25,7 +25,7 @@ use b2bua::decision::{
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{settle_until, B2buaSut};
+use b2bua_harness::{hangup, settle_until, B2buaSut};
 use call::CdrEventType;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
@@ -148,6 +148,8 @@ async fn failure_request_carries_snapshot_and_failed_response_headers() {
         "the triggering reject is already on the trail"
     );
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -205,7 +207,7 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
-    call.ack().await;
+    let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
     // … and the failed leg is cleared: the b2bua CANCELs the still-early carol
@@ -233,6 +235,12 @@ async fn b_leg_invite_transaction_timeout_consults_decision_and_reroutes() {
     assert_eq!(reqs[0].snapshot.callback_context.as_deref(), Some("ctx-timeout"));
     drop(reqs);
 
+    // The dead gateway never answers the CANCEL: past the 32 s terminating
+    // backstop after alice's hangup the call is reaped.
+    hangup(&mut dialog, &bob).await;
+    h.advance(Duration::from_secs(33)).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -585,7 +593,7 @@ async fn failover_route_limiter_reject_reconsults_with_call_limiter_origin() {
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
     call.expect(200).await;
-    call.ack().await;
+    let mut dialog = call.ack().await;
     bob.receive("ACK").await;
 
     let reqs = captured.lock().unwrap();
@@ -597,5 +605,8 @@ async fn failover_route_limiter_reject_reconsults_with_call_limiter_origin() {
     drop(reqs);
     assert_eq!(store.stats().current_total, 0, "the rejected trunk holds nothing");
 
+    hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

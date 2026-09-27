@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use media::sdp::{parse_sdp, OfferAnswerEngine};
 use media::{CommitReason, NetAddr, OpenOptions, PlayScript, PCMA};
 use media_harness::{classify, reference_clip, ClassifyOptions, ClipName};
@@ -89,5 +89,7 @@ async fn alice_and_bob_hear_each_other_through_b2bua() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

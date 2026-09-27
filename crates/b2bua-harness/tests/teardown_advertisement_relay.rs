@@ -2,7 +2,7 @@
 //! §16.6): a set-like header the peer split over several lines is one set
 //! (§7.3.1), and every line of it rides (issue 174).
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 use sip_message::header::HeaderName;
@@ -47,5 +47,7 @@ async fn a_relayed_bye_carries_every_line_of_the_peers_advertisement() {
     relayed.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

@@ -31,7 +31,7 @@ use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse,
 };
-use b2bua_harness::{establish, settle_until, B2buaSut};
+use b2bua_harness::{establish, hangup, settle_until, B2buaSut};
 use scenario_harness::Harness;
 
 const OFFER_SDP: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
@@ -147,7 +147,7 @@ async fn initial_invite_at_the_per_call_cap_is_shed_503_not_dropped() {
             .await;
 
     // Call 1 establishes and stays up → its per-call queue occupies the cap.
-    let _d1 = establish(&alice, &bob, b2bua.addr).await;
+    let mut d1 = establish(&alice, &bob, b2bua.addr).await;
     settle_until(|| b2bua.active_calls() == 1).await;
 
     // Call 2 is a brand-new INVITE while the map is at cap → stateless 503,
@@ -160,6 +160,9 @@ async fn initial_invite_at_the_per_call_cap_is_shed_503_not_dropped() {
     // born for the shed call 2 (stateless — like the Tier-3 gate).
     assert_eq!(b2bua.active_calls(), 1, "the shed INVITE created no call");
 
+    hangup(&mut d1, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 

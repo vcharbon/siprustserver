@@ -143,6 +143,8 @@ async fn reinvite_ack_discharges_the_2xx_obligation() {
     bye.expect(200).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 

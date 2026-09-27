@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -140,6 +140,8 @@ async fn refer_allow_full_happy() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -232,6 +234,8 @@ async fn refer_allow_full_c_reliable_provisional_is_acknowledged_by_the_stack() 
     let stray: Vec<&String> =
         lines[answered_at + 1..].iter().filter(|l| l.starts_with("SIP/2.0 1")).collect();
     assert!(stray.is_empty(), "the answered caller is shown no provisional: {stray:?}");
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -295,6 +299,8 @@ async fn refer_allow_full_a_reject_realign() {
     charlie.receive("BYE").await.respond(200, "OK").await;
 
     let _ = &mut alice_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -367,6 +373,8 @@ async fn refer_allow_full_a_glare_reinvite() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -437,6 +445,8 @@ async fn refer_allow_full_a_bye_during_a_realign() {
     charlie.receive("BYE").await.respond(200, "OK").await;
 
     let _ = &mut a_realign;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -516,5 +526,7 @@ async fn refer_allow_full_a_reinvite_timeout() {
         .await;
 
     let _ = &mut alice_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

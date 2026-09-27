@@ -33,7 +33,7 @@
 //! the confirmed dialog is the *winning* fork — all checked against the recorded
 //! callflow by the harness RFC audit at `finish()`.
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::{Harness, RunReport};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::{RAck, RSeq, Require};
@@ -225,6 +225,8 @@ async fn prack_update_forking_answer_on_second_fork() {
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     finish_with_report(h).await;
 }
 
@@ -348,6 +350,8 @@ async fn fake_prack_forking_answer_on_first_fork_keeps_its_own_cache() {
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -403,6 +407,8 @@ async fn fake_prack_forking_answer_on_second_fork_uses_its_own_cache() {
     bye_at_bob.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 

@@ -16,7 +16,7 @@
 //! per-dialog CSeq (RFC 3261 §12.2.1.1) and response-correlation (§8.1.3.3) are
 //! exercised end-to-end and hard-gated by the harness RFC audit at `finish()`.
 
-use b2bua_harness::{B2buaScene, B2buaSut};
+use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use call::features::RelayFirst18xStrategy;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -49,6 +49,8 @@ async fn established_update_no_sdp_a_to_b() {
     update.expect(200).await;
 
     s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
 
@@ -78,6 +80,8 @@ async fn established_update_no_sdp_b_to_a() {
     let mut bye = alice_dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -131,6 +135,8 @@ async fn early_not_pracked_a_to_b(
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -195,6 +201,8 @@ async fn early_not_pracked_update_b_to_a() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -246,6 +254,8 @@ async fn early_pracked_update_no_sdp_a_to_b() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -291,6 +301,8 @@ async fn early_update_forking_no_sdp_second_fork() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -338,6 +350,8 @@ async fn early_update_forking_b_to_a_second_fork() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -441,6 +455,8 @@ async fn prack_forking_sdp_and_bodyless_updates_worst_case() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -506,6 +522,8 @@ async fn fake_prack_early_update_with_offer_relays_to_bob() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -548,6 +566,8 @@ async fn fake_prack_early_bodyless_update_answered_locally() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -597,6 +617,8 @@ async fn fake_prack_confirmed_bodyless_update_from_b_relays_to_alice() {
     let mut bye = alice_dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -648,5 +670,7 @@ async fn fake_prack_confirmed_update_with_offer_from_b_relays_to_alice() {
     let mut bye = alice_dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

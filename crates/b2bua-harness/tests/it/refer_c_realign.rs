@@ -7,16 +7,17 @@
 //! B2BUA ACKs, the phase advances to `a-realigning` and the B2BUA fires the
 //! a-realign re-INVITE toward A. Slice 5b STOPS once that a-realign INVITE
 //! lands (verifying its body is C's active answer and Contact carries `leg=a`);
-//! the a-realign 200 / merge live in slice 5c (`refer-full-transfer.ts`).
+//! the a-realign 200 / merge live in slice 5c (`refer-full-transfer.ts`), and
+//! a happy case here answers it only to end the call.
 //!
 //! The rollback cases (CReject488, CTimeout) drive `begin-termination`, which
 //! BYEs all three confirmed legs (alice, bob, charlie).
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::agent::ServerTxn;
-use scenario_harness::Harness;
+use scenario_harness::{Agent, Dialog, Harness};
 use sip_message::generators::InDialogMethod;
 use sip_message::header::{Contact, Event, HeaderValue, ParamValue, SubscriptionState};
 
@@ -26,6 +27,9 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 // a-realign re-INVITE toward A must carry *this* body (not the initial held
 // answer) — the one-way-audio guard (slice5-refer-design.md §4).
 const CHARLIE_ACTIVE_ANSWER: &str = "v=0\r\no=charlie 9 9 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
+
+// A's answer to the a-realign re-INVITE.
+const ALICE_REALIGN_ANSWER: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 8\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n";
 
 const CHARLIE_PORT: u16 = 5667;
 
@@ -54,6 +58,15 @@ fn assert_notify(txn: &ServerTxn, state: &str, frag: &str) {
     assert!(ss.is(state), "subscription-state {:?} should be {state:?}", ss.token());
     let body = String::from_utf8_lossy(req.body());
     assert!(body.contains(frag), "sipfrag body {body:?} should contain {frag:?}");
+}
+
+/// A hangs up the transferred call: its BYE reaches C, and B, the orphaned
+/// leg, is BYE'd too.
+async fn end_transferred_call(alice_dialog: &mut Dialog, bob: &Agent, charlie: &Agent) {
+    let mut alice_bye = alice_dialog.bye().await;
+    charlie.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    alice_bye.expect(200).await;
 }
 
 /// Assert a re-INVITE carries `body`, an INVITE CSeq > 1 (a re-INVITE, not the
@@ -139,10 +152,16 @@ async fn refer_allow_c_realign_happy() {
 
     // Phase → a-realigning: B2BUA re-INVITEs A with C's active answer, Contact
     // leg=a. Slice 5b stops here (the a-realign 200 / merge are slice 5c).
-    let a_realign = alice.receive("INVITE").await;
+    let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    let _ = &mut alice_dialog;
+    // A answers: the transfer completes. A's BYE reaches C and the orphaned B.
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+    end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -200,6 +219,8 @@ async fn refer_allow_c_realign_c_reject_488() {
     charlie.receive("BYE").await.respond(200, "OK").await;
 
     let _ = &mut alice_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -276,6 +297,8 @@ async fn refer_allow_c_realign_c_timeout() {
         .await;
 
     let _ = &mut alice_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -339,10 +362,16 @@ async fn refer_allow_c_realign_c_glare() {
     charlie.receive("ACK").await;
 
     // Phase → a-realigning: B2BUA re-INVITEs A with C's active answer, leg=a.
-    let a_realign = alice.receive("INVITE").await;
+    let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    let _ = &mut alice_dialog;
+    // A answers: the transfer completes. A's BYE reaches C and the orphaned B.
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+    end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -404,9 +433,15 @@ async fn refer_allow_c_realign_b_non_bye() {
     c_realign.respond(200, "OK").with_sdp(CHARLIE_ACTIVE_ANSWER).await;
     charlie.receive("ACK").await;
 
-    let a_realign = alice.receive("INVITE").await;
+    let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 
-    let _ = &mut alice_dialog;
+    // A answers: the transfer completes. A's BYE reaches C and the orphaned B.
+    a_realign.respond(200, "OK").with_sdp(ALICE_REALIGN_ANSWER).await;
+    alice.receive("ACK").await;
+    end_transferred_call(&mut alice_dialog, &bob, &charlie).await;
+
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

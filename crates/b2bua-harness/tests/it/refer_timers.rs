@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -130,5 +130,7 @@ async fn refer_overall_safety_fires() {
 
     let _ = &mut alice_dialog;
     let _ = &mut charlie_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

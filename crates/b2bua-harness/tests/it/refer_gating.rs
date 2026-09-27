@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -146,6 +146,8 @@ async fn refer_gating_a_reinvite_refer_authorizing() {
     bob.receive_tolerating("BYE", &["NOTIFY", "OPTIONS"]).await.respond(200, "OK").await;
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -216,6 +218,8 @@ async fn refer_gating_a_reinvite_c_ringing() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -287,6 +291,8 @@ async fn refer_gating_a_reinvite_c_realigning() {
     alice_bye.expect(200).await;
 
     let _ = &mut charlie_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -359,6 +365,8 @@ async fn refer_gating_a_info_refer_authorizing() {
     bob.receive_tolerating("BYE", &["NOTIFY", "OPTIONS"]).await.respond(200, "OK").await;
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -429,6 +437,8 @@ async fn refer_gating_a_info_c_ringing() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -494,6 +504,8 @@ async fn refer_gating_b_info_refer_authorizing() {
     bob.receive_tolerating("BYE", &["NOTIFY", "OPTIONS"]).await.respond(200, "OK").await;
     alice_bye.expect_tolerating(200, &["OPTIONS"]).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -556,6 +568,8 @@ async fn refer_gating_second_refer_c_ringing() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -628,5 +642,7 @@ async fn refer_gating_second_refer_c_realigning() {
     alice_bye.expect(200).await;
 
     let _ = &mut charlie_dialog;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

@@ -25,7 +25,7 @@ const DEMO_LANE: &str = "upstream-demo";
 
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{B2buaScene, B2buaSut, BOB_PORT};
+use b2bua_harness::{settle_until, B2buaScene, B2buaSut, BOB_PORT};
 use call::model::cdr::CdrEventType;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpTransport, SimulatedHttpNetwork};
@@ -721,6 +721,8 @@ async fn rung_one_a_linear_answered_call_runs_green_and_writes_its_bundle() {
             if site == "step \"s7\"" && field == "header(P-Charging-Vector)"),
         "{note:#?}"
     );
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -745,6 +747,8 @@ async fn the_final_owed_to_a_sent_bye_is_absorbed_where_no_expect_scripts_it() {
         .unwrap_or_else(|| panic!("the owed final was recorded: {:#?}", outcome.recording.legs()))
         .clone();
     assert!(absorbed.note.as_deref().is_some_and(|note| note.contains("15.1.2")), "{absorbed:#?}");
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -784,6 +788,8 @@ async fn a_final_the_document_scripts_is_not_absorbed_when_its_status_differs() 
         "{:#?}",
         outcome.verdict.failures
     );
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -830,6 +836,8 @@ async fn an_auto_ack_acks_the_leg_s_own_invite_whatever_cseq_the_capture_carried
             );
         }
     }
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -886,6 +894,8 @@ async fn a_pipelined_re_invite_does_not_take_the_earlier_transaction_s_ack() {
         .count();
     assert_eq!(repeats, 1, "the answered re-INVITE was not laddered: {:#?}", legs["B"]);
 
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -932,6 +942,8 @@ async fn a_second_ack_for_one_2xx_still_finds_the_final_the_first_discharged() {
         assert!(text(ack).contains("CSeq: 1 ACK"), "both name the answered INVITE: {}", text(ack));
     }
 
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -949,6 +961,8 @@ async fn rung_two_a_cancelled_attempt_tolerates_the_ring_and_takes_the_teardown_
             outcome.verdict.completed_steps
         );
     }
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -1408,6 +1422,8 @@ async fn rung_two_an_alt_commits_to_the_branch_that_arrived_and_discards_the_oth
         !outcome.verdict.completed_steps.contains(&"s12".to_string()),
         "the branch that did not run contributes no step"
     );
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -1432,6 +1448,8 @@ async fn a_claim_is_scoped_to_the_socket_the_invite_arrived_on() {
     // And the claim landed on the socket that received it.
     let on_d = legs["D"].iter().any(|m| m.step.as_deref() == Some("s10"));
     assert!(on_d, "the second call's INVITE claimed leg D: {:#?}", legs["D"]);
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -1545,6 +1563,8 @@ async fn an_absorbed_retransmission_is_recorded_and_never_reaches_an_expect() {
     );
     assert!(!tu.iter().any(|e| e.is_repeat()), "no absorbed repeat reached the transaction user",);
 
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -1830,6 +1850,8 @@ async fn a_deviation_this_interpreter_cannot_emit_stops_the_run_before_the_wire(
     );
     assert!(dir.join("verdict.json").is_file());
 
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -1857,6 +1879,8 @@ async fn rung_two_a_loopback_endpoint_hosts_both_roles_on_one_socket() {
         .filter(|m| m.note.as_deref().is_some_and(|n| n.starts_with("background")))
         .count();
     assert!(answered >= 2, "the system's keepalives were answered: {legs:#?}");
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -1922,6 +1946,8 @@ async fn an_alt_its_released_absence_completes_still_settles_for_what_waits_on_i
             outcome.verdict.released_optional
         );
     }
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -1952,6 +1978,8 @@ async fn rung_three_two_calls_interleave_through_after() {
     for leg in ["A", "B", "C", "D"] {
         assert!(legs.contains_key(leg) && !legs[leg].is_empty(), "leg {leg} is empty: {legs:#?}");
     }
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -3968,6 +3996,8 @@ async fn a_dwell_anchored_on_an_alt_settles_when_the_block_completes() {
         "the tolerated absence was released by its budget: {:#?}",
         outcome.verdict.released_optional
     );
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -4341,6 +4371,8 @@ async fn a_ladder_paces_its_own_leg_and_parks_no_other() {
         byes[1].at_us
     );
 
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -4455,6 +4487,8 @@ async fn a_binary_body_is_recorded_byte_for_byte_on_both_legs() {
 
     assert_bundle_is_complete(&outcome, &dir);
     assert_eq!(outcome.verdict.completed_steps.len(), 17, "every step ran");
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -4477,6 +4511,8 @@ async fn a_binary_body_check_reads_its_bytes_as_base64_and_the_run_is_green() {
         "the run is green: {:#?}",
         outcome.verdict.failures
     );
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 
@@ -4521,6 +4557,8 @@ async fn a_multipart_body_s_recording_locates_its_parts_and_keeps_the_binary_one
 
     assert_bundle_is_complete(&outcome, &dir);
     assert_eq!(outcome.verdict.completed_steps.len(), 13, "every step ran");
+    settle_until(|| scene.b2bua.is_reaped()).await;
+    scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
 

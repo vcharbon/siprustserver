@@ -356,6 +356,8 @@ async fn service_http_request_round_trips_a_binary_body_verbatim() {
     assert_eq!(rb.1, req_b(), "server received corr-b request body verbatim");
 
     hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -390,5 +392,7 @@ async fn service_http_request_reenters_error_when_no_port_injected() {
     assert!(!err.is_empty(), "error re-entry carries a reason: {err:?}");
 
     hangup(&mut dialog, &bob).await;
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

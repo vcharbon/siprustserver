@@ -21,7 +21,7 @@
 //!      seam, `.without_core_refer_transfer()`) relays the REFER even on a call
 //!      whose route DID activate the feature.
 
-use b2bua_harness::B2buaSut;
+use b2bua_harness::{settle_until, B2buaSut};
 use scenario_harness::agent::ServerTxn;
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
@@ -104,6 +104,8 @@ async fn refer_intercept_wins_when_the_route_activates_local_processing() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -301,5 +303,7 @@ async fn refer_relays_transparently_when_core_refer_transfer_excluded() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

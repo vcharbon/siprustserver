@@ -137,6 +137,8 @@ async fn refer_allow_happy() {
         .expect("C's answer is recorded");
     assert_eq!(c_answer.decision_ordinal, 2);
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -188,6 +190,8 @@ async fn refer_allow_c486() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -269,6 +273,8 @@ async fn refer_allow_c_multiple_18x() {
     alice_bye.expect(200).await;
     let _ = &mut charlie_dialog;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -324,12 +330,20 @@ async fn refer_allow_c_no_answer() {
     assert_notify(&nterm, "terminated", "SIP/2.0 408");
     nterm.respond(200, "OK").await;
 
-    // A↔B survives; tear down normally. C was destroyed (CANCEL toward the
-    // still-early C leg, no BYE). Drain any retransmitted NOTIFY before the BYE.
+    // C is destroyed: CANCEL toward the still-early C leg, no BYE; charlie
+    // answers it and closes its INVITE with a 487.
+    charlie.receive("CANCEL").await.respond(200, "OK").await;
+    charlie_uas.respond(487, "Request Terminated").await;
+    charlie.receive("ACK").await;
+
+    // A↔B survives; tear down normally. Drain any retransmitted NOTIFY before
+    // the BYE.
     let mut alice_bye = alice_dialog.bye().await;
     bob.receive_tolerating("BYE", &["NOTIFY"]).await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -379,5 +393,7 @@ async fn refer_allow_c603() {
     bob.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

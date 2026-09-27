@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallTreatment, NewCallResponse, ScriptedDecisionEngine};
-use b2bua_harness::{B2buaScene, B2buaSut};
+use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
 use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 
@@ -62,6 +62,8 @@ async fn relayed_update_481_reaches_requester_and_call_survives() {
 
     // ── the dialogs are still live: a normal BYE teardown completes ──
     s.hangup(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 
@@ -100,6 +102,8 @@ async fn relayed_update_481_from_answering_side_reaches_bob() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
 
@@ -169,5 +173,7 @@ async fn update_during_pending_reroute_gets_491_and_reroute_completes() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

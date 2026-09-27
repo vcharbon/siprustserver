@@ -126,6 +126,8 @@ async fn announcement_happy_path() {
     dest.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
 
@@ -151,6 +153,8 @@ async fn announcement_mrf_rejects() {
     let failed = call.expect(503).await;
     assert_eq!(failed.status(), 503);
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
     assert_eq!(b2bua.active_calls(), 0, "the call is reaped");
 }
@@ -202,6 +206,8 @@ async fn announcement_clip_fails_after_answer_rejects_caller_without_bye() {
     // Only the (confirmed) media leg is BYE'd by the teardown.
     mrf.receive("BYE").await.respond(200, "OK").await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
     settle_until(|| b2bua.active_calls() == 0).await;
     assert_eq!(b2bua.active_calls(), 0, "the call reaps — no stranded a-leg BYE");
@@ -337,5 +343,7 @@ async fn announcement_caller_cancels_mid_clip() {
     // no announcement rule is involved (the generic termination reaps it).
     mrf.receive("BYE").await.respond(200, "OK").await;
 
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
