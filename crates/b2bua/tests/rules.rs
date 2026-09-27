@@ -640,8 +640,7 @@ fn decision_folds_on_a_live_call_still_apply() {
 /// counting the call on `x` + `y`.
 fn route_fold_payload_with_holds() -> serde_json::Value {
     let mut payload = route_fold_payload();
-    payload["call_limiter"] =
-        serde_json::json!({ "key": "call#k", "counted": true, "ids": ["x", "y"] });
+    payload["call_limiter"] = serde_json::json!({ "key": "call#k", "counted": true, "release_owed": true, "ids": ["x", "y"] });
     payload
 }
 
@@ -664,10 +663,10 @@ fn a_terminating_call_takes_the_route_fold_limiter_state() {
             panic!("one teardown rule takes the {topic}/{outcome} holds, got {candidates:?}");
         };
         let actions = fold_result(&call, rule_id, topic, outcome, payload);
-        let [RuleAction::SetLimiterState { key, counted, ids }] = &actions[..] else {
+        let [RuleAction::SetLimiterState { key, counted, release_owed, ids }] = &actions[..] else {
             panic!("{rule_id} states the call's limiter state and nothing else, got {actions:?}");
         };
-        assert!(counted);
+        assert!(*counted && *release_owed);
         assert_eq!(key, "call#k");
         assert_eq!(ids, &["x".to_string(), "y".to_string()]);
     }
@@ -677,8 +676,10 @@ fn a_terminating_call_takes_the_route_fold_limiter_state() {
 fn a_resolution_after_a_refused_route_states_the_call_uncounted() {
     // A refused route dropped the call's set: the resolution it ends in (the
     // failure chain's reject, redirect or terminate, a release whose reroute
-    // was refused) states the call uncounted first, live or going away.
-    let uncounted = serde_json::json!({ "key": "call#k", "counted": false, "ids": [] });
+    // was refused) states the call uncounted, owing its release, first, live
+    // or going away.
+    let uncounted =
+        serde_json::json!({ "key": "call#k", "counted": false, "release_owed": true, "ids": [] });
     let mut live = test_call();
     live.limiter = call::CallLimiterState::admitted("call#k".into(), vec!["x".into()]);
     live.callback_context = Some("cb".into());
@@ -711,7 +712,8 @@ fn a_resolution_after_a_refused_route_states_the_call_uncounted() {
         assert!(
             matches!(
                 actions.first(),
-                Some(RuleAction::SetLimiterState { counted: false, ids, .. }) if ids.is_empty()
+                Some(RuleAction::SetLimiterState { counted: false, release_owed: true, ids, .. })
+                    if ids.is_empty()
             ),
             "{rule_id} states the call uncounted first, got {actions:?}",
         );
@@ -722,7 +724,10 @@ fn a_resolution_after_a_refused_route_states_the_call_uncounted() {
         };
         let actions = fold_result(&going_away, teardown, topic, outcome, payload);
         assert!(
-            matches!(&actions[..], [RuleAction::SetLimiterState { counted: false, .. }]),
+            matches!(
+                &actions[..],
+                [RuleAction::SetLimiterState { counted: false, release_owed: true, .. }]
+            ),
             "{teardown} states the going-away call uncounted, got {actions:?}",
         );
     }
@@ -762,8 +767,7 @@ fn a_live_route_fold_hands_the_call_holds_to_its_route() {
         );
 
         let mut uncounted = route_fold_payload();
-        uncounted["call_limiter"] =
-            serde_json::json!({ "key": "call#k", "counted": false, "ids": [] });
+        uncounted["call_limiter"] = serde_json::json!({ "key": "call#k", "counted": false, "release_owed": true, "ids": [] });
         let actions = fold_result(&call, rule_id, topic, outcome, uncounted);
         assert!(
             actions.iter().any(|a| matches!(
@@ -3932,12 +3936,13 @@ mod enforce_equivalence {
             result.effects.buffered.push(BufferedObservabilityEffect::WriteCdr);
         }
 
-        // One release per counted call: a pre-emitted release discharges it.
+        // One release per call that sent an admit: a pre-emitted release
+        // discharges it.
         let already =
             result.effects.soft.iter().any(
                 |e| matches!(e, SoftBoundedEffect::ReleaseLimiter { key } if *key == result.call.limiter.key),
             );
-        if result.call.limiter.counted && !already {
+        if result.call.limiter.release_owed && !already {
             result
                 .effects
                 .soft
@@ -3958,10 +3963,15 @@ mod enforce_equivalence {
     }
 
     fn arb_limiter_state() -> impl Strategy<Value = CallLimiterState> {
-        (any::<bool>(), proptest::collection::vec(prop_oneof![Just("l1"), Just("l2")], 0..3))
-            .prop_map(|(counted, ids)| CallLimiterState {
+        (
+            any::<bool>(),
+            any::<bool>(),
+            proptest::collection::vec(prop_oneof![Just("l1"), Just("l2")], 0..3),
+        )
+            .prop_map(|(counted, sent, ids)| CallLimiterState {
                 key: "call#k".into(),
                 counted,
+                release_owed: counted || sent,
                 ids: ids.into_iter().map(str::to_string).collect(),
             })
     }
@@ -4039,7 +4049,7 @@ mod enforce_equivalence {
     }
 }
 
-// ── the limiter settle: one release per counted call ─────────────────────────
+// ── the limiter settle: one release per call that sent an admit ─────────────
 mod limiter_settle {
     use super::*;
     use b2bua::effects::{HandlerEffects, SoftBoundedEffect};
@@ -4083,13 +4093,25 @@ mod limiter_settle {
     }
 
     #[test]
-    fn an_uncounted_call_owes_no_release() {
+    fn a_call_that_sent_no_admit_owes_no_release() {
         let mut call = test_call();
         call.limiter = CallLimiterState::uncounted(call.limiter.key.clone());
         let mut effects = HandlerEffects::new();
         ObligationSet::core().settle(&call, &mut effects);
         assert_eq!(releases(&effects), 0, "{:?}", effects.soft);
         assert!(ObligationSet::core().owed(&call).iter().all(|o| o.kind == "cdr"));
+    }
+
+    #[test]
+    fn an_uncounted_call_that_sent_an_admit_is_released_once() {
+        let mut call = test_call();
+        call.limiter = CallLimiterState::unconfirmed(call.limiter.key.clone());
+        let mut effects = HandlerEffects::new();
+        ObligationSet::core().settle(&call, &mut effects);
+        assert_eq!(releases(&effects), 1, "{:?}", effects.soft);
+        assert_eq!(ObligationSet::core().owed(&call).len(), 2, "the limiter and the CDR");
+        ObligationSet::core().settle(&call, &mut effects);
+        assert_eq!(releases(&effects), 1, "{:?}", effects.soft);
     }
 
     /// Execute `actions` on `call` for a failover fold's turn, then enforce.
@@ -4123,6 +4145,7 @@ mod limiter_settle {
             &[RuleAction::SetLimiterState {
                 key: call.limiter.key.clone(),
                 counted: true,
+                release_owed: true,
                 ids: vec!["x".into()],
             }],
         );
@@ -4132,32 +4155,35 @@ mod limiter_settle {
         );
         assert_eq!(releases(&result.effects), 0, "{:?}", result.effects.soft);
 
-        // A route that admitted nothing leaves the call uncounted.
+        // A route that admitted nothing leaves the call uncounted, still owing
+        // the release its first admit made.
         let result = fold_turn(
             &call,
             &[RuleAction::SetLimiterState {
                 key: call.limiter.key.clone(),
                 counted: false,
+                release_owed: false,
                 ids: vec![],
             }],
         );
-        assert_eq!(result.call.limiter, CallLimiterState::uncounted(call.limiter.key.clone()));
+        assert_eq!(result.call.limiter, CallLimiterState::unconfirmed(call.limiter.key.clone()));
         assert_eq!(releases(&result.effects), 0, "{:?}", result.effects.soft);
     }
 
     #[test]
     fn a_fold_naming_another_key_releases_that_key_and_leaves_the_call_alone() {
         // A fold of an earlier call under this call_ref (its key differs):
-        // the resident call's state stays, the fold's counted key is released
-        // as a gone call's; a fold counting nothing releases nothing.
+        // the resident call's state stays, the fold's key is released as a
+        // gone call's when owed; a fold owing nothing releases nothing.
         let mut call = test_call();
         call.limiter = CallLimiterState::admitted(call.limiter.key.clone(), vec!["x".into()]);
         let result = fold_turn(
             &call,
             &[RuleAction::SetLimiterState {
                 key: "earlier#k".into(),
-                counted: true,
-                ids: vec!["y".into()],
+                counted: false,
+                release_owed: true,
+                ids: vec![],
             }],
         );
         assert_eq!(result.call.limiter, call.limiter, "the resident call is untouched");
@@ -4172,7 +4198,12 @@ mod limiter_settle {
         assert_eq!(released, ["earlier#k"]);
         let result = fold_turn(
             &call,
-            &[RuleAction::SetLimiterState { key: "earlier#k".into(), counted: false, ids: vec![] }],
+            &[RuleAction::SetLimiterState {
+                key: "earlier#k".into(),
+                counted: false,
+                release_owed: false,
+                ids: vec![],
+            }],
         );
         assert_eq!(releases(&result.effects), 0, "{:?}", result.effects.soft);
     }
@@ -4190,6 +4221,7 @@ mod limiter_settle {
                 RuleAction::SetLimiterState {
                     key: call.limiter.key.clone(),
                     counted: true,
+                    release_owed: true,
                     ids: vec!["x".into()],
                 },
                 RuleAction::TerminateCall { cause: TerminationCause::Supervisor, by_leg: None },
@@ -4198,17 +4230,29 @@ mod limiter_settle {
         assert_eq!(result.call.state, CallModelState::Terminated, "the turn ends the call");
         assert_eq!(releases(&result.effects), 1, "{:?}", result.effects.soft);
 
-        // A fold that left the call uncounted ends it with no release.
+        // A fold that left the call uncounted ends it with one release too:
+        // the call sent its admits.
         let result = fold_turn(
             &call,
             &[
                 RuleAction::SetLimiterState {
                     key: call.limiter.key.clone(),
                     counted: false,
+                    release_owed: true,
                     ids: vec![],
                 },
                 RuleAction::TerminateCall { cause: TerminationCause::Supervisor, by_leg: None },
             ],
+        );
+        assert_eq!(result.call.state, CallModelState::Terminated);
+        assert_eq!(releases(&result.effects), 1, "{:?}", result.effects.soft);
+
+        // A call that never sent an admit ends with none.
+        let mut fresh = call.clone();
+        fresh.limiter = CallLimiterState::uncounted(call.limiter.key.clone());
+        let result = fold_turn(
+            &fresh,
+            &[RuleAction::TerminateCall { cause: TerminationCause::Supervisor, by_leg: None }],
         );
         assert_eq!(result.call.state, CallModelState::Terminated);
         assert_eq!(releases(&result.effects), 0, "{:?}", result.effects.soft);

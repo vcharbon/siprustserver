@@ -5,7 +5,7 @@
 //! timeout budget lives here**: every request is wrapped in
 //! `tokio::time::timeout`, and a timeout *or* any transport error *or* a
 //! non-200 status maps to [`AdmitOutcome::Unavailable`] — the call site then
-//! runs the call uncounted.
+//! fails open, owing the call's release (the request may have landed).
 
 use std::net::SocketAddr;
 use std::sync::Arc;

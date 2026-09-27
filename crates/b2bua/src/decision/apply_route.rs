@@ -16,7 +16,7 @@ use crate::decision::{
 use crate::effects::{
     BufferedObservabilityEffect, CriticalStateEffect, HandlerEffects, HandlerResult,
 };
-use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
+use crate::limiter::{state_after_admit, AdmitOutcome, CallLimiter, LimiterEntry};
 use crate::rules::capabilities;
 use crate::rules::relay;
 use crate::target_admission::{classify_admission, AdmissionVerdict};
@@ -123,7 +123,9 @@ pub async fn apply_route(
 
     // Admission control: one admit of the route's whole limiter set, keyed by
     // the call — all or none. The initial route holds nothing yet, so a
-    // refusal releases nothing. The b2bua owns the fail-open policy.
+    // refusal releases nothing. The b2bua owns the fail-open policy
+    // (`state_after_admit`): a sent admit owes the call's release whatever
+    // its answer; only an admitted set is counted and refreshed.
     if !route.call_limiter.is_empty() {
         let entries: Vec<LimiterEntry> = route
             .call_limiter
@@ -139,9 +141,10 @@ pub async fn apply_route(
                 &format!("{entries:?} -> {outcome:?}"),
             );
         }
+        let ids: Vec<String> = entries.into_iter().map(|e| e.id).collect();
+        call.limiter = state_after_admit(&call.limiter, &outcome, false, ids);
         match outcome {
             AdmitOutcome::Admitted => {
-                call.limiter.set(true, entries.into_iter().map(|e| e.id).collect());
                 // Arm the refresh timer so a long call keeps its lease alive.
                 let entry = TimerEntry {
                     id: format!("{:?}", TimerType::LimiterRefresh),
@@ -152,13 +155,11 @@ pub async fn apply_route(
                 call.timers.push(entry.clone());
                 fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
             }
-            // Fail open: the call runs uncounted (nothing released or
-            // refreshed).
-            AdmitOutcome::Unavailable => call.limiter.set(false, Vec::new()),
+            // Fail open: the call runs uncounted (no refresh).
+            AdmitOutcome::Unavailable | AdmitOutcome::NotSent => {}
             // The key was minted this turn, so a release fence on it is
             // unreachable; counted as `limiter_admit_released_initial`.
             AdmitOutcome::Released => {
-                call.limiter.set(false, Vec::new());
                 fx.buffered.push(BufferedObservabilityEffect::LimiterAdmitReleased);
             }
             AdmitOutcome::Rejected { limiter_id } => {

@@ -17,7 +17,7 @@ use crate::decision::{
 };
 use crate::decision_log::STACK_AUTHORED;
 use crate::event::CallEvent;
-use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
+use crate::limiter::{state_after_admit, AdmitOutcome, CallLimiter, LimiterEntry};
 use crate::rules::defaults::route_fold_limiter_state;
 use tokio::sync::mpsc;
 
@@ -66,11 +66,12 @@ async fn send_route_fold(
     }
 }
 
-/// Release the call a route fold counts ([`route_fold_limiter_state`]) — for
-/// a fold no call will state. The call's own terminal release may have run
-/// already: the server applies this one as a no-op then.
+/// Release the call a route fold owes a release for
+/// ([`route_fold_limiter_state`]) — for a fold no call will state. The call's
+/// own terminal release may have run already: the server applies this one as
+/// a no-op then.
 pub(super) async fn release_route_fold_call(limiter: &dyn CallLimiter, fold: &CallEvent) {
-    if let Some(state) = route_fold_limiter_state(fold).filter(|l| l.counted) {
+    if let Some(state) = route_fold_limiter_state(fold).filter(|l| l.release_owed) {
         limiter.release(&state.key).await;
     }
 }
@@ -113,36 +114,35 @@ fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
 /// `admit(key, entries, release_on_refusal = true)`, checked net of the set
 /// the call holds: a refusal releases that set in the same step. Nothing is
 /// sent for a route stating no limiter on a call the limiter does not count.
-/// `Ok(state)`: the call's admission state the fold carries — counted with
-/// the route's ids, or uncounted after an empty route, a fail-open admit or a
-/// release-fence refusal (the call ended; counted as `limiter_admit_released_fold`);
-/// `Err(limiter_id)`: refused on a cap — the caller owns the treatment, the
-/// call holds nothing.
+/// `Ok(state)`: the call's admission state the fold carries
+/// ([`state_after_admit`] from `prior`) — counted with the route's ids, as it
+/// was after a lost answer, or uncounted after an empty route or a
+/// release-fence refusal (the call ended; counted as
+/// `limiter_admit_released_fold`); `Err(limiter_id)`: refused on a cap — the
+/// caller owns the treatment, the call holds nothing and owes its release.
 async fn admit_route_limiters(
     ctx: &RouterCtx,
-    key: &str,
-    counted: bool,
+    prior: &CallLimiterState,
     route: &RouteDecision,
 ) -> Result<CallLimiterState, String> {
-    if route.call_limiter.is_empty() && !counted {
-        return Ok(CallLimiterState::uncounted(key.to_string()));
+    if route.call_limiter.is_empty() && !prior.counted {
+        return Ok(prior.clone());
     }
     let entries: Vec<LimiterEntry> = route
         .call_limiter
         .iter()
         .map(|e| LimiterEntry { id: e.id.clone(), limit: e.limit })
         .collect();
-    match ctx.limiter.admit(key, &entries, true).await {
-        AdmitOutcome::Admitted => Ok(CallLimiterState::admitted(
-            key.to_string(),
-            entries.into_iter().map(|e| e.id).collect(),
-        )),
-        AdmitOutcome::Unavailable => Ok(CallLimiterState::uncounted(key.to_string())),
-        AdmitOutcome::Released => {
-            ctx.metrics.bump_limiter_admit_released_fold();
-            Ok(CallLimiterState::uncounted(key.to_string()))
-        }
+    let outcome = ctx.limiter.admit(&prior.key, &entries, true).await;
+    let ids: Vec<String> = entries.into_iter().map(|e| e.id).collect();
+    match outcome {
         AdmitOutcome::Rejected { limiter_id } => Err(limiter_id),
+        outcome => {
+            if outcome == AdmitOutcome::Released {
+                ctx.metrics.bump_limiter_admit_released_fold();
+            }
+            Ok(state_after_admit(prior, &outcome, true, ids))
+        }
     }
 }
 
@@ -310,7 +310,8 @@ pub(super) fn spawn_failure_callout(
 /// limiter refusal, not the failed peer's final — the fold says so via
 /// `origin`, so the a-facing mint carries none of the peer's relayed headers
 /// (ADR-0017 X2). A resolution other than a route after a refusal carries the
-/// call uncounted in `call_limiter`: the refusal dropped its set.
+/// call uncounted, owing its release, in `call_limiter`: the refusal dropped
+/// its set.
 async fn failure_outcome(
     ctx: &Arc<RouterCtx>,
     limiter: &CallLimiterState,
@@ -325,16 +326,15 @@ async fn failure_outcome(
     // A refused replacement released the call's set: the re-consult's route
     // replaces nothing, and a resolution other than a route states the call
     // uncounted.
-    let mut counted = limiter.counted;
+    let mut state = limiter.clone();
     let mut refused = false;
     let (outcome, mut payload) = loop {
         match ctx.decision.call_failure(req).await {
             Ok(CallTreatment::Route(route)) => {
-                let admitted = match admit_route_limiters(ctx, &limiter.key, counted, &route).await
-                {
+                let admitted = match admit_route_limiters(ctx, &state, &route).await {
                     Ok(admitted) => admitted,
                     Err(limiter_id) => {
-                        counted = false;
+                        state = CallLimiterState::unconfirmed(state.key);
                         refused = true;
                         if route.callback_context.is_some()
                             && depth < crate::decision::apply_route::MAX_LIMITER_FAILOVER
@@ -433,7 +433,7 @@ async fn failure_outcome(
         }
     };
     if refused && outcome != "failover" {
-        payload["call_limiter"] = uncounted_payload(&limiter.key);
+        payload["call_limiter"] = to_payload(state);
     }
     (outcome, payload)
 }
@@ -498,14 +498,15 @@ pub(super) fn spawn_release_callout(
         let event = json!(req.event);
         let (outcome, payload) = match ctx2.decision.call_release(req).await {
             Ok(CallReleaseResponse::Route(route)) => {
-                match admit_route_limiters(&ctx2, &limiter.key, limiter.counted, &route).await {
+                match admit_route_limiters(&ctx2, &limiter, &route).await {
                     Ok(admitted) => ("reroute", route_result_payload(route, admitted, None)),
                     // Divergence from the failover chain, DOCUMENTED: a limiter
                     // reject here does NOT re-consult the engine — the call was
                     // going down anyway, so the reject degrades to the release
                     // default (local teardown) instead of a recursive failover
                     // walk; the refusal released the call's set, and the fold
-                    // states the call uncounted. The answer still stands for
+                    // states the call uncounted, owing its release. The
+                    // answer still stands for
                     // everything but its route: the release is marked under its
                     // label and its service slices are merged.
                     Err(_) => {
@@ -513,7 +514,7 @@ pub(super) fn spawn_release_callout(
                             "reason": "limiter_rejected",
                             "event": event,
                             "label": route.label,
-                            "call_limiter": uncounted_payload(&limiter.key),
+                            "call_limiter": CallLimiterState::unconfirmed(limiter.key.clone()),
                         });
                         if !route.service_ext.is_empty() {
                             payload["service_ext"] = json!(route.service_ext);
@@ -645,20 +646,6 @@ struct RouteDestinationPayload {
     port: Option<u16>,
 }
 
-/// The call's admission state after the dispatching task replaced its set.
-#[derive(Serialize)]
-struct CallLimiterPayload {
-    key: String,
-    counted: bool,
-    ids: Vec<String>,
-}
-
-/// The `call_limiter` of a resolution a refused route ends in: the refusal
-/// dropped the call's set, so the call is uncounted.
-fn uncounted_payload(key: &str) -> serde_json::Value {
-    to_payload(CallLimiterPayload { key: key.to_string(), counted: false, ids: Vec::new() })
-}
-
 /// The internal-event payload the route-fold rules (`failover-create-leg` /
 /// `release-reroute`) consume: destination, identity/header rewrites, the
 /// output-parity fields the initial `apply_route` honors (features,
@@ -692,7 +679,9 @@ struct RoutePayload {
     // Keep → absent; Drop → null; Replace(s) → the string.
     #[serde(skip_serializing_if = "Option::is_none")]
     update_body: Option<Option<String>>,
-    call_limiter: CallLimiterPayload,
+    /// The call's admission state after the dispatching task replaced its
+    /// set.
+    call_limiter: CallLimiterState,
     #[serde(skip_serializing_if = "Option::is_none")]
     failed_leg_id: Option<String>,
     /// The decision's label, for the fold's `MarkDecision`.
@@ -729,11 +718,7 @@ fn route_result_payload(
             crate::decision::BodyUpdate::Drop => Some(None),
             crate::decision::BodyUpdate::Replace(s) => Some(Some(s)),
         },
-        call_limiter: CallLimiterPayload {
-            key: admitted.key,
-            counted: admitted.counted,
-            ids: admitted.ids,
-        },
+        call_limiter: admitted,
         failed_leg_id,
         label: route.label,
     })
@@ -841,14 +826,18 @@ mod tests {
         }
     }
 
-    fn failover_fold(counted: bool) -> CallEvent {
+    fn failover_fold(counted: bool, release_owed: bool) -> CallEvent {
         let mut route = crate::decision::test_adapter::route_to("127.0.0.1", 5070);
         route.call_limiter = vec![
             crate::decision::CallLimiterEntry { id: "x".into(), limit: 10 },
             crate::decision::CallLimiterEntry { id: "y".into(), limit: 10 },
         ];
-        let admitted =
-            CallLimiterState { key: "call-1#k".into(), counted, ids: vec!["x".into(), "y".into()] };
+        let admitted = CallLimiterState {
+            key: "call-1#k".into(),
+            counted,
+            release_owed,
+            ids: if counted { vec!["x".into(), "y".into()] } else { vec![] },
+        };
         let payload = route_result_payload(route, admitted, Some("b-1".into()));
         internal_event("call-1".into(), "call-failure-result", "failover", payload, Vec::new())
     }
@@ -858,28 +847,40 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
         let limiter = RecordingLimiter::default();
-        send_route_fold(&tx, &limiter, failover_fold(true)).await;
+        send_route_fold(&tx, &limiter, failover_fold(true, true)).await;
         assert_eq!(*limiter.released.lock().unwrap(), vec!["call-1#k".to_string()], "by its key");
     }
 
     #[tokio::test]
-    async fn a_route_fold_counting_nothing_releases_nothing() {
+    async fn an_uncounted_route_fold_owing_its_release_releases_its_call() {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
         let limiter = RecordingLimiter::default();
-        send_route_fold(&tx, &limiter, failover_fold(false)).await;
-        assert!(limiter.released.lock().unwrap().is_empty(), "an uncounted call owes nothing");
+        send_route_fold(&tx, &limiter, failover_fold(false, true)).await;
+        assert_eq!(*limiter.released.lock().unwrap(), vec!["call-1#k".to_string()], "by its key");
+    }
+
+    #[tokio::test]
+    async fn a_route_fold_owing_nothing_releases_nothing() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let limiter = RecordingLimiter::default();
+        send_route_fold(&tx, &limiter, failover_fold(false, false)).await;
+        assert!(
+            limiter.released.lock().unwrap().is_empty(),
+            "a call that sent no admit owes nothing"
+        );
     }
 
     #[tokio::test]
     async fn a_delivered_route_fold_keeps_its_state_for_the_call() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let limiter = RecordingLimiter::default();
-        send_route_fold(&tx, &limiter, failover_fold(true)).await;
+        send_route_fold(&tx, &limiter, failover_fold(true, true)).await;
         assert!(limiter.released.lock().unwrap().is_empty(), "the call states it");
         let state =
             route_fold_limiter_state(&rx.recv().await.unwrap()).expect("the fold carries it");
-        assert!(state.counted);
+        assert!(state.counted && state.release_owed);
         assert_eq!(state.key, "call-1#k");
         assert_eq!(state.ids, ["x", "y"]);
     }

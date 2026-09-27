@@ -128,22 +128,22 @@ pub(crate) fn route_fold_limiter_state(event: &CallEvent) -> Option<call::CallLi
 /// The [`RuleAction::SetLimiterState`] a non-route resolution states when its
 /// fold carries a limiter state (a refused route dropped the call's set).
 pub(crate) fn fold_limiter_state_action(event: &CallEvent) -> Option<RuleAction> {
-    let limiter = route_fold_limiter_state(event)?;
-    Some(RuleAction::SetLimiterState {
+    route_fold_limiter_state(event).map(set_limiter_state)
+}
+
+/// The [`RuleAction::SetLimiterState`] stating `limiter` on the call.
+pub(crate) fn set_limiter_state(limiter: call::CallLimiterState) -> RuleAction {
+    RuleAction::SetLimiterState {
         key: limiter.key,
         counted: limiter.counted,
+        release_owed: limiter.release_owed,
         ids: limiter.ids,
-    })
+    }
 }
 
 /// A route payload's `call_limiter` object: `None` when absent or malformed.
 fn admitted_state(payload: &serde_json::Value) -> Option<call::CallLimiterState> {
-    let o = payload.get("call_limiter")?.as_object()?;
-    let key = o.get("key")?.as_str()?.to_string();
-    let counted = o.get("counted")?.as_bool()?;
-    let ids: Vec<String> =
-        o.get("ids")?.as_array()?.iter().filter_map(|e| Some(e.as_str()?.to_string())).collect();
-    Some(call::CallLimiterState { key, counted, ids })
+    serde_json::from_value(payload.get("call_limiter")?.clone()).ok()
 }
 
 /// The decision's `label` on a fold payload, read by the router's fold mark
@@ -200,11 +200,7 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
         actions.push(RuleAction::SetSubscriptions { events: events.clone() });
     }
     if let Some(limiter) = &fold.limiter {
-        actions.push(RuleAction::SetLimiterState {
-            key: limiter.key.clone(),
-            counted: limiter.counted,
-            ids: limiter.ids.clone(),
-        });
+        actions.push(set_limiter_state(limiter.clone()));
     }
     if fold.limiter.as_ref().is_some_and(|l| l.counted) {
         actions.push(RuleAction::ScheduleTimer {

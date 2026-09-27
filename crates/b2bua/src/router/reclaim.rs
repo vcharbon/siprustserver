@@ -181,7 +181,7 @@ async fn discharge_folded_terminal(
 /// left to pin its limiter slot or leak its replica body forever. So this pass, in
 /// order:
 ///   1. for each **expired deferred terminal**, release the call on the limiter
-///      (the body carries `limiter.{key, counted}`; this is the SAME `release(key)`
+///      (the body carries `limiter.{key, release_owed}`; this is the SAME `release(key)`
 ///      the discharge funnel emits) and count it as a lost-CDR cleanup — the
 ///      accepted double-failure (primary down AND never returns): limiter freed,
 ///      memory freed, **CDR lost**.
@@ -210,10 +210,11 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
 
 /// Release the cluster-wide limiter set a never-reclaimed deferred terminal
 /// still owns, WITHOUT writing a CDR or propagating a delete. Mirrors the
-/// `LimiterObligations` derivation (an uncounted call owes nothing). The backup
-/// is the only node that can free this slot once its primary is dead for good.
+/// `LimiterObligations` derivation (a call that sent no admit owes nothing).
+/// The backup is the only node that can free this slot once its primary is
+/// dead for good.
 async fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
-    if call.limiter.counted {
+    if call.limiter.release_owed {
         ctx.limiter.release(&call.limiter.key).await;
     }
 }

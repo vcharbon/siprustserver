@@ -320,15 +320,15 @@ impl ActionExecutor<'_> {
                     *call = call::helpers::set_call_ext(call.clone(), service_id, v);
                 }
             }
-            RuleAction::SetLimiterState { key, counted, ids } => {
+            RuleAction::SetLimiterState { key, counted, release_owed, ids } => {
                 // The fold's dispatching task already replaced the set under
                 // `key` on the limiter; this turn's write states the outcome,
                 // which the terminal settle reads to owe one release. A fold of
                 // an earlier call under this call_ref names another key: that
                 // key is released as a gone call's, this call untouched.
                 if *key == call.limiter.key {
-                    call.limiter.set(*counted, ids.clone());
-                } else if *counted {
+                    call.limiter.set(*counted, *release_owed, ids.clone());
+                } else if *release_owed {
                     fx.soft.push(SoftBoundedEffect::ReleaseLimiter { key: key.clone() });
                 }
             }

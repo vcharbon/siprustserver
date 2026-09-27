@@ -4,18 +4,21 @@
 //! unique over time): [`CallLimiter::admit`] replaces the call's whole set on
 //! the server, checked net of what the call already holds, and reports
 //! [`AdmitOutcome::Admitted`] / [`AdmitOutcome::Rejected`] /
-//! [`AdmitOutcome::Released`] / [`AdmitOutcome::Unavailable`];
-//! [`CallLimiter::release`] drops the set (idempotent);
+//! [`AdmitOutcome::Released`] / [`AdmitOutcome::Unavailable`] /
+//! [`AdmitOutcome::NotSent`]; [`CallLimiter::release`] drops the set
+//! (idempotent, a no-op for a key the server holds nothing for);
 //! [`CallLimiter::refresh`] extends its lease, or re-registers the set the
 //! call carries when the server no longer holds it. The **call site owns the
-//! fail-open policy**: an `Unavailable` admit leaves the call uncounted, and
-//! an uncounted call never refreshes or releases.
+//! fail-open policy** ([`state_after_admit`]): a failed admit leaves the call
+//! as it was, a sent one owes the call's release, and only a confirmed set
+//! refreshes.
 //!
 //! The HTTP client implementation lives in [`crate::limiter_http`]; this module
 //! is the trait + a no-op (used when `LIMITER_URL` is unset and in tests that
 //! don't exercise limits).
 
 use async_trait::async_trait;
+use call::CallLimiterState;
 
 /// One limiter entry to admit: an id and its concurrent-call cap.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,9 +43,37 @@ pub enum AdmitOutcome {
     /// The call was released within the last lease: the server holds nothing
     /// for it and re-creates nothing.
     Released,
-    /// The backend was unreachable / slow / errored. The caller decides what
-    /// to do (b2bua: fail open — the call runs uncounted).
+    /// The request left and no usable answer came back (unreachable, slow,
+    /// errored, a bad body): it may have landed. The caller decides what to
+    /// do (b2bua: fail open).
     Unavailable,
+    /// No request left (no limiter configured, or a local guard refused to
+    /// send one): nothing can have landed. The caller fails open.
+    NotSent,
+}
+
+/// The call's admission state after an admit of `ids` answered `outcome`,
+/// from its state `prior`. Every answered or lost request owes the call's
+/// release; a cap refusal leaves the call uncounted when the limiter dropped
+/// its set (`release_on_refusal`, or a call that held none) and as it was
+/// otherwise; a lost answer and an unsent request leave the call counted as
+/// it was, refreshing whatever set the limiter holds for its key.
+pub fn state_after_admit(
+    prior: &CallLimiterState,
+    outcome: &AdmitOutcome,
+    release_on_refusal: bool,
+    ids: Vec<String>,
+) -> CallLimiterState {
+    let key = prior.key.clone();
+    match outcome {
+        AdmitOutcome::Admitted => CallLimiterState::admitted(key, ids),
+        AdmitOutcome::Rejected { .. } if release_on_refusal || !prior.counted => {
+            CallLimiterState::unconfirmed(key)
+        }
+        AdmitOutcome::Rejected { .. } | AdmitOutcome::Unavailable => prior.with_release_owed(),
+        AdmitOutcome::Released => CallLimiterState::unconfirmed(key),
+        AdmitOutcome::NotSent => prior.clone(),
+    }
 }
 
 /// The honest outcome of one refresh.
@@ -79,19 +110,75 @@ pub trait CallLimiter: Send + Sync {
     async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome;
 }
 
-/// Always unavailable: every admit fails open, so nothing is ever released or
-/// refreshed. Used when `LIMITER_URL` is unset, preserving the non-limiting
-/// behaviour.
+/// No limiter: every admit sends nothing ([`AdmitOutcome::NotSent`]), so no
+/// call is counted, refreshed or owes a release. Used when `LIMITER_URL` is
+/// unset, preserving the non-limiting behaviour.
 #[derive(Clone, Default)]
 pub struct NoopLimiter;
 
 #[async_trait]
 impl CallLimiter for NoopLimiter {
     async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
-        AdmitOutcome::Unavailable
+        AdmitOutcome::NotSent
     }
     async fn release(&self, _key: &str) {}
     async fn refresh(&self, _key: &str, _ids: &[String]) -> RefreshOutcome {
         RefreshOutcome::Unavailable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn counted() -> CallLimiterState {
+        CallLimiterState::admitted("c#k".into(), ids(&["x"]))
+    }
+
+    fn fresh() -> CallLimiterState {
+        CallLimiterState::uncounted("c#k".into())
+    }
+
+    fn refused() -> AdmitOutcome {
+        AdmitOutcome::Rejected { limiter_id: "y".into() }
+    }
+
+    #[test]
+    fn a_sent_initial_admit_owes_the_release_whatever_its_answer() {
+        for outcome in [refused(), AdmitOutcome::Released, AdmitOutcome::Unavailable] {
+            let state = state_after_admit(&fresh(), &outcome, false, ids(&["x", "y"]));
+            assert_eq!(state, CallLimiterState::unconfirmed("c#k".into()), "{outcome:?}");
+        }
+        let state = state_after_admit(&fresh(), &AdmitOutcome::Admitted, false, ids(&["x", "y"]));
+        assert_eq!(state, CallLimiterState::admitted("c#k".into(), ids(&["x", "y"])));
+    }
+
+    #[test]
+    fn an_unsent_admit_leaves_the_call_as_it_was() {
+        let state = state_after_admit(&fresh(), &AdmitOutcome::NotSent, false, ids(&["x"]));
+        assert_eq!(state, fresh(), "an unsent initial admit owes nothing");
+        let state = state_after_admit(&counted(), &AdmitOutcome::NotSent, true, ids(&["y"]));
+        assert_eq!(state, counted(), "a counted call stays counted on its set");
+    }
+
+    #[test]
+    fn a_lost_reroute_answer_keeps_the_call_counted_on_its_confirmed_ids() {
+        let state = state_after_admit(&counted(), &AdmitOutcome::Unavailable, true, ids(&["y"]));
+        assert_eq!(state, counted());
+        assert!(state.release_owed);
+    }
+
+    #[test]
+    fn a_refused_reroute_drops_the_set_only_when_it_asked_to() {
+        let state = state_after_admit(&counted(), &refused(), true, ids(&["y"]));
+        assert_eq!(state, CallLimiterState::unconfirmed("c#k".into()));
+        let state = state_after_admit(&counted(), &refused(), false, ids(&["y"]));
+        assert_eq!(state, counted(), "the old set stays");
+        let state = state_after_admit(&counted(), &AdmitOutcome::Released, true, ids(&["y"]));
+        assert_eq!(state, CallLimiterState::unconfirmed("c#k".into()));
     }
 }

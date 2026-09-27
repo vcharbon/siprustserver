@@ -69,8 +69,9 @@ pub struct LimiterCount {
     /// Holds the SUT released: the set of every call it released, and every
     /// set a later admit of the call replaced or a refusal dropped.
     pub released: i64,
-    /// Admits that failed open ([`AdmitOutcome::Unavailable`]): the call went
-    /// on uncounted, its granted holds left to the store's lease.
+    /// Admits that failed open ([`AdmitOutcome::Unavailable`],
+    /// [`AdmitOutcome::NotSent`]): the call went on as it was, and its
+    /// release frees whatever a request that landed left on the store.
     pub failed_open: i64,
     /// The registered store's live count summed over every id, if the SUT
     /// has a store (the default limiter's, or one registered by the test).
@@ -149,7 +150,7 @@ impl HoldLedger {
                 }
             }
             AdmitOutcome::Released => {}
-            AdmitOutcome::Unavailable => ledger.failed_open += 1,
+            AdmitOutcome::Unavailable | AdmitOutcome::NotSent => ledger.failed_open += 1,
         }
     }
 

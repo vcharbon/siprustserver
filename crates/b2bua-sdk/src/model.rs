@@ -940,15 +940,16 @@ pub enum RuleAction {
     /// State the call's admission state after a route fold: the fold's
     /// dispatching task already replaced the set held under `key` on the
     /// limiter (one `admit(key, ..)` net of the set the call held), so the
-    /// call is `counted` iff that admit was granted a non-empty set, and
-    /// `ids` names it. On a live call the refresh cadence follows; on a
-    /// going-away call the terminal settle releases the call. A `key` that is
-    /// not the resident call's names an earlier call under the same
-    /// `call_ref`: the call's state is left alone and that key is released
-    /// when counted.
+    /// call is `counted` with `ids` as the limiter confirmed them, and
+    /// `release_owed` once any admit request left for the key (the call's
+    /// obligation only grows). On a live call the refresh cadence follows;
+    /// the terminal settle releases a call that owes it. A `key` that is not
+    /// the resident call's names an earlier call under the same `call_ref`:
+    /// the call's state is left alone and that key is released when owed.
     SetLimiterState {
         key: String,
         counted: bool,
+        release_owed: bool,
         ids: Vec<String>,
     },
     /// Synthesize a final failure response on the a-leg INVITE server txn

@@ -110,37 +110,56 @@ pub struct PrackedProvisional {
 }
 
 /// The call's admission state on the call limiter: the key every hold of the
-/// call is kept under, whether the limiter counts the call, and the ids of the
-/// set it last admitted (observability: the CDR and the decision snapshot name
-/// them). The key is minted once at the call's creation and is unique over
-/// time (`call_ref` alone is not: a retried INVITE reuses it), so a release
-/// names this call and no later one; it is replicated with the call, so a
-/// takeover, a reclaim and the lossy reap release with the same key. A
-/// counted call refreshes its lease while it lives and owes one release at
-/// its end; an uncounted one (no limiter stated, or an admit that failed
-/// open) never refreshes or releases.
+/// call is kept under, whether the limiter counts the call, whether the call
+/// owes a release of its key, and the ids of the set it last admitted
+/// (observability: the CDR and the decision snapshot name them). The key is
+/// minted once at the call's creation and is unique over time (`call_ref`
+/// alone is not: a retried INVITE reuses it), so a release names this call and
+/// no later one; it is replicated with the call, so a takeover, a reclaim and
+/// the lossy reap release with the same key.
+///
+/// `counted` (the limiter confirmed a non-empty set) is what makes the call
+/// refresh its lease. `release_owed` is set once an admit request left for the
+/// key, whatever its answer, and is never cleared: the request may have landed,
+/// so the call releases its key once at its end. `counted` implies it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLimiterState {
     pub key: String,
     pub counted: bool,
+    pub release_owed: bool,
     pub ids: Vec<String>,
 }
 
 impl CallLimiterState {
-    /// The state of a call under `key` the limiter does not count.
+    /// The state of a call under `key` that sent no admit request.
     pub fn uncounted(key: String) -> Self {
-        Self { key, counted: false, ids: Vec::new() }
+        Self { key, counted: false, release_owed: false, ids: Vec::new() }
     }
 
     /// The state under `key` after an admitted set: counted iff the set is
-    /// not empty.
+    /// not empty; the release is owed either way.
     pub fn admitted(key: String, ids: Vec<String>) -> Self {
-        Self { key, counted: !ids.is_empty(), ids }
+        Self { key, counted: !ids.is_empty(), release_owed: true, ids }
     }
 
-    /// State the outcome of a replaced set, the key kept.
-    pub fn set(&mut self, counted: bool, ids: Vec<String>) {
+    /// The state under `key` after an admit request the limiter answered
+    /// with no set for the call (a cap refusal that dropped or never had
+    /// one, a release fence): uncounted, the release owed.
+    pub fn unconfirmed(key: String) -> Self {
+        Self { key, counted: false, release_owed: true, ids: Vec::new() }
+    }
+
+    /// This state after an admit request whose answer is lost: the set it
+    /// counted stays counted, and the release is owed.
+    pub fn with_release_owed(&self) -> Self {
+        Self { release_owed: true, ..self.clone() }
+    }
+
+    /// State the outcome of a replaced set, the key kept: `counted` and `ids`
+    /// are replaced, the release obligation only grows.
+    pub fn set(&mut self, counted: bool, release_owed: bool, ids: Vec<String>) {
         self.counted = counted;
+        self.release_owed |= release_owed;
         self.ids = ids;
     }
 }

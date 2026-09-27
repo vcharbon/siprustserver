@@ -44,10 +44,20 @@ and a lost release could not be retried.
    empty. A fenced call stays refused.
 5. **A set whose lease lapses is dropped and counted.** The lease is the
    backstop for every release the server never received.
-6. **A failed admit is never freed.** A technical failure (timeout, transport
-   error, a bad or non-200 answer) leaves the call **uncounted**: no refresh,
-   no release. A late admit that landed on the server lapses with its lease.
-   Counts read low while such calls live; the counters say how many.
+6. **A call that sent an admit request releases its key at its end**,
+   whatever the answer: admitted, refused at a cap, refused by a release
+   fence, a timeout, a transport error, a bad or non-200 answer. The request
+   may have landed; by decision 3 the release frees exactly what the server
+   holds for the call and nothing otherwise, and fences the key, so an admit
+   landing after it re-creates nothing. An admit that sent no request (no
+   limiter configured, a local guard refusing to send) owes nothing by
+   itself. Refresh stays reserved to a set the server confirmed: a failed
+   **initial** admit leaves the call uncounted (no refresh), so a set its
+   late admit created lives until the call's release or its lease, whichever
+   comes first. A counted call whose **reroute** admit fails technically
+   stays counted: its refresh extends whichever set the server holds for the
+   key (the old one, or the new one when the admit landed) or re-registers
+   the ids the server last confirmed, and its release frees it.
 7. **Only a counted Active call refreshes**, and it always has its refresh
    armed: the invariant layer re-arms a missing or past-due `LimiterRefresh`
    on every turn of the call, so a timer fire the per-call queue dropped heals
@@ -56,14 +66,19 @@ and a lost release could not be retried.
    plus one refresh period. A Terminating call stops refreshing: a teardown
    may outlast the lease (a release consult, then the sliding 32 s backstop),
    in which case the set lapses early and the terminal release is a no-op.
-8. **The call state is `{key, counted, ids}`**, one replicated field. A route
-   fold's dispatching task replaces the set before the fold reaches the call
-   and the fold states the outcome (`SetLimiterState`): the admitted route, or
-   uncounted when a refusal dropped the set and the consult resolves otherwise
-   (a reject, a redirect, a relay, the local teardown). A fold landing on a
-   gone call releases the call by the key it carries; a fold naming another
-   key (an earlier call under the same `call_ref`) releases that key when
-   counted and leaves the resident call alone.
+8. **The call state is `{key, counted, release_owed, ids}`**, one replicated
+   field. `counted` is refresh eligibility; `release_owed` is set by the first
+   admit request and never cleared, and is what every end path reads to send
+   the release: the terminal settle, a takeover, a reclaim, the lossy reap of
+   a deferred terminal, a fold landing on a gone call. A route fold's
+   dispatching task replaces the set before the fold reaches the call and the
+   fold states the outcome (`SetLimiterState`): the admitted route, the call
+   as it was after a lost answer, or uncounted when a refusal dropped the set
+   and the consult resolves otherwise (a reject, a redirect, a relay, the
+   local teardown). A fold landing on a gone call releases the key it carries
+   when owed; a fold naming another key (an earlier call under the same
+   `call_ref`) releases that key when owed and leaves the resident call
+   alone.
 
 ## Lease, refresh and the replica TTL
 
@@ -107,7 +122,7 @@ cells that prove re-registration run the deployed relation.
   call the primary still serves; that call's refreshes are refused for one
   lease, then re-register. A refresh sent before a fold's refusal dropped the
   call's set lands on the drop fence; the fold then states the call uncounted
-  and nothing more is sent.
+  and only its terminal release is sent.
 - `LimiterRefresh` entries are not cohort-smoothed on a bulk reclaim: the
   calls one node reclaims refresh together (batching is follow-up work).
 - Replica bodies decode strictly: a body without the limiter key is dropped at

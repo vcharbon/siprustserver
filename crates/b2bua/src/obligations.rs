@@ -13,7 +13,7 @@
 //! - **total over history** — tolerate snapshots written before the kind
 //!   existed (serde defaults / `Option` fields).
 //! - **skip-aware** — entries carrying no real allocation are skipped at
-//!   derive time (the fail-open limiter precedent).
+//!   derive time (the limiter precedent: a call that sent no admit).
 //! - **idempotent** — `settle` appends only what `effects` does not already
 //!   discharge, so a rule that emitted its own cleanup is not doubled, and
 //!   settling twice is a no-op. Dedupe semantics are kind-local (the limiter's
@@ -97,12 +97,13 @@ impl ObligationSet {
     }
 }
 
-/// Kind `"limiter"` — a counted call releases its limiter set exactly once
-/// at termination (the strong admit↔release invariant), with one
+/// Kind `"limiter"` — a call that sent an admit request releases its key
+/// exactly once at termination (the strong admit↔release invariant), with one
 /// `release(key)` under the call's own key, which the server applies
-/// idempotently. An uncounted call (no limiter stated, or an admit that
-/// failed open) owes nothing. A `ReleaseLimiter` of the call's key a rule
-/// already emitted discharges it; one of another key does not.
+/// idempotently and as a no-op for a key it holds nothing for. A call that
+/// sent none (no limiter stated, none configured) owes nothing. A
+/// `ReleaseLimiter` of the call's key a rule already emitted discharges it;
+/// one of another key does not.
 pub struct LimiterObligations;
 
 impl ObligationKind for LimiterObligations {
@@ -111,7 +112,7 @@ impl ObligationKind for LimiterObligations {
     }
 
     fn settle(&self, call: &Call, effects: &mut HandlerEffects) {
-        if !call.limiter.counted {
+        if !call.limiter.release_owed {
             return;
         }
         let already = effects.soft.iter().any(
@@ -123,7 +124,7 @@ impl ObligationKind for LimiterObligations {
     }
 
     fn owed(&self, call: &Call) -> Vec<Obligation> {
-        if call.limiter.counted {
+        if call.limiter.release_owed {
             vec![Obligation { kind: "limiter", key: call.limiter.key.clone() }]
         } else {
             Vec::new()

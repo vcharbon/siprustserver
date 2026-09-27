@@ -25,6 +25,7 @@ use crate::rules::model::{
 use super::route_fold::{
     fold_lands_on_going_away_call, fold_limiter_state_action, parse_header_updates,
     parse_route_fold, parse_service_ext, route_fold_limiter_state, route_fold_parity_actions,
+    set_limiter_state,
 };
 
 fn rule(
@@ -818,7 +819,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // A route fold's dispatching task replaced the call's set on the
         // limiter, or a refusal dropped it: the state it carries becomes a
         // Terminating call's, and the terminal settle releases the call when
-        // it is counted; no LimiterRefresh re-arm. A
+        // it owes a release; no LimiterRefresh re-arm. A
         // Terminated call is never resident on a rule turn (its folds take the
         // router's gone-call release).
         rule(
@@ -828,14 +829,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ctx.call.state() == CallModelState::Terminating
                     && route_fold_limiter_state(ctx.event).is_some()
             }),
-            |ctx| {
-                let limiter = route_fold_limiter_state(ctx.event)?;
-                ok(vec![RuleAction::SetLimiterState {
-                    key: limiter.key,
-                    counted: limiter.counted,
-                    ids: limiter.ids,
-                }])
-            },
+            |ctx| ok(vec![set_limiter_state(route_fold_limiter_state(ctx.event)?)]),
         )
         .runs_while_terminating(),
         // `terminate` (or backend error) → relay the original failure to the

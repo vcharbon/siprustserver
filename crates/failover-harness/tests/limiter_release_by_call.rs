@@ -10,7 +10,9 @@
 //! A counted call whose set lapsed while its primary was down (the lease is
 //! shorter than a silent takeover window) is counted again by the first
 //! refresh of the node that materialises it: the refresh re-registers the set.
-//! An uncounted call's fold set lapses with its lease and is counted there.
+//! A call that sent an admit request releases its key on every end path, a
+//! late-landed initial admit included; a fold set whose admit no surviving
+//! copy of the call knows of lapses with its lease and is counted there.
 //!
 //! Each id carries one **witness** hold admitted outside the call, so a
 //! surplus release reads below the witness instead of vanishing under the
@@ -640,12 +642,12 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
 }
 
-/// A fold admitted for an uncounted call, then a crash before the fold's
-/// flush. The initial route states no limiter, so the call is uncounted; the
-/// duration cap reroutes it to `[y, z]`, which the fold admits; the primary
-/// crashes with the flush unlanded. The backup's copy says uncounted, so the
-/// takeover never refreshes or releases: the set lapses with its lease and is
-/// counted there (ADR-0038 decision 6).
+/// A fold admitted for a call that sent no admit before, then a crash before
+/// the fold's flush. The initial route states no limiter, so the call is
+/// uncounted and owes nothing; the duration cap reroutes it to `[y, z]`, which
+/// the fold admits; the primary crashes with the flush unlanded. The backup's
+/// copy owes nothing, so the takeover never refreshes or releases: the set
+/// lapses with its lease and is counted there (ADR-0038 decision 5).
 #[tokio::test(start_paused = true)]
 async fn a_fold_set_of_an_uncounted_call_lost_with_the_primary_lapses_with_its_lease() {
     let mut fh = ha_harness("limiter-release-by-call-uncounted-fold-flush-lost");
@@ -703,7 +705,7 @@ async fn a_fold_set_of_an_uncounted_call_lost_with_the_primary_lapses_with_its_l
     assert!(backup.metrics().creations_total() > creations_before, "backup served the BYE");
     assert!(lapsed, "the fold's set lapsed with its lease; holds {:?}", rig.holds());
     assert_eq!(rig.store.stats().lease_expired_calls, 1, "counted as a lapsed lease");
-    assert_eq!(rig.store.stats().releases_total, 0, "nobody released the uncounted call");
+    assert_eq!(rig.store.stats().releases_total, 0, "no copy of the call owed a release");
     rig.release_witnesses();
     assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
 }
