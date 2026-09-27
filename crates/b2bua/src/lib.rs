@@ -47,6 +47,7 @@ pub mod router;
 pub mod rules;
 pub mod stack_identity;
 pub mod store;
+pub(crate) mod sweep;
 pub mod target_admission;
 pub mod tier1_brake;
 pub mod timers;

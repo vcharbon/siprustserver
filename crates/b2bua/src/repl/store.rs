@@ -366,23 +366,23 @@ impl ReplicatingCallStore {
         matches!(meta.get(call_ref), Some(m) if matches!(m.expiry_at_ms, Some(e) if now >= e))
     }
 
-    /// Evict every expired body + reap changelog tombstones/idle peers + prune
-    /// stale resurrection tombstones, and return the evicted bodies. The one
-    /// eviction site of an expired body: a read never evicts, so an expired
-    /// body that still owes something (a deferred terminal's limiter release)
-    /// reaches the caller exactly once. Call after advancing the clock.
-    #[must_use = "an evicted body may owe a release the caller must settle"]
-    pub async fn reap(&self, now_ms: i64) -> Vec<Arc<[u8]>> {
-        // Snapshot the expired (callRef, role, primary, indexes) tuples, drop the
-        // lock, then delete each body — WITH its captured index keys, so the
-        // ghost's `idx:*` entries are freed too (all per-call state released).
-        let expired: Vec<(String, PartitionRole, String, Vec<String>)> = {
-            let meta = self.meta.lock().unwrap();
-            meta.iter()
-                .filter(|(_, m)| matches!(m.expiry_at_ms, Some(e) if now_ms >= e))
-                .map(|(k, m)| (k.clone(), m.role, m.primary.clone(), m.meta.indexes.clone()))
-                .collect()
-        };
+    /// The refs whose body is expired at `now_ms`, with where each body lives
+    /// and the index keys it owns.
+    fn expired_snapshot(&self, now_ms: i64) -> Vec<(String, PartitionRole, String, Vec<String>)> {
+        let meta = self.meta.lock().unwrap();
+        meta.iter()
+            .filter(|(_, m)| matches!(m.expiry_at_ms, Some(e) if now_ms >= e))
+            .map(|(k, m)| (k.clone(), m.role, m.primary.clone(), m.meta.indexes.clone()))
+            .collect()
+    }
+
+    /// Evict each snapshotted body with its index keys (all per-call state
+    /// released) and return the evicted bodies.
+    async fn evict_snapshot(
+        &self,
+        expired: Vec<(String, PartitionRole, String, Vec<String>)>,
+        _now_ms: i64,
+    ) -> Vec<Arc<[u8]>> {
         let mut evicted = Vec::with_capacity(expired.len());
         for (call_ref, role, primary, indexes) in &expired {
             {
@@ -399,6 +399,18 @@ impl ReplicatingCallStore {
                 .delete_call(*role, primary, call_ref, indexes, &PutOpts::default())
                 .await;
         }
+        evicted
+    }
+
+    /// Evict every expired body + reap changelog tombstones/idle peers + prune
+    /// stale resurrection tombstones, and return the evicted bodies. The one
+    /// eviction site of an expired body: a read never evicts, so an expired
+    /// body that still owes something (a deferred terminal's limiter release)
+    /// reaches the caller exactly once. Call after advancing the clock.
+    #[must_use = "an evicted body may owe a release the caller must settle"]
+    pub async fn reap(&self, now_ms: i64) -> Vec<Arc<[u8]>> {
+        let expired = self.expired_snapshot(now_ms);
+        let evicted = self.evict_snapshot(expired, now_ms).await;
         // Prune resurrection tombstones past their window — `put_call` only ever
         // reads an entry younger than `RESURRECTION_TOMBSTONE_MS`, so an older one
         // is dead weight. Without this the map grows one entry per terminated call
@@ -625,6 +637,79 @@ mod backup_count_tests {
             .put_call(role, "w0", call_ref, b"b".to_vec(), &[], ttl_ms, 1, 0, &PutOpts::default())
             .await
             .unwrap();
+    }
+
+    /// A refresh that lands between the reap's snapshot and its eviction (a
+    /// healed peer's flush while the sweep runs) keeps its fresh body and
+    /// meta, and the reap hands nothing back for it.
+    #[tokio::test(start_paused = true)]
+    async fn a_refresh_landing_after_the_reap_snapshot_survives_the_reap() {
+        let clock = Clock::test_at(0);
+        let store = ReplicatingCallStore::new(1, clock.clone());
+        store
+            .put_call(
+                PartitionRole::Backup,
+                "w0",
+                "w0|r|t",
+                b"old".to_vec(),
+                &[],
+                1_000,
+                1,
+                0,
+                &PutOpts::default(),
+            )
+            .await
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
+
+        let expired = store.expired_snapshot(clock.now_ms());
+        assert_eq!(expired.len(), 1, "the old body is expired");
+        store
+            .put_call(
+                PartitionRole::Backup,
+                "w0",
+                "w0|r|t",
+                b"new".to_vec(),
+                &[],
+                60_000,
+                2,
+                0,
+                &PutOpts::default(),
+            )
+            .await
+            .unwrap();
+        let evicted = store.evict_snapshot(expired, clock.now_ms()).await;
+
+        assert!(evicted.is_empty(), "nothing is handed back for a refreshed ref");
+        let body = store.get_call(PartitionRole::Backup, "w0", "w0|r|t").await.unwrap();
+        assert_eq!(body.as_deref(), Some(&b"new"[..]), "the fresh body survives");
+        assert_eq!(
+            store.current_cv(PartitionRole::Backup, "w0", "w0|r|t"),
+            Some((2, 0)),
+            "and its meta"
+        );
+        assert_eq!(store.backup_held(), 1);
+    }
+
+    /// A panic under the metadata lock never takes the store down with it:
+    /// every later reader and the reap go on with the data as it stands.
+    #[tokio::test(start_paused = true)]
+    async fn a_poisoned_metadata_lock_still_reads_and_reaps() {
+        let clock = Clock::test_at(0);
+        let store = ReplicatingCallStore::new(1, clock.clone());
+        put(&store, PartitionRole::Backup, "w0|p|t", 1_000).await;
+        let poisoner = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.meta.lock();
+            panic!("poison the metadata lock");
+        })
+        .join();
+        assert!(store.meta.is_poisoned());
+
+        tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
+        assert!(store.get_call(PartitionRole::Backup, "w0", "w0|p|t").await.unwrap().is_none());
+        assert_eq!(store.reap(clock.now_ms()).await.len(), 1, "the reap still evicts");
+        assert_eq!(store.backup_held(), 0);
     }
 
     #[tokio::test(start_paused = true)]

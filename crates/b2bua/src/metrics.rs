@@ -104,6 +104,7 @@ struct Inner {
     // failed twice for a call; expected ~0 in any healthy run.
     handler_panics: AtomicU64,
     reaper_sweeps: AtomicU64,
+    sweep_restarts: AtomicU64,
     reaper_verdicts: AtomicU64,
     reaper_discharged: AtomicU64,
     // cdr
@@ -567,6 +568,7 @@ impl B2buaMetrics {
     // --- call reaper (ADR-0020) ---
     counter!(bump_handler_panic, handler_panics_total, handler_panics);
     counter!(bump_reaper_sweep, reaper_sweeps_total, reaper_sweeps);
+    counter!(bump_sweep_restart, sweep_restarts_total, sweep_restarts);
     counter!(bump_reaper_verdict, reaper_verdicts_total, reaper_verdicts);
     counter!(bump_reaper_discharged, reaper_discharged_total, reaper_discharged);
 
@@ -1094,6 +1096,11 @@ impl B2buaMetrics {
             "b2bua_reaper_sweeps_total",
             "reaper sweep ticks executed",
             self.reaper_sweeps_total(),
+        );
+        counter(
+            "b2bua_sweep_restarts_total",
+            "paced sweep passes that panicked; the sweep restarts one interval later — expected 0",
+            self.sweep_restarts_total(),
         );
         counter(
             "b2bua_reaper_verdicts_total",

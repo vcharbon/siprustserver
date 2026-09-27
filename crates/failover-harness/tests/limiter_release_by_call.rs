@@ -536,11 +536,13 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
 
     // ── the BYE ends the call on the backup, which defers the release ────
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
-    // The trace is read first at every step: reading the expired body before
-    // the reap must not cost the call its release.
+    // Every step reads the backup's replica the way a takeover does, the
+    // expired body included: a read before the reap must not cost the call its
+    // release.
     let reaped = fh
         .settle_lossy_cleanup(async || {
             rig.refresh_witnesses();
+            let _takeover_read = backup.is_synchronized_backup(&call_ref).await;
             !backup.holds_any_trace(&call_ref).await
                 && rig.holds() == [0, 0, 0]
                 && rig.store.stats().releases_total == 1
@@ -621,9 +623,11 @@ async fn the_reap_releases_a_terminal_deferred_after_the_backup_served_a_request
     let lapsed_before = rig.store.stats().lease_expired_calls;
 
     // ── past the replica TTL: the backup's reap releases the call ────────
-    // The trace is read first at every step, as in the cell above.
+    // Every step reads the backup's replica the way a takeover does, as in
+    // the cell above.
     let reaped = fh
         .settle_lossy_cleanup(async || {
+            let _takeover_read = backup.is_synchronized_backup(&call_ref).await;
             !backup.holds_any_trace(&call_ref).await && rig.holds() == [0, 0, 0]
         })
         .await;

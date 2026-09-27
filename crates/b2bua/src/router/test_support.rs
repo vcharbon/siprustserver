@@ -37,6 +37,11 @@ pub struct Node {
 
 /// Spawn a core on simulated SIP and replication fabrics with no peers.
 pub async fn node(ordinal: &str) -> Node {
+    node_with(ordinal, |_| {}).await
+}
+
+/// [`node`] with `tune` applied to its config last.
+pub async fn node_with(ordinal: &str, tune: impl FnOnce(&mut B2buaConfig)) -> Node {
     let clock = Clock::test_at(0);
     let sip_addr = SocketAddr::from(([127, 0, 0, 2], 5080));
     let endpoint = SimulatedSignalingNetwork::new(1)
@@ -64,6 +69,8 @@ pub async fn node(ordinal: &str) -> Node {
         reboot_budget_sec: 600,
         ..Default::default()
     };
+    let mut config = config;
+    tune(&mut config);
     let cdr = InMemoryCdrWriter::new();
     let metrics = B2buaMetrics::new();
     let deps = B2buaDeps {

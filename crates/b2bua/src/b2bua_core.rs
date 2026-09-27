@@ -433,18 +433,17 @@ impl B2buaCore {
             let state = ctx.state.clone();
             let dispatcher = ctx.dispatcher.clone();
             let ctx2 = ctx.clone();
-            let interval_ms = reaper.sweep_interval_ms();
-            tasks.push(tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                tick.tick().await; // skip the immediate first tick
-                loop {
-                    tick.tick().await;
+            let interval = std::time::Duration::from_millis(reaper.sweep_interval_ms());
+            let metrics = ctx.metrics.clone();
+            tasks.push(tokio::spawn(crate::sweep::run(interval, metrics, move || {
+                let (reaper, state, dispatcher, ctx2) =
+                    (reaper.clone(), state.clone(), dispatcher.clone(), ctx2.clone());
+                async move {
                     let now_ms = ctx2.clock.now_ms();
                     reaper.maybe_sweep(&state, &dispatcher, now_ms);
                     router::reap_expired_replicas(&ctx2, now_ms).await;
                 }
-            }));
+            })));
         }
 
         // The worker-side load sampler. Rides `tokio::time::interval` so a
