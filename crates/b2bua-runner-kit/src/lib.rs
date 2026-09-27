@@ -83,6 +83,7 @@ use sip_txn::IdGen;
 
 mod capacity_env;
 mod cdr_rabbitmq;
+mod drain_env;
 mod limiter_client;
 mod limiter_env;
 mod replication;
@@ -418,12 +419,11 @@ pub struct RunnerEnv {
     /// `LIMITER_BREAKER_PROBE_MS` — how often an open breaker probes the
     /// limiter's health answer (default 1000).
     pub limiter_breaker_probe_ms: u64,
-    /// `B2BUA_DRAIN_GRACE_MS` — SIGTERM drain grace before exit (default 5000).
-    pub drain_grace_ms: u64,
-    /// `B2BUA_DRAIN_MIN_MS` — floor a withdrawn worker's caught-up drain exit
-    /// waits out, so a request routed before the withdrawal reached the proxy is
-    /// still served (default 1000; ADR-0031 D2).
-    pub drain_min_ms: u64,
+    /// The planned exit's bounds, the grammar in `drain_env`:
+    /// `B2BUA_DRAIN_GRACE_MS` (the wait for the live calls), `B2BUA_DRAIN_MIN_MS`
+    /// (the floor of a withdrawn worker's caught-up exit, ADR-0031 D2) and
+    /// `B2BUA_DRAIN_RELEASE_FLUSH_MS` (the wait for the queued limiter releases).
+    pub drain: b2bua::drain::DrainBounds,
     /// The memory ceilings (ADR-0037), every one off unless stated; the
     /// grammar is in `capacity_env`.
     pub capacity: CapacityConfig,
@@ -538,8 +538,8 @@ impl RunnerEnv {
             limiter_release_queue_cap: limiter.queue_cap,
             limiter_breaker_failures: limiter.breaker_failures,
             limiter_breaker_probe_ms: limiter.breaker_probe_ms,
-            drain_grace_ms: env_or("B2BUA_DRAIN_GRACE_MS", "5000").parse().unwrap_or(5000),
-            drain_min_ms: env_or("B2BUA_DRAIN_MIN_MS", "1000").parse().unwrap_or(1000),
+            drain: drain_env::drain_from_lookup(|k| env::var(k).ok())
+                .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
             capacity: capacity_env::capacity_from_lookup(|k| env::var(k).ok())
                 .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}")),
         }
@@ -1021,14 +1021,19 @@ impl RunnerBase {
     /// proxy steers new calls away — then waits for the first of: the in-flight
     /// calls finishing, a withdrawn worker's backups holding them past
     /// `B2BUA_DRAIN_MIN_MS` (ADR-0031 D2), or `B2BUA_DRAIN_GRACE_MS`. Ctrl-C
-    /// (interactive) exits immediately. Returns when the process should exit.
+    /// (interactive) waits for no call. Either way the queued limiter releases
+    /// are then flushed within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (ADR-0038
+    /// decision 9). Returns when the process should exit.
     pub async fn run_until_shutdown(&self, core: &Arc<B2buaCore>) {
         let name = &self.name;
-        let drain_grace_ms = self.env.drain_grace_ms;
-        let drain_min_ms = self.env.drain_min_ms;
+        let bounds = self.env.drain;
+        let drain_grace_ms = bounds.grace.as_millis() as u64;
+        let drain_min_ms = bounds.floor.as_millis() as u64;
+        let release_flush_ms = bounds.release_flush.as_millis() as u64;
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!(service = name, signal = "SIGINT", "shutting down");
+                tracing::info!(service = name, signal = "SIGINT", release_flush_ms, "shutting down");
+                core.flush_limiter_releases(bounds.release_flush).await;
             }
             _ = wait_sigterm(name) => {
                 tracing::info!(
@@ -1036,18 +1041,15 @@ impl RunnerBase {
                     signal = "SIGTERM",
                     drain_grace_ms,
                     drain_min_ms,
+                    release_flush_ms,
                     "begin draining"
                 );
                 // Latch Draining, then wait. A node with no calls exits at once;
                 // a withdrawn node whose backups hold its calls exits past the
-                // floor; anything else is bounded by the grace. The exit reason
-                // and the residual are logged, never silently cut.
-                let out = core
-                    .drain(b2bua::drain::DrainBounds {
-                        grace: std::time::Duration::from_millis(drain_grace_ms),
-                        floor: std::time::Duration::from_millis(drain_min_ms),
-                    })
-                    .await;
+                // floor; anything else is bounded by the grace. The queued
+                // limiter releases are then flushed within their bound. The exit
+                // reason and the residual are logged, never silently cut.
+                let out = core.drain(bounds).await;
                 let reason = out.exit.label();
                 let residual = out.residual;
                 match out.exit {

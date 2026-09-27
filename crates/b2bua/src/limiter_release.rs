@@ -22,6 +22,12 @@
 //! breaker drives: while held nothing is sent (leases still expire), and a
 //! resume sends every waiting key at once. [`ReleaseQueue::on_push`] tells
 //! the breaker which calls ended, so it forgets their held refreshes.
+//!
+//! [`ReleaseQueue::flush`] is a planned exit's last send: every waiting key
+//! leaves at once and the exit waits, within a bound, for the queue to
+//! empty; what is still queued at the bound (a held queue's entries, a batch
+//! the limiter has not answered) is given up, counted and logged. A crash
+//! loses the queue unflushed.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -66,6 +72,16 @@ impl ReleaseQueueConfig {
     }
 }
 
+/// What a [`ReleaseQueue::flush`] left behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReleaseFlush {
+    /// Entries still queued at the bound, given up (a batch in flight
+    /// included: it may still land).
+    pub given_up: usize,
+    /// How long the flush waited.
+    pub elapsed: Duration,
+}
+
 /// One waiting release.
 struct Entry {
     /// The key, shared with [`Waiting::by_key`].
@@ -106,6 +122,8 @@ pub struct ReleaseQueue {
     metrics: B2buaMetrics,
     waiting: Mutex<Waiting>,
     wake: Notify,
+    /// Woken each time the queue is left empty.
+    emptied: Notify,
     /// Told every key pushed.
     on_push: OnceLock<PushHook>,
 }
@@ -127,6 +145,7 @@ impl ReleaseQueue {
             metrics,
             waiting: Mutex::new(Waiting::default()),
             wake: Notify::new(),
+            emptied: Notify::new(),
             on_push: OnceLock::new(),
         })
     }
@@ -202,6 +221,53 @@ impl ReleaseQueue {
             w.retry_at = None;
         }
         self.wake.notify_one();
+    }
+
+    /// A planned exit's last send: every waiting key leaves now, whatever
+    /// backoff a failed send had set, and the flush returns once the queue is
+    /// empty or `within` has passed. A held queue stays held. Every entry
+    /// still queued at the bound is given up, counted and logged. A key
+    /// pushed during the flush is flushed with it.
+    pub async fn flush(&self, within: Duration) -> ReleaseFlush {
+        let start = Instant::now();
+        let deadline = start + within;
+        {
+            let mut w = self.lock();
+            w.failures = 0;
+            w.retry_at = None;
+        }
+        self.wake.notify_one();
+        loop {
+            let emptied = self.emptied.notified();
+            tokio::pin!(emptied);
+            emptied.as_mut().enable();
+            if self.lock().entries.is_empty() {
+                return ReleaseFlush { given_up: 0, elapsed: start.elapsed() };
+            }
+            tokio::select! {
+                _ = emptied => {}
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+        let (given_up, held) = {
+            let mut w = self.lock();
+            let given_up = w.entries.len();
+            w.entries.clear();
+            w.by_key.clear();
+            self.publish_depth(&w);
+            (given_up, w.held)
+        };
+        if given_up == 0 {
+            return ReleaseFlush { given_up, elapsed: start.elapsed() };
+        }
+        self.metrics.add_limiter_release_dropped_shutdown(given_up as u64);
+        tracing::warn!(
+            given_up,
+            held,
+            within_ms = within.as_millis() as u64,
+            "limiter releases still queued at the exit's flush bound given up; the lease frees them"
+        );
+        ReleaseFlush { given_up, elapsed: start.elapsed() }
     }
 
     /// The supervised drainer, until the task is aborted with the worker. A
@@ -315,8 +381,12 @@ impl ReleaseQueue {
         }
     }
 
+    /// Publish the queue's depth, and wake a flush when it is empty.
     fn publish_depth(&self, w: &Waiting) {
         self.metrics.set_limiter_release_queue_depth(w.entries.len() as u64);
+        if w.entries.is_empty() {
+            self.emptied.notify_waiters();
+        }
     }
 }
 
@@ -674,5 +744,90 @@ mod tests {
         settle().await;
         let sizes: Vec<usize> = sent(&limiter).iter().map(Vec::len).collect();
         assert_eq!(sizes, [MAX_BATCH, 1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_of_an_empty_queue_returns_at_once() {
+        let limiter = Arc::new(Scripted::default());
+        let (q, metrics) = queue(limiter.clone(), 10);
+        let out = q.flush(Duration::from_secs(3)).await;
+        assert_eq!(out, ReleaseFlush { given_up: 0, elapsed: Duration::ZERO });
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_sends_at_once_whatever_the_backoff() {
+        let limiter = Arc::new(Scripted::default());
+        limiter.down.store(true, Ordering::SeqCst);
+        let metrics = B2buaMetrics::new();
+        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+        let q = ReleaseQueue::new(limiter.clone(), config, metrics.clone());
+        tokio::spawn(q.clone().run());
+        q.push("a");
+        // Six failed sends: the next one waits the longest backoff.
+        for _ in 0..6 {
+            tokio::time::advance(BACKOFF_MAX).await;
+            settle().await;
+        }
+        let sends = sent(&limiter).len();
+        limiter.down.store(false, Ordering::SeqCst);
+        q.push("b");
+        let out = q.flush(BACKOFF_MAX / 2).await;
+        assert_eq!(out, ReleaseFlush { given_up: 0, elapsed: Duration::ZERO });
+        assert_eq!(sent(&limiter)[sends..], [keys(&["a", "b"])], "one send, at once");
+        assert_eq!(q.waiting(), 0);
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_held_queue_is_given_up_at_the_flush_bound_unsent() {
+        let limiter = Arc::new(Scripted::default());
+        let (q, metrics) = queue(limiter.clone(), 10);
+        q.hold();
+        q.push("a");
+        q.push("b");
+        let out = q.flush(Duration::from_secs(3)).await;
+        assert_eq!(out, ReleaseFlush { given_up: 2, elapsed: Duration::from_secs(3) });
+        assert!(sent(&limiter).is_empty(), "a held queue sends nothing");
+        assert_eq!(q.waiting(), 0);
+        assert_eq!(metrics.limiter_release_queue_depth(), 0);
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 2);
+        q.resume();
+        settle().await;
+        assert!(sent(&limiter).is_empty(), "a given-up entry is never sent");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_queue_resumed_during_a_flush_ends_it_once_answered() {
+        let limiter = Arc::new(Scripted::default());
+        let (q, metrics) = queue(limiter.clone(), 10);
+        q.hold();
+        q.push("a");
+        let resumer = q.clone();
+        let (out, ()) = tokio::join!(q.flush(Duration::from_secs(3)), async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            resumer.resume();
+        });
+        assert_eq!(out, ReleaseFlush { given_up: 0, elapsed: Duration::from_secs(1) });
+        assert_eq!(sent(&limiter), [keys(&["a"])]);
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_batch_unanswered_at_the_flush_bound_is_given_up() {
+        let limiter = Arc::new(Gated::default());
+        let metrics = B2buaMetrics::new();
+        let config = ReleaseQueueConfig { lease: Duration::from_secs(20), cap: 10 };
+        let q = ReleaseQueue::new(limiter.clone(), config, metrics.clone());
+        tokio::spawn(q.clone().run());
+        q.push("a");
+        settle().await;
+        assert!(q.sending());
+        let out = q.flush(Duration::ZERO).await;
+        assert_eq!(out, ReleaseFlush { given_up: 1, elapsed: Duration::ZERO });
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 1);
+        limiter.go.notify_one();
+        settle().await;
+        assert_eq!(q.waiting(), 0, "the late answer finds nothing to remove");
     }
 }

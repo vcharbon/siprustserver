@@ -19,7 +19,7 @@ EndpointSlice API (`ready`, `serving`, `terminating`; the last two GA since Kube
 
 | | how the pod goes | what the slice shows | how long the process still runs | who replaces it |
 |---|---|---|---|---|
-| **1. Graceful** (rolling update, node drain, scale-down; the frequent case) | `delete` under the pod's `terminationGracePeriodSeconds` (30 s); SIGTERM at +0 | `ready=false, terminating=true` at +0 and the endpoint **stays in the slice** until the pod is gone; `serving` flips false a few seconds later, because the worker's own `/ready` answers 503 once it latches `Draining` | until it exits on its own (drain, ≤ `B2BUA_DRAIN_GRACE_MS` = 5 s) or SIGKILL at the grace | the same ordinal, **after** the old pod is gone (a StatefulSet never runs two pods of one ordinal) |
+| **1. Graceful** (rolling update, node drain, scale-down; the frequent case) | `delete` under the pod's `terminationGracePeriodSeconds` (30 s); SIGTERM at +0 | `ready=false, terminating=true` at +0 and the endpoint **stays in the slice** until the pod is gone; `serving` flips false a few seconds later, because the worker's own `/ready` answers 503 once it latches `Draining` | until it exits on its own (drain, ≤ `B2BUA_DRAIN_GRACE_MS` = 5 s, then the limiter release flush, ≤ 3 s) or SIGKILL at the grace | the same ordinal, **after** the old pod is gone (a StatefulSet never runs two pods of one ordinal) |
 | **2. Abrupt** (`delete --force --grace-period=0`) | the API object is removed at +0; kubelet still sends SIGTERM and SIGKILLs 2 s later | the endpoint **leaves the slice** at +0 (one `terminating=true` event may precede the removal) | 2 s | the same ordinal at a **new address** from +0.4 s, overlapping the old process |
 | **3. Vanished** (node crash, network partition) | 3a, the first ~40 s: nothing, the pod object is untouched. 3b: the node controller marks the node NotReady, its pods `Ready=False`; taint eviction (~5 min) stamps a deletion timestamp; with the kubelet unreachable the pod can stay `Terminating` indefinitely | 3a: **unchanged**, `ready=true`. 3b: `ready=false, serving=false`, then `terminating=true`, still in the slice | unknown: dead, or alive behind a partition and still firing its timers | nobody for minutes; on a heal, the **same process** is back |
 | **4. Restarted in place** (OOM-kill, kubelet restart, a readiness flap under load) | the pod object stays; the container restarts, or only the probe fails | `ready=false, serving=false, terminating=false`, still in the slice, **same address** | 0 (container restart) or the whole time (readiness flap: the process is alive and serving) | the same container, same address, seconds later |
@@ -108,7 +108,9 @@ static membership, or SIGTERM before the slice moved) keeps quiescence-or-grace:
 reactive, so a proxied worker's calls are served on the next in-dialog request, but a
 direct-bound worker's would be abandoned. Exiting on `caught_up` with live calls is a
 *replicated crash*, deliberately: ringing calls wait for the caller's next request or its
-own timers, as after any crash. Serves case 1. Case 2 runs the same drain for its 2 s: the
+own timers, as after any crash. Whatever the exit, the worker then flushes its queued
+limiter releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s) before it exits (ADR-0038
+decision 9). Serves case 1. Case 2 runs the same drain for its 2 s: the
 peers have parked, (iii) never holds, SIGKILL ends it. Cases 3 and 4 run no drain.
 
 **D3 — A forward flush never regresses backup progress.** This rule changes the

@@ -886,6 +886,13 @@ impl B2buaSut {
         )
     }
 
+    /// Drain the worker as its runner does on a planned exit
+    /// ([`B2buaCore::drain`]): latch `Draining`, wait for the live calls,
+    /// then flush the limiter release queue.
+    pub async fn drain(&self, bounds: b2bua::drain::DrainBounds) -> b2bua::drain::DrainOutcome {
+        self._core.drain(bounds).await
+    }
+
     /// Kill the process: its tasks stop and its socket closes, as on a crash,
     /// and every call it held goes with its memory. A fresh [`B2buaSutBuilder::start`]
     /// on the same address stands for the restarted process.

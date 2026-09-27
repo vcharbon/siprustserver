@@ -5,7 +5,9 @@
 //! queue. The queue sends at once, batches every due key into one request,
 //! retries a failed send with backoff, gives up an entry once it has
 //! waited one lease (the limiter already let the call's set lapse) and drops
-//! its oldest entry at its cap. Both drops are counted.
+//! its oldest entry at its cap. Both drops are counted. A draining worker
+//! flushes the queue before it exits, within a bound; what is left at the
+//! bound is given up and counted.
 //!
 //! Every call holds three limiters, each id with one **witness** hold
 //! admitted under a call of its own, so a surplus release reads below the
@@ -19,6 +21,7 @@ use async_trait::async_trait;
 use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::drain::{DrainBounds, DrainExit};
 use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
 use b2bua_harness::{settle_until, B2buaSut, WitnessRig};
 use call_limiter::LimiterConfig;
@@ -38,6 +41,15 @@ const LEASE_SEC: i64 = 20;
 const REFRESH_SEC: i64 = 5;
 /// The three limiters every call holds.
 const HOLDS: &[(&str, i64)] = &[("x", 10), ("y", 10), ("z", 10)];
+/// The bound of a draining worker's release flush.
+const RELEASE_FLUSH: Duration = Duration::from_secs(3);
+/// A planned exit's bounds: no live call is left, so the drain goes straight
+/// to the release flush.
+const DRAIN: DrainBounds = DrainBounds {
+    grace: Duration::from_secs(5),
+    floor: Duration::ZERO,
+    release_flush: RELEASE_FLUSH,
+};
 
 /// Which requests the limiter swallows: they arrive and are logged, and are
 /// neither applied nor answered.
@@ -414,6 +426,94 @@ async fn a_release_sender_that_panics_is_restarted_and_the_release_lands() {
     assert_eq!(s.b2bua.metrics().limiter_release_drainer_restarts_total(), 1);
     assert_eq!(s.queued(), 0, "the restarted sender sent the release");
     s.rig.expect_drained("the release landed after the restart").await;
+    s.b2bua.assert_fully_reaped();
+    let _ = s.h.finish().await;
+}
+
+/// Stalled limiter, then back inside the flush: a worker whose two ended
+/// calls (three limiters each) still wait in its release queue drains; the
+/// drain returns once both releases landed, so nothing is left for the lease.
+#[tokio::test(start_paused = true)]
+async fn a_draining_worker_flushes_its_release_queue_before_it_exits() {
+    let s = Scene::new("release-queue-drain-flush", |_| {}).await;
+    let mut dialogs = Vec::new();
+    for _ in 0..2 {
+        dialogs.push(s.establish().await);
+    }
+    s.rig.expect_holds([2, 2, 2], "two calls, three limiters each").await;
+
+    s.stall.send_replace(Stall::Releases);
+    for dialog in &mut dialogs {
+        s.hang_up(dialog).await;
+    }
+    sip_clock::testkit::settle().await;
+    assert!(s.b2bua.calls_reaped(), "both calls are removed while the limiter stalls");
+    assert_eq!(s.queued(), 2, "two releases wait");
+
+    let start = tokio::time::Instant::now();
+    let (out, ()) = tokio::join!(s.b2bua.drain(DRAIN), async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        s.stall.send_replace(Stall::Nothing);
+    });
+    let elapsed = start.elapsed();
+
+    assert_eq!(out.exit, DrainExit::Quiescent, "no live call held the drain");
+    assert_eq!(s.queued(), 0, "the drain returned with releases still queued");
+    assert_eq!(s.rig.all_holds(), [0, 0, 0], "both releases landed before the drain returned");
+    assert!(elapsed < RELEASE_FLUSH, "the flush returned once the queue emptied: {elapsed:?}");
+    let metrics = s.b2bua.metrics();
+    assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0, "nothing given up");
+    assert_eq!(
+        s.rig.store.stats().lease_expired_calls,
+        0,
+        "the releases freed them, not the lease"
+    );
+    s.rig.expect_drained("the flushed releases freed both calls").await;
+    s.b2bua.assert_fully_reaped();
+    let _ = s.h.finish().await;
+}
+
+/// Limiter down past the flush bound: the drain returns at the bound, the
+/// queued release is given up and counted as a shutdown drop, and the
+/// limiter's lease frees the call's three limiters.
+#[tokio::test(start_paused = true)]
+async fn a_draining_worker_gives_up_its_queued_releases_at_the_flush_bound() {
+    let s = Scene::new("release-queue-drain-flush-bound", |_| {}).await;
+    let mut dialog = s.establish().await;
+    s.rig.expect_holds([1, 1, 1], "the call holds its three limiters").await;
+
+    s.stall.send_replace(Stall::Releases);
+    s.hang_up(&mut dialog).await;
+    sip_clock::testkit::settle().await;
+    assert!(s.b2bua.calls_reaped());
+    assert_eq!(s.queued(), 1, "its release waits");
+
+    let start = tokio::time::Instant::now();
+    let out = s.b2bua.drain(DRAIN).await;
+    let elapsed = start.elapsed();
+
+    assert_eq!(out.exit, DrainExit::Quiescent);
+    let metrics = s.b2bua.metrics();
+    assert_eq!(
+        metrics.limiter_release_dropped_shutdown_total(),
+        1,
+        "the release left queued at the flush bound is counted"
+    );
+    assert!(
+        (RELEASE_FLUSH..=RELEASE_FLUSH + Duration::from_millis(10)).contains(&elapsed),
+        "the drain waits the flush bound and no longer: {elapsed:?}"
+    );
+    assert_eq!(s.queued(), 0, "the given-up entry left the queue");
+    assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 0);
+    assert_eq!(metrics.limiter_release_dropped_cap_total(), 0);
+    assert_eq!(s.rig.all_holds(), [1, 1, 1], "the limiter applied nothing");
+
+    let before = s.received();
+    s.stall.send_replace(Stall::Nothing);
+    s.hold_for(LEASE_SEC as u64 + 5).await;
+    assert!(s.releases_since(before).is_empty(), "the given-up entry is never sent");
+    assert_eq!(s.rig.store.stats().lease_expired_calls, 1, "the limiter's lease freed the call");
+    s.rig.expect_drained("the lease freed the call").await;
     s.b2bua.assert_fully_reaped();
     let _ = s.h.finish().await;
 }

@@ -103,7 +103,11 @@ and a lost release could not be retried.
    the call's set lapse; at the queue's cap the oldest entry is given up;
    both are counted. A given-up entry may still land if a send carrying it
    was in flight. The queue is not replicated: a worker that dies loses it
-   and the lease frees what it held. Its sender is supervised: one that
+   and the lease frees what it held. A planned exit flushes it: once the
+   drain has returned, every waiting key leaves at once whatever the backoff,
+   and the exit waits for the queue to empty within its own bound; a held
+   queue stays held, and what is still queued at the bound is given up and
+   counted (`reason=shutdown`), the lease freeing it. Its sender is supervised: one that
    panics is restarted with the queue intact, and counted. A circuit breaker
    drives the queue through `hold` and `resume`: nothing is sent while it is
    held, and a resume sends every waiting key at once. The worker's lease is
@@ -181,8 +185,9 @@ cells that prove re-registration run the deployed relation.
 - Config: `LIMITER_LEASE_SECONDS` on the limiter and on the workers (the
   same value), `LIMITER_REFRESH_SECONDS` on the workers, the refresh below
   the lease by more than one period; `LIMITER_RELEASE_TIMEOUT_MS`,
-  `LIMITER_RELEASE_QUEUE_CAP`, `LIMITER_BREAKER_FAILURES` (3) and
-  `LIMITER_BREAKER_PROBE_MS` (1000) on the workers.
+  `LIMITER_RELEASE_QUEUE_CAP`, `LIMITER_BREAKER_FAILURES` (3),
+  `LIMITER_BREAKER_PROBE_MS` (1000) and the exit's release flush bound
+  `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3000) on the workers.
 - The breaker trades counts for latency: the calls a worker starts while its
   breaker is open stay uncounted for their life, so after the limiter comes
   back its counts read low by those calls until they end, and a cap can be

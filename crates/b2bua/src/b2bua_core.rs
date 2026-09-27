@@ -709,10 +709,12 @@ impl B2buaCore {
     /// Graceful shutdown: latch `Draining` (so the proxy steers new calls away
     /// via the OPTIONS / `/ready` self-report) and then wait for the first of:
     /// the live call map clearing, a withdrawn worker's backups holding every
-    /// live call past the floor (ADR-0031 D2), or the grace. Returns the named
-    /// exit, the residual active-call count and how long it waited; the cut is
-    /// never silent. `Draining` is the single home for the drain state — there
-    /// is no second flag to keep in sync.
+    /// live call past the floor (ADR-0031 D2), or the grace. Then flush the
+    /// limiter release queue within `bounds.release_flush`
+    /// ([`flush_limiter_releases`](Self::flush_limiter_releases)). Returns the
+    /// named exit, the residual active-call count and how long the call wait
+    /// took; the cut is never silent. `Draining` is the single home for the
+    /// drain state — there is no second flag to keep in sync.
     pub async fn drain(&self, bounds: crate::drain::DrainBounds) -> crate::drain::DrainOutcome {
         self.begin_draining();
         let outcome = crate::drain::drain_until_quiescent(self.drain_probe(), bounds).await;
@@ -724,7 +726,19 @@ impl B2buaCore {
             withdrawn = self.is_withdrawn(),
             "drain returned"
         );
+        self.flush_limiter_releases(bounds.release_flush).await;
         outcome
+    }
+
+    /// A planned exit's last limiter send: the releases this worker still
+    /// queues leave now, and the wait for their answers lasts at most
+    /// `within`; what is still queued then is given up, counted
+    /// (`reason=shutdown`) and logged, and the lease frees it.
+    pub async fn flush_limiter_releases(
+        &self,
+        within: std::time::Duration,
+    ) -> crate::limiter_release::ReleaseFlush {
+        self.ctx.limiter_releases.flush(within).await
     }
 
     pub fn metrics(&self) -> &B2buaMetrics {

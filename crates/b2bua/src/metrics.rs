@@ -231,11 +231,12 @@ struct Inner {
     limiter_refresh_dropped: AtomicU64,
     // The limiter release queue (`limiter_release`): entries waiting, sends of
     // a key after its first, and entries given up (past the lease, at
-    // the cap).
+    // the cap, at a planned exit's flush bound).
     limiter_release_queue_depth: AtomicU64,
     limiter_release_retries: AtomicU64,
     limiter_release_dropped_lease_expired: AtomicU64,
     limiter_release_dropped_cap: AtomicU64,
+    limiter_release_dropped_shutdown: AtomicU64,
     limiter_release_drainer_restarts: AtomicU64,
     // The limiter circuit breaker (`limiter_breaker`): 1 while open, its
     // transitions, the admits and refreshes it answered without a request,
@@ -837,6 +838,14 @@ impl B2buaMetrics {
         limiter_release_dropped_cap_total,
         limiter_release_dropped_cap
     );
+    /// Count `n` queued releases a planned exit gave up on.
+    pub fn add_limiter_release_dropped_shutdown(&self, n: u64) {
+        self.inner.limiter_release_dropped_shutdown.fetch_add(n, Ordering::Relaxed);
+    }
+    /// Queued releases planned exits gave up on.
+    pub fn limiter_release_dropped_shutdown_total(&self) -> u64 {
+        self.inner.limiter_release_dropped_shutdown.load(Ordering::Relaxed)
+    }
     counter!(
         bump_limiter_release_drainer_restarts,
         limiter_release_drainer_restarts_total,
@@ -1330,7 +1339,7 @@ impl B2buaMetrics {
             s.push_str(&format!("b2bua_repl_forward_flush_refused_total{{op=\"{op}\"}} {v}\n"));
         }
 
-        s.push_str("# HELP b2bua_limiter_release_dropped_total queued limiter releases given up on before the limiter answered them (reason=lease_expired: queued longer than the limiter's lease, which already freed the call; reason=cap: the oldest entry of a full queue, freed by its lease unless a send already in flight lands)\n# TYPE b2bua_limiter_release_dropped_total counter\n");
+        s.push_str("# HELP b2bua_limiter_release_dropped_total queued limiter releases given up on before the limiter answered them (reason=lease_expired: queued longer than the limiter's lease, which already freed the call; reason=cap: the oldest entry of a full queue, freed by its lease unless a send already in flight lands; reason=shutdown: still queued when a planned exit's release flush reached its bound, freed by the lease)\n# TYPE b2bua_limiter_release_dropped_total counter\n");
         s.push_str(&format!(
             "b2bua_limiter_release_dropped_total{{reason=\"lease_expired\"}} {}\n",
             self.limiter_release_dropped_lease_expired_total()
@@ -1338,6 +1347,10 @@ impl B2buaMetrics {
         s.push_str(&format!(
             "b2bua_limiter_release_dropped_total{{reason=\"cap\"}} {}\n",
             self.limiter_release_dropped_cap_total()
+        ));
+        s.push_str(&format!(
+            "b2bua_limiter_release_dropped_total{{reason=\"shutdown\"}} {}\n",
+            self.limiter_release_dropped_shutdown_total()
         ));
 
         s.push_str("# HELP b2bua_limiter_breaker_transitions_total limiter circuit breaker transitions (to=open: consecutive admits with no usable answer reached the threshold; to=closed: a health probe was answered)\n# TYPE b2bua_limiter_breaker_transitions_total counter\n");

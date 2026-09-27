@@ -4,8 +4,9 @@
 //! has passed; anything else is capped at `grace` and its residual is reported,
 //! never silently cut without a number.
 //!
-//! The inputs are three closures ([`DrainInputs`]) and two durations
-//! ([`DrainBounds`]); the interface is one async function over them — the poll
+//! The inputs are three closures ([`DrainInputs`]) and the grace and floor
+//! of [`DrainBounds`] (its release flush bound is the worker's, read by
+//! `B2buaCore::drain` once this wait returns); the interface is one async function over them — the poll
 //! loop, the deadline arithmetic and the immediate-return shortcut all live
 //! behind it, so the runner's shutdown path stays a single call. The exit is
 //! named ([`DrainExit`]) so "the peers were behind" is visible and never read as
@@ -93,14 +94,19 @@ impl DrainInputs {
     }
 }
 
-/// The drain's two durations.
+/// The bounds of a planned exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrainBounds {
-    /// The ceiling: the drain never returns later than this.
+    /// The ceiling of the wait for the live calls: it never returns later
+    /// than this.
     pub grace: Duration,
     /// The floor a [`DrainExit::CaughtUp`] exit waits out, so a request routed
     /// before the withdrawal reached the proxy is still served (ADR-0031 D2).
     pub floor: Duration,
+    /// The most a worker's drain then waits for its limiter release queue to
+    /// empty ([`B2buaCore::drain`](crate::B2buaCore::drain)); what is still
+    /// queued at it is given up and counted.
+    pub release_flush: Duration,
 }
 
 /// Latch nothing here — the caller has already moved the node to `Draining` (so
@@ -155,7 +161,7 @@ mod tests {
 
     /// Grace only, no withdrawal — the shape every non-orchestrated shutdown has.
     fn bounds(grace: Duration) -> DrainBounds {
-        DrainBounds { grace, floor: Duration::ZERO }
+        DrainBounds { grace, floor: Duration::ZERO, release_flush: Duration::ZERO }
     }
 
     #[tokio::test(start_paused = true)]
@@ -218,7 +224,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let out = drain_until_quiescent(
             DrainInputs::new(|| 1, || true, || true),
-            DrainBounds { grace: Duration::from_secs(5), floor },
+            DrainBounds { grace: Duration::from_secs(5), floor, release_flush: Duration::ZERO },
         )
         .await;
         assert_eq!(out.exit, DrainExit::CaughtUp);
@@ -232,7 +238,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let out = drain_until_quiescent(
             DrainInputs::new(|| 1, || false, || true),
-            DrainBounds { grace, floor: Duration::from_secs(1) },
+            DrainBounds { grace, floor: Duration::from_secs(1), release_flush: Duration::ZERO },
         )
         .await;
         assert_eq!(out.exit, DrainExit::GracePeersBehind, "a flush window was lost");
@@ -248,7 +254,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let out = drain_until_quiescent(
             DrainInputs::new(|| 1, || true, || false),
-            DrainBounds { grace, floor: Duration::from_secs(1) },
+            DrainBounds { grace, floor: Duration::from_secs(1), release_flush: Duration::ZERO },
         )
         .await;
         assert_eq!(out.exit, DrainExit::Grace);
@@ -263,7 +269,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let out = drain_until_quiescent(
             DrainInputs::new(|| 1, || true, || true),
-            DrainBounds { grace, floor: Duration::from_secs(5) },
+            DrainBounds { grace, floor: Duration::from_secs(5), release_flush: Duration::ZERO },
         )
         .await;
         assert_eq!(out.exit, DrainExit::GracePeersBehind);

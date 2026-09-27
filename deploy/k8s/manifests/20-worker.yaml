@@ -38,7 +38,9 @@ spec:
       serviceAccountName: b2bua-worker
       nodeSelector: { tier: app }
       # Drain grace: SIGTERM latches Draining (OPTIONS 503 + /ready NotReady),
-      # the runner waits B2BUA_DRAIN_GRACE_MS, then exits. Keep this > grace.
+      # the runner waits B2BUA_DRAIN_GRACE_MS, then flushes its queued limiter
+      # releases for at most B2BUA_DRAIN_RELEASE_FLUSH_MS, then exits. Keep this
+      # > grace + flush.
       # A withdrawn worker exits earlier, once past B2BUA_DRAIN_MIN_MS every live
       # call's backup has applied its changelog head (ADR-0031 D2).
       terminationGracePeriodSeconds: 30
@@ -170,6 +172,7 @@ spec:
             - { name: B2BUA_REPL_SERVICE,   value: "b2bua-worker" }
             - { name: B2BUA_DRAIN_GRACE_MS, value: "5000" }
             - { name: B2BUA_DRAIN_MIN_MS,   value: "1000" }
+            - { name: B2BUA_DRAIN_RELEASE_FLUSH_MS, value: "3000" }
             # Heap profiling for /debug/heap at jemalloc's default interval
             # (ADR-0038). The binary carries its allocator defaults (four
             # arenas, thp:never, 1 s decay); this value adds to them key by key.

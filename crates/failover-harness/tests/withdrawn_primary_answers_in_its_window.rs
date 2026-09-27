@@ -88,8 +88,11 @@ const GRACE: Duration = Duration::from_secs(5);
 
 /// The drain's bounds: the same 5 s ceiling, with the caught-up exit's 1 s floor
 /// (ADR-0031 D2) — a request routed before the withdrawal is still served.
-const BOUNDS: failover_harness::DrainBounds =
-    failover_harness::DrainBounds { grace: GRACE, floor: Duration::from_millis(1000) };
+const BOUNDS: failover_harness::DrainBounds = failover_harness::DrainBounds {
+    grace: GRACE,
+    floor: Duration::from_millis(1000),
+    release_flush: Duration::from_secs(3),
+};
 
 /// The deployed shape: a failover-capable route (callback context) arming the
 /// per-b-leg `NoAnswer`, whose `no_answer_timeout` failure consult answers with

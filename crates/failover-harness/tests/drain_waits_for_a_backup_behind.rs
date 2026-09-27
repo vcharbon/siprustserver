@@ -46,7 +46,11 @@ const B2: &str = "127.0.0.1:5092";
 /// The deployed shutdown bounds: the 5 s ceiling with the caught-up exit's 1 s
 /// floor (ADR-0031 D2).
 const GRACE: Duration = Duration::from_secs(5);
-const BOUNDS: DrainBounds = DrainBounds { grace: GRACE, floor: Duration::from_millis(1000) };
+const BOUNDS: DrainBounds = DrainBounds {
+    grace: GRACE,
+    floor: Duration::from_millis(1000),
+    release_flush: Duration::from_secs(3),
+};
 
 #[tokio::test(start_paused = true)]
 async fn a_withdrawn_worker_whose_backup_reports_nothing_drains_to_the_grace() {

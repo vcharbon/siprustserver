@@ -40,7 +40,8 @@ const B2: &str = "127.0.0.1:5092";
 /// floor (ADR-0031 D2).
 const GRACE: Duration = Duration::from_secs(5);
 const FLOOR: Duration = Duration::from_millis(1000);
-const BOUNDS: DrainBounds = DrainBounds { grace: GRACE, floor: FLOOR };
+const BOUNDS: DrainBounds =
+    DrainBounds { grace: GRACE, floor: FLOOR, release_flush: Duration::from_secs(3) };
 
 #[tokio::test(start_paused = true)]
 async fn a_withdrawn_workers_drain_exits_on_its_backup_holding_the_call() {
