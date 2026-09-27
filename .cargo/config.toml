@@ -44,18 +44,10 @@ rustflags = ["--cfg", "tokio_unstable", "-Clink-arg=-fuse-ld=mold", "-Clink-arg=
 
 # ── allocator defaults ─────────────────────────────────────────────────
 #
-# Compiled into the bundled jemalloc as its first options string, so every
-# binary on this allocator holds the same footprint on any host, before any
-# manifest: `thp:never` keeps a host with THP=always from refilling purged
-# extents as huge pages (RSS would follow the retained size), the 1 s decays
-# return freed pages promptly, and `narenas:1` removes the slab slack that
-# grows with the thread count: a freed region returns to the arena owning its
-# slab and only that arena's threads refill it, so one arena per thread
-# (jemalloc's default, 4 per CPU) leaves 23 % of the slab pages empty under
-# churn at 26 threads and 33 % at 98, where one shared arena leaves 1 % at
-# either, the thread caches carrying the parallelism at equal CPU (ADR-0038).
-# `_RJEM_MALLOC_CONF` at run time is read after it and overrides key by key;
-# the startup line reports the resolved values and `jemalloc_footprint_hazards`
-# counts what cannot hold (jemalloc-stats).
+# Compiled into the bundled jemalloc, so every binary on it holds the same
+# footprint on any host: no huge-page refill of purged extents, freed pages
+# returned within 1 s, and one shared arena, whose slab slack does not grow with
+# the thread count (ADR-0038). `_RJEM_MALLOC_CONF` overrides key by key; the
+# startup line reports the resolved values and `jemalloc_footprint_hazards`.
 [env]
 JEMALLOC_SYS_WITH_MALLOC_CONF = "thp:never,dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:1"

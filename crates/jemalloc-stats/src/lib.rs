@@ -5,9 +5,9 @@
 //! steady-state RSS — glibc malloc retains freed arena chunks and ratchets RSS
 //! under sustained SIP churn (a no-chaos soak measured ~209 MiB/h growth with
 //! all logical state flat, → node-cgroup OOM). jemalloc returns dirty/muzzy
-//! pages to the OS on a time-based decay; the workspace compiles a 1 s decay
-//! and `thp:never` into jemalloc (`.cargo/config.toml`, ADR-0038) and
-//! `_RJEM_MALLOC_CONF` overrides it key by key. [`footprint`] states what the
+//! pages to the OS on a time-based decay; the workspace compiles a 1 s decay,
+//! `thp:never` and `narenas:1` into jemalloc (`.cargo/config.toml`, ADR-0038)
+//! and `_RJEM_MALLOC_CONF` overrides them key by key. [`footprint`] states what the
 //! resolved settings cost on the host and [`log_config`] reports it at startup.
 //!
 //! That fix is only observable if we can SEE it. This crate reads jemalloc's own
@@ -465,12 +465,13 @@ mod imp {
     /// config is visible without scraping `/metrics`. Pairs with the
     /// `jemalloc_opt_*` gauges for the silent-MALLOC_CONF-failure check.
     pub fn log_config() {
-        eprintln!("{}", footprint_report().line());
+        eprintln!("{}", Report::of(resolved()).line());
     }
 
-    /// The footprint of the resolved configuration on this host.
-    pub fn footprint_report() -> Report {
-        Report::of(resolved())
+    /// The footprint of the resolved configuration on this host; `None` only
+    /// on a build without jemalloc.
+    pub fn footprint_report() -> Option<Report> {
+        Some(Report::of(resolved()))
     }
 
     /// The resolved settings, from `mallctl`, `/proc/self/status` and the
