@@ -28,7 +28,8 @@ pub mod timers;
 // The layer actor: spawn, send API, per-call eviction, ADR-0014 self-release,
 // and the deferred-backlog ceiling on new calls.
 pub use layer::{
-    DeferredBound, NewCallRefusal, TransactionConfig, TransactionLayer, TransactionLayerClosed,
+    DeferredBound, NewCallRefusal, RefusedClass, TransactionConfig, TransactionLayer,
+    TransactionLayerClosed,
 };
 // The seeds a materialised call hands the layer, and a re-offer's disposition.
 pub use seed::{Reoffer, TxnSeed};

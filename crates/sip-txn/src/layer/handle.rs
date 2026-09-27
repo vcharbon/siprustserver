@@ -63,10 +63,11 @@ pub struct TransactionConfig {
     /// makes the defect a test failure, and a test that exercises the
     /// correction itself turns it off.
     pub strict_to_tag: bool,
-    /// The ceilings on the deferred backlog past which a new initial INVITE is
-    /// refused ([`DeferredBound`]). `None` — the default — sets none: the
-    /// backlog then grows with the initial INVITEs admitted while the consumer
-    /// does not drain, until the sweep removes them with their transactions.
+    /// The ceilings on the deferred backlog past which an INVITE no
+    /// transaction holds is refused ([`DeferredBound`]). `None` — the default —
+    /// sets none: the backlog then grows with the INVITEs admitted while the
+    /// consumer does not drain, until the sweep removes them with their
+    /// transactions.
     pub deferred_bound: Option<DeferredBound>,
 }
 

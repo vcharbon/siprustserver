@@ -863,6 +863,8 @@ impl RunnerBase {
             wire_faults: Default::default(),
             clock: self.clock.clone(),
             id_gen: Arc::new(IdGen::from_entropy()),
+            // Seeds the stateless refusals' To-tag secret, apart from `id_gen`.
+            refusal_id_gen: Arc::new(IdGen::from_entropy()),
             replication: None,
             metrics: self.metrics.clone(),
             // The generic service-authorable async-HTTP port is opt-in; a runner
@@ -1080,12 +1082,13 @@ pub fn txn_metrics_text(m: &sip_txn::TransactionMetrics) -> String {
     s.push_str("# HELP b2bua_txn_event_queue_deferred Critical events waiting for room in the inbound->app channel.\n");
     s.push_str("# TYPE b2bua_txn_event_queue_deferred gauge\n");
     s.push_str(&format!("b2bua_txn_event_queue_deferred {}\n", m.event_queue_deferred()));
-    s.push_str("# HELP b2bua_txn_deferred_refused_total New initial INVITEs refused 503 by the txn layer because its deferred backlog was at the ceiling of their class.\n");
+    s.push_str("# HELP b2bua_txn_deferred_refused_total INVITEs refused 503 by the txn layer because its deferred backlog was at the ceiling of their class (normal, emergency, in_dialog); a later copy of a refused INVITE is answered the same and not counted again.\n");
     s.push_str("# TYPE b2bua_txn_deferred_refused_total counter\n");
-    for (class, emergency) in [("normal", false), ("emergency", true)] {
+    for class in sip_txn::RefusedClass::ALL {
         s.push_str(&format!(
-            "b2bua_txn_deferred_refused_total{{class=\"{class}\"}} {}\n",
-            m.deferred_refused(emergency)
+            "b2bua_txn_deferred_refused_total{{class=\"{}\"}} {}\n",
+            class.label(),
+            m.deferred_refused(class)
         ));
     }
     s.push_str("# HELP b2bua_txn_deferred_swept_total Deferred requests removed with the server transaction the sweep deleted before the router took them.\n");
@@ -1270,6 +1273,7 @@ mod tests {
             "b2bua_txn_event_queue_drops_total{reason=\"request_invite\"} 0",
             "b2bua_txn_deferred_refused_total{class=\"normal\"} 0",
             "b2bua_txn_deferred_refused_total{class=\"emergency\"} 0",
+            "b2bua_txn_deferred_refused_total{class=\"in_dialog\"} 0",
             "b2bua_txn_deferred_swept_total 0",
         ] {
             assert!(text.lines().any(|l| l == line), "missing {line:?} in:\n{text}");

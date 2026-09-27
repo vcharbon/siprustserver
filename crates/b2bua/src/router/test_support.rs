@@ -76,6 +76,7 @@ pub async fn node(ordinal: &str) -> Node {
         wire_faults: Default::default(),
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::seeded(0xB2B1)),
+        refusal_id_gen: Arc::new(IdGen::seeded(0x0503)),
         replication: Some(setup),
         metrics: metrics.clone(),
         adaptation_http: None,

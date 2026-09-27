@@ -174,6 +174,7 @@ pub fn spawn_b2bua_core(
         wire_faults: wire_faults.unwrap_or_default(),
         clock,
         id_gen,
+        refusal_id_gen: Arc::new(IdGen::seeded(0x0503)),
         replication,
         metrics: B2buaMetrics::new(),
         adaptation_http,

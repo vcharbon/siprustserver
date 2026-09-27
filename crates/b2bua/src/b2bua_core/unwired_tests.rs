@@ -45,6 +45,7 @@ async fn unwired_core(ordinal: &str) -> B2buaCore {
         wire_faults: Default::default(),
         clock: Clock::test_at(0),
         id_gen: Arc::new(IdGen::seeded(0xB2B2)),
+        refusal_id_gen: Arc::new(IdGen::seeded(0x0503)),
         replication: None,
         metrics: B2buaMetrics::new(),
         adaptation_http: None,

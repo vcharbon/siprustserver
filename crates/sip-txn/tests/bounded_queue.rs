@@ -15,7 +15,9 @@ use std::sync::Arc;
 use sip_message::generators::{generate_response, GenerateResponseOpts};
 use sip_message::types::SipHeader;
 use sip_message::{SipMessage, SipRequest};
-use sip_txn::{DeferredBound, EventQueueClass, IdGen, TransactionConfig, TransactionEvent};
+use sip_txn::{
+    DeferredBound, EventQueueClass, IdGen, RefusedClass, TransactionConfig, TransactionEvent,
+};
 
 const UDP_QUEUE_MAX: usize = 8; // event capacity = max(64, 4×8) = 64
 
@@ -31,7 +33,9 @@ async fn capacity_and_counters_start_at_zero() {
         assert_eq!(m.event_queue_deferrals(r), 0);
     }
     assert_eq!(m.deferred_swept(), 0);
-    assert_eq!((m.deferred_refused(false), m.deferred_refused(true)), (0, 0));
+    for class in RefusedClass::ALL {
+        assert_eq!(m.deferred_refused(class), 0);
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -335,7 +339,10 @@ async fn reject_and_settle(stack: &mut Stack, delivered: &[SipRequest]) {
             invite,
             486,
             "Busy Here",
-            &GenerateResponseOpts { to_tag: Some(format!("uas-{i}")), ..Default::default() },
+            &GenerateResponseOpts {
+                to_tag: Some(invite.to().tag().map_or_else(|| format!("uas-{i}"), str::to_string)),
+                ..Default::default()
+            },
         );
         stack.txn.send_response(busy, addr(PEER)).await.unwrap();
     }
@@ -369,29 +376,33 @@ async fn a_stalled_consumer_under_an_invite_flood_holds_the_backlog_at_its_ceili
     let m = stack.txn.metrics();
     assert_eq!(m.event_queue_deferred(), normal, "the backlog stops at its ceiling");
     assert_eq!(m.active_transactions(), normal, "a refused INVITE holds no transaction");
-    assert_eq!(m.deferred_refused(false), (flood - normal) as u64);
-    assert_eq!(m.deferred_refused(true), 0);
+    assert_eq!(m.deferred_refused(RefusedClass::Normal), (flood - normal) as u64);
+    assert_eq!(m.deferred_refused(RefusedClass::Emergency), 0);
     let wire = stack.drain_peer();
     assert_eq!(count_responses(&wire, 100), normal, "only admitted INVITEs draw a 100 Trying");
     let refused = responses_of(&wire, 503);
     assert_eq!(refused.len(), flood - normal, "every INVITE past the ceiling is refused");
     assert!(refused.iter().all(|r| r.raw("Retry-After".into()).next() == Some("5")));
 
-    // A refused INVITE's retransmission is judged afresh: the same 503, still
-    // no transaction.
+    // A refused INVITE's retransmission draws the same 503, still no
+    // transaction, and is not counted as a second refusal.
     stack.inject(&new_invite(flood - 1)).await;
     elapse_ms(50).await;
     let again = responses_of(&stack.drain_peer(), 503);
     assert_eq!(again.len(), 1);
     assert_eq!(to_tag_of(&again[0]), to_tag_of(&refused[refused.len() - 1]));
     assert_eq!(stack.txn.metrics().active_transactions(), normal);
+    assert_eq!(stack.txn.metrics().deferred_refused(RefusedClass::Normal), (flood - normal) as u64);
 
-    // The callers ACK their 503s; the ACKs open nothing.
+    // The callers ACK their 503s: the layer that refused absorbs the ACKs, so
+    // none opens a transaction or competes for the full queue.
     for r in &refused {
         stack.inject(&ack_for(r)).await;
     }
     elapse_ms(50).await;
-    assert_eq!(stack.txn.metrics().active_transactions(), normal);
+    let m = stack.txn.metrics();
+    assert_eq!(m.active_transactions(), normal);
+    assert_eq!(m.event_queue_drops(EventQueueClass::RequestOther), 0, "no ACK reached the queue");
 
     // The consumer catches up: the admitted INVITEs arrive in order.
     stack.drain_events();
@@ -402,6 +413,11 @@ async fn a_stalled_consumer_under_an_invite_flood_holds_the_backlog_at_its_ceili
     let admitted_ids: Vec<String> = (0..normal).map(|i| format!("new-{i}@unit")).collect();
     assert_eq!(delivered_ids, admitted_ids, "the deferred INVITEs reach the consumer in order");
     assert_eq!(stack.txn.metrics().event_queue_deferred(), 0);
+
+    // An ACK copy arriving once the queue has room is absorbed all the same.
+    stack.inject(&ack_for(&refused[0])).await;
+    elapse_ms(50).await;
+    assert!(requests_of(&stack.drain_events(), "ACK").is_empty(), "the consumer never sees it");
     reject_and_settle(&mut stack, &delivered).await;
 }
 
@@ -425,8 +441,16 @@ async fn emergency_invites_are_admitted_between_the_ceilings_and_refused_at_the_
     elapse_ms(50).await;
 
     let m = stack.txn.metrics();
-    assert_eq!(m.deferred_refused(false), 1, "a normal INVITE at the normal ceiling");
-    assert_eq!(m.deferred_refused(true), 1, "an emergency INVITE at the emergency ceiling");
+    assert_eq!(
+        m.deferred_refused(RefusedClass::Normal),
+        1,
+        "a normal INVITE at the normal ceiling"
+    );
+    assert_eq!(
+        m.deferred_refused(RefusedClass::Emergency),
+        1,
+        "an emergency INVITE at the emergency ceiling"
+    );
     assert_eq!(m.event_queue_deferred(), 6);
     assert_eq!(m.active_transactions(), 6);
     let wire = stack.drain_peer();
@@ -445,13 +469,14 @@ async fn emergency_invites_are_admitted_between_the_ceilings_and_refused_at_the_
     reject_and_settle(&mut stack, &delivered).await;
 }
 
-/// At the ceiling, everything a call already admitted still flows: a
+/// At the normal ceiling, everything a call already admitted still flows: a
 /// retransmitted INVITE replays its 100 Trying, a re-INVITE (To-tag) is
-/// admitted, and a CANCEL of a deferred INVITE is answered 200 + 487 with its
-/// `Cancelled` deferred behind the INVITE. Only the new call is refused.
+/// admitted below the emergency ceiling, and a CANCEL of a deferred INVITE is
+/// answered 200 + 487 with its `Cancelled` deferred behind the INVITE. Only
+/// the new call is refused.
 #[tokio::test(start_paused = true)]
 async fn at_the_ceiling_admitted_calls_are_never_refused() {
-    let mut stack = bounded_stack(2, 2).await;
+    let mut stack = bounded_stack(2, 4).await;
     let cap = stack.txn.metrics().event_queue_capacity();
     saturate(&stack, cap).await;
 
@@ -482,7 +507,8 @@ async fn at_the_ceiling_admitted_calls_are_never_refused() {
     let wire = stack.drain_peer();
     assert_eq!(count_responses(&wire, 503), 1, "only the new call is refused");
     let m = stack.txn.metrics();
-    assert_eq!(m.deferred_refused(false), 1);
+    assert_eq!(m.deferred_refused(RefusedClass::Normal), 1);
+    assert_eq!(m.deferred_refused(RefusedClass::InDialog), 0);
     assert_eq!(m.event_queue_deferred(), 4, "A, B, the re-INVITE and A's Cancelled");
     assert_eq!(m.event_queue_deferrals(EventQueueClass::Cancelled), 1);
     stack.inject(&ack_for(&responses_of(&wire, 503)[0])).await;
@@ -535,4 +561,206 @@ async fn a_swept_invite_transaction_takes_its_deferred_invite_with_it() {
     assert_eq!(stack.drain_events().len(), cap);
     elapse_ms(200).await;
     assert!(requests_of(&stack.drain_events(), "INVITE").is_empty());
+}
+
+/// An INVITE carrying a To-tag is judged at the emergency ceiling: this layer
+/// cannot tell a dialog its consumer holds from one it never had, so a flood
+/// of tagged INVITEs stops there too, answered 503, which leaves a real
+/// dialog in place (RFC 3261 §12.2.1.2).
+#[tokio::test(start_paused = true)]
+async fn a_flood_of_to_tagged_invites_stops_at_the_emergency_ceiling() {
+    let (normal, emergency, flood) = (2, 4, 10);
+    let mut stack = bounded_stack(normal, emergency).await;
+    let cap = stack.txn.metrics().event_queue_capacity();
+    saturate(&stack, cap).await;
+
+    for i in 0..flood {
+        stack
+            .inject(&inbound_request(
+                "INVITE",
+                &format!("z9hG4bK-tagged-{i}"),
+                &format!("tagged-{i}@unit"),
+                Some(&format!("dlg-{i}")),
+            ))
+            .await;
+    }
+    elapse_ms(100).await;
+
+    let m = stack.txn.metrics();
+    assert_eq!(m.event_queue_deferred(), emergency, "the backlog stops at the emergency ceiling");
+    assert_eq!(m.active_transactions(), emergency);
+    assert_eq!(m.deferred_refused(RefusedClass::InDialog), (flood - emergency) as u64);
+    assert_eq!(m.deferred_refused(RefusedClass::Normal), 0);
+    let wire = stack.drain_peer();
+    assert_eq!(count_responses(&wire, 100), emergency);
+    let refused = responses_of(&wire, 503);
+    assert_eq!(refused.len(), flood - emergency);
+    for r in &refused {
+        stack.inject(&ack_for(r)).await;
+    }
+
+    stack.drain_events();
+    elapse_ms(200).await;
+    let delivered = requests_of(&stack.drain_events(), "INVITE");
+    assert_eq!(delivered.len(), emergency);
+    reject_and_settle(&mut stack, &delivered).await;
+}
+
+/// An emergency ceiling set below the normal one is read as the normal one:
+/// an emergency INVITE is never held to a lower ceiling than an ordinary call.
+#[tokio::test(start_paused = true)]
+async fn an_emergency_ceiling_below_the_normal_one_is_read_as_the_normal_one() {
+    let mut stack = bounded_stack(4, 2).await;
+    let cap = stack.txn.metrics().event_queue_capacity();
+    saturate(&stack, cap).await;
+
+    stack.inject(&new_invite(0)).await;
+    stack.inject(&new_invite(1)).await;
+    elapse_ms(50).await;
+    stack.inject(&emergency_invite(0)).await;
+    elapse_ms(50).await;
+    assert_eq!(
+        count_responses(&stack.drain_peer(), 100),
+        3,
+        "the emergency INVITE is admitted past its own ceiling of 2"
+    );
+    stack.inject(&new_invite(2)).await;
+    stack.inject(&emergency_invite(1)).await;
+    elapse_ms(50).await;
+    let wire = stack.drain_peer();
+    assert_eq!(count_responses(&wire, 100), 1);
+    let refused = responses_of(&wire, 503);
+    assert_eq!(refused.len(), 1);
+    assert_eq!(stack.txn.metrics().deferred_refused(RefusedClass::Emergency), 1);
+    stack.inject(&ack_for(&refused[0])).await;
+
+    stack.drain_events();
+    elapse_ms(200).await;
+    let delivered = requests_of(&stack.drain_events(), "INVITE");
+    assert_eq!(delivered.len(), 4);
+    reject_and_settle(&mut stack, &delivered).await;
+}
+
+/// RFC 3261 §8.2.7: a copy of a refused INVITE that crosses its 503 and
+/// arrives after the backlog drained draws the same 503 — admitting it would
+/// start a call its caller, already holding a final, never waits for. Past
+/// 64·T1, when no UAC still retransmits it, the identity is forgotten.
+#[tokio::test(start_paused = true)]
+async fn a_copy_crossing_its_refusal_after_the_backlog_drained_draws_the_same_refusal() {
+    let mut stack = bounded_stack(2, 4).await;
+    let cap = stack.txn.metrics().event_queue_capacity();
+    saturate(&stack, cap).await;
+
+    for i in 0..3 {
+        stack.inject(&new_invite(i)).await;
+    }
+    elapse_ms(50).await;
+    let refused = responses_of(&stack.drain_peer(), 503);
+    assert_eq!(refused.len(), 1);
+
+    stack.drain_events();
+    elapse_ms(200).await;
+    let mut delivered = requests_of(&stack.drain_events(), "INVITE");
+    assert_eq!(delivered.len(), 2);
+    assert_eq!(stack.txn.metrics().event_queue_deferred(), 0, "the backlog drained");
+
+    stack.inject(&new_invite(2)).await;
+    elapse_ms(50).await;
+    let wire = stack.drain_peer();
+    assert_eq!(count_responses(&wire, 100), 0, "the crossing copy starts no call");
+    let again = responses_of(&wire, 503);
+    assert_eq!(again.len(), 1);
+    assert_eq!(to_tag_of(&again[0]), to_tag_of(&refused[0]));
+    let m = stack.txn.metrics();
+    assert_eq!(m.active_transactions(), 2);
+    assert_eq!(m.deferred_refused(RefusedClass::Normal), 1);
+    assert!(requests_of(&stack.drain_events(), "INVITE").is_empty());
+    stack.inject(&ack_for(&refused[0])).await;
+
+    // 64·T1 later the identity is forgotten: a new INVITE on it is admitted.
+    elapse_ms(33_000).await;
+    stack.drain_peer();
+    stack.inject(&new_invite(2)).await;
+    elapse_ms(50).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 100), 1);
+    delivered.extend(requests_of(&stack.drain_events(), "INVITE"));
+    assert_eq!(delivered.len(), 3);
+    reject_and_settle(&mut stack, &delivered).await;
+}
+
+/// An INVITE from `from_tag`: the fixture's request under another From-tag.
+fn invite_from(
+    method: &str,
+    branch: &str,
+    call_id: &str,
+    from_tag: &str,
+    to: Option<&str>,
+) -> Vec<u8> {
+    String::from_utf8(inbound_request(method, branch, call_id, to))
+        .expect("utf-8")
+        .replace("tag=caller-tag", &format!("tag={from_tag}"))
+        .into_bytes()
+}
+
+/// Two INVITEs on one Via branch (RFC 3261 §17.2.3 keys the transaction by
+/// branch; two peers can collide on one): the first's transaction ends by
+/// its own timers while its INVITE and `Cancelled` still wait, the second is
+/// admitted and then swept. The sweep takes the second's INVITE only.
+async fn the_sweep_takes_only_the_swept_invite_on_a_shared_branch(b_call_id: &str, b_from: &str) {
+    let mut stack = Stack::build_with_config(
+        1,
+        1024,
+        TransactionConfig {
+            udp_queue_max: UDP_QUEUE_MAX,
+            id_gen: Arc::new(IdGen::seeded(0xC0FFEE)),
+            invite_initial_timeout_ms: 1_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    let cap = stack.txn.metrics().event_queue_capacity();
+    saturate(&stack, cap).await;
+
+    let branch = "z9hG4bK-shared";
+    stack.inject(&invite_from("INVITE", branch, "a@unit", "tag-a", None)).await;
+    elapse_ms(50).await;
+    stack.inject(&invite_from("CANCEL", branch, "a@unit", "tag-a", None)).await;
+    elapse_ms(50).await;
+    let terminated = responses_of(&stack.drain_peer(), 487);
+    assert_eq!(terminated.len(), 1);
+    let to_a = to_tag_of(&terminated[0]);
+    stack.inject(&invite_from("ACK", branch, "a@unit", "tag-a", Some(&to_a))).await;
+    elapse_ms(6_000).await;
+    assert_eq!(stack.txn.metrics().active_transactions(), 0, "Timer I ended the first");
+    assert_eq!(stack.txn.metrics().event_queue_deferred(), 2, "its INVITE and Cancelled wait");
+
+    stack.inject(&invite_from("INVITE", branch, b_call_id, b_from, None)).await;
+    elapse_ms(50).await;
+    assert_eq!(stack.txn.metrics().active_transactions(), 1, "the second is admitted");
+    assert_eq!(stack.txn.metrics().event_queue_deferred(), 3);
+
+    elapse_ms(50_000).await;
+    let m = stack.txn.metrics();
+    assert_eq!(m.active_transactions(), 0, "the sweep deleted the second");
+    assert_eq!(m.deferred_swept(), 1);
+    assert_eq!(m.event_queue_deferred(), 2, "the first's INVITE and Cancelled stay");
+
+    assert_eq!(stack.drain_events().len(), cap);
+    elapse_ms(200).await;
+    let events = stack.drain_events();
+    let invites = requests_of(&events, "INVITE");
+    assert_eq!(invites.len(), 1);
+    assert_eq!(invites[0].call_id().as_str(), "a@unit");
+    assert_eq!(invites[0].from().tag(), Some("tag-a"));
+    assert!(matches!(events.last(), Some(TransactionEvent::Cancelled { .. })));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_sweep_keys_a_shared_branch_by_call_id() {
+    the_sweep_takes_only_the_swept_invite_on_a_shared_branch("b@unit", "tag-a").await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_sweep_keys_a_shared_branch_by_from_tag() {
+    the_sweep_takes_only_the_swept_invite_on_a_shared_branch("a@unit", "tag-b").await;
 }

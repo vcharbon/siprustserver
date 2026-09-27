@@ -1,20 +1,5 @@
-//! The worker's ceilings on the transaction layer's deferred backlog
-//! ([`sip_txn::DeferredBound`]) and the refusal a new call draws past them.
-//!
-//! The backlog holds the initial INVITEs whose 100 Trying already left while
-//! the router is not draining the event queue. Nothing upstream of it sees
-//! that: the Tier-1 brake reads the ingress queue, which the transaction layer
-//! drains at parse speed whatever the router does, and the admission gates
-//! run in the router, behind the stall. So the transaction layer refuses the
-//! new call itself, after matching retransmissions of calls it already
-//! admitted — which the brake, ahead of the transaction layer, cannot tell
-//! from new calls (ADR-0037).
-//!
-//! The ceilings follow the memory bounds of ADR-0037: at `normal` a new
-//! non-emergency call is refused, at `emergency` every new call is. The
-//! refusal is the capacity 503 (jittered `Retry-After` floored at 1 s, no
-//! `Reason`), sent statelessly under a request-derived To-tag so every copy of
-//! one INVITE draws the same answer (RFC 3261 §8.2.7).
+//! The worker's ceilings on the transaction layer's deferred backlog and the
+//! 503 a refused INVITE draws past them (ADR-0037 item 6).
 
 use std::sync::Arc;
 
@@ -27,8 +12,8 @@ use crate::overload::{jittered_retry_after, StatelessRejectTagger};
 /// Deferred events at which a new non-emergency call is refused, in output
 /// queues' worth: one full queue waiting behind the full queue.
 const NORMAL_QUEUES: usize = 1;
-/// Deferred events at which every new call is refused, in output queues'
-/// worth.
+/// Deferred events at which an emergency call and an INVITE carrying a
+/// To-tag are refused too, in output queues' worth.
 const EMERGENCY_QUEUES: usize = 2;
 
 /// The ceilings for an output queue of `event_capacity` events, refusing with

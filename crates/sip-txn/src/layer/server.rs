@@ -246,10 +246,10 @@ impl Owner {
                     }
                 }
             }
-            // ACK with no matching server txn. A stateless-503 ACK carries no
-            // To-tag and must be absorbed (not propagated); a legitimate 2xx
-            // ACK always has a To-tag and passes through.
-            if req.to().tag().is_none() {
+            // ACK with no matching server txn. One without a To-tag answers
+            // no dialog and one acknowledging this layer's own refusal ends
+            // here; a 2xx ACK always has a To-tag and passes through.
+            if req.to().tag().is_none() || self.acknowledges_refusal(&req) {
                 return;
             }
             self.emit(TransactionEvent::Message {
@@ -272,16 +272,16 @@ impl Owner {
         }
 
         // Call admission (Tier-3, capacity) sits ABOVE this layer — see
-        // docs/adr/0007 "Deferred". This layer refuses only a new initial
-        // INVITE its deferred backlog has no room for (ADR-0037), before any
-        // 100 Trying or transaction exists; it admits every other INVITE, and
-        // every other request its event queue takes (below).
+        // docs/adr/0007 "Deferred". This layer refuses only an INVITE its
+        // deferred backlog has no room for (ADR-0037), before any 100 Trying or
+        // transaction exists; it admits every other INVITE, and every other
+        // request its event queue takes (below).
         let kind =
             if req.method() == Method::Invite { TxnKind::Invite } else { TxnKind::NonInvite };
         let is_invite = matches!(kind, TxnKind::Invite);
         if is_invite
-            && req.to().tag().is_none()
-            && self.refuse_on_backlog(endpoint, &req, src).await
+            && (self.repeat_refusal(endpoint, &req, src).await
+                || self.refuse_on_backlog(endpoint, &req, src).await)
         {
             return;
         }

@@ -18,7 +18,7 @@ use crate::metrics::MetricsInner;
 use crate::rng::IdGen;
 use crate::timers::{ms, TIMER_L, TXN_SWEEP_INTERVAL};
 
-use super::backlog::DeferredBound;
+use super::backlog::{DeferredBound, RefusedMemo};
 use super::events::SweptServer;
 use super::handle::{Command, TransactionConfig};
 use super::txn::{sweep_max_age, CancelWire, Timer, Transaction, TxnRole};
@@ -61,6 +61,8 @@ pub(super) struct Owner {
     pub(super) deferred_events: VecDeque<TransactionEvent>,
     /// [`TransactionConfig::deferred_bound`](crate::TransactionConfig).
     pub(super) deferred_bound: Option<DeferredBound>,
+    /// The INVITEs refused at a `deferred_bound` ceiling in the last 64·T1.
+    pub(super) refused: RefusedMemo,
     /// Whether a [`Timer::EventRetry`] is already in the wheel (at most one).
     pub(super) event_retry_armed: bool,
     /// call_refs whose last txn cleared THIS turn but whose `CallQuiesced` must be
@@ -194,6 +196,7 @@ impl Owner {
             txn_index: HashMap::new(),
             deferred_events: VecDeque::new(),
             deferred_bound: config.deferred_bound,
+            refused: RefusedMemo::new(),
             event_retry_armed: false,
             pending_quiesce: Vec::new(),
             invite_initial_timeout_ms: config.invite_initial_timeout_ms,

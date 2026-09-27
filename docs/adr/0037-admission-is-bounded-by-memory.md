@@ -28,12 +28,8 @@ kills it, and a kill drops every call it serves.
    bucket so it spends no token, through the INVITE server transaction. The
    stateless ingress brake does not: it cannot tell a new INVITE from a
    retransmission of one already admitted, and refusing that retransmission
-   would end a call being set up. In-dialog requests are never refused.
-   The transaction layer sends the same 503 statelessly, before its 100
-   Trying, to a new initial INVITE its deferred-event backlog has no room
-   for: a router that stops draining is invisible to every other gate. Its
-   ceilings (one output queue of events for normal calls, two for emergency)
-   are sized by that queue, not by the host, and always on.
+   would end a call being set up. In-dialog requests are never refused, but
+   for item 6.
 4. **Backup replicas have their own ceilings:** a count and an RSS ceiling,
    set lower than the admission ones. At either, a replica of a call this node
    does not hold yet is not stored. Updates and deletes of held replicas, and a
@@ -44,6 +40,23 @@ kills it, and a kill drops every call it serves.
    held (ADR-0031 D2).
 5. **RSS is sampled, counts are exact.** RSS is read every 100 ms through an
    injectable `SystemProbe`; tests drive it through a simulated one.
+6. **The transaction layer's deferred backlog is an internal bound, always
+   on.** It holds the critical events a full event queue keeps for a router
+   that stops draining, among them every INVITE whose 100 Trying already
+   left. No other gate sees that stall: the ingress brake reads a queue the
+   transaction layer drains at parse speed, and the gates of item 3 run in
+   the router, behind it. No operator setting sizes the event queue, so the
+   backlog's ceilings follow it: one queue of events for a new call, two for
+   an emergency call and for an INVITE carrying a To-tag, whose dialog the
+   layer cannot check. Item 2's rule on settings covers the host-dependent
+   bounds of item 1. Past a ceiling the layer sends item 3's 503 statelessly,
+   before any 100 Trying and after matching retransmissions of admitted
+   INVITEs; a 503 to a re-INVITE leaves its dialog in place. Each refused
+   INVITE is remembered for 64·T1 (at most 65 536 at once), so its copies
+   draw the same 503 and its ACK ends in the layer; a copy arriving after
+   that is judged afresh, as at the ingress brake. The ceiling counts every
+   critical event, so a takeover burst of `CallQuiesced` events can refuse
+   new calls until the router catches up.
 
 ## Consequences
 

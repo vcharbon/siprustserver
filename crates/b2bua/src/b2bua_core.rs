@@ -116,6 +116,11 @@ pub struct B2buaDeps {
     pub wire_faults: WireFaults,
     pub clock: Clock,
     pub id_gen: Arc<IdGen>,
+    /// Seeds the secret the transaction layer's stateless refusals derive
+    /// their To-tags from ([`crate::deferred_bound`]); apart from `id_gen` so
+    /// drawing it leaves the core's identifier sequence untouched. A seeded
+    /// generator keeps a simulated run reproducible.
+    pub refusal_id_gen: Arc<IdGen>,
     /// Opt-in replication. `None` → today's non-replicating behaviour verbatim.
     pub replication: Option<ReplicationSetup>,
     /// Shared metrics handle. The host builds this so components it constructs
@@ -193,6 +198,7 @@ impl B2buaCore {
             wire_faults,
             clock,
             id_gen,
+            refusal_id_gen,
             replication,
             metrics,
             adaptation_http,
@@ -201,7 +207,7 @@ impl B2buaCore {
         } = deps;
 
         let parser: Arc<dyn SipParser + Send + Sync> = Arc::new(CustomParser::new());
-        let txn_config = txn_config(&config, &id_gen);
+        let txn_config = txn_config(&config, &id_gen, &refusal_id_gen);
         let (txn, txn_rx) = TransactionLayer::spawn(endpoint, parser, txn_config);
         let (timers, timer_rx) = TimerService::spawn_with_metrics(clock.clone(), metrics.clone());
 
@@ -803,16 +809,18 @@ fn backups_caught_up_in(ctx: &RouterCtx, changelog: &crate::repl::Changelog) -> 
 }
 
 /// The transaction layer's tunables for this worker: its event queue, the
-/// deployment's INVITE bounds and CANCEL policy, and the new-call ceiling on
-/// the deferred backlog ([`crate::deferred_bound`]).
-fn txn_config(config: &B2buaConfig, id_gen: &Arc<IdGen>) -> TransactionConfig {
+/// deployment's INVITE bounds and CANCEL policy, and the ceilings on the
+/// deferred backlog ([`crate::deferred_bound`]), whose refusals take their
+/// To-tag secret from `refusal_id_gen`.
+fn txn_config(
+    config: &B2buaConfig,
+    id_gen: &Arc<IdGen>,
+    refusal_id_gen: &IdGen,
+) -> TransactionConfig {
     let mut txn_config = TransactionConfig {
-        // Sizes the bounded inbound→app events channel at `max(64, x*4)`.
-        // At 256 (→1024) a new-INVITE burst (e.g. a 200cps peak) fills the
-        // channel and drop-newest sheds in-dialog OPTIONS-200 keepalive
-        // responses for ESTABLISHED dialogs → KeepaliveTimeout BYEs healthy
-        // long calls. 1024 (→4096) gives the channel headroom to absorb the
-        // burst so in-dialog traffic is not starved.
+        // Sizes the events channel at 4096: room for a new-INVITE burst
+        // beside the in-dialog traffic of established calls, whose keepalive
+        // responses a full channel would drop.
         udp_queue_max: 1024,
         id_gen: id_gen.clone(),
         // The deployment's initial-INVITE bound (default 158 s):
@@ -830,13 +838,27 @@ fn txn_config(config: &B2buaConfig, id_gen: &Arc<IdGen>) -> TransactionConfig {
         strict_to_tag: true,
         deferred_bound: None,
     };
-    // The new-call ceiling on the deferred backlog. Its To-tag secret is
-    // drawn from its own generator so the core's id sequence is untouched.
     txn_config.deferred_bound = Some(crate::deferred_bound::deferred_bound(
         txn_config.event_capacity(),
         config.retry_after_base_sec,
         config.retry_after_jitter_sec,
-        &IdGen::from_entropy(),
+        refusal_id_gen,
     ));
     txn_config
+}
+
+#[cfg(test)]
+mod txn_config_tests {
+    use super::*;
+
+    /// The worker always bounds the deferred backlog, at one and two event
+    /// queues.
+    #[test]
+    fn the_worker_bounds_the_deferred_backlog() {
+        let config =
+            txn_config(&B2buaConfig::default(), &Arc::new(IdGen::seeded(1)), &IdGen::seeded(2));
+        assert_eq!(config.event_capacity(), 4096);
+        let bound = config.deferred_bound.expect("the worker sets a deferred bound");
+        assert_eq!((bound.normal, bound.emergency), (4096, 8192));
+    }
 }

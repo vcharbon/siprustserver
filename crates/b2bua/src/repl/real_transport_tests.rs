@@ -184,6 +184,7 @@ async fn spawn_reclaimer_core(
         wire_faults: Default::default(),
         clock: clock.clone(),
         id_gen: Arc::new(IdGen::seeded(0xB2B1)),
+        refusal_id_gen: Arc::new(IdGen::seeded(0x0503)),
         replication: Some(setup),
         metrics: crate::metrics::B2buaMetrics::new(),
         adaptation_http: None,

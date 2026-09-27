@@ -11,6 +11,7 @@ use sip_retransmit::Class;
 use tokio::sync::mpsc;
 
 use crate::event::{EventQueueClass, TransactionEvent};
+use crate::layer::RefusedClass;
 
 /// The transaction ladders this layer drives, in the order the family
 /// enumerates them. A dialog-level class is the TU's and never reaches here.
@@ -217,9 +218,9 @@ pub(crate) struct MetricsInner {
     /// Deferred requests removed because the sweep deleted the server
     /// transaction that admitted them (counter).
     pub deferred_swept: AtomicU64,
-    /// New initial INVITEs refused at a deferred-backlog ceiling, indexed
-    /// `[normal, emergency]` by the INVITE's class (counter).
-    pub deferred_refused: [AtomicU64; 2],
+    /// INVITEs refused at a deferred-backlog ceiling, indexed by
+    /// [`RefusedClass::index`] (counter).
+    pub deferred_refused: [AtomicU64; 3],
     /// Client transactions still open when their call was released — orphaned
     /// (see `Transaction::orphaned`), never cut short (counter).
     pub txn_orphaned_on_call_evict: AtomicU64,
@@ -417,11 +418,12 @@ impl TransactionMetrics {
         self.inner.deferred_swept.load(Ordering::Relaxed)
     }
 
-    /// New initial INVITEs refused at a deferred-backlog ceiling
-    /// ([`DeferredBound`](crate::DeferredBound)), for the emergency class or
-    /// the normal one (counter).
-    pub fn deferred_refused(&self, emergency: bool) -> u64 {
-        self.inner.deferred_refused[usize::from(emergency)].load(Ordering::Relaxed)
+    /// INVITEs refused at a deferred-backlog ceiling
+    /// ([`DeferredBound`](crate::DeferredBound)), by class; a later copy of a
+    /// refused INVITE, answered the same refusal, is not counted again
+    /// (counter).
+    pub fn deferred_refused(&self, class: RefusedClass) -> u64 {
+        self.inner.deferred_refused[class.index()].load(Ordering::Relaxed)
     }
 
     /// Client transactions orphaned — left to close their own obligations —
