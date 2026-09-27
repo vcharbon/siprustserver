@@ -549,11 +549,13 @@ mod tests {
         Call, CallBodyCodec, CallModelState, CallTopology, LegDisposition, LegState, MsgpackCodec,
     };
 
-    use super::{fold_refused_flush, reverse_flush_dominates, FlushDirection};
+    use super::{
+        fold_refused_flush, reap_expired_replicas, reverse_flush_dominates, FlushDirection,
+    };
     use crate::config::B2buaConfig;
     use crate::initial_invite::build_initial_call;
     use crate::router::test_support::{invite, node, src};
-    use crate::store::MaterialiseOrigin;
+    use crate::store::{CallStore, MaterialiseOrigin, PartitionRole, PutOpts};
 
     /// A replicable call at `(p, b)`, owned by `w0` and backed up by `w1`.
     fn base(p: i64, b: i64) -> Call {
@@ -758,5 +760,59 @@ mod tests {
 
         assert_eq!(live_pb(&n, &call_ref), (1, 2), "nothing was read, nothing was written");
         assert!(n.cdr.snapshot().is_empty(), "and nothing was discharged");
+    }
+
+    /// **A read never takes a deferred terminal's release.** A backup holds a
+    /// terminal it deferred to its dead primary; the body's TTL runs out and a
+    /// request for the call reaches the backup before the periodic reap does.
+    /// The takeover read finds nothing to serve, and the reap that follows
+    /// still releases the call's key and counts its CDR lost, once; a second
+    /// pass finds nothing.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_deferred_terminal_read_before_the_reap_is_still_released_once() {
+        let n = node("w1").await;
+        let ctx = n.core.router_ctx();
+        ctx.limiter_releases.hold();
+        let mut terminal = answered(1, 2, CallModelState::Terminated);
+        terminal.limiter = call::CallLimiterState::admitted(
+            "fold-key".into(),
+            vec!["x".into(), "x".into(), "y".into()],
+        );
+        let call_ref = terminal.call_ref.clone();
+        let body = MsgpackCodec::new().encode(&terminal);
+        n.store
+            .put_call(
+                PartitionRole::Backup,
+                "w0",
+                &call_ref,
+                body,
+                &[],
+                1_000,
+                1,
+                2,
+                &PutOpts::default(),
+            )
+            .await
+            .unwrap();
+
+        // Past the body's TTL, before the core's first reap tick (30 s).
+        tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
+        assert!(ctx.state.peek_replica(&call_ref).await.is_err(), "nothing left to serve");
+
+        reap_expired_replicas(ctx, n.clock.now_ms()).await;
+        assert_eq!(
+            ctx.limiter_releases.waiting_keys(),
+            vec!["fold-key".to_string()],
+            "the reap released the call by its key"
+        );
+        assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "its CDR counted lost, once");
+        assert!(
+            n.store.peek_body_raw(PartitionRole::Backup, "w0", &call_ref).await.is_none(),
+            "the reap evicted the body"
+        );
+
+        reap_expired_replicas(ctx, n.clock.now_ms()).await;
+        assert_eq!(ctx.limiter_releases.waiting(), 1, "a second pass releases nothing");
+        assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "and counts nothing");
     }
 }

@@ -472,9 +472,10 @@ async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
 /// materialises the call and re-arms its timers; the refresh re-registers the
 /// set within one refresh period of the takeover. The caller's BYE ends the
 /// call on the backup, whose takeover copy defers the release to the dead
-/// primary; the terminal it reverse-flushed is evicted at the replica TTL with
-/// no release sent, so the re-registered set is freed by its lease alone
-/// (ADR-0038).
+/// primary. At the replica TTL the backup's reap releases the call and counts
+/// its CDR lost, once. Under the deployed lease the re-registered set has
+/// lapsed by then, so that release frees nothing: the next cell proves the
+/// release itself under a lease outliving the replica TTL.
 #[tokio::test(start_paused = true)]
 async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_takeover() {
     let mut fh = ha_harness("limiter-release-by-call-lapsed-then-takeover");
@@ -534,18 +535,110 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
     );
 
     // ── the BYE ends the call on the backup, which defers the release ────
-    // Known gap: the reverse-flushed terminal is evicted at the replica TTL
-    // with no release sent; the lease is what frees the set.
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
-    let released = fh
+    // The trace is read first at every step: reading the expired body before
+    // the reap must not cost the call its release.
+    let reaped = fh
         .settle_lossy_cleanup(async || {
             rig.refresh_witnesses();
-            rig.holds() == [0, 0, 0] && !backup.holds_any_trace(&call_ref).await
+            !backup.holds_any_trace(&call_ref).await
+                && rig.holds() == [0, 0, 0]
+                && rig.store.stats().releases_total == 1
         })
         .await;
-    assert!(released, "the call drains to the witnesses; holds {:?}", rig.holds());
-    assert_eq!(rig.store.stats().lease_expired_calls, 2, "the initial and the re-registered set");
-    assert_eq!(rig.store.stats().releases_total, 0, "no node released the call: the lease did");
+    assert!(
+        reaped,
+        "the backup's reap released the call; holds {:?}, releases {}",
+        rig.holds(),
+        rig.store.stats().releases_total
+    );
+    assert_eq!(rig.store.stats().releases_total, 1, "the reap's release, once");
+    assert_eq!(
+        rig.store.stats().lease_expired_calls,
+        2,
+        "the initial and the re-registered set: the deployed lease lapses before the reap"
+    );
+    assert_eq!(
+        w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
+        1,
+        "the reap counted the deferred terminal's CDR lost, once",
+    );
+    rig.release_witnesses();
+    assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
+}
+
+/// The primary crashes; the caller's re-INVITE fails over to the backup,
+/// whose takeover copy serves it, flushes the call back toward the primary and
+/// self-releases. The caller's BYE then lands on the backup, which serves it
+/// from that flushed copy and defers the terminal to the dead primary. At the
+/// replica TTL the backup's reap releases the call by its key and counts the
+/// CDR lost, once. The lease outlives the replica TTL, so the release is what
+/// frees the set: no set lapses.
+#[tokio::test(start_paused = true)]
+async fn the_reap_releases_a_terminal_deferred_after_the_backup_served_a_request() {
+    let mut fh = ha_harness("limiter-release-by-call-served-then-reaped");
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let rig = LimiterRig::serve().await;
+    let (proxy, mut w_b1, mut w_b2) =
+        spawn_workers(&mut fh, &rig, limited_decision(&["x", "x", "y"])).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(rig.holds(), [2, 1, 0], "the call holds x twice and y");
+    let backup_sut = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
+    let call_ref = replicated_call_ref(&fh, backup_sut, &primary_ord).await;
+
+    let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
+        if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
+
+    // ── the primary crashes; a re-INVITE fails over to the backup ─────────
+    accept_takeover_cseq_overlap(&mut fh);
+    primary.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_secs(5)).await;
+    let creations_before = backup.metrics().creations_total();
+    let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    reinv.expect(200).await;
+    dialog.ack(Some(ANSWER)).await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_secs(1)).await;
+    assert!(backup.metrics().creations_total() > creations_before, "backup served the re-INVITE");
+    assert_eq!(rig.holds(), [2, 1, 0], "the takeover keeps the call's set");
+
+    // ── the BYE ends the call on the backup, which defers the release ────
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    fh.advance(Duration::from_secs(1)).await;
+    assert_eq!(rig.holds(), [2, 1, 0], "the backup defers the release to the primary");
+    let lapsed_before = rig.store.stats().lease_expired_calls;
+
+    // ── past the replica TTL: the backup's reap releases the call ────────
+    // The trace is read first at every step, as in the cell above.
+    let reaped = fh
+        .settle_lossy_cleanup(async || {
+            !backup.holds_any_trace(&call_ref).await && rig.holds() == [0, 0, 0]
+        })
+        .await;
+    assert!(reaped, "the backup's reap released the call; holds {:?}", rig.holds());
+    assert_eq!(rig.store.stats().releases_total, 1, "the reap's release, once");
+    assert_eq!(
+        rig.store.stats().lease_expired_calls,
+        lapsed_before,
+        "no set lapsed: the release freed the call"
+    );
+    assert_eq!(
+        w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
+        1,
+        "the reap counted the deferred terminal's CDR lost, once",
+    );
     rig.release_witnesses();
     assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
 }
