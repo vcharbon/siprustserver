@@ -299,6 +299,60 @@ async fn a_crash_between_a_reroute_fold_and_its_flush_releases_the_call_once() {
     assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
 }
 
+/// The initial admit lands on the limiter and its answer is lost (each hop to
+/// the limiter is slowed so the answer comes past the 150 ms budget): the call
+/// runs uncounted, the limiter holds `[x, y]` for it, and its replicas owe the
+/// release the admit request made. The primary crashes; the caller's BYE
+/// fails over to the backup, whose copy defers the terminal to the dead
+/// primary; the backup's lossy cleanup releases the call's key, which frees
+/// the late set. The witnesses are intact.
+#[tokio::test(start_paused = true)]
+async fn a_late_landed_initial_admit_is_released_by_the_takeover_s_lossy_cleanup() {
+    let mut fh = ha_harness("limiter-release-by-call-late-initial-admit");
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let rig = LimiterRig::serve().await;
+    let (proxy, mut w_b1, mut w_b2) =
+        spawn_workers(&mut fh, &rig, limited_decision(&["x", "y"])).await;
+
+    // ── the admit lands at 100 ms, its answer would come back at 200 ms ──
+    rig.http.apply_fault(http_net::Fault::Delay { dst: laddr(), ms: 100 });
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    rig.http.apply_fault(http_net::Fault::Resume { dst: laddr() });
+    let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(rig.holds(), [1, 1, 0], "the late admit counted the call on the limiter");
+    let backup_sut = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
+    let call_ref = replicated_call_ref(&fh, backup_sut, &primary_ord).await;
+
+    // ── the primary crashes ──────────────────────────────────────────────
+    let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+    accept_takeover_cseq_overlap(&mut fh);
+    primary.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_millis(300)).await;
+
+    // ── the BYE fails over to the backup; its lossy cleanup releases ─────
+    let creations_before = backup.metrics().creations_total();
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    let released = fh.settle_lossy_cleanup(async || rig.holds() == [0, 0, 0]).await;
+    assert!(backup.metrics().creations_total() > creations_before, "backup served the BYE");
+    assert!(
+        released,
+        "the backup's copy owes the release its admit request made; holds {:?}",
+        rig.holds()
+    );
+    assert_eq!(rig.store.stats().lease_expired_calls, 0, "released, not lapsed");
+    rig.release_witnesses();
+    assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
+}
+
 /// The route toward bob holding `ids`.
 fn limited_decision(ids: &'static [&'static str]) -> Arc<dyn CallDecisionEngine> {
     Arc::new(

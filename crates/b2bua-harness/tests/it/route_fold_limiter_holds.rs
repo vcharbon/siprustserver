@@ -29,7 +29,7 @@ use b2bua::decision::{
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
 use b2bua_harness::{
-    invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_LIMITER_ADDR,
+    invite_final_statuses, settle_until, B2buaSut, WitnessRig, WITNESS_LIMITER_ADDR,
 };
 use call::ReleaseEventKind;
 use call_limiter::LimiterConfig;
@@ -492,11 +492,10 @@ async fn failover_fold_after_an_uncounted_call_is_gone_is_released_by_the_router
 }
 
 /// Release-reroute fold whose admit fails open on a Terminating counted call:
-/// the limiter is stalled when the fold's admit leaves, so the call ends
-/// uncounted and never releases its old set, which lingers on the limiter
-/// until its lease lapses and is counted there.
+/// the limiter is stalled when the fold's admit leaves, so the call stays
+/// counted with its old set, and its terminal release frees that set.
 #[tokio::test(start_paused = true)]
-async fn a_fail_open_fold_on_an_ending_call_leaves_its_old_set_to_the_lease() {
+async fn a_fail_open_fold_on_an_ending_call_is_freed_by_its_release() {
     let h = Harness::new("release-reroute-fold-fail-open-terminating-call");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -562,21 +561,21 @@ async fn a_fail_open_fold_on_an_ending_call_leaves_its_old_set_to_the_lease() {
     );
     rig.http.apply_fault(http_net::Fault::Resume { dst: WITNESS_LIMITER_ADDR.parse().unwrap() });
 
-    // ── bob's 200 ends the call: uncounted, it releases nothing ────────────
+    // ── bob's 200 ends the call: still counted, it releases its set ────────
     bob_bye.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
-    assert_eq!(rig.all_holds(), [1, 1, 0], "the old set lingers: a failed admit is never released");
+    rig.expect_holds([0, 0, 0], "the terminal release freed the old set").await;
     let count = b2bua.limiter_count();
-    assert_eq!((count.failed_open, count.released), (1, 0));
+    assert_eq!((count.failed_open, count.released), (1, 2));
 
     for _ in 0..22 {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
     }
     rig.store.sweep_now();
-    assert_eq!(rig.store.stats().lease_expired_calls, 1, "the lease freed the set");
-    rig.expect_drained("only the lease frees a set the call never released").await;
-    b2bua.assert_fully_reaped_leaving(LimiterLeak { unreleased: 2, stored: 0 });
+    assert_eq!(rig.store.stats().lease_expired_calls, 0, "the release freed the set");
+    rig.expect_drained("released").await;
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

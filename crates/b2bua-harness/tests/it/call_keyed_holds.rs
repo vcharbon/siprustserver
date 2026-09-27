@@ -5,7 +5,8 @@
 //! or reduces never refuses, only an id it adds is checked against its cap.
 //! A refused replacement releases the call's old set (the ended leg is freed
 //! before the failure is consulted). A call that ended before a fold's admit
-//! lands holds nothing from it; an admit that failed open is never released.
+//! lands holds nothing from it; a call that sent an admit releases its key at
+//! its end, whatever the answer.
 //!
 //! Every scenario carries several limiters with one **witness** hold per id,
 //! admitted under a call of its own, so a surplus release reads below the
@@ -39,8 +40,6 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 const MEDIA_ANSWER: &str = "v=0\r\no=media 7 7 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 const ALICE_REALIGN: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
-/// The production admit budget.
-const ADMIT_BUDGET: Duration = Duration::from_millis(150);
 /// A fail-open budget above the paused-clock HTTP round trip: a detached
 /// admit is woken inside a coarse `h.advance`, whose 100 ms chunks a
 /// production-sized budget could expire between.
@@ -48,14 +47,9 @@ const WIDE_BUDGET: Duration = Duration::from_secs(2);
 /// A short lease, so the paused clock crosses it cheaply.
 const LEASE_SEC: i64 = 20;
 
-/// The witness rig under a short lease and a client budget of `budget`; the
-/// server answers `answers_after` each request it applied.
-async fn limiter_rig_with(budget: Duration, answers_after: Option<Duration>) -> WitnessRig {
-    WitnessRig::serve(LimiterConfig { lease_sec: LEASE_SEC }, budget, answers_after).await
-}
-
+/// The witness rig under a short lease and a client budget of `budget`.
 async fn limiter_rig(budget: Duration) -> WitnessRig {
-    limiter_rig_with(budget, None).await
+    WitnessRig::serve(LimiterConfig { lease_sec: LEASE_SEC }, budget, None).await
 }
 
 /// Limiter entries `(id, cap)`. A cap of 2 on an id the call already holds
@@ -420,65 +414,6 @@ impl CallDecisionEngine for DelayedFailure {
     ) -> Result<CallReleaseResponse, CallDecisionError> {
         self.inner.call_release(req).await
     }
-}
-
-/// The initial admit lands on the server but its answer comes past the
-/// client's budget: the call runs uncounted, sends no refresh and no release,
-/// and the server's count for it lapses with its lease. The witnesses' leases
-/// are kept alive across it.
-#[tokio::test(start_paused = true)]
-async fn an_admit_that_times_out_and_lands_late_is_never_released() {
-    let h = Harness::new("keyed-holds-late-admit-never-released");
-    let alice = h.agent("alice", "127.0.0.1:5060").await;
-    let bob = h.agent("bob", "127.0.0.1:5070").await;
-    // The limiter answers past the admit budget: the request lands, the
-    // client gives up.
-    let rig = limiter_rig_with(ADMIT_BUDGET, Some(Duration::from_millis(400))).await;
-    let decision = Arc::new(
-        ScriptedDecisionEngine::builder()
-            .fallback(|_| {
-                let mut r = route_to("127.0.0.1", 5070);
-                r.call_limiter = limiters(&[("x", 10), ("y", 10)]);
-                NewCallResponse::Route(r)
-            })
-            .build(),
-    );
-    let b2bua = B2buaSut::builder(decision)
-        .limiter(rig.client.clone())
-        .limiter_store(rig.store.clone())
-        .tune(|c| c.limiter_refresh_sec = 5)
-        .start(&h, "b2bua", "127.0.0.1:5080")
-        .await;
-
-    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
-    let mut uas = bob.receive("INVITE").await;
-    uas.respond(200, "OK").with_sdp(ANSWER).await;
-    call.expect(200).await;
-    let mut dialog = call.ack().await;
-    bob.receive("ACK").await;
-    rig.expect_holds([1, 1, 0], "the late admit counted the call on the server").await;
-
-    // Past several refresh periods the uncounted call has refreshed
-    // nothing: its server-side set lapses with its lease.
-    for _ in 0..LEASE_SEC {
-        h.advance(Duration::from_secs(1)).await;
-        rig.refresh_witnesses();
-    }
-    h.advance(Duration::from_secs(2)).await;
-    rig.store.sweep_now();
-    rig.expect_holds([0, 0, 0], "the uncounted call's set lapsed with its lease").await;
-    assert_eq!(rig.store.stats().lease_expired_calls, 1);
-
-    let mut bye = dialog.bye().await;
-    bob.receive("BYE").await.respond(200, "OK").await;
-    bye.expect(200).await;
-    settle_until(|| b2bua.is_reaped()).await;
-    rig.expect_drained("the uncounted call released nothing").await;
-    assert_eq!(rig.store.stats().releases_total, 3, "only the witnesses' releases");
-    let count = b2bua.limiter_count();
-    assert_eq!((count.failed_open, count.released), (1, 0));
-    b2bua.assert_fully_reaped();
-    let _ = h.finish().await;
 }
 
 /// A failover fold whose admit reaches the server after the call ended:
@@ -947,9 +882,10 @@ fn after_last_admit(paths: &Mutex<Vec<String>>) -> Vec<String> {
 }
 
 /// A refused release reroute leaves the call uncounted: the refusal dropped
-/// the call's `x`, so the call sends no refresh and no terminal release after
-/// it. The call holds `x`; the release reroute `[y, z]` is refused on `z`
-/// (at its cap); the call ends by the local teardown, drained.
+/// the call's `x`, so the call sends no refresh after it, and one terminal
+/// release, which frees nothing. The call holds `x`; the release reroute
+/// `[y, z]` is refused on `z` (at its cap); the call ends by the local
+/// teardown, drained.
 #[tokio::test(start_paused = true)]
 async fn a_refused_release_reroute_leaves_the_call_uncounted() {
     let h = Harness::new("keyed-holds-refused-reroute-uncounted");
@@ -1008,10 +944,10 @@ async fn a_refused_release_reroute_leaves_the_call_uncounted() {
 
     assert_eq!(
         after_last_admit(&paths),
-        Vec::<String>::new(),
-        "the refused reroute left the call uncounted: no refresh, no release after it",
+        ["/v1/release"],
+        "the refused reroute left the call uncounted: no refresh, one release after it",
     );
-    assert_eq!(rig.store.stats().releases_total, 0, "no terminal release");
+    assert_eq!(rig.store.stats().releases_total, 1, "one terminal release");
     assert_eq!(b2bua.metrics().limiter_refresh_released_total(), 0);
     rig.expect_drained("the refusal dropped the call's set").await;
     let count = b2bua.limiter_count();
@@ -1025,8 +961,9 @@ async fn a_refused_release_reroute_leaves_the_call_uncounted() {
 
 /// The failure chain's terminal 486 leaves the call uncounted: the refused
 /// failover route dropped the call's `x`, and the re-consult is refused again,
-/// so the call ends with no terminal release. Bob busies out; the failover
-/// route `[y, z]` is refused on `z` (at its cap) at every depth.
+/// so the call ends with one terminal release, which frees nothing. Bob
+/// busies out; the failover route `[y, z]` is refused on `z` (at its cap) at
+/// every depth.
 #[tokio::test(start_paused = true)]
 async fn the_failure_chain_s_terminal_486_leaves_the_call_uncounted() {
     let h = Harness::new("keyed-holds-terminal-486-uncounted");
@@ -1049,10 +986,10 @@ async fn the_failure_chain_s_terminal_486_leaves_the_call_uncounted() {
 
     assert_eq!(
         after_last_admit(&paths),
-        Vec::<String>::new(),
-        "the refused chain left the call uncounted: no release after it",
+        ["/v1/release"],
+        "the refused chain left the call uncounted: one release after it",
     );
-    assert_eq!(rig.store.stats().releases_total, 0, "no terminal release");
+    assert_eq!(rig.store.stats().releases_total, 1, "one terminal release");
     rig.expect_drained("the first refusal dropped the call's set").await;
     let count = b2bua.limiter_count();
     assert_eq!((count.admitted, count.released), (1, 1), "x granted, released by the refusal");
@@ -1064,30 +1001,38 @@ async fn the_failure_chain_s_terminal_486_leaves_the_call_uncounted() {
     assert_eq!(invite_final_statuses(&report, alice.addr()), vec![486]);
 }
 
-/// A limiter that answers every admit `Released`: the release-fence refusal on
-/// an initial route leaves the call uncounted and is counted on the b2bua.
-struct AnswersReleased;
+/// A limiter that answers every admit `Released` and counts the releases it
+/// receives: the release-fence refusal on an initial route leaves the call
+/// uncounted and is counted on the b2bua.
+#[derive(Default)]
+struct AnswersReleased {
+    releases: AtomicUsize,
+}
 
 #[async_trait]
 impl CallLimiter for AnswersReleased {
     async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
         AdmitOutcome::Released
     }
-    async fn release(&self, _key: &str) {}
+    async fn release(&self, _key: &str) {
+        self.releases.fetch_add(1, Ordering::SeqCst);
+    }
     async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
         RefreshOutcome::Released
     }
 }
 
-/// An initial admit refused by a release fence runs the call uncounted and counts
-/// it as `limiter_admit_released_initial`.
+/// An initial admit refused by a release fence runs the call uncounted, counts
+/// it as `limiter_admit_released_initial`, and releases the call's key once at
+/// its end: the admit was answered, so it was sent.
 #[tokio::test(start_paused = true)]
 async fn an_initial_admit_refused_by_a_release_fence_runs_the_call_uncounted() {
     let h = Harness::new("keyed-holds-initial-admit-released");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let limiter = Arc::new(AnswersReleased::default());
     let b2bua = B2buaSut::builder(routes_holding(&[("x", 10)]))
-        .limiter(Arc::new(AnswersReleased))
+        .limiter(limiter.clone())
         .start(&h, "b2bua", "127.0.0.1:5080")
         .await;
     let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
@@ -1104,6 +1049,7 @@ async fn an_initial_admit_refused_by_a_release_fence_runs_the_call_uncounted() {
     settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
     let count = b2bua.limiter_count();
     assert_eq!((count.admitted, count.released, count.failed_open), (0, 0, 0), "uncounted");
+    assert_eq!(limiter.releases.load(Ordering::SeqCst), 1, "one release of the call's key");
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

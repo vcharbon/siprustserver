@@ -5,8 +5,9 @@
 //! replaced the call's set on the limiter in one admit: the replaced route's
 //! holds are freed and the new route's become the call's. A route that states
 //! no limiter still replaces: the call is then uncounted. A route whose admit
-//! fails open leaves the call uncounted too, its old set on the limiter until
-//! its lease lapses (a failed admit is never released).
+//! fails technically leaves a counted call counted: it keeps refreshing
+//! whichever set the limiter holds for it (the old one, or the new one when
+//! the admit landed) and its terminal release frees that set.
 //!
 //! Every scenario carries several limiters: distinct ids on one route, the
 //! same id on the replaced and the new route, the same id twice, overlapping
@@ -28,9 +29,7 @@ use b2bua::decision::{
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
 use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
-use b2bua_harness::{
-    invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
-};
+use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut, WitnessRig, WITNESS_IDS};
 use call::ReleaseEventKind;
 use call_limiter::LimiterConfig;
 use scenario_harness::Harness;
@@ -53,10 +52,18 @@ async fn limiter_rig() -> WitnessRig {
 
 /// A limiter whose `n`-th admit (1-based) is unavailable — the fail-open
 /// outcome of a stalled or unreachable limiter — and which otherwise delegates.
+/// With `lands`, that admit still reaches `inner` (its answer is what is lost).
 struct UnavailableOnAdmit {
     n: usize,
+    lands: bool,
     admits: AtomicUsize,
     inner: Arc<dyn CallLimiter>,
+}
+
+impl UnavailableOnAdmit {
+    fn new(n: usize, lands: bool, inner: Arc<dyn CallLimiter>) -> Self {
+        Self { n, lands, admits: AtomicUsize::new(0), inner }
+    }
 }
 
 #[async_trait]
@@ -68,6 +75,9 @@ impl CallLimiter for UnavailableOnAdmit {
         release_on_refusal: bool,
     ) -> AdmitOutcome {
         if self.admits.fetch_add(1, Ordering::SeqCst) + 1 == self.n {
+            if self.lands {
+                self.inner.admit(key, entries, release_on_refusal).await;
+            }
             return AdmitOutcome::Unavailable;
         }
         self.inner.admit(key, entries, release_on_refusal).await
@@ -253,43 +263,98 @@ async fn failover_route_without_limiters_releases_the_initial_route_holds() {
     .await;
 }
 
-/// The failover route `[y, z]`'s admit fails open (the limiter is unavailable
-/// for that admit only): the call proceeds uncounted. Its replaced set `[x]`
-/// stays on the limiter — a failed admit is never released, so nothing frees
-/// it but its lease — and the hangup releases nothing. The witnesses, whose
-/// leases are refreshed, outlive it.
-#[tokio::test(start_paused = true)]
-async fn failover_route_admitted_fail_open_leaves_the_call_uncounted() {
-    let rig = limiter_rig_with(LimiterConfig { lease_sec: 20 }).await;
-    let limiter: Arc<dyn CallLimiter> = Arc::new(UnavailableOnAdmit {
-        n: 2,
-        admits: AtomicUsize::new(0),
-        inner: rig.client.clone(),
-    });
-    let (b2bua, rig) = busy_then_failover_answered(
-        &["x"],
-        &["y", "z"],
-        rig,
-        limiter,
-        "reroute-holds-failover-fail-open",
-        [1, 0, 0],
-        [1, 0, 0],
-    )
-    .await;
-    // The call is over and reaped; the fail-open route's set never reached
-    // the limiter and the replaced `[x]` was never released.
-    assert_eq!(rig.all_holds(), [1, 0, 0], "the replaced set stays until its lease lapses");
-    let count = b2bua.limiter_count();
-    assert_eq!((count.admitted, count.released, count.failed_open), (1, 0, 1));
+/// The lease of the failed-reroute scenarios: shorter than the call lasts.
+const SHORT_LEASE_SEC: i64 = 20;
 
-    for _ in 0..22 {
-        tokio::time::advance(Duration::from_secs(1)).await;
+/// Initial `[x]`, bob busies out, and the failover route `[y, z]`'s admit
+/// fails technically (`lands`: it reached the limiter, its answer is lost).
+/// The call stays counted: carol answers, the call lasts longer than two
+/// leases while refreshing every 5 s, and `held` is what the limiter holds
+/// for it throughout — the old `[x]`, or the landed `[y, z]`. No set lapses;
+/// the hangup's release drains the call.
+async fn failover_admit_fails_and_the_call_outlives_the_lease(
+    name: &str,
+    lands: bool,
+    held: [i64; 3],
+) {
+    let h = Harness::new(name);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let carol = h.agent("carol", "127.0.0.1:5071").await;
+    let rig = limiter_rig_with(LimiterConfig { lease_sec: SHORT_LEASE_SEC }).await;
+    let limiter: Arc<dyn CallLimiter> =
+        Arc::new(UnavailableOnAdmit::new(2, lands, rig.client.clone()));
+    let b2bua = B2buaSut::builder(one_failover(&["x"], &["y", "z"]))
+        .limiter(limiter)
+        .limiter_store(rig.store.clone())
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.limiter_refresh_sec = 5;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    rig.expect_holds([1, 0, 0], "the initial route's x").await;
+    bob_uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+
+    let mut carol_uas = carol.receive("INVITE").await;
+    carol_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    carol.receive("ACK").await;
+    rig.expect_holds(held, "the set the limiter holds for the call").await;
+
+    // ── the call outlives two leases: its refresh keeps the set alive ─────
+    for _ in 0..2 * SHORT_LEASE_SEC + 5 {
+        h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
     }
     rig.store.sweep_now();
-    assert_eq!(rig.store.stats().lease_expired_calls, 1, "the uncounted call's set lapsed");
-    rig.expect_drained("only the lease frees a set the call never released").await;
-    b2bua.assert_fully_reaped_leaving(LimiterLeak { unreleased: 1, stored: 0 });
+    assert_eq!(rig.all_holds(), held, "the refreshed set outlives its lease");
+    assert_eq!(rig.store.stats().lease_expired_calls, 0, "no set lapsed");
+
+    let mut bye = dialog.bye().await;
+    carol.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("the hangup's release frees the set the limiter holds").await;
+    assert_eq!(rig.store.stats().lease_expired_calls, 0, "freed by its release, not its lease");
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released, count.failed_open), (1, 1, 1));
+    b2bua.assert_fully_reaped();
+
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let report = h.finish().await;
+    assert_eq!(invite_final_statuses(&report, alice.addr()), vec![200]);
+}
+
+/// The failover admit never reaches the limiter: the call keeps its `[x]`,
+/// refreshed, until its release.
+#[tokio::test(start_paused = true)]
+async fn failover_admit_that_fails_before_landing_keeps_the_call_counted() {
+    failover_admit_fails_and_the_call_outlives_the_lease(
+        "reroute-holds-failover-admit-lost",
+        false,
+        [1, 0, 0],
+    )
+    .await;
+}
+
+/// The failover admit lands and its answer is lost: the limiter holds
+/// `[y, z]` for the call, which the call's refresh (naming `[x]`) extends and
+/// its release frees.
+#[tokio::test(start_paused = true)]
+async fn failover_admit_that_lands_but_times_out_keeps_the_call_counted() {
+    failover_admit_fails_and_the_call_outlives_the_lease(
+        "reroute-holds-failover-admit-answer-lost",
+        true,
+        [0, 1, 1],
+    )
+    .await;
 }
 
 /// Two consecutive failovers `[x]` → `[y]` → `[z]`: at each point only the

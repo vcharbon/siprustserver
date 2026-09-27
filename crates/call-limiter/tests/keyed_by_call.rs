@@ -230,6 +230,27 @@ async fn release_is_idempotent_and_unknown_calls_are_a_no_op() {
     assert_eq!(s.stats().current_total, 2);
 }
 
+/// A release of a key the store holds nothing for changes no count and
+/// creates no set, and fences the key for one lease: an admit or a refresh
+/// landing after it is refused and creates nothing.
+#[tokio::test(start_paused = true)]
+async fn a_release_of_an_unknown_key_creates_nothing_and_fences_the_key() {
+    let s = store();
+    witnesses(&s, &["x", "y"]);
+    s.release("c1");
+    assert_eq!([s.held("x"), s.held("y")], [1, 1], "the witnesses");
+    assert_eq!(s.calls(), 2, "no set created");
+    assert_eq!(s.stats().fences, 1, "the key is fenced");
+    assert_eq!(
+        s.admit("c1", &entries(&[("x", 10), ("y", 10)]), false),
+        AdmitResult::Released,
+        "an admit landing after the release is refused by its fence"
+    );
+    assert_eq!(s.refresh("c1", &["x".into()]), RefreshResult::Released);
+    assert_eq!([s.held("x"), s.held("y")], [1, 1], "the witnesses");
+    assert_eq!(s.calls(), 2, "no set created");
+}
+
 /// A released call is fenced for one lease: an admit is refused with a
 /// distinct reason (not a cap refusal) and holds nothing; a refresh says
 /// the call is unknown.
@@ -430,6 +451,21 @@ async fn call(net: &SimulatedHttpNetwork, req: HttpRequest) -> HttpResponse {
     });
     advance(Duration::from_millis(5)).await;
     h.await.unwrap().unwrap()
+}
+
+/// A release of an unknown key answers 200 on the wire and creates nothing.
+#[tokio::test(start_paused = true)]
+async fn a_release_of_an_unknown_key_answers_200_and_creates_nothing() {
+    let store = Arc::new(store());
+    witnesses(&store, &["x"]);
+    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+    let net = SimulatedHttpNetwork::new();
+    let _h = net.serve(addr(), server).await.unwrap();
+    let body = serde_json::to_vec(&ReleaseRequest { key: "c1".into() }).unwrap();
+    assert_eq!(call(&net, HttpRequest::post("/v1/release", body)).await.status, 200);
+    assert_eq!(store.held("x"), 1, "the witness");
+    assert_eq!(store.calls(), 1, "no set created");
+    assert_eq!(store.stats().fences, 1, "the key is fenced");
 }
 
 /// The HTTP surface carries the call key: an admit names its call and
