@@ -12,6 +12,13 @@ Never implement SIP header or message extraction in crates other than sip-messag
 Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). Run `just fmt` before a commit; `.githooks/pre-commit` (installed by `just hooks`) refuses an unformatted stage — never hand-format around it; `.githooks/prepare-commit-msg` refuses an amend on `develop`, the integration branch (commit on a topic branch).
 
 
+## Agent models
+
+When work is delegated to sub-agents, the Fable model is used only for **code review** of
+changes to the SIP core libraries and the B2BUA (dispatch rules, call state machines, relay,
+dialog and transaction handling, replication of call state). Implementation, tests, fix-ups and
+every other task run on Opus, B2BUA changes included, unless the user explicitly asks otherwise.
+
 ## Where the details live (progressive disclosure)
 
 Read the linked doc BEFORE the matching kind of work; the sections below are
