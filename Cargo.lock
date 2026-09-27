@@ -565,6 +565,7 @@ dependencies = [
  "async-trait",
  "b2bua",
  "call",
+ "call-limiter",
  "http-net",
  "kube",
  "lapin",

@@ -138,14 +138,16 @@ async fn main() {
     // discarding default, either way behind the kit's bounded buffer.
     let cdr_sink = base.rabbitmq_cdr_sink_from_env();
 
-    let mut deps = base.deps(
-        Arc::new(ScriptedDecisionEngine::route_all_to_with_limiter(
-            dest_host.clone(),
-            dest_port,
-            stress_limiter_from_env(),
-        )),
-        cdr_sink,
-    );
+    let mut deps = base
+        .deps(
+            Arc::new(ScriptedDecisionEngine::route_all_to_with_limiter(
+                dest_host.clone(),
+                dest_port,
+                stress_limiter_from_env(),
+            )),
+            cdr_sink,
+        )
+        .await;
 
     // Replication (opt-in, S11): `None` leaves the node unwired.
     deps.replication = base.replication_setup_from_env().await;

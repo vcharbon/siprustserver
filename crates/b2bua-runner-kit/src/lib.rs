@@ -38,7 +38,7 @@
 //! ```no_run
 //! # async fn run(my_engine: std::sync::Arc<dyn b2bua::decision::CallDecisionEngine>) {
 //! let base = b2bua_runner_kit::RunnerEnv::from_env().bind("my-runner").await;
-//! let deps = base.deps(my_engine, None); // swap any B2buaDeps field before spawn
+//! let deps = base.deps(my_engine, None).await; // swap any B2buaDeps field before spawn
 //! let core = base.spawn(deps, Vec::new()); // + your composed ServiceDefs
 //! let _probe = base.spawn_probe_server(&core, None, None).await;
 //! base.spawn_gauge_sampler(&core);
@@ -64,8 +64,8 @@ use async_trait::async_trait;
 use b2bua::cdr::{BufferedCdrWriter, CdrEncoder, CdrRecord, CdrWriter};
 use b2bua::config::{B2buaConfig, CapacityConfig, CdrConfig};
 use b2bua::decision::CallDecisionEngine;
-use b2bua::limiter::{CallLimiter, NoopLimiter};
-use b2bua::limiter_http::HttpCallLimiter;
+use b2bua::limiter::CallLimiter;
+use b2bua::limiter_target::SystemResolver;
 use b2bua::metrics::{B2buaMetrics, UdpTransportMetrics};
 use b2bua::new_calls::NewCallCounts;
 use b2bua::rules::ServiceDef;
@@ -83,6 +83,7 @@ use sip_txn::IdGen;
 
 mod capacity_env;
 mod cdr_rabbitmq;
+mod limiter_client;
 mod limiter_env;
 mod replication;
 pub use cdr_rabbitmq::{
@@ -795,36 +796,36 @@ pub struct RunnerBase {
 }
 
 impl RunnerBase {
-    /// The default call-limiter client: `HttpCallLimiter` against `LIMITER_URL`,
-    /// or `NoopLimiter` (fail-open) when unset. Its `host:port` is resolved
-    /// on the request path: a name that does not resolve yet fails each
-    /// request as a transport error, which the worker's breaker counts, and
-    /// is reached once it resolves.
-    pub fn limiter_from_env(&self) -> Arc<dyn CallLimiter> {
-        if self.env.limiter_url.is_empty() {
-            return Arc::new(NoopLimiter);
+    /// The default call-limiter client: `HttpCallLimiter` against
+    /// `LIMITER_URL`, its name looked up at boot within one breaker probe
+    /// period (a name that has not resolved by then boots the breaker open),
+    /// or `NoopLimiter` when unset.
+    pub async fn limiter_from_env(&self) -> Arc<dyn CallLimiter> {
+        let hostport = (!self.env.limiter_url.is_empty()).then(|| self.env.limiter_url.clone());
+        if let Some(hostport) = &hostport {
+            tracing::info!(
+                service = %self.name,
+                limiter = %hostport,
+                timeout_ms = self.env.limiter_timeout_ms,
+                release_timeout_ms = self.env.limiter_release_timeout_ms,
+                refresh_sec = self.env.limiter_refresh_sec,
+                breaker_failures = self.env.limiter_breaker_failures,
+                breaker_probe_ms = self.env.limiter_breaker_probe_ms,
+                "call-limiter client wired"
+            );
         }
-        let hostport = self.env.limiter_url.as_str();
-        tracing::info!(
-            service = %self.name,
-            limiter = %hostport,
-            timeout_ms = self.env.limiter_timeout_ms,
-            release_timeout_ms = self.env.limiter_release_timeout_ms,
-            refresh_sec = self.env.limiter_refresh_sec,
-            breaker_failures = self.env.limiter_breaker_failures,
-            breaker_probe_ms = self.env.limiter_breaker_probe_ms,
-            "call-limiter client wired"
-        );
-        Arc::new(
-            HttpCallLimiter::named(
-                Arc::new(RealHttpNetwork::new()),
-                hostport,
-                std::time::Duration::from_millis(self.env.limiter_timeout_ms),
-            )
-            .with_release_timeout(std::time::Duration::from_millis(
-                self.env.limiter_release_timeout_ms,
-            )),
+        let settings = limiter_client::LimiterClientSettings {
+            hostport,
+            timeout: std::time::Duration::from_millis(self.env.limiter_timeout_ms),
+            release_timeout: std::time::Duration::from_millis(self.env.limiter_release_timeout_ms),
+            boot_lookup: std::time::Duration::from_millis(self.env.limiter_breaker_probe_ms),
+        };
+        limiter_client::limiter_client(
+            &settings,
+            Arc::new(RealHttpNetwork::new()),
+            Arc::new(SystemResolver),
         )
+        .await
     }
 
     /// The RabbitMQ CDR sink the env selects ([`RabbitMqCdrSettings`]),
@@ -877,7 +878,7 @@ impl RunnerBase {
     /// (drop-on-overload at `cdr_queue` depth), the shared metrics registry,
     /// entropy id-gen, no replication. Every field on the returned struct is
     /// pub — swap any single piece before [`spawn`](Self::spawn).
-    pub fn deps(
+    pub async fn deps(
         &self,
         decision: Arc<dyn CallDecisionEngine>,
         cdr_sink: Option<Arc<dyn CdrWriter>>,
@@ -886,7 +887,7 @@ impl RunnerBase {
         B2buaDeps {
             config: self.config.clone(),
             decision,
-            limiter: self.limiter_from_env(),
+            limiter: self.limiter_from_env().await,
             cdr: Arc::new(BufferedCdrWriter::spawn(sink, self.env.cdr_queue, self.metrics.clone())),
             store: Arc::new(InMemoryCallStore::new()),
             // No injected store faults in production (ADR-0023: the live-path

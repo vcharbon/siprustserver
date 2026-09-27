@@ -128,6 +128,17 @@ impl LimiterTarget {
         let answer = lookup.wait_for(Option::is_some).await.ok()?;
         answer.flatten()
     }
+
+    /// The address known now, without a lookup.
+    pub fn address(&self) -> Option<SocketAddr> {
+        match &self.kind {
+            Kind::Addr(addr) => Some(*addr),
+            Kind::Name(named) => named.resolved.get().copied(),
+        }
+    }
+
+    /// Forget the address a name resolved to (stub).
+    pub fn forget(&self) {}
 }
 
 impl std::fmt::Display for LimiterTarget {
@@ -191,6 +202,61 @@ pub(crate) mod tests {
         assert_eq!(target.resolve().await, Some(addr()), "the resolved address is kept");
         assert_eq!(resolver.lookups.load(Ordering::SeqCst), 2);
         assert_eq!(target.to_string(), "limiter:8080");
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_address_is_looked_up_again() {
+        let resolver = Arc::new(FakeResolver::default());
+        resolver.names.lock().unwrap().insert("limiter:8080".into(), addr());
+        let target = LimiterTarget::name_with("limiter:8080", resolver.clone());
+        assert_eq!(target.resolve().await, Some(addr()));
+        let moved: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        resolver.names.lock().unwrap().insert("limiter:8080".into(), moved);
+        assert_eq!(target.resolve().await, Some(addr()), "kept until forgotten");
+        target.forget();
+        assert_eq!(target.address(), None, "forgotten");
+        assert_eq!(target.resolve().await, Some(moved), "looked up again");
+        assert_eq!(target.address(), Some(moved));
+        assert_eq!(resolver.lookups.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_socket_address_is_never_forgotten() {
+        let target = LimiterTarget::addr(addr());
+        target.forget();
+        assert_eq!(target.address(), Some(addr()));
+    }
+
+    /// Answers each lookup from a script of `(delay, answer)`.
+    #[derive(Default)]
+    struct ScriptedResolver {
+        script: std::sync::Mutex<std::collections::VecDeque<(u64, Option<SocketAddr>)>>,
+    }
+
+    #[async_trait]
+    impl NameResolver for ScriptedResolver {
+        async fn resolve(&self, _: &str) -> Option<SocketAddr> {
+            let (delay, answer) = self.script.lock().unwrap().pop_front().unwrap_or((0, None));
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            answer
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lookup_that_lands_after_a_forget_is_not_kept() {
+        let moved: SocketAddr = "10.0.0.2:8080".parse().unwrap();
+        let resolver = Arc::new(ScriptedResolver::default());
+        *resolver.script.lock().unwrap() = [(100, Some(addr())), (10, Some(moved))].into();
+        let target = Arc::new(LimiterTarget::name_with("limiter:8080", resolver));
+        let stale = tokio::spawn({
+            let target = target.clone();
+            async move { target.resolve().await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        target.forget();
+        assert_eq!(target.resolve().await, Some(moved), "a forget starts a new lookup");
+        assert_eq!(stale.await.unwrap(), Some(addr()), "its waiter hears the stale lookup");
+        assert_eq!(target.address(), Some(moved), "the stale answer is not kept");
     }
 
     #[tokio::test]

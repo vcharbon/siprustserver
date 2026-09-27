@@ -300,6 +300,9 @@ mod tests {
     struct Serving {
         up: AtomicBool,
         asked: AtomicUsize,
+        /// The limiter's address is not known.
+        unaddressed: AtomicBool,
+        forgets: AtomicUsize,
     }
 
     #[async_trait]
@@ -307,6 +310,12 @@ mod tests {
         async fn serving(&self) -> bool {
             self.asked.fetch_add(1, Ordering::SeqCst);
             self.up.load(Ordering::SeqCst)
+        }
+        fn has_address(&self) -> bool {
+            !self.unaddressed.load(Ordering::SeqCst)
+        }
+        fn forget_address(&self) {
+            self.forgets.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -340,7 +349,11 @@ mod tests {
     const PROBE: Duration = Duration::from_secs(1);
 
     fn rig(script: Vec<AdmitOutcome>) -> Rig {
-        let scripted = Arc::new(Scripted::default());
+        rig_with(script, Scripted::default())
+    }
+
+    fn rig_with(script: Vec<AdmitOutcome>, scripted: Scripted) -> Rig {
+        let scripted = Arc::new(scripted);
         *scripted.admits.lock().unwrap() = script.into();
         let metrics = B2buaMetrics::new();
         let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
@@ -518,6 +531,55 @@ mod tests {
             (r.metrics.limiter_breaker_opened_total(), r.metrics.limiter_breaker_closed_total()),
             (2, 2)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_limiter_without_an_address_starts_open_and_the_first_health_answer_closes_it() {
+        let scripted = Scripted::default();
+        scripted.serving.unaddressed.store(true, Ordering::SeqCst);
+        let r = rig_with(Vec::new(), scripted);
+        assert!(r.metrics.limiter_breaker_open(), "starts open");
+        assert_eq!(r.metrics.limiter_breaker_opened_total(), 1);
+        assert_eq!(admit(&r.limiter).await, AdmitOutcome::NotSent, "fails open at once");
+        assert_eq!(r.scripted.admits_sent.load(Ordering::SeqCst), 0, "nothing sent");
+        assert_eq!(r.metrics.limiter_breaker_admits_not_sent_total(), 1);
+        r.releases.push("a");
+        settle().await;
+        assert!(r.scripted.released.lock().unwrap().is_empty(), "the queue is held");
+
+        tokio::time::advance(PROBE).await;
+        settle().await;
+        assert!(r.metrics.limiter_breaker_open(), "no answer yet");
+        r.scripted.serving.unaddressed.store(false, Ordering::SeqCst);
+        r.scripted.serving.up.store(true, Ordering::SeqCst);
+        tokio::time::advance(PROBE).await;
+        settle().await;
+        assert!(!r.metrics.limiter_breaker_open(), "the first answer closes it");
+        assert_eq!(*r.scripted.released.lock().unwrap(), [vec!["a".to_string()]]);
+        assert_eq!(admit(&r.limiter).await, AdmitOutcome::Admitted);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn it_forgets_the_address_when_it_opens_and_after_each_failed_probe() {
+        let r = rig([vec![AdmitOutcome::Admitted], lost(3)].concat());
+        admit(&r.limiter).await;
+        assert_eq!(r.scripted.serving.forgets.load(Ordering::SeqCst), 0, "closed: kept");
+        trip(&r.limiter).await;
+        assert_eq!(r.scripted.serving.forgets.load(Ordering::SeqCst), 1, "forgotten on open");
+        for _ in 0..3 {
+            tokio::time::advance(PROBE).await;
+            settle().await;
+        }
+        assert_eq!(
+            r.scripted.serving.forgets.load(Ordering::SeqCst),
+            4,
+            "and on each failed probe"
+        );
+        r.scripted.serving.up.store(true, Ordering::SeqCst);
+        tokio::time::advance(PROBE).await;
+        settle().await;
+        assert!(!r.metrics.limiter_breaker_open());
+        assert_eq!(r.scripted.serving.forgets.load(Ordering::SeqCst), 4, "kept once answered");
     }
 
     #[tokio::test(start_paused = true)]

@@ -44,6 +44,11 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 sip-message = { path = "../sip-message" }
+# The limiter client's boot and re-resolve tests run a real limiter server on
+# the simulated HTTP network under the paused clock.
+call-limiter = { path = "../call-limiter" }
+sip-clock = { path = "../sip-clock", features = ["testkit"] }
+tokio = { workspace = true, features = ["test-util"] }
 # The scripted AMQP 0-9-1 broker the CDR sink's delivery tests run against
 # (tests/support/fake_broker.rs): lapin's own frame codec, so the wire is the
 # client's.

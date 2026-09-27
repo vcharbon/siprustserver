@@ -141,6 +141,14 @@ pub trait LimiterHealth: Send + Sync {
     /// Whether the limiter answered a request that reads its store, within
     /// the admit budget: an admit sent now can be served.
     async fn serving(&self) -> bool;
+    /// Whether the limiter's address is known: a limiter whose name has not
+    /// resolved has none, and a breaker guarding it starts open.
+    fn has_address(&self) -> bool {
+        true
+    }
+    /// Forget the limiter's address, so the next request looks its name up
+    /// again. A limiter at a fixed address keeps it.
+    fn forget_address(&self) {}
 }
 
 /// No limiter: every admit sends nothing ([`AdmitOutcome::NotSent`]), so no

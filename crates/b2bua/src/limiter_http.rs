@@ -123,6 +123,12 @@ impl HttpCallLimiter {
         self
     }
 
+    /// Look the target's name up now, waiting at most `budget`: whether its
+    /// address is known.
+    pub async fn lookup(&self, budget: Duration) -> bool {
+        tokio::time::timeout(budget, self.endpoint.target.resolve()).await.ok().flatten().is_some()
+    }
+
     /// Fire one request under `budget`. `None` on timeout / transport error /
     /// non-200 — the caller treats all three as "backend unavailable".
     async fn call(&self, req: HttpRequest, budget: Duration) -> Option<HttpResponse> {
@@ -366,6 +372,34 @@ mod tests {
         assert_eq!(client.refresh("c#k", &["x".into()]).await, RefreshOutcome::Unavailable);
         assert_eq!(client.release(&["c#k".into()]).await, ReleaseAnswer::Unavailable);
         assert!(!client.health().unwrap().serving().await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_named_client_has_an_address_once_its_name_resolves_until_it_forgets_it() {
+        let (net, _server) = served().await;
+        let names = resolver();
+        let target = LimiterTarget::name_with("limiter:8080", names.clone());
+        let client = HttpCallLimiter::with_target(Arc::new(net), target, BUDGET);
+        let health = client.health().unwrap();
+        assert!(!health.has_address(), "never looked up");
+        assert!(!client.lookup(BUDGET).await, "does not resolve");
+        assert!(!health.has_address());
+        names.names.lock().unwrap().insert("limiter:8080".into(), laddr());
+        assert!(client.lookup(BUDGET).await);
+        assert!(health.has_address());
+        health.forget_address();
+        assert!(!health.has_address(), "forgotten");
+        assert!(health.serving().await, "the probe looks it up again");
+        assert!(health.has_address());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_at_an_address_always_has_it() {
+        let (net, _server) = served().await;
+        let client = HttpCallLimiter::new(Arc::new(net), laddr(), BUDGET);
+        let health = client.health().unwrap();
+        health.forget_address();
+        assert!(health.has_address());
     }
 
     #[tokio::test(start_paused = true)]
