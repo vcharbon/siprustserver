@@ -15,7 +15,9 @@ it entirely:
    forever, zero CDR, timers live.
 2. **Queue/cap drop** — a dropped event may be the BYE or timer that was
    supposed to terminate the call; nothing notices. (A dropped non-INVITE
-   request is now readmitted on its retransmission: `router::unanswered`.)
+   request is now readmitted on its retransmission and a dropped INVITE
+   answered: `router::unanswered`; a `Cancelled` is queued past the bounds.
+   A request left without a final at a Terminated release is forgotten there.)
 3. **Lost `TerminatingTimeout`** — the 32 s stuck-in-Terminating watchdog is
    itself a losable timer.
 4. **Best-effort CDR** — `BufferedCdrWriter` drops on overflow; a panic before

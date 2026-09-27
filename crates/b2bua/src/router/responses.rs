@@ -1,6 +1,6 @@
 //! Locally-authored response builders: the OPTIONS health reply, the
-//! call-layer-stateless store-fault 500, and the 481 and 405 a request naming
-//! no call draws. The overload reject lives with the policy that owns it —
+//! call-layer-stateless store-fault 500, the 481 and 405 a request naming
+//! no call draws, and the retry-later 500. The overload reject lives with the policy that owns it —
 //! [`crate::overload::build_reject_new_call_503`].
 
 use sip_message::generators::{generate_response, CapabilitySet, GenerateResponseOpts};
@@ -24,6 +24,20 @@ fn hdr(name: &str, value: impl Into<String>) -> SipHeader {
 pub(super) fn build_481(req: &SipRequest, to_tag: Option<&str>) -> SipResponse {
     let opts = GenerateResponseOpts { to_tag: to_tag.map(str::to_owned), ..Default::default() };
     generate_response(req, 481, "Call/Transaction Does Not Exist", &opts)
+}
+
+/// `500 Server Internal Error` to `req` with `Retry-After: retry_after_sec`,
+/// floored at 1 s: a request this node took but could not process now, which
+/// the UAC may retry (RFC 3261 §14.2 for a re-INVITE, §21.5.1).
+pub(super) fn build_retry_later_500(req: &SipRequest, retry_after_sec: u32) -> SipResponse {
+    let opts = GenerateResponseOpts {
+        extra_headers: vec![hdr(
+            "Retry-After",
+            retry_after_sec.max(crate::overload::MIN_REJECT_RETRY_AFTER_SEC).to_string(),
+        )],
+        ..Default::default()
+    };
+    generate_response(req, 500, "Server Internal Error", &opts)
 }
 
 /// `405 Method Not Allowed` to `req`, a request of a method the node does not

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::dispatch::{Discard, PastBound};
 use crate::tier1_brake::Tier1BrakeCounters;
 
 /// Upper bounds (seconds) of the `b2bua_drain_seconds` buckets, ascending; the
@@ -58,6 +59,11 @@ struct Inner {
     queue_drops: AtomicU64,
     cap_drops: AtomicU64,
     release_discards: AtomicU64,
+    past_bound_depth: AtomicU64,
+    past_bound_cap: AtomicU64,
+    invite_discard_answered_queue_full: AtomicU64,
+    invite_discard_answered_at_cap: AtomicU64,
+    invite_discard_answered_released: AtomicU64,
     saturation: AtomicU64,
     // MAX_MESSAGES_PER_CALL cap-defense: calls torn down for crossing the
     // per-call message cap (a runaway re-INVITE/OPTIONS storm or glare loop).
@@ -357,6 +363,26 @@ impl RemovalClass {
     }
 }
 
+/// One discard of each site, in label order: a release of any class counts
+/// under `released`.
+const DISCARD_SITES: [Discard; 3] =
+    [Discard::QueueFull, Discard::AtCap, Discard::Released(RemovalClass::Terminated)];
+
+fn discard_label(why: Discard) -> &'static str {
+    match why {
+        Discard::QueueFull => "queue_full",
+        Discard::AtCap => "at_cap",
+        Discard::Released(_) => "released",
+    }
+}
+
+fn past_bound_label(bound: PastBound) -> &'static str {
+    match bound {
+        PastBound::Depth => "depth",
+        PastBound::Cap => "cap",
+    }
+}
+
 macro_rules! counter {
     ($bump:ident, $get:ident, $field:ident) => {
         pub fn $bump(&self) {
@@ -389,6 +415,50 @@ impl B2buaMetrics {
 
     pub fn removals_of_total(&self, class: RemovalClass) -> u64 {
         self.removal_class_counter(class).load(Ordering::Relaxed)
+    }
+
+    /// One item queued past a dispatcher bound (see [`Job::past_bounds`](crate::dispatch::Job::past_bounds)).
+    pub fn bump_past_bound(&self, bound: PastBound) {
+        self.past_bound_counter(bound).fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn past_bound_of_total(&self, bound: PastBound) -> u64 {
+        self.past_bound_counter(bound).load(Ordering::Relaxed)
+    }
+
+    /// Items queued past either bound.
+    pub fn past_bound_total(&self) -> u64 {
+        self.past_bound_of_total(PastBound::Depth) + self.past_bound_of_total(PastBound::Cap)
+    }
+
+    fn past_bound_counter(&self, bound: PastBound) -> &AtomicU64 {
+        match bound {
+            PastBound::Depth => &self.inner.past_bound_depth,
+            PastBound::Cap => &self.inner.past_bound_cap,
+        }
+    }
+
+    /// One INVITE answered where the dispatcher discarded its body unrun,
+    /// counted by site (every release class under `released`).
+    pub fn bump_invite_discard_answered(&self, why: Discard) {
+        self.invite_discard_counter(why).fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn invite_discard_answered_of_total(&self, why: Discard) -> u64 {
+        self.invite_discard_counter(why).load(Ordering::Relaxed)
+    }
+
+    /// INVITEs answered at any discard site.
+    pub fn invite_discard_answered_total(&self) -> u64 {
+        DISCARD_SITES.iter().map(|w| self.invite_discard_answered_of_total(*w)).sum()
+    }
+
+    fn invite_discard_counter(&self, why: Discard) -> &AtomicU64 {
+        match why {
+            Discard::QueueFull => &self.inner.invite_discard_answered_queue_full,
+            Discard::AtCap => &self.inner.invite_discard_answered_at_cap,
+            Discard::Released(_) => &self.inner.invite_discard_answered_released,
+        }
     }
 
     fn removal_class_counter(&self, class: RemovalClass) -> &AtomicU64 {
@@ -842,10 +912,10 @@ impl B2buaMetrics {
         counter("b2bua_message_cap_terminated_total", "calls terminated for exceeding max_messages_per_call (cap-defense; a climbing rate names a runaway-traffic call class)", self.message_cap_terminated_total());
         counter(
             "b2bua_dispatch_queue_drops_total",
-            "events dropped: per-call queue full (a non-INVITE request's transaction is forgotten so its retransmission is admitted again)",
+            "events dropped: per-call queue full (a non-INVITE request's transaction is forgotten so its retransmission is admitted again; an INVITE is answered with a Retry-After)",
             self.queue_drops_total(),
         );
-        counter("b2bua_dispatch_cap_drops_total", "events hitting the global call cap: a new initial INVITE is shed with a stateless 503 (ADR-0022), any other event is dropped (a non-INVITE request's transaction is forgotten so its retransmission is admitted again)", self.cap_drops_total());
+        counter("b2bua_dispatch_cap_drops_total", "events hitting the global call cap: a new initial INVITE is shed with a stateless 503 (ADR-0022), any other event is dropped (a non-INVITE request's transaction is forgotten so its retransmission is admitted again; an in-dialog INVITE is answered 500 with a Retry-After)", self.cap_drops_total());
         counter(
             "b2bua_dispatch_release_discards_total",
             "events queued behind a call's release, discarded unrun",
@@ -1035,6 +1105,22 @@ impl B2buaMetrics {
                 "b2bua_call_removals_by_class_total{{class=\"{}\"}} {}\n",
                 class.label(),
                 self.removals_of_total(class)
+            ));
+        }
+        s.push_str("# HELP b2bua_dispatch_past_bound_total items queued past a dispatcher bound instead of dropped (depth: a full per-call queue; cap: the global queue cap): a call's release, or an event that must not be lost such as a Cancelled\n# TYPE b2bua_dispatch_past_bound_total counter\n");
+        for bound in [PastBound::Depth, PastBound::Cap] {
+            s.push_str(&format!(
+                "b2bua_dispatch_past_bound_total{{bound=\"{}\"}} {}\n",
+                past_bound_label(bound),
+                self.past_bound_of_total(bound)
+            ));
+        }
+        s.push_str("# HELP b2bua_dispatch_invite_discard_answered_total INVITEs whose handler body was discarded unrun, answered at the discard site (queue_full / at_cap: 500 or 503 with Retry-After; released: 481 in a dialog, 503 otherwise)\n# TYPE b2bua_dispatch_invite_discard_answered_total counter\n");
+        for why in DISCARD_SITES {
+            s.push_str(&format!(
+                "b2bua_dispatch_invite_discard_answered_total{{site=\"{}\"}} {}\n",
+                discard_label(why),
+                self.invite_discard_answered_of_total(why)
             ));
         }
 

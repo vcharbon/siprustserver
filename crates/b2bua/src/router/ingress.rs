@@ -3,7 +3,7 @@
 //! out-of-dialog OPTIONS health responder, resolution (an event resolving to
 //! no call goes to [`super::unroutable`]), the full-guarantee cap shed, and
 //! finally the per-call FIFO dispatch, guarded so a request discarded unrun
-//! is readmitted on its retransmission ([`super::unanswered`]).
+//! is readmitted on its retransmission or answered ([`super::unanswered`]).
 
 use std::sync::Arc;
 
@@ -14,9 +14,10 @@ use super::process::process;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::{replica_takeover_call_ref, resolve};
 use super::responses::build_options_health_response;
-use super::unanswered::UnansweredGuard;
+use super::unanswered::{InviteAnswer, UnansweredGuard};
 use super::unroutable::Lookup;
 use super::RouterCtx;
+use crate::dispatch::Job;
 use crate::event::CallEvent;
 
 pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
@@ -161,8 +162,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // existing: the racing INVITE created it synchronously in this same run
     // loop (and a live call's worker exits only on teardown poison), so the
     // 069 window always marks — while a stray CANCEL with no queue guards
-    // nothing, and `dispatch` may silently cap-drop its body, which would
-    // strand the mark forever (no teardown path would ever run to clear it).
+    // nothing.
     if matches!(&event, CallEvent::Cancelled { in_dialog: false, .. })
         && ctx.dispatcher.has_queue(&call_ref)
     {
@@ -178,8 +178,10 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // with a stateless 503 instead (mirrors the Tier-3 admission gate: stateless,
     // no per-call resources, sent through the INVITE server txn that carries the
     // 100). Any other event for an at-cap new call_ref is cap-dropped by
-    // `dispatch`; a non-INVITE request among them has its transaction forgotten
-    // (`UnansweredGuard`), so its retransmission is admitted again.
+    // `dispatch`: a non-INVITE request among them has its transaction forgotten
+    // (`UnansweredGuard`), so its retransmission is admitted again, an
+    // in-dialog INVITE is answered 500 + Retry-After (`InviteAnswer`), and a
+    // `Cancelled` is queued past the cap.
     if res.initial_invite && ctx.dispatcher.would_drop_new_at_cap(&call_ref) {
         if let CallEvent::Sip { message, src, .. } = &event {
             if let SipMessage::Request(req) = message.as_ref() {
@@ -197,13 +199,21 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
         return;
     }
 
+    // Nothing leaves this point unaccounted: a request discarded unrun is
+    // forgotten or answered (`super::unanswered`), and a `Cancelled` — the
+    // layer already answered 200 + 487 and the caller will not send it again —
+    // is never discarded for want of room, only behind the call's release,
+    // which ends the call it would have ended. At most one per INVITE server
+    // transaction, so the layer bounds how many wait past the queue.
     let ctx2 = ctx.clone();
     let guard = UnansweredGuard::for_event(&ctx.txn, &event);
-    ctx.dispatcher.dispatch(
-        &call_ref,
-        Box::pin(async move {
-            guard.disarm();
-            process(&ctx2, event, res).await;
-        }),
-    );
+    let answer = InviteAnswer::of(ctx).hook_for(&event);
+    let must_run = matches!(event, CallEvent::Cancelled { .. });
+    let job = Job::new(Box::pin(async move {
+        guard.disarm();
+        process(&ctx2, event, res).await;
+    }))
+    .on_discard(answer);
+    let job = if must_run { job.past_bounds() } else { job };
+    ctx.dispatcher.dispatch(&call_ref, job).await;
 }

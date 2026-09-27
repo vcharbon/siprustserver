@@ -493,6 +493,9 @@ impl Owner {
             Command::ForgetUnanswered { branch, call_id, from_tag } => {
                 self.forget_unanswered(&branch, &call_id, &from_tag)
             }
+            Command::ForgetUnansweredOfCall { call_ref, reply } => {
+                let _ = reply.send(self.forget_unanswered_of_call(&call_ref));
+            }
             Command::ActiveTxnCount { call_ref, reply } => {
                 let n = self.txn_index.get(call_ref.as_str()).map_or(0, |s| s.len());
                 let _ = reply.send(n);

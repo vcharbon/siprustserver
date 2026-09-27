@@ -367,6 +367,31 @@ impl Owner {
         }
     }
 
+    /// Forget every non-INVITE server transaction of `call_ref` that has sent
+    /// no final (`Trying`, or `Proceeding` on a provisional): the consumer
+    /// released the call, so no answer will come. Counted; returns how many.
+    pub(super) fn forget_unanswered_of_call(&mut self, call_ref: &str) -> usize {
+        let unanswered: Vec<String> = self
+            .txn_index
+            .get(call_ref)
+            .into_iter()
+            .flatten()
+            .filter(|b| {
+                self.txns.get(b.as_str()).is_some_and(|t| {
+                    t.role == TxnRole::Server
+                        && t.kind == TxnKind::NonInvite
+                        && matches!(t.state, TxnState::Trying | TxnState::Proceeding)
+                })
+            })
+            .cloned()
+            .collect();
+        let forgotten = unanswered.iter().filter(|b| self.delete_txn(b)).count();
+        self.metrics
+            .released_unanswered_forgotten
+            .fetch_add(forgotten as u64, std::sync::atomic::Ordering::Relaxed);
+        forgotten
+    }
+
     /// The retransmission path (RFC 3261 §17.2.1): a request whose branch
     /// already holds a server transaction draws that transaction's cached
     /// response — a repeat no timer paced, counted as `trigger` under the

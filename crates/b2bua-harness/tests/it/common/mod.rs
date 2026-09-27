@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+pub mod unrun;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 

@@ -149,7 +149,9 @@ the INVITE server txn (the same shape as the Tier-3 admission gate —
 `dispatch`. In-dialog events for an at-cap new call_ref keep the `dispatch`
 cap-drop; a non-INVITE request among them has its server transaction forgotten
 (`router::unanswered`), so its retransmission is admitted again and reaches the
-orphan path once the cap frees. Only the initial INVITE owes a final here. The check is
+orphan path once the cap frees, and an in-dialog INVITE — silenced by its 100
+like the initial one — is answered 500 with a Retry-After by the same module,
+as it is on a full queue (481 behind a release). The check is
 race-free from the single-task router — only the router inserts queues, so between
 `would_drop_new_at_cap` and the following `dispatch` the count can only fall (a
 worker finishing), never rise. This path is unreachable under sane tuning (the

@@ -1,13 +1,21 @@
-//! The unanswered-request guard: a non-INVITE request whose handler body is
-//! discarded before it runs — the call's queue full, the call cap reached,
-//! a release draining the queue — has its server transaction forgotten, so
-//! the UAC's retransmission (RFC 3261 §17.1.2.2) is admitted afresh and
-//! reaches the router again instead of being absorbed unanswered.
+//! A request whose handler body is discarded before it runs — the call's
+//! queue full, the call cap reached, a release draining the queue — is never
+//! left unanswered. A non-INVITE has its server transaction forgotten, so the
+//! UAC's retransmission (RFC 3261 §17.1.2.2) is admitted afresh and reaches
+//! the router again. An INVITE, whose 100 Trying already stopped the UAC's
+//! retransmissions, is answered at the discard site.
 
-use sip_message::{Method, SipMessage};
-use sip_txn::TransactionLayer;
+use std::net::SocketAddr;
+use std::sync::Arc;
 
+use sip_message::{Method, SipMessage, SipRequest, SipResponse};
+use sip_txn::{IdGen, TransactionLayer};
+
+use super::responses::{build_481, build_retry_later_500};
+use super::RouterCtx;
+use crate::dispatch::{Discard, DiscardHook};
 use crate::event::CallEvent;
+use crate::metrics::{B2buaMetrics, RemovalClass};
 
 /// Rides a handler body from dispatch to its first poll. Dropped armed — the
 /// body discarded unpolled — it asks the transaction layer to forget the
@@ -31,9 +39,8 @@ struct TxnKey {
 impl UnansweredGuard {
     /// Armed for a non-INVITE request other than ACK and CANCEL: the one kind
     /// of event whose server transaction absorbs its retransmissions while it
-    /// waits on the router. An INVITE's 100 Trying already stopped the caller
-    /// retransmitting, ACK has no transaction, and a CANCEL reaching the router
-    /// matched none.
+    /// waits on the router. An INVITE is answered instead ([`InviteAnswer`]),
+    /// ACK has no transaction, and a CANCEL reaching the router matched none.
     pub(super) fn for_event(txn: &TransactionLayer, event: &CallEvent) -> Self {
         let key = match event {
             CallEvent::Sip { message, .. } => match message.as_ref() {
@@ -67,6 +74,97 @@ impl Drop for UnansweredGuard {
     }
 }
 
+/// Answers an INVITE whose handler body is discarded unrun, through its
+/// server transaction (which then absorbs the ACK). In a dialog: 481 behind
+/// the release of a terminated or orphan call (RFC 3261 §12.2.2), else 500
+/// with a Retry-After (§14.2) — no room, or a takeover copy shed while the
+/// call lives on at its primary. Out of a dialog: the capacity 503 with a
+/// Retry-After, whatever the site, since the call it would start was never
+/// looked at.
+pub(super) struct InviteAnswer<'a> {
+    pub(super) txn: &'a TransactionLayer,
+    pub(super) id_gen: &'a Arc<IdGen>,
+    pub(super) metrics: &'a B2buaMetrics,
+    pub(super) retry_after_base_sec: u32,
+    pub(super) retry_after_jitter_sec: u32,
+}
+
+impl<'a> InviteAnswer<'a> {
+    pub(super) fn of(ctx: &'a RouterCtx) -> Self {
+        Self {
+            txn: &ctx.txn,
+            id_gen: &ctx.id_gen,
+            metrics: &ctx.metrics,
+            retry_after_base_sec: ctx.config.retry_after_base_sec,
+            retry_after_jitter_sec: ctx.config.retry_after_jitter_sec,
+        }
+    }
+
+    /// The discard hook for `event`: `Some` for an INVITE request only.
+    pub(super) fn hook_for(&self, event: &CallEvent) -> Option<DiscardHook> {
+        let CallEvent::Sip { message, src, .. } = event else { return None };
+        let SipMessage::Request(req) = message.as_ref() else { return None };
+        if req.method() != Method::Invite {
+            return None;
+        }
+        let pending = PendingInvite {
+            req: req.clone(),
+            src: *src,
+            txn: self.txn.clone(),
+            id_gen: self.id_gen.clone(),
+            metrics: self.metrics.clone(),
+            retry_after_base_sec: self.retry_after_base_sec,
+            retry_after_jitter_sec: self.retry_after_jitter_sec,
+        };
+        Some(Box::new(move |why| Box::pin(pending.answer(why))))
+    }
+}
+
+/// What the answer to one discarded INVITE needs, owned by its hook.
+struct PendingInvite {
+    req: SipRequest,
+    src: SocketAddr,
+    txn: TransactionLayer,
+    id_gen: Arc<IdGen>,
+    metrics: B2buaMetrics,
+    retry_after_base_sec: u32,
+    retry_after_jitter_sec: u32,
+}
+
+impl PendingInvite {
+    async fn answer(self, why: Discard) {
+        let resp = self.response(why);
+        let _ = self.txn.send_response(resp, self.src).await;
+        self.metrics.bump_invite_discard_answered(why);
+    }
+
+    fn response(&self, why: Discard) -> SipResponse {
+        let in_dialog = self.req.to().tag().is_some();
+        // A self-released takeover copy lives on at its primary: only a
+        // terminated or orphan call has no dialog left to answer for.
+        let gone =
+            matches!(why, Discard::Released(RemovalClass::Terminated | RemovalClass::Orphan));
+        if in_dialog && gone {
+            return build_481(&self.req, None);
+        }
+        let roll = u64::from(self.id_gen.new_sequence_number());
+        let retry_after = crate::overload::jittered_retry_after(
+            self.retry_after_base_sec,
+            self.retry_after_jitter_sec,
+            || roll,
+        );
+        if in_dialog {
+            build_retry_later_500(&self.req, retry_after)
+        } else {
+            crate::capacity::build_capacity_reject_503(
+                self.id_gen.new_tag(),
+                &self.req,
+                retry_after,
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
@@ -80,7 +178,7 @@ mod tests {
     use tokio::sync::{mpsc, Notify};
 
     use super::*;
-    use crate::dispatch::PerCallDispatcher;
+    use crate::dispatch::{Job, PerCallDispatcher};
     use crate::metrics::{B2buaMetrics, RemovalClass};
 
     const LAYER: &str = "127.0.0.1:5080";
@@ -104,12 +202,88 @@ mod tests {
         .into_bytes()
     }
 
+    /// An INVITE from the peer: in the dialog `a`/`b` when `to_tag`, else
+    /// out of any dialog.
+    fn invite(branch: &str, to_tag: bool) -> Vec<u8> {
+        let to_tag = if to_tag { ";tag=b" } else { "" };
+        format!(
+            "INVITE sip:b2bua@127.0.0.1:5080 SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 10.0.0.1:5060;branch={branch}\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@10.0.0.1>;tag=a\r\n\
+             To: <sip:bob@127.0.0.1>{to_tag}\r\n\
+             Call-ID: glare@unit\r\n\
+             CSeq: 3 INVITE\r\n\
+             Contact: <sip:alice@10.0.0.1:5060>\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// The responses `rig.peer` receives within `wait`, as text.
+    async fn responses_at_peer(rig: &Rig, wait: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(wait);
+        while let Ok(Some(p)) = tokio::time::timeout_at(deadline, rig.peer.recv()).await {
+            let text = String::from_utf8_lossy(&p.raw).to_string();
+            if text.starts_with("SIP/2.0 ") {
+                out.push(text);
+            }
+        }
+        out
+    }
+
+    fn status(resp: &str) -> u16 {
+        resp["SIP/2.0 ".len()..][..3].parse().unwrap()
+    }
+
+    fn retry_after(resp: &str) -> Option<u32> {
+        resp.lines()
+            .find_map(|l| l.strip_prefix("Retry-After: "))
+            .map(|v| v.trim().parse().unwrap())
+    }
+
+    /// The hook the router would attach to `event`.
+    fn answer_hook(rig: &Rig, event: &CallEvent) -> Option<crate::dispatch::DiscardHook> {
+        InviteAnswer {
+            txn: &rig.txn,
+            id_gen: &rig.id_gen,
+            metrics: &rig.metrics,
+            retry_after_base_sec: 5,
+            retry_after_jitter_sec: 5,
+        }
+        .hook_for(event)
+    }
+
+    /// An INVITE from the peer, taken off the layer and dispatched behind the
+    /// release queued on call `c`, then the release drained.
+    async fn invite_behind_the_release(
+        rig: &mut Rig,
+        class: RemovalClass,
+        branch: &str,
+        to_tag: bool,
+    ) {
+        let gate = park_with_release_of(rig, class).await;
+        rig.peer.send_to(&invite(branch, to_tag), addr(LAYER)).await.unwrap();
+        let event = next_event(rig, 100).await.expect("the INVITE reaches the router");
+        let hook = answer_hook(rig, &event);
+        assert!(hook.is_some(), "an INVITE carries a discard answer");
+        let job = Job::new(Box::pin(async move { drop(event) })).on_discard(hook);
+        rig.dispatcher.dispatch("c", job).await;
+        gate.notify_one();
+        while rig.dispatcher.queue_count() > 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(rig.metrics.release_discards_total(), 1);
+    }
+
     struct Rig {
         txn: TransactionLayer,
         events: mpsc::Receiver<TransactionEvent>,
         peer: Box<dyn UdpEndpoint>,
         dispatcher: PerCallDispatcher,
         metrics: B2buaMetrics,
+        id_gen: Arc<IdGen>,
     }
 
     async fn rig() -> Rig {
@@ -123,7 +297,7 @@ mod tests {
         );
         let metrics = B2buaMetrics::new();
         let dispatcher = PerCallDispatcher::new(8, 64, 1024, metrics.clone());
-        Rig { txn, events, peer, dispatcher, metrics }
+        Rig { txn, events, peer, dispatcher, metrics, id_gen: Arc::new(IdGen::seeded(7)) }
     }
 
     /// The next event the layer hands up within `wait`, as the router sees it.
@@ -138,17 +312,24 @@ mod tests {
     /// Park a body on call `c` until `gate` opens, with the call's release
     /// queued behind it: the worker drains whatever lands after the poison.
     async fn park_with_release_queued(rig: &Rig) -> Arc<Notify> {
+        park_with_release_of(rig, RemovalClass::Terminated).await
+    }
+
+    /// [`park_with_release_queued`] with a release of `class`.
+    async fn park_with_release_of(rig: &Rig, class: RemovalClass) -> Arc<Notify> {
         let (gate, started) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
         let (g, st) = (gate.clone(), started.clone());
-        rig.dispatcher.dispatch(
-            "c",
-            Box::pin(async move {
-                st.notify_one();
-                g.notified().await;
-            }),
-        );
+        rig.dispatcher
+            .dispatch(
+                "c",
+                Job::new(Box::pin(async move {
+                    st.notify_one();
+                    g.notified().await;
+                })),
+            )
+            .await;
         started.notified().await;
-        rig.dispatcher.enqueue_poison("c", RemovalClass::Terminated);
+        rig.dispatcher.enqueue_poison("c", class);
         gate
     }
 
@@ -166,13 +347,15 @@ mod tests {
         let ran = Arc::new(AtomicBool::new(false));
         let guard = UnansweredGuard::for_event(&rig.txn, &event);
         let r = ran.clone();
-        rig.dispatcher.dispatch(
-            "c",
-            Box::pin(async move {
-                guard.disarm();
-                r.store(true, Ordering::SeqCst);
-            }),
-        );
+        rig.dispatcher
+            .dispatch(
+                "c",
+                Job::new(Box::pin(async move {
+                    guard.disarm();
+                    r.store(true, Ordering::SeqCst);
+                })),
+            )
+            .await;
 
         gate.notify_one();
         while rig.dispatcher.queue_count() > 0 {
@@ -201,18 +384,96 @@ mod tests {
         let guard = UnansweredGuard::for_event(&rig.txn, &event);
         let done = Arc::new(Notify::new());
         let d = done.clone();
-        rig.dispatcher.dispatch(
-            "c",
-            Box::pin(async move {
-                guard.disarm();
-                d.notify_one();
-            }),
-        );
+        rig.dispatcher
+            .dispatch(
+                "c",
+                Job::new(Box::pin(async move {
+                    guard.disarm();
+                    d.notify_one();
+                })),
+            )
+            .await;
         done.notified().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(rig.txn.metrics().unanswered_forgotten(), 0);
 
         rig.peer.send_to(&bye("z9hG4bK-ran"), addr(LAYER)).await.unwrap();
         assert!(next_event(&mut rig, 100).await.is_none(), "the Trying transaction absorbs it");
+    }
+
+    /// A peer's re-INVITE that crosses the call's release lands behind the
+    /// poison and is discarded unrun. Its 100 Trying stopped the peer's
+    /// retransmissions, so the discard answers it: 481, the dialog being gone
+    /// (RFC 3261 §12.2.2).
+    #[tokio::test(start_paused = true)]
+    async fn a_reinvite_queued_behind_the_release_is_answered_481() {
+        let mut rig = rig().await;
+        invite_behind_the_release(&mut rig, RemovalClass::Terminated, "z9hG4bK-reinv", true).await;
+        let statuses: Vec<u16> =
+            responses_at_peer(&rig, 100).await.iter().map(|r| status(r)).collect();
+        assert_eq!(statuses, vec![100, 481]);
+        assert_eq!(
+            rig.metrics
+                .invite_discard_answered_of_total(Discard::Released(RemovalClass::Terminated)),
+            1
+        );
+    }
+
+    /// Behind the shedding of a takeover copy the dialog lives on at the
+    /// call's primary: the re-INVITE is refused for now, 500 + Retry-After,
+    /// never 481 (which ends the dialog, RFC 3261 §14.1).
+    #[tokio::test(start_paused = true)]
+    async fn a_reinvite_queued_behind_a_self_release_is_answered_500_with_retry_after() {
+        let mut rig = rig().await;
+        invite_behind_the_release(&mut rig, RemovalClass::SelfRelease, "z9hG4bK-shed", true).await;
+        let responses = responses_at_peer(&rig, 100).await;
+        let statuses: Vec<u16> = responses.iter().map(|r| status(r)).collect();
+        assert_eq!(statuses, vec![100, 500]);
+        assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{}", responses[1]);
+    }
+
+    /// An out-of-dialog INVITE behind a release — a new attempt reusing the
+    /// released call's Call-ID and From-tag — names no dialog to be missing:
+    /// it draws the capacity 503 and a Retry-After, and may be retried.
+    #[tokio::test(start_paused = true)]
+    async fn an_initial_invite_queued_behind_the_release_is_answered_503_with_retry_after() {
+        let mut rig = rig().await;
+        invite_behind_the_release(&mut rig, RemovalClass::Terminated, "z9hG4bK-anew", false).await;
+        let responses = responses_at_peer(&rig, 100).await;
+        let statuses: Vec<u16> = responses.iter().map(|r| status(r)).collect();
+        assert_eq!(statuses, vec![100, 503]);
+        assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{}", responses[1]);
+    }
+
+    /// Once the body starts, its hook is dropped unheard: the body owns the
+    /// answer.
+    #[tokio::test(start_paused = true)]
+    async fn an_invite_whose_body_ran_is_not_answered_by_its_hook() {
+        let mut rig = rig().await;
+        rig.peer.send_to(&invite("z9hG4bK-ran-inv", true), addr(LAYER)).await.unwrap();
+        let event = next_event(&mut rig, 100).await.expect("the INVITE reaches the router");
+        let hook = answer_hook(&rig, &event);
+        let done = Arc::new(Notify::new());
+        let d = done.clone();
+        let job = Job::new(Box::pin(async move {
+            drop(event);
+            d.notify_one();
+        }))
+        .on_discard(hook);
+        rig.dispatcher.dispatch("c", job).await;
+        done.notified().await;
+        let statuses: Vec<u16> =
+            responses_at_peer(&rig, 100).await.iter().map(|r| status(r)).collect();
+        assert_eq!(statuses, vec![100], "only the layer's 100 Trying");
+        assert_eq!(rig.metrics.invite_discard_answered_total(), 0);
+    }
+
+    /// Only an INVITE request carries a discard answer.
+    #[tokio::test(start_paused = true)]
+    async fn a_non_invite_request_carries_no_discard_answer() {
+        let mut rig = rig().await;
+        rig.peer.send_to(&bye("z9hG4bK-no-hook"), addr(LAYER)).await.unwrap();
+        let event = next_event(&mut rig, 100).await.expect("the BYE reaches the router");
+        assert!(answer_hook(&rig, &event).is_none());
     }
 }

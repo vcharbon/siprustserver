@@ -1427,3 +1427,59 @@ async fn forget_unanswered_keeps_answered_and_invite_transactions() {
     assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the cached 200 is replayed");
     assert!(stack.drain_events().is_empty());
 }
+
+// ── forget_unanswered_of_call: the consumer released the call ────────────────
+
+/// A request of a call, attributed to it by its Request-URI `callRef`.
+fn call_request(method: &str, branch: &str, call_ref: &str, to_tag: Option<&str>) -> Vec<u8> {
+    let to = match to_tag {
+        Some(t) => format!("<sip:b2bua@127.0.0.1:5070>;tag={t}"),
+        None => "<sip:b2bua@127.0.0.1:5070>".to_string(),
+    };
+    format!(
+        "{method} sip:b2bua@127.0.0.1:5070;callRef={call_ref} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP 10.0.0.1:5555;branch={branch}\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:caller@10.0.0.1:5555>;tag=caller-tag\r\n\
+         To: {to}\r\n\
+         Call-ID: {call_ref}@u\r\n\
+         CSeq: 1 {method}\r\n\
+         Contact: <sip:caller@10.0.0.1:5555>\r\n\
+         Content-Length: 0\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// At its call's release, a non-INVITE server transaction of the call with no
+/// final is forgotten, so its next copy is admitted afresh; one that has
+/// answered keeps replaying its final, an INVITE transaction is kept, and
+/// another call's transactions are untouched.
+#[tokio::test(start_paused = true)]
+async fn a_released_calls_unanswered_non_invite_transactions_are_forgotten() {
+    let mut stack = Stack::build(TRANSIT, 64, 64).await;
+    let info = call_request("INFO", "z9hG4bK-info", "cr1", Some("callee-tag"));
+    let answered = "z9hG4bK-opts";
+    stack.inject(&info).await;
+    stack.inject(&call_request("OPTIONS", answered, "cr1", Some("callee-tag"))).await;
+    stack.inject(&call_request("INVITE", "z9hG4bK-reinv", "cr1", Some("callee-tag"))).await;
+    stack.inject(&call_request("INFO", "z9hG4bK-other", "cr2", Some("callee-tag"))).await;
+    elapse_ms(60).await;
+    let _ = stack.drain_events();
+    let resp = parse_response(&response_bytes(200, "OK", "OPTIONS", answered, "cr1@u", true));
+    stack.txn.send_response(resp, addr(PEER)).await.unwrap();
+    elapse_ms(60).await;
+    let _ = stack.drain_peer();
+    assert_eq!(active(&stack), 4);
+
+    assert_eq!(stack.txn.forget_unanswered_of_call("cr1").await.unwrap(), 1);
+    assert_eq!(active(&stack), 3, "only the unanswered INFO of cr1 is forgotten");
+    assert_eq!(stack.txn.metrics().released_unanswered_forgotten(), 1);
+
+    stack.inject(&info).await;
+    elapse_ms(60).await;
+    assert!(has_message_request(&stack.drain_events(), "INFO"), "the copy is admitted afresh");
+    stack.inject(&call_request("OPTIONS", answered, "cr1", Some("callee-tag"))).await;
+    elapse_ms(60).await;
+    assert_eq!(count_responses(&stack.drain_peer(), 200), 1, "the cached 200 is replayed");
+    assert!(stack.drain_events().is_empty());
+}

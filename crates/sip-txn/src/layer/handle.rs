@@ -148,6 +148,12 @@ pub(super) enum Command {
         call_id: String,
         from_tag: String,
     },
+    /// Forget every non-INVITE server transaction of `call_ref` that has sent
+    /// no final; replies with how many.
+    ForgetUnansweredOfCall {
+        call_ref: String,
+        reply: oneshot::Sender<usize>,
+    },
     /// Register `call_ref` for a one-shot [`TransactionEvent::CallQuiesced`] when
     /// its last transaction clears (ADR-0014 self-release). If it already has no
     /// transactions, `CallQuiesced` is emitted at once.
@@ -318,6 +324,23 @@ impl TransactionLayer {
         if let Err(mpsc::error::TrySendError::Full(_)) = self.cmd_tx.try_send(cmd) {
             self.metrics.count_forget_refused();
         }
+    }
+
+    /// The consumer released `call_ref` for good: nothing will answer a request
+    /// of it any more. Every non-INVITE server transaction attributed to it
+    /// that has sent no final is forgotten, so the UAC's retransmission
+    /// (RFC 3261 §17.1.2.2) is admitted afresh — and meets no call — instead
+    /// of being absorbed until its Timer F. INVITE transactions are kept.
+    /// Returns how many were forgotten.
+    pub async fn forget_unanswered_of_call(
+        &self,
+        call_ref: &str,
+    ) -> Result<usize, TransactionLayerClosed> {
+        self.roundtrip(|reply| Command::ForgetUnansweredOfCall {
+            call_ref: call_ref.to_string(),
+            reply,
+        })
+        .await
     }
 
     /// Ask to be notified (via [`TransactionEvent::CallQuiesced`]) when the last

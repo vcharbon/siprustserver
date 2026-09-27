@@ -29,7 +29,10 @@ The dispatcher owns `callRef → bounded mpsc`; each call has one worker task th
 runs its handler bodies in strict FIFO order; a global `Semaphore` caps total
 in-flight handlers. Handler bodies run on spawned sub-tasks the worker awaits, so
 a panicking handler is isolated and the worker survives. cap-drop / queue-drop /
-saturation are atomic counters. Rationale: a slow handler on one call must not
+saturation are atomic counters. A body discarded unrun hands its reason to the
+hook it was offered with; a job the protocol will not send again, and the
+release poison, queue past the bounds in FIFO order instead (bounded by their
+producers). Rationale: a slow handler on one call must not
 block other calls — the single actor (the txn-layer choice) would stall every
 call, which is exactly what `PerCallDispatcher` exists to prevent. `CallState`
 adds a per-`callRef` lock as a second serialization layer (uncontended under the
