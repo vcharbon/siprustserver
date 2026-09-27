@@ -65,6 +65,10 @@ image tag='siprustserver:dev':
 sipp-check:
     deploy/k8s/sipp/checks/run.sh
 
+# The SIPp stat exporter against a large stat CSV under a memory cap, and its disk trimmer.
+sipp-exporter-check:
+    python3 deploy/k8s/sipp/exporter-check/test_sipp_stat_exporter.py
+
 # ── environment ────────────────────────────────────────────────────────
 
 # Check this machine can build the workspace (toolchain, mold, a real compile).

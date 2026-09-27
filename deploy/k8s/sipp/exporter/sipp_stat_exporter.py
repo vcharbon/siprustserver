@@ -6,7 +6,9 @@ SIPp (`-trace_stat -stf <file> -fd 1`) appends one `;`-separated row per flush
 to a stat CSV. The first line is a header naming every column; cumulative
 counters carry a `(C)` suffix, periodic ones `(P)`. This exporter parses the
 header into a name->index map (robust to SIPp column drift across versions),
-reads the LAST data row on each scrape, and exposes it at /metrics.
+reads the LAST complete data row on each scrape, and exposes it at /metrics.
+A scrape reads the first line and a bounded window at the end of the file, so
+its memory is flat whatever the file size; stat_trim.py bounds the disk.
 
 Headline series (labelled by scenario/role/job from the env):
   sipp_current_calls            gauge   concurrent established dialogs
@@ -30,17 +32,26 @@ Env:
                                          (NOT `job`: that is reserved and gets
                                          overwritten by the vmagent scrape job)
   EXPORTER_PORT   (default 9035)
+  SIPP_STAT_KEEP_BYTES (default 16 MiB) -> tail kept on disk by the trimmer;
+                                         0 disables it (the file needs write access)
 """
 import os
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import stat_trim
 
 STAT_FILE = os.environ.get("SIPP_STAT_FILE", "/stats/stat.csv")
 SCENARIO = os.environ.get("SIPP_SCENARIO", "unknown")
 ROLE = os.environ.get("SIPP_ROLE", "uac")
 JOB = os.environ.get("SIPP_JOB", "")
 PORT = int(os.environ.get("EXPORTER_PORT", "9035"))
+KEEP_BYTES = int(os.environ.get("SIPP_STAT_KEEP_BYTES", str(16 * 1024 * 1024)))
+
+# Longest header line read; a stat row is about 0.5 KB, its header a few KB.
+HEADER_MAX = 64 * 1024
+# Bytes read at the end of the file per scrape: many rows, whatever the columns.
+TAIL_WINDOW = 64 * 1024
 
 # Failed* CSV column (cumulative) -> cause label on sipp_failed_total.
 FAILURE_CAUSES = {
@@ -93,23 +104,37 @@ def parse_time_ms(cell):
     return 0.0
 
 
-def read_last_row():
-    """Return (header_list, last_data_fields) or (None, None) if unreadable."""
+def read_last_row(path):
+    """Return (header_list, last_data_fields) or (None, None) if unreadable.
+
+    The last data row is the last newline-terminated non-blank line in the final
+    TAIL_WINDOW bytes: a row SIPp is still writing is skipped, and NUL bytes a
+    punched hole reads as are stripped.
+    """
     try:
-        with open(STAT_FILE, "r", errors="replace") as fh:
-            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        with open(path, "rb") as fh:
+            head = fh.readline(HEADER_MAX)
+            size = os.fstat(fh.fileno()).st_size
+            start = max(len(head), size - TAIL_WINDOW)
+            fh.seek(start)
+            tail = fh.read(size - start)
     except OSError:
         return None, None
-    if len(lines) < 2:
+    if not head.endswith(b"\n"):
         return None, None
-    header = lines[0].split(";")
-    last = lines[-1].split(";")
-    return header, last
+    lines = tail[:tail.rfind(b"\n") + 1].split(b"\n")
+    if start > len(head):
+        lines = lines[1:]  # the window may begin mid-row
+    for raw in reversed(lines):
+        line = raw.strip(b"\0").decode(errors="replace").strip()
+        if line:
+            return head.decode(errors="replace").strip().split(";"), line.split(";")
+    return None, None
 
 
-def render():
+def render(path=STAT_FILE):
     out = []
-    header, row = read_last_row()
+    header, row = read_last_row(path)
     if header is None:
         out.append(fmt("sipp_up", 0))
         return "".join(out)
@@ -192,6 +217,8 @@ def main():
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"sipp_stat_exporter: serving :{PORT}/metrics from {STAT_FILE} "
           f"(scenario={SCENARIO} role={ROLE} job={JOB or '-'})", file=sys.stderr)
+    if KEEP_BYTES > 0:
+        stat_trim.start(STAT_FILE, KEEP_BYTES)
     srv.serve_forever()
 
 

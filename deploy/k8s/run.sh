@@ -540,7 +540,8 @@ sipp_uas_up() {
       --cpus "$SIPP_UAS_CPUS" --memory "$SIPP_UAS_MEM" \
       -v "$SCENARIOS:/scenarios:ro" \
       sipp:dev sipp -sf /scenarios/uas-basic.xml -i "$ip" -p 5060 \
-        -l 60000 -recv_timeout 600000 -trace_err >/dev/null
+        -l 60000 -recv_timeout 600000 \
+        -trace_err -ringbuffer_files 1 -ringbuffer_size 16777216 >/dev/null
     printf '%s\n' "$ip" >> "$SIPEXT_GEN_DIR/uas-targets.csv"
     log "sipp-uas-$i up at $ip (docker, sipext)"
   done

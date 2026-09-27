@@ -40,6 +40,9 @@
 #   stale in-repo FQDN file — workers must never resolve external names),
 #   -s service, -i <its sipext IP> -p 5060, -r/-rp/-l/-m/-recv_timeout
 #   600000/-trace_err/-trace_stat -stf /stats/stat.csv -fd 1.
+#   Both files are bounded: SIPp rotates the error file at 16 MiB keeping one
+#   rotated file (-ringbuffer_*), the exporter twin trims the stat CSV to its
+#   last 16 MiB on disk (exporter/stat_trim.py; it mounts /stats writable).
 #
 # Observability: the exporter twin serves :9035 on the stream's sipext IP; the
 # host-side VictoriaMetrics scrapes the .100-.135 range statically (see
@@ -140,7 +143,8 @@ sipext_sipp_uac_up() {  # name scenario cps role slot max_calls max_concurrent
       -r "$cps" -rp 1000 \
       -l "$maxc" -m "$max_calls" \
       -recv_timeout 600000 \
-      -trace_err -trace_stat -stf /stats/stat.csv -fd 1 \
+      -trace_err -ringbuffer_files 1 -ringbuffer_size 16777216 \
+      -trace_stat -stf /stats/stat.csv -fd 1 \
     >/dev/null || { _sipext_gen_die "docker run failed for UAC stream $name"; return 1; }
   # Stat->Prometheus exporter twin: SAME netns as the UAC (shares its IP; 9035
   # TCP cannot clash with sipp's 5060 UDP), same env contract as the old
@@ -150,7 +154,7 @@ sipext_sipp_uac_up() {  # name scenario cps role slot max_calls max_concurrent
     --label "sipext-run=$CLUSTER" --label "sipext-kind=sipp-exporter" \
     --network "container:$name" \
     --cpus 0.5 --memory 128m \
-    -v "$sdir:/stats:ro" \
+    -v "$sdir:/stats" \
     -v "$SIPP_EXPORTER_DIR:/exporter:ro" \
     -e SIPP_STAT_FILE=/stats/stat.csv \
     -e "SIPP_SCENARIO=$scenario" \
