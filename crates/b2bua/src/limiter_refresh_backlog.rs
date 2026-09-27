@@ -6,10 +6,13 @@
 //! lapsed on the limiter during the outage is re-registered at the close,
 //! not one refresh period later.
 //!
-//! Bounds: an entry not renewed for one lease is given up (a live counted
-//! call renews it every refresh period, so its call has ended), and a hold
-//! onto a full backlog gives up the oldest entry; both are counted. An entry
-//! is a key and its ids, nothing else of the call. The backlog is not
+//! An entry lives one lease from the first refresh held for its key: a later
+//! hold replaces its ids and keeps its place and its expiry. Past it, the
+//! call's own refresh, which keeps firing every period, re-registers the set
+//! (ADR-0038 decision 4). A hold onto a full backlog gives up the oldest
+//! entry, and the release of a call forgets its entry (an ended call's set is
+//! never refreshed); all three are counted. An entry is a key and its ids,
+//! nothing else of the call. The backlog is not
 //! replicated: a worker that dies loses it, and the calls a peer takes over
 //! re-register on their own refresh.
 
@@ -26,7 +29,7 @@ use crate::metrics::B2buaMetrics;
 /// The backlog's bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RefreshBacklogConfig {
-    /// How long an entry is worth sending without being renewed: the
+    /// How long an entry is worth sending after its first hold: the
     /// limiter's lease.
     pub lease: Duration,
     /// Most entries the backlog holds.
@@ -54,7 +57,7 @@ struct Entry {
 #[derive(Default)]
 struct Held {
     by_key: HashMap<String, Entry>,
-    /// Keys by last renewal: the first expires first.
+    /// Keys by first hold: the first expires first.
     order: BTreeMap<u64, String>,
     next_seq: u64,
 }
@@ -78,13 +81,15 @@ impl RefreshBacklog {
         self.held.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Hold the refresh of `key` with `ids`, replacing the one it held.
+    /// Hold the refresh of `key` with `ids`: a key already held takes the
+    /// new ids and keeps its place and expiry.
     pub fn hold(&self, key: &str, ids: &[String]) {
         let now = Instant::now();
         let mut held = self.lock();
         self.expire(&mut held, now);
-        if let Some(old) = held.by_key.remove(key) {
-            held.order.remove(&old.seq);
+        if let Some(entry) = held.by_key.get_mut(key) {
+            entry.ids = ids.to_vec();
+            return;
         }
         while held.by_key.len() >= self.config.cap {
             let Some((_, oldest)) = held.order.pop_first() else { break };
@@ -110,6 +115,16 @@ impl RefreshBacklog {
         order.into_values().filter_map(|key| by_key.remove(&key).map(|e| (key, e.ids))).collect()
     }
 
+    /// Forget the refresh held for `key`: its call's release was queued.
+    pub fn forget(&self, key: &str) {
+        let mut held = self.lock();
+        if let Some(entry) = held.by_key.remove(key) {
+            held.order.remove(&entry.seq);
+            self.metrics.bump_limiter_breaker_refreshes_dropped_released();
+            self.metrics.set_limiter_breaker_refreshes_held(held.by_key.len() as u64);
+        }
+    }
+
     /// Refreshes held.
     pub fn len(&self) -> usize {
         self.lock().by_key.len()
@@ -120,7 +135,7 @@ impl RefreshBacklog {
         self.len() == 0
     }
 
-    /// Give up every entry not renewed for one lease.
+    /// Give up every entry held for one lease.
     fn expire(&self, held: &mut Held, now: Instant) {
         while let Some(entry) = held.order.first_entry() {
             let key = entry.get();
@@ -156,21 +171,33 @@ mod tests {
         b.hold("b", &ids(&["y"]));
         b.hold("a", &ids(&["x", "z"]));
         assert_eq!(metrics.limiter_breaker_refreshes_held(), 2);
-        assert_eq!(b.take(), [("b".to_string(), ids(&["y"])), ("a".to_string(), ids(&["x", "z"]))]);
+        assert_eq!(b.take(), [("a".to_string(), ids(&["x", "z"])), ("b".to_string(), ids(&["y"]))]);
         assert!(b.is_empty());
         assert_eq!(metrics.limiter_breaker_refreshes_held(), 0);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_entry_not_renewed_for_one_lease_is_given_up() {
+    async fn an_entry_lives_one_lease_from_its_first_hold() {
+        let (b, metrics) = backlog(10);
+        b.hold("first", &ids(&["x"]));
+        tokio::time::advance(Duration::from_secs(5)).await;
+        b.hold("later", &ids(&["x"]));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        b.hold("first", &ids(&["x", "y"]));
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(b.take(), [("later".to_string(), ids(&["x"]))], "a re-hold renews nothing");
+        assert_eq!(metrics.limiter_breaker_refreshes_dropped_lease_expired_total(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_released_call_s_entry_is_forgotten() {
         let (b, metrics) = backlog(10);
         b.hold("ended", &ids(&["x"]));
         b.hold("live", &ids(&["x"]));
-        tokio::time::advance(Duration::from_secs(15)).await;
-        b.hold("live", &ids(&["x"]));
-        tokio::time::advance(Duration::from_secs(10)).await;
+        b.forget("ended");
+        b.forget("never-held");
         assert_eq!(b.take(), [("live".to_string(), ids(&["x"]))]);
-        assert_eq!(metrics.limiter_breaker_refreshes_dropped_lease_expired_total(), 1);
+        assert_eq!(metrics.limiter_breaker_refreshes_dropped_released_total(), 1);
     }
 
     #[tokio::test(start_paused = true)]

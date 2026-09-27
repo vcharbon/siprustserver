@@ -111,23 +111,28 @@ and a lost release could not be retried.
 10. **No call pays the timeout of a limiter that keeps failing.** Each worker
     runs a circuit breaker in front of its limiter. Closed, it counts
     consecutive admits that got no usable answer: a timeout, a transport error
-    (a name that does not resolve included), any non-200 status (a 4xx
-    included), a bad body. Any answered admit, a refusal included, ends the
-    run, and only admits count. A run of 3 opens it. Open, an admit sends
-    nothing and answers at once: the call owes no release by that admit and
-    stays as it was (an initial admit leaves it uncounted for its life, a
-    reroute admit leaves a counted call counted on its old set). A refresh
-    sends nothing; the breaker holds the latest refresh of each key, bounded
-    like the release queue (one lease without renewal, its cap). The release
-    queue is held. A background probe asks the limiter's health answer, which
-    reads its store, every second under the admit budget; answers of admits
-    sent before the breaker opened change nothing. The first answer closes the
-    breaker, resumes the queue and sends the held refreshes, at most 32 in
-    flight, but those of calls whose release waits: a counted call whose set
-    lapsed during the outage is re-registered at the close (decision 4), not
-    one refresh period later. No call is a probe. A limiter client without a
+    (a name that does not resolve within the admit's budget included), any
+    non-200 status (a 4xx included), a bad body. Any answered admit, a refusal
+    included, ends the run, and only admits count. A run of 3 opens it. Open,
+    an admit sends nothing and answers at once: the call owes no release by
+    that admit and stays as it was (an initial admit leaves it uncounted for
+    its life, a reroute admit leaves a counted call counted on its old set). A
+    refresh sends nothing; the breaker holds the latest refresh of each key
+    for one lease from the first one held, within the release queue's cap, and
+    forgets it when the call's release is queued, so an ended call's set is
+    never refreshed. The release queue is held. A background probe asks the
+    limiter's health answer, which reads its store, every second under the
+    admit budget; answers of admits sent before the breaker opened change
+    nothing. The first answer closes the breaker, resumes the queue and sends
+    the held refreshes, at most 32 in flight: a counted call whose set lapsed
+    during the outage is re-registered at the close (decision 4), not one
+    refresh period later. Their answers are counted apart; the call learns its
+    state at its next refresh. No call is a probe. A limiter client without a
     health answer runs without a breaker, and a guarded limiter is never
-    guarded twice.
+    guarded twice. The limiter's `host:port` is a socket address used as it
+    is, or a name resolved on the request path: one lookup at a time, every
+    request meanwhile waiting for it within its own budget, the first address
+    found kept for the life of the client.
 
 ## Lease, refresh and the replica TTL
 
@@ -173,20 +178,20 @@ cells that prove re-registration run the deployed relation.
   passed by them. The worker counts the admits it did not send
   (`b2bua_limiter_breaker_admits_not_sent_total`: each owes no release by
   that admit; an initial admit leaves its call uncounted, a reroute admit
-  leaves the call as it was). A gauge of the live uncounted calls is left to
-  the limiter's degraded-path metrics (`limiter_uncounted_calls`), not built
-  here. The breaker's state is `b2bua_limiter_breaker_open`, its transitions
-  `b2bua_limiter_breaker_transitions_total{to=open|closed}`, its held
-  refreshes `b2bua_limiter_breaker_refreshes_not_sent_total`,
-  `b2bua_limiter_breaker_refreshes_held` and
-  `b2bua_limiter_breaker_refreshes_dropped_total{reason=lease_expired|cap}`,
-  its probes `b2bua_limiter_breaker_probe_failures_total` and
+  leaves the call as it was). A gauge of the live calls left uncounted is
+  future work. The breaker's state is `b2bua_limiter_breaker_open`, its
+  transitions `b2bua_limiter_breaker_transitions_total{to=open|closed}`, its
+  held refreshes `b2bua_limiter_breaker_refreshes_not_sent_total`,
+  `b2bua_limiter_breaker_refreshes_held`,
+  `b2bua_limiter_breaker_refreshes_dropped_total{reason=lease_expired|cap|released}`
+  and `b2bua_limiter_breaker_refreshes_flushed_total{outcome}`, its probes
+  `b2bua_limiter_breaker_probe_failures_total` and
   `b2bua_limiter_breaker_probe_restarts_total`; a failed probe also counts in
   the limiter's fail-open episode, which so lasts as long as the outage. The
   limiter's health answer is `GET /v1/health`; `/healthz` answers the process
-  alone. A malformed `LIMITER_URL` (another scheme, no port, a path) refuses
-  boot; a well-formed name that does not resolve yet is the breaker's to wait
-  for.
+  alone. A malformed `LIMITER_URL` (another scheme, no port, a path, an
+  unbracketed IPv6 address) refuses boot; a well-formed name that does not
+  resolve yet is the breaker's to wait for.
 - A refresh carries the call's ids: one request per counted call per period.
 - Re-registration knows no cap: a stale counted copy materialised after its
   release's fence lapsed (a primary that released, crashed before the

@@ -20,10 +20,11 @@
 //!
 //! [`ReleaseQueue::hold`] and [`ReleaseQueue::resume`] are the seam a circuit
 //! breaker drives: while held nothing is sent (leases still expire), and a
-//! resume sends every waiting key at once.
+//! resume sends every waiting key at once. [`ReleaseQueue::on_push`] tells
+//! the breaker which calls ended, so it forgets their held refreshes.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use crate::abort_on_drop::AbortOnDrop;
@@ -105,7 +106,12 @@ pub struct ReleaseQueue {
     metrics: B2buaMetrics,
     waiting: Mutex<Waiting>,
     wake: Notify,
+    /// Told every key pushed.
+    on_push: OnceLock<PushHook>,
 }
+
+/// What [`ReleaseQueue::on_push`] registers.
+type PushHook = Box<dyn Fn(&str) + Send + Sync>;
 
 impl ReleaseQueue {
     /// An empty queue sending through `limiter`. Nothing is sent until
@@ -121,7 +127,14 @@ impl ReleaseQueue {
             metrics,
             waiting: Mutex::new(Waiting::default()),
             wake: Notify::new(),
+            on_push: OnceLock::new(),
         })
+    }
+
+    /// Tell `hook` every key pushed from now on, before it is queued. One
+    /// hook per queue: a second registration is refused (`false`).
+    pub fn on_push(&self, hook: impl Fn(&str) + Send + Sync + 'static) -> bool {
+        self.on_push.set(Box::new(hook)).is_ok()
     }
 
     /// The queue's state. A panic under the lock leaves the state whole
@@ -134,6 +147,9 @@ impl ReleaseQueue {
     /// Queue the release of `key` and return at once. A key already waiting
     /// stays one entry; on a full queue the oldest entry is given up.
     pub fn push(&self, key: &str) {
+        if let Some(hook) = self.on_push.get() {
+            hook(key);
+        }
         let now = Instant::now();
         let mut w = self.lock();
         self.expire(&mut w, now);

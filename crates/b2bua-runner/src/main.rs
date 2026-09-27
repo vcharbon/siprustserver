@@ -60,7 +60,7 @@
 //!   B2BUA_CDR_CAPTURED_HEADERS header names whose values every ring entry captures, comma-separated (default empty)
 //!
 //! ## Call limiter
-//!   LIMITER_URL             shared limiter base URL; unset → NoopLimiter (fail-open)
+//!   LIMITER_URL             the shared limiter, [http://]host:port; unset → NoopLimiter (fail-open)
 //!   LIMITER_REFRESH_SECONDS lease refresh cadence, below the service lease    (default 40)
 //!   LIMITER_TIMEOUT_MS      per-request fail-open budget                     (default 150)
 //!   B2BUA_STRESS_LIMITER_ID always-on limiter id on every call; "" disables  (default global-stress)

@@ -40,7 +40,7 @@ pub(crate) fn limiter_url_from_lookup(
     };
     let refuse = |why: &str| format!("LIMITER_URL={url:?}: {why}");
     let rest = match url.split_once("://") {
-        Some(("http", rest)) => rest,
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => rest,
         Some((scheme, _)) => return Err(refuse(&format!("scheme {scheme} is not http"))),
         None => url.as_str(),
     };
@@ -53,6 +53,9 @@ pub(crate) fn limiter_url_from_lookup(
     };
     if host.is_empty() {
         return Err(refuse("no host"));
+    }
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        return Err(refuse("an IPv6 host is written in brackets: [addr]:port"));
     }
     match port.parse::<u16>() {
         Ok(0) | Err(_) => Err(refuse("the port is not in 1..=65535")),
@@ -176,6 +179,8 @@ mod tests {
             ("limiter.ns.svc.cluster.local:8080", "limiter.ns.svc.cluster.local:8080"),
             ("http://10.0.0.1:8080", "10.0.0.1:8080"),
             ("http://[::1]:8080", "[::1]:8080"),
+            ("HTTP://limiter:8080", "limiter:8080"),
+            ("Http://limiter:8080", "limiter:8080"),
         ] {
             assert_eq!(url(value), Ok(Some(hostport.to_string())), "{value}");
         }
@@ -196,6 +201,9 @@ mod tests {
             "http://limiter:0",
             "http://limiter:http",
             "http://limiter:70000",
+            "::1:8080",
+            "http://::1:8080",
+            "http://[::1:8080",
         ] {
             let e = url(value).expect_err(value);
             assert!(e.contains("LIMITER_URL"), "{e}");

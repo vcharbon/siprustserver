@@ -284,6 +284,75 @@ mod tests {
         assert!(health.serving().await);
     }
 
+    /// `client` behind a worker's breaker (3 failures, 1 s probe), its probe
+    /// running.
+    fn guarded(client: HttpCallLimiter) -> (Arc<dyn CallLimiter>, crate::metrics::B2buaMetrics) {
+        use crate::limiter_breaker::{BreakerConfig, BreakerLimiter};
+        use crate::limiter_refresh_backlog::RefreshBacklogConfig;
+        use crate::limiter_release::{ReleaseQueue, ReleaseQueueConfig};
+        let metrics = crate::metrics::B2buaMetrics::new();
+        let client: Arc<dyn CallLimiter> = Arc::new(client);
+        let bounds = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 10 };
+        let releases = ReleaseQueue::new(client.clone(), bounds, metrics.clone());
+        let (limiter, breaker) = BreakerLimiter::guard(
+            client,
+            BreakerConfig { failures: 3, probe: Duration::from_secs(1) },
+            releases,
+            RefreshBacklogConfig { lease: Duration::from_secs(120), cap: 10 },
+            metrics.clone(),
+        );
+        tokio::spawn(breaker.expect("guarded").run());
+        (limiter, metrics)
+    }
+
+    /// Five admits of distinct calls sent at once through `limiter`.
+    async fn five_at_once(limiter: &Arc<dyn CallLimiter>) -> Vec<AdmitOutcome> {
+        let admits: Vec<_> = (0..5)
+            .map(|n| {
+                let limiter = limiter.clone();
+                let wide = vec![LimiterEntry { id: "x".into(), limit: 100 }];
+                tokio::spawn(async move { limiter.admit(&format!("c{n}#k"), &wide, false).await })
+            })
+            .collect();
+        let mut outcomes = Vec::new();
+        for admit in admits {
+            outcomes.push(admit.await.unwrap());
+        }
+        outcomes
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admits_during_a_first_lookup_inside_the_budget_wait_for_it_and_are_admitted() {
+        let (net, _server) = served().await;
+        let names = Arc::new(crate::limiter_target::tests::FakeResolver {
+            delay: Some(Duration::from_millis(100)),
+            ..Default::default()
+        });
+        names.names.lock().unwrap().insert("limiter:8080".into(), laddr());
+        let target = LimiterTarget::name_with("limiter:8080", names.clone());
+        let (limiter, metrics) =
+            guarded(HttpCallLimiter::with_target(Arc::new(net), target, BUDGET));
+        assert_eq!(five_at_once(&limiter).await, vec![AdmitOutcome::Admitted; 5]);
+        assert!(!metrics.limiter_breaker_open(), "a healthy limiter keeps the breaker closed");
+        assert_eq!(names.lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn admits_during_a_lookup_slower_than_the_budget_fail_and_count() {
+        let (net, _server) = served().await;
+        let names = Arc::new(crate::limiter_target::tests::FakeResolver {
+            delay: Some(Duration::from_millis(300)),
+            ..Default::default()
+        });
+        names.names.lock().unwrap().insert("limiter:8080".into(), laddr());
+        let target = LimiterTarget::name_with("limiter:8080", names.clone());
+        let (limiter, metrics) =
+            guarded(HttpCallLimiter::with_target(Arc::new(net), target, BUDGET));
+        assert_eq!(five_at_once(&limiter).await, vec![AdmitOutcome::Unavailable; 5]);
+        assert!(metrics.limiter_breaker_open(), "the lost admits count");
+        assert_eq!(names.lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     fn resolver() -> Arc<crate::limiter_target::tests::FakeResolver> {
         Arc::new(Default::default())
     }

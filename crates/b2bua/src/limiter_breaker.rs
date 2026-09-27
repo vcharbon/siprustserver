@@ -18,12 +18,14 @@
 //! The probe ([`BreakerLimiter::run`]) asks the limiter's health answer every
 //! [`BreakerConfig::probe`] while open; the first answer closes the breaker,
 //! resumes the queue (every waiting key leaves at once) and sends the held
-//! refreshes, [`FLUSH_CONCURRENCY`] at a time, but those of calls whose
-//! release is waiting. No call is a probe. A limiter without a health answer
+//! refreshes, [`FLUSH_CONCURRENCY`] at a time. A call whose release is
+//! pushed has its held refresh forgotten, so an ended call's set is never
+//! refreshed after its release. The flushed refreshes' answers are counted
+//! apart from the calls' own refreshes: the call learns its state at its
+//! next refresh. No call is a probe. A limiter without a health answer
 //! runs without a breaker, and a guarded limiter has none: it is never
 //! guarded twice.
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -76,7 +78,7 @@ pub struct BreakerLimiter {
     health: Arc<dyn LimiterHealth>,
     config: BreakerConfig,
     releases: Arc<ReleaseQueue>,
-    refreshes: RefreshBacklog,
+    refreshes: Arc<RefreshBacklog>,
     metrics: B2buaMetrics,
     state: Mutex<State>,
     /// Wakes the probe when the breaker opens.
@@ -98,12 +100,16 @@ impl BreakerLimiter {
             return (inner, None);
         };
         metrics.set_limiter_breaker_open(false);
+        let refreshes = Arc::new(RefreshBacklog::new(backlog, metrics.clone()));
+        let forget = refreshes.clone();
+        let hooked = releases.on_push(move |key| forget.forget(key));
+        debug_assert!(hooked, "one breaker per release queue");
         let breaker = Arc::new(Self {
             inner,
             health,
             config,
             releases,
-            refreshes: RefreshBacklog::new(backlog, metrics.clone()),
+            refreshes,
             metrics,
             state: Mutex::new(State::default()),
             opened: Notify::new(),
@@ -200,10 +206,8 @@ impl BreakerLimiter {
             while self.is_open() {
                 tick.tick().await;
                 if self.health.serving().await {
-                    let releasing: HashSet<String> =
-                        self.releases.waiting_keys().into_iter().collect();
                     self.close();
-                    self.flush_refreshes(&releasing).await;
+                    self.flush_refreshes().await;
                 } else {
                     self.metrics.bump_limiter_breaker_probe_failures();
                 }
@@ -211,12 +215,10 @@ impl BreakerLimiter {
         }
     }
 
-    /// Send the refreshes held while open, [`FLUSH_CONCURRENCY`] at a time,
-    /// but those of the keys in `releasing` (the call ended; its release
-    /// frees it). A refresh the breaker reopened before is held again.
-    async fn flush_refreshes(&self, releasing: &HashSet<String>) {
-        let mut held =
-            self.refreshes.take().into_iter().filter(|(key, _)| !releasing.contains(key));
+    /// Send the refreshes held while open, [`FLUSH_CONCURRENCY`] at a time.
+    /// A refresh the breaker reopened before is held again.
+    async fn flush_refreshes(&self) {
+        let mut held = self.refreshes.take().into_iter();
         let mut in_flight = JoinSet::new();
         loop {
             while in_flight.len() < FLUSH_CONCURRENCY {
@@ -229,13 +231,14 @@ impl BreakerLimiter {
                 in_flight.spawn(async move { inner.refresh(&key, &ids).await });
             }
             let Some(done) = in_flight.join_next().await else { break };
-            match done {
-                Ok(RefreshOutcome::Reregistered) => {
-                    self.metrics.bump_limiter_refresh_reregistered()
-                }
-                Ok(RefreshOutcome::Released) => self.metrics.bump_limiter_refresh_released(),
-                Ok(RefreshOutcome::Dropped) => self.metrics.bump_limiter_refresh_dropped(),
-                _ => {}
+            if let Ok(outcome) = done {
+                self.metrics.record_limiter_breaker_refresh_flushed(match outcome {
+                    RefreshOutcome::Extended => "extended",
+                    RefreshOutcome::Reregistered => "reregistered",
+                    RefreshOutcome::Released => "released",
+                    RefreshOutcome::Dropped => "dropped",
+                    RefreshOutcome::Unavailable => "unavailable",
+                });
             }
         }
     }
@@ -288,6 +291,7 @@ mod tests {
         admits_sent: AtomicUsize,
         refreshes_sent: AtomicUsize,
         refreshed: Mutex<Vec<(String, Vec<String>)>>,
+        refresh_answer: Mutex<Option<RefreshOutcome>>,
         released: Mutex<Vec<Vec<String>>>,
         serving: Arc<Serving>,
     }
@@ -319,7 +323,7 @@ mod tests {
         async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
             self.refreshes_sent.fetch_add(1, Ordering::SeqCst);
             self.refreshed.lock().unwrap().push((key.to_string(), ids.to_vec()));
-            RefreshOutcome::Extended
+            self.refresh_answer.lock().unwrap().clone().unwrap_or(RefreshOutcome::Extended)
         }
         fn health(&self) -> Option<Arc<dyn LimiterHealth>> {
             Some(self.serving.clone())
@@ -424,7 +428,8 @@ mod tests {
         r.releases.push("ended");
         assert_eq!(r.scripted.refreshes_sent.load(Ordering::SeqCst), 0, "nothing sent open");
         assert_eq!(r.metrics.limiter_breaker_refreshes_not_sent_total(), 3);
-        assert_eq!(r.metrics.limiter_breaker_refreshes_held(), 2);
+        assert_eq!(r.metrics.limiter_breaker_refreshes_held(), 1, "the ended call's is forgotten");
+        assert_eq!(r.metrics.limiter_breaker_refreshes_dropped_released_total(), 1);
 
         r.scripted.serving.up.store(true, Ordering::SeqCst);
         tokio::time::advance(PROBE).await;
@@ -435,6 +440,20 @@ mod tests {
             "the latest refresh of k, none of a call whose release waited"
         );
         assert_eq!(r.metrics.limiter_breaker_refreshes_held(), 0);
+        assert_eq!(r.metrics.limiter_breaker_refreshes_flushed_total("extended"), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flushed_refresh_counts_apart_from_the_calls_own() {
+        let r = rig(lost(3));
+        *r.scripted.refresh_answer.lock().unwrap() = Some(RefreshOutcome::Released);
+        trip(&r.limiter).await;
+        r.limiter.refresh("k", &["x".into()]).await;
+        r.scripted.serving.up.store(true, Ordering::SeqCst);
+        tokio::time::advance(PROBE).await;
+        settle().await;
+        assert_eq!(r.metrics.limiter_breaker_refreshes_flushed_total("released"), 1);
+        assert_eq!(r.metrics.limiter_refresh_released_total(), 0, "not a peer's reap");
     }
 
     #[tokio::test(start_paused = true)]
@@ -458,6 +477,27 @@ mod tests {
         assert_eq!(*r.scripted.released.lock().unwrap(), [vec!["a".to_string()]]);
         assert_eq!(admit(&r.limiter).await, AdmitOutcome::Admitted, "admits are sent again");
         assert_eq!(r.scripted.admits_sent.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_release_given_up_at_the_cap_leaves_no_refresh_to_send_on_close() {
+        let r = rig(lost(3));
+        trip(&r.limiter).await;
+        r.limiter.refresh("ended", &["x".into()]).await;
+        r.releases.push("ended");
+        for n in 0..10 {
+            r.releases.push(&format!("other-{n}"));
+        }
+        assert!(!r.releases.waiting_keys().contains(&"ended".to_string()), "given up at the cap");
+
+        r.scripted.serving.up.store(true, Ordering::SeqCst);
+        tokio::time::advance(PROBE).await;
+        settle().await;
+        assert!(!r.metrics.limiter_breaker_open());
+        assert!(
+            r.scripted.refreshed.lock().unwrap().is_empty(),
+            "an ended call's set is never refreshed after its release"
+        );
     }
 
     #[tokio::test(start_paused = true)]

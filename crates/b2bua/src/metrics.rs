@@ -250,6 +250,8 @@ struct Inner {
     limiter_breaker_refreshes_held: AtomicU64,
     limiter_breaker_refreshes_dropped_lease_expired: AtomicU64,
     limiter_breaker_refreshes_dropped_cap: AtomicU64,
+    limiter_breaker_refreshes_dropped_released: AtomicU64,
+    limiter_breaker_refreshes_flushed: Mutex<BTreeMap<&'static str, u64>>,
     // Re-hydration diagnostics (long-call-on-reboot study, 2026-06-05). How a
     // rebooted primary's bootstrap passes terminate: `seeded` = a pass reached
     // the first catch-up `Noop` (the peer streamed the full `bak:{me}` keyset);
@@ -880,6 +882,31 @@ impl B2buaMetrics {
         limiter_breaker_refreshes_dropped_cap_total,
         limiter_breaker_refreshes_dropped_cap
     );
+    counter!(
+        bump_limiter_breaker_refreshes_dropped_released,
+        limiter_breaker_refreshes_dropped_released_total,
+        limiter_breaker_refreshes_dropped_released
+    );
+    /// Count one held refresh sent at the breaker's close, by its answer.
+    pub fn record_limiter_breaker_refresh_flushed(&self, outcome: &'static str) {
+        *self
+            .inner
+            .limiter_breaker_refreshes_flushed
+            .lock()
+            .unwrap()
+            .entry(outcome)
+            .or_insert(0) += 1;
+    }
+    /// Held refreshes sent at the breaker's close and answered `outcome`.
+    pub fn limiter_breaker_refreshes_flushed_total(&self, outcome: &str) -> u64 {
+        self.inner
+            .limiter_breaker_refreshes_flushed
+            .lock()
+            .unwrap()
+            .get(outcome)
+            .copied()
+            .unwrap_or(0)
+    }
     /// Set the number of refreshes the open breaker holds (gauge).
     pub fn set_limiter_breaker_refreshes_held(&self, n: u64) {
         self.inner.limiter_breaker_refreshes_held.store(n, Ordering::Relaxed);
@@ -1323,7 +1350,7 @@ impl B2buaMetrics {
             self.limiter_breaker_closed_total()
         ));
 
-        s.push_str("# HELP b2bua_limiter_breaker_refreshes_dropped_total refreshes the open limiter breaker held and gave up before it closed (reason=lease_expired: not renewed for one lease, the call ended; reason=cap: the oldest entry of a full backlog)\n# TYPE b2bua_limiter_breaker_refreshes_dropped_total counter\n");
+        s.push_str("# HELP b2bua_limiter_breaker_refreshes_dropped_total refreshes the open limiter breaker held and gave up before it closed (reason=lease_expired: held for one lease, the call's own refresh takes over; reason=cap: the oldest entry of a full backlog; reason=released: the call's release was queued)\n# TYPE b2bua_limiter_breaker_refreshes_dropped_total counter\n");
         s.push_str(&format!(
             "b2bua_limiter_breaker_refreshes_dropped_total{{reason=\"lease_expired\"}} {}\n",
             self.limiter_breaker_refreshes_dropped_lease_expired_total()
@@ -1332,6 +1359,16 @@ impl B2buaMetrics {
             "b2bua_limiter_breaker_refreshes_dropped_total{{reason=\"cap\"}} {}\n",
             self.limiter_breaker_refreshes_dropped_cap_total()
         ));
+        s.push_str(&format!(
+            "b2bua_limiter_breaker_refreshes_dropped_total{{reason=\"released\"}} {}\n",
+            self.limiter_breaker_refreshes_dropped_released_total()
+        ));
+        s.push_str("# HELP b2bua_limiter_breaker_refreshes_flushed_total refreshes the limiter breaker held while open and sent when it closed, by answer (reregistered: a set that lapsed during the outage is counted again; released: the call was released meanwhile); apart from the calls' own refreshes\n# TYPE b2bua_limiter_breaker_refreshes_flushed_total counter\n");
+        for (outcome, v) in self.inner.limiter_breaker_refreshes_flushed.lock().unwrap().iter() {
+            s.push_str(&format!(
+                "b2bua_limiter_breaker_refreshes_flushed_total{{outcome=\"{outcome}\"}} {v}\n"
+            ));
+        }
 
         s.push_str("# HELP b2bua_drain_exits_total drains by why they returned (reason=quiescent|caught_up|grace|grace_peers_behind, ADR-0031 D2); grace_peers_behind means a departing worker abandoned live calls no peer reported holding — a lost flush window, never a clean drain\n# TYPE b2bua_drain_exits_total counter\n");
         for (reason, v) in self.inner.drain_exits.lock().unwrap().iter() {
