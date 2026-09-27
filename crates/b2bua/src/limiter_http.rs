@@ -12,9 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use call_limiter::wire::RefreshOutcome as WireRefresh;
 use call_limiter::wire::{
-    AdmitEntry, AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest,
+    AdmitEntry, AdmitRequest, AdmitResponse, RefreshAnswer, RefreshRequest, RefreshResponse,
+    ReleaseRequest,
 };
 use http_net::{HttpRequest, HttpResponse, HttpTransport};
 
@@ -121,11 +121,11 @@ impl CallLimiter for HttpCallLimiter {
             return RefreshOutcome::Unavailable;
         };
         match serde_json::from_slice::<RefreshResponse>(&resp.body) {
-            Ok(RefreshResponse { outcome: WireRefresh::Extended }) => RefreshOutcome::Known,
-            Ok(RefreshResponse { outcome: WireRefresh::Reregistered }) => {
+            Ok(RefreshResponse { outcome: RefreshAnswer::Extended }) => RefreshOutcome::Extended,
+            Ok(RefreshResponse { outcome: RefreshAnswer::Reregistered }) => {
                 RefreshOutcome::Reregistered
             }
-            Ok(RefreshResponse { outcome: WireRefresh::Released }) => RefreshOutcome::Released,
+            Ok(RefreshResponse { outcome: RefreshAnswer::Released }) => RefreshOutcome::Released,
             Err(_) => RefreshOutcome::Unavailable,
         }
     }

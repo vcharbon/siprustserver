@@ -728,14 +728,14 @@ impl B2buaCore {
         self.ctx.state.peek(call_ref).is_some()
     }
 
-    /// The live copy of `call_ref` this worker serves, if any (introspection:
-    /// what its rules read at the next event).
     /// Cancel a timer in this node's driver, the record untouched: a test's
     /// stand-in for a fire the per-call queue dropped.
     pub async fn cancel_driver_timer(&self, call_ref: &str, id: &str) {
         self.ctx.timers.cancel(call_ref.to_string(), id.to_string()).await;
     }
 
+    /// The live copy of `call_ref` this worker serves, if any (introspection:
+    /// what its rules read at the next event).
     pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
         self.ctx.state.peek(call_ref)
     }

@@ -49,7 +49,7 @@ pub enum AdmitOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefreshOutcome {
     /// The call's lease was extended.
-    Known,
+    Extended,
     /// The server held no set for the call (lapsed, or the server restarted):
     /// it re-created the set from the ids sent, with no cap check.
     Reregistered,

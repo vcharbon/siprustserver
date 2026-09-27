@@ -483,7 +483,7 @@ async fn an_admit_that_times_out_and_lands_late_is_never_released() {
 
 /// A failover fold whose admit reaches the server after the call ended:
 /// the caller CANCELs while the consult is in flight, the call terminates
-/// and releases its set; the fold's admit then lands on the tombstone and
+/// and releases its set; the fold's admit then lands on the release fence and
 /// holds nothing; the gone-call path releases nothing. The witnesses are
 /// intact.
 #[tokio::test(start_paused = true)]
@@ -530,7 +530,7 @@ async fn a_fold_admitted_after_the_call_ended_holds_nothing() {
     rig.expect_holds([0, 0, 0], "the terminated call released its set").await;
     let refused_before = rig.store.stats().admits_refused_released;
 
-    // ── the fold lands on the gone call: its admit hit the tombstone ───
+    // ── the fold lands on the gone call: its admit hit the release fence
     h.advance(Duration::from_secs(2)).await;
     assert!(
         carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
@@ -539,7 +539,7 @@ async fn a_fold_admitted_after_the_call_ended_holds_nothing() {
     assert_eq!(
         rig.store.stats().admits_refused_released,
         refused_before + 1,
-        "the fold's admit was refused by the tombstone",
+        "the fold's admit was refused by the release fence",
     );
     rig.expect_drained("the fold's set was never counted; the witnesses are intact").await;
     assert_eq!(b2bua.metrics().limiter_admit_released_fold_total(), 1);
@@ -566,7 +566,7 @@ fn routes_holding(entries: &'static [(&'static str, i64)]) -> Arc<ScriptedDecisi
 
 /// The limiter key is unique over time. A retried INVITE reusing the first
 /// call's Call-ID and From tag (RFC 3261 §8.1.3.5) is a call of its own on
-/// the limiter: it holds `x` although the first call's release tombstoned
+/// the limiter: it holds `x` although the first call's release fenced
 /// their common `call_ref`, and a third call on `x` at its cap is refused.
 #[tokio::test(start_paused = true)]
 async fn a_retried_invite_reusing_the_call_identity_is_counted() {
@@ -893,15 +893,15 @@ async fn a_refresh_refused_by_a_release_behind_the_call_s_back_is_counted() {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
     }
-    assert_eq!(rig.all_holds(), [0, 0, 0], "the tombstone refuses the refresh");
+    assert_eq!(rig.all_holds(), [0, 0, 0], "the release fence refuses the refresh");
     assert_eq!(b2bua.metrics().limiter_refresh_released_total(), 1);
 
-    // ── past the tombstone's lease the refresh re-registers ────────────────
+    // ── past the fence's lease the refresh re-registers ────────────────────
     for _ in 0..LEASE_SEC + 5 {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
     }
-    rig.expect_holds([1, 0, 0], "the set is re-registered once the tombstone lapsed").await;
+    rig.expect_holds([1, 0, 0], "the set is re-registered once the fence lapsed").await;
     assert_eq!(b2bua.metrics().limiter_refresh_reregistered_total(), 1);
 
     let mut bye = dialog.bye().await;
@@ -913,7 +913,158 @@ async fn a_refresh_refused_by_a_release_behind_the_call_s_back_is_counted() {
     let _ = h.finish().await;
 }
 
-/// A limiter that answers every admit `Released`: the tombstone refusal on
+/// The path of every request the limiter server received, in arrival order.
+struct RequestLog {
+    inner: Arc<dyn HttpService>,
+    paths: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl HttpService for RequestLog {
+    async fn handle(&self, req: HttpRequest) -> HttpResponse {
+        self.paths.lock().unwrap().push(req.path.clone());
+        self.inner.handle(req).await
+    }
+}
+
+/// The witness rig behind a [`RequestLog`]; returns the log.
+async fn logged_rig() -> (WitnessRig, Arc<Mutex<Vec<String>>>) {
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    let log = paths.clone();
+    let rig =
+        WitnessRig::serve_wrapped(LimiterConfig { lease_sec: LEASE_SEC }, WIDE_BUDGET, move |s| {
+            Arc::new(RequestLog { inner: s, paths: log.clone() })
+        })
+        .await;
+    (rig, paths)
+}
+
+/// The requests the limiter received after its last admit.
+fn after_last_admit(paths: &Mutex<Vec<String>>) -> Vec<String> {
+    let paths = paths.lock().unwrap();
+    let last = paths.iter().rposition(|p| p == "/v1/admit").expect("an admit was received");
+    paths[last + 1..].to_vec()
+}
+
+/// A refused release reroute leaves the call uncounted: the refusal dropped
+/// the call's `x`, so the call sends no refresh and no terminal release after
+/// it. The call holds `x`; the release reroute `[y, z]` is refused on `z`
+/// (at its cap); the call ends by the local teardown, drained.
+#[tokio::test(start_paused = true)]
+async fn a_refused_release_reroute_leaves_the_call_uncounted() {
+    let h = Harness::new("keyed-holds-refused-reroute-uncounted");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (rig, paths) = logged_rig().await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = limited_route("127.0.0.1", 5070, &[("x", 10)]);
+                // Off the refresh period's multiples: no refresh is in flight
+                // when the reroute is admitted.
+                r.features.platform.max_duration_sec = 62;
+                r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
+                NewCallResponse::Route(r)
+            })
+            .on_release(|_| {
+                // z at cap 1 is refused: its witness already holds one.
+                let mut r = route_to("127.0.0.1", 5090);
+                r.call_limiter = limiters(&[("y", 10), ("z", 1)]);
+                ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+            c.limiter_refresh_sec = 5;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let _dialog = call.ack().await;
+    bob.receive("ACK").await;
+    rig.expect_holds([1, 0, 0], "the established call holds x").await;
+
+    // ── the cap raises the reroute; its admit is refused and drops x ───────
+    for _ in 0..62 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    for _ in 0..8 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+
+    assert_eq!(
+        after_last_admit(&paths),
+        Vec::<String>::new(),
+        "the refused reroute left the call uncounted: no refresh, no release after it",
+    );
+    assert_eq!(rig.store.stats().releases_total, 0, "no terminal release");
+    assert_eq!(b2bua.metrics().limiter_refresh_released_total(), 0);
+    rig.expect_drained("the refusal dropped the call's set").await;
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released), (1, 1), "x granted, released by the refusal");
+    b2bua.assert_fully_reaped();
+
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let _ = h.finish().await;
+}
+
+/// The failure chain's terminal 486 leaves the call uncounted: the refused
+/// failover route dropped the call's `x`, and the re-consult is refused again,
+/// so the call ends with no terminal release. Bob busies out; the failover
+/// route `[y, z]` is refused on `z` (at its cap) at every depth.
+#[tokio::test(start_paused = true)]
+async fn the_failure_chain_s_terminal_486_leaves_the_call_uncounted() {
+    let h = Harness::new("keyed-holds-terminal-486-uncounted");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let (rig, paths) = logged_rig().await;
+    let b2bua = B2buaSut::builder(one_failover(&[("x", 10)], &[("y", 10), ("z", 1)]))
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    rig.expect_holds([1, 0, 0], "the initial route holds x").await;
+    bob_uas.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+    call.expect(486).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+
+    assert_eq!(
+        after_last_admit(&paths),
+        Vec::<String>::new(),
+        "the refused chain left the call uncounted: no release after it",
+    );
+    assert_eq!(rig.store.stats().releases_total, 0, "no terminal release");
+    rig.expect_drained("the first refusal dropped the call's set").await;
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released), (1, 1), "x granted, released by the refusal");
+    b2bua.assert_fully_reaped();
+
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let report = h.finish().await;
+    assert_eq!(invite_final_statuses(&report, alice.addr()), vec![486]);
+}
+
+/// A limiter that answers every admit `Released`: the release-fence refusal on
 /// an initial route leaves the call uncounted and is counted on the b2bua.
 struct AnswersReleased;
 
@@ -928,10 +1079,10 @@ impl CallLimiter for AnswersReleased {
     }
 }
 
-/// An initial admit refused by a tombstone runs the call uncounted and counts
+/// An initial admit refused by a release fence runs the call uncounted and counts
 /// it as `limiter_admit_released_initial`.
 #[tokio::test(start_paused = true)]
-async fn an_initial_admit_refused_by_a_tombstone_runs_the_call_uncounted() {
+async fn an_initial_admit_refused_by_a_release_fence_runs_the_call_uncounted() {
     let h = Harness::new("keyed-holds-initial-admit-released");
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;

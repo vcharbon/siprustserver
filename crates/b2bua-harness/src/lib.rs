@@ -38,12 +38,11 @@ use tokio::task::JoinHandle;
 
 pub mod limiter;
 pub mod terminated;
+pub mod witness;
 
-pub use limiter::{
-    LimiterCount, LimiterLeak, LimiterProbe, WitnessRig, DEFAULT_LIMITER_ID, WITNESS_IDS,
-    WITNESS_LIMITER_ADDR,
-};
+pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
 pub use terminated::{TerminatedCalls, TerminatedCallsWriter};
+pub use witness::{WitnessRig, WITNESS_IDS, WITNESS_LIMITER_ADDR};
 
 // ===========================================================================
 // Shared b2bua spawn primitive
@@ -893,14 +892,14 @@ impl B2buaSut {
         self._core.active_calls()
     }
 
-    /// The live copy of `call_ref` this worker serves, if any (introspection:
-    /// what its rules read at the next event).
     /// Cancel `id` in the SUT's timer driver, the record untouched: a stand-in
     /// for a fire the per-call queue dropped.
     pub async fn cancel_driver_timer(&self, call_ref: &str, id: &str) {
         self._core.cancel_driver_timer(call_ref, id).await;
     }
 
+    /// The live copy of `call_ref` this worker serves, if any (introspection:
+    /// what its rules read at the next event).
     pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
         self._core.live_call(call_ref)
     }

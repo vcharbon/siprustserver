@@ -141,8 +141,10 @@ pub fn release_reroute_rules() -> Vec<RuleDefinition> {
                     _ => return None,
                 };
                 let cause = release_fold_cause(payload);
+                // A refused reroute dropped the call's set.
+                let mut actions: Vec<_> =
+                    super::defaults::fold_limiter_state_action(ctx.event).into_iter().collect();
                 // A release seeds its service slices exactly as a route does.
-                let mut actions = Vec::new();
                 let service_ext = super::defaults::parse_service_ext(payload);
                 if !service_ext.is_empty() {
                     actions.push(RuleAction::MergeCallExt { ext: service_ext });

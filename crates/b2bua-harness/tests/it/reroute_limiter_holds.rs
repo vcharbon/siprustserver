@@ -63,17 +63,17 @@ struct UnavailableOnAdmit {
 impl CallLimiter for UnavailableOnAdmit {
     async fn admit(
         &self,
-        call_ref: &str,
+        key: &str,
         entries: &[LimiterEntry],
         release_on_refusal: bool,
     ) -> AdmitOutcome {
         if self.admits.fetch_add(1, Ordering::SeqCst) + 1 == self.n {
             return AdmitOutcome::Unavailable;
         }
-        self.inner.admit(call_ref, entries, release_on_refusal).await
+        self.inner.admit(key, entries, release_on_refusal).await
     }
-    async fn release(&self, call_ref: &str) {
-        self.inner.release(call_ref).await
+    async fn release(&self, key: &str) {
+        self.inner.release(key).await
     }
     async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
         self.inner.refresh(key, ids).await

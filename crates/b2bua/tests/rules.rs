@@ -674,6 +674,61 @@ fn a_terminating_call_takes_the_route_fold_limiter_state() {
 }
 
 #[test]
+fn a_resolution_after_a_refused_route_states_the_call_uncounted() {
+    // A refused route dropped the call's set: the resolution it ends in (the
+    // failure chain's reject, redirect or terminate, a release whose reroute
+    // was refused) states the call uncounted first, live or going away.
+    let uncounted = serde_json::json!({ "key": "call#k", "counted": false, "ids": [] });
+    let mut live = test_call();
+    live.limiter = call::CallLimiterState::admitted("call#k".into(), vec!["x".into()]);
+    live.callback_context = Some("cb".into());
+    live = call::helpers::add_b_leg(live, b_leg_pending());
+    let mut going_away = live.clone();
+    going_away.state = CallModelState::Terminating;
+    for (rule_id, topic, outcome, mut payload) in [
+        (
+            "failover-reject",
+            "call-failure-result",
+            "reject",
+            serde_json::json!({ "code": 486, "reason": "Busy Here" }),
+        ),
+        (
+            "failover-redirect",
+            "call-failure-result",
+            "redirect",
+            serde_json::json!({ "code": 302, "contacts": [{ "uri": "sip:c@example.com" }] }),
+        ),
+        ("failover-terminate", "call-failure-result", "terminate", serde_json::json!({})),
+        (
+            "release-result-release",
+            "call-release-result",
+            "release",
+            serde_json::json!({ "reason": "limiter_rejected" }),
+        ),
+    ] {
+        payload["call_limiter"] = uncounted.clone();
+        let actions = fold_result(&live, rule_id, topic, outcome, payload.clone());
+        assert!(
+            matches!(
+                actions.first(),
+                Some(RuleAction::SetLimiterState { counted: false, ids, .. }) if ids.is_empty()
+            ),
+            "{rule_id} states the call uncounted first, got {actions:?}",
+        );
+
+        let candidates = fold_candidates(&going_away, topic, outcome, payload.clone());
+        let [teardown] = candidates[..] else {
+            panic!("one teardown rule takes the {topic}/{outcome} state, got {candidates:?}");
+        };
+        let actions = fold_result(&going_away, teardown, topic, outcome, payload);
+        assert!(
+            matches!(&actions[..], [RuleAction::SetLimiterState { counted: false, .. }]),
+            "{teardown} states the going-away call uncounted, got {actions:?}",
+        );
+    }
+}
+
+#[test]
 fn a_live_route_fold_hands_the_call_holds_to_its_route() {
     // Both route folds on a live call state the call's limiter state after
     // the route replaced its set: counted with the route's ids (plus the

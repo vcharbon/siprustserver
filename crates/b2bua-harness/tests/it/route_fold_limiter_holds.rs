@@ -10,7 +10,7 @@
 //!  - going-away call (`Terminating`): the fold drives no progress, yet it
 //!    states the set and the call's termination releases the call;
 //!  - gone call (released before the fold's admit landed): the admit meets the
-//!    call's tombstone and holds nothing.
+//!    call's release fence and holds nothing.
 //!
 //! Every scenario carries several limiters: distinct ids on one route, the
 //! same id on the initial and the failover route, overlapping sets across a
@@ -177,7 +177,7 @@ async fn failover_fold_on_a_terminating_call_releases_its_holds() {
 /// Failover fold on a call already gone. Bob busies out at once; the consult
 /// parks; the caller CANCELs, which resolves the last leg: the call terminates
 /// (released, its `x` freed) and is evicted before the fold's admit lands. The
-/// admit meets the call's tombstone: `x` + `y` are never counted, and the
+/// admit meets the call's release fence: `x` + `y` are never counted, and the
 /// fold has no call left to state them on.
 #[tokio::test(start_paused = true)]
 async fn failover_fold_after_the_call_is_gone_holds_nothing() {
@@ -216,7 +216,7 @@ async fn failover_fold_after_the_call_is_gone_holds_nothing() {
     b2bua.assert_calls_reaped();
     let refused_before = rig.store.stats().admits_refused_released;
 
-    // ── the fold's admit lands on the evicted call's tombstone ─────────────
+    // ── the fold's admit lands on the evicted call's release fence ─────────
     h.advance(Duration::from_secs(2)).await;
     assert!(
         carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
@@ -225,7 +225,7 @@ async fn failover_fold_after_the_call_is_gone_holds_nothing() {
     assert_eq!(
         rig.store.stats().admits_refused_released,
         refused_before + 1,
-        "the fold's admit was refused by the tombstone",
+        "the fold's admit was refused by the release fence",
     );
     rig.expect_drained("the gone call's fold counted nothing").await;
     b2bua.assert_fully_reaped();
@@ -432,7 +432,7 @@ async fn failover_route_refused_on_its_second_limiter_counts_nothing() {
 /// Failover fold on a gone call that was uncounted at its end. The initial
 /// route states no limiter; bob busies out; the consult parks; the caller
 /// CANCELs and the call is evicted, releasing nothing (an uncounted call
-/// leaves no tombstone). The fold's admit of `x` + `y` is then granted: no
+/// leaves no release fence). The fold's admit of `x` + `y` is then granted: no
 /// call is left to state it on, and the router releases the call.
 #[tokio::test(start_paused = true)]
 async fn failover_fold_after_an_uncounted_call_is_gone_is_released_by_the_router() {

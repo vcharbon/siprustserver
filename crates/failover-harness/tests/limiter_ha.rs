@@ -776,7 +776,7 @@ fn failover_decision() -> Arc<dyn CallDecisionEngine> {
 /// bob busies out and the failover route to charlie replaces them with `y` +
 /// `z`, which the backup counts in its replica. The primary crashes after the
 /// failover; the caller's BYE fails over to the backup, whose lossy
-/// auto-cleanup releases the call by `call_ref`: `y` and `z` are freed, never
+/// auto-cleanup releases the call by its limiter key: `y` and `z` are freed, never
 /// the replaced `x` again. Each id carries one witness hold admitted under a
 /// call of its own, so a surplus release reads below the witness instead of
 /// vanishing under the store's floor at 0.

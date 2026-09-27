@@ -115,7 +115,7 @@ fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
 /// sent for a route stating no limiter on a call the limiter does not count.
 /// `Ok(state)`: the call's admission state the fold carries — counted with
 /// the route's ids, or uncounted after an empty route, a fail-open admit or a
-/// tombstone refusal (the call ended; counted as `limiter_admit_released_fold`);
+/// release-fence refusal (the call ended; counted as `limiter_admit_released_fold`);
 /// `Err(limiter_id)`: refused on a cap — the caller owns the treatment, the
 /// call holds nothing.
 async fn admit_route_limiters(
@@ -309,7 +309,8 @@ pub(super) fn spawn_failure_callout(
 /// AFTER a `call_limiter` re-consult (and the terminal 486) answers the
 /// limiter refusal, not the failed peer's final — the fold says so via
 /// `origin`, so the a-facing mint carries none of the peer's relayed headers
-/// (ADR-0017 X2).
+/// (ADR-0017 X2). A resolution other than a route after a refusal carries the
+/// call uncounted in `call_limiter`: the refusal dropped its set.
 async fn failure_outcome(
     ctx: &Arc<RouterCtx>,
     limiter: &CallLimiterState,
@@ -322,9 +323,11 @@ async fn failure_outcome(
         request.get("failed_leg_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut depth: u32 = 0;
     // A refused replacement released the call's set: the re-consult's route
-    // replaces nothing.
+    // replaces nothing, and a resolution other than a route states the call
+    // uncounted.
     let mut counted = limiter.counted;
-    loop {
+    let mut refused = false;
+    let (outcome, mut payload) = loop {
         match ctx.decision.call_failure(req).await {
             Ok(CallTreatment::Route(route)) => {
                 let admitted = match admit_route_limiters(ctx, &limiter.key, counted, &route).await
@@ -332,6 +335,7 @@ async fn failure_outcome(
                     Ok(admitted) => admitted,
                     Err(limiter_id) => {
                         counted = false;
+                        refused = true;
                         if route.callback_context.is_some()
                             && depth < crate::decision::apply_route::MAX_LIMITER_FAILOVER
                         {
@@ -352,7 +356,7 @@ async fn failure_outcome(
                         // Chain exhausted / no context → the initial path's
                         // terminal limiter treatment (486 Busy Here) — the
                         // stack's own capacity statement.
-                        return (
+                        break (
                             "reject",
                             json!({
                                 "code": 486,
@@ -364,12 +368,12 @@ async fn failure_outcome(
                         );
                     }
                 };
-                return ("failover", route_result_payload(route, admitted, Some(failed_leg_id)));
+                break ("failover", route_result_payload(route, admitted, Some(failed_leg_id)));
             }
             // Decision-authored reject — the plan declined to fail over and
             // supplied its own final failure (code/reason/headers).
             Ok(CallTreatment::Reject(rj)) => {
-                return (
+                break (
                     "reject",
                     to_payload(FailureRejectPayload {
                         code: rj.reject_code,
@@ -384,7 +388,7 @@ async fn failure_outcome(
             }
             // Decision-authored 3xx redirect with a Contact list.
             Ok(CallTreatment::Redirect(rd)) => {
-                return (
+                break (
                     "redirect",
                     to_payload(FailureRedirectPayload {
                         code: rd.code,
@@ -406,7 +410,7 @@ async fn failure_outcome(
             // failure (response path) + tear the call down. Echo the failure's
             // status/reason the seed stashed for the relay.
             Ok(CallTreatment::Relay { label }) => {
-                return ("terminate", terminate_payload(request, &failed_leg_id, Some(label)));
+                break ("terminate", terminate_payload(request, &failed_leg_id, Some(label)));
             }
             // The engine's stated refusal: the reject fold a decision reject
             // takes, on the stack's own account.
@@ -421,13 +425,17 @@ async fn failure_outcome(
                     label: None,
                 });
                 payload[STACK_AUTHORED] = json!(true);
-                return ("reject", payload);
+                break ("reject", payload);
             }
             Err(CallDecisionError::Unavailable(_)) => {
-                return ("terminate", terminate_payload(request, &failed_leg_id, None));
+                break ("terminate", terminate_payload(request, &failed_leg_id, None));
             }
         }
+    };
+    if refused && outcome != "failover" {
+        payload["call_limiter"] = uncounted_payload(&limiter.key);
     }
+    (outcome, payload)
 }
 
 /// The `terminate` fold's payload: the failed final's status and reason the
@@ -496,8 +504,8 @@ pub(super) fn spawn_release_callout(
                     // reject here does NOT re-consult the engine — the call was
                     // going down anyway, so the reject degrades to the release
                     // default (local teardown) instead of a recursive failover
-                    // walk; the refusal released the call's set. The answer
-                    // still stands for everything but its route: the release
+                    // walk; the refusal released the call's set, and the fold
+                    // states the call uncounted. The answer still stands for everything but its route: the release
                     // is marked under its label and its service slices are
                     // merged.
                     Err(_) => {
@@ -505,6 +513,7 @@ pub(super) fn spawn_release_callout(
                             "reason": "limiter_rejected",
                             "event": event,
                             "label": route.label,
+                            "call_limiter": uncounted_payload(&limiter.key),
                         });
                         if !route.service_ext.is_empty() {
                             payload["service_ext"] = json!(route.service_ext);
@@ -642,6 +651,12 @@ struct CallLimiterPayload {
     key: String,
     counted: bool,
     ids: Vec<String>,
+}
+
+/// The `call_limiter` of a resolution a refused route ends in: the refusal
+/// dropped the call's set, so the call is uncounted.
+fn uncounted_payload(key: &str) -> serde_json::Value {
+    to_payload(CallLimiterPayload { key: key.to_string(), counted: false, ids: Vec::new() })
 }
 
 /// The internal-event payload the route-fold rules (`failover-create-leg` /

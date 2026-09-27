@@ -100,8 +100,8 @@ pub async fn apply_route(
     // from a misconfigured fixture, or a `.svc.cluster.local` name the K8s runner
     // constructs that has no live pod). Without this the host would flow to the
     // send path and block on `getaddrinfo`/`EAI_AGAIN`; admission is the cheap
-    // early filter — emit `503` and terminate BEFORE any b-leg state / limiter
-    // INCR is allocated (port of `applyRoute.ts`'s admission block). `reject_call`
+    // early filter — emit `503` and terminate BEFORE any b-leg state or limiter
+    // hold is allocated (port of `applyRoute.ts`'s admission block). `reject_call`
     // is the Rust analogue of `buildAdmissionRejectResult` (503 + To-tag +
     // terminate effects + Reject CDR). Done before the limiter loop so a rejected
     // target never acquires a hold.
@@ -155,7 +155,7 @@ pub async fn apply_route(
             // Fail open: the call runs uncounted (nothing released or
             // refreshed).
             AdmitOutcome::Unavailable => call.limiter.set(false, Vec::new()),
-            // The key was minted this turn, so a tombstone on it is
+            // The key was minted this turn, so a release fence on it is
             // unreachable; counted as `limiter_admit_released_initial`.
             AdmitOutcome::Released => {
                 call.limiter.set(false, Vec::new());

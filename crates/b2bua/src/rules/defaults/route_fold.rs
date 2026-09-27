@@ -2,7 +2,8 @@
 //! the router's `route_result_payload`) and the parity actions both async
 //! route folds — `failover-create-leg` (`call-failure-result`) and
 //! `release-reroute` (`call-release-result`) — must apply identically, and the
-//! reader of the limiter state both carry ([`route_fold_limiter_state`]). One parser +
+//! reader of the limiter state those consults' folds carry
+//! ([`route_fold_limiter_state`]). One parser +
 //! one parity-action builder so the folds cannot drift from each other or from
 //! the initial `apply_route`.
 
@@ -94,17 +95,26 @@ pub(crate) fn parse_route_fold(payload: &serde_json::Value) -> Option<RouteFold>
     })
 }
 
-/// The `(topic, outcome)` of the two route-shaped folds: a failover route and
-/// a release reroute. Only these carry a limiter state their dispatching task
-/// settled.
-const ROUTE_FOLDS: [(&str, &str); 2] =
-    [("call-failure-result", "failover"), ("call-release-result", "reroute")];
+/// The `(topic, outcome)` of the folds whose dispatching task may have changed
+/// the call's set on the limiter: the two route-shaped folds (a failover
+/// route, a release reroute), and the resolutions a refused route ends in (the
+/// failure chain's reject, redirect or terminate after a refusal, a release
+/// whose reroute was refused). Only these carry a limiter state.
+const ROUTE_FOLDS: [(&str, &str); 6] = [
+    ("call-failure-result", "failover"),
+    ("call-failure-result", "reject"),
+    ("call-failure-result", "redirect"),
+    ("call-failure-result", "terminate"),
+    ("call-release-result", "reroute"),
+    ("call-release-result", "release"),
+];
 
 /// The call's admission state a route fold carries: its dispatching task
-/// replaced the call's set on the limiter before the fold was posted, so the
-/// call the fold names owns that set from then on — stated on its record, or
-/// released when no call is left to state it on. `None` for any other event,
-/// or a route fold carrying no state.
+/// replaced the call's set on the limiter, or a refusal dropped it, before the
+/// fold was posted, so the call the fold names owns that outcome from then
+/// on — stated on its record, or released when no call is left to state it
+/// on. `None` for any other event, or a fold whose task left the set as it
+/// was.
 pub(crate) fn route_fold_limiter_state(event: &CallEvent) -> Option<call::CallLimiterState> {
     let CallEvent::InternalEvent { topic, outcome, payload, .. } = event else {
         return None;
@@ -113,6 +123,17 @@ pub(crate) fn route_fold_limiter_state(event: &CallEvent) -> Option<call::CallLi
         return None;
     }
     admitted_state(payload)
+}
+
+/// The [`RuleAction::SetLimiterState`] a non-route resolution states when its
+/// fold carries a limiter state (a refused route dropped the call's set).
+pub(crate) fn fold_limiter_state_action(event: &CallEvent) -> Option<RuleAction> {
+    let limiter = route_fold_limiter_state(event)?;
+    Some(RuleAction::SetLimiterState {
+        key: limiter.key,
+        counted: limiter.counted,
+        ids: limiter.ids,
+    })
 }
 
 /// A route payload's `call_limiter` object: `None` when absent or malformed.

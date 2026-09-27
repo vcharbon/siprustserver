@@ -238,7 +238,7 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     let bob = h.agent("bob", "127.0.0.1:5070").await;
 
     // A real `LimiterServer` on the simulated HTTP fabric (same rig as
-    // `limiter.rs`), so the INCR is a genuine cluster hold we can probe.
+    // `limiter.rs`), so the admitted hold is a genuine cluster hold we can probe.
     let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
     let http = SimulatedHttpNetwork::new();
     let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
@@ -277,7 +277,7 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     cxl.expect(200).await;
     call.expect(487).await;
 
-    // Cross the decision's landing: the route INCRs its hold, then is dropped.
+    // Cross the decision's landing: the route admits its hold, then is dropped.
     h.advance(Duration::from_secs(2)).await;
     assert!(
         bob.try_receive_tolerating("INVITE", &[]).await.is_none(),

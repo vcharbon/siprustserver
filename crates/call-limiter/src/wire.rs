@@ -33,7 +33,7 @@ pub struct AdmitRequest {
 
 /// `POST /v1/admit` response. `admitted` carries the whole set; a cap
 /// refusal names the first `rejected_id` at its cap; `released` states a
-/// refusal by the call's tombstone (the call ended), which names no id.
+/// refusal by the call's release fence (the call ended), which names no id.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmitResponse {
     /// Whether the call's set is now the entries sent.
@@ -65,7 +65,7 @@ pub struct RefreshRequest {
 /// `POST /v1/refresh` response: the outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RefreshOutcome {
+pub enum RefreshAnswer {
     /// The lease was extended.
     Extended,
     /// The set was re-created from the ids sent.
@@ -78,5 +78,5 @@ pub enum RefreshOutcome {
 /// `POST /v1/refresh` response.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshResponse {
-    pub outcome: RefreshOutcome,
+    pub outcome: RefreshAnswer,
 }

@@ -18,7 +18,7 @@
 //! `apply-route-admission-reject.test.ts` proves with `Effect.die` stubs): the
 //! admission reject lands BEFORE the limiter is touched. The route carries a
 //! `call_limiter` entry, yet admission must short-circuit so the limiter's
-//! `admit()` is never invoked — no INCR is allocated for a doomed target. A
+//! `admit()` is never invoked — no hold is allocated for a doomed target. A
 //! recording [`SpyLimiter`] (the Rust analogue of the TS die-on-call stub) records
 //! whether `admit` ran and the test asserts it did not.
 
@@ -126,7 +126,7 @@ async fn admission_reject_short_circuits_before_the_limiter_is_touched() {
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
 
     // The load-bearing assertion: the limiter was never consulted on the reject
-    // path (no INCR allocated for a target that never reaches the send path).
+    // path (no hold allocated for a target that never reaches the send path).
     assert!(
         !spy.admitted.load(Ordering::SeqCst),
         "admission reject must short-circuit BEFORE the limiter's admit() — even \

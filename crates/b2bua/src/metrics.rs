@@ -215,7 +215,7 @@ struct Inner {
     // The call limiter's degraded paths, seen from the b2bua: an admit refused
     // because the limiter had released the key (initial route / route fold),
     // a refresh that re-registered a set the limiter no longer held, a
-    // refresh refused because the call was released.
+    // refresh refused on a fenced key.
     limiter_admit_released_initial: AtomicU64,
     limiter_admit_released_fold: AtomicU64,
     limiter_refresh_reregistered: AtomicU64,
@@ -1051,7 +1051,7 @@ impl B2buaMetrics {
         counter("b2bua_limiter_admit_released_initial_total", "initial-route admits refused because the limiter had released the call's key (the call runs uncounted) — expected 0", self.limiter_admit_released_initial_total());
         counter("b2bua_limiter_admit_released_fold_total", "route-fold admits refused because the call was released while the consult was in flight (the fold counts nothing)", self.limiter_admit_released_fold_total());
         counter("b2bua_limiter_refresh_reregistered_total", "refreshes that re-registered a counted call's set the limiter no longer held (a lapsed lease across a takeover, a limiter restart)", self.limiter_refresh_reregistered_total());
-        counter("b2bua_limiter_refresh_released_total", "refreshes refused because the limiter had released the call (a stale counted copy) — expected 0", self.limiter_refresh_released_total());
+        counter("b2bua_limiter_refresh_released_total", "refreshes refused because the limiter fenced the call's key: a partitioned peer's reap released a call still served (refused for one lease, then re-registered), or the refresh was in flight when a route fold's refusal dropped the set (ADR-0038)", self.limiter_refresh_released_total());
         counter("b2bua_repl_terminal_lost_total", "backup-held deferred terminals whose primary never reclaimed them (dead past the replica TTL): limiter released + memory freed by the periodic reap, but NO CDR — the accepted lost-CDR double-failure (ADR-0020 X3)", self.repl_terminal_lost_total());
         counter("b2bua_repl_bootstrap_seeded_total", "rebooted-primary bootstrap passes that reached the first catch-up Noop (peer streamed the full bak:{me} keyset)", self.repl_bootstrap_seeded_total());
         counter("b2bua_repl_bootstrap_stalled_total", "rebooted-primary bootstrap passes that hit the bootstrap hard deadline before the first Noop (best-effort completion; keeps streaming on the same socket)", self.repl_bootstrap_stalled_total());

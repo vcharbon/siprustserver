@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use call_limiter::wire::{
-    AdmitEntry, AdmitRequest, AdmitResponse, RefreshOutcome, RefreshRequest, RefreshResponse,
+    AdmitEntry, AdmitRequest, AdmitResponse, RefreshAnswer, RefreshRequest, RefreshResponse,
     ReleaseRequest,
 };
 use call_limiter::{
@@ -91,9 +91,9 @@ async fn http_server_matches_direct_core() {
     let resp = call(&net, HttpRequest::post("/v1/refresh", body)).await;
     let http: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
     let direct = match oracle.refresh("c2", &["A".into()]) {
-        RefreshResult::Extended => RefreshOutcome::Extended,
-        RefreshResult::Reregistered => RefreshOutcome::Reregistered,
-        RefreshResult::Released => RefreshOutcome::Released,
+        RefreshResult::Extended => RefreshAnswer::Extended,
+        RefreshResult::Reregistered => RefreshAnswer::Reregistered,
+        RefreshResult::Released => RefreshAnswer::Released,
     };
     assert_eq!(http.outcome, direct, "refresh outcomes agree");
     tokio::time::advance(Duration::from_secs(3)).await;

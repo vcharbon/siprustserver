@@ -14,7 +14,7 @@ use http_net::{HttpRequest, HttpResponse, HttpService};
 use crate::metrics::LimiterMetrics;
 use crate::store::{AdmitResult, CallStore, RefreshResult};
 use crate::wire::{
-    AdmitRequest, AdmitResponse, RefreshOutcome, RefreshRequest, RefreshResponse, ReleaseRequest,
+    AdmitRequest, AdmitResponse, RefreshAnswer, RefreshRequest, RefreshResponse, ReleaseRequest,
 };
 
 /// The limiter HTTP service: a call store + its metrics.
@@ -92,9 +92,9 @@ impl HttpService for LimiterServer {
                     Err(e) => return bad_request(&format!("bad refresh body: {e}")),
                 };
                 let outcome = match self.store.refresh(&parsed.key, &parsed.ids) {
-                    RefreshResult::Extended => RefreshOutcome::Extended,
-                    RefreshResult::Reregistered => RefreshOutcome::Reregistered,
-                    RefreshResult::Released => RefreshOutcome::Released,
+                    RefreshResult::Extended => RefreshAnswer::Extended,
+                    RefreshResult::Reregistered => RefreshAnswer::Reregistered,
+                    RefreshResult::Released => RefreshAnswer::Released,
                 };
                 self.metrics.on_refresh();
                 json_ok(&RefreshResponse { outcome })

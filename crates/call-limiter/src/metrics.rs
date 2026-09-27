@@ -29,8 +29,8 @@ impl LimiterMetrics {
         Self::default()
     }
 
-    /// One admit request arrived, with its outcome (a tombstone refusal is
-    /// counted by the store).
+    /// One admit request arrived, with its outcome (a refusal of a released
+    /// call is counted by the store).
     pub fn on_admit(&self, outcome: &AdmitResult) {
         self.inner.admit.fetch_add(1, Ordering::Relaxed);
         match outcome {
@@ -109,10 +109,10 @@ impl LimiterMetrics {
         );
         metric("limiter_calls", "gauge", "calls holding a set", stats.calls.to_string());
         metric(
-            "limiter_tombstones",
+            "limiter_fences",
             "gauge",
-            "released calls still tombstoned",
-            stats.tombstones.to_string(),
+            "keys fenced against refresh: released calls, and calls whose set an admit dropped",
+            stats.fences.to_string(),
         );
         metric(
             "limiter_current_total",
@@ -140,7 +140,7 @@ mod tests {
             calls: 3,
             current_total: 7,
             admission_max: 4,
-            tombstones: 1,
+            fences: 1,
             lease_expired_calls: 2,
             lease_expired_holds: 4,
             reregistered_calls: 1,
@@ -157,7 +157,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("\nlimiter_calls 3\n"), "{text}");
-        assert!(text.contains("\nlimiter_tombstones 1\n"), "{text}");
+        assert!(text.contains("\nlimiter_fences 1\n"), "{text}");
         assert!(text.contains("\nlimiter_lease_expired_calls_total 2\n"), "{text}");
         assert!(text.contains("\nlimiter_lease_expired_holds_total 4\n"), "{text}");
         assert!(text.contains("\nlimiter_reregistered_calls_total 1\n"), "{text}");

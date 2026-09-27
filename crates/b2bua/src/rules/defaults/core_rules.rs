@@ -23,8 +23,8 @@ use crate::rules::model::{
 };
 
 use super::route_fold::{
-    fold_lands_on_going_away_call, parse_header_updates, parse_route_fold, parse_service_ext,
-    route_fold_limiter_state, route_fold_parity_actions,
+    fold_lands_on_going_away_call, fold_limiter_state_action, parse_header_updates,
+    parse_route_fold, parse_service_ext, route_fold_limiter_state, route_fold_parity_actions,
 };
 
 fn rule(
@@ -769,8 +769,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         ),
         // ── the limiter state of a route fold on a going-away call ──────────
         // A route fold's dispatching task replaced the call's set on the
-        // limiter: the state it carries becomes a Terminating call's, and the
-        // terminal settle releases the call; no LimiterRefresh re-arm. A
+        // limiter, or a refusal dropped it: the state it carries becomes a
+        // Terminating call's, and the terminal settle releases the call when
+        // it is counted; no LimiterRefresh re-arm. A
         // Terminated call is never resident on a rule turn (its folds take the
         // router's gone-call release).
         rule(
@@ -807,7 +808,9 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     crate::event::CallEvent::InternalEvent { payload, .. } => payload,
                     _ => return None,
                 };
-                let mut actions = Vec::new();
+                // A refused route before it dropped the call's set.
+                let mut actions: Vec<_> =
+                    fold_limiter_state_action(ctx.event).into_iter().collect();
                 match payload.get("status").and_then(|v| v.as_u64()) {
                     Some(status) => {
                         let reason = payload
@@ -860,8 +863,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                     .unwrap_or_else(|| b2bua_sdk::reason_phrase::default_reason(status))
                     .to_string();
                 let header_updates = parse_header_updates(payload);
+                // A refused route before it dropped the call's set.
+                let mut actions: Vec<_> =
+                    fold_limiter_state_action(ctx.event).into_iter().collect();
                 // A reject seeds its service slices exactly as a route does.
-                let mut actions = Vec::new();
                 let service_ext = parse_service_ext(payload);
                 if !service_ext.is_empty() {
                     actions.push(RuleAction::MergeCallExt { ext: service_ext });
@@ -920,8 +925,10 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                             .collect()
                     })
                     .unwrap_or_default();
+                // A refused route before it dropped the call's set.
+                let mut actions: Vec<_> =
+                    fold_limiter_state_action(ctx.event).into_iter().collect();
                 // A redirect seeds its service slices exactly as a route does.
-                let mut actions = Vec::new();
                 let service_ext = parse_service_ext(payload);
                 if !service_ext.is_empty() {
                     actions.push(RuleAction::MergeCallExt { ext: service_ext });

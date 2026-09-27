@@ -2,28 +2,28 @@
 //!
 //! The store keeps, per `key`, the multiset of limiter ids the call holds
 //! and the lease that bounds it, and per id the live count over every call.
+//! The key is the client's per-call limiter key, unique over time.
 //!
 //! - **admit** replaces the call's set in one step, checked net of the set the
 //!   call already holds: an id the call keeps or reduces never refuses, an id
 //!   it adds is checked against the cap the entry states; the same id twice in
 //!   one list takes two slots. All or none: a refusal leaves every count as it
 //!   was and keeps the call's old set, unless `release_on_refusal` drops it in
-//!   the same step.
-//! - **release** drops the call's set and tombstones the `key` for one
-//!   lease, so an admit or a refresh landing after the call ended re-creates
-//!   nothing. A release of an unknown or tombstoned call is a no-op. An admit
-//!   that drops the set without replacing it (a cap refusal with
-//!   `release_on_refusal`, an empty replacement) fences the key for refresh
-//!   the same way, until the next admit of the key.
+//!   the same step. An admit that drops the set without replacing it (a cap
+//!   refusal with `release_on_refusal`, an empty replacement) fences the key
+//!   against refresh for one lease, until the next admit of the key: a refresh
+//!   that left before the drop re-creates nothing.
+//! - **release** drops the call's set and fences the `key` for one lease
+//!   against admit and refresh, so an admit or a refresh landing after the
+//!   call ended re-creates nothing. A release of an unknown or released call
+//!   is a no-op.
 //! - **refresh** extends the lease of a known call. For a call the store does
 //!   not know and has not fenced it re-creates the set from the ids the
 //!   refresh carries, with no cap check: the call exists and was admitted, and
 //!   its set lapsed (a lease missed across a takeover or a restart of the
 //!   store). A fenced call is refused.
-//!
-//! The key is the client's per-call limiter key, unique over time.
 //! - **sweep** drops every set whose lease lapsed (a release the store never
-//!   received) and every tombstone past its lease, and counts the sets.
+//!   received) and every fence past its lease, and counts the sets.
 //!
 //! All time is read through the injected [`Clock`], so leases advance
 //! deterministically under a paused test clock; the store is pure compute.
@@ -41,8 +41,8 @@ use crate::wire::AdmitEntry;
 /// replica TTL and a reactive takeover is stated in ADR-0038.
 #[derive(Clone, Copy, Debug)]
 pub struct LimiterConfig {
-    /// How long a call's set lives without a refresh, and how long a released
-    /// key stays tombstoned (seconds).
+    /// How long a call's set lives without a refresh, and how long a key
+    /// stays fenced (seconds).
     pub lease_sec: i64,
 }
 
@@ -104,13 +104,13 @@ struct Inner {
     /// has no entry.
     counts: HashMap<String, i64>,
     /// Fenced `key` -> why, and when the fence lapses.
-    tombstones: HashMap<String, (Fence, i64)>,
+    fences: HashMap<String, (Fence, i64)>,
     /// Lease deadlines of the sets, oldest first. A refresh pushes a new
     /// deadline and leaves the old one stale: a popped deadline expires the
     /// set only when it is still the set's own.
     set_deadlines: BinaryHeap<Reverse<(i64, String)>>,
-    /// Lapse instants of the tombstones, oldest first.
-    tombstone_deadlines: BinaryHeap<Reverse<(i64, String)>>,
+    /// Lapse instants of the fences, oldest first.
+    fence_deadlines: BinaryHeap<Reverse<(i64, String)>>,
     lease_expired_calls: u64,
     lease_expired_holds: u64,
     reregistered_calls: u64,
@@ -133,9 +133,9 @@ impl CallStore {
             inner: Mutex::new(Inner {
                 calls: HashMap::new(),
                 counts: HashMap::new(),
-                tombstones: HashMap::new(),
+                fences: HashMap::new(),
                 set_deadlines: BinaryHeap::new(),
-                tombstone_deadlines: BinaryHeap::new(),
+                fence_deadlines: BinaryHeap::new(),
                 lease_expired_calls: 0,
                 lease_expired_holds: 0,
                 reregistered_calls: 0,
@@ -166,7 +166,7 @@ impl CallStore {
         let mut inner = self.inner.lock().unwrap();
         sweep(&mut inner, now_ms);
 
-        if inner.tombstones.get(key).is_some_and(|(fence, _)| *fence == Fence::Released) {
+        if inner.fences.get(key).is_some_and(|(fence, _)| *fence == Fence::Released) {
             inner.admits_refused_released += 1;
             return AdmitResult::Released;
         }
@@ -201,7 +201,7 @@ impl CallStore {
         }
 
         drop_set(&mut inner, key);
-        inner.tombstones.remove(key);
+        inner.fences.remove(key);
         let lease_expires_at_ms = now_ms + self.lease_ms();
         if entries.is_empty() {
             fence(&mut inner, key, Fence::Dropped, lease_expires_at_ms);
@@ -212,14 +212,15 @@ impl CallStore {
         AdmitResult::Admitted
     }
 
-    /// Drop the call's set and tombstone the `key` for one lease. A
-    /// second release, or one of a call never admitted, changes nothing.
+    /// Drop the call's set and fence the `key` for one lease against admit
+    /// and refresh. A second release changes nothing; a release of a call
+    /// never admitted, or whose set an admit dropped, fences its key the same.
     pub fn release(&self, key: &str) {
         let now_ms = self.now_ms();
         let mut inner = self.inner.lock().unwrap();
         sweep(&mut inner, now_ms);
         inner.releases_total += 1;
-        if inner.tombstones.get(key).is_some_and(|(fence, _)| *fence == Fence::Released) {
+        if inner.fences.get(key).is_some_and(|(fence, _)| *fence == Fence::Released) {
             return;
         }
         drop_set(&mut inner, key);
@@ -238,7 +239,7 @@ impl CallStore {
             inner.set_deadlines.push(Reverse((lease_expires_at_ms, key.to_string())));
             return RefreshResult::Extended;
         }
-        if inner.tombstones.contains_key(key) || ids.is_empty() {
+        if inner.fences.contains_key(key) || ids.is_empty() {
             return RefreshResult::Released;
         }
         insert_set(&mut inner, key, ids.to_vec(), lease_expires_at_ms);
@@ -246,7 +247,7 @@ impl CallStore {
         RefreshResult::Reregistered
     }
 
-    /// Drop every lapsed set and tombstone now (the janitor entry point).
+    /// Drop every lapsed set and fence now (the janitor entry point).
     /// Returns how many sets lapsed.
     pub fn sweep_now(&self) -> u64 {
         let now_ms = self.now_ms();
@@ -281,7 +282,7 @@ impl CallStore {
             calls: inner.calls.len() as u64,
             current_total: inner.counts.values().sum(),
             admission_max: inner.counts.values().copied().max().unwrap_or(0),
-            tombstones: inner.tombstones.len() as u64,
+            fences: inner.fences.len() as u64,
             lease_expired_calls: inner.lease_expired_calls,
             lease_expired_holds: inner.lease_expired_holds,
             reregistered_calls: inner.reregistered_calls,
@@ -301,8 +302,9 @@ pub struct StoreStats {
     /// The largest live count of one id: what the next admit of that id
     /// compares with its cap. 0 when nothing is held.
     pub admission_max: i64,
-    /// Released calls still tombstoned.
-    pub tombstones: u64,
+    /// Keys fenced against refresh: released calls, and calls whose set an
+    /// admit dropped.
+    pub fences: u64,
     /// Cumulative sets dropped because their lease lapsed.
     pub lease_expired_calls: u64,
     /// Cumulative holds those sets carried.
@@ -318,8 +320,8 @@ pub struct StoreStats {
 
 /// Fence `key` against refresh as `why`, until `lapses_at_ms`.
 fn fence(inner: &mut Inner, key: &str, why: Fence, lapses_at_ms: i64) {
-    inner.tombstones.insert(key.to_string(), (why, lapses_at_ms));
-    inner.tombstone_deadlines.push(Reverse((lapses_at_ms, key.to_string())));
+    inner.fences.insert(key.to_string(), (why, lapses_at_ms));
+    inner.fence_deadlines.push(Reverse((lapses_at_ms, key.to_string())));
 }
 
 /// Count `ids` (not empty) for `key` under a lease ending at
@@ -348,7 +350,7 @@ fn drop_set(inner: &mut Inner, key: &str) -> usize {
     set.ids.len()
 }
 
-/// Drop every set whose lease lapsed and every tombstone past its lease.
+/// Drop every set whose lease lapsed and every fence past its lease.
 fn sweep(inner: &mut Inner, now_ms: i64) {
     while let Some(Reverse((deadline, _))) = inner.set_deadlines.peek() {
         if *deadline > now_ms {
@@ -365,15 +367,15 @@ fn sweep(inner: &mut Inner, now_ms: i64) {
             inner.lease_expired_holds += holds as u64;
         }
     }
-    while let Some(Reverse((deadline, _))) = inner.tombstone_deadlines.peek() {
+    while let Some(Reverse((deadline, _))) = inner.fence_deadlines.peek() {
         if *deadline > now_ms {
             break;
         }
-        let Some(Reverse((deadline, key))) = inner.tombstone_deadlines.pop() else {
+        let Some(Reverse((deadline, key))) = inner.fence_deadlines.pop() else {
             break;
         };
-        if inner.tombstones.get(&key).is_some_and(|(_, at)| *at == deadline) {
-            inner.tombstones.remove(&key);
+        if inner.fences.get(&key).is_some_and(|(_, at)| *at == deadline) {
+            inner.fences.remove(&key);
         }
     }
 }

@@ -453,7 +453,7 @@ async fn failover_route_limiter_is_admitted_and_released_at_termination() {
     carol.receive("INVITE").await.respond(503, "Service Unavailable").await;
     carol.receive("ACK").await;
 
-    // The failover route's limiter entry is INCRed against the new target.
+    // The failover route's limiter entry is admitted against the new target.
     let mut bob_uas = bob.receive("INVITE").await;
     settle_until(|| store.stats().current_total == 1).await;
     assert_eq!(store.stats().current_total, 1, "failover route admitted its limiter entry");

@@ -36,13 +36,13 @@ struct DropsReleases {
 impl CallLimiter for DropsReleases {
     async fn admit(
         &self,
-        call_ref: &str,
+        key: &str,
         entries: &[LimiterEntry],
         release_on_refusal: bool,
     ) -> AdmitOutcome {
         let wire: Vec<AdmitEntry> =
             entries.iter().map(|e| AdmitEntry { id: e.id.clone(), limit: e.limit }).collect();
-        match self.store.admit(call_ref, &wire, release_on_refusal) {
+        match self.store.admit(key, &wire, release_on_refusal) {
             AdmitResult::Admitted => AdmitOutcome::Admitted,
             AdmitResult::Rejected { limiter_id } => AdmitOutcome::Rejected { limiter_id },
             AdmitResult::Released => AdmitOutcome::Released,
@@ -51,7 +51,7 @@ impl CallLimiter for DropsReleases {
     async fn release(&self, _key: &str) {}
     async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
         match self.store.refresh(key, ids) {
-            RefreshResult::Extended => RefreshOutcome::Known,
+            RefreshResult::Extended => RefreshOutcome::Extended,
             RefreshResult::Reregistered => RefreshOutcome::Reregistered,
             RefreshResult::Released => RefreshOutcome::Released,
         }

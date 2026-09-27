@@ -56,9 +56,12 @@ const IDS: [&str; 3] = ["x", "y", "z"];
 /// production parity value).
 const REBOOT_BUDGET: Duration = Duration::from_secs(600);
 
-/// The workers' refresh period (`limiter_refresh_sec`, the deployed value):
-/// a set is re-registered within it of the node materialising the call.
-const REFRESH_PERIOD_MS: i64 = 40_000;
+/// The workers' refresh period (`limiter_refresh_sec`, the config default the
+/// workers run): a set is re-registered within it of the node materialising
+/// the call.
+fn refresh_period_ms() -> i64 {
+    b2bua::B2buaConfig::default().limiter_refresh_sec * 1000
+}
 
 fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
@@ -233,7 +236,7 @@ fn release_reroute_decision(
 /// fold replaces the call's set on the limiter and dials the media server, and
 /// its flush never lands. The primary crashes. The caller's BYE fails over to
 /// the backup, whose copy still says `[x, y]`; its lossy cleanup releases the
-/// call by `call_ref`, which frees what the limiter holds for it, `y` and `z`,
+/// call by its limiter key, which frees what the limiter holds for it, `y` and `z`,
 /// and nothing of `x`: the witness on `x` is intact and the call drains to 0.
 #[tokio::test(start_paused = true)]
 async fn a_crash_between_a_reroute_fold_and_its_flush_releases_the_call_once() {
@@ -469,13 +472,14 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
     assert_eq!(rig.store.stats().reregistered_calls, 1);
     assert_eq!(backup.metrics().limiter_refresh_reregistered_total(), 1);
     assert!(
-        fh.now_ms() - reinvite_at <= REFRESH_PERIOD_MS,
+        fh.now_ms() - reinvite_at <= refresh_period_ms(),
         "re-registered within one refresh period of the re-INVITE ({} ms)",
         fh.now_ms() - reinvite_at
     );
 
     // ── the BYE ends the call on the backup, which defers the release ────
-    // The set lapses with its lease; the reap's release is a no-op.
+    // Known gap: the reverse-flushed terminal is evicted at the replica TTL
+    // with no release sent; the lease is what frees the set.
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let released = fh
         .settle_lossy_cleanup(async || {
@@ -559,7 +563,7 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
     );
     assert_eq!(rig.store.stats().reregistered_calls, 1);
     assert!(
-        fh.now_ms() - ready_at <= REFRESH_PERIOD_MS,
+        fh.now_ms() - ready_at <= refresh_period_ms(),
         "re-registered within one refresh period of the node being ready ({} ms)",
         fh.now_ms() - ready_at
     );
