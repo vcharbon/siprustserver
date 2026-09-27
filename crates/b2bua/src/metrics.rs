@@ -990,7 +990,7 @@ impl B2buaMetrics {
             s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {v}\n"));
         };
         counter("b2bua_message_cap_lifetime_crossed_total", "calls that crossed max_messages_per_call_lifetime: more events offered over the call's life than any healthy call sees, counted at dispatch in every state; each is sent one verdict that ends it", self.message_cap_lifetime_crossed_total());
-        counter("b2bua_dispatch_capped_refusals_total", "events refused on a call past its lifetime cap: a BYE is answered 200 where refused, any other request but ACK 481 (a CANCEL matching no transaction statelessly); the node's timers and Cancelled notices are dropped; responses keep their room and are never refused", self.capped_refusals_total());
+        counter("b2bua_dispatch_capped_refusals_total", "events refused on a call past its lifetime cap: a BYE is answered 200 where refused, any other request but ACK 481 (a CANCEL matching no transaction statelessly); a Cancelled notice is dropped; responses keep their room and are never refused", self.capped_refusals_total());
         counter("b2bua_dispatch_capped_request_answered_total", "non-INVITE requests refused on a call past its lifetime cap and answered where refused: BYE 200, any other 481", self.capped_request_answered_total());
         counter("b2bua_message_cap_terminated_total", "calls terminated for exceeding max_messages_per_call (cap-defense; a climbing rate names a runaway-traffic call class)", self.message_cap_terminated_total());
         counter(

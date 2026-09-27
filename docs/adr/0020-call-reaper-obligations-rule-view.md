@@ -19,7 +19,8 @@ it entirely:
    answered: `router::unanswered`; a `Cancelled` is queued past the bounds,
    up to a per-call ceiling past which the reaper tears the call down on the
    wire (BYE, CANCEL: its peers are alive, unlike a stale call's), and a
-   verdict, a terminating call's timeout and every client transaction's
+   verdict, every timer fire of the call (one per armed timer, the
+   terminating call's timeout among them) and every client transaction's
    outcome (at most two per transaction the call sent) past every bound. A
    non-INVITE request left without a final when the call ends is forgotten at
    its release, and an in-dialog INVITE answered 481 there.)

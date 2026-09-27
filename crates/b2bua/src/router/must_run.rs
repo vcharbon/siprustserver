@@ -4,7 +4,6 @@
 //! cap, and whether it counts toward that cap (everything but the node's own
 //! work).
 
-use call::TimerType;
 use sip_message::SipMessage;
 
 use crate::dispatch::Job;
@@ -28,15 +27,15 @@ impl Room {
     ///   past a full queue and the cap, up to the call's overflow ceiling. A
     ///   call flooded past it is torn down by the reaper.
     /// - What the node's own work produces waits past every bound: a reaper
-    ///   verdict (paced by the sweep), the `TerminatingTimeout` fire (one per
-    ///   termination), and a client transaction's outcome (at most two per
-    ///   transaction the call sent, see [`is_transaction_outcome`]). None of
-    ///   them counts toward the overflow ceiling, which detects a peer
-    ///   flooding the call. The lifetime cap counts the outcomes, and admits
-    ///   them past it.
+    ///   verdict (paced by the sweep), a call's timer fire (one per arm, and
+    ///   the next arm takes a turn of the call), and a client transaction's
+    ///   outcome (at most two per transaction the call sent, see
+    ///   [`is_transaction_outcome`]). None of them counts toward the overflow
+    ///   ceiling, which detects a peer flooding the call. The lifetime cap
+    ///   counts the outcomes, and admits them past it.
     pub(super) fn of(event: &CallEvent) -> Self {
         if crate::reaper::is_reaper_event(event)
-            || matches!(event, CallEvent::Timer { timer_type: TimerType::TerminatingTimeout, .. })
+            || matches!(event, CallEvent::Timer { .. })
             || is_transaction_outcome(event)
         {
             return Room::PastAllBounds;
@@ -96,7 +95,7 @@ mod tests {
     use sip_message::parser::custom::CustomParser;
     use sip_message::{SipMessage, SipParser};
 
-    use super::{is_own, is_transaction_outcome};
+    use super::{is_own, is_transaction_outcome, Room};
     use crate::event::CallEvent;
 
     /// `status` to an INVITE, as the layer hands it up.
@@ -125,6 +124,30 @@ mod tests {
         }
         assert!(!is_transaction_outcome(&invite_response(180, true)));
         assert!(!is_transaction_outcome(&invite_response(200, false)));
+    }
+
+    /// A call's timer fires once, whatever its kind: none is dropped for want
+    /// of room.
+    #[test]
+    fn every_timer_fire_waits_past_every_bound() {
+        for timer_type in [
+            TimerType::NoAnswer,
+            TimerType::SetupTimeout,
+            TimerType::GlobalDuration,
+            TimerType::LimiterRefresh,
+            TimerType::Keepalive,
+            TimerType::KeepaliveTimeout,
+            TimerType::TerminatingTimeout,
+            TimerType::ReferOverallSafety,
+            TimerType::service(call::MachineId::new("svc"), "key"),
+        ] {
+            let fire = CallEvent::Timer {
+                timer_type: timer_type.clone(),
+                call_ref: "c".into(),
+                leg_id: Some("b".into()),
+            };
+            assert!(matches!(Room::of(&fire), Room::PastAllBounds), "{timer_type:?}");
+        }
     }
 
     /// The lifetime cap counts what peers send, never the node's own timers

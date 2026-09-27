@@ -69,8 +69,8 @@ and a lost release could not be retried.
    counted (see Consequences).
 7. **Only a counted Active call refreshes**, and it always has its refresh
    armed: the invariant layer re-arms a missing or past-due `LimiterRefresh`
-   on every turn of the call, so a timer fire the per-call queue dropped heals
-   on the call's next turn. For an idle established call that turn is its
+   on every turn of the call, so a refresh that never fired heals on the
+   call's next turn. For an idle established call that turn is its
    keepalive, so the call may run uncounted for up to the keepalive interval
    plus one refresh period. A Terminating call stops refreshing: a teardown
    may outlast the lease (a release consult, then the sliding 32 s backstop),
