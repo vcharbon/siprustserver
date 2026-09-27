@@ -93,7 +93,7 @@ impl Job {
     }
 
     /// Queued past a full per-call queue and past the global cap, in FIFO
-    /// order, while the call's overflow holds fewer jobs than its queue
+    /// order, while the call's overflow holds fewer such jobs than its queue
     /// depth. Past that ceiling it is discarded as for a full queue and the
     /// overflow hook hears the call. A release discards it like any job.
     pub fn past_bounds(mut self) -> Self {
@@ -151,11 +151,14 @@ struct PerCallQueue {
     /// The class of the release queued on this call, once one is: every later
     /// item would be drained behind it.
     released: Option<RemovalClass>,
+    /// How many past-bounds jobs wait in `overflow` — what the ceiling
+    /// counts. Items admitted past every bound are not among them.
+    waiting: usize,
 }
 
 impl PerCallQueue {
     fn new(tx: mpsc::Sender<DispatchItem>) -> Self {
-        Self { tx, overflow: VecDeque::new(), released: None }
+        Self { tx, overflow: VecDeque::new(), released: None, waiting: 0 }
     }
 
     /// Queue `item` in FIFO order, or hand it back with why not. `ceiling`
@@ -184,10 +187,11 @@ impl PerCallQueue {
         };
         match item.admission() {
             Admission::Bounded => return Err((item, Refusal::Full { ceiling: false })),
-            Admission::PastBounds if self.overflow.len() >= ceiling => {
+            Admission::PastBounds if self.waiting >= ceiling => {
                 return Err((item, Refusal::Full { ceiling: true }))
             }
-            _ => {}
+            Admission::PastBounds => self.waiting += 1,
+            Admission::Always => {}
         }
         metrics.bump_past_bound(PastBound::Depth);
         metrics.add_overflow_depth(1);
@@ -195,18 +199,29 @@ impl PerCallQueue {
         Ok(())
     }
 
+    /// Take the overflow's oldest item, keeping its counts.
+    fn pop_overflow(&mut self, metrics: &B2buaMetrics) -> Option<DispatchItem> {
+        let item = self.overflow.pop_front()?;
+        left_overflow(&mut self.waiting, &item, metrics);
+        Some(item)
+    }
+
     /// Move overflow items into the channel's free slots, oldest first.
     fn refill(&mut self, metrics: &B2buaMetrics) {
-        while let Some(front) = self.overflow.pop_front() {
-            match self.tx.try_send(front) {
-                Ok(()) => metrics.add_overflow_depth(-1),
-                Err(mpsc::error::TrySendError::Full(front))
-                | Err(mpsc::error::TrySendError::Closed(front)) => {
-                    self.overflow.push_front(front);
-                    return;
-                }
-            }
+        while !self.overflow.is_empty() {
+            let Ok(slot) = self.tx.try_reserve() else { return };
+            let front = self.overflow.pop_front().expect("the overflow is not empty");
+            left_overflow(&mut self.waiting, &front, metrics);
+            slot.send(front);
         }
+    }
+}
+
+/// Account for `item` leaving a call's overflow.
+fn left_overflow(waiting: &mut usize, item: &DispatchItem, metrics: &B2buaMetrics) {
+    metrics.add_overflow_depth(-1);
+    if item.admission() == Admission::PastBounds {
+        *waiting -= 1;
     }
 }
 
@@ -403,9 +418,7 @@ async fn next_item(
         let mut map = queues.lock().unwrap();
         match rx.try_recv() {
             Ok(item) => Some(item),
-            Err(_) => map.get_mut(call_ref).and_then(|q| q.overflow.pop_front()).inspect(|_| {
-                metrics.add_overflow_depth(-1);
-            }),
+            Err(_) => map.get_mut(call_ref).and_then(|q| q.pop_overflow(metrics)),
         }
     };
     match parked {
@@ -837,5 +850,32 @@ mod tests {
         assert_eq!(*heard.lock().unwrap(), vec![Discard::Released(RemovalClass::Terminated)]);
         assert_eq!(metrics.release_discards_total(), 1);
         assert_eq!(metrics.removals_of_total(RemovalClass::Terminated), 1);
+    }
+
+    /// Jobs queued past every bound do not use up the call's allowance of
+    /// past-bounds jobs: a `past_bounds` job still finds room behind them.
+    #[tokio::test]
+    async fn jobs_past_all_bounds_leave_the_ceiling_to_past_bounds_jobs() {
+        let metrics = B2buaMetrics::new();
+        let d = PerCallDispatcher::new(1, 1, 1024, metrics.clone());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let gate = park(&d).await;
+        d.dispatch("c", Job::new(record(&order, "queued"))).await;
+        d.dispatch("c", Job::new(record(&order, "v1")).past_all_bounds()).await;
+        d.dispatch("c", Job::new(record(&order, "v2")).past_all_bounds()).await;
+        d.dispatch(
+            "c",
+            Job::new(record(&order, "cancelled")).past_bounds().on_discard(recording_hook(&heard)),
+        )
+        .await;
+        assert!(heard.lock().unwrap().is_empty(), "the past-bounds job finds its allowance");
+        assert_eq!(metrics.overflow_refused_total(), 0);
+
+        gate.notify_one();
+        d.enqueue_poison("c", RemovalClass::Terminated);
+        drained(&d).await;
+        assert_eq!(*order.lock().unwrap(), vec!["queued", "v1", "v2", "cancelled"]);
+        assert_eq!(metrics.overflow_depth(), 0);
     }
 }

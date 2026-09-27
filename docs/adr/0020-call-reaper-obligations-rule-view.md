@@ -17,7 +17,8 @@ it entirely:
    supposed to terminate the call; nothing notices. (A dropped non-INVITE
    request is now readmitted on its retransmission and a dropped INVITE
    answered: `router::unanswered`; a `Cancelled` is queued past the bounds,
-   up to a per-call ceiling past which the reaper tears the call down, and a
+   up to a per-call ceiling past which the reaper tears the call down on the
+   wire (BYE, CANCEL: its peers are alive, unlike a stale call's), and a
    verdict past every bound. A non-INVITE request left without a final when
    the call ends is forgotten at its release.)
 3. **Lost `TerminatingTimeout`** — the 32 s stuck-in-Terminating watchdog is

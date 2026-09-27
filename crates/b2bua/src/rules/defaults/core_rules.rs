@@ -175,7 +175,30 @@ fn let_stand_final(payload: &serde_json::Value) -> RuleAction {
         contacts: vec![],
     }
 }
-/// Shared body of the reaper-verdict rules (ADR-0020 X1): force every
+/// The `reaper-overflow` body. The call is condemned for flooding its
+/// dispatch overflow, not found dead: its legs are alive, so the ordinary
+/// teardown runs — BYE to each confirmed leg, CANCEL to each early b-leg —
+/// with the reason on the CDR, and `TerminatingTimeout` bounds the wait for
+/// their answers. It does not run on a call already terminating.
+fn reap_overflow(ctx: &RuleContext) -> Option<RuleHandleResult> {
+    const REASON: &str = "dispatch-overflow";
+    ok(vec![
+        RuleAction::AddCdrEvent {
+            event_type: CdrEventType::Bye,
+            leg_id: ctx.call.a_leg().leg_id.clone(),
+            status_code: None,
+            reason: Some(REASON.into()),
+        },
+        RuleAction::BeginTermination {
+            reason: Some(REASON.into()),
+            cause: TerminationCause::Supervisor,
+            by_leg: None,
+        },
+    ])
+}
+
+/// Shared body of the `reaper-stale` and `reaper-fatal-error` rules
+/// (ADR-0020 X1), for a call found dead or whose handler died: force every
 /// still-unresolved leg terminal (mirroring `is_fully_resolved`, like
 /// `terminating-safety-timeout`), record the reason on the CDR, and command
 /// termination. No wire messages: the legs were force-resolved above, so
@@ -1882,9 +1905,8 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             Match::internal_event()
                 .topic(crate::reaper::REAPER_TOPIC)
                 .outcome(crate::reaper::OUTCOME_OVERFLOW),
-            |ctx| reap_force_terminal(ctx, "dispatch-overflow"),
-        )
-        .runs_while_terminating(),
+            reap_overflow,
+        ),
         rule(
             "terminating-safety-timeout",
             &[],

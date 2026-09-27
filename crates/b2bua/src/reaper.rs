@@ -52,8 +52,9 @@ pub const OUTCOME_STALE: &str = "stale";
 pub const OUTCOME_FATAL: &str = "fatal-error";
 /// Overflow verdict: the call's dispatch overflow reached its ceiling — more
 /// must-run events arrive than the call consumes. Handled by the CORE_LAYER
-/// `reaper-overflow` rule, re-sent each sweep with the stale escalation
-/// until the call is gone.
+/// `reaper-overflow` rule, which tears the live legs down on the wire;
+/// re-sent each sweep on its own escalation ladder while the call stays
+/// Active.
 pub const OUTCOME_OVERFLOW: &str = "overflow";
 /// Strike-2 verdict: the rules path itself failed (a second panic, or stale
 /// verdicts that never took effect). Deliberately has NO rule — the router's
@@ -86,10 +87,13 @@ pub struct Reaper {
     /// Panic/abort strikes per call_ref (the X6 two-strike ladder). Pruned
     /// against the live map each sweep so it cannot ratchet.
     strikes: Arc<Mutex<HashMap<String, u32>>>,
-    /// Sweep-verdict attempts per call_ref (the abort/discharge escalation).
+    /// Stale-verdict attempts per call_ref (the abort/discharge escalation).
     attempts: Arc<Mutex<HashMap<String, u32>>>,
-    /// Calls whose dispatch overflow reached its ceiling: swept like stale
-    /// ones until gone. Pruned against the live map each sweep.
+    /// Overflow-verdict attempts per call_ref, a ladder of their own so a call
+    /// both stale and condemned climbs one rung per sweep on each.
+    condemned_attempts: Arc<Mutex<HashMap<String, u32>>>,
+    /// Calls whose dispatch overflow reached its ceiling: swept while Active.
+    /// Pruned each sweep.
     condemned: Arc<Mutex<HashSet<String>>>,
     reentry_tx: mpsc::UnboundedSender<CallEvent>,
     metrics: B2buaMetrics,
@@ -113,6 +117,7 @@ impl Reaper {
             strikes: Arc::new(Mutex::new(HashMap::new())),
             attempts: Arc::new(Mutex::new(HashMap::new())),
             condemned: Arc::new(Mutex::new(HashSet::new())),
+            condemned_attempts: Arc::new(Mutex::new(HashMap::new())),
             reentry_tx,
             metrics,
         }
@@ -168,64 +173,70 @@ impl Reaper {
         self.sweep_interval_ms
     }
 
-    /// One sweep pass: emit verdicts for stale candidates (paced), escalate
-    /// undelivered ones, prune dead escalation state. Sync + lock-light.
+    /// One sweep pass: emit verdicts for stale candidates, then for condemned
+    /// ones, at most [`MAX_VERDICTS_PER_SWEEP`] in all; escalate undelivered
+    /// ones; prune dead escalation state. Sync + lock-light.
     fn sweep_once(&self, state: &CallState, dispatcher: &PerCallDispatcher, now_ms: i64) {
         self.metrics.bump_reaper_sweep();
-        for (call_ref, watermark) in state
-            .stale_candidates(now_ms, self.idle_max_ms)
-            .into_iter()
-            .take(MAX_VERDICTS_PER_SWEEP)
+        let mut budget = MAX_VERDICTS_PER_SWEEP;
+        for (call_ref, watermark) in
+            state.stale_candidates(now_ms, self.idle_max_ms).into_iter().take(budget)
         {
-            let attempt = {
-                let mut attempts = self.attempts.lock().unwrap();
-                let a = attempts.entry(call_ref.clone()).or_insert(0);
-                *a += 1;
-                *a
-            };
-            if attempt > ESCALATE_DISCHARGE_AFTER {
-                // The stale verdicts never took effect (rules path broken /
-                // verdicts repeatedly dropped) — bypass the rules.
-                self.send_verdict(&call_ref, OUTCOME_DISCHARGE, serde_json::json!({}));
-                continue;
-            }
-            if attempt > ESCALATE_ABORT_AFTER {
-                // A hung body holds the worker + per-call lock; aborting drops
-                // it (the lock guard releases) so the queued verdict can run.
-                dispatcher.abort_in_flight(&call_ref);
-            }
+            budget -= 1;
             // Idempotent re-send: a queue-full drop is simply retried next
             // sweep — the reaper never assumes delivery. The verdict carries
             // the observed stamp; `process` discards it if the stamp moved
             // (X5), so a call that revived in the meantime is untouched.
-            self.send_verdict(
-                &call_ref,
-                OUTCOME_STALE,
-                serde_json::json!({ "watermark": watermark }),
-            );
+            self.climb(&self.attempts, &call_ref, dispatcher, || {
+                (OUTCOME_STALE, serde_json::json!({ "watermark": watermark }))
+            });
         }
-        let condemned: Vec<String> = self.condemned.lock().unwrap().iter().cloned().collect();
-        for call_ref in condemned.into_iter().filter(|r| state.contains(r)) {
-            let attempt = {
-                let mut attempts = self.attempts.lock().unwrap();
-                let a = attempts.entry(call_ref.clone()).or_insert(0);
-                *a += 1;
-                *a
-            };
-            if attempt > ESCALATE_DISCHARGE_AFTER {
-                self.send_verdict(&call_ref, OUTCOME_DISCHARGE, serde_json::json!({}));
-                continue;
-            }
-            if attempt > ESCALATE_ABORT_AFTER {
-                dispatcher.abort_in_flight(&call_ref);
-            }
-            self.send_verdict(&call_ref, OUTCOME_OVERFLOW, serde_json::json!({}));
+        // A condemned call that left Active has its teardown under way, bounded
+        // by `TerminatingTimeout`: it needs no further verdict.
+        let condemned: Vec<String> = {
+            let mut set = self.condemned.lock().unwrap();
+            set.retain(|r| state.peek(r).is_some_and(|c| c.state == CallModelState::Active));
+            set.iter().cloned().collect()
+        };
+        for call_ref in condemned.into_iter().take(budget) {
+            self.climb(&self.condemned_attempts, &call_ref, dispatcher, || {
+                (OUTCOME_OVERFLOW, serde_json::json!({}))
+            });
         }
         // Prune escalation state for calls no longer resident (normal
         // termination, reap completed, self-release) — bounded by live calls.
         self.strikes.lock().unwrap().retain(|r, _| state.contains(r));
         self.attempts.lock().unwrap().retain(|r, _| state.contains(r));
-        self.condemned.lock().unwrap().retain(|r| state.contains(r));
+        self.condemned_attempts.lock().unwrap().retain(|r, _| state.contains(r));
+    }
+
+    /// One rung of `call_ref`'s escalation on `ladder`: the verdict `verdict`
+    /// builds, then — its verdicts not taking effect — the in-flight body
+    /// aborted (a hung body holds the worker and the per-call lock; dropping
+    /// it lets the queued verdict run), then the discharge that bypasses the
+    /// rules.
+    fn climb(
+        &self,
+        ladder: &Mutex<HashMap<String, u32>>,
+        call_ref: &str,
+        dispatcher: &PerCallDispatcher,
+        verdict: impl FnOnce() -> (&'static str, serde_json::Value),
+    ) {
+        let attempt = {
+            let mut attempts = ladder.lock().unwrap();
+            let a = attempts.entry(call_ref.to_string()).or_insert(0);
+            *a += 1;
+            *a
+        };
+        if attempt > ESCALATE_DISCHARGE_AFTER {
+            self.send_verdict(call_ref, OUTCOME_DISCHARGE, serde_json::json!({}));
+            return;
+        }
+        if attempt > ESCALATE_ABORT_AFTER {
+            dispatcher.abort_in_flight(call_ref);
+        }
+        let (outcome, payload) = verdict();
+        self.send_verdict(call_ref, outcome, payload);
     }
 
     fn send_verdict(&self, call_ref: &str, outcome: &str, payload: serde_json::Value) {
@@ -374,5 +385,68 @@ mod tests {
         assert!(!verdict_confirmed(OUTCOME_FATAL, None, None));
         assert!(verdict_confirmed(OUTCOME_DISCHARGE, None, Some(5)));
         assert!(!verdict_confirmed(OUTCOME_DISCHARGE, None, None));
+    }
+
+    fn condemned_rig(
+        calls: usize,
+    ) -> (Reaper, mpsc::UnboundedReceiver<CallEvent>, CallState, Vec<String>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let metrics = B2buaMetrics::new();
+        let reaper = Reaper::new(true, 1, 60_000, tx, metrics.clone());
+        let state = CallState::new(Arc::new(InMemoryCallStore::new()), "w0", metrics);
+        let src = "10.0.0.9:5060".parse().unwrap();
+        let refs = (0..calls)
+            .map(|n| {
+                let invite = test_support::invite("w0", "w1", &format!("flood{n}"));
+                state.create(build_initial_call(&invite, src, &B2buaConfig::default(), 0))
+            })
+            .collect();
+        (reaper, rx, state, refs)
+    }
+
+    /// A sweep sends at most `MAX_VERDICTS_PER_SWEEP` verdicts, condemned
+    /// calls included.
+    #[tokio::test]
+    async fn the_condemned_loop_shares_the_sweep_budget() {
+        let (reaper, mut rx, state, refs) = condemned_rig(MAX_VERDICTS_PER_SWEEP + 6);
+        let hook = reaper.overflow_hook();
+        for r in &refs {
+            hook(r);
+        }
+        let _ = outcomes(&mut rx);
+        let dispatcher = PerCallDispatcher::new(1, 1, 8, B2buaMetrics::new());
+        reaper.maybe_sweep(&state, &dispatcher, 0);
+        assert_eq!(outcomes(&mut rx).len(), MAX_VERDICTS_PER_SWEEP);
+    }
+
+    /// A call both stale and condemned climbs each ladder one rung per sweep:
+    /// three sweeps reach neither discharge.
+    #[tokio::test]
+    async fn stale_and_overflow_verdicts_keep_their_own_ladders() {
+        let (reaper, mut rx, state, refs) = condemned_rig(1);
+        reaper.overflow_hook()(&refs[0]);
+        let _ = outcomes(&mut rx);
+        let dispatcher = PerCallDispatcher::new(1, 1, 8, B2buaMetrics::new());
+        let far = i64::MAX / 2;
+        for _ in 0..3 {
+            reaper.maybe_sweep(&state, &dispatcher, far);
+        }
+        let sent = outcomes(&mut rx);
+        assert_eq!(sent.len(), 6, "{sent:?}");
+        assert!(!sent.iter().any(|o| o == OUTCOME_DISCHARGE), "{sent:?}");
+    }
+
+    /// A condemned call whose teardown has begun gets no further verdict.
+    #[tokio::test]
+    async fn a_condemned_call_that_left_active_is_not_swept() {
+        let (reaper, mut rx, state, refs) = condemned_rig(1);
+        reaper.overflow_hook()(&refs[0]);
+        let _ = outcomes(&mut rx);
+        let mut call = state.peek(&refs[0]).unwrap();
+        call.state = CallModelState::Terminating;
+        state.update(call);
+        let dispatcher = PerCallDispatcher::new(1, 1, 8, B2buaMetrics::new());
+        reaper.maybe_sweep(&state, &dispatcher, 0);
+        assert!(outcomes(&mut rx).is_empty());
     }
 }

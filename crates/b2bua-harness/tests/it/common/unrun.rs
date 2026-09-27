@@ -94,6 +94,12 @@ impl DialogIds {
         self.request(from, "INVITE", cseq, branch, &contact)
     }
 
+    /// The CANCEL of the re-INVITE sent on `branch` at `cseq` (RFC 3261 §9.1):
+    /// same branch and CSeq number, method CANCEL.
+    pub fn cancel(&self, from: &Agent, cseq: u32, branch: &str) -> Vec<u8> {
+        self.request(from, "CANCEL", cseq, branch, "")
+    }
+
     /// The hop-by-hop ACK to a non-2xx final for the re-INVITE sent on
     /// `branch` at `cseq` (RFC 3261 §17.1.1.3): same branch, the final's
     /// To-tag, which in a dialog is the dialog's own.
