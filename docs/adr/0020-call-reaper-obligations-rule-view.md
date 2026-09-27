@@ -100,16 +100,20 @@ so exactly-once holds by construction (no cross-node CDR/limiter idempotency). T
 primary discharges exactly once: **immediately** if alive (its Reclaim-tail puller
 reconciles the dominating terminal into the LIVE map and discharges via the funnel
 — ADR-0014), or **on reboot reclaim** (a reclaimed `Terminated`/`Terminating` body
-discharges instead of re-serving). If the primary never returns, the deferred
-Element's alive-timer expires and the paced replica reap evicts it, releases the
-call's limiter key and counts its CDR lost: the record is lost with the primary
-(the accepted double-failure), the limiter slot and the memory are not. The reap
-is the only eviction site of an expired body and no read evicts one before it, so
-each expired deferred terminal is released once, whichever partition holds it (a
-replica its primary flushed, or the takeover copy's own terminal). A late reverse-flush racing the discharge cannot resurrect the call: a
-store-side **delete tombstone** (apply-side delete-wins) rejects a re-creating `Put`
-for a recently-deleted ref — required because the `(p,b)` vector structurally cannot
-let a backup's discharged-marker apply to a primary that has bumped `p`. The reaper
+discharges instead of re-serving).
+
+If the primary never returns, the deferred Element's alive-timer expires. The
+paced replica reap then evicts it, releases the call's limiter key and counts its
+CDR lost. The record is lost with the primary (the accepted double-failure); the
+limiter slot and the memory are not. The reap is the only eviction site of an
+expired body, and no read evicts one before it. So each expired deferred terminal
+is released once, whichever partition holds it: a replica its primary flushed, or
+the takeover copy's own terminal.
+
+A late reverse-flush racing the discharge cannot resurrect the call. A store-side
+**delete tombstone** (apply-side delete-wins) rejects a re-creating `Put` for a
+recently-deleted ref. It is required because the `(p,b)` vector structurally
+cannot let a backup's discharged-marker apply to a primary that has bumped `p`. The reaper
 X1 promise is unchanged (one funnel, one CDR); the reap task is a durability backstop,
 not a reconciliation timer (ADR-0014 causality preserved).
 

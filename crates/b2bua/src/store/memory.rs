@@ -5,7 +5,7 @@
 //! transport lands, a replicating impl honours them with no caller changes.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use async_trait::async_trait;
 
@@ -50,41 +50,33 @@ impl InMemoryCallStore {
     /// call whose index keys CHANGE across re-flushes, or whose delete passes the
     /// wrong keys, strands `idx:*` entries — the no-chaos RSS climb suspect).
     pub fn lens(&self) -> (usize, usize) {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.locked();
         (inner.bodies.len(), inner.indexes.len())
     }
 
     fn body_key(role: PartitionRole, primary: &str, call_ref: &str) -> String {
         format!("{}:{}:call:{}", role.as_str(), primary, call_ref)
     }
-}
 
-#[async_trait]
-impl CallStore for InMemoryCallStore {
-    async fn get_call(
-        &self,
-        role: PartitionRole,
-        primary: &str,
-        call_ref: &str,
-    ) -> Result<Option<Arc<[u8]>>, StoreError> {
-        let inner = self.inner.lock().unwrap();
-        // `Arc` clone == refcount bump, no byte copy.
-        Ok(inner.bodies.get(&Self::body_key(role, primary, call_ref)).cloned())
+    /// The maps as they stand: a panic under the lock leaves every map whole
+    /// (each write is one insert or remove), so a poisoned lock is taken as it is.
+    fn locked(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    async fn put_call(
+    /// Store `body` (and replace the index keys `call_ref` owns when `indexes`
+    /// is not empty) in one step. The synchronous core of
+    /// [`put_call`](CallStore::put_call), for a caller that must write under
+    /// its own lock.
+    pub(crate) fn store_body(
         &self,
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
         body: Vec<u8>,
         indexes: &[String],
-        _ttl_ms: i64,
-        _call_gen: i64,
-        _call_bgen: i64,
-        _opts: &PutOpts,
-    ) -> Result<(), StoreError> {
-        let mut inner = self.inner.lock().unwrap();
+    ) {
+        let mut inner = self.locked();
         // Wrap the owned encoded bytes in an `Arc` once, here.
         inner.bodies.insert(Self::body_key(role, primary, call_ref), Arc::from(body));
         // REPLACE (not just insert) this call's index keys: drop any previously
@@ -108,19 +100,20 @@ impl CallStore for InMemoryCallStore {
             }
             inner.idx_by_ref.insert(call_ref.to_string(), new_keys);
         }
-        Ok(())
     }
 
-    async fn delete_call(
+    /// Remove the body and every index key `call_ref` owns in one step and
+    /// return the removed body. The synchronous core of
+    /// [`delete_call`](CallStore::delete_call).
+    pub(crate) fn remove_body(
         &self,
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
         indexes: &[String],
-        _opts: &PutOpts,
-    ) -> Result<(), StoreError> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.bodies.remove(&Self::body_key(role, primary, call_ref));
+    ) -> Option<Arc<[u8]>> {
+        let mut inner = self.locked();
+        let removed = inner.bodies.remove(&Self::body_key(role, primary, call_ref));
         // Reclaim EVERY index key this call owns from the reverse map — the
         // authoritative teardown that does not depend on the caller passing the
         // keys (a replicated `Delete` frame carries none; changelog `delete_frame`
@@ -140,11 +133,53 @@ impl CallStore for InMemoryCallStore {
                 inner.indexes.remove(&k);
             }
         }
+        removed
+    }
+}
+
+#[async_trait]
+impl CallStore for InMemoryCallStore {
+    async fn get_call(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+    ) -> Result<Option<Arc<[u8]>>, StoreError> {
+        let inner = self.locked();
+        // `Arc` clone == refcount bump, no byte copy.
+        Ok(inner.bodies.get(&Self::body_key(role, primary, call_ref)).cloned())
+    }
+
+    async fn put_call(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+        body: Vec<u8>,
+        indexes: &[String],
+        _ttl_ms: i64,
+        _call_gen: i64,
+        _call_bgen: i64,
+        _opts: &PutOpts,
+    ) -> Result<(), StoreError> {
+        self.store_body(role, primary, call_ref, body, indexes);
+        Ok(())
+    }
+
+    async fn delete_call(
+        &self,
+        role: PartitionRole,
+        primary: &str,
+        call_ref: &str,
+        indexes: &[String],
+        _opts: &PutOpts,
+    ) -> Result<(), StoreError> {
+        self.remove_body(role, primary, call_ref, indexes);
         Ok(())
     }
 
     async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.locked();
         Ok(inner.indexes.get(&format!("idx:{index_key}")).cloned())
     }
 
@@ -154,7 +189,7 @@ impl CallStore for InMemoryCallStore {
         primary: &str,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         let prefix = format!("{}:{}:call:", role.as_str(), primary);
-        let inner = self.inner.lock().unwrap();
+        let inner = self.locked();
         Ok(inner
             .bodies
             .iter()

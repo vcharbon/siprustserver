@@ -79,6 +79,10 @@ endurance twin) but still cannot reproduce a host clock stepping *mid-run*.
 - **Pristine reboot.** A restarted node (including a backup) must come back
   with zero live calls before reclaim; the failover harness hard-asserts it
   and endurance treats it as an invariant.
+- **Only the core's paced sweep evicts expired replica bodies.** A read never
+  evicts one, and no other task calls `ReplicatingCallStore::reap`: an
+  out-of-band reap takes deferred terminals without their limiter release or
+  their lost-CDR count.
 
 ## References
 

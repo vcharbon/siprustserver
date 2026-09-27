@@ -1,14 +1,54 @@
-//! The worker's paced sweep: one task that runs one pass per interval (the
-//! reaper sweep, then the replica reap, `b2bua_core`).
+//! The worker's paced sweep: one supervised task that runs one pass per
+//! interval (the reaper sweep, then the replica reap, `b2bua_core`). The
+//! replica reap is the only eviction site of expired replica bodies, so the
+//! sweep outlives a pass that panics.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
+
+use tokio::task::JoinHandle;
 
 use crate::metrics::B2buaMetrics;
 
+/// Aborts the task it holds when dropped, so aborting the supervisor aborts
+/// the passes it runs.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Run `pass` once per `interval`, the first one `interval` after the start,
-/// until the task is aborted with the worker.
-pub(crate) async fn run<F, Fut>(interval: Duration, _metrics: B2buaMetrics, pass: F)
+/// until the task is aborted with the worker. A pass that panics is logged
+/// and counted (`b2bua_sweep_restarts_total`), and the passes start again one
+/// interval later: a pass that keeps panicking restarts once per interval,
+/// never faster.
+pub(crate) async fn run<F, Fut>(interval: Duration, metrics: B2buaMetrics, pass: F)
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let pass = Arc::new(pass);
+    loop {
+        let mut passes = AbortOnDrop(tokio::spawn(paced(interval, pass.clone())));
+        match (&mut passes.0).await {
+            Err(e) if e.is_panic() => {
+                metrics.bump_sweep_restart();
+                tracing::error!(
+                    interval_ms = interval.as_millis() as u64,
+                    "sweep pass panicked; the sweep restarts one interval later"
+                );
+            }
+            _ => return,
+        }
+    }
+}
+
+/// One pass per `interval`, the first one `interval` after the start.
+async fn paced<F, Fut>(interval: Duration, pass: Arc<F>)
 where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
@@ -94,6 +134,23 @@ mod tests {
         );
         assert_eq!(n.metrics.repl_terminal_lost_total(), 1);
         assert_eq!(n.metrics.sweep_restarts_total(), 1, "the panic is counted");
+        task.abort();
+    }
+
+    /// A pass that panics every time restarts the sweep once per interval:
+    /// no hot spin.
+    #[tokio::test(start_paused = true)]
+    async fn a_pass_that_keeps_panicking_restarts_once_per_interval() {
+        let metrics = crate::metrics::B2buaMetrics::new();
+        let task = tokio::spawn(super::run(Duration::from_secs(1), metrics.clone(), || async {
+            panic!("every pass panics")
+        }));
+        for _ in 0..100 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            sip_clock::testkit::settle().await;
+        }
+        let restarts = metrics.sweep_restarts_total();
+        assert!((8..=10).contains(&restarts), "{restarts} restarts in 10 s at a 1 s interval");
         task.abort();
     }
 }

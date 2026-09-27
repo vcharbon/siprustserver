@@ -412,9 +412,9 @@ impl B2buaCore {
 
         tasks.push(tokio::spawn(router::run(ctx.clone(), txn_rx, timer_rx, reentry_rx, repl_rx)));
         // The single periodic sweep task, driving two concerns off ONE
-        // `tokio::time::interval` (was two tasks at the same cadence — racy under
-        // the paused clock, redundant timers). Aborted by the harness `crash()`
-        // like the router/serve loops. Per tick, in order:
+        // `tokio::time::interval`, supervised by `sweep::run` (a pass that panics
+        // is counted and the passes restart one interval later). Aborted by the
+        // harness `crash()` like the router/serve loops. Per tick, in order:
         //   1. the reaper sweep (ADR-0020): scan the last-touched ledger + inject
         //      verdicts through the re-entry channel — `maybe_sweep` is a no-op for
         //      a disabled reaper.
