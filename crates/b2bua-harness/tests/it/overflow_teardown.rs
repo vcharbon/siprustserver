@@ -7,8 +7,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use b2bua_harness::{settle_until, B2buaScene, B2buaSut};
+use async_trait::async_trait;
+use b2bua::decision::{
+    CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
+    CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
+    NewCallRequest, NewCallResponse,
+};
+use b2bua_harness::{settle_until, B2buaScene, B2buaSut, WitnessRig};
 use call::helpers::TERMINATING_TIMEOUT_MS;
+use call_limiter::LimiterConfig;
 use scenario_harness::agent::WaiverScope;
 use scenario_harness::callflow::OFFER_SDP;
 use scenario_harness::{ClientInvite, Dialog};
@@ -19,9 +26,19 @@ use crate::common::unrun::{establish_keeping_answer, DialogIds, RouteFirstThenHa
 
 /// One handler permit, a per-call queue one deep, and no reaper sweep inside
 /// the test: only the verdict the ceiling sends at once can end the call.
-async fn scene(name: &str) -> B2buaScene {
-    let s = B2buaScene::with_b2bua(name, |bob_port| {
-        B2buaSut::builder(Arc::new(RouteFirstThenHang::to("127.0.0.1", bob_port))).tune(|c| {
+/// With `rig`, the SUT runs that limiter and the first route holds `[x, y]`
+/// on it; otherwise the harness's default limiter.
+async fn scene(name: &str, rig: Option<&WitnessRig>) -> B2buaScene {
+    let limiter = rig.map(|r| (r.client.clone(), r.store.clone()));
+    let s = B2buaScene::with_b2bua(name, move |bob_port| {
+        let route_first = RouteFirstThenHang::to("127.0.0.1", bob_port);
+        let builder = match limiter {
+            None => B2buaSut::builder(Arc::new(route_first)),
+            Some((client, store)) => B2buaSut::builder(Arc::new(HoldingXY(route_first)))
+                .limiter(client)
+                .limiter_store(store),
+        };
+        builder.tune(|c| {
             c.event_dispatch_concurrency = 1;
             c.per_call_queue_depth = 1;
             c.reaper_sweep_interval_sec = 3600;
@@ -61,8 +78,8 @@ struct Flooded {
 /// to its re-INVITE leaves, so three `Cancelled` events arrive for a call
 /// whose overflow holds one: the second is refused at the ceiling and the
 /// reaper condemns the call.
-async fn flood_past_the_ceiling(name: &str) -> Flooded {
-    let s = scene(name).await;
+async fn flood_past_the_ceiling(name: &str, rig: Option<&WitnessRig>) -> Flooded {
+    let s = scene(name, rig).await;
     let carol = s.h.agent("carol", "127.0.0.1:5062").await;
     let (mut dialog, answer) = establish_keeping_answer(&s.alice, &s.bob, s.b2bua.addr).await;
     let ids = DialogIds::of(&answer);
@@ -136,7 +153,7 @@ fn assert_one_overflow_cdr(s: &B2buaScene) {
 /// a BYE, both INFOs are answered, and the CDR is written.
 #[tokio::test(start_paused = true)]
 async fn a_call_flooded_past_its_overflow_ceiling_is_torn_down_on_the_wire() {
-    let mut f = flood_past_the_ceiling("b2bua-overflow-condemned-teardown").await;
+    let mut f = flood_past_the_ceiling("b2bua-overflow-condemned-teardown", None).await;
     bob_hears_the_teardown(&mut f).await;
     let s = &f.s;
     let mut a_bye = s.alice.try_receive("BYE").await.expect("alice hears the teardown");
@@ -171,7 +188,7 @@ async fn a_call_flooded_past_its_overflow_ceiling_is_torn_down_on_the_wire() {
 /// terminal and writes its CDR — not left Terminating while the flood goes on.
 #[tokio::test(start_paused = true)]
 async fn a_condemned_call_ends_at_its_terminating_timeout_while_the_flood_goes_on() {
-    let mut f = flood_past_the_ceiling("b2bua-overflow-teardown-under-flood").await;
+    let mut f = flood_past_the_ceiling("b2bua-overflow-teardown-under-flood", None).await;
     bob_hears_the_teardown(&mut f).await;
     let torn_down_at = tokio::time::Instant::now();
 
@@ -195,6 +212,75 @@ async fn a_condemned_call_ends_at_its_terminating_timeout_while_the_flood_goes_o
         "the call ended within TerminatingTimeout of its teardown, give or take the held permit"
     );
     assert_one_overflow_cdr(s);
+    s.b2bua.assert_fully_reaped();
+    let Flooded { s, .. } = f;
+    let _ = s.finish().await;
+}
+
+/// `inner` with `[x, y]` on every route of a new call.
+struct HoldingXY(RouteFirstThenHang);
+
+#[async_trait]
+impl CallDecisionEngine for HoldingXY {
+    async fn new_call(&self, req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
+        match self.0.new_call(req).await? {
+            NewCallResponse::Route(mut r) => {
+                r.call_limiter =
+                    ["x", "y"].map(|id| CallLimiterEntry { id: id.into(), limit: 10 }).to_vec();
+                Ok(NewCallResponse::Route(r))
+            }
+            other => Ok(other),
+        }
+    }
+    async fn call_failure(
+        &self,
+        req: CallFailureRequest,
+    ) -> Result<CallFailureResponse, CallDecisionError> {
+        self.0.call_failure(req).await
+    }
+    async fn call_refer(
+        &self,
+        req: CallReferRequest,
+    ) -> Result<CallReferResponse, CallDecisionError> {
+        self.0.call_refer(req).await
+    }
+    async fn call_release(
+        &self,
+        req: CallReleaseRequest,
+    ) -> Result<CallReleaseResponse, CallDecisionError> {
+        self.0.call_release(req).await
+    }
+}
+
+/// A condemned call whose initial admit landed on the limiter with its answer
+/// lost runs uncounted and owes its release: the reaper's teardown sends it,
+/// which frees the late set; nothing is left to the lease.
+#[tokio::test(start_paused = true)]
+async fn a_condemned_call_that_owes_its_release_drains_its_limiter() {
+    let rig = WitnessRig::serve(
+        LimiterConfig::default(),
+        Duration::from_millis(150),
+        Some(Duration::from_millis(400)),
+    )
+    .await;
+    let mut f = flood_past_the_ceiling("b2bua-overflow-condemned-owes-release", Some(&rig)).await;
+    rig.expect_holds([1, 1, 0], "the late admit counted the call on the limiter").await;
+    bob_hears_the_teardown(&mut f).await;
+    let s = &f.s;
+    let mut a_bye = s.alice.try_receive("BYE").await.expect("alice hears the teardown");
+    a_bye.respond(200, "OK").await;
+    s.h.advance(Duration::from_millis(500)).await;
+    while s.alice.take_queued().await.is_some() {}
+
+    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
+        .await;
+    assert_one_overflow_cdr(s);
+    rig.expect_holds([0, 0, 0], "the teardown released the call's key").await;
+    let stats = rig.store.stats();
+    assert_eq!(stats.releases_total, 1, "one release of the call");
+    assert_eq!(stats.lease_expired_calls, 0);
+    rig.expect_drained("released").await;
+    assert_eq!(s.b2bua.limiter_count().failed_open, 1, "the admit's answer was lost");
     s.b2bua.assert_fully_reaped();
     let Flooded { s, .. } = f;
     let _ = s.finish().await;
