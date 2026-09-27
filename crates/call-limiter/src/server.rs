@@ -95,6 +95,7 @@ impl HttpService for LimiterServer {
                     RefreshResult::Extended => RefreshAnswer::Extended,
                     RefreshResult::Reregistered => RefreshAnswer::Reregistered,
                     RefreshResult::Released => RefreshAnswer::Released,
+                    RefreshResult::Dropped => RefreshAnswer::Dropped,
                 };
                 self.metrics.on_refresh();
                 json_ok(&RefreshResponse { outcome })

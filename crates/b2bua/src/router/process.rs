@@ -816,9 +816,12 @@ fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call
 /// `/v1/refresh` call carrying the call's ids, which the server re-registers
 /// when it no longer holds them) and re-arm the timer while the call is
 /// Active. A Terminating call stops refreshing: its teardown is bounded by
-/// the 32 s backstop, inside the lease. A failed or refused refresh changes
-/// nothing here: the next cycle retries, and the terminal release names a
-/// call the server may already have forgotten, as a no-op.
+/// the 32 s backstop, inside the lease. A refresh answered `Dropped` (an
+/// admit of the call's key dropped its set, e.g. a reroute whose answer was
+/// lost) leaves the call uncounted, still owing its release. A failed or
+/// release-fenced refresh changes nothing here: the next cycle retries, and
+/// the terminal release names a call the server may already have forgotten,
+/// as a no-op.
 async fn handle_limiter_refresh(
     ctx: &Arc<RouterCtx>,
     mut call: Call,
@@ -835,13 +838,17 @@ async fn handle_limiter_refresh(
             ctx.metrics.bump_limiter_refresh_reregistered()
         }
         crate::limiter::RefreshOutcome::Released => ctx.metrics.bump_limiter_refresh_released(),
+        crate::limiter::RefreshOutcome::Dropped => {
+            ctx.metrics.bump_limiter_refresh_dropped();
+            call.limiter.set(false, false, Vec::new());
+        }
         _ => {}
     }
     if crate::trace::sampled(&call) {
         crate::trace::emit::limiter(&call, now_ms, "refresh", &format!("{outcome:?}"));
     }
 
-    if call.state == CallModelState::Active {
+    if call.state == CallModelState::Active && call.limiter.counted {
         let entry = TimerEntry {
             id: format!("{:?}", TimerType::LimiterRefresh),
             timer_type: TimerType::LimiterRefresh,

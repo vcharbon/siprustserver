@@ -126,6 +126,7 @@ impl CallLimiter for HttpCallLimiter {
                 RefreshOutcome::Reregistered
             }
             Ok(RefreshResponse { outcome: RefreshAnswer::Released }) => RefreshOutcome::Released,
+            Ok(RefreshResponse { outcome: RefreshAnswer::Dropped }) => RefreshOutcome::Dropped,
             Err(_) => RefreshOutcome::Unavailable,
         }
     }

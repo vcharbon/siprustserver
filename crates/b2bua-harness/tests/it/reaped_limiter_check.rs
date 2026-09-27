@@ -54,6 +54,7 @@ impl CallLimiter for DropsReleases {
             RefreshResult::Extended => RefreshOutcome::Extended,
             RefreshResult::Reregistered => RefreshOutcome::Reregistered,
             RefreshResult::Released => RefreshOutcome::Released,
+            RefreshResult::Dropped => RefreshOutcome::Dropped,
         }
     }
 }

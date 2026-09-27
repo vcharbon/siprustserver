@@ -85,8 +85,11 @@ pub enum RefreshOutcome {
     /// it re-created the set from the ids sent, with no cap check.
     Reregistered,
     /// The server holds nothing for the call and re-creates nothing: the call
-    /// was released within the last lease, or an admit dropped its set.
+    /// was released within the last lease.
     Released,
+    /// The server holds nothing for the call and re-creates nothing: an admit
+    /// of the call's key dropped its set, and no admit since replaced it.
+    Dropped,
     /// The backend was unreachable / slow / errored.
     Unavailable,
 }

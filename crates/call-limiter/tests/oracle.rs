@@ -94,6 +94,7 @@ async fn http_server_matches_direct_core() {
         RefreshResult::Extended => RefreshAnswer::Extended,
         RefreshResult::Reregistered => RefreshAnswer::Reregistered,
         RefreshResult::Released => RefreshAnswer::Released,
+        RefreshResult::Dropped => RefreshAnswer::Dropped,
     };
     assert_eq!(http.outcome, direct, "refresh outcomes agree");
     tokio::time::advance(Duration::from_secs(3)).await;

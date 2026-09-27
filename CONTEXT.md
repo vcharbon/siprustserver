@@ -642,8 +642,7 @@ release, **derivable from the persisted `Call` snapshot alone** and idempotently
 dischargeable through the normal effects pipeline. The two today: the owed CDR
 (from the call itself) and one limiter release for a call that sent an admit
 request, by the key `limiter` carries (the derivation `invariants::enforce`
-already performs). The
-Call *is* the ledger.
+already performs). The Call *is* the ledger.
 _Avoid_: a parallel allocation registry / resource ledger (the mirror/slice
 divergence hazard; would not survive failover, while `limiter` and
 `cdr_events` ride the replicated Element for free).

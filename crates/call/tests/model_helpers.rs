@@ -790,3 +790,13 @@ fn every_open_invite_transaction_mark_makes_a_newcomer_glare() {
     owes_ack.ext.awaited_ack_cseq = Some(4002);
     assert!(invite_transaction_open(&owes_ack));
 }
+
+#[test]
+fn limiter_state_release_obligation_only_grows() {
+    let mut state = CallLimiterState::uncounted("c#k".into());
+    state.set(true, false, vec!["x".into()]);
+    assert!(state.counted && state.release_owed, "a counted call owes its release");
+    state.set(false, false, Vec::new());
+    assert!(!state.counted && state.release_owed, "the obligation is never cleared");
+    assert_eq!(state, CallLimiterState::unconfirmed("c#k".into()));
+}

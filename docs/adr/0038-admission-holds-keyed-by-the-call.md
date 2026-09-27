@@ -36,7 +36,9 @@ and a lost release could not be retried.
    node frees nothing. An admit that drops the set without replacing it (a cap
    refusal with `release_on_refusal`, an empty replacement) fences the key
    against refresh the same way, until the next admit of the key: a refresh
-   that left before the drop and lands after it re-creates nothing.
+   that left before the drop and lands after it re-creates nothing. A
+   refused refresh names its fence: `released` (the call was released) or
+   `dropped` (an admit of the key dropped the set).
 4. **`refresh(key, ids)` extends the lease** of a known call. For a call the
    server does not know and has not fenced it **re-creates the set from
    the ids the refresh carries, with no cap check**: the call exists and was
@@ -57,7 +59,14 @@ and a lost release could not be retried.
    comes first. A counted call whose **reroute** admit fails technically
    stays counted: its refresh extends whichever set the server holds for the
    key (the old one, or the new one when the admit landed) or re-registers
-   the ids the server last confirmed, and its release frees it.
+   the ids the server last confirmed, and its release frees it; until a
+   refresh or a later fold states otherwise, `ids` (the decision snapshot,
+   the CDR) name the set the server last confirmed, which a landed admit may
+   have replaced. When the lost admit landed and dropped the set (an empty
+   replacement, a cap refusal), the refresh answers `dropped` and the call
+   goes uncounted, still owing its release: a set its own admit dropped is
+   never re-registered. A refresh refused by a release fence leaves the call
+   counted (see Consequences).
 7. **Only a counted Active call refreshes**, and it always has its refresh
    armed: the invariant layer re-arms a missing or past-due `LimiterRefresh`
    on every turn of the call, so a timer fire the per-call queue dropped heals
@@ -67,10 +76,11 @@ and a lost release could not be retried.
    may outlast the lease (a release consult, then the sliding 32 s backstop),
    in which case the set lapses early and the terminal release is a no-op.
 8. **The call state is `{key, counted, release_owed, ids}`**, one replicated
-   field. `counted` is refresh eligibility; `release_owed` is set by the first
-   admit request and never cleared, and is what every end path reads to send
-   the release: the terminal settle, a takeover, a reclaim, the lossy reap of
-   a deferred terminal, a fold landing on a gone call. A route fold's
+   field. `counted` is refresh eligibility and implies `release_owed`, which
+   the first admit request sets and nothing clears; every end path reads it
+   to send the release: the terminal settle, the primary's discharge of a
+   takeover copy's terminal, a reclaim, the lossy reap of a deferred
+   terminal, a fold landing on a gone call. A route fold's
    dispatching task replaces the set before the fold reaches the call and the
    fold states the outcome (`SetLimiterState`): the admitted route, the call
    as it was after a lost answer, or uncounted when a refusal dropped the set
@@ -107,7 +117,9 @@ cells that prove re-registration run the deployed relation.
   `limiter_admission_max` (the largest live count of one id: what an admit
   compares with its cap). The b2bua counts admits refused on a fence per site
   (`b2bua_limiter_admit_released_{initial,fold}_total`) and refreshes that
-  re-registered or were refused.
+  re-registered, were refused by a release fence
+  (`b2bua_limiter_refresh_released_total`) or learnt their set was dropped
+  (`b2bua_limiter_refresh_dropped_total`).
 - Config: `LIMITER_LEASE_SECONDS` on the limiter, `LIMITER_REFRESH_SECONDS`
   on the workers, the refresh below the lease by more than one period.
 - A refresh carries the call's ids: one request per counted call per period.
@@ -121,8 +133,13 @@ cells that prove re-registration run the deployed relation.
   partitioned backup's reap of a primary it believes dead fences the key of a
   call the primary still serves; that call's refreshes are refused for one
   lease, then re-register. A refresh sent before a fold's refusal dropped the
-  call's set lands on the drop fence; the fold then states the call uncounted
-  and only its terminal release is sent.
+  call's set lands on the drop fence and answers `dropped`; the fold then
+  states the call uncounted and only its terminal release is sent.
+- The terminal release is awaited in the call's last turn, before its CDR
+  and its removal, until the release leaves the call's turn (follow-up
+  work). Every call that sent an admit sends it, those whose admit failed
+  open included, so while the limiter is unreachable each such call's end
+  waits one limiter timeout.
 - `LimiterRefresh` entries are not cohort-smoothed on a bulk reclaim: the
   calls one node reclaims refresh together (batching is follow-up work).
 - Replica bodies decode strictly: a body without the limiter key is dropped at

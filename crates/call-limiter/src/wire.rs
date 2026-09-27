@@ -70,9 +70,12 @@ pub enum RefreshAnswer {
     Extended,
     /// The set was re-created from the ids sent.
     Reregistered,
-    /// Nothing is held for the call and nothing was re-created (released,
-    /// dropped by an admit, or no ids sent).
+    /// Nothing is held for the call and nothing was re-created (released, or
+    /// no ids sent).
     Released,
+    /// Nothing is held for the call and nothing was re-created: an admit of
+    /// the key dropped its set, and no admit since replaced it.
+    Dropped,
 }
 
 /// `POST /v1/refresh` response.

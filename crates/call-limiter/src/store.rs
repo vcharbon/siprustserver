@@ -21,7 +21,9 @@
 //!   not know and has not fenced it re-creates the set from the ids the
 //!   refresh carries, with no cap check: the call exists and was admitted, and
 //!   its set lapsed (a lease missed across a takeover or a restart of the
-//!   store). A fenced call is refused.
+//!   store). A fenced call is refused, and the answer names the fence: an
+//!   admit dropped the set (the call holds nothing by its own request) or the
+//!   call was released.
 //! - **sweep** drops every set whose lease lapsed (a release the store never
 //!   received) and every fence past its lease, and counts the sets.
 //!
@@ -60,10 +62,13 @@ pub enum RefreshResult {
     /// The store held no set for the call: it was re-created from the ids the
     /// refresh carries.
     Reregistered,
-    /// Nothing is held for the call and nothing was re-created: the key is
-    /// fenced (the call was released within the last lease, or an admit
-    /// dropped its set), or the refresh carried no ids.
+    /// Nothing is held for the call and nothing was re-created: the call was
+    /// released within the last lease, or the refresh carried no ids.
     Released,
+    /// Nothing is held for the call and nothing was re-created: an admit of
+    /// the key dropped its set without replacing it, and no admit since
+    /// replaced it.
+    Dropped,
 }
 
 /// Why a key is fenced against refresh.
@@ -239,8 +244,11 @@ impl CallStore {
             inner.set_deadlines.push(Reverse((lease_expires_at_ms, key.to_string())));
             return RefreshResult::Extended;
         }
-        if inner.fences.contains_key(key) || ids.is_empty() {
-            return RefreshResult::Released;
+        match inner.fences.get(key) {
+            Some((Fence::Dropped, _)) => return RefreshResult::Dropped,
+            Some((Fence::Released, _)) => return RefreshResult::Released,
+            None if ids.is_empty() => return RefreshResult::Released,
+            None => {}
         }
         insert_set(&mut inner, key, ids.to_vec(), lease_expires_at_ms);
         inner.reregistered_calls += 1;

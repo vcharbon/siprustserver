@@ -156,10 +156,11 @@ impl CallLimiterState {
     }
 
     /// State the outcome of a replaced set, the key kept: `counted` and `ids`
-    /// are replaced, the release obligation only grows.
+    /// are replaced, the release obligation only grows (a counted call owes
+    /// it).
     pub fn set(&mut self, counted: bool, release_owed: bool, ids: Vec<String>) {
         self.counted = counted;
-        self.release_owed |= release_owed;
+        self.release_owed |= release_owed || counted;
         self.ids = ids;
     }
 }

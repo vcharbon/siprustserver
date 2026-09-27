@@ -636,13 +636,13 @@ async fn release_reroute_replaces_the_route_holds() {
 /// answer is lost. The call stays counted on `[x]` and the reroute is applied;
 /// the rerouted call then outlives two leases (refreshing every 5 s) and
 /// `held` is what the limiter holds for it throughout. No set lapses and the
-/// hangup's one release drains the call. Returns the store's re-registration
-/// count read before the hangup.
+/// hangup's one release drains the call. Returns, read before the hangup, the
+/// store's re-registrations and the SUT's refreshes answered `Dropped`.
 async fn release_reroute_admit_answer_lost(
     name: &str,
     reroute: &'static [&'static str],
     held: [i64; 3],
-) -> u64 {
+) -> (u64, u64) {
     let h = Harness::new(name);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -713,6 +713,7 @@ async fn release_reroute_admit_answer_lost(
     assert_eq!(rig.all_holds(), held, "the limiter holds the same set two leases on");
     assert_eq!(rig.store.stats().lease_expired_calls, 0, "no set lapsed");
     let reregistered = rig.store.stats().reregistered_calls;
+    let refresh_dropped = b2bua.metrics().limiter_refresh_dropped_total();
 
     let mut bye = dialog.bye().await;
     media.receive("BYE").await.respond(200, "OK").await;
@@ -729,7 +730,7 @@ async fn release_reroute_admit_answer_lost(
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
     let _ = h.finish().await;
-    reregistered
+    (reregistered, refresh_dropped)
 }
 
 /// A release reroute `[y, z]` whose admit lands with its answer lost: the
@@ -737,13 +738,14 @@ async fn release_reroute_admit_answer_lost(
 /// limiter holds for it until its release.
 #[tokio::test(start_paused = true)]
 async fn release_reroute_admit_that_lands_but_times_out_keeps_the_call_counted() {
-    let reregistered = release_reroute_admit_answer_lost(
+    let (reregistered, refresh_dropped) = release_reroute_admit_answer_lost(
         "reroute-holds-release-reroute-answer-lost",
         &["y", "z"],
         [0, 1, 1],
     )
     .await;
     assert_eq!(reregistered, 0, "the landed set was extended, never re-created");
+    assert_eq!(refresh_dropped, 0);
 }
 
 /// A release reroute stating no limiter whose admit lands with its answer
@@ -753,11 +755,12 @@ async fn release_reroute_admit_that_lands_but_times_out_keeps_the_call_counted()
 /// sends the call's one release.
 #[tokio::test(start_paused = true)]
 async fn release_reroute_admit_that_dropped_the_set_is_never_re_registered() {
-    let reregistered = release_reroute_admit_answer_lost(
+    let (reregistered, refresh_dropped) = release_reroute_admit_answer_lost(
         "reroute-holds-release-reroute-dropped-answer-lost",
         &[],
         [0, 0, 0],
     )
     .await;
     assert_eq!(reregistered, 0, "the dropped set was never re-created");
+    assert_eq!(refresh_dropped, 1, "one refresh learnt the drop; the call refreshed no more");
 }

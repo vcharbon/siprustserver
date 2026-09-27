@@ -69,9 +69,11 @@ pub struct LimiterCount {
     /// Holds the SUT released: the set of every call it released, and every
     /// set a later admit of the call replaced or a refusal dropped.
     pub released: i64,
-    /// Admits that failed open ([`AdmitOutcome::Unavailable`],
-    /// [`AdmitOutcome::NotSent`]): the call went on as it was, and its
-    /// release frees whatever a request that landed left on the store.
+    /// Admits the SUT ran the call past without a limiter answer: a lost
+    /// answer ([`AdmitOutcome::Unavailable`]) and an admit that sent no
+    /// request ([`AdmitOutcome::NotSent`], e.g. no limiter configured). The
+    /// call went on as it was; its release frees whatever a request that
+    /// landed left on the store.
     pub failed_open: i64,
     /// The registered store's live count summed over every id, if the SUT
     /// has a store (the default limiter's, or one registered by the test).

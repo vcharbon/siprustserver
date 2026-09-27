@@ -159,8 +159,8 @@ async fn an_empty_replacement_frees_the_set_behind_a_drop_fence() {
     assert_eq!(s.stats().fences, 1, "the drop fences the key");
     assert_eq!(
         s.refresh("c1", &["x".into(), "y".into()]),
-        RefreshResult::Released,
-        "a refresh re-creates nothing behind the drop fence"
+        RefreshResult::Dropped,
+        "a refresh re-creates nothing behind the drop fence, and says why"
     );
     assert_eq!(s.admit("c1", &entries(&[("y", 10)]), false), AdmitResult::Admitted);
     assert_eq!(s.held("y"), 2);
@@ -294,8 +294,9 @@ async fn a_release_fence_expires_after_one_lease() {
 
 /// An admit that dropped the set without replacing it (a cap refusal with
 /// `release_on_refusal`, an empty replacement) fences the key against a
-/// refresh landing after it: nothing is re-created. The next admit of the
-/// key clears the fence, and a refresh then extends.
+/// refresh landing after it: nothing is re-created, and the answer is
+/// `Dropped`, not the release fence's `Released`. The next admit of the key
+/// clears the fence, and a refresh then extends.
 #[tokio::test(start_paused = true)]
 async fn a_refresh_after_an_admit_dropped_the_set_re_creates_nothing() {
     let s = store();
@@ -306,12 +307,12 @@ async fn a_refresh_after_an_admit_dropped_the_set_re_creates_nothing() {
         s.admit("c1", &entries(&[("y", 10), ("z", 1)]), true),
         AdmitResult::Rejected { limiter_id: "z".into() }
     );
-    assert_eq!(s.refresh("c1", &["x".into()]), RefreshResult::Released, "fenced by the drop");
+    assert_eq!(s.refresh("c1", &["x".into()]), RefreshResult::Dropped, "fenced by the drop");
     assert_eq!(s.held("x"), 1, "the witness only");
     // Dropped by an empty replacement.
     assert_eq!(s.admit("c2", &entries(&[("x", 10)]), false), AdmitResult::Admitted);
     assert_eq!(s.admit("c2", &[], true), AdmitResult::Admitted);
-    assert_eq!(s.refresh("c2", &["x".into()]), RefreshResult::Released, "fenced by the drop");
+    assert_eq!(s.refresh("c2", &["x".into()]), RefreshResult::Dropped, "fenced by the drop");
     assert_eq!(s.held("x"), 1);
     assert_eq!(s.stats().reregistered_calls, 0);
     // A later admit of the key clears the fence.
@@ -523,5 +524,14 @@ async fn the_wire_carries_the_call_key() {
     assert!(!body.admitted);
     assert!(body.released, "the release fence refuses with its own reason");
     assert!(body.rejected_id.is_none());
+    assert_eq!(store.held("x"), 0);
+
+    // An empty replacement drops the set: a refresh then answers `dropped`.
+    let resp = call(&net, HttpRequest::post("/v1/admit", admit("c4", vec![], true))).await;
+    let body: AdmitResponse = serde_json::from_slice(&resp.body).unwrap();
+    assert!(body.admitted);
+    let resp = call(&net, HttpRequest::post("/v1/refresh", refresh("c4"))).await;
+    let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
+    assert_eq!(body.outcome, RefreshAnswer::Dropped, "a dropped set is refused with its reason");
     assert_eq!(store.held("x"), 0);
 }
