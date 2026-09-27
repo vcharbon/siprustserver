@@ -105,6 +105,14 @@ pub struct B2buaConfig {
     /// (120) by a margin that survives a missed refresh: default 40. The test
     /// harness lowers this for fast paused-clock tests.
     pub limiter_refresh_sec: i64,
+    /// The limiter's lease, seconds (its `LIMITER_LEASE_SECONDS`). A release
+    /// queued longer than one lease is dropped unsent: the limiter already let
+    /// the call's set lapse. Default 120.
+    pub limiter_lease_sec: i64,
+    /// Most releases the worker's limiter release queue holds; at the cap the
+    /// oldest entry is dropped (its lease frees the call). Default 100 000:
+    /// one lease of calls ending at 800/s.
+    pub limiter_release_queue_cap: usize,
     /// **Keepalive catch-up speed-up** (ADR-0014, performance-only). On reboot a
     /// primary's `ReclaimAll` re-materialises its whole `pri:{self}` partition;
     /// many keepalive timers are past-due. Firing them all at once floods a
@@ -438,6 +446,8 @@ impl Default for B2buaConfig {
             keepalive_timeout_sec: 32,
             reboot_budget_sec: 600,
             limiter_refresh_sec: 40,
+            limiter_lease_sec: 120,
+            limiter_release_queue_cap: 100_000,
             keepalive_catchup_speedup: 10,
             max_catchup_window_sec: None,
             reaper_enabled: true,

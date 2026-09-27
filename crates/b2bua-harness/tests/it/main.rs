@@ -49,6 +49,7 @@ mod lifetime_message_cap;
 mod limit_cases;
 mod limiter;
 mod limiter_refresh;
+mod limiter_release_queue;
 mod long_ring;
 mod max_duration_anchor;
 mod max_forwards;

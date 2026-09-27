@@ -946,6 +946,12 @@ impl B2buaSut {
     /// counted, so `active_calls() == 0` alone can hold while a removal is
     /// still pending.
     pub fn is_reaped(&self) -> bool {
+        self.calls_reaped()
+    }
+
+    /// Every call created has been removed, whatever the limiter releases
+    /// they owe.
+    pub fn calls_reaped(&self) -> bool {
         self.metrics.removals_total() == self.metrics.creations_total()
     }
 

@@ -227,6 +227,13 @@ struct Inner {
     limiter_refresh_reregistered: AtomicU64,
     limiter_refresh_released: AtomicU64,
     limiter_refresh_dropped: AtomicU64,
+    // The limiter release queue (`limiter_release`): entries waiting, sends of
+    // a key after its first, and entries dropped unsent (past the lease, at
+    // the cap).
+    limiter_release_queue_depth: AtomicU64,
+    limiter_release_retries: AtomicU64,
+    limiter_release_dropped_lease_expired: AtomicU64,
+    limiter_release_dropped_cap: AtomicU64,
     // Re-hydration diagnostics (long-call-on-reboot study, 2026-06-05). How a
     // rebooted primary's bootstrap passes terminate: `seeded` = a pass reached
     // the first catch-up `Noop` (the peer streamed the full `bak:{me}` keyset);
@@ -783,6 +790,33 @@ impl B2buaMetrics {
         limiter_refresh_released
     );
     counter!(bump_limiter_refresh_dropped, limiter_refresh_dropped_total, limiter_refresh_dropped);
+
+    /// Set the number of releases waiting in the limiter release queue (gauge).
+    pub fn set_limiter_release_queue_depth(&self, n: u64) {
+        self.inner.limiter_release_queue_depth.store(n, Ordering::Relaxed);
+    }
+    /// Releases waiting in the limiter release queue, in flight included.
+    pub fn limiter_release_queue_depth(&self) -> u64 {
+        self.inner.limiter_release_queue_depth.load(Ordering::Relaxed)
+    }
+    /// Count `n` sends of queued keys that a failed send put back to wait.
+    pub fn add_limiter_release_retries(&self, n: u64) {
+        self.inner.limiter_release_retries.fetch_add(n, Ordering::Relaxed);
+    }
+    /// Keys put back to wait after a failed send, summed over every send.
+    pub fn limiter_release_retries_total(&self) -> u64 {
+        self.inner.limiter_release_retries.load(Ordering::Relaxed)
+    }
+    counter!(
+        bump_limiter_release_dropped_lease_expired,
+        limiter_release_dropped_lease_expired_total,
+        limiter_release_dropped_lease_expired
+    );
+    counter!(
+        bump_limiter_release_dropped_cap,
+        limiter_release_dropped_cap_total,
+        limiter_release_dropped_cap
+    );
     counter!(bump_repl_bootstrap_seeded, repl_bootstrap_seeded_total, repl_bootstrap_seeded);
     counter!(bump_repl_bootstrap_stalled, repl_bootstrap_stalled_total, repl_bootstrap_stalled);
 
@@ -1087,6 +1121,7 @@ impl B2buaMetrics {
         counter("b2bua_limiter_refresh_reregistered_total", "refreshes that re-registered a counted call's set the limiter no longer held (a lapsed lease across a takeover, a limiter restart)", self.limiter_refresh_reregistered_total());
         counter("b2bua_limiter_refresh_released_total", "refreshes refused because the limiter released the call's key: a partitioned peer's reap released a call still served (refused for one lease, then re-registered) (ADR-0038)", self.limiter_refresh_released_total());
         counter("b2bua_limiter_refresh_dropped_total", "refreshes refused because an admit of the call's key dropped its set (a refusal, an empty replacement, a reroute whose answer was lost): the call goes uncounted and still releases its key at its end (ADR-0038)", self.limiter_refresh_dropped_total());
+        counter("b2bua_limiter_release_retries_total", "queued releases put back to wait after a failed send (unreachable, slow or erroring limiter), one per key per failed send", self.limiter_release_retries_total());
         counter("b2bua_repl_terminal_lost_total", "backup-held deferred terminals whose primary never reclaimed them (dead past the replica TTL): limiter released + memory freed by the periodic reap, but NO CDR — the accepted lost-CDR double-failure (ADR-0020 X3)", self.repl_terminal_lost_total());
         counter("b2bua_repl_bootstrap_seeded_total", "rebooted-primary bootstrap passes that reached the first catch-up Noop (peer streamed the full bak:{me} keyset)", self.repl_bootstrap_seeded_total());
         counter("b2bua_repl_bootstrap_stalled_total", "rebooted-primary bootstrap passes that hit the bootstrap hard deadline before the first Noop (best-effort completion; keeps streaming on the same socket)", self.repl_bootstrap_stalled_total());
@@ -1172,6 +1207,16 @@ impl B2buaMetrics {
         for (op, v) in self.inner.repl_forward_flush_refused.lock().unwrap().iter() {
             s.push_str(&format!("b2bua_repl_forward_flush_refused_total{{op=\"{op}\"}} {v}\n"));
         }
+
+        s.push_str("# HELP b2bua_limiter_release_dropped_total queued limiter releases dropped unsent (reason=lease_expired: queued longer than the limiter's lease, which already freed the call; reason=cap: the oldest entry of a full queue, freed by its lease)\n# TYPE b2bua_limiter_release_dropped_total counter\n");
+        s.push_str(&format!(
+            "b2bua_limiter_release_dropped_total{{reason=\"lease_expired\"}} {}\n",
+            self.limiter_release_dropped_lease_expired_total()
+        ));
+        s.push_str(&format!(
+            "b2bua_limiter_release_dropped_total{{reason=\"cap\"}} {}\n",
+            self.limiter_release_dropped_cap_total()
+        ));
 
         s.push_str("# HELP b2bua_drain_exits_total drains by why they returned (reason=quiescent|caught_up|grace|grace_peers_behind, ADR-0031 D2); grace_peers_behind means a departing worker abandoned live calls no peer reported holding — a lost flush window, never a clean drain\n# TYPE b2bua_drain_exits_total counter\n");
         for (reason, v) in self.inner.drain_exits.lock().unwrap().iter() {
@@ -1321,6 +1366,12 @@ impl B2buaMetrics {
             "b2bua_repl_peers_pulled_not_ready",
             "replication peers pulled while their endpoint is not ready (present in membership only; ADR-0031 D1)",
             self.repl_peers_pulled_not_ready(),
+        );
+        g(
+            &mut s,
+            "b2bua_limiter_release_queue_depth",
+            "limiter releases waiting in this worker's release queue, in flight included (a queue that only grows means the limiter is not answering)",
+            self.limiter_release_queue_depth(),
         );
         g(&mut s, "b2bua_repl_bootstrap_last_applied", "bodies the most recent bootstrap pass imported (re-stalling at the same value across passes ⇒ the stream is truncating, not the materialisation)", self.repl_bootstrap_last_applied());
         g(&mut s, "b2bua_repl_reclaim_scanned", "bodies the most recent bulk reclaim pass found in pri:{self} (denominator: everything bootstrap import made reclaimable; ≪ peer repl_meta_backup ⇒ a bootstrap-import/forward-replication gap)", self.repl_reclaim_scanned());
