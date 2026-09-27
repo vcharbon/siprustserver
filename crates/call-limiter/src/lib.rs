@@ -5,8 +5,8 @@
 //! - [`CallStore`] — the keyed core: per call the multiset of ids it holds and
 //!   a lease, per id the live count. One `admit` replaces a call's whole set
 //!   atomically, checked net of the set it already holds; `release` is
-//!   idempotent by call; `refresh` extends the lease; a lapsed lease drops the
-//!   set.
+//!   idempotent by call; `refresh` extends the lease, or re-creates a set the
+//!   store no longer holds; a lapsed lease drops the set.
 //! - The [`wire`] DTOs of the HTTP API: every request names its call.
 //! - [`LimiterServer`] — an [`http_net::HttpService`] routing `/v1/*` +
 //!   `/metrics` + `/healthz` onto the core.
@@ -21,4 +21,4 @@ pub mod wire;
 
 pub use metrics::LimiterMetrics;
 pub use server::LimiterServer;
-pub use store::{AdmitResult, CallStore, LimiterConfig, StoreStats};
+pub use store::{AdmitResult, CallStore, LimiterConfig, RefreshResult, StoreStats};

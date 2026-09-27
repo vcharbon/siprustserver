@@ -54,7 +54,13 @@ fn state(clock: Clock) -> CallState {
 
 fn call(call_id: &str, created_at: i64) -> call::Call {
     let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    build_initial_call(&invite(call_id), src, &B2buaConfig::default(), created_at)
+    build_initial_call(
+        &invite(call_id),
+        src,
+        &B2buaConfig::default(),
+        &sip_txn::IdGen::seeded(1),
+        created_at,
+    )
 }
 
 #[tokio::test(start_paused = true)]

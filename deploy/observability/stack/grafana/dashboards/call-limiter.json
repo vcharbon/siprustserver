@@ -104,7 +104,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [
-        { "expr": "limiter_calls", "refId": "A", "legendFormat": "live keys" },
+        { "expr": "limiter_calls", "refId": "A", "legendFormat": "calls counted" },
         { "expr": "rate(limiter_lease_expired_calls_total[1m])", "refId": "B", "legendFormat": "lease-expired/s" }
       ],
       "fieldConfig": { "defaults": { "unit": "none", "min": 0, "custom": { "fillOpacity": 6, "showPoints": "never", "lineWidth": 1 } } },

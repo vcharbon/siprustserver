@@ -18,7 +18,7 @@ use call_limiter::wire::AdmitEntry;
 use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_fully_over, cookie_field, FailoverHarness, ReplicatedB2buaSut, WorkerHealth,
-    RULE_CSEQ_IN_DIALOG_ORDER,
+    LEASE_OUTLIVING_THE_REPLICA_TTL, RULE_CSEQ_IN_DIALOG_ORDER,
 };
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
@@ -42,12 +42,6 @@ const LIMITER_ADDR: &str = "10.0.0.1:8080";
 fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
-
-/// A lease outliving the replica TTL (`reboot_budget_sec`, 600 s): a set the
-/// crashed primary never releases is freed by the backup's reap or the
-/// reborn primary's reclaim, never by the lease, so each cell proves the
-/// release it names.
-const LEASE_OUTLIVING_THE_REPLICA_TTL: LimiterConfig = LimiterConfig { lease_sec: 3600 };
 
 /// The `FailoverHarness` every limiter-HA case runs on. The RFC audit gates in
 /// full; a case whose fault gives one leg two owners declares ADR-0014's accepted
@@ -211,16 +205,12 @@ async fn hold_is_released_on_the_takeover_node_after_primary_crash() {
     // `target/seq-reports/limiter-ha-takeover/` — no explicit call needed.
 }
 
-/// THE 2026-06-12 endurance zombie, end to end: a call caught **mid-setup**
-/// (b-leg ringing, no final response) by a primary crash. The sip-txn
-/// `INVITE_INITIAL_TIMEOUT` died with the node, the per-b-leg `NoAnswer` was
-/// never armed (endurance routes supply none), and the reclaimed copy sat
-/// `Active` holding its limiter slot — refreshing it every 300 s, reaper-proof
-/// — until the 1 h GlobalDuration. The ledger-replicated `SetupTimeout` is the
-/// fix: it rides `call.timers` into the bak: snapshot, is restored by the
-/// reboot reclaim, and tears the call down at the 150 s deadline — releasing
-/// the hold ~55 min earlier (the cap20 SIPp stream was pinned at 15/20 for the
-/// whole window).
+/// A call caught **mid-setup** (b-leg ringing, no final response) by a primary
+/// crash. The sip-txn initial-INVITE bound dies with the node and the routes
+/// supply no per-b-leg `NoAnswer`; the ledger-replicated `SetupTimeout` rides
+/// `call.timers` into the bak: snapshot, is restored by the reboot reclaim,
+/// and tears the reclaimed call down at its deadline, releasing the counted
+/// call well before the GlobalDuration cap.
 #[tokio::test(start_paused = true)]
 async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_reclaim() {
     let mut fh = ha_harness("limiter-ha-setup-stall-reclaim");
@@ -333,6 +323,11 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
     );
     assert_eq!(primary.active_calls(), 0, "no zombie call on the rebooted primary");
     assert_eq!(backup.active_calls(), 0, "the backup never owned a live copy");
+    assert_eq!(
+        store.stats().lease_expired_calls,
+        0,
+        "the reclaimed call kept its lease alive: the release freed the set, not the lease",
+    );
 }
 
 /// Lease recovery when the primary is **permanently** dead.

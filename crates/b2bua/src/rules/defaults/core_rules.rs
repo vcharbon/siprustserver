@@ -24,7 +24,7 @@ use crate::rules::model::{
 
 use super::route_fold::{
     fold_lands_on_going_away_call, parse_header_updates, parse_route_fold, parse_service_ext,
-    route_fold_holds, route_fold_parity_actions,
+    route_fold_limiter_state, route_fold_parity_actions,
 };
 
 fn rule(
@@ -767,25 +767,22 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 ok(actions)
             },
         ),
-        // ── route-fold holds on a going-away call ───────────────────────────
+        // ── the limiter state of a route fold on a going-away call ──────────
         // A route fold's dispatching task replaced the call's set on the
         // limiter: the state it carries becomes a Terminating call's, and the
         // terminal settle releases by `call_ref`; no LimiterRefresh re-arm. A
         // Terminated call is never resident on a rule turn (its folds take the
         // router's gone-call release).
         rule(
-            "route-fold-holds-on-going-away-call",
+            "route-fold-limiter-state-on-going-away-call",
             &[],
             Match::internal_event().filter(|ctx| {
                 ctx.call.state() == CallModelState::Terminating
-                    && route_fold_holds(ctx.event).is_some()
+                    && route_fold_limiter_state(ctx.event).is_some()
             }),
             |ctx| {
-                let limiter = route_fold_holds(ctx.event)?;
-                ok(vec![RuleAction::ReplaceLimiterHolds {
-                    counted: limiter.counted,
-                    ids: limiter.ids,
-                }])
+                let limiter = route_fold_limiter_state(ctx.event)?;
+                ok(vec![RuleAction::SetLimiterState { counted: limiter.counted, ids: limiter.ids }])
             },
         )
         .runs_while_terminating(),

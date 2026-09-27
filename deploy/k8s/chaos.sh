@@ -441,10 +441,10 @@ orphan_kill() {
 }
 
 # CHAOS: kill the (single-replica) shared call-limiter. It is a SPOF for the
-# limiter FUNCTION only: while it is down the b2bua fails OPEN (admits with no
-# holds, 150ms budget), so calls keep flowing — the cap simply stops being
+# limiter FUNCTION only: while it is down the b2bua fails OPEN (the call runs
+# uncounted, 150ms budget), so calls keep flowing — the cap simply stops being
 # enforced. The Deployment (strategy: Recreate) brings a fresh, empty pod back;
-# the calls admitted before it are released on it as no-ops.
+# the counted calls re-register their sets on their next refresh (ADR-0038).
 limiter_kill() {
   log "CHAOS: killing the shared call-limiter pod (b2bua fails open while it's down)"
   push_metric 'sip_chaos_event{type="limiter_kill",phase="start"} 1'

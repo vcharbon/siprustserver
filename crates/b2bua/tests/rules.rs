@@ -68,7 +68,7 @@ fn in_dialog_request(method: sip_message::Method) -> sip_message::SipRequest {
 
 fn test_call() -> call::Call {
     let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    build_initial_call(&invite(), src, &B2buaConfig::default(), 0)
+    build_initial_call(&invite(), src, &B2buaConfig::default(), &IdGen::seeded(1), 0)
 }
 
 /// A call whose a-leg already carries the early dialog `a1` (the tag a relayed
@@ -640,7 +640,8 @@ fn decision_folds_on_a_live_call_still_apply() {
 /// counting the call on `x` + `y`.
 fn route_fold_payload_with_holds() -> serde_json::Value {
     let mut payload = route_fold_payload();
-    payload["call_limiter"] = serde_json::json!({ "counted": true, "ids": ["x", "y"] });
+    payload["call_limiter"] =
+        serde_json::json!({ "key": "call#k", "counted": true, "ids": ["x", "y"] });
     payload
 }
 
@@ -663,7 +664,7 @@ fn route_fold_holds_join_a_terminating_call_ledger() {
             panic!("one teardown rule takes the {topic}/{outcome} holds, got {candidates:?}");
         };
         let actions = fold_result(&call, rule_id, topic, outcome, payload);
-        let [RuleAction::ReplaceLimiterHolds { counted, ids }] = &actions[..] else {
+        let [RuleAction::SetLimiterState { counted, ids }] = &actions[..] else {
             panic!("{rule_id} states the call's limiter state and nothing else, got {actions:?}");
         };
         assert!(counted);
@@ -687,7 +688,7 @@ fn a_live_route_fold_hands_the_call_holds_to_its_route() {
         let replaced: Vec<_> = actions
             .iter()
             .filter_map(|a| match a {
-                RuleAction::ReplaceLimiterHolds { counted, ids } => Some((*counted, ids.clone())),
+                RuleAction::SetLimiterState { counted, ids } => Some((*counted, ids.clone())),
                 _ => None,
             })
             .collect();
@@ -705,12 +706,13 @@ fn a_live_route_fold_hands_the_call_holds_to_its_route() {
         );
 
         let mut uncounted = route_fold_payload();
-        uncounted["call_limiter"] = serde_json::json!({ "counted": false, "ids": [] });
+        uncounted["call_limiter"] =
+            serde_json::json!({ "key": "call#k", "counted": false, "ids": [] });
         let actions = fold_result(&call, rule_id, topic, outcome, uncounted);
         assert!(
             actions.iter().any(|a| matches!(
                 a,
-                RuleAction::ReplaceLimiterHolds { counted: false, ids } if ids.is_empty()
+                RuleAction::SetLimiterState { counted: false, ids } if ids.is_empty()
             )),
             "{rule_id} leaves the call uncounted for a route that admitted none, got {actions:?}",
         );
@@ -3755,7 +3757,7 @@ mod header_update_removal_withholds_a_relayed_name {
         let config = B2buaConfig::default();
         let a_invite = invite_with_vendor_header();
         let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-        let call = build_initial_call(&a_invite, src, &config, 0);
+        let call = build_initial_call(&a_invite, src, &config, &sip_txn::IdGen::seeded(1), 0);
         let event = CallEvent::Sip {
             message: Box::new(SipMessage::Request(a_invite)),
             src,
@@ -3897,6 +3899,7 @@ mod enforce_equivalence {
     fn arb_limiter_state() -> impl Strategy<Value = CallLimiterState> {
         (any::<bool>(), proptest::collection::vec(prop_oneof![Just("l1"), Just("l2")], 0..3))
             .prop_map(|(counted, ids)| CallLimiterState {
+                key: "call#k".into(),
                 counted,
                 ids: ids.into_iter().map(str::to_string).collect(),
             })
@@ -3990,7 +3993,10 @@ mod limiter_settle {
     #[test]
     fn a_counted_call_is_released_once_whatever_its_set() {
         let mut call = test_call();
-        call.limiter = CallLimiterState::admitted(vec!["x".into(), "x".into(), "y".into()]);
+        call.limiter = CallLimiterState::admitted(
+            call.limiter.key.clone(),
+            vec!["x".into(), "x".into(), "y".into()],
+        );
         let mut effects = HandlerEffects::new();
         ObligationSet::core().settle(&call, &mut effects);
         assert_eq!(releases(&effects), 1, "{:?}", effects.soft);
@@ -4004,7 +4010,7 @@ mod limiter_settle {
     #[test]
     fn a_rule_emitted_release_discharges_the_call() {
         let mut call = test_call();
-        call.limiter = CallLimiterState::admitted(vec!["x".into()]);
+        call.limiter = CallLimiterState::admitted(call.limiter.key.clone(), vec!["x".into()]);
         let mut effects = HandlerEffects::new();
         effects.soft.push(SoftBoundedEffect::ReleaseLimiter);
         ObligationSet::core().settle(&call, &mut effects);
@@ -4014,7 +4020,7 @@ mod limiter_settle {
     #[test]
     fn an_uncounted_call_owes_no_release() {
         let mut call = test_call();
-        call.limiter = CallLimiterState::uncounted();
+        call.limiter = CallLimiterState::uncounted(call.limiter.key.clone());
         let mut effects = HandlerEffects::new();
         ObligationSet::core().settle(&call, &mut effects);
         assert_eq!(releases(&effects), 0, "{:?}", effects.soft);
@@ -4043,18 +4049,24 @@ mod limiter_settle {
         // The fold's dispatching task replaced the set on the limiter: the
         // turn states the new set and sends no release of its own.
         let mut call = test_call();
-        call.limiter = CallLimiterState::admitted(vec!["x".into(), "x".into(), "z".into()]);
+        call.limiter = CallLimiterState::admitted(
+            call.limiter.key.clone(),
+            vec!["x".into(), "x".into(), "z".into()],
+        );
         let result = fold_turn(
             &call,
-            &[RuleAction::ReplaceLimiterHolds { counted: true, ids: vec!["x".into()] }],
+            &[RuleAction::SetLimiterState { counted: true, ids: vec!["x".into()] }],
         );
-        assert_eq!(result.call.limiter, CallLimiterState::admitted(vec!["x".into()]));
+        assert_eq!(
+            result.call.limiter,
+            CallLimiterState::admitted(call.limiter.key.clone(), vec!["x".into()])
+        );
         assert_eq!(releases(&result.effects), 0, "{:?}", result.effects.soft);
 
         // A route that admitted nothing leaves the call uncounted.
         let result =
-            fold_turn(&call, &[RuleAction::ReplaceLimiterHolds { counted: false, ids: vec![] }]);
-        assert_eq!(result.call.limiter, CallLimiterState::uncounted());
+            fold_turn(&call, &[RuleAction::SetLimiterState { counted: false, ids: vec![] }]);
+        assert_eq!(result.call.limiter, CallLimiterState::uncounted(call.limiter.key.clone()));
         assert_eq!(releases(&result.effects), 0, "{:?}", result.effects.soft);
     }
 
@@ -4063,11 +4075,12 @@ mod limiter_settle {
         // The turn replaces then terminates: one release of the call, which
         // frees whatever set the limiter holds for it.
         let mut call = test_call();
-        call.limiter = CallLimiterState::admitted(vec!["x".into(), "x".into()]);
+        call.limiter =
+            CallLimiterState::admitted(call.limiter.key.clone(), vec!["x".into(), "x".into()]);
         let result = fold_turn(
             &call,
             &[
-                RuleAction::ReplaceLimiterHolds { counted: true, ids: vec!["x".into()] },
+                RuleAction::SetLimiterState { counted: true, ids: vec!["x".into()] },
                 RuleAction::TerminateCall { cause: TerminationCause::Supervisor, by_leg: None },
             ],
         );
@@ -4078,7 +4091,7 @@ mod limiter_settle {
         let result = fold_turn(
             &call,
             &[
-                RuleAction::ReplaceLimiterHolds { counted: false, ids: vec![] },
+                RuleAction::SetLimiterState { counted: false, ids: vec![] },
                 RuleAction::TerminateCall { cause: TerminationCause::Supervisor, by_leg: None },
             ],
         );
@@ -5342,4 +5355,86 @@ fn observers_chain_and_an_unclaimed_event_keeps_their_writes() {
     assert_eq!(ext.get("second"), Some(&serde_json::json!({"first_seen": true})));
     assert!(result.effects.outbound.is_empty(), "nothing claimed the BYE here");
     assert_eq!(result.call.state, CallModelState::Active);
+}
+
+// ── the limiter refresh is always armed on a counted live call ───────────────
+mod limiter_refresh_armed {
+    use super::*;
+    use b2bua::effects::{CriticalStateEffect, HandlerResult};
+    use b2bua::rules::invariants::arm_limiter_refresh;
+    use call::{CallLimiterState, TimerEntry, TimerType};
+
+    fn refresh_timer(fire_at: i64) -> TimerEntry {
+        TimerEntry {
+            id: format!("{:?}", TimerType::LimiterRefresh),
+            timer_type: TimerType::LimiterRefresh,
+            fire_at,
+            leg_id: None,
+        }
+    }
+
+    fn scheduled(result: &HandlerResult) -> Vec<i64> {
+        result
+            .effects
+            .critical
+            .iter()
+            .filter_map(|e| match e {
+                CriticalStateEffect::ScheduleTimer(t)
+                    if t.timer_type == TimerType::LimiterRefresh =>
+                {
+                    Some(t.fire_at)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn counted_active() -> call::Call {
+        let mut call = test_call();
+        call.state = CallModelState::Active;
+        call.limiter = CallLimiterState::admitted(call.limiter.key.clone(), vec!["x".into()]);
+        call
+    }
+
+    #[test]
+    fn a_dropped_fire_is_re_armed_on_the_next_turn() {
+        // The ledger still carries the fired entry (past due) and the driver
+        // has nothing: the turn re-arms one refresh ahead, on the record too.
+        let mut call = counted_active();
+        call.timers = vec![refresh_timer(9_000)];
+        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40);
+        assert_eq!(scheduled(&result), vec![50_000]);
+        let armed: Vec<i64> = result
+            .call
+            .timers
+            .iter()
+            .filter(|t| t.timer_type == TimerType::LimiterRefresh)
+            .map(|t| t.fire_at)
+            .collect();
+        assert_eq!(armed, vec![50_000], "one entry, replaced");
+
+        // No entry at all: armed as well.
+        let result = arm_limiter_refresh(HandlerResult::new(counted_active()), 10_000, 40);
+        assert_eq!(scheduled(&result), vec![50_000]);
+    }
+
+    #[test]
+    fn a_live_refresh_is_left_alone() {
+        let mut call = counted_active();
+        call.timers = vec![refresh_timer(30_000)];
+        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40);
+        assert!(scheduled(&result).is_empty(), "{:?}", result.effects.critical);
+    }
+
+    #[test]
+    fn an_uncounted_or_ending_call_arms_nothing() {
+        let mut call = counted_active();
+        call.limiter = CallLimiterState::uncounted(call.limiter.key.clone());
+        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40);
+        assert!(scheduled(&result).is_empty());
+        let mut call = counted_active();
+        call.state = CallModelState::Terminating;
+        let result = arm_limiter_refresh(HandlerResult::new(call), 10_000, 40);
+        assert!(scheduled(&result).is_empty());
+    }
 }

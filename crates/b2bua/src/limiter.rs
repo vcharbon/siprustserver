@@ -1,11 +1,13 @@
 //! Call-limiter seam — the b2bua side of the limiter keyed by the call.
 //!
-//! Every request names the call (`call_ref`): [`CallLimiter::admit`] replaces
-//! the call's whole set on the server, checked net of what the call already
-//! holds, and reports [`AdmitOutcome::Admitted`] / [`AdmitOutcome::Rejected`]
-//! / [`AdmitOutcome::Released`] / [`AdmitOutcome::Unavailable`];
+//! Every request names the call by its limiter key (`Call::limiter.key`,
+//! unique over time): [`CallLimiter::admit`] replaces the call's whole set on
+//! the server, checked net of what the call already holds, and reports
+//! [`AdmitOutcome::Admitted`] / [`AdmitOutcome::Rejected`] /
+//! [`AdmitOutcome::Released`] / [`AdmitOutcome::Unavailable`];
 //! [`CallLimiter::release`] drops the set (idempotent);
-//! [`CallLimiter::refresh`] extends its lease. The **call site owns the
+//! [`CallLimiter::refresh`] extends its lease, or re-registers the set the
+//! call carries when the server no longer holds it. The **call site owns the
 //! fail-open policy**: an `Unavailable` admit leaves the call uncounted, and
 //! an uncounted call never refreshes or releases.
 //!
@@ -48,9 +50,12 @@ pub enum AdmitOutcome {
 pub enum RefreshOutcome {
     /// The call's lease was extended.
     Known,
-    /// The server holds no set for the call (released or lapsed); nothing was
-    /// re-created.
-    Unknown,
+    /// The server held no set for the call (lapsed, or the server restarted):
+    /// it re-created the set from the ids sent, with no cap check.
+    Reregistered,
+    /// The call was released within the last lease: the server holds nothing
+    /// for it and re-creates nothing.
+    Released,
     /// The backend was unreachable / slow / errored.
     Unavailable,
 }
@@ -63,14 +68,15 @@ pub trait CallLimiter: Send + Sync {
     /// same step when a cap refuses.
     async fn admit(
         &self,
-        call_ref: &str,
+        key: &str,
         entries: &[LimiterEntry],
         release_on_refusal: bool,
     ) -> AdmitOutcome;
     /// Drop the call's set, best-effort. Idempotent on the server.
-    async fn release(&self, call_ref: &str);
-    /// Extend the call's lease.
-    async fn refresh(&self, call_ref: &str) -> RefreshOutcome;
+    async fn release(&self, key: &str);
+    /// Extend the call's lease; `ids` is the set the server re-registers
+    /// when it no longer holds one for the call.
+    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome;
 }
 
 /// Always unavailable: every admit fails open, so nothing is ever released or
@@ -81,16 +87,11 @@ pub struct NoopLimiter;
 
 #[async_trait]
 impl CallLimiter for NoopLimiter {
-    async fn admit(
-        &self,
-        _call_ref: &str,
-        _entries: &[LimiterEntry],
-        _release_on_refusal: bool,
-    ) -> AdmitOutcome {
+    async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
         AdmitOutcome::Unavailable
     }
-    async fn release(&self, _call_ref: &str) {}
-    async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+    async fn release(&self, _key: &str) {}
+    async fn refresh(&self, _key: &str, _ids: &[String]) -> RefreshOutcome {
         RefreshOutcome::Unavailable
     }
 }

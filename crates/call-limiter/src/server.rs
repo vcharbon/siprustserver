@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use http_net::{HttpRequest, HttpResponse, HttpService};
 
 use crate::metrics::LimiterMetrics;
-use crate::store::{AdmitResult, CallStore};
+use crate::store::{AdmitResult, CallStore, RefreshResult};
 use crate::wire::{AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest};
 
 /// The limiter HTTP service: a call store + its metrics.
@@ -82,7 +82,6 @@ impl HttpService for LimiterServer {
                     Err(e) => return bad_request(&format!("bad release body: {e}")),
                 };
                 self.store.release(&parsed.call_ref);
-                self.metrics.on_release();
                 json_ok(&serde_json::json!({}))
             }
             ("POST", "/v1/refresh") => {
@@ -90,9 +89,12 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad refresh body: {e}")),
                 };
-                let known = self.store.refresh(&parsed.call_ref);
-                self.metrics.on_refresh(known);
-                json_ok(&RefreshResponse { known })
+                let outcome = self.store.refresh(&parsed.call_ref, &parsed.ids);
+                self.metrics.on_refresh();
+                json_ok(&RefreshResponse {
+                    known: outcome == RefreshResult::Extended,
+                    reregistered: outcome == RefreshResult::Reregistered,
+                })
             }
             ("GET", "/metrics") => {
                 HttpResponse::ok(self.metrics.prometheus_text(self.store.stats()).into_bytes())

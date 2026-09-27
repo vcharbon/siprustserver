@@ -268,7 +268,7 @@ pub fn verdict_confirmed(outcome: &str, watermark: Option<i64>, current: Option<
 /// supervisor where nothing ended the call before, `state = Terminated` — and return
 /// it with EMPTY effects: the caller runs the ordinary
 /// `finalize → enforce → process_result`, so the CDR write, the limiter
-/// decrements (derived from `limiter_entries` by the `ObligationSet`), and the
+/// release (owed by a counted call, derived by the `ObligationSet`), and the
 /// final `RemoveCall → release_call(Terminated)` all come from the ONE
 /// enforcement path. Pure, panic-free by construction (no rule code, no SDP,
 /// no relay logic).
@@ -327,7 +327,13 @@ mod tests {
         let state = CallState::new(Arc::new(InMemoryCallStore::new()), "w0", metrics.clone());
         let src = "10.0.0.9:5060".parse().unwrap();
         let invite = test_support::invite("w0", "w1", "flood");
-        let call_ref = state.create(build_initial_call(&invite, src, &B2buaConfig::default(), 0));
+        let call_ref = state.create(build_initial_call(
+            &invite,
+            src,
+            &B2buaConfig::default(),
+            &sip_txn::IdGen::seeded(1),
+            0,
+        ));
         let dispatcher = PerCallDispatcher::new(1, 1, 8, metrics.clone());
 
         let hook = reaper.overflow_hook();

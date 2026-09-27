@@ -95,6 +95,10 @@ pub enum SoftBoundedEffect {
 #[derive(Debug, Clone)]
 pub enum BufferedObservabilityEffect {
     WriteCdr,
+    /// The initial route's admit was refused because the limiter had released
+    /// the call's key: the call runs uncounted. The router counts it as
+    /// `limiter_admit_released_initial`.
+    LimiterAdmitReleased,
     /// A final of `status` toward the a-leg's initial INVITE was refused: that
     /// transaction already carries `carried` (RFC 3261 §17.2.1). The router
     /// counts it as `second_final_refused`.

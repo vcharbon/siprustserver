@@ -640,11 +640,11 @@ on `CallQuiesced` — ADR-0014).
 A consequence of admitting a call that must be discharged exactly once at
 release, **derivable from the persisted `Call` snapshot alone** and idempotently
 dischargeable through the normal effects pipeline. The two today: the owed CDR
-(from the call itself) and one limiter decrement per `limiter_entries` hold
-(the derivation `invariants::enforce` already performs). The Call *is* the
-ledger.
+(from the call itself) and one limiter release for a counted call, by the key
+`limiter` carries (the derivation `invariants::enforce` already performs). The
+Call *is* the ledger.
 _Avoid_: a parallel allocation registry / resource ledger (the mirror/slice
-divergence hazard; would not survive failover, while `limiter_entries` and
+divergence hazard; would not survive failover, while `limiter` and
 `cdr_events` ride the replicated Element for free).
 
 **Last-touched stamp**:

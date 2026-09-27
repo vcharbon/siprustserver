@@ -126,7 +126,13 @@ async fn mark_takeover_flags_the_copy_for_self_release() {
     let repl = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(0)));
     let state = call_state("w1", repl.clone());
 
-    let c0 = build_initial_call(&invite("w0", "w1", "cid-a"), src(), &config_for("w0"), 0);
+    let c0 = build_initial_call(
+        &invite("w0", "w1", "cid-a"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r0 = c0.call_ref.clone();
     assert!(r0.starts_with("w0|"));
     state.create(c0);
@@ -147,7 +153,13 @@ async fn drop_local_sheds_live_copy_but_keeps_backup_element() {
     let state = call_state("w1", repl.clone());
 
     // A call w0 owns + we (w1) back up: seed bak:w0, then materialise the takeover.
-    let call = build_initial_call(&invite("w0", "w1", "cid-h"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-h"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     put(&repl, BAK, "w0", &call).await;
 
@@ -214,7 +226,13 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
     let state = call_state("w0", repl.clone());
 
     // A reclaimable pri:w0 call (rebooted-primary reclaim source).
-    let call = build_initial_call(&invite("w0", "w1", "cid-skew"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-skew"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     put_with_origin(&repl, PRI, "w0", &call, 70_000).await;
 
@@ -239,7 +257,13 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
     // The backup-partition takeover read surfaces it too.
     let repl_b = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
     let state_b = call_state("w1", repl_b.clone());
-    let call_b = build_initial_call(&invite("w0", "w1", "cid-skew-b"), src(), &config_for("w0"), 0);
+    let call_b = build_initial_call(
+        &invite("w0", "w1", "cid-skew-b"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let rb = call_b.call_ref.clone();
     put_with_origin(&repl_b, BAK, "w0", &call_b, 55_000).await; // origin 45 s behind
     let (_c, skew_b) = state_b.peek_replica(&rb).await.expect("read bak:w0");
@@ -247,7 +271,13 @@ async fn skew_offset_is_computed_persisted_and_reaches_hydration() {
 
     // A locally-originated write (no origin stamp) carries NO offset.
     let repl_local = Arc::new(ReplicatingCallStore::new(1, Clock::test_at(100_000)));
-    let call_l = build_initial_call(&invite("w0", "w1", "cid-local"), src(), &config_for("w0"), 0);
+    let call_l = build_initial_call(
+        &invite("w0", "w1", "cid-local"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     put(&repl_local, PRI, "w0", &call_l).await;
     assert_eq!(
         repl_local.skew_offset_ms(&call_l.call_ref),
@@ -271,8 +301,13 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
     let state = call_state_metered("w1", repl.clone(), metrics.clone());
 
     // The image w1 reverse-flushed when its takeover copy of a w0 call released.
-    let mut ended =
-        build_initial_call(&invite("w0", "w1", "cid-ended"), src(), &config_for("w0"), 0);
+    let mut ended = build_initial_call(
+        &invite("w0", "w1", "cid-ended"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     ended.state = CallModelState::Terminated;
     let r_ended = ended.call_ref.clone();
     put(&repl, BAK, "w0", &ended).await;
@@ -290,7 +325,13 @@ async fn peek_replica_reads_the_backup_body_without_deciding_or_inserting() {
 
     // A ref this node is primary for is not a takeover source; an unknown
     // backup-role ref is simply absent.
-    let own = build_initial_call(&invite("w1", "w0", "cid-own"), src(), &config_for("w1"), 0);
+    let own = build_initial_call(
+        &invite("w1", "w0", "cid-own"),
+        src(),
+        &config_for("w1"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     assert_eq!(state.peek_replica(&own.call_ref).await.err(), Some(ReplicaMiss::WrongRole));
     assert_eq!(state.peek_replica("w0|nobody|t").await.err(), Some(ReplicaMiss::Absent));
 }
@@ -304,7 +345,13 @@ async fn reclaim_scan_materialises_pri_partition_idempotently() {
     let state = call_state("w0", repl.clone());
 
     // A call w0 reclaimed into its own pri:w0 partition (via bootstrap).
-    let call = build_initial_call(&invite("w0", "w1", "cid-r"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-r"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     put(&repl, PRI, "w0", &call).await;
 
@@ -370,7 +417,13 @@ async fn reboot_primary_481s_bye_for_unmaterialised_pri_call() {
 
     // A long-hold call w0 owns. After reboot its body is present in pri:w0 (the
     // bootstrap delivered it) but it was NOT materialised into the live map.
-    let call = build_initial_call(&invite("w0", "w1", "cid-long"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-long"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     assert!(r.starts_with("w0|"), "call_ref encodes w0 as the primary");
     put(&repl, PRI, "w0", &call).await; // pri:w0 body present …
@@ -433,7 +486,13 @@ async fn reboot_primary_481s_bye_when_pri_body_was_never_pulled() {
 
     // Build the ref the same way, but seed NOTHING into this node's pri:w0 (the
     // truncated bootstrap never imported it). It lives only in bak:w0 on w1.
-    let call = build_initial_call(&invite("w0", "w1", "cid-long2"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-long2"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     assert!(state.peek(&r).is_none(), "not live (never reclaimed)");
 
@@ -476,7 +535,13 @@ async fn reclaimed_call_is_visible_to_backup_bootstrap() {
     let state = call_state("w0", repl.clone());
 
     // A call w0 owns, backed up by w1 (topology.bak = w1, from the w_bak cookie).
-    let call = build_initial_call(&invite("w0", "w1", "cid-bak"), src(), &config_for("w0"), 0);
+    let call = build_initial_call(
+        &invite("w0", "w1", "cid-bak"),
+        src(),
+        &config_for("w0"),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     let r = call.call_ref.clone();
     assert_eq!(
         call.topology.as_ref().map(|t| t.bak.as_str()),
@@ -539,6 +604,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
             &invite("w0", "w1", &format!("rec-{i}")),
             src(),
             &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
             0,
         );
         put(&repl, PRI, "w0", &call).await;
@@ -570,6 +636,7 @@ async fn churn_during_reclaim_keeps_state_consistent() {
                     &invite("w0", "w1", &format!("churn-{w}-{j}")),
                     src(),
                     &config_for("w0"),
+                    &sip_txn::IdGen::seeded(1),
                     0,
                 );
                 let cr = call.call_ref.clone();

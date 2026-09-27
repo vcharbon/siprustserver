@@ -58,6 +58,9 @@ pub struct Invite<'a> {
     delayed_automatic: Option<DelayedAutomatic>,
     /// The `(Call-ID, From tag)` the dialog is created under; `None` mints both.
     identity: Option<(String, String)>,
+    /// The INVITE's CSeq number; `None` is 1. A retry of an earlier INVITE
+    /// under the same identity states the next one (RFC 3261 §8.1.3.5).
+    cseq: Option<u32>,
 }
 
 impl<'a> Invite<'a> {
@@ -79,6 +82,7 @@ impl<'a> Invite<'a> {
             max_forwards: None,
             delayed_automatic: None,
             identity: None,
+            cseq: None,
         }
     }
 
@@ -184,6 +188,13 @@ impl<'a> Invite<'a> {
         self
     }
 
+    /// State the INVITE's CSeq number: a retry under an earlier INVITE's
+    /// identity carries the next one (RFC 3261 §8.1.3.5).
+    pub fn cseq(mut self, cseq: u32) -> Self {
+        self.cseq = Some(cseq);
+        self
+    }
+
     /// Send the initial INVITE to `proxy` instead of directly to the peer (the
     /// Request-URI still targets the peer). Used to drive an LB/record-routing
     /// proxy; subsequent in-dialog requests then follow the route set learned
@@ -215,7 +226,7 @@ impl<'a> Invite<'a> {
             call_id: call_id.clone(),
             from: Some(from_of(&from_uri, &from_tag)),
             to: Some(to_of(&to_uri)),
-            cseq: 1,
+            cseq: self.cseq.unwrap_or(1),
             via: Some(caller.via()),
             contact: Some(caller.contact()),
             max_forwards: Some(self.max_forwards.unwrap_or(70)),
@@ -255,7 +266,7 @@ impl<'a> Invite<'a> {
             local_uri: from_uri,
             remote_uri: to_uri,
             remote_target: request_uri,
-            local_cseq: 1,
+            local_cseq: self.cseq.unwrap_or(1),
             route_set: vec![],
         };
         ClientInvite {

@@ -83,12 +83,12 @@ impl HttpCallLimiter {
 impl CallLimiter for HttpCallLimiter {
     async fn admit(
         &self,
-        call_ref: &str,
+        key: &str,
         entries: &[LimiterEntry],
         release_on_refusal: bool,
     ) -> AdmitOutcome {
         let body = AdmitRequest {
-            call_ref: call_ref.to_string(),
+            call_ref: key.to_string(),
             entries: entries
                 .iter()
                 .map(|e| AdmitEntry { id: e.id.clone(), limit: e.limit })
@@ -109,19 +109,22 @@ impl CallLimiter for HttpCallLimiter {
         }
     }
 
-    async fn release(&self, call_ref: &str) {
+    async fn release(&self, key: &str) {
         // Best-effort: a lost release lapses with the call's lease.
-        let _ = self.post("/v1/release", &ReleaseRequest { call_ref: call_ref.to_string() }).await;
+        let _ = self.post("/v1/release", &ReleaseRequest { call_ref: key.to_string() }).await;
     }
 
-    async fn refresh(&self, call_ref: &str) -> RefreshOutcome {
-        let body = RefreshRequest { call_ref: call_ref.to_string() };
+    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
+        let body = RefreshRequest { call_ref: key.to_string(), ids: ids.to_vec() };
         let Some(resp) = self.post("/v1/refresh", &body).await else {
             return RefreshOutcome::Unavailable;
         };
         match serde_json::from_slice::<RefreshResponse>(&resp.body) {
-            Ok(RefreshResponse { known: true }) => RefreshOutcome::Known,
-            Ok(RefreshResponse { known: false }) => RefreshOutcome::Unknown,
+            Ok(RefreshResponse { known: true, .. }) => RefreshOutcome::Known,
+            Ok(RefreshResponse { known: false, reregistered: true }) => {
+                RefreshOutcome::Reregistered
+            }
+            Ok(RefreshResponse { known: false, reregistered: false }) => RefreshOutcome::Released,
             Err(_) => RefreshOutcome::Unavailable,
         }
     }

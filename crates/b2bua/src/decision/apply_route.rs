@@ -3,7 +3,7 @@
 //! attach features, seed service ext, run the limiter, create the b-leg).
 
 use call::helpers::{add_originated_b_leg, mark_decision};
-use call::{Call, CallLimiterState, DecisionKind, TerminationCause, TimerEntry, TimerType};
+use call::{Call, DecisionKind, TerminationCause, TimerEntry, TimerType};
 use sip_clock::Clock;
 use sip_message::SipRequest;
 use sip_txn::IdGen;
@@ -13,7 +13,9 @@ use crate::decision::{
     header_lines, CallDecisionEngine, CallDecisionError, CallFailureRequest, CallTreatment,
     FailureInfo,
 };
-use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult};
+use crate::effects::{
+    BufferedObservabilityEffect, CriticalStateEffect, HandlerEffects, HandlerResult,
+};
 use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
 use crate::rules::capabilities;
 use crate::rules::relay;
@@ -128,7 +130,7 @@ pub async fn apply_route(
             .iter()
             .map(|e| LimiterEntry { id: e.id.clone(), limit: e.limit })
             .collect();
-        let outcome = limiter.admit(&call.call_ref, &entries, false).await;
+        let outcome = limiter.admit(&call.limiter.key, &entries, false).await;
         if crate::trace::sampled(&call) {
             crate::trace::emit::limiter(
                 &call,
@@ -139,8 +141,7 @@ pub async fn apply_route(
         }
         match outcome {
             AdmitOutcome::Admitted => {
-                call.limiter =
-                    CallLimiterState::admitted(entries.into_iter().map(|e| e.id).collect());
+                call.limiter.set(true, entries.into_iter().map(|e| e.id).collect());
                 // Arm the refresh timer so a long call keeps its lease alive.
                 let entry = TimerEntry {
                     id: format!("{:?}", TimerType::LimiterRefresh),
@@ -152,10 +153,14 @@ pub async fn apply_route(
                 fx.critical.push(CriticalStateEffect::ScheduleTimer(entry));
             }
             // Fail open: the call runs uncounted (nothing released or
-            // refreshed). A tombstone refusal (a `call_ref` released within the
-            // last lease) is a stale key, not a cap: the call runs uncounted too.
-            AdmitOutcome::Unavailable | AdmitOutcome::Released => {
-                call.limiter = CallLimiterState::uncounted();
+            // refreshed).
+            AdmitOutcome::Unavailable => call.limiter.set(false, Vec::new()),
+            // The key is minted per call, so a tombstone on it names this
+            // call's own release: a fold's admit landing on the initial
+            // route is unreachable, and this is counted apart.
+            AdmitOutcome::Released => {
+                call.limiter.set(false, Vec::new());
+                fx.buffered.push(BufferedObservabilityEffect::LimiterAdmitReleased);
             }
             AdmitOutcome::Rejected { limiter_id } => {
                 return Box::pin(limiter_reject_failover(

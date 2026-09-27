@@ -208,6 +208,7 @@ mod tests {
             &crate::rules::relay::rebuild_a_leg_invite(&minimal_invite_snapshot()),
             "203.0.113.7:5060".parse().unwrap(),
             &B2buaConfig::default(),
+            &sip_txn::IdGen::seeded(1),
             0,
         );
         call.a_leg.dialogs = a_dialogs;

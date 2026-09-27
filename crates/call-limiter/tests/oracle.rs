@@ -9,7 +9,9 @@ use std::time::Duration;
 use call_limiter::wire::{
     AdmitEntry, AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest,
 };
-use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
+use call_limiter::{
+    AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer, RefreshResult,
+};
 use http_net::{HttpRequest, HttpResponse, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 
@@ -83,10 +85,16 @@ async fn http_server_matches_direct_core() {
 
     // Refresh c2 across most of the lease; both stores keep it; c1 lapses.
     tokio::time::advance(Duration::from_secs(8)).await;
-    let body = serde_json::to_vec(&RefreshRequest { call_ref: "c2".into() }).unwrap();
+    let body = serde_json::to_vec(&RefreshRequest { call_ref: "c2".into(), ids: vec!["A".into()] })
+        .unwrap();
     let resp = call(&net, HttpRequest::post("/v1/refresh", body)).await;
     let http: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
-    assert_eq!(http.known, oracle.refresh("c2"), "refresh outcomes agree");
+    let direct = oracle.refresh("c2", &["A".into()]);
+    assert_eq!(
+        (http.known, http.reregistered),
+        (direct == RefreshResult::Extended, direct == RefreshResult::Reregistered),
+        "refresh outcomes agree"
+    );
     tokio::time::advance(Duration::from_secs(3)).await;
     assert_eq!(server.store().sweep_now(), oracle.sweep_now(), "the same sets lapsed");
 

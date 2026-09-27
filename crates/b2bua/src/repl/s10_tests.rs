@@ -102,7 +102,7 @@ async fn replicating_callstate_flush_lands_on_peer() {
     // Build a call from an INVITE carrying the w_pri=w0;w_bak=w1 cookie. The
     // callRef encodes primary w0, so the write-side policy routes it Forward → w1.
     let invite = invite_with_cookie("w0", "w1");
-    let call = build_initial_call(&invite, src(), &config_for("w0"), 0);
+    let call = build_initial_call(&invite, src(), &config_for("w0"), &sip_txn::IdGen::seeded(1), 0);
     assert_eq!(
         call.topology.as_ref().map(|t| (t.pri.as_str(), t.bak.as_str(), t.gen)),
         Some(("w0", "w1", 1)),
@@ -133,7 +133,7 @@ async fn replicating_callstate_flush_lands_on_peer() {
 #[tokio::test(start_paused = true)]
 async fn cookie_parse_sets_topology_pri_bak() {
     let invite = invite_with_cookie("w0", "w1");
-    let call = build_initial_call(&invite, src(), &config_for("w0"), 0);
+    let call = build_initial_call(&invite, src(), &config_for("w0"), &sip_txn::IdGen::seeded(1), 0);
     let topo = call.topology.expect("cookie present → topology set");
     assert_eq!(topo.pri, "w0");
     assert_eq!(topo.bak, "w1", "w_bak reaches topology.bak");
@@ -152,7 +152,7 @@ async fn cookie_parse_sets_topology_pri_bak() {
         SipMessage::Request(r) => r,
         _ => panic!(),
     };
-    let call = build_initial_call(&req, src(), &config_for("w0"), 0);
+    let call = build_initial_call(&req, src(), &config_for("w0"), &sip_txn::IdGen::seeded(1), 0);
     assert!(call.topology.is_none(), "no cookie → no topology (non-replicating)");
 }
 
@@ -168,7 +168,8 @@ async fn update_bumps_call_gen() {
     );
 
     let invite = invite_with_cookie("w0", "w1");
-    let call: Call = build_initial_call(&invite, src(), &config_for("w0"), 0);
+    let call: Call =
+        build_initial_call(&invite, src(), &config_for("w0"), &sip_txn::IdGen::seeded(1), 0);
     let call_ref = call.call_ref.clone();
     state.create(call.clone());
     assert_eq!(gen(&state, &call_ref), 1, "create keeps the gen=1 baseline");

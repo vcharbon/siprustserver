@@ -55,6 +55,13 @@ pub(super) async fn process_result(
     result: HandlerResult,
     now_ms: i64,
 ) {
+    // A counted live call always has its refresh armed: a fire the per-call
+    // queue dropped is re-armed by the next turn, before the record lands.
+    let result = crate::rules::invariants::arm_limiter_refresh(
+        result,
+        now_ms,
+        ctx.config.limiter_refresh_sec,
+    );
     // What the turn sends is on the record before the record lands, and a
     // termination this turn began is cut after it: every ring entry with
     // `seq <= termination.last_seq` was received or sent as part of
@@ -163,7 +170,7 @@ pub(super) async fn process_result(
     for eff in &result.effects.soft {
         match eff {
             SoftBoundedEffect::ReleaseLimiter => {
-                ctx.limiter.release(call_ref).await;
+                ctx.limiter.release(&result.call.limiter.key).await;
                 if crate::trace::sampled(&result.call) {
                     crate::trace::emit::limiter(
                         &result.call,
@@ -179,6 +186,9 @@ pub(super) async fn process_result(
     for eff in &result.effects.buffered {
         match eff {
             BufferedObservabilityEffect::WriteCdr => ctx.cdr.write(&result.call, now_ms).await,
+            BufferedObservabilityEffect::LimiterAdmitReleased => {
+                ctx.metrics.bump_limiter_admit_released_initial()
+            }
             BufferedObservabilityEffect::SecondFinalRefused { .. } => {
                 ctx.metrics.bump_second_final_refused()
             }

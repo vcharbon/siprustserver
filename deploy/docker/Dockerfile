@@ -8,7 +8,7 @@
 # one to run via the container `command`:
 #   - sip-proxy-runner     (front proxy + load balancer)
 #   - b2bua-runner         (B2BUA worker)
-#   - call-limiter-runner  (shared sliding-window call limiter)
+#   - call-limiter-runner  (shared call limiter, keyed by the call)
 #   - cdr-consumer-runner  (drains the RabbitMQ CDR queue -> Prometheus metrics)
 #   - loadgen              (multiplexed SIP load generator — the endurance
 #                           functional-perf stream that runs alongside SIPp)

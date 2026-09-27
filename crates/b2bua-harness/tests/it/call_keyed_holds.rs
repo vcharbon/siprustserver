@@ -13,7 +13,6 @@
 //! probed per id while the call is up and drained to the witnesses after it
 //! ends.
 
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,27 +24,18 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
-use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut};
-use call::ReleaseEventKind;
-use call_limiter::wire::AdmitEntry;
-use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{
-    HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport, SimulatedHttpNetwork,
+use b2bua_harness::{
+    invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
 };
+use call::ReleaseEventKind;
+use call_limiter::LimiterConfig;
 use scenario_harness::Harness;
-use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const MEDIA_ANSWER: &str = "v=0\r\no=media 7 7 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 const ALICE_REALIGN: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
-/// Every id a scenario may hold; each carries one witness hold.
-const IDS: [&str; 3] = ["x", "y", "z"];
-
-const LADDR: &str = "10.0.0.1:8080";
 /// The production admit budget.
 const ADMIT_BUDGET: Duration = Duration::from_millis(150);
 /// A fail-open budget above the paused-clock HTTP round trip: a detached
@@ -55,89 +45,13 @@ const WIDE_BUDGET: Duration = Duration::from_secs(2);
 /// A short lease, so the paused clock crosses it cheaply.
 const LEASE_SEC: i64 = 20;
 
-/// The limiter `inner` answering every request `after` it applied it: what a
-/// client past its budget sees as a timeout landed on the server.
-struct AnswersLate {
-    inner: Arc<dyn HttpService>,
-    after: Duration,
+/// The witness rig under a short lease and a client budget of `budget`; the
+/// server answers `answers_after` each request it applied.
+async fn limiter_rig_with(budget: Duration, answers_after: Option<Duration>) -> WitnessRig {
+    WitnessRig::serve(LimiterConfig { lease_sec: LEASE_SEC }, budget, answers_after).await
 }
 
-#[async_trait]
-impl HttpService for AnswersLate {
-    async fn handle(&self, req: HttpRequest) -> HttpResponse {
-        let resp = self.inner.handle(req).await;
-        tokio::time::sleep(self.after).await;
-        resp
-    }
-}
-
-/// A real keyed `LimiterServer` on the simulated HTTP fabric with one
-/// witness hold per id in [`IDS`], each under its own call.
-struct LimiterRig {
-    store: Arc<CallStore>,
-    client: Arc<dyn CallLimiter>,
-    _server: Box<dyn HttpServerHandle>,
-}
-
-impl LimiterRig {
-    /// The holds the call owns on `id`: the store's count less the witness.
-    /// Negative = a release matched no hold of the call.
-    fn holds(&self, id: &str) -> i64 {
-        self.store.held(id) - 1
-    }
-
-    fn all_holds(&self) -> [i64; 3] {
-        IDS.map(|id| self.holds(id))
-    }
-
-    async fn expect_holds(&self, expected: [i64; 3], why: &str) {
-        settle_until(|| self.all_holds() == expected).await;
-        assert_eq!(self.all_holds(), expected, "holds on {IDS:?}: {why}");
-    }
-
-    /// Settle until the call holds nothing, then release the witnesses so the
-    /// store reads empty for the reaped check.
-    async fn expect_drained(&self, why: &str) {
-        self.expect_holds([0, 0, 0], why).await;
-        for id in IDS {
-            self.store.release(&format!("witness-{id}"));
-        }
-    }
-
-    /// Extend every witness's lease.
-    fn refresh_witnesses(&self) {
-        for id in IDS {
-            assert!(self.store.refresh(&format!("witness-{id}")), "witness on {id} is known");
-        }
-    }
-}
-
-/// The rig under a client budget of `budget`; the server answers `answers_after`
-/// each request it applied.
-async fn limiter_rig_with(budget: Duration, answers_after: Option<Duration>) -> LimiterRig {
-    let laddr: SocketAddr = LADDR.parse().unwrap();
-    let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(CallStore::new(LimiterConfig { lease_sec: LEASE_SEC }, Clock::test_at(0)));
-    for id in IDS {
-        let witness = store.admit(
-            &format!("witness-{id}"),
-            &[AdmitEntry { id: id.into(), limit: 100 }],
-            false,
-        );
-        assert_eq!(witness, AdmitResult::Admitted, "witness on {id}");
-    }
-    let mut server: Arc<dyn HttpService> =
-        Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-    if let Some(after) = answers_after {
-        server = Arc::new(AnswersLate { inner: server, after });
-    }
-    let handle = http.serve(laddr, server).await.unwrap();
-    let client: Arc<dyn CallLimiter> =
-        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, budget));
-    LimiterRig { store, client, _server: handle }
-}
-
-async fn limiter_rig(budget: Duration) -> LimiterRig {
+async fn limiter_rig(budget: Duration) -> WitnessRig {
     limiter_rig_with(budget, None).await
 }
 
@@ -173,7 +87,7 @@ fn one_failover(
 }
 
 /// Bob busies out, the failover route is admitted, carol answers, alice
-/// hangs up. `before` and `after` are the call's holds on [`IDS`] while bob
+/// hangs up. `before` and `after` are the call's holds on [`WITNESS_IDS`] while bob
 /// is dialed and once the failover route is applied.
 async fn busy_then_failover_answered(
     initial: &'static [(&'static str, i64)],
@@ -440,7 +354,7 @@ async fn refused_replacement_releases_the_call_holds() {
     assert_eq!(
         rig.all_holds(),
         [0, 0, 0],
-        "holds on {IDS:?}: the refused replacement released x; y and z were never counted",
+        "holds on {WITNESS_IDS:?}: the refused replacement released x; y and z were never counted",
     );
 
     // ── the re-consult's route is applied ───────────────────────────────────
@@ -631,4 +545,138 @@ async fn a_fold_admitted_after_the_call_ended_holds_nothing() {
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
     let report = h.finish().await;
     assert_eq!(invite_final_statuses(&report, alice.addr()), vec![487]);
+}
+
+/// A route holding `entries` toward bob, with no failover.
+fn routes_holding(entries: &'static [(&'static str, i64)]) -> Arc<ScriptedDecisionEngine> {
+    Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(move |_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.call_limiter = limiters(entries);
+                NewCallResponse::Route(r)
+            })
+            .build(),
+    )
+}
+
+/// The limiter key is unique over time. A retried INVITE reusing the first
+/// call's Call-ID and From tag (RFC 3261 §8.1.3.5) is a call of its own on
+/// the limiter: it holds `x` although the first call's release tombstoned
+/// their common `call_ref`, and a third call on `x` at its cap is refused.
+#[tokio::test(start_paused = true)]
+async fn a_retried_invite_reusing_the_call_identity_is_counted() {
+    const CALL_ID: &str = "retried-call@127.0.0.1";
+    const FROM_TAG: &str = "retried-from-tag";
+    let h = Harness::new("keyed-holds-retried-identity");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let carol = h.agent("carol", "127.0.0.1:5061").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let rig = limiter_rig(WIDE_BUDGET).await;
+    // x at cap 2: the witness and one call.
+    let b2bua = B2buaSut::builder(routes_holding(&[("x", 2)]))
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    // ── the first call is challenged and ends ──────────────────────────────
+    let mut first = alice
+        .invite(&bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER)
+        .through(b2bua.addr)
+        .send()
+        .await;
+    bob.receive("INVITE")
+        .await
+        .respond(401, "Unauthorized")
+        .with_header("WWW-Authenticate", "Digest realm=\"bob\", nonce=\"n1\"")
+        .await;
+    bob.receive("ACK").await;
+    first.expect(401).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_holds([0, 0, 0], "the challenged call released its set").await;
+
+    // ── the retry under the same identity is a counted call ────────────────
+    let mut retry = alice
+        .invite(&bob)
+        .identity(CALL_ID, FROM_TAG)
+        .cseq(2)
+        .with_sdp(OFFER)
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    retry.expect(200).await;
+    let mut dialog = retry.ack().await;
+    bob.receive("ACK").await;
+    rig.expect_holds([1, 0, 0], "the retried call holds x").await;
+
+    // ── x is at its cap: a third call is refused ───────────────────────────
+    let mut third = carol.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    third.expect(486).await;
+    rig.expect_holds([1, 0, 0], "the refused call counted nothing").await;
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("the hangup releases the retried call").await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// The limiter restarts with counted calls live: its store is empty, and each
+/// call's next refresh re-registers its set (no cap check), so the counts are
+/// back within one refresh period. The hangups release once.
+#[tokio::test(start_paused = true)]
+async fn a_limiter_restart_is_healed_by_the_next_refresh() {
+    let h = Harness::new("keyed-holds-limiter-restart");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let carol = h.agent("carol", "127.0.0.1:5061").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let mut rig = limiter_rig(WIDE_BUDGET).await;
+    let b2bua = B2buaSut::builder(routes_holding(&[("x", 10), ("y", 10)]))
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .tune(|c| c.limiter_refresh_sec = 5)
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut dialogs = Vec::new();
+    for caller in [&alice, &carol] {
+        let mut call = caller.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+        bob.receive("INVITE").await.respond(200, "OK").with_sdp(ANSWER).await;
+        call.expect(200).await;
+        dialogs.push(call.ack().await);
+        bob.receive("ACK").await;
+    }
+    rig.expect_holds([2, 2, 0], "two counted calls").await;
+
+    // ── the limiter restarts empty ─────────────────────────────────────────
+    let dead = rig.restart().await;
+    assert_eq!(rig.all_holds(), [0, 0, 0], "the restarted store holds nothing for the calls");
+    h.advance(Duration::from_secs(6)).await;
+    rig.expect_holds([2, 2, 0], "each call's refresh re-registered its set").await;
+    assert_eq!(rig.store.stats().reregistered_calls, 2);
+    assert_eq!(b2bua.metrics().limiter_refresh_reregistered_total(), 2);
+
+    for mut dialog in dialogs {
+        let mut bye = dialog.bye().await;
+        bob.receive("BYE").await.respond(200, "OK").await;
+        bye.expect(200).await;
+    }
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("the hangups release the re-registered sets once").await;
+    assert_eq!(rig.store.stats().releases_total, 5, "two calls and three witnesses");
+    // The SUT's ledger saw one grant and one release per call; the store it
+    // reads is the dead one, frozen with the two calls and the witnesses.
+    b2bua.assert_fully_reaped_leaving(LimiterLeak {
+        unreleased: 0,
+        stored: dead.stats().current_total,
+    });
+    assert_eq!(dead.stats().current_total, 7);
+    let _ = h.finish().await;
 }

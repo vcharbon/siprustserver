@@ -1,9 +1,9 @@
 # Call-limiter service — the dedicated, stateless concurrency limiter keyed by
 # the call, shared cluster-wide. SINGLE replica (Deployment, not StatefulSet):
 # one authoritative in-memory set per call, no persistence. On restart the
-# store is empty: the calls admitted before it are released as no-ops, and the
-# b2bua fails open during the brief downtime — so this is a SPOF for the
-# limiter function only, never for calls.
+# store is empty: the counted calls re-register their sets on their next
+# refresh (ADR-0038), and the b2bua fails open during the brief downtime — so
+# this is a SPOF for the limiter function only, never for calls.
 #
 # The b2bua workers reach it at call-limiter:8080 (LIMITER_URL on the worker).
 # Inert until a /call/new decision returns `call_limiter` entries.

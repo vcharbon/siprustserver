@@ -320,11 +320,11 @@ impl ActionExecutor<'_> {
                     *call = call::helpers::set_call_ext(call.clone(), service_id, v);
                 }
             }
-            RuleAction::ReplaceLimiterHolds { counted, ids } => {
+            RuleAction::SetLimiterState { counted, ids } => {
                 // The fold's dispatching task already replaced the call's set
                 // on the limiter; this turn's write states the outcome, which
                 // the terminal settle reads to owe one release.
-                call.limiter = call::CallLimiterState { counted: *counted, ids: ids.clone() };
+                call.limiter.set(*counted, ids.clone());
             }
             RuleAction::RelayFailureToALeg { status, reason } => {
                 self.relay_failure_to_a_leg(call, fx, ctx, *status, reason);

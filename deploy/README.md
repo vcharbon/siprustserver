@@ -32,7 +32,7 @@ Both are configured entirely by env vars (see the module docs at the top of each
 `B2BUA_REPL=1`: real TCP repl transport + `K8sMembership` EndpointSlice
 discovery + SIGTERM drain + `/ready` probe — ADR-0011 / the chaos suite below).
 Still deferred per ADR-0009/0010 and **not** wired here: the HTTP call-control
-decision adapter, the real sliding-window limiter, the real proxy self-gate, the
+decision adapter, the call-keyed limiter as the default, the real proxy self-gate, the
 AIMD per-worker bucket, proxy VIP/HA, and the proxy's own k8s registry (it still
 takes IP literals via `PROXY_WORKERS`).
 

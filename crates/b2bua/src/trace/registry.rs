@@ -328,6 +328,7 @@ mod tests {
             &invite,
             std::net::SocketAddr::from(([10, 0, 0, 9], 5060)),
             &crate::config::B2buaConfig::default(),
+            &sip_txn::IdGen::seeded(1),
             0,
         );
         c.trace_id = Some(trace_id.to_string());

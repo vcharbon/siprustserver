@@ -7,7 +7,10 @@
 //! *promoted* (`terminating → terminated`) once every leg is resolved.
 
 use call::helpers::is_fully_resolved;
-use call::{Call, CallModelState, CdrEvent, CdrEventType, LegState, MachineId, StateLabel};
+use call::{
+    Call, CallModelState, CdrEvent, CdrEventType, LegState, MachineId, StateLabel, TimerEntry,
+    TimerType,
+};
 
 use crate::effects::{BufferedObservabilityEffect, CriticalStateEffect, HandlerResult};
 use crate::obligations::ObligationSet;
@@ -44,6 +47,37 @@ pub fn finalize(mut result: HandlerResult) -> HandlerResult {
     // (ADR-0016) — Masking → Suppressing as the first 18x is relayed; absent when
     // no masking strategy is active (incl. the delayed-offer self-disable).
     super::relay_first_18x::project_cursor(&mut result.call);
+    result
+}
+
+/// A counted Active call carries a live `LimiterRefresh` timer: one whose
+/// deadline is still ahead. A missing or past-due entry (a fire the per-call
+/// queue dropped, a copy materialised with a stale ledger) is re-armed at
+/// `now_ms + refresh_sec`, on the record and as a `ScheduleTimer`. The
+/// refresh turn itself re-arms ahead, so it is left alone.
+pub fn arm_limiter_refresh(
+    mut result: HandlerResult,
+    now_ms: i64,
+    refresh_sec: i64,
+) -> HandlerResult {
+    let call = &result.call;
+    if !call.limiter.counted || call.state != CallModelState::Active {
+        return result;
+    }
+    let armed =
+        call.timers.iter().any(|t| t.timer_type == TimerType::LimiterRefresh && t.fire_at > now_ms);
+    if armed {
+        return result;
+    }
+    let entry = TimerEntry {
+        id: format!("{:?}", TimerType::LimiterRefresh),
+        timer_type: TimerType::LimiterRefresh,
+        fire_at: now_ms + refresh_sec * 1000,
+        leg_id: None,
+    };
+    result.call.timers =
+        call::helpers::replace_timer_by_id(std::mem::take(&mut result.call.timers), entry.clone());
+    result.effects.critical.push(CriticalStateEffect::ScheduleTimer(entry));
     result
 }
 

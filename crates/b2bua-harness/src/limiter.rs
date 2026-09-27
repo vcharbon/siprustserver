@@ -23,9 +23,14 @@ use b2bua::decision::{
 };
 use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
 use b2bua::limiter_http::HttpCallLimiter;
-use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use call_limiter::wire::AdmitEntry;
+use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
+use http_net::{
+    HttpRequest, HttpResponse, HttpServerHandle, HttpService, HttpTransport, SimulatedHttpNetwork,
+};
 use sip_clock::Clock;
+
+use crate::settle_until;
 
 /// The id of the entry the default limiter adds to every route. Its cap never
 /// refuses, so it counts calls without changing any admission outcome.
@@ -177,22 +182,22 @@ pub(crate) struct CountingLimiter {
 impl CallLimiter for CountingLimiter {
     async fn admit(
         &self,
-        call_ref: &str,
+        key: &str,
         entries: &[LimiterEntry],
         release_on_refusal: bool,
     ) -> AdmitOutcome {
-        let outcome = self.inner.admit(call_ref, entries, release_on_refusal).await;
-        self.ledger.on_admit(call_ref, entries.len() as i64, &outcome, release_on_refusal);
+        let outcome = self.inner.admit(key, entries, release_on_refusal).await;
+        self.ledger.on_admit(key, entries.len() as i64, &outcome, release_on_refusal);
         outcome
     }
 
-    async fn release(&self, call_ref: &str) {
-        self.ledger.on_release(call_ref);
-        self.inner.release(call_ref).await;
+    async fn release(&self, key: &str) {
+        self.ledger.on_release(key);
+        self.inner.release(key).await;
     }
 
-    async fn refresh(&self, call_ref: &str) -> RefreshOutcome {
-        self.inner.refresh(call_ref).await
+    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
+        self.inner.refresh(key, ids).await
     }
 }
 
@@ -277,6 +282,147 @@ impl SutLimiter {
     }
 }
 
+/// The ids a [`WitnessRig`] serves; each carries one witness hold.
+pub const WITNESS_IDS: [&str; 3] = ["x", "y", "z"];
+
+/// Where a [`WitnessRig`] listens on its private fabric.
+pub const WITNESS_LIMITER_ADDR: &str = "10.0.0.1:8080";
+
+/// The limiter `inner` answering every request `after` it applied it: what a
+/// client past its budget sees as a timeout landed on the server.
+struct AnswersLate {
+    inner: Arc<dyn HttpService>,
+    after: Duration,
+}
+
+#[async_trait]
+impl HttpService for AnswersLate {
+    async fn handle(&self, req: HttpRequest) -> HttpResponse {
+        let resp = self.inner.handle(req).await;
+        tokio::time::sleep(self.after).await;
+        resp
+    }
+}
+
+/// A real [`LimiterServer`] on a private simulated HTTP fabric, reached by the
+/// production client, with one **witness** hold per id of [`WITNESS_IDS`],
+/// each under a call of its own (`witness-<id>`), so a surplus release reads
+/// below the witness instead of vanishing under the store's floor at 0. A
+/// scenario probes the call's holds per id while it is up and drains them to
+/// the witnesses after it ends.
+pub struct WitnessRig {
+    /// The fabric the limiter is served on (for faults).
+    pub http: SimulatedHttpNetwork,
+    pub store: Arc<CallStore>,
+    /// The production client over the fabric, for the SUT.
+    pub client: Arc<dyn CallLimiter>,
+    cfg: LimiterConfig,
+    answers_after: Option<Duration>,
+    _server: Box<dyn HttpServerHandle>,
+}
+
+impl WitnessRig {
+    /// Serve a store under `cfg`, reached by a client with `budget` as its
+    /// fail-open budget; `answers_after` makes the server answer every request
+    /// late, after it applied it.
+    pub async fn serve(
+        cfg: LimiterConfig,
+        budget: Duration,
+        answers_after: Option<Duration>,
+    ) -> Self {
+        let laddr: SocketAddr = WITNESS_LIMITER_ADDR.parse().expect("witness limiter address");
+        let http = SimulatedHttpNetwork::new();
+        let (store, handle) = Self::serve_store(&http, cfg, answers_after).await;
+        let client: Arc<dyn CallLimiter> =
+            Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, budget));
+        Self { http, store, client, cfg, answers_after, _server: handle }
+    }
+
+    /// An empty store under `cfg` with the witnesses admitted, served on
+    /// `http` at the rig's address.
+    async fn serve_store(
+        http: &SimulatedHttpNetwork,
+        cfg: LimiterConfig,
+        answers_after: Option<Duration>,
+    ) -> (Arc<CallStore>, Box<dyn HttpServerHandle>) {
+        let laddr: SocketAddr = WITNESS_LIMITER_ADDR.parse().expect("witness limiter address");
+        let store = Arc::new(CallStore::new(cfg, Clock::test_at(0)));
+        for id in WITNESS_IDS {
+            let witness = store.admit(
+                &format!("witness-{id}"),
+                &[AdmitEntry { id: id.into(), limit: 100 }],
+                false,
+            );
+            assert_eq!(witness, AdmitResult::Admitted, "witness on {id}");
+        }
+        let mut server: Arc<dyn HttpService> =
+            Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+        if let Some(after) = answers_after {
+            server = Arc::new(AnswersLate { inner: server, after });
+        }
+        let handle = http.serve(laddr, server).await.expect("witness limiter binds");
+        (store, handle)
+    }
+
+    /// Restart the limiter: the store is gone with its process, an empty one
+    /// (the witnesses re-admitted) answers at the same address. The SUT's
+    /// client notices nothing. Returns the dead store, which a SUT built on
+    /// it still reads.
+    pub async fn restart(&mut self) -> Arc<CallStore> {
+        let old = std::mem::replace(&mut self._server, Box::new(NoServer));
+        drop(old);
+        let (store, handle) = Self::serve_store(&self.http, self.cfg, self.answers_after).await;
+        self._server = handle;
+        std::mem::replace(&mut self.store, store)
+    }
+
+    /// The holds the call owns on `id`: the store's count less the witness.
+    /// Negative = a release matched no hold of the call.
+    pub fn holds(&self, id: &str) -> i64 {
+        self.store.held(id) - 1
+    }
+
+    /// The call's holds on every id of [`WITNESS_IDS`], in order.
+    pub fn all_holds(&self) -> [i64; 3] {
+        WITNESS_IDS.map(|id| self.holds(id))
+    }
+
+    /// Settle until the call's holds read `expected`, then assert them.
+    pub async fn expect_holds(&self, expected: [i64; 3], why: &str) {
+        settle_until(|| self.all_holds() == expected).await;
+        assert_eq!(self.all_holds(), expected, "holds on {WITNESS_IDS:?}: {why}");
+    }
+
+    /// Settle until the call holds nothing, then release the witnesses so the
+    /// store reads empty for the reaped check.
+    pub async fn expect_drained(&self, why: &str) {
+        self.expect_holds([0, 0, 0], why).await;
+        for id in WITNESS_IDS {
+            self.store.release(&format!("witness-{id}"));
+        }
+    }
+
+    /// Extend every witness's lease.
+    pub fn refresh_witnesses(&self) {
+        for id in WITNESS_IDS {
+            assert_eq!(
+                self.store.refresh(&format!("witness-{id}"), &[id.to_string()]),
+                call_limiter::RefreshResult::Extended,
+                "witness on {id} is known"
+            );
+        }
+    }
+}
+
+/// The placeholder handle while a [`WitnessRig`] restarts its server.
+struct NoServer;
+
+impl HttpServerHandle for NoServer {
+    fn local_addr(&self) -> SocketAddr {
+        WITNESS_LIMITER_ADDR.parse().expect("witness limiter address")
+    }
+}
+
 /// A decision engine that appends the [`DEFAULT_LIMITER_ID`] entry to every
 /// route `inner` returns (new call, failover, release reroute), after the
 /// route's own entries, so both are admitted in one set.
@@ -341,8 +487,8 @@ mod tests {
         async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
             AdmitOutcome::Admitted
         }
-        async fn release(&self, _call_ref: &str) {}
-        async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+        async fn release(&self, _key: &str) {}
+        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
             RefreshOutcome::Known
         }
     }
@@ -355,8 +501,8 @@ mod tests {
         async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
             AdmitOutcome::Unavailable
         }
-        async fn release(&self, _call_ref: &str) {}
-        async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+        async fn release(&self, _key: &str) {}
+        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
             RefreshOutcome::Unavailable
         }
     }
@@ -369,9 +515,9 @@ mod tests {
         async fn admit(&self, _: &str, entries: &[LimiterEntry], _: bool) -> AdmitOutcome {
             AdmitOutcome::Rejected { limiter_id: entries[0].id.clone() }
         }
-        async fn release(&self, _call_ref: &str) {}
-        async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
-            RefreshOutcome::Unknown
+        async fn release(&self, _key: &str) {}
+        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
+            RefreshOutcome::Released
         }
     }
 
@@ -422,7 +568,7 @@ mod tests {
     async fn every_granted_set_released_once_matches_no_leak() {
         let (limiter, ledger) = counting(Arc::new(Grants));
         limiter.admit("c1", &[entry("x"), entry("x"), entry("y")], false).await;
-        limiter.refresh("c1").await;
+        limiter.refresh("c1", &["x".into()]).await;
         limiter.release("c1").await;
         ledger.count(None).assert_matches(LimiterLeak::NONE);
     }

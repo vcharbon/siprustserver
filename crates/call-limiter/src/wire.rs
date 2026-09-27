@@ -54,17 +54,23 @@ pub struct ReleaseRequest {
     pub call_ref: String,
 }
 
-/// `POST /v1/refresh` body: extend the call's lease.
+/// `POST /v1/refresh` body: extend the call's lease, or re-create its set from
+/// `ids` when the store no longer holds it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshRequest {
     /// The call to keep alive.
     pub call_ref: String,
+    /// The ids the call holds, re-registered when the store holds no set.
+    #[serde(default)]
+    pub ids: Vec<String>,
 }
 
-/// `POST /v1/refresh` response: whether the store holds a set for the call.
+/// `POST /v1/refresh` response. `known`: the lease was extended;
+/// `reregistered`: the set was re-created from the ids sent; neither: the call
+/// was released within the last lease.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshResponse {
-    /// `false` for a call never admitted, released or lapsed: nothing was
-    /// re-created.
     pub known: bool,
+    #[serde(default)]
+    pub reregistered: bool,
 }

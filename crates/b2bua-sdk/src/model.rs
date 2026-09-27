@@ -939,11 +939,11 @@ pub enum RuleAction {
     },
     /// State the call's admission state after a route fold: the fold's
     /// dispatching task already replaced the call's set on the limiter (one
-    /// `admit(call_ref, ..)` net of the set the call held), so the call is
+    /// `admit(key, ..)` net of the set the call held), so the call is
     /// `counted` iff that admit was granted a non-empty set, and `ids` names
     /// it. On a live call the refresh cadence follows; on a going-away call
-    /// the terminal settle releases by `call_ref`.
-    ReplaceLimiterHolds {
+    /// the terminal settle releases the call.
+    SetLimiterState {
         counted: bool,
         ids: Vec<String>,
     },
@@ -1081,7 +1081,7 @@ impl RuleAction {
             | RuleAction::SetReroute { .. }
             | RuleAction::SetFeatures { .. }
             | RuleAction::MergeCallExt { .. }
-            | RuleAction::ReplaceLimiterHolds { .. }
+            | RuleAction::SetLimiterState { .. }
             | RuleAction::ResolveCancelledReinvite { .. } => EffectKind::Bookkeeping,
         }
     }
@@ -1099,7 +1099,7 @@ impl RuleAction {
 /// these): `topology` (the HA `(p,b)` version vector), `worker_index`,
 /// `sampled`/`trace_id`/`root_span_id` (observability), `message_count`,
 /// `terminating_refresh_legs`, `a_leg_pending_vias`/`a_leg_pending_cseq`
-/// (relay frame state), `limiter_entries`, `timers`, `active_rules`,
+/// (relay frame state), `limiter`, `timers`, `active_rules`,
 /// `policy_update_headers`/`policy_update_body`, `billing_context`,
 /// `emergency`. Add an accessor only when a real rule needs it — never
 /// speculatively.

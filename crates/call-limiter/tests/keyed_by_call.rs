@@ -16,7 +16,9 @@ use std::time::Duration;
 use call_limiter::wire::{
     AdmitEntry, AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest,
 };
-use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
+use call_limiter::{
+    AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer, RefreshResult,
+};
 use http_net::{HttpRequest, HttpResponse, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 
@@ -151,14 +153,14 @@ async fn an_empty_replacement_frees_the_set_without_a_tombstone() {
     assert_eq!(s.admit("c1", &[], true), AdmitResult::Admitted);
     assert_eq!([s.held("x"), s.held("y")], [1, 1], "only the witnesses");
     assert_eq!(s.calls(), 2, "the call holds no set");
-    assert!(!s.refresh("c1"), "nothing to keep alive");
     assert_eq!(s.admit("c1", &entries(&[("y", 10)]), false), AdmitResult::Admitted);
     assert_eq!(s.held("y"), 2);
 }
 
-/// The cap of the most recent admit per id applies.
+/// Each admit is checked against its own entries' caps: the store keeps no
+/// cap per id.
 #[tokio::test(start_paused = true)]
-async fn the_most_recent_limit_of_an_id_applies() {
+async fn each_admit_is_checked_against_its_own_entry_cap() {
     let s = store();
     witnesses(&s, &["x"]);
     assert_eq!(s.admit("c1", &entries(&[("x", 2)]), false), AdmitResult::Admitted);
@@ -168,6 +170,38 @@ async fn the_most_recent_limit_of_an_id_applies() {
         s.admit("c3", &entries(&[("x", 3)]), false),
         AdmitResult::Rejected { limiter_id: "x".into() }
     );
+}
+
+/// An id the call keeps or reduces is never checked: `[x(10)]` → `[x(1)]`
+/// with two witnesses on `x` is admitted although `x` is over the new cap.
+#[tokio::test(start_paused = true)]
+async fn a_kept_id_over_a_lower_cap_is_admitted() {
+    let s = store();
+    witnesses(&s, &["x"]);
+    assert_eq!(s.admit("witness-x-2", &entries(&[("x", 100)]), false), AdmitResult::Admitted);
+    assert_eq!(s.admit("c1", &entries(&[("x", 10)]), false), AdmitResult::Admitted);
+    assert_eq!(s.held("x"), 3);
+    assert_eq!(s.admit("c1", &entries(&[("x", 1)]), true), AdmitResult::Admitted);
+    assert_eq!(s.held("x"), 3, "the call keeps its one hold on x");
+}
+
+/// `admission_max` is the largest live count over the ids, what the next
+/// admit of that id compares with its cap; 0 once everything is released.
+#[tokio::test(start_paused = true)]
+async fn the_admission_max_gauge_is_the_largest_live_count() {
+    let s = store();
+    assert_eq!(s.stats().admission_max, 0);
+    witnesses(&s, &["x", "y"]);
+    assert_eq!(
+        s.admit("c1", &entries(&[("x", 10), ("x", 10), ("y", 10)]), false),
+        AdmitResult::Admitted
+    );
+    assert_eq!(s.stats().admission_max, 3, "x is held three times");
+    s.release("c1");
+    assert_eq!(s.stats().admission_max, 1, "the witnesses");
+    s.release("witness-x");
+    s.release("witness-y");
+    assert_eq!(s.stats().admission_max, 0);
 }
 
 // ── release ───────────────────────────────────────────────────────────
@@ -201,7 +235,11 @@ async fn a_released_call_refuses_admit_and_refresh_for_one_lease() {
         "a fold landing after the call ended holds nothing"
     );
     assert_eq!(s.held("y"), 1);
-    assert!(!s.refresh("c1"), "a refresh of a released call re-creates nothing");
+    assert_eq!(
+        s.refresh("c1", &["x".into()]),
+        RefreshResult::Released,
+        "a refresh of a released call re-creates nothing"
+    );
     assert_eq!(s.held("x"), 1);
     s.release("c1");
     assert_eq!([s.held("x"), s.held("y")], [1, 1], "a second release is a no-op");
@@ -237,8 +275,8 @@ async fn lease_expiry_drops_the_set_and_counts_it() {
     );
     // Keep the witnesses alive across the lease.
     advance(LEASE / 2).await;
-    assert!(s.refresh("witness-x"));
-    assert!(s.refresh("witness-y"));
+    assert_eq!(s.refresh("witness-x", &["x".into()]), RefreshResult::Extended);
+    assert_eq!(s.refresh("witness-y", &["y".into()]), RefreshResult::Extended);
     advance(LEASE / 2 + Duration::from_secs(1)).await;
     assert_eq!(s.sweep_now(), 1, "one call expired");
     assert_eq!([s.held("x"), s.held("y")], [1, 1], "only the witnesses");
@@ -255,7 +293,7 @@ async fn refresh_and_replace_extend_the_lease() {
     assert_eq!(s.admit("c1", &entries(&[("x", 10)]), false), AdmitResult::Admitted);
     assert_eq!(s.admit("c2", &entries(&[("y", 10)]), false), AdmitResult::Admitted);
     advance(LEASE - Duration::from_secs(1)).await;
-    assert!(s.refresh("c1"));
+    assert_eq!(s.refresh("c1", &["x".into()]), RefreshResult::Extended);
     assert_eq!(s.admit("c2", &entries(&[("y", 10), ("z", 10)]), false), AdmitResult::Admitted);
     advance(Duration::from_secs(2)).await;
     assert_eq!(s.sweep_now(), 0, "both leases were extended");
@@ -265,13 +303,44 @@ async fn refresh_and_replace_extend_the_lease() {
     assert_eq!(s.stats().current_total, 0);
 }
 
-/// A refresh of a call the store never admitted re-creates nothing.
+/// A refresh of a call the store does not know and has not tombstoned
+/// re-creates its set from the ids it carries, with no cap check: the call
+/// exists and was admitted.
 #[tokio::test(start_paused = true)]
-async fn a_refresh_of_an_unknown_call_is_a_no_op() {
+async fn a_refresh_of_an_unknown_call_re_registers_its_set_without_a_cap_check() {
     let s = store();
-    assert!(!s.refresh("never-admitted"));
+    witnesses(&s, &["x"]);
+    assert_eq!(s.admit("c1", &entries(&[("x", 10), ("y", 10)]), false), AdmitResult::Admitted);
+    advance(LEASE + Duration::from_secs(1)).await;
+    assert_eq!(s.sweep_now(), 2, "the witness and the call lapsed");
+    assert_eq!([s.held("x"), s.held("y")], [0, 0]);
+    // x at cap 1 would refuse an admit; the refresh re-registers regardless.
+    assert_eq!(s.admit("filler", &entries(&[("x", 1)]), false), AdmitResult::Admitted);
+    assert_eq!(s.refresh("c1", &["x".into(), "x".into(), "y".into()]), RefreshResult::Reregistered);
+    assert_eq!([s.held("x"), s.held("y")], [3, 1], "the set the refresh carries, cap or not");
+    assert_eq!(s.stats().reregistered_calls, 1);
+    assert_eq!(s.refresh("c1", &["x".into()]), RefreshResult::Extended, "known again");
+    s.release("c1");
+    assert_eq!([s.held("x"), s.held("y")], [1, 0], "one release frees the re-registered set");
+}
+
+/// A re-registration racing the call's release: whichever lands first, the
+/// release wins and the store holds nothing for the call.
+#[tokio::test(start_paused = true)]
+async fn a_re_registration_racing_the_release_loses() {
+    let s = store();
+    // Release first: the tombstone refuses the refresh.
+    assert_eq!(s.admit("c1", &entries(&[("x", 10)]), false), AdmitResult::Admitted);
+    s.release("c1");
+    assert_eq!(s.refresh("c1", &["x".into()]), RefreshResult::Released);
+    assert_eq!(s.held("x"), 0);
+    // Refresh first: it re-registers, the release drops it.
+    assert_eq!(s.refresh("c2", &["x".into()]), RefreshResult::Reregistered);
+    assert_eq!(s.held("x"), 1);
+    s.release("c2");
+    assert_eq!(s.held("x"), 0);
+    assert_eq!(s.refresh("c2", &["x".into()]), RefreshResult::Released);
     assert_eq!(s.calls(), 0);
-    assert_eq!(s.stats().current_total, 0);
 }
 
 // ── wire ──────────────────────────────────────────────────────────────
@@ -317,14 +386,21 @@ async fn the_wire_carries_the_call_key() {
     assert_eq!(body.rejected_id.as_deref(), Some("x"));
     assert!(!body.released, "a cap refusal is not a tombstone refusal");
 
-    let refresh =
-        |call_ref: &str| serde_json::to_vec(&RefreshRequest { call_ref: call_ref.into() }).unwrap();
+    let refresh = |call_ref: &str| {
+        serde_json::to_vec(&RefreshRequest { call_ref: call_ref.into(), ids: vec!["x".into()] })
+            .unwrap()
+    };
     let resp = call(&net, HttpRequest::post("/v1/refresh", refresh("c1"))).await;
     let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
-    assert!(body.known);
+    assert!(body.known && !body.reregistered);
 
     let release =
         |call_ref: &str| serde_json::to_vec(&ReleaseRequest { call_ref: call_ref.into() }).unwrap();
+    let resp = call(&net, HttpRequest::post("/v1/refresh", refresh("c3"))).await;
+    let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
+    assert!(!body.known && body.reregistered, "an unknown call is re-registered");
+    assert_eq!(store.held("x"), 2);
+    assert_eq!(call(&net, HttpRequest::post("/v1/release", release("c3"))).await.status, 200);
     assert_eq!(call(&net, HttpRequest::post("/v1/release", release("c1"))).await.status, 200);
     assert_eq!(call(&net, HttpRequest::post("/v1/release", release("c1"))).await.status, 200);
     assert_eq!(call(&net, HttpRequest::post("/v1/release", release("nope"))).await.status, 200);
@@ -332,7 +408,7 @@ async fn the_wire_carries_the_call_key() {
 
     let resp = call(&net, HttpRequest::post("/v1/refresh", refresh("c1"))).await;
     let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
-    assert!(!body.known, "a released call is unknown to refresh");
+    assert!(!body.known && !body.reregistered, "a released call is refused by refresh");
 
     let resp =
         call(&net, HttpRequest::post("/v1/admit", admit("c1", entries(&[("x", 1)]), false))).await;

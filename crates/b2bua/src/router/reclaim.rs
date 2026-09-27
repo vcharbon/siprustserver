@@ -214,7 +214,7 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
 /// is the only node that can free this slot once its primary is dead for good.
 async fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
     if call.limiter.counted {
-        ctx.limiter.release(&call.call_ref).await;
+        ctx.limiter.release(&call.limiter.key).await;
     }
 }
 
@@ -557,7 +557,13 @@ mod tests {
     /// A replicable call at `(p, b)`, owned by `w0` and backed up by `w1`.
     fn base(p: i64, b: i64) -> Call {
         let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        let mut call = build_initial_call(&invite("w0", "w1", "fold"), src(), &config, 0);
+        let mut call = build_initial_call(
+            &invite("w0", "w1", "fold"),
+            src(),
+            &config,
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
         call.topology =
             Some(CallTopology { pri: "w0".into(), bak: "w1".into(), gen: p, bak_gen: b });
         call

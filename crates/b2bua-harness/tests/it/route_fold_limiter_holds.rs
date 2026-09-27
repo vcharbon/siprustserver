@@ -18,7 +18,6 @@
 //! own, so a surplus release reads below the witness. The store is probed per
 //! id while the call holds its set and drained to the witnesses after it ends.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,15 +28,12 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
-use b2bua::limiter::CallLimiter;
-use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut};
+use b2bua_harness::{
+    invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_LIMITER_ADDR,
+};
 use call::ReleaseEventKind;
-use call_limiter::wire::AdmitEntry;
-use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use call_limiter::LimiterConfig;
 use scenario_harness::Harness;
-use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -50,8 +46,11 @@ const RELEASE_DELAY: Duration = Duration::from_secs(3);
 /// The route-supplied ring deadline of the first b-leg.
 const NO_ANSWER_SEC: i64 = 5;
 
-/// Every id a scenario may hold; each carries one witness hold.
-const IDS: [&str; 3] = ["x", "y", "z"];
+/// The witness rig with a fail-open budget above the paused-clock HTTP round
+/// trip (a detached admit is woken inside a coarse `h.advance`).
+async fn limiter_rig() -> WitnessRig {
+    WitnessRig::serve(LimiterConfig::default(), Duration::from_secs(2), None).await
+}
 
 /// Delay `call_failure` / `call_release` before delegating.
 struct DelayedDecisionEngine {
@@ -85,61 +84,6 @@ impl CallDecisionEngine for DelayedDecisionEngine {
         tokio::time::sleep(self.release_delay).await;
         self.inner.call_release(req).await
     }
-}
-
-/// A real `LimiterServer` on the simulated HTTP fabric, so every admit is a
-/// genuine set the store counts, with one witness hold per id in [`IDS`].
-struct LimiterRig {
-    store: Arc<CallStore>,
-    client: Arc<dyn CallLimiter>,
-    _server: Box<dyn HttpServerHandle>,
-}
-
-impl LimiterRig {
-    /// The holds the call owns on `id`: the store's count less the witness.
-    fn holds(&self, id: &str) -> i64 {
-        self.store.held(id) - 1
-    }
-
-    fn all_holds(&self) -> [i64; 3] {
-        IDS.map(|id| self.holds(id))
-    }
-
-    async fn expect_holds(&self, expected: [i64; 3], why: &str) {
-        settle_until(|| self.all_holds() == expected).await;
-        assert_eq!(self.all_holds(), expected, "holds on {IDS:?}: {why}");
-    }
-
-    /// Settle until the call holds nothing, then release the witnesses so the
-    /// store reads empty for the reaped check.
-    async fn expect_drained(&self, why: &str) {
-        self.expect_holds([0, 0, 0], why).await;
-        for id in IDS {
-            self.store.release(&format!("witness-{id}"));
-        }
-    }
-}
-
-async fn limiter_rig() -> LimiterRig {
-    let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-    let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
-    for id in IDS {
-        let witness = store.admit(
-            &format!("witness-{id}"),
-            &[AdmitEntry { id: id.into(), limit: 100 }],
-            false,
-        );
-        assert_eq!(witness, AdmitResult::Admitted, "witness on {id}");
-    }
-    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-    let handle = http.serve(laddr, server).await.unwrap();
-    // A fail-open budget above the paused-clock HTTP round trip: the detached
-    // admit is woken inside a coarse `h.advance`, whose 100 ms chunks a
-    // production-sized budget could expire between.
-    let client: Arc<dyn CallLimiter> =
-        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_secs(2)));
-    LimiterRig { store, client, _server: handle }
 }
 
 fn limiters(ids: &[&str]) -> Vec<CallLimiterEntry> {
@@ -483,4 +427,156 @@ async fn failover_route_refused_on_its_second_limiter_counts_nothing() {
         vec![486],
         "the a-leg INVITE transaction carries exactly one final: the 486",
     );
+}
+
+/// Failover fold on a gone call that was uncounted at its end. The initial
+/// route states no limiter; bob busies out; the consult parks; the caller
+/// CANCELs and the call is evicted, releasing nothing (an uncounted call
+/// leaves no tombstone). The fold's admit of `x` + `y` is then granted: no
+/// call is left to state it on, and the router releases the call.
+#[tokio::test(start_paused = true)]
+async fn failover_fold_after_an_uncounted_call_is_gone_is_released_by_the_router() {
+    let h = Harness::new("failover-fold-uncounted-gone-call");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let carol = h.agent("carol", "127.0.0.1:5071").await;
+    let rig = limiter_rig().await;
+    let decision = Arc::new(DelayedDecisionEngine {
+        failure_delay: FAILURE_DELAY,
+        release_delay: Duration::ZERO,
+        inner: Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(|_| initial_route(5070, &[]))
+                .on_failure(|_| failover_route(5071, &["x", "y"]))
+                .build(),
+        ),
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    bob.receive("INVITE").await.respond(486, "Busy Here").await;
+    bob.receive("ACK").await;
+
+    // ── the caller gives up while the consult is in flight ─────────────────
+    let mut cxl = call.cancel().await;
+    cxl.expect(200).await;
+    call.expect(487).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    b2bua.assert_calls_reaped();
+    let released_before = rig.store.stats().releases_total;
+
+    // ── the fold's admit is granted; the router releases the gone call ─────
+    h.advance(Duration::from_secs(2)).await;
+    assert!(
+        carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
+        "the fold dials no leg for a call that is gone",
+    );
+    rig.expect_drained("the router released the gone call's set").await;
+    assert_eq!(
+        rig.store.stats().releases_total,
+        released_before + 1 + 3,
+        "one release for the call"
+    );
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released), (2, 2));
+    b2bua.assert_fully_reaped();
+
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let report = h.finish().await;
+    assert_eq!(invite_final_statuses(&report, alice.addr()), vec![487]);
+}
+
+/// Release-reroute fold whose admit fails open on a Terminating counted call:
+/// the limiter is stalled when the fold's admit leaves, so the call ends
+/// uncounted and never releases its old set, which lingers on the limiter
+/// until its lease lapses and is counted there.
+#[tokio::test(start_paused = true)]
+async fn a_fail_open_fold_on_an_ending_call_leaves_its_old_set_to_the_lease() {
+    let h = Harness::new("release-reroute-fold-fail-open-terminating-call");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let media = h.agent("media", "127.0.0.1:5090").await;
+    let rig =
+        WitnessRig::serve(LimiterConfig { lease_sec: 20 }, Duration::from_millis(150), None).await;
+    let decision = Arc::new(DelayedDecisionEngine {
+        failure_delay: Duration::ZERO,
+        release_delay: RELEASE_DELAY,
+        inner: Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(|_| {
+                    let mut r = route_to("127.0.0.1", 5070);
+                    r.features.platform.max_duration_sec = 60;
+                    r.callback_context = Some("release-ctx".into());
+                    r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
+                    r.call_limiter = limiters(&["x", "y"]);
+                    NewCallResponse::Route(r)
+                })
+                .on_release(|_| {
+                    let mut r = route_to("127.0.0.1", 5090);
+                    r.call_limiter = limiters(&["y", "z"]);
+                    ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
+                })
+                .build(),
+        ),
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+            c.limiter_refresh_sec = 5;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    rig.expect_holds([1, 1, 0], "the established call holds x and y").await;
+
+    // ── the cap raises the release consult, which parks ─────────────────────
+    for _ in 0..61 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    // ── the caller hangs up; the limiter stalls before the fold's admit ────
+    let mut bye = dialog.bye().await;
+    let mut bob_bye = bob.receive("BYE").await;
+    rig.http.apply_fault(http_net::Fault::Stall { dst: WITNESS_LIMITER_ADDR.parse().unwrap() });
+    for _ in 0..RELEASE_DELAY.as_secs() {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    assert!(
+        media.try_receive_tolerating("INVITE", &[]).await.is_none(),
+        "the fold dials no replacement leg for a call whose parties hung up",
+    );
+    rig.http.apply_fault(http_net::Fault::Resume { dst: WITNESS_LIMITER_ADDR.parse().unwrap() });
+
+    // ── bob's 200 ends the call: uncounted, it releases nothing ────────────
+    bob_bye.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    assert_eq!(rig.all_holds(), [1, 1, 0], "the old set lingers: a failed admit is never released");
+    let count = b2bua.limiter_count();
+    assert_eq!((count.failed_open, count.released), (1, 0));
+
+    for _ in 0..22 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    rig.store.sweep_now();
+    assert_eq!(rig.store.stats().lease_expired_calls, 1, "the lease freed the set");
+    rig.expect_drained("only the lease frees a set the call never released").await;
+    b2bua.assert_fully_reaped_leaving(LimiterLeak { unreleased: 2, stored: 0 });
+    let _ = h.finish().await;
 }

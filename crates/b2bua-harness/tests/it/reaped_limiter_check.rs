@@ -19,7 +19,7 @@ use b2bua_harness::{
     settle_until, B2buaScene, B2buaSut, LimiterLeak, BOB_PORT, DEFAULT_LIMITER_ID,
 };
 use call_limiter::wire::AdmitEntry;
-use call_limiter::{AdmitResult, CallStore, LimiterConfig};
+use call_limiter::{AdmitResult, CallStore, LimiterConfig, RefreshResult};
 use scenario_harness::Harness;
 use sip_clock::Clock;
 
@@ -48,12 +48,12 @@ impl CallLimiter for DropsReleases {
             AdmitResult::Released => AdmitOutcome::Released,
         }
     }
-    async fn release(&self, _call_ref: &str) {}
-    async fn refresh(&self, call_ref: &str) -> RefreshOutcome {
-        if self.store.refresh(call_ref) {
-            RefreshOutcome::Known
-        } else {
-            RefreshOutcome::Unknown
+    async fn release(&self, _key: &str) {}
+    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
+        match self.store.refresh(key, ids) {
+            RefreshResult::Extended => RefreshOutcome::Known,
+            RefreshResult::Reregistered => RefreshOutcome::Reregistered,
+            RefreshResult::Released => RefreshOutcome::Released,
         }
     }
 }

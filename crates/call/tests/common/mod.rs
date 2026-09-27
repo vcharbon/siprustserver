@@ -221,7 +221,10 @@ pub fn representative_call() -> Call {
             ],
             body: SDP_BODY.to_vec(),
         },
-        limiter: CallLimiterState::admitted(vec!["subscriber:alice@example.com".into()]),
+        limiter: CallLimiterState::admitted(
+            "worker-0|call-id-deadbeef@example.com|alice-from-tag-001#k1".into(),
+            vec!["subscriber:alice@example.com".into()],
+        ),
         timers: vec![
             TimerEntry {
                 id: "timer-no-answer-a".into(),
@@ -841,8 +844,8 @@ fn arb_cdr() -> impl Strategy<Value = CdrEvent> {
         })
 }
 fn arb_limiter() -> impl Strategy<Value = CallLimiterState> {
-    (any::<bool>(), proptest::collection::vec(arb_tag(), 0..3))
-        .prop_map(|(counted, ids)| CallLimiterState { counted, ids })
+    (arb_tag(), any::<bool>(), proptest::collection::vec(arb_tag(), 0..3))
+        .prop_map(|(key, counted, ids)| CallLimiterState { key, counted, ids })
 }
 fn arb_tagmap() -> impl Strategy<Value = TagMapping> {
     (arb_tag(), arb_tag(), arb_tag()).prop_map(|(a_tag, b_leg_id, b_tag)| TagMapping {

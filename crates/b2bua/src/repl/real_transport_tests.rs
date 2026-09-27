@@ -115,8 +115,13 @@ fn invite(pri: &str, bak: &str, cid: &str) -> SipRequest {
 /// timer-restore work per call without the timer firing (and tearing the call
 /// down) mid-measurement. Returns `(call_ref, encoded body)`.
 fn reclaim_body(primary: &str, backup: &str, cid: &str, clock: &Clock) -> (String, Vec<u8>) {
-    let mut call =
-        build_initial_call(&invite(primary, backup, cid), src(), &config_for(primary), 0);
+    let mut call = build_initial_call(
+        &invite(primary, backup, cid),
+        src(),
+        &config_for(primary),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     call.timers.push(TimerEntry {
         id: format!("keepalive-{cid}"),
         timer_type: TimerType::Keepalive,

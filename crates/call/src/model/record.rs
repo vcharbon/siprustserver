@@ -109,27 +109,39 @@ pub struct PrackedProvisional {
     pub rseq: i64,
 }
 
-/// The call's admission state on the call limiter, which keys every hold by
-/// `call_ref`: whether the limiter counts the call, and the ids of the set it
-/// last admitted (observability: the CDR and the decision snapshot name them).
-/// A counted call refreshes its lease while it lives and owes one release at
+/// The call's admission state on the call limiter: the key every hold of the
+/// call is kept under, whether the limiter counts the call, and the ids of the
+/// set it last admitted (observability: the CDR and the decision snapshot name
+/// them). The key is minted once at the call's creation and is unique over
+/// time (`call_ref` alone is not: a retried INVITE reuses it), so a release
+/// names this call and no later one; it is replicated with the call, so a
+/// takeover, a reclaim and the lossy reap release with the same key. A
+/// counted call refreshes its lease while it lives and owes one release at
 /// its end; an uncounted one (no limiter stated, or an admit that failed
 /// open) never refreshes or releases.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLimiterState {
+    pub key: String,
     pub counted: bool,
     pub ids: Vec<String>,
 }
 
 impl CallLimiterState {
-    /// The state after an admitted set: counted iff the set is not empty.
-    pub fn admitted(ids: Vec<String>) -> Self {
-        Self { counted: !ids.is_empty(), ids }
+    /// The state of a call under `key` the limiter does not count.
+    pub fn uncounted(key: String) -> Self {
+        Self { key, counted: false, ids: Vec::new() }
     }
 
-    /// The state of a call the limiter does not count.
-    pub fn uncounted() -> Self {
-        Self::default()
+    /// The state under `key` after an admitted set: counted iff the set is
+    /// not empty.
+    pub fn admitted(key: String, ids: Vec<String>) -> Self {
+        Self { key, counted: !ids.is_empty(), ids }
+    }
+
+    /// State the outcome of a replaced set, the key kept.
+    pub fn set(&mut self, counted: bool, ids: Vec<String>) {
+        self.counted = counted;
+        self.ids = ids;
     }
 }
 

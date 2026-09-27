@@ -345,8 +345,13 @@ mod tests {
 
     fn call_with(a_state: LegState, b: Leg) -> Call {
         let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        let mut call =
-            build_initial_call(&a_invite(), "10.0.0.1:5060".parse().unwrap(), &config, 0);
+        let mut call = build_initial_call(
+            &a_invite(),
+            "10.0.0.1:5060".parse().unwrap(),
+            &config,
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
         call.a_leg.state = a_state;
         call = call::helpers::add_b_leg(call, b);
         call.active_peer = Some(call::ActivePeer { leg_a: "a".into(), leg_b: "b-1".into() });

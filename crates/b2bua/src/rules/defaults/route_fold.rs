@@ -2,7 +2,7 @@
 //! the router's `route_result_payload`) and the parity actions both async
 //! route folds — `failover-create-leg` (`call-failure-result`) and
 //! `release-reroute` (`call-release-result`) — must apply identically, and the
-//! reader of the limiter state both carry ([`route_fold_holds`]). One parser +
+//! reader of the limiter state both carry ([`route_fold_limiter_state`]). One parser +
 //! one parity-action builder so the folds cannot drift from each other or from
 //! the initial `apply_route`.
 
@@ -105,7 +105,7 @@ const ROUTE_FOLDS: [(&str, &str); 2] =
 /// call the fold names owns that set from then on — stated on its record, or
 /// released when no call is left to state it on. `None` for any other event,
 /// or a route fold carrying no state.
-pub(crate) fn route_fold_holds(event: &CallEvent) -> Option<call::CallLimiterState> {
+pub(crate) fn route_fold_limiter_state(event: &CallEvent) -> Option<call::CallLimiterState> {
     let CallEvent::InternalEvent { topic, outcome, payload, .. } = event else {
         return None;
     };
@@ -118,10 +118,11 @@ pub(crate) fn route_fold_holds(event: &CallEvent) -> Option<call::CallLimiterSta
 /// A route payload's `call_limiter` object: `None` when absent or malformed.
 fn admitted_state(payload: &serde_json::Value) -> Option<call::CallLimiterState> {
     let o = payload.get("call_limiter")?.as_object()?;
+    let key = o.get("key")?.as_str()?.to_string();
     let counted = o.get("counted")?.as_bool()?;
     let ids: Vec<String> =
         o.get("ids")?.as_array()?.iter().filter_map(|e| Some(e.as_str()?.to_string())).collect();
-    Some(call::CallLimiterState { counted, ids })
+    Some(call::CallLimiterState { key, counted, ids })
 }
 
 /// The decision's `label` on a fold payload, read by the router's fold mark
@@ -178,7 +179,7 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
         actions.push(RuleAction::SetSubscriptions { events: events.clone() });
     }
     if let Some(limiter) = &fold.limiter {
-        actions.push(RuleAction::ReplaceLimiterHolds {
+        actions.push(RuleAction::SetLimiterState {
             counted: limiter.counted,
             ids: limiter.ids.clone(),
         });

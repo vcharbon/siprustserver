@@ -221,7 +221,13 @@ mod tests {
             _ => panic!("expected a request"),
         };
         let cfg = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        build_initial_call(&req, SocketAddr::from(([10, 0, 0, 9], 5060)), &cfg, 1_000)
+        build_initial_call(
+            &req,
+            SocketAddr::from(([10, 0, 0, 9], 5060)),
+            &cfg,
+            &sip_txn::IdGen::seeded(1),
+            1_000,
+        )
     }
 
     fn settings(declare: CdrQueueDeclare) -> RabbitMqCdrSettings {

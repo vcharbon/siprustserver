@@ -86,6 +86,15 @@ pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
         .sum()
 }
 
+/// A limiter lease outliving the replica TTL (`reboot_budget_sec`, 600 s): a
+/// set a crashed primary never releases is freed by the backup's reap or the
+/// reborn primary's reclaim, never by the lease, so a cell proves the release
+/// it names. Production runs the opposite relation (lease 120 s, refresh 40 s,
+/// see ADR-0038): there the lease frees such a set first and the reap's
+/// release is a no-op.
+pub const LEASE_OUTLIVING_THE_REPLICA_TTL: call_limiter::LimiterConfig =
+    call_limiter::LimiterConfig { lease_sec: 3600 };
+
 /// **The universal "call terminated on the backup" post-condition** (TODO
 /// `FixCallTerminateOnBackup` §2). After the call ends and the cluster settles,
 /// *every* cell must hold all four invariants, regardless of which node served the
@@ -96,11 +105,12 @@ pub fn total_cdrs_for(nodes: &[&ReplicatedB2buaSut], call_ref: &str) -> usize {
 /// 2. **The call is OVER** — no node serves it and no node holds a replica body,
 ///    so no later reboot can resurrect it, and both nodes' per-call memory is
 ///    clean ([`assert_call_fully_released`], which also asserts 0 serving owners).
-/// 3. **Limiter released exactly once** — the shared `LimiterServer`'s
-///    `current_total == 0` (not leaked at ≥1, not driven negative by a double
-///    release).
+/// 3. **Limiter released** — the shared `LimiterServer`'s `current_total == 0`
+///    (a release is keyed by the call and idempotent, so the count never goes
+///    negative; a cell checks that the release it names happened).
 ///
-/// `limiter` is the shared `WindowStore` behind the cluster's one `LimiterServer`;
+/// `limiter` is the shared `CallStore` behind the cluster's one `LimiterServer`;
+/// a cell with witness holds releases them before this check;
 /// since each cell runs a single call, its global `current_total` is this call's.
 pub async fn assert_call_fully_over(
     nodes: &[&ReplicatedB2buaSut],
@@ -116,16 +126,9 @@ pub async fn assert_call_fully_over(
         "expected EXACTLY ONE CDR for {call_ref} across the cluster (0 = lost / \
          backup self-released without a CDR, 2 = double-billed); got {cdrs}",
     );
-    // #3 — limiter released exactly once (drained to zero, never negative).
+    // #3 — limiter released (drained to zero).
     let total = limiter.stats().current_total;
-    assert_eq!(
-        total,
-        0,
-        "limiter hold for {call_ref} not released exactly once: current_total = {total} \
-         ({} = leaked / pinned, {} = double release)",
-        if total > 0 { "positive" } else { "" },
-        if total < 0 { "negative" } else { "" },
-    );
+    assert_eq!(total, 0, "limiter set of {call_ref} not released: current_total = {total}");
 }
 
 /// **The StayDead post-condition** (ADR-0020 X3, Model Y): a call whose terminal was
@@ -136,9 +139,9 @@ pub async fn assert_call_fully_over(
 ///
 /// 1. **Write NO CDR** — exactly zero across the cluster ([`total_cdrs_for`] == 0).
 ///    A `1` would mean the backup illegally discharged (the removed fallback).
-/// 2. **Release the limiter exactly once anyway** — the shared `WindowStore`'s
-///    `current_total == 0` (not leaked at ≥1 by skipping the release, not driven
-///    negative by a double release). This is the auto-cleanup the contract requires.
+/// 2. **Release the limiter anyway** — the shared `CallStore`'s
+///    `current_total == 0` (not leaked at ≥1 by skipping the release). This is
+///    the auto-cleanup the contract requires.
 /// 3. **Leave no trace / no leaked per-call memory** — the deferral body is evicted,
 ///    so a later reboot cannot resurrect it ([`assert_call_fully_released`]).
 ///
@@ -159,12 +162,9 @@ pub async fn assert_call_lost_no_cdr(
     );
     let total = limiter.stats().current_total;
     assert_eq!(
-        total,
-        0,
-        "limiter hold for {call_ref} not released by the backup auto-cleanup: \
-         current_total = {total} ({} = leaked / pinned, {} = double release)",
-        if total > 0 { "positive" } else { "" },
-        if total < 0 { "negative" } else { "" },
+        total, 0,
+        "limiter set of {call_ref} not released by the backup auto-cleanup: \
+         current_total = {total}"
     );
 }
 

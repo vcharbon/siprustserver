@@ -48,7 +48,7 @@ fn unwired_state(store: &Arc<InMemoryCallStore>, metrics: &B2buaMetrics) -> Call
 fn cookie_call() -> Call {
     let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
     let src = SocketAddr::from(([10, 0, 0, 9], 5060));
-    build_initial_call(&invite_with_cookie("w0", "w1"), src, &config, 0)
+    build_initial_call(&invite_with_cookie("w0", "w1"), src, &config, &sip_txn::IdGen::seeded(1), 0)
 }
 
 /// With no replication store wired, a call that names a backup peer is created,

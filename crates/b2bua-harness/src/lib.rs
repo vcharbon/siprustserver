@@ -39,7 +39,10 @@ use tokio::task::JoinHandle;
 pub mod limiter;
 pub mod terminated;
 
-pub use limiter::{LimiterCount, LimiterLeak, LimiterProbe, DEFAULT_LIMITER_ID};
+pub use limiter::{
+    LimiterCount, LimiterLeak, LimiterProbe, WitnessRig, DEFAULT_LIMITER_ID, WITNESS_IDS,
+    WITNESS_LIMITER_ADDR,
+};
 pub use terminated::{TerminatedCalls, TerminatedCallsWriter};
 
 // ===========================================================================

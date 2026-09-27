@@ -36,10 +36,10 @@ use b2bua::decision::{
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
+use call_limiter::{CallStore, LimiterMetrics, LimiterServer};
 use failover_harness::{
     assert_call_fully_over, assert_call_lost_no_cdr, worker_ordinals, FailoverHarness, ProxySut,
-    ReplicatedB2buaSut, WorkerHealth,
+    ReplicatedB2buaSut, WorkerHealth, LEASE_OUTLIVING_THE_REPLICA_TTL,
 };
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use scenario_harness::{Agent, Dialog};
@@ -58,12 +58,6 @@ const LIMITER_ADDR: &str = "10.0.0.1:8080";
 fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
-
-/// A lease outliving the replica TTL (`reboot_budget_sec`, 600 s): a set the
-/// crashed primary never releases is freed by the backup's reap or the
-/// reborn primary's reclaim, never by the lease, so each cell proves the
-/// release it names.
-const LEASE_OUTLIVING_THE_REPLICA_TTL: LimiterConfig = LimiterConfig { lease_sec: 3600 };
 
 fn limiter_client(http: &SimulatedHttpNetwork) -> Arc<dyn CallLimiter> {
     Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr(), Duration::from_millis(150)))

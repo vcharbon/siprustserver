@@ -58,7 +58,7 @@ impl CallLimiter for SpyLimiter {
     async fn release(&self, _call_ref: &str) {
         self.touched.store(true, Ordering::SeqCst);
     }
-    async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+    async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
         self.touched.store(true, Ordering::SeqCst);
         RefreshOutcome::Unavailable
     }

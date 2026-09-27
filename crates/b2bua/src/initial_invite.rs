@@ -9,8 +9,9 @@ use std::net::SocketAddr;
 
 use call::helpers::{add_cdr_event, mark_decision, record_termination};
 use call::{
-    ALegInviteSnapshot, Call, CallModelState, CallTopology, CdrEvent, CdrEventType, DecisionKind,
-    Leg, LegDisposition, LegKind, LegState, RemoteInfo, TerminationCause,
+    ALegInviteSnapshot, Call, CallLimiterState, CallModelState, CallTopology, CdrEvent,
+    CdrEventType, DecisionKind, Leg, LegDisposition, LegKind, LegState, RemoteInfo,
+    TerminationCause,
 };
 use sip_clock::Clock;
 use sip_message::emergency::is_emergency_request;
@@ -152,6 +153,7 @@ pub fn build_initial_call(
     invite: &SipRequest,
     src: SocketAddr,
     config: &B2buaConfig,
+    id_gen: &IdGen,
     now_ms: i64,
 ) -> Call {
     let call_ref = call::derive_call_ref(
@@ -159,6 +161,9 @@ pub fn build_initial_call(
         invite.call_id().as_str(),
         invite.from().tag().unwrap_or(""),
     );
+    // The limiter key: the call_ref plus a nonce, unique over time where the
+    // call_ref is not (a retried INVITE reuses its Call-ID and From tag).
+    let limiter = CallLimiterState::uncounted(format!("{call_ref}#{}", id_gen.new_tag()));
     let a_leg = Leg {
         leg_id: "a".to_string(),
         call_id: invite.call_id().to_string(),
@@ -198,7 +203,7 @@ pub fn build_initial_call(
         callback_context: None,
         billing_context: None,
         a_leg_invite,
-        limiter: Default::default(),
+        limiter,
         timers: vec![],
         cdr_events: vec![CdrEvent {
             event_type: CdrEventType::InviteReceived,
@@ -585,7 +590,13 @@ mod emergency_on_invite_tests {
         // Each canonical emergency RPH token flags the new a-leg Call as emergency.
         for tok in ["esnet.0", "wps.0", "q735.0"] {
             let invite = invite_with_rph(Some(tok));
-            let call = build_initial_call(&invite, src(), &config_for("w0"), 0);
+            let call = build_initial_call(
+                &invite,
+                src(),
+                &config_for("w0"),
+                &sip_txn::IdGen::seeded(1),
+                0,
+            );
             assert_eq!(
                 call.emergency,
                 Some(true),
@@ -597,12 +608,23 @@ mod emergency_on_invite_tests {
     #[test]
     fn non_emergency_invite_leaves_emergency_unset() {
         // No Resource-Priority at all → field stays absent (`None`), NOT Some(false).
-        let call = build_initial_call(&invite_with_rph(None), src(), &config_for("w0"), 0);
+        let call = build_initial_call(
+            &invite_with_rph(None),
+            src(),
+            &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
         assert_eq!(call.emergency, None, "no RPH → emergency stays None");
 
         // A well-formed but non-emergency RPH namespace.value also stays None.
-        let call =
-            build_initial_call(&invite_with_rph(Some("dsn.flash")), src(), &config_for("w0"), 0);
+        let call = build_initial_call(
+            &invite_with_rph(Some("dsn.flash")),
+            src(),
+            &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
         assert_eq!(call.emergency, None, "non-emergency RPH → emergency stays None");
     }
 
@@ -610,8 +632,13 @@ mod emergency_on_invite_tests {
     fn emergency_is_derived_through_the_real_helper() {
         // Proves the field is wired to `is_emergency_request` and not a naive
         // header-presence check: r-values compare case-insensitively (RFC 4412)…
-        let call =
-            build_initial_call(&invite_with_rph(Some("ESNET.0")), src(), &config_for("w0"), 0);
+        let call = build_initial_call(
+            &invite_with_rph(Some("ESNET.0")),
+            src(),
+            &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
         assert_eq!(call.emergency, Some(true), "r-value casing must not gate emergency");
 
         // …an emergency r-value among multiple namespaces flags…
@@ -619,13 +646,19 @@ mod emergency_on_invite_tests {
             &invite_with_rph(Some("dsn.flash, q735.0")),
             src(),
             &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
             0,
         );
         assert_eq!(call.emergency, Some(true), "emergency r-value in a list flags emergency");
 
         // …and an r-value merely embedding a token does not.
-        let call =
-            build_initial_call(&invite_with_rph(Some("esnet.01")), src(), &config_for("w0"), 0);
+        let call = build_initial_call(
+            &invite_with_rph(Some("esnet.01")),
+            src(),
+            &config_for("w0"),
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
         assert_eq!(call.emergency, None, "embedded token is not an emergency r-value");
     }
 }
@@ -680,7 +713,13 @@ mod stickiness_cookie_tests {
 
     fn call_for(invite: &SipRequest) -> call::Call {
         let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        build_initial_call(invite, SocketAddr::from(([10, 0, 0, 9], 5060)), &config, 0)
+        build_initial_call(
+            invite,
+            SocketAddr::from(([10, 0, 0, 9], 5060)),
+            &config,
+            &sip_txn::IdGen::seeded(1),
+            0,
+        )
     }
 
     #[test]

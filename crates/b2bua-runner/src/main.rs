@@ -61,7 +61,7 @@
 //!
 //! ## Call limiter
 //!   LIMITER_URL             shared limiter base URL; unset → NoopLimiter (fail-open)
-//!   LIMITER_WINDOW_SECONDS  refresh cadence; MUST match the service window (default 300)
+//!   LIMITER_REFRESH_SECONDS lease refresh cadence, below the service lease    (default 40)
 //!   LIMITER_TIMEOUT_MS      per-request fail-open budget                     (default 150)
 //!   B2BUA_STRESS_LIMITER_ID always-on limiter id on every call; "" disables  (default global-stress)
 //!   B2BUA_STRESS_LIMITER_LIMIT cap for that entry (never rejects in practice) (default 999999)

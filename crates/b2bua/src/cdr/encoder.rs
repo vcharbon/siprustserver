@@ -57,7 +57,13 @@ mod tests {
             _ => panic!("expected a request"),
         };
         let cfg = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
-        build_initial_call(&req, SocketAddr::from(([10, 0, 0, 9], 5060)), &cfg, created_at)
+        build_initial_call(
+            &req,
+            SocketAddr::from(([10, 0, 0, 9], 5060)),
+            &cfg,
+            &sip_txn::IdGen::seeded(1),
+            created_at,
+        )
     }
 
     /// The default encoder publishes exactly the bytes of `serde_json::to_vec`

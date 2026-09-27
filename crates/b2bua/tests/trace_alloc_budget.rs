@@ -52,6 +52,7 @@ fn unsampled_call() -> Call {
         &invite,
         SocketAddr::from(([10, 0, 0, 9], 5060)),
         &B2buaConfig::default(),
+        &sip_txn::IdGen::seeded(1),
         0,
     );
     assert_eq!(call.sampled, None, "a fresh call is not sampled until the draw says so");

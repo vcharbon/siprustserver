@@ -108,7 +108,7 @@ fn in_dialog_request(method: sip_message::Method) -> sip_message::SipRequest {
 
 fn test_call() -> Call {
     let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    build_initial_call(&invite(), src, &B2buaConfig::default(), 0)
+    build_initial_call(&invite(), src, &B2buaConfig::default(), &sip_txn::IdGen::seeded(1), 0)
 }
 
 fn info_event() -> CallEvent {

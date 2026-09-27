@@ -212,6 +212,14 @@ struct Inner {
     // This counter is that lost-CDR count: it should stay ~0 in a healthy cluster
     // and only climbs when a primary is permanently lost mid-call.
     repl_terminal_lost: AtomicU64,
+    // The call limiter's degraded paths, seen from the b2bua: an admit refused
+    // because the limiter had released the key (initial route / route fold),
+    // a refresh that re-registered a set the limiter no longer held, a
+    // refresh refused because the call was released.
+    limiter_admit_released_initial: AtomicU64,
+    limiter_admit_released_fold: AtomicU64,
+    limiter_refresh_reregistered: AtomicU64,
+    limiter_refresh_released: AtomicU64,
     // Re-hydration diagnostics (long-call-on-reboot study, 2026-06-05). How a
     // rebooted primary's bootstrap passes terminate: `seeded` = a pass reached
     // the first catch-up `Noop` (the peer streamed the full `bak:{me}` keyset);
@@ -724,6 +732,26 @@ impl B2buaMetrics {
     counter!(bump_repl_reclaimed, repl_reclaimed_total, repl_reclaimed);
     counter!(bump_repl_self_release, repl_self_release_total, repl_self_release);
     counter!(bump_repl_terminal_lost, repl_terminal_lost_total, repl_terminal_lost);
+    counter!(
+        bump_limiter_admit_released_initial,
+        limiter_admit_released_initial_total,
+        limiter_admit_released_initial
+    );
+    counter!(
+        bump_limiter_admit_released_fold,
+        limiter_admit_released_fold_total,
+        limiter_admit_released_fold
+    );
+    counter!(
+        bump_limiter_refresh_reregistered,
+        limiter_refresh_reregistered_total,
+        limiter_refresh_reregistered
+    );
+    counter!(
+        bump_limiter_refresh_released,
+        limiter_refresh_released_total,
+        limiter_refresh_released
+    );
     counter!(bump_repl_bootstrap_seeded, repl_bootstrap_seeded_total, repl_bootstrap_seeded);
     counter!(bump_repl_bootstrap_stalled, repl_bootstrap_stalled_total, repl_bootstrap_stalled);
 
@@ -1020,6 +1048,10 @@ impl B2buaMetrics {
         counter("b2bua_repl_takeover_refused_terminated_total", "backup-replica lookups refused because the body is Terminated (a released takeover copy): the message falls to the orphan 481/drop instead of re-serving a call that already ended", self.repl_takeover_refused_terminated_total());
         counter("b2bua_repl_reclaimed_total", "calls a rebooted primary re-materialised into its live map + re-armed (active reclaim, ADR-0011 X11)", self.repl_reclaimed_total());
         counter("b2bua_repl_self_release_total", "acting-backup takeover copies self-released once their served transaction(s) reached a terminal state (ADR-0014, replaces the Deactivate handback)", self.repl_self_release_total());
+        counter("b2bua_limiter_admit_released_initial_total", "initial-route admits refused because the limiter had released the call's key (the call runs uncounted) — expected 0", self.limiter_admit_released_initial_total());
+        counter("b2bua_limiter_admit_released_fold_total", "route-fold admits refused because the call was released while the consult was in flight (the fold counts nothing)", self.limiter_admit_released_fold_total());
+        counter("b2bua_limiter_refresh_reregistered_total", "refreshes that re-registered a counted call's set the limiter no longer held (a lapsed lease across a takeover, a limiter restart)", self.limiter_refresh_reregistered_total());
+        counter("b2bua_limiter_refresh_released_total", "refreshes refused because the limiter had released the call (a stale counted copy) — expected 0", self.limiter_refresh_released_total());
         counter("b2bua_repl_terminal_lost_total", "backup-held deferred terminals whose primary never reclaimed them (dead past the replica TTL): limiter released + memory freed by the periodic reap, but NO CDR — the accepted lost-CDR double-failure (ADR-0020 X3)", self.repl_terminal_lost_total());
         counter("b2bua_repl_bootstrap_seeded_total", "rebooted-primary bootstrap passes that reached the first catch-up Noop (peer streamed the full bak:{me} keyset)", self.repl_bootstrap_seeded_total());
         counter("b2bua_repl_bootstrap_stalled_total", "rebooted-primary bootstrap passes that hit the bootstrap hard deadline before the first Noop (best-effort completion; keeps streaming on the same socket)", self.repl_bootstrap_stalled_total());

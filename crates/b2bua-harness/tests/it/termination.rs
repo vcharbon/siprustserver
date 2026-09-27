@@ -567,7 +567,7 @@ impl CallLimiter for RefusingLimiter {
         }
     }
     async fn release(&self, _call_ref: &str) {}
-    async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
+    async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
         RefreshOutcome::Unavailable
     }
 }

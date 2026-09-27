@@ -78,7 +78,7 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             maybe_reject_orphan(ctx, &event).await;
             // A route fold for a vanished call: no call is left to own the
             // set its dispatching task admitted.
-            super::callouts::release_route_fold_holds(ctx.limiter.as_ref(), &event).await;
+            super::callouts::release_route_fold_call(ctx.limiter.as_ref(), &event).await;
             // This event was dispatched into a fresh per-call queue (one
             // `bump_creation`) and took the per-call lock, but resolved to NO
             // live call — nothing will ever emit `RemoveCall`, and a per-call
@@ -337,7 +337,7 @@ async fn initial_invite_turn(
         ctx.overload.increment_non_emergency_admitted();
     }
 
-    let mut call = build_initial_call(req, src, &ctx.config, now_ms);
+    let mut call = build_initial_call(req, src, &ctx.config, &ctx.id_gen, now_ms);
     if let Some(ring) = crate::message_ring::Ring::of(&ctx.config) {
         let a_leg = call.a_leg.leg_id.clone();
         call = ring.invite_received(call, &a_leg, req, now_ms);
@@ -813,9 +813,12 @@ fn record_keepalive_timeout_peer(ctx: &RouterCtx, event: &CallEvent, call: &Call
 }
 
 /// Handle a `LimiterRefresh` timer: extend a counted call's lease (an async
-/// `/v1/refresh` call) and re-arm the timer while the call is alive. A
-/// failed or unknown refresh changes nothing here: the next cycle retries,
-/// and a set the server no longer holds is released as a no-op at the end.
+/// `/v1/refresh` call carrying the call's ids, which the server re-registers
+/// when it no longer holds them) and re-arm the timer while the call is
+/// Active. A Terminating call stops refreshing: its teardown is bounded by
+/// the 32 s backstop, inside the lease. A failed or refused refresh changes
+/// nothing here: the next cycle retries, and the terminal release names a
+/// call the server may already have forgotten, as a no-op.
 async fn handle_limiter_refresh(
     ctx: &Arc<RouterCtx>,
     mut call: Call,
@@ -826,7 +829,14 @@ async fn handle_limiter_refresh(
         return HandlerResult { call, effects: fx };
     }
 
-    let outcome = ctx.limiter.refresh(&call.call_ref).await;
+    let outcome = ctx.limiter.refresh(&call.limiter.key, &call.limiter.ids).await;
+    match outcome {
+        crate::limiter::RefreshOutcome::Reregistered => {
+            ctx.metrics.bump_limiter_refresh_reregistered()
+        }
+        crate::limiter::RefreshOutcome::Released => ctx.metrics.bump_limiter_refresh_released(),
+        _ => {}
+    }
     if crate::trace::sampled(&call) {
         crate::trace::emit::limiter(&call, now_ms, "refresh", &format!("{outcome:?}"));
     }

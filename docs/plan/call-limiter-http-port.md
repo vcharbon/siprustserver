@@ -1,5 +1,9 @@
 # Call-limiter HTTP port — implementation-ready design
 
+> Status: the design below was implemented, then superseded by the call-keyed
+> protocol of [ADR-0038](../adr/0038-admission-holds-keyed-by-the-call.md)
+> (`crates/call-limiter/src/store.rs`). Kept as history.
+
 Source (TS, pinned): `portsource/sipjsserver` — `src/call/CallLimiter*.ts`,
 `src/decision/apply/applyRoute.ts`, `src/b2bua/rules/framework/FrameworkLimiterRefresh.ts`,
 `src/redis/LimiterRedisClient.ts`.

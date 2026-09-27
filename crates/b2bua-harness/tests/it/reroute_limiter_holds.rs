@@ -16,7 +16,6 @@
 //! the call is up and drained to the witnesses after it ends; the witnesses
 //! are then released, so the reaped check reads the store empty.
 
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,89 +28,26 @@ use b2bua::decision::{
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
 use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
-use b2bua::limiter_http::HttpCallLimiter;
-use b2bua_harness::{invite_final_statuses, settle_until, B2buaSut, LimiterLeak};
+use b2bua_harness::{
+    invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
+};
 use call::ReleaseEventKind;
-use call_limiter::wire::AdmitEntry;
-use call_limiter::{AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
-use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
+use call_limiter::LimiterConfig;
 use scenario_harness::Harness;
-use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
 const MEDIA_ANSWER: &str = "v=0\r\no=media 7 7 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 30000 RTP/AVP 0\r\n";
 const ALICE_REALIGN: &str = "v=0\r\no=alice 2 2 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
-/// Every id a scenario may hold; each carries one witness hold.
-const IDS: [&str; 3] = ["x", "y", "z"];
-
-/// A real `LimiterServer` on the simulated HTTP fabric, so every admit is a
-/// genuine set the store counts, with one witness hold per id in [`IDS`].
-struct LimiterRig {
-    store: Arc<CallStore>,
-    client: Arc<dyn CallLimiter>,
-    _server: Box<dyn HttpServerHandle>,
+/// The witness rig under `cfg`, with a fail-open budget above the paused-clock
+/// HTTP round trip: a detached admit is woken inside a coarse `h.advance`,
+/// whose 100 ms chunks a production-sized budget could expire between.
+async fn limiter_rig_with(cfg: LimiterConfig) -> WitnessRig {
+    WitnessRig::serve(cfg, Duration::from_secs(2), None).await
 }
 
-impl LimiterRig {
-    /// The holds the call owns on `id`: the store's count less the witness.
-    /// Negative = a release matched no hold of the call.
-    fn holds(&self, id: &str) -> i64 {
-        self.store.held(id) - 1
-    }
-
-    /// The call's holds on every id of [`IDS`], in order.
-    fn all_holds(&self) -> [i64; 3] {
-        IDS.map(|id| self.holds(id))
-    }
-
-    /// Settle until the call's holds read `expected`, then assert them.
-    async fn expect_holds(&self, expected: [i64; 3], why: &str) {
-        settle_until(|| self.all_holds() == expected).await;
-        assert_eq!(self.all_holds(), expected, "holds on {IDS:?}: {why}");
-    }
-
-    /// Settle until the call holds nothing, then release the witnesses so the
-    /// store reads empty for the reaped check.
-    async fn expect_drained(&self, why: &str) {
-        self.expect_holds([0, 0, 0], why).await;
-        for id in IDS {
-            self.store.release(&format!("witness-{id}"));
-        }
-    }
-
-    /// Extend every witness's lease.
-    fn refresh_witnesses(&self) {
-        for id in IDS {
-            assert!(self.store.refresh(&format!("witness-{id}")), "witness on {id} is known");
-        }
-    }
-}
-
-async fn limiter_rig_with(cfg: LimiterConfig) -> LimiterRig {
-    let laddr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
-    let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(CallStore::new(cfg, Clock::test_at(0)));
-    for id in IDS {
-        let witness = store.admit(
-            &format!("witness-{id}"),
-            &[AdmitEntry { id: id.into(), limit: 100 }],
-            false,
-        );
-        assert_eq!(witness, AdmitResult::Admitted, "witness on {id}");
-    }
-    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-    let handle = http.serve(laddr, server).await.unwrap();
-    // A fail-open budget above the paused-clock HTTP round trip: the detached
-    // admit is woken inside a coarse `h.advance`, whose 100 ms chunks a
-    // production-sized budget could expire between.
-    let client: Arc<dyn CallLimiter> =
-        Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, Duration::from_secs(2)));
-    LimiterRig { store, client, _server: handle }
-}
-
-async fn limiter_rig() -> LimiterRig {
+async fn limiter_rig() -> WitnessRig {
     limiter_rig_with(LimiterConfig::default()).await
 }
 
@@ -139,8 +75,8 @@ impl CallLimiter for UnavailableOnAdmit {
     async fn release(&self, call_ref: &str) {
         self.inner.release(call_ref).await
     }
-    async fn refresh(&self, call_ref: &str) -> RefreshOutcome {
-        self.inner.refresh(call_ref).await
+    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
+        self.inner.refresh(key, ids).await
     }
 }
 
@@ -209,18 +145,18 @@ fn one_failover(
 
 /// Bob busies out, carol rings then answers, alice hangs up: the failover
 /// shape every single-failover scenario shares. `before` and `after` are the
-/// call's expected holds on [`IDS`] while bob is dialed and once the failover
+/// call's expected holds on [`WITNESS_IDS`] while bob is dialed and once the failover
 /// route is applied. Returns the SUT and the rig once the call is reaped, for
 /// the caller's own drain and reaped checks.
 async fn busy_then_failover_answered(
     initial: &'static [&'static str],
     failover: &'static [&'static str],
-    rig: LimiterRig,
+    rig: WitnessRig,
     limiter: Arc<dyn CallLimiter>,
     name: &str,
     before: [i64; 3],
     after: [i64; 3],
-) -> (B2buaSut, LimiterRig) {
+) -> (B2buaSut, WitnessRig) {
     let h = Harness::new(name);
     let alice = h.agent("alice", "127.0.0.1:5060").await;
     let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -473,7 +409,7 @@ async fn refused_failover_route_releases_the_call_holds_before_the_re_consult() 
     assert_eq!(
         rig.all_holds(),
         [0, 0, 0],
-        "holds on {IDS:?}: the refused route counted nothing and released x",
+        "holds on {WITNESS_IDS:?}: the refused route counted nothing and released x",
     );
 
     // ── the re-consult's route is applied as the call's set ────────────────

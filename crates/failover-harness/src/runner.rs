@@ -24,7 +24,7 @@ use b2bua::decision::{
 };
 use b2bua::limiter::CallLimiter;
 use b2bua::limiter_http::HttpCallLimiter;
-use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
+use call_limiter::{CallStore, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
 use sip_clock::Clock;
 use sip_message::generators::InDialogMethod;
@@ -105,12 +105,10 @@ pub async fn run_cell(cell: Cell, inject: bool) -> (Observation, TeardownSweep) 
     let b2_lane = fh.agent("b2-lane", B2).await;
     drop((b1_lane, b2_lane));
 
-    // Shared limiter server on its own simulated HTTP fabric (survives crashes).
-    // Its lease outlives the replica TTL, so a set the crashed primary never
-    // releases is freed by the backup's reap, never by the lease: the sweep
-    // proves the release.
+    // Shared limiter server on its own simulated HTTP fabric (survives crashes),
+    // its lease outliving the replica TTL so the sweep proves the reap's release.
     let http = SimulatedHttpNetwork::new();
-    let store = Arc::new(CallStore::new(LimiterConfig { lease_sec: 3600 }, Clock::test_at(0)));
+    let store = Arc::new(CallStore::new(crate::LEASE_OUTLIVING_THE_REPLICA_TTL, Clock::test_at(0)));
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let _lh: Box<dyn HttpServerHandle> = http.serve(laddr(), server).await.unwrap();
 

@@ -45,8 +45,8 @@ impl CallLimiter for FullLimiter {
         AdmitOutcome::Rejected { limiter_id: TRUNK.to_string() }
     }
     async fn release(&self, _call_ref: &str) {}
-    async fn refresh(&self, _call_ref: &str) -> RefreshOutcome {
-        RefreshOutcome::Unknown
+    async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
+        RefreshOutcome::Released
     }
 }
 

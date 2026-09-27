@@ -63,7 +63,13 @@ fn state(clock: Clock) -> CallState {
 /// nominal's correlation triple.
 fn replicated(call_id: &str, sampled: Option<bool>) -> call::Call {
     let src: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    let mut c = build_initial_call(&invite(call_id), src, &B2buaConfig::default(), 0);
+    let mut c = build_initial_call(
+        &invite(call_id),
+        src,
+        &B2buaConfig::default(),
+        &sip_txn::IdGen::seeded(1),
+        0,
+    );
     c.trace_id = Some(NOMINAL_TRACE.to_string());
     c.root_span_id = Some(NOMINAL_ROOT.to_string());
     c.sampled = sampled;

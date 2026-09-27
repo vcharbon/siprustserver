@@ -18,7 +18,7 @@ use crate::decision::{
 use crate::decision_log::STACK_AUTHORED;
 use crate::event::CallEvent;
 use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry};
-use crate::rules::defaults::route_fold_holds;
+use crate::rules::defaults::route_fold_limiter_state;
 use tokio::sync::mpsc;
 
 /// Fold a callout result back into the router as a re-entrant internal event.
@@ -54,27 +54,24 @@ fn internal_event(
 }
 
 /// Post a route fold to the router. A fold the router can no longer take (its
-/// channel closed) is never stated on a call, so the set its dispatching task
-/// admitted is released here.
+/// channel closed) is never stated on a call, so the call its dispatching task
+/// counted is released here.
 async fn send_route_fold(
     tx: &mpsc::UnboundedSender<CallEvent>,
     limiter: &dyn CallLimiter,
     fold: CallEvent,
 ) {
     if let Err(mpsc::error::SendError(fold)) = tx.send(fold) {
-        release_route_fold_holds(limiter, &fold).await;
+        release_route_fold_call(limiter, &fold).await;
     }
 }
 
-/// Release the call a route fold counts ([`route_fold_holds`]) — for a fold
-/// no call will state. The call's own terminal release may have run already:
-/// the server applies this one as a no-op then.
-pub(super) async fn release_route_fold_holds(limiter: &dyn CallLimiter, fold: &CallEvent) {
-    let CallEvent::InternalEvent { call_ref, .. } = fold else {
-        return;
-    };
-    if route_fold_holds(fold).is_some_and(|l| l.counted) {
-        limiter.release(call_ref).await;
+/// Release the call a route fold counts ([`route_fold_limiter_state`]) — for
+/// a fold no call will state. The call's own terminal release may have run
+/// already: the server applies this one as a no-op then.
+pub(super) async fn release_route_fold_call(limiter: &dyn CallLimiter, fold: &CallEvent) {
+    if let Some(state) = route_fold_limiter_state(fold).filter(|l| l.counted) {
+        limiter.release(&state.key).await;
     }
 }
 
@@ -113,32 +110,38 @@ fn to_payload<T: Serialize>(p: T) -> serde_json::Value {
 /// Replace the call's set on the cluster limiter with a route's
 /// `call_limiter` entries — the ONE fold shared by the failover and release
 /// callouts, so the two can never drift from each other. One
-/// `admit(call_ref, entries, release_on_refusal = true)`, checked net of the
-/// set the call holds: a refusal releases that set in the same step. Nothing
-/// is sent for a route stating no limiter on a call the limiter does not
-/// count. `Ok(state)`: the call's admission state the fold carries — counted
-/// with the route's ids, or uncounted after an empty route, a fail-open admit
-/// or a tombstone refusal (the call ended); `Err(limiter_id)`: refused on a
-/// cap — the caller owns the treatment, the call holds nothing.
+/// `admit(key, entries, release_on_refusal = true)`, checked net of the set
+/// the call holds: a refusal releases that set in the same step. Nothing is
+/// sent for a route stating no limiter on a call the limiter does not count.
+/// `Ok(state)`: the call's admission state the fold carries — counted with
+/// the route's ids, or uncounted after an empty route, a fail-open admit or a
+/// tombstone refusal (the call ended; counted as `limiter_admit_released_fold`);
+/// `Err(limiter_id)`: refused on a cap — the caller owns the treatment, the
+/// call holds nothing.
 async fn admit_route_limiters(
-    limiter: &dyn CallLimiter,
-    call_ref: &str,
+    ctx: &RouterCtx,
+    key: &str,
     counted: bool,
     route: &RouteDecision,
 ) -> Result<CallLimiterState, String> {
     if route.call_limiter.is_empty() && !counted {
-        return Ok(CallLimiterState::uncounted());
+        return Ok(CallLimiterState::uncounted(key.to_string()));
     }
     let entries: Vec<LimiterEntry> = route
         .call_limiter
         .iter()
         .map(|e| LimiterEntry { id: e.id.clone(), limit: e.limit })
         .collect();
-    match limiter.admit(call_ref, &entries, true).await {
-        AdmitOutcome::Admitted => {
-            Ok(CallLimiterState::admitted(entries.into_iter().map(|e| e.id).collect()))
+    match ctx.limiter.admit(key, &entries, true).await {
+        AdmitOutcome::Admitted => Ok(CallLimiterState::admitted(
+            key.to_string(),
+            entries.into_iter().map(|e| e.id).collect(),
+        )),
+        AdmitOutcome::Unavailable => Ok(CallLimiterState::uncounted(key.to_string())),
+        AdmitOutcome::Released => {
+            ctx.metrics.bump_limiter_admit_released_fold();
+            Ok(CallLimiterState::uncounted(key.to_string()))
         }
-        AdmitOutcome::Unavailable | AdmitOutcome::Released => Ok(CallLimiterState::uncounted()),
         AdmitOutcome::Rejected { limiter_id } => Err(limiter_id),
     }
 }
@@ -285,11 +288,10 @@ pub(super) fn spawn_failure_callout(
     let ctx2 = ctx.clone();
     let snapshot = CallSnapshot::of(call);
     let trace = crate::trace::emit::TraceHandle::of(call);
-    let counted = call.limiter.counted;
+    let limiter = call.limiter.clone();
     tokio::spawn(async move {
         let sent_at_ms = ctx2.clock.now_ms();
-        let (outcome, payload) =
-            failure_outcome(&ctx2, &call_ref, counted, snapshot, &request).await;
+        let (outcome, payload) = failure_outcome(&ctx2, &limiter, snapshot, &request).await;
         record_round_trip(&trace, &ctx2, "/call/failure", sent_at_ms, &request, outcome, &payload);
         let fold = internal_event(call_ref, "call-failure-result", outcome, payload, Vec::new());
         send_route_fold(&ctx2.reentry_tx, ctx2.limiter.as_ref(), fold).await;
@@ -310,8 +312,7 @@ pub(super) fn spawn_failure_callout(
 /// (ADR-0017 X2).
 async fn failure_outcome(
     ctx: &Arc<RouterCtx>,
-    call_ref: &str,
-    counted: bool,
+    limiter: &CallLimiterState,
     snapshot: CallSnapshot,
     request: &serde_json::Value,
 ) -> (&'static str, serde_json::Value) {
@@ -322,49 +323,47 @@ async fn failure_outcome(
     let mut depth: u32 = 0;
     // A refused replacement released the call's set: the re-consult's route
     // replaces nothing.
-    let mut counted = counted;
+    let mut counted = limiter.counted;
     loop {
         match ctx.decision.call_failure(req).await {
             Ok(CallTreatment::Route(route)) => {
-                let admitted =
-                    match admit_route_limiters(ctx.limiter.as_ref(), call_ref, counted, &route)
-                        .await
-                    {
-                        Ok(admitted) => admitted,
-                        Err(limiter_id) => {
-                            counted = false;
-                            if route.callback_context.is_some()
-                                && depth < crate::decision::apply_route::MAX_LIMITER_FAILOVER
-                            {
-                                depth += 1;
-                                req = CallFailureRequest {
-                                    callback_context: route.callback_context.clone(),
-                                    failure: FailureInfo {
-                                        origin: "call_limiter".to_string(),
-                                        limiter_id: Some(limiter_id),
-                                        failed_leg_id: (!failed_leg_id.is_empty())
-                                            .then(|| failed_leg_id.clone()),
-                                        ..Default::default()
-                                    },
-                                    snapshot: snapshot.clone(),
-                                };
-                                continue;
-                            }
-                            // Chain exhausted / no context → the initial path's
-                            // terminal limiter treatment (486 Busy Here) — the
-                            // stack's own capacity statement.
-                            return (
-                                "reject",
-                                json!({
-                                    "code": 486,
-                                    "reason": "Busy Here",
-                                    "failed_leg_id": failed_leg_id,
-                                    "origin": "call_limiter",
-                                    STACK_AUTHORED: true,
-                                }),
-                            );
+                let admitted = match admit_route_limiters(ctx, &limiter.key, counted, &route).await
+                {
+                    Ok(admitted) => admitted,
+                    Err(limiter_id) => {
+                        counted = false;
+                        if route.callback_context.is_some()
+                            && depth < crate::decision::apply_route::MAX_LIMITER_FAILOVER
+                        {
+                            depth += 1;
+                            req = CallFailureRequest {
+                                callback_context: route.callback_context.clone(),
+                                failure: FailureInfo {
+                                    origin: "call_limiter".to_string(),
+                                    limiter_id: Some(limiter_id),
+                                    failed_leg_id: (!failed_leg_id.is_empty())
+                                        .then(|| failed_leg_id.clone()),
+                                    ..Default::default()
+                                },
+                                snapshot: snapshot.clone(),
+                            };
+                            continue;
                         }
-                    };
+                        // Chain exhausted / no context → the initial path's
+                        // terminal limiter treatment (486 Busy Here) — the
+                        // stack's own capacity statement.
+                        return (
+                            "reject",
+                            json!({
+                                "code": 486,
+                                "reason": "Busy Here",
+                                "failed_leg_id": failed_leg_id,
+                                "origin": "call_limiter",
+                                STACK_AUTHORED: true,
+                            }),
+                        );
+                    }
+                };
                 return ("failover", route_result_payload(route, admitted, Some(failed_leg_id)));
             }
             // Decision-authored reject — the plan declined to fail over and
@@ -481,7 +480,7 @@ pub(super) fn spawn_release_callout(
     let ctx2 = ctx.clone();
     let snapshot = CallSnapshot::of(call);
     let trace = crate::trace::emit::TraceHandle::of(call);
-    let counted = call.limiter.counted;
+    let limiter = call.limiter.clone();
     tokio::spawn(async move {
         let sent_at_ms = ctx2.clock.now_ms();
         let req = parse_call_release_request(&request, snapshot);
@@ -491,8 +490,7 @@ pub(super) fn spawn_release_callout(
         let event = json!(req.event);
         let (outcome, payload) = match ctx2.decision.call_release(req).await {
             Ok(CallReleaseResponse::Route(route)) => {
-                match admit_route_limiters(ctx2.limiter.as_ref(), &call_ref, counted, &route).await
-                {
+                match admit_route_limiters(&ctx2, &limiter.key, limiter.counted, &route).await {
                     Ok(admitted) => ("reroute", route_result_payload(route, admitted, None)),
                     // Divergence from the failover chain, DOCUMENTED: a limiter
                     // reject here does NOT re-consult the engine — the call was
@@ -641,6 +639,7 @@ struct RouteDestinationPayload {
 /// The call's admission state after the dispatching task replaced its set.
 #[derive(Serialize)]
 struct CallLimiterPayload {
+    key: String,
     counted: bool,
     ids: Vec<String>,
 }
@@ -715,7 +714,11 @@ fn route_result_payload(
             crate::decision::BodyUpdate::Drop => Some(None),
             crate::decision::BodyUpdate::Replace(s) => Some(Some(s)),
         },
-        call_limiter: CallLimiterPayload { counted: admitted.counted, ids: admitted.ids },
+        call_limiter: CallLimiterPayload {
+            key: admitted.key,
+            counted: admitted.counted,
+            ids: admitted.ids,
+        },
         failed_leg_id,
         label: route.label,
     })
@@ -812,18 +815,13 @@ mod tests {
 
     #[async_trait]
     impl CallLimiter for RecordingLimiter {
-        async fn admit(
-            &self,
-            _call_ref: &str,
-            _entries: &[LimiterEntry],
-            _release_on_refusal: bool,
-        ) -> AdmitOutcome {
+        async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
             AdmitOutcome::Unavailable
         }
-        async fn release(&self, call_ref: &str) {
-            self.released.lock().unwrap().push(call_ref.to_string());
+        async fn release(&self, key: &str) {
+            self.released.lock().unwrap().push(key.to_string());
         }
-        async fn refresh(&self, _call_ref: &str) -> crate::limiter::RefreshOutcome {
+        async fn refresh(&self, _: &str, _: &[String]) -> crate::limiter::RefreshOutcome {
             crate::limiter::RefreshOutcome::Unavailable
         }
     }
@@ -834,7 +832,8 @@ mod tests {
             crate::decision::CallLimiterEntry { id: "x".into(), limit: 10 },
             crate::decision::CallLimiterEntry { id: "y".into(), limit: 10 },
         ];
-        let admitted = CallLimiterState { counted, ids: vec!["x".into(), "y".into()] };
+        let admitted =
+            CallLimiterState { key: "call-1#k".into(), counted, ids: vec!["x".into(), "y".into()] };
         let payload = route_result_payload(route, admitted, Some("b-1".into()));
         internal_event("call-1".into(), "call-failure-result", "failover", payload, Vec::new())
     }
@@ -845,7 +844,7 @@ mod tests {
         drop(rx);
         let limiter = RecordingLimiter::default();
         send_route_fold(&tx, &limiter, failover_fold(true)).await;
-        assert_eq!(*limiter.released.lock().unwrap(), vec!["call-1".to_string()]);
+        assert_eq!(*limiter.released.lock().unwrap(), vec!["call-1#k".to_string()], "by its key");
     }
 
     #[tokio::test]
@@ -863,8 +862,10 @@ mod tests {
         let limiter = RecordingLimiter::default();
         send_route_fold(&tx, &limiter, failover_fold(true)).await;
         assert!(limiter.released.lock().unwrap().is_empty(), "the call states it");
-        let state = route_fold_holds(&rx.recv().await.unwrap()).expect("the fold carries it");
+        let state =
+            route_fold_limiter_state(&rx.recv().await.unwrap()).expect("the fold carries it");
         assert!(state.counted);
+        assert_eq!(state.key, "call-1#k");
         assert_eq!(state.ids, ["x", "y"]);
     }
 }
