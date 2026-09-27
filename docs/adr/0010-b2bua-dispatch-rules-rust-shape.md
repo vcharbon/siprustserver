@@ -32,8 +32,9 @@ a panicking handler is isolated and the worker survives. cap-drop / queue-drop /
 saturation are atomic counters. A body discarded unrun hands its reason to the
 hook it was offered with; a job the protocol will not send again queues past
 the bounds in FIFO order instead, up to a per-call overflow ceiling (the
-queue depth), and the release poison, the sweep-paced reaper verdicts and a
-terminating call's timeout and transaction outcomes past every bound. Rationale: a slow handler on one call must not
+queue depth), and the release poison, the sweep-paced reaper verdicts, a
+terminating call's timeout and every client transaction's outcome past every
+bound. Rationale: a slow handler on one call must not
 block other calls — the single actor (the txn-layer choice) would stall every
 call, which is exactly what `PerCallDispatcher` exists to prevent. `CallState`
 adds a per-`callRef` lock as a second serialization layer (uncontended under the

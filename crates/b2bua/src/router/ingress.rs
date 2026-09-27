@@ -15,7 +15,7 @@ use super::process::process;
 use super::release::{release_call, ReleaseKind};
 use super::resolve::{replica_takeover_call_ref, resolve};
 use super::responses::build_options_health_response;
-use super::unanswered::{InviteAnswer, UnansweredGuard};
+use super::unanswered::{DiscardAnswer, UnansweredGuard};
 use super::unroutable::Lookup;
 use super::RouterCtx;
 use crate::dispatch::Job;
@@ -181,7 +181,7 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     // 100). Any other event for an at-cap new call_ref is cap-dropped by
     // `dispatch`: a non-INVITE request among them has its transaction forgotten
     // (`UnansweredGuard`), so its retransmission is admitted again, an
-    // in-dialog INVITE is answered 500 + Retry-After (`InviteAnswer`), and a
+    // in-dialog INVITE is answered 500 + Retry-After (`DiscardAnswer`), and a
     // `Cancelled` is queued past the cap.
     if res.initial_invite && ctx.dispatcher.would_drop_new_at_cap(&call_ref) {
         if let CallEvent::Sip { message, src, .. } = &event {
@@ -206,13 +206,15 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
 
     // Nothing leaves this point unaccounted: a request discarded unrun is
     // forgotten or answered (`super::unanswered`), a one-shot event waits
-    // past the bounds, and all but the node's own work counts toward the
-    // call's lifetime cap (`super::must_run`).
+    // past the bounds, a response keeps its room past the call's lifetime
+    // cap, and all but the node's own work counts toward that cap
+    // (`super::must_run`).
     let ctx2 = ctx.clone();
     let guard = UnansweredGuard::for_event(&ctx.txn, &event);
-    let answer = InviteAnswer::of(ctx).hook_for(&event);
-    let room = Room::of(ctx, &event, &call_ref);
+    let answer = DiscardAnswer::of(ctx).hook_for(&event);
+    let room = Room::of(&event);
     let own = super::must_run::is_own(&event);
+    let past_lifetime_cap = super::must_run::keeps_room_past_lifetime_cap(&event);
     let job = Job::new(Box::pin(async move {
         guard.disarm();
         process(&ctx2, event, res).await;
@@ -220,5 +222,6 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
     .on_discard(answer);
     let job = room.admit(job);
     let job = if own { job.own() } else { job };
+    let job = if past_lifetime_cap { job.past_lifetime_cap() } else { job };
     ctx.dispatcher.dispatch(&call_ref, job).await;
 }

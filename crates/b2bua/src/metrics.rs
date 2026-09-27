@@ -66,6 +66,10 @@ struct Inner {
     invite_discard_answered_queue_full: AtomicU64,
     invite_discard_answered_at_cap: AtomicU64,
     invite_discard_answered_released: AtomicU64,
+    invite_discard_answered_capped: AtomicU64,
+    capped_refusals: AtomicU64,
+    capped_request_answered: AtomicU64,
+    calls_near_lifetime_cap: std::sync::atomic::AtomicI64,
     saturation: AtomicU64,
     // MAX_MESSAGES_PER_CALL cap-defense: calls torn down for crossing the
     // per-call message cap (a runaway re-INVITE/OPTIONS storm or glare loop).
@@ -73,7 +77,7 @@ struct Inner {
     // process unbounded in-dialog events, ratcheting txn/clone/store churn).
     message_cap_terminated: AtomicU64,
     // Calls that crossed their lifetime message cap (the work bound).
-    message_cap_lifetime_terminated: AtomicU64,
+    message_cap_lifetime_crossed: AtomicU64,
     creations: AtomicU64,
     removals: AtomicU64,
     removals_terminated: AtomicU64,
@@ -380,14 +384,19 @@ impl RemovalClass {
 
 /// One discard of each site, in label order: a release of any class counts
 /// under `released`.
-const DISCARD_SITES: [Discard; 3] =
-    [Discard::QueueFull, Discard::AtCap, Discard::Released(RemovalClass::Terminated)];
+const DISCARD_SITES: [Discard; 4] = [
+    Discard::QueueFull,
+    Discard::AtCap,
+    Discard::Released(RemovalClass::Terminated),
+    Discard::Capped,
+];
 
 fn discard_label(why: Discard) -> &'static str {
     match why {
         Discard::QueueFull => "queue_full",
         Discard::AtCap => "at_cap",
         Discard::Released(_) => "released",
+        Discard::Capped => "capped",
     }
 }
 
@@ -422,10 +431,22 @@ impl B2buaMetrics {
 
     counter!(bump_message_cap_terminated, message_cap_terminated_total, message_cap_terminated);
     counter!(
-        bump_message_cap_lifetime_terminated,
-        message_cap_lifetime_terminated_total,
-        message_cap_lifetime_terminated
+        bump_message_cap_lifetime_crossed,
+        message_cap_lifetime_crossed_total,
+        message_cap_lifetime_crossed
     );
+    counter!(bump_capped_refusal, capped_refusals_total, capped_refusals);
+    counter!(bump_capped_request_answered, capped_request_answered_total, capped_request_answered);
+
+    /// Move the gauge of live calls near their lifetime cap by `delta`.
+    pub fn add_calls_near_lifetime_cap(&self, delta: i64) {
+        self.inner.calls_near_lifetime_cap.fetch_add(delta, Ordering::Relaxed);
+    }
+
+    /// Live calls offered more than 80 % of their lifetime cap (gauge).
+    pub fn calls_near_lifetime_cap(&self) -> i64 {
+        self.inner.calls_near_lifetime_cap.load(Ordering::Relaxed)
+    }
     counter!(bump_queue_drop, queue_drops_total, queue_drops);
     counter!(bump_cap_drop, cap_drops_total, cap_drops);
     counter!(bump_release_discard, release_discards_total, release_discards);
@@ -495,6 +516,7 @@ impl B2buaMetrics {
             Discard::QueueFull => &self.inner.invite_discard_answered_queue_full,
             Discard::AtCap => &self.inner.invite_discard_answered_at_cap,
             Discard::Released(_) => &self.inner.invite_discard_answered_released,
+            Discard::Capped => &self.inner.invite_discard_answered_capped,
         }
     }
 
@@ -967,7 +989,9 @@ impl B2buaMetrics {
         let mut counter = |name: &str, help: &str, v: u64| {
             s.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {v}\n"));
         };
-        counter("b2bua_message_cap_lifetime_terminated_total", "calls ended for crossing max_messages_per_call_lifetime: more events offered over the call's life than any healthy call sees, counted at dispatch in every state", self.message_cap_lifetime_terminated_total());
+        counter("b2bua_message_cap_lifetime_crossed_total", "calls that crossed max_messages_per_call_lifetime: more events offered over the call's life than any healthy call sees, counted at dispatch in every state; each is sent one verdict that ends it", self.message_cap_lifetime_crossed_total());
+        counter("b2bua_dispatch_capped_refusals_total", "events refused on a call past its lifetime cap (a request among them is answered 481 where refused); responses keep their room", self.capped_refusals_total());
+        counter("b2bua_dispatch_capped_request_answered_total", "non-INVITE requests refused on a call past its lifetime cap, answered 481 through their transaction", self.capped_request_answered_total());
         counter("b2bua_message_cap_terminated_total", "calls terminated for exceeding max_messages_per_call (cap-defense; a climbing rate names a runaway-traffic call class)", self.message_cap_terminated_total());
         counter(
             "b2bua_dispatch_queue_drops_total",
@@ -1186,7 +1210,9 @@ impl B2buaMetrics {
         ));
         s.push_str("# HELP b2bua_dispatch_overflow_depth items waiting past a full per-call queue, all calls\n# TYPE b2bua_dispatch_overflow_depth gauge\n");
         s.push_str(&format!("b2bua_dispatch_overflow_depth {}\n", self.overflow_depth()));
-        s.push_str("# HELP b2bua_dispatch_invite_discard_answered_total INVITEs whose handler body was discarded unrun, answered at the discard site (in a dialog: 481 behind a terminated call's release, else 500 with Retry-After — no room, a self-release, an orphan release; out of a dialog: 503 with Retry-After)\n# TYPE b2bua_dispatch_invite_discard_answered_total counter\n");
+        s.push_str("# HELP b2bua_calls_near_lifetime_cap live calls offered more than 80% of max_messages_per_call_lifetime\n# TYPE b2bua_calls_near_lifetime_cap gauge\n");
+        s.push_str(&format!("b2bua_calls_near_lifetime_cap {}\n", self.calls_near_lifetime_cap()));
+        s.push_str("# HELP b2bua_dispatch_invite_discard_answered_total INVITEs whose handler body was discarded unrun, answered at the discard site (in a dialog: 481 behind a terminated call's release or past the call's lifetime cap, else 500 with Retry-After — no room, a self-release, an orphan release; out of a dialog: 503 with Retry-After)\n# TYPE b2bua_dispatch_invite_discard_answered_total counter\n");
         for why in DISCARD_SITES {
             s.push_str(&format!(
                 "b2bua_dispatch_invite_discard_answered_total{{site=\"{}\"}} {}\n",

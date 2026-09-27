@@ -1,9 +1,11 @@
 //! A request whose handler body is discarded before it runs — the call's
-//! queue full, the call cap reached, a release draining the queue — is never
-//! left unanswered. A non-INVITE has its server transaction forgotten, so the
-//! UAC's retransmission (RFC 3261 §17.1.2.2) is admitted afresh and reaches
-//! the router again. An INVITE, whose 100 Trying already stopped the UAC's
-//! retransmissions, is answered at the discard site.
+//! queue full, the call cap reached, the call past its lifetime cap, a
+//! release draining the queue — is never left unanswered. An INVITE, whose
+//! 100 Trying already stopped the UAC's retransmissions, is answered at the
+//! discard site. So is any request refused on a call past its lifetime cap,
+//! which refuses every retransmission too. Any other non-INVITE has its
+//! server transaction forgotten, so the UAC's retransmission (RFC 3261
+//! §17.1.2.2) is admitted afresh and reaches the router again.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -74,14 +76,21 @@ impl Drop for UnansweredGuard {
     }
 }
 
-/// Answers an INVITE whose handler body is discarded unrun, through its
-/// server transaction (which then absorbs the ACK). In a dialog: 481 behind
-/// the release of a terminated call (RFC 3261 §12.2.2), else 500 with a
-/// Retry-After (§14.2) — no room, a takeover copy shed while the call lives
-/// on at its primary, or an orphan release that looked no dialog up. Out of
-/// a dialog: the capacity 503 with a Retry-After, whatever the site, since
-/// the call it would start was never looked at.
-pub(super) struct InviteAnswer<'a> {
+/// Answers a request whose handler body is discarded unrun, through its
+/// server transaction (which then absorbs its retransmissions and, for an
+/// INVITE, the ACK).
+///
+/// - An INVITE in a dialog: 481 behind the release of a terminated call or
+///   past the call's lifetime cap, whose teardown is ending the dialog
+///   (RFC 3261 §12.2.2); else 500 with a Retry-After (§14.2): no room, a
+///   takeover copy shed while the call lives on at its primary, or an orphan
+///   release that looked no dialog up. Out of a dialog: the capacity 503
+///   with a Retry-After, whatever the site, since the call it would start was
+///   never looked at.
+/// - Any other request but ACK (which draws no response) past the call's
+///   lifetime cap: 481, the answer the call gives once it is gone. At any
+///   other site the transaction is forgotten instead ([`UnansweredGuard`]).
+pub(super) struct DiscardAnswer<'a> {
     pub(super) txn: &'a TransactionLayer,
     pub(super) id_gen: &'a Arc<IdGen>,
     pub(super) metrics: &'a B2buaMetrics,
@@ -89,7 +98,7 @@ pub(super) struct InviteAnswer<'a> {
     pub(super) retry_after_jitter_sec: u32,
 }
 
-impl<'a> InviteAnswer<'a> {
+impl<'a> DiscardAnswer<'a> {
     pub(super) fn of(ctx: &'a RouterCtx) -> Self {
         Self {
             txn: &ctx.txn,
@@ -100,14 +109,15 @@ impl<'a> InviteAnswer<'a> {
         }
     }
 
-    /// The discard hook for `event`: `Some` for an INVITE request only.
+    /// The discard hook for `event`: `Some` for a request other than ACK
+    /// and CANCEL (a CANCEL reaching the router matched no transaction).
     pub(super) fn hook_for(&self, event: &CallEvent) -> Option<DiscardHook> {
         let CallEvent::Sip { message, src, .. } = event else { return None };
         let SipMessage::Request(req) = message.as_ref() else { return None };
-        if req.method() != Method::Invite {
+        if matches!(req.method(), Method::Ack | Method::Cancel) {
             return None;
         }
-        let pending = PendingInvite {
+        let pending = PendingRequest {
             req: req.clone(),
             src: *src,
             txn: self.txn.clone(),
@@ -120,8 +130,8 @@ impl<'a> InviteAnswer<'a> {
     }
 }
 
-/// What the answer to one discarded INVITE needs, owned by its hook.
-struct PendingInvite {
+/// What the answer to one discarded request needs, owned by its hook.
+struct PendingRequest {
     req: SipRequest,
     src: SocketAddr,
     txn: TransactionLayer,
@@ -131,12 +141,21 @@ struct PendingInvite {
     retry_after_jitter_sec: u32,
 }
 
-impl PendingInvite {
+impl PendingRequest {
     /// Hand the answer to the layer and count it. A transaction that already
     /// holds its final — a CANCEL's 487 got there first — keeps it, and the
     /// layer drops this one (RFC 3261 §17.2.1); it is counted all the same.
     async fn answer(self, why: Discard) {
-        let resp = self.response(why);
+        if self.req.method() != Method::Invite {
+            if why == Discard::Capped {
+                let to_tag = self.req.to().tag().is_none().then(|| self.id_gen.new_tag());
+                let resp = build_481(&self.req, to_tag.as_deref());
+                let _ = self.txn.send_response(resp, self.src).await;
+                self.metrics.bump_capped_request_answered();
+            }
+            return;
+        }
+        let resp = self.invite_response(why);
         let _ = self.txn.send_response(resp, self.src).await;
         self.metrics.bump_invite_discard_answered(why);
         // A new INVITE discarded unrun was never admitted: its 503 ends it.
@@ -148,12 +167,13 @@ impl PendingInvite {
         }
     }
 
-    fn response(&self, why: Discard) -> SipResponse {
+    fn invite_response(&self, why: Discard) -> SipResponse {
         let in_dialog = self.req.to().tag().is_some();
-        // Only a terminated call is known to have no dialog left. A shed
-        // takeover copy lives on at its primary, and an orphan release looked
-        // nothing up: the retry meets the orphan path's lookup and its 481.
-        let gone = why == Discard::Released(RemovalClass::Terminated);
+        // Only a terminated or capped call is known to be ending its dialog. A
+        // shed takeover copy lives on at its primary, and an orphan release
+        // looked nothing up: the retry meets the orphan path's lookup and its
+        // 481.
+        let gone = matches!(why, Discard::Released(RemovalClass::Terminated) | Discard::Capped);
         if in_dialog && gone {
             return build_481(&self.req, None);
         }
@@ -257,7 +277,7 @@ mod tests {
 
     /// The hook the router would attach to `event`.
     fn answer_hook(rig: &Rig, event: &CallEvent) -> Option<crate::dispatch::DiscardHook> {
-        InviteAnswer {
+        DiscardAnswer {
             txn: &rig.txn,
             id_gen: &rig.id_gen,
             metrics: &rig.metrics,
@@ -346,9 +366,9 @@ mod tests {
     }
 
     /// A peer's BYE that crosses the call's release lands behind the poison
-    /// and is discarded unrun: its transaction is forgotten, and the peer's
-    /// retransmission reaches the router again (where the call is gone and
-    /// the orphan path answers it).
+    /// and is discarded unrun: its hook answers nothing, its transaction is
+    /// forgotten, and the peer's retransmission reaches the router again
+    /// (where the call is gone and the orphan path answers it).
     #[tokio::test(start_paused = true)]
     async fn a_bye_queued_behind_the_release_is_readmitted_on_its_retransmission() {
         let mut rig = rig().await;
@@ -358,6 +378,7 @@ mod tests {
         let event = next_event(&mut rig, 100).await.expect("the BYE reaches the router");
         let ran = Arc::new(AtomicBool::new(false));
         let guard = UnansweredGuard::for_event(&rig.txn, &event);
+        let hook = answer_hook(&rig, &event);
         let r = ran.clone();
         rig.dispatcher
             .dispatch(
@@ -365,7 +386,8 @@ mod tests {
                 Job::new(Box::pin(async move {
                     guard.disarm();
                     r.store(true, Ordering::SeqCst);
-                })),
+                }))
+                .on_discard(hook),
             )
             .await;
 
@@ -495,12 +517,47 @@ mod tests {
         assert_eq!(rig.metrics.invite_discard_answered_total(), 0);
     }
 
-    /// Only an INVITE request carries a discard answer.
+    /// A call past its lifetime cap refuses a BYE and every retransmission
+    /// of it, so the refusal answers it: 481 through its transaction, which
+    /// the body's drop then leaves alone, and which absorbs the
+    /// retransmission.
     #[tokio::test(start_paused = true)]
-    async fn a_non_invite_request_carries_no_discard_answer() {
+    async fn a_bye_refused_past_the_lifetime_cap_is_answered_481_through_its_transaction() {
         let mut rig = rig().await;
-        rig.peer.send_to(&bye("z9hG4bK-no-hook"), addr(LAYER)).await.unwrap();
+        rig.dispatcher = PerCallDispatcher::new(8, 64, 1024, rig.metrics.clone())
+            .with_lifetime_cap(1, Arc::new(|_: &str| {}));
+        let gate = park_with_release_of(&rig, RemovalClass::Terminated).await;
+        // The parked body was the one offer the cap allows; the release
+        // queued behind it is the node's own and uncounted.
+        rig.peer.send_to(&bye("z9hG4bK-capped"), addr(LAYER)).await.unwrap();
         let event = next_event(&mut rig, 100).await.expect("the BYE reaches the router");
+        let guard = UnansweredGuard::for_event(&rig.txn, &event);
+        let hook = answer_hook(&rig, &event);
+        assert!(hook.is_some(), "a BYE carries a discard answer");
+        let job = Job::new(Box::pin(async move { guard.disarm() })).on_discard(hook);
+        rig.dispatcher.dispatch("c", job).await;
+        assert_eq!(rig.metrics.capped_refusals_total(), 1);
+
+        assert_eq!(statuses(&responses_at_peer(&rig, 100).await), vec![481]);
+        assert_eq!(rig.metrics.capped_request_answered_total(), 1);
+        assert_eq!(rig.txn.metrics().unanswered_forgotten(), 0);
+        rig.peer.send_to(&bye("z9hG4bK-capped"), addr(LAYER)).await.unwrap();
+        assert!(next_event(&mut rig, 100).await.is_none(), "the transaction absorbs it");
+        assert_eq!(
+            statuses(&responses_at_peer(&rig, 100).await),
+            vec![481],
+            "and re-sends its 481"
+        );
+        gate.notify_one();
+    }
+
+    /// An ACK draws no response, so it carries no discard answer.
+    #[tokio::test(start_paused = true)]
+    async fn an_ack_carries_no_discard_answer() {
+        let mut rig = rig().await;
+        let ack = String::from_utf8(bye("z9hG4bK-ack")).unwrap().replace("BYE", "ACK");
+        rig.peer.send_to(ack.as_bytes(), addr(LAYER)).await.unwrap();
+        let event = next_event(&mut rig, 100).await.expect("the ACK reaches the router");
         assert!(answer_hook(&rig, &event).is_none());
     }
 }

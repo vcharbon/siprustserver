@@ -8,9 +8,10 @@
 //! a panicking handler is isolated (`JoinError`) and the worker survives.
 //!
 //! A body offered as a [`Job`] may be discarded unrun — the call's queue full,
-//! the global cap reached, or queued behind the call's release — and its
-//! [`DiscardHook`] then hears why and answers for it. A job marked
-//! [`past_bounds`](Job::past_bounds) is never discarded for want of room.
+//! the global cap reached, the call past its lifetime cap, or queued behind
+//! the call's release — and its [`DiscardHook`] then hears why and answers
+//! for it. A job marked [`past_bounds`](Job::past_bounds) is never discarded
+//! for want of room.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -52,6 +53,9 @@ pub enum Discard {
     /// It was queued behind the call's release, of this class, and drained
     /// with it.
     Released(RemovalClass),
+    /// The call crossed its lifetime cap: it runs no more such work, and is
+    /// being ended.
+    Capped,
 }
 
 /// Answers for a body discarded unrun: handed the reason, it returns the work
@@ -79,12 +83,21 @@ pub struct Job {
     admission: Admission,
     /// Counted toward the call's lifetime cap; `false` for the node's own work.
     counted: bool,
+    /// Keeps its room on a call past its lifetime cap instead of being
+    /// refused there.
+    past_lifetime_cap: bool,
 }
 
 impl Job {
     /// A body discarded when there is no room for it.
     pub fn new(body: DispatchBody) -> Self {
-        Self { body, on_discard: None, admission: Admission::Bounded, counted: true }
+        Self {
+            body,
+            on_discard: None,
+            admission: Admission::Bounded,
+            counted: true,
+            past_lifetime_cap: false,
+        }
     }
 
     /// `hook` runs in place of the body if it is discarded unrun; dropped
@@ -118,12 +131,22 @@ impl Job {
         self
     }
 
-    /// Drop the body unrun and run the hook in its place.
+    /// Keeps its ordinary room on a call past its lifetime cap: work the
+    /// call's teardown still needs. The room stays bounded, so a peer
+    /// repeating such work fills the queue and no more.
+    pub fn past_lifetime_cap(mut self) -> Self {
+        self.past_lifetime_cap = true;
+        self
+    }
+
+    /// Run the hook in the body's place, then drop the body unrun. The hook
+    /// goes first, so an answer it sends reaches the request's transaction
+    /// before anything the body's drop does to it.
     async fn discard(self, why: Discard) {
-        drop(self.body);
         if let Some(hook) = self.on_discard {
             hook(why).await;
         }
+        drop(self.body);
     }
 }
 
@@ -167,7 +190,11 @@ struct PerCallQueue {
     /// Counted jobs offered for the call over its life, whatever became of
     /// them.
     offered: u64,
-    /// The lifetime cap was crossed: only jobs past every bound still get in.
+    /// The offers passed [`NEAR_CAP_PERCENT`] of the lifetime cap: the call
+    /// is among those the near-cap gauge counts.
+    near_cap: bool,
+    /// The lifetime cap was crossed: only jobs past every bound or past the
+    /// lifetime cap still get in.
     capped: bool,
 }
 
@@ -179,17 +206,22 @@ impl PerCallQueue {
             released: None,
             waiting: 0,
             offered: 0,
+            near_cap: false,
             capped: false,
         }
     }
 
     /// Count `job` against the lifetime cap `cap`; `true` when this job is
     /// the one that crosses it.
-    fn count(&mut self, job: &Job, cap: u64) -> bool {
+    fn count(&mut self, job: &Job, cap: u64, metrics: &B2buaMetrics) -> bool {
         if !job.counted {
             return false;
         }
         self.offered += 1;
+        if !self.near_cap && self.offered as u128 * 100 > cap as u128 * NEAR_CAP_PERCENT as u128 {
+            self.near_cap = true;
+            metrics.add_calls_near_lifetime_cap(1);
+        }
         let crossed = self.offered > cap && !self.capped;
         self.capped |= crossed;
         crossed
@@ -250,6 +282,10 @@ impl PerCallQueue {
         }
     }
 }
+
+/// The share of the lifetime cap, in percent, past which a call is counted
+/// as near it.
+const NEAR_CAP_PERCENT: u64 = 80;
 
 /// Account for `item` leaving a call's overflow.
 fn left_overflow(waiting: &mut usize, item: &DispatchItem, metrics: &B2buaMetrics) {
@@ -338,9 +374,10 @@ impl PerCallDispatcher {
     }
 
     /// Bound the counted jobs a call may be offered over its life (builder-
-    /// style). The job that crosses `cap`, and every later one not admitted
-    /// past every bound, is discarded as behind the call's release; `hook`
-    /// hears the call once, when it crosses.
+    /// style). The job that crosses `cap`, and every later one admitted
+    /// neither past every bound nor [past the lifetime cap](Job::past_lifetime_cap),
+    /// is discarded as [`Discard::Capped`]; `hook` hears the call once, when
+    /// it crosses, and must end it: nothing else ends a capped call.
     pub fn with_lifetime_cap(mut self, cap: u64, hook: LifetimeHook) -> Self {
         self.lifetime_cap = cap;
         self.lifetime_hook = Some(hook);
@@ -370,7 +407,12 @@ impl PerCallDispatcher {
     pub async fn dispatch(&self, call_ref: &str, job: Job) {
         let (enqueued, crossed) = self.enqueue(call_ref, job);
         if crossed {
-            self.metrics.bump_message_cap_lifetime_terminated();
+            self.metrics.bump_message_cap_lifetime_crossed();
+            tracing::warn!(
+                call_ref,
+                cap = self.lifetime_cap,
+                "call crossed its lifetime message cap: ending it"
+            );
             if let Some(hook) = &self.lifetime_hook {
                 hook(call_ref);
             }
@@ -392,11 +434,10 @@ impl PerCallDispatcher {
     fn enqueue(&self, call_ref: &str, job: Job) -> (Enqueued, bool) {
         let mut map = self.queues.lock().unwrap();
         if let Some(q) = map.get_mut(call_ref) {
-            let crossed = q.count(&job, self.lifetime_cap);
-            if q.capped && job.admission != Admission::Always {
-                self.metrics.bump_release_discard();
-                let why = Discard::Released(RemovalClass::Terminated);
-                return (Enqueued::Discarded(why, job), crossed);
+            let crossed = q.count(&job, self.lifetime_cap, &self.metrics);
+            if q.capped && job.admission != Admission::Always && !job.past_lifetime_cap {
+                self.metrics.bump_capped_refusal();
+                return (Enqueued::Discarded(Discard::Capped, job), crossed);
             }
             let enqueued = match q.push(DispatchItem::Event(job), self.depth, &self.metrics) {
                 Ok(()) => Enqueued::Queued,
@@ -426,7 +467,7 @@ impl PerCallDispatcher {
         }
         let (tx, rx) = mpsc::channel(self.depth);
         let mut queue = PerCallQueue::new(tx);
-        queue.count(&job, self.lifetime_cap);
+        queue.count(&job, self.lifetime_cap, &self.metrics);
         // Send before spawning the worker: capacity is fresh so this can't fail.
         let _ = queue.tx.try_send(DispatchItem::Event(job));
         map.insert(call_ref.to_string(), queue);
@@ -522,6 +563,9 @@ async fn worker(
                 // later event for the call_ref starts a fresh queue.
                 inflight.lock().unwrap().remove(&call_ref);
                 let left = queues.lock().unwrap().remove(&call_ref);
+                if left.as_ref().is_some_and(|q| q.near_cap) {
+                    metrics.add_calls_near_lifetime_cap(-1);
+                }
                 debug_assert!(
                     left.is_none_or(|q| q.overflow.is_empty()) && rx.try_recv().is_err(),
                     "an item queued behind a release"
@@ -968,8 +1012,8 @@ mod tests {
 
     /// A stuck call still counts every job it is offered — queued or
     /// discarded at the full queue. The one that crosses the cap is turned
-    /// away as behind a release, the hook hears the call once, later jobs are
-    /// turned away too, and a job past every bound still gets in.
+    /// away as capped, the hook hears the call once, later jobs are turned
+    /// away too, and a job past every bound still gets in.
     #[tokio::test]
     async fn a_stuck_calls_queued_and_discarded_jobs_count_toward_its_lifetime_cap() {
         let metrics = B2buaMetrics::new();
@@ -984,9 +1028,12 @@ mod tests {
             .await;
         d.dispatch("c", Job::new(record(&order, "fifth")).on_discard(recording_hook(&heard))).await;
         assert_eq!(*crossed.lock().unwrap(), vec!["c".to_string()], "heard once");
-        assert_eq!(metrics.message_cap_lifetime_terminated_total(), 1);
-        let released = Discard::Released(RemovalClass::Terminated);
-        assert_eq!(*heard.lock().unwrap(), vec![Discard::QueueFull, released, released]);
+        assert_eq!(metrics.message_cap_lifetime_crossed_total(), 1);
+        assert_eq!(
+            *heard.lock().unwrap(),
+            vec![Discard::QueueFull, Discard::Capped, Discard::Capped]
+        );
+        assert_eq!(metrics.capped_refusals_total(), 2);
 
         d.dispatch("c", Job::new(record(&order, "verdict")).own().past_all_bounds()).await;
         gate.notify_one();
@@ -1008,9 +1055,59 @@ mod tests {
             d.dispatch("c", Job::new(record(&order, "verdict")).own().past_all_bounds()).await;
         }
         assert!(crossed.lock().unwrap().is_empty());
-        assert_eq!(metrics.message_cap_lifetime_terminated_total(), 0);
+        assert_eq!(metrics.message_cap_lifetime_crossed_total(), 0);
         gate.notify_one();
         d.enqueue_poison("c", RemovalClass::Terminated);
         drained(&d).await;
+    }
+
+    /// On a capped call a job marked past the lifetime cap keeps its
+    /// ordinary room: it is queued while there is room, and dropped at a full
+    /// queue like any bounded job.
+    #[tokio::test]
+    async fn a_job_past_the_lifetime_cap_keeps_its_ordinary_room_on_a_capped_call() {
+        let metrics = B2buaMetrics::new();
+        let (d, crossed) = capped(1, &metrics);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let gate = park(&d).await;
+        d.dispatch("c", Job::new(record(&order, "crossing")).on_discard(recording_hook(&heard)))
+            .await;
+        assert_eq!(crossed.lock().unwrap().len(), 1);
+        d.dispatch("c", Job::new(record(&order, "response")).past_lifetime_cap()).await;
+        d.dispatch(
+            "c",
+            Job::new(record(&order, "no room"))
+                .past_lifetime_cap()
+                .on_discard(recording_hook(&heard)),
+        )
+        .await;
+        assert_eq!(*heard.lock().unwrap(), vec![Discard::Capped, Discard::QueueFull]);
+
+        gate.notify_one();
+        d.enqueue_poison("c", RemovalClass::Terminated);
+        drained(&d).await;
+        assert_eq!(*order.lock().unwrap(), vec!["response"]);
+    }
+
+    /// A call is counted near its lifetime cap once its offers pass 80 % of
+    /// it, and leaves the count with its queue.
+    #[tokio::test]
+    async fn a_call_past_most_of_its_lifetime_cap_is_counted_near_it_until_released() {
+        let metrics = B2buaMetrics::new();
+        let (d, _) = capped(10, &metrics);
+        let gate = park(&d).await;
+        for _ in 0..7 {
+            d.dispatch("c", Job::new(Box::pin(async {}))).await;
+        }
+        assert_eq!(metrics.calls_near_lifetime_cap(), 0, "8 offers of 10 is not past 80 %");
+        d.dispatch("c", Job::new(Box::pin(async {}))).await;
+        d.dispatch("c", Job::new(Box::pin(async {}))).await;
+        assert_eq!(metrics.calls_near_lifetime_cap(), 1, "counted once");
+
+        gate.notify_one();
+        d.enqueue_poison("c", RemovalClass::Terminated);
+        drained(&d).await;
+        assert_eq!(metrics.calls_near_lifetime_cap(), 0, "the released call leaves the count");
     }
 }

@@ -97,6 +97,7 @@ mod teardown_header_relay;
 mod teardown_races;
 mod termination;
 mod tier3_admission_gate;
+mod transaction_outcome_past_bounds;
 mod unacked_2xx_reap;
 mod unacked_reinvite_2xx_reap;
 mod unanswered_at_release;

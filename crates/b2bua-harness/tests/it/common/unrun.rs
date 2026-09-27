@@ -7,12 +7,14 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallReferRequest, CallReferResponse, NewCallRequest, NewCallResponse, ScriptedDecisionEngine,
 };
+use b2bua_harness::{B2buaScene, B2buaSut};
 use scenario_harness::callflow::{ANSWER_SDP, OFFER_SDP};
 use scenario_harness::{Agent, Dialog};
 use sip_message::SipResponse;
@@ -52,6 +54,19 @@ impl CallDecisionEngine for RouteFirstThenHang {
     ) -> Result<CallReferResponse, CallDecisionError> {
         self.inner.call_refer(req).await
     }
+}
+
+/// One handler permit and a per-call queue one deep: a second call parked on
+/// its decision holds the permit, so two events fill the first call's worker
+/// and queue.
+pub async fn one_permit_one_deep(name: &str) -> B2buaScene {
+    B2buaScene::with_b2bua(name, |bob_port| {
+        B2buaSut::builder(Arc::new(RouteFirstThenHang::to("127.0.0.1", bob_port))).tune(|c| {
+            c.event_dispatch_concurrency = 1;
+            c.per_call_queue_depth = 1;
+        })
+    })
+    .await
 }
 
 /// What the caller side of a confirmed dialog needs to write an in-dialog

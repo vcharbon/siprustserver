@@ -5,7 +5,6 @@
 //! site answers the INVITE, and a `Cancelled` is never discarded for want of
 //! room.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use b2bua_harness::{establish, settle_until, stated_by_response, B2buaScene, B2buaSut};
@@ -14,20 +13,7 @@ use scenario_harness::Harness;
 use sip_message::generators::InDialogMethod;
 use sip_message::{SipMessage, SipResponse};
 
-use crate::common::unrun::{establish_keeping_answer, DialogIds, RouteFirstThenHang};
-
-/// One handler permit and a per-call queue one deep: a second call parked on
-/// its decision holds the permit, so two events fill the first call's worker
-/// and queue.
-async fn one_permit_one_deep(name: &str) -> B2buaScene {
-    B2buaScene::with_b2bua(name, |bob_port| {
-        B2buaSut::builder(Arc::new(RouteFirstThenHang::to("127.0.0.1", bob_port))).tune(|c| {
-            c.event_dispatch_concurrency = 1;
-            c.per_call_queue_depth = 1;
-        })
-    })
-    .await
-}
+use crate::common::unrun::{establish_keeping_answer, one_permit_one_deep, DialogIds};
 
 /// The Retry-After seconds `resp` states.
 fn retry_after(resp: &SipResponse) -> u32 {

@@ -36,7 +36,13 @@ pub struct B2buaConfig {
     /// queue bound, so a stuck handler or a full queue hides none — the call
     /// ends (ADR-0020). The node's own timers and internal events do not
     /// count. A healthy call stays far below it: a 24 h call with 300 s
-    /// keepalives and session refreshes offers a few thousand. Never 0.
+    /// keepalives and session refreshes offers a few thousand. Enforced only
+    /// with the reaper on, whose verdict ends the call. Never 0, never below
+    /// `max_messages_per_call`.
+    ///
+    /// A call held just under `max_messages_per_call` per keepalive window
+    /// reaches it after `lifetime / max_messages_per_call × keepalive
+    /// interval`: 500 windows, about 41.7 h, at the defaults.
     pub max_messages_per_call_lifetime: u64,
     /// Bounded CDR submit queue; `0` disables buffering (passthrough).
     pub cdr_buffer_queue_max: usize,
@@ -521,6 +527,14 @@ impl B2buaConfig {
                         off; set it far above any healthy call"
                 .to_string());
         }
+        if self.max_messages_per_call_lifetime < self.max_messages_per_call {
+            return Err(format!(
+                "max_messages_per_call_lifetime={} < max_messages_per_call={}: the lifetime \
+                 cap would end a call inside its first keepalive window, before the per-window \
+                 guard could",
+                self.max_messages_per_call_lifetime, self.max_messages_per_call
+            ));
+        }
         if self.keepalive_interval_sec < Self::MIN_KEEPALIVE_SEC {
             return Err(format!(
                 "keepalive_interval_sec={} < min {} s (2 min): a shorter in-dialog \
@@ -952,6 +966,19 @@ mod tests {
         });
         let err = c.validate().unwrap_err();
         assert!(err.contains("capacity.calls"), "{err}");
+    }
+
+    #[test]
+    fn a_lifetime_message_cap_below_the_per_window_cap_is_refused() {
+        let c = B2buaConfig {
+            max_messages_per_call: 200,
+            max_messages_per_call_lifetime: 199,
+            ..Default::default()
+        };
+        let err = c.validate().unwrap_err();
+        assert!(err.contains("max_messages_per_call_lifetime=199"), "{err}");
+        let c = B2buaConfig { max_messages_per_call_lifetime: 200, ..c };
+        assert!(c.validate().is_ok());
     }
 
     #[test]

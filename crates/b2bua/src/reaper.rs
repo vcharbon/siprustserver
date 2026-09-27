@@ -184,8 +184,8 @@ impl Reaper {
 
     /// The dispatcher-facing lifetime hook: a call that crossed its lifetime
     /// message cap gets one `message-cap` verdict. The dispatcher admits it
-    /// past every bound and turns the call's other traffic away, so one is
-    /// enough.
+    /// past every bound and refuses the call's requests from then on, so one
+    /// is enough.
     pub fn lifetime_hook(&self) -> crate::dispatch::LifetimeHook {
         let this = self.clone();
         Arc::new(move |call_ref: &str| {

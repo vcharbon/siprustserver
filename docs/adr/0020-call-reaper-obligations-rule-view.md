@@ -19,15 +19,17 @@ it entirely:
    answered: `router::unanswered`; a `Cancelled` is queued past the bounds,
    up to a per-call ceiling past which the reaper tears the call down on the
    wire (BYE, CANCEL: its peers are alive, unlike a stale call's), and a
-   verdict — and a terminating call's timeout and transaction outcomes, so
-   its teardown completes under a flood — past every bound. A non-INVITE
-   request left without a final when the call ends is forgotten at its
-   release.)
+   verdict, a terminating call's timeout and every client transaction's
+   outcome (at most two per transaction the call sent) past every bound. A
+   non-INVITE request left without a final when the call ends is forgotten at
+   its release.)
 3. **Lost `TerminatingTimeout`** — the 32 s stuck-in-Terminating watchdog is
    itself a losable timer. (It is now admitted past every dispatch bound —
    the time bound. The work bound is `max_messages_per_call_lifetime`: the
    events offered for a call, counted at dispatch in every state, and past it
-   a `message-cap` verdict ends the call and its other traffic is refused.)
+   a `message-cap` verdict ends the call: its requests are refused and
+   answered 481, its responses keep their room. Installed only with the
+   reaper on.)
 4. **Best-effort CDR** — `BufferedCdrWriter` drops on overflow; a panic before
    `WriteCdr` writes nothing; additionally `process_result` executes
    `RemoveCall` (which propagates the replica delete) *before* the buffered
