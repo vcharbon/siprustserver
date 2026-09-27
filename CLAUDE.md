@@ -14,10 +14,11 @@ Formatting is `cargo fmt` under the root `rustfmt.toml` (stable options only). R
 
 ## Agent models
 
-When work is delegated to sub-agents, the Fable model is used only for **code review** of
-changes to the SIP core libraries and the B2BUA (dispatch rules, call state machines, relay,
-dialog and transaction handling, replication of call state). Implementation, tests, fix-ups and
-every other task run on Opus, B2BUA changes included, unless the user explicitly asks otherwise.
+When work is delegated to sub-agents: implementation, tests, fix-ups and every other task run on
+Opus, B2BUA changes included. Each review pass is one adversarial reviewer on Opus. The Fable
+model reviews only a specifically complex change (for example a new mechanism in the B2BUA core,
+its call state machines or the replication of call state), at most once per change; later
+review passes run on Opus. Unless the user explicitly asks otherwise.
 
 ## Where the details live (progressive disclosure)
 
