@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use call_limiter::wire::{
-    AdmitEntry, AdmitRequest, AdmitResponse, RefreshAnswer, RefreshRequest, RefreshResponse,
-    ReleaseRequest,
+    AdmitEntry, AdmitRequest, AdmitResponse, HealthResponse, RefreshAnswer, RefreshRequest,
+    RefreshResponse, ReleaseRequest,
 };
 use call_limiter::{
     AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer, RefreshResult,
@@ -135,6 +135,12 @@ async fn metrics_and_health_endpoints() {
     let health = call(&net, HttpRequest::get("/healthz")).await;
     assert_eq!(health.status, 200);
     assert_eq!(health.body, b"ok\n");
+
+    // The health answer reads the store: the calls it holds.
+    let health = call(&net, HttpRequest::get("/v1/health")).await;
+    assert_eq!(health.status, 200, "the store-touching health answer");
+    let answer: HealthResponse = serde_json::from_slice(&health.body).expect("a health body");
+    assert_eq!(answer, HealthResponse { calls: 1 });
 
     let metrics = call(&net, HttpRequest::get("/metrics")).await;
     assert_eq!(metrics.status, 200);

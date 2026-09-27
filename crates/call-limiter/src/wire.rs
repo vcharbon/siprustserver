@@ -4,6 +4,7 @@
 //! - `POST /v1/admit`   [`AdmitRequest`]  -> [`AdmitResponse`]
 //! - `POST /v1/release` [`ReleaseRequest`] -> `200 {}`
 //! - `POST /v1/refresh` [`RefreshRequest`] -> [`RefreshResponse`]
+//! - `GET /v1/health` -> [`HealthResponse`]
 //!
 //! Every request names the call by the client's per-call limiter `key`, unique
 //! over time; the server keeps the call's set and its lease, so the client
@@ -84,4 +85,11 @@ pub enum RefreshAnswer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshResponse {
     pub outcome: RefreshAnswer,
+}
+
+/// `GET /v1/health` response: the store answered, holding `calls` sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthResponse {
+    /// Calls holding a set when the store answered.
+    pub calls: u64,
 }
