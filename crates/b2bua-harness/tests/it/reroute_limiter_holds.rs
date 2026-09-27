@@ -764,3 +764,190 @@ async fn release_reroute_admit_that_dropped_the_set_is_never_re_registered() {
     assert_eq!(reregistered, 0, "the dropped set was never re-created");
     assert_eq!(refresh_dropped, 1, "one refresh learnt the drop; the call refreshed no more");
 }
+
+/// Counts `call_release` consults and answers each one `delay` late.
+struct SlowRelease {
+    delay: Duration,
+    releases: Arc<AtomicUsize>,
+    inner: Arc<dyn CallDecisionEngine>,
+}
+
+#[async_trait]
+impl CallDecisionEngine for SlowRelease {
+    async fn new_call(&self, req: NewCallRequest) -> Result<NewCallResponse, CallDecisionError> {
+        self.inner.new_call(req).await
+    }
+    async fn call_failure(
+        &self,
+        req: CallFailureRequest,
+    ) -> Result<CallFailureResponse, CallDecisionError> {
+        self.inner.call_failure(req).await
+    }
+    async fn call_refer(
+        &self,
+        req: CallReferRequest,
+    ) -> Result<CallReferResponse, CallDecisionError> {
+        self.inner.call_refer(req).await
+    }
+    async fn call_release(
+        &self,
+        req: CallReleaseRequest,
+    ) -> Result<CallReleaseResponse, CallDecisionError> {
+        self.releases.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        self.inner.call_release(req).await
+    }
+}
+
+/// Counts the admits that replace a call's set (`release_on_refusal`: a
+/// route fold's) and delegates.
+struct CountReplacingAdmits {
+    replacing: Arc<AtomicUsize>,
+    inner: Arc<dyn CallLimiter>,
+}
+
+#[async_trait]
+impl CallLimiter for CountReplacingAdmits {
+    async fn admit(
+        &self,
+        key: &str,
+        entries: &[LimiterEntry],
+        release_on_refusal: bool,
+    ) -> AdmitOutcome {
+        if release_on_refusal {
+            self.replacing.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.admit(key, entries, release_on_refusal).await
+    }
+    async fn release(&self, key: &str) {
+        self.inner.release(key).await
+    }
+    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
+        self.inner.refresh(key, ids).await
+    }
+}
+
+/// A release consult in flight is the call's only one: the cap that raised it
+/// is spent, and nothing the established call does while the consult is
+/// pending raises another. The consult of `[x, y]`'s call answers 150 s late
+/// with the reroute `[y, z]`; meanwhile the cap's period elapses twice more,
+/// the call refreshes its set and the caller re-INVITEs. One consult, one
+/// replacing admit: the route the call applies is the set the limiter holds,
+/// and the hangup drains it.
+#[tokio::test(start_paused = true)]
+async fn release_consult_in_flight_is_the_only_one_of_the_call() {
+    const CAP_SEC: i64 = 60;
+    const CONSULT_SEC: u64 = 150;
+    let h = Harness::new("reroute-holds-release-consult-in-flight");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let media = h.agent("media", "127.0.0.1:5090").await;
+    let rig = limiter_rig().await;
+    let replacing = Arc::new(AtomicUsize::new(0));
+    let limiter: Arc<dyn CallLimiter> =
+        Arc::new(CountReplacingAdmits { replacing: replacing.clone(), inner: rig.client.clone() });
+    let releases = Arc::new(AtomicUsize::new(0));
+    let decision = Arc::new(SlowRelease {
+        delay: Duration::from_secs(CONSULT_SEC),
+        releases: releases.clone(),
+        inner: Arc::new(
+            ScriptedDecisionEngine::builder()
+                .fallback(|_| {
+                    let mut r = route_to("127.0.0.1", 5070);
+                    r.features.platform.max_duration_sec = CAP_SEC;
+                    r.callback_context = Some("release-ctx".into());
+                    r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
+                    r.call_limiter = limiters(&["x", "y"]);
+                    NewCallResponse::Route(r)
+                })
+                .on_release(|_| {
+                    let mut r = route_to("127.0.0.1", 5090);
+                    r.call_limiter = limiters(&["y", "z"]);
+                    ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
+                })
+                .build(),
+        ),
+    });
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter)
+        .limiter_store(rig.store.clone())
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+            c.call_control_timeout_ms = 1_000 * (CONSULT_SEC as i64 + 30);
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    // ── establish A↔B ───────────────────────────────────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    rig.expect_holds([1, 1, 0], "the established call holds x and y").await;
+
+    // ── the cap raises the release consult, which stays pending ─────────────
+    for _ in 0..CAP_SEC + 1 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    settle_until(|| releases.load(Ordering::SeqCst) == 1).await;
+
+    // The caller refreshes the session while the consult is pending.
+    let mut reinv = dialog.reinvite(Some(ALICE_REALIGN)).await;
+    let reinvite_cseq = dialog.local_cseq();
+    let mut bob_reinv = bob.receive("INVITE").await;
+    bob_reinv.respond(200, "OK").with_sdp(ANSWER).await;
+    reinv.expect(200).await;
+    dialog.ack_for(reinvite_cseq, None).await;
+    bob.receive("ACK").await;
+
+    // Two more cap periods pass and the call refreshes its set.
+    for _ in 0..2 * CAP_SEC + 10 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    assert_eq!(releases.load(Ordering::SeqCst), 1, "one release consult while it is pending");
+    assert_eq!(
+        replacing.load(Ordering::SeqCst),
+        0,
+        "no replacing admit before the consult answers"
+    );
+    rig.expect_holds([1, 1, 0], "the call still holds x and y").await;
+
+    // ── the consult answers; the reroute is applied ─────────────────────────
+    for _ in 0..30 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    let mut media_uas = media.receive("INVITE").await;
+    media_uas.respond(200, "OK").with_sdp(MEDIA_ANSWER).await;
+    let tag = media_uas.dialog().local_tag().to_string();
+    while let Some(mut retrans) = media.try_receive_tolerating("INVITE", &[]).await {
+        retrans.respond(200, "OK").with_sdp(MEDIA_ANSWER).with_to_tag(&tag).await;
+    }
+    media.receive("ACK").await;
+    let mut realign = alice.receive("INVITE").await;
+    realign.respond(200, "OK").with_sdp(ALICE_REALIGN).await;
+    alice.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    rig.expect_holds([0, 1, 1], "the applied reroute is the set the limiter holds").await;
+    assert_eq!(releases.load(Ordering::SeqCst), 1, "one release consult for the call");
+    assert_eq!(replacing.load(Ordering::SeqCst), 1, "one replacing admit for the call");
+
+    // ── the rerouted call ends normally ─────────────────────────────────────
+    let mut bye = dialog.bye().await;
+    media.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("the hangup releases the reroute's holds").await;
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released, count.failed_open), (4, 4, 0));
+    b2bua.assert_fully_reaped();
+
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let _ = h.finish().await;
+}
