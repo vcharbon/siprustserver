@@ -147,7 +147,7 @@ sweep.
    pub async fn assert_call_fully_over(
        nodes: &[&ReplicatedB2buaSut],
        call_ref: &str,
-       limiter: &WindowStore,   // shared LimiterServer store
+       limiter: &CallStore,   // shared LimiterServer store
    ) {
        assert_single_owner(nodes, call_ref);          // 0 owners after terminal
        assert_call_fully_released(nodes, call_ref).await;

@@ -106,7 +106,7 @@ pub struct RouterCtx {
     pub services: Arc<Vec<ServiceDef>>,
     pub metrics: B2buaMetrics,
     /// The obligation registry (ADR-0020 X7) — what every call owes at release
-    /// (the CDR, the limiter decrements), derived from the snapshot by
+    /// (the CDR, the limiter release), derived from the snapshot by
     /// `invariants::enforce` on each `→ Terminated` transition.
     pub obligations: Arc<ObligationSet>,
     /// Self-reported readiness driving the OPTIONS health responder (S7). The

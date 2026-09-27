@@ -225,11 +225,11 @@ async fn reject_decision_landing_after_the_callers_cancel_is_dropped() {
     assert_eq!(distinct_invite_call_ids(&report, bob.addr()), 0, "bob was never dialed");
 }
 
-/// Limiter variant: `apply_route` INCRs the route's `call_limiter` holds
-/// BEFORE the drop seam runs, so the dropped result must still carry them onto
-/// the resident call — the queued termination's obligation discharge DECRs
-/// each one. A drop that discarded the holds would strand a cluster-visible
-/// slot for the whole limiter window on exactly the caller-gives-up-early
+/// Limiter variant: `apply_route` admits the route's `call_limiter` set
+/// BEFORE the drop seam runs, so the dropped result must still carry the
+/// counted state onto the resident call — the queued termination's obligation
+/// discharge releases the call. A drop that discarded it would strand a
+/// cluster-visible set for a whole lease on exactly the caller-gives-up-early
 /// path the spec calls common.
 #[tokio::test(start_paused = true)]
 async fn dropped_route_still_discharges_its_limiter_holds() {

@@ -499,7 +499,7 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
     );
 }
 
-/// **Switchback-BYE decrement** — the Rust port of
+/// **Switchback-BYE release** — the Rust port of
 /// `tests/sip-front-proxy/failover/limiter-decrement-via-switchback-bye.test.ts`
 /// ("re-INVITE on backup → respawn → BYE on returned-primary decrements the
 /// cluster-shared limiter").
@@ -534,7 +534,7 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
 /// the cookie's `w_pri` is alive again, so alice's BYE routes back to it
 /// (`decode_forward`) and the reborn primary discharges — one CDR, limiter to 0.
 #[tokio::test(start_paused = true)]
-async fn switchback_bye_on_returned_primary_decrements_the_shared_limiter() {
+async fn switchback_bye_on_returned_primary_releases_the_shared_limiter() {
     let mut fh = ha_harness("limiter-ha-switchback-bye");
     let alice = fh.agent("alice", ALICE).await;
     let bob = fh.agent("bob", BOB).await;

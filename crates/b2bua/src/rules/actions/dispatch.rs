@@ -9,7 +9,7 @@ use call::helpers::{
 };
 use call::{Call, CdrEvent, TagMapping};
 
-use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance};
+use crate::effects::{CriticalStateEffect, HandlerEffects, Provenance, SoftBoundedEffect};
 use crate::rules::model::{MessageTransform, RuleAction, RuleContext};
 use crate::rules::relay;
 
@@ -320,11 +320,17 @@ impl ActionExecutor<'_> {
                     *call = call::helpers::set_call_ext(call.clone(), service_id, v);
                 }
             }
-            RuleAction::SetLimiterState { counted, ids } => {
-                // The fold's dispatching task already replaced the call's set
-                // on the limiter; this turn's write states the outcome, which
-                // the terminal settle reads to owe one release.
-                call.limiter.set(*counted, ids.clone());
+            RuleAction::SetLimiterState { key, counted, ids } => {
+                // The fold's dispatching task already replaced the set under
+                // `key` on the limiter; this turn's write states the outcome,
+                // which the terminal settle reads to owe one release. A fold of
+                // an earlier call under this call_ref names another key: that
+                // key is released as a gone call's, this call untouched.
+                if *key == call.limiter.key {
+                    call.limiter.set(*counted, ids.clone());
+                } else if *counted {
+                    fx.soft.push(SoftBoundedEffect::ReleaseLimiter { key: key.clone() });
+                }
             }
             RuleAction::RelayFailureToALeg { status, reason } => {
                 self.relay_failure_to_a_leg(call, fx, ctx, *status, reason);

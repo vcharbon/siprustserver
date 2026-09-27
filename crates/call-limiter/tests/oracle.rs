@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use call_limiter::wire::{
-    AdmitEntry, AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest,
+    AdmitEntry, AdmitRequest, AdmitResponse, RefreshOutcome, RefreshRequest, RefreshResponse,
+    ReleaseRequest,
 };
 use call_limiter::{
     AdmitResult, CallStore, LimiterConfig, LimiterMetrics, LimiterServer, RefreshResult,
@@ -62,9 +63,9 @@ async fn http_server_matches_direct_core() {
         ("c1", entries(&[("A", 2), ("B", 1)]), true),
         ("c4", entries(&[("B", 5)]), false),
     ];
-    for (call_ref, entries, release_on_refusal) in &admits {
+    for (key, entries, release_on_refusal) in &admits {
         let body = serde_json::to_vec(&AdmitRequest {
-            call_ref: (*call_ref).into(),
+            key: (*key).into(),
             entries: entries.clone(),
             release_on_refusal: *release_on_refusal,
         })
@@ -72,7 +73,7 @@ async fn http_server_matches_direct_core() {
         let resp = call(&net, HttpRequest::post("/v1/admit", body)).await;
         assert_eq!(resp.status, 200);
         let http: AdmitResponse = serde_json::from_slice(&resp.body).unwrap();
-        let direct = oracle.admit(call_ref, entries, *release_on_refusal);
+        let direct = oracle.admit(key, entries, *release_on_refusal);
         match (&http, &direct) {
             (AdmitResponse { admitted: true, .. }, AdmitResult::Admitted) => {}
             (
@@ -85,21 +86,21 @@ async fn http_server_matches_direct_core() {
 
     // Refresh c2 across most of the lease; both stores keep it; c1 lapses.
     tokio::time::advance(Duration::from_secs(8)).await;
-    let body = serde_json::to_vec(&RefreshRequest { call_ref: "c2".into(), ids: vec!["A".into()] })
-        .unwrap();
+    let body =
+        serde_json::to_vec(&RefreshRequest { key: "c2".into(), ids: vec!["A".into()] }).unwrap();
     let resp = call(&net, HttpRequest::post("/v1/refresh", body)).await;
     let http: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
-    let direct = oracle.refresh("c2", &["A".into()]);
-    assert_eq!(
-        (http.known, http.reregistered),
-        (direct == RefreshResult::Extended, direct == RefreshResult::Reregistered),
-        "refresh outcomes agree"
-    );
+    let direct = match oracle.refresh("c2", &["A".into()]) {
+        RefreshResult::Extended => RefreshOutcome::Extended,
+        RefreshResult::Reregistered => RefreshOutcome::Reregistered,
+        RefreshResult::Released => RefreshOutcome::Released,
+    };
+    assert_eq!(http.outcome, direct, "refresh outcomes agree");
     tokio::time::advance(Duration::from_secs(3)).await;
     assert_eq!(server.store().sweep_now(), oracle.sweep_now(), "the same sets lapsed");
 
     // Release c2 on both; both free the slot identically.
-    let body = serde_json::to_vec(&ReleaseRequest { call_ref: "c2".into() }).unwrap();
+    let body = serde_json::to_vec(&ReleaseRequest { key: "c2".into() }).unwrap();
     let resp = call(&net, HttpRequest::post("/v1/release", body)).await;
     assert_eq!(resp.status, 200);
     oracle.release("c2");
@@ -119,9 +120,9 @@ async fn metrics_and_health_endpoints() {
     let _h = net.serve(addr(), server).await.unwrap();
 
     // One admit + one refusal to move the counters.
-    let admit = |call_ref: &str| {
+    let admit = |key: &str| {
         serde_json::to_vec(&AdmitRequest {
-            call_ref: call_ref.into(),
+            key: key.into(),
             entries: entries(&[("A", 1)]),
             release_on_refusal: false,
         })

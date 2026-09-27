@@ -1,10 +1,12 @@
 //! Framework guarantees — port of `InvariantEnforcer.ts` + the bye-disposition
 //! invariant. On the `→ terminated` transition the framework appends the
 //! cleanup a buggy rule might have forgotten: cancel-all-timers first, then
-//! every **obligation** the call still owes (the CDR, the limiter decrements —
+//! every **obligation** the call still owes (the CDR, the limiter release —
 //! derived from the snapshot by the [`ObligationSet`], ADR-0020 X7), then
 //! remove-call last — so termination is always clean. Termination is also
-//! *promoted* (`terminating → terminated`) once every leg is resolved.
+//! *promoted* (`terminating → terminated`) once every leg is resolved. On
+//! every turn of a live call the framework keeps a counted call's limiter
+//! refresh armed ([`arm_limiter_refresh`], ADR-0038).
 
 use call::helpers::is_fully_resolved;
 use call::{
@@ -83,7 +85,7 @@ pub fn arm_limiter_refresh(
 
 /// Guarantee cleanup on the `→ terminated` transition: CancelAllTimers first,
 /// the unanswered-a-leg final (ADR-0022, when `answer_unanswered_a_leg`), then
-/// every owed obligation (`obligations.settle` — the CDR + limiter decrements
+/// every owed obligation (`obligations.settle` — the CDR + the limiter release
 /// derived from the snapshot, idempotent against rule-emitted cleanup), then
 /// RemoveCall last.
 ///

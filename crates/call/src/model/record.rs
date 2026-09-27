@@ -119,7 +119,7 @@ pub struct PrackedProvisional {
 /// counted call refreshes its lease while it lives and owes one release at
 /// its end; an uncounted one (no limiter stated, or an admit that failed
 /// open) never refreshes or releases.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallLimiterState {
     pub key: String,
     pub counted: bool,
@@ -236,8 +236,7 @@ pub struct Call {
     pub billing_context: Option<String>,
     /// Snapshot of the original a-leg INVITE; never mutated.
     pub a_leg_invite: ALegInviteSnapshot,
-    /// The call's admission state on the call limiter, keyed by `call_ref`.
-    #[serde(default)]
+    /// The call's admission state on the call limiter, under its own key.
     pub limiter: CallLimiterState,
     /// Serializable timer intents (not runtime fibers).
     pub timers: Vec<TimerEntry>,

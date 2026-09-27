@@ -13,7 +13,9 @@ use http_net::{HttpRequest, HttpResponse, HttpService};
 
 use crate::metrics::LimiterMetrics;
 use crate::store::{AdmitResult, CallStore, RefreshResult};
-use crate::wire::{AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest};
+use crate::wire::{
+    AdmitRequest, AdmitResponse, RefreshOutcome, RefreshRequest, RefreshResponse, ReleaseRequest,
+};
 
 /// The limiter HTTP service: a call store + its metrics.
 pub struct LimiterServer {
@@ -59,7 +61,7 @@ impl HttpService for LimiterServer {
                     Err(e) => return bad_request(&format!("bad admit body: {e}")),
                 };
                 let outcome =
-                    self.store.admit(&parsed.call_ref, &parsed.entries, parsed.release_on_refusal);
+                    self.store.admit(&parsed.key, &parsed.entries, parsed.release_on_refusal);
                 self.metrics.on_admit(&outcome);
                 let resp = match outcome {
                     AdmitResult::Admitted => {
@@ -81,7 +83,7 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad release body: {e}")),
                 };
-                self.store.release(&parsed.call_ref);
+                self.store.release(&parsed.key);
                 json_ok(&serde_json::json!({}))
             }
             ("POST", "/v1/refresh") => {
@@ -89,12 +91,13 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad refresh body: {e}")),
                 };
-                let outcome = self.store.refresh(&parsed.call_ref, &parsed.ids);
+                let outcome = match self.store.refresh(&parsed.key, &parsed.ids) {
+                    RefreshResult::Extended => RefreshOutcome::Extended,
+                    RefreshResult::Reregistered => RefreshOutcome::Reregistered,
+                    RefreshResult::Released => RefreshOutcome::Released,
+                };
                 self.metrics.on_refresh();
-                json_ok(&RefreshResponse {
-                    known: outcome == RefreshResult::Extended,
-                    reregistered: outcome == RefreshResult::Reregistered,
-                })
+                json_ok(&RefreshResponse { outcome })
             }
             ("GET", "/metrics") => {
                 HttpResponse::ok(self.metrics.prometheus_text(self.store.stats()).into_bytes())

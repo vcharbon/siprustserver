@@ -770,7 +770,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
         // ── the limiter state of a route fold on a going-away call ──────────
         // A route fold's dispatching task replaced the call's set on the
         // limiter: the state it carries becomes a Terminating call's, and the
-        // terminal settle releases by `call_ref`; no LimiterRefresh re-arm. A
+        // terminal settle releases the call; no LimiterRefresh re-arm. A
         // Terminated call is never resident on a rule turn (its folds take the
         // router's gone-call release).
         rule(
@@ -782,7 +782,11 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
             }),
             |ctx| {
                 let limiter = route_fold_limiter_state(ctx.event)?;
-                ok(vec![RuleAction::SetLimiterState { counted: limiter.counted, ids: limiter.ids }])
+                ok(vec![RuleAction::SetLimiterState {
+                    key: limiter.key,
+                    counted: limiter.counted,
+                    ids: limiter.ids,
+                }])
             },
         )
         .runs_while_terminating(),
@@ -1575,7 +1579,7 @@ pub(super) fn core_rules() -> Vec<RuleDefinition> {
                 },
                 // Final answer to the caller; BeginTermination then CANCELs the
                 // pending (trying/early) b-legs and the → terminated invariant
-                // settles the obligations (limiter decrements + CDR).
+                // settles the obligations (the limiter release + the CDR).
                 RuleAction::RespondToALeg {
                     status: 408,
                     reason: "Request Timeout".into(),

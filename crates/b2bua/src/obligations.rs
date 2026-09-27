@@ -41,7 +41,7 @@ pub struct Obligation {
     /// Stable kind id ("limiter", "cdr", …) — metrics labels / audit lines only.
     pub kind: &'static str,
     /// Dedupe key, unique within `kind` for one call
-    /// (limiter: the `call_ref`; cdr: `"cdr"`).
+    /// (limiter: the call's limiter key; cdr: `"cdr"`).
     pub key: String,
 }
 
@@ -99,9 +99,10 @@ impl ObligationSet {
 
 /// Kind `"limiter"` — a counted call releases its limiter set exactly once
 /// at termination (the strong admit↔release invariant), with one
-/// `release(call_ref)` the server applies idempotently. An uncounted call
-/// (no limiter stated, or an admit that failed open) owes nothing. A
-/// `ReleaseLimiter` a rule already emitted discharges it.
+/// `release(key)` under the call's own key, which the server applies
+/// idempotently. An uncounted call (no limiter stated, or an admit that
+/// failed open) owes nothing. A `ReleaseLimiter` of the call's key a rule
+/// already emitted discharges it; one of another key does not.
 pub struct LimiterObligations;
 
 impl ObligationKind for LimiterObligations {
@@ -113,15 +114,17 @@ impl ObligationKind for LimiterObligations {
         if !call.limiter.counted {
             return;
         }
-        let already = effects.soft.iter().any(|e| matches!(e, SoftBoundedEffect::ReleaseLimiter));
+        let already = effects.soft.iter().any(
+            |e| matches!(e, SoftBoundedEffect::ReleaseLimiter { key } if *key == call.limiter.key),
+        );
         if !already {
-            effects.soft.push(SoftBoundedEffect::ReleaseLimiter);
+            effects.soft.push(SoftBoundedEffect::ReleaseLimiter { key: call.limiter.key.clone() });
         }
     }
 
     fn owed(&self, call: &Call) -> Vec<Obligation> {
         if call.limiter.counted {
-            vec![Obligation { kind: "limiter", key: call.call_ref.clone() }]
+            vec![Obligation { kind: "limiter", key: call.limiter.key.clone() }]
         } else {
             Vec::new()
         }

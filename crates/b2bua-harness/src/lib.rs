@@ -895,6 +895,12 @@ impl B2buaSut {
 
     /// The live copy of `call_ref` this worker serves, if any (introspection:
     /// what its rules read at the next event).
+    /// Cancel `id` in the SUT's timer driver, the record untouched: a stand-in
+    /// for a fire the per-call queue dropped.
+    pub async fn cancel_driver_timer(&self, call_ref: &str, id: &str) {
+        self._core.cancel_driver_timer(call_ref, id).await;
+    }
+
     pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
         self._core.live_call(call_ref)
     }

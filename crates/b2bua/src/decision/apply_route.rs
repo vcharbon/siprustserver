@@ -155,9 +155,8 @@ pub async fn apply_route(
             // Fail open: the call runs uncounted (nothing released or
             // refreshed).
             AdmitOutcome::Unavailable => call.limiter.set(false, Vec::new()),
-            // The key is minted per call, so a tombstone on it names this
-            // call's own release: a fold's admit landing on the initial
-            // route is unreachable, and this is counted apart.
+            // The key was minted this turn, so a tombstone on it is
+            // unreachable; counted as `limiter_admit_released_initial`.
             AdmitOutcome::Released => {
                 call.limiter.set(false, Vec::new());
                 fx.buffered.push(BufferedObservabilityEffect::LimiterAdmitReleased);

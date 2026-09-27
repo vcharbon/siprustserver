@@ -13,7 +13,7 @@
 //! leg: armed at route time (so it rides the replicated `call.timers` ledger
 //! and survives crash → reclaim), untouched by reroutes, cancelled at answer.
 //! On fire for a still-unanswered call: 408 to the a-leg, CANCEL the pending
-//! b-leg(s), terminate — which settles the obligations (limiter decrement +
+//! b-leg(s), terminate — which settles the obligations (the limiter release +
 //! CDR) through the ordinary enforce path.
 
 use std::net::SocketAddr;

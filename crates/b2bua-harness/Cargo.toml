@@ -29,7 +29,7 @@ tokio = { workspace = true, features = ["test-util"] }
 sip-proxy = { path = "../sip-proxy" }
 # The `CdrWriter` impl that keeps each terminated `Call` (`src/terminated.rs`).
 async-trait = { workspace = true }
-# The SUT's default call limiter (`src/limiter.rs`): a real `WindowStore` served
+# The SUT's default call limiter (`src/limiter.rs`): a real `CallStore` served
 # by a `LimiterServer` on the simulated HTTP fabric.
 http-net = { path = "../http-net" }
 call-limiter = { path = "../call-limiter" }

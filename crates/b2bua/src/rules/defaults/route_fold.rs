@@ -18,8 +18,8 @@ use b2bua_sdk::header_update::payload_lines;
 /// `Terminated` call is moot: the caller already holds its final, so the fold
 /// drives no forward progress — no new leg toward a callee whose caller is
 /// gone, no second final on the a-leg's completed transaction (RFC 3261
-/// §17.2.1). The termination in progress owns the teardown; the holds a route
-/// fold carries still become the call's ([`route_fold_holds`]).
+/// §17.2.1). The termination in progress owns the teardown; the limiter state
+/// a route fold carries still becomes the call's ([`route_fold_limiter_state`]).
 pub(crate) fn fold_lands_on_going_away_call(ctx: &RuleContext) -> bool {
     matches!(ctx.call.state(), CallModelState::Terminating | CallModelState::Terminated)
 }
@@ -180,6 +180,7 @@ pub(crate) fn route_fold_parity_actions(fold: &RouteFold, ctx: &RuleContext) -> 
     }
     if let Some(limiter) = &fold.limiter {
         actions.push(RuleAction::SetLimiterState {
+            key: limiter.key.clone(),
             counted: limiter.counted,
             ids: limiter.ids.clone(),
         });

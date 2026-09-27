@@ -6,7 +6,7 @@
 //! route time, and EVERY limit teardown path (max-duration BYE, message-cap
 //! 503, the crossing CANCEL/200) MUST release it — `current_total` back to 0 —
 //! exactly as a clean BYE would. A limit that tears the call down but forgets
-//! the limiter decrement pins a trunk's capacity forever (the endurance cap20
+//! the limiter release pins a trunk's capacity forever (the endurance cap20
 //! pinning class, see [[stuck-setup-zombie-limiter-pinning]]).
 //!
 //! Coverage map (the user's enumerated limit cases):

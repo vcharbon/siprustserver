@@ -33,7 +33,10 @@ and a lost release could not be retried.
    for one lease: an admit or a refresh landing after the call ended re-creates
    nothing and is refused with its own reason, so every order of admit,
    refresh and release on one call is safe, and a second release from another
-   node frees nothing.
+   node frees nothing. An admit that drops the set without replacing it (a cap
+   refusal with `release_on_refusal`, an empty replacement) fences the key
+   against refresh the same way, until the next admit of the key: a refresh
+   that left before the drop and lands after it re-creates nothing.
 4. **`refresh(key, ids)` extends the lease** of a known call. For a call the
    server does not know and has not tombstoned it **re-creates the set from
    the ids the refresh carries, with no cap check**: the call exists and was
@@ -47,9 +50,12 @@ and a lost release could not be retried.
    Counts read low while such calls live; the counters say how many.
 7. **Only a counted Active call refreshes**, and it always has its refresh
    armed: the invariant layer re-arms a missing or past-due `LimiterRefresh`
-   on every turn, so a timer fire the per-call queue dropped heals on the next
-   turn. A Terminating call stops refreshing; its teardown is bounded by the
-   32 s backstop, inside the lease.
+   on every turn of the call, so a timer fire the per-call queue dropped heals
+   on the call's next turn. For an idle established call that turn is its
+   keepalive, so the call may run uncounted for up to the keepalive interval
+   plus one refresh period. A Terminating call stops refreshing: a teardown
+   may outlast the lease (a release consult, then the sliding 32 s backstop),
+   in which case the set lapses early and the terminal release is a no-op.
 8. **The call state is `{key, counted, ids}`**, one replicated field. A route
    fold's dispatching task replaces the set before the fold reaches the call
    and the fold states the outcome (`SetLimiterState`); a fold landing on a
@@ -64,8 +70,11 @@ request reaches it). So a call whose primary crashed and that nobody has taken
 over stops refreshing and loses its set one lease after its last refresh, and
 the reap of a deferred terminal at the replica TTL releases a set the lease
 already dropped. Decision 4 is what closes this: the node that materialises
-the call re-arms its timers, the past-due refresh fires at once, and the set is
-re-registered within one refresh of the takeover or the reclaim. The HA cells
+the call re-arms its timers; the restored past-due refresh, or the refresh the
+invariant arms on the materialising turn, re-registers the set within one
+refresh period of the takeover or the reclaim. A takeover copy that reaches
+its end defers the release to the primary: its re-registered set is freed by
+the lease, and the reap's release at the replica TTL is a no-op. The HA cells
 that prove a release (the reap's, the reclaim's) run a lease longer than the
 replica TTL on purpose, so the release they name is what frees the call; the
 cells that prove re-registration run the deployed relation.
@@ -82,6 +91,16 @@ cells that prove re-registration run the deployed relation.
 - Config: `LIMITER_LEASE_SECONDS` on the limiter, `LIMITER_REFRESH_SECONDS`
   on the workers, the refresh below the lease by more than one period.
 - A refresh carries the call's ids: one request per counted call per period.
+- Re-registration knows no cap: a stale counted copy materialised after its
+  release's tombstone lapsed (a primary that released, crashed before the
+  flush and reboots later than one lease) re-registers a set until the
+  keepalive reaps that zombie; and after a limiter restart the sets
+  re-registered beside admits made in the gap can read above the cap on
+  `limiter_admission_max` for the life of the calls that outlived the restart.
+- `b2bua_limiter_refresh_released_total` is not always a fault: a partitioned
+  backup's reap of a primary it believes dead tombstones the key of a call the
+  primary still serves; that call's refreshes are refused for one lease, then
+  re-register.
 - Out of scope here: what a batched per-node refresh and a release queue
   change about the request rate; per-leg keys for a transfer, which extend the
   key without changing this contract.

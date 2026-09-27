@@ -56,6 +56,10 @@ const IDS: [&str; 3] = ["x", "y", "z"];
 /// production parity value).
 const REBOOT_BUDGET: Duration = Duration::from_secs(600);
 
+/// The workers' refresh period (`limiter_refresh_sec`, the deployed value):
+/// a set is re-registered within it of the node materialising the call.
+const REFRESH_PERIOD_MS: i64 = 40_000;
+
 fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
@@ -406,10 +410,12 @@ async fn a_reboot_reclaim_and_the_backup_reap_release_the_call_once() {
 
 /// The primary crashes and the call is silent for longer than the lease: its
 /// set lapses. The caller's re-INVITE then fails over to the backup, which
-/// materialises the call and re-arms its timers; the past-due refresh fires at
-/// once and re-registers the set, so the call is counted again within one
-/// refresh of the takeover. The caller's BYE ends it on the backup (StayDead:
-/// the deferred terminal is reaped) and the store drains to the witnesses.
+/// materialises the call and re-arms its timers; the refresh re-registers the
+/// set within one refresh period of the takeover. The caller's BYE ends the
+/// call on the backup, whose takeover copy defers the release to the dead
+/// primary; the terminal it reverse-flushed is evicted at the replica TTL with
+/// no release sent, so the re-registered set is freed by its lease alone
+/// (ADR-0038).
 #[tokio::test(start_paused = true)]
 async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_takeover() {
     let mut fh = ha_harness("limiter-release-by-call-lapsed-then-takeover");
@@ -447,6 +453,7 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
     assert_eq!(rig.store.stats().lease_expired_calls, 1);
 
     // ── a re-INVITE fails over to the backup, whose refresh re-registers ──
+    let reinvite_at = fh.now_ms();
     let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
     let mut bob_uas = bob.receive("INVITE").await;
     bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
@@ -461,8 +468,14 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
     );
     assert_eq!(rig.store.stats().reregistered_calls, 1);
     assert_eq!(backup.metrics().limiter_refresh_reregistered_total(), 1);
+    assert!(
+        fh.now_ms() - reinvite_at <= REFRESH_PERIOD_MS,
+        "re-registered within one refresh period of the re-INVITE ({} ms)",
+        fh.now_ms() - reinvite_at
+    );
 
-    // ── the BYE ends the call on the backup; the reap frees it (no CDR) ──
+    // ── the BYE ends the call on the backup, which defers the release ────
+    // The set lapses with its lease; the reap's release is a no-op.
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
     let released = fh
         .settle_lossy_cleanup(async || {
@@ -471,15 +484,18 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
         })
         .await;
     assert!(released, "the call drains to the witnesses; holds {:?}", rig.holds());
+    assert_eq!(rig.store.stats().lease_expired_calls, 2, "the initial and the re-registered set");
+    assert_eq!(rig.store.stats().releases_total, 0, "no node released the call: the lease did");
     rig.release_witnesses();
     assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
 }
 
 /// The reboot variant: the primary crashes, the call is silent past the
 /// lease, and the primary reboots inside the replica TTL. Its reclaim
-/// re-arms the call's timers; the past-due refresh re-registers the set, so
-/// the call is counted again within one refresh of the reclaim. The caller's
-/// BYE lands on the reborn primary, which releases the call once.
+/// re-arms the call's timers; the refresh re-registers the set within one
+/// refresh period of the node being ready. The caller's BYE lands on the
+/// reborn primary, which releases the call once: the re-registered set is
+/// freed by that release, not by the lease.
 #[tokio::test(start_paused = true)]
 async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_reclaim() {
     let mut fh = ha_harness("limiter-release-by-call-lapsed-then-reclaim");
@@ -528,6 +544,7 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
         }
     }
     assert!(primary.is_ready(), "rebooted primary re-hydrated from the backup");
+    let ready_at = fh.now_ms();
     proxy.set_health(&primary_ord, WorkerHealth::Alive);
     let counted_again = fh
         .settle_terminal(async || {
@@ -541,6 +558,11 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
         rig.holds()
     );
     assert_eq!(rig.store.stats().reregistered_calls, 1);
+    assert!(
+        fh.now_ms() - ready_at <= REFRESH_PERIOD_MS,
+        "re-registered within one refresh period of the node being ready ({} ms)",
+        fh.now_ms() - ready_at
+    );
 
     // ── the BYE lands on the reborn primary, which releases once ─────────
     scenario_harness::callflow::hangup(&mut dialog, &bob).await;
@@ -554,6 +576,8 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
         })
         .await;
     assert!(drained, "the release drained the call; holds {:?}", rig.holds());
+    assert_eq!(rig.store.stats().lease_expired_calls, 1, "only the silent window lapsed");
+    assert_eq!(rig.store.stats().releases_total, 1, "the BYE's release freed the set");
     rig.release_witnesses();
     assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
 }
@@ -563,7 +587,7 @@ async fn a_call_whose_set_lapsed_while_its_primary_was_down_is_counted_again_on_
 /// duration cap reroutes it to `[y, z]`, which the fold admits; the primary
 /// crashes with the flush unlanded. The backup's copy says uncounted, so the
 /// takeover never refreshes or releases: the set lapses with its lease and is
-/// counted there (map Q7).
+/// counted there (ADR-0038 decision 6).
 #[tokio::test(start_paused = true)]
 async fn a_fold_set_of_an_uncounted_call_lost_with_the_primary_lapses_with_its_lease() {
     let mut fh = ha_harness("limiter-release-by-call-uncounted-fold-flush-lost");

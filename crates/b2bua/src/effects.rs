@@ -86,9 +86,11 @@ pub enum CriticalStateEffect {
 /// Soft-bounded effects — limiter requests with a short timeout (never block).
 #[derive(Debug, Clone)]
 pub enum SoftBoundedEffect {
-    /// Release the call's limiter set: one `release(call_ref)`, idempotent on
-    /// the server. The terminal settle emits it once for a counted call.
-    ReleaseLimiter,
+    /// Release the limiter set held under `key`: one `release(key)`,
+    /// idempotent on the server. The terminal settle emits it once for a
+    /// counted call, under the call's own key; a route fold carrying another
+    /// call's key releases that key.
+    ReleaseLimiter { key: String },
 }
 
 /// Buffered observability effects — drop-on-overload is acceptable.

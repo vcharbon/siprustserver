@@ -17,9 +17,9 @@ async fn real_http_admit_reject_release_metrics() {
     let handle = net.serve("127.0.0.1:0".parse().unwrap(), server).await.unwrap();
     let dst = handle.local_addr();
 
-    let admit = |call_ref: &str| {
+    let admit = |key: &str| {
         serde_json::to_vec(&AdmitRequest {
-            call_ref: call_ref.into(),
+            key: key.into(),
             entries: vec![AdmitEntry { id: "trunk-A".into(), limit: 1 }],
             release_on_refusal: false,
         })
@@ -39,7 +39,7 @@ async fn real_http_admit_reject_release_metrics() {
     assert_eq!(a2.rejected_id.as_deref(), Some("trunk-A"));
 
     // Release the first call, then the second is admitted.
-    let rel = serde_json::to_vec(&ReleaseRequest { call_ref: "c1".into() }).unwrap();
+    let rel = serde_json::to_vec(&ReleaseRequest { key: "c1".into() }).unwrap();
     let rr = net.request(dst, HttpRequest::post("/v1/release", rel)).await.unwrap();
     assert_eq!(rr.status, 200);
 

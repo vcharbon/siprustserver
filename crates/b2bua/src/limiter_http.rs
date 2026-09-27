@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use call_limiter::wire::RefreshOutcome as WireRefresh;
 use call_limiter::wire::{
     AdmitEntry, AdmitRequest, AdmitResponse, RefreshRequest, RefreshResponse, ReleaseRequest,
 };
@@ -88,7 +89,7 @@ impl CallLimiter for HttpCallLimiter {
         release_on_refusal: bool,
     ) -> AdmitOutcome {
         let body = AdmitRequest {
-            call_ref: key.to_string(),
+            key: key.to_string(),
             entries: entries
                 .iter()
                 .map(|e| AdmitEntry { id: e.id.clone(), limit: e.limit })
@@ -111,20 +112,20 @@ impl CallLimiter for HttpCallLimiter {
 
     async fn release(&self, key: &str) {
         // Best-effort: a lost release lapses with the call's lease.
-        let _ = self.post("/v1/release", &ReleaseRequest { call_ref: key.to_string() }).await;
+        let _ = self.post("/v1/release", &ReleaseRequest { key: key.to_string() }).await;
     }
 
     async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
-        let body = RefreshRequest { call_ref: key.to_string(), ids: ids.to_vec() };
+        let body = RefreshRequest { key: key.to_string(), ids: ids.to_vec() };
         let Some(resp) = self.post("/v1/refresh", &body).await else {
             return RefreshOutcome::Unavailable;
         };
         match serde_json::from_slice::<RefreshResponse>(&resp.body) {
-            Ok(RefreshResponse { known: true, .. }) => RefreshOutcome::Known,
-            Ok(RefreshResponse { known: false, reregistered: true }) => {
+            Ok(RefreshResponse { outcome: WireRefresh::Extended }) => RefreshOutcome::Known,
+            Ok(RefreshResponse { outcome: WireRefresh::Reregistered }) => {
                 RefreshOutcome::Reregistered
             }
-            Ok(RefreshResponse { known: false, reregistered: false }) => RefreshOutcome::Released,
+            Ok(RefreshResponse { outcome: WireRefresh::Released }) => RefreshOutcome::Released,
             Err(_) => RefreshOutcome::Unavailable,
         }
     }

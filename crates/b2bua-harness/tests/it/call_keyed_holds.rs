@@ -24,12 +24,15 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
 use b2bua_harness::{
     invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
 };
 use call::ReleaseEventKind;
 use call_limiter::LimiterConfig;
+use http_net::{HttpRequest, HttpResponse, HttpService};
 use scenario_harness::Harness;
+use sip_message::generators::InDialogMethod;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -539,6 +542,7 @@ async fn a_fold_admitted_after_the_call_ended_holds_nothing() {
         "the fold's admit was refused by the tombstone",
     );
     rig.expect_drained("the fold's set was never counted; the witnesses are intact").await;
+    assert_eq!(b2bua.metrics().limiter_admit_released_fold_total(), 1);
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -678,5 +682,277 @@ async fn a_limiter_restart_is_healed_by_the_next_refresh() {
         stored: dead.stats().current_total,
     });
     assert_eq!(dead.stats().current_total, 7);
+    let _ = h.finish().await;
+}
+
+/// The limiter applies a `/v1/refresh` `after` it arrived, detached from the
+/// request: a client past its budget has given up when it lands.
+struct LateRefresh {
+    inner: Arc<dyn HttpService>,
+    after: Duration,
+}
+
+#[async_trait]
+impl HttpService for LateRefresh {
+    async fn handle(&self, req: HttpRequest) -> HttpResponse {
+        if req.path != "/v1/refresh" {
+            return self.inner.handle(req).await;
+        }
+        let (inner, after) = (self.inner.clone(), self.after);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            let _ = tx.send(inner.handle(req).await);
+        });
+        rx.await.unwrap_or_else(|_| HttpResponse::status(500))
+    }
+}
+
+/// A refresh that left before a refused reroute dropped the call's set and
+/// lands after it re-creates nothing: the drop fenced the key. The call holds
+/// `x`; its refresh is applied late; the release reroute `[y, z]` is refused
+/// on `z` (at its cap) and drops `x`; the late refresh then lands on the fence.
+/// The call ends by the local teardown, drained.
+#[tokio::test(start_paused = true)]
+async fn a_refresh_landing_after_a_refused_reroute_dropped_the_set_re_creates_nothing() {
+    let h = Harness::new("keyed-holds-late-refresh-after-drop");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let rig = WitnessRig::serve_wrapped(LimiterConfig { lease_sec: LEASE_SEC }, WIDE_BUDGET, |s| {
+        Arc::new(LateRefresh { inner: s, after: Duration::from_secs(5) })
+    })
+    .await;
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = limited_route("127.0.0.1", 5070, &[("x", 10)]);
+                r.features.platform.max_duration_sec = 60;
+                r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
+                NewCallResponse::Route(r)
+            })
+            .on_release(|_| {
+                // z at cap 1 is refused: its witness already holds one.
+                let mut r = route_to("127.0.0.1", 5090);
+                r.call_limiter = limiters(&[("y", 10), ("z", 1)]);
+                ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+            c.limiter_refresh_sec = 5;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let _dialog = call.ack().await;
+    bob.receive("ACK").await;
+    rig.expect_holds([1, 0, 0], "the established call holds x").await;
+
+    // ── every refresh is applied 5 s late; the cap raises the reroute ──────
+    // The refresh of t = 60 s is in flight when the refused reroute's admit
+    // drops x; it lands 5 s later on the fence.
+    for _ in 0..61 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    // The refused reroute degrades to the local teardown of both legs.
+    alice.receive("BYE").await.respond(200, "OK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    for _ in 0..8 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    assert_eq!(rig.all_holds(), [0, 0, 0], "the late refresh re-created nothing");
+    assert_eq!(rig.store.stats().reregistered_calls, 0);
+    rig.expect_drained("nothing of the call is held").await;
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released), (1, 1), "x granted, released by the refusal");
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// A `LimiterRefresh` fire the driver lost (a full per-call queue drops it):
+/// the set lapses, and the call's next turn re-arms the refresh, which
+/// re-registers the set. Nothing but the turn heals it.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_refresh_fire_is_re_armed_by_the_call_s_next_turn() {
+    const CALL_ID: &str = "dropped-fire@127.0.0.1";
+    const FROM_TAG: &str = "dropped-fire-tag";
+    let h = Harness::new("keyed-holds-dropped-refresh-fire");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let rig = limiter_rig(WIDE_BUDGET).await;
+    let b2bua = B2buaSut::builder(routes_holding(&[("x", 10)]))
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.limiter_refresh_sec = 5;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice
+        .invite(&bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER)
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    rig.expect_holds([1, 0, 0], "the established call holds x").await;
+
+    // ── the driver loses the refresh fire; the set lapses ──────────────────
+    let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
+    b2bua.cancel_driver_timer(&call_ref, "LimiterRefresh").await;
+    for _ in 0..22 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    rig.store.sweep_now();
+    assert_eq!(rig.all_holds(), [0, 0, 0], "nobody refreshed the set");
+    assert_eq!(rig.store.stats().lease_expired_calls, 1);
+
+    // ── the call's next turn re-arms the refresh, which re-registers ───────
+    let mut probe = dialog.request(InDialogMethod::Options, None).await;
+    bob.receive("OPTIONS").await.respond(200, "OK").await;
+    let _ = probe.expect(200).await;
+    for _ in 0..6 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    rig.expect_holds([1, 0, 0], "the re-armed refresh re-registered the set").await;
+    assert_eq!(rig.store.stats().reregistered_calls, 1);
+    assert_eq!(b2bua.metrics().limiter_refresh_reregistered_total(), 1);
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("the hangup releases the re-registered set").await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// A counted call whose key the limiter released behind its back (a
+/// partitioned backup's reap of a primary it believes dead): its refreshes are
+/// refused for one lease and counted, then the next one re-registers the set.
+/// The hangup releases once.
+#[tokio::test(start_paused = true)]
+async fn a_refresh_refused_by_a_release_behind_the_call_s_back_is_counted() {
+    const CALL_ID: &str = "released-behind@127.0.0.1";
+    const FROM_TAG: &str = "released-behind-tag";
+    let h = Harness::new("keyed-holds-refresh-released");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let rig = limiter_rig(WIDE_BUDGET).await;
+    let b2bua = B2buaSut::builder(routes_holding(&[("x", 10)]))
+        .limiter(rig.client.clone())
+        .limiter_store(rig.store.clone())
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.limiter_refresh_sec = 5;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice
+        .invite(&bob)
+        .identity(CALL_ID, FROM_TAG)
+        .with_sdp(OFFER)
+        .through(b2bua.addr)
+        .send()
+        .await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    rig.expect_holds([1, 0, 0], "the established call holds x").await;
+
+    // ── the key is released behind the call's back ─────────────────────────
+    let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
+    let key = b2bua.live_call(&call_ref).expect("the call is live").limiter.key;
+    rig.store.release(&key);
+    assert_eq!(rig.all_holds(), [0, 0, 0]);
+    for _ in 0..6 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    assert_eq!(rig.all_holds(), [0, 0, 0], "the tombstone refuses the refresh");
+    assert_eq!(b2bua.metrics().limiter_refresh_released_total(), 1);
+
+    // ── past the tombstone's lease the refresh re-registers ────────────────
+    for _ in 0..LEASE_SEC + 5 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    rig.expect_holds([1, 0, 0], "the set is re-registered once the tombstone lapsed").await;
+    assert_eq!(b2bua.metrics().limiter_refresh_reregistered_total(), 1);
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    rig.expect_drained("the hangup releases the re-registered set").await;
+    b2bua.assert_fully_reaped();
+    let _ = h.finish().await;
+}
+
+/// A limiter that answers every admit `Released`: the tombstone refusal on
+/// an initial route leaves the call uncounted and is counted on the b2bua.
+struct AnswersReleased;
+
+#[async_trait]
+impl CallLimiter for AnswersReleased {
+    async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
+        AdmitOutcome::Released
+    }
+    async fn release(&self, _key: &str) {}
+    async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
+        RefreshOutcome::Released
+    }
+}
+
+/// An initial admit refused by a tombstone runs the call uncounted and counts
+/// it as `limiter_admit_released_initial`.
+#[tokio::test(start_paused = true)]
+async fn an_initial_admit_refused_by_a_tombstone_runs_the_call_uncounted() {
+    let h = Harness::new("keyed-holds-initial-admit-released");
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let b2bua = B2buaSut::builder(routes_holding(&[("x", 10)]))
+        .limiter(Arc::new(AnswersReleased))
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    assert_eq!(b2bua.metrics().limiter_admit_released_initial_total(), 1);
+
+    let mut bye = dialog.bye().await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released, count.failed_open), (0, 0, 0), "uncounted");
+    b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

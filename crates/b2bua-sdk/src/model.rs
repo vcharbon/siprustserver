@@ -938,12 +938,16 @@ pub enum RuleAction {
         ext: ExtMap,
     },
     /// State the call's admission state after a route fold: the fold's
-    /// dispatching task already replaced the call's set on the limiter (one
-    /// `admit(key, ..)` net of the set the call held), so the call is
-    /// `counted` iff that admit was granted a non-empty set, and `ids` names
-    /// it. On a live call the refresh cadence follows; on a going-away call
-    /// the terminal settle releases the call.
+    /// dispatching task already replaced the set held under `key` on the
+    /// limiter (one `admit(key, ..)` net of the set the call held), so the
+    /// call is `counted` iff that admit was granted a non-empty set, and
+    /// `ids` names it. On a live call the refresh cadence follows; on a
+    /// going-away call the terminal settle releases the call. A `key` that is
+    /// not the resident call's names an earlier call under the same
+    /// `call_ref`: the call's state is left alone and that key is released
+    /// when counted.
     SetLimiterState {
+        key: String,
         counted: bool,
         ids: Vec<String>,
     },

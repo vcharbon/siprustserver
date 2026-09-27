@@ -8,7 +8,8 @@
 //! a limiter and must drain it. Whatever limiter the SUT runs, a
 //! [`HoldLedger`] counts, per call, the holds the SUT was granted, the holds
 //! it released (a replaced set counts as released) and the admits that failed
-//! open.
+//! open. A [`WitnessRig`] is the limiter a test drives itself: a real store
+//! with one witness hold per id, probed per id, restartable.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -282,6 +283,9 @@ impl SutLimiter {
     }
 }
 
+/// A seam a [`WitnessRig`] puts in front of its limiter server.
+type ServerWrap = dyn Fn(Arc<dyn HttpService>) -> Arc<dyn HttpService> + Send + Sync;
+
 /// The ids a [`WitnessRig`] serves; each carries one witness hold.
 pub const WITNESS_IDS: [&str; 3] = ["x", "y", "z"];
 
@@ -317,7 +321,7 @@ pub struct WitnessRig {
     /// The production client over the fabric, for the SUT.
     pub client: Arc<dyn CallLimiter>,
     cfg: LimiterConfig,
-    answers_after: Option<Duration>,
+    wrap: Arc<ServerWrap>,
     _server: Box<dyn HttpServerHandle>,
 }
 
@@ -330,20 +334,36 @@ impl WitnessRig {
         budget: Duration,
         answers_after: Option<Duration>,
     ) -> Self {
+        Self::serve_wrapped(cfg, budget, move |server| match answers_after {
+            Some(after) => Arc::new(AnswersLate { inner: server, after }),
+            None => server,
+        })
+        .await
+    }
+
+    /// [`serve`](Self::serve) with the limiter server wrapped by `wrap` (a
+    /// fault seam in front of the store); a restart wraps the new server the
+    /// same way.
+    pub async fn serve_wrapped(
+        cfg: LimiterConfig,
+        budget: Duration,
+        wrap: impl Fn(Arc<dyn HttpService>) -> Arc<dyn HttpService> + Send + Sync + 'static,
+    ) -> Self {
         let laddr: SocketAddr = WITNESS_LIMITER_ADDR.parse().expect("witness limiter address");
         let http = SimulatedHttpNetwork::new();
-        let (store, handle) = Self::serve_store(&http, cfg, answers_after).await;
+        let wrap: Arc<ServerWrap> = Arc::new(wrap);
+        let (store, handle) = Self::serve_store(&http, cfg, wrap.as_ref()).await;
         let client: Arc<dyn CallLimiter> =
             Arc::new(HttpCallLimiter::new(Arc::new(http.clone()), laddr, budget));
-        Self { http, store, client, cfg, answers_after, _server: handle }
+        Self { http, store, client, cfg, wrap, _server: handle }
     }
 
     /// An empty store under `cfg` with the witnesses admitted, served on
-    /// `http` at the rig's address.
+    /// `http` at the rig's address behind `wrap`.
     async fn serve_store(
         http: &SimulatedHttpNetwork,
         cfg: LimiterConfig,
-        answers_after: Option<Duration>,
+        wrap: &ServerWrap,
     ) -> (Arc<CallStore>, Box<dyn HttpServerHandle>) {
         let laddr: SocketAddr = WITNESS_LIMITER_ADDR.parse().expect("witness limiter address");
         let store = Arc::new(CallStore::new(cfg, Clock::test_at(0)));
@@ -355,12 +375,9 @@ impl WitnessRig {
             );
             assert_eq!(witness, AdmitResult::Admitted, "witness on {id}");
         }
-        let mut server: Arc<dyn HttpService> =
+        let server: Arc<dyn HttpService> =
             Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
-        if let Some(after) = answers_after {
-            server = Arc::new(AnswersLate { inner: server, after });
-        }
-        let handle = http.serve(laddr, server).await.expect("witness limiter binds");
+        let handle = http.serve(laddr, wrap(server)).await.expect("witness limiter binds");
         (store, handle)
     }
 
@@ -371,7 +388,8 @@ impl WitnessRig {
     pub async fn restart(&mut self) -> Arc<CallStore> {
         let old = std::mem::replace(&mut self._server, Box::new(NoServer));
         drop(old);
-        let (store, handle) = Self::serve_store(&self.http, self.cfg, self.answers_after).await;
+        let wrap = self.wrap.clone();
+        let (store, handle) = Self::serve_store(&self.http, self.cfg, wrap.as_ref()).await;
         self._server = handle;
         std::mem::replace(&mut self.store, store)
     }

@@ -31,8 +31,8 @@ fn laddr() -> SocketAddr {
     LIMITER_ADDR.parse().unwrap()
 }
 
-/// Serve a real `LimiterServer` (default 300 s window, so the window never rolls
-/// mid-test) on `net` at [`LIMITER_ADDR`]; return the store (for count probes)
+/// Serve a real `LimiterServer` (the default lease, longer than any test here)
+/// on `net` at [`LIMITER_ADDR`]; return the store (for count probes)
 /// and the server handle (keep alive for the test).
 async fn serve_limiter(net: &SimulatedHttpNetwork) -> (Arc<CallStore>, Box<dyn HttpServerHandle>) {
     let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));

@@ -5,9 +5,9 @@
 //! - `POST /v1/release` [`ReleaseRequest`] -> `200 {}`
 //! - `POST /v1/refresh` [`RefreshRequest`] -> [`RefreshResponse`]
 //!
-//! Every request names the call (`call_ref`); the server keeps the call's set
-//! and its lease, so the client stores nothing but whether the call is
-//! counted.
+//! Every request names the call by the client's per-call limiter `key`, unique
+//! over time; the server keeps the call's set and its lease, so the client
+//! stores nothing but whether the call is counted.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,11 +24,10 @@ pub struct AdmitEntry {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmitRequest {
     /// The call the set belongs to.
-    pub call_ref: String,
+    pub key: String,
     /// Every limiter entry the call must satisfy, admitted all-or-none.
     pub entries: Vec<AdmitEntry>,
     /// On a cap refusal, drop the call's current set in the same step.
-    #[serde(default)]
     pub release_on_refusal: bool,
 }
 
@@ -43,7 +42,6 @@ pub struct AdmitResponse {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub rejected_id: Option<String>,
     /// The call was released within the last lease: nothing is held for it.
-    #[serde(default)]
     pub released: bool,
 }
 
@@ -51,7 +49,7 @@ pub struct AdmitResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseRequest {
     /// The call to release.
-    pub call_ref: String,
+    pub key: String,
 }
 
 /// `POST /v1/refresh` body: extend the call's lease, or re-create its set from
@@ -59,18 +57,26 @@ pub struct ReleaseRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshRequest {
     /// The call to keep alive.
-    pub call_ref: String,
+    pub key: String,
     /// The ids the call holds, re-registered when the store holds no set.
-    #[serde(default)]
     pub ids: Vec<String>,
 }
 
-/// `POST /v1/refresh` response. `known`: the lease was extended;
-/// `reregistered`: the set was re-created from the ids sent; neither: the call
-/// was released within the last lease.
+/// `POST /v1/refresh` response: the outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefreshOutcome {
+    /// The lease was extended.
+    Extended,
+    /// The set was re-created from the ids sent.
+    Reregistered,
+    /// Nothing is held for the call and nothing was re-created (released,
+    /// dropped by an admit, or no ids sent).
+    Released,
+}
+
+/// `POST /v1/refresh` response.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshResponse {
-    pub known: bool,
-    #[serde(default)]
-    pub reregistered: bool,
+    pub outcome: RefreshOutcome,
 }

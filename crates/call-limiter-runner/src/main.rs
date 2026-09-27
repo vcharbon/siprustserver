@@ -5,10 +5,9 @@
 //! runs a periodic janitor so even a fully idle server drops the sets whose
 //! lease lapsed (the sweep-on-access path only fires on traffic).
 //!
-//! Stateless, no persistence: on restart the store is empty; the calls
-//! admitted before it refresh a set the store no longer holds and are released
-//! as no-ops. The b2bua fails open during the downtime. Deployed as a single
-//! replica (ClusterIP).
+//! Stateless, no persistence: on restart the store is empty; the counted calls
+//! re-register their sets on their next refresh (ADR-0038). The b2bua fails
+//! open during the downtime. Deployed as a single replica (ClusterIP).
 //!
 //! ## Config (env)
 //! - `LIMITER_LISTEN`                   (default `0.0.0.0:8080`)
