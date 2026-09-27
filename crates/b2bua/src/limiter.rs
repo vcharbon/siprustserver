@@ -5,8 +5,10 @@
 //! the server, checked net of what the call already holds, and reports
 //! [`AdmitOutcome::Admitted`] / [`AdmitOutcome::Rejected`] /
 //! [`AdmitOutcome::Released`] / [`AdmitOutcome::Unavailable`] /
-//! [`AdmitOutcome::NotSent`]; [`CallLimiter::release`] drops the set
-//! (idempotent, a no-op for a key the server holds nothing for);
+//! [`AdmitOutcome::NotSent`]; [`CallLimiter::release`] drops the set of every
+//! call it names (idempotent per key, a no-op for a key the server holds
+//! nothing for), and is reached only through the worker's release queue
+//! ([`crate::limiter_release`]);
 //! [`CallLimiter::refresh`] extends its lease, or re-registers the set the
 //! call carries when the server no longer holds it. The **call site owns the
 //! fail-open policy** ([`state_after_admit`]): a failed admit leaves the call
@@ -94,6 +96,16 @@ pub enum RefreshOutcome {
     Unavailable,
 }
 
+/// The honest outcome of one release request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseAnswer {
+    /// The limiter answered: every key sent is released (or was already).
+    Released,
+    /// The request left and no usable answer came back: it may have landed.
+    /// The caller sends the keys again; a release is idempotent per key.
+    Unavailable,
+}
+
 /// Admission/release/refresh seam for per-call concurrency limits.
 #[async_trait]
 pub trait CallLimiter: Send + Sync {
@@ -106,8 +118,9 @@ pub trait CallLimiter: Send + Sync {
         entries: &[LimiterEntry],
         release_on_refusal: bool,
     ) -> AdmitOutcome;
-    /// Drop the call's set, best-effort. Idempotent on the server.
-    async fn release(&self, key: &str);
+    /// Drop the set of every call of `keys` in one request. Idempotent per
+    /// key on the server. The implementation bounds the wait.
+    async fn release(&self, keys: &[String]) -> ReleaseAnswer;
     /// Extend the call's lease; `ids` is the set the server re-registers
     /// when it no longer holds one for the call.
     async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome;
@@ -124,7 +137,9 @@ impl CallLimiter for NoopLimiter {
     async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
         AdmitOutcome::NotSent
     }
-    async fn release(&self, _key: &str) {}
+    async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
+        ReleaseAnswer::Released
+    }
     async fn refresh(&self, _key: &str, _ids: &[String]) -> RefreshOutcome {
         RefreshOutcome::Unavailable
     }

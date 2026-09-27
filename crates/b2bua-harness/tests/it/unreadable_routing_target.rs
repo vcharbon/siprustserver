@@ -71,6 +71,7 @@ async fn unreadable_new_ruri_answers_500_and_dials_nobody() {
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     let cdrs = b2bua.cdr_records();
     assert!(cdrs[0].b_legs.is_empty(), "no b-leg is created for a refused route");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }
@@ -105,6 +106,7 @@ async fn unreadable_identity_rewrites_answer_500_and_dial_nobody() {
         assert_bob_was_never_dialled(&bob).await;
 
         settle_until(|| !b2bua.cdr_records().is_empty()).await;
+        b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
         b2bua.assert_fully_reaped();
         let _r = h.finish().await;
     }
@@ -142,6 +144,7 @@ async fn out_of_range_destination_port_refuses_the_route() {
     assert_bob_was_never_dialled(&bob).await;
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }
@@ -186,6 +189,7 @@ async fn unreadable_redirect_target_answers_500_without_a_contact() {
     assert_bob_was_never_dialled(&bob).await;
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _r = h.finish().await;
 }

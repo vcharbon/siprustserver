@@ -13,10 +13,10 @@
 //!   refusal with `release_on_refusal`, an empty replacement) fences the key
 //!   against refresh for one lease, until the next admit of the key: a refresh
 //!   that left before the drop re-creates nothing.
-//! - **release** drops the call's set and fences the `key` for one lease
-//!   against admit and refresh, so an admit or a refresh landing after the
-//!   call ended re-creates nothing. A release of an unknown or released call
-//!   is a no-op.
+//! - **release** names one or more calls; it drops each call's set and fences
+//!   its `key` for one lease against admit and refresh, so an admit or a
+//!   refresh landing after the call ended re-creates nothing. A release of an
+//!   unknown or released call changes no count and creates no set.
 //! - **refresh** extends the lease of a known call. For a call the store does
 //!   not know and has not fenced it re-creates the set from the ids the
 //!   refresh carries, with no cap check: the call exists and was admitted, and
@@ -217,19 +217,24 @@ impl CallStore {
         AdmitResult::Admitted
     }
 
-    /// Drop the call's set and fence the `key` for one lease against admit
-    /// and refresh. A second release changes nothing; a release of a call
-    /// never admitted, or whose set an admit dropped, fences its key the same.
-    pub fn release(&self, key: &str) {
+    /// Release every call of `keys` in one step: drop each call's set and
+    /// fence its key for one lease against admit and refresh. A second
+    /// release of a key changes nothing; a release of a call never admitted,
+    /// or whose set an admit dropped, fences its key the same.
+    pub fn release<K: AsRef<str>>(&self, keys: &[K]) {
         let now_ms = self.now_ms();
+        let fenced_until_ms = now_ms + self.lease_ms();
         let mut inner = self.inner.lock().unwrap();
         sweep(&mut inner, now_ms);
-        inner.releases_total += 1;
-        if inner.fences.get(key).is_some_and(|(fence, _)| *fence == Fence::Released) {
-            return;
+        for key in keys {
+            let key = key.as_ref();
+            inner.releases_total += 1;
+            if inner.fences.get(key).is_some_and(|(fence, _)| *fence == Fence::Released) {
+                continue;
+            }
+            drop_set(&mut inner, key);
+            fence(&mut inner, key, Fence::Released, fenced_until_ms);
         }
-        drop_set(&mut inner, key);
-        fence(&mut inner, key, Fence::Released, now_ms + self.lease_ms());
     }
 
     /// Extend the call's lease, or re-create its set from `ids` (no cap check)

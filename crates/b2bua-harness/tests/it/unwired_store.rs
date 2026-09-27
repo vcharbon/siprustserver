@@ -101,8 +101,7 @@ async fn a_worker_with_no_replication_wired_writes_nothing_to_its_store() {
     bye.expect(200).await;
 
     let serving = if w0.metrics().creations_total() == 1 { &w0 } else { &w1 };
-    settle_until(|| serving.metrics().removals_total() == serving.metrics().creations_total())
-        .await;
+    settle_until(|| serving.is_reaped()).await;
     settle_until(|| serving.cdr_records().len() == 1).await;
     w0.assert_fully_reaped();
     w1.assert_fully_reaped();

@@ -207,8 +207,7 @@ async fn hangup_while_ringing(
     carol_uas.respond(487, "Request Terminated").await;
     bye.expect(200).await;
 
-    settle_until(|| p.b2bua.metrics().removals_total() == p.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| p.b2bua.is_reaped()).await;
     p.b2bua.assert_fully_reaped();
     settle_until(|| !p.b2bua.cdr_records().is_empty()).await;
     let cdrs = p.b2bua.cdr_records();

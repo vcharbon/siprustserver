@@ -200,7 +200,7 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
         // serialize against — and taking the lock would leak a `locks` map entry
         // (only `release_call`/`discard_orphan` clear it). The decoded snapshot is
         // all the limiter release needs; `reap_replica` then evicts the body.
-        release_orphaned_limiter_holds(ctx, &terminal).await;
+        release_orphaned_limiter_holds(ctx, &terminal);
         ctx.metrics.bump_repl_terminal_lost();
     }
     // Evict the leftover: the deferred terminals just limiter-released + the
@@ -213,9 +213,9 @@ pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
 /// `LimiterObligations` derivation (a call that sent no admit owes nothing).
 /// The backup is the only node that can free this slot once its primary is
 /// dead for good.
-async fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
+fn release_orphaned_limiter_holds(ctx: &Arc<RouterCtx>, call: &Call) {
     if call.limiter.release_owed {
-        ctx.limiter.release(&call.limiter.key).await;
+        ctx.limiter_releases.push(&call.limiter.key);
     }
 }
 

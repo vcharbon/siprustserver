@@ -75,6 +75,7 @@ async fn a_spent_hop_count_reaches_the_decision_engine() {
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "the refused call is a call that was born and released");
     assert!(cdrs[0].b_legs.is_empty(), "a reject creates no b-leg");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;
@@ -132,6 +133,7 @@ async fn a_decision_cannot_restate_the_hop_count() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| b2bua.cdr_records().len() == 1).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;
@@ -164,6 +166,7 @@ async fn a_route_for_a_spent_hop_count_is_refused_483() {
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the refused call");
     assert!(cdrs[0].b_legs.is_empty(), "the leg the decision asked for is never originated");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;
@@ -202,6 +205,7 @@ async fn a_b_leg_may_leave_with_its_last_hop_spent() {
     bye.expect(200).await;
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;
@@ -239,6 +243,7 @@ async fn a_bye_at_zero_hops_still_tears_the_call_down() {
     bye.expect(200).await;
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;
@@ -285,6 +290,7 @@ async fn every_relayed_request_states_one_hop_less() {
     bye.expect(200).await;
 
     settle_until(|| b2bua.cdr_records().len() == 1).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _r = h.finish().await;

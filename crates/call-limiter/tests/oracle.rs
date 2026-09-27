@@ -101,10 +101,10 @@ async fn http_server_matches_direct_core() {
     assert_eq!(server.store().sweep_now(), oracle.sweep_now(), "the same sets lapsed");
 
     // Release c2 on both; both free the slot identically.
-    let body = serde_json::to_vec(&ReleaseRequest { key: "c2".into() }).unwrap();
+    let body = serde_json::to_vec(&ReleaseRequest { keys: vec!["c2".into()] }).unwrap();
     let resp = call(&net, HttpRequest::post("/v1/release", body)).await;
     assert_eq!(resp.status, 200);
-    oracle.release("c2");
+    oracle.release(&["c2"]);
 
     for id in ["A", "B"] {
         assert_eq!(server.store().held(id), oracle.held(id), "counts on {id} agree");

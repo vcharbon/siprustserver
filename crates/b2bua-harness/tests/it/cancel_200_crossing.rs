@@ -116,7 +116,7 @@ async fn cancel_200_crossing_acks_then_byes_the_b_leg_and_releases_the_limiter()
 
     // ── no leak: the hold is released by the crossing teardown ───────────────
     settle_until(|| store.stats().current_total == 0).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

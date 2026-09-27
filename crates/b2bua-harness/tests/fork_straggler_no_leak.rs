@@ -103,7 +103,7 @@ async fn a_fork_straggler_leaves_our_call_intact_and_reaped() {
     bye.expect(200).await;
 
     // ── nothing is left on the platform ──────────────────────────────────────
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(b2bua.active_calls(), 0, "no call record survives the hangup");
     b2bua.assert_fully_reaped();
 

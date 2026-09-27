@@ -373,6 +373,12 @@ impl B2buaCore {
         // included) bypasses it. `<= 0` disables (the reaper-wedge escape hatch).
         let decision =
             crate::decision::DeadlineDecisionEngine::wrap(decision, config.call_control_timeout_ms);
+        let limiter_releases = crate::limiter_release::ReleaseQueue::new(
+            limiter.clone(),
+            crate::limiter_release::ReleaseQueueConfig::from_config(&config),
+            metrics.clone(),
+        );
+        tasks.push(tokio::spawn(limiter_releases.clone().run()));
         let ctx = Arc::new(RouterCtx {
             config,
             state,
@@ -383,6 +389,7 @@ impl B2buaCore {
             dispatcher,
             decision,
             limiter,
+            limiter_releases,
             cdr: cdr.clone(),
             id_gen,
             clock,
@@ -746,6 +753,12 @@ impl B2buaCore {
     /// what its rules read at the next event).
     pub fn live_call(&self, call_ref: &str) -> Option<call::Call> {
         self.ctx.state.peek(call_ref)
+    }
+
+    /// Limiter releases this worker has queued and not yet had answered
+    /// (test/observability): a call is removed before its release leaves.
+    pub fn limiter_releases_waiting(&self) -> usize {
+        self.ctx.limiter_releases.waiting()
     }
 
     /// Live per-call serialization-lock count (test/observability). Should track

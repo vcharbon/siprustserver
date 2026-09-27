@@ -83,7 +83,7 @@ impl HttpService for LimiterServer {
                     Ok(p) => p,
                     Err(e) => return bad_request(&format!("bad release body: {e}")),
                 };
-                self.store.release(&parsed.key);
+                self.store.release(&parsed.keys);
                 json_ok(&serde_json::json!({}))
             }
             ("POST", "/v1/refresh") => {

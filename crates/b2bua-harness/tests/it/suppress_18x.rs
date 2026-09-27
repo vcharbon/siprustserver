@@ -542,6 +542,7 @@ async fn assert_rejected_and_reaped(b2bua: &B2buaSut) {
     assert_eq!(cdrs.len(), 1, "one CDR for the rejected call");
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
     assert!(kinds.contains(&CdrEventType::Reject), "reject event: {kinds:?}");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -719,6 +720,7 @@ async fn the_cancelled_call_s_487_rides_the_owned_180_s_tag() {
     settle_until(|| !b2bua.cdr_records().is_empty() && b2bua.active_calls() == 0).await;
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the cancelled call");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     alice.drain().await;
     bob.drain().await;

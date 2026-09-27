@@ -215,7 +215,7 @@ async fn no_answer_deadline_on_a_caller_cancelled_call_is_inert() {
             - Duration::from_secs(NO_ANSWER_SEC as u64).as_millis() as u64,
     ))
     .await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(consults.load(Ordering::SeqCst), 0, "still no consult through teardown");
     b2bua.assert_fully_reaped();
 
@@ -302,7 +302,7 @@ async fn a_service_watchdog_armed_before_the_cancel_is_disarmed_at_termination()
             .as_millis() as u64,
     ))
     .await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(consults.load(Ordering::SeqCst), 0, "still no consult through teardown");
     assert!(
         bob.try_receive_tolerating("CANCEL", &["INVITE"]).await.is_none(),
@@ -399,7 +399,7 @@ async fn invite_transaction_timeout_on_a_caller_cancelled_call_is_inert() {
         "no second CANCEL toward the already-CANCELed callee",
     );
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(consults.load(Ordering::SeqCst), 0, "still no consult through teardown");
     b2bua.assert_fully_reaped();
 

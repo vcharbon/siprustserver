@@ -176,6 +176,7 @@ async fn a_traced_call_records_the_datagram_and_the_length_of_its_decision() {
          the response landed ({received}); the decision parked for {parked} ms",
     );
 
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(traces().active(), 0, "the root span closed with the call");
 

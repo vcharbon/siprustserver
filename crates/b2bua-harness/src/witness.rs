@@ -152,7 +152,7 @@ impl WitnessRig {
     pub async fn expect_drained(&self, why: &str) {
         self.expect_holds([0, 0, 0], why).await;
         for id in WITNESS_IDS {
-            self.store.release(&format!("witness-{id}"));
+            self.store.release(&[format!("witness-{id}")]);
         }
     }
 

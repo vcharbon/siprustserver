@@ -49,7 +49,7 @@ async fn reinvite_during_bye_gets_481_locally() {
     bye.expect(200).await;
 
     // ── full teardown: the 481 did not wedge or leak the call record ──
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

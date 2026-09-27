@@ -87,7 +87,7 @@ async fn setup_stalled_call_is_reaped_by_global_duration() {
                               // The still-unanswered a-leg gets the ADR-0022 synthesized 503 (terminated
                               // unanswered); reading it auto-ACKs the a-leg INVITE txn (§17.1.1.3).
     call.expect(503).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     // A setup-stalled call must be reaped once the GlobalDuration-driven CANCEL resolves.
     b2bua.assert_fully_reaped();
 

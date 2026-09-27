@@ -144,7 +144,7 @@ async fn stale_no_answer_fire_on_a_confirmed_call_is_absorbed() {
 
     // The surviving dialog terminates normally: BYE end-to-end.
     hangup(&mut dialog, &bob).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The CDR carries no trace of the absorbed fire.

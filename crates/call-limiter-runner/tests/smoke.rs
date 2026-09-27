@@ -39,7 +39,7 @@ async fn real_http_admit_reject_release_metrics() {
     assert_eq!(a2.rejected_id.as_deref(), Some("trunk-A"));
 
     // Release the first call, then the second is admitted.
-    let rel = serde_json::to_vec(&ReleaseRequest { key: "c1".into() }).unwrap();
+    let rel = serde_json::to_vec(&ReleaseRequest { keys: vec!["c1".into()] }).unwrap();
     let rr = net.request(dst, HttpRequest::post("/v1/release", rel)).await.unwrap();
     assert_eq!(rr.status, 200);
 

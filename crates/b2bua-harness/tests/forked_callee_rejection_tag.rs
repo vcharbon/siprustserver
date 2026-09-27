@@ -59,6 +59,7 @@ async fn assert_rejected_and_reaped(h: &Harness, b2bua: &B2buaSut) {
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
     assert!(kinds.contains(&CdrEventType::Reject), "reject event: {kinds:?}");
     let _ = h;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 

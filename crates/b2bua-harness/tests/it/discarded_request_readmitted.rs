@@ -85,8 +85,7 @@ async fn a_bye_the_full_per_call_queue_dropped_is_answered_on_its_retransmission
     let mut relayed = s.bob.receive("BYE").await;
     relayed.respond(200, "OK").await;
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -106,8 +105,7 @@ async fn a_late_bye_dropped_at_the_call_cap_draws_481_once_the_cap_frees() {
     let ids = DialogIds::of(&answer);
     let bye_cseq = ended.local_cseq() + 2;
     s.hangup(&mut ended).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.h.allow_violation(
         "mid-dialog-tags",
         "a BYE in a dialog the B2BUA no longer holds is the deviation under test",
@@ -127,8 +125,7 @@ async fn a_late_bye_dropped_at_the_call_cap_draws_481_once_the_cap_frees() {
 
     // Freeing the cap: carol hangs up.
     scenario_harness::callflow::hangup(&mut holding, &s.bob).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
 
     s.alice.try_send_datagram(&bye, s.b2bua.addr).await.expect("the BYE leaves");
     assert_eq!(

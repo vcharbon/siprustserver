@@ -170,7 +170,7 @@ pub(super) async fn process_result(
     for eff in &result.effects.soft {
         match eff {
             SoftBoundedEffect::ReleaseLimiter { key } => {
-                ctx.limiter.release(key).await;
+                ctx.limiter_releases.push(key);
                 if crate::trace::sampled(&result.call) {
                     crate::trace::emit::limiter(&result.call, now_ms, "release", key);
                 }

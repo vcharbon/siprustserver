@@ -17,7 +17,8 @@ use crate::decision::{
 };
 use crate::decision_log::STACK_AUTHORED;
 use crate::event::CallEvent;
-use crate::limiter::{state_after_admit, AdmitOutcome, CallLimiter, LimiterEntry};
+use crate::limiter::{state_after_admit, AdmitOutcome, LimiterEntry};
+use crate::limiter_release::ReleaseQueue;
 use crate::rules::defaults::route_fold_limiter_state;
 use tokio::sync::mpsc;
 
@@ -56,23 +57,23 @@ fn internal_event(
 /// Post a route fold to the router. A fold the router can no longer take (its
 /// channel closed) is never stated on a call, so the call its dispatching task
 /// counted is released here.
-async fn send_route_fold(
+fn send_route_fold(
     tx: &mpsc::UnboundedSender<CallEvent>,
-    limiter: &dyn CallLimiter,
+    releases: &ReleaseQueue,
     fold: CallEvent,
 ) {
     if let Err(mpsc::error::SendError(fold)) = tx.send(fold) {
-        release_route_fold_call(limiter, &fold).await;
+        release_route_fold_call(releases, &fold);
     }
 }
 
-/// Release the call a route fold owes a release for
+/// Queue the release of the call a route fold owes a release for
 /// ([`route_fold_limiter_state`]) — for a fold no call will state. The call's
 /// own terminal release may have run already: the server applies this one as
 /// a no-op then.
-pub(super) async fn release_route_fold_call(limiter: &dyn CallLimiter, fold: &CallEvent) {
+pub(super) fn release_route_fold_call(releases: &ReleaseQueue, fold: &CallEvent) {
     if let Some(state) = route_fold_limiter_state(fold).filter(|l| l.release_owed) {
-        limiter.release(&state.key).await;
+        releases.push(&state.key);
     }
 }
 
@@ -294,7 +295,7 @@ pub(super) fn spawn_failure_callout(
         let (outcome, payload) = failure_outcome(&ctx2, &limiter, snapshot, &request).await;
         record_round_trip(&trace, &ctx2, "/call/failure", sent_at_ms, &request, outcome, &payload);
         let fold = internal_event(call_ref, "call-failure-result", outcome, payload, Vec::new());
-        send_route_fold(&ctx2.reentry_tx, ctx2.limiter.as_ref(), fold).await;
+        send_route_fold(&ctx2.reentry_tx, &ctx2.limiter_releases, fold);
     });
 }
 
@@ -546,7 +547,7 @@ pub(super) fn spawn_release_callout(
             &payload,
         );
         let fold = internal_event(call_ref, "call-release-result", outcome, payload, Vec::new());
-        send_route_fold(&ctx2.reentry_tx, ctx2.limiter.as_ref(), fold).await;
+        send_route_fold(&ctx2.reentry_tx, &ctx2.limiter_releases, fold);
     });
 }
 
@@ -801,29 +802,17 @@ fn parse_call_failure_request(v: &serde_json::Value) -> CallFailureRequest {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
-    use async_trait::async_trait;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
+    use crate::limiter::NoopLimiter;
+    use crate::limiter_release::ReleaseQueueConfig;
 
-    /// Records every release by call; admits nothing.
-    #[derive(Default)]
-    struct RecordingLimiter {
-        released: Mutex<Vec<String>>,
-    }
-
-    #[async_trait]
-    impl CallLimiter for RecordingLimiter {
-        async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
-            AdmitOutcome::Unavailable
-        }
-        async fn release(&self, key: &str) {
-            self.released.lock().unwrap().push(key.to_string());
-        }
-        async fn refresh(&self, _: &str, _: &[String]) -> crate::limiter::RefreshOutcome {
-            crate::limiter::RefreshOutcome::Unavailable
-        }
+    /// A release queue nobody drains: what a fold queued stays readable.
+    fn releases() -> Arc<ReleaseQueue> {
+        let config = ReleaseQueueConfig { lease: Duration::from_secs(120), cap: 16 };
+        ReleaseQueue::new(Arc::new(NoopLimiter), config, crate::metrics::B2buaMetrics::new())
     }
 
     fn failover_fold(counted: bool, release_owed: bool) -> CallEvent {
@@ -846,38 +835,35 @@ mod tests {
     async fn a_route_fold_the_router_cannot_take_releases_its_call() {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
-        let limiter = RecordingLimiter::default();
-        send_route_fold(&tx, &limiter, failover_fold(true, true)).await;
-        assert_eq!(*limiter.released.lock().unwrap(), vec!["call-1#k".to_string()], "by its key");
+        let releases = releases();
+        send_route_fold(&tx, &releases, failover_fold(true, true));
+        assert_eq!(releases.waiting_keys(), ["call-1#k"], "by its key");
     }
 
     #[tokio::test]
     async fn an_uncounted_route_fold_owing_its_release_releases_its_call() {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
-        let limiter = RecordingLimiter::default();
-        send_route_fold(&tx, &limiter, failover_fold(false, true)).await;
-        assert_eq!(*limiter.released.lock().unwrap(), vec!["call-1#k".to_string()], "by its key");
+        let releases = releases();
+        send_route_fold(&tx, &releases, failover_fold(false, true));
+        assert_eq!(releases.waiting_keys(), ["call-1#k"], "by its key");
     }
 
     #[tokio::test]
     async fn a_route_fold_owing_nothing_releases_nothing() {
         let (tx, rx) = mpsc::unbounded_channel();
         drop(rx);
-        let limiter = RecordingLimiter::default();
-        send_route_fold(&tx, &limiter, failover_fold(false, false)).await;
-        assert!(
-            limiter.released.lock().unwrap().is_empty(),
-            "a call that sent no admit owes nothing"
-        );
+        let releases = releases();
+        send_route_fold(&tx, &releases, failover_fold(false, false));
+        assert!(releases.waiting_keys().is_empty(), "a call that sent no admit owes nothing");
     }
 
     #[tokio::test]
     async fn a_delivered_route_fold_keeps_its_state_for_the_call() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let limiter = RecordingLimiter::default();
-        send_route_fold(&tx, &limiter, failover_fold(true, true)).await;
-        assert!(limiter.released.lock().unwrap().is_empty(), "the call states it");
+        let releases = releases();
+        send_route_fold(&tx, &releases, failover_fold(true, true));
+        assert!(releases.waiting_keys().is_empty(), "the call states it");
         let state =
             route_fold_limiter_state(&rx.recv().await.unwrap()).expect("the fold carries it");
         assert!(state.counted && state.release_owed);

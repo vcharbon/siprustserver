@@ -151,7 +151,7 @@ async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_on
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     let report = h.finish().await;
     write_flow_report(&report);
     let entries = report.entries();
@@ -166,6 +166,7 @@ async fn an_unacked_reliable_provisional_to_a_reinvite_ends_the_renegotiation_on
     let relayed = requests_to(&entries, b2bua.addr, bob_addr, "BYE");
     assert_eq!(alice_bye.len(), 1, "alice ends the call once: {alice_bye:?}");
     assert_eq!(relayed.len(), 1, "and the callee sees hers, relayed, and no other: {relayed:?}",);
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -246,7 +247,7 @@ async fn the_give_up_answers_the_face_that_owed_the_prack() {
     alice.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     let report = h.finish().await;
     write_flow_report(&report);
     let entries = report.entries();
@@ -258,5 +259,6 @@ async fn the_give_up_answers_the_face_that_owed_the_prack() {
     let relayed = requests_to(&entries, b2bua.addr, alice_addr, "BYE");
     assert_eq!(bob_bye.len(), 1, "bob ends the call once: {bob_bye:?}");
     assert_eq!(relayed.len(), 1, "and the caller sees his, relayed, and no other: {relayed:?}",);
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }

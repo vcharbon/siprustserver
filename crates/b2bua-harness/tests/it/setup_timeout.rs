@@ -136,7 +136,7 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
     uas.respond(487, "Request Terminated").await;
     bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(
         b2bua.metrics().removals_total(),
         b2bua.metrics().creations_total(),
@@ -155,6 +155,7 @@ async fn ringing_forever_is_torn_down_at_setup_timeout_and_releases_the_limiter(
         "CDR carries the setup-timeout reason: {:?}",
         reasons_of(&cdrs[0]),
     );
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -202,7 +203,7 @@ async fn long_ring_that_answers_before_the_deadline_survives() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

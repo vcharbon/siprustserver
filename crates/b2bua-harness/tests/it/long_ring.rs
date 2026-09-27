@@ -61,8 +61,7 @@ async fn ring_past_158s_gives_up_cleanly_at_the_app_deadline() {
     uas.respond(487, "Request Terminated").await;
     s.bob.receive("ACK").await;
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
 
     let alice_addr = s.alice.addr();
@@ -106,8 +105,7 @@ async fn answer_after_158s_establishes_end_to_end() {
     );
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     s.finish().await;
 }
@@ -171,8 +169,7 @@ async fn no_answer_at_or_above_the_bound_is_clamped_to_the_margin() {
         "caller's INVITE resolves at the clamped no-answer deadline",
     );
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
 
     let alice_addr = s.alice.addr();

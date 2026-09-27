@@ -1010,6 +1010,7 @@ async fn an_unscripted_cancel_is_refused_and_answered_200_then_487() {
             outcome.verdict.completed_steps
         );
     }
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -1068,6 +1069,7 @@ async fn an_unscripted_prack_is_refused_and_answered_200_so_the_relay_walks_on()
     assert!(outcome.verdict.abandoned.is_none(), "{:#?}", outcome.verdict.abandoned);
     assert_eq!(outcome.verdict.completed_steps.len(), 14, "{:?}", outcome.verdict.completed_steps);
 
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -1140,6 +1142,7 @@ async fn an_unscripted_non_2xx_final_is_refused_and_acked_on_the_invite_s_branch
         "the close re-ACKed what the refusal had already answered: {:#?}",
         abandoned.closed
     );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -1241,6 +1244,7 @@ async fn a_bye_taken_after_the_flow_completed_is_answered_200_and_still_a_late_a
         "{:#?}",
         legs["A"]
     );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -1377,6 +1381,7 @@ async fn a_re_invite_pending_when_the_bye_is_answered_draws_487_behind_the_200()
         "settled at {settled} ms, before the ACK at {} us",
         ack.at_us
     );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -1484,6 +1489,7 @@ async fn a_run_whose_document_asserts_the_wrong_final_fails_by_name_and_keeps_it
         "{:#?}",
         abandoned.closed
     );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
 
     // The evidence survives the failure.
@@ -2174,6 +2180,7 @@ async fn a_callee_side_fork_rings_twice_under_two_minted_tags() {
     assert!(to_tags[0].ends_with("-early-f1") && to_tags[1].ends_with("-early-f2"), "{to_tags:?}");
     assert_eq!(to_tags[2], to_tags[0], "the 486 answers under f1's tag: {to_tags:?}");
 
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -2239,6 +2246,7 @@ async fn an_interleaved_fork_s_prack_rides_its_own_early_dialog() {
     assert_eq!(pracks[0].2, "2 PRACK", "fork 1's space: the INVITE was its CSeq 1");
     assert_eq!(pracks[1].2, "2 PRACK", "fork 2's space, not fork 1's leavings");
 
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -2467,6 +2475,7 @@ async fn rung_three_an_info_intake_transfer_finds_no_intake_on_this_lane() {
         abandoned.closed
     );
     assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3294,6 +3303,7 @@ async fn rung_six_a_limited_second_call_is_refused_before_any_b_leg() {
         outcome.verdict.informative
     );
 
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3379,6 +3389,7 @@ async fn rung_seven_a_negative_case_passes_by_failing_exactly_as_it_declared() {
     // a call that ended. Presence is what a negative case asserts; what is IN
     // the record is deliberately not this case's subject.
     assert_eq!(scene.b2bua.cdr_records().len(), 1);
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3416,6 +3427,7 @@ async fn the_same_document_without_its_declaration_fails_on_the_very_same_ack() 
     assert!(outcome.verdict.abandoned.is_none());
     assert_eq!(outcome.verdict.completed_steps.len(), 12, "{:?}", outcome.verdict.completed_steps);
 
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3453,6 +3465,7 @@ async fn a_declaration_whose_divergence_never_happened_fails_the_run() {
     // call down, and the close had nothing to close.
     assert!(outcome.verdict.abandoned.is_none());
 
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3489,6 +3502,7 @@ async fn a_wire_divergence_past_the_anchor_is_carried_by_the_negative_case() {
     };
     assert_eq!((step.as_str(), *declared, *observed), ("s12", 1, 0));
 
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3513,6 +3527,7 @@ async fn a_wire_divergence_before_the_anchor_still_fails_the_negative_case() {
     // The declared failure still matched: only the early divergence turned it red.
     assert!(outcome.verdict.must_fail[0].observed.is_some());
 
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3571,6 +3586,7 @@ async fn a_script_that_ends_before_its_teardown_is_closed_by_the_scripted_ends()
     assert!(abandoned.closed[1].sent.starts_with("BYE "), "{:?}", abandoned.closed[1].sent);
 
     assert_eq!(scene.b2bua.cdr_records().len(), 1, "the call was billed");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3610,6 +3626,7 @@ async fn a_red_negative_run_is_still_closed_and_leaves_no_call_up() {
     assert_eq!(abandoned.closed.len(), 3, "{:#?}", abandoned.closed);
     assert!(outcome.timing.settled_at_ms.is_some(), "a red run still settles");
     assert_eq!(scene.b2bua.cdr_records().len(), 1);
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3672,6 +3689,7 @@ async fn a_ringing_call_the_script_walked_away_from_is_cancelled_by_its_caller()
         abandoned.closed
     );
     assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3716,6 +3734,7 @@ async fn an_expect_gated_on_a_dwelling_send_does_not_spend_its_budget_waiting_fo
     let acked = at(&|raw: &str| raw.starts_with("ACK "));
     let byed = at(&|raw: &str| raw.starts_with("BYE "));
     assert!(byed - acked >= budget * 6 * 1000, "the BYE dwelled: {acked} → {byed}");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3751,6 +3770,7 @@ async fn an_expect_declaring_its_own_gap_opens_its_budget_at_the_end_of_it() {
 
     assert_bundle_is_complete(&outcome, &dir);
     assert_eq!(outcome.verdict.completed_steps.len(), 13, "every step ran");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3826,6 +3846,7 @@ async fn a_background_policy_does_not_absorb_the_arrival_an_open_expect_waits_fo
         options(&|m| m.note.as_deref().is_some_and(|n| n.starts_with("background"))) >= 1,
         "the audits are the policy's: {b_leg:#?}"
     );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -3923,6 +3944,7 @@ async fn an_open_expect_holds_out_for_the_relay_when_an_audit_lands_in_the_same_
          polled {polled_at}, relayed {}, leg {b_leg:#?}",
         relay.at_us
     );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -4049,6 +4071,7 @@ async fn a_positive_run_whose_answer_is_a_reject_ends_its_script_and_closes() {
     // And the run still owes its call an ending and its attempt a record.
     assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
     assert_eq!(scene.b2bua.cdr_records().len(), 1, "the attempt was billed");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -4087,6 +4110,7 @@ async fn a_failed_inline_check_fails_the_verdict_and_the_flow_walks_to_its_own_t
     );
     assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
     assert_eq!(scene.b2bua.cdr_records().len(), 1, "the call was billed");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -4138,6 +4162,7 @@ async fn a_header_the_answer_omits_names_itself_and_the_call_reaches_its_teardow
     assert!(outcome.verdict.abandoned.is_none(), "{:#?}", outcome.verdict.abandoned);
     assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
     assert_eq!(scene.b2bua.cdr_records().len(), 1, "the call was billed");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
 
     // The reception is ATTRIBUTED to the step, which is what lets the post-run
@@ -4205,6 +4230,7 @@ async fn a_send_refused_mid_dialog_ends_the_script_and_the_close_ends_the_call()
     assert_eq!(acts, [("A", CloseOwed::Bye), ("B", CloseOwed::Answer)], "{:#?}", abandoned.closed);
     assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
     assert_eq!(scene.b2bua.cdr_records().len(), 1, "the call was billed");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -4252,6 +4278,7 @@ async fn a_missing_injector_ends_the_script_and_the_close_ends_the_call() {
     assert_eq!(acts, [("A", CloseOwed::Bye), ("B", CloseOwed::Answer)], "{:#?}", abandoned.closed);
     assert!(outcome.timing.settled_at_ms.is_some(), "the run settled");
     assert_eq!(scene.b2bua.cdr_records().len(), 1, "the call was billed");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -4562,6 +4589,7 @@ async fn two_answers_on_two_transactions_are_taken_in_either_order() {
         bye_ok < terminated,
         "the system answered the BYE first: 200 at {bye_ok}, 487 at {terminated}"
     );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -4579,6 +4607,7 @@ async fn a_final_on_one_transaction_is_charged_to_that_transaction_s_expect_alon
     let scene = api_scene("pivot-answer-on-the-other-transaction").await;
     let (outcome, _dir) = replay(&scene, "answer-on-the-other-transaction.v3.json").await;
     assert_substituted_finals_run_on(&outcome, &[("s12", 481, "PRACK", 200)]);
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -4597,6 +4626,7 @@ async fn two_substituted_finals_on_two_transactions_are_charged_one_to_each_expe
         &outcome,
         &[("s11", 486, "INVITE", 600), ("s12", 481, "PRACK", 200)],
     );
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }
@@ -4717,6 +4747,7 @@ async fn a_cancel_sent_after_its_invite_s_final_takes_200_or_481() {
         a_leg.iter().filter(|m| m.dir == Dir::Out && text(m).starts_with("ACK ")).collect();
     assert_eq!(acks.len(), 1, "one ACK on A: {a_leg:#?}");
     assert_eq!(acks[0].step.as_deref(), Some("s9"), "the scripted ACK, not the close's");
+    b2bua_harness::settle_until(|| scene.b2bua.is_reaped()).await;
     scene.b2bua.assert_fully_reaped();
     scene.finish().await;
 }

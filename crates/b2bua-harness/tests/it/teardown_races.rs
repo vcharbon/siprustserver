@@ -95,7 +95,7 @@ async fn bye_bye_glare_reaps_once_and_releases_the_limiter_once() {
     bob.drain().await;
     h.advance(Duration::from_secs(33)).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -142,7 +142,7 @@ async fn reinvite_crossing_bye_terminates_and_releases_the_limiter() {
     bob.drain().await;
     h.advance(Duration::from_secs(33)).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

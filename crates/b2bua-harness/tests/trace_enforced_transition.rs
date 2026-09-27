@@ -76,7 +76,7 @@ async fn the_enforced_teardown_of_an_unanswered_a_leg_shows_on_the_trace() {
     bob.receive("ACK").await;
     call.expect(503).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // ── The synthesized final left the box… ──────────────────────────────────

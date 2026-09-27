@@ -74,7 +74,7 @@ async fn a_2xx_repeated_before_the_callers_ack_draws_none_then_hers_relays() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
 
     // One 2xx received = one answer processed: the repeats must not re-enter the
     // answer path (no duplicate Answer event, no re-bridge).
@@ -88,6 +88,7 @@ async fn a_2xx_repeated_before_the_callers_ack_draws_none_then_hers_relays() {
     assert_eq!(answers, 1, "exactly one Answer CDR event for four copies of one 200");
     assert_eq!(records[0].b_legs.len(), 1, "no re-bridge: one b-leg");
 
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;

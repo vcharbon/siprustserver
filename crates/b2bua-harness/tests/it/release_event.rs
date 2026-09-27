@@ -143,7 +143,7 @@ async fn unsubscribed_max_duration_keeps_local_teardown_without_consult() {
     // Local teardown as today: both legs BYEd, max_duration CDR, no consult.
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     assert_eq!(
@@ -207,7 +207,7 @@ async fn subscribed_release_consults_engine_then_tears_down() {
     // Engine said Release → the same local teardown as the unsubscribed path.
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let reqs = captured.lock().unwrap();
@@ -332,7 +332,7 @@ async fn subscribed_route_reroutes_established_call_then_normal_hangup() {
     alice_bye.expect(200).await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -442,7 +442,7 @@ async fn rerouted_call_survives_displaced_callee_bye_crossing_ours() {
     mrf.receive("BYE").await.respond(200, "OK").await;
     alice_bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "one CDR for the rerouted call");
@@ -508,7 +508,7 @@ async fn reroute_route_rearms_cap_and_owns_subscriptions() {
     h.advance(Duration::from_secs(61)).await;
     alice.receive("BYE").await.respond(200, "OK").await;
     mrf.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(
         consults.load(Ordering::SeqCst),
@@ -555,7 +555,7 @@ async fn hung_release_consult_falls_back_to_local_teardown_within_deadline() {
 
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -598,7 +598,7 @@ async fn erroring_release_consult_falls_back_to_local_teardown() {
 
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _ = h.finish().await;

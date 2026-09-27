@@ -117,7 +117,7 @@ async fn hung_decision_is_rejected_503_at_the_default_deadline() {
     h.advance(Duration::from_millis(1_000)).await;
     call.expect(503).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "exactly one CDR for the deadline-rejected call");
@@ -187,7 +187,7 @@ async fn panicking_decision_is_rejected_503_immediately() {
     h.advance(Duration::from_secs(1)).await;
     call.expect(503).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.metrics().handler_panics_total(), 1, "the panic was observed, not swallowed");
     let cdrs = b2bua.cdr_records();

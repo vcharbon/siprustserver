@@ -114,7 +114,7 @@ async fn no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee_and_failover
     bob.receive("BYE").await.respond(200, "OK").await;
     d_bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
@@ -200,7 +200,7 @@ async fn no_answer_reject_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     let failed = call.expect(480).await;
     assert_eq!(failed.status(), 480, "caller's INVITE resolves with a final failure");
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
@@ -302,7 +302,7 @@ async fn drop_sdp_no_answer_cancel_crossed_by_200_reaps_the_abandoned_callee() {
     bob.receive("BYE").await.respond(200, "OK").await;
     d_bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }
@@ -384,7 +384,7 @@ async fn transaction_timeout_cancel_crossed_by_200_reaps_the_abandoned_callee() 
     bob.receive("BYE").await.respond(200, "OK").await;
     d_bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
 }

@@ -371,6 +371,7 @@ async fn a_late_ack_into_a_reaped_dialog_is_absorbed_never_answered() {
         "§17.1.1.3: a late ACK is absorbed, never answered (a 481 here is a defect)"
     );
     assert_eq!(b2bua.active_calls(), 0, "the late ACK created no call state");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     alice.drain().await;

@@ -1567,6 +1567,7 @@ async fn loadgen_reack_recovers_dropped_initial_b_leg_ack() {
     assert!(total >= 1 && drops >= 1, "no call / drop never fired: drops={drops} total={total}");
 
     settle_secs(SETTLE_LOSS_SECS, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(
         audit,
@@ -1613,6 +1614,7 @@ async fn loadgen_callee_retransmits_non2xx_final_on_lost_hop_ack() {
     assert!(drops >= 1, "the reject hop-ACK drop never fired: drops={drops}");
 
     settle_secs(SETTLE_LOSS_SECS, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(
         audit, 0,
@@ -1679,6 +1681,7 @@ async fn loadgen_abandoned_reject_leg_recovery_lands_on_recording() {
     );
 
     settle_secs(SETTLE_LOSS_SECS, || core.registry_size() == 0 && b2bua.active_calls() == 0).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(
         audit, 0,
@@ -2677,6 +2680,7 @@ async fn loadgen_loss_soak_all_bodies_recover() {
     assert_eq!(core_a.registry_size(), 0, "mux registry leak after group A soak");
     b2bua_a.assert_fully_reaped();
     assert_eq!(core_b.registry_size(), 0, "mux registry leak after group B soak");
+    b2bua_harness::settle_until(|| b2bua_b.is_reaped()).await;
     b2bua_b.assert_fully_reaped();
 
     // What P4 + the actor executor GUARANTEE under loss (STRICT): `rfc_audit_fail

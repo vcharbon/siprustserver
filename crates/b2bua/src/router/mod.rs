@@ -96,6 +96,8 @@ pub struct RouterCtx {
     pub dispatcher: PerCallDispatcher,
     pub decision: Arc<dyn CallDecisionEngine>,
     pub limiter: Arc<dyn CallLimiter>,
+    /// Where every release of a call's limiter key goes: no call waits on it.
+    pub limiter_releases: Arc<crate::limiter_release::ReleaseQueue>,
     pub cdr: Arc<dyn CdrWriter>,
     pub id_gen: Arc<IdGen>,
     pub clock: Clock,

@@ -141,6 +141,7 @@ async fn notify_481_ends_the_subscription() {
 
     let _report = h.finish().await;
     settle_until(|| b2bua.cdr_records().iter().any(|c| !c.events.is_empty())).await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The transfer's own outcome is unchanged by the 481.

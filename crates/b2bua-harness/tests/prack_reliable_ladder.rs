@@ -202,7 +202,7 @@ async fn the_caller_facing_ladder_runs_on_our_own_clock() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let entries = report.entries();
@@ -276,7 +276,7 @@ async fn the_callees_own_pacing_never_reaches_the_caller() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
 
@@ -342,7 +342,7 @@ async fn the_ladder_gives_up_at_64_t1() {
     bob.receive("CANCEL").await.respond(200, "OK").await;
     uas.respond(487, "Request Terminated").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     // The give-up is counted once, under the obligation alice left
     // undischarged; every rung before it was counted as it left.
@@ -430,7 +430,7 @@ async fn a_prack_inside_the_bound_is_not_rejected() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let entries = report.entries();
@@ -493,7 +493,7 @@ async fn the_ladder_ceases_at_the_final_response() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let entries = report.entries();
@@ -551,7 +551,7 @@ async fn the_ladder_ceases_on_the_callers_cancel() {
     // Two rungs' worth of quiet after the cancellation.
     advance(3_000).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let entries = report.entries();
@@ -633,7 +633,7 @@ async fn the_ladder_dies_with_the_fork_that_raised_it() {
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let entries = report.entries();
@@ -743,7 +743,7 @@ async fn a_rerouted_ring_opens_its_own_caller_early_dialog() {
     bob2.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let entries = report.entries();
@@ -851,7 +851,7 @@ async fn the_ladder_of_a_relayed_reinvite_ceases_at_its_own_final() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let entries = report.entries();

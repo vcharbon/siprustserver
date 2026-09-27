@@ -67,7 +67,7 @@ async fn caller_silent_keepalive_reaps_with_cdr() {
 
     // The unanswered BYE times out (Timer F) and the call is fully reaped.
     h.advance(BYE_TIMEOUT).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let cdrs = b2bua.cdr_records();
@@ -115,7 +115,7 @@ async fn callee_silent_keepalive_reaps_with_cdr() {
 
     // The unanswered BYE times out (Timer F) and the call is fully reaped.
     h.advance(BYE_TIMEOUT).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let cdrs = b2bua.cdr_records();
@@ -189,7 +189,7 @@ async fn two_calls_both_reap_despite_shared_timer_ids() {
 
     // No orphaned established call leaked once the unanswered BYEs time out.
     h.advance(BYE_TIMEOUT).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let cdrs = b2bua.cdr_records();

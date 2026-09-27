@@ -76,8 +76,7 @@ async fn a_reinvite_the_full_per_call_queue_drops_is_answered_500_with_retry_aft
     }
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -97,8 +96,7 @@ async fn a_late_reinvite_dropped_at_the_call_cap_is_answered_500_with_retry_afte
     let ids = DialogIds::of(&answer);
     let cseq = ended.local_cseq() + 2;
     s.hangup(&mut ended).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.h.allow_violation(
         "mid-dialog-tags",
         "a re-INVITE in a dialog the B2BUA no longer holds is the deviation under test",
@@ -124,8 +122,7 @@ async fn a_late_reinvite_dropped_at_the_call_cap_is_answered_500_with_retry_afte
     );
 
     scenario_harness::callflow::hangup(&mut holding, &s.bob).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -169,8 +166,7 @@ async fn a_cancel_arriving_on_a_full_per_call_queue_still_cancels_the_callee() {
     b_invite.respond(487, "Request Terminated").await;
     s.bob.receive("ACK").await;
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }

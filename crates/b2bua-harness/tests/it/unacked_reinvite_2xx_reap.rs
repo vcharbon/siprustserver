@@ -91,7 +91,7 @@ async fn unacked_reinvite_2xx_is_retransmitted_then_byes_both_legs() {
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -141,7 +141,7 @@ async fn reinvite_ack_discharges_the_2xx_obligation() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
 
     settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();

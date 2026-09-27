@@ -47,8 +47,7 @@ async fn bye_under_a_foreign_to_tag_is_refused_481_and_the_call_stays_up() {
 
     // The dialog's own tag ends it.
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -125,8 +124,7 @@ async fn ack_under_a_foreign_to_tag_discharges_nothing_and_the_2xx_is_repeated()
     let mut bye = dialog.bye().await;
     s.bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }

@@ -30,7 +30,7 @@ fn reliable_180(uas: &mut ServerTxn) -> scenario_harness::Respond<'_> {
 }
 
 async fn reaped(b2bua: &B2buaSut) {
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 

@@ -121,7 +121,7 @@ async fn a_2xx_ladder_rung_does_not_count_toward_the_message_cap() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(counted(), RUNGS_2XX, "the ACK stopped the ladder: nothing more was counted");
     assert_eq!(
@@ -203,7 +203,7 @@ async fn a_reliable_provisional_rung_does_not_count_toward_the_message_cap() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(
         counted(),
@@ -306,7 +306,7 @@ async fn a_repeated_inbound_2xx_counts_toward_the_message_cap() {
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let records = b2bua.cdr_records();

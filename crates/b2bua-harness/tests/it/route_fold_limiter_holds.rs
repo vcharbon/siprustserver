@@ -160,7 +160,7 @@ async fn failover_fold_on_a_terminating_call_releases_its_holds() {
 
     // ── bob's withheld 487 resolves the b-leg; the call terminates ─────────
     b_inv.respond(487, "Request Terminated").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_drained("the termination releases the call's set").await;
     b2bua.assert_fully_reaped();
 
@@ -211,7 +211,7 @@ async fn failover_fold_after_the_call_is_gone_holds_nothing() {
     let mut cxl = call.cancel().await;
     cxl.expect(200).await;
     call.expect(487).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_holds([0, 0, 0], "the terminated call released its set").await;
     b2bua.assert_calls_reaped();
     let refused_before = rig.store.stats().admits_refused_released;
@@ -311,7 +311,7 @@ async fn release_reroute_fold_on_a_terminating_call_releases_its_holds() {
     // ── bob's 200 ends the call ─────────────────────────────────────────────
     bob_bye.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_drained("the termination releases the reroute's set").await;
     b2bua.assert_fully_reaped();
 
@@ -413,7 +413,7 @@ async fn failover_route_refused_on_its_second_limiter_counts_nothing() {
         carol.try_receive_tolerating("INVITE", &[]).await.is_none(),
         "the refused route dials nothing",
     );
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_drained("the refused admit counted nothing and released x").await;
     let count = b2bua.limiter_count();
     assert_eq!((count.admitted, count.released), (1, 1), "x granted, released by the refusal");
@@ -465,7 +465,7 @@ async fn failover_fold_after_an_uncounted_call_is_gone_is_released_by_the_router
     let mut cxl = call.cancel().await;
     cxl.expect(200).await;
     call.expect(487).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_calls_reaped();
     let released_before = rig.store.stats().releases_total;
 
@@ -564,7 +564,7 @@ async fn a_fail_open_fold_on_an_ending_call_is_freed_by_its_release() {
     // ── bob's 200 ends the call: still counted, it releases its set ────────
     bob_bye.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_holds([0, 0, 0], "the terminal release freed the old set").await;
     let count = b2bua.limiter_count();
     assert_eq!((count.failed_open, count.released), (1, 2));

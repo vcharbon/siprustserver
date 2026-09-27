@@ -169,6 +169,7 @@ async fn refer_relays_transparently_when_the_route_activates_nothing() {
     alice_bye.expect(200).await;
 
     let _ = h.finish().await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -224,6 +225,7 @@ async fn a_malformed_refer_to_relays_untouched_on_the_transparent_path() {
     alice_bye.expect(200).await;
 
     let _ = h.finish().await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 

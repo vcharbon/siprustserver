@@ -310,6 +310,7 @@ async fn crossing_bye_after_reject_gets_200_and_no_second_final_to_caller() {
         vec![480],
         "exactly one final (the 480) toward the caller — no spurious second final",
     );
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 

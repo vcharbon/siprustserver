@@ -56,7 +56,7 @@ async fn unanswered_keepalive_byes_both_peers_and_reaps() {
 
     // ── Alice never answers the BYE: its timeout resolves her leg, the call reaps ─
     h.advance(BYE_TIMEOUT).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The CDR records the keepalive-driven teardown.
@@ -100,7 +100,7 @@ async fn a_silent_leg_answering_its_bye_after_the_probes_timer_f_is_confirmed() 
     // Alice answers her BYE before its own Timer F (t = 67 s): the call ends
     // on that answer.
     alice_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the call");

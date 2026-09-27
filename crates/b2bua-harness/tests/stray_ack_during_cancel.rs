@@ -107,7 +107,7 @@ async fn a_leg_stray_ack_is_absorbed_and_never_acks_the_unanswered_b_leg() {
 
     // ── fully reaped ─────────────────────────────────────────────────────────
     h.advance(Duration::from_secs(1)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

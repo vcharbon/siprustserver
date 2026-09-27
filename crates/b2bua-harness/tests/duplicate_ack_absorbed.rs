@@ -103,7 +103,7 @@ async fn a_duplicate_ack_on_a_fresh_branch_draws_no_second_b_leg_ack() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     settle_until(|| b2bua.cdr_records().len() == 1).await;
     let cdrs = b2bua.cdr_records();
@@ -155,7 +155,7 @@ async fn a_duplicate_ack_on_the_same_branch_draws_no_second_b_leg_ack() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -212,7 +212,7 @@ async fn a_duplicate_reinvite_ack_draws_no_third_b_leg_ack() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

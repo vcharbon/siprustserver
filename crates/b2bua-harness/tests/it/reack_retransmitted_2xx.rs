@@ -94,7 +94,7 @@ async fn retransmitted_2xx_is_re_acked_on_the_same_branch() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -174,7 +174,7 @@ async fn retransmitted_2xx_is_re_acked_under_18x_masking() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -261,7 +261,7 @@ async fn retransmitted_2xx_under_fake_prack_does_not_restage_the_answer() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -344,7 +344,7 @@ async fn a_foreign_tagged_2xx_is_not_a_retransmission() {
     );
 
     alice_bye.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;

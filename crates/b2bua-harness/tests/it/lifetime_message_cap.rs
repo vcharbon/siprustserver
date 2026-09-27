@@ -62,8 +62,7 @@ async fn a_terminating_call_flooded_past_its_lifetime_cap_ends_at_the_cap() {
 
     // The permit frees: the verdict, admitted past every bound, ends the call.
     parked.expect(503).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     assert!(
         terminating_since.elapsed() < Duration::from_millis(TERMINATING_TIMEOUT_MS as u64),
         "the call ended at the cap, not at its TerminatingTimeout"
@@ -95,6 +94,7 @@ async fn a_terminating_call_flooded_past_its_lifetime_cap_ends_at_the_cap() {
         }
     }
     assert_eq!(late_finals, vec![481], "a message after the cap draws 481");
+    b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -142,8 +142,7 @@ async fn a_capped_calls_callee_answering_across_the_cancel_is_acked_and_sent_bye
     bye.respond(200, "OK").await;
     let _ = call.try_expect_final(503).await.expect("alice is answered the teardown's 503");
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let (s_addr, bob_addr) = (s.b2bua.addr, s.bob.addr());
     let report = s.finish().await;
@@ -211,8 +210,7 @@ async fn a_bye_to_a_capped_call_is_answered_where_it_is_refused() {
     s.bob.receive("INFO").await.respond(481, "Call/Transaction Does Not Exist").await;
     s.bob.receive("BYE").await.respond(481, "Call/Transaction Does Not Exist").await;
     s.alice.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     let cdrs = s.b2bua.cdr_records();
     assert_eq!(
         cdrs.iter()
@@ -245,8 +243,7 @@ async fn with_the_reaper_off_a_call_past_the_lifetime_cap_hangs_up_as_usual() {
     uas.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     assert_eq!(s.b2bua.metrics().message_cap_lifetime_crossed_total(), 0);
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;

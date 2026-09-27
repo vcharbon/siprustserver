@@ -940,13 +940,15 @@ impl B2buaSut {
         self._core.lock_count()
     }
 
-    /// Every call created has been removed: the condition to settle on before
-    /// [`assert_fully_reaped`](Self::assert_fully_reaped). A call leaves the
-    /// map ([`active_calls`](Self::active_calls)) before its removal is
-    /// counted, so `active_calls() == 0` alone can hold while a removal is
-    /// still pending.
+    /// Every call created has been removed and every limiter release the
+    /// worker queued has been answered or dropped: the condition to settle on
+    /// before [`assert_fully_reaped`](Self::assert_fully_reaped). A call
+    /// leaves the map ([`active_calls`](Self::active_calls)) before its
+    /// removal is counted, so `active_calls() == 0` alone can hold while a
+    /// removal is still pending; and a call is removed before its release
+    /// leaves the worker's release queue.
     pub fn is_reaped(&self) -> bool {
-        self.calls_reaped()
+        self.calls_reaped() && self.limiter_releases_waiting() == 0
     }
 
     /// Every call created has been removed, whatever the limiter releases
@@ -955,10 +957,14 @@ impl B2buaSut {
         self.metrics.removals_total() == self.metrics.creations_total()
     }
 
+    /// Limiter releases the worker has queued and not yet had answered.
+    pub fn limiter_releases_waiting(&self) -> usize {
+        self._core.limiter_releases_waiting()
+    }
+
     /// The holds the SUT was granted and released so far, its fail-opens, and
-    /// its store's count when it has one. A release counts when it is issued:
-    /// one issued by a detached task (a route fold for a call already gone)
-    /// can still be in flight to the store when the call is reaped.
+    /// its store's count when it has one. A release counts when the worker's
+    /// release queue sends it, after its call was removed.
     pub fn limiter_count(&self) -> LimiterCount {
         self.limiter.count()
     }
@@ -994,10 +1000,8 @@ impl B2buaSut {
     /// then checked by every reap test — the locality this oracle exists for.
     ///
     /// Call it *after* the teardown has drained: settle on
-    /// [`is_reaped`](Self::is_reaped) (see [`settle_until`]). A scenario whose
-    /// holds are released by a detached task (a route fold landing after its
-    /// call is gone) also settles on the store's count, since that release can
-    /// land after the call is reaped.
+    /// [`is_reaped`](Self::is_reaped) (see [`settle_until`]), which waits for
+    /// the worker's release queue too.
     #[track_caller]
     pub fn assert_fully_reaped(&self) {
         self.assert_fully_reaped_leaving(LimiterLeak::NONE)

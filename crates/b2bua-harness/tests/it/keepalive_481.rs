@@ -67,6 +67,7 @@ async fn bob_481_on_options_byes_both_peers() {
     assert_eq!(cdrs.len(), 1, "one CDR for the 481-terminated call");
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
     assert!(kinds.contains(&CdrEventType::Bye), "bye event from 481 handling: {kinds:?}");
+    b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
 
     // ── One BYE to each peer ─────────────────────────────────────────────────

@@ -25,7 +25,7 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, ReleaseOutcome, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
 use b2bua_harness::{
     invite_final_statuses, settle_until, B2buaSut, LimiterLeak, WitnessRig, WITNESS_IDS,
 };
@@ -126,7 +126,7 @@ async fn busy_then_failover_answered(
     let mut bye = dialog.bye().await;
     carol.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_drained("the hangup releases the failover route's holds").await;
     b2bua.assert_fully_reaped();
 
@@ -243,7 +243,7 @@ async fn release_reroute_keeping_an_id_at_its_cap_is_admitted() {
     let mut bye = dialog.bye().await;
     media.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_drained("the hangup releases the reroute's holds").await;
     b2bua.assert_fully_reaped();
 
@@ -370,7 +370,7 @@ async fn refused_replacement_releases_the_call_holds() {
     let mut bye = dialog.bye().await;
     carol.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_drained("the hangup releases the applied route's hold").await;
     b2bua.assert_fully_reaped();
 
@@ -461,7 +461,7 @@ async fn a_fold_admitted_after_the_call_ended_holds_nothing() {
     let mut cxl = call.cancel().await;
     cxl.expect(200).await;
     call.expect(487).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_holds([0, 0, 0], "the terminated call released its set").await;
     let refused_before = rig.store.stats().admits_refused_released;
 
@@ -534,7 +534,7 @@ async fn a_retried_invite_reusing_the_call_identity_is_counted() {
         .await;
     bob.receive("ACK").await;
     first.expect(401).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_holds([0, 0, 0], "the challenged call released its set").await;
 
     // ── the retry under the same identity is a counted call ────────────────
@@ -561,7 +561,7 @@ async fn a_retried_invite_reusing_the_call_identity_is_counted() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_drained("the hangup releases the retried call").await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
@@ -607,7 +607,7 @@ async fn a_limiter_restart_is_healed_by_the_next_refresh() {
         bob.receive("BYE").await.respond(200, "OK").await;
         bye.expect(200).await;
     }
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_drained("the hangups release the re-registered sets once").await;
     assert_eq!(rig.store.stats().releases_total, 5, "two calls and three witnesses");
     // The SUT's ledger saw one grant and one release per call; the store it
@@ -702,7 +702,7 @@ async fn a_refresh_landing_after_a_refused_reroute_dropped_the_set_re_creates_no
     // The refused reroute degrades to the local teardown of both legs.
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     for _ in 0..8 {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
@@ -777,7 +777,7 @@ async fn a_dropped_refresh_fire_is_re_armed_by_the_call_s_next_turn() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_drained("the hangup releases the re-registered set").await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
@@ -822,7 +822,7 @@ async fn a_refresh_refused_by_a_release_behind_the_call_s_back_is_counted() {
     // ── the key is released behind the call's back ─────────────────────────
     let call_ref = call::derive_call_ref("w0", CALL_ID, FROM_TAG);
     let key = b2bua.live_call(&call_ref).expect("the call is live").limiter.key;
-    rig.store.release(&key);
+    rig.store.release(&[&key]);
     assert_eq!(rig.all_holds(), [0, 0, 0]);
     for _ in 0..6 {
         h.advance(Duration::from_secs(1)).await;
@@ -842,7 +842,7 @@ async fn a_refresh_refused_by_a_release_behind_the_call_s_back_is_counted() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     rig.expect_drained("the hangup releases the re-registered set").await;
     b2bua.assert_fully_reaped();
     let _ = h.finish().await;
@@ -936,7 +936,7 @@ async fn a_refused_release_reroute_leaves_the_call_uncounted() {
     }
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     for _ in 0..8 {
         h.advance(Duration::from_secs(1)).await;
         rig.refresh_witnesses();
@@ -982,7 +982,7 @@ async fn the_failure_chain_s_terminal_486_leaves_the_call_uncounted() {
     bob_uas.respond(486, "Busy Here").await;
     bob.receive("ACK").await;
     call.expect(486).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
 
     assert_eq!(
         after_last_admit(&paths),
@@ -1014,8 +1014,9 @@ impl CallLimiter for AnswersReleased {
     async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
         AdmitOutcome::Released
     }
-    async fn release(&self, _key: &str) {
-        self.releases.fetch_add(1, Ordering::SeqCst);
+    async fn release(&self, keys: &[String]) -> ReleaseAnswer {
+        self.releases.fetch_add(keys.len(), Ordering::SeqCst);
+        ReleaseAnswer::Released
     }
     async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
         RefreshOutcome::Released
@@ -1046,7 +1047,7 @@ async fn an_initial_admit_refused_by_a_release_fence_runs_the_call_uncounted() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     let count = b2bua.limiter_count();
     assert_eq!((count.admitted, count.released, count.failed_open), (0, 0, 0), "uncounted");
     assert_eq!(limiter.releases.load(Ordering::SeqCst), 1, "one release of the call's key");

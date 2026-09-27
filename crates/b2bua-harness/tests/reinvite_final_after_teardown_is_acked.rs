@@ -157,6 +157,7 @@ async fn a_2xx_to_a_relayed_reinvite_after_the_bye_is_acked() {
 
     alice.drain().await;
     bob.drain().await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
@@ -238,6 +239,7 @@ async fn a_late_487_is_re_acked_on_each_repeat_and_purged_at_timer_d() {
     h.advance(Duration::from_millis(500)).await;
     assert_eq!(bob.drain().await, 0, "a final after Timer D draws nothing at all");
     alice.drain().await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let acks = acks_to(&report, b2bua.addr, bob.addr());
@@ -306,6 +308,7 @@ async fn a_late_2xx_is_re_acked_on_each_repeat_and_purged_at_timer_m() {
     assert_eq!(b2bua.txn_metrics().timer_queue_len(), 0, "no timer survives the purge");
     alice.drain().await;
     bob.drain().await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let acks = acks_to(&report, b2bua.addr, bob.addr());
@@ -356,6 +359,7 @@ async fn a_relayed_reinvite_that_draws_nothing_is_purged_at_timer_b() {
     drop(bob_reinv);
     alice.drain().await;
     bob.drain().await;
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     let acks = acks_to(&report, b2bua.addr, bob.addr());

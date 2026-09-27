@@ -64,6 +64,7 @@ async fn a_sampled_call_records_its_messages_decision_and_rules_on_one_span() {
     assert!(sip_in.iter().all(|e| e.contains("at_ms=")), "every fact is timestamped");
 
     // ── Release ─────────────────────────────────────────────────────────────
+    b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     assert_eq!(traces().active(), 0, "the root span closed with the call, freeing its slot");
 

@@ -323,6 +323,7 @@ async fn cancelled_service_timer_does_not_fire_after_the_18x() {
         !reasons_of(&b2bua.cdr_records()[0]).iter().any(|r| r.contains("ringwatch")),
         "disarmed watchdog left no trace",
     );
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;

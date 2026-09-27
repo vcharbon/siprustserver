@@ -103,6 +103,7 @@ async fn orphan_in_dialog_481_does_not_leak_dispatch_state() {
     // ── THE INVARIANT: drained ⇒ per-call accounting back to ZERO. Pre-fix this
     //    fails — `removals` stays at N while `creations` is 2N, and `lock_count`
     //    sits at N (one stranded lock per orphan callRef).
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 

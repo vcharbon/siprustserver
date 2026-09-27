@@ -56,7 +56,7 @@ async fn unanswered_bye_is_reaped_by_safety_timer() {
 
     // ── Safety net: 32 s later the wedged call must be reaped ─────────────────
     h.advance(TERMINATING_TIMEOUT + Duration::from_secs(1)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     // BYE-without-200 must be reaped by the 32 s safety timer.
     b2bua.assert_fully_reaped();
 

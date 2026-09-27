@@ -107,7 +107,7 @@ async fn tier3_shed_strands_no_per_call_lock() {
     // Let the shed's orphan teardown drain: the per-call worker takes the poison
     // and bumps `removal`, balancing the dispatch-time `creation`.
     settle_until(|| b2bua.metrics().overload_rejected_total() == 1).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
 
     // The strongest oracle: creations == removals, no live call, NO stranded lock,
     // no stamp residue. A pre-fix bare `return` fails this on `lock_count`/creations.

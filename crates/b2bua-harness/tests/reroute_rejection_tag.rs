@@ -87,12 +87,13 @@ fn caller_ack_to_tag(h: &Harness, from: SocketAddr, to: SocketAddr, cseq: u32) -
 }
 
 /// The rerouted call left one CDR carrying a reject, and the B2BUA holds nothing.
-fn assert_rejected_and_reaped(b2bua: &B2buaSut) {
+async fn assert_rejected_and_reaped(b2bua: &B2buaSut) {
     let cdrs = b2bua.cdr_records();
     assert_eq!(cdrs.len(), 1, "one CDR for the rerouted-then-rejected call");
     let kinds: Vec<CdrEventType> = cdrs[0].events.iter().map(|e| e.event_type).collect();
     assert!(kinds.contains(&CdrEventType::Reject), "reject event: {kinds:?}");
     assert_eq!(cdrs[0].b_legs.len(), 2, "both attempts are on the record");
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 
@@ -165,7 +166,7 @@ async fn a_rerouted_attempt_s_rejection_rides_the_first_attempt_s_caller_tag() {
     );
 
     settle_until(|| !b2bua.cdr_records().is_empty() && b2bua.active_calls() == 0).await;
-    assert_rejected_and_reaped(&b2bua);
+    assert_rejected_and_reaped(&b2bua).await;
     alice.drain().await;
     bob1.drain().await;
     bob2.drain().await;
@@ -245,7 +246,7 @@ async fn a_rerouted_fork_s_rejection_still_rides_the_first_attempt_s_caller_tag(
     );
 
     settle_until(|| !b2bua.cdr_records().is_empty() && b2bua.active_calls() == 0).await;
-    assert_rejected_and_reaped(&b2bua);
+    assert_rejected_and_reaped(&b2bua).await;
     alice.drain().await;
     bob1.drain().await;
     bob2.drain().await;

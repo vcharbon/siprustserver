@@ -46,8 +46,7 @@ async fn a_callee_reject_arriving_on_a_full_per_call_queue_reaches_the_caller() 
     call.expect(180).await;
     call.try_expect(486).await.expect("the callee's reject reaches the caller");
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -89,8 +88,7 @@ async fn a_relayed_requests_final_arriving_on_a_full_per_call_queue_is_relayed_b
     info3.expect(200).await;
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -140,8 +138,7 @@ async fn a_relayed_reinvite_timeout_on_a_full_per_call_queue_reaches_the_call() 
     info1.expect(200).await;
     info2.expect(200).await;
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -187,8 +184,7 @@ async fn a_relayed_requests_timeout_on_a_full_per_call_queue_reaches_the_call() 
     info3.expect(200).await;
     info1.try_expect(481).await.expect("the timed-out INFO is answered");
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -227,8 +223,7 @@ async fn a_callee_answer_on_a_full_per_call_queue_is_acked_without_its_retransmi
     s.bob.try_receive("ACK").await.expect("bob is ACKed without repeating his 200");
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }

@@ -106,7 +106,7 @@ async fn an_initial_ack_body_reaches_the_callee_verbatim() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "one call record");
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
@@ -142,7 +142,7 @@ async fn a_reinvite_ack_body_reaches_the_callee_verbatim() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "one call record");
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
@@ -203,7 +203,7 @@ async fn a_non_sdp_ack_body_is_relayed_under_its_own_media_type() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "one call record");
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
@@ -236,7 +236,7 @@ async fn a_bare_caller_ack_yields_a_bare_callee_ack() {
     let mut bye = dialog.bye().await;
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     assert_eq!(b2bua.cdr_records().len(), 1, "one call record");
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;

@@ -321,7 +321,7 @@ async fn b_leg_that_draws_nothing_fails_at_the_first_response_bound_as_response(
     // carol never answers her CANCEL, so the call rides the terminating
     // backstop out: advance exactly past it, then assert release.
     h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -415,7 +415,7 @@ async fn b_leg_that_rang_under_the_first_response_bound_fails_at_the_long_bound_
     // carol never answers her CANCEL, so the call rides the terminating
     // backstop out: advance exactly past it, then assert release.
     h.advance(Duration::from_millis(call::helpers::TERMINATING_TIMEOUT_MS as u64 + 1_000)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _ = h.finish().await;
@@ -536,7 +536,7 @@ async fn failover_route_limiter_replaces_the_initial_route_holds() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
     settle_until(|| store.stats().current_total == 0).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _ = h.finish().await;

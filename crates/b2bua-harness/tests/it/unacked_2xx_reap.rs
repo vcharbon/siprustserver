@@ -118,7 +118,7 @@ async fn unacked_2xx_is_retransmitted_then_byes_both_legs() {
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The third rung (at 3.5 s) fell inside the 6 s bound; the fourth (7.5 s)
@@ -217,7 +217,7 @@ async fn a_deadline_past_timer_l_does_not_extend_the_2xx_ladder() {
     bob.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -289,7 +289,7 @@ async fn a_nonpositive_deadline_still_ends_the_session_at_timer_l() {
     bob.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -374,7 +374,7 @@ async fn a_service_that_parks_the_give_up_does_not_keep_the_session() {
     bob.receive("ACK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let records = b2bua.cdr_records();
@@ -428,7 +428,7 @@ async fn a_delayed_offer_callee_gets_the_give_up_bye_with_no_ack() {
     let mut bob_bye = bob.receive("BYE").await;
     bob_bye.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let report = h.finish().await;
@@ -485,7 +485,7 @@ async fn a_silent_callee_reinvite_gives_up_with_the_callers_2xx_acked_first() {
     alice.receive("BYE").await.respond(200, "OK").await;
     bob.receive("BYE").await.respond(200, "OK").await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(
         b2bua.metrics().repeat_give_ups_total("ack-of-2xx"),

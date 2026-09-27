@@ -78,7 +78,7 @@ pub(super) async fn process(ctx: &Arc<RouterCtx>, event: CallEvent, res: Resolut
             maybe_reject_orphan(ctx, &event).await;
             // A route fold for a vanished call: no call is left to own the
             // set its dispatching task admitted.
-            super::callouts::release_route_fold_call(ctx.limiter.as_ref(), &event).await;
+            super::callouts::release_route_fold_call(&ctx.limiter_releases, &event);
             // This event was dispatched into a fresh per-call queue (one
             // `bump_creation`) and took the per-call lock, but resolved to NO
             // live call — nothing will ever emit `RemoveCall`, and a per-call

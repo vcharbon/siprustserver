@@ -137,7 +137,7 @@ async fn route_decision_landing_after_the_callers_cancel_is_dropped() {
     );
     assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 1, "the drop is metered once",);
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The CDR records the CANCEL and no trace of the dropped route.
@@ -199,7 +199,7 @@ async fn reject_decision_landing_after_the_callers_cancel_is_dropped() {
     );
     assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 1);
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -285,7 +285,7 @@ async fn dropped_route_still_discharges_its_limiter_holds() {
     );
     assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 1);
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     // The admit really happened AND the termination released the call — the
     // admit↔release pairing survives the drop.
     let count = b2bua.limiter_count();
@@ -367,7 +367,7 @@ async fn fold_lands_on_terminating_call(
 
     // ── bob's withheld 487 resolves the cancelled b-leg; the call finalizes ──
     b_inv.respond(487, "Request Terminated").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     (h, alice, bob, b2bua)
 }
@@ -451,7 +451,7 @@ async fn delayed_route_on_a_live_call_still_routes() {
     assert_eq!(b2bua.metrics().decision_dropped_cancelled_total(), 0, "nothing was dropped");
     hangup(&mut dialog, &bob).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let report = h.finish().await;
     assert_eq!(distinct_invite_call_ids(&report, bob.addr()), 1, "the delayed route dialed bob");

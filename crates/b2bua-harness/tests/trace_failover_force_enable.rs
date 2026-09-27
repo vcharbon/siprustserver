@@ -23,7 +23,7 @@ use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallFailureResponse, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
 use b2bua::trace::{install_process_traces, traces, CallTraces};
 use b2bua_harness::{settle_until, B2buaSut};
 use observe::{RateDraw, SampleAdmission, TokenBucket};
@@ -44,7 +44,9 @@ impl CallLimiter for FullLimiter {
     async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
         AdmitOutcome::Rejected { limiter_id: TRUNK.to_string() }
     }
-    async fn release(&self, _call_ref: &str) {}
+    async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
+        ReleaseAnswer::Released
+    }
     async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
         RefreshOutcome::Released
     }
@@ -137,6 +139,7 @@ async fn a_failover_route_turns_the_trace_on_and_backfills_the_call() {
     // ── …and everything after it ─────────────────────────────────────────────
     assert!(!log.matching("kind=rule.fired").is_empty(), "the call records once traced");
 
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(traces().active(), 0, "the root span closed with the call");
 

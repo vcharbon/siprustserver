@@ -127,7 +127,7 @@ async fn cancelling_a_reinvite_stops_its_reliable_provisional_ladder() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     let report = h.finish().await;
     write_flow_report(&report);
     assert_eq!(

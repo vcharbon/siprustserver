@@ -532,6 +532,13 @@ impl B2buaConfig {
     /// refuses to start on `Err`; unit/sim harnesses construct configs directly
     /// and skip it). Returns the first violation as a human-readable message.
     pub fn validate(&self) -> Result<(), String> {
+        if self.limiter_lease_sec <= 0 || self.limiter_release_queue_cap == 0 {
+            return Err(format!(
+                "limiter_lease_sec={} / limiter_release_queue_cap={}: the release queue \
+                 needs a positive lease and a positive cap",
+                self.limiter_lease_sec, self.limiter_release_queue_cap
+            ));
+        }
         if self.reaper_enabled && self.max_messages_per_call_lifetime == 0 {
             return Err("max_messages_per_call_lifetime=0: the per-call work bound has no \
                         off; set it far above any healthy call"

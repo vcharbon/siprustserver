@@ -401,6 +401,14 @@ pub struct RunnerEnv {
     /// `LIMITER_REFRESH_SECONDS` — how often a counted call extends its lease;
     /// below the limiter service's `LIMITER_LEASE_SECONDS` (default 40).
     pub limiter_refresh_sec: i64,
+    /// `LIMITER_LEASE_SECONDS` — the limiter service's lease; a release queued
+    /// longer is dropped unsent (default 120).
+    pub limiter_lease_sec: i64,
+    /// `LIMITER_RELEASE_TIMEOUT_MS` — the release request budget (default 2000).
+    pub limiter_release_timeout_ms: u64,
+    /// `LIMITER_RELEASE_QUEUE_CAP` — most releases the worker's release queue
+    /// holds; the oldest is dropped past it (default 100000).
+    pub limiter_release_queue_cap: usize,
     /// `B2BUA_DRAIN_GRACE_MS` — SIGTERM drain grace before exit (default 5000).
     pub drain_grace_ms: u64,
     /// `B2BUA_DRAIN_MIN_MS` — floor a withdrawn worker's caught-up drain exit
@@ -512,6 +520,13 @@ impl RunnerEnv {
             limiter_url: env_or("LIMITER_URL", ""),
             limiter_timeout_ms: env_or("LIMITER_TIMEOUT_MS", "150").parse().unwrap_or(150),
             limiter_refresh_sec: env_or("LIMITER_REFRESH_SECONDS", "40").parse().unwrap_or(40),
+            limiter_lease_sec: env_or("LIMITER_LEASE_SECONDS", "120").parse().unwrap_or(120),
+            limiter_release_timeout_ms: env_or("LIMITER_RELEASE_TIMEOUT_MS", "2000")
+                .parse()
+                .unwrap_or(2000),
+            limiter_release_queue_cap: env_or("LIMITER_RELEASE_QUEUE_CAP", "100000")
+                .parse()
+                .unwrap_or(100_000),
             drain_grace_ms: env_or("B2BUA_DRAIN_GRACE_MS", "5000").parse().unwrap_or(5000),
             drain_min_ms: env_or("B2BUA_DRAIN_MIN_MS", "1000").parse().unwrap_or(1000),
             capacity: capacity_env::capacity_from_lookup(|k| env::var(k).ok())
@@ -686,6 +701,8 @@ impl RunnerEnv {
             keepalive_timeout_sec: self.keepalive_timeout_sec,
             reboot_budget_sec: self.reboot_budget_sec,
             limiter_refresh_sec: self.limiter_refresh_sec,
+            limiter_lease_sec: self.limiter_lease_sec,
+            limiter_release_queue_cap: self.limiter_release_queue_cap,
             setup_timeout_sec: self.setup_timeout_sec,
             invite_txn_timeout_sec: self.invite_txn_timeout_sec,
             invite_first_response_timeout_sec: self.invite_first_response_timeout_sec,
@@ -786,14 +803,20 @@ impl RunnerBase {
                     service = %self.name,
                     limiter = %addr,
                     timeout_ms = self.env.limiter_timeout_ms,
+                    release_timeout_ms = self.env.limiter_release_timeout_ms,
                     refresh_sec = self.env.limiter_refresh_sec,
                     "call-limiter client wired"
                 );
-                Arc::new(HttpCallLimiter::new(
-                    Arc::new(RealHttpNetwork::new()),
-                    addr,
-                    std::time::Duration::from_millis(self.env.limiter_timeout_ms),
-                ))
+                Arc::new(
+                    HttpCallLimiter::new(
+                        Arc::new(RealHttpNetwork::new()),
+                        addr,
+                        std::time::Duration::from_millis(self.env.limiter_timeout_ms),
+                    )
+                    .with_release_timeout(std::time::Duration::from_millis(
+                        self.env.limiter_release_timeout_ms,
+                    )),
+                )
             }
             None => {
                 tracing::warn!(

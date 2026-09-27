@@ -22,7 +22,7 @@ use b2bua::decision::{
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallReleaseRequest, CallReleaseResponse,
     CallTreatment, NewCallRequest, NewCallResponse, RouteDecision,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
 use b2bua::limiter_http::HttpCallLimiter;
 use call_limiter::{CallStore, LimiterConfig, LimiterMetrics, LimiterServer};
 use http_net::{HttpServerHandle, HttpTransport, SimulatedHttpNetwork};
@@ -36,10 +36,10 @@ pub const DEFAULT_LIMITER_ID: &str = "sut-default";
 /// set never lapses before the reaped check reads it.
 const DEFAULT_STORE_LEASE_SEC: i64 = 10 * 365 * 24 * 3600;
 
-/// The default client's fail-open budget. Fail-open is never exercised on the
-/// default limiter (the reaped check refuses one), so the budget only has to
-/// outlast the largest single clock jump a paused scenario makes while a
-/// request is in flight.
+/// The default client's admit, refresh and release budget. Fail-open is never
+/// exercised on the default limiter (the reaped check refuses one), so the
+/// budget only has to outlast the largest single clock jump a paused scenario
+/// makes while a request is in flight.
 const DEFAULT_CLIENT_BUDGET: Duration = Duration::from_secs(24 * 3600);
 
 /// Where the default limiter listens on its private fabric.
@@ -184,9 +184,11 @@ impl CallLimiter for CountingLimiter {
         outcome
     }
 
-    async fn release(&self, key: &str) {
-        self.ledger.on_release(key);
-        self.inner.release(key).await;
+    async fn release(&self, keys: &[String]) -> ReleaseAnswer {
+        for key in keys {
+            self.ledger.on_release(key);
+        }
+        self.inner.release(keys).await
     }
 
     async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
@@ -235,8 +237,10 @@ impl SutLimiter {
         let store = Arc::new(CallStore::new(cfg, Clock::test_at(0)));
         let service = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
         let server = http.serve(addr, service).await.expect("default limiter binds");
-        let client: Arc<dyn CallLimiter> =
-            Arc::new(HttpCallLimiter::new(Arc::new(http), addr, DEFAULT_CLIENT_BUDGET));
+        let client: Arc<dyn CallLimiter> = Arc::new(
+            HttpCallLimiter::new(Arc::new(http), addr, DEFAULT_CLIENT_BUDGET)
+                .with_release_timeout(DEFAULT_CLIENT_BUDGET),
+        );
         let sut =
             Self { ledger: Default::default(), store: Some(store), default_server: Some(server) };
         (client, sut)
@@ -339,7 +343,9 @@ mod tests {
         async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
             AdmitOutcome::Admitted
         }
-        async fn release(&self, _key: &str) {}
+        async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
+            ReleaseAnswer::Released
+        }
         async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
             RefreshOutcome::Extended
         }
@@ -353,7 +359,9 @@ mod tests {
         async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
             AdmitOutcome::Unavailable
         }
-        async fn release(&self, _key: &str) {}
+        async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
+            ReleaseAnswer::Released
+        }
         async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
             RefreshOutcome::Unavailable
         }
@@ -367,7 +375,9 @@ mod tests {
         async fn admit(&self, _: &str, entries: &[LimiterEntry], _: bool) -> AdmitOutcome {
             AdmitOutcome::Rejected { limiter_id: entries[0].id.clone() }
         }
-        async fn release(&self, _key: &str) {}
+        async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
+            ReleaseAnswer::Released
+        }
         async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
             RefreshOutcome::Released
         }
@@ -411,7 +421,7 @@ mod tests {
         let limiter = CountingLimiter { inner: Arc::new(Grants), ledger: sut.ledger() };
         limiter.admit("c1", &[entry("x"), entry("y")], false).await;
         limiter.admit("c2", &[entry("x")], false).await;
-        limiter.release("c1").await;
+        limiter.release(&["c1".to_string()]).await;
         assert_eq!(probe.count(), sut.count());
         assert_eq!((probe.count().admitted, probe.count().released), (3, 2));
     }
@@ -421,7 +431,7 @@ mod tests {
         let (limiter, ledger) = counting(Arc::new(Grants));
         limiter.admit("c1", &[entry("x"), entry("x"), entry("y")], false).await;
         limiter.refresh("c1", &["x".into()]).await;
-        limiter.release("c1").await;
+        limiter.release(&["c1".to_string()]).await;
         ledger.count(None).assert_matches(LimiterLeak::NONE);
     }
 
@@ -431,7 +441,7 @@ mod tests {
         limiter.admit("c1", &[entry("x"), entry("y")], false).await;
         limiter.admit("c1", &[entry("y"), entry("z")], true).await;
         assert_eq!((ledger.count(None).admitted, ledger.count(None).released), (4, 2));
-        limiter.release("c1").await;
+        limiter.release(&["c1".to_string()]).await;
         ledger.count(None).assert_matches(LimiterLeak::NONE);
     }
 
@@ -453,7 +463,7 @@ mod tests {
         let (limiter, ledger) = counting(Arc::new(Grants));
         limiter.admit("c1", &[entry("x")], false).await;
         limiter.admit("c2", &[entry("y")], false).await;
-        limiter.release("c1").await;
+        limiter.release(&["c1".to_string()]).await;
         ledger.count(None).assert_matches(LimiterLeak::NONE);
     }
 
@@ -461,9 +471,9 @@ mod tests {
     async fn a_second_release_of_one_call_counts_nothing() {
         let (limiter, ledger) = counting(Arc::new(Grants));
         limiter.admit("c1", &[entry("x")], false).await;
-        limiter.release("c1").await;
-        limiter.release("c1").await;
-        limiter.release("never-admitted").await;
+        limiter.release(&["c1".to_string()]).await;
+        limiter.release(&["c1".to_string()]).await;
+        limiter.release(&["never-admitted".to_string()]).await;
         assert_eq!(ledger.count(None).released, 1);
         ledger.count(None).assert_matches(LimiterLeak::NONE);
     }

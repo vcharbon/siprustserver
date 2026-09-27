@@ -148,7 +148,7 @@ async fn max_duration_byes_both_legs_and_releases_the_limiter() {
         0,
         "limiter hold released at the max-duration teardown"
     );
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -225,7 +225,7 @@ async fn max_duration_fires_mid_reinvite_and_releases_the_limiter() {
     h.advance(Duration::from_secs(33)).await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     settle_until(|| !b2bua.cdr_records().is_empty()).await;
@@ -296,7 +296,7 @@ async fn provisional_storm_before_connect_trips_the_cap_and_releases_the_limiter
     bob.receive("ACK").await; // the b2bua completes bob's 487 txn (§17.1.1.3)
 
     settle_until(|| store.stats().current_total == 0).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -385,7 +385,7 @@ async fn prack_loop_storm_before_connect_trips_the_cap_and_releases_the_limiter(
         0,
         "limiter released after the PRACK-loop cap teardown"
     );
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -464,7 +464,7 @@ async fn in_dialog_message_storm_trips_the_cap_and_releases_the_limiter() {
     b_bye.respond(200, "OK").await;
 
     settle_until(|| store.stats().current_total == 0).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     let _report = h.finish().await;
@@ -569,7 +569,7 @@ async fn cap_trip_on_the_resolving_turn_discharges_in_the_same_turn() {
         reasons_of(&cdrs[0]),
     );
     settle_until(|| store.stats().current_total == 0).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 
     // The parked consult's deadline fold lands on a call that no longer exists

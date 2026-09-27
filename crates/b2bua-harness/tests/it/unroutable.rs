@@ -131,8 +131,7 @@ async fn an_unkeyed_in_dialog_request_for_an_ended_dialog_draws_481() {
     let (mut dialog, answer) = establish_keeping_answer(&s).await;
     let ids = DialogIds::of(&answer);
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.h.allow_violation(
         "mid-dialog-tags",
         "requests in a dialog the B2BUA no longer holds are the deviation under test",
@@ -170,6 +169,7 @@ async fn an_unkeyed_in_dialog_request_for_an_ended_dialog_draws_481() {
     assert_eq!(m.unroutable_refused_of("BYE", 481), 1);
     assert_eq!(m.unroutable_refused_of("INFO", 481), 1);
     assert_eq!(m.unroutable_internal_total(), 0);
+    b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -237,8 +237,7 @@ async fn an_untagged_request_naming_no_call_draws_its_rfc_answer_under_a_fresh_t
     assert_eq!(m.unroutable_refused_of("other", 405), 1, "an extension method's label is bounded");
     assert_eq!(m.unroutable_dropped_total(), 0, "an answered request is no drop");
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -260,8 +259,7 @@ async fn keyed_late_messages_take_the_transaction_layer_or_the_orphan_path() {
         .expect("the BYE leaves");
     s.bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
 
     let calls_seen = s.b2bua.metrics().creations_total();
     s.h.advance(Duration::from_secs(5)).await;
@@ -282,8 +280,7 @@ async fn keyed_late_messages_take_the_transaction_layer_or_the_orphan_path() {
     late.expect(481).await;
     assert_eq!(s.b2bua.metrics().unroutable_dropped_total(), 0, "a keyed message is routable");
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -370,7 +367,7 @@ async fn a_released_transactions_timeout_is_not_a_wire_drop() {
     h.advance(Duration::from_secs(5)).await;
     bob.receive("BYE").await.respond(200, "OK").await;
     alice.receive_tolerating("BYE", &["OPTIONS"]).await.respond(200, "OK").await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
 
     // Past the probe's Timer F.
     h.advance(Duration::from_secs(30)).await;
@@ -387,6 +384,7 @@ async fn a_released_transactions_timeout_is_not_a_wire_drop() {
         "the released probe's Timer F is counted as this node's own event"
     );
 
+    b2bua_harness::settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }
@@ -411,8 +409,7 @@ async fn a_late_cancel_draws_481_under_the_rejected_invites_tag() {
     uas.expect_ack().await;
     let busy = call.expect(486).await;
     let tag = busy.to().tag().expect("the final carries a To-tag").to_string();
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
 
     s.h.advance(Duration::from_secs(10)).await;
     let mut cxl = call.cancel().await;
@@ -435,8 +432,7 @@ async fn a_tagged_request_of_any_method_naming_no_dialog_draws_481() {
     let (mut dialog, answer) = establish_keeping_answer(&s).await;
     let ids = DialogIds::of(&answer);
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.h.allow_violation(
         "mid-dialog-tags",
         "requests in a dialog the B2BUA no longer holds are the deviation under test",
@@ -455,8 +451,7 @@ async fn a_tagged_request_of_any_method_naming_no_dialog_draws_481() {
     assert_eq!(r.iter().map(SipResponse::status).collect::<Vec<_>>(), vec![481], "unroutable");
     assert_eq!(s.b2bua.metrics().unroutable_refused_of("MESSAGE", 481), 1);
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
@@ -476,8 +471,7 @@ async fn a_store_fault_on_an_unkeyed_lookup_draws_500_not_481() {
     let (mut dialog, answer) = establish_keeping_answer(&s).await;
     let ids = DialogIds::of(&answer);
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.h.allow_violation(
         "mid-dialog-tags",
         "a request in a dialog the B2BUA no longer holds is the deviation under test",
@@ -497,6 +491,7 @@ async fn a_store_fault_on_an_unkeyed_lookup_draws_500_not_481() {
     let r = responses_to(&s.h, &s.alice, "BYE", Duration::from_millis(1000)).await;
     assert_eq!(r.iter().map(SipResponse::status).collect::<Vec<_>>(), vec![481]);
 
+    b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }

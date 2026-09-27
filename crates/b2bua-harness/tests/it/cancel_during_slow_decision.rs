@@ -141,7 +141,7 @@ async fn cancel_during_slow_decision_tears_down_cleanly() {
     // With no b-leg pending, the queued `handle-cancel` finalizes the call
     // immediately — well before the 32 s TerminatingTimeout backstop.
     h.advance(Duration::from_secs(1)).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     // A CANCEL racing a slow decision must still reap the call.
     b2bua.assert_fully_reaped();
 

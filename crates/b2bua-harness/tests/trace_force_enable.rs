@@ -78,6 +78,7 @@ async fn an_engine_force_enable_activates_and_backfills_the_call() {
     // ── …and everything after it ────────────────────────────────────────────
     assert!(!log.matching("kind=rule.fired").is_empty(), "the call keeps recording once traced");
 
+    b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     assert_eq!(traces().active(), 0, "the root span closed with the call");
 

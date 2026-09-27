@@ -2,8 +2,8 @@
 //!
 //! The store keeps, per limiter key, the multiset of ids the call holds and a
 //! lease. `admit(key, entries, release_on_refusal)` replaces the call's
-//! set atomically, checked net of the call's own set; `release(key)` is
-//! idempotent and fences the key for one lease; `refresh(key, ids)`
+//! set atomically, checked net of the call's own set; `release(keys)` is
+//! idempotent per key and fences each key for one lease; `refresh(key, ids)`
 //! extends the lease or re-registers a lapsed set; a set whose lease lapses
 //! is dropped and counted.
 //!
@@ -108,7 +108,7 @@ async fn the_same_id_twice_on_one_list_takes_two_slots() {
     assert_eq!(s.held("x"), 1);
     assert_eq!(s.admit("c1", &entries(&[("x", 3), ("x", 3)]), false), AdmitResult::Admitted);
     assert_eq!(s.held("x"), 3);
-    s.release("c1");
+    s.release(&["c1"]);
     assert_eq!(s.held("x"), 1, "both slots released at once");
 }
 
@@ -207,10 +207,10 @@ async fn the_admission_max_gauge_is_the_largest_live_count() {
         AdmitResult::Admitted
     );
     assert_eq!(s.stats().admission_max, 3, "x is held three times");
-    s.release("c1");
+    s.release(&["c1"]);
     assert_eq!(s.stats().admission_max, 1, "the witnesses");
-    s.release("witness-x");
-    s.release("witness-y");
+    s.release(&["witness-x"]);
+    s.release(&["witness-y"]);
     assert_eq!(s.stats().admission_max, 0);
 }
 
@@ -223,11 +223,32 @@ async fn release_is_idempotent_and_unknown_calls_are_a_no_op() {
     let s = store();
     witnesses(&s, &["x", "y"]);
     assert_eq!(s.admit("c1", &entries(&[("x", 10), ("y", 10)]), false), AdmitResult::Admitted);
-    s.release("c1");
-    s.release("c1");
-    s.release("never-admitted");
+    s.release(&["c1"]);
+    s.release(&["c1"]);
+    s.release(&["never-admitted"]);
     assert_eq!([s.held("x"), s.held("y")], [1, 1], "the witnesses");
     assert_eq!(s.stats().current_total, 2);
+}
+
+/// One release names several calls: each named call's set is dropped and
+/// its key fenced; a key named twice, or unknown, changes nothing more.
+#[tokio::test(start_paused = true)]
+async fn one_release_frees_every_call_it_names() {
+    let s = store();
+    witnesses(&s, &["x", "y", "z"]);
+    assert_eq!(s.admit("c1", &entries(&[("x", 10), ("y", 10)]), false), AdmitResult::Admitted);
+    assert_eq!(s.admit("c2", &entries(&[("y", 10), ("z", 10)]), false), AdmitResult::Admitted);
+    assert_eq!(s.admit("c3", &entries(&[("x", 10), ("z", 10)]), false), AdmitResult::Admitted);
+    s.release(&["c1", "c2", "c1", "never-admitted"]);
+    assert_eq!([s.held("x"), s.held("y"), s.held("z")], [2, 1, 2], "c3 and the witnesses");
+    assert_eq!(s.calls(), 4, "c3 and the witnesses");
+    assert_eq!(s.stats().fences, 3, "c1, c2 and the unknown key are fenced");
+    assert_eq!(s.stats().releases_total, 4, "one per key named");
+    assert_eq!(
+        s.admit("c2", &entries(&[("y", 10)]), false),
+        AdmitResult::Released,
+        "an admit after the release meets the fence"
+    );
 }
 
 /// A release of a key the store holds nothing for changes no count and
@@ -237,7 +258,7 @@ async fn release_is_idempotent_and_unknown_calls_are_a_no_op() {
 async fn a_release_of_an_unknown_key_creates_nothing_and_fences_the_key() {
     let s = store();
     witnesses(&s, &["x", "y"]);
-    s.release("c1");
+    s.release(&["c1"]);
     assert_eq!([s.held("x"), s.held("y")], [1, 1], "the witnesses");
     assert_eq!(s.calls(), 2, "no set created");
     assert_eq!(s.stats().fences, 1, "the key is fenced");
@@ -259,7 +280,7 @@ async fn a_released_call_refuses_admit_and_refresh_for_one_lease() {
     let s = store();
     witnesses(&s, &["x", "y"]);
     assert_eq!(s.admit("c1", &entries(&[("x", 10)]), false), AdmitResult::Admitted);
-    s.release("c1");
+    s.release(&["c1"]);
     assert_eq!(
         s.admit("c1", &entries(&[("y", 10)]), false),
         AdmitResult::Released,
@@ -272,7 +293,7 @@ async fn a_released_call_refuses_admit_and_refresh_for_one_lease() {
         "a refresh of a released call re-creates nothing"
     );
     assert_eq!(s.held("x"), 1);
-    s.release("c1");
+    s.release(&["c1"]);
     assert_eq!([s.held("x"), s.held("y")], [1, 1], "a second release is a no-op");
 }
 
@@ -282,14 +303,14 @@ async fn a_released_call_refuses_admit_and_refresh_for_one_lease() {
 async fn a_release_fence_expires_after_one_lease() {
     let s = store();
     assert_eq!(s.admit("c1", &entries(&[("x", 10)]), false), AdmitResult::Admitted);
-    s.release("c1");
+    s.release(&["c1"]);
     advance(LEASE - Duration::from_secs(1)).await;
     assert_eq!(s.admit("c1", &entries(&[("x", 10)]), false), AdmitResult::Released);
     advance(Duration::from_secs(2)).await;
     s.sweep_now();
     assert_eq!(s.admit("c1", &entries(&[("x", 10)]), false), AdmitResult::Admitted);
     assert_eq!(s.held("x"), 1);
-    s.release("c1");
+    s.release(&["c1"]);
 }
 
 /// An admit that dropped the set without replacing it (a cap refusal with
@@ -394,7 +415,7 @@ async fn a_refresh_of_an_unknown_call_re_registers_its_set_without_a_cap_check()
     assert_eq!([s.held("x"), s.held("y")], [3, 1], "the set the refresh carries, cap or not");
     assert_eq!(s.stats().reregistered_calls, 1);
     assert_eq!(s.refresh("c1", &["x".into()]), RefreshResult::Extended, "known again");
-    s.release("c1");
+    s.release(&["c1"]);
     assert_eq!([s.held("x"), s.held("y")], [1, 0], "one release frees the re-registered set");
 }
 
@@ -405,13 +426,13 @@ async fn a_refresh_before_or_after_the_release_leaves_nothing_held() {
     let s = store();
     // Release first: the release fence refuses the refresh.
     assert_eq!(s.admit("c1", &entries(&[("x", 10)]), false), AdmitResult::Admitted);
-    s.release("c1");
+    s.release(&["c1"]);
     assert_eq!(s.refresh("c1", &["x".into()]), RefreshResult::Released);
     assert_eq!(s.held("x"), 0);
     // Refresh first: it re-registers, the release drops it.
     assert_eq!(s.refresh("c2", &["x".into()]), RefreshResult::Reregistered);
     assert_eq!(s.held("x"), 1);
-    s.release("c2");
+    s.release(&["c2"]);
     assert_eq!(s.held("x"), 0);
     assert_eq!(s.refresh("c2", &["x".into()]), RefreshResult::Released);
     assert_eq!(s.calls(), 0);
@@ -428,7 +449,7 @@ async fn a_release_behind_a_drop_fence_refuses_a_later_admit() {
         s.admit("c1", &entries(&[("z", 1)]), true),
         AdmitResult::Rejected { limiter_id: "z".into() }
     );
-    s.release("c1");
+    s.release(&["c1"]);
     assert_eq!(s.stats().fences, 1, "one fence for the key");
     assert_eq!(
         s.admit("c1", &entries(&[("x", 10)]), false),
@@ -462,11 +483,30 @@ async fn a_release_of_an_unknown_key_answers_200_and_creates_nothing() {
     let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
     let net = SimulatedHttpNetwork::new();
     let _h = net.serve(addr(), server).await.unwrap();
-    let body = serde_json::to_vec(&ReleaseRequest { key: "c1".into() }).unwrap();
+    let body = serde_json::to_vec(&ReleaseRequest { keys: vec!["c1".into()] }).unwrap();
     assert_eq!(call(&net, HttpRequest::post("/v1/release", body)).await.status, 200);
     assert_eq!(store.held("x"), 1, "the witness");
     assert_eq!(store.calls(), 1, "no set created");
     assert_eq!(store.stats().fences, 1, "the key is fenced");
+}
+
+/// One release request names several calls: every known one is freed, an
+/// unknown one creates nothing, and the answer is 200.
+#[tokio::test(start_paused = true)]
+async fn one_release_request_frees_every_call_it_names() {
+    let store = Arc::new(store());
+    witnesses(&store, &["x", "y"]);
+    assert_eq!(store.admit("c1", &entries(&[("x", 10), ("y", 10)]), false), AdmitResult::Admitted);
+    assert_eq!(store.admit("c2", &entries(&[("x", 10)]), false), AdmitResult::Admitted);
+    let server = Arc::new(LimiterServer::new(store.clone(), LimiterMetrics::new()));
+    let net = SimulatedHttpNetwork::new();
+    let _h = net.serve(addr(), server).await.unwrap();
+    let keys = vec!["c1".into(), "unknown".into(), "c2".into()];
+    let body = serde_json::to_vec(&ReleaseRequest { keys }).unwrap();
+    assert_eq!(call(&net, HttpRequest::post("/v1/release", body)).await.status, 200);
+    assert_eq!([store.held("x"), store.held("y")], [1, 1], "the witnesses");
+    assert_eq!(store.calls(), 2, "the witnesses");
+    assert_eq!(store.stats().fences, 3, "every named key is fenced");
 }
 
 /// The HTTP surface carries the call key: an admit names its call and
@@ -503,7 +543,8 @@ async fn the_wire_carries_the_call_key() {
     let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
     assert_eq!(body.outcome, RefreshAnswer::Extended);
 
-    let release = |key: &str| serde_json::to_vec(&ReleaseRequest { key: key.into() }).unwrap();
+    let release =
+        |key: &str| serde_json::to_vec(&ReleaseRequest { keys: vec![key.into()] }).unwrap();
     let resp = call(&net, HttpRequest::post("/v1/refresh", refresh("c3"))).await;
     let body: RefreshResponse = serde_json::from_slice(&resp.body).unwrap();
     assert_eq!(body.outcome, RefreshAnswer::Reregistered, "an unknown call is re-registered");

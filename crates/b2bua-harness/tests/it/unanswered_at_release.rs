@@ -86,8 +86,7 @@ async fn an_info_whose_handler_died_draws_481_on_its_retransmission_once_the_cal
 
     // The reaper's fatal-error verdict forces the call terminal; it sends
     // no BYE (ADR-0020).
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     assert_eq!(s.b2bua.metrics().handler_panics_total(), 1);
     assert_eq!(s.b2bua.txn_metrics().released_unanswered_forgotten(), 1);
 
@@ -103,8 +102,7 @@ async fn an_info_whose_handler_died_draws_481_on_its_retransmission_once_the_cal
     a_bye.expect(481).await;
     let mut b_bye = b_dialog.bye().await;
     b_bye.expect(481).await;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }

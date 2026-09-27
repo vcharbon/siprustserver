@@ -1,11 +1,12 @@
 //! [`HttpCallLimiter`] — the production limiter client.
 //!
 //! Speaks the call-keyed limiter API over an injected [`HttpTransport`] (real
-//! `reqwest` in the runner, the simulated fabric in tests). The **fail-open
-//! timeout budget lives here**: every request is wrapped in
-//! `tokio::time::timeout`, and a timeout *or* any transport error *or* a
-//! non-200 status maps to [`AdmitOutcome::Unavailable`] — the call site then
-//! fails open, owing the call's release (the request may have landed).
+//! `reqwest` in the runner, the simulated fabric in tests). The **timeout
+//! budgets live here**: every request is wrapped in `tokio::time::timeout`,
+//! and a timeout *or* any transport error *or* a non-200 status maps to
+//! `Unavailable`. An admit or a refresh runs on a call's turn under the
+//! fail-open budget; a release runs off every call, in the worker's release
+//! queue, under its own longer budget.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,13 +19,19 @@ use call_limiter::wire::{
 };
 use http_net::{HttpRequest, HttpResponse, HttpTransport};
 
-use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
+use crate::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
+
+/// The release budget a client runs with unless told otherwise.
+pub const DEFAULT_RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// HTTP-backed limiter client over a pluggable transport.
 pub struct HttpCallLimiter {
     transport: Arc<dyn HttpTransport>,
     addr: SocketAddr,
+    /// The admit and refresh budget.
     timeout: Duration,
+    /// The release budget.
+    release_timeout: Duration,
     /// Fail-open aggregation keyed by the limiter address (ADR-0026): a limiter
     /// outage is ONE episode — rising edge, ~5 s summaries, falling-edge totals
     /// — ended once 200s have come back for the idle window.
@@ -36,21 +43,29 @@ pub struct HttpCallLimiter {
 
 impl HttpCallLimiter {
     /// Build a client targeting the limiter service at `addr`, with `timeout` as
-    /// the per-request fail-open budget.
+    /// the admit and refresh fail-open budget and [`DEFAULT_RELEASE_TIMEOUT`]
+    /// as the release budget.
     pub fn new(transport: Arc<dyn HttpTransport>, addr: SocketAddr, timeout: Duration) -> Self {
         Self {
             transport,
             addr,
             timeout,
+            release_timeout: DEFAULT_RELEASE_TIMEOUT,
             fail_open: crate::lifecycle::backend_waves("call-limiter"),
             addr_key: addr.to_string(),
         }
     }
 
-    /// Fire one request under the fail-open budget. `None` on timeout / transport
-    /// error / non-200 — the caller treats all three as "backend unavailable".
-    async fn call(&self, req: HttpRequest) -> Option<HttpResponse> {
-        match tokio::time::timeout(self.timeout, self.transport.request(self.addr, req)).await {
+    /// The same client with `release_timeout` as its release budget.
+    pub fn with_release_timeout(mut self, release_timeout: Duration) -> Self {
+        self.release_timeout = release_timeout;
+        self
+    }
+
+    /// Fire one request under `budget`. `None` on timeout / transport error /
+    /// non-200 — the caller treats all three as "backend unavailable".
+    async fn call(&self, req: HttpRequest, budget: Duration) -> Option<HttpResponse> {
+        match tokio::time::timeout(budget, self.transport.request(self.addr, req)).await {
             Ok(Ok(resp)) if resp.status == 200 => {
                 // A 200 reports the recovery; the episode ends once the
                 // limiter stops failing, so a limiter answering every other
@@ -72,11 +87,16 @@ impl HttpCallLimiter {
         }
     }
 
-    /// One request whose body serializes `body`; `None` when the limiter is
-    /// unavailable.
-    async fn post<T: serde::Serialize>(&self, path: &str, body: &T) -> Option<HttpResponse> {
+    /// One request whose body serializes `body`, under `budget`; `None` when
+    /// the limiter is unavailable.
+    async fn post<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+        budget: Duration,
+    ) -> Option<HttpResponse> {
         let bytes = serde_json::to_vec(body).ok()?;
-        self.call(HttpRequest::post(path, bytes)).await
+        self.call(HttpRequest::post(path, bytes), budget).await
     }
 }
 
@@ -96,7 +116,7 @@ impl CallLimiter for HttpCallLimiter {
                 .collect(),
             release_on_refusal,
         };
-        let Some(resp) = self.post("/v1/admit", &body).await else {
+        let Some(resp) = self.post("/v1/admit", &body, self.timeout).await else {
             return AdmitOutcome::Unavailable;
         };
         match serde_json::from_slice::<AdmitResponse>(&resp.body) {
@@ -110,14 +130,17 @@ impl CallLimiter for HttpCallLimiter {
         }
     }
 
-    async fn release(&self, key: &str) {
-        // Best-effort: a lost release lapses with the call's lease.
-        let _ = self.post("/v1/release", &ReleaseRequest { key: key.to_string() }).await;
+    async fn release(&self, keys: &[String]) -> ReleaseAnswer {
+        let body = ReleaseRequest { keys: keys.to_vec() };
+        match self.post("/v1/release", &body, self.release_timeout).await {
+            Some(_) => ReleaseAnswer::Released,
+            None => ReleaseAnswer::Unavailable,
+        }
     }
 
     async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
         let body = RefreshRequest { key: key.to_string(), ids: ids.to_vec() };
-        let Some(resp) = self.post("/v1/refresh", &body).await else {
+        let Some(resp) = self.post("/v1/refresh", &body, self.timeout).await else {
             return RefreshOutcome::Unavailable;
         };
         match serde_json::from_slice::<RefreshResponse>(&resp.body) {

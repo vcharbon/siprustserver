@@ -29,8 +29,8 @@ and a lost release could not be retried.
    the old set stays, unless `release_on_refusal` drops it in the same step.
    The initial route admits with it off; every route fold with it on (a
    refused replacement frees the ended leg before the failure is consulted).
-3. **`release(key)` is idempotent.** It drops the set and fences the key
-   for one lease: an admit or a refresh landing after the call ended re-creates
+3. **`release(keys)` is idempotent per key.** One request names one or
+   more calls; for each it drops the set and fences the key for one lease: an admit or a refresh landing after the call ended re-creates
    nothing and is refused with its own reason, so every order of admit,
    refresh and release on one call is safe, and a second release from another
    node frees nothing. An admit that drops the set without replacing it (a cap
@@ -89,6 +89,20 @@ and a lost release could not be retried.
    when owed; a fold naming another key (an earlier call under the same
    `call_ref`) releases that key when owed and leaves the resident call
    alone.
+9. **The release never holds the call.** Every end path hands the key to
+   the worker's release queue and goes on, so the call's CDR is written and
+   the call removed in its last turn whatever the limiter does. The queue
+   sends at once, every waiting key in one request, under a release budget
+   longer than the admit's (2 s). A failed send keeps its keys, and the next
+   send waits a backoff that doubles with each consecutive failure: one
+   limiter, one backoff, so the waiting keys stay one batch. An entry is the
+   key and its lease expiry, nothing of the call. An entry that has waited
+   one lease is dropped unsent, since the limiter has let the call's set
+   lapse; at the queue's cap the oldest entry is dropped; both drops are
+   counted. The queue is not replicated: a worker that dies loses it and the
+   lease frees what it held. A circuit breaker drives the queue through
+   `hold` and `resume`: nothing is sent while it is held, and a resume sends
+   every waiting key at once.
 
 ## Lease, refresh and the replica TTL
 
@@ -120,8 +134,10 @@ cells that prove re-registration run the deployed relation.
   re-registered, were refused by a release fence
   (`b2bua_limiter_refresh_released_total`) or learnt their set was dropped
   (`b2bua_limiter_refresh_dropped_total`).
-- Config: `LIMITER_LEASE_SECONDS` on the limiter, `LIMITER_REFRESH_SECONDS`
-  on the workers, the refresh below the lease by more than one period.
+- Config: `LIMITER_LEASE_SECONDS` on the limiter and on the workers (the
+  same value), `LIMITER_REFRESH_SECONDS` on the workers, the refresh below
+  the lease by more than one period; `LIMITER_RELEASE_TIMEOUT_MS` and
+  `LIMITER_RELEASE_QUEUE_CAP` on the workers.
 - A refresh carries the call's ids: one request per counted call per period.
 - Re-registration knows no cap: a stale counted copy materialised after its
   release's fence lapsed (a primary that released, crashed before the
@@ -135,15 +151,19 @@ cells that prove re-registration run the deployed relation.
   lease, then re-register. A refresh sent before a fold's refusal dropped the
   call's set lands on the drop fence and answers `dropped`; the fold then
   states the call uncounted and only its terminal release is sent.
-- The terminal release is awaited in the call's last turn, before its CDR
-  and its removal, until the release leaves the call's turn (follow-up
-  work). Every call that sent an admit sends it, those whose admit failed
-  open included, so while the limiter is unreachable each such call's end
-  waits one limiter timeout.
+- No call waits on its release: a stalled or unreachable limiter delays
+  no CDR and no removal, those of calls whose admit failed open included.
+  What waits is the release queue, at most one lease of ending calls per
+  worker and never more than its cap, read on
+  `b2bua_limiter_release_queue_depth`, `b2bua_limiter_release_retries_total`
+  and `b2bua_limiter_release_dropped_total{reason=lease_expired|cap}`. A
+  release lost with its worker or dropped from the queue is freed by the
+  lease, so the limiter's counts read high by those calls for up to one
+  lease.
 - `LimiterRefresh` entries are not cohort-smoothed on a bulk reclaim: the
   calls one node reclaims refresh together (batching is follow-up work).
 - Replica bodies decode strictly: a body without the limiter key is dropped at
   reclaim and at the reap (no upgrade compatibility, by policy).
-- Out of scope here: what a batched per-node refresh and a release queue
-  change about the request rate; per-leg keys for a transfer, which extend the
-  key without changing this contract.
+- Out of scope here: what a batched per-node refresh changes about the
+  request rate; per-leg keys for a transfer, which extend the key without
+  changing this contract.

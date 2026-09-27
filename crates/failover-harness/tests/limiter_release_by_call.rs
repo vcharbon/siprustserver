@@ -130,7 +130,7 @@ impl LimiterRig {
     /// empty.
     fn release_witnesses(&self) {
         for id in IDS {
-            self.store.release(&format!("witness-{id}"));
+            self.store.release(&[format!("witness-{id}")]);
         }
     }
 

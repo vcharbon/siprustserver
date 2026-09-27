@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use b2bua::decision::{
     test_adapter::route_to, CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
 use b2bua_harness::{settle_until, B2buaSut};
 use call::CdrEventType;
 use scenario_harness::Harness;
@@ -55,8 +55,9 @@ impl CallLimiter for SpyLimiter {
         // but the whole point of the test is that it must NOT reach us.
         AdmitOutcome::Unavailable
     }
-    async fn release(&self, _call_ref: &str) {
+    async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
         self.touched.store(true, Ordering::SeqCst);
+        ReleaseAnswer::Released
     }
     async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
         self.touched.store(true, Ordering::SeqCst);

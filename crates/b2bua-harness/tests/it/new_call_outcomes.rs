@@ -182,6 +182,7 @@ async fn every_new_invite_is_counted_once_by_its_outcome() {
     assert_eq!(counts.total(), 9, "one count per INVITE sent");
     settle_until(|| s.b2bua.cdr_records().len() == 2).await;
     assert_eq!(s.b2bua.cdr_records().len(), 2, "one CDR per accepted call");
+    b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     s.finish().await;
 }
@@ -214,6 +215,7 @@ async fn the_ingress_brake_counts_a_shed_invite_once() {
     assert_counts(&counts, [0, 1], &[(Refusal::Tier1Brake, false, 1)]);
     assert_eq!(counts.total(), 2, "one count per INVITE sent");
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     s.finish().await;
 }
@@ -258,6 +260,7 @@ async fn a_shed_invite_copy_below_the_brake_threshold_is_shed_again() {
     assert_counts(&counts, [1, 0], &[(Refusal::Tier1Brake, false, 1)]);
     assert_eq!(counts.total(), 2, "one count per INVITE sent");
     settle_until(|| s.b2bua.cdr_records().len() == 1).await;
+    b2bua_harness::settle_until(|| s.b2bua.is_reaped()).await;
     s.b2bua.assert_fully_reaped();
     s.finish().await;
 }

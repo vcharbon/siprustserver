@@ -59,7 +59,7 @@ async fn expect_refused(alice: &Agent, bob: &Agent, b2bua: &B2buaSut, emergency:
 /// INVITEs' orphan queues included.
 async fn assert_all_released(b2bua: &B2buaSut, cdrs: usize) {
     settle_until(|| b2bua.cdr_records().len() == cdrs).await;
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
 }
 

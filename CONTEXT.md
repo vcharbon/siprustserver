@@ -647,6 +647,13 @@ _Avoid_: a parallel allocation registry / resource ledger (the mirror/slice
 divergence hazard; would not survive failover, while `limiter` and
 `cdr_events` ride the replicated Element for free).
 
+**Release queue**:
+The worker's queue of limiter releases. The **obligation**'s limiter
+release is handed to it and the call ends in its last turn; the queue sends
+every waiting key in one request, backs off after a failed send, and drops
+an entry that waited one lease or is the oldest at its cap (ADR-0038). It
+holds keys only and is not replicated: the lease covers a crashed worker.
+
 **Last-touched stamp**:
 The node-local, store-side per-call activity timestamp — refreshed on every
 dispatched event and at hydration/**reclaim** — that is the reaper's *only*

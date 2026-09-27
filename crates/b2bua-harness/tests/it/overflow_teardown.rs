@@ -173,8 +173,7 @@ async fn a_call_flooded_past_its_overflow_ceiling_is_torn_down_on_the_wire() {
     info_finals.dedup();
     assert_eq!(info_finals.len(), 2, "both INFOs answered: {info_finals:?}");
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     assert_one_overflow_cdr(s);
     s.b2bua.assert_fully_reaped();
     let Flooded { s, .. } = f;
@@ -205,8 +204,7 @@ async fn a_condemned_call_ends_at_its_terminating_timeout_while_the_flood_goes_o
 
     parked.expect(503).await;
     let s = &f.s;
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     assert!(
         torn_down_at.elapsed() < Duration::from_millis(TERMINATING_TIMEOUT_MS as u64 + 10_000),
         "the call ended within TerminatingTimeout of its teardown, give or take the held permit"
@@ -272,8 +270,7 @@ async fn a_condemned_call_that_owes_its_release_drains_its_limiter() {
     s.h.advance(Duration::from_millis(500)).await;
     while s.alice.take_queued().await.is_some() {}
 
-    settle_until(|| s.b2bua.metrics().removals_total() == s.b2bua.metrics().creations_total())
-        .await;
+    settle_until(|| s.b2bua.is_reaped()).await;
     assert_one_overflow_cdr(s);
     rig.expect_holds([0, 0, 0], "the teardown released the call's key").await;
     let stats = rig.store.stats();

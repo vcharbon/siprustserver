@@ -83,12 +83,14 @@ pub enum CriticalStateEffect {
     RemoveCall,
 }
 
-/// Soft-bounded effects — limiter requests with a short timeout (never block).
+/// Soft-bounded effects — limiter work handed off the call's turn (never
+/// awaited by the call).
 #[derive(Debug, Clone)]
 pub enum SoftBoundedEffect {
-    /// Release the limiter set held under `key`: one `release(key)`,
-    /// idempotent on the server. The terminal settle emits it once for a
-    /// counted call, under the call's own key; a route fold carrying another
+    /// Release the limiter set held under `key`: the key joins the worker's
+    /// release queue, and the call's turn goes on at once. Idempotent on the
+    /// server. The terminal settle emits it once for a call that owes its
+    /// release, under the call's own key; a route fold carrying another
     /// call's key releases that key.
     ReleaseLimiter { key: String },
 }

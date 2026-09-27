@@ -45,11 +45,13 @@ pub struct AdmitResponse {
     pub released: bool,
 }
 
-/// `POST /v1/release` body: drop the call's set. Idempotent.
+/// `POST /v1/release` body: drop the set of every call named, in one step.
+/// Idempotent per key; a key the server holds nothing for changes no count,
+/// creates no set and is fenced like any released call.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseRequest {
-    /// The call to release.
-    pub key: String,
+    /// The calls to release.
+    pub keys: Vec<String>,
 }
 
 /// `POST /v1/refresh` body: extend the call's lease, or re-create its set from

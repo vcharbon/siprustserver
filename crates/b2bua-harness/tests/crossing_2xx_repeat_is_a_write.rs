@@ -78,7 +78,7 @@ async fn a_re_ack_beside_a_bye_is_a_write_not_a_quiet_turn() {
     if let Some(bye) = second_bye.as_mut() {
         bye.respond(200, "OK").await;
     }
-    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| b2bua.is_reaped()).await;
     b2bua.assert_fully_reaped();
     assert_eq!(b2bua.cdr_records().len(), 1, "one CDR");
     let _report = h.finish().await;
