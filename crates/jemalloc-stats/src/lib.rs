@@ -5,9 +5,9 @@
 //! steady-state RSS — glibc malloc retains freed arena chunks and ratchets RSS
 //! under sustained SIP churn (a no-chaos soak measured ~209 MiB/h growth with
 //! all logical state flat, → node-cgroup OOM). jemalloc returns dirty/muzzy
-//! pages to the OS on a time-based decay; the workspace compiles a 1 s decay,
-//! `thp:never` and `narenas:1` into jemalloc (`.cargo/config.toml`, ADR-0038)
-//! and `_RJEM_MALLOC_CONF` overrides them key by key. [`footprint`] states what the
+//! pages to the OS on a time-based decay. Linking this crate sets jemalloc's
+//! defaults ([`defaults`]: 1 s decay, `thp:never`, four arenas) and
+//! `_RJEM_MALLOC_CONF` overrides them key by key. [`footprint`] states what the
 //! resolved settings cost on the host and [`log_config`] reports it at startup.
 //!
 //! That fix is only observable if we can SEE it. This crate reads jemalloc's own
@@ -29,13 +29,15 @@
 //!    jemalloc actually adopted — assert they equal 1000, don't infer it from
 //!    the RSS curve.
 //!
-//! Read-only: this crate NEVER sets the allocator (the binary's
-//! `#[global_allocator]` does). On a non-jemalloc build it must not be linked —
-//! `tikv-jemalloc-ctl` brings its own jemalloc, so depending on it without the
-//! matching allocator would link a second, unused jemalloc whose stats are all
-//! zero. Gate the dependency on the same `cfg(not(target_env = "msvc"))` as the
-//! allocator. On msvc this crate is no-op stubs so callers need no second cfg.
+//! This crate never installs the allocator (the binary's `#[global_allocator]`
+//! does); it sets jemalloc's defaults and reads its statistics. On a
+//! non-jemalloc build it must not be linked — `tikv-jemalloc-ctl` brings its
+//! own jemalloc, so depending on it without the matching allocator would link
+//! a second, unused jemalloc whose stats are all zero. Gate the dependency on
+//! the same `cfg(not(target_env = "msvc"))` as the allocator. On msvc this
+//! crate is no-op stubs so callers need no second cfg.
 
+pub mod defaults;
 pub mod footprint;
 
 #[cfg(not(target_env = "msvc"))]
@@ -62,15 +64,22 @@ mod imp {
         }
     }
 
-    /// Read a string-valued `mallctl` (`opt.thp`); `None` on any error.
+    /// Read a string-valued `mallctl` (`opt.thp`, `opt.malloc_conf.*`);
+    /// `None` on any error or a null string.
     ///
-    /// SAFETY: `read_str` transmutes the returned pointer to a NUL-terminated
-    /// C string, which is what every `const char *` mallctl yields.
+    /// SAFETY: every such mallctl yields a `const char *` that is null or
+    /// NUL-terminated and lives for the process; null is checked before
+    /// `CStr::from_ptr`.
     fn raw_str(name: &[u8]) -> Option<String> {
         #[allow(unsafe_code)] // irreducible mallctl FFI; see SAFETY above
-        let bytes = unsafe { tikv_jemalloc_ctl::raw::read_str(name).ok()? };
-        // The slice carries the C string's NUL terminator.
-        Some(String::from_utf8_lossy(bytes).trim_end_matches('\0').to_owned())
+        let text = unsafe {
+            let ptr = tikv_jemalloc_ctl::raw::read::<*const std::os::raw::c_char>(name).ok()?;
+            if ptr.is_null() {
+                return None;
+            }
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        };
+        Some(text)
     }
 
     fn push_gauge(s: &mut String, name: &str, help: &str, v: impl std::fmt::Display) {
@@ -211,16 +220,10 @@ mod imp {
         // backtrace/symbol resolution (unreliable on an optimised+inlined binary).
         // Emitted as `jemalloc_bin_live_bytes{size="N"}` (curregs×size).
         //
-        // Beside it, what the class costs in pages: `jemalloc_bin_active_bytes`
-        // is curslabs×slab_size, so active/live per class is that class's slab
-        // utilisation. A heap-profiling sample of a small object lives in its
-        // own page-rounded extent, outside every slab, plus the pad page of a
-        // cache-oblivious large extent: jemalloc counts it in the nmalloc and
-        // ndalloc of the bin of its ROUNDED size but in no curregs, so it is
-        // absent from `allocated` and present in `active`.
-        // `jemalloc_bin_sampled_live{size="4096"}` is that count for every
-        // sampled object up to a page, nmalloc−ndalloc−curregs, and
-        // `_sampled_bytes` the pages it holds.
+        // Beside it, the class's slab pages (`_active_bytes`) and the heap-profile
+        // samples outside every slab: jemalloc counts a sampled object in the
+        // nmalloc/ndalloc of the bin of its size but in no curregs, so
+        // nmalloc−ndalloc−curregs is its live count, in extents of its own.
         let page: usize = raw(b"arenas.page\0").unwrap_or(4096);
         let pad_pages = u64::from(raw::<bool>(b"opt.cache_oblivious\0").unwrap_or(true));
         let mut sampled_extent_bytes = 0u64;
@@ -320,6 +323,7 @@ mod imp {
                 v,
             );
         }
+        push_mutex_waits(&mut s);
         let _ = ALL; // documents the magic 4096 above; keeps it greppable.
 
         // --- resolved config: the "did MALLOC_CONF parse?" evidence ------------
@@ -346,7 +350,15 @@ mod imp {
             push_gauge(
                 &mut s,
                 "jemalloc_arenas",
-                "Number of arenas (parallelism vs per-arena retention trade-off).",
+                "Arenas in use: the automatic ones plus the arena for huge allocations.",
+                v,
+            );
+        }
+        if let Some(v) = raw::<u32>(b"opt.narenas\0") {
+            push_gauge(
+                &mut s,
+                "jemalloc_opt_narenas",
+                "Configured automatic arenas (parallelism vs slab slack trade-off).",
                 v,
             );
         }
@@ -368,11 +380,11 @@ mod imp {
                 v as u8,
             );
         }
-        if let Some(v) = raw::<usize>(b"opt.lg_prof_sample\0") {
+        if let Some(v) = lg_prof_sample() {
             push_gauge(
                 &mut s,
                 "jemalloc_opt_lg_prof_sample",
-                "Resolved lg2 of the mean bytes between heap-profile samples (jemalloc default 19).",
+                "Live lg2 of the mean bytes between heap-profile samples (jemalloc default 19).",
                 v,
             );
         }
@@ -394,9 +406,18 @@ mod imp {
         push_gauge(
             &mut s,
             "jemalloc_prof_sample_overhead_ratio",
-            "Expected sampled-extent bytes per live small byte at the resolved profiling interval (0 = no sampling).",
+            "Sampled-extent bytes per live byte of objects up to a page at the live profiling interval (0 = no sampling).",
             format!("{:.6}", report.sample_overhead),
         );
+        push_gauge(
+            &mut s,
+            "jemalloc_prof_sample_overhead_max_ratio",
+            "The same for the largest small size class: the bound over the small heap.",
+            format!("{:.6}", report.sample_overhead_max),
+        );
+        let host_thp = report.resolved.host_thp.as_deref().unwrap_or("unreadable");
+        s.push_str("# HELP jemalloc_host_thp The host's transparent_hugepage mode (unreadable when /sys does not say).\n# TYPE jemalloc_host_thp gauge\n");
+        s.push_str(&format!("jemalloc_host_thp{{mode=\"{host_thp}\"}} 1\n"));
         push_gauge(
             &mut s,
             "jemalloc_footprint_hazards",
@@ -414,6 +435,73 @@ mod imp {
         // make-or-break signal for "jemalloc didn't help."
         push_proc(&mut s);
         s
+    }
+
+    /// jemalloc's own lock contention: acquisitions that waited and the time
+    /// they waited, per arena mutex (merged over arenas), for the bin mutexes
+    /// summed over size classes, and per global mutex. Fewer arenas trade slab
+    /// slack for these waits (ADR-0038).
+    fn push_mutex_waits(s: &mut String) {
+        const ARENA: [&str; 12] = [
+            "large",
+            "extent_avail",
+            "extents_dirty",
+            "extents_muzzy",
+            "extents_retained",
+            "decay_dirty",
+            "decay_muzzy",
+            "base",
+            "tcache_list",
+            "hpa_shard",
+            "hpa_shard_grow",
+            "hpa_sec",
+        ];
+        const GLOBAL: [&str; 9] = [
+            "background_thread",
+            "max_per_bg_thd",
+            "ctl",
+            "prof",
+            "prof_thds_data",
+            "prof_dump",
+            "prof_recent_alloc",
+            "prof_recent_dump",
+            "prof_stats",
+        ];
+        let read = |prefix: &str| {
+            let waits = raw::<u64>(format!("{prefix}.num_wait\0").as_bytes())?;
+            let ns = raw::<u64>(format!("{prefix}.total_wait_time\0").as_bytes())?;
+            Some((waits, ns))
+        };
+        let mut rows: Vec<(String, &str, u64, u64)> = Vec::new();
+        for m in ARENA {
+            if let Some((w, ns)) = read(&format!("stats.arenas.4096.mutexes.{m}")) {
+                rows.push((m.to_string(), "arena", w, ns));
+            }
+        }
+        if let Some(nbins) = raw::<u32>(b"arenas.nbins\0") {
+            let (w, ns) = (0..nbins)
+                .filter_map(|j| read(&format!("stats.arenas.4096.bins.{j}.mutex")))
+                .fold((0u64, 0u64), |(w, ns), (a, b)| (w.saturating_add(a), ns.saturating_add(b)));
+            rows.push(("bins".to_string(), "arena", w, ns));
+        }
+        for m in GLOBAL {
+            if let Some((w, ns)) = read(&format!("stats.mutexes.{m}")) {
+                rows.push((m.to_string(), "global", w, ns));
+            }
+        }
+        s.push_str("# HELP jemalloc_mutex_waits_total Lock acquisitions that waited for another thread.\n# TYPE jemalloc_mutex_waits_total counter\n");
+        for (m, scope, w, _) in &rows {
+            s.push_str(&format!(
+                "jemalloc_mutex_waits_total{{mutex=\"{m}\",scope=\"{scope}\"}} {w}\n"
+            ));
+        }
+        s.push_str("# HELP jemalloc_mutex_wait_seconds_total Time lock acquisitions spent waiting.\n# TYPE jemalloc_mutex_wait_seconds_total counter\n");
+        for (m, scope, _, ns) in &rows {
+            s.push_str(&format!(
+                "jemalloc_mutex_wait_seconds_total{{mutex=\"{m}\",scope=\"{scope}\"}} {:.9}\n",
+                *ns as f64 / 1e9
+            ));
+        }
     }
 
     /// OS-level process memory + thread count from `/proc/self`. Linux-only;
@@ -485,11 +573,19 @@ mod imp {
         let host_thp = std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled")
             .ok()
             .and_then(|e| host_thp_mode(&e));
+        let small_max = raw::<u32>(b"arenas.nbins\0")
+            .and_then(|n| {
+                raw::<usize>(format!("arenas.bin.{}.size\0", n.checked_sub(1)?).as_bytes())
+            })
+            .unwrap_or(0);
         Resolved {
+            malloc_conf: raw_str(b"opt.malloc_conf.global_var\0"),
             page: raw(b"arenas.page\0").unwrap_or(4096),
+            small_max,
             cache_oblivious: raw(b"opt.cache_oblivious\0").unwrap_or(true),
             prof_active: raw::<bool>(b"prof.active\0"),
-            lg_prof_sample: raw::<usize>(b"opt.lg_prof_sample\0").unwrap_or(19) as u32,
+            lg_prof_sample: lg_prof_sample().unwrap_or(19) as u32,
+            opt_narenas: raw(b"opt.narenas\0").unwrap_or(0),
             narenas: raw(b"arenas.narenas\0").unwrap_or(0),
             thp: raw_str(b"opt.thp\0").unwrap_or_else(|| "?".into()),
             host_thp,
@@ -498,6 +594,16 @@ mod imp {
             background_thread: raw(b"background_thread\0").unwrap_or(false),
             threads,
         }
+    }
+
+    /// The live sampling interval (`prof.lg_sample`, which `prof.reset` can
+    /// change) when profiling is built in and on, else the configured one
+    /// (`prof.lg_sample` reads 0 with `prof:false`).
+    fn lg_prof_sample() -> Option<usize> {
+        let live = raw::<bool>(b"opt.prof\0")
+            .filter(|on| *on)
+            .and_then(|_| raw::<usize>(b"prof.lg_sample\0"));
+        live.or_else(|| raw::<usize>(b"opt.lg_prof_sample\0"))
     }
 
     /// `(allocated, active)` bytes from a fresh stats epoch; `None` when
@@ -575,12 +681,18 @@ mod exposition_tests {
             "jemalloc_page_bytes ",
             "jemalloc_opt_lg_prof_sample ",
             "jemalloc_prof_sample_overhead_ratio ",
+            "jemalloc_prof_sample_overhead_max_ratio ",
             "jemalloc_footprint_hazards ",
+            "jemalloc_opt_narenas 4\n",
+            "jemalloc_host_thp{mode=",
+            "jemalloc_mutex_waits_total{mutex=\"bins\",scope=\"arena\"}",
+            "jemalloc_mutex_wait_seconds_total{mutex=\"extents_dirty\",scope=\"arena\"}",
+            "jemalloc_mutex_waits_total{mutex=\"ctl\",scope=\"global\"}",
         ] {
             assert!(text.contains(name), "missing {name} in:\n{text}");
         }
-        // This process samples nothing and the workspace compiles `thp:never`
-        // in, so no hazard holds here, whatever the host's THP mode.
+        // This process samples nothing and runs on the crate's defaults, so no
+        // hazard holds here, whatever the host's THP mode.
         assert!(text.contains("\njemalloc_footprint_hazards 0\n"), "{text}");
     }
 }

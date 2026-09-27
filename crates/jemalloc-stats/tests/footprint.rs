@@ -1,5 +1,6 @@
 //! The allocator's footprint under a transaction-table allocation pattern on a
-//! multi-thread runtime, per resolved jemalloc configuration.
+//! multi-thread runtime, per resolved jemalloc configuration, and the defaults
+//! a binary linking this crate resolves with no operator setting.
 //!
 //! jemalloc reads `_RJEM_MALLOC_CONF` once, before `main`, so each case
 //! re-executes this test binary with the configuration under test and reads
@@ -12,14 +13,17 @@
 //! or with profiling off, `active` stays within 1.3× `allocated` at the held
 //! heap. The lane's diagnostic interval (2^13) is kept as the falsifier of the
 //! hazard model: a sample of a small object costs two pages, so it doubles the
-//! small heap; the startup line must say so.
+//! small heap; the startup line must say so. The pattern holds its heap for
+//! 1.5 s, too short for slab slack to build: it cannot tell arena counts apart
+//! (1.00 at one arena, 1.09 at 97), which minutes of churn do (ADR-0038).
+
+#![cfg(not(target_env = "msvc"))]
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -125,15 +129,22 @@ fn child_pattern() {
     });
 }
 
-/// `(allocated, active, stderr)` of this binary re-run as the child for
+/// The output of this binary re-run as the child for `test` under `conf`
+/// (`None`: no `_RJEM_MALLOC_CONF` at all).
+fn child(test: &str, conf: Option<&str>) -> std::process::Output {
+    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    cmd.args(["--exact", test, "--nocapture", "--test-threads=1"]).env(CHILD, "1");
+    match conf {
+        Some(conf) => cmd.env("_RJEM_MALLOC_CONF", conf),
+        None => cmd.env_remove("_RJEM_MALLOC_CONF"),
+    };
+    cmd.output().expect("child runs")
+}
+
+/// `(allocated, active, stderr)` of the pattern re-run as the child for
 /// `test` under `conf`.
 fn run_child(test: &str, conf: &str) -> (u64, u64, String) {
-    let out = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test, "--nocapture", "--test-threads=1"])
-        .env(CHILD, "1")
-        .env("_RJEM_MALLOC_CONF", conf)
-        .output()
-        .expect("child runs");
+    let out = child(test, Some(conf));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     // The harness prints `test <name> ... ` without a newline first, so the
@@ -205,4 +216,34 @@ fn a_fine_profiling_interval_doubles_the_small_heap_and_the_startup_line_says_so
     let line = stderr.lines().find(|l| l.starts_with("jemalloc")).unwrap_or_default();
     assert!(line.contains("lg_prof_sample=13"), "startup line: {line}");
     assert!(line.contains("hazard"), "startup line names no hazard: {line}");
+}
+
+/// With no operator setting, a binary linking this crate resolves its
+/// defaults: four arenas whatever the host, no huge-page refill, 1 s decays.
+#[test]
+fn a_binary_linking_the_crate_resolves_its_defaults_without_any_setting() {
+    const TEST: &str = "a_binary_linking_the_crate_resolves_its_defaults_without_any_setting";
+    if std::env::var_os(CHILD).is_some() {
+        let r = jemalloc_stats::footprint_report().expect("jemalloc answers").resolved;
+        println!(
+            "RESOLVED conf={} opt.narenas={} thp={} dirty={} muzzy={}",
+            r.malloc_conf.as_deref().unwrap_or("none"),
+            r.opt_narenas,
+            r.thp,
+            r.dirty_decay_ms,
+            r.muzzy_decay_ms
+        );
+        return;
+    }
+    let out = child(TEST, None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let expected = format!(
+        "RESOLVED conf={} opt.narenas=4 thp=never dirty=1000 muzzy=1000",
+        jemalloc_stats::defaults::MALLOC_CONF
+    );
+    assert!(stdout.contains(&expected), "expected `{expected}` in: {stdout}");
+    // An operator setting overrides key by key; the rest stay.
+    let out = child(TEST, Some("narenas:2"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("opt.narenas=2 thp=never dirty=1000 muzzy=1000"), "{stdout}");
 }

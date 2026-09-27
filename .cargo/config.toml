@@ -41,13 +41,3 @@
 [build]
 jobs = 4
 rustflags = ["--cfg", "tokio_unstable", "-Clink-arg=-fuse-ld=mold", "-Clink-arg=-Wl,--thread-count=4"]
-
-# ── allocator defaults ─────────────────────────────────────────────────
-#
-# Compiled into the bundled jemalloc, so every binary on it holds the same
-# footprint on any host: no huge-page refill of purged extents, freed pages
-# returned within 1 s, and one shared arena, whose slab slack does not grow with
-# the thread count (ADR-0038). `_RJEM_MALLOC_CONF` overrides key by key; the
-# startup line reports the resolved values and `jemalloc_footprint_hazards`.
-[env]
-JEMALLOC_SYS_WITH_MALLOC_CONF = "thp:never,dirty_decay_ms:1000,muzzy_decay_ms:1000,narenas:1"

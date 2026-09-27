@@ -166,15 +166,16 @@ spec:
             - { name: B2BUA_REPL_SERVICE,   value: "b2bua-worker" }
             - { name: B2BUA_DRAIN_GRACE_MS, value: "5000" }
             - { name: B2BUA_DRAIN_MIN_MS,   value: "1000" }
-            # jemalloc options (ADR-0038). The binary compiles in thp:never, a
-            # 1 s dirty/muzzy decay and narenas:1; this line restates them and
-            # keeps heap profiling on so /debug/heap attributes a leak, at
-            # jemalloc's default interval: a sample of a small object holds two
-            # pages outside `allocated`, so an interval below 2^19 is a
-            # footprint hazard (2^13 doubles the heap the RSS ceiling sees).
-            # The startup line reports the resolved values and every hazard;
-            # jemalloc_footprint_hazards on /metrics must read 0.
-            - { name: _RJEM_MALLOC_CONF,    value: "prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/tmp/jeprof/auto,dirty_decay_ms:1000,muzzy_decay_ms:1000,thp:never,narenas:1" }
+            # Heap profiling for /debug/heap at jemalloc's default interval
+            # (ADR-0038). The binary carries its allocator defaults (four
+            # arenas, thp:never, 1 s decay); this value adds to them key by key.
+            # An interval below 19 is a footprint hazard: a sample of a small
+            # object holds two to five pages outside `allocated`, so 13 doubles
+            # the heap the RSS ceiling sees. The startup line reports the
+            # resolved values and every hazard; jemalloc_footprint_hazards reads
+            # 0 on 4 KiB pages (a 64 KiB-page build reports 19 as a hazard and
+            # names 23).
+            - { name: _RJEM_MALLOC_CONF,    value: "prof:true,prof_active:true,lg_prof_sample:19,prof_prefix:/tmp/jeprof/auto" }
             # Per-call tracing (ADR-0026). An EMPTY OTEL_EXPORTER_OTLP_ENDPOINT
             # means "no exporter": the whole sampling machinery is inert, no span
             # is ever built. run.sh stamps the lab VictoriaTraces OTLP base
