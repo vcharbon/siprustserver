@@ -9,8 +9,10 @@
 #   deploy/k8s/sipp/checks/run.sh            needs `sipp` (>= 3.7) and `ss` on PATH
 #
 # A pairing states its expectation: `ok` (both SIPp processes end with every call
-# successful) or `fail:<Failed* stat column>` (the scenario under test counts
-# every call failed on that column, the peer still succeeds).
+# successful), `count:<stat column>` (as `ok`, and the scenario under test counts
+# every call on that column too) or `fail:<Failed* stat column>` (the scenario
+# under test counts every call failed on that column and none on GenericCounter1,
+# the peer still succeeds).
 #
 # Env: SIPP=sipp  BASE_PORT (unset: a free block is picked)  KEEP=1 keeps the run
 # dir (logs, stat files). Holds are staged at 2 s (hold_ms and the first hold
@@ -33,6 +35,10 @@ PAIRS=(
   "uac-capacity-short.xml          uac  peer-uas-rings-no-answer.xml             1  10 fail:FailedTimeoutOnRecv    60000"
   "uac-capacity-short-noemerg.xml  uac  peer-uas-options-crosses-bye.xml         1  10 ok                          60000"
   "uac-capacity-short-noemerg.xml  uac  peer-uas-rings-no-answer.xml             1  10 fail:FailedTimeoutOnRecv    60000"
+  "uac-capacity-short.xml          uac  peer-uas-rejects-503.xml                 1  10 count:GenericCounter1     60000"
+  "uac-capacity-short-noemerg.xml  uac  peer-uas-rejects-503.xml                 1  10 count:GenericCounter1     60000"
+  "uac-capacity-short.xml          uac  peer-uas-503-no-retry-after.xml          1  10 fail:FailedRegexpHdrNotFound 60000"
+  "uac-capacity-short-noemerg.xml  uac  peer-uas-503-no-retry-after.xml          1  10 fail:FailedRegexpHdrNotFound 60000"
   "uac-endurance-short.xml         uac  uas-basic.xml                            1  10 ok                          60000"
   "uac-endurance-short.xml         uac  peer-uas-options-crosses-bye.xml         1  10 ok                          60000"
   "uac-endurance-short-noemerg.xml uac  peer-uas-options-crosses-bye.xml         1  10 ok                          60000"
@@ -119,8 +125,12 @@ pairing() {
   fi
   if [ "$expect" = ok ]; then
     [ "$src" = 0 ] && [ "$prc" = 0 ] && got=ok
+  elif [ "${expect%%:*}" = count ]; then
+    [ "$src" = 0 ] && [ "$prc" = 0 ] && [ "$(stat "$d" "${expect#count:}(C)")" = "$calls" ] && got=ok
   else
-    [ "$src" = 1 ] && [ "$prc" = 0 ] && [ "$(stat "$d" "${expect#fail:}(C)")" = "$calls" ] && got=ok
+    # A failed call is never counted as shed (GenericCounter1, when the scenario has one).
+    [ "$src" = 1 ] && [ "$prc" = 0 ] && [ "$(stat "$d" "${expect#fail:}(C)")" = "$calls" ] \
+      && [[ "$(stat "$d" "GenericCounter1(C)")" =~ ^(0|missing)$ ]] && got=ok
   fi
   if [ "${got:-}" = ok ]; then
     printf 'ok    %-32s vs %-42s %s\n' "$sut" "$peer" "$expect"

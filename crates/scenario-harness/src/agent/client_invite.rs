@@ -72,6 +72,8 @@ pub struct ClientInvite {
     /// §9.1), so it is retained here.
     pub(super) wire_dst: SocketAddr,
     pub(super) original_invite: SipRequest,
+    /// The datagram the INVITE went out as, for [`retransmit`](Self::retransmit).
+    pub(super) invite_wire: Vec<u8>,
     pub(super) dialog: StackDialog,
     /// Per-forked-early-dialog CSeq (keyed by the fork's To-tag), for the
     /// delayed-offer forking case (RFC 3261 §12.1.2 / §12.2.1.1): one INVITE
@@ -93,6 +95,13 @@ impl ClientInvite {
     /// per-endpoint demux binds the originating actor to.
     pub fn call_id(&self) -> String {
         self.original_invite.call_id().to_string()
+    }
+
+    /// Send the INVITE again, byte for byte, as Timer A does while no response
+    /// has arrived (RFC 3261 §17.1.1.2): the same transaction, not a new
+    /// request. A retransmission belongs before the final is read.
+    pub async fn retransmit(&self) {
+        self.agent.send_wire(&self.invite_wire, self.wire_dst).await;
     }
 
     /// Wait for and assert a response status. Learns the remote tag (from the
@@ -398,6 +407,7 @@ impl ClientInvite {
         self.agent.try_send_wire(resent.image(), self.wire_dst).await?;
         // Re-point the transaction state at the retried INVITE: the CANCEL / ACK /
         // dialog CSeq must all follow the new transaction, not the challenged one.
+        self.invite_wire = resent.image().to_vec();
         self.original_invite = resent;
         self.dialog.local_cseq = new_cseq;
         Ok(true)

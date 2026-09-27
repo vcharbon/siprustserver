@@ -2,11 +2,16 @@
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!--
   Capacity-ramp UAC, emergency half: INVITE / 180 / 200 / ACK / 5 s hold / BYE.
-  Carries `Resource-Priority: esnet.0` (RFC 4412), so the B2BUA admission gate
-  never sheds it. The 5 s hold keeps concurrency near (ring + 5 s) x rate.
+  Carries `Resource-Priority: esnet.0` (RFC 4412), so the B2BUA rate gates
+  never shed it; a memory ceiling of the emergency class still may. The 5 s
+  hold keeps concurrency near (ring + 5 s) x rate.
   Response time 1 is INVITE to the first 180: the setup latency through the SUT,
-  with the callee's ring left out. Any final other than 200 fails the call
-  (SIPp ACKs a non-2xx final it did not expect). Both recv waits are bounded
+  with the callee's ring left out. A 503 with Retry-After is the SUT's
+  admission refusing the new call: it is ACKed and the call ends counted on
+  GenericCounter1, so the stat file keeps completed calls (successful minus
+  GenericCounter1), shed calls and failures apart. A 503 without Retry-After
+  fails the call, as any final other than 200 does (SIPp ACKs a non-2xx final
+  it did not expect). Both recv waits are bounded
   at 64*T1 (RFC 3261 Timer B) so a lost call fails in 32 s, not at -recv_timeout.
   SIPp times a wait on the recv the call stands on, and the call moves along an
   optional group as its messages arrive, so every recv of a group carries the
@@ -42,6 +47,11 @@
 
   <recv response="100" optional="true" timeout="32000"/>
   <recv response="180" optional="true" rtd="1" timeout="32000"/>
+  <recv response="503" optional="true" next="shed" timeout="32000">
+    <action>
+      <ereg regexp="[0-9]+" search_in="hdr" header="Retry-After:" check_it="true" assign_to="retry_after"/>
+    </action>
+  </recv>
   <recv response="200" rrs="true" timeout="32000"/>
 
   <send>
@@ -157,6 +167,35 @@
 
   <nop next="end"/>
 
+  <!-- The admission shed: the SUT refused the new call with a 503 carrying
+       Retry-After, as its admission tiers do. The ACK takes the INVITE's branch
+       (RFC 3261 section 17.1.1.3) and the call ends counted on GenericCounter1,
+       apart from the calls that completed and from the failures. A 503 without
+       Retry-After is authored on the call path: the recv above fails the call
+       (FailedRegexpHdrNotFound), the call still ACKs it here and ends without
+       reaching the counter. -->
+  <label id="shed"/>
+  <send>
+    <![CDATA[
+      ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch-18];rport
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Max-Forwards: 70
+      Content-Length: 0
+    ]]>
+    <action>
+      <strcmp assign_to="retry_after_cmp" variable="retry_after" value=""/>
+      <test assign_to="shed_counted" variable="retry_after_cmp" compare="not_equal" value="0"/>
+    </action>
+  </send>
+  <nop test="shed_counted" next="shed_counted"/>
+  <nop next="end"/>
+  <label id="shed_counted"/>
+  <nop counter="1" next="end"/>
+
   <!-- SIPp runs a call one step per loop turn and reads its socket in between:
        a request that lands while the call stands on a send or a nop (the step
        after a hold timeout), or that no recv at hand expects (a BYE mid-hold),
@@ -209,7 +248,7 @@
   </nop>
   <label id="end"/>
 
-  <Reference variables="opt_via_row,opt_rr_row"/>
+  <Reference variables="opt_via_row,opt_rr_row,retry_after"/>
   <ResponseTimeRepartition value="2, 5, 10, 20, 50, 100, 200, 500, 1000"/>
   <CallLengthRepartition value="1000, 5000, 10000, 15000, 30000, 60000"/>
 </scenario>

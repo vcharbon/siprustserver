@@ -245,7 +245,8 @@ impl<'a> Invite<'a> {
             &apply_name_forms(msg.headers(), &self.name_forms),
             &self.remote_emits,
         );
-        caller.send_wire(&emitted_wire(&msg, &headers), wire_dst).await;
+        let invite_wire = emitted_wire(&msg, &headers);
+        caller.send_wire(&invite_wire, wire_dst).await;
 
         let dialog = StackDialog {
             call_id,
@@ -262,6 +263,7 @@ impl<'a> Invite<'a> {
             fallback_addr: peer.addr,
             wire_dst,
             original_invite: invite,
+            invite_wire,
             dialog,
             fork_cseq: HashMap::new(),
             delayed_automatic: self.delayed_automatic,

@@ -312,6 +312,8 @@ pub struct B2buaMetrics {
     /// Cardinality-bounded per-peer failure/timeout counters
     /// (`b2bua_peer_failures_total{peer,scope,kind}`). Shared across clones.
     per_peer: Arc<crate::peer_failures::PeerFailures>,
+    /// The router's new-call admission outcomes ([`crate::new_calls`]).
+    new_calls: crate::new_calls::NewCallTally,
 }
 
 /// The unroutable series published at 0 from startup, so `increase()` reads
@@ -337,7 +339,7 @@ impl Default for B2buaMetrics {
                 internal.insert(format!("timeout|{method}"), 0);
             }
         }
-        Self { inner: Arc::new(inner), per_peer: Arc::default() }
+        Self { inner: Arc::new(inner), per_peer: Arc::default(), new_calls: Default::default() }
     }
 }
 
@@ -399,6 +401,12 @@ macro_rules! counter {
 impl B2buaMetrics {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The router's new-call admission outcomes; `b2bua_new_calls_total`
+    /// composes them with the other tiers' ([`crate::new_calls::NewCallCounts`]).
+    pub fn new_calls(&self) -> &crate::new_calls::NewCallTally {
+        &self.new_calls
     }
 
     counter!(bump_message_cap_terminated, message_cap_terminated_total, message_cap_terminated);
@@ -1548,6 +1556,11 @@ impl UdpTransportMetrics {
     /// New emergency INVITEs that bypassed the Tier-1 brake above the threshold.
     pub fn tier1_emergency_bypassed(&self) -> u64 {
         self.brake.emergency_bypassed()
+    }
+    /// The brake's counters, for the new-call outcome count
+    /// ([`crate::new_calls::NewCallCounts::read`]).
+    pub fn brake(&self) -> &Tier1BrakeCounters {
+        &self.brake
     }
     /// The non-blocking outbound-send counters (`bufferedSend`).
     pub fn buffered_send(&self) -> &BufferedSendCounters {

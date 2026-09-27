@@ -78,22 +78,43 @@ impl RefusedClass {
     }
 }
 
-/// The most refused identities remembered at once; past it the oldest is
-/// forgotten first, and a later copy of that INVITE is judged afresh.
+/// The most refused identities the layer's memo holds at once; past it the
+/// oldest is forgotten first, and a later copy of that INVITE is judged afresh.
+/// At 64·T1 it covers refusals up to 2 048 a second.
 const REFUSED_MEMO_MAX: usize = 65_536;
 
 /// The identities (top-`Via` branch, Call-ID, From-tag) of the INVITEs
 /// refused in the last 64·T1 (Timer B, the longest a UAC retransmits an
-/// INVITE), as keyed hashes with their refusal instant, oldest first.
-pub(super) struct RefusedMemo {
+/// INVITE), as keyed hashes with their refusal instant, oldest first. Past its
+/// capacity the oldest identity is forgotten first.
+pub struct RefusedMemo {
     keys: HashSet<u64>,
     order: VecDeque<(Instant, u64)>,
     hasher: RandomState,
+    max: usize,
+}
+
+impl Default for RefusedMemo {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RefusedMemo {
-    pub(super) fn new() -> Self {
-        Self { keys: HashSet::new(), order: VecDeque::new(), hasher: RandomState::new() }
+    /// An empty memo holding at most 65 536 identities.
+    pub fn new() -> Self {
+        Self::with_capacity(REFUSED_MEMO_MAX)
+    }
+
+    /// An empty memo holding at most `max` identities.
+    pub fn with_capacity(max: usize) -> Self {
+        Self { keys: HashSet::new(), order: VecDeque::new(), hasher: RandomState::new(), max }
+    }
+
+    /// Whether no identity refused in the last 64·T1 is held, as of the last
+    /// call that expired the old ones.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
     }
 
     /// The key of `req`'s transaction identity. An ACK to a non-2xx final
@@ -108,7 +129,7 @@ impl RefusedMemo {
 
     fn expire(&mut self, now: Instant) {
         while let Some(&(at, key)) = self.order.front() {
-            if now.duration_since(at) < ms(TIMER_B) && self.order.len() <= REFUSED_MEMO_MAX {
+            if now.duration_since(at) < ms(TIMER_B) && self.order.len() <= self.max {
                 break;
             }
             self.order.pop_front();
@@ -116,16 +137,22 @@ impl RefusedMemo {
         }
     }
 
-    fn remember(&mut self, req: &SipRequest) {
+    /// Remember `req`'s identity as refused now. `true` when the memo did not
+    /// hold it: `req` is the first copy of its INVITE refused in 64·T1.
+    pub fn remember(&mut self, req: &SipRequest) -> bool {
         let now = Instant::now();
         let key = self.key(req);
-        if self.keys.insert(key) {
+        let first = self.keys.insert(key);
+        if first {
             self.order.push_back((now, key));
         }
         self.expire(now);
+        first
     }
 
-    fn holds(&mut self, req: &SipRequest) -> bool {
+    /// Whether `req` shares the identity of an INVITE refused in the last
+    /// 64·T1 (a copy of it, or the ACK to its refusal).
+    pub fn holds(&mut self, req: &SipRequest) -> bool {
         self.expire(Instant::now());
         !self.keys.is_empty() && self.keys.contains(&self.key(req))
     }

@@ -111,6 +111,16 @@ class TailRead(unittest.TestCase):
         self.assertEqual(metric(text, "sipp_successful_calls_total"), "4999")
         self.assertEqual(metric(text, "sipp_response_time_ms"), "150")
 
+    def test_scenario_counters_are_served_by_number(self):
+        cols = COLUMNS + ["GenericCounter1(P)", "GenericCounter1(C)", "GenericCounter12(C)"]
+        with open(self.path, "wb") as fh:
+            fh.write((";".join(cols) + ";\n").encode())
+            fh.write(row(9)[:-2] + b";0;7;3;\n")
+        text = exporter.render(self.path)
+        self.assertIn('sipp_generic_counter_total{scenario="unknown",role="uac",counter="1"} 7', text)
+        self.assertIn('counter="12"} 3', text)
+        self.assertNotIn("GenericCounter", text)
+
     def test_header_only_is_down(self):
         with open(self.path, "wb") as fh:
             fh.write(header())

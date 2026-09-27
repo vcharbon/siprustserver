@@ -4,6 +4,7 @@
 //! `bind_sut` seam (ADR-0006/0009) to the B2BUA (ADR-0010).
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use b2bua::cdr::{CdrRecord, CdrWriter};
@@ -391,6 +392,9 @@ pub fn invite_final_statuses(report: &RunReport, to: SocketAddr) -> Vec<u16> {
     statuses
 }
 
+/// [`B2buaSut::force_brake_depth`]'s "no depth forced": the brake reads the live one.
+const NO_FORCED_DEPTH: usize = usize::MAX;
+
 /// A running B2BUA bound on the harness fabric. Keep it alive for the duration
 /// of the scenario (drop tears the worker tasks down with the endpoint).
 pub struct B2buaSut {
@@ -398,6 +402,9 @@ pub struct B2buaSut {
     cdr: TerminatedCallsWriter,
     metrics: B2buaMetrics,
     limiter: limiter::SutLimiter,
+    /// The ingress brake's counters and the queue depth forced on it, when the
+    /// SUT's bind carries one.
+    brake: Option<(b2bua::tier1_brake::Tier1BrakeCounters, Arc<AtomicUsize>)>,
     _core: B2buaCore,
 }
 
@@ -426,6 +433,7 @@ pub struct B2buaSutBuilder {
     store_faults: Option<StoreFaults>,
     wire_faults: Option<WireFaults>,
     capacity: Option<b2bua::capacity::CapacityGate>,
+    tier1_brake: Option<b2bua::tier1_brake::Tier1BrakeConfig>,
     keep_terminated_calls: bool,
 }
 
@@ -503,6 +511,17 @@ impl B2buaSutBuilder {
         self
     }
 
+    /// Install the Tier-1 ingress brake ([`b2bua::tier1_brake`]) on the SUT's
+    /// bind, as the production runner does; its counters feed
+    /// [`B2buaSut::new_calls`]. The bind's queue holds 256 datagrams, so a
+    /// threshold of 0 % sheds every new non-emergency INVITE;
+    /// [`B2buaSut::force_brake_depth`] sets the depth the brake reads.
+    /// Default: none.
+    pub fn tier1_brake(mut self, config: b2bua::tier1_brake::Tier1BrakeConfig) -> Self {
+        self.tier1_brake = Some(config);
+        self
+    }
+
     /// Inject the generic service-authorable async-HTTP capability
     /// ([`AdaptationHttpPort`](b2bua::AdaptationHttpPort)) a registered service's
     /// `RuleAction::ServiceHttpRequest` fires over. Defaults to `None` (a service
@@ -565,6 +584,7 @@ impl B2buaSutBuilder {
             store_faults,
             wire_faults,
             capacity,
+            tier1_brake,
             keep_terminated_calls,
         } = self;
         let (decision, limiter, sut_limiter) = match limiter {
@@ -584,11 +604,27 @@ impl B2buaSutBuilder {
         // `{Uac, Uas}` and the proxy-subject audit rules (no-target-404,
         // 100-within-200ms, unmatched-PRACK forwarding, strict-route rewrite)
         // do not judge this lane.
+        let brake = tier1_brake.map(|config| {
+            let counters = b2bua::tier1_brake::Tier1BrakeCounters::new();
+            let brake = b2bua::tier1_brake::build_tier1_brake_hook(
+                config,
+                counters.clone(),
+                &IdGen::seeded(0x7131),
+            );
+            let forced = Arc::new(AtomicUsize::new(NO_FORCED_DEPTH));
+            let depth = forced.clone();
+            let hook: sip_net::PreIngressHook = Arc::new(move |raw, src, live| {
+                let forced = depth.load(Ordering::Relaxed);
+                brake(raw, src, if forced == NO_FORCED_DEPTH { live } else { forced })
+            });
+            ((counters, forced), hook)
+        });
         let (endpoint, sa) = h
-            .bind_sut_with_roles(
+            .bind_sut_with_opts(
                 name,
                 addr,
                 std::collections::HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
+                brake.as_ref().map(|(_, hook)| hook.clone()),
             )
             .await;
         let cdr = if keep_terminated_calls {
@@ -643,7 +679,14 @@ impl B2buaSutBuilder {
             tune(config);
         });
         let metrics = core.metrics().clone();
-        B2buaSut { addr: sa, cdr, metrics, limiter: sut_limiter, _core: core }
+        B2buaSut {
+            addr: sa,
+            cdr,
+            metrics,
+            limiter: sut_limiter,
+            brake: brake.map(|(counters, _)| counters),
+            _core: core,
+        }
     }
 }
 
@@ -665,6 +708,7 @@ impl B2buaSut {
             store_faults: None,
             wire_faults: None,
             capacity: None,
+            tier1_brake: None,
             keep_terminated_calls: false,
         }
     }
@@ -792,6 +836,29 @@ impl B2buaSut {
 
     pub fn metrics(&self) -> &B2buaMetrics {
         &self.metrics
+    }
+
+    /// The ingress brake's counters, when [`B2buaSutBuilder::tier1_brake`]
+    /// installed one.
+    pub fn tier1_brake(&self) -> Option<&b2bua::tier1_brake::Tier1BrakeCounters> {
+        self.brake.as_ref().map(|(counters, _)| counters)
+    }
+
+    /// The ingress queue depth the brake reads from now on: `Some(d)` forces
+    /// `d`, `None` restores the bind's live depth. Panics without a brake.
+    pub fn force_brake_depth(&self, depth: Option<usize>) {
+        let (_, forced) = self.brake.as_ref().expect("the SUT carries no ingress brake");
+        forced.store(depth.unwrap_or(NO_FORCED_DEPTH), Ordering::Relaxed);
+    }
+
+    /// Every new call's admission outcome so far, all tiers composed
+    /// ([`b2bua::new_calls::NewCallCounts`]).
+    pub fn new_calls(&self) -> b2bua::new_calls::NewCallCounts {
+        b2bua::new_calls::NewCallCounts::read(
+            self.metrics.new_calls(),
+            self._core.txn_metrics(),
+            self.tier1_brake(),
+        )
     }
 
     /// Kill the process: its tasks stop and its socket closes, as on a crash,

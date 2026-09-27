@@ -3,8 +3,9 @@
 //!
 //! Its one goal is to **reject new non-emergency calls when the ingress queue
 //! is saturated**, before the datagram is queued and before any transaction or
-//! call state exists. Below the threshold it is a single integer compare and
-//! the packet is accepted untouched.
+//! call state exists. Below the threshold, and while it remembers no shed
+//! INVITE, it is an integer compare and an atomic load, and the packet is
+//! accepted untouched.
 //!
 //! At or above `floor(queue_max * tier1_threshold_pct / 100)` the datagram is
 //! classified:
@@ -21,7 +22,17 @@
 //!   - initial non-emergency INVITE → reply with the shared
 //!     [`build_reject_new_call_503`], counted on
 //!     [`Tier1BrakeCounters::drops_tier1_brake`] /
-//!     [`tier1_reject_sent`](Tier1BrakeCounters::tier1_reject_sent).
+//!     [`tier1_reject_sent`](Tier1BrakeCounters::tier1_reject_sent) per copy
+//!     and on [`new_calls_shed`](Tier1BrakeCounters::new_calls_shed) once per
+//!     INVITE: the brake remembers the INVITEs it shed for 64·T1
+//!     ([`RefusedMemo`], at most [`Tier1BrakeConfig::memo_capacity`]
+//!     identities; past it the oldest is forgotten and a later copy of it is
+//!     judged afresh).
+//!
+//! Below the threshold, an initial INVITE the memo holds — a copy of an INVITE
+//! the brake shed — draws the same 503 again, so a shed call is never admitted
+//! behind its caller's back. Every other datagram below the threshold is
+//! accepted.
 //!
 //! The reject carries no transaction state, so this tier is a stateless UAS:
 //! its `To`-tag and `Retry-After` jitter are derived from the request through
@@ -32,18 +43,24 @@
 //! response once the message has reached the router; this tier exists to shed
 //! it a queue earlier, without paying for transaction state.
 //!
+//! FIXME(tier1_brake): a copy of an INVITE that passed below the threshold and
+//! was admitted is shed above it: the caller gets a 503 for a call being set
+//! up, and the INVITE counts both accepted and `tier1_brake` (at most twice).
+//! Fix: spare initial INVITEs whose identity the transaction layer holds.
+//!
 //! Counters are `Arc<AtomicU64>` because a [`PreIngressHook`] is an immutable
 //! `Fn` shared across the recv task(s); the read side stays lock-free for the
-//! `/metrics` scrape.
+//! `/metrics` scrape. The memo sits behind a `Mutex`, taken only on a shed or,
+//! while the memo holds an identity, on an INVITE below the threshold.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use sip_message::emergency::is_emergency_request;
 use sip_message::preparse::is_invite_request_buffer;
 use sip_message::{serialize, CustomParser, SipMessage, SipParser};
 use sip_net::types::{PreIngressAction, PreIngressHook};
-use sip_txn::IdGen;
+use sip_txn::{IdGen, RefusedMemo};
 
 use crate::overload::{build_reject_new_call_503, jittered_retry_after, StatelessRejectTagger};
 
@@ -74,6 +91,13 @@ impl Tier1BrakeConfig {
         let product = self.queue_max as u64 * u64::from(self.tier1_threshold_pct);
         (product / 100) as usize
     }
+
+    /// The most shed identities the brake remembers: a full queue of INVITEs
+    /// every second for 64·T1, and never fewer than the transaction layer's
+    /// memo holds.
+    pub fn memo_capacity(&self) -> usize {
+        self.queue_max.saturating_mul(32).max(65_536)
+    }
 }
 
 /// The brake's observability surface, as shareable lock-free atomics. One
@@ -88,6 +112,9 @@ pub struct Tier1BrakeCounters {
     /// anyway — non-zero under flood means the brake is correctly letting
     /// emergency calls through while shedding the rest.
     emergency_bypassed: Arc<AtomicU64>,
+    /// New calls shed: the first copy of each INVITE the brake refused in
+    /// 64·T1.
+    new_calls_shed: Arc<AtomicU64>,
 }
 
 impl Tier1BrakeCounters {
@@ -106,6 +133,18 @@ impl Tier1BrakeCounters {
     /// shed; kept distinct so a future silent-drop branch stays separable.
     pub fn tier1_reject_sent(&self) -> u64 {
         self.tier1_reject_sent.load(Ordering::Relaxed)
+    }
+
+    /// New calls the brake shed: each INVITE once, however many of its copies
+    /// the brake answered in 64·T1 (every copy counts on
+    /// [`drops_tier1_brake`](Self::drops_tier1_brake)).
+    pub fn new_calls_shed(&self) -> u64 {
+        self.new_calls_shed.load(Ordering::Relaxed)
+    }
+
+    /// Record one new call shed, on the first copy of its INVITE.
+    fn record_new_call_shed(&self) {
+        self.new_calls_shed.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Initial emergency INVITEs that crossed the threshold and bypassed the
@@ -145,8 +184,18 @@ pub fn build_tier1_brake_hook(
     let jitter = config.retry_after_jitter_sec;
     let parser = CustomParser::new();
     let tagger = StatelessRejectTagger::from_id_gen(id_gen);
+    let shed = Mutex::new(RefusedMemo::with_capacity(config.memo_capacity()));
+    // Mirrors `!shed.is_empty()`, so the fast path below never takes the lock.
+    let remembering = AtomicBool::new(false);
+    let reject = move |req: &sip_message::SipRequest| {
+        let (to_tag, roll) = tagger.for_request(req);
+        let retry_after = jittered_retry_after(base, jitter, || roll);
+        let resp = build_reject_new_call_503(to_tag, req, retry_after);
+        PreIngressAction::Reply(serialize(&SipMessage::Response(resp)))
+    };
     Arc::new(move |raw: &[u8], _src, depth: usize| {
-        if depth < threshold {
+        let above = depth >= threshold;
+        if !above && !remembering.load(Ordering::Relaxed) {
             return PreIngressAction::Accept;
         }
         // Seven bytes decide every class the brake always admits — responses,
@@ -164,15 +213,30 @@ pub fn build_tier1_brake_hook(
         if req.to().tag().is_some() {
             return PreIngressAction::Accept;
         }
+        if !above {
+            // A copy of an INVITE this brake shed draws that 503 again.
+            let mut memo = shed.lock().unwrap_or_else(|p| p.into_inner());
+            let held = memo.holds(&req);
+            remembering.store(!memo.is_empty(), Ordering::Relaxed);
+            drop(memo);
+            if !held {
+                return PreIngressAction::Accept;
+            }
+            counters.record_shed();
+            return reject(&req);
+        }
         if is_emergency_request(&req) {
             counters.record_emergency_bypass();
             return PreIngressAction::Accept;
         }
-        let (to_tag, roll) = tagger.for_request(&req);
-        let retry_after = jittered_retry_after(base, jitter, || roll);
-        let resp = build_reject_new_call_503(to_tag, &req, retry_after);
         counters.record_shed();
-        PreIngressAction::Reply(serialize(&SipMessage::Response(resp)))
+        let mut memo = shed.lock().unwrap_or_else(|p| p.into_inner());
+        if memo.remember(&req) {
+            counters.record_new_call_shed();
+        }
+        remembering.store(true, Ordering::Relaxed);
+        drop(memo);
+        reject(&req)
     })
 }
 
@@ -328,6 +392,37 @@ Content-Length: 0\r\n\r\n"
         assert_eq!(rejects, flood - 2);
         assert_eq!(counters.drops_tier1_brake(), (flood - 2) as u64);
         assert_eq!(counters.tier1_reject_sent(), (flood - 2) as u64);
+    }
+
+    /// Every copy of a shed INVITE is answered and counted as a datagram shed,
+    /// but the new call is counted once: a retransmission is no new call.
+    #[test]
+    fn a_retransmitted_invite_is_one_new_call_shed() {
+        let (hook, counters) = brake();
+        for _ in 0..3 {
+            assert!(matches!(hook(&new_invite(7), src(), 2), PreIngressAction::Reply(_)));
+        }
+        assert!(matches!(hook(&new_invite(8), src(), 2), PreIngressAction::Reply(_)));
+        assert_eq!(counters.drops_tier1_brake(), 4);
+        assert_eq!(counters.new_calls_shed(), 2);
+    }
+
+    /// A copy of a shed INVITE that arrives below the threshold draws the same
+    /// 503 and is not a new call; any other INVITE below it passes.
+    #[test]
+    fn a_shed_invite_copy_below_the_threshold_is_shed_again() {
+        let (hook, counters) = brake();
+        let PreIngressAction::Reply(first) = hook(&new_invite(7), src(), 2) else {
+            panic!("above the threshold a new INVITE is shed");
+        };
+        let PreIngressAction::Reply(again) = hook(&new_invite(7), src(), 0) else {
+            panic!("a copy of a shed INVITE is shed below the threshold too");
+        };
+        assert_eq!(first, again, "the same request draws the same 503 (RFC 3261 §8.2.7)");
+        assert!(matches!(hook(&new_invite(8), src(), 0), PreIngressAction::Accept));
+        assert!(matches!(hook(&options_buf(8), src(), 0), PreIngressAction::Accept));
+        assert_eq!(counters.drops_tier1_brake(), 2);
+        assert_eq!(counters.new_calls_shed(), 1);
     }
 
     /// The shared reject-new-call primitive tags To (RFC 3261 §8.2.6.2), so the

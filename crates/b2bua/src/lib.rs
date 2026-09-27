@@ -36,6 +36,7 @@ pub mod limiter;
 pub mod limiter_http;
 pub(crate) mod message_ring;
 pub mod metrics;
+pub mod new_calls;
 pub mod obligations;
 pub mod overload;
 pub mod peer_failures;

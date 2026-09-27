@@ -26,6 +26,7 @@ use super::RouterCtx;
 use crate::effects::{CriticalStateEffect, HandlerEffects, HandlerResult, QuietTurn};
 use crate::event::CallEvent;
 use crate::initial_invite::{build_initial_call, handle_initial_invite};
+use crate::new_calls::Refusal;
 use crate::rules::model::RuleAction;
 use crate::rules::{execute_rules, ActionExecutor, RuleCall, RuleContext};
 use crate::store::StoreFaultPoint;
@@ -232,7 +233,10 @@ async fn reaper_verdict_gate(
 }
 
 /// The initial-INVITE admission ladder: store-fault probe → retransmit guard →
-/// capacity gate → Tier-3 admission gate → build + rule the new call.
+/// capacity gate → Tier-3 admission gate → build + rule the new call. Each
+/// rung that ends the INVITE's admission counts its outcome once
+/// ([`crate::new_calls`]); a retransmission this far is a copy of a resident
+/// call and is not counted.
 async fn initial_invite_turn(
     ctx: &Arc<RouterCtx>,
     call_ref: &str,
@@ -248,10 +252,12 @@ async fn initial_invite_turn(
     // Server Internal Error** through the INVITE server txn — superseding the
     // auto-100, composing with the ADR-0022 no-100-then-silence guarantee —
     // and NO call state is born.
+    let is_emergency = is_emergency_request(req);
     if ctx.store_faults.check(StoreFaultPoint::LiveInitialInvite).is_err() {
         let resp = build_store_fault_500(&ctx.id_gen, req);
         let _ = ctx.txn.send_response(resp, src).await;
         ctx.metrics.bump_store_fault_rejected();
+        ctx.metrics.new_calls().reject(Refusal::StoreFault, is_emergency);
         return Turn::Shed;
     }
 
@@ -271,7 +277,6 @@ async fn initial_invite_turn(
     // wire-raw datagram. It is still **stateless at the call layer** — no
     // `build_initial_call`/`create`, so no dialog, CDR, limiter hold, or
     // replicated state is ever born.
-    let is_emergency = is_emergency_request(req);
 
     // ── Capacity gate (ADR-0037), ahead of the CPS bucket so a memory reject
     // spends no token. Behind the INVITE server transaction, so a retransmission
@@ -300,11 +305,14 @@ async fn initial_invite_turn(
         let resp = crate::capacity::build_capacity_reject_503(to_tag, req, retry_after);
         let _ = ctx.txn.send_response(resp, src).await;
         ctx.capacity.record_reject(bound, is_emergency);
+        ctx.metrics.new_calls().reject(bound.into(), is_emergency);
         return Turn::Shed;
     }
 
+    // The reason is the verdict: a reject always names one, so it is counted.
     let decision = ctx.overload.should_admit(is_emergency);
-    if !decision.admit {
+    debug_assert_eq!(decision.admit, decision.reason.is_none());
+    if let Some(reason) = decision.reason {
         let resp = crate::overload::build_reject_new_call_503(
             ctx.id_gen.new_tag(),
             req,
@@ -315,8 +323,10 @@ async fn initial_invite_turn(
         // `reason`/`retry_after_sec` are carried on the 503 itself (Reason +
         // Retry-After) for the caller and any wire trace.
         ctx.metrics.bump_overload_rejected();
+        ctx.metrics.new_calls().reject(reason.into(), is_emergency);
         return Turn::Shed;
     }
+    ctx.metrics.new_calls().accept(is_emergency);
     // Counter published on X-Overload (`adm`). Emergency admits are NOT counted
     // on `adm` — the LB's AIMD caps non-emergency traffic only — but ARE
     // tallied on their own `b2bua_emergency_admitted_total` counter so the

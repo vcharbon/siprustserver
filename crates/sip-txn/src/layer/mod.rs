@@ -32,5 +32,5 @@ mod seed;
 mod server;
 mod txn;
 
-pub use backlog::{DeferredBound, NewCallRefusal, RefusedClass};
+pub use backlog::{DeferredBound, NewCallRefusal, RefusedClass, RefusedMemo};
 pub use handle::{TransactionConfig, TransactionLayer, TransactionLayerClosed};

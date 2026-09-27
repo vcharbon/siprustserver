@@ -139,6 +139,13 @@ impl PendingInvite {
         let resp = self.response(why);
         let _ = self.txn.send_response(resp, self.src).await;
         self.metrics.bump_invite_discard_answered(why);
+        // A new INVITE discarded unrun was never admitted: its 503 ends it.
+        if self.req.to().tag().is_none() {
+            self.metrics.new_calls().reject(
+                crate::new_calls::Refusal::DispatchDiscard,
+                sip_message::emergency::is_emergency_request(&self.req),
+            );
+        }
     }
 
     fn response(&self, why: Discard) -> SipResponse {
@@ -446,6 +453,8 @@ mod tests {
         let responses = responses_at_peer(&rig, 100).await;
         assert_eq!(statuses(&responses), vec![100, 500]);
         assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{:?}", responses[1]);
+        let counts = crate::new_calls::NewCallCounts::compose(rig.metrics.new_calls(), [0, 0], 0);
+        assert_eq!(counts.total(), 0, "a re-INVITE is no new call");
     }
 
     /// An out-of-dialog INVITE behind a release — a new attempt reusing the
@@ -459,6 +468,9 @@ mod tests {
         let statuses = statuses(&responses);
         assert_eq!(statuses, vec![100, 503]);
         assert!(retry_after(&responses[1]).is_some_and(|s| s >= 1), "{:?}", responses[1]);
+        let counts = crate::new_calls::NewCallCounts::compose(rig.metrics.new_calls(), [0, 0], 0);
+        assert_eq!(counts.rejected(crate::new_calls::Refusal::DispatchDiscard, false), 1);
+        assert_eq!(counts.total(), 1, "the discarded new call is counted once");
     }
 
     /// Once the body starts, its hook is dropped unheard: the body owns the

@@ -191,6 +191,10 @@ pub(super) async fn on_event(ctx: &Arc<RouterCtx>, event: CallEvent) {
                     ctx.config.retry_after_base_sec,
                 );
                 let _ = ctx.txn.send_response(resp, *src).await;
+                ctx.metrics.new_calls().reject(
+                    crate::new_calls::Refusal::CapShed,
+                    sip_message::emergency::is_emergency_request(req),
+                );
             }
         }
         // Count it on the same cap counter (the cap WAS reached); the caller now

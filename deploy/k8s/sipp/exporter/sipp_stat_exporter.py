@@ -16,6 +16,9 @@ Headline series (labelled by scenario/role/job from the env):
   sipp_successful_calls_total   counter SuccessfulCall(C)
   sipp_failed_calls_total       counter FailedCall(C)
   sipp_failed_total{cause=...}  counter one series per Failed* column
+  sipp_generic_counter_total{counter=N}
+                                counter GenericCounterN(C): the calls that crossed
+                                        a scenario message carrying counter="N"
   sipp_retransmissions_total    counter Retransmissions(C)
   sipp_out_of_call_msgs_total   counter OutOfCallMsgs(C)
   sipp_dead_call_msgs_total     counter DeadCallMsgs(C)
@@ -208,6 +211,13 @@ def render(path=STAT_FILE, trimmer=None, follower=None):
         v = num(col, int)
         if v is not None:
             out.append(fmt("sipp_failed_total", v, [("cause", cause)]))
+
+    # Scenario counters (`counter="N"` on a message), one series per column.
+    for col in header:
+        if col.startswith("GenericCounter") and col.endswith("(C)"):
+            v = num(col, int)
+            if v is not None:
+                out.append(fmt("sipp_generic_counter_total", v, [("counter", col[14:-3])]))
 
     return "".join(out)
 

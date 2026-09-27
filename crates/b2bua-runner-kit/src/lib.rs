@@ -67,6 +67,7 @@ use b2bua::decision::CallDecisionEngine;
 use b2bua::limiter::{CallLimiter, NoopLimiter};
 use b2bua::limiter_http::HttpCallLimiter;
 use b2bua::metrics::{B2buaMetrics, UdpTransportMetrics};
+use b2bua::new_calls::NewCallCounts;
 use b2bua::rules::ServiceDef;
 use b2bua::store::InMemoryCallStore;
 use b2bua::target_admission::{classify_admission, AdmissionVerdict};
@@ -891,8 +892,9 @@ impl RunnerBase {
     /// is a single read of one source: `core.readiness_state()` already folds
     /// in the Draining latch, so there is no second flag to drift from it. The
     /// `/metrics` body concatenates the worker's metric sources per scrape
-    /// (core registry + txn backpressure + UDP transport + overload signal),
-    /// then `extra_metrics` (e.g. allocator stats). Hold the returned server
+    /// (core registry + txn backpressure + UDP transport + overload signal +
+    /// capacity gate + every new call's admission outcome, all tiers
+    /// composed), then `extra_metrics` (e.g. allocator stats). Hold the returned server
     /// for the process lifetime — its accept loop aborts on drop.
     pub async fn spawn_probe_server(
         &self,
@@ -915,6 +917,14 @@ impl RunnerBase {
                 text.push_str(&udp_metrics.prometheus_text());
                 text.push_str(&overload.prometheus_text());
                 text.push_str(&capacity.prometheus_text());
+                text.push_str(
+                    &NewCallCounts::read(
+                        metrics.new_calls(),
+                        &txn_metrics,
+                        Some(udp_metrics.brake()),
+                    )
+                    .prometheus_text(),
+                );
                 // Dropped log lines + trace-admission denials (ADR-0026): the
                 // only visibility into output the process deliberately shed.
                 text.push_str(&observe::counters::prometheus_text());

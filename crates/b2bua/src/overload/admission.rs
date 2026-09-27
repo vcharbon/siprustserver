@@ -26,7 +26,7 @@ impl AdmitReason {
 pub struct AdmitDecision {
     /// `true` → proceed (build the call); `false` → send a stateless 503.
     pub admit: bool,
-    /// The rejection reason when `!admit`; `None` on an admit.
+    /// The rejection reason: `Some` exactly when `!admit`.
     pub reason: Option<AdmitReason>,
     /// Suggested `Retry-After` value (seconds): at least
     /// [`MIN_REJECT_RETRY_AFTER_SEC`](super::MIN_REJECT_RETRY_AFTER_SEC) when

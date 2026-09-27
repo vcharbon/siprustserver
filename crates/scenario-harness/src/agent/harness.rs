@@ -32,6 +32,8 @@ use crate::run::RunReport;
 /// RFC-legitimate silence a compliant SUT produces while still owing traffic:
 /// the §13.3.1.4 retransmit ladder's T2 plateau (4 s between rungs).
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
+/// The inbound queue bound of a SUT's bind.
+const SUT_QUEUE_MAX: usize = 256;
 
 /// Monotonic id source for branches / tags / Call-IDs. Deterministic (no RNG),
 /// so report bytes are stable across runs. `pub(crate)` so the Send
@@ -491,14 +493,28 @@ impl Harness {
         addr: &str,
         roles: HashSet<sip_net::UaRole>,
     ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
+        self.bind_sut_with_opts(name, addr, roles, None).await
+    }
+
+    /// [`bind_sut_with_roles`](Self::bind_sut_with_roles) with the SUT's own
+    /// arrival-time [`sip_net::PreIngressHook`], run on every datagram with the
+    /// bind's live queue depth before it is queued (a SUT's ingress brake).
+    pub async fn bind_sut_with_opts(
+        &self,
+        name: impl Into<String>,
+        addr: &str,
+        roles: HashSet<sip_net::UaRole>,
+        pre_ingress: Option<sip_net::PreIngressHook>,
+    ) -> (Box<dyn UdpEndpoint>, SocketAddr) {
         let name = name.into();
         let addr: SocketAddr = addr.parse().unwrap_or_else(|e| panic!("bad addr {addr:?}: {e}"));
         self.recorder.register_lane(addr, name, NetworkTag::Core);
-        let ep = self
-            .network
-            .bind_udp(BindUdpOpts::new(addr, 256).with_roles(roles))
-            .await
-            .unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
+        let mut opts = BindUdpOpts::new(addr, SUT_QUEUE_MAX).with_roles(roles);
+        if let Some(hook) = pre_ingress {
+            opts = opts.with_pre_ingress(hook);
+        }
+        let ep =
+            self.network.bind_udp(opts).await.unwrap_or_else(|e| panic!("bind {addr} failed: {e}"));
         (ep, addr)
     }
 

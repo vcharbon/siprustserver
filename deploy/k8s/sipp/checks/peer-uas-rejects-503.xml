@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<!-- Peer UAS: refuses the new call with 100 then 503 Retry-After, as an
+     admission shed does. The caller must ACK the 503 on its INVITE's branch
+     (RFC 3261 section 17.1.1.3); an ACK on any other branch fails this peer. -->
+<scenario name="peer uas: 503 shed">
+  <recv request="INVITE" crlf="true">
+    <action>
+      <ereg regexp="branch=([^;[:space:]]+)" search_in="hdr" header="Via:" check_it="true" assign_to="invite_via,invite_branch"/>
+    </action>
+  </recv>
+  <send>
+    <![CDATA[
+      SIP/2.0 100 Trying
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+    ]]>
+  </send>
+  <send>
+    <![CDATA[
+      SIP/2.0 503 Service Unavailable
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]SIPpTag01[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Retry-After: 5
+      Content-Length: 0
+    ]]>
+  </send>
+  <recv request="ACK" crlf="true" timeout="6000">
+    <action>
+      <ereg regexp="branch=([^;[:space:]]+)" search_in="hdr" header="Via:" check_it="true" assign_to="ack_via,ack_branch"/>
+      <strcmp assign_to="branch_differs" variable="invite_branch" variable2="ack_branch"/>
+      <test assign_to="same_branch" variable="branch_differs" compare="equal" value="0" check_it="true"/>
+    </action>
+  </recv>
+  <Reference variables="invite_via,ack_via,same_branch"/>
+</scenario>
