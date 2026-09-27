@@ -5,7 +5,7 @@
 //! transport lands, a replicating impl honours them with no caller changes.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 
@@ -58,10 +58,9 @@ impl InMemoryCallStore {
         format!("{}:{}:call:{}", role.as_str(), primary, call_ref)
     }
 
-    /// The maps as they stand: a panic under the lock leaves every map whole
-    /// (each write is one insert or remove), so a poisoned lock is taken as it is.
+    /// The maps, a poisoned lock taken as it stands (`store::locked`).
     fn locked(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        super::locked(&self.inner, "replica bodies")
     }
 
     /// Store `body` (and replace the index keys `call_ref` owns when `indexes`
@@ -73,12 +72,12 @@ impl InMemoryCallStore {
         role: PartitionRole,
         primary: &str,
         call_ref: &str,
-        body: Vec<u8>,
+        body: Arc<[u8]>,
         indexes: &[String],
     ) {
+        let key = Self::body_key(role, primary, call_ref);
         let mut inner = self.locked();
-        // Wrap the owned encoded bytes in an `Arc` once, here.
-        inner.bodies.insert(Self::body_key(role, primary, call_ref), Arc::from(body));
+        inner.bodies.insert(key, body);
         // REPLACE (not just insert) this call's index keys: drop any previously
         // owned key absent from the new set, then upsert the new set and record
         // it for teardown. A put with no index keys (some reclaim/bootstrap puts)
@@ -162,7 +161,8 @@ impl CallStore for InMemoryCallStore {
         _call_bgen: i64,
         _opts: &PutOpts,
     ) -> Result<(), StoreError> {
-        self.store_body(role, primary, call_ref, body, indexes);
+        // Wrap the owned encoded bytes in an `Arc` once, here.
+        self.store_body(role, primary, call_ref, Arc::from(body), indexes);
         Ok(())
     }
 

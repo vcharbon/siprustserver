@@ -10,6 +10,7 @@
 mod call_store;
 mod faults;
 mod memory;
+mod poison;
 mod terminate_writer;
 #[cfg(test)]
 mod unwired_tests;
@@ -19,6 +20,8 @@ pub use call_store::{
 };
 pub use faults::{FaultInjectingCallStore, StoreFaultPoint, StoreFaults};
 pub use memory::InMemoryCallStore;
+pub(crate) use poison::locked;
+pub use poison::poisoned_lock_recoveries;
 pub use terminate_writer::BufferedTerminateWriter;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
