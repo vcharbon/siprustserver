@@ -37,6 +37,8 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# A test wraps the limiter client (the `CallLimiter` trait is async-trait).
+async-trait = { workspace = true }
 # The trace-plane tests install their own sampling gate and read the captured
 # subscriber buffer (ADR-0026).
 observe = { path = "../observe" }

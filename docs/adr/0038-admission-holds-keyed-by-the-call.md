@@ -105,10 +105,13 @@ and a lost release could not be retried.
    was in flight. The queue is not replicated: a worker that dies loses it
    and the lease frees what it held. A planned exit flushes it before the
    process leaves: every waiting key leaves at once whatever the backoff,
-   and the exit waits for the queue to empty within its own bound; a queue
-   held by an open breaker is not waited for. What is still queued at the
-   bound or held is given up, counted (`reason=shutdown`) and logged, and
-   the lease frees it; the drain's residual stays a count of live calls.
+   and the exit waits for the queue to empty within its own bound, and is
+   taken only with the queue empty. A queue held by an open breaker, at the
+   flush or during it, is not waited for: the lease frees its entries, and
+   waiting on the probe's cadence would stretch every exit toward the full
+   bound. What is still queued at the bound or held is given up, counted
+   (`reason=shutdown`) and logged; the drain's residual stays a count of
+   live calls.
    Its sender is supervised: one that
    panics is restarted with the queue intact, and counted. A circuit breaker
    drives the queue through `hold` and `resume`: nothing is sent while it is

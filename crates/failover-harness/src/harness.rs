@@ -330,6 +330,17 @@ impl ReplicatedB2buaSut {
             .unwrap_or_else(|| repl_net::frame::Watermark::new(0, 0))
     }
 
+    /// This node's changelog head: the position of the last change it logged
+    /// for its peers. `None` while crashed or unreplicated.
+    pub fn changelog_head(&self) -> Option<repl_net::frame::Watermark> {
+        self.core.as_ref().and_then(|c| c.repl_store()).map(|s| s.changelog().head())
+    }
+
+    /// This incarnation's limiter release queue. `None` while crashed.
+    pub fn limiter_release_queue(&self) -> Option<Arc<b2bua::limiter_release::ReleaseQueue>> {
+        self.core.as_ref().map(|c| c.limiter_releases())
+    }
+
     /// Whether `peer`'s flow on `partition` is connected to THIS node's
     /// replication server and has reported applying everything this node ever
     /// logged for it (ADR-0031 D2) — the per-flow predicate the drain's
@@ -628,14 +639,17 @@ impl ReplicatedB2buaSut {
             core.drain_probe()
         });
         let metrics = self.core.as_ref().map(|core| core.metrics().clone());
+        let releases = self.core.as_ref().map(|core| core.limiter_releases());
         let mut pending = PendingDrain {
             fut: Box::pin(async move {
                 match probe {
                     Some(p) => {
                         // The core's own drain, flush included, without the
-                        // borrow of the core; it records the same exit.
+                        // borrow of the core; it records the same exit, unless
+                        // the incarnation was killed mid-drain.
                         let out = b2bua::drain::drain_until_quiescent(p, bounds).await;
-                        if let Some(m) = metrics {
+                        let killed = releases.is_some_and(|r| r.is_stopped());
+                        if let (Some(m), false) = (metrics, killed) {
                             m.record_drain_exit(&out);
                         }
                         out

@@ -138,8 +138,8 @@ pub struct ReleaseQueue {
     metrics: B2buaMetrics,
     waiting: Mutex<Waiting>,
     wake: Notify,
-    /// Woken each time the queue is left empty.
-    emptied: Notify,
+    /// Woken each time the queue is left empty, is held or is stopped.
+    settled: Notify,
     /// Told every key pushed.
     on_push: OnceLock<PushHook>,
 }
@@ -161,7 +161,7 @@ impl ReleaseQueue {
             metrics,
             waiting: Mutex::new(Waiting::default()),
             wake: Notify::new(),
-            emptied: Notify::new(),
+            settled: Notify::new(),
             on_push: OnceLock::new(),
         })
     }
@@ -217,6 +217,17 @@ impl ReleaseQueue {
         self.lock().entries.values().map(|e| e.key.to_string()).collect()
     }
 
+    /// Releases a flush still has to send: the waiting entries, none once
+    /// the queue is stopped.
+    pub fn unsent(&self) -> usize {
+        let w = self.lock();
+        if w.stopped {
+            0
+        } else {
+            w.entries.len()
+        }
+    }
+
     /// A release request is in flight (at most one at a time).
     pub fn sending(&self) -> bool {
         self.lock().sending
@@ -225,6 +236,7 @@ impl ReleaseQueue {
     /// Stop sending (a breaker opened): entries wait, and still expire.
     pub fn hold(&self) {
         self.lock().held = true;
+        self.settled.notify_waiters();
     }
 
     /// Send again (a breaker closed): every waiting key leaves at once,
@@ -242,39 +254,40 @@ impl ReleaseQueue {
     /// A planned exit's last send: every waiting key leaves now, whatever
     /// backoff a failed send had set (a send failing during the flush backs
     /// off from the first step), and the flush returns once the queue is
-    /// empty or `within` has passed. A held queue (an open breaker) is given
-    /// up at once. Every entry still queued at the bound is given up, counted
-    /// and logged. A key pushed during the flush is flushed with it; one
-    /// pushed after it returns is sent only if the worker lives on, and is
-    /// otherwise lost uncounted with the process. A stopped queue has
-    /// nothing to flush.
+    /// empty or `within` has passed. A held queue (an open breaker, now or
+    /// during the flush) is given up at once. Every entry still queued at the
+    /// bound is given up, counted and logged. A key pushed during the flush
+    /// is flushed with it; one pushed after it returns is sent only if the
+    /// worker lives on, and is otherwise lost uncounted with the process
+    /// (a drain flushes again until its queue reads empty). A stopped queue
+    /// has nothing to flush.
     pub async fn flush(&self, within: Duration) -> ReleaseFlush {
         let start = Instant::now();
         let deadline = start + within;
-        let (queued, held) = {
+        let queued = {
             let mut w = self.lock();
             if w.stopped {
                 return ReleaseFlush::default();
             }
             w.failures = 0;
             w.retry_at = None;
-            (w.entries.len(), w.held)
+            w.entries.len()
         };
-        if held {
-            let given_up = self.give_up_all();
-            return ReleaseFlush { queued, given_up, elapsed: start.elapsed() };
-        }
         self.wake.notify_one();
         loop {
-            let emptied = self.emptied.notified();
-            tokio::pin!(emptied);
-            emptied.as_mut().enable();
-            let (empty, stopped) = {
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            let (empty, held, stopped) = {
                 let w = self.lock();
-                (w.entries.is_empty(), w.stopped)
+                (w.entries.is_empty(), w.held, w.stopped)
             };
             if stopped {
                 return ReleaseFlush::default();
+            }
+            if held && !empty {
+                let given_up = self.give_up_all();
+                return ReleaseFlush { queued, given_up, elapsed: start.elapsed() };
             }
             if empty {
                 let elapsed = start.elapsed();
@@ -288,7 +301,7 @@ impl ReleaseQueue {
                 return ReleaseFlush { queued, given_up: 0, elapsed };
             }
             tokio::select! {
-                _ = emptied => {}
+                _ = settled => {}
                 _ = tokio::time::sleep_until(deadline) => break,
             }
         }
@@ -319,11 +332,16 @@ impl ReleaseQueue {
         given_up
     }
 
+    /// Whether the worker crashed ([`stop`](Self::stop)).
+    pub fn is_stopped(&self) -> bool {
+        self.lock().stopped
+    }
+
     /// The worker crashed: its queue is lost as it stands, and a flush
     /// returns at once.
     pub fn stop(&self) {
         self.lock().stopped = true;
-        self.emptied.notify_waiters();
+        self.settled.notify_waiters();
     }
 
     /// The supervised drainer, until the task is aborted with the worker. A
@@ -441,7 +459,7 @@ impl ReleaseQueue {
     fn publish_depth(&self, w: &Waiting) {
         self.metrics.set_limiter_release_queue_depth(w.entries.len() as u64);
         if w.entries.is_empty() {
-            self.emptied.notify_waiters();
+            self.settled.notify_waiters();
         }
     }
 }
@@ -937,5 +955,35 @@ mod tests {
         });
         assert_eq!(out, ReleaseFlush::default(), "the crash cut the flush, not its bound");
         assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_breaker_opening_during_a_flush_gives_the_queue_up_at_once() {
+        let limiter = Arc::new(Scripted::default());
+        limiter.down.store(true, Ordering::SeqCst);
+        let (q, metrics) = queue(limiter.clone(), 10);
+        q.push("a");
+        settle().await;
+        let breaker = q.clone();
+        let (out, ()) = tokio::join!(q.flush(Duration::from_secs(3)), async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            breaker.hold();
+        });
+        assert_eq!(
+            out,
+            ReleaseFlush { queued: 1, given_up: 1, elapsed: Duration::from_millis(100) }
+        );
+        assert_eq!(metrics.limiter_release_dropped_shutdown_total(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_queue_has_nothing_unsent() {
+        let limiter = Arc::new(Scripted::default());
+        let (q, _metrics) = queue(limiter.clone(), 10);
+        q.hold();
+        q.push("a");
+        assert_eq!(q.unsent(), 1);
+        q.stop();
+        assert_eq!(q.unsent(), 0, "a crashed worker's queue is lost");
     }
 }

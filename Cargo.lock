@@ -1363,6 +1363,7 @@ dependencies = [
 name = "failover-harness"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "b2bua",
  "b2bua-harness",
  "call",

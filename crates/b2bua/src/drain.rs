@@ -96,6 +96,9 @@ pub struct DrainInputs {
     pub withdrawn: Probe<bool>,
     /// Flush the worker's limiter release queue before an exit.
     pub flush_releases: ReleaseFlusher,
+    /// Releases the worker's queue still has to send (none once it is
+    /// stopped): an exit is taken only with none.
+    pub releases_waiting: Probe<usize>,
 }
 
 impl DrainInputs {
@@ -110,7 +113,18 @@ impl DrainInputs {
             backups_caught_up: Arc::new(backups_caught_up),
             withdrawn: Arc::new(withdrawn),
             flush_releases: Arc::new(|_| Box::pin(async { ReleaseFlush::default() })),
+            releases_waiting: Arc::new(|| 0),
         }
+    }
+
+    /// These inputs with `waiting` as the release queue's depth (the default
+    /// reads none).
+    pub fn with_releases_waiting(
+        mut self,
+        waiting: impl Fn() -> usize + Send + Sync + 'static,
+    ) -> Self {
+        self.releases_waiting = Arc::new(waiting);
+        self
     }
 
     /// These inputs with `flush` as the release flush (the default flushes
@@ -144,41 +158,48 @@ pub struct DrainBounds {
 /// Latch nothing here — the caller has already moved the node to `Draining` (so
 /// the proxy is steering new calls away). This waits for the first of: the
 /// live calls clearing, a withdrawn node's backups holding them past the floor,
-/// or the grace; then flushes the release queue within `release_flush`. A clean
-/// exit returns only if it still holds once the flush is done; otherwise the
-/// wait goes on, and the drain never returns later than the grace plus the
-/// flush bound.
+/// or the grace; then flushes the release queue within `release_flush`. An exit
+/// is taken only if it still holds once the flush is done (a clean exit's
+/// condition, and an empty release queue); otherwise the wait goes on, and the
+/// drain never returns later than the grace plus the flush bound, where what
+/// is still queued is given up.
 pub async fn drain_until_quiescent(inputs: DrainInputs, bounds: DrainBounds) -> DrainOutcome {
     let start = tokio::time::Instant::now();
     let deadline = start + bounds.grace;
     let floor_at = start + bounds.floor;
     let ceiling = deadline + bounds.release_flush;
     let mut flushed = ReleaseFlush::default();
+    let flush = async |flushed: &mut ReleaseFlush, within: Duration| {
+        let flush = (inputs.flush_releases)(within).await;
+        flushed.queued += flush.queued;
+        flushed.given_up += flush.given_up;
+        flushed.elapsed += flush.elapsed;
+    };
     loop {
         let now = tokio::time::Instant::now();
-        if let Some(exit) = exit_at(&inputs, now, floor_at, deadline) {
-            let within = bounds.release_flush.min(ceiling.saturating_duration_since(now));
-            let flush = (inputs.flush_releases)(within).await;
-            flushed.queued += flush.queued;
-            flushed.given_up += flush.given_up;
-            flushed.elapsed += flush.elapsed;
+        if exit_at(&inputs, now, floor_at, deadline).0.is_some() {
+            flush(&mut flushed, bounds.release_flush.min(ceiling.saturating_duration_since(now)))
+                .await;
+            // The node served its calls while it flushed: a clean exit must
+            // still hold; past the deadline an exit always stands.
             let now = tokio::time::Instant::now();
-            // A grace exit is final; a clean one must still hold after the
-            // flush, which the node spent serving its calls.
-            let exit = match exit {
-                DrainExit::Grace | DrainExit::GracePeersBehind => Some(exit),
-                _ => exit_at(&inputs, now, floor_at, deadline).filter(|e| e.is_clean()),
-            };
-            if let Some(exit) = exit {
+            let (exit, live) = exit_at(&inputs, now, floor_at, deadline);
+            if let Some(exit) = exit.filter(|e| e.is_clean() || now >= deadline) {
+                if (inputs.releases_waiting)() > 0 {
+                    if now < ceiling {
+                        // A release queued after the flush emptied the queue:
+                        // flush again, one poll later at most.
+                        tokio::time::sleep(DRAIN_POLL.min(ceiling - now)).await;
+                        continue;
+                    }
+                    flush(&mut flushed, Duration::ZERO).await;
+                }
                 return DrainOutcome {
                     exit,
-                    residual: (inputs.active)(),
+                    residual: live,
                     elapsed: start.elapsed(),
                     release_flush: flushed,
                 };
-            }
-            if now >= deadline {
-                continue;
             }
         }
         // Never overshoot the deadline, and land exactly on the floor: a node
@@ -193,29 +214,27 @@ pub async fn drain_until_quiescent(inputs: DrainInputs, bounds: DrainBounds) -> 
     }
 }
 
-/// The exit the inputs name at `now`, if any.
+/// The exit the inputs name at `now`, if any, and the live calls read.
 fn exit_at(
     inputs: &DrainInputs,
     now: tokio::time::Instant,
     floor_at: tokio::time::Instant,
     deadline: tokio::time::Instant,
-) -> Option<DrainExit> {
-    if (inputs.active)() == 0 {
-        return Some(DrainExit::Quiescent);
+) -> (Option<DrainExit>, usize) {
+    let live = (inputs.active)();
+    if live == 0 {
+        return (Some(DrainExit::Quiescent), 0);
     }
     let withdrawn = (inputs.withdrawn)();
     // The caught-up exit needs all three preconditions: withdrawn, the floor
     // passed, and every live call's peer flow at this node's head.
     if withdrawn && now >= floor_at && (inputs.backups_caught_up)() {
-        return Some(DrainExit::CaughtUp);
+        return (Some(DrainExit::CaughtUp), live);
     }
     // A withdrawn node reaching the grace lost a flush window; a node that is
     // not withdrawn simply still has calls (quiescence-or-grace).
-    (now >= deadline).then_some(if withdrawn {
-        DrainExit::GracePeersBehind
-    } else {
-        DrainExit::Grace
-    })
+    let grace = if withdrawn { DrainExit::GracePeersBehind } else { DrainExit::Grace };
+    ((now >= deadline).then_some(grace), live)
 }
 
 #[cfg(test)]
@@ -471,5 +490,70 @@ mod tests {
         assert_eq!(out.elapsed, bounds.floor + bounds.release_flush, "no second wait");
         assert!(out.elapsed <= bounds.grace + bounds.release_flush);
         assert_eq!(out.release_flush.given_up, 1);
+    }
+
+    /// A release pushed after the flush emptied the queue (a gone call's
+    /// fold, a reclaimed terminal) keeps a clean exit waiting: it is flushed
+    /// before the exit, not lost with the process.
+    #[tokio::test(start_paused = true)]
+    async fn a_release_pushed_after_the_flush_emptied_the_queue_is_flushed_before_the_exit() {
+        let waiting = Arc::new(AtomicUsize::new(1));
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let (probe, queue, count) = (waiting.clone(), waiting.clone(), flushes.clone());
+        let inputs = DrainInputs::new(|| 0, || false, || false)
+            .with_release_flush(move |_| {
+                let queue = queue.clone();
+                let first = count.fetch_add(1, Ordering::SeqCst) == 0;
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    // The first flush empties the queue, then one more
+                    // release lands before the drain looks again.
+                    queue.store(if first { 1 } else { 0 }, Ordering::SeqCst);
+                    ReleaseFlush { queued: 1, given_up: 0, elapsed: Duration::from_millis(500) }
+                })
+            })
+            .with_releases_waiting(move || probe.load(Ordering::SeqCst));
+        let out = drain_until_quiescent(
+            inputs,
+            DrainBounds {
+                grace: Duration::from_secs(5),
+                floor: Duration::ZERO,
+                release_flush: Duration::from_secs(3),
+            },
+        )
+        .await;
+        assert_eq!(out.exit, DrainExit::Quiescent);
+        assert_eq!(
+            waiting.load(Ordering::SeqCst),
+            0,
+            "the late release was flushed before the exit"
+        );
+        assert_eq!(flushes.load(Ordering::SeqCst), 2);
+        assert_eq!(out.release_flush.queued, 2);
+    }
+
+    /// A queue that never reads empty (a push racing every flush) keeps the
+    /// drain flushing at most until the grace plus the flush bound, then it
+    /// exits: it never spins on a flush that returns at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_queue_that_never_settles_ends_the_drain_at_its_ceiling() {
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let count = flushes.clone();
+        let inputs = DrainInputs::new(|| 1, || false, || false)
+            .with_release_flush(move |_| {
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                assert!(n < 1_000, "the drain spins on its release flush");
+                Box::pin(async { ReleaseFlush::default() })
+            })
+            .with_releases_waiting(|| 1);
+        let bounds = DrainBounds {
+            grace: Duration::from_secs(2),
+            floor: Duration::ZERO,
+            release_flush: Duration::from_secs(1),
+        };
+        let out = drain_until_quiescent(inputs, bounds).await;
+        assert_eq!(out.exit, DrainExit::Grace);
+        assert_eq!(out.residual, 1);
+        assert_eq!(out.elapsed, bounds.grace + bounds.release_flush);
     }
 }

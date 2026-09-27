@@ -706,10 +706,14 @@ impl B2buaCore {
                 None => false,
             }),
             withdrawn: Arc::new(move || supervisor.as_ref().is_some_and(|s| s.is_withdrawn())),
-            flush_releases: Arc::new(move |within| {
+            flush_releases: Arc::new({
                 let releases = releases.clone();
-                Box::pin(async move { releases.flush(within).await })
+                move |within| {
+                    let releases = releases.clone();
+                    Box::pin(async move { releases.flush(within).await })
+                }
             }),
+            releases_waiting: Arc::new(move || releases.unsent()),
         }
     }
 

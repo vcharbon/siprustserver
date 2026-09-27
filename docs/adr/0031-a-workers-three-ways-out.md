@@ -109,9 +109,10 @@ reactive, so a proxied worker's calls are served on the next in-dialog request, 
 direct-bound worker's would be abandoned. Exiting on `caught_up` with live calls is a
 *replicated crash*, deliberately: ringing calls wait for the caller's next request or its
 own timers, as after any crash. Before any exit the worker flushes its queued limiter
-releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s, ADR-0038 decision 9); a quiescent or
-caught-up exit is taken only if it still holds once the flush is done, since the worker
-serves its calls meanwhile, and the drain never outlasts the grace plus the flush.
+releases within `B2BUA_DRAIN_RELEASE_FLUSH_MS` (3 s, ADR-0038 decision 9); an exit is
+taken only with the queue empty, and a quiescent or caught-up one only if it still holds
+once the flush is done, since the worker serves its calls meanwhile; the drain never
+outlasts the grace plus the flush.
 Serves case 1. Case 2 runs the same drain for its 2 s: the
 peers have parked, (iii) never holds, SIGKILL ends it. Cases 3 and 4 run no drain.
 
