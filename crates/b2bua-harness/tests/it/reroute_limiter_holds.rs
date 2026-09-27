@@ -630,3 +630,134 @@ async fn release_reroute_replaces_the_route_holds() {
     assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
     let _ = h.finish().await;
 }
+
+/// An established call holding `[x]` whose duration cap raises a release
+/// reroute stating `reroute`; the reroute's admit lands on the limiter and its
+/// answer is lost. The call stays counted on `[x]` and the reroute is applied;
+/// the rerouted call then outlives two leases (refreshing every 5 s) and
+/// `held` is what the limiter holds for it throughout. No set lapses and the
+/// hangup's one release drains the call. Returns the store's re-registration
+/// count read before the hangup.
+async fn release_reroute_admit_answer_lost(
+    name: &str,
+    reroute: &'static [&'static str],
+    held: [i64; 3],
+) -> u64 {
+    let h = Harness::new(name);
+    let alice = h.agent("alice", "127.0.0.1:5060").await;
+    let bob = h.agent("bob", "127.0.0.1:5070").await;
+    let media = h.agent("media", "127.0.0.1:5090").await;
+    let rig = limiter_rig_with(LimiterConfig { lease_sec: SHORT_LEASE_SEC }).await;
+    let limiter: Arc<dyn CallLimiter> =
+        Arc::new(UnavailableOnAdmit::new(2, true, rig.client.clone()));
+    let decision = Arc::new(
+        ScriptedDecisionEngine::builder()
+            .fallback(|_| {
+                let mut r = route_to("127.0.0.1", 5070);
+                r.features.platform.max_duration_sec = 60;
+                r.callback_context = Some("release-ctx".into());
+                r.subscriptions = vec![ReleaseEventKind::MaxCallDuration];
+                r.call_limiter = limiters(&["x"]);
+                NewCallResponse::Route(r)
+            })
+            .on_release(move |_| {
+                let mut r = route_to("127.0.0.1", 5090);
+                r.call_limiter = limiters(reroute);
+                ReleaseOutcome::Respond(CallReleaseResponse::Route(r))
+            })
+            .build(),
+    );
+    let b2bua = B2buaSut::builder(decision)
+        .limiter(limiter)
+        .limiter_store(rig.store.clone())
+        .tune(|c| {
+            c.keepalive_interval_sec = 3_600;
+            c.reaper_enabled = false;
+            c.limiter_refresh_sec = 5;
+        })
+        .start(&h, "b2bua", "127.0.0.1:5080")
+        .await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(b2bua.addr).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    rig.expect_holds([1, 0, 0], "the established call holds x").await;
+
+    // ── the cap raises the release consult; the reroute is applied ─────────
+    for _ in 0..61 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    let mut media_uas = media.receive("INVITE").await;
+    media_uas.respond(200, "OK").with_sdp(MEDIA_ANSWER).await;
+    let tag = media_uas.dialog().local_tag().to_string();
+    while let Some(mut retrans) = media.try_receive_tolerating("INVITE", &[]).await {
+        retrans.respond(200, "OK").with_sdp(MEDIA_ANSWER).with_to_tag(&tag).await;
+    }
+    media.receive("ACK").await;
+    let mut realign = alice.receive("INVITE").await;
+    realign.respond(200, "OK").with_sdp(ALICE_REALIGN).await;
+    alice.receive("ACK").await;
+    bob.receive("BYE").await.respond(200, "OK").await;
+    rig.expect_holds(held, "the set the limiter holds for the rerouted call").await;
+
+    // ── the rerouted call outlives two leases ───────────────────────────────
+    for _ in 0..2 * SHORT_LEASE_SEC + 5 {
+        h.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    rig.store.sweep_now();
+    assert_eq!(rig.all_holds(), held, "the limiter holds the same set two leases on");
+    assert_eq!(rig.store.stats().lease_expired_calls, 0, "no set lapsed");
+    let reregistered = rig.store.stats().reregistered_calls;
+
+    let mut bye = dialog.bye().await;
+    media.receive("BYE").await.respond(200, "OK").await;
+    bye.expect(200).await;
+    settle_until(|| b2bua.metrics().removals_total() == b2bua.metrics().creations_total()).await;
+    settle_until(|| rig.store.stats().releases_total == 1).await;
+    assert_eq!(rig.store.stats().releases_total, 1, "one release of the call");
+    rig.expect_drained("the hangup's release frees what the limiter holds").await;
+    assert_eq!(rig.store.stats().lease_expired_calls, 0, "freed by its release, not its lease");
+    let count = b2bua.limiter_count();
+    assert_eq!((count.admitted, count.released, count.failed_open), (1, 1, 1));
+    b2bua.assert_fully_reaped();
+
+    settle_until(|| !b2bua.cdr_records().is_empty()).await;
+    assert_eq!(b2bua.cdr_records().len(), 1, "exactly one CDR");
+    let _ = h.finish().await;
+    reregistered
+}
+
+/// A release reroute `[y, z]` whose admit lands with its answer lost: the
+/// call stays counted, and its refresh (naming `[x]`) extends the `[y, z]` the
+/// limiter holds for it until its release.
+#[tokio::test(start_paused = true)]
+async fn release_reroute_admit_that_lands_but_times_out_keeps_the_call_counted() {
+    let reregistered = release_reroute_admit_answer_lost(
+        "reroute-holds-release-reroute-answer-lost",
+        &["y", "z"],
+        [0, 1, 1],
+    )
+    .await;
+    assert_eq!(reregistered, 0, "the landed set was extended, never re-created");
+}
+
+/// A release reroute stating no limiter whose admit lands with its answer
+/// lost: the limiter dropped the call's `[x]` behind a drop fence. The call's
+/// next refresh learns the set was dropped and the call goes uncounted, so `x`
+/// is never re-registered, not even once the fence lapses; the hangup still
+/// sends the call's one release.
+#[tokio::test(start_paused = true)]
+async fn release_reroute_admit_that_dropped_the_set_is_never_re_registered() {
+    let reregistered = release_reroute_admit_answer_lost(
+        "reroute-holds-release-reroute-dropped-answer-lost",
+        &[],
+        [0, 0, 0],
+    )
+    .await;
+    assert_eq!(reregistered, 0, "the dropped set was never re-created");
+}
