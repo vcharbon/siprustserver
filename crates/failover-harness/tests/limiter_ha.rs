@@ -345,7 +345,7 @@ async fn setup_stalled_call_is_released_at_the_deadline_after_crash_reboot_recla
 ///      reclaim. The set is leaked: nothing on the SIP plane will ever release
 ///      it. The backup holds a *non-terminal* (`Established`) replica, so the
 ///      Model-Y `reap_expired_replicas` lossy path — which only releases
-///      `Terminating`/`Terminated` replicas (`expired_terminal_fallbacks`) —
+///      `Terminating`/`Terminated` replicas (`CallState::reap_replica`) —
 ///      does **not** touch it either. The ONLY remaining recovery is the lease.
 ///   3. Advance one lease + slack (~125 s): the set lapsed. Call B is then
 ///      established through the proxy on the surviving worker; its admit is
@@ -421,7 +421,7 @@ async fn leaked_limiter_slot_recovers_via_the_lease_when_primary_is_permanently_
     call.expect(200).await;
     // Call A is fully confirmed so the leaked replica is `Established`, not
     // early: `Established` and early replicas are BOTH non-terminal, so both are
-    // equally ignored by the Model-Y lossy reap (`expired_terminal_fallbacks`
+    // equally ignored by the Model-Y lossy reap (`CallState::reap_replica`
     // returns only `Terminating`/`Terminated`).
     let _dialog = call.ack().await;
     bob1.receive("ACK").await;

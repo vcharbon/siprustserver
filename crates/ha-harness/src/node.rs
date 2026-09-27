@@ -231,9 +231,10 @@ impl HaNode {
     }
 
     /// Reap expired bodies + changelog tombstones/idle peers after a clock
-    /// advance (lazy TTL — deterministic, no background task).
+    /// advance (deterministic, no background task). This harness runs no call
+    /// model, so the evicted bodies owe nothing here.
     pub async fn reap(&self, now_ms: i64) {
-        self.store.reap(now_ms).await;
+        let _evicted = self.store.reap(now_ms).await;
     }
 
     /// CRASH: abort the server accept-loop task and drop the store + supervisor

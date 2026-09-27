@@ -121,9 +121,12 @@ already dropped. Decision 4 is what closes this: the node that materialises
 the call re-arms its timers; the restored past-due refresh, or the refresh the
 invariant arms on the materialising turn, re-registers the set within one
 refresh period of the takeover or the reclaim. A takeover copy that reaches
-its end defers the release to the primary. Known gap: that terminal, flushed
-back to the primary's partition, is evicted at the replica TTL with no
-release, so the lease is what frees its re-registered set. The HA cells
+its end defers the release to the primary; when no primary reclaims it inside
+the replica TTL, the backup's reap releases the key. The reap is the one
+eviction site of an expired replica body and no read evicts one first, so
+every expired deferred terminal is released once, whichever partition holds
+it. Under the deployed relation the lease has freed the re-registered set by
+then and that release is a no-op. The HA cells
 that prove a release (the reap's, the reclaim's) run a lease longer than the
 replica TTL on purpose, so the release they name is what frees the call; the
 cells that prove re-registration run the deployed relation.

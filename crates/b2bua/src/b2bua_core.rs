@@ -418,13 +418,13 @@ impl B2buaCore {
         //   1. the reaper sweep (ADR-0020): scan the last-touched ledger + inject
         //      verdicts through the re-entry channel — `maybe_sweep` is a no-op for
         //      a disabled reaper.
-        //   2. the Model-Y replica-store maintenance (FixCallTerminateOnBackup §9;
-        //      ADR-0020 X3): physically evict expired replica bodies (missed-delete
-        //      ghosts AND a deferred terminal whose primary never reclaimed it) and
-        //      prune resurrection tombstones. **No discharge** — the primary is the
-        //      sole discharge authority; a deferred terminal the primary never comes
-        //      back to reclaim is silently evicted, its CDR/limiter cleanup lost (the
-        //      accepted double-failure). No-op without a replicating store.
+        //   2. the Model-Y replica-store maintenance (ADR-0020 X3): the one
+        //      eviction site of expired replica bodies (missed-delete ghosts AND a
+        //      deferred terminal whose primary never reclaimed it), plus the
+        //      resurrection-tombstone prune. **No discharge** — the primary is the
+        //      sole discharge authority; an evicted deferred terminal has its
+        //      limiter key released and its CDR counted lost (the accepted
+        //      double-failure). No-op without a replicating store.
         // The two gates are independent (reaper `enabled` vs replica store present),
         // so neither disabling the reaper nor running without HA suppresses the
         // other. The harness `advance` drives both under the paused clock.

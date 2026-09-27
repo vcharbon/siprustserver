@@ -594,10 +594,10 @@ impl CallState {
     /// call an in-dialog request reaches before the sweep does. A backup-role
     /// ref is a [`ReplicaMiss::WrongRole`].
     ///
-    /// **Evicting** read: an expired body here is a genuinely-dead own call (its
-    /// active-replica TTL = `reboot_budget` elapsed without a refresh), so it must
-    /// NOT be re-served — let `get_call`'s lazy eviction reap it. The reverse-flush
-    /// reconcile path wants the opposite (see [`peek_reclaimable_raw`]).
+    /// An expired body reads as absent: it is a genuinely-dead own call (its
+    /// active-replica TTL = `reboot_budget` elapsed without a refresh), so it is
+    /// NOT re-served; the periodic reap evicts it. The reverse-flush reconcile
+    /// path wants the opposite (see [`peek_reclaimable_raw`]).
     /// Returns the decoded call plus its persisted receive-time clock-skew offset
     /// (`0` when none) so the reclaim re-anchors its timers before re-arming them
     /// (clock-skew hardening).
@@ -613,13 +613,12 @@ impl CallState {
         self.codec.decode(body).ok()
     }
 
-    /// Like [`peek_reclaimable`](Self::peek_reclaimable) but a **non-evicting**
-    /// read (`peek_body_raw`): a reverse-flushed *terminal* the live primary is about
-    /// to fold must NOT be destroyed on read — the evicting `get_call` would
-    /// physically delete it, stranding the CDR the reconcile is about to write. Used
-    /// by the reverse-flush reconcile to classify the body; a non-terminal one is
-    /// then materialised through the evicting read. Returns the decoded call plus
-    /// its persisted receive-time clock-skew offset (`0` when none).
+    /// Like [`peek_reclaimable`](Self::peek_reclaimable) but it reads an expired
+    /// body too (`peek_body_raw`): a reverse-flushed *terminal* the live primary is
+    /// about to fold is folded whatever its TTL, so the reconcile writes its CDR.
+    /// Used by the reverse-flush reconcile to classify the body; a non-terminal one
+    /// is then materialised through the TTL-gated read. Returns the decoded call
+    /// plus its persisted receive-time clock-skew offset (`0` when none).
     pub async fn peek_reclaimable_raw(&self, call_ref: &str) -> Option<(Call, i64)> {
         let repl = self.repl_store()?;
         let (role, primary) = partition_of(&self.self_ordinal, call_ref);
@@ -633,7 +632,7 @@ impl CallState {
     }
 
     /// The one narrow partition read behind [`peek_replica`](Self::peek_replica)
-    /// and [`peek_reclaimable`](Self::peek_reclaimable): the evicting `get_call`
+    /// and [`peek_reclaimable`](Self::peek_reclaimable): the TTL-gated `get_call`
     /// of `call_ref` in the partition this node holds for it, which must be
     /// `required`. Every miss is typed so the router can tell a ref this node
     /// plays the other role for from a body that is gone or unreadable.
@@ -658,48 +657,27 @@ impl CallState {
         Ok((call, skew))
     }
 
-    /// **Model-Y orphaned-deferred-terminal read-path.** Decode every **expired**
-    /// Element whose body is a deferred terminal (`Terminating`/`Terminated`) — a
-    /// backup served a BYE/CANCEL and deferred the discharge to the primary, but the
-    /// primary never came back to reclaim it inside the replica TTL (crashed for
-    /// good). The router does **not** discharge these (the primary is the sole CDR
-    /// authority); instead it releases the call's limiter hold(s) and lets
-    /// [`reap_replica`] free the memory, writing **no CDR** (the accepted lost-CDR
-    /// double-failure). A non-evicting [`peek_body_raw`] read so the body survives
-    /// for the limiter release before `reap_replica` evicts it in the same pass.
-    /// Excludes non-terminal expired Elements (missed-delete ghosts `reap` evicts
-    /// silently). Empty when no replicating store is wired.
-    pub async fn expired_terminal_fallbacks(&self, now_ms: i64) -> Vec<Call> {
+    /// Physically evict every expired replica body, changelog tombstone and
+    /// stale resurrection tombstone (the missed-delete ghost backstop,
+    /// ADR-0014), and return the evicted bodies that are **deferred terminals**
+    /// (`Terminating`/`Terminated`): a node served the call's end and deferred
+    /// its discharge to a primary that never reconciled it inside the TTL. The
+    /// router releases each one's limiter key and counts its CDR lost (the
+    /// accepted double-failure); an expired non-terminal ghost is evicted
+    /// silently. A read never evicts, so each expired body is returned by
+    /// exactly one pass. Empty without a replicating store.
+    pub async fn reap_replica(&self, now_ms: i64) -> Vec<Call> {
         let Some(repl) = self.repl_store() else {
             return Vec::new();
         };
-        let mut out = Vec::new();
-        for (call_ref, role, primary) in repl.expired_refs(now_ms) {
-            if let Some(body) = repl.peek_body_raw(role, &primary, &call_ref).await {
-                if let Ok(call) = self.codec.decode(&body) {
-                    if matches!(
-                        call.state,
-                        CallModelState::Terminating | CallModelState::Terminated
-                    ) {
-                        out.push(call);
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    /// Physically evict expired replica bodies + changelog tombstones + prune
-    /// resurrection tombstones (the missed-delete ghost backstop, ADR-0014). Under
-    /// Model Y a deferred terminal whose primary never reclaimed it (crashed for
-    /// good) is also evicted here — but only **after** the router has released its
-    /// limiter hold(s) via [`expired_terminal_fallbacks`]; the eviction itself frees
-    /// the replica memory with **no CDR** (the accepted double-failure). No-op
-    /// without a replicating store.
-    pub async fn reap_replica(&self, now_ms: i64) {
-        if let Some(repl) = self.repl_store() {
-            repl.reap(now_ms).await;
-        }
+        repl.reap(now_ms)
+            .await
+            .iter()
+            .filter_map(|body| self.codec.decode(body).ok())
+            .filter(|call| {
+                matches!(call.state, CallModelState::Terminating | CallModelState::Terminated)
+            })
+            .collect()
     }
 
     /// The one residency insert: put a materialised call into the live map +

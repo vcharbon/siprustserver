@@ -100,10 +100,10 @@ pub(super) async fn process_result(
     // releases **NO** limiter hold, propagates **NO** delete here (that is the
     // primary's sole authority, so exactly-once holds by construction — no
     // cross-node idempotency). If the primary never reconciles (crashed for
-    // good, never returning inside the replica TTL), the retained `bak:` replica
-    // is silently evicted by the periodic reap and the CDR/limiter cleanup is
-    // LOST — the accepted double-failure. A primary-served (non-takeover)
-    // terminal falls through to the normal discharge below.
+    // good, never returning inside the replica TTL), the periodic reap evicts
+    // the retained body, releases its limiter key and counts the CDR LOST — the
+    // accepted double-failure. A primary-served (non-takeover) terminal falls
+    // through to the normal discharge below.
     if result.call.state == CallModelState::Terminated && ctx.state.is_takeover(call_ref) {
         // Reverse-flush the Terminated body held with the normal replica TTL
         // (`reboot_budget`): a live primary reconciles + forward-deletes it within ~1

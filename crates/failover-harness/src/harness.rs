@@ -521,8 +521,9 @@ impl ReplicatedB2buaSut {
     }
 
     /// Does this node hold **any trace** of `call_ref` — live (serving) or as a
-    /// replica body in either partition? Used to assert a terminated call left
-    /// nothing behind anywhere (so a later reboot cannot resurrect it).
+    /// replica body in either partition, an expired body included until the
+    /// reap evicts it? Used to assert a terminated call left nothing behind
+    /// anywhere (so a later reboot cannot resurrect it). A pure read.
     pub async fn holds_any_trace(&self, call_ref: &str) -> bool {
         if self.serves(call_ref) {
             return true;
@@ -530,14 +531,7 @@ impl ReplicatedB2buaSut {
         match call::parse_call_ref(call_ref) {
             Some(p) => {
                 for role in [PartitionRole::Primary, PartitionRole::Backup] {
-                    if self
-                        .store
-                        .get_call(role, &p.primary, call_ref)
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some()
-                    {
+                    if self.store.peek_body_raw(role, &p.primary, call_ref).await.is_some() {
                         return true;
                     }
                 }

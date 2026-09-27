@@ -37,8 +37,8 @@ use crate::store::{role_of, MaterialiseOrigin, PartitionRole};
 /// have made itself. Idempotent: `update` bumps our `p` and the fold takes the
 /// progress, so a re-delivered flush no longer dominates.
 pub(super) async fn reconcile_reverse_flush(ctx: &Arc<RouterCtx>, call_ref: &str) {
-    // Non-evicting read: an expired reverse-flushed terminal must not be destroyed
-    // on access — the backup-durable fallback still needs to discharge it (#7).
+    // A read that sees an expired body too: an expired reverse-flushed terminal
+    // is still folded and discharged here (#7).
     let Some((mut replica, skew_offset_ms)) = ctx.state.peek_reclaimable_raw(call_ref).await else {
         return;
     };
@@ -175,37 +175,30 @@ async fn discharge_folded_terminal(
 
 /// Periodic replica-store maintenance. **No CDR is ever written here** — the
 /// acting-backup terminal contract (ADR-0020 X3) makes the **primary the sole CDR
-/// authority**: a backup never discharges (no CDR, no delete propagation), *not even*
-/// as a durable fallback. But a deferred terminal whose primary never came back to
-/// reclaim it (crashed for good, past the replica TTL = `reboot_budget`) must NOT be
-/// left to pin its limiter slot or leak its replica body forever. So this pass, in
-/// order:
-///   1. for each **expired deferred terminal**, release the call on the limiter
-///      (the body carries `limiter.{key, release_owed}`; this is the SAME `release(key)`
-///      the discharge funnel emits) and count it as a lost-CDR cleanup — the
-///      accepted double-failure (primary down AND never returns): limiter freed,
-///      memory freed, **CDR lost**.
-///   2. `reap_replica` then physically evicts every expired body (the just-released
-///      terminals + the missed-delete ghosts) and prunes the resurrection tombstones.
+/// authority**. But a deferred terminal whose primary never came back to reclaim
+/// it (crashed for good, past the replica TTL = `reboot_budget`) must NOT be left
+/// to pin its limiter slot or leak its replica body. `reap_replica` evicts every
+/// expired body and hands back the deferred terminals among them, whichever
+/// partition holds the body (a replica its primary flushed, or a takeover copy's
+/// own terminal); each one is released on the limiter by its key — the SAME
+/// `release(key)` the discharge funnel emits — and counted as a lost-CDR cleanup:
+/// limiter freed, memory freed, **CDR lost**. An expired body is returned by one
+/// pass only, and no read evicts it before this pass sees it.
 ///
 /// A primary that reboots *inside* `reboot_budget` reclaims and discharges first;
 /// when its propagated delete never reaches this backup, this pass releases the
 /// same call a second time, which the limiter applies as a no-op (the release is
 /// keyed by the call). Spawned as a paced task by `b2bua_core`.
 pub(crate) async fn reap_expired_replicas(ctx: &Arc<RouterCtx>, now_ms: i64) {
-    for terminal in ctx.state.expired_terminal_fallbacks(now_ms).await {
-        // No per-call lock: this is a `bak:` Element the backup self-released (never
-        // in the live map), and the backup never reclaims its own backup partition
-        // (`reclaim_scan` reads `pri:{self}`), so there is no concurrent writer to
-        // serialize against — and taking the lock would leak a `locks` map entry
-        // (only `release_call`/`discard_orphan` clear it). The decoded snapshot is
-        // all the limiter release needs; `reap_replica` then evicts the body.
+    for terminal in ctx.state.reap_replica(now_ms).await {
+        // No per-call lock: the body is already evicted and this node does not
+        // serve the call live (a takeover copy self-released at its terminal), so
+        // there is no writer to serialize against — and taking the lock would leak
+        // a `locks` map entry (only `release_call`/`discard_orphan` clear it). The
+        // decoded snapshot is all the limiter release needs.
         release_orphaned_limiter_holds(ctx, &terminal);
         ctx.metrics.bump_repl_terminal_lost();
     }
-    // Evict the leftover: the deferred terminals just limiter-released + the
-    // non-terminal missed-delete ghosts. Frees the replica memory (no CDR).
-    ctx.state.reap_replica(now_ms).await;
 }
 
 /// Release the cluster-wide limiter set a never-reclaimed deferred terminal
@@ -430,8 +423,8 @@ async fn resync_timers(
 /// call into the live map + re-arm its timers — what makes a rebooted primary
 /// re-*serve* its partition, not just re-*store* it. The scan decodes the
 /// partition to size the cohort; each body is then materialised through the
-/// evicting reclaim read, so a body whose TTL ran out is dead and is evicted,
-/// never re-served: it counts in `scanned` and not in `materialized`.
+/// TTL-gated reclaim read, so a body whose TTL ran out is dead and is never
+/// re-served: it counts in `scanned` and not in `materialized`.
 ///
 /// **Keepalive smoothing (ADR-0014, performance-only).** Many keepalive timers in
 /// a just-rehydrated partition are past-due; firing them all at once floods the

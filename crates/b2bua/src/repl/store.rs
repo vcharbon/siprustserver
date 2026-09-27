@@ -14,10 +14,11 @@
 //! `opts.peer == None` is the non-HA path: store the body, make **no** bump.
 //!
 //! ## TTL
-//! Bodies carry an absolute `expiry_at_ms`; expired bodies are **lazily evicted
-//! on access** and dropped wholesale by [`reap`](ReplicatingCallStore::reap)
-//! after the clock advances — no background task, no `DelayQueue` aliasing
-//! (CLAUDE.md timer hazard).
+//! Bodies carry an absolute `expiry_at_ms`. An expired body reads as absent to
+//! every read and is evicted only by [`reap`](ReplicatingCallStore::reap),
+//! which hands back what it evicted so its caller can settle what an expired
+//! body still owes (a deferred terminal's limiter release) — no background
+//! task, no `DelayQueue` aliasing (CLAUDE.md timer hazard).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,7 +60,7 @@ struct CallMeta {
     /// **Backup**-flow bootstrap scan `pri:{self}` filtered to a given backup
     /// (ADR-0014 Option B). `None` for replicas we hold for others (`bak:` side).
     backup: Option<String>,
-    /// Absolute body-expiry deadline (lazy TTL); `None` when `ttl_ms <= 0`.
+    /// Absolute body-expiry deadline; `None` when `ttl_ms <= 0`.
     expiry_at_ms: Option<i64>,
     /// Receive-time **wall-clock skew offset** `receiver_now_ms − origin_now_ms`
     /// (clock-skew hardening), computed on an origin-stamped write
@@ -218,26 +219,10 @@ impl ReplicatingCallStore {
             .collect()
     }
 
-    /// Snapshot `(call_ref, role, primary)` for every Element whose alive-timer (the
-    /// per-Element TTL, refreshed on each primary update) has **expired** at `now`.
-    /// The Model-Y orphaned-deferred-terminal cleanup reads this to find a deferred
-    /// terminal whose primary never reclaimed it (so the backup can release its
-    /// limiter hold before the body is reaped); the plain [`reap`](Self::reap) then
-    /// evicts whatever is left. Pure read; no body touched.
-    pub fn expired_refs(&self, now_ms: i64) -> Vec<(String, PartitionRole, String)> {
-        let meta = self.meta.lock().unwrap();
-        meta.iter()
-            .filter(|(_, m)| matches!(m.expiry_at_ms, Some(e) if now_ms >= e))
-            .map(|(k, m)| (k.clone(), m.role, m.primary.clone()))
-            .collect()
-    }
-
-    /// Read a body bypassing the lazy-TTL eviction. [`get_call`](Self::get_call)
-    /// evicts (and returns `None` for) an expired body on access; the live
-    /// reverse-flush reconcile reads through here ([`peek_reclaimable_raw`]), and the
-    /// orphaned-deferred-terminal cleanup reads an EXPIRED body here, so neither is
-    /// destroyed on read before it is handled. Pure read of the backing store; no
-    /// eviction, no meta change.
+    /// Read a body whatever its TTL. [`get_call`](Self::get_call) reads an
+    /// expired body as absent; the live reverse-flush reconcile reads through
+    /// here ([`peek_reclaimable_raw`]) so it can still fold an expired terminal.
+    /// Pure read of the backing store; no meta change.
     pub async fn peek_body_raw(
         &self,
         role: PartitionRole,
@@ -373,57 +358,24 @@ impl ReplicatingCallStore {
         self.meta.lock().unwrap().get(call_ref).is_some_and(|m| m.authority_answered)
     }
 
-    /// Is this call's body past its TTL? (lazy-eviction gate; pure read.)
+    /// Is this call's body past its TTL? An expired body reads as absent until
+    /// [`reap`](Self::reap) evicts it. Pure read.
     fn is_expired(&self, call_ref: &str) -> bool {
         let now = self.clock.now_ms();
         let meta = self.meta.lock().unwrap();
         matches!(meta.get(call_ref), Some(m) if matches!(m.expiry_at_ms, Some(e) if now >= e))
     }
 
-    /// Lazily evict an expired body + meta on access; returns `true` if evicted.
-    ///
-    /// The body is deleted at the `(role, primary)` the META records, never the
-    /// caller's: the meta is keyed by callRef alone, so a read at the other role
-    /// would drop the meta and leave the body behind for ever — unreachable by
-    /// every later expiry check and immortal.
-    ///
-    /// The meta's captured `indexes` ride the delete: an expired ghost must free
-    /// its `idx:*` entries too (all per-call state released, CLAUDE.md) — the
-    /// meta is removed in the same step, so this is the LAST moment the index
-    /// keys are recoverable. Leaving them stranded both leaked the index map and
-    /// let `resolve_from_replica_index` resolve a takeover to a dead callRef.
-    async fn evict_if_expired(&self, call_ref: &str) -> bool {
-        if !self.is_expired(call_ref) {
-            return false;
-        }
-        let gone = {
-            let mut meta = self.meta.lock().unwrap();
-            let Some(gone) = meta.remove(call_ref) else {
-                return false;
-            };
-            self.account_role(Some(gone.role), None);
-            gone
-        };
-        let _ = self
-            .inner
-            .delete_call(
-                gone.role,
-                &gone.primary,
-                call_ref,
-                &gone.meta.indexes,
-                &PutOpts::default(),
-            )
-            .await;
-        true
-    }
-
     /// Evict every expired body + reap changelog tombstones/idle peers + prune
-    /// stale resurrection tombstones. Call after advancing the clock (lazy TTL —
-    /// deterministic, no background task).
-    pub async fn reap(&self, now_ms: i64) {
+    /// stale resurrection tombstones, and return the evicted bodies. The one
+    /// eviction site of an expired body: a read never evicts, so an expired
+    /// body that still owes something (a deferred terminal's limiter release)
+    /// reaches the caller exactly once. Call after advancing the clock.
+    #[must_use = "an evicted body may owe a release the caller must settle"]
+    pub async fn reap(&self, now_ms: i64) -> Vec<Arc<[u8]>> {
         // Snapshot the expired (callRef, role, primary, indexes) tuples, drop the
         // lock, then delete each body — WITH its captured index keys, so the
-        // ghost's `idx:*` entries are freed too (see `evict_if_expired`).
+        // ghost's `idx:*` entries are freed too (all per-call state released).
         let expired: Vec<(String, PartitionRole, String, Vec<String>)> = {
             let meta = self.meta.lock().unwrap();
             meta.iter()
@@ -431,12 +383,16 @@ impl ReplicatingCallStore {
                 .map(|(k, m)| (k.clone(), m.role, m.primary.clone(), m.meta.indexes.clone()))
                 .collect()
         };
+        let mut evicted = Vec::with_capacity(expired.len());
         for (call_ref, role, primary, indexes) in &expired {
             {
                 let mut meta = self.meta.lock().unwrap();
                 if let Some(gone) = meta.remove(call_ref) {
                     self.account_role(Some(gone.role), None);
                 }
+            }
+            if let Ok(Some(body)) = self.inner.get_call(*role, primary, call_ref).await {
+                evicted.push(body);
             }
             let _ = self
                 .inner
@@ -455,6 +411,7 @@ impl ReplicatingCallStore {
             .retain(|_, &mut deleted_at| now_ms - deleted_at < RESURRECTION_TOMBSTONE_MS);
         self.shed.lock().unwrap().reap(now_ms);
         self.changelog.reap(now_ms);
+        evicted
     }
 }
 
@@ -466,7 +423,7 @@ impl CallStore for ReplicatingCallStore {
         primary: &str,
         call_ref: &str,
     ) -> Result<Option<Arc<[u8]>>, StoreError> {
-        if self.evict_if_expired(call_ref).await {
+        if self.is_expired(call_ref) {
             return Ok(None);
         }
         self.inner.get_call(role, primary, call_ref).await
@@ -600,8 +557,10 @@ impl CallStore for ReplicatingCallStore {
         Ok(())
     }
 
+    /// An index entry of an expired body reads as absent, like the body.
     async fn get_index(&self, index_key: &str) -> Result<Option<String>, StoreError> {
-        self.inner.get_index(index_key).await
+        let call_ref = self.inner.get_index(index_key).await?;
+        Ok(call_ref.filter(|call_ref| !self.is_expired(call_ref)))
     }
 
     async fn scan_calls(
@@ -614,7 +573,7 @@ impl CallStore for ReplicatingCallStore {
 }
 
 /// The changelog drains bodies through this store. Reads live bodies + per-ref
-/// metadata; both gated by lazy TTL eviction.
+/// metadata; an expired body reads as absent.
 #[async_trait]
 impl BodySource for ReplicatingCallStore {
     async fn read_body(
@@ -700,8 +659,8 @@ mod backup_count_tests {
         check(3);
         tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
         assert!(store.get_call(PartitionRole::Backup, "w0", "w0|d|t").await.unwrap().is_none());
-        check(2);
-        store.reap(clock.now_ms()).await;
+        check(3);
+        assert_eq!(store.reap(clock.now_ms()).await.len(), 2, "the reap evicts both");
         check(1);
     }
 }

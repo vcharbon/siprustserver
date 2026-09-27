@@ -643,6 +643,104 @@ async fn the_reap_releases_a_terminal_deferred_after_the_backup_served_a_request
     assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
 }
 
+/// The primary crashes; the caller's re-INVITE and then her BYE fail over to
+/// the backup, which serves both and defers the terminal to the dead primary.
+/// The primary reboots inside the replica TTL, pulls the deferred terminal,
+/// discharges it (one CDR, the call released) and its delete reaches the
+/// backup. Past the TTL the backup's reap has nothing left to release: the
+/// call is released once and no CDR is counted lost.
+#[tokio::test(start_paused = true)]
+async fn a_primary_back_inside_the_ttl_discharges_the_served_terminal_and_the_reap_counts_nothing()
+{
+    let mut fh = ha_harness("limiter-release-by-call-served-then-reclaimed");
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let rig = LimiterRig::serve().await;
+    let (proxy, mut w_b1, mut w_b2) =
+        spawn_workers(&mut fh, &rig, limited_decision(&["x", "x", "y"])).await;
+
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(rig.holds(), [2, 1, 0], "the call holds x twice and y");
+    let backup_sut = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
+    let call_ref = replicated_call_ref(&fh, backup_sut, &primary_ord).await;
+
+    let (primary, backup): (&mut ReplicatedB2buaSut, &ReplicatedB2buaSut) =
+        if primary_ord == "b1" { (&mut w_b1, &w_b2) } else { (&mut w_b2, &w_b1) };
+
+    // ── the primary crashes; a re-INVITE then the BYE fail over ──────────
+    accept_takeover_cseq_overlap(&mut fh);
+    primary.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    fh.advance(Duration::from_secs(5)).await;
+    let mut reinv = dialog.request(InDialogMethod::Invite, None).await;
+    let mut bob_uas = bob.receive("INVITE").await;
+    bob_uas.respond(200, "OK").with_sdp(ANSWER).await;
+    reinv.expect(200).await;
+    dialog.ack(Some(ANSWER)).await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_secs(1)).await;
+    let deferred_at = fh.now_ms();
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    fh.advance(Duration::from_secs(1)).await;
+    assert_eq!(rig.holds(), [2, 1, 0], "the backup defers the release to the primary");
+    assert!(backup.holds_any_trace(&call_ref).await, "the backup holds the deferred terminal");
+
+    // ── inside the TTL: the primary reboots and discharges the deferral ──
+    let reboot_at = deferred_at + REBOOT_BUDGET.as_millis() as i64 - 40_000;
+    while fh.now_ms() < reboot_at {
+        fh.advance(Duration::from_secs(10)).await;
+    }
+    let new_addr = primary.reboot().await;
+    for _ in 0..40 {
+        fh.advance(Duration::from_millis(500)).await;
+        if primary.is_ready() {
+            break;
+        }
+    }
+    assert!(primary.is_ready(), "rebooted primary re-hydrated from the backup");
+    proxy.set_address(&primary_ord, new_addr);
+    fh.note_worker_rebound(&primary_ord, new_addr);
+    proxy.set_health(&primary_ord, WorkerHealth::Alive);
+    let discharged = fh
+        .settle_terminal(async || {
+            primary.cdr_records().len() == 1
+                && rig.holds() == [0, 0, 0]
+                && !backup.holds_any_trace(&call_ref).await
+        })
+        .await;
+    assert!(
+        discharged,
+        "the reclaim discharged the deferral and its delete reached the backup; holds {:?}",
+        rig.holds()
+    );
+    assert!(
+        fh.now_ms() < deferred_at + REBOOT_BUDGET.as_millis() as i64,
+        "the reclaim ran inside the replica TTL",
+    );
+
+    // ── past the TTL: nothing is left for the backup's reap ──────────────
+    let past_ttl = deferred_at + REBOOT_BUDGET.as_millis() as i64 + 90_000;
+    while fh.now_ms() < past_ttl {
+        fh.advance(Duration::from_secs(30)).await;
+    }
+    assert_eq!(rig.store.stats().releases_total, 1, "the reclaim's release, once");
+    assert_eq!(rig.store.stats().lease_expired_calls, 0, "no set lapsed");
+    assert_eq!(
+        w_b1.metrics().repl_terminal_lost_total() + w_b2.metrics().repl_terminal_lost_total(),
+        0,
+        "the primary discharged the call: no CDR is counted lost",
+    );
+    rig.release_witnesses();
+    assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
+}
+
 /// The reboot variant: the primary crashes, the call is silent past the
 /// lease, and the primary reboots inside the replica TTL. Its reclaim
 /// re-arms the call's timers; the refresh re-registers the set within one

@@ -997,25 +997,20 @@ impl RunnerBase {
 
     /// Memory-attribution sampler: push the store + replication map sizes into
     /// their gauges every 5 s so an RSS climb can be pinned to a specific map
-    /// even when `active_calls` is flat, and physically reap expired backup
-    /// bodies + changelog tombstones. `reap` is correct but must be actively
-    /// DRIVEN in production — logical/lazy cleanup is bounded only by OOM (same
-    /// lesson as the timer wheel). 5 s is well inside the scrape cadence; the
-    /// sample is a couple of brief locks, off the call path.
+    /// even when `active_calls` is flat. 5 s is well inside the scrape cadence;
+    /// the sample is a couple of brief locks, off the call path. It evicts
+    /// nothing: the core's paced replica reap is the one eviction site, since an
+    /// expired deferred terminal owes its limiter release on the way out.
     pub fn spawn_gauge_sampler(&self, core: &Arc<B2buaCore>) {
         let core = core.clone();
-        let clock = self.clock.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 tick.tick().await;
                 core.sample_gauges();
                 if let Some(repl) = core.repl_store() {
-                    // Sample inner-store map sizes BEFORE reap so a leak is
-                    // visible even if reap is the thing fixing it.
                     let (bodies, idx, _meta, tomb) = repl.map_lens();
                     core.metrics().set_store_map_sizes(bodies as u64, idx as u64, tomb as u64);
-                    repl.reap(clock.now_ms()).await;
                 }
             }
         });

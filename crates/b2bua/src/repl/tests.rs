@@ -216,8 +216,10 @@ async fn lock_discipline_concurrent_rewrite_is_consistent() {
     }
 }
 
+/// An expired body reads as absent, and a read leaves it in place: only the
+/// reap evicts it, and hands it back once.
 #[tokio::test(start_paused = true)]
-async fn ttl_eviction_drops_body_on_access_and_reap() {
+async fn an_expired_body_reads_absent_and_only_the_reap_evicts_it() {
     let clock = Clock::test_at(0);
     let store = ReplicatingCallStore::new(1, clock.clone());
     put(&store, "c1", b"v1", 500, 1, &fwd("A")).await;
@@ -226,12 +228,13 @@ async fn ttl_eviction_drops_body_on_access_and_reap() {
     assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_some());
 
     tokio::time::advance(Duration::from_millis(501)).await;
-    // Lazy eviction on access.
-    assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_none());
+    assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_none(), "expired reads absent");
+    assert!(store.peek_body_raw(PRI, SELF, "c1").await.is_some(), "the read evicted nothing");
 
-    // Explicit reap also clears any leftover meta.
-    store.reap(clock.now_ms()).await;
-    assert!(store.get_call(PRI, SELF, "c1").await.unwrap().is_none());
+    let evicted = store.reap(clock.now_ms()).await;
+    assert_eq!(evicted.iter().map(|b| &b[..]).collect::<Vec<_>>(), vec![&b"v1"[..]]);
+    assert!(store.peek_body_raw(PRI, SELF, "c1").await.is_none(), "the reap evicted it");
+    assert!(store.reap(clock.now_ms()).await.is_empty(), "and hands it back once");
 }
 
 #[tokio::test(start_paused = true)]
@@ -257,7 +260,7 @@ async fn resurrection_tombstone_pruned_by_reap() {
 
     // Past the window + a reap: the tombstone is pruned, so a fresh Put lands.
     tokio::time::advance(Duration::from_millis(300_001)).await;
-    store.reap(clock.now_ms()).await;
+    let _evicted = store.reap(clock.now_ms()).await;
     put(&store, "c1", b"v3", 60_000, 3, &fwd("A")).await;
     assert!(
         store.get_call(PRI, SELF, "c1").await.unwrap().is_some(),
@@ -466,24 +469,23 @@ async fn nonpositive_ttl_replica_self_evicts_via_backstop() {
     assert!(store.get_call(BAK, "A", "c1").await.unwrap().is_some());
     assert_eq!(store.get_index("leg:cid-1|tag-a").await.unwrap().as_deref(), Some("c1"));
 
-    // Past the backstop → lazily evicted on access (no permanent ghost), AND the
-    // ghost's idx:* entries are freed with it — a stranded index would both leak
-    // and let `resolve_from_replica_index` resolve a takeover to a dead callRef.
+    // Past the backstop → reads absent (no permanent ghost), its idx:* entries
+    // too — an index resolving to an expired body would let
+    // `resolve_from_replica_index` resolve a takeover to a dead callRef.
     tokio::time::advance(Duration::from_millis(1_001)).await;
     assert!(
         store.get_call(BAK, "A", "c1").await.unwrap().is_none(),
-        "ttl<=0 replica self-evicts via the backstop"
+        "ttl<=0 replica expires via the backstop"
     );
     assert_eq!(
         store.get_index("leg:cid-1|tag-a").await.unwrap(),
         None,
-        "lazy eviction must free the replica's index entries too"
+        "an expired replica's index entries read absent too"
     );
 }
 
-/// The bulk `reap` path frees an expired ghost's `idx:*` entries along with its
-/// body — same invariant as the lazy-eviction path above, on the sweep the
-/// runner drives every few seconds.
+/// The `reap` frees an expired ghost's `idx:*` entries along with its body, on
+/// the sweep the core drives.
 #[tokio::test(start_paused = true)]
 async fn reap_frees_expired_replica_index_entries() {
     let clock = Clock::test_at(0);
@@ -497,7 +499,7 @@ async fn reap_frees_expired_replica_index_entries() {
     assert_eq!(store.get_index("leg:cid-2|tag-b").await.unwrap().as_deref(), Some("c2"));
 
     tokio::time::advance(Duration::from_millis(1_001)).await;
-    store.reap(clock.now_ms()).await;
+    assert_eq!(store.reap(clock.now_ms()).await.len(), 1);
 
     assert!(store.get_call(BAK, "A", "c2").await.unwrap().is_none());
     assert_eq!(store.get_index("leg:cid-2|tag-b").await.unwrap(), None);
@@ -631,7 +633,7 @@ async fn authority_answer_survives_every_write_and_leaves_with_the_ref() {
     // Past the resurrection tombstone, a fresh record under the same ref stands
     // and starts unanswered: the mark belonged to the record, not the ref.
     tokio::time::advance(Duration::from_millis(300_001)).await;
-    store.reap(clock.now_ms()).await;
+    let _evicted = store.reap(clock.now_ms()).await;
     put(&store, "c1", b"v3", 0, 3, &PutOpts::default()).await;
     assert_eq!(store.current_cv(PRI, SELF, "c1"), Some((3, 0)), "the fresh put stands");
     assert!(!store.authority_answered("c1"), "a fresh record starts unanswered");

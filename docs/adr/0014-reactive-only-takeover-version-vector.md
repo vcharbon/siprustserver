@@ -310,8 +310,8 @@ three rules (the primary is the sole discharge authority; see ADR-0020 X3):
 2. **The acting-backup defers the terminal.** A takeover copy reaching terminal
    reverse-flushes it (short grace TTL = its alive-timer) and `drop_local`s — it
    does **not** discharge. The primary is the sole discharge authority; if it never
-   returns, the backup's alive-timer fallback discharges (durability rests on
-   *primary OR backup* restarting).
+   returns, the backup's replica reap releases the call's limiter key when the
+   alive-timer expires and counts its CDR lost (ADR-0020 X3).
 
 3. **`flush` carries the authoritative `(p,b)`; a delete is tombstoned.** `flush`
    embeds the authoritative `(p,b)` in the replicated **body** (encoding the
