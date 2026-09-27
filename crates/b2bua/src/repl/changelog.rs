@@ -242,6 +242,18 @@ impl Changelog {
         }
     }
 
+    /// Poison the changelog's lock, as a panic under it would.
+    #[cfg(test)]
+    pub(crate) fn poison_for_test(&self) {
+        let inner = self.inner.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = inner.lock();
+            panic!("poison the changelog lock");
+        })
+        .join();
+        assert!(self.inner.is_poisoned());
+    }
+
     /// Override the tombstone / dead-peer TTLs (tests use short values).
     pub fn with_ttls(mut self, tombstone_ttl_ms: i64, dead_peer_ttl_ms: i64) -> Self {
         self.tombstone_ttl_ms = tombstone_ttl_ms;

@@ -808,4 +808,46 @@ mod tests {
         assert_eq!(ctx.limiter_releases.waiting(), 1, "a second pass releases nothing");
         assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "and counts nothing");
     }
+
+    /// **A panic in the store's other upkeep never takes the evicted bodies.**
+    /// With the replica changelog's lock poisoned, the reap still releases an
+    /// expired deferred terminal's key and counts its CDR lost, once.
+    #[tokio::test(start_paused = true)]
+    async fn a_poisoned_changelog_lock_does_not_cost_an_expired_terminal_its_release() {
+        let n = node("w1").await;
+        let ctx = n.core.router_ctx();
+        ctx.limiter_releases.hold();
+        let mut terminal = answered(1, 2, CallModelState::Terminated);
+        terminal.limiter =
+            call::CallLimiterState::admitted("upkeep-key".into(), vec!["x".into(), "y".into()]);
+        let call_ref = terminal.call_ref.clone();
+        let body = MsgpackCodec::new().encode(&terminal);
+        n.store
+            .put_call(
+                PartitionRole::Backup,
+                "w0",
+                &call_ref,
+                body,
+                &[],
+                1_000,
+                1,
+                2,
+                &PutOpts::default(),
+            )
+            .await
+            .unwrap();
+        n.store.changelog().poison_for_test();
+
+        tokio::time::advance(std::time::Duration::from_millis(2_000)).await;
+        let pass = tokio::spawn({
+            let ctx = ctx.clone();
+            async move { reap_expired_replicas(&ctx, ctx.clock.now_ms()).await }
+        });
+        assert!(pass.await.is_ok(), "the reap pass completes");
+        assert_eq!(ctx.limiter_releases.waiting_keys(), vec!["upkeep-key".to_string()]);
+        assert_eq!(n.metrics.repl_terminal_lost_total(), 1);
+        reap_expired_replicas(ctx, n.clock.now_ms()).await;
+        assert_eq!(ctx.limiter_releases.waiting(), 1, "released once");
+        assert_eq!(n.metrics.repl_terminal_lost_total(), 1, "counted once");
+    }
 }

@@ -153,4 +153,75 @@ mod tests {
         assert!((8..=10).contains(&restarts), "{restarts} restarts in 10 s at a 1 s interval");
         task.abort();
     }
+
+    /// A reaper step that panics on every pass never stops the replica reap
+    /// that runs after it: each pass still evicts and releases what expired.
+    #[tokio::test(start_paused = true)]
+    async fn a_reaper_step_that_keeps_panicking_never_stops_the_replica_reap() {
+        let n = node_with("w1", |c| c.reaper_sweep_interval_sec = 3_600).await;
+        let ctx = n.core.router_ctx().clone();
+        ctx.limiter_releases.hold();
+        seed_expiring_terminal(&n, "early", "early-key", 500).await;
+        seed_expiring_terminal(&n, "late", "late-key", 1_500).await;
+
+        let pass_ctx = ctx.clone();
+        let task = tokio::spawn(super::run(Duration::from_secs(1), n.metrics.clone(), move || {
+            let ctx = pass_ctx.clone();
+            async move {
+                reaper_step_that_panics();
+                crate::router::reap_expired_replicas(&ctx, ctx.clock.now_ms()).await;
+            }
+        }));
+
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        sip_clock::testkit::settle().await;
+        assert_eq!(ctx.limiter_releases.waiting_keys(), vec!["early-key".to_string()]);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        sip_clock::testkit::settle().await;
+        assert_eq!(
+            ctx.limiter_releases.waiting_keys(),
+            vec!["early-key".to_string(), "late-key".to_string()],
+            "the second pass released the later terminal"
+        );
+        assert_eq!(n.metrics.repl_terminal_lost_total(), 2);
+        task.abort();
+    }
+
+    fn reaper_step_that_panics() {
+        panic!("the reaper sweep panics");
+    }
+
+    /// Seed a deferred terminal of `w0`'s call `cid` in `w1`'s backup
+    /// partition, owing the release of `key`, expiring `ttl_ms` from now.
+    async fn seed_expiring_terminal(
+        n: &crate::router::test_support::Node,
+        cid: &str,
+        key: &str,
+        ttl_ms: i64,
+    ) {
+        let config = B2buaConfig { self_ordinal: "w0".into(), ..Default::default() };
+        let mut terminal = build_initial_call(
+            &invite("w0", "w1", cid),
+            src(),
+            &config,
+            &sip_txn::IdGen::seeded(1),
+            0,
+        );
+        terminal.state = CallModelState::Terminated;
+        terminal.limiter = CallLimiterState::admitted(key.into(), vec!["x".into()]);
+        n.store
+            .put_call(
+                PartitionRole::Backup,
+                "w0",
+                &terminal.call_ref,
+                MsgpackCodec::new().encode(&terminal),
+                &[],
+                ttl_ms,
+                1,
+                1,
+                &PutOpts::default(),
+            )
+            .await
+            .unwrap();
+    }
 }
