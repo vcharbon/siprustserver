@@ -50,6 +50,7 @@ mod limit_cases;
 mod limiter;
 mod limiter_breaker;
 mod limiter_refresh;
+mod limiter_refresh_batch;
 mod limiter_release_queue;
 mod long_ring;
 mod max_duration_anchor;

@@ -119,6 +119,13 @@ pub struct B2buaConfig {
     /// How often an open limiter breaker probes the limiter's health answer,
     /// milliseconds; the first answer closes it. Default 1000.
     pub limiter_breaker_probe_ms: u64,
+    /// The worker's limiter refresh tick, milliseconds: a refresh falling due
+    /// is sent within one tick, with every other key due, in one request per
+    /// [`limiter_refresh_batch_max`](Self::limiter_refresh_batch_max) keys.
+    /// Below the refresh period. Default 1000.
+    pub limiter_refresh_batch_ms: u64,
+    /// Most keys one limiter refresh request carries. Default 1000.
+    pub limiter_refresh_batch_max: usize,
     /// **Keepalive catch-up speed-up** (ADR-0014, performance-only). On reboot a
     /// primary's `ReclaimAll` re-materialises its whole `pri:{self}` partition;
     /// many keepalive timers are past-due. Firing them all at once floods a
@@ -456,6 +463,8 @@ impl Default for B2buaConfig {
             limiter_release_queue_cap: 100_000,
             limiter_breaker_failures: 3,
             limiter_breaker_probe_ms: 1_000,
+            limiter_refresh_batch_ms: 1_000,
+            limiter_refresh_batch_max: 1_000,
             keepalive_catchup_speedup: 10,
             max_catchup_window_sec: None,
             reaper_enabled: true,
