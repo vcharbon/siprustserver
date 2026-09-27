@@ -9,25 +9,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use b2bua::config::{B2buaConfig, CdrConfig};
+use b2bua::config::CdrConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{
     CallDecisionEngine, CallDecisionError, CallFailureRequest, CallFailureResponse,
     CallLimiterEntry, CallReferRequest, CallReferResponse, CallTreatment, HeaderUpdate,
     NewCallRequest, NewCallResponse, RejectDecision, SipHeaderUpdates,
 };
-use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, NoopLimiter, RefreshOutcome};
-use b2bua::metrics::B2buaMetrics;
-use b2bua::store::InMemoryCallStore;
-use b2bua::{B2buaCore, B2buaDeps};
-use b2bua_harness::settle_until;
-use b2bua_harness::{TerminatedCalls, TerminatedCallsWriter};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
+use b2bua_harness::{settle_until, B2buaSut};
 use call::{Call, DecisionKind, TerminationCause};
 use scenario_harness::Harness;
-use sip_clock::Clock;
 use sip_message::header::HeaderName;
 use sip_message::SipResponse;
-use sip_txn::IdGen;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 
@@ -127,64 +121,33 @@ impl CallLimiter for RefusingLimiter {
     }
 }
 
+/// The SUT under `engine`, keeping every terminated `Call` whole; a capped
+/// engine runs behind the refusing limiter.
 struct Sut {
     addr: SocketAddr,
-    core: B2buaCore,
-    terminated: TerminatedCalls,
+    b2bua: B2buaSut,
 }
 
 impl Sut {
     async fn spawn(h: &Harness, engine: Engine) -> Self {
-        let limiter: Arc<dyn CallLimiter> =
-            if engine.capped { Arc::new(RefusingLimiter) } else { Arc::new(NoopLimiter) };
-        let (endpoint, addr) = h
-            .bind_sut_with_roles(
-                "b2bua",
-                B2BUA,
-                std::collections::HashSet::from([sip_net::UaRole::Uac, sip_net::UaRole::Uas]),
-            )
-            .await;
-        let terminated = TerminatedCalls::default();
-        let config = B2buaConfig {
-            self_ordinal: "w0".into(),
-            sip_local_ip: addr.ip().to_string(),
-            sip_local_port: addr.port(),
-            worker_allowed_target_suffixes: vec!["*".into()],
-            keepalive_interval_sec: 30,
-            keepalive_timeout_sec: 5,
-            overload_panic_elu_threshold: 1.1,
-            cdr: CdrConfig { message_ring: 32, captured_headers: Vec::new() },
-            ..Default::default()
-        };
-        let deps = B2buaDeps {
-            config,
-            decision: Arc::new(engine),
-            limiter,
-            cdr: Arc::new(TerminatedCallsWriter::new(terminated.clone())),
-            store: Arc::new(InMemoryCallStore::new()),
-            store_faults: Default::default(),
-            wire_faults: Default::default(),
-            clock: Clock::test_at(0),
-            id_gen: Arc::new(IdGen::seeded(0xB2B0)),
-            refusal_id_gen: Arc::new(IdGen::seeded(0x0503)),
-            replication: None,
-            metrics: B2buaMetrics::new(),
-            adaptation_http: None,
-            compose: b2bua::rules::ComposeOptions::default(),
-            capacity: None,
-        };
-        let core = B2buaCore::spawn(endpoint, deps);
-        Self { addr, core, terminated }
+        let capped = engine.capped;
+        let mut builder = B2buaSut::builder(Arc::new(engine)).keep_terminated_calls().tune(|c| {
+            c.worker_allowed_target_suffixes = vec!["*".into()];
+            c.cdr = CdrConfig { message_ring: 32, captured_headers: Vec::new() };
+        });
+        if capped {
+            builder = builder.limiter(Arc::new(RefusingLimiter));
+        }
+        let b2bua = builder.start(h, "b2bua", B2BUA).await;
+        Self { addr: b2bua.addr, b2bua }
     }
 
-    /// Every call created is reaped and the one CDR is written.
+    /// Every call created is reaped, every limiter hold released, and the
+    /// one CDR is written.
     async fn assert_reaped(&self) -> Call {
-        settle_until(|| self.terminated.snapshot().len() == 1).await;
-        settle_until(|| self.core.active_calls() == 0).await;
-        assert_eq!(self.core.lock_count(), 0, "no stranded per-call lock");
-        let m = self.core.metrics();
-        assert_eq!(m.creations_total(), m.removals_total(), "every call created is removed");
-        let terminated = self.terminated.snapshot();
+        settle_until(|| self.b2bua.is_reaped() && self.b2bua.cdr_records().len() == 1).await;
+        self.b2bua.assert_fully_reaped();
+        let terminated = self.b2bua.terminated_calls();
         assert_eq!(terminated.len(), 1, "exactly one CDR per call");
         terminated.into_iter().next().unwrap()
     }

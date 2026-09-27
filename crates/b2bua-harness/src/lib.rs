@@ -437,6 +437,7 @@ pub struct B2buaSutBuilder {
     capacity: Option<b2bua::capacity::CapacityGate>,
     tier1_brake: Option<b2bua::tier1_brake::Tier1BrakeConfig>,
     keep_terminated_calls: bool,
+    cdr_tap: Option<Arc<dyn CdrWriter>>,
 }
 
 impl B2buaSutBuilder {
@@ -444,6 +445,14 @@ impl B2buaSutBuilder {
     /// Off by default: a long-running SUT keeps the records only.
     pub fn keep_terminated_calls(mut self) -> Self {
         self.keep_terminated_calls = true;
+        self
+    }
+
+    /// Hand every CDR write to `tap` as well, after the SUT's own writer and
+    /// within the same write: a probe of what holds at the instant the CDR is
+    /// written.
+    pub fn cdr_tap(mut self, tap: Arc<dyn CdrWriter>) -> Self {
+        self.cdr_tap = Some(tap);
         self
     }
 
@@ -588,6 +597,7 @@ impl B2buaSutBuilder {
             capacity,
             tier1_brake,
             keep_terminated_calls,
+            cdr_tap,
         } = self;
         let (decision, limiter, sut_limiter) = match limiter {
             Some(own) => (decision, own, limiter::SutLimiter::own(limiter_store)),
@@ -633,6 +643,10 @@ impl B2buaSutBuilder {
             TerminatedCallsWriter::new(TerminatedCalls::default())
         } else {
             TerminatedCallsWriter::records_only()
+        };
+        let cdr = match cdr_tap {
+            Some(tap) => cdr.with_tap(tap),
+            None => cdr,
         };
         let params = B2buaSpawnParams {
             ordinal: "w0".into(),
@@ -712,6 +726,7 @@ impl B2buaSut {
             capacity: None,
             tier1_brake: None,
             keep_terminated_calls: false,
+            cdr_tap: None,
         }
     }
 
@@ -882,6 +897,12 @@ impl B2buaSut {
     /// The memory admission gate (ADR-0037) the running core decides with.
     pub fn capacity(&self) -> &b2bua::capacity::CapacityGate {
         self._core.capacity()
+    }
+
+    /// [`active_calls`](Self::active_calls) as an owned probe, for a reader
+    /// that outlives a borrow of the SUT (a [`cdr_tap`](B2buaSutBuilder::cdr_tap)).
+    pub fn active_calls_probe(&self) -> Arc<dyn Fn() -> usize + Send + Sync> {
+        self._core.active_calls_probe()
     }
 
     /// Ground-truth live call-map size (`inner.calls.len()`). An orphan-reject

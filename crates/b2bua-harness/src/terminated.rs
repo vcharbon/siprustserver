@@ -21,22 +21,29 @@ impl TerminatedCalls {
 
 /// Writes each record into an [`InMemoryCdrWriter`] and, when it keeps them,
 /// pushes the `Call` the record was built from onto a [`TerminatedCalls`]
-/// list, the `Call` first.
+/// list, the `Call` first; a tap, when set, is then handed the same write.
 #[derive(Clone)]
 pub struct TerminatedCallsWriter {
     records: InMemoryCdrWriter,
     terminated: Option<TerminatedCalls>,
+    tap: Option<Arc<dyn CdrWriter>>,
 }
 
 impl TerminatedCallsWriter {
     /// A writer keeping every terminated `Call` on `terminated`.
     pub fn new(terminated: TerminatedCalls) -> Self {
-        Self { records: InMemoryCdrWriter::new(), terminated: Some(terminated) }
+        Self { records: InMemoryCdrWriter::new(), terminated: Some(terminated), tap: None }
     }
 
     /// A writer keeping the records only, as [`InMemoryCdrWriter`] does.
     pub fn records_only() -> Self {
-        Self { records: InMemoryCdrWriter::new(), terminated: None }
+        Self { records: InMemoryCdrWriter::new(), terminated: None, tap: None }
+    }
+
+    /// This writer, handing every write to `tap` after its own, within the
+    /// same write.
+    pub fn with_tap(self, tap: Arc<dyn CdrWriter>) -> Self {
+        Self { tap: Some(tap), ..self }
     }
 
     /// The records written so far.
@@ -57,6 +64,9 @@ impl CdrWriter for TerminatedCallsWriter {
             terminated.0.lock().unwrap().push(call.clone());
         }
         self.records.write(call, terminated_at).await;
+        if let Some(tap) = &self.tap {
+            tap.write(call, terminated_at).await;
+        }
     }
 
     async fn read_all(&self) -> Vec<CdrRecord> {
