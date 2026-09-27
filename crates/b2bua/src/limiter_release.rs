@@ -26,8 +26,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use crate::abort_on_drop::AbortOnDrop;
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::config::B2buaConfig;
@@ -96,16 +96,6 @@ enum Step {
     Send(Vec<u64>, Vec<String>),
     /// Nothing to send before this instant (or before a wake, when `None`).
     Wait(Option<Instant>),
-}
-
-/// Aborts the task it holds when dropped: the drainer dies with its
-/// supervisor.
-struct AbortOnDrop(JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 /// The worker's queue of limiter releases. See the module doc.

@@ -386,6 +386,7 @@ impl B2buaCore {
             limiter,
             crate::limiter_breaker::BreakerConfig::from_config(&config),
             limiter_releases.clone(),
+            crate::limiter_refresh_backlog::RefreshBacklogConfig::from_config(&config),
             metrics.clone(),
         );
         if let Some(breaker) = breaker {

@@ -37,23 +37,25 @@ pub struct HttpCallLimiter {
     timeout: Duration,
     /// The release budget.
     release_timeout: Duration,
-    /// Fail-open aggregation keyed by the limiter target (ADR-0026): a limiter
-    /// outage is ONE episode — rising edge, ~5 s summaries, falling-edge totals
-    /// — ended once 200s have come back for the idle window.
-    fail_open: Arc<observe::WaveSet>,
-    /// The target rendered once — the episode key, so an outage costs no
-    /// per-request allocation.
-    addr_key: String,
 }
 
 /// A request never reached an answer: the transport failed, or the
 /// target's name does not resolve.
 struct TransportFailed;
 
-/// The transport and the target every request of one client goes through.
+/// The transport and the target every request of one client goes through,
+/// and the client's fail-open episode.
 struct Endpoint {
     transport: Arc<dyn HttpTransport>,
     target: LimiterTarget,
+    /// Fail-open aggregation keyed by the limiter target (ADR-0026): a limiter
+    /// outage is ONE episode — rising edge, ~5 s summaries, falling-edge totals
+    /// — ended once 200s have come back for the idle window. A failed health
+    /// probe counts in it, so the episode lasts as long as the outage.
+    fail_open: Arc<observe::WaveSet>,
+    /// The target rendered once — the episode key, so an outage costs no
+    /// per-request allocation.
+    addr_key: String,
 }
 
 impl Endpoint {
@@ -63,6 +65,19 @@ impl Endpoint {
         let addr = self.target.resolve().await.ok_or(TransportFailed)?;
         self.transport.request(addr, req).await.map_err(|_| TransportFailed)
     }
+
+    /// A 200 came back: the episode may end.
+    fn answered(&self) {
+        // One relaxed load while healthy.
+        if self.fail_open.is_active() {
+            self.fail_open.recovered(&self.addr_key);
+        }
+    }
+
+    /// One failure of kind `counter` in the episode.
+    fn failed(&self, counter: &'static str) {
+        self.fail_open.record(&self.addr_key, counter, 1);
+    }
 }
 
 impl HttpCallLimiter {
@@ -70,27 +85,35 @@ impl HttpCallLimiter {
     /// the admit and refresh fail-open budget and [`DEFAULT_RELEASE_TIMEOUT`]
     /// as the release budget.
     pub fn new(transport: Arc<dyn HttpTransport>, addr: SocketAddr, timeout: Duration) -> Self {
-        Self::at(transport, LimiterTarget::addr(addr), timeout)
+        Self::with_target(transport, LimiterTarget::addr(addr), timeout)
     }
 
     /// [`new`](Self::new) for a limiter named `host:port`, resolved on the
-    /// request path ([`LimiterTarget::name`]).
+    /// request path by the host's resolver ([`LimiterTarget::name`]).
     pub fn named(
         transport: Arc<dyn HttpTransport>,
         name: impl Into<String>,
         timeout: Duration,
     ) -> Self {
-        Self::at(transport, LimiterTarget::name(name), timeout)
+        Self::with_target(transport, LimiterTarget::name(name), timeout)
     }
 
-    fn at(transport: Arc<dyn HttpTransport>, target: LimiterTarget, timeout: Duration) -> Self {
+    /// [`new`](Self::new) for any [`LimiterTarget`].
+    pub fn with_target(
+        transport: Arc<dyn HttpTransport>,
+        target: LimiterTarget,
+        timeout: Duration,
+    ) -> Self {
         let addr_key = target.to_string();
         Self {
-            endpoint: Arc::new(Endpoint { transport, target }),
+            endpoint: Arc::new(Endpoint {
+                transport,
+                target,
+                fail_open: crate::lifecycle::backend_waves("call-limiter"),
+                addr_key,
+            }),
             timeout,
             release_timeout: DEFAULT_RELEASE_TIMEOUT,
-            fail_open: crate::lifecycle::backend_waves("call-limiter"),
-            addr_key,
         }
     }
 
@@ -105,21 +128,17 @@ impl HttpCallLimiter {
     async fn call(&self, req: HttpRequest, budget: Duration) -> Option<HttpResponse> {
         match tokio::time::timeout(budget, self.endpoint.send(req)).await {
             Ok(Ok(resp)) if resp.status == 200 => {
-                // A 200 reports the recovery; the episode ends once the
-                // limiter stops failing, so a limiter answering every other
-                // request stays one episode. One relaxed load while healthy.
-                if self.fail_open.is_active() {
-                    self.fail_open.recovered(&self.addr_key);
-                }
+                // The episode ends once the limiter stops failing, so a
+                // limiter answering every other request stays one episode.
+                self.endpoint.answered();
                 Some(resp)
             }
             other => {
-                let counter = match other {
+                self.endpoint.failed(match other {
                     Err(_) => "timeouts",
                     Ok(Err(_)) => "transport_errors",
                     Ok(Ok(_)) => "non_200",
-                };
-                self.fail_open.record(&self.addr_key, counter, 1);
+                });
                 None
             }
         }
@@ -150,12 +169,19 @@ impl LimiterHealth for HttpHealth {
         let answer =
             tokio::time::timeout(self.timeout, self.endpoint.send(HttpRequest::get("/v1/health")))
                 .await;
-        match answer {
+        let serving = match answer {
             Ok(Ok(resp)) if resp.status == 200 => {
                 serde_json::from_slice::<HealthResponse>(&resp.body).is_ok()
             }
             _ => false,
+        };
+        if serving {
+            self.endpoint.answered();
+        } else {
+            self.endpoint.failed("probe");
+            tracing::debug!(limiter = %self.endpoint.addr_key, "limiter health probe failed");
         }
+        serving
     }
 }
 
@@ -258,11 +284,15 @@ mod tests {
         assert!(health.serving().await);
     }
 
+    fn resolver() -> Arc<crate::limiter_target::tests::FakeResolver> {
+        Arc::new(Default::default())
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_name_that_does_not_resolve_fails_as_a_transport_error() {
         let (net, _server) = served().await;
-        // RFC 6761: `.invalid` never resolves.
-        let client = HttpCallLimiter::named(Arc::new(net), "limiter.invalid:8080", BUDGET);
+        let target = LimiterTarget::name_with("limiter:8080", resolver());
+        let client = HttpCallLimiter::with_target(Arc::new(net), target, BUDGET);
         assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Unavailable);
         assert_eq!(client.refresh("c#k", &["x".into()]).await, RefreshOutcome::Unavailable);
         assert_eq!(client.release(&["c#k".into()]).await, ReleaseAnswer::Unavailable);
@@ -270,10 +300,14 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_name_that_resolves_reaches_the_limiter() {
+    async fn a_name_reaches_the_limiter_once_it_resolves() {
         let (net, _server) = served().await;
-        let client = HttpCallLimiter::named(Arc::new(net), "10.0.0.1:8080", BUDGET);
-        assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Admitted);
+        let names = resolver();
+        let target = LimiterTarget::name_with("limiter:8080", names.clone());
+        let client = HttpCallLimiter::with_target(Arc::new(net), target, BUDGET);
+        assert!(!client.health().unwrap().serving().await, "not resolving yet");
+        names.names.lock().unwrap().insert("limiter:8080".into(), laddr());
         assert!(client.health().unwrap().serving().await);
+        assert_eq!(client.admit("c#k", &entries(), false).await, AdmitOutcome::Admitted);
     }
 }

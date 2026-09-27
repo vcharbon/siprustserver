@@ -176,19 +176,6 @@ impl Scene {
         HOLDS.iter().map(|(id, _)| self.store.held(id)).collect()
     }
 
-    /// Advance `total` in 10 ms steps, so a limiter request in flight
-    /// (1 ms each way on the fabric) is answered well inside its budget.
-    async fn run_for(&self, total: Duration) {
-        let mut left = total;
-        let step = Duration::from_millis(10);
-        while !left.is_zero() {
-            let d = left.min(step);
-            tokio::time::advance(d).await;
-            sip_clock::testkit::settle().await;
-            left -= d;
-        }
-    }
-
     /// Settle until the calls are reaped and the store drained, then run
     /// the reaped check.
     async fn assert_drained(&self) {
@@ -196,6 +183,12 @@ impl Scene {
         assert_eq!(self.holds(), [0, 0, 0], "every limiter drained to 0");
         self.b2bua.assert_fully_reaped();
     }
+}
+
+/// Advance `d` in the harness's settled steps, fine enough that a limiter
+/// request in flight is answered inside its budget.
+async fn advance(d: Duration) {
+    b2bua_harness::advance(d.as_millis() as u64).await;
 }
 
 /// The distinct keys of `keys`, sorted.
@@ -238,7 +231,7 @@ async fn a_stalled_limiter_opens_the_breaker_and_its_return_closes_it_within_one
     // The counted call ends while the breaker is open: its release waits.
     let releases = s.sent_on("/v1/release");
     s.hang_up(&mut counted).await;
-    s.run_for(3 * PROBE).await;
+    advance(3 * PROBE).await;
     assert_eq!(s.sent_on("/v1/release"), releases, "no release request while open");
     assert_eq!(s.b2bua.limiter_releases_waiting(), 1, "the counted call's release waits");
     assert_eq!(s.holds(), [1, 1, 1], "the counted call is still held");
@@ -246,7 +239,7 @@ async fn a_stalled_limiter_opens_the_breaker_and_its_return_closes_it_within_one
     // The limiter answers again: within one probe period the breaker
     // closes, the waiting release leaves and the next call is counted.
     s.net.apply_fault(Fault::Resume { dst: laddr() });
-    s.run_for(PROBE + Duration::from_millis(200)).await;
+    advance(PROBE + Duration::from_millis(200)).await;
     assert!(!metrics.limiter_breaker_open(), "the probe closed the breaker");
     assert_eq!(metrics.limiter_breaker_closed_total(), 1);
     assert_eq!(s.b2bua.limiter_releases_waiting(), 0, "the release left on close");
@@ -282,11 +275,11 @@ async fn a_cut_limiter_opens_the_breaker_until_a_probe_answers() {
     for n in 4..=5 {
         dialogs.push(s.establish().await.0);
         assert_eq!(s.sent_on("/v1/admit"), 3, "call {n} sent no admit");
-        s.run_for(2 * PROBE).await;
+        advance(2 * PROBE).await;
     }
 
     s.net.apply_fault(Fault::Resume { dst: laddr() });
-    s.run_for(PROBE + Duration::from_millis(200)).await;
+    advance(PROBE + Duration::from_millis(200)).await;
     dialogs.push(s.establish().await.0);
     assert_eq!(s.sent_on("/v1/admit"), 4, "the breaker closed: the next call admits");
     let metrics = s.b2bua.metrics();
@@ -313,5 +306,47 @@ async fn a_cut_limiter_opens_the_breaker_until_a_probe_answers() {
         admitted,
         "the calls admitted while open release nothing"
     );
+    let _ = s.h.finish().await;
+}
+
+/// Limiter stalled past the lease: a counted call's refreshes are held while
+/// the breaker is open, and its set lapses on the limiter. The breaker's
+/// close sends the held refresh at once, which re-registers the set within
+/// one probe period of the limiter's return, not one refresh period later.
+#[tokio::test(start_paused = true)]
+async fn a_refresh_held_while_open_re_registers_a_lapsed_set_on_close() {
+    let s = Scene::new("limiter-breaker-held-refresh").await;
+    let (mut counted, _) = s.establish().await;
+    assert_eq!(s.holds(), [1, 1, 1], "the call before the outage is counted");
+
+    s.net.apply_fault(Fault::Stall { dst: laddr() });
+    let mut outage = Vec::new();
+    for _ in 0..3 {
+        outage.push(s.establish().await.0);
+    }
+    assert!(s.b2bua.metrics().limiter_breaker_open(), "three failed admits open the breaker");
+    for dialog in &mut outage {
+        s.hang_up(dialog).await;
+    }
+
+    advance(Duration::from_secs(130)).await;
+    assert!(s.b2bua.metrics().limiter_breaker_open(), "still open while stalled");
+    assert!(
+        s.b2bua.metrics().limiter_breaker_refreshes_not_sent_total() >= 3,
+        "the counted call's refreshes were held"
+    );
+    assert_eq!(s.holds(), [0, 0, 0], "the call's set lapsed on the limiter");
+
+    s.net.apply_fault(Fault::Resume { dst: laddr() });
+    advance(PROBE + Duration::from_millis(200)).await;
+    assert!(!s.b2bua.metrics().limiter_breaker_open(), "the probe closed the breaker");
+    assert_eq!(s.holds(), [1, 1, 1], "the held refresh re-registered the set on close");
+
+    s.hang_up(&mut counted).await;
+    s.assert_drained().await;
+    // The outage calls' releases waited past the lease and were given up:
+    // the calls never held anything. Only the counted call is released.
+    assert_eq!(s.b2bua.metrics().limiter_release_dropped_lease_expired_total(), 3);
+    assert_eq!(s.released_keys(), s.admitted_keys()[..1]);
     let _ = s.h.finish().await;
 }

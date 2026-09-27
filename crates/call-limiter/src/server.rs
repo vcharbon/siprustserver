@@ -5,8 +5,9 @@
 //! `GET /v1/health`, `GET /metrics`, `GET /healthz`. `/healthz` answers the
 //! process; `/v1/health` answers only once the store has, so a client's
 //! breaker probing it learns that a request can be served. A malformed body
-//! is `400`; an unknown route is `404`. The handler is pure compute (no real I/O), so the simulated fabric
-//! drives it deterministically under a paused clock.
+//! is `400`; an unknown route is `404`. The handler is pure compute (no real
+//! I/O), so the simulated fabric drives it deterministically under a paused
+//! clock.
 
 use std::sync::Arc;
 

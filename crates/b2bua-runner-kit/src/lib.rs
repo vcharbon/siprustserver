@@ -395,7 +395,8 @@ pub struct RunnerEnv {
     /// `B2BUA_CDR_CAPTURED_HEADERS` — the header names every ring entry
     /// captures the values of, comma-separated (default empty).
     pub cdr_captured_headers: Vec<String>,
-    /// `LIMITER_URL` — shared limiter base URL; empty → `NoopLimiter` (fail-open).
+    /// `LIMITER_URL` as the limiter's `host:port` (boot refuses a malformed
+    /// value); empty when unset → `NoopLimiter` (fail-open).
     pub limiter_url: String,
     /// `LIMITER_TIMEOUT_MS` — per-request fail-open budget (default 150).
     pub limiter_timeout_ms: u64,
@@ -526,7 +527,9 @@ impl RunnerEnv {
             relay_headers: split_csv(&env_or("B2BUA_RELAY_HEADERS", "")),
             cdr_message_ring,
             cdr_captured_headers,
-            limiter_url: env_or("LIMITER_URL", ""),
+            limiter_url: limiter_env::limiter_url_from_lookup(|k| env::var(k).ok())
+                .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"))
+                .unwrap_or_default(),
             limiter_timeout_ms: limiter.timeout_ms,
             limiter_refresh_sec: limiter.refresh_sec,
             limiter_lease_sec: limiter.lease_sec,
@@ -793,20 +796,15 @@ pub struct RunnerBase {
 
 impl RunnerBase {
     /// The default call-limiter client: `HttpCallLimiter` against `LIMITER_URL`,
-    /// or `NoopLimiter` (fail-open) when unset. The URL's `host:port` is
-    /// resolved on the request path: a name that does not resolve yet fails
-    /// each request as a transport error, which the worker's breaker counts,
-    /// and is reached once it resolves.
+    /// or `NoopLimiter` (fail-open) when unset. Its `host:port` is resolved
+    /// on the request path: a name that does not resolve yet fails each
+    /// request as a transport error, which the worker's breaker counts, and
+    /// is reached once it resolves.
     pub fn limiter_from_env(&self) -> Arc<dyn CallLimiter> {
         if self.env.limiter_url.is_empty() {
             return Arc::new(NoopLimiter);
         }
-        let hostport = self
-            .env
-            .limiter_url
-            .strip_prefix("http://")
-            .unwrap_or(&self.env.limiter_url)
-            .trim_end_matches('/');
+        let hostport = self.env.limiter_url.as_str();
         tracing::info!(
             service = %self.name,
             limiter = %hostport,
