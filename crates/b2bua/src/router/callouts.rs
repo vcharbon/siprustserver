@@ -505,9 +505,9 @@ pub(super) fn spawn_release_callout(
                     // going down anyway, so the reject degrades to the release
                     // default (local teardown) instead of a recursive failover
                     // walk; the refusal released the call's set, and the fold
-                    // states the call uncounted. The answer still stands for everything but its route: the release
-                    // is marked under its label and its service slices are
-                    // merged.
+                    // states the call uncounted. The answer still stands for
+                    // everything but its route: the release is marked under its
+                    // label and its service slices are merged.
                     Err(_) => {
                         let mut payload = json!({
                             "reason": "limiter_rejected",
