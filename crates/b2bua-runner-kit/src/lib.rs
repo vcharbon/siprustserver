@@ -83,6 +83,7 @@ use sip_txn::IdGen;
 
 mod capacity_env;
 mod cdr_rabbitmq;
+mod limiter_release_env;
 mod replication;
 pub use cdr_rabbitmq::{
     rabbitmq_cdr_writer_from_lookup, rabbitmq_cdr_writer_from_lookup_with_encoder,
@@ -402,7 +403,7 @@ pub struct RunnerEnv {
     /// below the limiter service's `LIMITER_LEASE_SECONDS` (default 40).
     pub limiter_refresh_sec: i64,
     /// `LIMITER_LEASE_SECONDS` — the limiter service's lease; a release queued
-    /// longer is dropped unsent (default 120).
+    /// longer is given up (default 120).
     pub limiter_lease_sec: i64,
     /// `LIMITER_RELEASE_TIMEOUT_MS` — the release request budget (default 2000).
     pub limiter_release_timeout_ms: u64,
@@ -425,6 +426,9 @@ impl RunnerEnv {
     /// unparseable value — a typo'd knob must never silently become a default.
     pub fn from_env() -> Self {
         let (cdr_message_ring, cdr_captured_headers) = cdr_ring_from_lookup(|k| env::var(k).ok());
+        let limiter_release =
+            limiter_release_env::limiter_release_from_lookup(|k| env::var(k).ok())
+                .unwrap_or_else(|e| panic!("invalid B2BUA config: {e}"));
         Self {
             listen: env_or("B2BUA_LISTEN", "0.0.0.0:5060"),
             advertise: env::var("B2BUA_ADVERTISE").ok(),
@@ -520,13 +524,9 @@ impl RunnerEnv {
             limiter_url: env_or("LIMITER_URL", ""),
             limiter_timeout_ms: env_or("LIMITER_TIMEOUT_MS", "150").parse().unwrap_or(150),
             limiter_refresh_sec: env_or("LIMITER_REFRESH_SECONDS", "40").parse().unwrap_or(40),
-            limiter_lease_sec: env_or("LIMITER_LEASE_SECONDS", "120").parse().unwrap_or(120),
-            limiter_release_timeout_ms: env_or("LIMITER_RELEASE_TIMEOUT_MS", "2000")
-                .parse()
-                .unwrap_or(2000),
-            limiter_release_queue_cap: env_or("LIMITER_RELEASE_QUEUE_CAP", "100000")
-                .parse()
-                .unwrap_or(100_000),
+            limiter_lease_sec: limiter_release.lease_sec,
+            limiter_release_timeout_ms: limiter_release.release_timeout_ms,
+            limiter_release_queue_cap: limiter_release.queue_cap,
             drain_grace_ms: env_or("B2BUA_DRAIN_GRACE_MS", "5000").parse().unwrap_or(5000),
             drain_min_ms: env_or("B2BUA_DRAIN_MIN_MS", "1000").parse().unwrap_or(1000),
             capacity: capacity_env::capacity_from_lookup(|k| env::var(k).ok())

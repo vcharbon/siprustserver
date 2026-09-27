@@ -709,3 +709,58 @@ async fn a_fold_set_of_an_uncounted_call_lost_with_the_primary_lapses_with_its_l
     rig.release_witnesses();
     assert_call_lost_no_cdr(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
 }
+
+/// The primary crashes while the release of a call it ended waits in its
+/// release queue. The call holds `[x, y]` under a short lease; the limiter
+/// stalls, the caller hangs up on the primary, which writes the CDR, removes
+/// the call and replicates the removal, its release queued. The primary
+/// crashes with the queue: the backup holds no copy to release, and the lease
+/// frees the call. The witnesses are intact.
+#[tokio::test(start_paused = true)]
+async fn a_release_queued_on_a_crashed_primary_is_freed_by_the_lease() {
+    const LEASE_SEC: i64 = 60;
+    let mut fh = ha_harness("limiter-release-by-call-queued-release-crash");
+    let alice = fh.agent("alice", ALICE).await;
+    let bob = fh.agent("bob", BOB).await;
+    let rig = LimiterRig::serve_with(LimiterConfig { lease_sec: LEASE_SEC }).await;
+    let (proxy, mut w_b1, mut w_b2) =
+        spawn_workers(&mut fh, &rig, limited_decision(&["x", "y"])).await;
+
+    // ── establish A↔B on the primary; replicate ──────────────────────────
+    let mut call = alice.invite(&bob).with_sdp(OFFER).through(proxy.addr()).send().await;
+    let mut uas = bob.receive("INVITE").await;
+    let primary_ord = cookie_field(uas.request(), "w_pri").unwrap_or_default();
+    uas.respond(200, "OK").with_sdp(ANSWER).await;
+    call.expect(200).await;
+    let mut dialog = call.ack().await;
+    bob.receive("ACK").await;
+    fh.advance(Duration::from_millis(500)).await;
+    assert_eq!(rig.holds(), [1, 1, 0], "the established call holds x and y");
+    let backup_sut = if primary_ord == "b1" { &w_b2 } else { &w_b1 };
+    let call_ref = replicated_call_ref(&fh, backup_sut, &primary_ord).await;
+
+    // ── the limiter stalls; the call ends on the primary ─────────────────
+    rig.http.apply_fault(http_net::Fault::Stall { dst: laddr() });
+    scenario_harness::callflow::hangup(&mut dialog, &bob).await;
+    fh.advance(Duration::from_millis(500)).await;
+    let (primary, backup): (&mut ReplicatedB2buaSut, &mut ReplicatedB2buaSut) =
+        if primary_ord == "b1" { (&mut w_b1, &mut w_b2) } else { (&mut w_b2, &mut w_b1) };
+    assert!(!primary.serves(&call_ref), "the primary removed the call");
+    assert!(!backup.holds_any_trace(&call_ref).await, "the removal reached the backup");
+    assert_eq!(primary.metrics().limiter_release_queue_depth(), 1, "its release waits");
+    assert_eq!(rig.holds(), [1, 1, 0], "the stalled limiter applied nothing");
+
+    // ── the primary crashes with its release queue ───────────────────────
+    primary.crash();
+    proxy.set_health(&primary_ord, WorkerHealth::Dead);
+    rig.http.apply_fault(http_net::Fault::Resume { dst: laddr() });
+    for _ in 0..LEASE_SEC + 5 {
+        fh.advance(Duration::from_secs(1)).await;
+        rig.refresh_witnesses();
+    }
+    assert_eq!(rig.store.stats().lease_expired_calls, 1, "the lease freed the call");
+    assert_eq!(rig.store.stats().releases_total, 0, "no node released it");
+    assert_eq!(rig.holds(), [0, 0, 0], "the witnesses are intact");
+    rig.release_witnesses();
+    assert_call_fully_over(&[&w_b1, &w_b2], &call_ref, &rig.store).await;
+}

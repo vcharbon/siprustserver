@@ -28,8 +28,11 @@ const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0
 
 /// A limiter backend over a real store that applies every admit and drops
 /// every release: the SUT releases its calls, the store keeps counting them.
+/// With `answers` off no release is ever answered either, so each stays in
+/// the SUT's release queue.
 struct DropsReleases {
     store: Arc<CallStore>,
+    answers: bool,
 }
 
 #[async_trait]
@@ -49,7 +52,11 @@ impl CallLimiter for DropsReleases {
         }
     }
     async fn release(&self, _keys: &[String]) -> ReleaseAnswer {
-        ReleaseAnswer::Released
+        if self.answers {
+            ReleaseAnswer::Released
+        } else {
+            ReleaseAnswer::Unavailable
+        }
     }
     async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
         match self.store.refresh(key, ids) {
@@ -83,8 +90,14 @@ fn routes_holding(ids: &'static [(&'static str, i64)]) -> Arc<ScriptedDecisionEn
 /// One call through a SUT whose limiter drops releases: established, hung up
 /// by alice, reaped. Returns the scene for the caller's reaped check.
 async fn call_through_a_backend_that_drops_releases(name: &str) -> B2buaScene {
+    call_through_a_backend(name, true).await
+}
+
+/// One call through a SUT whose limiter drops releases, and answers them when
+/// `answers`: established, hung up by alice, its call removed.
+async fn call_through_a_backend(name: &str, answers: bool) -> B2buaScene {
     let store = Arc::new(CallStore::new(LimiterConfig::default(), Clock::test_at(0)));
-    let limiter = Arc::new(DropsReleases { store: store.clone() });
+    let limiter = Arc::new(DropsReleases { store: store.clone(), answers });
     let s = B2buaScene::with_b2bua(name, move |_| {
         B2buaSut::builder(routes_holding(&[("x", 10), ("y", 10)]))
             .limiter(limiter)
@@ -93,7 +106,7 @@ async fn call_through_a_backend_that_drops_releases(name: &str) -> B2buaScene {
     .await;
     let mut dialog = s.establish().await;
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.is_reaped()).await;
+    settle_until(|| s.b2bua.calls_reaped() && s.b2bua.limiter_count().released == 2).await;
     s
 }
 
@@ -109,7 +122,21 @@ async fn a_declared_limiter_leak_passes_the_reaped_check() {
     let s = call_through_a_backend_that_drops_releases("reaped-limiter-declared-leak").await;
     let count = s.b2bua.limiter_count();
     assert_eq!((count.admitted, count.released, count.stored), (2, 2, Some(2)));
-    let _ = s.finish_leaving(LimiterLeak { unreleased: 0, stored: 2 }).await;
+    let _ = s.finish_leaving(LimiterLeak { unreleased: 0, stored: 2, queued: 0 }).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "limiter leak: 1 release(s) still queued; declared 0")]
+async fn a_release_left_in_the_release_queue_fails_the_reaped_check() {
+    let s = call_through_a_backend("reaped-limiter-release-queued", false).await;
+    s.b2bua.assert_fully_reaped_leaving(LimiterLeak { unreleased: 0, stored: 2, queued: 0 });
+}
+
+#[tokio::test]
+async fn a_declared_queued_release_passes_the_reaped_check() {
+    let s = call_through_a_backend("reaped-limiter-declared-queued", false).await;
+    assert_eq!(s.b2bua.limiter_releases_waiting(), 1);
+    let _ = s.finish_leaving(LimiterLeak { unreleased: 0, stored: 2, queued: 1 }).await;
 }
 
 /// The call-state checks judge the calls alone: a hold the store still
@@ -118,7 +145,7 @@ async fn a_declared_limiter_leak_passes_the_reaped_check() {
 async fn the_call_state_checks_leave_the_limiter_to_the_full_check() {
     let s = call_through_a_backend_that_drops_releases("reaped-calls-only").await;
     s.b2bua.assert_calls_reaped();
-    let _ = s.finish_leaving(LimiterLeak { unreleased: 0, stored: 2 }).await;
+    let _ = s.finish_leaving(LimiterLeak { unreleased: 0, stored: 2, queued: 0 }).await;
 }
 
 /// A call still established fails the call-state checks; once it ends they

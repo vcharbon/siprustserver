@@ -173,7 +173,13 @@ async fn fail_open_admits_when_limiter_is_cut() {
     assert_eq!(b2bua.limiter_count().failed_open, 1, "the admit failed open");
 
     hangup(&mut dialog, &bob).await;
+    // The release the admit owes waits in the release queue while the limiter
+    // is cut, and leaves once it is back.
+    settle_until(|| b2bua.calls_reaped()).await;
+    assert_eq!(b2bua.limiter_releases_waiting(), 1, "the release waits for the limiter");
+    http.apply_fault(Fault::Resume { dst: laddr() });
     assert_drained(&b2bua, &store).await;
+    assert_eq!(store.stats().releases_total, 1, "the release landed once the limiter was back");
     let _ = h.finish().await;
 }
 

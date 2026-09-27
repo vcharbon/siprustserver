@@ -106,7 +106,7 @@ pub struct B2buaConfig {
     /// harness lowers this for fast paused-clock tests.
     pub limiter_refresh_sec: i64,
     /// The limiter's lease, seconds (its `LIMITER_LEASE_SECONDS`). A release
-    /// queued longer than one lease is dropped unsent: the limiter already let
+    /// queued longer than one lease is given up: the limiter already let
     /// the call's set lapse. Default 120.
     pub limiter_lease_sec: i64,
     /// Most releases the worker's limiter release queue holds; at the cap the
@@ -491,6 +491,9 @@ impl Default for B2buaConfig {
 }
 
 impl B2buaConfig {
+    /// Longest limiter lease (s) the worker accepts: one day.
+    pub const MAX_LIMITER_LEASE_SEC: i64 = 86_400;
+
     /// Absolute minimum OPTIONS keepalive (s). Below 2 min a mid-dialog OPTIONS
     /// poke breaks long-hold traffic (see [`keepalive_interval_sec`] doc). A
     /// **production** floor only — the paused-clock test harness builds configs
@@ -532,12 +535,25 @@ impl B2buaConfig {
     /// refuses to start on `Err`; unit/sim harnesses construct configs directly
     /// and skip it). Returns the first violation as a human-readable message.
     pub fn validate(&self) -> Result<(), String> {
-        if self.limiter_lease_sec <= 0 || self.limiter_release_queue_cap == 0 {
+        if !(1..=Self::MAX_LIMITER_LEASE_SEC).contains(&self.limiter_lease_sec) {
             return Err(format!(
-                "limiter_lease_sec={} / limiter_release_queue_cap={}: the release queue \
-                 needs a positive lease and a positive cap",
-                self.limiter_lease_sec, self.limiter_release_queue_cap
+                "limiter_lease_sec={} outside 1..={} s: the limiter's lease bounds how \
+                 long a queued release is worth sending",
+                self.limiter_lease_sec,
+                Self::MAX_LIMITER_LEASE_SEC
             ));
+        }
+        if self.limiter_refresh_sec <= 0 || self.limiter_refresh_sec >= self.limiter_lease_sec {
+            return Err(format!(
+                "limiter_refresh_sec={} not in 1..{} (limiter_lease_sec): a counted call \
+                 must refresh inside its lease",
+                self.limiter_refresh_sec, self.limiter_lease_sec
+            ));
+        }
+        if self.limiter_release_queue_cap == 0 {
+            return Err("limiter_release_queue_cap=0: the release queue needs room for \
+                        one release"
+                .to_string());
         }
         if self.reaper_enabled && self.max_messages_per_call_lifetime == 0 {
             return Err("max_messages_per_call_lifetime=0: the per-call work bound has no \
@@ -760,6 +776,24 @@ mod tests {
     #[test]
     fn default_config_validates() {
         assert!(B2buaConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn the_limiter_lease_refresh_and_release_queue_bounds_are_checked() {
+        let with = |f: fn(&mut B2buaConfig)| {
+            let mut c = B2buaConfig::default();
+            f(&mut c);
+            c.validate()
+        };
+        let e = with(|c| c.limiter_lease_sec = 0).expect_err("zero lease");
+        assert!(e.contains("limiter_lease_sec=0"), "{e}");
+        let e = with(|c| c.limiter_lease_sec = i64::MAX).expect_err("lease past the bound");
+        assert!(e.contains("limiter_lease_sec="), "{e}");
+        let e = with(|c| c.limiter_refresh_sec = 120).expect_err("refresh at the lease");
+        assert!(e.contains("limiter_refresh_sec=120"), "{e}");
+        let e = with(|c| c.limiter_release_queue_cap = 0).expect_err("zero cap");
+        assert!(e.contains("limiter_release_queue_cap=0"), "{e}");
+        assert!(with(|c| c.limiter_lease_sec = B2buaConfig::MAX_LIMITER_LEASE_SEC).is_ok());
     }
 
     #[test]

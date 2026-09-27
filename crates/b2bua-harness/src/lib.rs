@@ -994,6 +994,7 @@ impl B2buaSut {
     ///   6. every limiter hold the SUT was granted is released exactly once,
     ///      its limiter store counts no hold, and the default limiter never
     ///      failed open ([`limiter_count`](Self::limiter_count)).
+    ///   7. the worker's limiter release queue is empty.
     ///
     /// A new leak dimension (e.g. the `b2bua_timer_queue_len − b2bua_timer_live`
     /// tombstone gap from the CLAUDE.md timer hazard) is added here once and is
@@ -1008,14 +1009,28 @@ impl B2buaSut {
     }
 
     /// [`assert_fully_reaped`](Self::assert_fully_reaped) for a scenario that
-    /// leaves limiter holds behind on purpose: check 6 requires exactly
-    /// `leak`, every other check is unchanged.
+    /// leaves limiter holds or queued releases behind on purpose: checks 6
+    /// and 7 require exactly `leak`, every other check is unchanged.
     #[track_caller]
     pub fn assert_fully_reaped_leaving(&self, leak: LimiterLeak) {
         self.assert_calls_reaped();
         // 6. every limiter hold granted is released once, the store counts
         //    none, and the default limiter never failed open.
         self.limiter.assert_drained(leak);
+        // 7. no release waits in the worker's release queue.
+        assert_eq!(
+            self.limiter_releases_waiting(),
+            leak.queued,
+            "limiter leak: {} release(s) still queued; declared {}",
+            self.limiter_releases_waiting(),
+            leak.queued
+        );
+    }
+
+    /// [`is_reaped`](Self::is_reaped) for a scenario that leaves `leak.queued`
+    /// releases in the worker's release queue on purpose.
+    pub fn is_reaped_leaving(&self, leak: LimiterLeak) -> bool {
+        self.calls_reaped() && self.limiter_releases_waiting() == leak.queued
     }
 
     /// Checks 1–5 of [`assert_fully_reaped`](Self::assert_fully_reaped): every
@@ -1158,7 +1173,7 @@ impl B2buaScene {
     /// [`finish`](Self::finish) for a scenario that leaves limiter holds
     /// behind on purpose: the reaped check requires exactly `leak`.
     pub async fn finish_leaving(self, leak: LimiterLeak) -> RunReport {
-        settle_until(|| self.b2bua.is_reaped()).await;
+        settle_until(|| self.b2bua.is_reaped_leaving(leak)).await;
         self.b2bua.assert_fully_reaped_leaving(leak);
         self.h.finish().await
     }

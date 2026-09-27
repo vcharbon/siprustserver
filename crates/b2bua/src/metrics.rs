@@ -228,12 +228,13 @@ struct Inner {
     limiter_refresh_released: AtomicU64,
     limiter_refresh_dropped: AtomicU64,
     // The limiter release queue (`limiter_release`): entries waiting, sends of
-    // a key after its first, and entries dropped unsent (past the lease, at
+    // a key after its first, and entries given up (past the lease, at
     // the cap).
     limiter_release_queue_depth: AtomicU64,
     limiter_release_retries: AtomicU64,
     limiter_release_dropped_lease_expired: AtomicU64,
     limiter_release_dropped_cap: AtomicU64,
+    limiter_release_drainer_restarts: AtomicU64,
     // Re-hydration diagnostics (long-call-on-reboot study, 2026-06-05). How a
     // rebooted primary's bootstrap passes terminate: `seeded` = a pass reached
     // the first catch-up `Noop` (the peer streamed the full `bak:{me}` keyset);
@@ -817,6 +818,11 @@ impl B2buaMetrics {
         limiter_release_dropped_cap_total,
         limiter_release_dropped_cap
     );
+    counter!(
+        bump_limiter_release_drainer_restarts,
+        limiter_release_drainer_restarts_total,
+        limiter_release_drainer_restarts
+    );
     counter!(bump_repl_bootstrap_seeded, repl_bootstrap_seeded_total, repl_bootstrap_seeded);
     counter!(bump_repl_bootstrap_stalled, repl_bootstrap_stalled_total, repl_bootstrap_stalled);
 
@@ -1121,6 +1127,7 @@ impl B2buaMetrics {
         counter("b2bua_limiter_refresh_reregistered_total", "refreshes that re-registered a counted call's set the limiter no longer held (a lapsed lease across a takeover, a limiter restart)", self.limiter_refresh_reregistered_total());
         counter("b2bua_limiter_refresh_released_total", "refreshes refused because the limiter released the call's key: a partitioned peer's reap released a call still served (refused for one lease, then re-registered) (ADR-0038)", self.limiter_refresh_released_total());
         counter("b2bua_limiter_refresh_dropped_total", "refreshes refused because an admit of the call's key dropped its set (a refusal, an empty replacement, a reroute whose answer was lost): the call goes uncounted and still releases its key at its end (ADR-0038)", self.limiter_refresh_dropped_total());
+        counter("b2bua_limiter_release_drainer_restarts_total", "release-queue drainers that panicked and were restarted with the queue intact — expected 0", self.limiter_release_drainer_restarts_total());
         counter("b2bua_limiter_release_retries_total", "queued releases put back to wait after a failed send (unreachable, slow or erroring limiter), one per key per failed send", self.limiter_release_retries_total());
         counter("b2bua_repl_terminal_lost_total", "backup-held deferred terminals whose primary never reclaimed them (dead past the replica TTL): limiter released + memory freed by the periodic reap, but NO CDR — the accepted lost-CDR double-failure (ADR-0020 X3)", self.repl_terminal_lost_total());
         counter("b2bua_repl_bootstrap_seeded_total", "rebooted-primary bootstrap passes that reached the first catch-up Noop (peer streamed the full bak:{me} keyset)", self.repl_bootstrap_seeded_total());
@@ -1208,7 +1215,7 @@ impl B2buaMetrics {
             s.push_str(&format!("b2bua_repl_forward_flush_refused_total{{op=\"{op}\"}} {v}\n"));
         }
 
-        s.push_str("# HELP b2bua_limiter_release_dropped_total queued limiter releases dropped unsent (reason=lease_expired: queued longer than the limiter's lease, which already freed the call; reason=cap: the oldest entry of a full queue, freed by its lease)\n# TYPE b2bua_limiter_release_dropped_total counter\n");
+        s.push_str("# HELP b2bua_limiter_release_dropped_total queued limiter releases given up on before the limiter answered them (reason=lease_expired: queued longer than the limiter's lease, which already freed the call; reason=cap: the oldest entry of a full queue, freed by its lease unless a send already in flight lands)\n# TYPE b2bua_limiter_release_dropped_total counter\n");
         s.push_str(&format!(
             "b2bua_limiter_release_dropped_total{{reason=\"lease_expired\"}} {}\n",
             self.limiter_release_dropped_lease_expired_total()

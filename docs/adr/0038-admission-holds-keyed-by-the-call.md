@@ -30,7 +30,8 @@ and a lost release could not be retried.
    The initial route admits with it off; every route fold with it on (a
    refused replacement frees the ended leg before the failure is consulted).
 3. **`release(keys)` is idempotent per key.** One request names one or
-   more calls; for each it drops the set and fences the key for one lease: an admit or a refresh landing after the call ended re-creates
+   more calls; for each it drops the set and fences the key for one lease:
+   an admit or a refresh landing after the call ended re-creates
    nothing and is refused with its own reason, so every order of admit,
    refresh and release on one call is safe, and a second release from another
    node frees nothing. An admit that drops the set without replacing it (a cap
@@ -96,13 +97,17 @@ and a lost release could not be retried.
    longer than the admit's (2 s). A failed send keeps its keys, and the next
    send waits a backoff that doubles with each consecutive failure: one
    limiter, one backoff, so the waiting keys stay one batch. An entry is the
-   key and its lease expiry, nothing of the call. An entry that has waited
-   one lease is dropped unsent, since the limiter has let the call's set
-   lapse; at the queue's cap the oldest entry is dropped; both drops are
-   counted. The queue is not replicated: a worker that dies loses it and the
-   lease frees what it held. A circuit breaker drives the queue through
-   `hold` and `resume`: nothing is sent while it is held, and a resume sends
-   every waiting key at once.
+   key and its lease expiry, nothing of the call: about 200 bytes with an
+   80-byte key, so one lease of calls ending at 500/s holds about 12 MB. An
+   entry that has waited one lease is given up, since the limiter has let
+   the call's set lapse; at the queue's cap the oldest entry is given up;
+   both are counted. A given-up entry may still land if a send carrying it
+   was in flight. The queue is not replicated: a worker that dies loses it
+   and the lease frees what it held. Its sender is supervised: one that
+   panics is restarted with the queue intact, and counted. A circuit breaker
+   drives the queue through `hold` and `resume`: nothing is sent while it is
+   held, and a resume sends every waiting key at once. The worker's lease is
+   the limiter's, at most one day, and its refresh period is below it.
 
 ## Lease, refresh and the replica TTL
 
@@ -155,11 +160,11 @@ cells that prove re-registration run the deployed relation.
   no CDR and no removal, those of calls whose admit failed open included.
   What waits is the release queue, at most one lease of ending calls per
   worker and never more than its cap, read on
-  `b2bua_limiter_release_queue_depth`, `b2bua_limiter_release_retries_total`
-  and `b2bua_limiter_release_dropped_total{reason=lease_expired|cap}`. A
-  release lost with its worker or dropped from the queue is freed by the
-  lease, so the limiter's counts read high by those calls for up to one
-  lease.
+  `b2bua_limiter_release_queue_depth`, `b2bua_limiter_release_retries_total`,
+  `b2bua_limiter_release_dropped_total{reason=lease_expired|cap}` and
+  `b2bua_limiter_release_drainer_restarts_total`. A release lost with its
+  worker or given up by the queue is freed by the lease, so the limiter's
+  counts read high by those calls for up to one lease.
 - `LimiterRefresh` entries are not cohort-smoothed on a bulk reclaim: the
   calls one node reclaims refresh together (batching is follow-up work).
 - Replica bodies decode strictly: a body without the limiter key is dropped at

@@ -172,7 +172,7 @@ pub(super) async fn process_result(
             SoftBoundedEffect::ReleaseLimiter { key } => {
                 ctx.limiter_releases.push(key);
                 if crate::trace::sampled(&result.call) {
-                    crate::trace::emit::limiter(&result.call, now_ms, "release", key);
+                    crate::trace::emit::limiter(&result.call, now_ms, "release queued", key);
                 }
             }
         }

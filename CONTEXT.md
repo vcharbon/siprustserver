@@ -650,8 +650,8 @@ divergence hazard; would not survive failover, while `limiter` and
 **Release queue**:
 The worker's queue of limiter releases. The **obligation**'s limiter
 release is handed to it and the call ends in its last turn; the queue sends
-every waiting key in one request, backs off after a failed send, and drops
-an entry that waited one lease or is the oldest at its cap (ADR-0038). It
+every waiting key in one request, backs off after a failed send, and gives
+up an entry that waited one lease or is the oldest at its cap (ADR-0038). It
 holds keys only and is not replicated: the lease covers a crashed worker.
 
 **Last-touched stamp**:

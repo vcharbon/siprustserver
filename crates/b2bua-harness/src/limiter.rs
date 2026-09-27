@@ -54,11 +54,14 @@ pub struct LimiterLeak {
     /// Holds the registered store still counts (a release the store never
     /// applied, an increment the SUT never learned of).
     pub stored: i64,
+    /// Releases still waiting in the worker's release queue (a limiter that
+    /// never answers them before the scenario ends).
+    pub queued: usize,
 }
 
 impl LimiterLeak {
     /// Nothing left behind: the reaped check's default.
-    pub const NONE: Self = Self { unreleased: 0, stored: 0 };
+    pub const NONE: Self = Self { unreleased: 0, stored: 0, queued: 0 };
 }
 
 /// The SUT's limiter count at one instant.
@@ -482,7 +485,7 @@ mod tests {
     async fn a_declared_unreleased_hold_matches() {
         let (limiter, ledger) = counting(Arc::new(Grants));
         limiter.admit("c1", &[entry("x"), entry("y")], false).await;
-        ledger.count(None).assert_matches(LimiterLeak { unreleased: 2, stored: 0 });
+        ledger.count(None).assert_matches(LimiterLeak { unreleased: 2, stored: 0, queued: 0 });
     }
 
     #[test]

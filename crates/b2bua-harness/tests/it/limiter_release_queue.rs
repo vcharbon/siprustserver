@@ -3,7 +3,7 @@
 //! A call's end writes its CDR and removes the call in its last turn, whatever
 //! the limiter does: the release of its key goes to the worker's release
 //! queue. The queue sends at once, batches every due key into one request,
-//! retries a failed send with backoff, drops an entry unsent once it has
+//! retries a failed send with backoff, gives up an entry once it has
 //! waited one lease (the limiter already let the call's set lapse) and drops
 //! its oldest entry at its cap. Both drops are counted.
 //!
@@ -11,6 +11,7 @@
 //! admitted under a call of its own, so a surplus release reads below the
 //! witness instead of vanishing under the store's floor at 0.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,6 +19,7 @@ use async_trait::async_trait;
 use b2bua::config::B2buaConfig;
 use b2bua::decision::test_adapter::route_to;
 use b2bua::decision::{CallLimiterEntry, NewCallResponse, ScriptedDecisionEngine};
+use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome, ReleaseAnswer};
 use b2bua_harness::{settle_until, B2buaSut, WitnessRig};
 use call_limiter::LimiterConfig;
 use http_net::{HttpRequest, HttpResponse, HttpService};
@@ -98,6 +100,15 @@ struct Scene {
 
 impl Scene {
     async fn new(name: &str, tune: impl FnOnce(&mut B2buaConfig) + 'static) -> Self {
+        Self::with_client(name, tune, |client| client).await
+    }
+
+    /// [`new`](Self::new) with the SUT's limiter client wrapped by `wrap`.
+    async fn with_client(
+        name: &str,
+        tune: impl FnOnce(&mut B2buaConfig) + 'static,
+        wrap: impl FnOnce(Arc<dyn CallLimiter>) -> Arc<dyn CallLimiter>,
+    ) -> Self {
         let h = Harness::new(name);
         let alice = h.agent("alice", "127.0.0.1:5060").await;
         let bob = h.agent("bob", "127.0.0.1:5070").await;
@@ -123,7 +134,7 @@ impl Scene {
                 .build(),
         );
         let b2bua = B2buaSut::builder(decision)
-            .limiter(rig.client.clone())
+            .limiter(wrap(rig.client.clone()))
             .limiter_store(rig.store.clone())
             .tune(move |c| {
                 c.keepalive_interval_sec = 3_600;
@@ -263,10 +274,10 @@ async fn the_limiter_back_drains_the_queue_in_one_batched_request() {
     let _ = s.h.finish().await;
 }
 
-/// Limiter down past the lease: the entry is dropped unsent and counted; the
+/// Limiter down past the lease: the entry is given up and counted, never sent again; the
 /// limiter's lease already freed the call.
 #[tokio::test(start_paused = true)]
-async fn a_release_queued_past_the_lease_is_dropped_unsent() {
+async fn a_release_queued_past_the_lease_is_given_up() {
     let s = Scene::new("release-queue-lease-expired", |_| {}).await;
     let mut dialog = s.establish().await;
     s.rig.expect_holds([1, 1, 1], "the call holds its three limiters").await;
@@ -361,6 +372,48 @@ async fn a_call_ending_during_a_limiter_outage_is_not_delayed_by_the_limiter() {
         "the call's key was released"
     );
     s.rig.expect_drained("the call never held anything").await;
+    s.b2bua.assert_fully_reaped();
+    let _ = s.h.finish().await;
+}
+
+/// The limiter `inner`, except that the first release request panics the
+/// task sending it.
+struct FirstReleasePanics {
+    inner: Arc<dyn CallLimiter>,
+    released: AtomicBool,
+}
+
+#[async_trait]
+impl CallLimiter for FirstReleasePanics {
+    async fn admit(&self, key: &str, entries: &[LimiterEntry], drop: bool) -> AdmitOutcome {
+        self.inner.admit(key, entries, drop).await
+    }
+    async fn release(&self, keys: &[String]) -> ReleaseAnswer {
+        assert!(self.released.swap(true, Ordering::SeqCst), "the first release panics");
+        self.inner.release(keys).await
+    }
+    async fn refresh(&self, key: &str, ids: &[String]) -> RefreshOutcome {
+        self.inner.refresh(key, ids).await
+    }
+}
+
+/// The release queue's sender panics on the call's release: it is restarted,
+/// counted, and sends the release the panic interrupted.
+#[tokio::test(start_paused = true)]
+async fn a_release_sender_that_panics_is_restarted_and_the_release_lands() {
+    let s = Scene::with_client(
+        "release-queue-drainer-restart",
+        |_| {},
+        |inner| Arc::new(FirstReleasePanics { inner, released: AtomicBool::new(false) }),
+    )
+    .await;
+    let mut dialog = s.establish().await;
+    s.rig.expect_holds([1, 1, 1], "the call holds its three limiters").await;
+    s.hang_up(&mut dialog).await;
+    settle_until(|| s.b2bua.is_reaped()).await;
+    assert_eq!(s.b2bua.metrics().limiter_release_drainer_restarts_total(), 1);
+    assert_eq!(s.queued(), 0, "the restarted sender sent the release");
+    s.rig.expect_drained("the release landed after the restart").await;
     s.b2bua.assert_fully_reaped();
     let _ = s.h.finish().await;
 }

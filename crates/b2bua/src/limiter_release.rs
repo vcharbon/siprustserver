@@ -2,29 +2,32 @@
 //!
 //! Every release of a call's limiter key is handed to the queue and the caller
 //! moves on, so a call writes its CDR and is removed in its last turn whatever
-//! the limiter does. One drainer task ([`ReleaseQueue::run`]) sends: at once
-//! when nothing is in flight, every waiting key in one request (up to
+//! the limiter does. One drainer ([`ReleaseQueue::run`]) sends: at once when
+//! nothing is in flight, every waiting key in one request (up to
 //! [`MAX_BATCH`] keys), under the client's release budget. A failed send keeps
 //! its keys, and the next send waits a backoff that doubles with each
 //! consecutive failure; the limiter is one endpoint, so the backoff is the
-//! queue's, not the entry's, and the keys stay in one batch.
+//! queue's, not the entry's, and the keys stay in one batch. A drainer that
+//! panics is restarted with the queue intact, and counted.
 //!
-//! Bounds: an entry that has waited one lease is dropped unsent (the limiter
-//! already let the call's set lapse), and a push onto a full queue drops the
-//! oldest entry; both drops are counted. An entry is a key and its lease
-//! expiry, nothing of the call. The queue is not replicated: a worker that
-//! dies loses it, and the lease frees what it held; a release is idempotent
-//! per key, so a key another node also releases frees nothing twice.
+//! Bounds: an entry that has waited one lease (at most [`MAX_LEASE`]) is
+//! given up (the limiter already let the call's set lapse), and a push onto a
+//! full queue gives up the oldest entry; both are counted. An entry is a key
+//! and its lease expiry, nothing of the call. The queue is not replicated: a
+//! worker that dies loses it, and the lease frees what it held; a release is
+//! idempotent per key, so a key another node also releases frees nothing
+//! twice.
 //!
 //! [`ReleaseQueue::hold`] and [`ReleaseQueue::resume`] are the seam a circuit
 //! breaker drives: while held nothing is sent (leases still expire), and a
 //! resume sends every waiting key at once.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::config::B2buaConfig;
@@ -40,6 +43,9 @@ pub const BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 /// The longest wait between two sends while the limiter keeps failing.
 pub const BACKOFF_MAX: Duration = Duration::from_secs(5);
 
+/// The longest lease the queue honours.
+pub const MAX_LEASE: Duration = Duration::from_secs(B2buaConfig::MAX_LIMITER_LEASE_SEC as u64);
+
 /// The queue's bounds.
 #[derive(Clone, Copy, Debug)]
 pub struct ReleaseQueueConfig {
@@ -50,10 +56,10 @@ pub struct ReleaseQueueConfig {
 }
 
 impl ReleaseQueueConfig {
-    /// The bounds `config` states.
+    /// The bounds `config` states, the lease clamped to [`MAX_LEASE`].
     pub fn from_config(config: &B2buaConfig) -> Self {
         Self {
-            lease: Duration::from_secs(config.limiter_lease_sec.max(0) as u64),
+            lease: Duration::from_secs(config.limiter_lease_sec.max(0) as u64).min(MAX_LEASE),
             cap: config.limiter_release_queue_cap.max(1),
         }
     }
@@ -61,7 +67,8 @@ impl ReleaseQueueConfig {
 
 /// One waiting release.
 struct Entry {
-    key: String,
+    /// The key, shared with [`Waiting::by_key`].
+    key: Arc<str>,
     /// Past this instant the limiter has let the call's set lapse.
     lease_expires_at: Instant,
 }
@@ -71,7 +78,7 @@ struct Waiting {
     /// Entries by push order: the first is the oldest and expires first.
     entries: BTreeMap<u64, Entry>,
     /// The push order of every waiting key.
-    by_key: HashMap<String, u64>,
+    by_key: HashMap<Arc<str>, u64>,
     next_seq: u64,
     /// Consecutive failed sends.
     failures: u32,
@@ -87,6 +94,16 @@ enum Step {
     Send(Vec<u64>, Vec<String>),
     /// Nothing to send before this instant (or before a wake, when `None`).
     Wait(Option<Instant>),
+}
+
+/// Aborts the task it holds when dropped: the drainer dies with its
+/// supervisor.
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// The worker's queue of limiter releases. See the module doc.
@@ -115,10 +132,19 @@ impl ReleaseQueue {
         })
     }
 
+    /// The queue's state. A panic under the lock leaves the state whole
+    /// (every step keeps `entries` and `by_key` in step or loses a key the
+    /// lease frees), so a poisoned lock is taken as it is.
+    fn lock(&self) -> MutexGuard<'_, Waiting> {
+        self.waiting.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Queue the release of `key` and return at once. A key already waiting
-    /// stays one entry; on a full queue the oldest entry is dropped.
+    /// stays one entry; on a full queue the oldest entry is given up.
     pub fn push(&self, key: &str) {
-        let mut w = self.waiting.lock().unwrap();
+        let now = Instant::now();
+        let mut w = self.lock();
+        self.expire(&mut w, now);
         if w.by_key.contains_key(key) {
             return;
         }
@@ -129,9 +155,10 @@ impl ReleaseQueue {
         }
         let seq = w.next_seq;
         w.next_seq += 1;
-        let lease_expires_at = Instant::now() + self.config.lease;
-        w.entries.insert(seq, Entry { key: key.to_string(), lease_expires_at });
-        w.by_key.insert(key.to_string(), seq);
+        let key: Arc<str> = Arc::from(key);
+        let lease_expires_at = now + self.config.lease;
+        w.entries.insert(seq, Entry { key: key.clone(), lease_expires_at });
+        w.by_key.insert(key, seq);
         self.publish_depth(&w);
         drop(w);
         self.wake.notify_one();
@@ -139,24 +166,24 @@ impl ReleaseQueue {
 
     /// Releases waiting, the batch in flight included.
     pub fn waiting(&self) -> usize {
-        self.waiting.lock().unwrap().entries.len()
+        self.lock().entries.len()
     }
 
     /// The waiting keys, oldest first.
     pub fn waiting_keys(&self) -> Vec<String> {
-        self.waiting.lock().unwrap().entries.values().map(|e| e.key.clone()).collect()
+        self.lock().entries.values().map(|e| e.key.to_string()).collect()
     }
 
     /// Stop sending (a breaker opened): entries wait, and still expire.
     pub fn hold(&self) {
-        self.waiting.lock().unwrap().held = true;
+        self.lock().held = true;
     }
 
     /// Send again (a breaker closed): every waiting key leaves at once,
     /// whatever backoff a failed send had set.
     pub fn resume(&self) {
         {
-            let mut w = self.waiting.lock().unwrap();
+            let mut w = self.lock();
             w.held = false;
             w.failures = 0;
             w.retry_at = None;
@@ -164,8 +191,27 @@ impl ReleaseQueue {
         self.wake.notify_one();
     }
 
-    /// The drainer: sends until the task is aborted with the worker.
+    /// The supervised drainer, until the task is aborted with the worker. A
+    /// drainer that panics is logged, counted and started again; what it was
+    /// sending is still queued and leaves with the next send.
     pub async fn run(self: Arc<Self>) {
+        loop {
+            let mut drainer = AbortOnDrop(tokio::spawn(self.clone().drain()));
+            match (&mut drainer.0).await {
+                Err(e) if e.is_panic() => {
+                    self.metrics.bump_limiter_release_drainer_restarts();
+                    tracing::error!(
+                        waiting = self.waiting(),
+                        "limiter release drainer panicked; restarting it"
+                    );
+                }
+                _ => return,
+            }
+        }
+    }
+
+    /// Send what is due, then wait for the next due instant or a push.
+    async fn drain(self: Arc<Self>) {
         loop {
             match self.step(Instant::now()) {
                 Step::Send(seqs, keys) => {
@@ -183,10 +229,10 @@ impl ReleaseQueue {
         }
     }
 
-    /// Drop the entries past their lease, then say what to send, or until
+    /// Give up the entries past their lease, then say what to send, or until
     /// when to wait.
     fn step(&self, now: Instant) -> Step {
-        let mut w = self.waiting.lock().unwrap();
+        let mut w = self.lock();
         self.expire(&mut w, now);
         let Some(oldest) = w.entries.first_key_value().map(|(_, e)| e.lease_expires_at) else {
             return Step::Wait(None);
@@ -198,14 +244,14 @@ impl ReleaseQueue {
             return Step::Wait(Some(at.min(oldest)));
         }
         let (seqs, keys) =
-            w.entries.iter().take(MAX_BATCH).map(|(seq, e)| (*seq, e.key.clone())).unzip();
+            w.entries.iter().take(MAX_BATCH).map(|(seq, e)| (*seq, e.key.to_string())).unzip();
         Step::Send(seqs, keys)
     }
 
     /// Apply a send's outcome: an answered send removes its keys and clears
     /// the backoff; a failed one keeps them and backs off.
     fn settle(&self, seqs: &[u64], outcome: ReleaseAnswer, now: Instant) {
-        let mut w = self.waiting.lock().unwrap();
+        let mut w = self.lock();
         match outcome {
             ReleaseAnswer::Released => {
                 for seq in seqs {
@@ -226,7 +272,7 @@ impl ReleaseQueue {
         self.publish_depth(&w);
     }
 
-    /// Drop, unsent, every entry that has waited one lease.
+    /// Give up every entry that has waited one lease.
     fn expire(&self, w: &mut Waiting, now: Instant) {
         let mut dropped = false;
         while let Some(entry) = w.entries.first_entry() {
@@ -414,6 +460,91 @@ mod tests {
         settle().await;
         assert_eq!(sent(&limiter), [keys(&["a"]), keys(&["a", "b"])]);
         assert_eq!(q.waiting(), 0);
+    }
+
+    /// Panics on its first release, answers every later one.
+    #[derive(Default)]
+    struct PanicsOnce {
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl CallLimiter for PanicsOnce {
+        async fn admit(&self, _: &str, _: &[LimiterEntry], _: bool) -> AdmitOutcome {
+            AdmitOutcome::NotSent
+        }
+        async fn release(&self, keys: &[String]) -> ReleaseAnswer {
+            let first = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(keys.to_vec());
+                calls.len() == 1
+            };
+            assert!(!first, "the drainer's first send panics");
+            ReleaseAnswer::Released
+        }
+        async fn refresh(&self, _: &str, _: &[String]) -> RefreshOutcome {
+            RefreshOutcome::Unavailable
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_drainer_is_restarted_with_the_queue_intact() {
+        let limiter = Arc::new(PanicsOnce::default());
+        let metrics = B2buaMetrics::new();
+        let config = ReleaseQueueConfig { lease: Duration::from_secs(20), cap: 10 };
+        let q = ReleaseQueue::new(limiter.clone(), config, metrics.clone());
+        tokio::spawn(q.clone().run());
+        q.push("a");
+        settle().await;
+        q.push("b");
+        settle().await;
+        assert_eq!(metrics.limiter_release_drainer_restarts_total(), 1);
+        assert_eq!(q.waiting(), 0, "the restarted drainer sent what the first one held");
+        let calls = limiter.calls.lock().unwrap().clone();
+        assert_eq!(calls.first(), Some(&keys(&["a"])), "the send that panicked");
+        assert!(calls[1..].concat().contains(&"a".to_string()), "a is sent again");
+        assert!(calls[1..].concat().contains(&"b".to_string()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_poisoned_queue_still_takes_and_sends_releases() {
+        let limiter = Arc::new(Scripted::default());
+        let (q, _metrics) = queue(limiter.clone(), 10);
+        let poisoner = q.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.waiting.lock().unwrap();
+            panic!("poison the queue's lock");
+        })
+        .join();
+        assert!(q.waiting.is_poisoned());
+        q.push("a");
+        settle().await;
+        assert_eq!(sent(&limiter), [keys(&["a"])]);
+        assert_eq!(q.waiting(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lease_past_the_bound_is_clamped() {
+        let config = B2buaConfig { limiter_lease_sec: i64::MAX, ..Default::default() };
+        let bounds = ReleaseQueueConfig::from_config(&config);
+        assert_eq!(bounds.lease, MAX_LEASE);
+        let limiter = Arc::new(Scripted::default());
+        let q = ReleaseQueue::new(limiter.clone(), bounds, B2buaMetrics::new());
+        q.push("a");
+        assert_eq!(q.waiting(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_push_expires_what_waited_one_lease_without_the_drainer() {
+        let limiter = Arc::new(Scripted::default());
+        let metrics = B2buaMetrics::new();
+        let config = ReleaseQueueConfig { lease: Duration::from_secs(20), cap: 10 };
+        let q = ReleaseQueue::new(limiter, config, metrics.clone());
+        q.push("a");
+        tokio::time::advance(Duration::from_secs(20)).await;
+        q.push("b");
+        assert_eq!(q.waiting_keys(), ["b"]);
+        assert_eq!(metrics.limiter_release_dropped_lease_expired_total(), 1);
     }
 
     #[tokio::test(start_paused = true)]

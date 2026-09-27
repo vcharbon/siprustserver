@@ -80,7 +80,7 @@ impl LimiterMetrics {
         metric(
             "limiter_release_total",
             "counter",
-            "release requests received",
+            "keys named by the release requests received, a key named again included",
             stats.releases_total.to_string(),
         );
         metric(
