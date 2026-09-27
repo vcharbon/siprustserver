@@ -61,19 +61,23 @@ Every test models a complete, functioning callflow:
   dead-call detection (keepalive timeout, the 32 s terminating safety timer,
   `GlobalDuration`) so the B2BUA detects the dead call and reaps it. Never
   leave a call up at `finish()`.
-- **Assert release, not just silence.** `finish()` does NOT catch a leaked
-  call (structural leak anomalies deliberately don't gate). After any
-  timeout-path termination, drain with `settle_until` then assert
-  `B2buaSut::assert_fully_reaped()` (or `assert_call_fully_over` in failover
-  tests).
+- **Assert release, not just silence.** `B2buaScene::finish()` settles the SUT
+  and runs `B2buaSut::assert_fully_reaped()` (calls, locks, reaper stamps,
+  setup-CANCEL marks, limiter holds); `finish_leaving(leak)` declares limiter
+  holds left on purpose. `Harness::finish()` alone does NOT catch a leaked
+  call (structural leak anomalies deliberately don't gate): a test on a bare
+  `Harness` + `B2buaSut` drains with `settle_until(|| sut.is_reaped())` then
+  asserts `assert_fully_reaped()` itself (`assert_call_fully_over` in
+  failover tests).
 
 ## Writing a new b2bua / failover test
 
 Do NOT hand-roll the INVITE/180/200/ACK dance — it lives once in
 `scenario_harness::callflow`. Single-SUT b2bua test: use `B2buaScene::new(name)`
 (alice :5060 / bob :5070 / b2bua :5080, routes to bob) then `scene.establish()`
-→ interesting part → `scene.hangup(&mut dialog)` → `scene.finish()`; for a
-non-default decision use `B2buaScene::with_b2bua(name, |bob_port| …builder…)`.
+→ interesting part → `scene.hangup(&mut dialog)` → `scene.finish()` (the
+reaped check runs there); for a non-default decision use
+`B2buaScene::with_b2bua(name, |bob_port| …builder…)`.
 HA failover test: `scenario_harness::callflow::establish(&alice,&bob,proxy.addr())`
 (or `Call::new(..).no_ring()` for the 200-only variant) and `hangup` for teardown.
 ONLY for the uninterrupted happy-path setup — any dance that asserts on the 18x,

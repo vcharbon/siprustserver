@@ -62,8 +62,6 @@ async fn relayed_update_481_reaches_requester_and_call_survives() {
 
     // ── the dialogs are still live: a normal BYE teardown completes ──
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.is_reaped()).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 

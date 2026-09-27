@@ -151,7 +151,7 @@ async fn refer_allow_c_realign_happy() {
     charlie.receive("ACK").await;
 
     // Phase → a-realigning: B2BUA re-INVITEs A with C's active answer, Contact
-    // leg=a. Slice 5b stops here (the a-realign 200 / merge are slice 5c).
+    // leg=a.
     let mut a_realign = alice.receive("INVITE").await;
     assert_reinvite(a_realign.request(), CHARLIE_ACTIVE_ANSWER, "a");
 

@@ -26,7 +26,6 @@ use b2bua::limiter::{AdmitOutcome, CallLimiter, LimiterEntry, RefreshOutcome};
 use b2bua_harness::{settle_until, B2buaSut, B2buaSutBuilder};
 use call::{Call, MessageDirection, MessageEntry, Termination, TerminationCause, TimeoutKind};
 use scenario_harness::Harness;
-use sip_clock::Clock;
 
 const OFFER: &str = "v=0\r\no=alice 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\n";
 const ANSWER: &str = "v=0\r\no=bob 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n";
@@ -39,7 +38,6 @@ const B2BUA: &str = "127.0.0.1:5080";
 struct Sut {
     addr: SocketAddr,
     b2bua: B2buaSut,
-    clock: Clock,
 }
 
 impl Sut {
@@ -83,7 +81,7 @@ impl Sut {
             })
             .start(h, "b2bua", B2BUA)
             .await;
-        Self { addr: b2bua.addr, b2bua, clock: Clock::test_at(0) }
+        Self { addr: b2bua.addr, b2bua }
     }
 
     fn live(&self, call_id: &str, from_tag: &str) -> Call {
@@ -152,7 +150,7 @@ async fn a_caller_bye_is_recorded_by_the_caller_and_cut_at_the_relayed_bye() {
     let mut dialog = call.ack().await;
     bob.receive("ACK").await;
     h.advance(Duration::from_secs(5)).await;
-    let sent_at = sut.clock.now_ms();
+    let sent_at = sut.b2bua.clock().now_ms();
 
     let mut bye = dialog.bye().await;
     let mut bob_bye = bob.receive("BYE").await;

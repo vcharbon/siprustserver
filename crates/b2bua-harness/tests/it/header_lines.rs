@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use b2bua::decision::ScriptedDecisionEngine;
-use b2bua_harness::{settle_until, B2buaScene, B2buaSut, BOB_PORT};
+use b2bua_harness::{B2buaScene, B2buaSut, BOB_PORT};
 use sip_message::header::HeaderName;
 use sip_message::SipRequest;
 
@@ -77,8 +77,6 @@ async fn a_route_states_a_multi_instance_header_as_ordered_lines() {
     s.bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| s.b2bua.is_reaped()).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 
@@ -119,8 +117,6 @@ async fn a_removed_capability_half_is_not_re_advertised() {
     s.bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| s.b2bua.is_reaped()).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 
@@ -148,7 +144,5 @@ async fn a_reject_states_a_multi_instance_header_as_ordered_lines() {
     let reasons: Vec<String> = resp.raw(HeaderName::from("Reason")).map(str::to_string).collect();
     assert_eq!(reasons, ["Q.850;cause=21", "SIP;cause=603;text=\"policy\""]);
 
-    settle_until(|| s.b2bua.is_reaped()).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }

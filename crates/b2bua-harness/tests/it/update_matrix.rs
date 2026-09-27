@@ -49,8 +49,6 @@ async fn established_update_no_sdp_a_to_b() {
     update.expect(200).await;
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.is_reaped()).await;
-    s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
 

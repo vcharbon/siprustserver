@@ -311,6 +311,9 @@ async fn a_restarted_worker_answers_the_dead_processes_dialogs_481() {
     let restarted = B2buaSut::route_all_to("127.0.0.1", s.bob.addr().port())
         .start(&s.h, "b2bua", &addr.to_string())
         .await;
+    // The dead process lost its call with its memory; the scene judges the
+    // process that answers from now on.
+    let _crashed = std::mem::replace(&mut s.b2bua, restarted);
     s.h.allow_violation(
         "mid-dialog-tags",
         "the dialogs' requests reaching a process that never held them are under test",
@@ -318,8 +321,8 @@ async fn a_restarted_worker_answers_the_dead_processes_dialogs_481() {
 
     let mut keyed = alice_dialog.send_request(InDialogMethod::Bye).send().await;
     keyed.expect(481).await;
-    assert_eq!(restarted.metrics().unroutable_dropped_total(), 0, "the key resolves");
-    assert_eq!(restarted.metrics().unroutable_refused_total(), 0, "the orphan path answered");
+    assert_eq!(s.b2bua.metrics().unroutable_dropped_total(), 0, "the key resolves");
+    assert_eq!(s.b2bua.metrics().unroutable_refused_total(), 0, "the orphan path answered");
 
     // The callee's BYE, addressed to the bare host as some UAs do.
     let ids = DialogIds {
@@ -338,12 +341,9 @@ async fn a_restarted_worker_answers_the_dead_processes_dialogs_481() {
         vec![481],
         "without the key the restarted worker still owes the BYE its 481"
     );
-    assert_eq!(restarted.metrics().unroutable_refused_of("BYE", 481), 1);
-    assert_eq!(restarted.metrics().unroutable_dropped_total(), 0, "an answered request is no drop");
+    assert_eq!(s.b2bua.metrics().unroutable_refused_of("BYE", 481), 1);
+    assert_eq!(s.b2bua.metrics().unroutable_dropped_total(), 0, "an answered request is no drop");
 
-    settle_until(|| restarted.metrics().removals_total() == restarted.metrics().creations_total())
-        .await;
-    restarted.assert_fully_reaped();
     let _ = s.finish().await;
 }
 

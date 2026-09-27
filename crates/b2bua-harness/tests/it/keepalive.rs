@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use b2bua_harness::{settle_until, B2buaScene};
+use b2bua_harness::B2buaScene;
 
 /// The Rust default keepalive interval (`KeepaliveActivation.interval_sec`).
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -39,7 +39,5 @@ async fn keepalive_options_to_both_legs_two_cycles() {
     // ── Teardown ─────────────────────────────────────────────────────────────
     s.hangup(&mut dialog).await;
 
-    settle_until(|| s.b2bua.is_reaped()).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }

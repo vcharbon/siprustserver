@@ -7,7 +7,7 @@
 //! side unless these mint points carry it — and `Reason` is the Q.850 cause a
 //! PSTN gateway and both CDRs are built on.
 
-use b2bua_harness::{settle_until, stated, B2buaScene};
+use b2bua_harness::{stated, B2buaScene};
 use sip_message::generators::InDialogMethod;
 
 /// Alice releases with a cause, a charging correlation, a vendor annotation and
@@ -50,8 +50,6 @@ async fn a_releasing_peers_headers_ride_the_bye_minted_for_the_other_leg() {
     bob_uas.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| s.b2bua.is_reaped()).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 
@@ -79,8 +77,6 @@ async fn a_cancellers_release_cause_rides_the_cancel_minted_for_the_callee() {
     bob_uas.respond(487, "Request Terminated").await;
     call.expect(487).await;
 
-    settle_until(|| s.b2bua.is_reaped()).await;
-    s.b2bua.assert_fully_reaped();
     let _report = s.finish().await;
 }
 
@@ -114,8 +110,6 @@ async fn a_retransmitted_2xx_repeats_the_advertisement_the_first_one_stated() {
     s.bob.receive("ACK").await;
     s.hangup(&mut dialog).await;
     let sut = s.b2bua.addr;
-    settle_until(|| s.b2bua.is_reaped()).await;
-    s.b2bua.assert_fully_reaped();
     let report = s.finish().await;
 
     let answers: Vec<String> = report

@@ -107,8 +107,7 @@ async fn a_declared_limiter_leak_passes_the_reaped_check() {
     let s = call_through_a_backend_that_drops_releases("reaped-limiter-declared-leak").await;
     let count = s.b2bua.limiter_count();
     assert_eq!((count.admitted, count.released, count.stored), (2, 2, Some(2)));
-    s.b2bua.assert_fully_reaped_leaving(LimiterLeak { unreleased: 0, stored: 2 });
-    let _ = s.finish().await;
+    let _ = s.finish_leaving(LimiterLeak { unreleased: 0, stored: 2 }).await;
 }
 
 /// The call-state checks judge the calls alone: a hold the store still
@@ -117,8 +116,7 @@ async fn a_declared_limiter_leak_passes_the_reaped_check() {
 async fn the_call_state_checks_leave_the_limiter_to_the_full_check() {
     let s = call_through_a_backend_that_drops_releases("reaped-calls-only").await;
     s.b2bua.assert_calls_reaped();
-    s.b2bua.assert_fully_reaped_leaving(LimiterLeak { unreleased: 0, stored: 2 });
-    let _ = s.finish().await;
+    let _ = s.finish_leaving(LimiterLeak { unreleased: 0, stored: 2 }).await;
 }
 
 /// A call still established fails the call-state checks; once it ends they
@@ -135,8 +133,6 @@ async fn a_call_not_yet_reaped_fails_the_call_state_checks() {
     assert!(message.contains("call leak"), "{message}");
 
     s.hangup(&mut dialog).await;
-    settle_until(|| s.b2bua.is_reaped()).await;
-    s.b2bua.assert_fully_reaped();
     let _ = s.finish().await;
 }
 

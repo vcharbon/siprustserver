@@ -210,8 +210,6 @@ async fn failing_no_leak_actor(name: &str, scenario: &dyn ActorScenario) {
         "voluntarily-failing actor scenario `{name}` unexpectedly succeeded: {result:?}"
     );
 
-    settle_until(|| scene.b2bua.is_reaped()).await;
-    scene.b2bua.assert_fully_reaped();
     let _ = scene.finish().await;
 }
 
@@ -253,7 +251,5 @@ async fn realcall_refer_charlie_reject_no_leak() {
     // and the SUT reaps promptly (see the refer happy-path note on the late BYE).
     drain_callees(&scene.bob, &charlie).await;
 
-    settle_until(|| scene.b2bua.is_reaped()).await;
-    scene.b2bua.assert_fully_reaped();
     let _ = scene.finish().await;
 }

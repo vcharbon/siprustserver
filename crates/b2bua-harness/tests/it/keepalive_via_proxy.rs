@@ -49,7 +49,7 @@ async fn keepalive_options_travels_via_proxy_on_both_legs() {
     let alice = h.agent("alice", ALICE).await;
     let bob = h.agent("bob", BOB).await;
     let proxy = common::spawn_lb_proxy(&h, PROXY, "b2bua", B2BUA.parse().unwrap()).await;
-    let _b2bua = B2buaSut::route_all_to("127.0.0.1", 5071)
+    let b2bua = B2buaSut::route_all_to("127.0.0.1", 5071)
         .outbound_proxy("127.0.0.1", 5081)
         .start(&h, "b2bua", B2BUA)
         .await;
@@ -93,7 +93,7 @@ async fn keepalive_options_travels_via_proxy_on_both_legs() {
     bob.receive("BYE").await.respond(200, "OK").await;
     bye.expect(200).await;
 
-    settle_until(|| _b2bua.is_reaped()).await;
-    _b2bua.assert_fully_reaped();
+    settle_until(|| b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
     let _report = h.finish().await;
 }

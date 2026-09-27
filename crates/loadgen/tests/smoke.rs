@@ -1205,13 +1205,37 @@ async fn loadgen_packet_drop_without_retransmit_breaks_calls() {
 /// production 5 s) so compounded two-hop recovery has headroom under CI CPU load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_auto_retransmit_recovers_packet_drop() {
+    let (_h, _b2bua, core) = auto_retransmit_under_loss(6590).await;
+    // The loadgen's mux state is clean regardless. No SUT reaped check here: a
+    // call that times out idles the 45 s recv window, and its lost teardown then
+    // ends on the SUT's 32 s terminating backstop, past the default lane's 60 s
+    // real-clock budget. The slow-lane twin below waits it out and runs the check.
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
+}
+
+/// The recovery proof above, run to the end of the SUT's own dead-call
+/// detection: every call it created is reaped and every limiter hold released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real-clock >60s — slow lane (just test-slow)"]
+async fn loadgen_auto_retransmit_reaps_every_call() {
+    let (_h, b2bua, core) = auto_retransmit_under_loss(6660).await;
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
+    settle_secs(DEAD_DIALOG_REAP_SECS, || b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// Drive the basic-call mix over a 10 % lossy fabric with retransmit on, and
+/// assert the recovery: OK dominates, the 18x gate holds.
+async fn auto_retransmit_under_loss(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>) {
     // recv = 12 s: under CPU contention a recovering call's retransmit ladder
     // (0.5+1+2+4 s cumulative) plus stretched per-hop latency can overrun a 6 s
     // window, flipping the small-N dominance ratio below — the observed flake.
     // The wide window only costs wall time on the deterministic doomed-call
     // tail, which idles the full window either way.
-    let (_h, b2bua, core, transport) =
-        setup_recv(6590, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
+    let (h, b2bua, core, transport) =
+        setup_recv(base, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
@@ -1253,23 +1277,39 @@ async fn loadgen_auto_retransmit_recovers_packet_drop() {
         "ringing gate metrics missing from /metrics"
     );
 
-    // The loadgen's mux state is clean regardless, and the SUT reaps every call
-    // (a teardown the fabric ate ends on the SUT's 32 s terminating backstop).
-    settle_until(|| core.registry_size() == 0).await;
-    assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
-    settle_secs(SETTLE_LOSS_SECS, || b2bua.is_reaped()).await;
-    b2bua.assert_fully_reaped();
+    (h, b2bua, core)
 }
 
 /// B9 baseline: the SAME lossy fabric, refer-only mix, NO retransmit — the
 /// multi-leg transfer (~3× the datagrams of a basic call, three serialized
 /// legs) breaks under loss, establishing that the recovery proof below is not
-/// vacuous. No SUT reaped check: its doomed calls give up at the end of the
+/// vacuous. No SUT reaped check here: its doomed calls give up at the end of the
 /// recv window, and a teardown the fabric ate then ends on the SUT's 32 s
-/// terminating backstop, past the default lane's 60 s real-clock budget.
+/// terminating backstop, past the default lane's 60 s real-clock budget. The
+/// slow-lane twin below waits it out and runs the check.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_refer_drop_without_retransmit_breaks_transfers() {
-    let (_h, b2bua, core, transport) = setup(6510, Correlation::header("X-Loadgen-Id"), 3).await;
+    let (_h, _b2bua, core) = refer_drop_without_retransmit(6510).await;
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under refer loss");
+}
+
+/// The refer baseline above, run to the end of the SUT's own dead-call
+/// detection: every call it created is reaped and every limiter hold released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real-clock >60s — slow lane (just test-slow)"]
+async fn loadgen_refer_drop_without_retransmit_reaps_every_call() {
+    let (_h, b2bua, core) = refer_drop_without_retransmit(6550).await;
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under refer loss");
+    settle_secs(DEAD_DIALOG_REAP_SECS, || b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// Drive the refer-only mix over an 8 % lossy fabric with retransmit off, and
+/// assert the loss bit: some transfer failed.
+async fn refer_drop_without_retransmit(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>) {
+    let (h, b2bua, core, transport) = setup(base, Correlation::header("X-Loadgen-Id"), 3).await;
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
@@ -1288,9 +1328,7 @@ async fn loadgen_refer_drop_without_retransmit_breaks_transfers() {
         "no refer call failed despite {drops} dropped datagrams and no retransmit:\n{}",
         reporter.render_prometheus()
     );
-
-    settle_until(|| core.registry_size() == 0).await;
-    assert_eq!(core.registry_size(), 0, "mux registry leak under refer loss");
+    (h, b2bua, core)
 }
 
 /// **B9 — the actor-refer loss-recovery proof** (plan §4.5). The two endurance
@@ -1330,10 +1368,49 @@ async fn loadgen_refer_drop_without_retransmit_breaks_transfers() {
 /// what this test pins.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
+    let (_h, b2bua, core, nok) = actor_refer_under_loss(6530).await;
+    // The loadgen's own mux state is always reclaimed; the SUT may hold only the
+    // (rare) failed calls' straggler dialogs (best-effort teardown is single-shot
+    // under loss), reaped on its own timers. Use the shared lossy settle ceiling
+    // ([`SETTLE_LOSS_SECS`], > the SUT's 32 s terminating timer) not the 1 s
+    // `settle_until`: under loss a recovered refer call's teardown rides retransmit
+    // ladders and — worst case, a fully-lost BYE — falls back to that 32 s SUT
+    // timer, so a 20 s window flaked under full-suite CPU contention.
+    settle_secs(SETTLE_LOSS_SECS, || {
+        core.registry_size() == 0 && b2bua.active_calls() as u64 <= nok
+    })
+    .await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
+    assert!(
+        b2bua.active_calls() as u64 <= nok,
+        "SUT holds {} live calls vs {nok} failed — a RECOVERED call leaked",
+        b2bua.active_calls()
+    );
+    // No SUT reaped check here: a call that times out idles the 45 s recv
+    // window, and its lost teardown then ends on the SUT's 32 s terminating
+    // backstop, past the default lane's 60 s real-clock budget. The slow-lane
+    // twin below waits it out and runs the check.
+}
+
+/// The actor-refer proof above, run to the end of the SUT's own dead-call
+/// detection: every call it created is reaped and every limiter hold released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real-clock >60s — slow lane (just test-slow)"]
+async fn loadgen_actor_refer_reaps_every_call() {
+    let (_h, b2bua, core, _nok) = actor_refer_under_loss(6680).await;
+    settle_until(|| core.registry_size() == 0).await;
+    assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
+    settle_secs(DEAD_DIALOG_REAP_SECS, || b2bua.is_reaped()).await;
+    b2bua.assert_fully_reaped();
+}
+
+/// Drive the actor refer mix over a 5 % lossy fabric with retransmit on, and
+/// assert the recovery; returns the count of failed calls.
+async fn actor_refer_under_loss(base: u16) -> (Harness, B2buaSut, Arc<MuxCore>, u64) {
     // recv = 12 s like the basic-call recovery test: compounded two-hop
     // retransmit ladders (0.5+1+2+4 s) need headroom under CI CPU contention.
-    let (_h, b2bua, core, transport) =
-        setup_recv(6530, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
+    let (h, b2bua, core, transport) =
+        setup_recv(base, Correlation::header("X-Loadgen-Id"), 3, RECV_LOSSY).await;
     let reporter =
         Arc::new(Reporter::new(ReporterCfg { sample_cap: 3, background_record_every: 8 }));
 
@@ -1389,26 +1466,7 @@ async fn loadgen_actor_refer_recovers_loss_without_false_audit() {
     let (_rung, expected) = reporter.ringing_totals();
     assert_eq!(expected, 0, "refer began feeding the 18x ringing gate — contract drift");
 
-    // The loadgen's own mux state is always reclaimed; the SUT may hold only the
-    // (rare) failed calls' straggler dialogs (best-effort teardown is single-shot
-    // under loss), reaped on its own timers. Use the shared lossy settle ceiling
-    // ([`SETTLE_LOSS_SECS`], > the SUT's 32 s terminating timer) not the 1 s
-    // `settle_until`: under loss a recovered refer call's teardown rides retransmit
-    // ladders and — worst case, a fully-lost BYE — falls back to that 32 s SUT
-    // timer, so a 20 s window flaked under full-suite CPU contention.
-    settle_secs(SETTLE_LOSS_SECS, || {
-        core.registry_size() == 0 && b2bua.active_calls() as u64 <= nok
-    })
-    .await;
-    assert_eq!(core.registry_size(), 0, "mux registry leak under loss+retransmit");
-    assert!(
-        b2bua.active_calls() as u64 <= nok,
-        "SUT holds {} live calls vs {nok} failed — a RECOVERED call leaked",
-        b2bua.active_calls()
-    );
-    // The failed calls' stragglers end on that same backstop.
-    settle_secs(SETTLE_LOSS_SECS, || b2bua.is_reaped()).await;
-    b2bua.assert_fully_reaped();
+    (h, b2bua, core, nok)
 }
 
 /// **P2 — the ack-gate RECOVERY side** (plan §5). A refer call's a-leg BYE — an

@@ -404,6 +404,7 @@ pub struct B2buaSut {
     cdr: TerminatedCallsWriter,
     metrics: B2buaMetrics,
     limiter: limiter::SutLimiter,
+    clock: Clock,
     /// The ingress brake's counters and the queue depth forced on it, when the
     /// SUT's bind carries one.
     brake: Option<(b2bua::tier1_brake::Tier1BrakeCounters, Arc<AtomicUsize>)>,
@@ -648,6 +649,7 @@ impl B2buaSutBuilder {
             Some(tap) => cdr.with_tap(tap),
             None => cdr,
         };
+        let clock = Clock::test_at(0);
         let params = B2buaSpawnParams {
             ordinal: "w0".into(),
             sip_addr: sa,
@@ -656,7 +658,7 @@ impl B2buaSutBuilder {
             services,
             outbound_proxy,
             replication: None,
-            clock: Clock::test_at(0),
+            clock: clock.clone(),
             id_gen: Arc::new(IdGen::seeded(0xB2B0)),
             cdr: Arc::new(cdr.clone()),
             overload,
@@ -700,6 +702,7 @@ impl B2buaSutBuilder {
             cdr,
             metrics,
             limiter: sut_limiter,
+            clock,
             brake: brake.map(|(counters, _)| counters),
             _core: core,
         }
@@ -853,6 +856,11 @@ impl B2buaSut {
 
     pub fn metrics(&self) -> &B2buaMetrics {
         &self.metrics
+    }
+
+    /// The clock the core stamps its records with.
+    pub fn clock(&self) -> &Clock {
+        &self.clock
     }
 
     /// The ingress brake's counters, when [`B2buaSutBuilder::tier1_brake`]
@@ -1066,8 +1074,14 @@ pub const B2BUA_PORT: u16 = 5080;
 /// let mut dialog = s.establish().await;          // alice → b2bua → bob, confirmed
 /// // ... the interesting part, driving `s.alice` / `s.bob` / `s.b2bua` ...
 /// s.hangup(&mut dialog).await;                    // BYE / 200
-/// s.finish().await;                              // RFC gate + render
+/// s.finish().await;                              // reaped check + RFC gate + render
 /// ```
+///
+/// [`finish`](Self::finish) settles the SUT and runs
+/// [`B2buaSut::assert_fully_reaped`]: a call the scenario left up, or a
+/// limiter hold never released, fails the test. A scenario that leaves
+/// limiter holds behind on purpose declares them with
+/// [`finish_leaving`](Self::finish_leaving).
 ///
 /// Each `Harness` has its own simulated network namespace, so the fixed ports
 /// never collide between tests. For a non-default b2bua decision (refer, limiter,
@@ -1124,9 +1138,18 @@ impl B2buaScene {
         callflow::hangup(dialog, &self.bob).await
     }
 
-    /// Gate RFC audit + render the report. Consumes the scene (`Harness::finish`
-    /// consumes `self`).
+    /// Settle until every call is reaped, run [`B2buaSut::assert_fully_reaped`],
+    /// then gate the RFC audit and render the report. Consumes the scene
+    /// (`Harness::finish` consumes `self`).
     pub async fn finish(self) -> RunReport {
+        self.finish_leaving(LimiterLeak::NONE).await
+    }
+
+    /// [`finish`](Self::finish) for a scenario that leaves limiter holds
+    /// behind on purpose: the reaped check requires exactly `leak`.
+    pub async fn finish_leaving(self, leak: LimiterLeak) -> RunReport {
+        settle_until(|| self.b2bua.is_reaped()).await;
+        self.b2bua.assert_fully_reaped_leaving(leak);
         self.h.finish().await
     }
 }

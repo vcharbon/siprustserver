@@ -50,6 +50,7 @@ async fn produce_result() -> RunResult {
     BasicCall.run(&mut rt, &case.input).await;
     let (report, rfc_gate) = rt.finish().await;
     assert!(rfc_gate.is_empty(), "unexpected gating RFC findings: {rfc_gate:?}");
+    assert!(report.passed(), "{:?}", report.extra_anomalies);
 
     let verdicts = checks::evaluate_case(
         &case,
@@ -127,6 +128,7 @@ async fn rfc_keeps_only_rule_sourced_findings() {
     let mut rt = FakeLsbcB2bua.build("result/rule-sourced", &fake_cfg()).await;
     BasicCall.run(&mut rt, &case.input).await;
     let (mut report, _rfc_gate) = rt.finish().await;
+    assert!(report.passed(), "{:?}", report.extra_anomalies);
     report.extra_anomalies.push(seq_report::Anomaly {
         check: "http.unmatched".into(),
         detail: "no script opens POST /x".into(),
